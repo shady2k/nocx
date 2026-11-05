@@ -94,7 +94,17 @@ type writerDetacher interface {
 // inFlight, writerBusy and the rest of run's bookkeeping belong to nobody
 // else (owner.go's own package doc). Safe to call more than once — only the
 // first close of detachSignal has any effect.
+//
+// detachPending is stored BEFORE the signal closes, and that order is the
+// point (nocx-atpw5.1.22): a write the stop's own proc.Close unblocks reports
+// its outcome on writeRes, and that outcome can reach completeWrite before
+// run ever gets to answer this signal — measured, 2 of 30 runs under load,
+// with n=80 err=EOF. completeWrite reads the flag and leaves the item to
+// performDetach, so the stop cannot be turned into a join by the scheduling
+// order of two goroutines. Storing it first is what keeps the flag true for
+// every outcome the close can produce.
 func (o *sessionOwner) triggerDetach() {
+	o.detachPending.Store(true)
 	o.detachOnce.Do(func() { close(o.detachSignal) })
 }
 
@@ -124,6 +134,13 @@ func (o *sessionOwner) triggerDetach() {
 // was actually in flight: a forced stop against an idle SSH session's
 // writer must not report writerDetached when there was nothing to detach.
 func (o *sessionOwner) performDetach() {
+	// The request is settled here whatever it finds below: completeWrite must
+	// stop treating later outcomes as belonging to a giving-up stop once this
+	// has run, including when it found nothing in flight (an idle writer's
+	// forced stop, which must not report a detach) or a detach it already
+	// made. Same goroutine as completeWrite, so the clear cannot interleave
+	// with a read of it.
+	o.detachPending.Store(false)
 	if o.detached.Load() {
 		return
 	}

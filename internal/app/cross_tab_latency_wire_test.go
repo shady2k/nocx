@@ -29,6 +29,10 @@
 // e2e/cross-tab-latency.spec.ts with the deterministic unit test beside the
 // pane (frontend/src/terminal-content.test.ts, nocx-07ymy).
 //
+// The premise that A actually produced is a floor of 10 screen frames a second,
+// not the ~100 an ordinary build reaches: the producer is this test binary, so
+// `go test -race` slows it too, and a floor above that would assert the runner.
+//
 // The ceiling is deliberately loose, and set by the regression rather than by
 // today's numbers. It is not a performance target; it is the shape that must
 // not come back — a shared worker that put one session's work in front of
@@ -829,9 +833,17 @@ func TestCrossTabLatencyAtTheWire(t *testing.T) {
 	idleCmd, idleKey := report(idle)
 	busyCmd, busyKey := report(busy)
 
-	// THE PREMISE: a fixture that did not load the page proves nothing.
+	// THE PREMISE: a fixture that produced nothing proves nothing. The floor
+	// is low ON PURPOSE, and set by what a -race build can do rather than by
+	// what an ordinary one does: the producer is this same test binary, so
+	// under `go test -race` (which is how CI repeats a changed test) it is
+	// instrumented too, and on a 2-core VM its output fell from ~100 to ~43
+	// screen frames a second. An earlier floor of 50 failed on exactly that
+	// and asserted the runner rather than the product. Ten frames a second
+	// still proves the producer ran end to end; the rate is printed so a log
+	// shows how hard the check was driven.
 	busyFramesPerSecond := float64(f1-f0) / busyDur.Seconds()
-	if busyFramesPerSecond < 50 {
+	if busyFramesPerSecond < 10 {
 		t.Fatalf("A produced %.0f screen frames a second; the bound below would prove nothing", busyFramesPerSecond)
 	}
 
@@ -875,6 +887,14 @@ func TestCrossTabLatencyAtTheWire(t *testing.T) {
 		busyDur.Seconds(), delta(cpuBusyBefore, cpuBusy, helper), delta(cpuBusyBefore, cpuBusy, helper)/busyDur.Seconds(),
 		delta(cpuBusyBefore, cpuBusy, children), delta(cpuBusyBefore, cpuBusy, children)/busyDur.Seconds(),
 		selfBusy1-selfBusy0, (selfBusy1-selfBusy0)/busyDur.Seconds())
+	// UNDER THE LOCK THE READER WRITES THEM WITH. The connection is still
+	// open here — the reader goroutine keeps counting while this line runs —
+	// so reading these four maps bare is a data race (the race detector found
+	// this one first in CI).
+	w.mu.Lock()
+	bDataN, bDataB := w.dataN[paneB.SessionID], w.dataB[paneB.SessionID]
+	bFrames, bBytes := w.frames[paneB.SessionID], w.bytes[paneB.SessionID]
+	w.mu.Unlock()
 	t.Logf("B received: %d data frames/%d bytes, %d screen frames/%d bytes",
-		w.dataN[paneB.SessionID], w.dataB[paneB.SessionID], w.frames[paneB.SessionID], w.bytes[paneB.SessionID])
+		bDataN, bDataB, bFrames, bBytes)
 }

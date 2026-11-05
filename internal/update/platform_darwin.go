@@ -4,6 +4,7 @@ package update
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/shady2k/nocx/internal/desktopidentity"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/version"
 	"golang.org/x/sys/unix"
@@ -101,6 +103,37 @@ func (p *darwinPlatform) VerifyExtracted(ctx context.Context, bundlePath string)
 	}
 
 	return nil
+}
+
+// InspectBundle implements [Platform.InspectBundle] for a macOS .app bundle.
+//
+// Ownership is the bundle's own identifier, read from the Info.plist inside
+// it: the release passes -productidentifier dev.nocx (ADR-0103) and a release
+// reads CFBundleIdentifier back as that value, so a bundle declaring anything
+// else is not one of ours however it is named. The version is
+// CFBundleShortVersionString, which is what lets reconcile keep a copy NEWER
+// than the running install instead of deleting the only copy of that release.
+//
+// An unreadable plist is not proof of ownership: it answers Nocx false and the
+// caller refuses with the path, which is the safe direction for a directory
+// this code is considering deleting.
+func (p *darwinPlatform) InspectBundle(ctx context.Context, path string) (BundleReport, error) {
+	plist := filepath.Join(path, "Contents", "Info.plist")
+	out, err := exec.CommandContext(ctx, "/usr/bin/plutil", "-convert", "json", "-o", "-", plist).Output() //nolint:gosec // fixed argv; plist is Contents/Info.plist under one of reconcile's own managed names, never outside input
+	if err != nil {
+		return BundleReport{}, nil
+	}
+	var info struct {
+		Identifier string `json:"CFBundleIdentifier"`
+		Version    string `json:"CFBundleShortVersionString"`
+	}
+	if err := json.Unmarshal(out, &info); err != nil {
+		return BundleReport{}, nil
+	}
+	return BundleReport{
+		Nocx:    info.Identifier == desktopidentity.ID,
+		Version: strings.TrimSpace(info.Version),
+	}, nil
 }
 
 // Exchange implements [Platform.Exchange] via renameatx_np(RENAME_SWAP).

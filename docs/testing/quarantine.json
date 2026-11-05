@@ -56,6 +56,14 @@
     {
       "test": "e2e:e2e/completion.spec.ts › tab completion › cd onto a directory holding only a file names why there is nothing to choose",
       "bead": "nocx-atpw5.1.39"
+    },
+    {
+      "test": "e2e:e2e/backend-clear-boundary.spec.ts › clear hides the earlier block, and the record still holds it",
+      "bead": "nocx-atpw5.1.36"
+    },
+    {
+      "test": "e2e:e2e/enhanced-input.spec.ts › enhanced input raw routing › read command receives input after enhanced submit",
+      "bead": "nocx-atpw5.1.38"
     }
   ]
 }

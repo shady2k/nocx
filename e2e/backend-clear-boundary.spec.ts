@@ -27,6 +27,13 @@ test('clear hides the earlier block, and the record still holds it', async ({ pa
   // Command B: `clear` itself. Its own erase is what sights the boundary,
   // inside its own still-running interval.
   await input.fill('clear')
+  // THE PREMISE, established where it is consumed (nocx-atpw5.1.36). Enter
+  // submits what the editor HOLDS; a fill that landed in the DOM but not in
+  // the editor's document turns this Enter into a bare newline — no command,
+  // no erase, and an earlier block that simply stays on screen, which fifteen
+  // seconds of waiting cannot explain. Asserted here so the next failure
+  // names the step that lost the line instead of the block count.
+  await expect(input, 'the composer never held the typed line').toHaveText('clear')
   await page.keyboard.press('Enter')
 
   // The live view: command A's block is gone the moment the boundary

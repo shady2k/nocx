@@ -73,4 +73,30 @@ type Platform interface {
 	// artefact from the release manifest. The returned value is
 	// passed to [MatchArtifact].
 	ArtifactID() ArtifactID
+
+	// InspectBundle reports what this platform can prove about the object at
+	// path WITHOUT trusting the name it was found under: whether it is nocx's
+	// own installed artefact, and the release version that artefact declares
+	// where it declares one.
+	//
+	// Reconcile uses it on the fixed managed names (nocx-vh2hr.1.14): a
+	// directory called .nocx-backup.app is not evidence that nocx put it
+	// there, and deleting somebody else's application is not a recovery.
+	// A path that cannot be read is not proof of ownership: report Nocx
+	// false rather than guessing, and let the caller refuse.
+	//
+	// It never modifies path.
+	InspectBundle(ctx context.Context, path string) (BundleReport, error)
+}
+
+// BundleReport is what a platform can prove about a bundle at a path.
+type BundleReport struct {
+	// Nocx is true when the artefact at the path is nocx's own: on macOS the
+	// bundle identifier is the application's, on Linux the file is the
+	// AppImage this platform ships.
+	Nocx bool
+	// Version is the release version the artefact declares, or "" where the
+	// platform's artefact carries none (a Linux AppImage carries no version
+	// anywhere a reader can reach without executing it).
+	Version string
 }

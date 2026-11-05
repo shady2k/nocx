@@ -410,10 +410,15 @@ time (§7.6), and nothing is deleted or reused without checking its identity aga
 identities at `installPath`, `.nocx-swap.app` and `.nocx-backup.app`, and acts:
 
 - **No record, no managed debris** — nothing in flight.
-- **No record, but managed debris exists** — refuse with an actionable message naming what was
-  found. _Round 3: deleting the config directory after an exchange produces exactly this, and
-  `.nocx-swap.app` may then hold the only rollback copy. Automatic interpretation would be
-  guessing._
+- **No record, but managed debris exists** — resolve it by ownership, per
+  [ADR-1k87bjwr](../../decisions/1k87bjwr-managed-update-debris-with-no-journal-is-resolved-by-ownership.md)
+  (`nocx-vh2hr.1.14`). Round 3 refused here, on the sound ground that a path name proves
+  nothing; but finalisation renames `.nocx-swap.app` to `.nocx-backup.app` and only then deletes
+  the record, so a completed update always leaves one managed file nothing names, and refusing
+  it made every later update on that machine impossible. The platform now proves what the
+  artefact is (`InspectBundle`): nocx's own is removed unless it is another name for the running
+  install or a release newer than the running one, and a bundle that is not nocx's is refused
+  with the path and the step that clears it.
 - **Record present, `installPath` holds `oldBundleID`** — the exchange did not happen, whether or
   not `newBundleID` was ever filled in. Everything else this transaction created is therefore
   debris: remove `.nocx-swap.app` and the extraction directory if present, clear the record. Both

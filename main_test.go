@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 
@@ -187,16 +188,39 @@ func TestShowNoticesKeepsWhatItCannotShow(t *testing.T) {
 // recordingShell is a shellWindow that remembers what it was asked to do, in
 // order. The order is the point: a dialog raised before the window is the
 // defect, so "which call came first" is the assertion.
+//
+// Present runs on its own goroutine (nocx-vh2hr.1.19), so the memory it keeps
+// is behind a mutex and each presentation signals a channel the test waits on
+// rather than sleeping.
 type recordingShell struct {
-	calls   []string
-	notices []coordinator.Notice
+	mu        sync.Mutex
+	calls     []string
+	notices   []coordinator.Notice
+	presented chan coordinator.Notice
 }
 
-func (s *recordingShell) Show() { s.calls = append(s.calls, "show") }
+func newRecordingShell() *recordingShell {
+	return &recordingShell{presented: make(chan coordinator.Notice, 8)}
+}
+
+func (s *recordingShell) Show() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, "show")
+}
 
 func (s *recordingShell) Present(n coordinator.Notice) {
+	s.mu.Lock()
 	s.calls = append(s.calls, "present")
 	s.notices = append(s.notices, n)
+	s.mu.Unlock()
+	s.presented <- n
+}
+
+func (s *recordingShell) snapshot() ([]string, []coordinator.Notice) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.calls...), append([]coordinator.Notice(nil), s.notices...)
 }
 
 // The bead's regression test, at the seam the launch resolves on.
@@ -206,7 +230,7 @@ func (s *recordingShell) Present(n coordinator.Notice) {
 // user takes — and the one sentence explaining what happened has to reach it,
 // after the window and not before.
 func TestAReplacementEndsWithAWindowAndThenTheNotice(t *testing.T) {
-	shell := &recordingShell{}
+	shell := newRecordingShell()
 	w := &WailsApp{
 		logger: logtest.Slog(t),
 		shell:  shell,
@@ -227,15 +251,96 @@ func TestAReplacementEndsWithAWindowAndThenTheNotice(t *testing.T) {
 		t.Fatalf("ResolveBackend() = %#v, want a resolved backend after a replacement", got)
 	}
 
-	if len(shell.calls) != 2 || shell.calls[0] != "show" || shell.calls[1] != "present" {
-		t.Fatalf("the shell was asked for %v; want [show present] — the window first, then "+
-			"what the launcher did", shell.calls)
+	// The notice is presented off the caller's goroutine, so wait for the
+	// presentation rather than reading the shell at the instant of return
+	// (nocx-vh2hr.1.19). The ORDER is still the contract.
+	select {
+	case <-shell.presented:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the notice was never presented")
 	}
-	if len(shell.notices) != 1 || shell.notices[0].Kind != coordinator.NoticeSessionsLost {
-		t.Fatalf("the shell was given %#v; want the sessions-lost notice", shell.notices)
+	calls, notices := shell.snapshot()
+	if len(calls) != 2 || calls[0] != "show" || calls[1] != "present" {
+		t.Fatalf("the shell was asked for %v; want [show present] — the window first, then "+
+			"what the launcher did", calls)
+	}
+	if len(notices) != 1 || notices[0].Kind != coordinator.NoticeSessionsLost {
+		t.Fatalf("the shell was given %#v; want the sessions-lost notice", notices)
 	}
 	if left := w.notices.drain(); len(left) != 0 {
 		t.Fatalf("%d notice(s) still recorded after they were shown; want 0", len(left))
+	}
+}
+
+// blockingShell presents the way GTK3 does: Present does not return until the
+// person presses the dialog. It is the defect's shape, not a mock convenience.
+type blockingShell struct {
+	presented chan coordinator.Notice
+	release   chan struct{}
+}
+
+func (s *blockingShell) Show() {}
+
+func (s *blockingShell) Present(n coordinator.Notice) {
+	s.presented <- n
+	<-s.release
+}
+
+// AN UNPRESSED DIALOG MUST NOT HOLD THE WINDOW SHUT (nocx-vh2hr.1.19).
+//
+// On GTK3 a Wails message dialog runs gtk_dialog_run from the thread that
+// raises it, and a binding call runs on that thread — so a notice shown
+// inline keeps ResolveBackend open until somebody presses OK. The renderer's
+// first call then never settles: it never learns the backend's address, never
+// connects, the first pane never opens, ReportHealthy never runs and the
+// update journal is left for the next launch to count. Measured on the real
+// Wails v3 beta.9 GTK3 path, 2026-11-05: the goroutine dump sat in
+// gtk_dialog_run under ResolveBackend while the renderer showed "Cannot reach
+// the nocx backend / Reconnecting".
+//
+// So the resolution must return while the dialog is still up, AND the person
+// must still be told. Both ends are asserted here.
+func TestAnUnpressedNoticeDoesNotHoldTheLaunchOpen(t *testing.T) {
+	shell := &blockingShell{presented: make(chan coordinator.Notice, 1), release: make(chan struct{})}
+	t.Cleanup(func() { close(shell.release) })
+	w := &WailsApp{
+		logger: logtest.Slog(t),
+		shell:  shell,
+		launchCoordinatorFn: func(context.Context, string) (coordinator.Launch, error) {
+			return coordinator.Launch{
+				Hello:    coordinator.Hello{WSAddress: "127.0.0.1:4323", WSToken: "token"},
+				Spawned:  true,
+				Replaced: true,
+			}, nil
+		},
+	}
+	w.notices.Announce(coordinator.Notice{
+		Kind:    coordinator.NoticeSessionsLost,
+		Message: "The nocx backend that was already running has been stopped and replaced.",
+	})
+
+	resolved := make(chan BackendResolution, 1)
+	go func() { resolved <- w.ResolveBackend() }()
+
+	select {
+	case got := <-resolved:
+		if !got.OK {
+			t.Fatalf("ResolveBackend() = %#v, want a resolved backend", got)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ResolveBackend never returned while the notice was unpressed: the dialog is " +
+			"running its own loop on the caller's goroutine, so the renderer never receives an " +
+			"endpoint and the update can never be reported healthy")
+	}
+
+	select {
+	case notice := <-shell.presented:
+		if notice.Kind != coordinator.NoticeSessionsLost {
+			t.Fatalf("the person was shown %#v; want the sessions-lost notice", notice)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the notice was never presented: a resolution that returns by dropping the " +
+			"sentence is the other half of the same defect")
 	}
 }
 

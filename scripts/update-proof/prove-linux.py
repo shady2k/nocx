@@ -238,6 +238,65 @@ class Desktop:
         actions = node.queryAction()
         require(actions.nActions > 0 and actions.doAction(0), "control refused activation: " + name)
 
+    NOTICE = "has been stopped and replaced"
+
+    def notice(self):
+        """The replacement warning as a person sees it, or ''.
+
+        D4 says the loss of the old coordinator's sessions must be said out
+        loud, and ADR-0104 makes a protocol change the case that has to say it.
+        Read from the real accessibility tree: the sentence is a node in the
+        dialog, and the dialog is a child of this profile's application.
+        """
+        node = self.named_notice()
+        return (node.name or "") if node is not None else ""
+
+    def named_notice(self):
+        """The accessible carrying the warning's sentence, or None.
+
+        The node, not its text: dismissing needs the dialog around it.
+        """
+        for node in self.nodes():
+            try:
+                if self.NOTICE in (node.name or ""):
+                    return node
+            except RuntimeError:
+                continue
+        return None
+
+    def dismiss_notice(self):
+        """Press the warning's own button; the name it pressed, or ''.
+
+        The dialog is deliberately LEFT UP until this is called
+        (nocx-vh2hr.1.19): a window that only reports healthy once somebody
+        presses OK is an update that depends on a person.
+        """
+        message = self.named_notice()
+        if message is None:
+            return ""
+        # From the sentence up to its dialog, then the button the toolkit put
+        # there. GTK's stock OK is localised, so the label is not the anchor.
+        node = message
+        for _ in range(8):
+            try:
+                if node.getRoleName() == "dialog":
+                    break
+                node = node.parent
+            except (RuntimeError, AttributeError):
+                return ""
+            if node is None:
+                return ""
+        for child in descendants(node):
+            try:
+                if child.getRoleName() != "push button":
+                    continue
+                actions = child.queryAction()
+                if actions.nActions > 0 and actions.doAction(0):
+                    return child.name or ""
+            except (RuntimeError, AttributeError):
+                continue
+        return ""
+
     def select_channel(self, channel):
         """Set the update channel through the shipped select, by its own value."""
         label = {"nightly": "Nightly", "stable": "Stable"}[channel]
@@ -356,7 +415,7 @@ class RestartObservation:
     """One restart observation, shared by the wait predicate and its diagnostic."""
 
     def __init__(self, previous, candidate, initial, identities, install, old_windows,
-                 home, journal, backup):
+                 home, journal, backup, desktop=None):
         self.permitted = permitted_coordinators(previous, candidate, initial, identities)
         self.policy = ("same-Version coordinator reuse permitted"
                        if previous["version"] == candidate["version"] else
@@ -369,8 +428,18 @@ class RestartObservation:
         self.windows = []
         self.servers = []
         self.old_still_running = False
+        self.desktop = desktop
+        # What the person was actually shown while the update was still
+        # pending. Sampled from every observation, so "the warning was up and
+        # the update finalised anyway" is a fact and not an inference from the
+        # log (nocx-vh2hr.1.19).
+        self.notice_seen = ""
+        self.window_text = ""
 
     def observe(self):
+        self.window_text = log_tail(self.window, 400)
+        if self.desktop is not None and not self.notice_seen:
+            self.notice_seen = self.desktop.notice()
         self.processes = profile_processes(self.home)
         self.windows = [p for p in self.processes
                         if p["sha256"] == self.identities["window"]
@@ -381,6 +450,20 @@ class RestartObservation:
         self.old_still_running = any(p["pid"] in self.old_windows for p in self.processes)
         return self.processes if (self.windows and self.servers and not self.old_still_running
                                   and not self.journal.exists() and self.backup.exists()) else None
+
+    def replaced_coordinator(self):
+        """Whether the new window says it stopped a previous coordinator.
+
+        The line is the launcher's own, written before the notice is raised, so
+        it decides whether a warning is REQUIRED on this run: a proof of two
+        builds that speak the same protocol replaces nothing and has nothing to
+        announce (ADR-0104).
+        """
+        text = self.window_text
+        newest = text.rfind("nocx window starting up")
+        if newest >= 0:
+            text = text[newest:]
+        return "replacing an incompatible coordinator" in text
 
     def describe(self):
         observed = [p["sha256"] for p in self.processes if "nocx-server" in p["executable"]]
@@ -549,11 +632,31 @@ def run(args, evidence):
         # coordinator to survive a different-Commit nightly. Require a REAL
         # serving executable, but do not invent a coordinator takeover policy.
         restarted = RestartObservation(previous, candidate, initial, identities, install,
-                                       old_windows, home, journal, backup)
+                                       old_windows, home, journal, backup, desktop)
         desktop.click("Restart now")
         evidence["restartedProcesses"] = wait_for(
             "new window and serving coordinator, ReportHealthy finalization",
             restarted.observe, describe=restarted.describe)
+        # THE WARNING, AND THE PERSON WHO DOES NOT PRESS IT (nocx-vh2hr.1.19).
+        # A protocol change replaces the running coordinator, and D4 requires
+        # the person be told. The proof leaves the dialog exactly where a
+        # person who is not looking at the screen leaves it — up — and the
+        # update above has already had to finalise in that state. Then it
+        # presses OK and requires the sentence to go away, which is the other
+        # half: an update must neither depend on the answer nor ignore a
+        # dismissal.
+        if restarted.replaced_coordinator():
+            require(restarted.notice_seen,
+                    "the new window replaced a coordinator and never showed the person "
+                    "why: no replacement warning appeared while the update was pending")
+            evidence["replacementNotice"] = restarted.notice_seen
+            pressed = desktop.dismiss_notice()
+            require(pressed, "the replacement warning has no button to press")
+            evidence["replacementNoticeDismissedWith"] = pressed
+            wait_for("the replacement warning to close", lambda: not desktop.notice())
+            evidence["updateFinalisedWhileNoticeUnpressed"] = True
+        else:
+            evidence["replacementNotice"] = "not required: this pair speaks one protocol"
         evidence["coordinatorPolicy"] = (
             "ADR-0104 acceptance #3: same-Version/different-Commit nightlies may run "
             "the new window against the previous coordinator by design"

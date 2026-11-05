@@ -812,6 +812,33 @@ describe('control-plane saturation visibility', () => {
     expect(toasts()[0].message).toContain('Try again in a moment')
   })
 
+  it('names the execution lane as the holder when the control scope is exhausted (nocx-3an1s.1.1)', async () => {
+    const provider = new TestEndpointProvider()
+    const d = new Dispatcher(provider)
+    await connected(d)
+
+    // The lane every admission-backed control method shares: what a stuck
+    // pane open holds, and what the owner met as "The terminal is busy" with
+    // no holder named. The refusal carries the admission's own name.
+    const call = d.call('session.open', {})
+    const id = socket().requests()[0].id!
+    socket().deliverText({
+      jsonrpc: '2.0',
+      id,
+      error: {
+        ...SATURATION_ERROR,
+        data: { ...SATURATION_ERROR.data, scope: 'control' },
+      },
+    })
+    await expect(call).rejects.toMatchObject({ code: -32004 })
+    await vi.dynamicImportSettled()
+    expect(toasts()).toHaveLength(1)
+    expect(toasts()[0].message).toContain('another terminal operation is still in progress')
+    expect(toasts()[0].message).not.toBe(
+      'The terminal is busy — that action was refused. Try again in a moment.',
+    )
+  })
+
   it('names the holder for a refused notification too, and falls back for a scope it does not know', async () => {
     const provider = new TestEndpointProvider()
     const d = new Dispatcher(provider)

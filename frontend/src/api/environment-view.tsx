@@ -38,6 +38,7 @@ import {
 import type { SecretPickerSource } from '../ui/secret-picker'
 import { TextField } from '../ui/text-field'
 import { environmentPath } from './api-paths'
+import { t } from '../i18n/locale-model'
 import type { ApiConnection } from './api-client'
 import type { ApiEnvironment, ApiEnvironmentRef, ApiRoute } from './api-model'
 
@@ -127,18 +128,18 @@ export function EnvironmentView(props: EnvironmentViewProps) {
   }
 
   return (
-    <section class="api-environments" aria-label="Environments">
+    <section class="api-environments" aria-label={t('api.env.aria', 'Environments')}>
       <div class="api-environments__body">
         {/* The list. It is the reason this is a surface and not a dialog:
             what somebody opens this for is usually the OTHER environment. */}
         <div class="api-environments__list">
           <div class="api-environments__list-head">
-            <Caption>In this collection</Caption>
+            <Caption>{t('api.env.inCollection', 'In this collection')}</Caption>
             <IconButton
               id="api-environment-add"
               size="sm"
-              title="New environment"
-              ariaLabel="New environment"
+              title={t('api.env.new', 'New environment')}
+              ariaLabel={t('api.env.new', 'New environment')}
               onClick={props.onNew}
             >
               <PlusIcon />
@@ -148,8 +149,8 @@ export function EnvironmentView(props: EnvironmentViewProps) {
             when={props.environments.length > 0}
             fallback={
               <p class="api-environments__note">
-                None yet. A URL written in <code>{'{{baseUrl}}'}</code> resolves against one of
-                these.
+                {t('api.env.none.head', 'None yet. A URL written in ')}<code>{'{{baseUrl}}'}</code>
+                {t('api.env.none.tail', ' resolves against one of these.')}
               </p>
             }
           >
@@ -169,7 +170,7 @@ export function EnvironmentView(props: EnvironmentViewProps) {
                       question from "this is what I am editing", and the two
                       are legitimately different rows. */}
                   <Show when={env.relPath === props.active}>
-                    <Badge tone="neutral">sending</Badge>
+                    <Badge tone="neutral">{t('api.env.sending', 'sending')}</Badge>
                   </Show>
                 </Button>
               )}
@@ -182,8 +183,8 @@ export function EnvironmentView(props: EnvironmentViewProps) {
             when={editingSomething()}
             fallback={
               <EmptyState
-                title="Nothing selected"
-                description="Pick an environment on the left, or make one."
+                title={t('api.env.empty.title', 'Nothing selected')}
+                description={t('api.env.empty.desc', 'Pick an environment on the left, or make one.')}
               />
             }
           >
@@ -203,8 +204,8 @@ export function EnvironmentView(props: EnvironmentViewProps) {
             <Show when={props.creating}>
               <TextField
                 id="api-environment-path"
-                label="File"
-                description="Inside the collection, under environments/. Safe to commit: no secret value is ever written into it."
+                label={t('api.env.file.label', 'File')}
+                description={t('api.env.file.desc', 'Inside the collection, under environments/. Safe to commit: no secret value is ever written into it.')}
                 placeholder={environmentPath(props.name) || 'environments/production.json'}
                 value={props.relPath}
                 error={refusal()}
@@ -217,10 +218,10 @@ export function EnvironmentView(props: EnvironmentViewProps) {
                 standing beside it would be a control governing an answer
                 that had not been given. */}
             <div class="api-environments__route">
-              <Field for="api-environment-route" label="Sends from">
+              <Field for="api-environment-route" label={t('api.env.sendsFrom', 'Sends from')}>
                 <div data-api-field="route-kind">
                   <Select
-                    ariaLabel="Where a send under this environment leaves from"
+                    ariaLabel={t('api.env.sendsFrom.aria', 'Where a send under this environment leaves from')}
                     value={props.route.kind}
                     onChange={(kind) =>
                       props.onRoute(
@@ -232,25 +233,25 @@ export function EnvironmentView(props: EnvironmentViewProps) {
                     options={
                       props.connections.length > 0
                         ? [
-                            { value: 'direct', label: 'This machine' },
-                            { value: 'connection', label: 'Through a connection' },
+                            { value: 'direct', label: t('api.env.machine', 'This machine') },
+                            { value: 'connection', label: t('api.env.throughConnection', 'Through a connection') },
                           ]
-                        : [{ value: 'direct', label: 'This machine' }]
+                        : [{ value: 'direct', label: t('api.env.machine', 'This machine') }]
                     }
                   />
                 </div>
               </Field>
               <Show when={props.route.kind === 'connection'}>
-                <Field for="api-environment-profile" label="Connection">
+                <Field for="api-environment-profile" label={t('api.env.connection', 'Connection')}>
                   <div data-api-field="route-profile">
                     <Select
-                      ariaLabel="The connection a send goes through"
+                      ariaLabel={t('api.env.connection.aria', 'The connection a send goes through')}
                       value={props.route.profileId}
                       onChange={(profileId) =>
                         props.onRoute({ ...props.route, kind: 'connection', profileId })
                       }
                       options={props.connections.map((c) => ({ value: c.id, label: c.name }))}
-                      placeholder="Choose a connection"
+                      placeholder={t('api.env.connection.ph', 'Choose a connection')}
                       placeholderValue=""
                     />
                   </div>
@@ -271,18 +272,22 @@ export function EnvironmentView(props: EnvironmentViewProps) {
                   is on cannot answer that. Per environment, so dev can have it
                   and production cannot inherit it. */}
               <Checkbox
-                label="Do not verify the server's certificate"
+                label={t('api.env.noVerify.label', 'Do not verify the server\'s certificate')}
                 checked={props.route.insecureTls}
                 onChange={(insecureTls) => props.onRoute({ ...props.route, insecureTls })}
               />
               <p class="api-environments__note">
-                Covers every refusal a certificate can draw: self-signed, signed by an authority
-                this machine does not know, expired, or issued for another name.
+                {t(
+                  'api.env.noVerify.note',
+                  'Covers every refusal a certificate can draw: self-signed, signed by an authority this machine does not know, expired, or issued for another name.',
+                )}
               </p>
               <Show when={props.route.insecureTls}>
                 <p class="api-environments__warning">
-                  Sends under this environment do not check that the server is who it says it is. It
-                  is written into the collection file, and every run that goes out under it says so.
+                  {t(
+                    'api.env.noVerify.warn',
+                    'Sends under this environment do not check that the server is who it says it is. It is written into the collection file, and every run that goes out under it says so.',
+                  )}
                 </p>
               </Show>
 
@@ -293,9 +298,10 @@ export function EnvironmentView(props: EnvironmentViewProps) {
                   the bastion this control just named. */}
               <Show when={props.route.kind === 'connection'}>
                 <p class="api-environments__note">
-                  Requests under this environment are dialled from that host, through the same
-                  pooled connection a terminal tab uses. A connection that cannot be reached fails
-                  the send rather than falling back to this machine.
+                  {t(
+                    'api.env.viaHost.note',
+                    'Requests under this environment are dialled from that host, through the same pooled connection a terminal tab uses. A connection that cannot be reached fails the send rather than falling back to this machine.',
+                  )}
                 </p>
               </Show>
             </div>
@@ -305,7 +311,7 @@ export function EnvironmentView(props: EnvironmentViewProps) {
                 marks and vault-state wording. */}
             <EditableRowList
               variant="table"
-              ariaLabel="Environment values"
+              ariaLabel={t('api.env.values.aria', 'Environment values')}
               columns={[{ label: 'Name' }, { label: 'Value' }]}
               rows={props.rows}
               addLabel="Add variable"
@@ -316,7 +322,7 @@ export function EnvironmentView(props: EnvironmentViewProps) {
                   <td>
                     <TextField
                       id={`api-environment-var-name-${i}`}
-                      ariaLabel={`Variable ${i + 1} name`}
+                      ariaLabel={`${t('api.env.var.nameAriaHead', 'Variable')} ${i + 1}${t('api.env.var.nameAriaTail', ' name')}`}
                       placeholder="baseUrl"
                       value={row().name}
                       onInput={(v) => patchRow(i, { name: v })}
@@ -325,7 +331,7 @@ export function EnvironmentView(props: EnvironmentViewProps) {
                   <td>
                     <SecretTextField
                       id={`api-environment-var-value-${i}`}
-                      ariaLabel={`Variable ${i + 1} value`}
+                      ariaLabel={`${t('api.env.var.valueAriaHead', 'Value')} ${i + 1}${t('api.env.var.valueAriaTail', ' value')}`}
                       placeholder="https://api.example.com"
                       value={row().value}
                       onInput={(v) => patchRow(i, { value: v })}
@@ -349,14 +355,14 @@ export function EnvironmentView(props: EnvironmentViewProps) {
                 two inches apart. */}
             <div class="api-environments__actions">
               <Button variant="primary" disabled={!savable()} onClick={props.onSave}>
-                Save
+                {t('api.env.save', 'Save')}
               </Button>
               {/* Reset is the draft's undo, so it is offered only when there
                   IS a draft to throw away — and never while making a new one,
                   where "reset" would mean discarding the whole thing, which is
                   what Back does. */}
               <Show when={props.dirty && !props.creating}>
-                <Button onClick={props.onReset}>Reset</Button>
+                <Button onClick={props.onReset}>{t('api.env.reset', 'Reset')}</Button>
               </Show>
             </div>
           </Show>

@@ -40,6 +40,7 @@ import { createSecretChip, createSecretChipDamaged } from '../ui/secret-chip'
 import { layOutJSON } from '../ui/format-json'
 import { ResponseBody } from './response-body'
 import type { ApiRun, ApiRunView } from './api-store'
+import { t, tPlural } from '../i18n/locale-model'
 import { TimingBar } from './timing-bar'
 import {
   type ApiCertificate,
@@ -79,8 +80,8 @@ export function RunList(props: RunListProps) {
         when={props.runs.length > 0}
         fallback={
           <EmptyState
-            title="No runs yet"
-            description="Press Send and the exchange appears here, newest first."
+            title={t('api.runs.empty.title', 'No runs yet')}
+            description={t('api.runs.empty.desc', 'Press Send and the exchange appears here, newest first.')}
           />
         }
       >
@@ -172,7 +173,7 @@ function Run(props: {
             {(view) => (
               <>
                 <ResponseBody
-                  ariaLabel="Response body"
+                  ariaLabel={t('api.runs.responseBody.aria', 'Response body')}
                   text={view().text}
                   language={isJSONResponse(res) ? 'json' : 'text'}
                 />
@@ -195,10 +196,10 @@ function Run(props: {
       })
       items.push({
         id: 'headers',
-        label: `Headers ${res.headers.length}`,
+        label: tPlural('api.runs.headersHead', res.headers.length, 'Headers {count}'),
         content: () => (
           <ResponseBody
-            ariaLabel="Response headers"
+            ariaLabel={t('api.runs.responseHeaders.aria', 'Response headers')}
             text={responseHeaderText(res)}
             language="text"
           />
@@ -311,7 +312,7 @@ function Run(props: {
           while it has not. */}
       <Show when={run().outcome === 'pending'}>
         <div class="api-run__state">
-          <Badge tone="info">Sending…</Badge>
+          <Badge tone="info">{t('api.runs.sending', 'Sending…')}</Badge>
           <span class="api-run__elapsed">{formatElapsed(elapsed())}</span>
         </div>
       </Show>
@@ -323,7 +324,7 @@ function Run(props: {
           not work, and here is what was said" looks like everywhere else in
           the product. */}
       <Show when={run().outcome === 'refused' && run().error !== ''}>
-        <StatusCard tone="danger" title="The request did not go out" description={run().error} />
+        <StatusCard tone="danger" title={t('api.runs.notSent.title', 'The request did not go out')} description={run().error} />
       </Show>
 
       {/* AN ATTEMPT THAT ENDED WITHOUT AN ANSWER. The card says WHERE it
@@ -346,7 +347,7 @@ function Run(props: {
       <Show when={tabs().length > 0}>
         <Tabs
           orientation="horizontal"
-          ariaLabel="This exchange"
+          ariaLabel={t('api.runs.exchange.aria', 'This exchange')}
           active={active()}
           onChange={(v) => props.onView(run().id, v as ApiRunView)}
           // THE NUMBERS RIDE THE TAB ROW, which is where the owner's
@@ -452,12 +453,12 @@ function RawExchange(props: {
           bytes off the wire, and a fingerprint is a thing people copy out of
           a block that shows it whole. */}
       <Caption>── request ──</Caption>
-      <CodeBlock ariaLabel="Raw request" wrap={false}>
+      <CodeBlock ariaLabel={t('api.runs.rawRequest.aria', 'Raw request')} wrap={false}>
         <For each={rawSegments(props.request)}>{(seg) => rawSegment(seg, props.secretName)}</For>
       </CodeBlock>
       <Caption>── connection ──</Caption>
       <Show when={props.connection !== ''}>
-        <CodeBlock ariaLabel="Connection">{props.connection}</CodeBlock>
+        <CodeBlock ariaLabel={t('api.runs.connection.aria', 'Connection')}>{props.connection}</CodeBlock>
       </Show>
       <TimingBar timings={props.timings} />
       {/* WHAT WAS ON THE OTHER END. Present for any TLS exchange, not only
@@ -482,7 +483,7 @@ function RawExchange(props: {
         {(raw) => (
           <>
             <Caption>── response ──</Caption>
-            <CodeBlock ariaLabel="Raw response" wrap={false}>
+            <CodeBlock ariaLabel={t('api.runs.rawResponse.aria', 'Raw response')} wrap={false}>
               <For each={rawSegments(raw())}>{(seg) => rawSegment(seg, props.secretName)}</For>
             </CodeBlock>
           </>

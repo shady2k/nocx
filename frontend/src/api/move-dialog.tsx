@@ -22,6 +22,7 @@ import { Button } from '../ui/button'
 import { Dialog } from '../ui/dialog'
 import { Radio } from '../ui/radio'
 import { TextField } from '../ui/text-field'
+import { t } from '../i18n/locale-model'
 
 export interface MoveToFolderDialogProps {
   open: boolean
@@ -112,7 +113,7 @@ export function MoveToFolderDialog(props: MoveToFolderDialogProps) {
       footer={
         <>
           <Button variant="default" onClick={props.onCancel}>
-            Cancel
+            {t('api.dialog.cancel', 'Cancel')}
           </Button>
           <Button variant="primary" disabled={!ready() || props.busy} onClick={submit}>
             {chosen() === NEW_FOLDER_VALUE ? 'Create and move' : 'Move here'}
@@ -125,7 +126,7 @@ export function MoveToFolderDialog(props: MoveToFolderDialogProps) {
           role. Root first, then the collection's folders in the backend's
           own order (parents before their children — api-tree depends on
           it, and so does this list). */}
-      <div class="api-move__folders" role="radiogroup" aria-label="Move to folder">
+      <div class="api-move__folders" role="radiogroup" aria-label={t('api.move.aria', 'Move to folder')}>
         <Radio
           name="api-move-folder"
           value=""
@@ -151,7 +152,7 @@ export function MoveToFolderDialog(props: MoveToFolderDialogProps) {
           value={NEW_FOLDER_VALUE}
           checked={chosen() === NEW_FOLDER_VALUE}
           onChange={setChosen}
-          label="New folder…"
+          label={t('api.move.newFolder', 'New folder…')}
         />
       </div>
       {/* The new-folder half of the same decision: only when it is the
@@ -161,9 +162,9 @@ export function MoveToFolderDialog(props: MoveToFolderDialogProps) {
       <Show when={chosen() === NEW_FOLDER_VALUE}>
         <TextField
           id="api-move-new-folder-name"
-          ariaLabel="New folder name"
-          label="New folder name"
-          description={`A folder at the root of ${props.collectionName}; ${props.requestName} will be moved into it.`}
+          ariaLabel={t('api.move.newName.aria', 'New folder name')}
+          label={t('api.move.newName.aria', 'New folder name')}
+          description={`${t('api.move.rootNote.head', 'A folder at the root of ')}${props.collectionName}${t('api.move.rootNote.middle', '; ')}${props.requestName}${t('api.move.rootNote.tail', ' will be moved into it.')}`}
           value={newName()}
           onInput={setNewName}
           error={refusal()}

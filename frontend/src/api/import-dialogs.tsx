@@ -46,6 +46,7 @@ import { TextField } from '../ui/text-field'
 import { isCollectionsRoot } from './api-paths'
 import type { ApiConnection } from './api-client'
 import type { ApiRoute } from './api-model'
+import { t } from '../i18n/locale-model'
 
 /** This ask's name in `data-file-drop-target`. Exported so the element that
  *  carries it and the subscriber that filters on it read one constant — two
@@ -244,13 +245,13 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
   return (
     <Dialog
       open={props.open}
-      title="Import collection"
+      title={t('api.import.collection.title', 'Import collection')}
       onClose={props.onCancel}
       onSubmit={submit}
       footer={
         <>
           <Button variant="default" onClick={props.onCancel}>
-            Cancel
+            {t('api.dialog.cancel', 'Cancel')}
           </Button>
           <Button variant="primary" disabled={!ready()} onClick={submit}>
             Import
@@ -270,8 +271,8 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
           once, for the ask and the call alike (api-paths.ts). */}
       <TextField
         id="api-import-paste"
-        label="Paste a Postman export or a URL"
-        description="Read, never executed."
+        label={t('api.import.paste.label', 'Paste a Postman export or a URL')}
+        description={t('api.import.readNote', 'Read, never executed.')}
         multiline
         value={props.pasted}
         error={pasteRefusal()}
@@ -294,10 +295,10 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
           a second spelling of "route through a connection" is two answers
           that agree until they do not. */}
       <Show when={props.sourceIsURL}>
-        <Field for="api-import-route" label="Fetch through">
+        <Field for="api-import-route" label={t('api.import.fetchThrough', 'Fetch through')}>
           <Select
             id="api-import-route"
-            ariaLabel="The connection this fetch goes through"
+            ariaLabel={t('api.import.fetchThrough.aria', 'The connection this fetch goes through')}
             value={props.route.kind === 'connection' ? props.route.profileId : ''}
             onChange={(profileId) =>
               props.onRoute(
@@ -343,7 +344,7 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
       <DropZone
         target={API_IMPORT_DROP_TARGET}
         sessionId={props.dropSession}
-        hint="Drop a Postman export here to import it"
+        hint={t('api.import.dropHint', 'Drop a Postman export here to import it')}
         pickLabel="Or select a file"
         // What the browser picker offers. Postman exports are JSON documents
         // or ZIP archives (design §10, Postman v2.1), and this bounds the
@@ -364,8 +365,8 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
         <div hidden>
           <TextField
             id="api-import-postman-file"
-            label="Postman v2.1 export"
-            description="Read, never executed."
+            label={t('api.import.v21.label', 'Postman v2.1 export')}
+            description={t('api.import.readNote', 'Read, never executed.')}
             value={props.file}
             onInput={props.onFile}
           />
@@ -380,8 +381,8 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
           {props.sourceLabel}
           <IconButton
             size="sm"
-            ariaLabel="Forget this source"
-            title="Forget this source"
+            ariaLabel={t('api.import.forget.title', 'Forget this source')}
+            title={t('api.import.forget.title', 'Forget this source')}
             onClick={props.onClearSource}
           >
             <CloseIcon />
@@ -400,8 +401,8 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
             : 'Choose where this goes'}
           <IconButton
             size="sm"
-            ariaLabel="Change where this goes"
-            title="Change where this goes"
+            ariaLabel={t('api.import.changeDest.title', 'Change where this goes')}
+            title={t('api.import.changeDest.title', 'Change where this goes')}
             onClick={props.onEditDest}
           >
             <PencilIcon />
@@ -418,8 +419,8 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
       <div hidden={!editing()}>
         <TextField
           id="api-import-postman-dest"
-          label="New collection folder"
-          description="Must not exist yet — the import arrives whole or not at all."
+          label={t('api.import.newFolder.label', 'New collection folder')}
+          description={t('api.import.newFolder.desc', 'Must not exist yet — the import arrives whole or not at all.')}
           value={props.dest}
           onInput={props.onDest}
           onFocus={() => {
@@ -433,8 +434,8 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
             props.onBrowse ? (
               <IconButton
                 size="sm"
-                ariaLabel="Browse…"
-                title="Choose a folder with the system picker"
+                ariaLabel={t('api.dialog.browse.aria', 'Browse…')}
+                title={t('api.dialog.browse.title', 'Choose a folder with the system picker')}
                 onClick={() => props.onBrowse?.()}
               >
                 <FolderOpenIcon />
@@ -457,7 +458,8 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
           person aims at is above this point and stays where they saw it. */}
       <Show when={props.reading === true}>
         <p class="api-import-summary">
-          <Spinner size="sm" label="Reading the export" /> Reading the export…
+          <Spinner size="sm" label={t('api.import.reading', 'Reading the export')} />{' '}
+          {t('api.import.reading', 'Reading the export')}…
         </p>
       </Show>
       <Show
@@ -561,13 +563,13 @@ export function CurlImportDialog(props: CurlImportDialogProps) {
   return (
     <Dialog
       open={props.open}
-      title="Import a curl command"
+      title={t('api.import.curl.title', 'Import a curl command')}
       onClose={props.onCancel}
       onSubmit={submit}
       footer={
         <>
           <Button variant="default" onClick={props.onCancel}>
-            Cancel
+            {t('api.dialog.cancel', 'Cancel')}
           </Button>
           <Button variant="primary" disabled={!ready()} onClick={submit}>
             Convert to a request
@@ -577,7 +579,7 @@ export function CurlImportDialog(props: CurlImportDialogProps) {
     >
       <TextField
         id="api-import-curl"
-        label="curl command line"
+        label={t('api.import.curl.lineLabel', 'curl command line')}
         description="Parsed, never executed — there is no shell behind this field. It fills the form, replacing what is open there; nothing is written until the request is saved. A request with unsaved changes is not replaced without asking."
         multiline
         value={props.value}
@@ -592,7 +594,7 @@ export function CurlImportDialog(props: CurlImportDialogProps) {
           "one of N"; this places it in a Field, which is what gives it its
           visible label. */}
       <Show when={props.collectionName !== ''}>
-        <Field for="api-import-curl-dest" label="Save it in">
+        <Field for="api-import-curl-dest" label={t('api.import.saveIn', 'Save it in')}>
           <Select
             id="api-import-curl-dest"
             value={props.dest}

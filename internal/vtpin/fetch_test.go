@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -306,38 +307,194 @@ func serveFlaky(t *testing.T, f *fixture, status, fails int) (*httptest.Server, 
 	return srv, seen
 }
 
-// TestFetchRidesOutAServerError is CI's release download answering one 500:
-// GitHub's release CDN does that, and a red job that ran no test is a report
-// about nothing. A 5xx is the server's fault and says nothing about the bytes,
-// so the fetch asks again; the hash check is unchanged by the second ask.
-func TestFetchRidesOutAServerError(t *testing.T) {
+// The retry contract (nocx-atpw5.1.44). A CI job's fetch of the release is a
+// network read, and on 2026-11-05 GitHub's release download answered 504 for
+// minutes; ten jobs across two pull requests went red on it. Three rules, each
+// with a test: a bounded number of attempts with a pause between them, every
+// attempt logged with the URL and the status; an answer that will not improve —
+// a 404, or bytes that hash wrong — taken once; and a run that exhausts its
+// attempts naming the URL and the status it kept getting.
+//
+// NO TEST WAITS. The pause is injected (Fetcher.Sleep) and the schedule is
+// injected (Fetcher.Backoff): a test asserts the waits it configured rather than
+// sleeping them, so the suite costs nothing and the schedule under test is the
+// one the test named.
+
+// paused replaces a fetcher's pause with a recorder and returns it.
+func paused(fetcher *Fetcher) *[]time.Duration {
+	waits := &[]time.Duration{}
+	fetcher.Sleep = func(d time.Duration) { *waits = append(*waits, d) }
+	return waits
+}
+
+// recordingLog collects what a fetch said, so a test can read the line a CI log
+// would carry.
+func recordingLog() (*[]string, func(string, ...any)) {
+	lines := &[]string{}
+	return lines, func(format string, args ...any) { *lines = append(*lines, fmt.Sprintf(format, args...)) }
+}
+
+// retryLines returns the logged lines that report a retry.
+func retryLines(lines []string) []string {
+	var retried []string
+	for _, line := range lines {
+		if strings.Contains(line, "retry") {
+			retried = append(retried, line)
+		}
+	}
+	return retried
+}
+
+// TestFetchRidesOutAGatewayTimeout is the incident itself: the release download
+// answers 504 once and then the bytes. The fetch asks again after the first
+// backoff step, and the log says which URL got which status — a retry nobody
+// can see is indistinguishable in a job's log from a download that worked.
+func TestFetchRidesOutAGatewayTimeout(t *testing.T) {
 	f := newFixture(t)
-	srv, seen := serveFlaky(t, f, http.StatusInternalServerError, 1)
+	f.manifest.Targets = nil
+	srv, seen := serveFlaky(t, f, http.StatusGatewayTimeout, 1)
 	fetcher := NewFetcher(srv.URL)
-	fetcher.Backoff = []time.Duration{0, 0}
-	if err := f.manifest.Fetch(t.TempDir(), fetcher, FetchOptions{}); err != nil {
-		t.Fatalf("a fetch whose server answered 500 once = %v, want it to succeed on the next ask", err)
+	fetcher.Backoff = []time.Duration{2 * time.Second, 30 * time.Second}
+	waits := paused(fetcher)
+	lines, logf := recordingLog()
+	if err := f.manifest.Fetch(t.TempDir(), fetcher, FetchOptions{Log: logf}); err != nil {
+		t.Fatalf("a fetch whose first answer was 504 = %v, want it to ask again", err)
 	}
 	if got := seen[f.manifest.Licenses.Name]; got != 2 {
-		t.Fatalf("the licences document was requested %d times, want 2 (one 500, one answer)", got)
+		t.Fatalf("the licences document was requested %d times, want 2 (one 504, one answer)", got)
+	}
+	if len(*waits) != 1 || (*waits)[0] != 2*time.Second {
+		t.Fatalf("the fetch paused %v before retrying, want the first step of the schedule, 2s", *waits)
+	}
+	retried := retryLines(*lines)
+	if len(retried) != 1 {
+		t.Fatalf("the fetch logged %q; want one line saying it retried", *lines)
+	}
+	url := srv.URL + "/" + f.manifest.Licenses.Name
+	if !strings.Contains(retried[0], url) || !strings.Contains(retried[0], "504") {
+		t.Fatalf("the retry line %q does not name %s and the status 504", retried[0], url)
 	}
 }
 
-// TestFetchGivesUpOnAServerThatKeepsFailing bounds the asking: a release that
-// is down stays a red build, after exactly the attempts Backoff allows.
-func TestFetchGivesUpOnAServerThatKeepsFailing(t *testing.T) {
+// TestFetchGivesUpAfterItsStatedAttempts is the bound: a release that keeps
+// answering 504 is a red build after the attempts the schedule allows and no
+// more, and the error says which URL kept answering what.
+func TestFetchGivesUpAfterItsStatedAttempts(t *testing.T) {
 	f := newFixture(t)
-	srv, seen := serveFlaky(t, f, http.StatusBadGateway, 1000)
+	f.manifest.Targets = nil
+	srv, seen := serveFlaky(t, f, http.StatusGatewayTimeout, 1000)
 	fetcher := NewFetcher(srv.URL)
-	fetcher.Backoff = []time.Duration{0, 0}
+	fetcher.Backoff = []time.Duration{time.Second, 3 * time.Second}
+	waits := paused(fetcher)
 	err := f.manifest.Fetch(t.TempDir(), fetcher, FetchOptions{})
-	if err == nil || !strings.Contains(err.Error(), "502") {
-		t.Fatalf("a fetch whose server always answers 502 = %v, want the 502", err)
+	if err == nil {
+		t.Fatal("a fetch whose server always answers 504 succeeded")
 	}
-	for name, n := range seen {
-		if n != 3 {
-			t.Fatalf("%s was requested %d times, want 3 (one ask and two retries)", name, n)
+	url := srv.URL + "/" + f.manifest.Licenses.Name
+	for _, want := range []string{url, "504 Gateway Timeout", "3 attempts"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the failure %q does not name %q", err, want)
 		}
+	}
+	if got := seen[f.manifest.Licenses.Name]; got != 3 {
+		t.Fatalf("the licences document was requested %d times, want 3 (one ask and two retries)", got)
+	}
+	if len(*waits) != 2 || (*waits)[0] != time.Second || (*waits)[1] != 3*time.Second {
+		t.Fatalf("the fetch paused %v, want exactly the injected schedule [1s 3s]", *waits)
+	}
+}
+
+// TestFetchRidesOutTooManyRequests: a 429 is the release host asking for a
+// pause, and the pause it asks for is the one the schedule already names.
+func TestFetchRidesOutTooManyRequests(t *testing.T) {
+	f := newFixture(t)
+	f.manifest.Targets = nil
+	srv, seen := serveFlaky(t, f, http.StatusTooManyRequests, 1)
+	fetcher := NewFetcher(srv.URL)
+	fetcher.Backoff = []time.Duration{5 * time.Second}
+	waits := paused(fetcher)
+	if err := f.manifest.Fetch(t.TempDir(), fetcher, FetchOptions{}); err != nil {
+		t.Fatalf("a fetch whose only 429 preceded the bytes = %v, want it to ask again", err)
+	}
+	if got := seen[f.manifest.Licenses.Name]; got != 2 {
+		t.Fatalf("the licences document was requested %d times after one 429, want 2", got)
+	}
+	if len(*waits) != 1 {
+		t.Fatalf("the fetch paused %v, want one injected wait", *waits)
+	}
+}
+
+// TestFetchRetriesATruncatedBody: the connection can die after the response
+// line, and a half-read archive is not a wrong archive — it is no answer at
+// all. It is asked for again rather than reported as a mismatch, because the
+// bytes that arrived were never the whole file to hash.
+func TestFetchRetriesATruncatedBody(t *testing.T) {
+	f := newFixture(t)
+	f.manifest.Targets = nil
+	body := f.contents[f.manifest.Licenses.Name]
+	attempts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(body[:len(body)/2])
+			return
+		}
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	fetcher := NewFetcher(srv.URL)
+	fetcher.Backoff = []time.Duration{time.Second}
+	waits := paused(fetcher)
+	if err := f.manifest.Fetch(t.TempDir(), fetcher, FetchOptions{}); err != nil {
+		t.Fatalf("a fetch whose first body was cut off mid-stream = %v, want it to ask again", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("the server was asked %d times, want 2 (one truncated body, one whole one)", attempts)
+	}
+	if len(*waits) != 1 {
+		t.Fatalf("the fetch paused %v, want one injected wait", *waits)
+	}
+}
+
+// TestFetchRetriesAConnectionThatDiedBeforeTheAnswer: a reset connection is the
+// same class as a 5xx — the server's hiccup, nothing about the bytes.
+func TestFetchRetriesAConnectionThatDiedBeforeTheAnswer(t *testing.T) {
+	f := newFixture(t)
+	f.manifest.Targets = nil
+	body := f.contents[f.manifest.Licenses.Name]
+	attempts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			hijacker, ok := w.(http.Hijacker)
+			if !ok {
+				t.Error("the test server does not support hijacking a connection")
+				return
+			}
+			conn, _, err := hijacker.Hijack()
+			if err != nil {
+				t.Errorf("hijacking the connection to reset it: %v", err)
+				return
+			}
+			_ = conn.Close()
+			return
+		}
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	fetcher := NewFetcher(srv.URL)
+	fetcher.Backoff = []time.Duration{time.Second}
+	waits := paused(fetcher)
+	if err := f.manifest.Fetch(t.TempDir(), fetcher, FetchOptions{}); err != nil {
+		t.Fatalf("a fetch whose first connection was reset = %v, want it to ask again", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("the server was asked %d times, want 2 (one reset, one answer)", attempts)
+	}
+	if len(*waits) != 1 {
+		t.Fatalf("the fetch paused %v, want one injected wait", *waits)
 	}
 }
 
@@ -347,13 +504,49 @@ func TestFetchDoesNotAskAgainForAMissingRelease(t *testing.T) {
 	f := newFixture(t)
 	srv, seen := serveFlaky(t, f, http.StatusNotFound, 1000)
 	fetcher := NewFetcher(srv.URL)
-	fetcher.Backoff = []time.Duration{0, 0}
-	if err := f.manifest.Fetch(t.TempDir(), fetcher, FetchOptions{}); err == nil {
+	fetcher.Backoff = []time.Duration{time.Second, time.Second}
+	waits := paused(fetcher)
+	err := f.manifest.Fetch(t.TempDir(), fetcher, FetchOptions{})
+	if err == nil {
 		t.Fatal("a fetch of a release that answers 404 succeeded")
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Fatalf("the failure %q does not name the 404", err)
 	}
 	for name, n := range seen {
 		if n != 1 {
 			t.Fatalf("%s was requested %d times after a 404, want 1", name, n)
 		}
+	}
+	if len(*waits) != 0 {
+		t.Fatalf("the fetch paused %v after a 404; a 404 is an answer, not a hiccup", *waits)
+	}
+}
+
+// TestFetchRefusesASubstitutedArchiveWithoutAskingAgain: the tamper check is
+// not a transient failure. The bytes arrived whole and hashed wrong, and asking
+// the same server again cannot turn them into the pinned file.
+func TestFetchRefusesASubstitutedArchiveWithoutAskingAgain(t *testing.T) {
+	f := newFixture(t)
+	f.manifest.Targets = nil
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		_, _ = w.Write([]byte("someone else's terms"))
+	}))
+	t.Cleanup(srv.Close)
+	fetcher := NewFetcher(srv.URL)
+	fetcher.Backoff = []time.Duration{time.Second, time.Second}
+	waits := paused(fetcher)
+	err := f.manifest.Fetch(t.TempDir(), fetcher, FetchOptions{})
+	var mismatch *MismatchError
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("a fetch of substituted bytes returned %v, want a MismatchError at once", err)
+	}
+	if requests != 1 {
+		t.Fatalf("the substituted asset was requested %d times, want 1: a wrong hash is decided, not retried", requests)
+	}
+	if len(*waits) != 0 {
+		t.Fatalf("the fetch paused %v before refusing bytes that hashed wrong", *waits)
 	}
 }

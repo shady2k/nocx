@@ -274,13 +274,59 @@ test('a job whose every test step passed says so, and an unreadable evidence set
         runId: '22',
         attempt: 1,
         expectedSteps: ['go-backend'],
+        job: 'ci-backend (no-secret-service)',
         mainIssuesJsonl: '{}',
         quarantineJson: '{"schema":1,"tests":[]}',
         issuesJsonl: '',
         write: () => {},
       }),
-    /ENOENT/,
+    /ci-backend \(no-secret-service\): no test step ran .*never created/,
   )
+})
+
+// A JOB THAT DIED BEFORE ANY TEST STEP (nocx-atpw5.1.44). On 2026-11-05
+// `make vt-archives` answered 504, every test step was skipped, and the gate —
+// which runs `always()` — reported "ENOENT scandir /tmp/nocx-test-logs". That
+// names a directory and not the job's failure, so a reader was sent looking for
+// a missing log instead of at the step above. The gate is not a test and cannot
+// judge one that never ran; it owes the reader that sentence.
+test('a job that failed before any test step says so, naming itself and the step above', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'nocx-quarantine-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const bin = join(root, 'bin')
+  mkdirSync(bin)
+  // Both tracker reads are the same stub: this test is about the missing
+  // evidence, not about the store.
+  writeFileSync(
+    join(bin, 'git'),
+    '#!/bin/sh\ncase "$1" in\n  fetch) exit 0 ;;\n  show) printf \'%s\\n\' \'{"id":"nocx-a","status":"open"}\' ;;\n  *) exit 1 ;;\nesac\n',
+    { mode: 0o755 },
+  )
+  // An empty quarantine file: this test is about the missing evidence, not
+  // about which beads the committed file names.
+  const quarantineFile = join(root, 'quarantine.json')
+  writeFileSync(quarantineFile, '{"schema":1,"tests":[]}')
+  const logs = join(root, 'nocx-test-logs')
+  const result = spawnSync('node', ['scripts/quarantine-gate.mjs'], {
+    env: {
+      ...process.env,
+      NOCX_QUARANTINE_FILE: quarantineFile,
+      NOCX_TEST_LOG_DIR: logs,
+      NOCX_EXPECTED_STEPS: 'go-backend',
+      NOCX_QUARANTINE_JOB: 'ci-backend (no-secret-service)',
+      NOCX_QUARANTINE_PULL: '12',
+      GITHUB_RUN_ID: '22',
+      GITHUB_RUN_ATTEMPT: '1',
+      PATH: `${bin}:${process.env.PATH}`,
+    },
+    encoding: 'utf8',
+  })
+  assert.equal(result.status, 1, result.stdout + result.stderr)
+  assert.match(
+    result.stderr,
+    /quarantine: FAILED: ci-backend \(no-secret-service\): no test step ran — .*never created, so the job failed before any gated test step\. Read the failing step above this one/,
+  )
+  assert.doesNotMatch(result.stderr, /ENOENT/)
 })
 
 // Missing evidence is not an empty green run. The manifest is supplied by the

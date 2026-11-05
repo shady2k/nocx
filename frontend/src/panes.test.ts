@@ -1721,6 +1721,33 @@ describe('PaneManager', () => {
     expect(text).toContain('Reinstall or update nocx')
   })
 
+  // A SAVED SSH CONNECTION THAT FAILS SAYS WHY WHERE IT DIED (nocx-398ca).
+  // The pane is the surface that outlives the attempt, and the reason the
+  // owner's stuck tab never showed was that the open never failed at all —
+  // this pins the renderer half: a failure, once it arrives, is readable in
+  // the pane rather than a bare cursor.
+  it('shows why a saved SSH connection failed, in the pane it left', async () => {
+    const refusal = new RpcError(
+      "Nocx started this machine's helper and it did not answer as the build that installed it: " +
+        'helper: connection lost: EOF. Open the pane again.',
+      -32603,
+      { reason: 'handshake', action: 'retry-open' },
+    )
+    const client = makeClient({ openSSHSession: vi.fn(() => Promise.reject(refusal)) })
+    const { manager, panes } = await mountPaneManager(client)
+
+    manager.newSSHPane('ssh:test:1', 'host.example.com')
+
+    await vi.waitFor(() => {
+      const notice = panes.querySelector('.pane.active .pane-error')
+      expect(notice).not.toBeNull()
+      const text = notice?.textContent ?? ''
+      expect(text).toContain('Terminal failed to start')
+      expect(text).toContain('did not answer as the build that installed it')
+      expect(text).toContain('Open the pane again')
+    })
+  })
+
   it('Tab.ready resolves true for a genuinely started tab', async () => {
     // initialPaneReady resolved above, proving the content-level signal resolved true.
     //

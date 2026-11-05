@@ -278,13 +278,24 @@ type Options struct {
 	// duration — the interval is real wall-clock time, D5's own clock
 	// seam (Now) is what the sweep still measures a session's age against.
 	SweepInterval time.Duration
-	// StartupGrace bounds a daemon that has never owned a session. The
-	// composition root supplies MeasuredStartupGrace; zero disables the grace
-	// for services used outside the daemon runtime (including unit tests).
+	// StartupGrace bounds a daemon NOBODY HAS REACHED: it expires while no
+	// client is bound and no session has ever been owned. The composition
+	// root supplies MeasuredStartupGrace; zero disables the grace for services
+	// used outside the daemon runtime (including unit tests).
 	StartupGrace time.Duration
-	// OnDrained is called once after admission closes because the startup grace
-	// expired empty, or the final session ended. The daemon uses it to stop
-	// accepting before releasing its endpoint.
+	// ConnectedGrace bounds a daemon that HAS a client and has never owned a
+	// session — the coordinator is on its way to a spawn. It replaces
+	// StartupGrace the moment the first client binds, because from then on
+	// the question is not whether the helper was reached but whether its
+	// client abandoned it. The composition root supplies ConnectedIdleGrace.
+	ConnectedGrace time.Duration
+	// LifecycleTimers schedules the two deadlines above. Nil uses
+	// time.AfterFunc; a test supplies one so it can fire a deadline at the
+	// moment the rule is about rather than wait for a clock.
+	LifecycleTimers LifecycleTimers
+	// OnDrained is called once after admission closes because the startup
+	// (or connected-idle) grace expired empty, or the final session ended.
+	// The daemon uses it to stop accepting before releasing its endpoint.
 	OnDrained func()
 }
 
@@ -392,10 +403,15 @@ func newWithLifecycleTimer(opts Options, afterFunc lifecycleAfterFunc) *Service 
 	if s.newID == nil {
 		s.newID = randomID
 	}
+	if afterFunc == nil && opts.LifecycleTimers != nil {
+		afterFunc = func(d time.Duration, f func()) lifecycleTimer {
+			return opts.LifecycleTimers.AfterFunc(d, f)
+		}
+	}
 	if afterFunc == nil {
-		s.lifecycle = newDaemonLifecycle(opts.StartupGrace, opts.OnDrained)
+		s.lifecycle = newDaemonLifecycle(opts.StartupGrace, opts.ConnectedGrace, opts.OnDrained)
 	} else {
-		s.lifecycle = newDaemonLifecycleWithTimer(opts.StartupGrace, opts.OnDrained, afterFunc)
+		s.lifecycle = newDaemonLifecycleWithTimer(opts.StartupGrace, opts.ConnectedGrace, opts.OnDrained, afterFunc)
 	}
 	interval := opts.SweepInterval
 	if interval <= 0 {
@@ -450,6 +466,12 @@ func (s *Service) sweepLoop(interval time.Duration) {
 // where "process-scoped registry, connection-scoped engines" is actually
 // enforced rather than described.
 func (s *Service) Bind(sink Sink) (release func()) {
+	// THE CONNECTION IS A LIFECYCLE FACT, and this is where it is counted: a
+	// daemon a coordinator has reached is in use, so the startup deadline —
+	// which asks whether it was ever reached — stops being asked. The count
+	// is per bound connection and ends with the release below, which bounds a
+	// daemon nobody ever spawned on from the moment its client leaves.
+	s.lifecycle.clientBound()
 	s.mu.Lock()
 	s.sinks[sink] = struct{}{}
 	s.mu.Unlock()
@@ -464,6 +486,7 @@ func (s *Service) Bind(sink Sink) (release func()) {
 			for _, hs := range live {
 				hs.releaseConnection(sink)
 			}
+			s.lifecycle.clientReleased()
 		})
 	}
 }

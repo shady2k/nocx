@@ -90,10 +90,6 @@ const SATURATION_TOAST_MESSAGE =
  * cause; a new admission is a new row here, deliberately.
  */
 const SATURATION_HOLDERS: Record<string, string> = {
-  // The execution lane's own name (nocx-3an1s.1.8). It was the one scope a
-  // stuck open held that the table did not know, so the commonest refusal in
-  // the owner's log read as "that action was refused" — true, and useless.
-  control: 'another terminal operation is still running',
   config: 'a settings or connections change is still being saved',
   session: 'another pane is still completing a terminal operation',
   vault: 'the vault is still being used',
@@ -101,6 +97,12 @@ const SATURATION_HOLDERS: Record<string, string> = {
   git: 'a git operation is still running',
   filesystem: 'a file operation is still running',
   api: 'an API request is still running',
+  // The execution lane every admission-backed control method shares
+  // (internal/transport/ws.go's control.NewSemaphore("control", …)). It is
+  // the scope a stuck pane open takes eight of, and until it was named here
+  // the owner met exactly that: "The terminal is busy" with nothing holding
+  // it they could name (nocx-3an1s.1.1, nocx-398ca).
+  control: 'another terminal operation is still in progress',
 }
 
 /** The toast's sentence for one refusal, naming the holder where the scope

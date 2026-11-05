@@ -652,6 +652,39 @@ const farToolTeardownTimeout = 10 * time.Second
 // shrinks it for the run rather than waiting out the production budget.
 var gitOpenTimeout = 20 * time.Second
 
+// farHelperAnswerTimeout bounds ONE answer the far helper owes an open: its
+// spawn, and the attach that makes the session a pane (nocx-398ca).
+//
+// It is the same budget the lifecycle adapter already grants the shell after
+// the spawn (remoteShellSetupTimeout): a spawn that has not answered in the
+// time the product allows the shell it started to prove itself is not slow,
+// it is stopped. The context an open carries is the WS request's, which lives
+// as long as the renderer's promise — so a helper that accepted the request
+// and went silent held the open, and with it one of the execution lane's
+// eight permits, until the server died. The owner met exactly that: eight
+// stuck opens, then "Control plane busy" on every other action until the
+// process was killed (nocx-3an1s.1.1).
+//
+// A timed-out spawn may still have forked a shell on the far host; the client
+// is closed with the failure, the helper keeps that session (D1) and the
+// unclaimed-session sweep retires it. The pane gets an error rather than a
+// cursor, which is the trade this bound makes.
+//
+// A var, not a const: the silent-helper test shrinks it rather than waiting
+// out the production budget.
+var farHelperAnswerTimeout = remoteShellSetupTimeout
+
+// farHelperAnswerError says WHICH answer never came when the bound above is
+// what ended the wait. Every other failure keeps its own error: a refusal, a
+// lost connection and a bad request are the far side's answers and already
+// name themselves.
+func farHelperAnswerError(what string, err error) error {
+	if !errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return fmt.Errorf("the far helper did not answer the %s within %s: %w", what, farHelperAnswerTimeout, err)
+}
+
 // beginFarToolSocket registers one far pane's socket against its session BEFORE
 // the listener exists, and answers false when the session is ALREADY over.
 //
@@ -1086,8 +1119,13 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 	if lifecycleAdapter != nil {
 		lifecycleAdapter.BeginSetup()
 	}
+	// THE ANSWER IS BOUNDED, THE OPEN IS NOT (nocx-398ca): see
+	// farHelperAnswerTimeout's own note. The spawn and the attach are one
+	// round trip each on a connection that is already up, and each gets the
+	// budget the adapter above gives the shell that follows them.
+	spawnCtx, cancelSpawn := context.WithTimeout(ctx, farHelperAnswerTimeout)
 	endSpawn := diagnostics.Stage(ctx, diagnostics.StageSpawn)
-	entry, err := c.Spawn(ctx, proto.SpawnParams{
+	entry, err := c.Spawn(spawnCtx, proto.SpawnParams{
 		Cwd: cfg.Cwd, Cols: cfg.Cols, Rows: cfg.Rows, Lifecycle: lifecycleLaunch,
 		// THE CLAIM RIDES THE SPAWN, and it is the L7 interval's opening half
 		// rather than a duplicate of the row the open path already wrote
@@ -1109,11 +1147,12 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 		// (nocx-50w7p.16).
 		AgentToolToken: toolToken,
 	})
+	cancelSpawn()
 	if err != nil {
 		endSpawn(err)
 		endLifecycleLeg("open-rollback:spawn")
 		_ = c.Close()
-		return transport.HostedSessionOpen{}, true, err
+		return transport.HostedSessionOpen{}, true, farHelperAnswerError("spawn", err)
 	}
 	// THE SPAWN NAMED THE FAR SESSION: everything the kernel accepted while
 	// it was unknown is delivered now, in acceptance order.
@@ -1123,7 +1162,8 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 	// The rows plane is held from the first frame and bound below, as the
 	// local hosted opener does (helper_hosted.go).
 	holdOpt, held := holdRowsBeforeAttach(r.blockRows)
-	attached, err := c.Attach(ctx, proto.AttachParams{
+	attachCtx, cancelAttach := context.WithTimeout(ctx, farHelperAnswerTimeout)
+	attached, err := c.Attach(attachCtx, proto.AttachParams{
 		Subscriber: subscriber,
 		Session: proto.HostSessionID{
 			Generation: proto.GenerationID(entry.HostSessionID.Generation),
@@ -1132,12 +1172,19 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 		Offset: proto.StreamOffset(entry.Window.Base), Fresh: true,
 		LifecycleOffset: 0, LifecycleFresh: true, RequestWrite: true,
 	}, holdOpt)
+	cancelAttach()
 	endSpawn(err)
 	if err != nil {
 		endLifecycleLeg("open-rollback:attach")
-		_ = c.CloseSession(ctx, entry.HostSessionID)
+		// A HELPER THAT DID NOT ANSWER THE ATTACH WILL NOT ANSWER THE CLOSE.
+		// Asking anyway would hold the failure for another budget; the
+		// connection ending is what releases the session to the helper's own
+		// unclaimed-session sweep (D1).
+		if !errors.Is(err, context.DeadlineExceeded) {
+			_ = c.CloseSession(ctx, entry.HostSessionID)
+		}
 		_ = c.Close()
-		return transport.HostedSessionOpen{}, true, err
+		return transport.HostedSessionOpen{}, true, farHelperAnswerError("attach", err)
 	}
 	sid := session.ID(entry.HostSessionID.Session)
 	f.sid = sid
@@ -1223,7 +1270,13 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 		// REGISTERED BEFORE THE LISTENER EXISTS, so an end that arrives during
 		// the open is not lost (beginFarToolSocket's own note).
 		live := r.beginFarToolSocket(sid, farToolSocket{host: cfg.Host, opts: opts, routes: routes})
-		id, oerr := r.tools.OpenFarPaneToolSocket(ctx, cfg.Host, opts, routes, string(sid))
+		// ONE MORE ANSWER THE HELPER OWES THIS OPEN, and it is bounded for the
+		// same reason the spawn and the attach are (nocx-398ca): this call is
+		// on the open's path, before its result, and a silent helper must not
+		// hold it.
+		toolCtx, cancelTool := context.WithTimeout(ctx, farHelperAnswerTimeout)
+		id, oerr := r.tools.OpenFarPaneToolSocket(toolCtx, cfg.Host, opts, routes, string(sid))
+		cancelTool()
 		switch {
 		case oerr != nil:
 			// The launch already names the socket, so a listener that never came
@@ -1232,7 +1285,10 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 			// scaffolding.
 			r.log.Warn("far pane: the tool socket was not opened; the pane runs with no tools",
 				"host", cfg.Host, "path", routes.Path, "error", oerr)
-			if rerr := r.tools.RemoveFarPaneToolSocketDir(ctx, cfg.Host, opts, routes); rerr != nil {
+			cleanupCtx, cancelCleanup := context.WithTimeout(ctx, farHelperAnswerTimeout)
+			rerr := r.tools.RemoveFarPaneToolSocketDir(cleanupCtx, cfg.Host, opts, routes)
+			cancelCleanup()
+			if rerr != nil {
 				r.log.Warn("far pane: the tool socket's directory was not removed", "host", cfg.Host, "error", rerr)
 			}
 		case !live || !r.completeFarToolSocket(sid, id):

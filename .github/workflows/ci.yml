@@ -1460,3 +1460,27 @@ jobs:
           NOCX_QUARANTINE_JOB: 'ci-e2e (${{ matrix.project }}, ${{ matrix.shard }})'
           NOCX_QUARANTINE_PULL: ${{ github.event.pull_request.number }}
         run: node scripts/quarantine-gate.mjs
+
+      # A FULL DISK ARRIVES AS SOMETHING ELSE (nocx-atpw5.1.40) — a Playwright
+      # failure with an empty block, an artifact upload that cannot zip, a step
+      # that exits 1 for a reason it cannot name. Measured 2026-11-05, run
+      # 41933347363's ci-e2e (webkit, 1) died at test 156 of 175 on "No space
+      # left on device" in the RUNNER's own diagnostics directory, and what the
+      # job reported was a red product run naming no test.
+      #
+      # So the leg ends by saying how much disk it had and what it grew: one df
+      # of the filesystem that holds all of it (/var/lib/docker for the image
+      # and the volumes, $runner.temp for the restored caches and the artifact
+      # directory), one du of the three things a run writes, and an annotation
+      # when the disk is nearly gone — an annotation is the one line a reader
+      # sees without opening a log. `always()`, because the interesting case is
+      # the one where nothing else reported the reason.
+      - name: Disk at the end of the run
+        if: always()
+        run: |
+          df -h /
+          du -sh test-results .e2e "$RUNNER_TEMP/nocx-e2e-cache" 2>/dev/null || true
+          avail_kib=$(df -Pk / | awk 'NR==2 { print $4 }')
+          if [ "${avail_kib:-0}" -lt 1048576 ]; then
+            echo "::error::the runner is nearly out of disk: ${avail_kib} KiB left on /. A step that failed here failed of ENOSPC, not of the product — read this line first (nocx-atpw5.1.40)."
+          fi

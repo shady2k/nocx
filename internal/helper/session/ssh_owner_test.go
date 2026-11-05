@@ -194,12 +194,17 @@ func TestAWriterBlockedOnAZeroWindowIsDetachedAndTheSessionCloses(t *testing.T) 
 	// THE ASSERTION THIS TEST EXISTS FOR, and it stays strict: the chunk
 	// dispatched at exactly fitChunks cannot fit in what the far side's window
 	// has left (the derivation above), and this fixture never reads that
-	// channel, so it can never resolve — it can only be detached. A run in
-	// which it resolved means the far side adjusted a window this peer must
-	// never adjust: a fixture defect, said as one, never accepted as an
-	// alternative outcome (AGENTS.md: a report is not converted into silence).
-	// The fence numbers are in the failure so the next occurrence names the
-	// state it hit rather than repeating the sentence.
+	// channel, so the far side can never grant it more — it can only be
+	// detached. It CAN still be resolved by the stop itself, and that is what
+	// this test failed on in CI (nocx-atpw5.1.22): closing an SSH channel makes
+	// the peer close it back, which ends this side's remoteWin and makes the
+	// blocked Write return with n=80 err=io.EOF — the 80 bytes the two fitting
+	// chunks left. The stop used to close first and ask for the detach second,
+	// so whichever goroutine the scheduler ran first decided whether this was a
+	// detach or a join. It now gives up first and closes second, and
+	// completeWrite refuses an outcome that arrives after the request. So a
+	// failure here means that order regressed, and the fence numbers and the
+	// leftover byte count name the state it hit.
 	if stand.sessions.TestWriteInFlight(stuckID) {
 		t.Fatalf("the forced stop returned with the stuck write still in flight (fence %d -> %d, %d chunks fit): the stop did not give up on a write no peer can complete",
 			fenceBefore, fenceBefore+fitChunks, fitChunks)
@@ -209,7 +214,7 @@ func TestAWriterBlockedOnAZeroWindowIsDetachedAndTheSessionCloses(t *testing.T) 
 		t.Fatalf("fence after the forced stop: %v", ferr)
 	}
 	if !writerDetached {
-		t.Fatalf("writerDetached = false after the forced stop: fence %d -> %d with %d chunks fitting, so the chunk dispatched at the gate (%d) was the one that could not fit — it resolved instead of being detached, which means the far side adjusted its window (this fixture must never read) or the detach found nothing in flight",
+		t.Fatalf("writerDetached = false after the forced stop: fence %d -> %d with %d chunks fitting, so the chunk dispatched at the gate (%d) was the one that could not fit, and it resolved instead of being detached — the stop closed the channel before giving up on the write, or the far side adjusted a window this fixture must never adjust",
 			fenceBefore, after, fitChunks, fenceBefore+fitChunks+1)
 	}
 

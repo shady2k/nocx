@@ -43,6 +43,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/shady2k/nocx/internal/diagnostics"
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/endpoint"
 	helperlocal "github.com/shady2k/nocx/internal/helper/local"
@@ -328,7 +329,7 @@ type localHelperOpener struct {
 	// two the remote hosted route uses. Nil is a legitimate wiring and makes
 	// a conventional session, never a failure.
 	kernel               lifecyclechannel.Kernel
-	lifecycleLoss        func(lifecycle.LaneID, lifecyclechannel.LossCause)
+	lifecycleLoss        func(lifecycle.LaneID, lifecyclechannel.Loss)
 	reserveLifecycleLane func(lifecycle.LaneID)
 	abandonLifecycleLane func(lifecycle.LaneID)
 	// procs and reportShellReplaced are the shell-replacement observation
@@ -427,6 +428,13 @@ type localHelperOpener struct {
 	// client is the one connection to the local daemon. Held across panes,
 	// dropped when it is lost so the next open redials.
 	client *helperclient.Client
+	// connectedAt is when the CURRENT client was established, and
+	// connectFailure a bounded code for why the last attempt did not. They
+	// exist for app.diagnostics (nocx-3an1s.1.8): after the helper is killed
+	// the record must say "not connected" and since when, without a path or
+	// an error's text.
+	connectedAt    time.Time
+	connectFailure string
 	// reverse is the closed set of ops this coordinator answers when the
 	// helper asks it something (helper_reverse.go). It is bound by the
 	// composition root once the vault and the ssh client exist, and it is
@@ -1049,7 +1057,10 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 	// machine") and what the shared pool key (AD-4) exists for.
 	if remote := cfg.Remote; remote != nil && remote.RemoteInstaller != nil &&
 		profile.DesiredMode(remote.DesiredMode).DeliversScripts() {
-		if hold, herr := o.holdConnection(ctx, target); herr != nil {
+		endHold := diagnostics.Stage(ctx, diagnostics.StageHold)
+		hold, herr := o.holdConnection(ctx, target)
+		endHold(herr)
+		if herr != nil {
 			// A DEFINITIVE REJECTION IS THE ANSWER, NOT A SETBACK
 			// (nocx-1ebrs.18). The hold is an optimisation, so every failure
 			// that might still be recovered below is only a warning — but a
@@ -1088,7 +1099,10 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 	// a pane (nocx-viil), so the chain stays in the log line below and the
 	// vocabulary in internal/shellintegration is what crosses.
 	publishFailure := shellintegration.PublishFailureNone
-	if perr := o.publishForPane(ctx, cfg); perr != nil {
+	endPublish := diagnostics.Stage(ctx, diagnostics.StagePublish)
+	perr := o.publishForPane(ctx, cfg)
+	endPublish(perr)
+	if perr != nil {
 		// AND A FAILED PUBLISH NEVER COSTS A SECOND AUTHENTICATION.
 		//
 		// A publish that failed on a connection which is UP — the far side
@@ -1116,6 +1130,11 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 			o.log.Warn("ssh pane: the shell integration bundle could not be published; the far side may find no generation",
 				"host", cfg.Host, "reason", publishFailure, "error", perr)
 		}
+	}
+	if publishFailure == shellintegration.PublishFailureNone {
+		diagnostics.NotePublish(ctx, "ok")
+	} else {
+		diagnostics.NotePublish(ctx, "failed:"+string(publishFailure))
 	}
 	params := proto.SSHSpawnParams{
 		// The person's row buffer setting, as it reads now (nocx-2v80t.3.36).
@@ -1188,6 +1207,8 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 		KeepaliveIntervalMS: cfg.Remote.KeepaliveInterval.Milliseconds(),
 		KeepaliveCountMax:   cfg.Remote.KeepaliveCountMax,
 	}
+	// The spawn and the adoption are staged INSIDE hostedSpawn.run, which both
+	// routes share: a second pair here would name one wait twice.
 	res, err := spawn.run(ctx, cfg, func(ctx context.Context, life *proto.LifecycleLaunch) (helperclient.SessionEntry, error) {
 		params.Lifecycle = life
 		return spawn.client.SpawnSSH(ctx, params)
@@ -1585,11 +1606,16 @@ func (o *localHelperOpener) connect(ctx context.Context) (*helperclient.Client, 
 		Reverse: reverse,
 	})
 	if err != nil {
+		o.mu.Lock()
+		o.connectFailure = "unreachable"
+		o.mu.Unlock()
 		return nil, "", refuseLocalHelperUnreachable(err)
 	}
 	o.mu.Lock()
+	o.connectFailure = ""
 	if o.client == nil {
 		o.client = c
+		o.connectedAt = time.Now()
 		o.mu.Unlock()
 		return c, string(installed.Generation), nil
 	}
@@ -1863,7 +1889,41 @@ func (o *localHelperOpener) dropIfLost(c *helperclient.Client) {
 	defer o.mu.Unlock()
 	if o.client == c {
 		o.client = nil
+		o.connectedAt = time.Time{}
+		o.connectFailure = "connection lost"
 	}
+}
+
+// HelperStatus is what app.diagnostics may say about this machine's helper
+// (nocx-3an1s.1.8): whether a connection is up, how long it has been up, and a
+// bounded code when it is not. It never carries a path, an address or an
+// error's text.
+func (o *localHelperOpener) HelperStatus() diagnostics.HelperStatus {
+	if o == nil {
+		return diagnostics.HelperStatus{Known: true, Failure: "no helper opener"}
+	}
+	o.mu.Lock()
+	c, since, failure, installed := o.client, o.connectedAt, o.connectFailure, o.installed
+	o.mu.Unlock()
+	if installed.Binary == "" {
+		return diagnostics.HelperStatus{Known: true, Failure: "no helper installed"}
+	}
+	if c == nil {
+		if failure == "" {
+			failure = "no connection from this server"
+		}
+		return diagnostics.HelperStatus{Known: true, Failure: failure}
+	}
+	select {
+	case <-c.Done():
+		return diagnostics.HelperStatus{Known: true, Failure: "connection lost"}
+	default:
+	}
+	connectedFor := time.Duration(0)
+	if !since.IsZero() {
+		connectedFor = time.Since(since)
+	}
+	return diagnostics.HelperStatus{Known: true, Connected: true, ConnectedFor: connectedFor}
 }
 
 // close releases the connection to the local daemon. It does NOT end the

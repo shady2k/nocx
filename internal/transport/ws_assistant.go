@@ -328,6 +328,7 @@ func (h assistantProbeHandlers) handleEndpointProbe(ctx context.Context, req jso
 	if h.admit != nil {
 		permit, rej := h.admit.TryAcquire(ctx)
 		if rej != nil {
+			control.ReportRefusal(ctx, *rej)
 			_ = h.r.TryError(req.ID, saturationRPCError(req.Method, rej))
 			return
 		}

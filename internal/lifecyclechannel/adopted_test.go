@@ -135,8 +135,8 @@ func TestAnAdoptedStreamLosesItsDomainWhenTheShellIsGone(t *testing.T) {
 	var lostCause LossCause
 	done := make(chan struct{})
 	a, err := NewAdoptedStream(log.NewSlogAdapter(nil), pub, coordinator, launch,
-		WithLossReporter(func(lane lifecycle.LaneID, cause LossCause) {
-			lostLane, lostCause = lane, cause
+		WithLossReporter(func(lane lifecycle.LaneID, loss Loss) {
+			lostLane, lostCause = lane, loss.Cause
 			close(done)
 		}))
 	if err != nil {

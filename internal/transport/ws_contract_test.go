@@ -5546,8 +5546,8 @@ func TestSessionIntegrationChanged_OverTheWireConformsToContract(t *testing.T) {
 	// its string, and the adapter's own constant is the single spelling.
 	ch, child := newLifecycleSocketPairAdapter(t, logger, pub,
 		lifecyclechannel.WithHelloTimeout(50*time.Millisecond),
-		lifecyclechannel.WithLossReporter(func(lane lifecycle.LaneID, cause lifecyclechannel.LossCause) {
-			e.ws.NoteIntegrationLoss(lane, string(cause))
+		lifecyclechannel.WithLossReporter(func(lane lifecycle.LaneID, loss lifecyclechannel.Loss) {
+			e.ws.NoteIntegrationLoss(lane, string(loss.Cause))
 		}))
 	t.Cleanup(func() { _ = child.Close() })
 	e.ws.RegisterLifecycleLane(ch.Lane(), session.ID(sid))

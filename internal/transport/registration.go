@@ -65,6 +65,14 @@ var ingressCriticalMethods = map[string]struct{}{
 	"agent.laneInteractivity": {},
 	"transport.ping":          {},
 	"rpc.cancel":              {},
+	// app.diagnostics (nocx-3an1s.1.8): the moment a person needs it is the
+	// moment the lane is full, so a lane permit would make it unavailable at
+	// exactly the wrong time. Its handler is bounded by construction — a
+	// mutex-guarded snapshot of fixed-size rings, one stat, and a goroutine
+	// COUNT; the stack summary is read only while the process is small enough
+	// for it to be a millisecond (see GoroutineSummary). It runs on a person's
+	// click, never per frame.
+	"app.diagnostics": {},
 }
 
 // methodSpec declares one control method at server construction: the

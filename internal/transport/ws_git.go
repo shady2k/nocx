@@ -35,11 +35,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/shady2k/nocx/internal/operation/catalog"
 	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/shady2k/nocx/internal/operation/catalog"
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/git"

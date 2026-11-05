@@ -5,8 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/shady2k/nocx/internal/operation/catalog"
 	"unicode/utf8"
+
+	"github.com/shady2k/nocx/internal/operation/catalog"
 
 	gossh "golang.org/x/crypto/ssh"
 

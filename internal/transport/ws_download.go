@@ -124,7 +124,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/shady2k/nocx/internal/operation/catalog"
 	"io"
 	"io/fs"
 	"net/http"
@@ -133,6 +132,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/shady2k/nocx/internal/operation/catalog"
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/session"

@@ -29,9 +29,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/shady2k/nocx/internal/operation/catalog"
 	"syscall"
 	"time"
+
+	"github.com/shady2k/nocx/internal/operation/catalog"
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/lifecycle"

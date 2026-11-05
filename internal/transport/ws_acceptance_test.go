@@ -12,13 +12,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/shady2k/nocx/internal/operation/catalog"
 	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/shady2k/nocx/internal/operation/catalog"
 
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/capability"

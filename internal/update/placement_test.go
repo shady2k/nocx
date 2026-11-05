@@ -95,33 +95,69 @@ func TestApplyRefusalLeavesAllDirectoriesUntouched(t *testing.T) {
 	}
 }
 
-func TestInstallTargetSelection(t *testing.T) {
+// THE RUNNING BUNDLE IS THE UPDATE TARGET (nocx-vh2hr.1.19).
+//
+// The macOS update proof installs its previous nightly under the disposable
+// home and runs it. The applier used to resolve /Applications first, whatever
+// the running executable was, so it swapped a bundle the proof had never
+// installed and the proof failed with "the installed bundle is not the
+// candidate's bytes". A run of the real build on this machine is the other
+// half of the same reading: nothing wrote to the bundle it was running.
+func TestInstallTargetReplacesTheRunningBundle(t *testing.T) {
+	home := "/home/person"
 	for _, tc := range []struct {
-		name          string
-		firstWritable bool
-		want          string
+		name   string
+		exe    string
+		refuse map[string]bool
+		want   string
+		probed []string
 	}{
-		{"system", true, "/Applications/nocx.app"}, {"home fallback", false, "/home/person/Applications/nocx.app"},
+		{
+			name:   "under the user's Applications",
+			exe:    "/home/person/Applications/nocx.app/Contents/MacOS/nocx",
+			want:   "/home/person/Applications/nocx.app",
+			probed: []string{"/home/person/Applications"},
+		},
+		{
+			name:   "in /Applications",
+			exe:    "/Applications/nocx.app/Contents/MacOS/nocx",
+			want:   "/Applications/nocx.app",
+			probed: []string{"/Applications"},
+		},
+		{
+			name:   "a read-only mounted bundle falls back to /Applications",
+			exe:    "/Volumes/nocx/nocx.app/Contents/MacOS/nocx",
+			refuse: map[string]bool{"/Volumes/nocx": true},
+			want:   "/Applications/nocx.app",
+			probed: []string{"/Volumes/nocx", "/Applications"},
+		},
+		{
+			name:   "and then to the user's Applications",
+			exe:    "/Volumes/nocx/nocx.app/Contents/MacOS/nocx",
+			refuse: map[string]bool{"/Volumes/nocx": true, "/Applications": true},
+			want:   "/home/person/Applications/nocx.app",
+			probed: []string{"/Volumes/nocx", "/Applications", "/home/person/Applications"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var probed []string
-			got, err := ResolveInstallTarget("darwin", "/AppTranslocation/random/nocx.app/Contents/MacOS/nocx", "", "/home/person", func(dir string) error {
+			got, err := ResolveInstallTarget("darwin", tc.exe, "", home, func(dir string) error {
 				probed = append(probed, dir)
-				if dir == "/Applications" && !tc.firstWritable {
+				if tc.refuse[dir] {
 					return os.ErrPermission
 				}
 				return nil
 			})
 			if err != nil || got != tc.want {
-				t.Fatalf("target %q, error %v", got, err)
+				t.Fatalf("target %q, error %v; want %q", got, err, tc.want)
 			}
-			if tc.firstWritable && len(probed) != 1 || !tc.firstWritable && len(probed) != 2 {
-				t.Fatalf("probed %v", probed)
+			if !reflect.DeepEqual(probed, tc.probed) {
+				t.Fatalf("probed %v; want %v", probed, tc.probed)
 			}
 		})
 	}
 	t.Run("neither writable", func(t *testing.T) {
-		_, err := ResolveInstallTarget("darwin", "/Downloads/nocx.app/Contents/MacOS/nocx", "", "/home/person", func(string) error { return os.ErrPermission })
+		_, err := ResolveInstallTarget("darwin", "/Volumes/nocx/nocx.app/Contents/MacOS/nocx", "", "/home/person", func(string) error { return os.ErrPermission })
 		if err == nil {
 			t.Fatal("expected refusal")
 		}
@@ -130,8 +166,8 @@ func TestInstallTargetSelection(t *testing.T) {
 
 func TestInstallTargetCreatesHomeApplications(t *testing.T) {
 	home := t.TempDir()
-	target, err := ResolveInstallTarget("darwin", "/AppTranslocation/nocx.app/Contents/MacOS/nocx", "", home, func(dir string) error {
-		if dir == "/Applications" {
+	target, err := ResolveInstallTarget("darwin", "/Volumes/nocx/nocx.app/Contents/MacOS/nocx", "", home, func(dir string) error {
+		if dir == "/Applications" || dir == "/Volumes/nocx" {
 			return os.ErrPermission
 		}
 		return ProbeInstallDirectory(dir)

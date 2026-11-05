@@ -39,9 +39,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"github.com/shady2k/nocx/internal/operation/catalog"
 	"io"
 	"strconv"
+
+	"github.com/shady2k/nocx/internal/operation/catalog"
 
 	"github.com/shady2k/nocx/internal/commandnames"
 	"github.com/shady2k/nocx/internal/notify"

@@ -208,4 +208,5 @@ var internalDeclarations = []Declaration{
 		d(30000, BasisRead, "read: one retry of a prompt-boundary frame; no explicit bound today"),
 		none(), none(), none(),
 		MergeNone, nil,
-		"Retrying the shell signal", RowNever, ExpiredOutcomeUnknown)}
+		"Retrying the shell signal", RowNever, ExpiredOutcomeUnknown),
+}

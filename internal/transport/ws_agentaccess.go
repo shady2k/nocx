@@ -17,8 +17,9 @@ package transport
 import (
 	"context"
 	"encoding/json"
-	"github.com/shady2k/nocx/internal/operation/catalog"
 	"unicode/utf8"
+
+	"github.com/shady2k/nocx/internal/operation/catalog"
 )
 
 // AgentAccessRecord is one answer in the terms this surface speaks: the four

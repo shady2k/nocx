@@ -5,9 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/shady2k/nocx/internal/operation/catalog"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/shady2k/nocx/internal/operation/catalog"
 
 	"github.com/shady2k/nocx/internal/backup"
 	"github.com/shady2k/nocx/internal/capability"

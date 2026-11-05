@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/shady2k/nocx/internal/operation/catalog"
 	"io"
 	"net"
 	"net/http"
@@ -16,6 +15,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/shady2k/nocx/internal/operation/catalog"
 
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/agenttools"

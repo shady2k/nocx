@@ -10,8 +10,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/shady2k/nocx/internal/operation/catalog"
 	"unicode/utf8"
+
+	"github.com/shady2k/nocx/internal/operation/catalog"
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/completion"

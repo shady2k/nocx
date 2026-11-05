@@ -36,8 +36,9 @@ package transport
 import (
 	"context"
 	"encoding/json"
-	"github.com/shady2k/nocx/internal/operation/catalog"
 	"unicode/utf8"
+
+	"github.com/shady2k/nocx/internal/operation/catalog"
 
 	"github.com/shady2k/nocx/internal/agentrule"
 )

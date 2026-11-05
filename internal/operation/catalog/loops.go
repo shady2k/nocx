@@ -19,24 +19,42 @@ type Loop struct {
 }
 
 var loopTable = []Loop{
-	{ID: "loop.session.readPump", Owner: OwnerSession, Iteration: "internal.session.recorder",
-		Stop: d(10000, BasisRead, "session teardown joins the read pump within the transport's control drain bound (session close path)")},
-	{ID: "loop.files.watchPoll", Owner: OwnerBinding, Iteration: "internal.files.watchPoll",
-		Stop: d(5000, BasisRead, "files.close stops the poll loop before it releases the binding (internal/transport/ws_files.go)")},
-	{ID: "loop.pane.observerSweep", Owner: OwnerServer, Iteration: "internal.pane.observer",
-		Stop: d(10000, BasisRead, "server Stop cancels the observer sweep and waits within the control drain bound")},
-	{ID: "loop.signal.ticker", Owner: OwnerSession, Iteration: "internal.session.endHold",
-		Stop: d(5000, BasisRead, "the signal ticker exits with its held-stop owner")},
-	{ID: "loop.typedLine.ownershipPoll", Owner: OwnerSession, Iteration: "internal.typedLine.ownership",
-		Stop: d(5000, BasisRead, "the typed-line poll exits with its session")},
-	{ID: "loop.worker.deliveryPoll", Owner: OwnerSession, Iteration: "internal.agent.run",
-		Stop: d(10000, BasisRead, "worker delivery stops with the app's workers")},
-	{ID: "loop.worker.checkoutSweep", Owner: OwnerServer, Iteration: "internal.worker.checkoutSweep",
-		Stop: d(10000, BasisRead, "the sweep stops with the app's workers")},
-	{ID: "loop.ssh.keepalive", Owner: OwnerServer, Iteration: "internal.ssh.keepalive",
-		Stop: d(10000, BasisRead, "keepalive exits when its connection closes")},
-	{ID: "loop.vault.autoSeal", Owner: OwnerServer, Iteration: "internal.vault.autoSeal",
-		Stop: d(10000, BasisRead, "auto-seal stops with the app")},
+	{
+		ID: "loop.session.readPump", Owner: OwnerSession, Iteration: "internal.session.recorder",
+		Stop: d(10000, BasisRead, "session teardown joins the read pump within the transport's control drain bound (session close path)"),
+	},
+	{
+		ID: "loop.files.watchPoll", Owner: OwnerBinding, Iteration: "internal.files.watchPoll",
+		Stop: d(5000, BasisRead, "files.close stops the poll loop before it releases the binding (internal/transport/ws_files.go)"),
+	},
+	{
+		ID: "loop.pane.observerSweep", Owner: OwnerServer, Iteration: "internal.pane.observer",
+		Stop: d(10000, BasisRead, "server Stop cancels the observer sweep and waits within the control drain bound"),
+	},
+	{
+		ID: "loop.signal.ticker", Owner: OwnerSession, Iteration: "internal.session.endHold",
+		Stop: d(5000, BasisRead, "the signal ticker exits with its held-stop owner"),
+	},
+	{
+		ID: "loop.typedLine.ownershipPoll", Owner: OwnerSession, Iteration: "internal.typedLine.ownership",
+		Stop: d(5000, BasisRead, "the typed-line poll exits with its session"),
+	},
+	{
+		ID: "loop.worker.deliveryPoll", Owner: OwnerSession, Iteration: "internal.agent.run",
+		Stop: d(10000, BasisRead, "worker delivery stops with the app's workers"),
+	},
+	{
+		ID: "loop.worker.checkoutSweep", Owner: OwnerServer, Iteration: "internal.worker.checkoutSweep",
+		Stop: d(10000, BasisRead, "the sweep stops with the app's workers"),
+	},
+	{
+		ID: "loop.ssh.keepalive", Owner: OwnerServer, Iteration: "internal.ssh.keepalive",
+		Stop: d(10000, BasisRead, "keepalive exits when its connection closes"),
+	},
+	{
+		ID: "loop.vault.autoSeal", Owner: OwnerServer, Iteration: "internal.vault.autoSeal",
+		Stop: d(10000, BasisRead, "auto-seal stops with the app"),
+	},
 }
 
 // Loops returns the registered loops.

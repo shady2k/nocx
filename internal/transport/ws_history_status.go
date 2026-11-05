@@ -42,8 +42,9 @@ package transport
 
 import (
 	"context"
-	"github.com/shady2k/nocx/internal/operation/catalog"
 	"sync"
+
+	"github.com/shady2k/nocx/internal/operation/catalog"
 
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/transport/control"

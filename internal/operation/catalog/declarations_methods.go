@@ -2070,7 +2070,8 @@ var methodDeclarations = []Declaration{
 		none(),
 		none(),
 		MergeNone, nil,
-		"Changing the window layout", RowPastWait, ExpiredOutcomeUnknown)}
+		"Changing the window layout", RowPastWait, ExpiredOutcomeUnknown),
+}
 
 // decl is the positional form of Declaration: the argument count is the
 // completeness check at the declaration site, and Validate is the semantic

@@ -25,8 +25,9 @@ package transport
 
 import (
 	"context"
-	"github.com/shady2k/nocx/internal/operation/catalog"
 	"time"
+
+	"github.com/shady2k/nocx/internal/operation/catalog"
 
 	"github.com/shady2k/nocx/internal/diagnostics"
 	"github.com/shady2k/nocx/internal/log"

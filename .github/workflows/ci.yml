@@ -205,7 +205,7 @@ jobs:
           node-version: '24'
       - name: Workflow decision and refusal tests
         run: |
-          node --test scripts/publish-nightly.test.mjs scripts/product-change.test.mjs scripts/quarantine.test.mjs scripts/changed-tests.test.mjs scripts/import-branch-beads.test.mjs scripts/workflow-wiring.test.mjs
+          node --test scripts/publish-nightly.test.mjs scripts/product-change.test.mjs scripts/quarantine.test.mjs scripts/changed-tests.test.mjs scripts/import-branch-beads.test.mjs scripts/workflow-wiring.test.mjs scripts/helper-hashes.test.mjs scripts/build-identity.test.mjs
           python3 -m unittest discover -s scripts -p 'verify_built_artifact_test.py'
           node --test .githooks/check-log-context.test.mjs
       - name: Promotion and cask fixtures by path
@@ -236,6 +236,27 @@ jobs:
         with:
           go-version: '1.26'
           cache: true
+
+      # THE ARCHIVES ARE ONE PIN FOR THE WHOLE RUN (nocx-atpw5.1.44). Every job
+      # downloads the same 13 files — 93.6 MiB — from the release, so a run of
+      # this workflow makes 117 requests (nine jobs: ci-mac, both ci-backend
+      # legs, both ci-linux legs, and the four ci-e2e legs through
+      # `make helpers-this-machine`) and moves 843 MiB, each request a chance
+      # for the release host to answer 504. The verified tree is 96.4 MiB on
+      # disk and 23.4 MiB compressed (`tar cz` of build/libghostty-vt measured
+      # 2026-11-05), so one entry keyed by the pin's own manifest turns a warm
+      # run's nine fetches into nine restores of one request each.
+      #
+      # The entry cannot substitute an archive: `vt-archives` hashes every file
+      # it finds and re-downloads anything that is not the pinned bytes
+      # (internal/vtpin), so a restored tree is verified exactly as a fetched
+      # one. The first run of a new pin misses in every job, as it does today,
+      # and the first save wins; the other saves are refused and logged.
+      - name: Cache the pinned libghostty-vt archives
+        uses: actions/cache@v6
+        with:
+          path: build/libghostty-vt
+          key: nocx-vt-archives-${{ hashFiles('third_party/libghostty-vt/MANIFEST.json') }}
 
       # THE PINNED EMULATOR BYTES, BEFORE ANYTHING THAT LOADS A CGo PACKAGE.
       # libghostty-vt is linked statically into the helper and the app
@@ -532,6 +553,27 @@ jobs:
           go-version: '1.26'
           cache: true
 
+      # THE ARCHIVES ARE ONE PIN FOR THE WHOLE RUN (nocx-atpw5.1.44). Every job
+      # downloads the same 13 files — 93.6 MiB — from the release, so a run of
+      # this workflow makes 117 requests (nine jobs: ci-mac, both ci-backend
+      # legs, both ci-linux legs, and the four ci-e2e legs through
+      # `make helpers-this-machine`) and moves 843 MiB, each request a chance
+      # for the release host to answer 504. The verified tree is 96.4 MiB on
+      # disk and 23.4 MiB compressed (`tar cz` of build/libghostty-vt measured
+      # 2026-11-05), so one entry keyed by the pin's own manifest turns a warm
+      # run's nine fetches into nine restores of one request each.
+      #
+      # The entry cannot substitute an archive: `vt-archives` hashes every file
+      # it finds and re-downloads anything that is not the pinned bytes
+      # (internal/vtpin), so a restored tree is verified exactly as a fetched
+      # one. The first run of a new pin misses in every job, as it does today,
+      # and the first save wins; the other saves are refused and logged.
+      - name: Cache the pinned libghostty-vt archives
+        uses: actions/cache@v6
+        with:
+          path: build/libghostty-vt
+          key: nocx-vt-archives-${{ hashFiles('third_party/libghostty-vt/MANIFEST.json') }}
+
       # THE PINNED EMULATOR BYTES, BEFORE ANYTHING THAT LOADS A CGo PACKAGE.
       # libghostty-vt is linked statically into the helper and the app
       # (ADR-0065), so `go build`, `go test`, golangci-lint's type-checker and
@@ -752,6 +794,27 @@ jobs:
         with:
           go-version: '1.26'
           cache: true
+
+      # THE ARCHIVES ARE ONE PIN FOR THE WHOLE RUN (nocx-atpw5.1.44). Every job
+      # downloads the same 13 files — 93.6 MiB — from the release, so a run of
+      # this workflow makes 117 requests (nine jobs: ci-mac, both ci-backend
+      # legs, both ci-linux legs, and the four ci-e2e legs through
+      # `make helpers-this-machine`) and moves 843 MiB, each request a chance
+      # for the release host to answer 504. The verified tree is 96.4 MiB on
+      # disk and 23.4 MiB compressed (`tar cz` of build/libghostty-vt measured
+      # 2026-11-05), so one entry keyed by the pin's own manifest turns a warm
+      # run's nine fetches into nine restores of one request each.
+      #
+      # The entry cannot substitute an archive: `vt-archives` hashes every file
+      # it finds and re-downloads anything that is not the pinned bytes
+      # (internal/vtpin), so a restored tree is verified exactly as a fetched
+      # one. The first run of a new pin misses in every job, as it does today,
+      # and the first save wins; the other saves are refused and logged.
+      - name: Cache the pinned libghostty-vt archives
+        uses: actions/cache@v6
+        with:
+          path: build/libghostty-vt
+          key: nocx-vt-archives-${{ hashFiles('third_party/libghostty-vt/MANIFEST.json') }}
 
       # THE PINNED EMULATOR BYTES, BEFORE ANYTHING THAT LOADS A CGo PACKAGE.
       # libghostty-vt is linked statically into the helper and the app
@@ -1277,6 +1340,18 @@ jobs:
         shard: [1, 2]
     steps:
       - uses: actions/checkout@v7
+
+      # The pinned archives come as one cache entry rather than nine fetches:
+      # the stand's `make helpers-this-machine` writes them into this checkout
+      # (build/libghostty-vt), which the container reads through the bind mount,
+      # so a restore here is what the container's fetch finds already verified.
+      # Why one entry for the run, and why it cannot substitute an archive, is
+      # in ci-mac's identical step above.
+      - name: Cache the pinned libghostty-vt archives
+        uses: actions/cache@v6
+        with:
+          path: build/libghostty-vt
+          key: nocx-vt-archives-${{ hashFiles('third_party/libghostty-vt/MANIFEST.json') }}
 
       # buildx, because --cache-from/--cache-to are buildx's: the default
       # `docker` driver takes the flags and does nothing with them.

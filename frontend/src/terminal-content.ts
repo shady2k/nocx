@@ -655,6 +655,25 @@ interface AlternateScreenFence {
   deadline: number | undefined
 }
 
+/**
+ * The backend could not say whether this pane's session is still running
+ * (nocx-3an1s.1.5).
+ *
+ * NOT AN ABSENCE. A failed live inventory, a claim refused "Control plane
+ * busy", a dropped socket and a refused replay are all the same fact here —
+ * the question was not answered — and the helper's shell may be alive behind
+ * every one of them. So this is the one error an adoption may throw that the
+ * pane must NOT answer with a replacement shell. The pane keeps its surface,
+ * says so with the same card a failed reattach uses (mountAttachOffer), and
+ * the card's retry asks again; only an ANSWERED absence opens a fresh shell.
+ */
+export class LiveSessionUncertainError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'LiveSessionUncertainError'
+  }
+}
+
 /** The host callbacks a tab may hand a TerminalContent. Named rather than
  *  positional: they are all optional functions, so any misalignment between
  *  them type-checks cleanly and fails only in front of a user. */
@@ -804,11 +823,17 @@ export interface TerminalContentHooks {
    *  It is therefore called exactly where an open would have been called, and
    *  only then.
    *
-   *  A REJECTION IS NOT FATAL: the session died, or another client took it,
-   *  between the list and the claim. The pane then opens a fresh session, the
-   *  way a pane with nothing to reclaim always has. Whoever supplies the
-   *  thunk owns saying so to the person — this side only falls back. */
-  adoptSession?: () => Promise<SessionHandle>
+   *  NULL IS A PROVEN ABSENCE, and only then does the pane open a fresh
+   *  session: the backend listed a session for this pane and then said it
+   *  holds no such session, or answered an inventory that names none. A
+   *  REJECTION IS NOT A VERDICT (nocx-3an1s.1.5): a live list that could not
+   *  be read, a claim refused "Control plane busy", a dropped socket — none
+   *  of those says the helper's shell ended, and falling back to `open` on
+   *  one is what put a second shell over every live one. Such a thunk throws
+   *  LiveSessionUncertainError instead; the pane keeps its surface, opens
+   *  nothing, and offers the same retry a failed reattach already offers.
+   *  Whoever supplies the thunk owns saying so to the person. */
+  adoptSession?: () => Promise<SessionHandle | null>
   /** This session's home directory (nocx-9bpeq.13/.16, spec §3): ONE
    *  binding per session, shared with the terminal-link opener — the
    *  composition root builds it once (main.tsx) and hands the same
@@ -1888,12 +1913,34 @@ export class TerminalContent extends BasePaneContent {
     this.scheduleLiveResize()
   }
 
+  /** ONE place a pane's attachment state becomes the pane's surface.
+   *
+   *  A session's own `onAttachment` and the uncertain-adoption path both land
+   *  here (nocx-3an1s.1.5), so "what an unattached pane looks like" is not
+   *  written twice: input is disabled, deferred submissions are dropped, the
+   *  card follows the state, and the tab mark says the same thing the card
+   *  does. */
+  private _applyAttachment(attachment: SessionAttachment): void {
+    const changed = this._attachment.kind !== attachment.kind
+    this._attachment = attachment
+    if (this._intentInput) this._intentInput.element.disabled = attachment.kind !== 'attached'
+    if (attachment.kind !== 'attached') this._cancelDeferredShellSubmissions()
+    this._syncAttachOffer()
+    if (changed) this._syncLifecycleOwnership()
+    this._publishTabMark()
+  }
+
   private _syncAttachOffer(): void {
     const target = this._paneTarget
     if (!target) return
+    // A pane with NO session still has something to retry when its adoption
+    // could not be decided (nocx-3an1s.1.5): the same card, the same words,
+    // and a retry that asks the unanswered question again rather than opening
+    // a second shell.
+    const recoverable = this.session !== null || this._pendingAdoption
     if (
       this._attachment.kind === 'attached' ||
-      !this.session ||
+      !recoverable ||
       this._sessionLost ||
       this._sessionExited
     ) {
@@ -1904,10 +1951,46 @@ export class TerminalContent extends BasePaneContent {
       this._attachOffer.set(this._attachment)
     } else {
       this._attachOffer = mountAttachOffer(target, this._attachment, () => {
-        void this.session?.retryAttach()
+        if (this.session !== null) void this.session.retryAttach()
+        else void this.retryPendingAdoption()
       })
     }
     this.scheduleLiveResize()
+  }
+
+  /** The attach card's retry for a pane whose adoption was never decided.
+   *
+   *  The question is asked again from the top — the live inventory, then the
+   *  claim — because that is the question that went unanswered. It is the
+   *  person's own act, so it is the one thing that re-arms the once-per-bind
+   *  attempt; nothing here retries on a timer, and a second failure leaves the
+   *  same card standing rather than escalating to a replacement shell. */
+  private async retryPendingAdoption(): Promise<void> {
+    if (!this._pendingAdoption || this._disposed) return
+    const signal = this.mountAbortController?.signal
+    if (!signal) return
+    this._adoptAttempted = false
+    this._attachment = { kind: 'attaching' }
+    this._syncAttachOffer()
+    this._publishTabMark()
+    try {
+      const outcome = await this._bindSession(signal, 'recover')
+      if (outcome === 'bound') this._publishConnectionCondition()
+    } catch (err) {
+      // The retry got an ANSWER and the answer was a refusal — a fresh open
+      // this pane was allowed to make, or a host that refused it. That is not
+      // the uncertainty this card is for, so the card says what happened
+      // rather than pretending the question is still open.
+      const message = err instanceof Error ? err.message : String(err)
+      log.warn('nocx: the recovery attempt for this pane failed', {
+        pane: this.pane.paneId,
+        error: message,
+      })
+      this._applyAttachment({
+        kind: 'unavailable',
+        message: `This tab\u2019s session could not be restored (${message}).`,
+      })
+    }
   }
 
   /** What this pane looks like right now, for the wake diagnostic
@@ -2047,8 +2130,14 @@ export class TerminalContent extends BasePaneContent {
   /** The drop gesture's detach, held for dispose. */
   private _dropDetach: (() => void) | null = null
   /** Whether the reclaim of a live session has already been tried — see
-   *  adoptLiveSession. */
+   *  adoptLiveSession. Reset only by the person's own retry (nocx-3an1s.1.5):
+   *  an answer nobody gave does not consume the pane's one attempt. */
   private _adoptAttempted = false
+  /** This pane is mounted with no session because its adoption could not be
+   *  decided (LiveSessionUncertainError). It is what tells the attach card's
+   *  retry which question to ask again — and what keeps the pane from opening
+   *  a replacement shell. */
+  private _pendingAdoption = false
   /** This pane's files binding, opened on the FIRST upload and reused. A
    *  terminal does not need one to run, so it is not opened at mount: a
    *  binding is a provider, a pooled SSH reference and a watch set, and a
@@ -2741,19 +2830,19 @@ export class TerminalContent extends BasePaneContent {
 
   /**
    * Take back the session the coordinator is already running for this pane,
-   * or answer null so a new one is opened (design D5, §5).
+   * answer null so a new one is opened, or refuse to answer (design D5, §5).
    *
-   * THE ATTEMPT IS MADE AT MOST ONCE per pane, whatever happens to it. The
+   * THE ATTEMPT IS MADE AT MOST ONCE per bind, whatever happens to it. The
    * caller retries on a host-key refusal, and a second claim would be a
    * second attempt to take a session this pane has already established it
    * cannot have — the ssh fallback is what the retry is about.
    *
-   * A failure is answered with null rather than raised: the session ended, or
-   * another client claimed it, between the list and the claim, and the pane
-   * then starts a fresh one exactly as a pane with nothing to reclaim does.
-   * Whoever supplied the thunk says so to the person — the fallback is here
-   * and the account of it is there, because this side cannot tell a claim
-   * that lost a race from a backend that never held anything.
+   * THE THREE ANSWERS ARE NOT TWO (nocx-3an1s.1.5). Null is the thunk's
+   * proven absence, and a fresh shell is the right recovery. Anything else it
+   * throws used to be read as absence too, and that is the defect: a claim
+   * refused "Control plane busy", or a live list that could not be read, says
+   * nothing about whether the shell ended. Those are rethrown as what they
+   * are, and the caller keeps the pane instead of opening a second shell.
    */
   private async adoptLiveSession(): Promise<SessionHandle | null> {
     const adopt = this.hooks.adoptSession
@@ -2762,6 +2851,7 @@ export class TerminalContent extends BasePaneContent {
     try {
       return await adopt()
     } catch (err) {
+      if (err instanceof LiveSessionUncertainError) throw err
       log.warn('nocx: the live session for this pane could not be taken back', {
         pane: this.pane.paneId,
         error: err instanceof Error ? err.message : String(err),
@@ -4375,7 +4465,12 @@ export class TerminalContent extends BasePaneContent {
 
       // The session and everything hanging off it. Extracted so it can run
       // again: a reconnect rebuilds exactly this and nothing above it.
-      if (!(await this._bindSession(signal, false))) return
+      //
+      // 'uncertain' is NOT a failed mount (nocx-3an1s.1.5): the pane has no
+      // session because the backend could not say whether one exists, and it
+      // goes on mounting with the attach card up. Only an abandoned bind —
+      // 'aborted' — takes the pane down.
+      if ((await this._bindSession(signal, 'first')) === 'aborted') return
 
       // ── Clipboard ────────────────────────────────────────────────────
       // Live-cell selection copies through the backend-frame selection
@@ -4748,7 +4843,7 @@ export class TerminalContent extends BasePaneContent {
 
       const controller = new AbortController()
       this._reconnectAbort = controller
-      const bound = await this._bindSession(controller.signal, true)
+      const bound = (await this._bindSession(controller.signal, 'rebind')) === 'bound'
       if (!bound) {
         // The attempt failed and the pane goes back to being lost — which is
         // a state it can be offered a way out of again. Restoring it here
@@ -4789,14 +4884,23 @@ export class TerminalContent extends BasePaneContent {
    * is the work), the lifecycle kernel does not (it describes a shell that no
    * longer exists).
    *
-   * `rebind` says which call this is. It changes exactly one thing — what an
-   * ABORT does — and the difference matters: a first bind that is abandoned
-   * takes the pane down, a rebind that is abandoned must leave the pane as it
-   * was, holding the scrollback the person did not want to lose.
+   * `mode` says which call this is. It changes what an ABORT does, and the
+   * difference matters: a first bind that is abandoned takes the pane down, a
+   * rebind that is abandoned must leave the pane as it was, holding the
+   * scrollback the person did not want to lose. A RECOVERY bind is the same
+   * leaving-alone applied to a pane that never held a session — it is the
+   * attach card's retry (retryPendingAdoption), and it draws no reconnection
+   * divider because no connection ended here.
    *
-   * Returns whether a session was bound.
+   * Returns 'bound' when a session is attached, 'uncertain' when the backend
+   * could not say whether this pane's session exists (the pane keeps its
+   * surface and its card; no replacement shell is opened), and 'aborted' when
+   * the mount signal ended the call.
    */
-  private async _bindSession(signal: AbortSignal, rebind: boolean): Promise<boolean> {
+  private async _bindSession(
+    signal: AbortSignal,
+    mode: 'first' | 'rebind' | 'recover',
+  ): Promise<'bound' | 'uncertain' | 'aborted'> {
     // Bumped for every bind, including this one: the recovery-ack claim
     // further below (_recoveryAckClaim) reads this._bindGeneration directly
     // to tell its own bind apart from a later one. Advancing it here has no
@@ -4822,7 +4926,7 @@ export class TerminalContent extends BasePaneContent {
     const target = this._paneTarget
     const host = this.host
     if (target === null || host === null || this.editor === null || this.scrollback === null) {
-      return false
+      return 'aborted'
     }
     const editor = this.editor
     const scrollback = this.scrollback
@@ -4969,7 +5073,25 @@ export class TerminalContent extends BasePaneContent {
         this.scrollback?.outputAnchorChanged()
       }),
     )
-    const session = await this.openSessionWithHostKeyRecovery(signal)
+    let session: SessionHandle
+    try {
+      session = await this.openSessionWithHostKeyRecovery(signal)
+    } catch (err) {
+      if (!(err instanceof LiveSessionUncertainError)) throw err
+      // THE SHELL IS NOT PROVEN GONE, SO NO REPLACEMENT IS OPENED
+      // (nocx-3an1s.1.5). This pane keeps its surface and its scrollback and
+      // offers the SAME retry a failed reattach offers; the retry re-asks the
+      // inventory and the claim. The alternative — the fallback this replaces
+      // — put a second shell beside every live one on a single transient
+      // failure and exhausted the helper's window budget doing it.
+      this._pendingAdoption = true
+      this._applyAttachment({ kind: 'unavailable', message: err.message })
+      log.warn('nocx: this pane\u2019s session could not be established or ruled out', {
+        pane: this.pane.paneId,
+        error: err.message,
+      })
+      return 'uncertain'
+    }
 
     if (signal.aborted) {
       session.close()
@@ -4977,13 +5099,14 @@ export class TerminalContent extends BasePaneContent {
       // has been shown and there is nothing to leave behind. A REBIND that
       // is aborted must leave the pane exactly as it was — its scrollback
       // is the work the person did not want to lose, which is the whole
-      // reason the tab was never closed.
-      if (!rebind) {
+      // reason the tab was never closed. A RECOVERY bind is that same
+      // leaving-alone: the pane mounted without a session and keeps its card.
+      if (mode === 'first') {
         editor.dispose()
         scrollback.dispose()
         this._readyResolve(false)
       }
-      return false
+      return 'aborted'
     }
 
     this._dropRecoveryNotice()
@@ -4999,6 +5122,9 @@ export class TerminalContent extends BasePaneContent {
     this._liveOutputGapAccount = { missing: 0, hostWindow: false, unknownCause: false }
     this.snapshotStore.reset()
     this.session = session
+    // The question that was open is answered; the card's retry no longer has
+    // anything to re-ask (nocx-3an1s.1.5).
+    this._pendingAdoption = false
     this._resetFrameMetadataSession(session.sessionId)
     // THE LIVE TIER'S PAGE SEAM (nocx-zg3k3.10.4): the session's
     // historyPage call and its rows carrier, handed to the surface in one
@@ -5026,13 +5152,7 @@ export class TerminalContent extends BasePaneContent {
     session.onProtocolError((message) => showToast({ level: 'danger', message }))
     session.onAttachment((attachment) => {
       if (this._disposed || this.session !== session) return
-      const changed = this._attachment.kind !== attachment.kind
-      this._attachment = attachment
-      if (this._intentInput) this._intentInput.element.disabled = attachment.kind !== 'attached'
-      if (attachment.kind !== 'attached') this._cancelDeferredShellSubmissions()
-      this._syncAttachOffer()
-      if (changed) this._syncLifecycleOwnership()
-      this._publishTabMark()
+      this._applyAttachment(attachment)
     })
     historySubscription.bindSession(session.sessionId)
     lifecycleSubscription.bindSession(session.sessionId)
@@ -5527,7 +5647,7 @@ export class TerminalContent extends BasePaneContent {
       this._projections?.reset()
       this.lifecycle.reset()
     })
-    return true
+    return 'bound'
   }
 
   // ── Live-region sizing ────────────────────────────────────────────────

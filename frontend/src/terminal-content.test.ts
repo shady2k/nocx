@@ -72,7 +72,12 @@ import {
   type InputTargetRegistry,
 } from './input-target'
 import type { ConnectionCondition } from './connection-condition'
-import { TerminalContent, type SnippetFire, type TerminalContentHooks } from './terminal-content'
+import {
+  LiveSessionUncertainError,
+  TerminalContent,
+  type SnippetFire,
+  type TerminalContentHooks,
+} from './terminal-content'
 import { LOCAL_TARGET_ID } from './ports-client'
 import { Pane } from './panes'
 import { SURFACE_TERMINAL, type ContentViewport } from './pane-content'
@@ -11578,6 +11583,106 @@ describe('reconnecting a lost pane (nocx-rtzo4)', () => {
       const [a, b] = await Promise.all([content.reconnect(), content.reconnect()])
       expect([a, b].filter(Boolean).length).toBe(1)
       expect(client._sessions.length).toBe(2)
+    } finally {
+      teardown()
+    }
+  })
+})
+
+// ── An adoption that could not be decided (nocx-3an1s.1.5) ─────────────────
+//
+// A FAILED inventory or reclaim is uncertainty, never proof the shell ended.
+// The pane this rule is about was restored while the coordinator still held
+// its shell; opening a second shell over it is what duplicated ten helpers
+// into eighteen. The pane therefore takes the SAME recovery card a failed
+// reattach already uses (mountAttachOffer), and its retry re-asks the one
+// question that was left unanswered — never "open a replacement".
+describe('an uncertain adoption keeps the pane and offers the same recovery', () => {
+  const UNCERTAIN =
+    'The coordinator could not say whether this tab\u2019s session is still running. No new shell was started.'
+
+  it('opens no replacement shell and retries the same adoption', async () => {
+    const client = makeClient()
+    const adopted = makeSession()
+    let attempts = 0
+    const hooks = {
+      adoptSession: (): Promise<SessionHandle | null> => {
+        attempts += 1
+        return attempts === 1
+          ? Promise.reject(new LiveSessionUncertainError(UNCERTAIN))
+          : Promise.resolve(asSessionHandleForTest(adopted))
+      },
+    }
+    const warnings: [boolean, string | undefined][] = []
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        attachToDocument: true,
+        hooks: { ...hooks, onWarningChange: (w, l) => warnings.push([w, l]) },
+      },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      // THE WHOLE DEFECT: no second shell, on any path.
+      expect(client.openSession).not.toHaveBeenCalled()
+      expect(client._sessions).toHaveLength(0)
+      expect(content.sessionLost()).toBe(false)
+      // The pane is usable as a surface and says what it is waiting for.
+      const card = tab.pane.querySelector('.nocx-attach-offer')
+      expect(card).not.toBeNull()
+      expect(card!.textContent).toContain('No new shell was started')
+      expect(warnings[warnings.length - 1]).toEqual([true, 'Session not attached'])
+
+      card!.querySelector<HTMLButtonElement>('button')!.click()
+      await vi.waitFor(() => expect(tab.pane.querySelector('.nocx-attach-offer')).toBeNull())
+      expect(attempts).toBe(2)
+      expect(client.openSession).not.toHaveBeenCalled()
+      expect(content.sessionLost()).toBe(false)
+
+      // And the recovered session is the pane's, so input reaches it.
+      adopted.intent.mockClear()
+      typeIntoPane(content, 'ok')
+      await vi.waitFor(() => expect(adopted.intent).toHaveBeenCalled())
+    } finally {
+      teardown()
+    }
+  })
+
+  it('keeps the card while the answer stays unavailable, and still opens nothing', async () => {
+    const client = makeClient()
+    const hooks = {
+      adoptSession: (): Promise<SessionHandle | null> =>
+        Promise.reject(new LiveSessionUncertainError(UNCERTAIN)),
+    }
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true, hooks },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      const card = tab.pane.querySelector('.nocx-attach-offer')
+      expect(card).not.toBeNull()
+
+      card!.querySelector<HTMLButtonElement>('button')!.click()
+      await vi.waitFor(() => expect(card!.querySelector('button')).not.toBeNull())
+      expect(tab.pane.querySelector('.nocx-attach-offer')).toBe(card)
+      expect(client.openSession).not.toHaveBeenCalled()
+      expect(content.sessionLost()).toBe(false)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('opens a fresh shell when the adoption answers that nothing is held', async () => {
+    // The pair of the rule above: an ANSWERED absence is proof, and a pane
+    // whose shell really is gone must not be left dead over a retry card.
+    const client = makeClient()
+    const hooks = { adoptSession: (): Promise<SessionHandle | null> => Promise.resolve(null) }
+    const { teardown } = await mountTerminal(makeClipboard(), { hooks }, client)
+    try {
+      expect(client.openSession).toHaveBeenCalledTimes(1)
     } finally {
       teardown()
     }

@@ -39,6 +39,8 @@ test('release tooling is supporting but CI, stable release and app wiring stay p
     '.github/workflows/release-build.yml',
     'scripts/product-change.mjs',
     'scripts/publish-nightly.test.mjs',
+    'scripts/helper-hashes.mjs',
+    'scripts/helper-hashes.test.mjs',
     'scripts/verify-built-artifact.py',
     'Casks/nocx.rb',
     'Casks/nocx@nightly.rb',
@@ -64,6 +66,7 @@ test('new supporting pipeline files always owe ci-pipeline checks', async () => 
   assert.match(job, /scripts\/release\/\*\.test\.\*/)
   assert.match(job, /scripts\/publish-nightly.test.mjs/)
   assert.match(job, /scripts\/changed-tests.test.mjs/)
+  assert.match(job, /scripts\/helper-hashes.test.mjs/)
   for (const f of [
     'scripts/release/promotion.mjs',
     'scripts/release/promotion-github.test.mjs',

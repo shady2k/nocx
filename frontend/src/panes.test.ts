@@ -1732,6 +1732,33 @@ describe('PaneManager', () => {
     expect(text).toContain('Reinstall or update nocx')
   })
 
+  // A SAVED SSH CONNECTION THAT FAILS SAYS WHY WHERE IT DIED (nocx-398ca).
+  // The pane is the surface that outlives the attempt, and the reason the
+  // owner's stuck tab never showed was that the open never failed at all —
+  // this pins the renderer half: a failure, once it arrives, is readable in
+  // the pane rather than a bare cursor.
+  it('shows why a saved SSH connection failed, in the pane it left', async () => {
+    const refusal = new RpcError(
+      "Nocx started this machine's helper and it did not answer as the build that installed it: " +
+        'helper: connection lost: EOF. Open the pane again.',
+      -32603,
+      { reason: 'handshake', action: 'retry-open' },
+    )
+    const client = makeClient({ openSSHSession: vi.fn(() => Promise.reject(refusal)) })
+    const { manager, panes } = await mountPaneManager(client)
+
+    manager.newSSHPane('ssh:test:1', 'host.example.com')
+
+    await vi.waitFor(() => {
+      const notice = panes.querySelector('.pane.active .pane-error')
+      expect(notice).not.toBeNull()
+      const text = notice?.textContent ?? ''
+      expect(text).toContain('Terminal failed to start')
+      expect(text).toContain('did not answer as the build that installed it')
+      expect(text).toContain('Open the pane again')
+    })
+  })
+
   it('Tab.ready resolves true for a genuinely started tab', async () => {
     // initialPaneReady resolved above, proving the content-level signal resolved true.
     //
@@ -3349,7 +3376,7 @@ describe('a restored pane and the session the backend still holds', () => {
     expect(returning.openSession).toHaveBeenCalledTimes(1)
   })
 
-  it('falls back to a fresh session when the claim is refused', async () => {
+  it('opens a fresh session when the backend proves it holds nothing for the pane', async () => {
     vi.mocked(showToast).mockClear()
     const chain = makeLayoutStore()
     await mountPaneManager(makeClient(), undefined, undefined, undefined, chain)
@@ -3358,9 +3385,13 @@ describe('a restored pane and the session the backend still holds', () => {
     const returning = makeClient()
     returning.listLiveSessions.mockResolvedValue([liveEntry(paneId)])
     // The session ended, or another client took it, between the list and the
-    // claim. A pane that stayed dead over that would be a worse answer than
-    // the one that predates the coordinator.
-    returning.reclaimSession.mockRejectedValue(new Error('session is gone'))
+    // claim — and the backend SAID so: `unknown-session` is the one refusal
+    // that establishes absence (refuseClaim's closed vocabulary). A pane that
+    // stayed dead over that would be a worse answer than the one that
+    // predates the coordinator.
+    returning.reclaimSession.mockRejectedValue(
+      new RpcError('unknown session', -32602, { reason: 'unknown-session' }),
+    )
     await mountPaneManager(
       returning,
       undefined,
@@ -3373,7 +3404,39 @@ describe('a restored pane and the session the backend still holds', () => {
     expect(returning.openSession).toHaveBeenCalledTimes(1)
     const warning = vi.mocked(showToast).mock.calls[0]?.[0]
     expect(warning?.level).toBe('warning')
-    expect(warning?.message).toContain('session is gone')
+    expect(warning?.message).toContain('has ended')
+  })
+
+  // THE DEFECT (nocx-3an1s.1.5). A claim that failed for a reason that is not
+  // a verdict — "Control plane busy", a dropped socket, a refused replay —
+  // says nothing about whether the helper's shell still exists. Falling back
+  // to `open` here is what duplicated ten helper sessions into eighteen.
+  it('keeps the pane on the same session when the claim is refused without a verdict', async () => {
+    const chain = makeLayoutStore()
+    await mountPaneManager(makeClient(), undefined, undefined, undefined, chain)
+    const paneId = chain.backend.rows().panes[0].id
+
+    const returning = makeClient()
+    returning.listLiveSessions.mockResolvedValue([liveEntry(paneId)])
+    returning.reclaimSession.mockRejectedValue(
+      new RpcError('Control plane busy', -32004, {
+        reason: 'control-saturated',
+        scope: 'session',
+        retryable: true,
+        retryAfterMs: 50,
+      }),
+    )
+    const mounted = await mountPaneManager(
+      returning,
+      undefined,
+      undefined,
+      undefined,
+      makeLayoutStore(chain.backend),
+    )
+
+    expect(returning.reclaimSession).toHaveBeenCalledTimes(1)
+    expect(returning.openSession).not.toHaveBeenCalled()
+    expect(mounted.panes.querySelector('.nocx-attach-offer')).not.toBeNull()
   })
 
   it('does not ask the backend twice for one pane', async () => {
@@ -3397,15 +3460,19 @@ describe('a restored pane and the session the backend still holds', () => {
     expect(returning.reclaimSession).toHaveBeenCalledTimes(1)
   })
 
-  it('carries on when the backend cannot say what it is running', async () => {
+  // AN INVENTORY THAT FAILED IS NOT AN EMPTY INVENTORY (nocx-3an1s.1.5).
+  // The old answer — "every restored pane opens a fresh session" — was the
+  // defect: a transient `sessions.live` failure turned ten live shells into
+  // ten replacements. The pane now asks the same question once more, and when
+  // that answer is the same failure it keeps the pane and says so.
+  it('asks again after a failed inventory and takes the same session back', async () => {
     const chain = makeLayoutStore()
     await mountPaneManager(makeClient(), undefined, undefined, undefined, chain)
+    const paneId = chain.backend.rows().panes[0].id
 
-    // The degrade is the behaviour that predates the coordinator: every
-    // restored pane opens a fresh session. A window that refused to boot over
-    // it would be a worse failure than the one it reports.
     const returning = makeClient()
-    returning.listLiveSessions.mockRejectedValue(new Error('no such method'))
+    returning.listLiveSessions.mockRejectedValueOnce(new Error('no such method'))
+    returning.listLiveSessions.mockResolvedValue([liveEntry(paneId)])
     await mountPaneManager(
       returning,
       undefined,
@@ -3414,7 +3481,40 @@ describe('a restored pane and the session the backend still holds', () => {
       makeLayoutStore(chain.backend),
     )
 
-    expect(returning.openSession).toHaveBeenCalledTimes(1)
+    expect(returning.listLiveSessions).toHaveBeenCalledTimes(2)
+    expect(returning.reclaimSession).toHaveBeenCalledTimes(1)
+    expect(returning.reclaimSession.mock.calls[0][0]).toMatchObject({ paneId })
+    // The whole point: no second shell over a process that is still running.
+    expect(returning.openSession).not.toHaveBeenCalled()
+  })
+
+  it('keeps a restored pane recoverable, and opens nothing, while the inventory stays unavailable', async () => {
+    const chain = makeLayoutStore()
+    await mountPaneManager(makeClient(), undefined, undefined, undefined, chain)
+    const paneId = chain.backend.rows().panes[0].id
+
+    const returning = makeClient()
+    returning.listLiveSessions.mockRejectedValue(new Error('Control plane busy'))
+    const mounted = await mountPaneManager(
+      returning,
+      undefined,
+      undefined,
+      undefined,
+      makeLayoutStore(chain.backend),
+    )
+
+    // Nothing is opened on a question that was never answered, and the pane
+    // is not declared lost either — its shell may still be running.
+    expect(returning.openSession).not.toHaveBeenCalled()
+    const card = mounted.panes.querySelector('.nocx-attach-offer')
+    expect(card).not.toBeNull()
+
+    // Once the plane answers, the person's retry takes the SAME session back.
+    returning.listLiveSessions.mockResolvedValue([liveEntry(paneId)])
+    card!.querySelector<HTMLButtonElement>('button')!.click()
+    await vi.waitFor(() => expect(returning.reclaimSession).toHaveBeenCalledTimes(1))
+    expect(returning.reclaimSession.mock.calls[0][0]).toMatchObject({ paneId })
+    expect(returning.openSession).not.toHaveBeenCalled()
   })
 })
 

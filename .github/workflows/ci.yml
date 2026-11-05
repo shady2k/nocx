@@ -1009,6 +1009,16 @@ jobs:
         working-directory: .
         run: node --test scripts/shard-files.test.mjs
 
+      # The disk sampler the e2e legs run under (nocx-atpw5.1.40). Its decision
+      # is a pure one — what the minimum was, and whether that minimum is below
+      # the threshold even after the space came back — so it is tested here
+      # rather than trusted as YAML: the guard that only read free space at the
+      # end of a run reported 12 G and stayed silent on a run that had died of
+      # ENOSPC.
+      - name: Disk-watch tests
+        working-directory: .
+        run: node --test scripts/e2e-disk-watch.test.mjs
+
       # The pre-commit hook's frontend lock (nocx-owbpb): two hooks in two
       # processes, one machine, and the second one waits. It drives the hook
       # with a stubbed toolchain, so it costs seconds and needs no linter.
@@ -1376,8 +1386,16 @@ jobs:
           fi
           # The container's own output is the job's, so the gate reads it the
           # same way it reads a Go step's: the Playwright failure list is in it.
+          #
+          # AND IT IS WRAPPED, so the step records the disk's PEAK and not only
+          # its end (nocx-atpw5.1.40): scripts/e2e-disk-watch.mjs samples free
+          # space for as long as this command runs, takes one breakdown when it
+          # falls below 6 GiB, and writes the minimum to the state file the
+          # job's last step reads. It returns this command's status unchanged,
+          # and its own failures are lines in the log, never a red step.
           NOCX_QUARANTINE_REPORT="test-results/playwright-${{ matrix.project }}-${{ matrix.shard }}.json" NOCX_E2E_SHARD_FILES=1 NOCX_E2E_SHARD="${{ matrix.shard }}" \
-            scripts/ci-run-logged.sh "e2e-${{ matrix.project }}-${{ matrix.shard }}" e2e/run-in-container.sh
+            node scripts/e2e-disk-watch.mjs --state "$RUNNER_TEMP/nocx-disk-watch-e2e.json" -- \
+              scripts/ci-run-logged.sh "e2e-${{ matrix.project }}-${{ matrix.shard }}" e2e/run-in-container.sh
         env:
           # The two totals are the matrix lists' lengths, written again because
           # GitHub has no expression for a matrix leg's own length. Keeping them
@@ -1433,8 +1451,12 @@ jobs:
           NOCX_E2E_IMAGE: nocx-e2e:local
           NOCX_E2E_CACHE_ROOT: ${{ runner.temp }}/nocx-e2e-cache
         run: |
+          # Wrapped like the ordinary run, for the same reason: ten repeats of a
+          # changed spec are ten traces, and this step's peak is the one the
+          # job's end cannot see (nocx-atpw5.1.40).
           # shellcheck disable=SC2086 # the list is spec paths, split on purpose
-          e2e/run-in-container.sh $REPEAT_SPECS --repeat-each=10 --pass-with-no-tests --output=test-results/repeat-changed
+          node scripts/e2e-disk-watch.mjs --state "$RUNNER_TEMP/nocx-disk-watch-repeat.json" -- \
+            e2e/run-in-container.sh $REPEAT_SPECS --repeat-each=10 --pass-with-no-tests --output=test-results/repeat-changed
 
       # Named per project AND per shard: two jobs uploading one name is a
       # collision, and the trace you want is the one from the browser and the
@@ -1480,7 +1502,11 @@ jobs:
         run: |
           df -h /
           du -sh test-results .e2e "$RUNNER_TEMP/nocx-e2e-cache" 2>/dev/null || true
-          avail_kib=$(df -Pk / | awk 'NR==2 { print $4 }')
-          if [ "${avail_kib:-0}" -lt 1048576 ]; then
-            echo "::error::the runner is nearly out of disk: ${avail_kib} KiB left on /. A step that failed here failed of ENOSPC, not of the product — read this line first (nocx-atpw5.1.40)."
-          fi
+          # THE PEAK, not the end (nocx-atpw5.1.40). The guard that read free
+          # space here reported 12 G and said nothing on a run that had died of
+          # ENOSPC at test 213: the space came back when the container that held
+          # it exited. The steps above record their own minimum, and this reads
+          # them, so a leg whose free space ever fell below the threshold says so
+          # — as an annotation, which is the line a reader sees without a log —
+          # whether or not the disk recovered.
+          node scripts/e2e-disk-watch.mjs --report "$RUNNER_TEMP"/nocx-disk-watch-*.json || true

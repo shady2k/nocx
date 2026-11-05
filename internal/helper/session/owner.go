@@ -307,16 +307,29 @@ type sessionOwner struct {
 	deadlineWake      chan struct{}
 	deadlineMono      int64
 	deadlineWall      time.Time
-	// detachSignal, detachOnce and detached are the SSH detach path (spec
-	// §5.7, nocx-6q1uh.3, owner_ssh.go): stop closes detachSignal, once,
-	// when its own deadline fires against a Process it cannot interrupt
-	// (writeInterrupter); run's own goroutine answers it (performDetach),
-	// because inFlight and writerBusy below are touched from nowhere else.
-	// detached is read from outside run()'s goroutine (writerDetached), an
-	// atomic for the same reason completedFence is.
-	detachSignal chan struct{}
-	detachOnce   sync.Once
-	detached     atomic.Bool
+	// detachSignal, detachOnce, detachPending and detached are the SSH
+	// detach path (spec §5.7, nocx-6q1uh.3, owner_ssh.go): stop marks
+	// detachPending and closes detachSignal, once, when its own deadline
+	// fires against a Process it cannot interrupt (writeInterrupter); run's
+	// own goroutine answers it (performDetach), because inFlight and
+	// writerBusy below are touched from nowhere else. detached is read from
+	// outside run()'s goroutine (writerDetached), an atomic for the same
+	// reason completedFence is.
+	//
+	// detachPending separates "stop has given up on the writer" from
+	// "performDetach has run", because the two are not the same instant and
+	// something else can land between them: a write the stop's own Close
+	// unblocks reports its outcome on writeRes, and completeWrite (below)
+	// must not read that outcome as a join the stop never made. triggerDetach
+	// sets it before closing detachSignal; performDetach clears it once the
+	// request is settled, whether or not there was anything to detach, so a
+	// later write is never stuck behind a stale request. It is written
+	// outside run()'s goroutine by triggerDetach and read/cleared on it by
+	// completeWrite and performDetach, which is why it is an atomic.
+	detachSignal  chan struct{}
+	detachOnce    sync.Once
+	detachPending atomic.Bool
+	detached      atomic.Bool
 
 	// inFlightFlag publishes whether writerBusy/inFlight are currently
 	// non-empty, for a caller outside run()'s own goroutine that needs to
@@ -1133,6 +1146,22 @@ func (o *sessionOwner) completeWrite(res writeOutcome) {
 	if fi == nil {
 		return
 	}
+	// A stop that has already given up on this writer must not have its
+	// giving-up turned back into a join by the scheduling order of two
+	// goroutines (nocx-atpw5.1.22). The forced stop asks for the detach and
+	// then closes the Process; for an SSH channel, that close makes the peer
+	// close the channel, which ends the local remoteWin and makes the blocked
+	// Write return (measured: n=80, err=io.EOF — the 80 bytes the two fitting
+	// chunks left in the window). When that outcome reaches this method
+	// before performDetach has run, treating it as this item's own result
+	// reports writerDetached=false for a stop that did give up, and resolves
+	// the item with a partial failure instead of delivery_unknown. So it is
+	// ignored here and performDetach resolves the item on run's next turn;
+	// performDetach is the only other place this item can become final, and
+	// it runs on this same goroutine, so nothing is lost.
+	if o.detachPending.Load() {
+		return
+	}
 	o.writerBusy = false
 	o.inFlight = nil
 	o.inFlightFlag.Store(false)
@@ -1347,17 +1376,28 @@ func (o *sessionOwner) stop(graceful bool, deadline time.Time) (tailLost bool) {
 	case <-o.stopped:
 		return false
 	case <-timer.C:
-		_ = o.proc.Close()
 		// A Process with no writeInterrupter (an SSH channel — see that
 		// interface's doc) may have a write stuck behind a peer holding its
-		// window at zero, which proc.Close's channel close cannot unblock
-		// (spec §5.7). Detaching is what lets run's own exit condition
-		// become true regardless; for a Process that DOES support
-		// interruption, beginClosing already interrupted the write when
-		// closing began, and this signal finds nothing in flight to detach.
+		// window at zero. Ask for the detach BEFORE closing the Process, not
+		// after it (nocx-atpw5.1.22): closing an SSH channel sends the peer a
+		// channel-close, the peer's reply ends this side's remoteWin, and the
+		// blocked Write then returns — measured, n=80 err=io.EOF, the 80
+		// bytes the two chunks that fit left in the window. Asking afterwards
+		// makes "detached" depend on whether run happened to process the
+		// detach signal before the writer's outcome, which is a scheduler
+		// race, not a fact about the write. The write in flight at this
+		// deadline is the one this stop gave up on; the request names it while
+		// it is still the in-flight item, and completeWrite ignores the
+		// outcome the close unblocks once that request is set. proc.Close
+		// still runs, as cleanup of the channel and its panes.
+		//
+		// For a Process that DOES support interruption (a local PTY),
+		// beginClosing already interrupted the write when closing began, and
+		// there is no detach to request.
 		if _, ok := o.proc.(writeInterrupter); !ok {
 			o.triggerDetach()
 		}
+		_ = o.proc.Close()
 		<-o.stopped
 		return promisedTail
 	}

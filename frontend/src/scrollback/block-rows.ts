@@ -147,17 +147,28 @@ export function snapshotForRows(lines: readonly LedgerBlockRowsLine[]) {
 }
 
 /** Selection reads the same parsed rows that paint the card, never its DOM text.
- * The immutable artifact id is part of the key so a replaced artifact cannot
- * silently resolve an old endpoint. */
-const selectionRows = new Map<string, StoredBlockRows>()
-function selectionKey(blockId: string, artifactVersion: string): string {
-  return `${blockId}\u0000${artifactVersion}`
-}
+ *
+ *  THE BLOCK ELEMENT OWNS ITS ROWS (nocx-3an1s.1.6). This was a module-global
+ *  Map keyed by block id and artifact version, so every block ever painted
+ *  stayed reachable for the life of the renderer and nothing ever deleted one —
+ *  the owner measured 46 stored-row artifacts still held for 45 closed tabs.
+ *  A weak key makes the entry's lifetime the block's: the tab closes, the
+ *  element leaves the document, and the last reference to its rows goes with
+ *  it, because nothing else keeps the element alive.
+ *
+ *  One entry per element also settles artifact versions: the read that paints
+ *  a newer artifact REPLACES the older entry rather than accumulating beside
+ *  it, and the version still has to match the one the selection asked for, so
+ *  a superseded artifact resolves to nothing rather than serving rows that no
+ *  longer describe the block. */
+const selectionRows = new WeakMap<HTMLElement, StoredBlockRows>()
+
 export function storedBlockRowsForSelection(
-  blockId: string,
+  block: HTMLElement,
   artifactVersion: string,
 ): StoredBlockRows | null {
-  return selectionRows.get(selectionKey(blockId, artifactVersion)) ?? null
+  const stored = selectionRows.get(block)
+  return stored !== undefined && stored.artifactVersion === artifactVersion ? stored : null
 }
 
 export interface StoredBlockPaintOptions {
@@ -269,9 +280,7 @@ export function paintStoredRows(
   opts: StoredBlockPaintOptions,
 ): void {
   const blockId = block.dataset.entryId
-  if (blockId && stored.artifactVersion) {
-    selectionRows.set(selectionKey(blockId, stored.artifactVersion), stored)
-  }
+  if (blockId && stored.artifactVersion) selectionRows.set(block, stored)
   block
     .querySelectorAll(
       ':scope > .cmd-output, :scope > [data-output-incomplete], :scope > [data-output-empty], :scope > [data-output-unreadable]',
@@ -310,7 +319,7 @@ export function repaintStoredRows(container: HTMLElement, opts: StoredBlockPaint
     const id = block?.dataset.entryId
     const version = row?.dataset.artifactVersion
     if (!block || !id || !version) continue
-    const stored = storedBlockRowsForSelection(id, version)
+    const stored = storedBlockRowsForSelection(block, version)
     const snapshot = stored ? snapshotForRows(stored.lines) : null
     if (stored && snapshot) {
       const painted = paintOutput(block, stored, snapshot, opts)

@@ -46,16 +46,32 @@ type Fetcher struct {
 	// than one that fails.
 	HTTP *http.Client
 	// Backoff is the pause before each retry of a URL fetch, so its length is
-	// the number of retries. Only a transport error or a 5xx is retried: those
-	// are the server's hiccup and say nothing about the release, while a 4xx
-	// is an answer and a wrong hash is the tamper check. Nil means the default.
+	// the number of retries: four with the default schedule, declared by
+	// defaultBackoff below. Only a failure that asking again could change is
+	// retried — a 5xx, a 429, a connection that died, a body cut off mid-stream
+	// — while a 4xx is an answer and a wrong hash is the tamper check. Nil
+	// means the default.
 	Backoff []time.Duration
+	// Sleep is the pause itself. Nil means time.Sleep; a test injects a
+	// recorder so the schedule is asserted rather than waited out.
+	Sleep func(time.Duration)
+	// Log, when set, is told about each retry with the URL and the status that
+	// caused it. Fetch lends it the fetch's Log when it has none, so one sink
+	// carries the whole job's log.
+	Log func(format string, args ...any)
 }
 
-// defaultBackoff rides out a release CDN that answers one 500, which GitHub's
-// does: twice on 2026-10-14 a CI job went red on that alone, having run no
-// test at all.
-var defaultBackoff = []time.Duration{2 * time.Second, 10 * time.Second}
+// defaultBackoff is four retries — 2 s, 10 s, 30 s, 60 s of waiting, 102 s in
+// all — and the schedule is the whole budget: a job gives up after one file has
+// spent it. The number is sized on the incident that bought it
+// (nocx-atpw5.1.44): on 2026-11-05 GitHub's release download answered 504 on
+// and off for about seven minutes, on a different asset in every job, and ten
+// jobs across two pull requests went red for code that had not changed. The
+// previous schedule (2 s, 10 s) would now be fourteen seconds of patience
+// against that; four retries costs a dead release 102 s before it reddens the
+// job, which is cheaper than the rerun it saves when the 504 is a bad minute
+// rather than a bad release.
+var defaultBackoff = []time.Duration{2 * time.Second, 10 * time.Second, 30 * time.Second, 60 * time.Second}
 
 // NewFetcher returns a fetcher for a base location.
 func NewFetcher(base string) *Fetcher {
@@ -91,34 +107,21 @@ func localBase(base string) (string, error) {
 	return u.Path, nil
 }
 
-// open returns a reader for an asset and a human-readable description of where
-// it came from.
-func (f *Fetcher) open(a Asset) (io.ReadCloser, string, error) {
-	base := f.Base
-	if isURL(base) {
-		target := strings.TrimSuffix(base, "/") + "/" + a.Name
-		if strings.Contains(base, "{asset}") {
-			target = strings.ReplaceAll(base, "{asset}", a.Name)
-		}
-		client := f.HTTP
-		if client == nil {
-			client = &http.Client{Timeout: 10 * time.Minute}
-		}
-		backoff := f.Backoff
-		if backoff == nil {
-			backoff = defaultBackoff
-		}
-		for attempt := 0; ; attempt++ {
-			body, retry, err := get(client, target)
-			if err == nil || !retry || attempt == len(backoff) {
-				return body, target, err
-			}
-			time.Sleep(backoff[attempt])
-		}
+// assetURL is where an HTTP base holds one asset, and the only place a release
+// URL is built.
+func (f *Fetcher) assetURL(a Asset) string {
+	if strings.Contains(f.Base, "{asset}") {
+		return strings.ReplaceAll(f.Base, "{asset}", a.Name)
 	}
-	dir, err := localBase(base)
+	return strings.TrimSuffix(f.Base, "/") + "/" + a.Name
+}
+
+// openLocal returns a reader for an asset in a directory of published files and
+// a human-readable description of where it came from.
+func (f *Fetcher) openLocal(a Asset) (io.ReadCloser, string, error) {
+	dir, err := localBase(f.Base)
 	if err != nil {
-		return nil, base, err
+		return nil, f.Base, err
 	}
 	path := filepath.Join(dir, a.Name)
 	file, err := os.Open(path) //nolint:gosec // the local form of a fetch: a directory of assets the caller named
@@ -131,39 +134,38 @@ func (f *Fetcher) open(a Asset) (io.ReadCloser, string, error) {
 	return file, path, nil
 }
 
-// get performs one request and says whether a failure is worth asking again.
-func get(client *http.Client, target string) (io.ReadCloser, bool, error) {
+// download performs one whole attempt at one asset over HTTP, and says whether
+// asking again could give a different answer. A 5xx, a 429 and a connection
+// that died before or during the body are the server's hiccup and say nothing
+// about the release; a 4xx is the release's answer, and bytes that hash wrong
+// are the tamper check. Retrying either of those only delays the red.
+func (f *Fetcher) download(target string, a Asset, dest string) (bool, error) {
+	client := f.HTTP
+	if client == nil {
+		client = &http.Client{Timeout: 10 * time.Minute}
+	}
 	resp, err := client.Get(target)
 	if err != nil {
-		return nil, true, err
+		return true, fmt.Errorf("GET %s: %w", target, err)
 	}
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		_ = resp.Body.Close()
-		return nil, resp.StatusCode >= 500, fmt.Errorf("GET %s: %s", target, resp.Status)
+		err := fmt.Errorf("GET %s: %s", target, resp.Status)
+		return resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests, err
 	}
-	return resp.Body, false, nil
+	return f.store(resp.Body, a, target, resp.Status, dest)
 }
 
-// EnsureFile makes dest hold exactly the pinned asset, downloading it if it is
-// absent or wrong. It returns whether it fetched.
+// store streams one asset to dest, hashing as it goes, and puts it in place
+// only when it is the pinned file — so a failed verification leaves the
+// previous, possibly correct, file untouched and never leaves a half-written
+// archive where a link would find it.
 //
-// The file is verified BEFORE it is put in place: it is streamed to a
-// temporary neighbour, hashed, and renamed only on a match, so a failed
-// verification leaves the previous — possibly correct — file untouched and
-// never leaves a half-written archive where a link would find it.
-func (f *Fetcher) EnsureFile(a Asset, dest string) (bool, error) {
-	if sum, _, err := HashFile(dest); err == nil && sum == a.SHA256 {
-		return false, nil
-	}
-	if err := os.MkdirAll(filepath.Dir(dest), 0o750); err != nil {
-		return false, err
-	}
-	body, from, err := f.open(a)
-	if err != nil {
-		return false, err
-	}
-	defer func() { _ = body.Close() }()
-
+// from names the source for the error a reader acts on; via is the HTTP status
+// line when the bytes came over HTTP, empty for a directory. Its bool has
+// download's meaning: a body that ended early is worth asking again, a hash
+// that disagrees is not.
+func (f *Fetcher) store(body io.Reader, a Asset, from, via, dest string) (bool, error) {
 	tmp := dest + ".part"
 	out, err := os.Create(tmp) //nolint:gosec // dest is the path the caller asked this fetch to populate
 	if err != nil {
@@ -174,7 +176,10 @@ func (f *Fetcher) EnsureFile(a Asset, dest string) (bool, error) {
 	closeErr := out.Close()
 	if copyErr != nil {
 		_ = os.Remove(tmp)
-		return false, copyErr
+		if via == "" {
+			return true, fmt.Errorf("%s: %w", from, copyErr)
+		}
+		return true, fmt.Errorf("GET %s: %s: %w", from, via, copyErr)
 	}
 	if closeErr != nil {
 		_ = os.Remove(tmp)
@@ -189,7 +194,72 @@ func (f *Fetcher) EnsureFile(a Asset, dest string) (bool, error) {
 		_ = os.Remove(tmp)
 		return false, err
 	}
-	return true, nil
+	return false, nil
+}
+
+// EnsureFile makes dest hold exactly the pinned asset, downloading it if it is
+// absent or wrong. It returns whether it fetched.
+//
+// A download is retried after each pause in Backoff, and only for a failure
+// that asking again could change: a 5xx, a 429, a connection that died, or a
+// body cut off mid-stream. A 404 and a hash mismatch are returned at once —
+// they are answers, and a second ask gets the same one. The file is verified
+// BEFORE it is put in place, so no number of attempts can put substituted
+// bytes there.
+func (f *Fetcher) EnsureFile(a Asset, dest string) (bool, error) {
+	if sum, _, err := HashFile(dest); err == nil && sum == a.SHA256 {
+		return false, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o750); err != nil {
+		return false, err
+	}
+	if !isURL(f.Base) {
+		body, from, err := f.openLocal(a)
+		if err != nil {
+			return false, err
+		}
+		defer func() { _ = body.Close() }()
+		if _, err := f.store(body, a, from, "", dest); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	target := f.assetURL(a)
+	backoff := f.Backoff
+	if backoff == nil {
+		backoff = defaultBackoff
+	}
+	for attempts := 1; ; attempts++ {
+		retry, err := f.download(target, a, dest)
+		if err == nil {
+			return true, nil
+		}
+		if !retry || attempts > len(backoff) {
+			if attempts == 1 {
+				return false, err
+			}
+			return false, fmt.Errorf("%w (after %d attempts)", err, attempts)
+		}
+		wait := backoff[attempts-1]
+		f.logf("retry %d of %d in %s: %v", attempts, len(backoff), wait, err)
+		f.sleep(wait)
+	}
+}
+
+// logf passes a line to the fetcher's log, if it has one.
+func (f *Fetcher) logf(format string, args ...any) {
+	if f.Log != nil {
+		f.Log(format, args...)
+	}
+}
+
+// sleep waits, through the injected pause when a test supplied one.
+func (f *Fetcher) sleep(d time.Duration) {
+	if f.Sleep != nil {
+		f.Sleep(d)
+		return
+	}
+	time.Sleep(d)
 }
 
 // FetchOptions tunes what a fetch materialises.
@@ -206,6 +276,11 @@ func (m *Manifest) Fetch(root string, f *Fetcher, opts FetchOptions) error {
 	logf := opts.Log
 	if logf == nil {
 		logf = func(string, ...any) {}
+	}
+	// The retry line is the fetcher's, but its sink is the fetch's: one line per
+	// attempt belongs in the log the job is already reading.
+	if f.Log == nil {
+		f.Log = logf
 	}
 	for _, t := range m.Targets {
 		dir := VendorDir(root, t.Name)

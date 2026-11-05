@@ -1,7 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
-import { Dispatcher } from './dispatcher'
+import { Dispatcher, RpcError } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
-import { SessionHandle, WSClient, type SessionIntentKind, type SessionRecovery } from './ipc'
+import {
+  SessionHandle,
+  WSClient,
+  isProvenSessionAbsence,
+  type SessionIntentKind,
+  type SessionRecovery,
+} from './ipc'
 import {
   FRAME_HEADER_SIZE,
   FRAME_VERSION,
@@ -2642,6 +2648,38 @@ describe('session.observationChanged notification', () => {
 // Reclaiming a live session (nocx-oevq4, the nocx-server design D5 and D8):
 // the window that has just started holds nothing, so it asks.
 // ═══════════════════════════════════════════════════════════════════════════
+
+// WHICH FAILED CLAIM IS A VERDICT (nocx-3an1s.1.5). Only the backend's
+// `unknown-session` says the shell is gone; everything else — a saturated
+// control plane, a dropped socket, a refused replay — is a question that was
+// not answered, and a caller that reads it as absence opens a second shell
+// over a process that is still running.
+describe('a failed claim and what it proves', () => {
+  it('treats only the backend\u2019s unknown-session refusal as absence', () => {
+    expect(
+      isProvenSessionAbsence(
+        new RpcError('unknown session', -32602, { reason: 'unknown-session' }),
+      ),
+    ).toBe(true)
+    expect(
+      isProvenSessionAbsence(
+        new RpcError('Control plane busy', -32004, {
+          reason: 'control-saturated',
+          scope: 'session',
+          retryable: true,
+          retryAfterMs: 50,
+        }),
+      ),
+    ).toBe(false)
+    expect(
+      isProvenSessionAbsence(
+        new RpcError('unknown session', -32603, { reason: 'unknown-session' }),
+      ),
+    ).toBe(false)
+    expect(isProvenSessionAbsence(new RpcError('no reason', -32602))).toBe(false)
+    expect(isProvenSessionAbsence(new Error('ws closed'))).toBe(false)
+  })
+})
 
 describe('reclaiming a live session', () => {
   const PANE = '0198f2b0-0000-7000-8000-0000000000c3'

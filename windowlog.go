@@ -59,7 +59,7 @@ func at(lg *slog.Logger) log.Logger {
 // fails the window: a log that cannot be opened is said on stderr and the
 // app starts, because a diagnostic must not cost more than the thing it
 // diagnoses. The returned file is nil when only stderr is in use.
-func openWindowLog() (*slog.Logger, *os.File) {
+func openWindowLog() (*slog.Logger, *log.File) {
 	paths, err := storage.NewAppPaths()
 	if err != nil {
 		level, _ := log.ConfiguredLevel(os.Getenv(log.LevelEnvVar))
@@ -73,7 +73,7 @@ func openWindowLog() (*slog.Logger, *os.File) {
 
 // newWindowLogger builds the logger for one data directory. It is the seam a
 // test drives without a running Wails app.
-func newWindowLogger(dataDir string) (*slog.Logger, *os.File, string) {
+func newWindowLogger(dataDir string) (*slog.Logger, *log.File, string) {
 	level, badLevel := log.ConfiguredLevel(os.Getenv(log.LevelEnvVar))
 	opts := log.HandlerOptions(level)
 	path := windowLogPath(dataDir)

@@ -125,6 +125,19 @@ function claimRefusalReason(err: unknown): string | undefined {
   return typeof data.reason === 'string' ? data.reason : undefined
 }
 
+/** Whether a failed claim is the backend's authoritative answer that it holds
+ *  no such session (nocx-3an1s.1.5). This is the ONE reading of that verdict:
+ *  the reconnect pass, the reclaim of a live entry and the pane's recovery all
+ *  ask here rather than deciding for themselves.
+ *
+ *  Everything else — a saturated control plane, a dropped socket, a refused
+ *  replay — is a question that was not answered. It is uncertainty, and a
+ *  caller that reads uncertainty as absence opens a second shell over a
+ *  process that is still running. */
+export function isProvenSessionAbsence(err: unknown): boolean {
+  return claimRefusalReason(err) === 'unknown-session'
+}
+
 /** The kinds of input a person produces, as the wire spells them
  *  (contracts/session.intent.params.schema.json's `kind`). It is the whole of
  *  sessionruntime's intent vocabulary and not the printable subset of it: a
@@ -1521,7 +1534,7 @@ export class WSClient {
     state: SessionState,
     err: unknown,
   ): 'lost' | 'unavailable' {
-    if (claimRefusalReason(err) === 'unknown-session') return this._loseSession(sessionId, state)
+    if (isProvenSessionAbsence(err)) return this._loseSession(sessionId, state)
     return this._attachUnavailable(sessionId, state, err)
   }
 

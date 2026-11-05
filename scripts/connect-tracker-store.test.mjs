@@ -116,8 +116,8 @@ function fixture(t, { breakObjects = false, trackerRef = true } = {}) {
   shim(bin, 'br', [
     'case "$1" in',
     '  where) printf \'%s\' "{\\"jsonl_path\\":\\"$EXPORT\\",\\"path\\":\\"$STORE_SPEC\\"}" ;;',
-    '  count) printf \'{"count":%s}\' "${FAKE_COUNT:-3}" ;;',
-    '  sync) echo "tracker: in step" ;;',
+    '  count) if [ -n "$COUNT_FILE" ] && [ -f "$COUNT_FILE" ]; then cat "$COUNT_FILE"; else printf \'{"count":%s}\' "${FAKE_COUNT:-3}"; fi ;;',
+    '  sync) case "${2:-}" in --import-only) [ -n "$COUNT_FILE" ] && printf \'{"count":3}\' > "$COUNT_FILE" ;; esac; echo "tracker: in step" ;;',
     'esac',
   ])
 
@@ -175,6 +175,21 @@ test('a tracker ref that did not arrive stops connect before any store exists', 
   // so it must not be asked at all.
   assert.equal(existsSync(result.marker), false, 'the mechanism ran and could make an empty store')
   assert.equal(existsSync(f.store), false, 'an empty store was created')
+})
+
+// The mechanism creates a store from the fetched ref and initializes an empty
+// database; it imports only a store that already existed. The checkout's own
+// import runs after this script, so a fresh store reads as empty when the count
+// is first asked. Refusing there would reject every first connect as the empty
+// store a missed fetch left behind, so the store's own state is imported before
+// the count is read as that defect.
+test('a fresh store is imported before its item count is read', (t) => {
+  const f = fixture(t)
+  const countFile = join(f.dir, 'count.json')
+  writeFileSync(countFile, '{"count":0}')
+  const result = f.run({ COUNT_FILE: countFile })
+  assert.equal(result.status, 0, result.said)
+  assert.equal(readFileSync(countFile, 'utf8'), '{"count":3}')
 })
 
 test('a remote with no tracker ref is a first connect, not a failure', (t) => {

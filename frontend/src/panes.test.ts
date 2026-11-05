@@ -74,6 +74,14 @@ function fireFrameMetadata(
   session.fireScreenFrame(frameOf(revision, rows, undefined, { cols: 80, rows: 24 }, state))
 }
 
+/** Wait for the display's next frame. A hidden pane applies the first frame
+ *  of a burst on arrival and the rest on that frame (nocx-07ymy), so a test
+ *  that fires more than one screen frame into a background tab and then
+ *  reads the DOM synchronously waits here. */
+async function flushDisplayFrame(): Promise<void> {
+  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+}
+
 function screenFrameWithText(revision: number, text: string): SessionFrame {
   const cells: CellSpec[] = Array.from(text, (char) => [char, 1, true])
   const rows = [cells, ...Array.from({ length: 23 }, () => [] as CellSpec[])]
@@ -822,6 +830,7 @@ describe('PaneManager', () => {
     // Deliver an accepted normal-buffer screen frame to the background tab.
     const bgSession = client._sessions[1]
     bgSession.fireScreenFrame(screenFrameWithText(2, 'hello'))
+    await flushDisplayFrame()
 
     // The background tab's indicator should have the activity class
     const indicators = bar.querySelectorAll('.nocx-tab-indicator')
@@ -887,6 +896,7 @@ describe('PaneManager', () => {
     // BEFORE THE PROMPT, accepted screen output is the pane starting up and
     // marks nothing.
     bgSession.fireScreenFrame(screenFrameWithText(1, 'a banner and an rc file'))
+    await flushDisplayFrame()
     expect(bar.querySelectorAll('.nocx-tab-indicator')[1].getAttribute('data-activity')).not.toBe(
       'true',
     )
@@ -895,6 +905,7 @@ describe('PaneManager', () => {
     // something a person can have missed.
     settlePane(1, client, 2)
     bgSession.fireScreenFrame(screenFrameWithText(3, 'normal output'))
+    await flushDisplayFrame()
 
     const indicators = bar.querySelectorAll('.nocx-tab-indicator')
     expect(indicators[1].getAttribute('data-activity') === 'true').toBe(true)

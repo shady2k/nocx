@@ -205,3 +205,58 @@ func TestAForcedStopWithNothingInFlightReportsNoDetach(t *testing.T) {
 		t.Fatal("a forced stop with nothing in flight reported a detach: writerDetached is a claim about a stalled WRITE, and there was none")
 	}
 }
+
+// TestAWriteOutcomeAfterADetachRequestIsNotAJoin pins the ordering
+// nocx-atpw5.1.22 was flaky on, without a network or a scheduler race.
+//
+// A forced stop on a Process it cannot interrupt gives up on the writer and
+// then closes the Process. For an SSH channel that close makes the peer close
+// the channel, which ends the local remoteWin and makes the blocked Write
+// return (measured on ssh_owner_test.go's fixture: n=80 err=io.EOF — the
+// bytes two fitting chunks left in the window). When that outcome reaches
+// completeWrite before run has answered the detach signal, it belongs to no
+// join: the stop never waited for it. Before the fix, completeWrite took it
+// as the item's own result, so the same stop reported writerDetached=false
+// and resolved the item as a partial failure, depending only on which
+// goroutine the scheduler ran first (2 of 30 runs under load).
+//
+// The two calls below are exactly what run and stop do on the two sides of
+// that race, in the losing order: the detach request first, then the outcome
+// the close unblocks, then run's own turn to answer the request.
+func TestAWriteOutcomeAfterADetachRequestIsNotAJoin(t *testing.T) {
+	proc := newOwnerFakeProcess()
+	owner, _ := newTestOwner(t, proc)
+
+	done := make(chan ownerResult, 1)
+	owner.writerBusy = true
+	owner.inFlight = &inFlightItem{item: ownerItem{kind: itemClientFrame, done: done}, fence: 7}
+	owner.inFlightFlag.Store(true)
+
+	owner.triggerDetach()
+	owner.completeWrite(writeOutcome{n: 80, err: errors.New("the close ended the channel")})
+
+	if owner.inFlight == nil {
+		t.Fatal("completeWrite took an outcome that arrived after the detach request as the item's own: the stop would report a join it never made")
+	}
+	if owner.writerDetached() {
+		t.Fatal("writerDetached is set before performDetach ran: the item must be resolved by the detach, not merely requested")
+	}
+
+	// run's own turn, which is where the signal it was sent is answered.
+	owner.performDetach()
+
+	select {
+	case res := <-done:
+		if !errors.Is(res.Err, errDeliveryUnknown) {
+			t.Fatalf("the item the detach was for resolved with %v, want delivery_unknown", res.Err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("performDetach never resolved the item the detach request was for")
+	}
+	if !owner.writerDetached() {
+		t.Fatal("performDetach did not report the detach it made")
+	}
+	if owner.inFlightFlag.Load() {
+		t.Fatal("the detached item is still in flight after performDetach")
+	}
+}

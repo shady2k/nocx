@@ -3494,7 +3494,11 @@ func (a *App) Shutdown(ctx context.Context) {
 	}
 	a.Logger.Info("application stopped")
 	// Close the log file last, after the final line: the stable copy of
-	// the log must not lose the stop record to a shutdown ordering.
+	// the log must not lose the stop record to a shutdown ordering. And a
+	// line logged AFTER this by a goroutine this Shutdown did not wait for
+	// is refused by the writer and dropped — Close is terminal
+	// (nocx-atpw5.1.45) — so nothing puts the file back on disk once the
+	// process has said it stopped.
 	if a.logFile != nil {
 		_ = a.logFile.Close()
 	}

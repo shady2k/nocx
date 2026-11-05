@@ -43,6 +43,12 @@ issues_at() {
     git cat-file -p "$1:.beads/issues.jsonl" 2>/dev/null | wc -l | tr -d ' ' || true
 }
 
+# The number of items this checkout's tracker holds. `br` is what a person
+# reads, so the count is asked of it, never of the state file.
+tracker_items() {
+    br count --status all --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const x=JSON.parse(s);if(typeof x.count!=="number")process.exit(2);process.stdout.write(String(x.count))})'
+}
+
 # ---- 1. the tracker ref, before anything is written ------------------------
 # A probe ref, never refs/tracker/state itself: this machine's store may hold
 # commits the remote has not got yet, and a forced fetch into the ref it is
@@ -121,7 +127,7 @@ store=$(printf '%s' "$status" | node -e 'let s="";process.stdin.on("data",d=>s+=
 
 if [ "$connect_status" -ne 0 ]; then
     # THE MECHANISM STOPS AT ITS FIRST PUSH, and a clone whose remote refuses
-    # this person's writes cannot satisfy that push. `pushOnce` in tracker-sync.mjs
+    # this person's writes cannot satisfy that push. `pushOid` in tracker-sync.mjs
     # (set-owned: never edited here) treats a refusal it does not recognise as
     # fatal, so connect gives up after it has already built and imported the
     # store - before it points the checkout at it. Everything from here is the
@@ -163,8 +169,20 @@ br sync --status
 # empty one the store's worktree carries. The ref is what says otherwise, and
 # `br` is what a person reads - so the question is asked of `br`.
 if [ "${remote_issues:-0}" -gt 0 ]; then
-    tracker_count=$(br count --status all --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const x=JSON.parse(s);if(typeof x.count!=="number")process.exit(2);process.stdout.write(String(x.count))})') ||
+    tracker_count=$(tracker_items) ||
         { printf 'tracker connect: br could not count this checkout'"'"'s issues\n' >&2; exit 1; }
+    if [ "$tracker_count" -eq 0 ]; then
+        # THE MECHANISM IMPORTS ONLY A STORE THAT ALREADY EXISTED. One it has
+        # just created from the ref carries the state files, but its `init`
+        # leaves the database empty; the checkout's own import is
+        # connect-clone.sh's, and that runs after this script. So a zero is
+        # first read as "not imported yet": import what the store carries and
+        # ask again. On the store this guard exists for, the state file is
+        # empty too, so nothing arrives and the refusal below still fires.
+        br sync --import-only >/dev/null 2>&1 || true
+        tracker_count=$(tracker_items) ||
+            { printf 'tracker connect: br could not count this checkout'"'"'s issues\n' >&2; exit 1; }
+    fi
     if [ "$tracker_count" -eq 0 ]; then
         printf 'tracker connect: the tracker in this checkout holds no issues although %s carries %s.\n' "$ref" "$remote_issues" >&2
         printf 'tracker connect: an earlier connect ran while its fetch was missing, and the store it built is empty. Repair it with:\n' >&2

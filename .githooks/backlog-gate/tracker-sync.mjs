@@ -469,6 +469,7 @@ async function recipeOk(decl, map, opts) {
  *   exportSide: 'node <recipeFile> export-side --out <out>'
  *   candidateFiles: ['<a local file a conditional write needs>', ...]
  *   prune: '<a command that keeps the tracker's own backups within its bound>'
+ *   signal: ['<a store-relative path the database writes>', ...]
  *
  * `candidateFiles` is the only way a path the store's git ignores reaches a
  * candidate: a tracker that keeps a setting outside the committed state names it
@@ -687,8 +688,15 @@ async function writeState(parts) {
   }
 }
 
-/** Stage the state files and the mechanism's own files, and commit a tree. */
-async function commitState(message, parents) {
+/** Stage the state files and the mechanism's own files, and commit a tree.
+ *
+ * `signal` is the database's change signal an export took immediately before it
+ * read the database: this commit is then the state that signal describes, and
+ * the pair is persisted so a hook that times out can prove what the head is
+ * (see readStatePair). Every commit without one moves the head away from the
+ * state the persisted pair describes, so the pair is dropped: a stale pair that
+ * still read as valid would vouch for a state the database no longer has. */
+async function commitState(message, parents, { signal = null } = {}) {
   const existing = stateFiles().filter((p) => existsSync(join(CURRENT.store, p)));
   if (existing.length) await git(['add', '--', ...existing], { cwd: CURRENT.store });
   const tracked = (await git(['ls-files', '--', ...stateFiles()], { cwd: CURRENT.store })).stdout.split('\n').filter(Boolean);
@@ -705,6 +713,7 @@ async function commitState(message, parents) {
   if (c.code !== 0) die(1, `could not write the store commit: ${text(c)}`);
   const oid = c.stdout.trim();
   await gitOk(['reset', '--soft', oid], { cwd: CURRENT.store });
+  pairExportState(signal, oid);
   return oid;
 }
 
@@ -1044,6 +1053,45 @@ async function hasUncommittedState() {
   return r.stdout.trim().length > 0;
 }
 
+/** The paths the recipe says move when its database does, or null.
+ *
+ *   signal: ['<a path the database writes>', ...]    store-relative
+ *
+ * A tracker's database is machine-local and its writes never touch the state
+ * files until they are flushed, so "did anything change?" is a question about
+ * the database, and the cheap answer is the stats of the files it writes: its
+ * own file, its write-ahead log and their sidecars. Declared as paths, never as
+ * a command, because the point of the signal is that asking costs no process
+ * and no store lock: the mechanism stats them itself. A recipe that declares
+ * none keeps the behaviour of a watcher that exports on every tick. */
+function changeSignalPaths() {
+  const decl = CURRENT.recipe.signal;
+  if (!decl) return null;
+  const paths = Array.isArray(decl) ? decl : decl.paths || [];
+  const list = paths.map(String).filter((p) => p);
+  return list.length ? list : null;
+}
+
+/** One tick's signal: each declared path's size and mtime, in nanoseconds.
+ *
+ * Read WITHOUT the store lock on purpose: it must not make a record wait. A
+ * read that fails for any reason other than "the file is not there" answers
+ * null, and null is never a match for anything, so the tick exports: a signal
+ * nobody could read must never become a skip. */
+function readChangeSignal(paths) {
+  const parts = [];
+  for (const p of paths) {
+    try {
+      const s = statSync(join(CURRENT.store, p), { bigint: true });
+      parts.push(`${p}:${s.mtimeNs}:${s.size}`);
+    } catch (e) {
+      if (e && e.code === 'ENOENT') { parts.push(`${p}:-`); continue; }
+      return null;
+    }
+  }
+  return parts.join('|');
+}
+
 /** The store's file lock, waited for. Past the deadline this throws a tagged
  * error rather than exiting: a one-shot command's locked() refuses with exit 1,
  * and a loop of the watcher skips the round. */
@@ -1073,6 +1121,14 @@ async function takeLockWait(ms) {
  * the lock) runs in the section that holds it, as it did before.
  */
 let LOCK_QUEUE = Promise.resolve();
+// How long an unqualified lock wait may take. A record started by a hook lowers
+// it for its own run: a commit is already made and nothing may wait on it for
+// minutes, so the hook's record asks a bounded few times instead (see
+// recordWithRetries).
+let LOCK_WAIT_MS = 120000;
+// Whether this run is a record a checkout's hook started: its lock timeouts are
+// thrown to that caller rather than ending the process on the spot.
+let HOOK_RECORD = false;
 // Whether THIS call is already inside a critical section. The two loops of one
 // process are both "this process" but never nested, so the answer has to travel
 // with the call that asked, not with the process: an async context says exactly
@@ -1094,13 +1150,15 @@ async function inProcessLock(fn) {
  * written. A loop inside the watcher passes skipOnTimeout: the round is not its
  * to take, so it is skipped, said once in the log, and tried again on the next
  * tick - never an exit, which the supervisor would answer with a restart. */
-async function locked(fn, waitMs = 120000, { skipOnTimeout = false } = {}) {
+async function locked(fn, waitMs = LOCK_WAIT_MS, { skipOnTimeout = false } = {}) {
   return inProcessLock(async () => {
     let release;
     try {
       release = await takeLockWait(waitMs);
     } catch (e) {
-      if (skipOnTimeout && e.lockTimeout) throw e;
+      // A loop skips the round; a record started by a hook is retried by its
+      // caller, which is the one that knows how long a commit may wait (#57).
+      if ((skipOnTimeout || HOOK_RECORD) && e.lockTimeout) throw e;
       die(1, e.message);
     }
     try { return await fn(); } finally { release(); }
@@ -1113,10 +1171,21 @@ async function publishOnce({ quiet, skipOnTimeout = false } = {}) {
   let oid;
   try {
     oid = await locked(async () => {
+      // The database's signal, read under the store's own lock immediately before
+      // the flush reads the database, is what this publish proves about the head.
+      const signal = exportSignal();
       const migrated = await migrateStore({ announce: true });
-      await flushDatabase();
-      if (!migrated.migrated && !(await hasUncommittedState())) return migrated.oid;
-      return commitState(`tracker store: ${nowIso()}`, [await headOid()]);
+      const flushed = await flushDatabase();
+      // Only a flush the tracker answered cleanly proves the state files are the
+      // database's: a refusal it calls "nothing unexported" leaves the files as
+      // they are - which is another machine's merge, not this database - and a
+      // refusal merged from the database's side file carries what that merge kept.
+      const clean = !!(flushed && flushed.ok && !flushed.nothing && !flushed.merged);
+      if (!migrated.migrated && !(await hasUncommittedState())) {
+        pairExportState(clean ? signal : null, await headOid());
+        return migrated.oid;
+      }
+      return commitState(`tracker store: ${nowIso()}`, [await headOid()], { signal: clean ? signal : null });
     }, 120000, { skipOnTimeout });
   } catch (e) {
     if (e.lockTimeout) return { ok: false, skipped: e.message };
@@ -2223,8 +2292,13 @@ async function recordedStateCommit(parts, oid, rev) {
   return made;
 }
 
-async function recordRun({ revision, checkout, fromTree }) {
+async function recordRun({ revision, checkout, fromTree, resolvedRevision }) {
   const ck = checkout ? resolve(checkout) : CURRENT.repoRoot;
+  // The revision is resolved once, in the checkout the person asked about, and
+  // carried through every attempt: a hook waits for the lock, HEAD may move
+  // meanwhile, and the marker, the recording and the refusal must all be about
+  // the same revision.
+  const requested = resolvedRevision || await canonicalRevision(await recordedRevision({ revision, checkout }), ck);
   let captured;
   for (let attempt = 0; attempt < 3; attempt++) {
     const remote = await fetchRemote();
@@ -2240,12 +2314,22 @@ async function recordRun({ revision, checkout, fromTree }) {
       await migrateStore();
       await pruneSettledCandidates(remote.tip);
     });
-    const step = await isolatedCandidate('record', revision || 'HEAD', async (before) => {
+    const step = await isolatedCandidate('record', requested || 'HEAD', async (before) => {
       const ck2 = ck;
-      let rev = revision;
+      // A revision named by abbreviation keeps the name it was asked with: a
+      // recording already made under it must be replayed, not written again
+      // under the full id.
+      let rev = revision || requested;
       let parts;
       if (!captured) {
-        if (fromTree) {
+        // A timed-out hook's marker names the store commit this revision's state
+        // had when the hook gave up: that state IS the revision's history, and a
+        // redo records it instead of the state standing now.
+        const pinned = await timeoutPinnedState(CURRENT.flags, CURRENT.repoRoot, requested);
+        if (pinned) {
+          parts = await stateFrom(pinned);
+          captured = { rev, parts, oid: pinned };
+        } else if (fromTree) {
           rev = rev || (await gitOk(['rev-parse', 'HEAD'], { cwd: ck2 })).trim();
           if ((await git(['cat-file', '-e', `${rev}^{commit}`], { cwd: CURRENT.store })).code !== 0)
             die(1, `${rev} is not a revision of this repository`);
@@ -2309,17 +2393,47 @@ async function recordRun({ revision, checkout, fromTree }) {
       const stateOid = await recordedStateCommit(parts, captured.oid, rev);
       captured.oid = stateOid;
       if (!remote.noRef) await mergeAndCommit(remote.tip);
+      // Check at the write, under the candidate's own lock: a hook's record of
+      // this revision may have given up while this run fetched or waited. A
+      // marker that names a store commit is that revision's state, and it is
+      // recorded instead of this run's own, later capture; a marker that names
+      // none is a state that was never captured, and today's state must not
+      // become that revision's history.
+      const arrival = requested ? findRecordTimeout(CURRENT.flags, CURRENT.repoRoot, requested) : null;
+      let written = stateOid;
+      if (arrival) {
+        const pinned = await timeoutPinnedState(CURRENT.flags, CURRENT.repoRoot, requested);
+        if (!pinned) die(1, `the recording of ${String(rev).slice(0, 12)} timed out at commit time and ${noSnapshotWaysOut(rev, arrival.commit)}`);
+        if (pinned !== stateOid) captured.oid = pinned;
+        written = pinned;
+      }
       mkdirSync(dirname(file), { recursive: true });
       // A reference, not a copy: the store's history already holds this state, and
       // a copy per revision grew one store to 5 GB against 10 MB of items (#45).
       // The digest covers the state the commit exports, which is what every reader
       // computes: a projection of the working tree's parts would not read back when
       // the commit holds a declared file the working tree does not (#49 review).
-      writeFileSync(file, recordingText(stateOid, await stateTextAt(stateOid)));
+      writeFileSync(file, recordingText(written, await stateTextAt(written)));
+      // A marker can be written in the instant between the check above and this
+      // write: a hook that gave up takes no store lock. It is still the state at
+      // commit time and still earlier than this run's capture, so the recording
+      // is rewritten to it before anything is committed.
+      const late = requested ? findRecordTimeout(CURRENT.flags, CURRENT.repoRoot, requested) : null;
+      if (late) {
+        const pinnedLate = await timeoutPinnedState(CURRENT.flags, CURRENT.repoRoot, requested);
+        if (!pinnedLate) die(1, `the recording of ${String(rev).slice(0, 12)} timed out at commit time and ${noSnapshotWaysOut(rev, late.commit)}`);
+        if (pinnedLate !== written) {
+          captured.oid = pinnedLate;
+          writeFileSync(file, recordingText(pinnedLate, await stateTextAt(pinnedLate)));
+        }
+      }
       return { oid: await commitState(`tracker store: record ${String(rev).slice(0, 12)}`, [await headOid()]) };
     });
     if (step.already) {
       settleDiagnostic(step.diagnostic);
+      // This revision IS recorded now: a marker a hook's timed-out record left
+      // must not outlive it, or the next push would name a timeout that is over.
+      clearRecordTimeout(CURRENT.flags, CURRENT.repoRoot, requested);
       writeConfig(CURRENT.flags, CURRENT.repoRoot, { lastRecord: nowIso() });
       say(`tracker-sync: ${step.already} is already recorded ${step.where}; a recording is written once and never moved, so nothing was written`);
       return;
@@ -2330,6 +2444,7 @@ async function recordRun({ revision, checkout, fromTree }) {
     if (step.pushed.ok) {
       await integrateCandidate(step);
       settleDiagnostic(step.diagnostic);
+      clearRecordTimeout(CURRENT.flags, CURRENT.repoRoot, requested);
       writeConfig(CURRENT.flags, CURRENT.repoRoot, { lastRecord: nowIso() });
       say(`tracker-sync: recorded the store at ${String(captured.rev).slice(0, 12)}`);
       return;
@@ -2340,12 +2455,318 @@ async function recordRun({ revision, checkout, fromTree }) {
   }
   die(4, 'the remote refused three recording candidates; live work was preserved; reconcile remote state before retrying');
 }
+// ---- a recording that timed out at commit time ----------------------------
+/**
+ * The marker a hook's record leaves when the store lock could not be had.
+ *
+ * A post-commit hook has nothing to fail: the commit exists, its output is
+ * discarded, and the recording it could not write is invisible until a push
+ * refuses the revision and says "no recording for <rev>: the store never
+ * recorded that revision" - which names the wrong cause (#57). So a record run
+ * started by a hook that still cannot take the lock keeps a marker per revision
+ * in the machine's own state (never in the tree): the push that reads the
+ * missing recording names the timeout, and a later successful record of that
+ * revision removes the marker.
+ *
+ * The marker also keeps the store commit whose tree holds the state that
+ * revision had when the hook gave up. Retrying the record later would otherwise
+ * record the tracker AS IT IS THEN under the old revision, and a recording is
+ * the one history that revision will ever have (the gate reads it with --at, and
+ * the baseline under block-new compares against it): a write made after the
+ * commit would become that revision's permanent history and could make a new
+ * violation look like old debt. So the redo records exactly that commit, and a
+ * marker written before this field existed - a state that was never captured -
+ * refuses a redo instead of inventing one.
+ */
+const recordTimeoutDir = (flags, repoRoot) => join(machineDir(flags, repoRoot), 'record-timeouts');
+/** The recording of a revision in the live store, whoever wrote it. */
+const recordingPathOf = (rev) => join(CURRENT.store, '.tracker-sync', 'recordings', `${rev}.jsonl`);
+/** A revision's full object id, or the name as given when it does not resolve.
+ *
+ * A marker is keyed by the full id, so a hook that writes `rev-parse HEAD` and a
+ * reader that asks with an abbreviation name the same marker, and two revisions
+ * that begin alike can never be confused: one marker file per revision, matched
+ * exactly. */
+async function canonicalRevision(rev, ck = CURRENT.repoRoot || CURRENT.store) {
+  const name = String(rev || '');
+  if (!name) return null;
+  const r = await git(['rev-parse', '--verify', `${name}^{commit}`], { cwd: ck });
+  const oid = r.code === 0 ? r.stdout.trim() : '';
+  return /^[0-9a-f]{40,64}$/.test(oid) ? oid : name;
+}
+
+/** The store commit whose tree is the state this machine has published, read
+ * without the store lock: a ref read takes none, so a hook that cannot take the
+ * lock can still name it.
+ *
+ * That commit is the one a recording references (`recordedStateCommit` names the
+ * candidate's base, which is this head), so it is exactly what the state at a
+ * revision would have been recorded against. What it cannot hold is a write the
+ * watcher had not exported yet at the moment it was read: the watcher publishes
+ * after `--debounce` seconds of quiet or `--max-age` seconds at most (2 and 5 by
+ * default), so a tracker write made within that window before the read is in no
+ * commit yet. A write the lock holder was exporting at that moment lands in a
+ * LATER store commit, and a recording may not name that one either: a state
+ * later than the revision's is what this whole mechanism must not invent. */
+async function storeStateCommit() {
+  const r = await git(['rev-parse', '--verify', 'HEAD^{commit}'], { cwd: CURRENT.store });
+  const oid = r.code === 0 ? r.stdout.trim() : '';
+  return /^[0-9a-f]{40,64}$/.test(oid) ? oid : null;
+}
+
+/** The signal an export took, and the store commit that export made.
+ *
+ * The head is the last PUBLISHED state, and a tracker write the watcher had not
+ * exported yet is in no commit at all - so naming the head as a revision's state
+ * is exact only while nothing is waiting to be exported (#skills-v0cn). An
+ * export therefore persists the database's change signal, read immediately
+ * before it reads the database, with the commit it made from it, or with the
+ * unchanged head when it made none: after a flush that left no uncommitted
+ * state, the head IS the state the database holds.
+ *
+ * A reader that finds the same signal standing now, and that commit at the head,
+ * has proved the head is exactly the state the database had; the redo then
+ * records it. Anything else is not proved: a signal that moved, a commit the
+ * head has left behind, a pair an older release never wrote, or a path that
+ * changed the head without a signal of its own - which drops the pair, because a
+ * pair left standing reads as a valid claim about a state that is gone.
+ *
+ * The pair is this machine's own, so it lives in the machine's state directory
+ * (never the tree), and it carries the store it describes, so a state directory
+ * reused for another store cannot lend it one.
+ */
+const statePairPath = (flags, repoRoot) => join(machineDir(flags, repoRoot), 'export-state.json');
+function readStatePair() {
+  try {
+    const f = statePairPath(CURRENT.flags, CURRENT.repoRoot);
+    requireRegularFile(f, 'the last exportʼs state pair');
+    const p = JSON.parse(readFileSync(f, 'utf8'));
+    if (typeof p?.signal !== 'string' || !p.signal) return null;
+    if (typeof p?.commit !== 'string' || !/^[0-9a-f]{40,64}$/.test(p.commit)) return null;
+    // A pair written for another store proves nothing about this one.
+    if (typeof p?.store === 'string' && p.store && canonicalPath(p.store) !== canonicalPath(CURRENT.store)) return null;
+    // When it was written: a pair that came after the reader's own look at the
+    // database proves nothing about the state the reader found (see exactStateCommit).
+    const at = Date.parse(p.at || '');
+    if (!Number.isFinite(at)) return null;
+    return { signal: p.signal, commit: p.commit, at };
+  } catch { return null; }
+}
+function writeStatePair(signal, commit) {
+  writeAtomic(statePairPath(CURRENT.flags, CURRENT.repoRoot), `${JSON.stringify({
+    signal, commit, store: CURRENT.store, at: nowIso(),
+  }, null, 2)}\n`);
+}
+function clearStatePair() {
+  try { rmSync(statePairPath(CURRENT.flags, CURRENT.repoRoot), { force: true }); } catch {}
+}
+/** What an export proved, or that it proved nothing: a signal that could not be
+ * read is never a pair, and a pair is never invented from a later read. */
+function pairExportState(signal, commit) {
+  if (typeof signal === 'string' && signal && /^[0-9a-f]{40,64}$/.test(String(commit || ''))) writeStatePair(signal, commit);
+  else clearStatePair();
+}
+/** The signal an export takes immediately before it reads the database, under
+ * the store lock, so no other export can run between the two. */
+const exportSignal = () => {
+  const paths = changeSignalPaths();
+  return paths ? readChangeSignal(paths) : null;
+};
+/** The store commit that holds exactly the state the database had when
+ * `signalAtStart` was read, or null when that is not proved.
+ *
+ * Three things have to hold, and together they are the whole proof:
+ *
+ *   the pair's signal IS the signal read here - so the database did not move
+ *   between the export's own read of it and this one; the pair's commit IS the
+ *   store head; and the pair was written BEFORE this reader looked at the
+ *   database. The last is what makes the state exact and not merely close: an
+ *   export reads the database a moment AFTER it reads the signal, so a pair
+ *   written after this reader's look could hold a tracker write made after the
+ *   reader looked - a later state, which this mechanism must never record. A pair
+ *   that was already there cannot: whatever the export read, it read it before
+ *   the pair was written, which was before this reader's look, and a write in
+ *   between would have moved the signal this reader compares.
+ *
+ * A signal that could not be read proves nothing, and neither does a recipe that
+ * declares no signal at all: a tracker whose database is not observed cannot be
+ * said to have stood still. */
+async function exactStateCommit(signalAtStart, readAt) {
+  if (typeof signalAtStart !== 'string' || !signalAtStart) return null;
+  const pair = readStatePair();
+  if (!pair || pair.signal !== signalAtStart) return null;
+  if (!(Number.isFinite(readAt) && pair.at <= readAt)) return null;
+  const head = await storeStateCommit();
+  return head && pair.commit === head ? pair : null;
+}
+
+/** The store commit a timeout marker pinned, verified in this store.
+ *
+ * A recording may only name a commit the store still holds and that the store's
+ * head builds on - the store ref's history is append-only - so a pinned commit
+ * is checked both ways before it is used. A marker without a commit (one this
+ * release's predecessor wrote) has no state to give: null, never a guess. */
+async function timeoutPinnedState(flags, repoRoot, revision) {
+  const marker = revision ? findRecordTimeout(flags, repoRoot, revision) : null;
+  // A marker names a state only when it carries the proof that the state IS the
+  // database's at that commit: the export pair, the commit it named being the one
+  // the same marker names. A marker from 0.132.0 kept none; a marker from 0.133.0
+  // kept the last published head, which a tracker write the watcher had not
+  // exported is missing - so neither is a state to record, and both are refused
+  // with the ways out instead (skills-v0cn).
+  const proved = marker && marker.pair && typeof marker.pair === 'object'
+    && typeof marker.pair.signal === 'string' && marker.pair.signal
+    && typeof marker.pair.commit === 'string' && marker.pair.commit === marker.commit;
+  const oid = proved && typeof marker.commit === 'string' && /^[0-9a-f]{40,64}$/.test(marker.commit) ? marker.commit : null;
+  if (!oid) return null;
+  if ((await git(['cat-file', '-e', `${oid}^{commit}`], { cwd: CURRENT.store })).code !== 0)
+    die(1, `the timeout marker of ${String(revision).slice(0, 12)} names store commit ${oid.slice(0, 12)}, which this store does not hold: the store ref's history is append-only, so the state that revision had is not guessed from a later one`);
+  if ((await git(['merge-base', '--is-ancestor', oid, await headOid()], { cwd: CURRENT.store })).code !== 0)
+    die(1, `the timeout marker of ${String(revision).slice(0, 12)} names store commit ${oid.slice(0, 12)}, which is not in the store head's history, so that state is not that revision's`);
+  return oid;
+}
+
+/** What a person can do about a marker that holds no state, in plain words. */
+const noSnapshotWaysOut = (rev, unproved = null) => `${unproved
+  ? `the marker kept store commit ${String(unproved).slice(0, 12)}, which an earlier release wrote from the last published state: whether that is exactly this revision's state was never proved, and a state that is not proved is not recorded, so`
+  : 'its state at that commit was never captured, and a later state is not guessed to be it:'} make a new commit (or amend this one) and its hook records that fresh revision, or sync, if another machine has already recorded ${String(rev || 'that revision').slice(0, 12)}`;
+// A revision's full name and a short one name the same marker: the hook writes
+// the name git gives it, and a reader may ask with either.
+function findRecordTimeout(flags, repoRoot, at) {
+  const dir = recordTimeoutDir(flags, repoRoot);
+  const want = String(at || '');
+  if (!want || want.includes('/') || want.includes('..')) return null;
+  let names = [];
+  try { names = readdirSync(dir); } catch { return null; }
+  // Exact first: the marker's name is the revision's full id, and `at` is read
+  // exactly as the caller wrote it. An abbreviation that resolves to nothing is
+  // the one case a prefix is allowed, and only when exactly one marker carries
+  // it: two revisions that begin alike must never lend each other a marker.
+  const ids = names.filter((n) => n.endsWith('.json')).map((n) => n.slice(0, -5));
+  const exact = ids.filter((id) => id === want);
+  const loose = exact.length ? exact : ids.filter((id) => id.startsWith(want) || want.startsWith(id));
+  if (loose.length !== 1) return null;
+  const name = `${loose[0]}.json`;
+  try { return { file: join(dir, name), ...JSON.parse(readFileSync(join(dir, name), 'utf8')) }; } catch { return { file: join(dir, name), revision: loose[0] }; }
+}
+function writeRecordTimeout(flags, repoRoot, revision, said, commit, proof = null) {
+  if (!revision) return null;
+  const file = join(recordTimeoutDir(flags, repoRoot), `${revision}.json`);
+  const pinned = /^[0-9a-f]{40,64}$/.test(String(commit || '')) ? String(commit) : null;
+  const body = { revision, at: nowIso(), said: String(said || '').split('\n')[0] };
+  // The state this revision had when the hook gave up, as the store commit whose
+  // tree holds it, WITH the evidence that proved it: the export pair - the
+  // database's signal, the commit it paired with that signal, and when - that was
+  // standing before the hook looked at the database. A marker without that
+  // evidence is a state that was never proved to be this revision's, whichever
+  // release wrote it, and no later state may be recorded as it either. The
+  // command is only a way back to a state that exists.
+  const proved = pinned && proof && proof.commit === pinned && typeof proof.signal === 'string' && proof.signal;
+  if (proved) {
+    body.commit = pinned;
+    body.pair = { signal: proof.signal, commit: pinned, at: new Date(proof.at).toISOString() };
+    body.command = rerunRecordLine(flags, repoRoot, revision);
+  }
+  writeAtomic(file, `${JSON.stringify(body, null, 2)}\n`);
+  return file;
+}
+function clearRecordTimeout(flags, repoRoot, revision) {
+  const found = findRecordTimeout(flags, repoRoot, revision);
+  if (!found) return false;
+  try { rmSync(found.file, { force: true }); return true; } catch { return false; }
+}
+/** The command that redoes a recording a hook could not write. */
+const rerunRecordLine = (flags, repoRoot, revision) =>
+  `node ${quote(join(HERE, 'tracker-sync.mjs'))} record --revision ${revision} --checkout ${quote(CURRENT.repoRoot)} --state ${quote(machineDir(flags, repoRoot))} --recipe ${quote(CURRENT.recipe.path)}`;
+
+/** A record a checkout's hook started: bounded, and never silent.
+ *
+ * Three attempts of at most HOOK_LOCK_WAIT_MS each, with a short pause between
+ * them: about half a minute at worst, and never the two minutes a person's own
+ * record may wait. A commit is not held by it in any case - the hook runs after
+ * the commit exists - but a hook that waits minutes is a hook that runs into the
+ * next one, so the bound is short and the outcome is a marker, not silence. */
+const HOOK_LOCK_WAIT_MS = 8000;
+const HOOK_RECORD_ATTEMPTS = 3;
+// The timeout path does NOT wait for the pair an export under way is about to
+// write, though it could: the export reads the database a moment after it reads
+// the signal, so a pair written after the hook's own look can hold a tracker
+// write made after it, and a state later than the commit's own is exactly what
+// this mechanism must never record. Measured on the sequence in
+// test/tracker-recording-recovery ('a blocked watcher's export ...'): the export
+// a blocked watcher owes lands 0.4-2 s after the store is released, and the wait
+// would catch it - but only by giving up the proof, so the marker keeps no commit
+// instead and the redo says how to get out.
+async function recordWithRetries(opts) {
+  HOOK_RECORD = true;
+  LOCK_WAIT_MS = HOOK_LOCK_WAIT_MS;
+  // Both read once, before any wait, and both lock-free: the revision this hook
+  // is about, and the store commit whose tree is the state it had when the commit
+  // was cut. A ref read takes no lock, and this is the closest lock-free point to
+  // the commit, so a marker written below can never name a state later than the
+  // commit's own.
+  const rev = await canonicalRevision(await recordedRevision(opts), opts.checkout ? resolve(opts.checkout) : CURRENT.repoRoot);
+  // The database's own change signal, read before any lock wait and lock-free,
+  // beside the revision: the marker names a store commit only when the head is
+  // exactly the state this value describes (see exactStateCommit). A recipe that
+  // declares no signal, and a read that failed, both land here as null, and null
+  // proves nothing for ever.
+  const readAt = Date.now();
+  const signalPaths = changeSignalPaths();
+  const signalAtStart = signalPaths ? readChangeSignal(signalPaths) : null;
+  const pinned = { ...opts, resolvedRevision: rev };
+  let last = null;
+  for (let attempt = 1; attempt <= HOOK_RECORD_ATTEMPTS; attempt++) {
+    try {
+      await recordRun(pinned);
+      return;
+    } catch (e) {
+      if (!e.lockTimeout) throw e;
+      last = e;
+      if (attempt < HOOK_RECORD_ATTEMPTS) {
+        say(`tracker-sync: the store is locked (${e.message.split(';')[0]}); attempt ${attempt} of ${HOOK_RECORD_ATTEMPTS} for this recording, trying again`);
+        await sleep(2000);
+      }
+    }
+  }
+  // Two things a marker must never do: replace an older marker of the same
+  // revision - the first one is the evidence closest to the commit, and a later
+  // timeout could only name a later state - or outlive a recording another run
+  // has already made. Both are checked here and again after the write, because a
+  // marker is written without the store lock the record holds.
+  // What the head is exactly, or null: the commit the last export paired with the
+  // signal this hook found standing, when that pair was already there before this
+  // hook looked (see exactStateCommit).
+  const exact = await exactStateCommit(signalAtStart, readAt);
+  const storeCommit = exact ? exact.commit : null;
+  const before = rev ? findRecordTimeout(CURRENT.flags, CURRENT.repoRoot, rev) : null;
+  const recorded = rev ? existsSync(recordingPathOf(rev)) : false;
+  const file = before ? before.file : recorded ? null : writeRecordTimeout(CURRENT.flags, CURRENT.repoRoot, rev, last.message, storeCommit, exact);
+  const kept = before && typeof before.commit === 'string' ? before.commit : storeCommit;
+  if (file && existsSync(recordingPathOf(rev))) rmSync(file, { force: true });
+  die(1, `the recording of ${rev ? String(rev).slice(0, 12) : 'this revision'} timed out on the store lock after ${HOOK_RECORD_ATTEMPTS} attempts (${last.message.split(';')[0]}); `
+    + `${file || before
+      ? `a marker is kept at ${file || before.file}, so the next push names the timeout instead of a missing recording; ${kept
+        ? `it names store commit ${kept.slice(0, 12)}, the state this revision had when it was cut, and running record again records exactly that state`
+        : 'the state this revision had was not captured, so record will refuse to write a later state as it'}`
+      : recorded
+        ? 'it is recorded now, so nothing is missing'
+        : `${kept ? `the state was at store commit ${kept.slice(0, 12)}; a person must rerun record` : 'a person must rerun record'}`}`);
+}
+/** The revision this run is about, read the way record reads it. */
+async function recordedRevision(opts) {
+  if (opts.revision) return String(opts.revision);
+  const ck = opts.checkout ? resolve(opts.checkout) : CURRENT.repoRoot;
+  const r = await git(['rev-parse', 'HEAD'], { cwd: ck });
+  return r.code === 0 ? r.stdout.trim() : null;
+}
+
 // ---- connect, status, export, watch ----------------------------------------
 
 /** The record step a checkout's own hook needs, said so a person can put it in a
  * hook this mechanism must not write to itself. */
 const recordLine = (flags, repoRoot, checkout) =>
-  `node ${quote(join(HERE, 'tracker-sync.mjs'))} record --revision "$(git rev-parse HEAD)" --checkout "$(git rev-parse --show-toplevel)" --state ${quote(machineDir(flags, repoRoot))} --recipe ${quote(CURRENT.recipe.path)}`;
+  `node ${quote(join(HERE, 'tracker-sync.mjs'))} record --hook --revision "$(git rev-parse HEAD)" --checkout "$(git rev-parse --show-toplevel)" --state ${quote(machineDir(flags, repoRoot))} --recipe ${quote(CURRENT.recipe.path)}`;
 
 /** The line that puts a checkout back on the store's pointer, for the hook that
  * runs when a branch is checked out. A branch from before the move carries its
@@ -2382,8 +2803,12 @@ async function hookPlan(checkout) {
     const file = join(dir, name);
     // A hook that is not a regular file is refused like one without the marker:
     // opening a named pipe there would block the connect for ever.
-    const text = existsSync(file) && notRegularFile(file) === null ? readFileSync(file, 'utf8') : null;
-    return { name, file, line: files[name], mark: `${HOOK_MARKS[name]}\n`, text, present: text !== null && text.includes(HOOK_MARKS[name]) };
+    // The bytes are kept beside the decoded text: an upgrade of an older
+    // generated command splices bytes, because a hook may carry comments or
+    // commands that are not valid UTF-8 and a decode-and-rewrite would replace them.
+    const bytes = existsSync(file) && notRegularFile(file) === null ? readFileSync(file) : null;
+    const text = bytes === null ? null : bytes.toString('utf8');
+    return { name, file, line: files[name], mark: `${HOOK_MARKS[name]}\n`, bytes, text, present: text !== null && text.includes(HOOK_MARKS[name]) };
   });
   return { dir, inRepo, wanted, missing: wanted.filter((h) => !h.present) };
 }
@@ -2415,13 +2840,54 @@ async function installHooks(checkout) {
   mkdirSync(plan.dir, { recursive: true });
   for (const h of plan.wanted) {
     const { file: f, mark, line } = h;
-    if (h.present) continue;
+    let upgraded = null;
+    if (h.present) {
+      // A hook that already carries the marker is normally left alone. The one
+      // exception is the exact command an older release generated, installed
+      // before `record --hook` existed: the marker says that line is ours, so
+      // rerunning setup can bring it up to date. A marker alone never grants
+      // ownership of code: only the exact old line, immediately after its own
+      // marker, is replaced, and every other byte is kept.
+      // A hooks folder inside the tree is the project's own files, and
+      // post-checkout carries the relink line, which never changed.
+      if (plan.inRepo || h.name === 'post-checkout') continue;
+      // Matched and spliced as bytes, never as decoded shell text: a comment or
+      // another command in the same hook may hold bytes that are not valid UTF-8,
+      // and only the generated line may change.
+      const legacy = Buffer.from(mark + line.replace(' record --hook --revision ', ' record --revision ').trimEnd());
+      const replacement = Buffer.from(mark + line.trimEnd());
+      const parts = [];
+      let copied = 0;
+      let at = h.bytes.indexOf(legacy);
+      while (at !== -1) {
+        const end = at + legacy.length;
+        // Whole lines only: the same text inside a longer command is not a
+        // generated line, and is not ours to change.
+        if ((at === 0 || h.bytes[at - 1] === 10) && (end === h.bytes.length || h.bytes[end] === 10)) {
+          parts.push(h.bytes.subarray(copied, at), replacement);
+          copied = end;
+        }
+        at = h.bytes.indexOf(legacy, end);
+      }
+      if (!parts.length) continue;
+      // A machine hook can be a symlink into the project's tracked files even
+      // when its folder is git metadata: the file itself is resolved, and a
+      // tracked target is never rewritten.
+      if (await hooksInsideRepository(checkout, f)) continue;
+      parts.push(h.bytes.subarray(copied));
+      upgraded = Buffer.concat(parts);
+    }
     if (h.text !== null) {
       // A hook that is not a POSIX shell script cannot carry this line: shell
       // appended to another language is a syntax error that stops every commit.
       const shebang = (h.text.split('\n')[0] || '').trim();
       if (shebang.startsWith('#!') && !/\/(sh|bash|dash|zsh|ksh)\b/.test(shebang)) {
         die(1, `${f} is not a shell hook (${shebang}): tracker-sync will not append shell to it. Call the step from that hook yourself: ${line.trim()}`);
+      }
+      if (upgraded !== null) {
+        writeFileSync(f, upgraded);
+        say(`tracker-sync: upgraded the generated ${h.name} record step in ${f}`);
+        continue;
       }
       // A hook that ends in `exit 0` would end before an appended step runs, so
       // the step goes in front of that line, and the project's own hook is kept.
@@ -2718,8 +3184,21 @@ async function exportRun(flags, pos) {
   if (at) {
     const f = join(CURRENT.store, '.tracker-sync', 'recordings', `${at}.jsonl`);
     requireRegularFile(f, 'the recording');
-    if (!existsSync(f))
+    if (!existsSync(f)) {
+      // A hook's record that timed out on the store lock left a marker: the push
+      // that finds no recording must name the timeout and the command that redoes
+      // it, never "the store never recorded that revision", which is not what
+      // happened and leaves the reader with no way to see it was a timeout (#57).
+      const timedOut = findRecordTimeout(CURRENT.flags, CURRENT.repoRoot, await canonicalRevision(at));
+      if (timedOut) {
+        const when = `the recording of ${at} timed out at commit time: the store was locked (${timedOut.said || 'the lock was held elsewhere'}), and record gave up after its bounds at ${timedOut.at || 'commit time'}`;
+        const pinned = await timeoutPinnedState(CURRENT.flags, CURRENT.repoRoot, await canonicalRevision(at));
+        die(1, pinned
+          ? `${when}; the state that revision had then is kept in store commit ${pinned.slice(0, 12)}, and no later state is recorded as it. Redo it with: ${timedOut.command || rerunRecordLine(CURRENT.flags, CURRENT.repoRoot, at)}`
+          : `${when}; ${noSnapshotWaysOut(at, timedOut.commit)}`);
+      }
       die(1, `no recording for ${at}: the store never recorded that revision, so its state is unknown and is not guessed from a later state`);
+    }
     // A recording holds a reference to the store commit whose state it records, so
     // the state is read from that commit: the bytes are the ones a snapshot of the
     // same state returned, and a baseline read at a revision changes by nothing.
@@ -2769,30 +3248,97 @@ async function watchRun(flags) {
     lockTimeoutSaid = true;
     say(`tracker-sync: another command holds the store lock (${e.message.split(';')[0]}); this round is skipped and tried again, the watcher stays up`);
   };
+  // The tracker's own change signal, for a recipe that declares one: with it,
+  // a tick whose signal equals the one taken before the last export skips both
+  // the store lock and the export, which is what makes an idle watcher cost
+  // almost nothing and lets a record have the lock at once (#57).
+  const sigPaths = changeSignalPaths();
+  let lastSignal = null;      // the signal taken BEFORE the export of that tick
+  let signalKnown = false;
+  let idleMs = 1000;
+  // How long the last tick waited before looking: the change it may have missed
+  // by that much is aged from before it was seen, so the idle back-off cannot
+  // push a publication past the bound a project set.
+  let idleWaited = 0;
+  const IDLE_MAX_MS = 5000;
   const publishLoop = async () => {
     while (!stop) {
+      // A tick's signal is taken BEFORE anything is exported, and that value -
+      // never the one after - is what the next tick is compared with. An outside
+      // write that lands at any point of the export, even after the export read
+      // the database and before the tick ended, is therefore part of the store's
+      // next signal, which cannot equal the recorded one, so the next tick
+      // exports again: such a write is delayed by one tick and never lost.
+      // A tracker whose flush moves its own database on every run then exports
+      // on every tick, which is what a watcher without a signal does: never
+      // worse than before, and never a write folded away. One whose flush with
+      // nothing to export moves nothing - measured on the shipped recipe,
+      // "Nothing to export (no dirty issues)" - records the value it found and
+      // goes idle from the next tick.
+      const sig = sigPaths ? readChangeSignal(sigPaths) : null;
+      if (sigPaths && sig !== null && signalKnown && sig === lastSignal && firstChange === null
+          && !(await hasUncommittedState())) {
+        idleMs = Math.min(IDLE_MAX_MS, idleMs + 1000);
+        idleWaited = idleMs;
+        await sleep(idleMs);
+        continue;
+      }
+      idleMs = 1000;
       // The lock covers the store's own work only; the push is a network call
       // and happens with the lock released, so a claim or a record from another
       // session is never made to wait on the watcher's network.
       let digest = null;
+      // What this tick's flush proved: the signal read under the lock immediately
+      // before the flush, and either nothing to commit - so the head is that
+      // state already - or the digest that is about to be committed as it.
+      let exportSignalNow = null;
+      let flushProved = false;
+      let exported = false;
       try {
         digest = await locked(async () => {
-          await flushDatabase();
-          if (!(await hasUncommittedState())) return null;
+          exportSignalNow = exportSignal();
+          const flushed = await flushDatabase();
+          // A flush the tracker refused does not prove the state files are the
+          // database's, so this tick proves nothing even when it commits nothing.
+          flushProved = !!(flushed && flushed.ok && !flushed.nothing && !flushed.merged);
+          if (!(await hasUncommittedState())) {
+            pairExportState(flushProved ? exportSignalNow : null, await headOid());
+            return null;
+          }
           return stateDigest();
         }, 20000, { skipOnTimeout: true });
+        exported = true;
       } catch (e) {
         if (e.lockTimeout) { onLockTimeout(e); await sleep(1000); continue; }
         say(`tracker-sync: the export failed: ${e.message}`);
       }
-      if (digest === null) { firstChange = null; lastChange = null; lastDigest = ''; await sleep(1000); continue; }
+      // What the next tick is compared with: the value taken BEFORE this export,
+      // and no other. A round that could not take the lock records nothing, so it
+      // tries again instead of believing it exported.
+      if (sigPaths && exported && sig !== null) { lastSignal = sig; signalKnown = true; }
+      if (digest === null) { firstChange = null; lastChange = null; lastDigest = ''; idleWaited = 0; await sleep(1000); continue; }
       const t = Date.now();
-      if (digest !== lastDigest) { lastDigest = digest; lastChange = t; if (firstChange === null) firstChange = t; }
+      if (digest !== lastDigest) {
+        lastDigest = digest;
+        lastChange = t;
+        // The change may have landed up to one idle poll before this tick looked,
+        // so the age that --max-age bounds starts where the poll last saw the
+        // store unchanged: the bound covers the idle wait, never less than it.
+        if (firstChange === null) firstChange = t - idleWaited;
+      }
       const ready = (t - lastChange) / 1000 >= debounce || (t - firstChange) / 1000 >= maxAge;
       if (ready) {
         let oid;
         try {
-          oid = await locked(async () => commitState(`tracker store: ${nowIso()}`, [await headOid()]), 20000, { skipOnTimeout: true });
+          oid = await locked(async () => {
+            // The commit is a second section, so the lock was free in between: the
+            // pair is proved again under THIS one - the database has not moved
+            // since the flush read it, and the state about to be committed is the
+            // state that flush produced - and a tick that cannot prove both
+            // commits without a claim instead of a false one.
+            const proved = flushProved && exportSignalNow !== null && exportSignal() === exportSignalNow && stateDigest() === digest;
+            return commitState(`tracker store: ${nowIso()}`, [await headOid()], { signal: proved ? exportSignalNow : null });
+          }, 20000, { skipOnTimeout: true });
         } catch (e) {
           if (e.lockTimeout) { onLockTimeout(e); await sleep(1000); continue; }
           throw e;
@@ -2836,7 +3382,7 @@ function usage(code = 1) {
     '  sync [--interval <s>]',
     '  claim --item <id> --holder <holder>',
     '  transition --item <id> --to <status>',
-    '  record --revision <rev> [--checkout <path>] [--from-tree]',
+    '  record --revision <rev> [--checkout <path>] [--from-tree] [--hook]',
     '  export [--at <revision>] [--now] [--offline]',
     '  status [--json]',
     '  watch [--interval <s>] [--debounce <s>] [--max-age <s>]',
@@ -2918,9 +3464,13 @@ async function main() {
       }, String(flags.item));
       break;
     }
-    case 'record':
-      await recordRun({ revision: flags.revision ? String(flags.revision) : null, checkout: flags.checkout ? String(flags.checkout) : null, fromTree: !!flags['from-tree'] });
+    case 'record': {
+      const opts = { revision: flags.revision ? String(flags.revision) : null, checkout: flags.checkout ? String(flags.checkout) : null, fromTree: !!flags['from-tree'] };
+      // --hook: the checkout's own post-commit and post-merge line. It is
+      // bounded and it never fails silently (see recordWithRetries).
+      if (flags.hook) await recordWithRetries(opts); else await recordRun(opts);
       break;
+    }
     case 'export':
       await exportRun(flags, pos);
       break;

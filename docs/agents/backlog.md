@@ -1,14 +1,19 @@
 # Backlog integration
 
-Maintained by `setup-shady2k-skills`. The installed checks carry setup protocol
-0.59.0 (plugin 0.130.0), installed by nocx-fg79x.6, which owns the proof evidence
-and any unperformed checks. Protocol 0.56.0 was installed by nocx-gkpwp and
-protocol 0.51.0 by nocx-fs95y.
-Protocol 0.46.0 was installed by nocx-q8yjf.25,
-whose record — with nocx-q8yjf.26–.28 and root nocx-nl23a — the published
-export carries but this tracker's database has lost, so `br` cannot show them.
-Protocol 0.44.0 was installed by nocx-q8yjf.24. A branch alone is not an
-installed update. The protocol ships
+Maintained by `setup-shady2k-skills`. This update installs setup protocol
+**0.63.0 from released plugin 0.134.0**, tracked by nocx-7z1zj. The release
+includes the repairs for exact recording recovery (nocx-zjpwl), existing-hook
+upgrades (nocx-hm9qc), and the synchronized candidate-size proof (nocx-9v4x0);
+those upstream blockers are closed. The refreshed branch's checker selftests,
+65 workflow/recovery tests, 161 clean synchronization proof assertions,
+isolated real-hook walk and independent review are recorded on nocx-7z1zj.
+No unpublished 0.135.0 source is used.
+The copies are installed per machine by `make connect`; a machine that has not
+run it since this landed keeps the mechanism it had, and a running watcher
+keeps its old copy until it is restarted.
+Protocol 0.59.0 was installed by nocx-fg79x.6, 0.56.0 by nocx-gkpwp,
+0.51.0 by nocx-fs95y, 0.46.0 by nocx-q8yjf.25, and 0.44.0 by nocx-q8yjf.24.
+A branch alone is not an installed update. The protocol ships
 with the skills and is not restated here. This file holds project facts and
 commands; changing choices live only in the config. Each person's plugin,
 runtime and connected hooks are checked directly, never represented as shared
@@ -182,20 +187,19 @@ keeps every later change.
   `check-present.mjs` and `check-product.mjs`, with `time-format.mjs`,
   `document-format.mjs`, `regular-file.mjs` and `argv.mjs`, in [`.githooks/backlog-gate/`](../../.githooks/backlog-gate/).
   These are byte-for-byte copies of the plugin files under
-  `skills/backlog/setup-shady2k-skills/` of plugin 0.130.0 (setup protocol
-  0.59.0), never edited here; the tracker recipe is `trackers/br.mjs` beside them. Compare each copy with that source. Run all five `--selftest`
-  commands from the plugin directory, where their fixtures live; `check.mjs`
-  additionally takes `--config <repo>/.githooks/backlog-gate/config.json` for
-  portability.
-  Protocol 0.45.0 adds an optional `check.mjs --at <revision>` guard: the
-  input's `source` must end in ` @ <revision>` matching that exact argument.
-  A known 0.46.0 limitation lets an empty or missing `--at` value skip that
-  optional guard; the fix remains in upstream shady2k/skills PR #33.
-  The owner approved using the published version rather than waiting for it.
-  The adapter emits the revision suffix for historical exports, but existing
-  hooks and CI do not pass this optional checker flag; their revision selection
-  and the in-branch tracker layout remain unchanged. This update does not
-  install the separate off-branch tracker migration.
+  `skills/backlog/setup-shady2k-skills/` of released plugin 0.134.0 (setup protocol
+  0.63.0), never edited here; the tracker recipe is `trackers/br.mjs` beside them.
+  Compare each copy with that source. Run all five `--selftest` commands from
+  the plugin directory, where their fixtures live; `check.mjs` additionally
+  takes `--config <repo>/.githooks/backlog-gate/config.json` for portability.
+  The checks' only change from the prepared 0.61.0 copies is their version;
+  the recipe and all four support modules already match the released source.
+  No adapter schema, policy, config or exemption change is required by this refresh.
+  The optional `check.mjs --at <revision>` guard requires the input's `source`
+  to end in ` @ <revision>` matching that exact argument. The adapter emits
+  the revision suffix for historical exports; existing hooks and CI do not
+  pass this optional checker flag. The off-branch layout already installed
+  on main is retained, not adopted anew by this update.
   The commit-link wrapper sets `recordsOnly` for staged changes and historical
   single-parent commits only when `.beads/issues.jsonl` is the sole changed
   path, the same issue ids remain, every other field except `comments` and
@@ -206,6 +210,24 @@ keeps every later change.
   existing link/incoming-history behavior; older commits retain their date
   exemption. This is a structural check, not a judgment of comment prose or
   commit titles, and it does not detect bookkeeping outside that export.
+- **Owner agreements:** setup 0.61 reads a feature's dated, quoted
+  `Agreed direction:` and `Agreed plan:` from its existing description once
+  work under its stages starts. The adapter already exports that description,
+  hierarchy, claims and main-line task links; no new adapter field is needed.
+  No agreement exemptions were added. Under `block-new`, an agreement finding
+  present in both the last accepted tracker baseline and the new state is old
+  debt; a newly started feature without those records is a new error. A leaf
+  with no stages needs no invented plan. The upstream checker now permits
+  dependencies on undecomposed stages, but this repository's stricter rule in
+  AGENTS.md still puts prerequisites on leaves, not feature roots or stages.
+- **Gate scope retained:** this update does not adopt the separate
+  product/feature/acceptance document gate or rewrite existing feature plans.
+  The config's existing `codePaths` and `requireDesignMatch` choices are kept,
+  but they are not proof of enforcement: the commit-link wrapper does not export
+  code paths or change-admission records to `check-commits.mjs`, and no document
+  policy is wired to `check-docs.mjs`. Those checks remain outside the installed
+  gate's scope. Present-document references, product-document rules, commit task
+  links and the published backlog delta retain their existing entry points.
 - **Present documents:** the config's `presentDocuments` lists what describes the present
   here — AGENTS.md, README.md, `docs/architecture.md`, `docs/agents/`, the frontend state
   ownership and lifecycle protocol documents, `contracts/README.md` and the UI kit's README.
@@ -300,17 +322,20 @@ connect` runs this connector before it checks the backlog inputs.
 - **Tracker synchronization:** `tracker-sync watch` publishes a change within seconds
   (`--debounce 2 --max-age 5`) and syncs with the remote every 60 seconds
   (`--interval 60`). The user systemd unit
-  (`~/.config/systemd/user/tracker-sync.service`) keeps it running; its copied
-  mechanism — `tracker-sync.mjs`, `trackers/br.mjs`, `argv.mjs`, `regular-file.mjs`
-  from plugin 0.130.0, with `tracker-sync.version` beside them — lives under
-  `~/.local/state/nocx/mechanism/` so removing a worktree does not stop it;
-  `node ~/.local/state/nocx/mechanism/tracker-sync.mjs status --expect-version <plugin>`
-  says whether it lags the set. Pushing `refs/tracker/state` starts no code CI, so the
+  (`~/.config/systemd/user/tracker-sync.service`) runs the machine's copy.
+  `make connect` installs `tracker-sync.mjs`, `trackers/br.mjs`, `argv.mjs` and
+  `regular-file.mjs` from released plugin 0.134.0 under
+  `~/.local/state/nocx/mechanism/`, with `tracker-sync.version` recording that
+  version, so removing a worktree does not remove the mechanism. Copying files
+  does not reload an already-running watcher: restarting the supervisor is a
+  separate machine step. After that installation, check each machine with
+  `node ~/.local/state/nocx/mechanism/tracker-sync.mjs status --expect-version 0.134.0`.
+  Pushing `refs/tracker/state` starts no code CI, so the
   backlog's own rules are checked on that ref's delta by
   `.github/workflows/tracker-gate.yml` rather than by a code push.
-  Measured 2026-11-01 on the coordinator machine: the watcher's publish loop runs
-  `br sync --flush-only` every second to see whether anything changed, about one
-  second of CPU per flush on a 4,550-issue store, so the unit carries a drop-in
+  Measured 2026-11-01 on the coordinator machine under 0.130.0: the watcher's
+  publish loop ran `br sync --flush-only` every second to see whether anything
+  changed, about one second of CPU per flush on a 4,550-issue store, so the unit carries a drop-in
   (`tracker-sync.service.d/limit-cpu.conf`: `Nice=19`, `CPUQuota=50%`): about 34% CPU.
   The flush holds the store lock, so a tighter quota starves the record hooks, which
   swallow their own failure: at 25% a post-commit recording timed out and the push of
@@ -318,12 +343,75 @@ connect` runs this connector before it checks the backlog inputs.
   once the watcher's startup sync has finished (records in its first minute can still
   time out). Memory under 0.130.0 is about 50 MB, against 1.3–1.7 GB under the
   hand-patched 0.128 copy it replaced.
+  0.134.0 retains the database/WAL change signal introduced in 0.132.0 to avoid
+  exports while idle. The earlier CPU figures are not measurements of 0.134.0;
+  the merge does not change the machine's existing CPU policy, and it neither
+  installs, restarts nor replaces a supervisor.
+  Recipe commands retain their 120-second default deadline. The published launch
+  uses `tracker-sync.mjs watch --repo <checkout> --recipe <recipe> --interval 60
+--debounce 2 --max-age 5`; those paths are machine-local, not shared settings.
+- **Exact recording recovery in 0.134.0:** a hook's lock timeout keeps a
+  per-revision marker. It names a recoverable store commit only when the export's
+  saved database-signal/commit pair predates the hook's initial signal read,
+  matches that signal and still names the store head. Retrying records that
+  exact state, not a later write, and leaves the live tracker unchanged.
+  An unexported write, a late export, a stale or missing pair, an unsupported
+  signal, or an older marker without that evidence cannot establish the state:
+  the retry refuses rather than inventing history. Make a new commit or amend
+  so a fresh revision can be recorded, or sync an existing recording from
+  another machine. Repeated timeouts preserve the first marker; a successful
+  recording clears it.
+- **Existing-hook upgrade in 0.134.0:** reconnect upgrades the exact generated
+  legacy record lines in external shell `post-commit` and `post-merge` hooks
+  to include `--hook`. Surrounding bytes and custom commands are preserved,
+  and a second connect changes nothing. Hooks tracked inside the project,
+  including symlink targets there, are not rewritten; required marker lines
+  still have to be present. The merge changes no live hook; a machine's
+  `make connect` upgrades the record lines it generated.
+- **Required released-source proofs:** run the commands below against the released
+  plugin, not an unpublished source checkout. They exercise disposable stores
+  and remotes, not this machine's live tracker. The recording suite covers exact
+  replay and refusal when the state is unproved; the hook suite covers upgrade,
+  byte preservation, rerun and the real upgraded hook's timeout. Candidate
+  case 24 waits for the import-ready marker before measuring the fully populated
+  candidate; directory creation alone is not its readiness signal.
+  These commands are requirements, not a claim that this refreshed branch has
+  passed them:
+
+  ```sh
+  PLUGIN="$HOME/.omp/plugins/cache/plugins/shady2k___shady2k-skills___0.134.0"
+  SETUP="$PLUGIN/skills/backlog/setup-shady2k-skills"
+  REPO="$(git rev-parse --show-toplevel)"
+  for f in check.mjs check-commits.mjs check-docs.mjs check-present.mjs check-product.mjs \
+      time-format.mjs document-format.mjs regular-file.mjs argv.mjs tracker-sync.mjs trackers/br.mjs; do
+      cmp "$SETUP/$f" "$REPO/.githooks/backlog-gate/$f" || exit 1
+  done
+  node "$REPO/.githooks/backlog-gate/tracker-sync.mjs" version
+  for f in check.mjs check-commits.mjs check-docs.mjs check-present.mjs check-product.mjs; do
+      node "$REPO/.githooks/backlog-gate/$f" --version || exit 1
+  done
+  node "$SETUP/check.mjs" --selftest --config "$REPO/.githooks/backlog-gate/config.json"
+  for f in check-commits.mjs check-docs.mjs check-present.mjs check-product.mjs; do
+      node "$SETUP/$f" --selftest || exit 1
+  done
+  node --test --test-concurrency=1 "$PLUGIN/test/tracker-recording-recovery.test.mjs" \
+      "$PLUGIN/test/tracker-hook-upgrade.test.mjs"
+  node "$PLUGIN/test/tracker-sync-proof.mjs" --only 24-candidates-are-small-and-swept
+  ```
+
+  The mechanism's `version` output must be `0.134.0`; all five check versions must
+  be `0.63.0`. Repository wrapper tests, recoverable real-entry-point proofs
+  (including clone-connection failure diagnostics), review and PR checks remain
+  required before acceptance. Real reboot and a second real machine are not
+  proved by these isolated suites.
+
 - **Document gate: not installed yet.** Its task is "The document gate checks product
   intent, feature readiness and acceptance evidence on every change here" (nocx-q8yjf.2).
   Until it lands, document readiness is checked by reading, and every report says the
   automatic check did not run. No document policy, baseline, receipts or synchronization
-  are wired, and nothing about documents is enforced by CI except the present-documents
-  check above, which judges names and not readiness. Since 0.33.0 a required check
+  are wired. CI's present-documents check judges names, not readiness, and its
+  separate product-documents check enforces the product-document rules above.
+  Since 0.33.0 a required check
   may name the paths it does not read (`ignores`), and its receipt is then pinned to a
   revision of its own inputs (`checkRevisions`, from `checkRevision` in the plugin's
   `document-format.mjs`); wiring the gate finds those paths from each check's command and
@@ -405,9 +493,12 @@ connect` runs this connector before it checks the backlog inputs.
   runtime: both scope classification and formatter arguments preserve NUL-delimited paths.
   Missing root formatter/linter binaries
   are installed from the locked root dependencies without install scripts; no Go,
-  frontend or product build is started. It reports missing files together and imports
-  the tracker successfully before connecting git hooks or clearing the retired driver.
-  Failure does not leave a half-connected clone. Safe to rerun.
+  frontend or product build is started. It reports preflight missing files together,
+  then imports the tracker successfully before connecting git hooks or clearing the
+  retired driver, and connects the tracker and external hooks before the final
+  export/import and permission checks. A failure before the tracker connector starts
+  leaves nothing connected; a later failure can leave the tracker connection in place,
+  and the error names the unfinished step. Fix that prerequisite and rerun.
   A clone whose remote refuses its pushes is connected too (nocx-3n1ly): the four
   hooks are linked and the tracker is checked before anything is published, so a
   refused push ends with a line saying the clone cannot publish tracker state and

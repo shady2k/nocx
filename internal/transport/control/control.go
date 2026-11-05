@@ -64,6 +64,11 @@ type Rejection struct {
 	Reason     string
 	Scope      string
 	RetryAfter time.Duration
+	// Holders names the requests that held the refusing admission at the
+	// moment it refused (nocx-3an1s.1.8). It is empty for a refusal with no
+	// held capacity — a closed submission, a missing key — and for an
+	// admission that keeps no identity. Oldest first.
+	Holders []Holder
 }
 
 // Submission is how work is handed over. It has one unconditional call site:

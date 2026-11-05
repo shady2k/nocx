@@ -335,9 +335,9 @@ func TestAGitOpenAgainstAReadoptedSessionLeavesItsLifecycleChannelOpen(t *testin
 	// open: it must never fire from a refusing git.open alone.
 	var lossMu sync.Mutex
 	var losses []lifecyclechannel.LossCause
-	second.reg.lifecycleLoss = func(_ lifecycle.LaneID, cause lifecyclechannel.LossCause) {
+	second.reg.lifecycleLoss = func(_ lifecycle.LaneID, loss lifecyclechannel.Loss) {
 		lossMu.Lock()
-		losses = append(losses, cause)
+		losses = append(losses, loss.Cause)
 		lossMu.Unlock()
 	}
 

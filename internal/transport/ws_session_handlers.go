@@ -308,7 +308,7 @@ func isLineageRefusal(err error) bool {
 // are the same answer to the caller, which asked for a terminal and did not
 // get one — so the mapping lives in one place rather than being written
 // twice and drifting once.
-func (h openHandlers) answerOpenFailure(r Responder, req jsonrpcRequest, err error) {
+func (h openHandlers) answerOpenFailure(ctx context.Context, r Responder, req jsonrpcRequest, err error) {
 	// A refusal the open path produced itself carries the sentence a person
 	// reads, and it is answered FIRST so nothing below can flatten it. The
 	// ssh taxonomy two paragraphs down would turn "SSH sessions not
@@ -364,7 +364,12 @@ func (h openHandlers) answerOpenFailure(r Responder, req jsonrpcRequest, err err
 		_ = respond(r, newJSONRPCError(req.ID, -32602, "Invalid params: "+err.Error()))
 		return
 	}
-	h.log.Error("failed to open session", "error", err)
+	// THE REQUEST AND THE TRACE RIDE IT (nocx-3an1s.1.8). This line used the
+	// server's logger, so the one line saying an open FAILED carried no
+	// request_id — and a person grepping their log by the id the other lines
+	// share could not find it. log.From(ctx) is the same logger the rest of
+	// the open's lines took.
+	log.From(ctx).Error("failed to open session", "error", err)
 	// A sealed vault surfaces here for EVERY connection that needs it —
 	// this is still a vault access, and the renderer must get the reason
 	// so the vault-owned unlock prompt appears instead of an error
@@ -433,7 +438,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 
 	opened, err := h.opener.Open(ctx, spec)
 	if err != nil {
-		h.answerOpenFailure(r, req, err)
+		h.answerOpenFailure(ctx, r, req, err)
 		return
 	}
 	sess, cfg, hosted, workspaceID := opened.Session, opened.Config, opened.Hosted, opened.WorkspaceID

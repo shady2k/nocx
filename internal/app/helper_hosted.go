@@ -37,6 +37,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/shady2k/nocx/internal/diagnostics"
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/lifecycle"
@@ -67,7 +68,7 @@ type hostedSpawn struct {
 	lifecycle lifecyclechannel.Kernel
 	// loss carries the adapter's loss cause to the session integration axis.
 	// Nil reports nowhere and the adapter still logs it.
-	loss func(lifecycle.LaneID, lifecyclechannel.LossCause)
+	loss func(lifecycle.LaneID, lifecyclechannel.Loss)
 	// reserveLifecycleLane and abandonLifecycleLane bracket the helper spawn
 	// interval before its session id is known, so an early timeout can be
 	// attached to the session once the open result arrives.
@@ -249,8 +250,10 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		// diagnostic line a failed pane produces. Binding the caller's
 		// exchange onto its logger HERE, where the identity exists, is what
 		// puts it beside the wait it explains instead of a timestamp away.
+		endChannel := diagnostics.Stage(ctx, diagnostics.StageLifecycle)
 		adapter, err := lifecyclechannel.NewStream(
 			log.NewSlogAdapter(h.log).WithContext(ctx), driveKernel, coordinatorConn, opts...)
+		endChannel(err)
 		if err != nil {
 			_ = peerConn.Close()
 			stopDownlink()
@@ -270,9 +273,10 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 	// THE ROLLBACK ENDS THE DOWNLINK TOO: every arm below that aborts the
 	// lifecycle leg is an open that never became a pane, and a delivery
 	// context with no pane is exactly the lifetime this file refuses to keep.
-	abortLifecycleNow := func() {
+	abortLifecycleNow := func(reason string) {
 		if lifecycleAdapter != nil {
-			_ = lifecycleAdapter.Close()
+			diagnostics.NoteLifecycleClosed(ctx, reason)
+			_ = lifecycleAdapter.CloseWith(reason)
 			_ = lifecyclePeer.Close()
 		}
 		if h.abandonLifecycleLane != nil {
@@ -298,9 +302,11 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 	if lifecycleAdapter != nil {
 		lifecycleAdapter.BeginSetup()
 	}
+	endSpawn := diagnostics.Stage(ctx, diagnostics.StageSpawn)
 	entry, err := spawn(ctx, life)
 	if err != nil {
-		abortLifecycleNow()
+		endSpawn(err)
+		abortLifecycleNow("open-rollback:spawn")
 		return hostedSpawnResult{}, err
 	}
 	if downlink != nil {
@@ -319,8 +325,9 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		Offset: proto.StreamOffset(entry.Window.Base), Fresh: true,
 		LifecycleOffset: 0, LifecycleFresh: true, RequestWrite: true,
 	}, holdOpt)
+	endSpawn(err)
 	if err != nil {
-		abortLifecycleNow()
+		abortLifecycleNow("open-rollback:attach")
 		_ = h.client.CloseSession(ctx, entry.HostSessionID)
 		return hostedSpawnResult{}, err
 	}
@@ -378,11 +385,13 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 	// first output is dropped at a door nobody opened yet.
 	stopBlockRows := bindHeldBlockRows(ctx, h.blockRows, session.ID(entry.HostSessionID.Session), attached, held)
 
+	endAdopt := diagnostics.Stage(ctx, diagnostics.StageAdoption)
 	sess, err := h.registry.Adopt(ctx, cfg, session.ID(entry.HostSessionID.Session), attached)
+	endAdopt(err)
 	if err != nil {
 		stopBlockRows()
 		_ = attached.Close()
-		abortLifecycleNow()
+		abortLifecycleNow("open-rollback:adopt")
 		_ = h.client.CloseSession(ctx, entry.HostSessionID)
 		return hostedSpawnResult{}, err
 	}
@@ -413,7 +422,7 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 			})
 		}
 		var abortOnce sync.Once
-		out.AbortLifecycle = func() { abortOnce.Do(abortLifecycleNow) }
+		out.AbortLifecycle = func() { abortOnce.Do(func() { abortLifecycleNow("open-aborted:transport") }) }
 		var detachOnce sync.Once
 		out.DetachLifecycle = func() { detachOnce.Do(detachLifecycleNow) }
 	}

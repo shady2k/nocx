@@ -254,9 +254,9 @@ func TestAFrameTheStoreCouldNotRecordEndsTheLegUnapplied(t *testing.T) {
 	var lossMu sync.Mutex
 	var losses []LossCause
 	a, err := NewAdoptedStream(log.NewSlogAdapter(nil), k, coordinator, adoptedLaunch(), WithFrameScope(failing),
-		WithLossReporter(func(_ lifecycle.LaneID, cause LossCause) {
+		WithLossReporter(func(_ lifecycle.LaneID, loss Loss) {
 			lossMu.Lock()
-			losses = append(losses, cause)
+			losses = append(losses, loss.Cause)
 			lossMu.Unlock()
 		}))
 	if err != nil {
@@ -304,9 +304,9 @@ func TestAFrameLeftForTheNextCoordinatorIsNotAppliedAndReportsNothing(t *testing
 	var lossMu sync.Mutex
 	var losses []LossCause
 	a, err := NewAdoptedStream(log.NewSlogAdapter(nil), k, coordinator, adoptedLaunch(), WithFrameScope(stopping),
-		WithLossReporter(func(_ lifecycle.LaneID, cause LossCause) {
+		WithLossReporter(func(_ lifecycle.LaneID, loss Loss) {
 			lossMu.Lock()
-			losses = append(losses, cause)
+			losses = append(losses, loss.Cause)
 			lossMu.Unlock()
 		}))
 	if err != nil {

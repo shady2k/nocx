@@ -262,3 +262,50 @@ func waitForClosedBy(t *testing.T, rec *diagnostics.Recorder, closer string) {
 		return last.ClosedBy == closer
 	})
 }
+
+// TestAFarOpensRecordNamesTheProbeAndTheInstall is nocx-b3j8r's first defect:
+// the two steps between sign-in and the tool socket had no stage of their own.
+// The probe and the install were invisible inside "dial", and the install was
+// recorded under "authentication" — a record that read "authentication 22 s"
+// over work that had nothing to do with signing in.
+//
+// The assertion is on the RECORD, not on a duration: a slow machine must not
+// be able to hide a stage behind a threshold.
+func TestAFarOpensRecordNamesTheProbeAndTheInstall(t *testing.T) {
+	sl := logtest.Slog(t)
+	appLog := log.NewSlogAdapter(sl)
+	stand := startFarStand(t, &recordingSpawner{}, helpersession.ConnectedIdleGrace, func() {})
+	stand.reg.tools = &fakeFarTools{}
+	ws := transport.NewWSServer(appLog, stand.reg.registry,
+		transport.WithProfileResolver(traceResolver{host: "host.example:22"}),
+		transport.WithHelperSessionOpener(registryOpener{reg: stand.reg}),
+	)
+	if err := ws.Start(t.Context()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(context.Background()) })
+
+	rec := diagnostics.NewRecorder()
+	ctx := diagnostics.WithRecorder(t.Context(), rec)
+	if _, err := ws.OpenSession(ctx, transport.OpenSpec{
+		Kind: "ssh", ProfileID: "ssh:stages", Cols: 80, Rows: 24,
+	}); err != nil {
+		t.Fatalf("opening a far helper pane: %v", err)
+	}
+
+	snap := rec.Snapshot()
+	if len(snap.Recent) != 1 {
+		t.Fatalf("the record holds %d finished opens, want 1", len(snap.Recent))
+	}
+	seen := map[string]bool{}
+	for _, stage := range snap.Recent[0].Stages {
+		seen[stage.Name] = true
+	}
+	for _, want := range []string{
+		diagnostics.StageProbe, diagnostics.StageInstall, diagnostics.StageHold,
+	} {
+		if !seen[want] {
+			t.Fatalf("the open's record does not name stage %q; it names %v", want, seen)
+		}
+	}
+}

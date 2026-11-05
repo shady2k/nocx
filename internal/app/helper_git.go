@@ -875,7 +875,9 @@ func (r *helperRegistry) openHoldingLease(ctx context.Context, cfg session.Confi
 	}
 	opts := session.SSHOptionsFromConfig(cfg.Remote)
 	mode := profile.DesiredMode(cfg.Remote.DesiredMode)
+	endProbe := diagnostics.Stage(ctx, diagnostics.StageProbe)
 	hold, fingerprint, platform, available, err := probeHelperPlatformHeld(ctx, cfg.Host, opts, r.install, r.source)
+	endProbe(err)
 	if err != nil {
 		// The connect-time helper ask (ADR-0068, owner's decision
 		// 2026-09-16). An unknown or changed host key is the ONE probe
@@ -991,9 +993,9 @@ func offeredHostKeyFingerprint(err error) string {
 // would be a second answer to "what did the probe say", and on a host whose
 // answer is expensive to obtain that second answer is another login.
 func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, claim string, opts []ssh.ConnectOption, platform deploy.Platform, fingerprint string) (transport.HostedSessionOpen, bool, error) {
-	endAuth := diagnostics.Stage(ctx, diagnostics.StageAuth)
+	endInstall := diagnostics.Stage(ctx, diagnostics.StageInstall)
 	installed, err := installHelperAt(ctx, cfg.Host, opts, r.install, r.source, platform)
-	endAuth(err)
+	endInstall(err)
 	if err != nil {
 		return transport.HostedSessionOpen{}, true, err
 	}

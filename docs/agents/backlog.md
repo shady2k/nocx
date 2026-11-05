@@ -1,18 +1,18 @@
 # Backlog integration
 
-Maintained by `setup-shady2k-skills`. This branch prepares setup protocol
-**0.63.0 from released plugin 0.134.0**, tracked by nocx-7z1zj in draft PR #698;
-it is **not installed or accepted**. The release includes the repairs for exact
-recording recovery (nocx-zjpwl), existing-hook upgrades (nocx-hm9qc), and the
-synchronized candidate-size proof (nocx-9v4x0); those upstream blockers are closed.
-The refreshed branch's checker selftests, 65 workflow/recovery tests, 161 clean
-synchronization proof assertions, isolated real-hook walk and independent review
-are recorded on nocx-7z1zj. Explicit owner approval to merge remains pending.
+Maintained by `setup-shady2k-skills`. This update installs setup protocol
+**0.63.0 from released plugin 0.134.0**, tracked by nocx-7z1zj. The release
+includes the repairs for exact recording recovery (nocx-zjpwl), existing-hook
+upgrades (nocx-hm9qc), and the synchronized candidate-size proof (nocx-9v4x0);
+those upstream blockers are closed. The refreshed branch's checker selftests,
+65 workflow/recovery tests, 161 clean synchronization proof assertions,
+isolated real-hook walk and independent review are recorded on nocx-7z1zj.
 No unpublished 0.135.0 source is used.
-Main remains at protocol 0.59.0, installed by nocx-fg79x.6, and the machine's
-mechanism remains at plugin 0.130.0 until the accepted update is connected.
-Protocol 0.56.0 was installed by nocx-gkpwp, 0.51.0 by nocx-fs95y,
-0.46.0 by nocx-q8yjf.25, and 0.44.0 by nocx-q8yjf.24.
+The copies are installed per machine by `make connect`; a machine that has not
+run it since this landed keeps the mechanism it had, and a running watcher
+keeps its old copy until it is restarted.
+Protocol 0.59.0 was installed by nocx-fg79x.6, 0.56.0 by nocx-gkpwp,
+0.51.0 by nocx-fs95y, 0.46.0 by nocx-q8yjf.25, and 0.44.0 by nocx-q8yjf.24.
 A branch alone is not an installed update. The protocol ships
 with the skills and is not restated here. This file holds project facts and
 commands; changing choices live only in the config. Each person's plugin,
@@ -322,14 +322,13 @@ connect` runs this connector before it checks the backlog inputs.
 - **Tracker synchronization:** `tracker-sync watch` publishes a change within seconds
   (`--debounce 2 --max-age 5`) and syncs with the remote every 60 seconds
   (`--interval 60`). The user systemd unit
-  (`~/.config/systemd/user/tracker-sync.service`) runs the machine's 0.130.0 copy.
-  This branch prepares `tracker-sync.mjs`, `trackers/br.mjs`, `argv.mjs` and
-  `regular-file.mjs` from released plugin 0.134.0, with `tracker-sync.version`
-  recording that version. After acceptance and merge, `make connect` installs
-  them under `~/.local/state/nocx/mechanism/`, so removing a worktree does not
-  remove the mechanism. Copying files does not reload an already-running watcher:
-  restarting the existing supervisor is a separate authorized machine step.
-  After that installation, check each machine with
+  (`~/.config/systemd/user/tracker-sync.service`) runs the machine's copy.
+  `make connect` installs `tracker-sync.mjs`, `trackers/br.mjs`, `argv.mjs` and
+  `regular-file.mjs` from released plugin 0.134.0 under
+  `~/.local/state/nocx/mechanism/`, with `tracker-sync.version` recording that
+  version, so removing a worktree does not remove the mechanism. Copying files
+  does not reload an already-running watcher: restarting the supervisor is a
+  separate machine step. After that installation, check each machine with
   `node ~/.local/state/nocx/mechanism/tracker-sync.mjs status --expect-version 0.134.0`.
   Pushing `refs/tracker/state` starts no code CI, so the
   backlog's own rules are checked on that ref's delta by
@@ -344,10 +343,10 @@ connect` runs this connector before it checks the backlog inputs.
   once the watcher's startup sync has finished (records in its first minute can still
   time out). Memory under 0.130.0 is about 50 MB, against 1.3–1.7 GB under the
   hand-patched 0.128 copy it replaced.
-  The prepared release retains the database/WAL change signal introduced in
-  0.132.0 to avoid exports while idle. The earlier CPU figures are not measurements
-  of 0.134.0; this branch neither changes the machine's existing CPU policy nor
-  installs, restarts or replaces a supervisor.
+  0.134.0 retains the database/WAL change signal introduced in 0.132.0 to avoid
+  exports while idle. The earlier CPU figures are not measurements of 0.134.0;
+  the merge does not change the machine's existing CPU policy, and it neither
+  installs, restarts nor replaces a supervisor.
   Recipe commands retain their 120-second default deadline. The published launch
   uses `tracker-sync.mjs watch --repo <checkout> --recipe <recipe> --interval 60
 --debounce 2 --max-age 5`; those paths are machine-local, not shared settings.
@@ -367,7 +366,8 @@ connect` runs this connector before it checks the backlog inputs.
   to include `--hook`. Surrounding bytes and custom commands are preserved,
   and a second connect changes nothing. Hooks tracked inside the project,
   including symlink targets there, are not rewritten; required marker lines
-  still have to be present. This branch changes no live hook.
+  still have to be present. The merge changes no live hook; a machine's
+  `make connect` upgrades the record lines it generated.
 - **Required released-source proofs:** run the commands below against the released
   plugin, not an unpublished source checkout. They exercise disposable stores
   and remotes, not this machine's live tracker. The recording suite covers exact

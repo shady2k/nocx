@@ -1,6 +1,6 @@
 # ADR-8eej3e66 — Every operation is catalogued with its lifetime, and busy is not an answer
 
-- **Status:** proposed
+- **Status:** accepted (2026-11-05)
 - **Date:** 2026-11-05
 - **Taken from** `nocx-3an1s.1.1`, the owner's decisions of 2026-11-05
 - **Supersedes parts of ADR-0026**, mapped under "What happens to ADR-0026" below. ADR-0032's
@@ -94,21 +94,22 @@ the next one. A consumer that reads the declaration cannot disagree with it.
 A **declaration** describes an operation, and holds no optional field and no zero value meaning
 "unlimited":
 
-| Field          | Says                                                                                                                                 |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `id`           | The JSON-RPC method, or an internal operation's name                                                                                 |
-| `phases`       | Ordered phases, each with its own `resources` and `dependencies` sets. A phase may hold nothing                                      |
-| `resources`    | Keys to order on: `session`, `binding`, `checkout`, `store:<name>`, `collection`, or a named barrier as `shared` or `exclusive`      |
-| `dependencies` | The failure domains it draws on                                                                                                      |
-| `turn`         | A finite deadline on waiting for resources and capacity                                                                              |
-| `max`          | A finite, non-renewable absolute bound on its work                                                                                   |
-| `silence`      | A progress bound within `max`, or `none`                                                                                             |
-| `answer`       | A finite deadline on a person's answer, or `none` when it asks nothing                                                               |
-| `recovery`     | The finite budget to finish or roll back a committed mutation, or `none`                                                             |
-| `merge`        | `none`, `latest-value` for state a later value replaces (resize), or `same-key` for a read. An effectful mutation may only be `none` |
-| `preempts`     | Queued operations on its key it may overtake (close over resize), or `none`                                                          |
-| `waiting`      | The sentence shown while it waits, in the person's terms                                                                             |
-| `expired`      | The outcome at the deadline: `not-started`, `outcome-unknown` or `retry-read`                                                        |
+| Field          | Says                                                                                                                                                                                                                                     |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`           | The JSON-RPC method, or an internal operation's name                                                                                                                                                                                     |
+| `phases`       | Ordered phases, each with its own `resources` and `dependencies` sets. A phase may hold nothing                                                                                                                                          |
+| `resources`    | Keys to order on: `session`, `binding`, `checkout`, `store:<name>`, `collection`, or a named barrier as `shared` or `exclusive`                                                                                                          |
+| `dependencies` | The failure domains it draws on                                                                                                                                                                                                          |
+| `turn`         | A finite deadline on waiting for resources and capacity                                                                                                                                                                                  |
+| `max`          | A finite, non-renewable absolute bound on its work                                                                                                                                                                                       |
+| `silence`      | A progress bound within `max`, or `none`                                                                                                                                                                                                 |
+| `answer`       | A finite deadline on a person's answer, or `none` when it asks nothing                                                                                                                                                                   |
+| `recovery`     | The finite budget to finish or roll back a committed mutation, or `none`                                                                                                                                                                 |
+| `merge`        | `none`, `latest-value` for state a later value replaces (resize), or `same-key` for a read. An effectful mutation may only be `none`                                                                                                     |
+| `preempts`     | Queued operations on its key it may overtake (close over resize), or `none`                                                                                                                                                              |
+| `waiting`      | The sentence shown while it waits, in the person's terms                                                                                                                                                                                 |
+| `row`          | When Operations shows it: `never`, `past-wait` (a person's call still waiting past the threshold) or `always` (work a person is watching: a transfer, a first helper install). `never` is the default a declaration has to argue against |
+| `expired`      | The outcome at the deadline: `not-started`, `outcome-unknown` or `retry-read`                                                                                                                                                            |
 
 An **invocation** carries what a declaration cannot: its `origin` (`person`, `background` or
 `system`) and its owner. One read method serves a person's refresh and a background poll, so origin
@@ -249,20 +250,21 @@ reaches it.
 
 ### 8. What a person sees
 
-| Situation                               | They see                                                                                                                                                                                                                                       |
-| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Waiting under two seconds               | The action's own pending state                                                                                                                                                                                                                 |
-| Waiting longer                          | A row in Operations (`frontend/src/operations/`), with the entry's `waiting` sentence and Cancel, and the count in the activity bar's indicator, which is always on screen. A first open's helper install appears there for its whole duration |
-| Background work stuck past its deadline | A row in Operations, with no toast                                                                                                                                                                                                             |
-| A read expired                          | That the action timed out, named, where it was asked for, with Retry                                                                                                                                                                           |
-| A mutation expired                      | One of "did not start", "done", or "checking what happened". A timeout never implies a rollback                                                                                                                                                |
-| Background waits or merges              | Nothing. It is in the log and in diagnostics                                                                                                                                                                                                   |
-| The sender has gone                     | Queued work never starts; running work is cancelled unless committed; session-owned work survives                                                                                                                                              |
-| A failure domain is suspect             | That the disk or host is not answering, named, and other work goes on                                                                                                                                                                          |
+| Situation                               | They see                                                                                                                                                                                      |
+| --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Waiting under two seconds               | The action's own pending state                                                                                                                                                                |
+| Waiting longer                          | A row in Operations (`frontend/src/operations/`), by the rule below, with the entry's `waiting` sentence and Cancel, and the count in the activity bar's indicator, which is always on screen |
+| Background work stuck past its deadline | One row per failure domain ("this disk is not answering"), never one per call, with no toast                                                                                                  |
+| A read expired                          | That the action timed out, named, where it was asked for, with Retry                                                                                                                          |
+| A mutation expired                      | One of "did not start", "done", or "checking what happened". A timeout never implies a rollback                                                                                               |
+| Background waits or merges              | Nothing. It is in the log and in diagnostics                                                                                                                                                  |
+| The sender has gone                     | Queued work never starts; running work is cancelled unless committed; session-owned work survives                                                                                             |
+| A failure domain is suspect             | That the disk or host is not answering, named, and other work goes on                                                                                                                         |
 
 `control.saturated`, its schemas, the holder sentences in `dispatcher.ts`, the toast and
-`isSaturationRefusal` are removed in the last stage. Two seconds is the agent's recommendation, put to
-the owner and not yet answered.
+`isSaturationRefusal` are removed in the last stage. Two seconds is accepted by the owner.
+
+**Operations does not become a log.** The owner's condition: it must not fill with every case. A row exists only while it means something: a person's call past two seconds, work a person is watching, or a stuck failure domain. A wait row goes the moment it settles and leaves no finished entry, because only transfers have an outcome worth keeping. Calls waiting on one thing share one row with a count. Ordinary work finishing inside the threshold, background polls, merges and internal operations never appear. A check asserts that a busy session of ordinary work, with a person acting throughout, leaves the list empty.
 
 Operations exists for this, by the owner's pointer: one list across every tab, one count, and a `cancel`
 each item owns. A waiting operation is a new source and a new `OperationKind`, which that module's

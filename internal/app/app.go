@@ -212,7 +212,7 @@ type App struct {
 	logFilePath string
 	// logFile is the open append handle, closed at shutdown after the
 	// final line. nil when file logging is unavailable.
-	logFile *os.File
+	logFile *log.File
 
 	// attentionHost is the late-bound implementation behind the notify
 	// router's banner route (ADR-0047). The route itself was decided when
@@ -700,7 +700,7 @@ func New(opts ...Option) (*App, error) {
 	if o.logFilePath != nil {
 		logFilePath = *o.logFilePath // test override; empty disables file logging
 	}
-	var logFile *os.File
+	var logFile *log.File
 	// The level is a knob, not a constant. It was slog.LevelInfo in both
 	// handlers below, so every Debug line in this codebase was unreachable
 	// without editing a source file and rebuilding — which is why debugging a

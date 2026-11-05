@@ -17,8 +17,6 @@ package log
 // line that mattered cannot be found again.
 import (
 	"log/slog"
-	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -64,19 +62,16 @@ func HandlerOptions(level slog.Level) *slog.HandlerOptions {
 
 // OpenFile opens a log file the way every process in this product does:
 // the directory is created 0700, the file is appended to and readable by its
-// owner only. Append is deliberate — one writer per file is the rule (the
-// backend owns nocx.log, the window owns nocx-window.log), and the window's
-// several instances share the window's file exactly as the helper daemon's
-// generations share helper.log (cmd/nocx-helper/servelog.go).
+// owner only, and the file is kept under MaxFileBytes with its newest lines
+// kept (file.go). Append is deliberate — one owner per file (the backend owns
+// nocx.log, the window owns nocx-window.log), and the window's several
+// instances share the window's file exactly as the helper daemon's
+// generations share helper.log (cmd/nocx-helper/servelog.go) — so the ceiling
+// belongs to the PATH, and this is the one place every writer asks for it.
 //
-// There is no rotation or size bound anywhere in this product today — the
-// backend appends and nothing truncates it. This helper does not invent a
-// second policy; if one is added it is added here, for every writer.
-func OpenFile(path string) (*os.File, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, err
-	}
-	// #nosec G304 — the path is the app data dir plus a fixed name, or a
-	// test override; never external input.
-	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+// The helper daemon is the one log outside these rules: it opens helper.log
+// itself, because the file it hands runtime/debug for crash output has to be
+// the file it writes records to (cmd/nocx-helper/servelog.go).
+func OpenFile(path string) (*File, error) {
+	return openFile(path, MaxFileBytes, KeepFileBytes)
 }

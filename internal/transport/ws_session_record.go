@@ -30,6 +30,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 )
 
@@ -167,6 +168,25 @@ func (s *WSServer) recordSessionOutput(ctx context.Context, sid session.ID, ring
 	ring.setRecording(true)
 	defer ring.setRecording(false)
 
+	// THE CAP'S LINE IS AN EPISODE'S, NOT A PASS'S (nocx-3an1s.1.7). A
+	// session held at its output cap evicts on every append — measured on an
+	// installed build at 10 to 200 ms apart — and one line per eviction put
+	// 1.3 GB in nocx.log and pushed every other line out of any tail. The
+	// episode says it once when it opens, once per interval with the total
+	// since the last line, and once more when it ends with what is left;
+	// nothing is lost, because every line names a running total.
+	//
+	// The logger comes from the context so the test that counts these lines
+	// reads the one this server was built with (log.From).
+	ctx = log.WithLogger(ctx, s.log)
+	capDrops := newCapEpisode(capReportInterval, time.Now)
+	defer func() {
+		if since, total, reported := capDrops.stopped(); reported {
+			log.From(ctx).Info("session recording stopped dropping its oldest bytes; the output cap episode is over",
+				"session_id", string(sid), "bytes", since, "total", total)
+		}
+	}()
+
 	// THE RECORDER RESUMES AT THE RING'S PERSISTENCE CURSOR, which is the one
 	// place that already holds "how far this session has been written down".
 	// For every session this coordinator opened it is zero and always was; for
@@ -297,13 +317,26 @@ func (s *WSServer) recordSessionOutput(ctx context.Context, sid session.ID, ring
 			s.historyStatus.ClearReason(HistoryDegradeWriteFailed)
 		}
 		if res.Dropped > 0 {
-			s.log.Info("session recording dropped its oldest bytes to stay inside the output cap",
-				"session_id", string(sid), "bytes", res.Dropped)
-			// The recording's answer to "what is missing" just changed, and
-			// this loop is the only party that knows it did
-			// (nocx-zg3k3.14.24). A reclaim read that answer once, before it
-			// attached, so without this the card a person reads keeps stating
-			// the number the reclaim caught.
+			if since, total, reported := capDrops.evicted(res.Dropped); reported {
+				log.From(ctx).Info("session recording dropped its oldest bytes to stay inside the output cap",
+					"session_id", string(sid), "bytes", since, "total", total)
+				// The recording's answer to "what is missing" just changed,
+				// and this loop is the only party that knows it did
+				// (nocx-zg3k3.14.24). A reclaim read that answer once, before
+				// it attached, so without this the card a person reads keeps
+				// stating the number the reclaim caught.
+				//
+				// It is published on the EPISODE's schedule and not on the
+				// pass's for the same reason the line is: reading the
+				// recovery status is a store query and the frame it fills is
+				// replaced by the next one, so per-pass publishing bought a
+				// query and a marshal per eviction to deliver a number
+				// nobody was waiting for. The last one still goes out, below.
+				s.publishRecoveryRevision(ctx, sid)
+			}
+		} else if since, total, reported := capDrops.stopped(); reported {
+			log.From(ctx).Info("session recording stopped dropping its oldest bytes; the output cap episode is over",
+				"session_id", string(sid), "bytes", since, "total", total)
 			s.publishRecoveryRevision(ctx, sid)
 		}
 		pos += uint64(len(data))

@@ -51,6 +51,41 @@
       "context": "attr:placeholder",
       "snippet": "https://api.example.com/v1",
       "reason": "example value — a sample URL"
+    },
+    {
+      "file": "src/secrets.tsx",
+      "line": 352,
+      "context": "prop:message",
+      "snippet": "\"\"",
+      "reason": "straight quotes around the user-typed secret name in the Added toast composite — punctuation only, the words ride the secrets.add.* keys (same shape as the baselined connections.tsx composites)"
+    },
+    {
+      "file": "src/secrets.tsx",
+      "line": 396,
+      "context": "prop:message",
+      "snippet": "\"\"",
+      "reason": "straight quotes around the secret name in the Replaced toast composite — punctuation only"
+    },
+    {
+      "file": "src/secrets.tsx",
+      "line": 426,
+      "context": "prop:message",
+      "snippet": "\"\"",
+      "reason": "straight quotes around the new name in the Renamed toast composite — punctuation only"
+    },
+    {
+      "file": "src/secrets.tsx",
+      "line": 481,
+      "context": "prop:message",
+      "snippet": "\"\"",
+      "reason": "straight quotes around the secret name in the Deleted toast composite — punctuation only"
+    },
+    {
+      "file": "src/secrets.tsx",
+      "line": 767,
+      "context": "attr:title",
+      "snippet": "\"\"",
+      "reason": "straight quotes around the secret name in the Replace dialog title composite — punctuation only"
     }
   ]
 }

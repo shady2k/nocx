@@ -6,6 +6,7 @@ import { CopyIcon, EyeIcon, ResetIcon } from './ui/icons'
 import { Prompt } from './ui/prompt'
 import { TextField } from './ui/text-field'
 import { showToast } from './ui/toast'
+import { t } from './i18n/locale-model'
 
 const LOWER = 'abcdefghijkmnopqrstuvwxyz'
 const UPPER = 'ABCDEFGHJKLMNPQRSTUVWXYZ'
@@ -89,9 +90,12 @@ export const PasswordEditor: Component<PasswordEditorProps> = (props) => {
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(draft())
-      showToast({ level: 'success', message: 'Password copied' })
+      showToast({ level: 'success', message: t('pw.copied', 'Password copied') })
     } catch (err) {
-      showToast({ level: 'danger', message: `Could not copy password: ${(err as Error).message}` })
+      showToast({
+        level: 'danger',
+        message: `${t('pw.copyFailedHead', 'Could not copy password:')} ${(err as Error).message}`,
+      })
     }
   }
 
@@ -103,7 +107,7 @@ export const PasswordEditor: Component<PasswordEditorProps> = (props) => {
 
   const save = () => {
     if (!draft()) {
-      showToast({ level: 'warning', message: 'Enter or generate a password' })
+      showToast({ level: 'warning', message: t('pw.enterOrGenerate', 'Enter or generate a password') })
       return
     }
     props.onSave(draft())
@@ -123,10 +127,10 @@ export const PasswordEditor: Component<PasswordEditorProps> = (props) => {
       actions={
         <>
           <Button variant="primary" onClick={save}>
-            OK
+            {t('pw.ok', 'OK')}
           </Button>
           <Button variant="default" onClick={props.onClose}>
-            Cancel
+            {t('pw.cancel', 'Cancel')}
           </Button>
         </>
       }
@@ -151,16 +155,16 @@ export const PasswordEditor: Component<PasswordEditorProps> = (props) => {
               </IconButton>
               <IconButton
                 size="sm"
-                ariaLabel="Generate password"
-                title="Generate password"
+                ariaLabel={t('pw.generate.title', 'Generate password')}
+                title={t('pw.generate.title', 'Generate password')}
                 onClick={() => regenerate()}
               >
                 <ResetIcon />
               </IconButton>
               <IconButton
                 size="sm"
-                ariaLabel="Copy password"
-                title="Copy password"
+                ariaLabel={t('pw.copy.title', 'Copy password')}
+                title={t('pw.copy.title', 'Copy password')}
                 disabled={!draft()}
                 onClick={() => void copy()}
               >
@@ -174,7 +178,7 @@ export const PasswordEditor: Component<PasswordEditorProps> = (props) => {
         <TextField
           id="password-length"
           type="number"
-          label="Length"
+          label={t('pw.length', 'Length')}
           value={length()}
           min={5}
           max={128}

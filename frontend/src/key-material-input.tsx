@@ -35,6 +35,7 @@ import { Stack } from './ui/stack'
 import { RpcError } from './dispatcher'
 import { log } from './log'
 import { showToast } from './ui/toast'
+import { t } from './i18n/locale-model'
 import type { ProfileClient } from './profiles'
 import type { InventoryEntry } from './vault-client'
 
@@ -45,11 +46,11 @@ export type KeyInputMode = 'path' | 'file' | 'material' | 'secret'
  *  'material'` at every save site and losing the reason. */
 export const suppliesMaterial = (m: KeyInputMode) => m === 'material' || m === 'file'
 
-const KEY_MODES: { value: KeyInputMode; label: string }[] = [
-  { value: 'file', label: 'Choose file' },
-  { value: 'path', label: 'Path' },
-  { value: 'material', label: 'Paste key' },
-  { value: 'secret', label: 'Secret' },
+const KEY_MODES: { value: KeyInputMode; tKey: string; tFallback: string }[] = [
+  { value: 'file', tKey: 'keymat.mode.chooseFile', tFallback: 'Choose file' },
+  { value: 'path', tKey: 'keymat.mode.path', tFallback: 'Path' },
+  { value: 'material', tKey: 'keymat.mode.paste', tFallback: 'Paste key' },
+  { value: 'secret', tKey: 'keymat.mode.secret', tFallback: 'Secret' },
 ]
 
 /** Select options for a vault-row picker: the inventory rows, each named by
@@ -183,7 +184,10 @@ export function KeyMaterialInput(props: KeyMaterialInputProps) {
         // tells the user what to do instead.
         showToast({
           level: 'danger',
-          message: 'The native file picker is not available here. Type the path by hand.',
+          message: t(
+            'keymat.picker.unavailable',
+            'The native file picker is not available here. Type the path by hand.',
+          ),
         })
       },
     )
@@ -192,16 +196,16 @@ export function KeyMaterialInput(props: KeyMaterialInputProps) {
   return (
     <>
       <SegmentedControl
-        options={KEY_MODES}
+        options={KEY_MODES.map((m) => ({ value: m.value, label: t(m.tKey, m.tFallback) }))}
         value={props.mode}
         onChange={changeMode}
-        ariaLabel="Key input mode"
+        ariaLabel={t('keymat.mode.aria', 'Key input mode')}
       />
       <Show when={props.mode === 'path'}>
         <div class="km-path-row">
           <TextField
             id={`${props.id}-path`}
-            label="Private Key Path"
+            label={t('keymat.path.label', 'Private Key Path')}
             value={props.pathValue}
             onInput={(value) => props.onPathChange(value)}
             placeholder={props.pathPlaceholder ?? '~/.ssh/id_ed25519'}
@@ -211,10 +215,10 @@ export function KeyMaterialInput(props: KeyMaterialInputProps) {
             <Button
               variant="default"
               onClick={browse}
-              ariaLabel="Browse for a private key file"
-              title="Choose a file with the system picker"
+              ariaLabel={t('keymat.browse.aria', 'Browse for a private key file')}
+              title={t('keymat.browse.title', 'Choose a file with the system picker')}
             >
-              Browse…
+              {t('keymat.browse.button', 'Browse…')}
             </Button>
           </Show>
         </div>
@@ -240,12 +244,15 @@ export function KeyMaterialInput(props: KeyMaterialInputProps) {
                   // field error stays for what is known at the moment of choosing.
                   showToast({
                     level: 'danger',
-                    message: 'Could not read that file. Choose another, or paste the key.',
+                    message: t(
+                      'keymat.read.failed',
+                      'Could not read that file. Choose another, or paste the key.',
+                    ),
                   })
                 },
               )
             }}
-            ariaLabel="Choose private key file"
+            ariaLabel={t('keymat.file.aria', 'Choose private key file')}
             buttonLabel="Choose file…"
           />
         </Field>
@@ -254,26 +261,26 @@ export function KeyMaterialInput(props: KeyMaterialInputProps) {
         <TextField
           multiline
           id={`${props.id}-text`}
-          label="Private Key"
+          label={t('keymat.key.label', 'Private Key')}
           value={props.materialValue}
           onInput={(value) => {
             setFileError(publicKeyMistake(value))
             props.onMaterialChange(value)
           }}
-          placeholder="Paste the private key content here"
+          placeholder={t('keymat.paste.ph', 'Paste the private key content here')}
           error={fileError() ?? props.error}
         />
         <Show when={props.fingerprint}>
-          <span class="cm-key-fingerprint">Fingerprint: {props.fingerprint}</span>
+          <span class="cm-key-fingerprint">{`${t('keymat.fingerprint', 'Fingerprint:')} ${props.fingerprint}`}</span>
         </Show>
       </Show>
       <Show when={props.mode === 'secret'}>
-        <Field for={`${props.id}-secret`} label="Private Key Secret" error={props.error}>
+        <Field for={`${props.id}-secret`} label={t('keymat.secret.label', 'Private Key Secret')} error={props.error}>
           <Select
             value={props.secretValue ?? ''}
             onChange={(value) => props.onSecretChange?.(value || undefined)}
             options={secretOptions(props.secrets ?? [], props.secretValue)}
-            placeholder={'\u2014 None \u2014'}
+            placeholder={t('keymat.none.ph', '— None —')}
           />
         </Field>
       </Show>
@@ -327,7 +334,7 @@ export function KeyPassphrasePrompt(props: KeyPassphrasePromptProps) {
         passphrase(),
         props.passphraseName,
       )
-      showToast({ level: 'success', message: 'Key passphrase stored.' })
+      showToast({ level: 'success', message: t('keymat.passphrase.saved', 'Key passphrase stored.') })
       props.onResult('saved', result.row)
     } catch (e) {
       setSaving(false)
@@ -345,7 +352,7 @@ export function KeyPassphrasePrompt(props: KeyPassphrasePromptProps) {
       }
       const message = (e as Error).message
       log.error('Failed to store key passphrase', { message })
-      showToast({ level: 'danger', message: `Could not save the key passphrase: ${message}` })
+      showToast({ level: 'danger', message: `${t('keymat.passphrase.saveFailedHead', 'Could not save the key passphrase:')} ${message}` })
     }
   }
 
@@ -354,7 +361,10 @@ export function KeyPassphrasePrompt(props: KeyPassphrasePromptProps) {
   const decline = () => {
     showToast({
       level: 'info',
-      message: 'No passphrase stored — the connection will ask for it when it connects.',
+      message: t(
+        'keymat.passphrase.none',
+        'No passphrase stored — the connection will ask for it when it connects.',
+      ),
     })
     props.onResult('skipped')
   }
@@ -363,9 +373,9 @@ export function KeyPassphrasePrompt(props: KeyPassphrasePromptProps) {
     <Prompt
       open={props.open}
       onClose={decline}
-      ariaLabel={`Passphrase for ${props.keyName}`}
+      ariaLabel={`${t('keymat.passphrase.ariaHead', 'Passphrase for')} ${props.keyName}`}
       placement="top-sheet"
-      title={`Passphrase for ${props.keyName}`}
+      title={`${t('keymat.passphrase.ariaHead', 'Passphrase for')} ${props.keyName}`}
       onSubmit={() => {
         if (saving()) return
         void save()
@@ -376,20 +386,22 @@ export function KeyPassphrasePrompt(props: KeyPassphrasePromptProps) {
             {saving() ? 'Saving…' : 'Save passphrase'}
           </Button>
           <Button variant="default" disabled={saving()} onClick={decline}>
-            Not now
+            {t('keymat.passphrase.notNow', 'Not now')}
           </Button>
         </>
       }
     >
       <Stack>
         <p class="ui-vault-desc-text">
-          This key is encrypted. The passphrase you save here opens it — not the vault, not a
-          connection password.
+          {t(
+            'keymat.passphrase.encryptedNote',
+            'This key is encrypted. The passphrase you save here opens it — not the vault, not a connection password.',
+          )}
         </p>
         <TextField
           id="key-passphrase"
-          label="Key passphrase"
-          placeholder="The passphrase that protects this key"
+          label={t('keymat.passphrase.label', 'Key passphrase')}
+          placeholder={t('keymat.passphrase.ph', 'The passphrase that protects this key')}
           type="password"
           value={passphrase()}
           onInput={(v) => {

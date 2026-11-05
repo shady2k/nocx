@@ -4061,162 +4061,6 @@
       "snippet": "Could not reattach this session. The shell has not been conf"
     },
     {
-      "file": "src/key-material-input.tsx",
-      "line": 49,
-      "context": "prop:label",
-      "snippet": "Choose file"
-    },
-    {
-      "file": "src/key-material-input.tsx",
-      "line": 50,
-      "context": "prop:label",
-      "snippet": "Path"
-    },
-    {
-      "file": "src/key-material-input.tsx",
-      "line": 51,
-      "context": "prop:label",
-      "snippet": "Paste key"
-    },
-    {
-      "file": "src/key-material-input.tsx",
-      "line": 52,
-      "context": "prop:label",
-      "snippet": "Secret"
-    },
-    {
-      "file": "src/key-material-input.tsx",
-      "line": 186,
-      "context": "prop:message",
-      "snippet": "The native file picker is not available here. Type the path"
-    },
-    {
-      "file": "src/key-material-input.tsx",
-      "line": 198,
-      "context": "attr:ariaLabel",
-      "snippet": "Key input mode"
-    },
-    {
-      "file": "src/key-material-input.tsx",
-      "line": 204,
-      "context": "attr:label",
-      "snippet": "Private Key Path"
-    },
-    {
-      "file": "src/key-material-input.tsx",
-      "line": 214,
-      "context": "attr:ariaLabel",
-      "snippet": "Browse for a private key file"
-    },
-    {
-      "file": "src/key-material-input.tsx",
-      "line": 215,
-      "context": "attr:title",
-      "snippet": "Choose a file with the system picker"
-    },
-    {
-      "file": "src/key-material-input.tsx",
-      "line": 216,
-      "context": "jsx-text",
-      "snippet": "Browse…"
-    },
-    {
-      "file": "src/key-material-input.tsx",
-      "line": 243,
-      "context": "prop:message",
-      "snippet": "Could not read that file. Choose another, or paste the key."
-    },
-    {
-      "file": "src/key-material-input.tsx",
-      "line": 248,
-      "context": "attr:ariaLabel",
-      "snippet": "Choose private key file"
-    },
-    {
-      "file": "src/key-material-input.tsx",
-      "line": 257,
-      "context": "attr:label",
-      "snippet": "Private Key"
-    },
-    {
-      "file": "src/key-material-input.tsx",
-      "line": 263,
-      "context": "attr:placeholder",
-      "snippet": "Paste the private key content here"
-    },
-    {
-      "file": "src/key-material-input.tsx",
-      "line": 267,
-      "context": "jsx-text",
-      "snippet": "Fingerprint:"
-    },
-    {
-      "file": "src/key-material-input.tsx",
-      "line": 271,
-      "context": "attr:label",
-      "snippet": "Private Key Secret"
-    },
-    {
-      "file": "src/key-material-input.tsx",
-      "line": 276,
-      "context": "attr:placeholder",
-      "snippet": "— None —"
-    },
-    {
-      "file": "src/key-material-input.tsx",
-      "line": 330,
-      "context": "prop:message",
-      "snippet": "Key passphrase stored."
-    },
-    {
-      "file": "src/key-material-input.tsx",
-      "line": 348,
-      "context": "prop:message",
-      "snippet": "Could not save the key passphrase:"
-    },
-    {
-      "file": "src/key-material-input.tsx",
-      "line": 357,
-      "context": "prop:message",
-      "snippet": "No passphrase stored — the connection will ask for it when i"
-    },
-    {
-      "file": "src/key-material-input.tsx",
-      "line": 366,
-      "context": "attr:ariaLabel",
-      "snippet": "Passphrase for"
-    },
-    {
-      "file": "src/key-material-input.tsx",
-      "line": 368,
-      "context": "attr:title",
-      "snippet": "Passphrase for"
-    },
-    {
-      "file": "src/key-material-input.tsx",
-      "line": 378,
-      "context": "jsx-text",
-      "snippet": "Not now"
-    },
-    {
-      "file": "src/key-material-input.tsx",
-      "line": 385,
-      "context": "jsx-text",
-      "snippet": "This key is encrypted. The passphrase you save here opens it"
-    },
-    {
-      "file": "src/key-material-input.tsx",
-      "line": 391,
-      "context": "attr:label",
-      "snippet": "Key passphrase"
-    },
-    {
-      "file": "src/key-material-input.tsx",
-      "line": 392,
-      "context": "attr:placeholder",
-      "snippet": "The passphrase that protects this key"
-    },
-    {
       "file": "src/layout/workspace-colours.ts",
       "line": 42,
       "context": "prop:label",
@@ -4818,85 +4662,25 @@
     },
     {
       "file": "src/password-editor.tsx",
-      "line": 92,
-      "context": "prop:message",
-      "snippet": "Password copied"
-    },
-    {
-      "file": "src/password-editor.tsx",
-      "line": 94,
-      "context": "prop:message",
-      "snippet": "Could not copy password:"
-    },
-    {
-      "file": "src/password-editor.tsx",
-      "line": 106,
-      "context": "prop:message",
-      "snippet": "Enter or generate a password"
-    },
-    {
-      "file": "src/password-editor.tsx",
-      "line": 125,
-      "context": "jsx-text",
-      "snippet": "OK"
-    },
-    {
-      "file": "src/password-editor.tsx",
-      "line": 128,
-      "context": "jsx-text",
-      "snippet": "Cancel"
-    },
-    {
-      "file": "src/password-editor.tsx",
-      "line": 154,
-      "context": "attr:ariaLabel",
-      "snippet": "Generate password"
-    },
-    {
-      "file": "src/password-editor.tsx",
-      "line": 155,
-      "context": "attr:title",
-      "snippet": "Generate password"
-    },
-    {
-      "file": "src/password-editor.tsx",
-      "line": 162,
-      "context": "attr:ariaLabel",
-      "snippet": "Copy password"
-    },
-    {
-      "file": "src/password-editor.tsx",
-      "line": 163,
-      "context": "attr:title",
-      "snippet": "Copy password"
-    },
-    {
-      "file": "src/password-editor.tsx",
-      "line": 177,
-      "context": "attr:label",
-      "snippet": "Length"
-    },
-    {
-      "file": "src/password-editor.tsx",
-      "line": 190,
+      "line": 194,
       "context": "attr:label",
       "snippet": "A–Z"
     },
     {
       "file": "src/password-editor.tsx",
-      "line": 198,
+      "line": 202,
       "context": "attr:label",
       "snippet": "a–z"
     },
     {
       "file": "src/password-editor.tsx",
-      "line": 206,
+      "line": 210,
       "context": "attr:label",
       "snippet": "0–9"
     },
     {
       "file": "src/password-editor.tsx",
-      "line": 214,
+      "line": 218,
       "context": "attr:label",
       "snippet": "!@#$%^&*"
     },
@@ -5513,432 +5297,6 @@
       "snippet": "Stop"
     },
     {
-      "file": "src/secret-create-ask.tsx",
-      "line": 107,
-      "context": "attr:title",
-      "snippet": "Create secret"
-    },
-    {
-      "file": "src/secret-create-ask.tsx",
-      "line": 111,
-      "context": "jsx-text",
-      "snippet": "Cancel"
-    },
-    {
-      "file": "src/secret-create-ask.tsx",
-      "line": 118,
-      "context": "jsx-text",
-      "snippet": "Save to vault"
-    },
-    {
-      "file": "src/secret-create-ask.tsx",
-      "line": 127,
-      "context": "attr:label",
-      "snippet": "Name"
-    },
-    {
-      "file": "src/secret-create-ask.tsx",
-      "line": 134,
-      "context": "attr:placeholder",
-      "snippet": "e.g. prod password"
-    },
-    {
-      "file": "src/secret-create-ask.tsx",
-      "line": 136,
-      "context": "attr:label",
-      "snippet": "Kind"
-    },
-    {
-      "file": "src/secret-create-ask.tsx",
-      "line": 144,
-      "context": "attr:label",
-      "snippet": "Value"
-    },
-    {
-      "file": "src/secret-create-ask.tsx",
-      "line": 147,
-      "context": "attr:ariaLabel",
-      "snippet": "Value"
-    },
-    {
-      "file": "src/secret-create-ask.tsx",
-      "line": 148,
-      "context": "attr:placeholder",
-      "snippet": "Paste the secret value"
-    },
-    {
-      "file": "src/secret-create-ask.tsx",
-      "line": 153,
-      "context": "attr:title",
-      "snippet": "Save secret to vault"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 97,
-      "context": "prop:label",
-      "snippet": "Password"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 98,
-      "context": "prop:label",
-      "snippet": "Key passphrase"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 99,
-      "context": "prop:label",
-      "snippet": "Private key"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 322,
-      "context": "prop:message",
-      "snippet": "This window cannot add a private key."
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 337,
-      "context": "prop:message",
-      "snippet": "Key added without a passphrase — a connection using it will"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 347,
-      "context": "prop:message",
-      "snippet": "Added \"\""
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 352,
-      "context": "prop:message",
-      "snippet": "Could not add secret:"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 391,
-      "context": "prop:message",
-      "snippet": "Replaced the value of \"\""
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 396,
-      "context": "prop:message",
-      "snippet": "Could not replace the value:"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 421,
-      "context": "prop:message",
-      "snippet": "Renamed to \"\""
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 426,
-      "context": "prop:message",
-      "snippet": "Could not rename secret:"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 476,
-      "context": "prop:message",
-      "snippet": "Deleted \"\""
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 482,
-      "context": "prop:message",
-      "snippet": "Could not delete secret:"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 497,
-      "context": "attr:title",
-      "snippet": "Loading secrets…"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 501,
-      "context": "attr:title",
-      "snippet": "Protection is not set up yet"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 502,
-      "context": "attr:description",
-      "snippet": "nocx has nowhere to keep passwords until protection is set u"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 504,
-      "context": "jsx-text",
-      "snippet": "Set up protection"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 514,
-      "context": "attr:title",
-      "snippet": "Vault is locked"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 515,
-      "context": "attr:description",
-      "snippet": "Unlock the vault to see what secrets it holds."
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 520,
-      "context": "jsx-text",
-      "snippet": "Unlock vault"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 530,
-      "context": "attr:title",
-      "snippet": "Could not load secrets"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 533,
-      "context": "jsx-text",
-      "snippet": "Try again"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 552,
-      "context": "jsx-text",
-      "snippet": "+ Add a secret"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 563,
-      "context": "attr:title",
-      "snippet": "Vault is empty"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 564,
-      "context": "attr:description",
-      "snippet": "There are no secrets in the vault yet. Add one here, or save"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 573,
-      "context": "attr:title",
-      "snippet": "No secret matches that"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 574,
-      "context": "attr:description",
-      "snippet": "Nothing in the vault matches the filter."
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 590,
-      "context": "jsx-text",
-      "snippet": "connection"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 609,
-      "context": "jsx-text",
-      "snippet": "Store unreachable"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 613,
-      "context": "attr:ariaLabel",
-      "snippet": "Replace value of"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 614,
-      "context": "attr:title",
-      "snippet": "Replace value"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 621,
-      "context": "attr:ariaLabel",
-      "snippet": "Rename"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 622,
-      "context": "attr:title",
-      "snippet": "Rename secret"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 629,
-      "context": "attr:ariaLabel",
-      "snippet": "Delete"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 630,
-      "context": "attr:title",
-      "snippet": "Delete secret"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 652,
-      "context": "attr:title",
-      "snippet": "Add secret"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 656,
-      "context": "jsx-text",
-      "snippet": "Add secret"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 659,
-      "context": "jsx-text",
-      "snippet": "Cancel"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 668,
-      "context": "attr:label",
-      "snippet": "Name"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 669,
-      "context": "attr:placeholder",
-      "snippet": "e.g. prod password"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 680,
-      "context": "attr:ariaLabel",
-      "snippet": "Kind"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 685,
-      "context": "attr:label",
-      "snippet": "Value"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 747,
-      "context": "attr:title",
-      "snippet": "Replace value of \"\""
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 755,
-      "context": "jsx-text",
-      "snippet": "Replace value"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 758,
-      "context": "jsx-text",
-      "snippet": "Cancel"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 765,
-      "context": "jsx-text",
-      "snippet": "Write a new value. The stored value is never shown and stays"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 772,
-      "context": "attr:label",
-      "snippet": "New value"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 811,
-      "context": "attr:title",
-      "snippet": "Rename \"\""
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 819,
-      "context": "jsx-text",
-      "snippet": "Rename"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 822,
-      "context": "jsx-text",
-      "snippet": "Cancel"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 831,
-      "context": "attr:label",
-      "snippet": "Name"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 854,
-      "context": "attr:title",
-      "snippet": "Delete \"\"?"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 864,
-      "context": "jsx-text",
-      "snippet": "Cancel"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 873,
-      "context": "jsx-text",
-      "snippet": "Checking which connections use this secret…"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 876,
-      "context": "jsx-text",
-      "snippet": "Could not check which connections use this secret:"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 883,
-      "context": "jsx-text",
-      "snippet": "Try again"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 888,
-      "context": "jsx-text",
-      "snippet": "These connections use this secret and will stop using it:"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 898,
-      "context": "jsx-text",
-      "snippet": "connection"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 898,
-      "context": "jsx-text",
-      "snippet": "use it, but the connection name could"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 905,
-      "context": "jsx-text",
-      "snippet": "No connection uses this secret. The stored value is destroye"
-    },
-    {
-      "file": "src/secrets.tsx",
-      "line": 910,
-      "context": "jsx-text",
-      "snippet": "This cannot be undone."
-    },
-    {
       "file": "src/session-signal-undelivered.ts",
       "line": 66,
       "context": "prop:message",
@@ -5964,349 +5322,349 @@
     },
     {
       "file": "src/settings.tsx",
-      "line": 545,
+      "line": 566,
       "context": "prop:title",
       "snippet": "Backup & Restore"
     },
     {
       "file": "src/settings.tsx",
-      "line": 554,
+      "line": 575,
       "context": "prop:title",
       "snippet": "Connections"
     },
     {
       "file": "src/settings.tsx",
-      "line": 572,
+      "line": 593,
       "context": "prop:title",
       "snippet": "Secrets"
     },
     {
       "file": "src/settings.tsx",
-      "line": 579,
+      "line": 600,
       "context": "attr:title",
       "snippet": "Secrets"
     },
     {
       "file": "src/settings.tsx",
-      "line": 579,
+      "line": 600,
       "context": "jsx-text",
       "snippet": "Vault secrets are not available in this window."
     },
     {
       "file": "src/settings.tsx",
-      "line": 599,
+      "line": 620,
       "context": "prop:title",
       "snippet": "Protection"
     },
     {
       "file": "src/settings.tsx",
-      "line": 611,
+      "line": 632,
       "context": "attr:title",
       "snippet": "Protection"
     },
     {
       "file": "src/settings.tsx",
-      "line": 611,
+      "line": 632,
       "context": "jsx-text",
       "snippet": "Vault is not available in this window."
     },
     {
       "file": "src/settings.tsx",
-      "line": 621,
+      "line": 642,
       "context": "prop:title",
       "snippet": "Endpoints"
     },
     {
       "file": "src/settings.tsx",
-      "line": 631,
+      "line": 652,
       "context": "attr:title",
       "snippet": "Endpoints"
     },
     {
       "file": "src/settings.tsx",
-      "line": 631,
+      "line": 652,
       "context": "jsx-text",
       "snippet": "AI endpoints are not available in this window."
     },
     {
       "file": "src/settings.tsx",
-      "line": 650,
+      "line": 671,
       "context": "prop:title",
       "snippet": "Snippets"
     },
     {
       "file": "src/settings.tsx",
-      "line": 661,
+      "line": 682,
       "context": "attr:title",
       "snippet": "Snippets"
     },
     {
       "file": "src/settings.tsx",
-      "line": 661,
+      "line": 682,
       "context": "jsx-text",
       "snippet": "Snippets are not available in this window."
     },
     {
       "file": "src/settings.tsx",
-      "line": 678,
+      "line": 699,
       "context": "prop:title",
       "snippet": "Skills"
     },
     {
       "file": "src/settings.tsx",
-      "line": 686,
+      "line": 707,
       "context": "attr:title",
       "snippet": "Skills"
     },
     {
       "file": "src/settings.tsx",
-      "line": 686,
+      "line": 707,
       "context": "jsx-text",
       "snippet": "Skills are not available in this window."
     },
     {
       "file": "src/settings.tsx",
-      "line": 697,
+      "line": 718,
       "context": "prop:title",
       "snippet": "Roles"
     },
     {
       "file": "src/settings.tsx",
-      "line": 707,
+      "line": 728,
       "context": "attr:title",
       "snippet": "Roles"
     },
     {
       "file": "src/settings.tsx",
-      "line": 707,
+      "line": 728,
       "context": "jsx-text",
       "snippet": "Model roles are not available in this window."
     },
     {
       "file": "src/settings.tsx",
-      "line": 718,
+      "line": 739,
       "context": "prop:title",
       "snippet": "Assistant permissions"
     },
     {
       "file": "src/settings.tsx",
-      "line": 725,
+      "line": 746,
       "context": "attr:title",
       "snippet": "Assistant permissions"
     },
     {
       "file": "src/settings.tsx",
-      "line": 725,
+      "line": 746,
       "context": "jsx-text",
       "snippet": "Your assistant permissions are not available in this window."
     },
     {
       "file": "src/settings.tsx",
-      "line": 751,
+      "line": 772,
       "context": "prop:title",
       "snippet": "Agent access"
     },
     {
       "file": "src/settings.tsx",
-      "line": 758,
+      "line": 779,
       "context": "attr:title",
       "snippet": "Agent access"
     },
     {
       "file": "src/settings.tsx",
-      "line": 758,
+      "line": 779,
       "context": "jsx-text",
       "snippet": "Which agents are allowed is not available in this window."
     },
     {
       "file": "src/settings.tsx",
-      "line": 771,
+      "line": 792,
       "context": "prop:title",
       "snippet": "Agents"
     },
     {
       "file": "src/settings.tsx",
-      "line": 778,
+      "line": 799,
       "context": "attr:title",
       "snippet": "Agents"
     },
     {
       "file": "src/settings.tsx",
-      "line": 778,
+      "line": 799,
       "context": "jsx-text",
       "snippet": "Agent launch records are not available in this window."
     },
     {
       "file": "src/settings.tsx",
-      "line": 791,
+      "line": 812,
       "context": "prop:title",
       "snippet": "Agent screens"
     },
     {
       "file": "src/settings.tsx",
-      "line": 802,
+      "line": 823,
       "context": "attr:title",
       "snippet": "Agent screens"
     },
     {
       "file": "src/settings.tsx",
-      "line": 802,
+      "line": 823,
       "context": "jsx-text",
       "snippet": "What an agent is emitting is not available in this window."
     },
     {
       "file": "src/settings.tsx",
-      "line": 823,
+      "line": 844,
       "context": "prop:title",
       "snippet": "Agent rules"
     },
     {
       "file": "src/settings.tsx",
-      "line": 830,
+      "line": 851,
       "context": "attr:title",
       "snippet": "Agent rules"
     },
     {
       "file": "src/settings.tsx",
-      "line": 830,
+      "line": 851,
       "context": "jsx-text",
       "snippet": "Editing the rules nocx reads your agents with is not availab"
     },
     {
       "file": "src/settings.tsx",
-      "line": 843,
+      "line": 864,
       "context": "prop:title",
       "snippet": "Calibrate an agent"
     },
     {
       "file": "src/settings.tsx",
-      "line": 855,
+      "line": 876,
       "context": "attr:title",
       "snippet": "Calibrate an agent"
     },
     {
       "file": "src/settings.tsx",
-      "line": 855,
+      "line": 876,
       "context": "jsx-text",
       "snippet": "Calibrating an agent is not available in this window."
     },
     {
       "file": "src/settings.tsx",
-      "line": 878,
+      "line": 899,
       "context": "prop:title",
       "snippet": "Updates"
     },
     {
       "file": "src/settings.tsx",
-      "line": 890,
+      "line": 911,
       "context": "prop:title",
       "snippet": "About"
     },
     {
       "file": "src/settings.tsx",
-      "line": 1136,
+      "line": 1160,
       "context": "prop:message",
       "snippet": "Could not save \"\":"
     },
     {
       "file": "src/settings.tsx",
-      "line": 1163,
+      "line": 1187,
       "context": "prop:message",
       "snippet": "Could not reset \"\":"
     },
     {
       "file": "src/settings.tsx",
-      "line": 1179,
+      "line": 1203,
       "context": "prop:message",
       "snippet": "Could not save \"\":"
     },
     {
       "file": "src/settings.tsx",
-      "line": 1195,
+      "line": 1219,
       "context": "prop:message",
       "snippet": "Could not clear \"\":"
     },
     {
       "file": "src/settings.tsx",
-      "line": 1473,
+      "line": 1497,
       "context": "attr:title",
       "snippet": "Reset to default"
     },
     {
       "file": "src/settings.tsx",
-      "line": 1739,
+      "line": 1763,
       "context": "jsx-text",
       "snippet": "Replace"
     },
     {
       "file": "src/settings.tsx",
-      "line": 1742,
+      "line": 1766,
       "context": "jsx-text",
       "snippet": "Clear"
     },
     {
       "file": "src/settings.tsx",
-      "line": 1760,
+      "line": 1784,
       "context": "attr:title",
       "snippet": "Settings"
     },
     {
       "file": "src/settings.tsx",
-      "line": 1769,
+      "line": 1793,
       "context": "attr:placeholder",
       "snippet": "Search settings…"
     },
     {
       "file": "src/settings.tsx",
-      "line": 1770,
+      "line": 1794,
       "context": "attr:ariaLabel",
       "snippet": "Search settings"
     },
     {
       "file": "src/settings.tsx",
-      "line": 1781,
+      "line": 1805,
       "context": "attr:label",
       "snippet": "Modified"
     },
     {
       "file": "src/settings.tsx",
-      "line": 1795,
+      "line": 1819,
       "context": "attr:label",
       "snippet": "Settings sections"
     },
     {
       "file": "src/settings.tsx",
-      "line": 1851,
+      "line": 1875,
       "context": "jsx-text",
       "snippet": "Loading settings…"
     },
     {
       "file": "src/settings.tsx",
-      "line": 1856,
+      "line": 1880,
       "context": "jsx-text",
       "snippet": "Failed to load settings."
     },
     {
       "file": "src/settings.tsx",
-      "line": 1857,
+      "line": 1881,
       "context": "jsx-text",
       "snippet": "Retry"
     },
     {
       "file": "src/settings.tsx",
-      "line": 1870,
+      "line": 1894,
       "context": "jsx-text",
       "snippet": "No settings match your search."
     },
     {
       "file": "src/settings.tsx",
-      "line": 1901,
+      "line": 1925,
       "context": "attr:ariaLabel",
       "snippet": "nocx system prompt"
     },
     {
       "file": "src/settings.tsx",
-      "line": 1972,
+      "line": 1996,
       "context": "attr:title",
       "snippet": "What the person added"
     },
@@ -7560,435 +6918,51 @@
     },
     {
       "file": "src/vault.tsx",
-      "line": 347,
-      "context": "prop:message",
-      "snippet": "Could not check vault status. Password was not saved."
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 707,
-      "context": "prop:message",
-      "snippet": "Recovery code copied to the clipboard."
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 711,
-      "context": "prop:message",
-      "snippet": "Could not copy the recovery code. Write it down before closi"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 732,
-      "context": "attr:label",
-      "snippet": "Master passphrase"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 744,
-      "context": "attr:label",
-      "snippet": "Confirm passphrase"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 759,
-      "context": "jsx-text",
-      "snippet": "Your vault is ready. Save this recovery code somewhere safe"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 773,
-      "context": "jsx-text",
-      "snippet": "Download"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 800,
-      "context": "attr:ariaLabel",
-      "snippet": "Set Up Vault"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 802,
-      "context": "attr:title",
-      "snippet": "Set Up Vault"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 817,
-      "context": "jsx-text",
-      "snippet": "Cancel"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 833,
-      "context": "attr:title",
-      "snippet": "Recovery Code"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 842,
-      "context": "jsx-text",
-      "snippet": "Done"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 913,
-      "context": "prop:message",
-      "snippet": "Vault reset."
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 917,
-      "context": "prop:message",
-      "snippet": "Vault reset. Set up protection to start again."
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 934,
-      "context": "attr:title",
-      "snippet": "Reset the vault"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 946,
-      "context": "jsx-text",
-      "snippet": "Cancel"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 953,
-      "context": "jsx-text",
-      "snippet": "This deletes every password and key passphrase nocx has save"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 963,
+      "line": 977,
       "context": "jsx-text",
       "snippet": "will be deleted."
     },
     {
       "file": "src/vault.tsx",
-      "line": 964,
-      "context": "jsx-text",
-      "snippet": "will ask for a password again."
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 969,
-      "context": "jsx-text",
-      "snippet": "There are no saved secrets to delete."
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 976,
+      "line": 992,
       "context": "jsx-text",
       "snippet": "The system keychain is not answering, so secrets stored ther"
     },
     {
       "file": "src/vault.tsx",
-      "line": 988,
-      "context": "attr:label",
-      "snippet": "I understand this cannot be undone"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1082,
-      "context": "prop:message",
-      "snippet": "Vault unlocked."
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1099,
-      "context": "jsx-text",
-      "snippet": "Passphrase"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1105,
-      "context": "jsx-text",
-      "snippet": "Recovery code"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1166,
-      "context": "jsx-text",
-      "snippet": "Cancel"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1236,
-      "context": "prop:message",
-      "snippet": "Passphrase changed."
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1250,
-      "context": "attr:ariaLabel",
-      "snippet": "Change vault passphrase"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1252,
-      "context": "attr:title",
-      "snippet": "Change vault passphrase"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1274,
-      "context": "jsx-text",
-      "snippet": "Cancel"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1288,
-      "context": "jsx-text",
-      "snippet": "I know my passphrase"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1297,
-      "context": "jsx-text",
-      "snippet": "I have a recovery code"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1305,
-      "context": "attr:label",
-      "snippet": "Current vault passphrase"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1318,
-      "context": "attr:label",
-      "snippet": "Vault recovery code"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1331,
-      "context": "attr:label",
-      "snippet": "New vault passphrase"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1341,
-      "context": "attr:label",
-      "snippet": "Confirm new vault passphrase"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1351,
+      "line": 1367,
       "context": "jsx-text",
       "snippet": "Changing the passphrase requires your current passphrase or"
     },
     {
       "file": "src/vault.tsx",
-      "line": 1408,
-      "context": "prop:message",
-      "snippet": "Recovery code copied to the clipboard."
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1413,
-      "context": "prop:message",
-      "snippet": "Could not copy the recovery code. Write it down before closi"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1432,
-      "context": "attr:ariaLabel",
-      "snippet": "Reissue recovery code"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1434,
-      "context": "attr:title",
-      "snippet": "Reissue recovery code"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1451,
-      "context": "attr:label",
-      "snippet": "Current vault passphrase"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1477,
-      "context": "jsx-text",
-      "snippet": "Cancel"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1484,
+      "line": 1500,
       "context": "jsx-text",
       "snippet": "Your new recovery code is shown below. Copy it now — it will"
     },
     {
       "file": "src/vault.tsx",
-      "line": 1494,
-      "context": "jsx-text",
-      "snippet": "Done"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1532,
-      "context": "prop:message",
-      "snippet": "Vault locked."
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1545,
-      "context": "prop:message",
-      "snippet": "Default provider updated."
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1577,
-      "context": "prop:label",
-      "snippet": "Never"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1578,
+      "line": 1594,
       "context": "prop:label",
       "snippet": "5 min"
     },
     {
       "file": "src/vault.tsx",
-      "line": 1579,
+      "line": 1595,
       "context": "prop:label",
       "snippet": "15 min"
     },
     {
       "file": "src/vault.tsx",
-      "line": 1580,
+      "line": 1596,
       "context": "prop:label",
       "snippet": "30 min"
     },
     {
       "file": "src/vault.tsx",
-      "line": 1581,
+      "line": 1597,
       "context": "prop:label",
       "snippet": "60 min"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1588,
-      "context": "prop:message",
-      "snippet": "Auto-lock timeout updated."
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1614,
-      "context": "prop:message",
-      "snippet": "is no longer registered."
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1712,
-      "context": "attr:title",
-      "snippet": "Where it is stored"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1731,
-      "context": "jsx-text",
-      "snippet": "New secrets go here"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1741,
-      "context": "jsx-text",
-      "snippet": "Store new secrets here"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1750,
-      "context": "jsx-text",
-      "snippet": "Test"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1758,
-      "context": "jsx-text",
-      "snippet": "· Last checked:"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1772,
-      "context": "attr:title",
-      "snippet": "Protection"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1777,
-      "context": "attr:label",
-      "snippet": "Lock automatically after"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1790,
-      "context": "attr:label",
-      "snippet": "Change passphrase"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1792,
-      "context": "attr:description",
-      "snippet": "The passphrase that unlocks the vault on a machine with no O"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1798,
-      "context": "jsx-text",
-      "snippet": "Change passphrase"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1804,
-      "context": "attr:label",
-      "snippet": "Recovery code"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1806,
-      "context": "attr:description",
-      "snippet": "The one-time code that recovers the vault when the passphras"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1812,
-      "context": "jsx-text",
-      "snippet": "Reissue recovery code"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1822,
-      "context": "attr:label",
-      "snippet": "Reset the vault"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1824,
-      "context": "attr:description",
-      "snippet": "Delete every saved password and key passphrase and start aga"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1826,
-      "context": "jsx-text",
-      "snippet": "Reset the vault"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1835,
-      "context": "jsx-text",
-      "snippet": "Diagnostics"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1843,
-      "context": "attr:label",
-      "snippet": "State"
     },
     {
       "file": "src/workspace-chip.tsx",

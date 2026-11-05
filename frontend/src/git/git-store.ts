@@ -72,7 +72,7 @@
 // states it.
 
 import { createMemo, createSignal, untrack } from 'solid-js'
-import { RpcError } from '../dispatcher'
+import { isSaturationRefusal, RpcError } from '../dispatcher'
 import { POLL_INTERVAL_MS } from '../ports'
 import type { ActiveOrigin } from '../pane-content'
 import type { GitPanelServices, GitDiffSide } from './git-client'
@@ -188,6 +188,15 @@ export interface GitStore {
   mutationInFlight(): boolean
   /** A rejected mutation call's account; cleared by the next mutation. */
   mutationError(): GitMutationError | null
+  /** A mutation the control plane REFUSED before it ran (ADR-8eej3e66
+   *  stage 1). Its own state, because it is not a failed mutation: nothing
+   *  is stale, nothing happened, and the same action can be asked again.
+   *  The person gets the sentence here and the retry below; a toast would be
+   *  the centralised "busy" surface this record removes. Null until a
+   *  refusal, cleared by the next mutation or its own retry. */
+  mutationRefused(): string | null
+  /** Run the refused mutation again — the explicit retry the refusal owes. */
+  retryRefusedMutation(): void
   stage(paths: string[]): void
   unstage(paths: string[]): void
   /** Whole-repository stage — refused while any entry is conflicted (D19):
@@ -404,6 +413,11 @@ export function createGitStore(
   const [envReason, setEnvReason] = createSignal<string | null>(null)
   const [mutationInFlight, setMutationInFlight] = createSignal(false)
   const [mutationError, setMutationError] = createSignal<GitMutationError | null>(null)
+  /** A mutation the control plane refused before it ran (see the interface).
+   *  `refusedRetry` is the same action, kept so the person can ask again
+   *  without hunting for the row they pressed. */
+  const [mutationRefused, setMutationRefused] = createSignal<string | null>(null)
+  let refusedRetry: (() => void) | null = null
   const [commitSubject, setCommitSubject] = createSignal('')
   const [commitBody, setCommitBody] = createSignal('')
   const [amend, setAmend] = createSignal(false)
@@ -576,7 +590,11 @@ export function createGitStore(
     const ctx: ScopeCtx = { paneId: o.paneId, generation, bindingId: b.bindingId, epoch }
     const scheduleVersion = pollScheduleVersion
     pollInFlight = true
-    services.status(b.bindingId).then(
+    // The POLL is the panel's own repeating work and is background: a refusal
+    // of it is never turned into a sentence for the person. Every other status
+    // read here answers something a person did (a refresh, a mutation that
+    // just landed) and stays theirs.
+    services.status(b.bindingId, options.poll === true ? 'background' : 'person').then(
       (res) => {
         pollInFlight = false
         const changed = applyStatus(ctx, res.status)
@@ -987,7 +1005,13 @@ export function createGitStore(
   /** Begin a mutation under the binding as it is at the moment of the
    *  call (untracked): at most one in flight (D18), the epoch bumped, the
    *  lane taken. Null when the lane is busy or there is nothing to mutate. */
-  function beginMutation(): { ctx: ScopeCtx; b: GitBinding } | null {
+  /** `what` names the action for the refusal's sentence ("Couldn't stage
+   *  that file"), and `retry` is the same action again — the two halves a
+   *  refused call owes the person (ADR-8eej3e66 §8). */
+  function beginMutation(
+    what: string,
+    retry: () => void,
+  ): { ctx: ScopeCtx; b: GitBinding; what: string; retry: () => void } | null {
     if (mutationInFlight()) return null
     const o = untrack(origin)
     const b = untrack(binding)
@@ -997,14 +1021,30 @@ export function createGitStore(
     const ctx: ScopeCtx = { paneId: o.paneId, generation, bindingId: b.bindingId, epoch }
     setMutationInFlight(true)
     setMutationError(null)
-    return { ctx, b }
+    setMutationRefused(null)
+    refusedRetry = null
+    return { ctx, b, what, retry }
   }
 
-  function onMutationError(ctx: ScopeCtx, e: unknown): void {
+  function onMutationError(
+    ctx: ScopeCtx,
+    e: unknown,
+    action: { what: string; retry: () => void },
+  ): void {
     setMutationInFlight(false)
     if (!scopeCurrent(ctx)) return
     if (isUnknownBinding(e)) {
       reResolve()
+      return
+    }
+    if (isSaturationRefusal(e)) {
+      // The call never ran. Nothing is stale, nothing happened, and the one
+      // useful thing to say is what failed plus the same action once more —
+      // never a sentence about the terminal being busy, and never a toast
+      // over whatever else the person is doing (ADR-8eej3e66 stage 1).
+      refusedRetry = action.retry
+      setMutationRefused(`${action.what}. ${messageOf(e)}`)
+      finishMutationPoll(ctx)
       return
     }
     // The mutation may have happened while the response failed (D17's
@@ -1015,9 +1055,22 @@ export function createGitStore(
     finishMutationPoll(ctx)
   }
 
+  /** The refused mutation's own retry: the same action, asked by hand. */
+  function retryRefusedMutation(): void {
+    const retry = refusedRetry
+    if (retry === null) return
+    refusedRetry = null
+    setMutationRefused(null)
+    retry()
+  }
+
   function stage(paths: string[]): void {
     if (paths.length === 0) return
-    const m = beginMutation()
+    const retry = (): void => stage(paths)
+    const m = beginMutation(
+      paths.length === 1 ? "Couldn't stage that file" : `Couldn't stage ${paths.length} files`,
+      retry,
+    )
     if (m === null) return
     services.stage(m.b.bindingId, paths).then(
       (res) => {
@@ -1025,13 +1078,17 @@ export function createGitStore(
         applyStatus(m.ctx, res.status)
         finishMutationPoll(m.ctx)
       },
-      (e) => onMutationError(m.ctx, e),
+      (e) => onMutationError(m.ctx, e, m),
     )
   }
 
   function unstage(paths: string[]): void {
     if (paths.length === 0) return
-    const m = beginMutation()
+    const retry = (): void => unstage(paths)
+    const m = beginMutation(
+      paths.length === 1 ? "Couldn't unstage that file" : `Couldn't unstage ${paths.length} files`,
+      retry,
+    )
     if (m === null) return
     services.unstage(m.b.bindingId, paths).then(
       (res) => {
@@ -1039,7 +1096,7 @@ export function createGitStore(
         applyStatus(m.ctx, res.status)
         finishMutationPoll(m.ctx)
       },
-      (e) => onMutationError(m.ctx, e),
+      (e) => onMutationError(m.ctx, e, m),
     )
   }
 
@@ -1061,7 +1118,7 @@ export function createGitStore(
 
   function stageAll(): void {
     if (conflictsPresent()) return
-    const m = beginMutation()
+    const m = beginMutation("Couldn't stage the whole repository", stageAll)
     if (m === null) return
     services.stageAll(m.b.bindingId).then(
       (res) => {
@@ -1069,13 +1126,13 @@ export function createGitStore(
         applyStatus(m.ctx, res.status)
         finishMutationPoll(m.ctx)
       },
-      (e) => onMutationError(m.ctx, e),
+      (e) => onMutationError(m.ctx, e, m),
     )
   }
 
   function unstageAll(): void {
     if (conflictsPresent()) return
-    const m = beginMutation()
+    const m = beginMutation("Couldn't unstage the whole repository", unstageAll)
     if (m === null) return
     services.unstageAll(m.b.bindingId).then(
       (res) => {
@@ -1083,7 +1140,7 @@ export function createGitStore(
         applyStatus(m.ctx, res.status)
         finishMutationPoll(m.ctx)
       },
-      (e) => onMutationError(m.ctx, e),
+      (e) => onMutationError(m.ctx, e, m),
     )
   }
 
@@ -1129,14 +1186,16 @@ export function createGitStore(
   function commit(): void {
     if (mutationInFlight()) return
     if (commitSubject().trim() === '') return
-    const m = beginMutation()
+    // The message itself is never cleared by a refusal: the person typed it,
+    // and re-asking must not cost them the words.
+    const m = beginMutation("Couldn't commit", commit)
     if (m === null) return
     setCommitState('running')
     services.commit(m.b.bindingId, fullCommitMessage(), amend()).then(
       (res) => applyCommitResult(m.ctx, res),
       (e) => {
         setCommitState('idle')
-        onMutationError(m.ctx, e)
+        onMutationError(m.ctx, e, m)
       },
     )
   }
@@ -1247,6 +1306,8 @@ export function createGitStore(
     refresh,
     mutationInFlight,
     mutationError,
+    mutationRefused,
+    retryRefusedMutation,
     stage,
     unstage,
     stageAll,

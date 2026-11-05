@@ -287,7 +287,7 @@ describe('files sidebar view', () => {
         '/',
       ),
     )
-    await vi.waitFor(() => expect(open).toHaveBeenCalledWith('s-local', '/'))
+    await vi.waitFor(() => expect(open).toHaveBeenCalledWith('s-local', '/', 'background'))
 
     // First in the view zone — before Ports.
     const viewButtons = bar.querySelectorAll<HTMLElement>('.activity-bar-top [data-view]')
@@ -347,7 +347,9 @@ describe('files sidebar view', () => {
     expect(disclosure).not.toBeNull()
     disclosure!.click()
 
-    await vi.waitFor(() => expect(list).toHaveBeenCalledWith('b1', '/docs', 0, expect.any(Number)))
+    await vi.waitFor(() =>
+      expect(list).toHaveBeenCalledWith('b1', '/docs', 0, expect.any(Number), 'person'),
+    )
     await vi.waitFor(() => expect(rowNamed(panel, 'notes.md')).not.toBeUndefined())
   })
 
@@ -697,7 +699,9 @@ describe('files sidebar view', () => {
     await vi.waitFor(() => expect(rowNamed(panel, 'loop')).not.toBeUndefined())
 
     rowNamed(panel, 'loop').querySelector<HTMLElement>('.ui-tree-row__disclosure')!.click()
-    await vi.waitFor(() => expect(list).toHaveBeenCalledWith('b1', '/loop', 0, expect.any(Number)))
+    await vi.waitFor(() =>
+      expect(list).toHaveBeenCalledWith('b1', '/loop', 0, expect.any(Number), 'person'),
+    )
 
     // Renders cyclic (a leaf — no disclosure), and no children were listed.
     // data-cyclic lives on the kit row (.ui-tree-row), not the surface
@@ -2027,93 +2031,132 @@ describe('the visibility signal (nocx-8hdia.1)', () => {
    *  opener's mock is held as a bare reference above: unbound-method exists
    *  to catch a detached method, and reaching through services.visible to
    *  its .mock is exactly that detachment. */
-  function recordingServices(): { services: FilesPanelServices; sent: boolean[] } {
+  /** Services that record BOTH the visibility signals and the opens, kept as
+   *  bare arrays rather than read back off the object — the same reason the
+   *  opener's mock is a bare reference. */
+  function recordingServices(): {
+    services: FilesPanelServices
+    sent: boolean[]
+    opened: string[]
+  } {
     const sent: boolean[] = []
+    const opened: string[] = []
     const services = fakeServices({
+      open: (sessionId: string) => {
+        opened.push(sessionId)
+        return Promise.resolve(openFixture())
+      },
       visible: (_bindingId: string, isVisible: boolean) => {
         sent.push(isVisible)
         return Promise.resolve({})
       },
     })
-    return { services, sent }
+    return { services, sent, opened }
   }
+
+  it('starts its work when the panel is first on screen, and only then', async () => {
+    // ADR-8eej3e66 §9: a panel nobody is looking at opens nothing. The
+    // sidebar mounts with Files in front, so this is the shown case — the
+    // never-shown case is files-store.test.ts's, where the store is the
+    // subject. What is asserted here is that the mount is what starts it.
+    const { services, opened } = recordingServices()
+    await mountApp(services)
+    await vi.waitFor(() => expect(opened).toEqual(['s-local']))
+    const mocks = services as unknown as Record<string, ReturnType<typeof vi.fn>>
+    expect(mocks.list).toHaveBeenCalled()
+    expect(mocks.watch).toHaveBeenCalled()
+  })
 
   it('tells the backend when the panel leaves the screen, and when it comes back', async () => {
     // The Files poll runs on the BACKEND, so unlike Git and Ports this panel
-    // cannot stop it by not asking — the flag has to travel. One poll tick
-    // is a full enumeration of every watched directory, so a collapsed
-    // sidebar used to cost exactly as much as an open one.
-    const { services, sent } = recordingServices()
+    // cannot stop it by not asking — the flag has to travel. A binding is
+    // only ever minted for a panel that is on screen (the store's own gate),
+    // so the FIRST thing the backend hears is "hidden", and the transition
+    // back is what resumes the poll it paused.
+    const { services, sent, opened } = recordingServices()
     const { bar, panel } = await mountApp(services)
-    await vi.waitFor(() => expect(sent).toEqual([true]))
+    await vi.waitFor(() => expect(opened).toEqual(['s-local']))
+    expect(sent).toEqual([])
 
     filesIcon(bar).click()
     await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(true))
-    await vi.waitFor(() => expect(sent).toEqual([true, false]))
+    await vi.waitFor(() => expect(sent).toEqual([false]))
 
     filesIcon(bar).click()
     await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(false))
-    await vi.waitFor(() => expect(sent).toEqual([true, false, true]))
+    await vi.waitFor(() => expect(sent).toEqual([false, true]))
   })
 
   it('counts another sidebar view being in front as off screen', async () => {
     // A view that is not rendered is not being looked at, and the sidebar
     // already says so — SidebarViewProps.visible is false for every view but
     // the one in front. Files was the only panel ignoring it.
-    const { services, sent } = recordingServices()
+    const { services, sent, opened } = recordingServices()
     const { handle } = await mountApp(services)
-    await vi.waitFor(() => expect(sent).toEqual([true]))
+    await vi.waitFor(() => expect(opened).toEqual(['s-local']))
 
     handle.revealView('ports')
-    await vi.waitFor(() => expect(sent).toEqual([true, false]))
+    await vi.waitFor(() => expect(sent).toEqual([false]))
 
     handle.revealView(FILES_VIEW_ID)
-    await vi.waitFor(() => expect(sent).toEqual([true, false, true]))
+    await vi.waitFor(() => expect(sent).toEqual([false, true]))
+    // The binding survived the glance at Ports: no second open, no second
+    // watch set, no tree rebuilt from scratch.
+    expect(opened).toEqual(['s-local'])
   })
 
   it('does not re-send a value the backend already has', async () => {
-    // The effect refires on a re-scope as well as on a transition, and a
+    // The effect refires whenever the visibility accessor re-evaluates, and a
     // repeated "visible: true" that reached the backend would make the panel
     // a poll trigger the cadence does not govern — every becoming-visible
     // edge costs one immediate enumeration.
-    const { services, sent } = recordingServices()
+    const { services, sent, opened } = recordingServices()
     const { filesStore } = await mountApp(services)
-    await vi.waitFor(() => expect(sent).toEqual([true]))
+    await vi.waitFor(() => expect(opened).toEqual(['s-local']))
 
     filesStore.setVisible(true)
     filesStore.setVisible(true)
-    expect(sent).toEqual([true])
+    expect(sent).toEqual([])
   })
 
   it('hiding the window tells Files to stop its background work, then showing resumes it', async () => {
     const restore = setDocumentHidden(false)
     try {
-      const { services, sent } = recordingServices()
+      const { services, sent, opened } = recordingServices()
       await mountApp(services)
-      await vi.waitFor(() => expect(sent).toEqual([true]))
+      await vi.waitFor(() => expect(opened).toEqual(['s-local']))
 
       const hide = setDocumentHidden(true)
       document.dispatchEvent(new Event('visibilitychange'))
-      await vi.waitFor(() => expect(sent).toEqual([true, false]))
+      await vi.waitFor(() => expect(sent).toEqual([false]))
 
       hide()
       document.dispatchEvent(new Event('visibilitychange'))
-      await vi.waitFor(() => expect(sent).toEqual([true, false, true]))
+      await vi.waitFor(() => expect(sent).toEqual([false, true]))
     } finally {
       restore()
     }
   })
 
-  it('a window already hidden at mount starts Files hidden and resumes on show', async () => {
+  it('a window already hidden at mount opens nothing, and starts when it is shown', async () => {
+    // The app being hidden is the panel being off screen, and a panel nobody
+    // can see costs nothing: no binding, no listing, no watch.
     const restore = setDocumentHidden(true)
     try {
-      const { services, sent } = recordingServices()
+      const { services, sent, opened } = recordingServices()
       await mountApp(services)
-      await vi.waitFor(() => expect(sent).toEqual([false]))
+      await new Promise((r) => setTimeout(r, 0))
+      expect(opened).toEqual([])
+      // Bare references: reading a method off the object is what
+      // `unbound-method` refuses, and these two are the ones that matter.
+      const mocks = services as unknown as Record<string, ReturnType<typeof vi.fn>>
+      expect(mocks.list).not.toHaveBeenCalled()
+      expect(mocks.watch).not.toHaveBeenCalled()
+      expect(sent).toEqual([])
 
       restore()
       document.dispatchEvent(new Event('visibilitychange'))
-      await vi.waitFor(() => expect(sent).toEqual([false, true]))
+      await vi.waitFor(() => expect(opened).toEqual(['s-local']))
     } finally {
       restore()
     }

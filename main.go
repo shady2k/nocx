@@ -973,18 +973,7 @@ func (w *WailsApp) showNotices() {
 	for _, n := range w.notices.drain() {
 		w.logger.Warn("nocx: telling the user what the launcher did",
 			"kind", string(n.Kind), "message", n.Message)
-		// NOT ON THE CALLER'S GOROUTINE (nocx-vh2hr.1.19). On GTK3 a Wails
-		// message dialog runs gtk_dialog_run from the thread that raises it,
-		// and a binding call is dispatched on that same thread — so a dialog
-		// shown inline holds the binding open until somebody presses it.
-		// Raised from ResolveBackend that is the renderer's FIRST call: its
-		// promise never settles, it never learns the backend's address, it
-		// never connects, the first pane never opens and ReportHealthy never
-		// runs. The journal is then left for the next launch to count, which
-		// is a silent rollback of a good update. Handing the dialog to its
-		// own goroutine makes it queue for the main loop like any other
-		// dispatch, so the resolution returns with the dialog still up.
-		go w.shell.Present(n)
+		w.shell.Present(n)
 	}
 }
 
@@ -1373,18 +1362,13 @@ func (w *WailsApp) ReportHealthy() error {
 // still serving a healthy window, the update waits for it to turn over,
 // and the surface offers to finish it with a full restart, never a force.
 //
-// A READ DOES NOT SETTLE AND DOES NOT COUNT (nocx-vh2hr.1.19). This used to
-// reconcile first, and Reconcile charges the pending transaction one launch
-// attempt — so merely reading the state spent one. Startup reconciliation has
-// already run in ServiceStartup, before the webview loads, and this binding is
-// called on every window start and again whenever the failed-update details
-// are copied; three reads in one window's life rolled a good update back
-// without a second launch. The transaction is settled where a launch begins,
-// and nowhere else.
+// Reconcile runs first so a journal that the launch is about to settle is
+// not read as pending work.
 func (w *WailsApp) GetUpdateState() update.UpdateState {
 	if w.updater == nil {
 		return update.UpdateState{}
 	}
+	_ = w.updater.Reconcile(context.Background())
 	return w.updater.State(context.Background())
 }
 

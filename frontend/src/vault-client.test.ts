@@ -30,8 +30,14 @@ describe('VaultClient inventory intent', () => {
     })
     await expect(client.reportInventory()).resolves.toEqual({ entries: [] })
     await expect(client.inventory()).resolves.toEqual({ entries: [] })
+    // The intent rides the call's options object (ADR-8eej3e66 §2: the
+    // invocation carries `intent` and `origin` together, absent meaning the
+    // person's own operation). What this test is about is unchanged and is
+    // the second line: ONLY the passive read is marked a report, and the
+    // active read passes nothing at all, so the seam's default still means
+    // "an operation that may raise the unlock".
     expect(calls).toEqual([
-      ['vault.inventory', {}, undefined, 'report'],
+      ['vault.inventory', {}, undefined, { intent: 'report' }],
       ['vault.inventory', {}],
     ])
   })

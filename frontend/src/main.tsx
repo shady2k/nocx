@@ -866,17 +866,18 @@ function main(): void {
     // disappears silently, in production only, while every test stays
     // green because the tests substitute their own services object.
     ...filesServices,
-    open: async (sessionId, rootPath) => {
-      const res = await filesServices.open(sessionId, rootPath)
+    open: async (...args: Parameters<FilesPanelServices['open']>) => {
+      const res = await filesServices.open(...args)
       liveFilesBindings.add(res.bindingId)
       return res
     },
-    close: async (bindingId) => {
+    close: async (...args: Parameters<FilesPanelServices['close']>) => {
+      const [bindingId] = args
       liveFilesBindings.delete(bindingId)
       const cbs = filesBindings.get(bindingId)
       filesBindings.delete(bindingId)
       if (cbs !== undefined) for (const cb of [...cbs]) cb(false)
-      return filesServices.close(bindingId)
+      return filesServices.close(...args)
     },
   }
   const onFilesBindingLiveness = (bindingId: string, cb: (live: boolean) => void): (() => void) => {
@@ -983,9 +984,13 @@ function main(): void {
         // session ever seen and outlived its tab, and `files.open` refuses a
         // session the registry no longer has open.
         localSession: () => tm.anyLocalSession(),
-        open: (sessionId, rootPath) => filesServicesTracked.open(sessionId, rootPath),
-        watch: (bindingId, paths) => filesServicesTracked.watch(bindingId, paths),
-        close: (bindingId) => filesServicesTracked.close(bindingId),
+        // The workbench's collection CARRIER (api-client.ts CollectionWatchPort):
+        // it exists so a folder rewritten on disk invalidates the tree. All
+        // three are the store's own bookkeeping, never a person's click —
+        // BACKGROUND, so a refusal is quiet and retried by the next sync.
+        open: (sessionId, rootPath) => filesServicesTracked.open(sessionId, rootPath, 'background'),
+        watch: (bindingId, paths) => filesServicesTracked.watch(bindingId, paths, 'background'),
+        close: (bindingId) => filesServicesTracked.close(bindingId, 'background'),
         subscribeChanged: (handler) => filesServicesTracked.subscribeFilesChanged(handler),
         onConnect: (handler) => filesServicesTracked.onConnect(handler),
       },
@@ -1141,7 +1146,12 @@ function main(): void {
   // nocx-9bpeq.16 wires it in — the prompt line, so the two never mint two
   // bindings for one session.
   const sessionHome = createSessionHomeSource({
-    openBinding: (sessionId, rootPath) => filesServicesTracked.open(sessionId, rootPath),
+    // BACKGROUND: the pane's prompt line asks for its home because the shell
+    // reported a cwd, never because somebody pressed anything. A refusal here
+    // is retried by the next verified cwd, and must never become a sentence
+    // over the person's work (ADR-8eej3e66 stage 1).
+    openBinding: (sessionId, rootPath) =>
+      filesServicesTracked.open(sessionId, rootPath, 'background'),
     onBindingLiveness: onFilesBindingLiveness,
   })
   registerTerminalLinks({
@@ -1166,10 +1176,13 @@ function main(): void {
   // same tracked git open/close the panel's own binding-liveness registry
   // already watches, so an ambient branch read participates in it too.
   tm.sessionHome = sessionHome
+  // The branch source is the prompt line's ambient decoration: it asks when a
+  // command settles, on its own account. BACKGROUND for both calls, so a
+  // refusal is the panel's silence and the next settle asks again.
   tm.createBranchSource = () =>
     createBranchSource({
-      open: (sessionId, cwd) => gitServicesTracked.open(sessionId, cwd),
-      close: (bindingId) => gitServicesTracked.close(bindingId),
+      open: (sessionId, cwd) => gitServicesTracked.open(sessionId, cwd, 'background'),
+      close: (bindingId) => gitServicesTracked.close(bindingId, 'background'),
     })
   const gitView = createGitView({
     services: gitServicesTracked,

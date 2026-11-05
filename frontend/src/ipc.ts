@@ -1,6 +1,6 @@
 import { decodeFrame, encodeFrame, isSessionID, MSG_TYPE_METADATA } from './frame'
 import type { DecodedFrame } from './frame'
-import { Dispatcher, RpcError, type RpcIntent } from './dispatcher'
+import { Dispatcher, RpcError, type CallOptions } from './dispatcher'
 import type { AttachResult } from './generated/attach'
 import type { Exit } from './generated/exit'
 import type { Open } from './generated/open'
@@ -1223,9 +1223,9 @@ export class WSClient {
     method: string,
     params: unknown,
     signal?: AbortSignal,
-    intent: RpcIntent = 'operation',
+    options: CallOptions = {},
   ): Promise<T> {
-    return this.dispatcher.call<T>(method, params, signal, intent)
+    return this.dispatcher.call<T>(method, params, signal, options)
   }
 
   /** Tell the backend a pane closed, so its PENDING CAPTURES die with it

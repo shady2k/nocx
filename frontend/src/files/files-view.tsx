@@ -174,18 +174,16 @@ function FilesPanel(props: FilesPanelProps) {
       (origin) => props.store.rescope(origin),
     ),
   )
-  // Visibility travels to the backend on every transition AND on every
-  // re-scope, which is why both are sources: a rescope mints a new binding
-  // whose watcher starts visible, so a panel that is hidden at that moment
-  // has to say so again. This is the Ports shape (ports.tsx: an on() over
-  // [profileId, visible]), and it is the same rule for the same reason.
+  // Visibility is the switch that starts this panel's work at all
+  // (ADR-8eej3e66 §9): while it is false the store opens no binding, lists
+  // nothing and watches nothing, so the panel being mounted while the
+  // sidebar is collapsed costs nothing. A re-scope no longer needs a second
+  // source here — the store re-asserts the current visibility itself when it
+  // mints a binding (ensureScope).
   createEffect(
     on(
-      [() => props.store.binding()?.bindingId ?? null, () => props.visible()],
-      ([bindingId, isVisible]) => {
-        if (bindingId === null) return
-        props.store.setVisible(isVisible)
-      },
+      () => props.visible(),
+      (isVisible) => props.store.setVisible(isVisible),
     ),
   )
   // Collapsing the sidebar leaves this panel MOUNTED with visible() false,

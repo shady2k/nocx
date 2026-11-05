@@ -1,13 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { EndpointProvider, EndpointResult } from './endpoint'
-import {
-  CONNECT_ATTEMPT_TIMEOUT_MS,
-  Dispatcher,
-  HEARTBEAT_IDLE_WINDOW_MS,
-  SATURATION_TOAST_WINDOW_MS,
-  resetSaturationToastDedup,
-} from './dispatcher'
+import { CONNECT_ATTEMPT_TIMEOUT_MS, Dispatcher, HEARTBEAT_IDLE_WINDOW_MS } from './dispatcher'
+import { log } from './log'
 import { clearToasts, toasts } from './ui/toast'
 
 /**
@@ -138,20 +133,6 @@ async function connected(d: Dispatcher): Promise<void> {
   await flush()
 }
 
-/**
- * Start an in-flight request and return its id. The promise's rejection is
- * swallowed here — the test delivers the response itself and asserts on the
- * returned promise from the caller's own `call`.
- */
-function startCall(d: Dispatcher, method = 'some.method'): number {
-  const call = d.call(method, {})
-  call.catch(() => {})
-  const sent = socket().requests()
-  const id = sent[sent.length - 1].id
-  if (id === undefined) throw new Error('no request id')
-  return id
-}
-
 function deliverSaturation(id: number): void {
   socket().deliverText({ jsonrpc: '2.0', id, error: SATURATION_ERROR })
 }
@@ -160,7 +141,6 @@ beforeEach(() => {
   MockWebSocket.last = null
   MockWebSocket.all = []
   vi.stubGlobal('WebSocket', MockWebSocket)
-  resetSaturationToastDedup()
   vi.useFakeTimers()
   vi.spyOn(Math, 'random').mockReturnValue(0)
 })
@@ -556,7 +536,7 @@ describe('dispatcher vault intent', () => {
       message: 'vault.inventory: vault is sealed',
       data: { reason: 'vault-sealed' },
     }
-    const report = d.call('vault.inventory', {}, undefined, 'report')
+    const report = d.call('vault.inventory', {}, undefined, { intent: 'report' })
     const operation = d.call('vault.inventory', {})
     const [reportRequest, operationRequest] = socket().requests()
     expect(reportRequest).toEqual({
@@ -751,50 +731,102 @@ describe('dispatcher heartbeat', () => {
   })
 })
 
-describe('control-plane saturation visibility', () => {
-  it('surfaces a refused request to the user without the calling surface opting in', async () => {
+describe('control-plane refusals (ADR-8eej3e66 stage 1)', () => {
+  // Stage 1 removes the refusal TOAST and nothing underneath: the backend
+  // still refuses, the wire discriminator still arrives, and every surface a
+  // person uses now owns the refusal it caused. What the dispatcher owes is
+  // (a) a sentence that names the cause without the words "busy" or "try
+  // again in a moment", (b) a record with the invocation's origin, and (c) no
+  // toast on either path — the failure is shown where it happened or not at
+  // all, never centrally over whatever the person is doing.
+  it('rejects a person call with a sentence naming the cause, and raises no toast', async () => {
     const provider = new TestEndpointProvider()
     const d = new Dispatcher(provider)
     await connected(d)
     const call = d.call('ssh.connect', {})
+    const id = socket().requests()[0].id!
+    socket().deliverText({
+      jsonrpc: '2.0',
+      id,
+      error: { ...SATURATION_ERROR, data: { ...SATURATION_ERROR.data, scope: 'filesystem' } },
+    })
+
+    // The refusal still rejects the caller's promise with the full error, so
+    // a surface can branch on the discriminator.
+    await expect(call).rejects.toMatchObject({ code: -32004 })
+    const err = (await call.catch((e: unknown) => e)) as Error
+    expect(err.message).toContain('refused')
+    expect(err.message).toContain('file operations')
+    expect(err.message.toLowerCase()).not.toContain('busy')
+    expect(err.message.toLowerCase()).not.toContain('try again in a moment')
+
+    await vi.dynamicImportSettled()
+    expect(toasts()).toHaveLength(0)
+  })
+
+  it('a background refusal is quiet to the person and recorded with its origin', async () => {
+    const provider = new TestEndpointProvider()
+    const d = new Dispatcher(provider)
+    await connected(d)
+    const warn = vi.spyOn(log, 'warn')
+    const call = d.call('files.list', {}, undefined, { origin: 'background' })
     const id = socket().requests()[0].id!
 
     deliverSaturation(id)
 
-    // The refusal still rejects the caller's promise with the full error...
-    await expect(call).rejects.toMatchObject({ code: -32004, message: 'Control plane busy' })
-    // ...and the global fallback makes it visible: one danger toast, no
-    // call-site handler involved. The toast module is imported lazily (the
-    // dispatcher must stay DOM-free at load), so flush that import first.
+    await expect(call).rejects.toMatchObject({ code: -32004 })
     await vi.dynamicImportSettled()
-    expect(toasts()).toHaveLength(1)
-    expect(toasts()[0].level).toBe('danger')
-    expect(toasts()[0].message).toContain('busy')
+    expect(toasts()).toHaveLength(0)
+    const record = warn.mock.calls.find((c) => String(c[0]).includes('control request refused'))
+    expect(record).toBeDefined()
+    expect(record?.[1]).toMatchObject({ origin: 'background', method: 'files.list' })
   })
 
-  it('deduplicates a burst of refusals into one toast', async () => {
+  it('records a person refusal with origin person, and treats an absent origin as person', async () => {
     const provider = new TestEndpointProvider()
     const d = new Dispatcher(provider)
     await connected(d)
-    const ids: number[] = []
-    for (let i = 0; i < 5; i++) {
-      ids.push(startCall(d))
-    }
-    for (const id of ids) {
-      deliverSaturation(id)
-    }
-    await vi.dynamicImportSettled()
-    expect(toasts()).toHaveLength(1)
+    const warn = vi.spyOn(log, 'warn')
+
+    const implicit = d.call('profiles.list', {})
+    implicit.catch(() => {})
+    deliverSaturation(socket().requests()[0].id!)
+    await expect(implicit).rejects.toMatchObject({ code: -32004 })
+
+    const explicit = d.call('profiles.list', {}, undefined, { origin: 'person' })
+    explicit.catch(() => {})
+    deliverSaturation(socket().requests()[1].id!)
+    await expect(explicit).rejects.toMatchObject({ code: -32004 })
+
+    const origins = warn.mock.calls
+      .filter((c) => String(c[0]).includes('control request refused'))
+      .map((c) => (c[1] as { origin?: string }).origin)
+    expect(origins).toEqual(['person', 'person'])
   })
 
-  it('names what holds the terminal, from the refusal’s own scope (nocx-3an1s.1.1)', async () => {
+  it('records a refused notification instead of toasting it (control.saturated carries no id)', async () => {
     const provider = new TestEndpointProvider()
     const d = new Dispatcher(provider)
     await connected(d)
+    const warn = vi.spyOn(log, 'warn')
 
-    // A settings or connections write in another surface holds the config
-    // domain: the person did nothing in this pane and can still be told what
-    // is holding it, because the refusal carries the admission's scope.
+    socket().deliverText({
+      jsonrpc: '2.0',
+      method: 'control.saturated',
+      params: { methodClass: 'ssh', scope: 'probe' },
+    })
+    await vi.dynamicImportSettled()
+
+    expect(toasts()).toHaveLength(0)
+    const record = warn.mock.calls.find((c) => String(c[0]).includes('control action refused'))
+    expect(record).toBeDefined()
+    expect(record?.[1]).toMatchObject({ methodClass: 'ssh', scope: 'probe' })
+  })
+
+  it('names a scope this build does not know without inventing a cause', async () => {
+    const provider = new TestEndpointProvider()
+    const d = new Dispatcher(provider)
+    await connected(d)
     const call = d.call('ssh.connect', {})
     const id = socket().requests()[0].id!
     socket().deliverText({
@@ -802,94 +834,16 @@ describe('control-plane saturation visibility', () => {
       id,
       error: {
         ...SATURATION_ERROR,
-        data: { ...SATURATION_ERROR.data, scope: 'config' },
+        data: { ...SATURATION_ERROR.data, scope: 'exec' },
       },
     })
-    await expect(call).rejects.toMatchObject({ code: -32004 })
-    await vi.dynamicImportSettled()
-    expect(toasts()).toHaveLength(1)
-    expect(toasts()[0].message).toContain('settings or connections change')
-    expect(toasts()[0].message).toContain('Try again in a moment')
+    const err = (await call.catch((e: unknown) => e)) as Error
+    expect(err.message).toContain('refused')
+    expect(err.message).not.toContain('exec')
+    expect(err.message.toLowerCase()).not.toContain('busy')
   })
 
-  it('names the execution lane as the holder when the control scope is exhausted (nocx-3an1s.1.1)', async () => {
-    const provider = new TestEndpointProvider()
-    const d = new Dispatcher(provider)
-    await connected(d)
-
-    // The lane every admission-backed control method shares: what a stuck
-    // pane open holds, and what the owner met as "The terminal is busy" with
-    // no holder named. The refusal carries the admission's own name.
-    const call = d.call('session.open', {})
-    const id = socket().requests()[0].id!
-    socket().deliverText({
-      jsonrpc: '2.0',
-      id,
-      error: {
-        ...SATURATION_ERROR,
-        data: { ...SATURATION_ERROR.data, scope: 'control' },
-      },
-    })
-    await expect(call).rejects.toMatchObject({ code: -32004 })
-    await vi.dynamicImportSettled()
-    expect(toasts()).toHaveLength(1)
-    expect(toasts()[0].message).toContain('another terminal operation is still in progress')
-    expect(toasts()[0].message).not.toBe(
-      'The terminal is busy — that action was refused. Try again in a moment.',
-    )
-  })
-
-  it('names the holder for a refused notification too, and falls back for a scope it does not know', async () => {
-    const provider = new TestEndpointProvider()
-    const d = new Dispatcher(provider)
-    await connected(d)
-
-    socket().deliverText({
-      jsonrpc: '2.0',
-      method: 'control.saturated',
-      params: { methodClass: 'session', scope: 'session' },
-    })
-    await vi.dynamicImportSettled()
-    expect(toasts()).toHaveLength(1)
-    expect(toasts()[0].message).toContain('another pane')
-
-    // A scope this build does not know names no cause rather than inventing
-    // one; the sentence still says the action was refused and may be retried.
-    vi.advanceTimersByTime(SATURATION_TOAST_WINDOW_MS)
-    socket().deliverText({
-      jsonrpc: '2.0',
-      method: 'control.saturated',
-      params: { methodClass: 'other', scope: 'exec' },
-    })
-    await vi.dynamicImportSettled()
-    expect(toasts()).toHaveLength(2)
-    expect(toasts()[1].message).toBe(
-      'The terminal is busy — that action was refused. Try again in a moment.',
-    )
-  })
-
-  it('raises a fresh toast once the dedup window has passed', async () => {
-    const provider = new TestEndpointProvider()
-    const d = new Dispatcher(provider)
-    await connected(d)
-
-    deliverSaturation(startCall(d))
-    await vi.dynamicImportSettled()
-    expect(toasts()).toHaveLength(1)
-
-    // A refusal inside the window stays silent.
-    deliverSaturation(startCall(d))
-    await vi.dynamicImportSettled()
-    expect(toasts()).toHaveLength(1)
-
-    // After the window a new episode deserves a new toast.
-    vi.advanceTimersByTime(SATURATION_TOAST_WINDOW_MS)
-    deliverSaturation(startCall(d))
-    await vi.dynamicImportSettled()
-    expect(toasts()).toHaveLength(2)
-  })
-
-  it('leaves an ordinary RPC error untouched — rejects, no saturation toast', async () => {
+  it('leaves an ordinary RPC error untouched — rejects with its own message', async () => {
     const provider = new TestEndpointProvider()
     const d = new Dispatcher(provider)
     await connected(d)
@@ -906,35 +860,6 @@ describe('control-plane saturation visibility', () => {
     await expect(call).rejects.toMatchObject({ code: -32603, message: 'internal error' })
     await vi.dynamicImportSettled()
     expect(toasts()).toHaveLength(0)
-  })
-
-  it('raises the same toast for a refused NOTIFICATION (control.saturated has no id)', async () => {
-    const provider = new TestEndpointProvider()
-    const d = new Dispatcher(provider)
-    await connected(d)
-
-    // A refused notification cannot carry the -32004 error (no id to
-    // answer), so the server emits the control.saturated notification
-    // instead. The dispatcher subscribes to it at construction and raises
-    // the same deduplicated toast.
-    socket().deliverText({
-      jsonrpc: '2.0',
-      method: 'control.saturated',
-      params: { methodClass: 'ssh', scope: 'probe' },
-    })
-    await vi.dynamicImportSettled()
-    expect(toasts()).toHaveLength(1)
-    expect(toasts()[0].level).toBe('danger')
-
-    // Inside the dedup window a second notification stays silent — the
-    // same episode, the same toast.
-    socket().deliverText({
-      jsonrpc: '2.0',
-      method: 'control.saturated',
-      params: { methodClass: 'config', scope: 'control' },
-    })
-    await vi.dynamicImportSettled()
-    expect(toasts()).toHaveLength(1)
   })
 
   it('an outbound stall drops the socket, because the connection cannot deliver what it owes (nocx-mrtvy)', async () => {

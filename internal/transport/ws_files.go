@@ -266,6 +266,12 @@ type filesBinding struct {
 	sessionID  session.ID
 	endpointID string
 	watcher    *filesWatcher // nil until files.watch
+	// visible is the last visibility the client stated for this panel, kept
+	// so a watcher created afterwards starts in the state the client already
+	// reported instead of a guess made at creation. visibleSet distinguishes
+	// "never stated" from an explicit false.
+	visible    bool
+	visibleSet bool
 }
 
 // defaultFilesPollInterval is the base unit for the transport-side
@@ -1248,6 +1254,8 @@ func (h filesBindingHandlers) handleWatch(ctx context.Context, state *connState,
 				for p, rev := range added {
 					paths[p] = newFilesPollEntry(rev, 1, base, jitter)
 				}
+				// A visibility stated before files.watch is the state
+				// this watcher must start in; never stated means visible.
 				w := &filesWatcher{
 					bindingID:      params.BindingID,
 					sessionID:      b.sessionID,
@@ -1255,7 +1263,7 @@ func (h filesBindingHandlers) handleWatch(ctx context.Context, state *connState,
 					pathOrder:      append([]string(nil), params.Paths...),
 					catchUp:        make(map[string]*filesPollEntry),
 					dirty:          make(map[string]string),
-					visible:        true,
+					visible:        !b.visibleSet || b.visible,
 					pollBase:       base,
 					refreshState:   filesRefreshStateOK,
 					nextGeneration: 1,
@@ -1361,15 +1369,20 @@ func (h filesBindingHandlers) handleVisible(state *connState, req jsonrpcRequest
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: unknown bindingId"})
 		return
 	}
-	// A binding with no watcher has nothing to pause: files.watch has not
-	// been sent yet, and the watcher it creates starts visible. Answering OK
-	// rather than erroring keeps the client free to send the signal in
-	// whatever order its own effects run.
+	// The signal can arrive before files.watch: the renderer's effects run
+	// in whatever order they run, and the watcher is created by a later
+	// call. Answering OK and recording nothing there used to drop it — the
+	// watcher files.watch then created started visible and kept polling a
+	// panel nobody could see until the next transition, which for a panel
+	// the person never reopens is for ever. So the stated value is recorded
+	// on the binding whether or not a watcher exists yet, and the watcher
+	// that is created later starts from it.
 	h.machine.withFilesBinding(params.BindingID, func(b *filesBinding) {
-		if b.watcher == nil {
-			return
+		b.visible = *params.Visible
+		b.visibleSet = true
+		if b.watcher != nil {
+			b.watcher.setVisible(b.visible)
 		}
-		b.watcher.setVisible(*params.Visible)
 	})
 	_ = h.r.TryResult(req.ID, mustMarshal(struct{}{}))
 }
@@ -2029,8 +2042,8 @@ func (s *WSServer) recordFilesBinding(bid string, sid session.ID, endpointID str
 
 // filesBindingOf returns the bookkeeping for a binding id, or nil. The
 // session and endpoint fields are written once at creation and never change,
-// so the returned pointer is safe to read; the watcher slot is only mutated
-// under the bookkeeping lock (withFilesBinding).
+// so the returned pointer is safe to read; the watcher slot and the stated
+// visibility are only mutated under the bookkeeping lock (withFilesBinding).
 func (s *WSServer) filesBindingOf(bid string) *filesBinding {
 	s.filesMu.Lock()
 	defer s.filesMu.Unlock()

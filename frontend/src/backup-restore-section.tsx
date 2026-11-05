@@ -28,13 +28,20 @@ interface State {
   strategy: RestoreStrategy
   preview: RestorePreview | null
   fileInputResetKey: number
-  /** The last preview was refused because the control plane was busy. */
-  previewRefused: boolean
+  /** Why the last preview did not run, when the control plane refused it
+   *  before it started: the refusal's own sentence, shown here rather than
+   *  in a toast, with the retry beneath it (ADR-8eej3e66 stage 1). */
+  previewRefused: string | null
   /** Bumped when the person asks for a refused preview again. */
   previewAttempt: number
 }
 
 const PLAINTEXT_WARNING = `The backup file is plaintext JSON. All settings values, hostnames, connection names, inline usernames, and auth modes are stored without encryption. Credential secrets (passwords, key passphrases) are never included, but the connection metadata may still be sensitive.`
+
+/** A rejected call's own sentence, as it will be shown. */
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
 
 /** A file the person picked that `readBackupText` could not read, in their words. */
 function readBackupFileSentence(err: unknown): string {
@@ -73,7 +80,7 @@ export function BackupRestoreSection(props: Props) {
     strategy: 'merge',
     preview: null,
     fileInputResetKey: 0,
-    previewRefused: false,
+    previewRefused: null,
     previewAttempt: 0,
   })
 
@@ -141,10 +148,10 @@ export function BackupRestoreSection(props: Props) {
     const gen = ++fileGen
     previewGen++
     if (!file) {
-      setState({ contents: null, preview: null, previewing: false, previewRefused: false })
+      setState({ contents: null, preview: null, previewing: false, previewRefused: null })
       return
     }
-    setState({ previewing: true, preview: null, previewRefused: false })
+    setState({ previewing: true, preview: null, previewRefused: null })
     try {
       const text = await readBackupText(file)
       if (gen !== fileGen) return
@@ -164,7 +171,7 @@ export function BackupRestoreSection(props: Props) {
       () => [state.strategy, state.contents, state.previewAttempt] as const,
       async ([strat, contents]) => {
         if (!contents) return
-        setState({ previewing: true, preview: null, previewRefused: false })
+        setState({ previewing: true, preview: null, previewRefused: null })
         previewGen++
         const gen = previewGen
         try {
@@ -173,14 +180,15 @@ export function BackupRestoreSection(props: Props) {
           setState({ preview: result })
         } catch (err) {
           if (gen !== previewGen) return
-          // A busy control plane is not the backup's fault and not final: the
-          // file is still chosen and nothing is wrong with it. Choosing the
-          // same file again fires no change event, so without a way to ask
-          // again the section is a dead end (nocx-9ox05). The dispatcher has
-          // already said the plane was busy; a second toast blaming the
-          // backup would be wrong.
+          // A refused request is not the backup's fault and not final: the
+          // file is still chosen, nothing ran, and nothing is wrong with it.
+          // Choosing the same file again fires no change event, so without a
+          // way to ask again the section is a dead end (nocx-9ox05). The
+          // sentence is the dispatcher's (`refusalSentence`), shown HERE
+          // next to the remedy instead of in a toast over the whole app
+          // (ADR-8eej3e66 stage 1).
           if (isSaturationRefusal(err)) {
-            setState({ preview: null, previewRefused: true })
+            setState({ preview: null, previewRefused: messageOf(err) })
             return
           }
           setState({ preview: null })
@@ -325,9 +333,9 @@ export function BackupRestoreSection(props: Props) {
           <p class="backup-restore__status">Generating preview…</p>
         </Show>
 
-        <Show when={state.contents && state.previewRefused && !state.previewing}>
-          <p class="backup-restore__status">
-            The preview was refused because the terminal was busy.
+        <Show when={state.previewRefused !== null && !state.previewing}>
+          <p class="backup-restore__status" data-testid="backup-preview-refused">
+            Could not build the preview. {state.previewRefused}
           </p>
           <Button
             disabled={busy()}

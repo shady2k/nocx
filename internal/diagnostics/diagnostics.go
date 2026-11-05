@@ -51,18 +51,8 @@ import (
 // The stages an open passes through. They are the vocabulary the owner asked
 // for, spelled once, so the log, the record and the text cannot disagree.
 const (
-	StageDial = "dial"
-	StageAuth = "authentication"
-	// StageProbe is the selection dial: one authenticated connection to the
-	// far host to ask what platform it is and whether an artifact exists for
-	// it. It is the first thing a far open does inside the dial, and it was
-	// invisible until nocx-b3j8r: the gap it hides is a handshake plus one
-	// exec.
-	StageProbe = "helper-probe"
-	// StageInstall is the far helper's install and completeness check. It was
-	// recorded under StageAuth before nocx-b3j8r, so a record read
-	// "authentication 22 s" over work that had nothing to do with signing in.
-	StageInstall    = "helper-install"
+	StageDial       = "dial"
+	StageAuth       = "authentication"
 	StageHold       = "connection-hold"
 	StagePublish    = "integration-publish"
 	StageToolSocket = "tool-socket"

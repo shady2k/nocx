@@ -118,80 +118,44 @@ func TestEnsureIncompleteDirectoryIsRemovedAndReinstalled(t *testing.T) {
 	}
 }
 
-// TestACompleteInstallIsNeverReadAgain is nocx-b3j8r: the completeness check
-// is the marker, and a complete install costs one Lstat — never a transfer of
-// the installed binary. The bytes are verified once, by the install that
-// wrote them; what runs is verified by the helper's own handshake (D21).
-//
-// It is asserted by BYTES, never by timing: a machine slow enough to make the
-// read invisible is exactly the machine this defect hides on.
-func TestACompleteInstallIsNeverReadAgain(t *testing.T) {
+// TestEnsureReinstallsExactlyOnceOnHashMismatch is D6: a complete directory
+// whose binary does not hash to its name is removed and reinstalled exactly
+// once, and the fresh install is returned. A second mismatch on the same
+// call is ErrHashMismatch and never loops — the next test.
+func TestEnsureReinstallsExactlyOnceOnHashMismatch(t *testing.T) {
 	fs := newFakeFS()
-	if _, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"}); err != nil {
+	installed, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"})
+	if err != nil {
 		t.Fatalf("install: %v", err)
 	}
-	before := fs.readFileCount()
-	beforeBytes := fs.readFileBytes()
+	// The directory looks complete but its binary no longer hashes to its
+	// name — the D6 mismatch.
+	fs.corruptFile(installed)
 	if _, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"}); err != nil {
-		t.Fatalf("ensure over a complete install: %v", err)
-	}
-	if got := fs.readFileCount() - before; got != 0 {
-		t.Fatalf("Ensure on a complete install performed %d ReadFile call(s), want 0", got)
-	}
-	if got := fs.readFileBytes() - beforeBytes; got != 0 {
-		t.Fatalf("Ensure on a complete install read %d byte(s), want 0", got)
-	}
-}
-
-// TestACorruptWriteLeavesNoMarkerAndTheNextAttemptReinstalls is D6 at the one
-// boundary that can leave corruption: the write. The marker is written only
-// after the bytes hash to the directory's key, so a transport that corrupts
-// the upload leaves a markerless tree, and the next Ensure removes it and
-// reinstalls exactly once.
-func TestACorruptWriteLeavesNoMarkerAndTheNextAttemptReinstalls(t *testing.T) {
-	fs := newFakeFS()
-	fs.corruptWrites = true
-	_, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"})
-	if !errors.Is(err, deploy.ErrHashMismatch) {
-		t.Fatalf("a corrupt write answered %v, want ErrHashMismatch", err)
-	}
-	if got := fs.binaryCreateCount(); got != 1 {
-		t.Fatalf("a corrupt write attempted %d uploads, want 1", got)
-	}
-	if fs.hasAnyMarker() {
-		t.Fatal("a corrupt write left a marker: the tree claims to be complete over bytes that do not hash")
-	}
-
-	fs.corruptWrites = false // heal
-	path, hash, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"})
-	if err != nil {
-		t.Fatalf("the attempt after a corrupt write: %v", err)
-	}
-	if hash != syntheticHash {
-		t.Fatalf("installed hash = %s, want %s", hash, syntheticHash)
-	}
-	if !fs.hasMarker(filepath.Dir(path)) {
-		t.Fatal("the reinstalled tree carries no marker")
+		t.Fatalf("ensure over a mismatched complete directory must reinstall once: %v", err)
 	}
 	if got := fs.binaryCreateCount(); got != 2 {
-		t.Fatalf("a corrupt write triggered %d uploads across two calls, want exactly 2 (the failed one and one reinstall)", got)
+		t.Fatalf("a hash mismatch triggered %d uploads, want exactly 2 (install + one reinstall)", got)
 	}
 }
 
-// TestEnsureHashMismatchDoesNotLoop is D6's terminal half: one call makes one
-// upload and stops. A second call is a second attempt, not a loop inside the
-// first.
+// TestEnsureHashMismatchDoesNotLoop is D6's terminal half: when the
+// reinstall STILL does not hash, Ensure returns ErrHashMismatch and stops —
+// exactly one reinstall, never a retry loop.
 func TestEnsureHashMismatchDoesNotLoop(t *testing.T) {
 	fs := newFakeFS()
-	fs.corruptWrites = true
-	for i := 0; i < 2; i++ {
-		_, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"})
-		if !errors.Is(err, deploy.ErrHashMismatch) {
-			t.Fatalf("call %d answered %v, want ErrHashMismatch", i+1, err)
-		}
-		if got := fs.binaryCreateCount(); got != i+1 {
-			t.Fatalf("after call %d Ensure had attempted %d uploads, want %d (one per call, no loop)", i+1, got, i+1)
-		}
+	installed, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"})
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	fs.corruptFile(installed)
+	fs.corruptWrites = true // the reinstall will be corrupt too
+	_, _, err = deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"})
+	if !errors.Is(err, deploy.ErrHashMismatch) {
+		t.Fatalf("second mismatch error = %v, want ErrHashMismatch", err)
+	}
+	if got := fs.binaryCreateCount(); got != 2 {
+		t.Fatalf("Ensure attempted %d uploads before ErrHashMismatch, want 2 (install + one reinstall, no loop)", got)
 	}
 }
 
@@ -336,8 +300,6 @@ type fakeFS struct {
 	creates       int
 	binaryCreates int
 	written       int  // bytes written across all binary Creates
-	readFiles     int  // ReadFile calls
-	readBytes     int  // bytes returned by ReadFile
 	failAt        int  // fail the write that crosses this byte; 0 = never
 	corruptWrites bool // corrupt every binary written
 	// fail is the per-operation fault knob: the next call to a named
@@ -430,6 +392,20 @@ func (f *fakeFS) remove(path string) {
 	defer f.mu.Unlock()
 	delete(f.files, path)
 	delete(f.dirs, path)
+}
+
+func (f *fakeFS) corruptFile(path string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	data, ok := f.files[path]
+	if !ok {
+		panic("fakefs: corrupt an absent file " + path)
+	}
+	if len(data) == 0 {
+		data = []byte{0}
+	}
+	data[0] ^= 0xFF
+	f.files[path] = data
 }
 
 // ─── RemoteFS implementation ───────────────────────────────────────────────
@@ -564,34 +540,7 @@ func (f *fakeFS) ReadFile(path string) ([]byte, error) {
 	if !ok {
 		return nil, fs.ErrNotExist
 	}
-	f.readFiles++
-	f.readBytes += len(data)
 	return append([]byte(nil), data...), nil
-}
-
-func (f *fakeFS) readFileCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.readFiles
-}
-
-func (f *fakeFS) readFileBytes() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.readBytes
-}
-
-// hasAnyMarker reports whether any install directory under the helper root
-// carries the completion marker.
-func (f *fakeFS) hasAnyMarker() bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for p := range f.files {
-		if filepath.Base(p) == ".install-complete" {
-			return true
-		}
-	}
-	return false
 }
 
 // fakeFile is a RemoteFS File handle. The payload becomes visible on Close,
@@ -658,9 +607,9 @@ func (fi fakeFileInfo) Sys() any           { return nil }
 
 var _ io.Writer = (*fakeFile)(nil)
 
-// TestEveryInstallBoundaryLeavesATreeTheNextAttemptCanFinish walks the
+// TestEveryInstallBoundaryLeavesATreeTheNextAttemptCanFinish walks the dozen
 // boundaries Ensure crosses and asserts the interval stated on Ensure itself:
-// outside "the marker exists over a binary the installer verified", what is
+// outside "the marker exists over a binary that hashes to the key", what is
 // left is a tree the next attempt REMOVES, and after the fault is healed the
 // very next call installs. The second half is the half a failure-path test
 // usually forgets — for every "returns an error when…" there is a paired "and
@@ -672,7 +621,8 @@ func TestEveryInstallBoundaryLeavesATreeTheNextAttemptCanFinish(t *testing.T) {
 		name string
 		op   string
 		// setup puts the tree in the state that makes this boundary run at
-		// all: the removal only happens over a tree that is already there.
+		// all: the reads only happen over an existing install, and the
+		// removal only happens over a tree that is already there.
 		setup func(t *testing.T, fs *fakeFS)
 	}{
 		{name: "the marker Lstat", op: "lstat"},
@@ -682,8 +632,12 @@ func TestEveryInstallBoundaryLeavesATreeTheNextAttemptCanFinish(t *testing.T) {
 		{name: "the close of the binary", op: "close"},
 		{name: "the rename into place", op: "rename"},
 		{name: "the directory sync", op: "syncdir"},
-		{name: "the verification read", op: "readfile"},
 		{name: "the marker", op: "createmarker"},
+		{
+			name:  "the verification read",
+			op:    "readfile",
+			setup: func(t *testing.T, fs *fakeFS) { installOnce(t, fs) },
+		},
 		{
 			name:  "the listing of an incomplete tree",
 			op:    "readdir",
@@ -731,6 +685,15 @@ func TestEveryInstallBoundaryLeavesATreeTheNextAttemptCanFinish(t *testing.T) {
 				t.Fatal("the recovered install does not hash to its directory's key")
 			}
 		})
+	}
+}
+
+// installOnce puts a complete install in place, so a boundary that only runs
+// over an existing one has something to run over.
+func installOnce(t *testing.T, fs *fakeFS) {
+	t.Helper()
+	if _, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"}); err != nil {
+		t.Fatalf("prepare a complete install: %v", err)
 	}
 }
 

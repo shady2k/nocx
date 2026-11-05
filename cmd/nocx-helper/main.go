@@ -264,14 +264,15 @@ func serve(ctx context.Context, log *slog.Logger, dir string, generation proto.G
 	daemonCtx, stopDaemon := context.WithCancel(ctx)
 	defer stopDaemon()
 	sessions := session.New(session.Options{
-		Generation:   generation,
-		StartupGrace: session.MeasuredStartupGrace,
-		OnDrained:    stopDaemon,
-		Spawner:      session.NewLocalSpawner(log, session.Shell{}, agentHelperPath),
-		SSHSpawner:   sshCap.sessionSpawner,
-		Inspector:    session.NewInspector(),
-		Log:          log,
-		Limits:       session.DefaultLimits(),
+		Generation:     generation,
+		StartupGrace:   session.MeasuredStartupGrace,
+		ConnectedGrace: session.ConnectedIdleGrace,
+		OnDrained:      stopDaemon,
+		Spawner:        session.NewLocalSpawner(log, session.Shell{}, agentHelperPath),
+		SSHSpawner:     sshCap.sessionSpawner,
+		Inspector:      session.NewInspector(),
+		Log:            log,
+		Limits:         session.DefaultLimits(),
 	})
 	defer sessions.Close()
 

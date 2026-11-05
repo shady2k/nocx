@@ -10,6 +10,7 @@ package log
 // that cannot happen does not take the log with it.
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -152,6 +153,50 @@ func TestFile_RecreatesAFileRemovedUnderIt(t *testing.T) {
 	}
 	if strings.Contains(body, "line 0000 ") {
 		t.Fatal("unreachable: the recreated file should not hold a line from before its removal")
+	}
+}
+
+// A CLOSED LOG FILE IS CLOSED (nocx-atpw5.1.45). App.Shutdown closes the log
+// last, after its final line, and a goroutine the composition root started can
+// still say one after that: measured 2026-11-05 in internal/app, the lifecycle
+// channel's pump logged "lifecycle ledger read failed" 22 ms after "application
+// stopped", and the lifecycle bridge said both of its closing lines after it.
+//
+// Those writes used to land in a file recreated by the writer itself: follow
+// sees a closed handle as "the path is not mine" and reopens it with O_CREATE.
+// A test whose cleanup then removes the log's directory fails with "directory
+// not empty" — a red test about a tidy-up, in a directory nobody had written to
+// since. Close has returned; nothing may put the file back on disk.
+func TestFile_AClosedFileIsNotRecreatedByALateWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nocx.log")
+	f, err := OpenFile(path)
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	writeLine(t, f, 0)
+	if err := f.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove the closed log: %v", err)
+	}
+
+	if _, err := f.WriteString("line 0001 late\n"); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("a write after Close returned %v, want os.ErrClosed", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("a write after Close put the log back at %s (stat error %v)", path, err)
+	}
+	// The directory a cleanup removes is exactly what must stay empty, and
+	// that is the shape the failure took.
+	if left, err := os.ReadDir(dir); err != nil || len(left) != 0 {
+		t.Fatalf("the log's directory holds %d entries after a write to a closed log (err %v)", len(left), err)
+	}
+	// Close is idempotent: App.Shutdown runs more than once in the tests that
+	// call it by hand, and a second Close must not report the first.
+	if err := f.Close(); err != nil {
+		t.Fatalf("second close: %v", err)
 	}
 }
 

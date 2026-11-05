@@ -84,6 +84,12 @@ type File struct {
 	max     int64
 	keep    int64
 	retryAt time.Time
+	// closed is the difference between a path that may be adopted again and
+	// one this writer has let go of. followLocked re-creates a log that was
+	// removed under a RUNNING process on purpose; after Close it must not,
+	// or a late line puts a file back in a directory somebody is removing
+	// (nocx-atpw5.1.45).
+	closed bool
 }
 
 // openFile is OpenFile with an explicit ceiling, so a test can drive the
@@ -126,6 +132,12 @@ func openFile(path string, max, keep int64) (*File, error) {
 func (w *File) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.closed {
+		// The same answer a closed *os.File gives, and no file created: the
+		// caller (slog) ignores it, which is right for a line that arrives
+		// after the owner said the process had stopped.
+		return 0, os.ErrClosed
+	}
 	w.followLocked()
 	n, err := w.f.Write(p)
 	if n > 0 {
@@ -143,11 +155,26 @@ func (w *File) Write(p []byte) (int, error) {
 // WriteString is Write for a string, the way os.File offers both.
 func (w *File) WriteString(s string) (int, error) { return w.Write([]byte(s)) }
 
-// Close closes the handle. A cut that follows writes to a new file, so the
-// handle this closes is always the current one.
+// Close closes the handle and ends this writer. A cut that follows writes to a
+// new file, so the handle this closes is always the current one.
+//
+// IT IS THE LAST THING THAT HAPPENS TO THIS FILE (nocx-atpw5.1.45). A write
+// after Close is refused rather than adopted by followLocked, because
+// followLocked's job is to keep a RUNNING process logging after the path was
+// removed — and after Close the only thing such a write can do is recreate a
+// file the owner has finished with. App.Shutdown closes the log last, and
+// goroutines it started can still say a line afterwards; those lines are
+// dropped, as they were before the ceiling existed, and no file appears.
+//
+// Close is idempotent, so a shutdown path that runs twice does not report its
+// own second call.
 func (w *File) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.closed {
+		return nil
+	}
+	w.closed = true
 	return w.f.Close()
 }
 

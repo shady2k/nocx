@@ -21,7 +21,7 @@
 // position, pinned, layout, workspace_id, seen-mark, and no "active".
 // ═══════════════════════════════════════════════════════════════════════════
 
-import type { SessionHandle, WSClient } from './ipc'
+import { isProvenSessionAbsence, type SessionHandle, type WSClient } from './ipc'
 import type { SessionEntry } from './generated/sessions.inventory'
 import type { LiveSession } from './generated/sessions.live'
 import { detectAgentStatus, type AgentStatus } from './agent-status'
@@ -83,6 +83,7 @@ import type {
 import { SURFACE_TERMINAL } from './pane-content'
 import type { SnippetProviderDeps } from './snippets/snippet-provider'
 import {
+  LiveSessionUncertainError,
   TerminalContent,
   type HostKeyErrorEvidence,
   type HelperConsentAskEvidence,
@@ -804,11 +805,27 @@ export class PaneManager {
    * the pane that had just adopted it.
    *
    * Empty is the ordinary answer: a cold coordinator holds nothing, and so
-   * does one whose sessions all ended. Empty is also what a backend that
-   * cannot answer leaves behind, and that degrade is the pre-coordinator
-   * behaviour exactly — every restored pane opens a fresh session.
+   * does one whose sessions all ended. A backend that could not answer is NOT
+   * this map's empty state (nocx-3an1s.1.5) — `liveInventoryUnavailable`
+   * carries that, and a pane whose session it could not rule out keeps the
+   * pane and a retry instead of opening a fresh shell.
    */
   private readonly liveByPane = new Map<string, LiveSession>()
+  /**
+   * Whether the last `sessions.live` read FAILED, as distinct from answering
+   * that the coordinator holds nothing (nocx-3an1s.1.5).
+   *
+   * The distinction is the defect this flag exists for. An empty map is an
+   * answer; a failed read is a question nobody answered, and the two used to
+   * be the same value here — so a single transient failure during a restore
+   * sent every pane down the "nothing to reclaim" path and opened a
+   * replacement shell over a live one.
+   */
+  private liveInventoryUnavailable = false
+  /** One in-flight re-read, shared by every pane whose adoption was uncertain.
+   *  A restore mounts its panes one after another; each asks the same
+   *  question, and it must cost one round trip rather than one per pane. */
+  private liveInventoryRefresh: Promise<boolean> | null = null
   /** The last helper inventory, keyed by the backend session id. */
   private readonly helperSessions = new Map<string, SessionEntry>()
   /** One in-flight read; concurrent overview opens share it. */
@@ -1264,12 +1281,13 @@ export class PaneManager {
    * fresh client attaches at; `adoptionFor` turns one of those into the claim
    * a pane makes instead of an open.
    *
-   * FAIL-QUIET, and the degrade is the behaviour that predates the
-   * coordinator: with no list in hand every restored pane opens a fresh
-   * session, which is what a pane whose backend had died always did. It is
-   * not silent — the warning names the reason — and it is not contradicted
-   * anywhere in the UI, because nothing promises a reclaimed pane before one
-   * has been reclaimed.
+   * FAIL-QUIET, but NOT answered with a fresh shell (nocx-3an1s.1.5). A
+   * failed read is recorded as a failure rather than left as an empty map:
+   * `adoptionFor` then gives every restored pane a claim that asks again at
+   * mount, and when the answer is still a failure the pane keeps its surface
+   * and its card instead of opening a second shell over a live one. The
+   * degrade is visible — the card says no shell was started — and it is not
+   * contradicted anywhere in the UI.
    *
    * Sessions with no pane are skipped rather than guessed at: a session that
    * is the pipe of no recorded pane is a legitimate state (the schema says
@@ -1277,18 +1295,53 @@ export class PaneManager {
    * stranger's output into somebody's tab.
    */
   private async primeLiveSessions(): Promise<void> {
-    this.liveByPane.clear()
+    this.liveInventoryUnavailable = false
     try {
-      for (const entry of await this.client.listLiveSessions()) {
-        if (entry.paneId === null) continue
-        this.liveByPane.set(entry.paneId, entry)
-      }
+      this.absorbLiveSessions(await this.client.listLiveSessions())
     } catch (err) {
+      this.liveInventoryUnavailable = true
       log.warn('nocx: the coordinator could not say what it is still running', {
         error: err instanceof Error ? err.message : String(err),
       })
     }
     log.info('nocx: live sessions the coordinator is holding', { panes: this.liveByPane.size })
+  }
+
+  /** One inventory answer becomes the adoption map. */
+  private absorbLiveSessions(sessions: readonly LiveSession[]): void {
+    this.liveByPane.clear()
+    for (const entry of sessions) {
+      if (entry.paneId === null) continue
+      this.liveByPane.set(entry.paneId, entry)
+    }
+  }
+
+  /** Ask again, once, for every pane whose first answer was a failure.
+   *
+   *  Returns whether the backend answered. The caller decides what an
+   *  unanswered question means for its pane, and the answer is shared so a
+   *  restore of ten panes costs one read rather than ten. */
+  private refreshLiveInventory(): Promise<boolean> {
+    if (this.liveInventoryRefresh !== null) return this.liveInventoryRefresh
+    const refresh = this.client.listLiveSessions().then(
+      (sessions) => {
+        this.absorbLiveSessions(sessions)
+        this.liveInventoryUnavailable = false
+        return true
+      },
+      (err: unknown) => {
+        this.liveInventoryUnavailable = true
+        log.warn('nocx: the coordinator still cannot say what it is running', {
+          error: err instanceof Error ? err.message : String(err),
+        })
+        return false
+      },
+    )
+    const tracked = refresh.finally(() => {
+      if (this.liveInventoryRefresh === tracked) this.liveInventoryRefresh = null
+    })
+    this.liveInventoryRefresh = tracked
+    return tracked
   }
 
   /**
@@ -1413,7 +1466,7 @@ export class PaneManager {
 
   /**
    * The claim a restored pane makes instead of an open, or undefined when the
-   * coordinator holds nothing for it.
+   * coordinator answered that it holds nothing for it.
    *
    * THE ENTRY IS TAKEN OUT OF THE MAP HERE, at build time, not inside the
    * thunk: two panes must not be handed the same session even if only one of
@@ -1422,26 +1475,85 @@ export class PaneManager {
    * whoever holds it — a pane built during a restore and closed before it was
    * ever displayed claims nothing.
    *
-   * A FAILED CLAIM IS SAID OUT LOUD HERE and rethrown. The pane falls back to
-   * a fresh session, which is the right recovery, and a person who left a
-   * command running has to be told that what came back is not it — a shell
-   * that silently replaced a running one is exactly the "soft degrade the UI
-   * contradicts" AGENTS.md names.
+   * THREE ANSWERS, AND THE THIRD IS THE FIX (nocx-3an1s.1.5):
+   *
+   *  - an entry was listed → claim it, and keep it if the claim is uncertain;
+   *  - the inventory ANSWERED and names no entry → proven absence, so the
+   *    pane opens a fresh session exactly as it always did;
+   *  - the inventory FAILED → a claim that asks again, and then either
+   *    reclaims the same session or throws LiveSessionUncertainError. The
+   *    pane never opens a replacement on a question nobody answered.
    */
-  private adoptionFor(paneId: string): (() => Promise<SessionHandle>) | undefined {
+  private adoptionFor(paneId: string): (() => Promise<SessionHandle | null>) | undefined {
+    if (this.liveInventoryUnavailable) {
+      return () => this.recoverLiveSession(paneId)
+    }
     const entry = this.liveByPane.get(paneId)
     if (entry === undefined) return undefined
     this.liveByPane.delete(paneId)
-    return () =>
-      this.client.reclaimSession(entry).catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : String(err)
-        log.warn('nocx: a live session could not be reclaimed', { pane: paneId, error: message })
+    return () => this.reclaimLiveSession(paneId, entry)
+  }
+
+  /** Ask the unanswered inventory question again for one pane, then take its
+   *  session back — or refuse to decide.
+   *
+   *  `null` is reserved for an ANSWERED inventory that names nothing: that is
+   *  proof the coordinator holds no shell for this pane, and a fresh one is
+   *  the honest recovery. A failed read is not proof, and it throws instead. */
+  private async recoverLiveSession(paneId: string): Promise<SessionHandle | null> {
+    if (this.liveInventoryUnavailable) {
+      const answered = await this.refreshLiveInventory()
+      if (!answered) {
+        throw new LiveSessionUncertainError(
+          'The coordinator could not say whether this tab\u2019s session is still running. No new shell was started.',
+        )
+      }
+    }
+    const entry = this.liveByPane.get(paneId)
+    if (entry === undefined) return null
+    this.liveByPane.delete(paneId)
+    return this.reclaimLiveSession(paneId, entry)
+  }
+
+  /** Claim one listed session, or say what the failure was.
+   *
+   *  A CLAIM THAT FAILED WITHOUT A VERDICT KEEPS THE ENTRY (nocx-3an1s.1.5):
+   *  the retry must find the same session again, and the pane must not open a
+   *  replacement over a shell that may still be running. Only the backend's
+   *  own `unknown-session` is a verdict, and only then does this answer null
+   *  and let the pane open a fresh shell — saying so out loud, because a
+   *  person who left a command running has to be told what came back is not
+   *  it. */
+  private async reclaimLiveSession(
+    paneId: string,
+    entry: LiveSession,
+  ): Promise<SessionHandle | null> {
+    try {
+      const handle = await this.client.reclaimSession(entry)
+      this.liveByPane.delete(paneId)
+      return handle
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      if (isProvenSessionAbsence(err)) {
+        log.info('nocx: the session a restored pane was the pipe of has ended', {
+          pane: paneId,
+          error: message,
+        })
         showToast({
           level: 'warning',
-          message: `The session this tab was running could not be taken back (${message}) — a new one was started`,
+          message: `The session this tab was running has ended (${message}) — a new shell was started`,
         })
-        throw err
+        return null
+      }
+      this.liveByPane.set(paneId, entry)
+      log.warn('nocx: a live session could not be reclaimed, and its shell is not proven gone', {
+        pane: paneId,
+        error: message,
       })
+      throw new LiveSessionUncertainError(
+        `The session this tab was running could not be checked (${message}). No new shell was started.`,
+      )
+    }
   }
 
   /** Read the chain, and say so in the product when it cannot be read. */
@@ -1553,7 +1665,7 @@ export class PaneManager {
     /** The live session the coordinator holds for this pane, as the claim
      *  that takes it back (adoptionFor). Undefined for a pane the user just
      *  asked for — there is nothing running to take. */
-    adoptSession?: () => Promise<SessionHandle>,
+    adoptSession?: () => Promise<SessionHandle | null>,
   ): Pane {
     const paneRef = { current: undefined as Pane | undefined }
     const content = new TerminalContent(
@@ -1652,7 +1764,7 @@ export class PaneManager {
     /** As buildLocalPane's: the claim that takes back a connection the
      *  coordinator is still holding, rather than making a second one to the
      *  same host beside it. */
-    adoptSession?: () => Promise<SessionHandle>,
+    adoptSession?: () => Promise<SessionHandle | null>,
   ): Pane {
     const { host, user, port } = sshOpts
     const paneRef = { current: undefined as Pane | undefined }

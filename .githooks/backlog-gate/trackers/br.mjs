@@ -1033,6 +1033,12 @@ export default {
   ref: 'refs/tracker/state',
   storePath: '.beads',
   stateFiles: ['.beads/issues.jsonl', '.beads/beads.base.jsonl', '.beads/config.yaml', '.beads/policy.yaml'],
+  // What moves when the database does: the database, its write-ahead log and the
+  // shared-memory index beside them. A watcher stats these without the store lock,
+  // so a tick whose database has not moved since the last export takes neither the
+  // lock nor the export (#57). Measured on br 0.7.0: a flush with nothing to export
+  // ("Nothing to export (no dirty issues)") moves none of the three.
+  signal: ['.beads/beads.db', '.beads/beads.db-wal', '.beads/beads.db-shm'],
   export: 'br sync --flush-only',
   // How this tracker refuses a flush, and what each refusal means. The mechanism
   // knows no tracker: a refusal it does not find here is the dangerous one -

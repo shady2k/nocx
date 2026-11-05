@@ -2,11 +2,11 @@
 # connect-clone.sh — connect this clone to the repository's hooks and backlog.
 #
 # `make connect` runs it, and `make init` runs it first. It is the one command a
-# fresh clone needs before its first commit: it points git at .githooks, imports
-# the tracked backlog into br's database, and checks every local input a hook
-# reads. Everything missing is reported in one run, and nothing is connected
-# until nothing is missing: a clone with hooks and no `br` would refuse every
-# commit-message check with a reason nobody set out to learn.
+# fresh clone needs before its first commit: it connects the external tracker
+# store, installs checkout-specific hooks outside the tree, and checks the
+# local inputs those hooks read. The preflight reports missing inputs together.
+# A failure after tracker connection may leave that connection in place;
+# fix the reported prerequisite and rerun rather than assuming rollback.
 #
 # Safe to rerun.
 set -u
@@ -69,7 +69,7 @@ for f in .beads/issues.jsonl .beads/config.yaml .beads/policy.yaml; do
     [ -r "$f" ] || need "$f is missing or unreadable"
 done
 if [ "$missing" = 1 ]; then
-    printf 'connect: nothing was connected; supply the above and run make connect again\n' >&2
+    printf 'connect: tracker connection completed, but required inputs are missing; supply them and rerun make connect\n' >&2
     exit 1
 fi
 br where >/dev/null 2>&1 || {
@@ -81,20 +81,20 @@ br where >/dev/null 2>&1 || {
 # these four project-owned entry points before connecting the configuration.
 if ! chmod +x .githooks/pre-commit .githooks/commit-msg \
     .githooks/pre-merge-commit .githooks/pre-push; then
-    printf 'connect: hook executable permissions could not be repaired; hooks were not connected\n' >&2
+    printf 'connect: tracker connection completed, but hook executable permissions could not be repaired\n' >&2
     exit 1
 fi
 for f in pre-commit commit-msg pre-merge-commit pre-push; do
     [ -x ".githooks/$f" ] || need ".githooks/$f is not executable"
 done
 if [ "$missing" = 1 ]; then
-    printf 'connect: nothing was connected; repair permissions and run make connect again\n' >&2
+    printf 'connect: tracker connection completed, but hook permissions need repair; rerun make connect after fixing them\n' >&2
     exit 1
 fi
 
-# Import first: a failed tracker operation must never leave hooks connected.
+# Verify the export after the tracker connector installed the store and hooks.
 br sync --import-only || {
-    printf 'connect: br could not import .beads/issues.jsonl; hooks were not connected\n' >&2
+    printf 'connect: tracker connection completed, but br could not import .beads/issues.jsonl; fix the import and rerun\n' >&2
     exit 1
 }
 

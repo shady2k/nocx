@@ -276,9 +276,19 @@ import (
 // launch wait keeps the shell in the terminal's foreground group, so an
 // interrupt cannot be lost to a child's process group. Comments are stripped
 // at publish; the published growth is that one line.
+//
+// The launch cancel fact measured 92949 bytes (+592), still 63 calls
+// (nocx-atpw5.1.42): the wrapper keeps its own cancel fact for its whole
+// resolution, so an interrupt that lands between the resolution's window and
+// the enrolment's is not forgotten by the next window's arm, and two doors
+// read it — the cancel sentence right after the enrolment, and the exec
+// itself, which is the last thing that could run the agent. Both script tiers
+// moved by the same three lines (the trap body sets it, the check reads it,
+// the exec refuses on it); `nocx.posix` publishes the same bytes, because its
+// wrapper has no resolution window to interrupt.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 92357
+	measuredMaxPublishBytes = 92949
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

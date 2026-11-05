@@ -181,7 +181,7 @@ func (l *Listener) expireExpectation(e *listenerExpectation) {
 	l.log.Info("lifecycle listener expected domain hello timed out",
 		"domain", e.domain, "lane", e.lane, "cause", string(LossHelloTimeout))
 	if l.report != nil {
-		l.report(e.lane, LossHelloTimeout)
+		l.report(e.lane, Loss{Cause: LossHelloTimeout})
 	}
 }
 

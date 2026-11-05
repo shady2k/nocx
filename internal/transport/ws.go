@@ -30,6 +30,7 @@ import (
 	"github.com/shady2k/nocx/internal/connectfwd"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/diagnostics"
 	"github.com/shady2k/nocx/internal/discovery"
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/git"
@@ -572,6 +573,19 @@ type WSServer struct {
 	// it backs the uistate.* JSON-RPC methods. When nil, those return
 	// -32601 and the shell falls back to its declared defaults.
 	uiState *uistate.Store
+	// diagnostics is the bounded in-memory record app.diagnostics answers from
+	// (nocx-3an1s.1.8). Nil is a server built without it: the method answers
+	// "record unavailable" rather than disappearing.
+	diagnostics *diagnostics.Recorder
+	// diagnosticsProvider supplies the two facts only the composition root
+	// knows: the helper's connection state and the log file's size.
+	diagnosticsProvider DiagnosticsProvider
+	// diagStarted is the server's own start, for the uptime line.
+	diagStarted time.Time
+	// diagAdmits is every admission leaf this server built, so the
+	// diagnostics method can name what holds each scope at the moment it is
+	// asked.
+	diagAdmits []control.Admission
 	// build is what app.about answers with: what this binary is. Zero-valued
 	// unless the composition root passes one, and the zero value is honest —
 	// every field then reads "unknown" rather than claiming a version this
@@ -2021,8 +2035,9 @@ func WithControlLaneCapacity(n int) WSServerOption {
 
 func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption) *WSServer {
 	s := &WSServer{
-		log:      logger,
-		registry: reg,
+		log:         logger,
+		registry:    reg,
+		diagStarted: time.Now(),
 		upgrader: websocket.Upgrader{
 			// CheckOrigin is always permissive; our own authorize
 			// call handles origin/host policy before the upgrade.
@@ -2132,6 +2147,12 @@ func (s *WSServer) buildControlPlane() {
 	// occupies a worker permit and the read loop never blocks on a conflict.
 	// The per-operation queue submissions bound in-flight tasks per operation.
 	gates := s.domainGates()
+	// Every admission leaf this server built, for app.diagnostics. The lane
+	// first: it is the one a saturated server holds for days.
+	s.diagAdmits = []control.Admission{
+		lane, gates.config, gates.vault, gates.content, gates.session,
+		gates.git, gates.filesystem, gates.api, s.agentProbeAdmit, s.dialogAdmit,
+	}
 	immediate := control.ImmediateSubmission{}
 	// The signal lane, built here rather than inside signalSpecs because it
 	// has TWO users and must be one lane: the method a person's Stop calls,
@@ -2185,6 +2206,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.layoutSpecs(contentSub, lane, gates.content)...)
 	specs = append(specs, s.shellSpecs(lane, gates.session)...)
 	specs = append(specs, s.aboutSpecs()...)
+	specs = append(specs, s.diagnosticsSpec())
 	specs = append(specs, s.lifecycleSpecs()...)
 	specs = append(specs, s.policySpecs()...)
 	specs = append(specs, s.agentAccessSpecs()...)
@@ -2761,11 +2783,6 @@ func (w *wsConn) TryResult(id json.RawMessage, result json.RawMessage) error {
 }
 
 func (w *wsConn) TryError(id json.RawMessage, rpcErr RPCError) error {
-	if rpcErr.Code == SaturationErrorCode {
-		if data, ok := rpcErr.Data.(saturationData); ok {
-			logSaturationRefusal(w.log, rpcErr.method, "request", data)
-		}
-	}
 	obj := &jsonrpcErrorObj{Code: rpcErr.Code, Message: rpcErr.Message}
 	if rpcErr.Data != nil {
 		obj.Data = rpcErr.Data
@@ -3581,7 +3598,14 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	// produces says which request it came from — without a single one of
 	// them being passed the method or the id. A handler that goes on to
 	// drive an EXCHANGE (an agent run) adds the trace beside it.
-	ctx = log.WithRequestID(ctx, requestTag(wconn, req))
+	tag := requestTag(wconn, req)
+	// THE SERVER'S SINK, on every frame (nocx-3an1s.1.8). log.From(ctx) used to
+	// fall back to the process root; binding this server's logger here means a
+	// stage or pending line written by anything below a request lands in the
+	// log of the server that owns the request — including an embedded server
+	// in a test, which otherwise writes to a sink its test cannot read.
+	ctx = log.WithLogger(ctx, s.log)
+	ctx = log.WithRequestID(ctx, tag)
 	// AND THE FRAME IS A SPAN (nocx-4l2a5.3). The request id above is the
 	// transport's own token and joins nothing outside this process; the span
 	// is the W3C identity, so a frame that goes on to reach the tool endpoint,
@@ -3589,6 +3613,22 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	// that drives a RUN opens its own trace over this, because a run outlives
 	// the frame that started it.
 	ctx, _ = log.StartSpan(ctx)
+	// THE RECORD AND THE HOLDER (nocx-3an1s.1.8). One binding per frame, at
+	// the one point every frame passes: the record app.diagnostics reads, the
+	// wire tag a holder is named by, and the sink an in-handler refusal is
+	// reported to. No layer below is handed any of the three.
+	ctx = diagnostics.WithRequestTag(ctx, tag)
+	ctx = diagnostics.WithRecorder(ctx, s.diagnostics)
+	ctx = control.WithHolder(ctx, control.Holder{
+		Method: req.Method, Request: tag, Trace: log.SpanFrom(ctx).TraceID,
+	})
+	disposition := "request"
+	if req.ID == nil {
+		disposition = "notification"
+	}
+	ctx = control.WithRefusalReporter(ctx, func(rctx context.Context, rej control.Rejection) {
+		s.noteRefusal(rctx, tag, req.Method, disposition, rej)
+	})
 	// One line every dispatched frame produces (nocx-n14oo.11): most control
 	// handlers never log at all when they succeed, so without this a
 	// connection's trace could go unrepresented in the backend log entirely
@@ -3624,15 +3664,16 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	if cancelEntry != nil {
 		wconn.requestCancels.drop(req.ID, cancelEntry)
 	}
-	sat := saturationErrorFor(rej)
 	// Refused. A request (has an id) answers with the saturation error; a
 	// notification (no id) has no response to carry it, so the server emits
-	// the rate-limited control.saturated notification instead.
+	// the rate-limited control.saturated notification instead. Both paths
+	// leave the SAME line and record: a refusal the owner saw on screen and
+	// could not find in 300 MB of log is the defect this closes.
+	control.ReportRefusal(requestCtx, *rej)
 	if req.ID != nil {
 		_ = wconn.TryError(req.ID, saturationRPCError(req.Method, rej))
 		return
 	}
-	logSaturationRefusal(s.log, req.Method, "notification", sat.Data)
 	s.emitSaturatedNotification(wconn, req.Method, rej)
 }
 

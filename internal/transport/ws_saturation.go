@@ -19,7 +19,6 @@
 package transport
 
 import (
-	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
 
@@ -112,16 +111,4 @@ func saturatedNotificationParamsFor(methodClass, scope string) saturatedNotifica
 func saturationRPCError(method string, r *control.Rejection) RPCError {
 	sat := saturationErrorFor(r)
 	return RPCError{Code: sat.Code, Message: sat.Message, Data: sat.Data, method: method}
-}
-
-// logSaturationRefusal emits only registered server vocabulary. Request
-// params, frame bytes, and the rejection's free-text reason are absent from
-// the signature, so this diagnostic cannot disclose them.
-func logSaturationRefusal(logger log.Logger, method, disposition string, data saturationData) {
-	logger.Debug("control action refused",
-		"method", method,
-		"methodClass", methodClassFor(method),
-		"scope", data.Scope,
-		"disposition", disposition,
-		"retryAfterMs", data.RetryAfterMs)
 }

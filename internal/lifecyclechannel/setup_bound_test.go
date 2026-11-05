@@ -182,7 +182,7 @@ func TestAnExpiredHandshakeCannotDeliverAcceptWhileReportingLoss(t *testing.T) {
 		reporting, release := make(chan struct{}), make(chan struct{})
 		a, err := NewStream(logger, newTestKernel(), coordinator,
 			WithHelloTimeout(time.Second), WithSetupTimeout(4*time.Second),
-			WithLossReporter(func(lifecycle.LaneID, LossCause) {
+			WithLossReporter(func(lifecycle.LaneID, Loss) {
 				close(reporting)
 				<-release
 			}))

@@ -136,7 +136,9 @@ func (op *sessionEndOperation) Run(ctx context.Context, before func(session.Sess
 	// take their free fast path without consulting ctx, so check each handoff.
 	refuseCancelled := func() error {
 		if ctx.Err() != nil {
-			return &RefusedError{Rejection: control.Rejection{Scope: GateSession, Reason: ctx.Err().Error()}}
+			rej := control.Rejection{Scope: GateSession, Reason: ctx.Err().Error()}
+			control.ReportRefusal(ctx, rej)
+			return &RefusedError{Rejection: rej}
 		}
 		return nil
 	}
@@ -145,7 +147,7 @@ func (op *sessionEndOperation) Run(ctx context.Context, before func(session.Sess
 	}
 	sessionPermit, rej := op.sessionGate.TryAcquire(ctx)
 	if rej != nil {
-		return nil, &RefusedError{Rejection: *rej}
+		return nil, refused(ctx, rej)
 	}
 	defer sessionPermit.Release()
 	if cancelled := refuseCancelled(); cancelled != nil {
@@ -156,7 +158,7 @@ func (op *sessionEndOperation) Run(ctx context.Context, before func(session.Sess
 	// live. Acquisition order remains domain gate before execution lane.
 	lanePermit, rej := op.lane.TryAcquire(ctx)
 	if rej != nil {
-		return nil, &RefusedError{Rejection: *rej}
+		return nil, refused(ctx, rej)
 	}
 	defer lanePermit.Release()
 	if cancelled := refuseCancelled(); cancelled != nil {
@@ -208,7 +210,7 @@ func (op *sessionTargetOperation) Disposition() Disposition {
 func (op *sessionTargetOperation) Run(ctx context.Context, fn func(context.Context, SessionTarget) error) error {
 	sessionPermit, rej := op.sessionGate.TryAcquire(ctx)
 	if rej != nil {
-		return &RefusedError{Rejection: *rej}
+		return refused(ctx, rej)
 	}
 	defer sessionPermit.Release()
 
@@ -217,7 +219,7 @@ func (op *sessionTargetOperation) Run(ctx context.Context, fn func(context.Conte
 	// after the immutable facts have been copied.
 	lanePermit, rej := op.lane.TryAcquire(ctx)
 	if rej != nil {
-		return &RefusedError{Rejection: *rej}
+		return refused(ctx, rej)
 	}
 	defer lanePermit.Release()
 

@@ -79,9 +79,9 @@ func TestGitOpenOnALiveFarHelperConnectionLeavesTheSessionAndLifecycleChannelOpe
 	// alone.
 	var lossMu sync.Mutex
 	var losses []lifecyclechannel.LossCause
-	reg.lifecycleLoss = func(_ lifecycle.LaneID, cause lifecyclechannel.LossCause) {
+	reg.lifecycleLoss = func(_ lifecycle.LaneID, loss lifecyclechannel.Loss) {
 		lossMu.Lock()
-		losses = append(losses, cause)
+		losses = append(losses, loss.Cause)
 		lossMu.Unlock()
 	}
 

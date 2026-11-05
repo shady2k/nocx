@@ -1,0 +1,20 @@
+/**
+ * GENERATED FILE — do not edit.
+ *
+ * Source: contracts/app.diagnostics.schema.json
+ * Regenerate: cd frontend && npm run contracts
+ *
+ * Editing this file is editing the wrong end of the contract. If the renderer
+ * needs a field the wire does not carry, the schema is what has to change, and
+ * then the Go transport has to satisfy it.
+ */
+
+/**
+ * The app.diagnostics JSON-RPC result: the text About > Copy diagnostics appends to the build facts (nocx-3an1s.1.8). One string, because the consumer is a person pasting it into an issue, a chat or a mail and every other shape would be a second spelling of the same prose. The text carries the recent and pending hosted opens with every stage and duration, the recent control-plane refusals with their scope and holders, every admission's current holders, the server's uptime, the helper's connection state, the log file's size and a goroutine summary. It holds NO host, user, address, file path, key fingerprint or typed input: a destination appears as a stable per-run label ("connection 1"), the log as a byte count, and a failure as a bounded code. The method answers while the control plane is saturated: it is registered on the transport's immediate submission, takes no gate, lane or queue, and does only bounded work.
+ */
+export interface AppDiagnostics {
+  /**
+   * The diagnostics block, plain text, one fact per line. Ends with a newline.
+   */
+  text: string
+}

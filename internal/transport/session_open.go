@@ -38,6 +38,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/diagnostics"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
@@ -251,7 +252,18 @@ func (o *sessionOpener) workspaceForOpen(ctx context.Context, paneID string) (st
 // returned, so reconciliation can never observe a live helper session without
 // the generation that qualifies its id space; a failed write closes the
 // session rather than exposing one no inventory may safely judge.
-func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec) (OpenedSession, error) {
+func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec) (_ OpenedSession, err error) {
+	// THE OPEN'S RECORD (nocx-3an1s.1.8). Begin is a no-op for a caller with
+	// no dispatcher record (a backend open, a test), so this costs one nil
+	// check there. The connection label is minted per destination and is the
+	// only way the record's text names a destination at all.
+	key := spec.ProfileID
+	if key == "" {
+		key = spec.Host
+	}
+	ctx, trace := diagnostics.BeginOpen(ctx, diagnostics.OpenInfo{Kind: spec.Kind, Key: key})
+	defer func() { trace.Finish(err) }()
+
 	workspaceID, wsErr := o.workspaceForOpen(ctx, spec.PaneID)
 	if wsErr != nil {
 		return OpenedSession{}, refuse(-32602, "Invalid params: "+wsErr.Error())
@@ -307,13 +319,16 @@ func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec) (OpenedSession,
 
 	// PHASE ONE — resolve, under [config, session]. Store and vault reads
 	// only.
-	if err := o.op.Prepare(ctx, func(ctx context.Context, svc capability.OpenService) error {
+	endAuth := diagnostics.Stage(ctx, diagnostics.StageAuth)
+	prepareErr := o.op.Prepare(ctx, func(ctx context.Context, svc capability.OpenService) error {
 		if spec.Kind != "ssh" {
 			return nil
 		}
 		return o.resolveRemote(ctx, svc, spec, &cfg)
-	}); err != nil {
-		return OpenedSession{}, err
+	})
+	endAuth(prepareErr)
+	if prepareErr != nil {
+		return OpenedSession{}, prepareErr
 	}
 
 	// PHASE TWO — dial, on the execution lane and no domain gate.
@@ -321,7 +336,8 @@ func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec) (OpenedSession,
 		sess   session.Session
 		hosted *HostedSessionOpen
 	)
-	if err := o.op.Dial(ctx, func(ctx context.Context, svc capability.OpenService) error {
+	endDial := diagnostics.Stage(ctx, diagnostics.StageDial)
+	dialErr := o.op.Dial(ctx, func(ctx context.Context, svc capability.OpenService) error {
 		// THE HELPER IS ASKED FIRST, for both kinds of destination.
 		if o.helper != nil {
 			openedHosted, selected, oerr := o.helper.OpenHosted(ctx, cfg, claim)
@@ -366,12 +382,19 @@ func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec) (OpenedSession,
 		var oerr error
 		sess, oerr = svc.Open(ctx, cfg)
 		return oerr
-	}); err != nil {
+	})
+	if dialErr != nil {
 		// The spawn did not happen, or did not survive its own failure arm.
 		// The claim goes with it: a key left standing would name a session
 		// nothing produced, and the next open of this pane would replay it.
+		endDial(dialErr)
 		o.releaseClaim(ctx, claim)
-		return OpenedSession{}, err
+		return OpenedSession{}, dialErr
+	}
+	endDial(nil)
+	if hosted != nil {
+		diagnostics.NotePublish(ctx, publishNote(hosted))
+		diagnostics.NoteIntegration(ctx, hosted.IntegrationStatus)
 	}
 
 	if err := o.recordHostedBinding(ctx, sess, cfg, hosted, workspaceID, claim); err != nil {
@@ -558,6 +581,18 @@ func (o *sessionOpener) resolveRemote(ctx context.Context, svc capability.OpenSe
 		}
 	}
 	return nil
+}
+
+// publishNote is the record's spelling of the bundle's delivery outcome: empty
+// when nothing was attempted or it landed, "failed:<reason>" when it did not.
+// It is the fact the owner needs to tell a WORKING open with a failed publish
+// from a stuck one: "opened" plus "publish=failed:..." is a terminal a person
+// can type into; "pending" is not.
+func publishNote(hosted *HostedSessionOpen) string {
+	if hosted == nil || hosted.PublishFailure == "" {
+		return ""
+	}
+	return "failed:" + string(hosted.PublishFailure)
 }
 
 // recordHostedBinding persists the helper's authoritative id and binding facts

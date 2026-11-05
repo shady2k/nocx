@@ -26,6 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/shady2k/nocx/internal/diagnostics"
 	"github.com/shady2k/nocx/internal/git"
 	helpergit "github.com/shady2k/nocx/internal/git/helper"
 	"github.com/shady2k/nocx/internal/helper/client"
@@ -582,7 +583,7 @@ type helperRegistry struct {
 	// moves and the product would otherwise learn nothing (nocx-dvql).
 	// Nil (tests, or a server without the wiring) reports nowhere and the
 	// loss is still logged by the adapter.
-	lifecycleLoss func(lane lifecycle.LaneID, cause lifecyclechannel.LossCause)
+	lifecycleLoss func(lane lifecycle.LaneID, loss lifecyclechannel.Loss)
 	// environmentEntries is the lane -> downlink registry
 	// (environment_entry.go, nocx-2v80t.3.21), the same one the local route
 	// uses. Nil wires nothing.
@@ -990,15 +991,19 @@ func offeredHostKeyFingerprint(err error) string {
 // would be a second answer to "what did the probe say", and on a host whose
 // answer is expensive to obtain that second answer is another login.
 func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, claim string, opts []ssh.ConnectOption, platform deploy.Platform, fingerprint string) (transport.HostedSessionOpen, bool, error) {
+	endAuth := diagnostics.Stage(ctx, diagnostics.StageAuth)
 	installed, err := installHelperAt(ctx, cfg.Host, opts, r.install, r.source, platform)
+	endAuth(err)
 	if err != nil {
 		return transport.HostedSessionOpen{}, true, err
 	}
 	f := &sessionFactory{reg: r, sid: session.NewID(), host: cfg.Host, account: accountFromOptions(opts), opts: opts, install: installed}
 	h := &hostHelper{f: f, lanes: r.lanes, log: r.log}
+	endHold := diagnostics.Stage(ctx, diagnostics.StageHold)
 	h.mu.Lock()
 	c, outcome, err := h.connectLocked(ctx)
 	h.mu.Unlock()
+	endHold(err)
 	if err != nil {
 		return transport.HostedSessionOpen{}, true, err
 	}
@@ -1047,12 +1052,14 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 		var lifecycleErr error
 		// The caller's exchange, for the reason helper_hosted.go gives.
 		cursor = newLifecycleCursor(ctx, r.lifecycleCursors, r.lifecycleStopping)
+		endChannel := diagnostics.Stage(ctx, diagnostics.StageLifecycle)
 		lifecycleAdapter, lifecycleErr = lifecyclechannel.NewStream(
 			log.NewSlogAdapter(r.log).WithContext(ctx), driveKernel, coordinatorConn,
 			lifecyclechannel.WithLossReporter(r.reportLifecycleLoss),
 			lifecyclechannel.WithFrameScope(cursor.applyFrame),
 			lifecyclechannel.WithSetupTimeout(remoteShellSetupTimeout),
 		)
+		endChannel(lifecycleErr)
 		if lifecycleErr != nil {
 			_ = peerConn.Close()
 			stopDownlink()
@@ -1074,9 +1081,10 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 	// that never became a pane has no session to deliver to, and a delivery
 	// context outliving its pane is the lifetime this package refuses to
 	// keep. One function, so no arm below can roll back half of it.
-	endLifecycleLeg := func() {
+	endLifecycleLeg := func(reason string) {
 		if lifecycleAdapter != nil {
-			_ = lifecycleAdapter.Close()
+			diagnostics.NoteLifecycleClosed(ctx, reason)
+			_ = lifecycleAdapter.CloseWith(reason)
 			_ = lifecyclePeer.Close()
 		}
 		if stopDownlink != nil {
@@ -1099,7 +1107,9 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 	var routes farPaneToolRoutes
 	var toolToken string
 	if claim != "" && r.tools != nil {
+		endTools := diagnostics.Stage(ctx, diagnostics.StageToolSocket)
 		prepared, perr := r.tools.PrepareFarPaneToolSocket(ctx, cfg.Host, opts, claim)
+		endTools(perr)
 		if perr != nil {
 			r.log.Warn("far pane: no tool socket for this pane", "host", cfg.Host, "error", perr)
 		} else {
@@ -1114,6 +1124,7 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 	// round trip each on a connection that is already up, and each gets the
 	// budget the adapter above gives the shell that follows them.
 	spawnCtx, cancelSpawn := context.WithTimeout(ctx, farHelperAnswerTimeout)
+	endSpawn := diagnostics.Stage(ctx, diagnostics.StageSpawn)
 	entry, err := c.Spawn(spawnCtx, proto.SpawnParams{
 		Cwd: cfg.Cwd, Cols: cfg.Cols, Rows: cfg.Rows, Lifecycle: lifecycleLaunch,
 		// THE CLAIM RIDES THE SPAWN, and it is the L7 interval's opening half
@@ -1138,7 +1149,8 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 	})
 	cancelSpawn()
 	if err != nil {
-		endLifecycleLeg()
+		endSpawn(err)
+		endLifecycleLeg("open-rollback:spawn")
 		_ = c.Close()
 		return transport.HostedSessionOpen{}, true, farHelperAnswerError("spawn", err)
 	}
@@ -1161,8 +1173,9 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 		LifecycleOffset: 0, LifecycleFresh: true, RequestWrite: true,
 	}, holdOpt)
 	cancelAttach()
+	endSpawn(err)
 	if err != nil {
-		endLifecycleLeg()
+		endLifecycleLeg("open-rollback:attach")
 		// A HELPER THAT DID NOT ANSWER THE ATTACH WILL NOT ANSWER THE CLOSE.
 		// Asking anyway would hold the failure for another budget; the
 		// connection ending is what releases the session to the helper's own
@@ -1201,11 +1214,13 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 	if lifecycleAdapter != nil {
 		attached.OnFirstOutput(lifecycleAdapter.ObserveShellOutput)
 	}
+	endAdopt := diagnostics.Stage(ctx, diagnostics.StageAdoption)
 	sess, err := r.registry.Adopt(ctx, cfg, sid, attached)
+	endAdopt(err)
 	if err != nil {
 		stopBlockRows()
 		_ = attached.Close()
-		endLifecycleLeg()
+		endLifecycleLeg("open-rollback:adopt")
 		_ = c.CloseSession(ctx, entry.HostSessionID)
 		_ = c.Close()
 		return transport.HostedSessionOpen{}, true, err
@@ -1319,7 +1334,7 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 		}
 		var abortOnce sync.Once
 		abortLifecycle = func() {
-			abortOnce.Do(endLifecycleLeg)
+			abortOnce.Do(func() { endLifecycleLeg("open-aborted:transport") })
 		}
 		// The detach mirrors the rollback but ends the adapter with Detach,
 		// not Close: the leg's adapter learns an orderly handover from this
@@ -2141,9 +2156,9 @@ func (r *refRepo) Close() error {
 // session, opened or taken back. A method rather than the field itself so a
 // registry without the wiring is one nil check here instead of one at each
 // construction site.
-func (r *helperRegistry) reportLifecycleLoss(lane lifecycle.LaneID, cause lifecyclechannel.LossCause) {
+func (r *helperRegistry) reportLifecycleLoss(lane lifecycle.LaneID, loss lifecyclechannel.Loss) {
 	if r == nil || r.lifecycleLoss == nil {
 		return
 	}
-	r.lifecycleLoss(lane, cause)
+	r.lifecycleLoss(lane, loss)
 }

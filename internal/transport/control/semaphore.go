@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"sync"
+	"time"
 )
 
 // semaphore is a counting Admission backed by a buffered channel. A token in
@@ -11,6 +12,7 @@ import (
 type semaphore struct {
 	name string
 	ch   chan struct{}
+	book *holderBook
 }
 
 // NewSemaphore returns a NonblockingAdmission with the given capacity. Its
@@ -22,7 +24,7 @@ func NewSemaphore(name string, capacity int) NonblockingAdmission {
 	if capacity < 0 {
 		panic("control: negative capacity for semaphore " + name)
 	}
-	return &semaphore{name: name, ch: make(chan struct{}, capacity)}
+	return &semaphore{name: name, ch: make(chan struct{}, capacity), book: newHolderBook()}
 }
 
 // nonblocking seals the interface: only this package's types satisfy it.
@@ -30,14 +32,15 @@ func (s *semaphore) nonblocking() {}
 
 func (s *semaphore) Name() string { return s.name }
 
-func (s *semaphore) TryAcquire(context.Context) (Permit, *Rejection) {
+func (s *semaphore) TryAcquire(ctx context.Context) (Permit, *Rejection) {
 	select {
 	case s.ch <- struct{}{}:
-		return &semaphorePermit{ch: s.ch}, nil
+		return &semaphorePermit{ch: s.ch, book: s.book, id: s.book.add(ctx, time.Now())}, nil
 	default:
 		return nil, &Rejection{
-			Reason: "capacity exhausted",
-			Scope:  s.name,
+			Reason:  "capacity exhausted",
+			Scope:   s.name,
+			Holders: s.book.snapshot(),
 		}
 	}
 }
@@ -51,8 +54,18 @@ func (s *semaphore) TryAcquire(context.Context) (Permit, *Rejection) {
 type semaphorePermit struct {
 	ch   chan struct{}
 	once sync.Once
+	book *holderBook
+	id   uint64
 }
 
 func (p *semaphorePermit) Release() {
-	p.once.Do(func() { <-p.ch })
+	p.once.Do(func() {
+		<-p.ch
+		if p.book != nil {
+			p.book.release(p.id)
+		}
+	})
 }
+
+// Holders names the requests currently holding this semaphore.
+func (s *semaphore) Holders() []Holder { return s.book.snapshot() }

@@ -73,6 +73,19 @@ test.describe('Copy diagnostics', () => {
     const shown = await page.locator('.ab-rows dd').allTextContents()
     await page.getByRole('button', { name: 'Copy diagnostics' }).click()
 
+    // THE WRITE IS ASYNCHRONOUS AND NOW WAITS FOR THE BACKEND. Copy asks
+    // app.diagnostics for the process's record before it writes, and the
+    // record's goroutine summary is slower on a loaded runner than on a
+    // developer's machine — reading the clipboard after the click alone is a
+    // race, and CI lost it (run 42022147595, clipboard read as ""). Wait on
+    // what the write produces: the toast is raised AFTER the clipboard call
+    // resolves, so its exact success sentence is the observable that says the
+    // text is there. A degraded copy says so instead, and this wait then fails
+    // with the reason rather than reading an empty clipboard.
+    await expect(page.locator('.ui-toast__message')).toHaveText('Build details copied', {
+      timeout: 10_000,
+    })
+
     const copied = await page.evaluate(() => navigator.clipboard.readText())
     expect(copied).toContain('nocx')
     for (const value of shown) expect(copied).toContain(value.trim())
@@ -81,5 +94,10 @@ test.describe('Copy diagnostics', () => {
     const version = (await page.locator('.ab-version').textContent())?.trim() ?? ''
     expect(version).not.toBe('')
     expect(copied).toContain(version)
+    // AND THE RECORD THE COPY NOW CARRIES (nocx-3an1s.1.8): the build facts
+    // alone are what this page always had, and the reason it gained a second
+    // half is a stuck pane. The header line is the record's own, present in
+    // every answer — including one with no opens and no refusals yet.
+    expect(copied).toContain('nocx diagnostics')
   })
 })

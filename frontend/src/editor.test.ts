@@ -77,6 +77,45 @@ describe('CommandEditor', () => {
     expect(ed.isVisible).toBe(false)
   })
 
+  // nocx-atpw5.1.36: one line per Enter, naming which way the composer's own
+  // decision went — and the line's LENGTH only. A `clear` that never reached
+  // the shell and one the shell refused look identical from every other
+  // surface, and this is the line the failure context prints.
+  it('says which way an Enter went, and never the line itself (nocx-atpw5.1.36)', () => {
+    const info = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      const { ed, view } = setup()
+      ed.show()
+
+      ed.insertText('clear')
+      enter(view)
+      expect(info).toHaveBeenCalledWith('nocx: submit {"path":"command","chars":5}')
+
+      info.mockClear()
+      enter(view)
+      expect(info).toHaveBeenCalledWith('nocx: submit {"path":"empty","chars":0}')
+
+      const logged = info.mock.calls.map((call) => JSON.stringify(call)).join('\n')
+      expect(logged.includes('clear')).toBe(false)
+    } finally {
+      info.mockRestore()
+    }
+  })
+
+  it('says a vetoed Enter was vetoed (nocx-atpw5.1.36)', () => {
+    const info = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      const { ed, view, submit } = setup({ beforeSubmit: () => false })
+      ed.show()
+      ed.insertText('clear')
+      enter(view)
+      expect(submit).not.toHaveBeenCalled()
+      expect(info).toHaveBeenCalledWith('nocx: submit {"path":"vetoed","chars":5}')
+    } finally {
+      info.mockRestore()
+    }
+  })
+
   it('Enter hides+clears before submit (atomic handoff)', () => {
     const { ed, view, submit, order } = setup()
     ed.show()

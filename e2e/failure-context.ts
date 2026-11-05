@@ -58,7 +58,7 @@ import { existsSync, readFileSync } from 'node:fs'
 
 import type { Page, TestInfo } from '@playwright/test'
 
-import { formatFrame, redactFrame, type RedactedFrame } from './redact-frame.mts'
+import { formatFrame, redactFrame, type PendingCalls, type RedactedFrame } from './redact-frame.mts'
 import { standBackendLogTail } from './stand'
 import { linesForTrace } from './trace-context.mts'
 
@@ -219,6 +219,11 @@ const pagesByTestId = new Map<string, WatchedPage[]>()
 export function attachFailureDiagnostics(page: Page): PageDiagnostics {
   const consoleLines = bounded<string>(MAX_CONSOLE_LINES)
   const frames = bounded<RedactedFrame>(MAX_FRAMES)
+  /** id → method of this page's open requests, so a response can be named and
+   *  a `session.intent` answer can say whether it wrote anything. One map for
+   *  the page: the ids are the connection's, and a response is read on the
+   *  same socket its request was written to. */
+  const calls: PendingCalls = new Map()
   let snapshot: string | null = null
   let blockDom: string | null = null
 
@@ -235,12 +240,12 @@ export function attachFailureDiagnostics(page: Page): PageDiagnostics {
     // what a person typed (AGENTS.md).
     ws.on('framesent', (f) => {
       if (typeof f.payload !== 'string') return
-      const r = redactFrame('sent', f.payload)
+      const r = redactFrame('sent', f.payload, calls)
       if (r) frames.push(r)
     })
     ws.on('framereceived', (f) => {
       if (typeof f.payload !== 'string') return
-      const r = redactFrame('received', f.payload)
+      const r = redactFrame('received', f.payload, calls)
       if (r) frames.push(r)
     })
   })

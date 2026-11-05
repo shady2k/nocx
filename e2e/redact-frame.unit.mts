@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { formatFrame, redactFrame } from './redact-frame.mts'
+import { formatFrame, redactFrame, type PendingCalls } from './redact-frame.mts'
 
 test('redactFrame keeps method and id from a request', () => {
   const f = redactFrame('sent', JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'layout.read' }))
@@ -77,5 +77,82 @@ test('formatFrame renders direction, method, id and error compactly', () => {
   assert.equal(
     formatFrame({ direction: 'received', id: 1, error: { code: -32601, message: 'nope' } }),
     '<- id=1 error={"code":-32601,"message":"nope"}',
+  )
+})
+
+// nocx-atpw5.1.36: a session.intent refusal is a RESULT, not an error, so
+// before this the failure block could not tell "the keys never reached the
+// program" from "the runtime took them and wrote zero bytes" — the two
+// questions every lost-keystroke report asks.
+test('redactFrame names a response from the request that produced it', () => {
+  const calls: PendingCalls = new Map()
+  redactFrame('sent', JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'session.intent' }), calls)
+  const f = redactFrame(
+    'received',
+    JSON.stringify({ jsonrpc: '2.0', id: 7, result: { state: 'executed', bytesWritten: 6 } }),
+    calls,
+  )
+  assert.deepEqual(f, {
+    direction: 'received',
+    method: 'session.intent',
+    id: 7,
+    intent: { state: 'executed', bytesWritten: 6 },
+  })
+  assert.equal(calls.has('7'), false)
+})
+
+test('redactFrame keeps a refusal cause and never the region it quotes', () => {
+  const calls: PendingCalls = new Map()
+  redactFrame('sent', JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'session.intent' }), calls)
+  const f = redactFrame(
+    'received',
+    JSON.stringify({
+      jsonrpc: '2.0',
+      id: 9,
+      result: {
+        state: 'refused',
+        bytesWritten: 0,
+        refusal: { cause: 'busy', regionNow: 'secret-typed-into-a-prompt' },
+      },
+    }),
+    calls,
+  )
+  assert.ok(f)
+  assert.equal(JSON.stringify(f).includes('secret-typed-into-a-prompt'), false)
+  assert.deepEqual(f.intent, { state: 'refused', bytesWritten: 0, refusalCause: 'busy' })
+})
+
+test('redactFrame still drops every other result', () => {
+  const calls: PendingCalls = new Map()
+  redactFrame('sent', JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'vault.unseal' }), calls)
+  const f = redactFrame(
+    'received',
+    JSON.stringify({ jsonrpc: '2.0', id: 4, result: { token: 'abc', apiKey: 'shh' } }),
+    calls,
+  )
+  assert.ok(f)
+  assert.equal(f.intent, undefined)
+  assert.equal(JSON.stringify(f).includes('shh'), false)
+})
+
+test('redactFrame leaves a response bare when its request was never seen', () => {
+  const f = redactFrame(
+    'received',
+    JSON.stringify({ jsonrpc: '2.0', id: 11, result: { state: 'executed', bytesWritten: 6 } }),
+  )
+  assert.ok(f)
+  assert.equal(f.method, undefined)
+  assert.equal(f.intent, undefined)
+})
+
+test('formatFrame prints an intent outcome after id and error', () => {
+  assert.equal(
+    formatFrame({
+      direction: 'received',
+      method: 'session.intent',
+      id: 50,
+      intent: { state: 'refused', bytesWritten: 0, refusalCause: 'busy' },
+    }),
+    '<- session.intent id=50 intent={"state":"refused","bytesWritten":0,"refusalCause":"busy"}',
   )
 })

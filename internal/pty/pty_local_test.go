@@ -361,24 +361,49 @@ func TestWaitReadableReturnsWhenWokenWithoutHoldingTheDrainLock(t *testing.T) {
 // Close used to wake a parked wait with a spurious nil and then close the
 // very fds the wait polls, so a caller doing what runReadiness does — look
 // again after a nil — re-entered poll(2) on descriptors that no longer
-// belonged to it. On Linux that answers POLLNVAL at once, forever: the loop
-// below spins and never learns the pty is gone. On Darwin, whose poll(2) is
+// belonged to it. On Linux that answers POLLNVAL at once, forever: such a
+// loop spins and never learns the pty is gone. On Darwin, whose poll(2) is
 // built on kqueue, closing a polled descriptor drops its registration and a
 // wait that entered before the close is never woken by anything (inferred
 // from the CI dump; not reproducible here). Either way the caller is told
 // nothing, and it is the program ignoring SIGHUP that removes the other
 // thing that could have ended it: a slave that hangs up.
 //
-// The contract this asserts is platform-free: after Close, WaitReadable ends
-// with an error rather than a nil — whether it was parked when Close ran or
-// is called afterwards. The loop bound is a count of spurious returns, not a
-// duration; the timer is a failure watchdog only.
+// The contract asserted here is platform-free: a wait that is parked when
+// Close runs ends with os.ErrClosed rather than a nil, and so does every call
+// after it.
+//
+// # Why neither the wait nor the premise is a count (nocx-atpw5.1.43)
+//
+// This test used to spin WaitReadable in a goroutine up to 1000 times, then
+// call Close. On ci-mac all 1000 answered nil within 0.01 s and it failed. A
+// count is not the event, and a readiness answer needs one of two things:
+// something readable, or Close's latch. This program writes nothing, so 1000
+// nils can only mean the premise was false — the child had not installed its
+// SIGHUP trap yet, Close's SIGHUP killed it, and the master answered
+// EOF-readable at once. Measured on Linux: Close immediately after spawn kills
+// that child in 6 of 200 runs, because `trap` runs a moment after the process
+// starts. With a readable master the count is then burned while Close's latch
+// does not exist yet: reproduced on Linux, 85 of 100 runs ended with 1000 nils
+// once Close was held back by a millisecond.
+//
+// The child therefore writes a marker AFTER the trap and BEFORE the exec, and
+// the test READS it: seeing it proves the program ignores the hangup before
+// Close can send one. Collecting it goes through the same readiness/drain
+// pair production uses and ends on EAGAIN, so from that point the program is
+// alive, ignores SIGHUP and writes nothing — a readiness wait parks. The
+// single wait then asserts on the moment Close takes that premise away, and
+// the program's survival is checked afterwards, so a pass cannot come from
+// the master becoming readable for some other reason.
 func TestCloseEndsAReadinessWaitOnAProgramThatOutlivesTheHangup(t *testing.T) {
+	const marker = "trap-installed"
 	lp, err := NewLocal(log.NewSlogAdapter(nil), Config{
 		Command: "/bin/sh",
-		Args:    []string{"-c", "trap '' HUP; exec sleep 60"},
-		Cols:    80,
-		Rows:    24,
+		// The marker is written after the trap and before the exec, so
+		// reading it proves the program already ignores SIGHUP.
+		Args: []string{"-c", "trap '' HUP; printf " + marker + "; exec sleep 60"},
+		Cols: 80,
+		Rows: 24,
 	})
 	if err != nil {
 		t.Fatalf("NewLocal: %v", err)
@@ -389,17 +414,22 @@ func TestCloseEndsAReadinessWaitOnAProgramThatOutlivesTheHangup(t *testing.T) {
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 	})
 
-	const spuriousBudget = 1000
+	// The premise, established rather than assumed: the program ignores the
+	// hangup, and it is silent — the master is drained to EAGAIN here.
+	drainUntil(t, lp, marker)
+
 	waitDone := make(chan error, 1)
-	go func() {
-		for range spuriousBudget {
-			if err := lp.WaitReadable(context.Background()); err != nil {
-				waitDone <- err
-				return
-			}
-		}
-		waitDone <- nil
-	}()
+	go func() { waitDone <- lp.WaitReadable(context.Background()) }()
+
+	// Asked at the moment Close takes the premise away, never by sleeping:
+	// with nothing to read and nothing to wake it, a wait cannot have
+	// answered. If it has, the premise is false and this test would prove
+	// nothing about Close.
+	select {
+	case err := <-waitDone:
+		t.Fatalf("WaitReadable answered %v with nothing to read and nothing to wake it: the premise below is false", err)
+	default:
+	}
 
 	if err := lp.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -407,19 +437,81 @@ func TestCloseEndsAReadinessWaitOnAProgramThatOutlivesTheHangup(t *testing.T) {
 
 	select {
 	case err := <-waitDone:
-		if err == nil {
-			t.Fatalf("WaitReadable answered nil %d times after Close and never an error: the caller is never told the pty is gone", spuriousBudget)
-		}
 		if !errors.Is(err, os.ErrClosed) {
-			t.Fatalf("WaitReadable after Close = %v, want os.ErrClosed", err)
+			t.Fatalf("a WaitReadable parked when Close ran = %v, want os.ErrClosed", err)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("a WaitReadable loop never returned after Close")
+		t.Fatal("Close never woke a WaitReadable parked on a program that outlives the hangup")
 	}
 
-	if err := lp.WaitReadable(context.Background()); !errors.Is(err, os.ErrClosed) {
-		t.Fatalf("WaitReadable called after Close = %v, want os.ErrClosed", err)
+	// The program outlived the hangup, so what ended the wait was Close's
+	// latch and nothing else: the one other thing that could have ended it, a
+	// slave that hangs up, did not happen.
+	if err := syscall.Kill(pid, 0); err != nil {
+		t.Fatalf("the program did not outlive the hangup (kill 0 = %v): the wait above ended for another reason", err)
+	}
+
+	// And the refusal is not a one-off for the wait that happened to be in
+	// flight: every call after Close answers the same, so a caller that looks
+	// again is never told nil.
+	for i := 1; i <= 3; i++ {
+		if err := lp.WaitReadable(context.Background()); !errors.Is(err, os.ErrClosed) {
+			t.Fatalf("WaitReadable call %d after Close = %v, want os.ErrClosed", i, err)
+		}
 	}
 	// And a wake after Close is still harmless.
 	lp.WakeReadiness()
+}
+
+// drainUntil waits — through the production readiness/drain pair, so no sleep
+// synchronises anything — until the master's output holds needle, and leaves
+// the master drained to EAGAIN: the caller knows the program wrote what it
+// wrote and has written nothing since. waitForOutput is the sibling waiting
+// on a marker, but it reads with a blocking Read and stops at the marker,
+// which cannot say the fd is quiet.
+//
+// The deadline is a failure watchdog only; what is asserted on is the
+// program's own output.
+func drainUntil(t *testing.T, lp *LocalPty, needle string) string {
+	t.Helper()
+	type collected struct {
+		out string
+		err error
+	}
+	done := make(chan collected, 1)
+	go func() {
+		var out strings.Builder
+		buf := make([]byte, 4096)
+		for {
+			for {
+				n, barrier, err := lp.RawReadChunk(buf)
+				if err != nil {
+					done <- collected{out.String(), err}
+					return
+				}
+				out.Write(buf[:n])
+				if barrier || n == 0 {
+					break
+				}
+			}
+			if strings.Contains(out.String(), needle) {
+				done <- collected{out.String(), nil}
+				return
+			}
+			if err := lp.WaitReadable(context.Background()); err != nil {
+				done <- collected{out.String(), err}
+				return
+			}
+		}
+	}()
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("collecting output until %q: %v (got %q)", needle, got.err, got.out)
+		}
+		return got.out
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the program never wrote %q", needle)
+		return ""
+	}
 }

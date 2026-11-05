@@ -14,7 +14,7 @@ import (
 
 func TestDaemonLifecycleDeadlineAdmissionWinsAtomically(t *testing.T) {
 	drained := make(chan struct{})
-	l := newDaemonLifecycle(time.Hour, func() { close(drained) })
+	l := newDaemonLifecycle(time.Hour, time.Hour, func() { close(drained) })
 	release, err := l.admit()
 	if err != nil {
 		t.Fatal(err)
@@ -43,7 +43,7 @@ func TestDaemonLifecycleScheduledGraceExpires(t *testing.T) {
 	drained := make(chan struct{})
 	var scheduled time.Duration
 	var fire func()
-	l := newDaemonLifecycleWithTimer(time.Hour, func() { close(drained) }, func(d time.Duration, f func()) lifecycleTimer {
+	l := newDaemonLifecycleWithTimer(time.Hour, time.Hour, func() { close(drained) }, func(d time.Duration, f func()) lifecycleTimer {
 		scheduled, fire = d, f
 		return inertLifecycleTimer{}
 	})
@@ -77,7 +77,7 @@ func (inertLifecycleTimer) Stop() bool { return true }
 func TestDaemonLifecycleFailedAdmittedSpawnReleasesReservation(t *testing.T) {
 	drained := make(chan struct{})
 	var fire func()
-	l := newDaemonLifecycleWithTimer(time.Hour, func() { close(drained) }, func(_ time.Duration, f func()) lifecycleTimer {
+	l := newDaemonLifecycleWithTimer(time.Hour, time.Hour, func() { close(drained) }, func(_ time.Duration, f func()) lifecycleTimer {
 		fire = f
 		return inertLifecycleTimer{}
 	})
@@ -112,7 +112,7 @@ func TestDaemonLifecycleDeadlineRacesAdmission(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		var mu sync.Mutex
 		admitted, refused, drained := false, false, false
-		l := newDaemonLifecycle(time.Hour, func() { mu.Lock(); drained = true; mu.Unlock() })
+		l := newDaemonLifecycle(time.Hour, time.Hour, func() { mu.Lock(); drained = true; mu.Unlock() })
 		start := make(chan struct{})
 		var wg sync.WaitGroup
 		wg.Add(2)
@@ -232,4 +232,150 @@ func testFailedServiceSpawnReleasesLifecycleReservation(t *testing.T, op string,
 	if drainedCalls.Load() != 1 {
 		t.Fatalf("OnDrained called %d times after refused spawn, want exactly once", drainedCalls.Load())
 	}
+}
+
+// recordingTimers records every deadline a lifecycle arms, so a test can fire
+// one at the moment its rule is about. Nothing here waits for a clock.
+type recordingTimers struct {
+	mu    sync.Mutex
+	deadl []recordedDeadline
+}
+
+type recordedDeadline struct {
+	after time.Duration
+	fire  func()
+}
+
+func (r *recordingTimers) afterFunc(after time.Duration, fire func()) lifecycleTimer {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.deadl = append(r.deadl, recordedDeadline{after: after, fire: fire})
+	return inertLifecycleTimer{}
+}
+
+func (r *recordingTimers) fire(after time.Duration) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	fired := false
+	for _, d := range r.deadl {
+		if d.after == after {
+			d.fire()
+			fired = true
+		}
+	}
+	return fired
+}
+
+// TestDaemonLifecycleABoundClientSurvivesTheStartupDeadline is nocx-398ca's
+// first rule: the startup deadline asks whether a daemon was ever REACHED, and
+// a client that is connected has answered that question. The deadline firing
+// after the bind — which is the race a real timer loses under load — must not
+// retire a daemon whose coordinator is on its way to a spawn.
+func TestDaemonLifecycleABoundClientSurvivesTheStartupDeadline(t *testing.T) {
+	drained := make(chan struct{})
+	timers := &recordingTimers{}
+	l := newDaemonLifecycleWithTimer(time.Hour, 2*time.Hour, func() { close(drained) }, timers.afterFunc)
+
+	l.clientBound()
+	if !timers.fire(time.Hour) {
+		t.Fatal("the startup deadline was not armed at construction")
+	}
+	select {
+	case <-drained:
+		t.Fatal("a connected client did not stop the startup deadline from retiring its helper")
+	default:
+	}
+
+	// The spawn the client was on its way to make is admitted.
+	release, err := l.admit()
+	if err != nil {
+		t.Fatalf("a client that connected before the deadline was refused its spawn: %v", err)
+	}
+	l.sessionStarted()
+	release()
+	select {
+	case <-drained:
+		t.Fatal("the daemon drained after admitting the spawn its connected client made")
+	default:
+	}
+
+	// The last-session rule still ends it: a connection is not a session.
+	l.fireDrained(l.markSessionEnded())
+	select {
+	case <-drained:
+	default:
+		t.Fatal("the last session's end did not retire a daemon whose client was still connected")
+	}
+	l.stop()
+}
+
+// TestDaemonLifecycleAClientThatNeverSpawnsIsBounded is the other half of the
+// same rule: a client that connects and then does nothing must not keep a
+// helper for ever. ConnectedIdleGrace is that bound, and it retires even with
+// the client still bound.
+func TestDaemonLifecycleAClientThatNeverSpawnsIsBounded(t *testing.T) {
+	drained := make(chan struct{})
+	timers := &recordingTimers{}
+	l := newDaemonLifecycleWithTimer(time.Hour, 2*time.Hour, func() { close(drained) }, timers.afterFunc)
+
+	l.clientBound()
+	if !timers.fire(2 * time.Hour) {
+		t.Fatal("binding a client armed no connected-idle deadline")
+	}
+	select {
+	case <-drained:
+	default:
+		t.Fatal("a client that held the helper for the whole bound without spawning did not retire it")
+	}
+	if _, err := l.admit(); !errors.Is(err, ErrDraining) {
+		t.Fatalf("admission after the connected-idle bound = %v, want draining", err)
+	}
+	l.stop()
+}
+
+// TestDaemonLifecycleAClientLeavingWithoutSpawningIsStillBounded: a release
+// is not evidence that nobody is arriving — a liveness probe connects and
+// leaves as an ordinary part of asking whether the generation is served, and
+// retiring the daemon it asked would delete the thing it reported. So the
+// release re-arms the connected-idle bound, and the daemon ends when that
+// expires rather than at once or never.
+func TestDaemonLifecycleAClientLeavingWithoutSpawningIsStillBounded(t *testing.T) {
+	drained := make(chan struct{})
+	timers := &recordingTimers{}
+	l := newDaemonLifecycleWithTimer(time.Hour, 2*time.Hour, func() { close(drained) }, timers.afterFunc)
+
+	l.clientBound()
+	l.clientReleased()
+	select {
+	case <-drained:
+		t.Fatal("a client's release retired the helper at once; a probe that leaves must not delete the daemon it asked")
+	default:
+	}
+	if !timers.fire(2 * time.Hour) {
+		t.Fatal("a client's release armed no connected-idle deadline")
+	}
+	select {
+	case <-drained:
+	default:
+		t.Fatal("a helper reached and left with no session never retired")
+	}
+	l.stop()
+}
+
+// TestDaemonLifecycleAnUnreachedHelperStillExpires pins the guarantee the
+// startup grace exists for (nocx-2b0mq): a daemon nobody ever dialed exits.
+func TestDaemonLifecycleAnUnreachedHelperStillExpires(t *testing.T) {
+	drained := make(chan struct{})
+	timers := &recordingTimers{}
+	l := newDaemonLifecycleWithTimer(time.Hour, 2*time.Hour, func() { close(drained) }, timers.afterFunc)
+
+	if !timers.fire(time.Hour) {
+		t.Fatal("the startup deadline was not armed at construction")
+	}
+	select {
+	case <-drained:
+	default:
+		t.Fatal("a daemon nobody reached did not retire when its startup deadline expired")
+	}
+	l.stop()
 }

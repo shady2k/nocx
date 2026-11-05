@@ -41,6 +41,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/endpoint"
@@ -1807,17 +1808,41 @@ func retryableLocalHelperOpen(err error) bool {
 	return errors.As(err, &refusal) && refusal.Code == "draining"
 }
 
+// helperRetireWaitTimeout bounds an open's wait for a retiring local
+// generation's connection to end (nocx-398ca).
+//
+// The wait is for an EVENT — the daemon that refused the spawn with `draining`
+// closing the connection it is no longer admitting on — and an event with no
+// bound is not one. A daemon can refuse new spawns while it still has an
+// admission in flight (lifecycle's closingAdmissions), and that admission may
+// itself be a spawn waiting on a person at a password prompt: the connection
+// then stays open for minutes, and this wait held the open — and its
+// execution-lane permit — for exactly as long. Past this bound the open
+// reports the refusal it already has, and a fresh one starts a fresh
+// generation.
+//
+// Thirty seconds is the product's own shell-setup budget
+// (remoteShellSetupTimeout): the event waited for is a daemon finishing the
+// work it had already admitted, not network work of its own. A var so a test
+// shrinks it rather than waiting it out, like gitOpenTimeout.
+var helperRetireWaitTimeout = 30 * time.Second
+
 // waitForClientLoss waits for the retiring generation to close its existing
 // connections before the next open calls endpoint.Ensure. This is an event
-// from the helper, not a guessed delay.
+// from the helper, not a guessed delay — and it is BOUNDED, because an event
+// nobody can wait out would hold the open for ever (helperRetireWaitTimeout).
 func (o *localHelperOpener) waitForClientLoss(ctx context.Context, c *helperclient.Client) error {
 	if c == nil {
 		return nil
 	}
+	timer := time.NewTimer(helperRetireWaitTimeout)
+	defer timer.Stop()
 	select {
 	case <-c.Done():
 		o.dropIfLost(c)
 		return nil
+	case <-timer.C:
+		return fmt.Errorf("the retiring helper did not end its connection within %s", helperRetireWaitTimeout)
 	case <-ctx.Done():
 		return ctx.Err()
 	}

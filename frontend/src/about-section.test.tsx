@@ -123,6 +123,55 @@ describe('AboutSection', () => {
   // A refusal is reported. The clipboard is a platform capability that can say
   // no (a non-secure context, a platform that refused the write), and a button
   // that silently does nothing is worse than one that is not there.
+  // THE PASTE A STUCK PANE NEEDS (nocx-3an1s.1.8). The owner asked for the
+  // diagnostics to reach the place a person actually quotes from, so the copy
+  // is the build block, a blank line, and the record — and the record names
+  // the stage a pending open is in.
+  it('copies the diagnostics record beside the build facts, naming the parked stage', async () => {
+    const clipboard = fakeClipboard()
+    const loadDiagnostics = () =>
+      Promise.resolve({
+        text: 'nocx diagnostics\nopens: 1 pending, 0 recent\n  pending [connection 1] ssh trace=abc request=1/open#4 stage=spawn for=12.4s elapsed=12.4s\n',
+      })
+    render(() => (
+      <AboutSection load={load(RELEASE)} clipboard={clipboard} loadDiagnostics={loadDiagnostics} />
+    ))
+    await waitFor(() => expect(screen.getByText('0.2.0')).toBeTruthy())
+
+    fireEvent.click(screen.getByRole('button', { name: /copy diagnostics/i }))
+
+    await waitFor(() => expect(clipboard.written.length).toBe(1))
+    const copied = clipboard.written[0]
+    expect(copied).toContain(`Version: ${RELEASE.version}`)
+    expect(copied).toContain('stage=spawn')
+  })
+
+  // A HALF A PASTE IS STILL WORTH PASTING, AND IT SAYS WHAT IS MISSING. The
+  // record is read at the moment of the press, so the backend can be saturated
+  // or gone; the build facts still copy and the toast names the missing half.
+  it('copies the build facts and says why when the record cannot be read', async () => {
+    const clipboard = fakeClipboard()
+    render(() => (
+      <AboutSection
+        load={load(RELEASE)}
+        clipboard={clipboard}
+        loadDiagnostics={() => Promise.reject(new Error('app.diagnostics: refused'))}
+      />
+    ))
+    await waitFor(() => expect(screen.getByText('0.2.0')).toBeTruthy())
+
+    fireEvent.click(screen.getByRole('button', { name: /copy diagnostics/i }))
+
+    await waitFor(() => expect(clipboard.written.length).toBe(1))
+    expect(clipboard.written[0]).toContain(`Version: ${RELEASE.version}`)
+    expect(clipboard.written[0]).not.toContain('nocx diagnostics')
+    await waitFor(() =>
+      expect(
+        toasts.some((t) => t.level === 'danger' && /without the diagnostics/.test(t.message)),
+      ).toBe(true),
+    )
+  })
+
   it('says so when the clipboard refuses', async () => {
     const clipboard: ClipboardAccess = {
       readText: () => Promise.resolve(''),

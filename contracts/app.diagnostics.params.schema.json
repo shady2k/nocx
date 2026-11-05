@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/app.diagnostics.params.schema.json",
+  "title": "AppDiagnosticsParams",
+  "description": "Params for app.diagnostics. The method reads a bounded in-memory record and takes nothing from the caller.",
+  "type": ["object", "null"],
+  "additionalProperties": false,
+  "required": [],
+  "properties": {}
+}

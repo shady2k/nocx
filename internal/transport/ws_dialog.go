@@ -106,6 +106,7 @@ type dialogHandlers struct {
 func (h dialogHandlers) holdPicker(ctx context.Context, req jsonrpcRequest) (control.Permit, bool) {
 	permit, rej := h.admit.TryAcquire(ctx)
 	if rej != nil {
+		control.ReportRefusal(ctx, *rej)
 		_ = h.r.TryError(req.ID, saturationRPCError(req.Method, rej))
 		return nil, false
 	}

@@ -18,6 +18,7 @@ import { For, Show, createResource, createSignal, type Accessor } from 'solid-js
 import { Badge, Button, PageSection, Stack, StatusCard } from './ui'
 import { showToast } from './ui/toast'
 import type { AppAbout } from './generated/app.about'
+import type { AppDiagnostics } from './generated/app.diagnostics'
 import type { ClipboardAccess } from './clipboard'
 import type { UpdateCheckOutcome } from './update-check'
 
@@ -33,6 +34,11 @@ export interface AboutSectionProps {
   /** Reads the build description. A thunk rather than the client itself, so
    *  the page can be driven from a stub without one existing. */
   load: () => Promise<AppAbout>
+  /** Reads the process's own record for the paste (nocx-3an1s.1.8): the
+   *  pending and recent opens with their stages, the recent refusals with
+   *  their holders, and the process facts. Absent in an embedding with no
+   *  backend; the copy then carries the build facts alone and says so. */
+  loadDiagnostics?: () => Promise<AppDiagnostics>
   clipboard: ClipboardAccess
   /** Why the last automatic update check failed, or null when it succeeded
    *  or has not run (nocx-1ebrs.36). Absent in an embedding with no window
@@ -111,9 +117,35 @@ export function AboutSection(props: AboutSectionProps) {
   async function copy(): Promise<void> {
     const value = about()
     if (!value) return
+    // THE PASTE IS TWO HALVES, READ AT THE MOMENT OF THE PRESS: what this build
+    // is (constant) and where the process is stuck (a snapshot of NOW). The
+    // second half is asked for here rather than with the page, because a
+    // diagnostics block cached at page load answers about a process that has
+    // moved on — and the moment it matters is the moment the pane is stuck.
+    let diagnostics = ''
+    let diagnosticsError: string | null = null
+    if (props.loadDiagnostics) {
+      try {
+        diagnostics = (await props.loadDiagnostics()).text
+      } catch (err) {
+        // A soft degrade is visible: the build facts still copy — the person
+        // came here to quote something — and the toast says the half that is
+        // missing and why. A copy that silently dropped it would be the
+        // failure this surface exists to prevent.
+        diagnosticsError = err instanceof Error ? err.message : String(err)
+      }
+    }
     try {
-      await props.clipboard.writeText(diagnosticsText(value))
-      showToast({ message: 'Build details copied' })
+      const text =
+        diagnostics === '' ? diagnosticsText(value) : `${diagnosticsText(value)}\n\n${diagnostics}`
+      await props.clipboard.writeText(text)
+      showToast({
+        message:
+          diagnosticsError === null
+            ? 'Build details copied'
+            : `Build details copied without the diagnostics: ${diagnosticsError}`,
+        level: diagnosticsError === null ? undefined : 'danger',
+      })
     } catch (err) {
       // The clipboard is a platform capability that can refuse — a non-secure
       // context, a platform that declined the write. A button that silently

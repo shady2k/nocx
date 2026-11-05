@@ -389,9 +389,9 @@ func startTypedBusyStackWith(t *testing.T, helloTimeout time.Duration, laneCapac
 		sessions:     sessionWindows{reg: reg},
 		probes:       defaultMasterProbes,
 		helloTimeout: helloTimeout,
-		lossReporter: func(l lifecycle.LaneID, cause lifecyclechannel.LossCause) {
+		lossReporter: func(l lifecycle.LaneID, ls lifecyclechannel.Loss) {
 			if l == lane {
-				loss <- cause
+				loss <- ls.Cause
 			}
 		},
 		deliveryContext: func() context.Context { return runCtx },

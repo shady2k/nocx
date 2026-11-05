@@ -93,6 +93,15 @@ const (
 	LossStoreRefused LossCause = "store-refused"
 )
 
+// Loss is one adapter's ending, with the fact `cause=closed` used to omit:
+// WHO closed it (nocx-3an1s.1.8). ClosedBy is empty for every cause but
+// LossClosed, where the closer is a bounded code such as
+// "open-rollback:spawn" — never a path, a host or an error's text.
+type Loss struct {
+	Cause    LossCause
+	ClosedBy string
+}
+
 // LossReporter is told which path ended an adapter's transport or which
 // expected listener domain failed to prove its capability, keyed by lane.
 // It exists because the kernel cannot answer this: a handshake that times
@@ -104,7 +113,7 @@ const (
 // status the product renders. Adapter loss is reported before its
 // TransportLost; listener expectation loss does not tear down the shared
 // transport.
-type LossReporter func(lane lifecycle.LaneID, cause LossCause)
+type LossReporter func(lane lifecycle.LaneID, loss Loss)
 
 // Option configures an Adapter or Listener.
 type Option func(*options)
@@ -194,6 +203,10 @@ type Adapter struct {
 
 	helloTimeout time.Duration
 	setupTimeout time.Duration
+	// closedBy is the bounded code naming the caller of CloseWith, read once
+	// by lose while it builds the loss (nocx-3an1s.1.8). Empty for every
+	// other end path.
+	closedBy string
 	// openedAt is when this transport was constructed, so the established
 	// line can say how long the far side took to authenticate — the number a
 	// hello-timeout is measured against.
@@ -491,8 +504,20 @@ func (a *Adapter) Send(env lifecycle.Envelope) error {
 }
 
 // Close tears the transport down: the domain ends (TransportLost), the hello
-// timer stops, and the pump stops. It is the session-end disposal path.
-func (a *Adapter) Close() error {
+// timer stops, and the pump stops. It is the session-end disposal path, and it
+// names no closer — a caller that knows who it is uses CloseWith.
+func (a *Adapter) Close() error { return a.CloseWith("") }
+
+// CloseWith is Close, naming the closer. The reason is a bounded code the
+// caller owns ("open-rollback:spawn", "adoption-refused", "session-ended"),
+// written onto the loss line and handed to the reporter, which is what turns
+// a bare `cause=closed` into an answer.
+func (a *Adapter) CloseWith(reason string) error {
+	if reason != "" {
+		a.mu.Lock()
+		a.closedBy = reason
+		a.mu.Unlock()
+	}
 	a.lose(LossClosed)
 	return nil
 }
@@ -566,13 +591,18 @@ func (a *Adapter) detached() bool {
 // those need different fixes.
 func (a *Adapter) lose(cause LossCause) {
 	a.loss.Do(func() {
+		a.mu.Lock()
+		closedBy := a.closedBy
+		a.mu.Unlock()
+		loss := Loss{Cause: cause, ClosedBy: closedBy}
 		a.log.Info("lifecycle channel lost",
-			"cause", string(cause), "transport", a.id, "lane", a.lane, "domain", a.domain)
+			"cause", string(cause), "transport", a.id, "lane", a.lane, "domain", a.domain,
+			"closed_by", closedBy)
 		// Before TransportLost: that call publishes the kernel's own facts
 		// synchronously, and a consumer watching both must not see the fact
 		// before the cause that explains it.
 		if a.report != nil {
-			a.report(a.lane, cause)
+			a.report(a.lane, loss)
 		}
 		a.stopHelloTimer()
 		if err := a.kernel.TransportLost(a.id); err != nil {
@@ -787,7 +817,7 @@ func (a *Adapter) halt(cause error) {
 		// The pane says so (AGENTS.md: a soft degrade is visible in the
 		// product): its channel is gone for this coordinator.
 		if a.report != nil {
-			a.report(a.lane, LossStoreRefused)
+			a.report(a.lane, Loss{Cause: LossStoreRefused})
 		}
 		a.stopHelloTimer()
 		a.mu.Lock()

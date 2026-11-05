@@ -203,6 +203,16 @@ var ErrOperationInactive = errors.New("capability: service used outside its oper
 // report an unavailable capability instead of dereferencing a typed nil.
 var ErrOperationUnavailable = errors.New("capability: operation service unavailable")
 
+// refused is the ONE place an admission refusal becomes the error a handler
+// answers with, and the one place it is reported to the request's diagnostics
+// record (nocx-3an1s.1.8). Two ownerships in one call because a second copy
+// of "a gate refused" is where the scope a person is told about would drift
+// from the scope the record kept.
+func refused(ctx context.Context, rej *control.Rejection) error {
+	control.ReportRefusal(ctx, *rej)
+	return &RefusedError{Rejection: *rej}
+}
+
 // RefusedError is returned by Run when the operation's conflict gates
 // refused the work. It carries the control.Rejection the transport already
 // maps to the control.saturated wire error.
@@ -290,7 +300,7 @@ func (op *operation[S]) Disposition() Disposition {
 func (op *operation[S]) Run(ctx context.Context, fn func(context.Context, S) error) error {
 	permit, rej := op.admission.TryAcquire(ctx)
 	if rej != nil {
-		return &RefusedError{Rejection: *rej}
+		return refused(ctx, rej)
 	}
 	// Release the permit only after the guard has gone cold: a service
 	// that escaped the callback must not observe a live guard in the

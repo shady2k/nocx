@@ -314,13 +314,18 @@ func TestSaturationRefusalEmitsSafeDebugDiagnostic(t *testing.T) {
 		params(func(json.RawMessage) string { return "" }),
 		func(w *wsConn, _ *connState, r Responder) handlerFunc {
 			_ = w
-			return func(_ context.Context, req jsonrpcRequest) {
-				answerOperationRefusal(r, req, &capability.RefusedError{
-					Rejection: control.Rejection{
-						Reason: "inner capacity exhausted: " + innerRequestValue,
-						Scope:  "config",
-					},
-				})
+			return func(ctx context.Context, req jsonrpcRequest) {
+				rejection := control.Rejection{
+					Reason: "inner capacity exhausted: " + innerRequestValue,
+					Scope:  "config",
+				}
+				// THE REFUSAL IS REPORTED WHERE IT IS BORN (nocx-3an1s.1.8).
+				// A real gate refusal is reported by capability.refused at the
+				// admission; this fixture builds one by hand, so it says the
+				// same thing at the same point — the diagnostic line is the
+				// transport's, and the transport hears it through this sink.
+				control.ReportRefusal(ctx, rejection)
+				answerOperationRefusal(r, req, &capability.RefusedError{Rejection: rejection})
 			}
 		},
 	)

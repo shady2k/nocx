@@ -43,6 +43,7 @@ type waitingSemaphore struct {
 	waiters  int // registered waiters, under mu
 	maxQueue int
 	timeout  time.Duration
+	book     *holderBook
 }
 
 func NewWaitingSemaphore(name string, capacity, maxQueue int, waitTimeout time.Duration) Admission {
@@ -60,6 +61,7 @@ func NewWaitingSemaphore(name string, capacity, maxQueue int, waitTimeout time.D
 		ch:       make(chan struct{}, capacity),
 		maxQueue: maxQueue,
 		timeout:  waitTimeout,
+		book:     newHolderBook(),
 	}
 }
 
@@ -76,7 +78,7 @@ func (s *waitingSemaphore) TryAcquire(ctx context.Context) (Permit, *Rejection) 
 		s.mu.Unlock()
 		select {
 		case s.ch <- struct{}{}:
-			return &waitingPermit{ch: s.ch}, nil
+			return &waitingPermit{ch: s.ch, book: s.book, id: s.book.add(ctx, time.Now())}, nil
 		default:
 		}
 		s.mu.Lock()
@@ -84,8 +86,9 @@ func (s *waitingSemaphore) TryAcquire(ctx context.Context) (Permit, *Rejection) 
 	if s.waiters >= s.maxQueue {
 		s.mu.Unlock()
 		return nil, &Rejection{
-			Reason: "conflict queue full",
-			Scope:  s.name,
+			Reason:  "conflict queue full",
+			Scope:   s.name,
+			Holders: s.book.snapshot(),
 		}
 	}
 	s.waiters++
@@ -105,16 +108,18 @@ func (s *waitingSemaphore) TryAcquire(ctx context.Context) (Permit, *Rejection) 
 	defer timer.Stop()
 	select {
 	case s.ch <- struct{}{}:
-		return &waitingPermit{ch: s.ch}, nil
+		return &waitingPermit{ch: s.ch, book: s.book, id: s.book.add(ctx, time.Now())}, nil
 	case <-ctx.Done():
 		return nil, &Rejection{
-			Reason: "cancelled",
-			Scope:  s.name,
+			Reason:  "cancelled",
+			Scope:   s.name,
+			Holders: s.book.snapshot(),
 		}
 	case <-timer.C:
 		return nil, &Rejection{
-			Reason: "wait exceeded",
-			Scope:  s.name,
+			Reason:  "wait exceeded",
+			Scope:   s.name,
+			Holders: s.book.snapshot(),
 		}
 	}
 }
@@ -125,8 +130,18 @@ func (s *waitingSemaphore) TryAcquire(ctx context.Context) (Permit, *Rejection) 
 type waitingPermit struct {
 	ch   chan struct{}
 	once sync.Once
+	book *holderBook
+	id   uint64
 }
 
 func (p *waitingPermit) Release() {
-	p.once.Do(func() { <-p.ch })
+	p.once.Do(func() {
+		<-p.ch
+		if p.book != nil {
+			p.book.release(p.id)
+		}
+	})
 }
+
+// Holders names the requests currently holding this gate.
+func (s *waitingSemaphore) Holders() []Holder { return s.book.snapshot() }

@@ -221,7 +221,7 @@ func (a lifecycleAdoption) attachTo(open *transport.HostedSessionOpen, attached 
 	}
 	open.AbortLifecycle = func() {
 		abortOnce.Do(func() {
-			_ = adapter.Close()
+			_ = adapter.CloseWith("adoption-refused")
 			_ = peer.Close()
 			// An adoption the transport refuses never became a pane; its
 			// downlink's lifetime ends with the rollback, not at some

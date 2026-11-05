@@ -901,6 +901,9 @@ export function SettingsComponent(props: SettingsComponentProps) {
               ? props.aboutClient.load()
               : Promise.reject(new Error('the build description is not available in this window'))
           }
+          loadDiagnostics={
+            props.aboutClient ? () => props.aboutClient!.loadDiagnostics() : undefined
+          }
           clipboard={props.clipboard ?? unavailableClipboard}
           updateCheckError={props.updateCheckError}
           onCheckForUpdates={props.checkForUpdates}

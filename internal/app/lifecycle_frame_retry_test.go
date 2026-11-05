@@ -59,10 +59,10 @@ type lossRecorder struct {
 	causes []lifecyclechannel.LossCause
 }
 
-func (r *lossRecorder) report(_ lifecycle.LaneID, cause lifecyclechannel.LossCause) {
+func (r *lossRecorder) report(_ lifecycle.LaneID, loss lifecyclechannel.Loss) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.causes = append(r.causes, cause)
+	r.causes = append(r.causes, loss.Cause)
 }
 
 func (r *lossRecorder) seen() []lifecyclechannel.LossCause {

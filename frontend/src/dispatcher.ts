@@ -90,6 +90,10 @@ const SATURATION_TOAST_MESSAGE =
  * cause; a new admission is a new row here, deliberately.
  */
 const SATURATION_HOLDERS: Record<string, string> = {
+  // The execution lane's own name (nocx-3an1s.1.8). It was the one scope a
+  // stuck open held that the table did not know, so the commonest refusal in
+  // the owner's log read as "that action was refused" — true, and useless.
+  control: 'another terminal operation is still running',
   config: 'a settings or connections change is still being saved',
   session: 'another pane is still completing a terminal operation',
   vault: 'the vault is still being used',

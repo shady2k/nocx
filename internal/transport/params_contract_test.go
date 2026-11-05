@@ -138,6 +138,11 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"app.about": {
 			[]byte(`{}`),
 		},
+		// app.diagnostics takes nothing from the caller: it reads a bounded
+		// record and the process facts (nocx-3an1s.1.8).
+		"app.diagnostics": {
+			[]byte(`{}`),
+		},
 		"backup.create": {
 			[]byte(`{}`),
 		},

@@ -37,6 +37,7 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/contentkey"
 	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/diagnostics"
 	"github.com/shady2k/nocx/internal/discovery"
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/filesystem/local"
@@ -695,6 +696,11 @@ func New(opts ...Option) (*App, error) {
 		// one we ship.
 		{Dir: filepath.Join(paths.ConfigDir(), "installed-skills"), Provenance: skill.ProvenanceInstalled},
 	}
+
+	// THE PROCESS'S DIAGNOSTIC RECORD (nocx-3an1s.1.8). Created before
+	// anything that can open a pane, so the first open is already recorded;
+	// bounded and in memory only.
+	diag := diagnostics.NewRecorder()
 
 	logFilePath := filepath.Join(paths.DataDir(), "nocx.log")
 	if o.logFilePath != nil {
@@ -2150,6 +2156,9 @@ func New(opts ...Option) (*App, error) {
 		// enroller closes the same interval by lane on the shell's own
 		// withdrawal, and both call Forget.
 		transport.WithPaneAdmissions(agentApprovalService))
+	tpOpts = append(tpOpts, transport.WithDiagnostics(diag, appDiagnosticsProvider{
+		opener: localOpener, logPath: logFilePath,
+	}))
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
 	// The screen plane's transport half, bound here because the opener was
 	// built before the transport existed — the same late-binding every other
@@ -2307,8 +2316,12 @@ func New(opts ...Option) (*App, error) {
 	// session.integrationChanged. The cause crosses as its string so the
 	// transport does not depend on the adapter package — the adapter's
 	// constants remain the single spelling.
-	localOpener.lifecycleLoss = func(lane lifecycle.LaneID, cause lifecyclechannel.LossCause) {
-		tp.NoteIntegrationLoss(lane, string(cause))
+	localOpener.lifecycleLoss = func(lane lifecycle.LaneID, loss lifecyclechannel.Loss) {
+		// The integration axis reads the CAUSE; the diag record keeps the
+		// closer as well, because `cause=closed` alone cannot say who closed
+		// it (nocx-3an1s.1.8).
+		tp.NoteIntegrationLoss(lane, string(loss.Cause))
+		diag.NoteLifecycleLoss(string(lane), string(loss.Cause), loss.ClosedBy)
 	}
 	localOpener.reserveLifecycleLane = tp.BeginLifecycleLane
 	localOpener.abandonLifecycleLane = tp.AbandonLifecycleLane

@@ -1957,6 +1957,55 @@
       }
     },
     {
+      "name": "app.diagnostics",
+      "params": [
+        {
+          "name": "params",
+          "required": false,
+          "schema": {
+            "$ref": "https://nocx.local/contracts/app.diagnostics.params.schema.json"
+          }
+        }
+      ],
+      "errors": [
+        {
+          "code": -32601,
+          "message": "Method not found",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32603,
+          "message": "Internal error",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32004,
+          "message": "Control plane busy",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        }
+      ],
+      "x-nocx-agent-disposition": "operation-owned",
+      "result": {
+        "name": "app.diagnosticsResult",
+        "schema": {
+          "$ref": "https://nocx.local/contracts/app.diagnostics.schema.json"
+        }
+      }
+    },
+    {
       "name": "attach",
       "params": [
         {
@@ -11092,6 +11141,9 @@
     },
     {
       "$ref": "https://nocx.local/contracts/app.about.schema.json"
+    },
+    {
+      "$ref": "https://nocx.local/contracts/app.diagnostics.schema.json"
     },
     {
       "$ref": "https://nocx.local/contracts/attach.schema.json"

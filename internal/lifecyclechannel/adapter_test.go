@@ -464,10 +464,10 @@ func newCauseRecorder() *causeRecorder {
 	return r
 }
 
-func (r *causeRecorder) report(lane lifecycle.LaneID, c LossCause) {
+func (r *causeRecorder) report(lane lifecycle.LaneID, loss Loss) {
 	<-r.mu
 	r.lanes = append(r.lanes, lane)
-	r.causes = append(r.causes, c)
+	r.causes = append(r.causes, loss.Cause)
 	r.mu <- struct{}{}
 }
 
@@ -556,7 +556,7 @@ func TestCauseIsReportedBeforeTheKernelIsTold(t *testing.T) {
 	order := make(chan string, 4)
 	a, child, err := newSocketPairAdapter(log.NewSlogAdapter(nil), &orderingKernel{Kernel: k, order: order},
 		WithHelloTimeout(50*time.Millisecond),
-		WithLossReporter(func(lifecycle.LaneID, LossCause) { order <- "cause" }))
+		WithLossReporter(func(lifecycle.LaneID, Loss) { order <- "cause" }))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

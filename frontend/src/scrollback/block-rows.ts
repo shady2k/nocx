@@ -307,6 +307,19 @@ export function paintStoredRows(
       ':scope > [data-output-incomplete], :scope > [data-output-empty], :scope > [data-output-unreadable]',
     )
     .forEach((el) => el.remove())
+  // The eviction sentence says a body is not here, and a rows read IS that
+  // body. A restored command answers `body: null` whenever its rows artifact
+  // exists (restore-client.ts), so every one of them starts with the
+  // sentence and then paints its real rows; keeping both left two
+  // `.cmd-output` elements, one showing the output and one saying it is
+  // gone. The sentence and the block's `data-output-evicted` are one fact,
+  // written together by restored-block.ts, so they are taken back together.
+  // A turn's prose notice is a claim about a different body and is never
+  // this paint's to take back.
+  if (block.dataset.blockKind !== 'ask' && block.dataset.outputEvicted === 'true') {
+    block.querySelectorAll(':scope > .cmd-output.cmd-output-evicted').forEach((el) => el.remove())
+    delete block.dataset.outputEvicted
+  }
   paintOutput(block, stored, opts)
   // The notice is the kit's own statement line (ui/README.md BlockNotice),
   // one per block by its data attribute, naming EACH cause the store sent —

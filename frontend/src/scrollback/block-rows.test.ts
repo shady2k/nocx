@@ -104,6 +104,47 @@ describe('stored block rows', () => {
     expect(block.querySelector('.cmd-output')?.classList.contains('cmd-output-evicted')).toBe(false)
   })
 
+  it('replaces a restored eviction sentence with the rows that are its real body', () => {
+    // A command whose body is a rows artifact answers `body: null` to the
+    // restore, so the block is built saying "Output is no longer kept"; the
+    // artifact's rows are then the body. Keeping both leaves a person
+    // reading real output and its own obituary side by side, and leaves two
+    // `.cmd-output` elements where the product has one body.
+    const container = document.createElement('div')
+    const block = restoredBlock(
+      {
+        id: 1,
+        command: 'make test',
+        cwd: '/repo',
+        location: '',
+        durationMs: 1200,
+        exitCode: 0,
+        status: 'success',
+        body: null,
+        author: 'shell',
+        kind: 'command',
+        entryId: 'entry-evicted',
+      },
+      DEFAULT_SNAPSHOT,
+      () => container,
+      () => {},
+      new CommandSnapshotStore(),
+    )
+    expect(block.querySelector('.cmd-output-evicted')).not.toBeNull()
+
+    paintStoredRows(
+      block,
+      { ...stored, artifactVersion: 'v1' },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+
+    const outputs = [...block.querySelectorAll('.cmd-output')]
+    expect(outputs).toHaveLength(1)
+    expect(outputs[0].textContent).toContain('ok')
+    expect(outputs[0].classList.contains('cmd-output-evicted')).toBe(false)
+    expect(block.dataset.outputEvicted).toBeUndefined()
+  })
+
   it("warms cell-fit with every row's cells before painting a single one (nocx-2v80t.3.18)", () => {
     // boxOf is a pure cache read (cell-fit.ts) — nothing warmed before the
     // paint pass means no glyph is ever boxed, whatever the metric says.

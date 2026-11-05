@@ -21,6 +21,7 @@ import {
   type BlockKind,
 } from './blocks'
 import { paintStoredRows } from './block-rows'
+import { restoredBlock } from './restored-block'
 import type { Row } from '../generated/ledger.blockRows'
 import { wireRowOf, type CellSpec } from '../painter/fixtures'
 import { DEFAULT_SNAPSHOT } from './serializer'
@@ -4887,6 +4888,50 @@ describe('backend-owned block rows', () => {
       expect(restored.querySelector('.cmd-output')).toBeNull()
       manager.restorePast([restored])
       expect(blockOutputText(restored)).toBe('late restore')
+    } finally {
+      manager.dispose()
+      inner.remove()
+    }
+  })
+
+  it('replaces a restored eviction sentence when deferred rows paint', () => {
+    const { manager, inner } = newManager()
+    const restored = restoredBlock(
+      {
+        id: 1,
+        command: 'printf rows',
+        cwd: '~',
+        location: '',
+        durationMs: 10,
+        exitCode: 0,
+        status: 'success',
+        body: null,
+        author: 'shell',
+        kind: 'command',
+        entryId: 'entry-deferred',
+      },
+      DEFAULT_SNAPSHOT,
+      () => inner,
+      () => {},
+      freshStore(),
+    )
+    try {
+      manager.setVisible(false)
+      manager.paintStoredRows(restored, {
+        lines: [{ from: 0, row: row('real output') }],
+        droppedRows: 0,
+        lostRows: 0,
+        truncated: null,
+      })
+      manager.restorePast([restored])
+      expect(restored.querySelectorAll('.cmd-output')).toHaveLength(2)
+
+      manager.setVisible(true)
+
+      const outputs = [...restored.querySelectorAll('.cmd-output')]
+      expect(outputs).toHaveLength(1)
+      expect(outputs[0].textContent?.trimEnd()).toBe('real output')
+      expect(restored.dataset.outputEvicted).toBeUndefined()
     } finally {
       manager.dispose()
       inner.remove()

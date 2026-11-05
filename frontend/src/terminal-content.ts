@@ -4870,6 +4870,15 @@ export class TerminalContent extends BasePaneContent {
         lifecycle: fact.lifecycle,
         domain: fact.domain,
         epoch: fact.epoch,
+        // WHICH ATTEMPT MOVED THE STATE, and WHEN (nocx-atpw5.1.39). A
+        // `prompt_ready -> running` line without them cannot be read: a real
+        // command and a replayed fact print the same three words, and the
+        // order they happened in was the other half. The id is the fact's own
+        // (absent on a fact that names no attempt), and `at` is the renderer's
+        // clock, because the backend's line for the same fact may be missing
+        // from the report entirely.
+        attempt: fact.attempt?.id,
+        at: new Date().toISOString(),
         from: before.kind,
         to: this.lifecycle.state.kind,
         applied: this.lifecycle.state !== before,

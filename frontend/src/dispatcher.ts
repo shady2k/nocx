@@ -51,19 +51,78 @@ export class VaultOperationCancelledError extends Error {
   }
 }
 
-/**
- * One visible saturation toast per episode, not one per refusal. The bounded
- * executor refuses a burst of requests while the control plane is saturated;
- * stacking a toast per refusal would bury the message in itself. The first
- * toast is sticky (danger level), so the user sees it, and a refusal after
- * the window gets a fresh toast — the plane is saturated again, and the
- * user may have dismissed the first.
+/** Who asked for a call (ADR-8eej3e66 §2).
  *
- * 10 s: an episode (executor refusals with retryAfterMs ~250 ms) resolves in
- * seconds, so the window collapses the whole burst into one toast; a window
- * much shorter would re-toast a user who is still reading the first.
+ *  A PERSON's call is one they pressed something for: a button, a row, a
+ *  refresh. A BACKGROUND call is work a surface does on its own behalf — a
+ *  store scoping itself to the tab in front, a watcher, a poll, a carrier —
+ *  and it is the origin that decides whether a refusal may become anything a
+ *  person sees. Absent, the origin is `person`: the side on which an error
+ *  cannot be silenced without somebody having decided so.
+ *
+ *  Renderer only at this stage. The wire carries it once the operation
+ *  catalogue exists (stage 2 of that record's migration), and until then the
+ *  backend treats every request as a person's, exactly as absent means here.
  */
-export const SATURATION_TOAST_WINDOW_MS = 10_000
+export type CallOrigin = 'person' | 'background'
+
+/** What a caller may say about its invocation. `intent` is the vault's
+ *  operation/report distinction (ADR-0032); `origin` is who is asking. */
+export interface CallOptions {
+  intent?: RpcIntent
+  origin?: CallOrigin
+}
+
+/** The wire's fixed reason for a refused control request
+ *  (contracts/control.saturated.schema.json). */
+const SATURATION_REASON = 'control-saturated'
+
+/**
+ * WHAT THE REFUSAL WAS FOR, in the person's words (nocx-3an1s.1.1).
+ *
+ * A refusal carries `scope`: the backend admission that refused the work, set
+ * from server vocabulary at the composition root and never from request text.
+ * The owner met "The terminal is busy" while no command of theirs was running,
+ * which is exactly what a background write in another surface looks like, so
+ * naming the domain is the least a refusal can do.
+ *
+ * An unknown scope names no domain rather than inventing a cause; a new
+ * admission is a new row here, deliberately.
+ */
+const REFUSAL_DOMAINS: Record<string, string> = {
+  config: 'settings',
+  session: 'terminal session',
+  vault: 'vault',
+  content: 'command record',
+  git: 'git',
+  filesystem: 'file',
+  api: 'API',
+  // The execution lane every admission-backed control method shares
+  // (internal/transport/ws.go's control.NewSemaphore("control", …)). It is
+  // the scope a stuck pane open takes eight of, and until it was named the
+  // owner met exactly that with nothing they could name (nocx-398ca).
+  control: 'terminal',
+}
+
+/**
+ * The sentence a refused call rejects with (ADR-8eej3e66 §8, stage 1).
+ *
+ * It says what happened and what was at its limit, and nothing else: no
+ * "busy", no "try again in a moment". The remedy belongs to the surface that
+ * asked — its own refused state and its own retry — because a sentence shared
+ * by every surface cannot know what the person was doing or whether asking
+ * again is even theirs to do.
+ *
+ * This is the ONE owner of the refusal's words. A surface that renders
+ * `err.message` therefore cannot inherit the wire's own "Control plane busy",
+ * and two spellings of one fact cannot drift apart.
+ */
+export function refusalSentence(scope?: string): string {
+  const domain = scope === undefined ? undefined : REFUSAL_DOMAINS[scope]
+  return domain === undefined
+    ? 'The request was refused — nocx was already running as many operations as it allows.'
+    : `The request was refused — nocx was already running as many ${domain} operations as it allows.`
+}
 
 /** The control-plane notification a full refreshable outbound queue sends
  *  through its one reserved slot, after dropping the frame that overflowed it
@@ -71,84 +130,29 @@ export const SATURATION_TOAST_WINDOW_MS = 10_000
  *  were dropped is the whole message. */
 const OUTBOUND_STALLED = 'outbound.stalled'
 
-const SATURATION_TOAST_MESSAGE =
-  'The terminal is busy — that action was refused. Try again in a moment.'
-
-/**
- * WHAT IS HOLDING THE TERMINAL, in the person's words (nocx-3an1s.1.1).
- *
- * A refusal carries `scope`: the backend admission that refused the work, set
- * from server vocabulary at the composition root (`capability.GateConfig`…
- * and the execution lane's own name) and never request text. A refusal that
- * says only "busy" leaves the person with nothing to act on — the owner saw
- * the toast while no command of theirs was running, which is exactly what a
- * background write in another surface looks like. Naming the domain is as
- * specific as the backend's answer is: the admission knows the resource, not
- * the caller's method.
- *
- * An unknown scope falls back to the generic sentence rather than inventing a
- * cause; a new admission is a new row here, deliberately.
- */
-const SATURATION_HOLDERS: Record<string, string> = {
-  config: 'a settings or connections change is still being saved',
-  session: 'another pane is still completing a terminal operation',
-  vault: 'the vault is still being used',
-  content: 'another command or answer is still being recorded',
-  git: 'a git operation is still running',
-  filesystem: 'a file operation is still running',
-  api: 'an API request is still running',
-  // The execution lane every admission-backed control method shares
-  // (internal/transport/ws.go's control.NewSemaphore("control", …)). It is
-  // the scope a stuck pane open takes eight of, and until it was named here
-  // the owner met exactly that: "The terminal is busy" with nothing holding
-  // it they could name (nocx-3an1s.1.1, nocx-398ca).
-  control: 'another terminal operation is still in progress',
-}
-
-/** The toast's sentence for one refusal, naming the holder where the scope
- *  names a domain this build knows. */
-function saturationMessage(scope?: string): string {
-  const holder = scope === undefined ? undefined : SATURATION_HOLDERS[scope]
-  return holder === undefined
-    ? SATURATION_TOAST_MESSAGE
-    : `The terminal is busy — ${holder}. Try again in a moment.`
-}
-
-// null = no saturation toast raised yet. Nullable on purpose: a numeric
-// sentinel of 0 would suppress the FIRST toast under a fake clock that
-// starts at epoch (Date.now() === 0 in tests).
-let lastSaturationToastAt: number | null = null
-
-/**
- * Test/teardown hook: forget the last saturation toast, so a fresh test (or
- * a fresh app session) starts with a clean dedup window. The dedup state is
- * module-global by design — one window per process, exactly like the toast
- * queue itself — so it needs the same explicit reset the queue has.
- */
-export function resetSaturationToastDedup(): void {
-  lastSaturationToastAt = null
-}
-
 /**
  * True when `data` is the error payload of a refused control request
  * (contracts/control.saturated.schema.json). Only the fixed `reason`
- * discriminates: a payload field may grow without silencing the toast.
+ * discriminates, so a payload field may grow without the class being lost.
  */
 function isSaturationData(data: unknown): data is Pick<ControlSaturated, 'reason'> {
   return (
     typeof data === 'object' &&
     data !== null &&
     'reason' in data &&
-    data.reason === 'control-saturated'
+    data.reason === SATURATION_REASON
   )
 }
 
 /**
  * True when `err` is a control request the backend refused because the
  * control plane was saturated — transient by contract (`retryable`), so a
- * surface may offer the person the same action again. The toast is the
- * dispatcher's either way; this only lets a surface avoid a dead end, through
- * the same discriminator the toast uses rather than a second reading of it.
+ * surface may offer the person the same action again.
+ *
+ * The dispatcher no longer shows anything for a refusal (ADR-8eej3e66 stage
+ * 1): this is how a surface recognises the one class of failure whose remedy
+ * is its own retry, through the wire's discriminator rather than a second
+ * reading of the message.
  */
 export function isSaturationRefusal(err: unknown): boolean {
   return err instanceof RpcError && isSaturationData(err.data)
@@ -199,6 +203,10 @@ interface PendingCall {
   method: string
   params: unknown
   intent: RpcIntent
+  /** Who asked. Carried on the call so a refusal can be recorded against the
+   *  invocation that caused it, and so the paths that must stay quiet can
+   *  recognise their own work (ADR-8eej3e66 §2). */
+  origin: CallOrigin
   sealedRetried: boolean
   sent: boolean
   settled: boolean
@@ -252,12 +260,20 @@ export class Dispatcher {
 
   constructor(private readonly provider: EndpointProvider) {
     this.subscribe('control.saturated', (params: unknown) => {
-      // Consume the generated params type (the contract file must be
-      // reachable from main() — dead-exports ratchet). The notification's
-      // shape is the contract: `scope` is what it names, and the toast uses
-      // it to say what holds the terminal (nocx-3an1s.1.1).
+      // A refused NOTIFICATION: no id, so no response to carry the -32004
+      // error, and the server says it here instead. Nobody's promise is
+      // rejected for it and nobody pressed anything for it, so the whole
+      // debt of this frame is the record (ADR-8eej3e66 stage 1 removed the
+      // toast; the schema and this subscription go in its last stage).
+      //
+      // Consumes the generated params type — the contract file must stay
+      // reachable from main(): `methodClass` and `scope` are the server's
+      // coarse class and admission name, never request text.
       const note = params as ControlSaturatedNotification
-      this.raiseSaturationToast(typeof note.scope === 'string' ? note.scope : undefined)
+      log.warn('nocx: control action refused', {
+        methodClass: typeof note.methodClass === 'string' ? note.methodClass : '',
+        scope: typeof note.scope === 'string' ? note.scope : '',
+      })
     })
     this.subscribe(OUTBOUND_STALLED, () => {
       // The OUTBOUND twin of control.saturated, and it needs the opposite
@@ -500,8 +516,10 @@ export class Dispatcher {
     method: string,
     params: unknown,
     signal?: AbortSignal,
-    intent: RpcIntent = 'operation',
+    options: CallOptions = {},
   ): Promise<T> {
+    const intent = options.intent ?? 'operation'
+    const origin = options.origin ?? 'person'
     return new Promise((resolve, reject) => {
       const id = this.nextID++
       const pending: PendingCall = {
@@ -510,6 +528,7 @@ export class Dispatcher {
         method,
         params,
         intent,
+        origin,
         sealedRetried: false,
         sent: false,
         settled: false,
@@ -729,7 +748,10 @@ export class Dispatcher {
           p.reject(new VaultOperationCancelledError())
           return
         }
-        this.handleSaturationData(msg.error.data)
+        if (isSaturationData(msg.error.data)) {
+          p.reject(refusedError(p.method, p.origin, msg.error.data, msg.error.code))
+          return
+        }
         p.reject(new RpcError(msg.error.message ?? 'rpc error', msg.error.code, msg.error.data))
       } else {
         p.resolve(msg.result)
@@ -884,49 +906,32 @@ export class Dispatcher {
       h()
     }
   }
+}
 
-  /**
-   * The global fallback for a refused control request. A surface that
-   * forgets to show its refusal still degrades visibly — a soft degrade
-   * must be visible in the product, not only in a log. Individual
-   * surfaces may later disable an action or retry; this is what stops
-   * silence.
-   */
-  private handleSaturationData(data: unknown): void {
-    if (!isSaturationData(data)) return
-    const scope = (data as { scope?: unknown }).scope
-    this.raiseSaturationToast(typeof scope === 'string' ? scope : undefined)
-  }
-
-  /**
-   * The deduplicated saturation toast, shared by the error path and the
-   * control.saturated notification path (a refused notification has no id,
-   * so the server emits the notification instead of an error — it must be
-   * visible the same way).
-   */
-  private raiseSaturationToast(scope?: string): void {
-    const now = Date.now()
-    if (
-      lastSaturationToastAt !== null &&
-      now - lastSaturationToastAt < SATURATION_TOAST_WINDOW_MS
-    ) {
-      return
-    }
-    lastSaturationToastAt = now
-    // Lazy import, on purpose: the toast kit pulls in Solid's DOM runtime,
-    // which must not load in the node-env unit suites that import the
-    // dispatcher (vitest defaults to node; solid modules are jsdom-only by
-    // convention). The import resolves once and is cached. The dedup state
-    // above is set synchronously, so a burst cannot race the import. The
-    // If the chunk fails to load there is no toast to fall back to, so the
-    // failure is logged rather than swallowed. A refusal the user is never
-    // told about is the exact degrade this whole surface exists to prevent —
-    // it would be perverse for the notifier to go quiet without a trace.
-    const message = saturationMessage(scope)
-    void import('./ui/toast')
-      .then((m) => m.showToast({ level: 'danger', message }))
-      .catch((err: unknown) => {
-        log.error('saturation toast could not be shown', { error: String(err) })
-      })
-  }
+/**
+ * The error one refused call rejects with, and the record of who caused it.
+ *
+ * Two things happen here and nowhere else (ADR-8eej3e66 stage 1):
+ *
+ * - The message becomes a sentence a person can read. The wire's own
+ *   "Control plane busy" is a diagnostic, not an answer, and a surface that
+ *   prints `err.message` — which most of them do — must not put it on screen.
+ *   `data` is untouched, so `isSaturationRefusal` still recognises the class.
+ * - The invocation is recorded with its origin, in the log. A background
+ *   refusal is silent to the person by design, so the record is the only
+ *   place it exists in the renderer; the backend's own `control action
+ *   refused` line and Copy diagnostics hold the same fact with its holders.
+ */
+function refusedError(
+  method: string,
+  origin: CallOrigin,
+  data: Pick<ControlSaturated, 'reason'>,
+  code: number | undefined,
+): RpcError {
+  const scope =
+    typeof (data as { scope?: unknown }).scope === 'string'
+      ? ((data as { scope?: unknown }).scope as string)
+      : ''
+  log.warn('nocx: control request refused', { method, scope, origin })
+  return new RpcError(refusalSentence(scope === '' ? undefined : scope), code, data)
 }

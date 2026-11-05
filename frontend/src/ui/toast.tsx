@@ -46,7 +46,7 @@ export type ToastLevel = 'info' | 'success' | 'warning' | 'danger'
  *  one concept, which is what this kit exists to prevent (nocx-1ebrs.54).
  *  Running an action answers the toast, so the kit dismisses it: no action is
  *  its own dismiss button too. */
-export interface ToastAction {
+interface ToastAction {
   label: string
   onClick: () => void
   /** `primary` paints the action the toast exists to offer; at most one. */
@@ -54,7 +54,7 @@ export interface ToastAction {
 }
 
 /** A link a toast carries — where the thing it names can be read. */
-export interface ToastLink {
+interface ToastLink {
   label: string
   href: string
 }

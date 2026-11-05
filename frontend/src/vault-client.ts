@@ -128,7 +128,7 @@ export interface VaultRpc {
     method: string,
     params: unknown,
     signal?: AbortSignal,
-    intent?: RpcIntent,
+    options?: { intent?: RpcIntent },
   ): Promise<T>
   onVaultSealed?: (method: string) => Promise<void>
 }
@@ -200,7 +200,7 @@ export class VaultClient {
    *  merely listing endpoints must not put a sheet over the window
    *  (nocx-76wyh). */
   reportInventory(): Promise<VaultInventory> {
-    return this.dispatcher.call('vault.inventory', {}, undefined, 'report')
+    return this.dispatcher.call('vault.inventory', {}, undefined, { intent: 'report' })
   }
 
   /** Store a secret created on the Secrets page: name and kind were asked of

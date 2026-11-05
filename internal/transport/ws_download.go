@@ -124,6 +124,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/shady2k/nocx/internal/operation/catalog"
 	"io"
 	"io/fs"
 	"net/http"
@@ -917,11 +918,11 @@ func rfc5987(s string) string {
 // the filesystem domain's bound.
 func (s *WSServer) filesDownloadSpecs(bindingOp capability.FilesystemBindingOperation, bindingSub control.Submission) []methodSpec {
 	return []methodSpec{
-		reg(bindingSub, "files.download", params(validateFilesDownloadRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(bindingSub, catalog.OpFilesDownload, params(validateFilesDownloadRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := downloadHandlers{op: bindingOp, machine: s, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDownload(ctx, state, req) }
 		}),
-		reg(bindingSub, "files.downloadCancel", params(validateFilesDownloadCancelRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(bindingSub, catalog.OpFilesDownloadCancel, params(validateFilesDownloadCancelRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := downloadHandlers{op: bindingOp, machine: s, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDownloadCancel(ctx, state, req) }
 		}),

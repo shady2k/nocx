@@ -25,6 +25,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
 
@@ -86,7 +87,12 @@ var ingressCriticalMethods = map[string]struct{}{
 // in the sealed-vault normalizer for every method (ADR-0032,
 // vault_sealed.go).
 type methodSpec struct {
-	method     string
+	method string
+	// op is the catalogue handle this registration runs. It is a typed handle,
+	// not the string above, so a method with no declaration cannot be
+	// registered: reg() is the only constructor and it takes the handle, and
+	// only internal/operation/catalog can mint one (ADR-8eej3e66 §1).
+	op         catalog.Method
 	submission control.Submission
 	build      func(w *wsConn, state *connState, r Responder) handlerFunc
 	// key optionally extracts the authoritative ordering key from validated
@@ -212,6 +218,7 @@ func validateParams(v paramsValidator, raw json.RawMessage) string {
 // controlMethod is one connection's answer to one control method: the shared
 // submission and the connection-scoped handler closure.
 type controlMethod struct {
+	op         catalog.Method
 	submission control.Submission
 	handle     func(ctx context.Context, req jsonrpcRequest)
 	key        func(json.RawMessage) (string, *RPCError)
@@ -228,6 +235,16 @@ func buildMethodSpecs(specs []methodSpec) (map[string]methodSpec, error) {
 	for _, spec := range specs {
 		if _, dup := m[spec.method]; dup {
 			return nil, fmt.Errorf("transport: duplicate registration for control method %q", spec.method)
+		}
+		if !spec.op.Valid() {
+			return nil, fmt.Errorf(
+				"transport: control method %q registered without a catalogue handle — declare the operation in "+
+					"internal/operation/catalog and pass its handle to reg(); a method with no declaration does not exist",
+				spec.method)
+		}
+		if want := string(spec.op.ID()); want != spec.method {
+			return nil, fmt.Errorf(
+				"transport: control method %q is registered with the handle for %q", spec.method, want)
 		}
 		if spec.validate == nil {
 			// The architectural prohibition: a control method with no
@@ -274,6 +291,7 @@ func connMethods(specs map[string]methodSpec, w *wsConn, state *connState) map[s
 		norm := newSealedNormalizer(w)
 		next := spec.build(w, state, norm)
 		method := controlMethod{
+			op:         spec.op,
 			submission: spec.submission,
 			handle:     validated(spec, next, w),
 		}
@@ -330,14 +348,14 @@ type handlerFunc func(ctx context.Context, req jsonrpcRequest)
 // per-connection handler builder. The builder receives the connection's
 // wsConn (identity), its state, and the Responder to write through — the
 // sealed-vault normalizer for every method (connMethods decides).
-func reg(sub control.Submission, method string, v paramsValidator, build func(w *wsConn, state *connState, r Responder) handlerFunc) methodSpec {
-	return methodSpec{method: method, submission: sub, build: build, validate: v}
+func reg(sub control.Submission, op catalog.Method, v paramsValidator, build func(w *wsConn, state *connState, r Responder) handlerFunc) methodSpec {
+	return methodSpec{method: string(op.ID()), op: op, submission: sub, build: build, validate: v}
 }
 
 // whenAvailable declares that a method answers only while its domain is
 // wired, and is consulted before the validator. Compose it onto a spec:
 //
-//	whenAvailable(regResponder(sub, "vault.unseal", params(fn), build), wired)
+//	whenAvailable(regResponder(sub, catalog.OpVaultUnseal, params(fn), build), wired)
 func whenAvailable(spec methodSpec, available func() bool, unavailable string) methodSpec {
 	spec.available = available
 	spec.unavailableMessage = unavailable
@@ -348,8 +366,8 @@ func whenAvailable(spec methodSpec, available func() bool, unavailable string) m
 // Responder — the common case. Handlers that need connection identity
 // (subscriber registration, capture tab id, tunnel ownership) use reg with
 // the *wsConn directly.
-func regResponder(sub control.Submission, method string, v paramsValidator, build func(r Responder) handlerFunc) methodSpec {
-	return reg(sub, method, v, func(_ *wsConn, _ *connState, r Responder) handlerFunc { return build(r) })
+func regResponder(sub control.Submission, op catalog.Method, v paramsValidator, build func(r Responder) handlerFunc) methodSpec {
+	return reg(sub, op, v, func(_ *wsConn, _ *connState, r Responder) handlerFunc { return build(r) })
 }
 
 // methodClassFor maps a refused method to its coarse server-side class for

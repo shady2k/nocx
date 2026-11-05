@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/shady2k/nocx/internal/operation/catalog"
 	"io"
 	"net"
 	"net/http"
@@ -3648,8 +3649,15 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 			return
 		}
 	}
+	// THE INVOCATION GETS A SCOPE (ADR-8eej3e66 §4). It carries the
+	// declaration's deadlines and the request's cancellation, and it owns the
+	// one settlement record. Stage 2 records settlement and logs expiry; it
+	// does not answer for it, so nothing a caller can do changes here yet.
+	scope := catalog.Begin(requestCtx, m.op, catalog.Invocation{})
+	requestCtx = catalog.WithScope(requestCtx, scope)
 	rej := m.submission.TrySubmit(requestCtx, control.Task{Key: key, Run: func(pctx context.Context) {
 		defer cancelRequest()
+		defer scope.Complete()
 		defer func() {
 			if cancelEntry != nil {
 				wconn.requestCancels.drop(req.ID, cancelEntry)
@@ -3660,6 +3668,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	if rej == nil {
 		return
 	}
+	scope.Refuse()
 	cancelRequest()
 	if cancelEntry != nil {
 		wconn.requestCancels.drop(req.ID, cancelEntry)

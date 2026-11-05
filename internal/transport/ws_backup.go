@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/shady2k/nocx/internal/operation/catalog"
 	"strings"
 	"unicode/utf8"
 
@@ -111,16 +112,16 @@ func (s *WSServer) backupSpecs(lane control.Admission, configGate control.Admiss
 	}
 	h := backupSpecs{operation: op, saver: s.backupFileSaver}
 	return []methodSpec{
-		regResponder(s.operationQueue("backup"), "backup.create", noParams(), func(r Responder) handlerFunc {
+		regResponder(s.operationQueue("backup"), catalog.OpBackupCreate, noParams(), func(r Responder) handlerFunc {
 			return func(ctx context.Context, req jsonrpcRequest) { h.create(ctx, r, req) }
 		}),
-		regResponder(s.operationQueue("backup"), "backup.preview", params(validateBackupPreviewRaw), func(r Responder) handlerFunc {
+		regResponder(s.operationQueue("backup"), catalog.OpBackupPreview, params(validateBackupPreviewRaw), func(r Responder) handlerFunc {
 			return func(ctx context.Context, req jsonrpcRequest) { h.preview(ctx, r, req) }
 		}),
-		regResponder(s.operationQueue("backup"), "backup.restore", params(validateBackupRestoreRaw), func(r Responder) handlerFunc {
+		regResponder(s.operationQueue("backup"), catalog.OpBackupRestore, params(validateBackupRestoreRaw), func(r Responder) handlerFunc {
 			return func(ctx context.Context, req jsonrpcRequest) { h.restore(ctx, r, req) }
 		}),
-		regResponder(s.dialogSub, "backup.saveToFile", params(validateBackupSaveRaw), func(r Responder) handlerFunc {
+		regResponder(s.dialogSub, catalog.OpBackupSaveToFile, params(validateBackupSaveRaw), func(r Responder) handlerFunc {
 			return func(ctx context.Context, req jsonrpcRequest) { h.saveToFile(ctx, r, req) }
 		}),
 	}

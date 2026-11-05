@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/shady2k/nocx/internal/operation/catalog"
 	"net/url"
 	"runtime"
 	"sort"
@@ -2944,19 +2945,19 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 		return h
 	}
 	return []methodSpec{
-		reg(contentSub, "agent.ask", params(validateAgentAskRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(contentSub, catalog.OpAgentAsk, params(validateAgentAskRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := build(w, state, r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAsk(ctx, req) }
 		}),
-		reg(contentSub, "agent.cancel", params(validateAgentCancelRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(contentSub, catalog.OpAgentCancel, params(validateAgentCancelRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := build(w, state, r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleCancel(ctx, req) }
 		}),
-		reg(contentSub, "agent.approve", params(validateAgentApproveRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(contentSub, catalog.OpAgentApprove, params(validateAgentApproveRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := build(w, state, r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleApprove(ctx, req) }
 		}),
-		regResponder(contentSub, "agent.dump", params(validateAgentDumpRaw), func(r Responder) handlerFunc {
+		regResponder(contentSub, catalog.OpAgentDump, params(validateAgentDumpRaw), func(r Responder) handlerFunc {
 			h := agentDumpHandlers{op: dumpOp, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
 		}),

@@ -29,6 +29,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/shady2k/nocx/internal/operation/catalog"
 	"syscall"
 	"time"
 
@@ -545,7 +546,7 @@ func (h signalHandlers) answer(ctx context.Context, req jsonrpcRequest, sid sess
 // with the same bound, from the composition of the control plane.
 func (s *WSServer) signalSpecs() []methodSpec {
 	return []methodSpec{
-		reg(s.signalSub, "session.signal", params(validateSignalRaw), func(_ *wsConn, state *connState, r Responder) handlerFunc {
+		reg(s.signalSub, catalog.OpSessionSignal, params(validateSignalRaw), func(_ *wsConn, state *connState, r Responder) handlerFunc {
 			h := signalHandlers{ops: s.signalOps, machine: s, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSignal(ctx, state, req) }
 		}),

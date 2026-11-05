@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/shady2k/nocx/internal/operation/catalog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1287,71 +1288,71 @@ func (s *WSServer) vaultSpecs(lane control.Admission, configGate, vaultGate cont
 	resetSub := s.operationQueue("vault-reset")
 
 	return []methodSpec{
-		whenAvailable(regResponder(vaultSub, "vault.status", noParams(), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(vaultSub, catalog.OpVaultStatus, noParams(), func(r Responder) handlerFunc {
 			h := vaultLifecycleHandlers{op: vaultOp, r: r, captures: s.captures, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleStatus(ctx, req) }
 		}), func() bool { return vaultOp != nil }, "vault not available"),
-		whenAvailable(regResponder(vaultSub, "vault.setup", params(validateVaultSetupRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(vaultSub, catalog.OpVaultSetup, params(validateVaultSetupRaw), func(r Responder) handlerFunc {
 			h := vaultLifecycleHandlers{op: vaultOp, r: r, captures: s.captures, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSetup(ctx, req) }
 		}), func() bool { return vaultOp != nil }, "vault not available"),
-		whenAvailable(regResponder(vaultSub, "vault.unseal", params(validateVaultUnsealRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(vaultSub, catalog.OpVaultUnseal, params(validateVaultUnsealRaw), func(r Responder) handlerFunc {
 			h := vaultLifecycleHandlers{op: vaultOp, r: r, captures: s.captures, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleUnseal(ctx, req) }
 		}), func() bool { return vaultOp != nil }, "vault not available"),
-		whenAvailable(regResponder(vaultSub, "vault.seal", noParams(), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(vaultSub, catalog.OpVaultSeal, noParams(), func(r Responder) handlerFunc {
 			h := vaultLifecycleHandlers{op: vaultOp, r: r, captures: s.captures, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSeal(ctx, req) }
 		}), func() bool { return vaultOp != nil }, "vault not available"),
-		whenAvailable(regResponder(vaultSub, "vault.changePassphrase", params(validateVaultChangePassphraseRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(vaultSub, catalog.OpVaultChangePassphrase, params(validateVaultChangePassphraseRaw), func(r Responder) handlerFunc {
 			h := vaultLifecycleHandlers{op: vaultOp, r: r, captures: s.captures, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleChangePassphrase(ctx, req) }
 		}), func() bool { return vaultOp != nil }, "vault not available"),
-		whenAvailable(regResponder(vaultSub, "vault.regenerateRecovery", params(validateVaultRegenerateRecoveryRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(vaultSub, catalog.OpVaultRegenerateRecovery, params(validateVaultRegenerateRecoveryRaw), func(r Responder) handlerFunc {
 			h := vaultLifecycleHandlers{op: vaultOp, r: r, captures: s.captures, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleRegenerateRecovery(ctx, req) }
 		}), func() bool { return vaultOp != nil }, "vault not available"),
-		whenAvailable(regResponder(vaultSub, "vault.setDefaultProvider", params(validateVaultSetDefaultProviderRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(vaultSub, catalog.OpVaultSetDefaultProvider, params(validateVaultSetDefaultProviderRaw), func(r Responder) handlerFunc {
 			h := vaultLifecycleHandlers{op: vaultOp, r: r, captures: s.captures, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSetDefaultProvider(ctx, req) }
 		}), func() bool { return vaultOp != nil }, "vault not available"),
-		whenAvailable(regResponder(vaultSub, "vault.setAutoSeal", params(validateVaultSetAutoSealRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(vaultSub, catalog.OpVaultSetAutoSeal, params(validateVaultSetAutoSealRaw), func(r Responder) handlerFunc {
 			h := vaultLifecycleHandlers{op: vaultOp, r: r, captures: s.captures, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSetAutoSeal(ctx, req) }
 		}), func() bool { return vaultOp != nil }, "vault not available"),
-		whenAvailable(regResponder(vaultSub, "vault.activity", noParams(), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(vaultSub, catalog.OpVaultActivity, noParams(), func(r Responder) handlerFunc {
 			h := vaultLifecycleHandlers{op: vaultOp, r: r, captures: s.captures, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleActivity(ctx, req) }
 		}), func() bool { return vaultOp != nil }, "vault not available"),
-		whenAvailable(regResponder(secretSub, "vault.inventory", noParams(), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(secretSub, catalog.OpVaultInventory, noParams(), func(r Responder) handlerFunc {
 			h := vaultSecretHandlers{op: secretOp, r: r, machine: s, notWired: s.vaultSecretUnavailable("vault.inventory")}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleInventory(ctx, req) }
 		}), func() bool { return secretOp != nil }, "vault not available"),
-		whenAvailable(regResponder(secretSub, "vault.createSecret", params(validateVaultCreateSecretRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(secretSub, catalog.OpVaultCreateSecret, params(validateVaultCreateSecretRaw), func(r Responder) handlerFunc {
 			h := vaultSecretHandlers{op: secretOp, r: r, machine: s, notWired: s.vaultSecretUnavailable("vault.createSecret")}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleCreateSecret(ctx, req) }
 		}), func() bool { return secretOp != nil }, "vault not available"),
-		whenAvailable(regResponder(secretSub, "vault.renameSecret", params(validateVaultRenameSecretRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(secretSub, catalog.OpVaultRenameSecret, params(validateVaultRenameSecretRaw), func(r Responder) handlerFunc {
 			h := vaultSecretHandlers{op: secretOp, r: r, machine: s, notWired: s.vaultSecretUnavailable("vault.renameSecret")}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleRenameSecret(ctx, req) }
 		}), func() bool { return secretOp != nil }, "vault not available"),
-		whenAvailable(regResponder(secretSub, "vault.replaceSecret", params(validateVaultReplaceSecretRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(secretSub, catalog.OpVaultReplaceSecret, params(validateVaultReplaceSecretRaw), func(r Responder) handlerFunc {
 			h := vaultSecretHandlers{op: secretOp, r: r, machine: s, notWired: s.vaultSecretUnavailable("vault.replaceSecret")}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleReplaceSecret(ctx, req) }
 		}), func() bool { return secretOp != nil }, "vault not available"),
-		whenAvailable(regResponder(secretSub, "vault.deleteSecret", params(validateVaultDeleteSecretRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(secretSub, catalog.OpVaultDeleteSecret, params(validateVaultDeleteSecretRaw), func(r Responder) handlerFunc {
 			h := vaultSecretHandlers{op: secretOp, r: r, machine: s, notWired: s.vaultSecretUnavailable("vault.deleteSecret")}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDeleteSecret(ctx, req) }
 		}), func() bool { return secretOp != nil }, "vault not available"),
-		whenAvailable(regResponder(secretSub, "vault.resolveLine", params(validateVaultResolveLineRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(secretSub, catalog.OpVaultResolveLine, params(validateVaultResolveLineRaw), func(r Responder) handlerFunc {
 			h := vaultSecretHandlers{op: secretOp, r: r, machine: s, secrets: s.credentialResolver(), notWired: s.vaultSecretUnavailable("vault.resolveLine")}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleResolveLine(ctx, req) }
 		}), func() bool { return secretOp != nil }, "vault not available"),
-		whenAvailable(regResponder(resetSub, "vault.resetPreview", noParams(), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(resetSub, catalog.OpVaultResetPreview, noParams(), func(r Responder) handlerFunc {
 			h := vaultResetHandlers{op: resetOp, r: r, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleResetPreview(ctx, req) }
 		}), func() bool { return resetOp != nil }, "vault not available"),
-		whenAvailable(regResponder(resetSub, "vault.reset", noParams(), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(resetSub, catalog.OpVaultReset, noParams(), func(r Responder) handlerFunc {
 			h := vaultResetHandlers{op: resetOp, r: r, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleReset(ctx, req) }
 		}), func() bool { return resetOp != nil }, "vault not available"),

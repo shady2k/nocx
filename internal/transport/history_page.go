@@ -23,6 +23,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/shady2k/nocx/internal/operation/catalog"
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/log"
@@ -244,7 +245,7 @@ func (h historyPageHandlers) handleHistoryPage(ctx context.Context, req jsonrpcR
 func (s *WSServer) historyPageSpecs(lane control.Admission, sessionGate control.Admission) []methodSpec {
 	historyOp := capability.NewSessionOperations(sessionGate, lane, s.registry, s.profileUsage)
 	return []methodSpec{
-		whenAvailable(regResponder(s.operationQueue("history-page"), "session.historyPage", params(validateHistoryPageRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(s.operationQueue("history-page"), catalog.OpSessionHistoryPage, params(validateHistoryPageRaw), func(r Responder) handlerFunc {
 			h := historyPageHandlers{ops: historyOp, pager: s.historyPager, publisher: s, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleHistoryPage(ctx, req) }
 		}), func() bool { return s.historyPager != nil }, "method not found: history pager not wired"),

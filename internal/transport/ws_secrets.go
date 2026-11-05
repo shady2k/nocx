@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/shady2k/nocx/internal/operation/catalog"
 	"unicode/utf8"
 
 	gossh "golang.org/x/crypto/ssh"
@@ -553,31 +554,31 @@ func (s *WSServer) secretSpecs(lane control.Admission, configGate, vaultGate, co
 	// queue would race the two goroutines.
 	captureSub := control.NewOrderedSubmission("capture", s.domainQueueDepth)
 	return []methodSpec{
-		whenAvailable(regResponder(secretSub, "secrets.usage", params(validateSecretsUsageRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(secretSub, catalog.OpSecretsUsage, params(validateSecretsUsageRaw), func(r Responder) handlerFunc {
 			h := secretsHandlers{op: secretOp, r: r, vaultWired: vaultWired, configWired: configWired, secrets: secretResolver}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleUsage(ctx, req) }
 		}), func() bool { return vaultWired && configWired }, "secrets.usage not available"),
-		whenAvailable(regResponder(secretSub, "secrets.savePassword", params(validateSecretsSavePasswordRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(secretSub, catalog.OpSecretsSavePassword, params(validateSecretsSavePasswordRaw), func(r Responder) handlerFunc {
 			h := secretsHandlers{op: secretOp, r: r, vaultWired: vaultWired, configWired: configWired, secrets: secretResolver}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMint(ctx, req) }
 		}), func() bool { return secretOp != nil }, "vault not available"),
-		whenAvailable(regResponder(secretSub, "secrets.saveKeyMaterial", params(validateSecretsSaveKeyMaterialRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(secretSub, catalog.OpSecretsSaveKeyMaterial, params(validateSecretsSaveKeyMaterialRaw), func(r Responder) handlerFunc {
 			h := secretsHandlers{op: secretOp, r: r, vaultWired: vaultWired, configWired: configWired, secrets: secretResolver}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMint(ctx, req) }
 		}), func() bool { return secretOp != nil }, "vault not available"),
-		whenAvailable(regResponder(secretSub, "secrets.saveKeyPassphrase", params(validateSecretsSaveKeyPassphraseRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(secretSub, catalog.OpSecretsSaveKeyPassphrase, params(validateSecretsSaveKeyPassphraseRaw), func(r Responder) handlerFunc {
 			h := secretsHandlers{op: secretOp, r: r, vaultWired: vaultWired, configWired: configWired, secrets: secretResolver}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMint(ctx, req) }
 		}), func() bool { return secretOp != nil }, "vault not available"),
-		regResponder(s.lane, "secrets.detect", params(validateSecretsDetectRaw), func(r Responder) handlerFunc {
+		regResponder(s.lane, catalog.OpSecretsDetect, params(validateSecretsDetectRaw), func(r Responder) handlerFunc {
 			h := secretsDetectHandlers{log: s.log, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDetect(req) }
 		}),
-		whenAvailable(regResponder(captureSub, "secrets.captureSave", params(validateSecretsCaptureSaveRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(captureSub, catalog.OpSecretsCaptureSave, params(validateSecretsCaptureSaveRaw), func(r Responder) handlerFunc {
 			h := captureSaveHandlers{op: captureOp, captures: s.captures, r: r, vaultWired: vaultWired, contentWired: contentWired}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleCaptureSave(ctx, req) }
 		}), func() bool { return captureOp != nil }, "vault not available"),
-		regResponder(s.lane, "secrets.captureDismiss", params(validateSecretsCaptureDismissRaw), func(r Responder) handlerFunc {
+		regResponder(s.lane, catalog.OpSecretsCaptureDismiss, params(validateSecretsCaptureDismissRaw), func(r Responder) handlerFunc {
 			h := captureDismissHandlers{captures: s.captures, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleCaptureDismiss(ctx, req) }
 		}),
@@ -590,7 +591,7 @@ func (s *WSServer) secretSpecs(lane control.Admission, configGate, vaultGate, co
 		// connection settles: a save in flight when the pane dies is left
 		// to settle (capture contract), but a save submitted after the
 		// close must see the destruction.
-		reg(captureSub, "secrets.paneClosed", params(validatePaneClosedRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(captureSub, catalog.OpSecretsPaneClosed, params(validatePaneClosedRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := paneClosedHandlers{captures: s.captures, log: s.log}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePaneClosed(ctx, w, req) }
 		}),

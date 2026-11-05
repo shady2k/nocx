@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/shady2k/nocx/internal/operation/catalog"
 	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/capability"
@@ -149,7 +150,7 @@ func (s *WSServer) shellSpecs(lane control.Admission, sessionGate control.Admiss
 	sessionOps := capability.NewSessionOperations(sessionGate, lane, s.registry, s.profileUsage)
 	shellSub := s.operationQueue("shell")
 	return []methodSpec{
-		regResponder(shellSub, "shell.complete", params(validateShellCompleteRaw), func(r Responder) handlerFunc {
+		regResponder(shellSub, catalog.OpShellComplete, params(validateShellCompleteRaw), func(r Responder) handlerFunc {
 			h := sessionShellHandlers{ops: sessionOps, r: r, local: s.localCompleter, remote: s.sshCompleter}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleComplete(ctx, req) }
 		}),
@@ -157,11 +158,11 @@ func (s *WSServer) shellSpecs(lane control.Admission, sessionGate control.Admiss
 		// as shell.complete, for the same reason: the scan behind it may
 		// take its whole deadline, and the session gate must not be held
 		// across it.
-		regResponder(shellSub, "shell.commandNames", params(validateShellCommandNamesRaw), func(r Responder) handlerFunc {
+		regResponder(shellSub, catalog.OpShellCommandNames, params(validateShellCommandNamesRaw), func(r Responder) handlerFunc {
 			h := sessionShellHandlers{ops: sessionOps, r: r, names: s.commandNames}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleCommandNames(ctx, req) }
 		}),
-		regResponder(shellSub, "shell.integrate", params(validateShellIntegrateRaw), func(r Responder) handlerFunc {
+		regResponder(shellSub, catalog.OpShellIntegrate, params(validateShellIntegrateRaw), func(r Responder) handlerFunc {
 			h := sessionShellHandlers{ops: sessionOps, r: r, inBand: s.inBand}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleIntegrate(ctx, req) }
 		}),
@@ -170,7 +171,7 @@ func (s *WSServer) shellSpecs(lane control.Admission, sessionGate control.Admiss
 		// the marker latch ADR-0024 forbids, and the branch deleted their
 		// handler, contracts and generated types (nocx-292k). The footprint
 		// methods below outlive them — they read the fact store, which stays.
-		regResponder(s.lane, "shell.footprint.status", noParams(), func(r Responder) handlerFunc {
+		regResponder(s.lane, catalog.OpShellFootprintStatus, noParams(), func(r Responder) handlerFunc {
 			h := footprintHandlers{
 				r:              r,
 				facts:          s.installedFacts,
@@ -181,7 +182,7 @@ func (s *WSServer) shellSpecs(lane control.Admission, sessionGate control.Admiss
 			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleFootprintStatus(ctx, req) }
 		}),
-		regResponder(s.lane, "shell.footprint.uninstall", params(validateFootprintUninstallRaw), func(r Responder) handlerFunc {
+		regResponder(s.lane, catalog.OpShellFootprintUninstall, params(validateFootprintUninstallRaw), func(r Responder) handlerFunc {
 			h := footprintHandlers{
 				r:           r,
 				uninstaller: s.remoteUninstaller,
@@ -190,7 +191,7 @@ func (s *WSServer) shellSpecs(lane control.Admission, sessionGate control.Admiss
 			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleFootprintUninstall(ctx, req) }
 		}),
-		regResponder(s.lane, "shell.footprint.helperUninstall", params(validateFootprintHelperUninstallRaw), func(r Responder) handlerFunc {
+		regResponder(s.lane, catalog.OpShellFootprintHelperUninstall, params(validateFootprintHelperUninstallRaw), func(r Responder) handlerFunc {
 			h := footprintHandlers{
 				r:                 r,
 				helperInstalls:    s.helperInstalls,

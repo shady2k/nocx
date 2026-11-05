@@ -15,6 +15,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/shady2k/nocx/internal/operation/catalog"
 	"net"
 	"net/url"
 	"strconv"
@@ -46,7 +47,7 @@ func (s *WSServer) seamSpecs(lane control.Admission, sessionGate control.Admissi
 		// composed with the lane, wrapped in the inflight set) — the
 		// registration IS that submission, so the probe acquires the lane
 		// exactly once.
-		regResponder(s.probeSub, "connections.test", params(validateConnectionsTestRaw), func(r Responder) handlerFunc {
+		regResponder(s.probeSub, catalog.OpConnectionsTest, params(validateConnectionsTestRaw), func(r Responder) handlerFunc {
 			h := probeHandlers{
 				resolver:         s.resolver,
 				prober:           s.prober,
@@ -55,7 +56,7 @@ func (s *WSServer) seamSpecs(lane control.Admission, sessionGate control.Admissi
 			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleConnectionsTest(ctx, req) }
 		}),
-		regResponder(s.lane, "connections.trustHostKey", params(validateTrustHostKeyRaw), func(r Responder) handlerFunc {
+		regResponder(s.lane, catalog.OpConnectionsTrustHostKey, params(validateTrustHostKeyRaw), func(r Responder) handlerFunc {
 			h := trustHostKeyHandlers{truster: s.hostKeyTruster, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleConnectionsTrustHostKey(ctx, req) }
 		}),
@@ -66,65 +67,65 @@ func (s *WSServer) seamSpecs(lane control.Admission, sessionGate control.Admissi
 		// All three own the SAME gate: the native dialog is one capability,
 		// so no picker can open over an outstanding one, whichever method
 		// asked for it.
-		regResponder(s.dialogSub, "dialog.openFile", noParams(), func(r Responder) handlerFunc {
+		regResponder(s.dialogSub, catalog.OpDialogOpenFile, noParams(), func(r Responder) handlerFunc {
 			h := dialogHandlers{dialog: dialog, admit: s.dialogAdmit, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDialogOpenFile(ctx, req) }
 		}),
-		regResponder(s.dialogSub, "dialog.openDirectory", noParams(), func(r Responder) handlerFunc {
+		regResponder(s.dialogSub, catalog.OpDialogOpenDirectory, noParams(), func(r Responder) handlerFunc {
 			h := dialogHandlers{dialog: dialog, admit: s.dialogAdmit, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDialogOpenDirectory(ctx, req) }
 		}),
 		// dialog.openFileForUpload rides the SAME capacity-one picker
 		// gate: it opens the same native picker, and two pickers must
 		// never stack whichever method asked for them.
-		regResponder(s.dialogSub, "dialog.openFileForUpload", noParams(), func(r Responder) handlerFunc {
+		regResponder(s.dialogSub, catalog.OpDialogOpenFileForUpload, noParams(), func(r Responder) handlerFunc {
 			h := dialogHandlers{dialog: dialog, admit: s.dialogAdmit, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDialogOpenFileForUpload(ctx, req) }
 		}),
-		regResponder(s.lane, "sshConfig.aliases", noParams(), func(r Responder) handlerFunc {
+		regResponder(s.lane, catalog.OpSshConfigAliases, noParams(), func(r Responder) handlerFunc {
 			h := sshConfigHandlers{resolver: s.sshConfigResolver, path: s.sshConfigPath, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSSHConfigAliases(ctx, req) }
 		}),
-		regResponder(s.lane, "sshConfig.path", noParams(), func(r Responder) handlerFunc {
+		regResponder(s.lane, catalog.OpSshConfigPath, noParams(), func(r Responder) handlerFunc {
 			h := sshConfigHandlers{resolver: s.sshConfigResolver, path: s.sshConfigPath, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSSHConfigPath(ctx, req) }
 		}),
-		regResponder(statusSub, "sessions.status", params(validateSessionsStatusRaw), func(r Responder) handlerFunc {
+		regResponder(statusSub, catalog.OpSessionsStatus, params(validateSessionsStatusRaw), func(r Responder) handlerFunc {
 			h := sessionsStatusHandlers{op: sessionOp, log: s.log, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSessionsStatus(ctx, req) }
 		}),
-		regResponder(s.lane, "fs.complete", params(validateFsCompleteRaw), func(r Responder) handlerFunc {
+		regResponder(s.lane, catalog.OpFsComplete, params(validateFsCompleteRaw), func(r Responder) handlerFunc {
 			h := fsCompleteHandlers{r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleFsComplete(ctx, req) }
 		}),
 		// tunnel.open needs the connection as the owner-map key (spec §7.3):
 		// the forward's owner is the tab that opened it, so the handler
 		// receives the *wsConn per call.
-		reg(s.lane, "tunnel.open", params(validateTunnelOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(s.lane, catalog.OpTunnelOpen, params(validateTunnelOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := tunnelHandlers{resolver: s.resolver, connector: s.tunnelConnector, ledger: ledger, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleTunnelOpen(ctx, w, r, req) }
 		}),
-		regResponder(s.lane, "tunnel.stop", params(validateTunnelStopRaw), func(r Responder) handlerFunc {
+		regResponder(s.lane, catalog.OpTunnelStop, params(validateTunnelStopRaw), func(r Responder) handlerFunc {
 			h := tunnelHandlers{resolver: s.resolver, connector: s.tunnelConnector, ledger: ledger, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleTunnelStop(req) }
 		}),
-		regResponder(s.lane, "ports.status", params(validatePortsProfileRaw), func(r Responder) handlerFunc {
+		regResponder(s.lane, catalog.OpPortsStatus, params(validatePortsProfileRaw), func(r Responder) handlerFunc {
 			h := portsHandlers{sched: s.discoverySched, ledger: ledger, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePortsMethod(req) }
 		}),
-		regResponder(s.lane, "ports.sample", params(validatePortsProfileRaw), func(r Responder) handlerFunc {
+		regResponder(s.lane, catalog.OpPortsSample, params(validatePortsProfileRaw), func(r Responder) handlerFunc {
 			h := portsHandlers{sched: s.discoverySched, ledger: ledger, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePortsMethod(req) }
 		}),
-		regResponder(s.lane, "ports.pause", params(validatePortsPauseRaw), func(r Responder) handlerFunc {
+		regResponder(s.lane, catalog.OpPortsPause, params(validatePortsPauseRaw), func(r Responder) handlerFunc {
 			h := portsHandlers{sched: s.discoverySched, ledger: ledger, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePortsMethod(req) }
 		}),
-		regResponder(s.lane, "ports.visible", params(validatePortsPauseRaw), func(r Responder) handlerFunc {
+		regResponder(s.lane, catalog.OpPortsVisible, params(validatePortsPauseRaw), func(r Responder) handlerFunc {
 			h := portsHandlers{sched: s.discoverySched, ledger: ledger, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePortsMethod(req) }
 		}),
-		regResponder(s.lane, "shell.openUrl", params(validateShellOpenUrlRaw), func(r Responder) handlerFunc {
+		regResponder(s.lane, catalog.OpShellOpenUrl, params(validateShellOpenUrlRaw), func(r Responder) handlerFunc {
 			h := openUrlHandlers{opener: opener, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleShellOpenUrl(ctx, req) }
 		}),

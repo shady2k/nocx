@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/shady2k/nocx/internal/operation/catalog"
 	"sync"
 
 	"github.com/shady2k/nocx/internal/transport/control"
@@ -121,7 +122,7 @@ func validateRPCCancelRaw(raw json.RawMessage) string {
 }
 
 func rpcCancelSpec(immediate control.Submission) methodSpec {
-	return reg(immediate, "rpc.cancel", params(validateRPCCancelRaw), func(w *wsConn, _ *connState, r Responder) handlerFunc {
+	return reg(immediate, catalog.OpRpcCancel, params(validateRPCCancelRaw), func(w *wsConn, _ *connState, r Responder) handlerFunc {
 		return func(_ context.Context, req jsonrpcRequest) {
 			var p rpcCancelParams
 			if err := json.Unmarshal(req.Params, &p); err != nil {

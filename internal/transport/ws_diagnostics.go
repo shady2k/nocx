@@ -25,6 +25,7 @@ package transport
 
 import (
 	"context"
+	"github.com/shady2k/nocx/internal/operation/catalog"
 	"time"
 
 	"github.com/shady2k/nocx/internal/diagnostics"
@@ -175,7 +176,7 @@ func holderText(holders []diagnostics.Holder) string {
 // does NOT have — a submission queue, a gate, a wired domain — is visible
 // rather than inferred from a neighbour.
 func (s *WSServer) diagnosticsSpec() methodSpec {
-	return regResponder(control.ImmediateSubmission{}, "app.diagnostics", noParams(), func(r Responder) handlerFunc {
+	return regResponder(control.ImmediateSubmission{}, catalog.OpAppDiagnostics, noParams(), func(r Responder) handlerFunc {
 		h := diagnosticsHandlers{
 			rec: s.diagnostics, provider: s.diagnosticsProvider,
 			started: s.diagStarted, admits: s.diagAdmits, r: r,

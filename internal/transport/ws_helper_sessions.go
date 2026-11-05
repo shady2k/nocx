@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"github.com/shady2k/nocx/internal/operation/catalog"
 
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/transport/control"
@@ -44,7 +45,7 @@ func (h hostSessionInventoryHandlers) handle(ctx context.Context, req jsonrpcReq
 }
 
 func (s *WSServer) hostSessionInventorySpecs(sub control.Submission) []methodSpec {
-	return []methodSpec{regResponder(sub, "sessions.inventory", noParams(), func(r Responder) handlerFunc {
+	return []methodSpec{regResponder(sub, catalog.OpSessionsInventory, noParams(), func(r Responder) handlerFunc {
 		h := hostSessionInventoryHandlers{inventory: s.hostSessionInventory, r: r}
 		return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
 	})}

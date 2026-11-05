@@ -17,6 +17,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"github.com/shady2k/nocx/internal/operation/catalog"
 	"unicode/utf8"
 )
 
@@ -145,11 +146,11 @@ type agentAccessHandlers struct {
 
 func (s *WSServer) agentAccessSpecs() []methodSpec {
 	return []methodSpec{
-		regResponder(s.lane, "agentAccess.list", noParams(), func(r Responder) handlerFunc {
+		regResponder(s.lane, catalog.OpAgentAccessList, noParams(), func(r Responder) handlerFunc {
 			h := agentAccessHandlers{store: s.agentAccess, wired: s.agentAccess != nil, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleList(ctx, req) }
 		}),
-		regResponder(s.lane, "agentAccess.forget", params(validateAgentAccessForgetRaw), func(r Responder) handlerFunc {
+		regResponder(s.lane, catalog.OpAgentAccessForget, params(validateAgentAccessForgetRaw), func(r Responder) handlerFunc {
 			h := agentAccessHandlers{store: s.agentAccess, wired: s.agentAccess != nil, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleForget(ctx, req) }
 		}),

@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/shady2k/nocx/internal/operation/catalog"
 	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/capability"
@@ -1228,33 +1229,33 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 	// handler judging a claim needs the value, never the registry.
 	instance := s.instanceIdentity()
 	return []methodSpec{
-		reg(openSub, "open", params(validateOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(openSub, catalog.OpOpen, params(validateOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := openHandlers{opener: s.opener, sess: s, log: s.log, intents: s.paneIntentSource}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, w, r, state, req) }
 		}),
-		orderedBySession(reg(ordered, "detach", params(validateCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		orderedBySession(reg(ordered, catalog.OpDetach, params(validateCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, conn: w, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDetach(ctx, state, req) }
 		})),
-		orderedBySession(reg(ordered, "session.intent", params(validateSessionIntentRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		orderedBySession(reg(ordered, catalog.OpSessionIntent, params(validateSessionIntentRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := sessionIntentHandler{source: s.paneIntentSource, r: r, state: state}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
 		})),
-		orderedBySession(reg(ordered, "resize", params(validateResizeRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		orderedBySession(reg(ordered, catalog.OpResize, params(validateResizeRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleResize(ctx, state, req) }
 		})),
-		orderedBySession(reg(ordered, "close", params(validateCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		orderedBySession(reg(ordered, catalog.OpClose, params(validateCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleClose(ctx, state, req) }
 		})),
-		reg(sessionSub, "attach", params(validateAttachRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(sessionSub, catalog.OpAttach, params(validateAttachRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, machine: s, intents: s.paneIntentSource}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAttach(ctx, w, r, state, req) }
 		}),
 		// Recovery metadata shares the session operation queue with attach and
 		// the live-session list; it is read as part of reclaiming one claim.
-		whenAvailable(regResponder(sessionSub, "session.recoveryStatus", params(validateSessionRecoveryStatusRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(sessionSub, catalog.OpSessionRecoveryStatus, params(validateSessionRecoveryStatusRaw), func(r Responder) handlerFunc {
 			h := sessionRecoveryStatusHandlers{ops: sessionOps, store: s.sessionRecorder, instance: instance, r: r}
 			return h.handle
 		}), func() bool { return s.sessionRecorder != nil }, "session recovery status is unavailable"),
@@ -1263,12 +1264,12 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 		// client — ask what is alive, take one — and a list answered under a
 		// different admission than the claim it feeds would be a list that can
 		// be admitted while every claim it names is refused.
-		regResponder(sessionSub, "sessions.live", noParams(), func(r Responder) handlerFunc {
+		regResponder(sessionSub, catalog.OpSessionsLive, noParams(), func(r Responder) handlerFunc {
 			h := sessionsLiveHandlers{op: liveOp, rings: s, r: r, log: s.log}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSessionsLive(ctx, req) }
 		}),
 
-		reg(immediate, "ack", params(validateAckRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(immediate, catalog.OpAck, params(validateAckRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := ackHandler{machine: s, conn: w, log: s.log}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAck(req) }
 		}),

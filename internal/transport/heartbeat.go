@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"github.com/shady2k/nocx/internal/operation/catalog"
 	"time"
 
 	"github.com/shady2k/nocx/internal/transport/control"
@@ -19,7 +20,7 @@ type transportPingResult struct {
 
 func (s *WSServer) heartbeatSpecs(immediate control.ImmediateSubmission) []methodSpec {
 	return []methodSpec{
-		regResponder(immediate, "transport.ping", noParams(), func(r Responder) handlerFunc {
+		regResponder(immediate, catalog.OpTransportPing, noParams(), func(r Responder) handlerFunc {
 			return func(_ context.Context, req jsonrpcRequest) {
 				result := transportPingResult{ServerTimeMs: time.Now().UnixMilli()}
 				_ = r.TryResult(req.ID, mustMarshal(result))

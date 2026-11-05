@@ -218,8 +218,18 @@ function main(): void {
   const activityBar = document.getElementById('activitybar')!
   const sidebarPanel = document.getElementById('sidebar')!
 
-  // Window-owned update state outlives every connection-scoped sidebar.
-  const updateController = createUpdateController()
+  // The platform clipboard, before the controller that offers to write to it
+  // (nocx-vh2hr.1.16): one instance for the whole window, shared with Settings.
+  const clipboard = createClipboardAccess()
+
+  // Window-owned update state outlives every connection-scoped sidebar. The
+  // failed toast's "Copy details" writes through the product's clipboard and
+  // quotes the running build from app.about — both injected here, because the
+  // controller must not reach for a platform or a wire of its own.
+  const updateController = createUpdateController({
+    clipboard,
+    about: () => aboutClient.load(),
+  })
 
   // A retained coordinator needs an explicit full restart, with its session
   // warning. Ordinary pending startup stays quiet until health is known.
@@ -239,7 +249,6 @@ function main(): void {
     },
   })
 
-  const clipboard = createClipboardAccess()
   const gate = new ClipboardGate()
   const banner = new ClipboardBannerImpl()
 

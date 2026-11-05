@@ -6945,6 +6945,50 @@ describe('the projections consume the kernel through the composition root (ADR-0
     }
   })
 
+  it('a running fact no submit explains does not take the keyboard from the line being typed (nocx-atpw5.1.41)', async () => {
+    const client = makeClient()
+    const { content, ed, view, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      const session = sessionOf(content)
+      const handler = lifecycleHandler(client)
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(ed.isVisible).toBe(true)
+      // THE PERSON IS TYPING. The composer holds the keyboard and a line.
+      view.contentDOM.focus()
+      expect(document.activeElement).toBe(view.contentDOM)
+      ed.insertText('printf END-ROW')
+      session.intent.mockClear()
+
+      // A `running` fact for an attempt this pane never submitted — the shape
+      // a late prompt mark over a submitted attempt produced one interval
+      // later (nocx-atpw5.1.41). It must not take the line's keyboard: the
+      // next keystroke would go to the pty and the line would keep the hole.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-spurious', state: 'open', origin: 'shell', command: '' },
+      })
+
+      expect(ed.isVisible).toBe(true)
+      expect(ed.getDoc()).toBe('printf END-ROW')
+      expect(document.activeElement).toBe(view.contentDOM)
+      // And nothing the person types next reaches the program.
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'x', bubbles: true, cancelable: true }),
+      )
+      expect(session.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([])
+    } finally {
+      teardown()
+    }
+  })
+
   it('keys typed at an unclaimed keyboard after the write landed are the program’s before its running fact (nocx-atpw5.1.20)', async () => {
     const client = makeClient()
     const { content, ed, view, teardown } = await mountTerminal(

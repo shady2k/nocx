@@ -1117,6 +1117,20 @@ export class TerminalContent extends BasePaneContent {
    *  one fact that ends the frozen screen's hold, so it is applied by the
    *  accepted-frame handler rather than discarded (nocx-atpw5.1.28). */
   private _deferredPromptBoundary: number | null = null
+  /** The newest frame a hidden pane was sent and has not applied yet, and the
+   *  animation frame that will apply it (nocx-07ymy). One slot, because a
+   *  frame is a whole snapshot: a later one supersedes the one it replaces. */
+  private _heldHiddenFrame: SessionFrame | null = null
+  private _heldHiddenHandle = 0
+  /** Whether the next frame a hidden pane is sent applies at once. Open at
+   *  rest — a lone frame, which is what most output produces, is applied
+   *  synchronously exactly as before — and closed by every apply until the
+   *  animation frame after it, so a burst spends one apply per display frame. */
+  private _hiddenGateOpen = true
+  /** Applies one frame through the mount's own handler. Set by mount, so the
+   *  coalescing above and the flush below reach the same code a visible pane
+   *  runs. */
+  private _acceptFrame: ((frame: SessionFrame) => void) | null = null
   /** The one presentation-owned stack. Answers scroll in its first child and
    *  the existing editor occupies its final flex seat while the summon is
    *  active; neither surface is rebuilt. */
@@ -5361,7 +5375,7 @@ export class TerminalContent extends BasePaneContent {
       return snapshot === null ? null : createMapping(snapshot)
     })
     let reportedBufferKind: 'normal' | 'alternate' | null = null
-    session.onScreenFrame((frame: SessionFrame) => {
+    const acceptFrame = (frame: SessionFrame): void => {
       if (this.session !== session || this._cellModel !== cellModel) return
       const model = cellModel
       try {
@@ -5480,6 +5494,26 @@ export class TerminalContent extends BasePaneContent {
           error: err instanceof Error ? err.message : String(err),
         })
       }
+    }
+    this._acceptFrame = acceptFrame
+    session.onScreenFrame((frame: SessionFrame) => {
+      // A HIDDEN PANE DOES NOT SPEND THE THREAD THE PERSON IS USING
+      // (nocx-07ymy). Applying a frame costs about 0.8–1.1 ms on this thread
+      // — it is the decode of a whole 100×30 grid — and a hidden pane paints
+      // none of it. Measured 2026-11-05 in a headless Chromium against a real
+      // backend: one hidden tab repainting at ~300 frames/s spent 27–32 % of
+      // the page's main thread inside this socket handler, and the tab beside
+      // it saw its keystroke-to-task delay rise from 20 ms to 35 ms and a
+      // command's output arrive 2.2× later. Frames are explicitly coalescable
+      // (ADR-0066) and every one of them is a whole snapshot, so keeping only
+      // the newest and applying it once per animation frame is lossless for
+      // what a pane shows — the same cadence the visible pane's paint already
+      // runs at.
+      if (!this._active) {
+        this._holdHiddenFrame(frame)
+        return
+      }
+      acceptFrame(frame)
     })
     // MEASURE THE GRID WHEN THE GRID HAS CHANGED, which is not when the
     // bytes were handed over. The former byte parser applied writes
@@ -6277,8 +6311,9 @@ export class TerminalContent extends BasePaneContent {
 
   /**
    * Visibility belongs to BasePaneContent, not keyboard focus: an unfocused
-   * split still paints. Hidden panes keep accepting state without painting;
-   * showing one schedules its latest accepted frame through the same batch.
+   * split still paints. Hidden panes keep accepting state without painting,
+   * and apply at most one frame per animation frame (nocx-07ymy); showing one
+   * applies the frame it is holding and schedules that through the paint batch.
    */
   setVisible(visible: boolean): void {
     super.setVisible(visible)
@@ -6290,6 +6325,11 @@ export class TerminalContent extends BasePaneContent {
       this._pendingPaint = null
     }
     if (visible) {
+      // The held frame first: it is the newest the runtime sent, the model
+      // below is what the paint reads, and a program at rest publishes
+      // nothing more for the pane to catch up on.
+      this._applyHeldHiddenFrame()
+      this._releaseHiddenFrames()
       const current = this._cellModel?.current()
       if (current) this._paintFrame(current)
     }
@@ -8001,6 +8041,54 @@ export class TerminalContent extends BasePaneContent {
     this._offerPendingAutomaticAttachment()
   }
 
+  /** Take one frame for a hidden pane: the first of a burst now, the rest at
+   *  the display's own cadence (nocx-07ymy). */
+  private _holdHiddenFrame(frame: SessionFrame): void {
+    if (this._hiddenGateOpen) {
+      this._hiddenGateOpen = false
+      this._acceptFrame?.(frame)
+      this._closeHiddenGateAfterAFrame()
+      return
+    }
+    this._heldHiddenFrame = frame
+  }
+
+  /** Apply what the hidden pane holds, then keep the gate shut for one more
+   *  animation frame or open it again when nothing is waiting. */
+  private _closeHiddenGateAfterAFrame(): void {
+    if (this._heldHiddenHandle !== 0) return
+    this._heldHiddenHandle = requestAnimationFrame(() => {
+      this._heldHiddenHandle = 0
+      // Becoming visible flushes the held frame from setVisible, before the
+      // pane paints.
+      if (this._active) return
+      if (this._heldHiddenFrame === null) {
+        this._hiddenGateOpen = true
+        return
+      }
+      this._applyHeldHiddenFrame()
+      this._closeHiddenGateAfterAFrame()
+    })
+  }
+
+  /** Apply the frame a hidden pane was holding, or nothing if it holds none. */
+  private _applyHeldHiddenFrame(): void {
+    const frame = this._heldHiddenFrame
+    this._heldHiddenFrame = null
+    if (frame === null || this._disposed) return
+    this._acceptFrame?.(frame)
+  }
+
+  /** Drop whatever a hidden pane was holding, and let the next frame in. */
+  private _releaseHiddenFrames(): void {
+    if (this._heldHiddenHandle !== 0) {
+      cancelAnimationFrame(this._heldHiddenHandle)
+      this._heldHiddenHandle = 0
+    }
+    this._heldHiddenFrame = null
+    this._hiddenGateOpen = true
+  }
+
   /** Apply a boundary that arrived before its screen (nocx-atpw5.1.28). */
   private _applyDeferredPromptBoundary(): void {
     const required = this._deferredPromptBoundary
@@ -9584,6 +9672,8 @@ export class TerminalContent extends BasePaneContent {
       paneScreenMappings.delete(this.session.sessionId)
     }
     this._cellModel = null
+    this._releaseHiddenFrames()
+    this._acceptFrame = null
     this._selectionGesture?.dispose()
     this._selectionGesture = null
     this._connectionMark?.dispose()

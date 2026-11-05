@@ -204,6 +204,14 @@ const editorViewOf = (editor: CommandEditor): EditorView =>
 const sessionOf = (content: TerminalContent): SessionFake =>
   (content as unknown as { session: SessionFake }).session
 
+/** Wait for the display's next frame: what a hidden pane coalesces a burst of
+ *  frames into (nocx-07ymy). A lone frame applies on arrival; every frame
+ *  after the first in one animation frame waits for this. Under fake timers
+ *  the frame is a fake timer, so advancing past it is the flush. */
+async function flushDisplayFrame(): Promise<void> {
+  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+}
+
 /** The pane's input element (nocx-zg3k3.3.1): the seam a person's keyboard now
  *  reaches; it emits structured key intents. Private, reached the same way
  *  editorOf and sessionOf reach theirs. */
@@ -6407,6 +6415,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
         ['agent.laneInteractivity', { sessionId: session.sessionId, bufferKind: 'alternate' }],
       ])
       fireBufferState(session, 'normal', 21)
+      await flushDisplayFrame()
       expect(laneCalls()).toEqual([
         ['agent.laneInteractivity', { sessionId: session.sessionId, bufferKind: 'alternate' }],
         ['agent.laneInteractivity', { sessionId: session.sessionId, bufferKind: 'normal' }],
@@ -7520,18 +7529,21 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       const older = screenFrame(4, ['prompt ls', '', ''])
       older.state.baseRow = 10
       client._sessions[0].fireScreenFrame(older)
+      await flushDisplayFrame()
       expect(block.outputAnchorOffset).toBeUndefined()
 
       const alternate = screenFrame(5, ['prompt ls', '', ''])
       alternate.state.bufferKind = 'alternate'
       alternate.state.baseRow = 10
       client._sessions[0].fireScreenFrame(alternate)
+      await flushDisplayFrame()
       expect(block.outputAnchorOffset).toBeUndefined()
 
       const wrongInstance = screenFrame(6, ['prompt ls', '', ''])
       wrongInstance.state.baseRow = 10
       wrongInstance.state.bufferInstance = '2'
       client._sessions[0].fireScreenFrame(wrongInstance)
+      await flushDisplayFrame()
       expect(block.outputAnchorOffset).toBeUndefined()
 
       // A frame of another width is the estimate a reflow allows, and the
@@ -7539,6 +7551,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       const otherWidth = screenFrame(7, ['prompt ls', '', ''], { cols: SCREEN_COLS + 1 })
       otherWidth.state.baseRow = 10
       client._sessions[0].fireScreenFrame(otherWidth)
+      await flushDisplayFrame()
       expect(block.outputAnchorOffset).toBe(2)
       expect(block.outputAnchorText).toBe('')
 
@@ -7622,6 +7635,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       const shrunk = screenFrame(7, ['prompt ls', 'out'], { rows: SCREEN_ROWS - 2 })
       shrunk.state.baseRow = 11
       client._sessions[0].fireScreenFrame(shrunk)
+      await flushDisplayFrame()
       expect(block.outputAnchorOffset).toBe(1)
       expect(block.outputAnchorText).toBe('prompt ls')
 
@@ -7631,6 +7645,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       const wider = screenFrame(8, ['out', ''], { cols: SCREEN_COLS + 1, rows: SCREEN_ROWS - 2 })
       wider.state.baseRow = 12
       client._sessions[0].fireScreenFrame(wider)
+      await flushDisplayFrame()
       expect(block.outputAnchorOffset).toBe(0)
       expect(block.outputAnchorText).toBe('prompt ls')
     } finally {
@@ -7729,6 +7744,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       caught.state.baseRow = 72
       caught.cursor = { x: 0, y: ROWS - 1, visible: true }
       client._sessions[0].fireScreenFrame(caught)
+      await flushDisplayFrame()
       expect(block.startOffset).toBe(0)
       expect(block.outputAnchorOffset).toBe(ROWS)
       expect(scrollback.terminalLiveInner.style.transform).toBe('translateY(-480px)')
@@ -7743,6 +7759,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       placed.state.baseRow = 73
       placed.cursor = { x: 0, y: ROWS - 1, visible: true }
       client._sessions[0].fireScreenFrame(placed)
+      await flushDisplayFrame()
       expect(block.outputAnchorOffset).toBe(29)
       expect(block.outputAnchorText).toBe('sleep 30')
       expect(scrollback.terminalLiveInner.style.transform).toBe('translateY(-464px)')
@@ -8404,6 +8421,7 @@ describe('alt-screen exit and the ready prompt present the structured layout (no
       // idle layout, not the flat conventional grid — the live domain
       // entitles the session to the block model on the way out too.
       fireBufferState(sessionOf(content), 'normal', 21)
+      await flushDisplayFrame()
       expect(scrollbackOf(content).mode).toBe('idle')
       expect(
         scrollbackOf(content).scrollbackInner.classList.contains('inner-fullscreen-mode'),
@@ -8440,6 +8458,7 @@ describe('alt-screen exit and the ready prompt present the structured layout (no
       // owns the live region, so the pane stays in the running layout until
       // the authenticated completion freezes the block.
       fireBufferState(sessionOf(content), 'normal', 21)
+      await flushDisplayFrame()
       expect(scrollbackOf(content).mode).toBe('running')
     } finally {
       Element.prototype.scrollTo = protoScrollTo
@@ -8457,6 +8476,7 @@ describe('alt-screen exit and the ready prompt present the structured layout (no
       fireBufferState(sessionOf(content), 'alternate', 20)
       expect(scrollbackOf(content).mode).toBe('fullscreen')
       fireBufferState(sessionOf(content), 'normal', 21)
+      await flushDisplayFrame()
       expect(scrollbackOf(content).mode).toBe('unstructured')
     } finally {
       teardown()
@@ -10832,6 +10852,48 @@ describe('TerminalContent visibility preserves the accepted painter frame', () =
     }
   }
 
+  it('applies one hidden frame per animation frame and keeps the newest (nocx-07ymy)', async () => {
+    const p = await controlledPaintPane()
+    try {
+      // HIDDEN, and sent a burst. Applying every one of these was measured at
+      // 0.8-1.1 ms per frame of the page's main thread, spent on a pane that
+      // paints none of it, in the tab beside the one the person was using.
+      for (let revision = 1; revision <= 6; revision++) {
+        p.session.fireScreenFrame(screenFrame(revision, [`burst ${revision}`]))
+      }
+      // The FIRST frame of a burst applies at once — a lone frame, which is
+      // what most output produces, must leave the model current the moment
+      // it arrives — and the rest wait for the display's next frame.
+      expect(p.model.current()?.revision).toBe(1)
+      expect(p.selection).toHaveBeenCalledOnce()
+      p.flush()
+      expect(p.model.current()?.revision).toBe(6)
+      expect(p.selection).toHaveBeenCalledTimes(2)
+
+      // A second burst: one apply again, and it is the last one.
+      for (let revision = 7; revision <= 20; revision++) {
+        p.session.fireScreenFrame(screenFrame(revision, [`burst ${revision}`]))
+      }
+      p.flush()
+      expect(p.model.current()?.revision).toBe(20)
+
+      // SHOWN WITH A FRAME IN HAND applies it now: the model is what the
+      // paint that follows the show reads, and a program at rest publishes
+      // nothing more. The burst is deliberately not flushed, so the newest
+      // frame is still held when the pane comes back.
+      p.session.fireScreenFrame(screenFrame(21, ['at the show']))
+      p.session.fireScreenFrame(screenFrame(22, ['held at the show']))
+      expect(p.model.current()?.revision).toBe(21)
+      p.content.setVisible(true)
+      expect(p.model.current()?.revision).toBe(22)
+      p.flush()
+      expect(p.paint).toHaveBeenCalledOnce()
+      expect(p.tab.pane.querySelector('.term-grid')?.textContent).toContain('held at the show')
+    } finally {
+      p.teardown()
+    }
+  })
+
   it('cancels a pending paint on hide and paints only the latest hidden state on show', async () => {
     const p = await controlledPaintPane()
     try {
@@ -10842,11 +10904,16 @@ describe('TerminalContent visibility preserves the accepted painter frame', () =
       p.flush()
       expect(p.paint).not.toHaveBeenCalled()
 
+      // A BURST while hidden: the first frame applies on arrival, the rest are
+      // superseded by the newest and applied on the display's next frame
+      // (nocx-07ymy) — this pane paints none of it, and applying each one
+      // spent the thread the pane in front needs.
       p.session.fireScreenFrame(screenFrame(2, ['hidden normal']))
+      expect(p.model.current()?.revision).toBe(2)
       const alternate = screenFrame(3, ['hidden alternate'], { cols: 60, rows: 6 })
       alternate.state.bufferKind = 'alternate'
       p.session.fireScreenFrame(alternate)
-      expect(scrollbackFor(p.content).mode).toBe('fullscreen')
+      expect(scrollbackFor(p.content).mode).toBe('unstructured')
       const latest = screenFrame(4, ['latest normal'], { cols: 50, rows: 5 })
       latest.state.title = 'hidden title'
       latest.state.cwd = { host: '', path: '/hidden/project' }
@@ -10865,8 +10932,10 @@ describe('TerminalContent visibility preserves the accepted painter frame', () =
       expect(p.model.current()?.revision).toBe(4)
       expect(p.model.current()?.geometry).toMatchObject({ cols: 50, rows: 5 })
       expect(scrollbackFor(p.content).mode).toBe('unstructured')
-      expect(p.selection).toHaveBeenCalledTimes(4)
-      expect(p.reflow).toHaveBeenCalledTimes(3)
+      // The first frame of the burst and the newest — never the three between.
+      // A column change of a superseded frame reflows nothing.
+      expect(p.selection).toHaveBeenCalledTimes(3)
+      expect(p.reflow).toHaveBeenCalledTimes(2)
       expect(p.settled).toHaveBeenCalledOnce()
       expect(p.tab.title).toBe('hidden title')
       expect(p.cwd).toHaveBeenCalledWith('/hidden/project')
@@ -11839,6 +11908,7 @@ describe('the pane reports its directory (nocx-zkiv4)', () => {
       expect(reported).toEqual(['/repo/frontend'])
 
       fireFrameMetadata(sessionOf(content), 3, { cwd: { host: '', path: '/repo/internal' } })
+      await flushDisplayFrame()
       expect(reported).toEqual(['/repo/frontend', '/repo/internal'])
     } finally {
       teardown()
@@ -19530,7 +19600,9 @@ describe('a pane drawing a session it did not size (nocx-eidfb.3)', () => {
     const { content, session, paint, teardown } = await workerPane()
     try {
       paint(['worker'])
-      vi.useFakeTimers()
+      // Only the debounce is faked: the display's frame is real, and the
+      // burst's second frame waits for it (nocx-07ymy).
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
       try {
         content.viewportChanged({ width: 1632, height: 832 })
         vi.advanceTimersByTime(1_000)
@@ -19538,6 +19610,9 @@ describe('a pane drawing a session it did not size (nocx-eidfb.3)', () => {
         // The session's grid moves under this window — another client resized
         // it. The frame describes THEIR grid, and this pane is not theirs.
         paint(['worker', 'a grid another window chose'], { cols: 90, rows: 30 })
+        // The burst's second frame is applied on the display's next frame
+        // (nocx-07ymy), and the report it schedules is a timer.
+        await flushDisplayFrame()
         vi.advanceTimersByTime(1_000)
         expect(session.sendResize).toHaveBeenCalledTimes(1)
         expect(session.sendResize.mock.calls[0][0]).toMatchObject({ cols: 204, rows: 52 })

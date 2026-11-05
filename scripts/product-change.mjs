@@ -11,6 +11,8 @@ const pipelineFiles = new Set([
   'scripts/changed-tests.test.mjs',
   'scripts/publish-nightly.mjs',
   'scripts/publish-nightly.test.mjs',
+  'scripts/helper-hashes.mjs',
+  'scripts/helper-hashes.test.mjs',
   'scripts/verify-built-artifact.py',
   'scripts/verify_built_artifact_test.py',
   'scripts/verify-built-artifact.md',

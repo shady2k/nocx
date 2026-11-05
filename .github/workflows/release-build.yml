@@ -319,6 +319,13 @@ jobs:
           go-version: '1.26'
           cache: true
 
+      # The platform key and the hash lookup are one owner
+      # (scripts/helper-hashes.mjs), so this job runs the Node the repository
+      # already pins rather than carrying a second derivation in shell.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
       # A LINUX-ONLY RUN HAS NO macOS SECRETS BY DESIGN (the dispatch input
       # exists to iterate Linux without them). This job still runs, because
       # build-linux needs the artifact it publishes, but it passes the local
@@ -349,14 +356,18 @@ jobs:
           set -euo pipefail
           [ -n "${SIGN_IDENTITY:-}" ] || { echo "::error::SIGN_IDENTITY is empty"; exit 1; }
           for arch in amd64 arm64; do
-            plat="darwin/$arch"
             gz="internal/helper/deploy/artifacts/bin/local/nocx-helper-darwin-$arch.gz"
             [ -s "$gz" ] || { echo "::error::$gz is missing; the helpers job built no local darwin/$arch helper"; exit 1; }
+            # THE PLATFORM KEY IS THE WRITER'S, not a second spelling derived
+            # here: the hash files key a line `<goos>-<goarch>`, taken from the
+            # artifact name. `darwin/$arch` matched no line and stopped every
+            # nightly from 2026-11-02 before it signed (nocx-vh2hr.1.18).
+            plat="$(node scripts/helper-hashes.mjs platform "$gz")"
             bin="$RUNNER_TEMP/nocx-helper-darwin-$arch"
             gunzip -c "$gz" > "$bin"
             # THE CHAIN OF CUSTODY, asserted before the bytes change: what
             # this signs is what the helpers job built, not a rebuild here.
-            want="$(awk -v p="$plat" '$1 == p { print $2 }' hashes/unsigned/helper-local-hashes.txt)"
+            want="$(node scripts/helper-hashes.mjs lookup hashes/unsigned/helper-local-hashes.txt "$plat")"
             [ -n "$want" ] || { echo "::error::the helpers job published no unsigned hash for $plat"; exit 1; }
             got="$(shasum -a 256 "$bin" | awk '{print $1}')"
             [ "$got" = "$want" ] || { echo "::error::$plat is not the helpers job's bytes: $got != $want"; exit 1; }

@@ -1612,13 +1612,23 @@ export class TerminalContent extends BasePaneContent {
    *  re-registered whenever `_homeWiredSession` changes underneath it. */
   private _homeUnsub: (() => void) | null = null
   private _themeUnsub: (() => void) | null = null
-  /** The session `sessionHome.ensure`/`.subscribe` have already been
-   *  asked for (spec §3: "opened when the session first reports a
-   *  verified cwd", not on every environment view). Null until then;
-   *  reset to null on dispose only — a session change on one pane never
-   *  happens without a fresh TerminalContent, so there is no rebind case
-   *  to reset it for. */
+  /** The session whose HOME SUBSCRIPTION is live (spec §3: "opened when the
+   *  session first reports a verified cwd", not on every environment view).
+   *  Null until then; reset to null on dispose only — a session change on
+   *  one pane never happens without a fresh TerminalContent, so there is no
+   *  rebind case to reset it for.
+   *
+   *  It is NOT the record of a successful `ensure`: a refused background
+   *  open was once claimed as done here, before the call, so a pane whose
+   *  first ask was refused never asked again and showed absolute paths for
+   *  the life of the tab (nocx-3an1s.1.1). The claim that follows is about
+   *  the CALL, and it is dropped when the call fails. */
   private _homeWiredSession: string | null = null
+  /** The session with a `sessionHome.ensure` in flight, so a burst of
+   *  environment views coalesces into one call while a retry is still
+   *  possible — the source itself remembers no rejection, so this is only
+   *  about not stacking calls on top of one that has not answered yet. */
+  private _homeEnsurePending: string | null = null
   /** A command block's branch, by `BlockRecord.id` — recorded once, at
    *  the moment the block opens (spec §3: "a block records the branch
    *  the pane knew when the command was submitted and never updates it
@@ -2635,16 +2645,36 @@ export class TerminalContent extends BasePaneContent {
     const sessionId = this.session?.sessionId
     if (sessionId && cwdVerified) {
       const homeSrc = this.hooks.sessionHome
-      if (homeSrc && this._homeWiredSession !== sessionId) {
-        this._homeWiredSession = sessionId
-        this._homeUnsub?.()
-        void homeSrc.ensure(sessionId, cwd, cwdVerified)
-        this._homeUnsub = homeSrc.subscribe(sessionId, (home) => this._onHomeKnown(home))
-        // subscribe() does not replay a value already known (its own
-        // contract) — a link click, or another pane on the same session,
-        // may have resolved it before this pane ever asked.
-        const known = homeSrc.home(sessionId)
-        if (known !== undefined) this._onHomeKnown(known)
+      if (homeSrc) {
+        if (this._homeWiredSession !== sessionId) {
+          this._homeWiredSession = sessionId
+          this._homeUnsub?.()
+          this._homeUnsub = homeSrc.subscribe(sessionId, (home) => this._onHomeKnown(home))
+          // subscribe() does not replay a value already known (its own
+          // contract) — a link click, or another pane on the same session,
+          // may have resolved it before this pane ever asked.
+          const known = homeSrc.home(sessionId)
+          if (known !== undefined) this._onHomeKnown(known)
+        }
+        // The OPEN is a BACKGROUND call (main.tsx binds it with that
+        // origin): it exists so a `~` can be drawn, and nobody pressed
+        // anything for it. So a refusal must not be remembered as done —
+        // the next verified cwd asks again, which is the same rule every
+        // other background ask follows (ADR-8eej3e66 stage 1). The source
+        // keeps no rejected promise either; this flag only stops a burst of
+        // views from stacking calls while one is still unanswered.
+        if (homeSrc.home(sessionId) === undefined && this._homeEnsurePending !== sessionId) {
+          this._homeEnsurePending = sessionId
+          const settled = (): void => {
+            if (this._homeEnsurePending === sessionId) this._homeEnsurePending = null
+          }
+          // Both outcomes clear the claim: success because the source now
+          // answers `home()`, refusal because the next verified cwd must be
+          // free to ask again. Nothing is surfaced — the prompt line simply
+          // keeps the absolute path, which is what "home unknown" already
+          // renders.
+          void homeSrc.ensure(sessionId, cwd, cwdVerified).then(settled, settled)
+        }
       }
     }
     if (this.branchSource) {

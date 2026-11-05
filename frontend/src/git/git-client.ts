@@ -5,7 +5,7 @@
 // to prevent. The panel consumes it through a services object so tests can
 // substitute a fake without a WebSocket (the files/ports pattern).
 
-import type { Dispatcher } from '../dispatcher'
+import type { CallOrigin, Dispatcher } from '../dispatcher'
 import type { GitOpenResult } from '../generated/git.open'
 import type { GitStatusResult } from '../generated/git.status'
 import type { GitDiffResult } from '../generated/git.diff'
@@ -38,12 +38,19 @@ class GitClient {
    *  typed fact derived from renderer state to cross, and files.open already
    *  sends the same one. `state` is the discriminator — switch on it first.
    *  The first status rides the result, so a panel open is one round trip. */
-  open(sessionId: string, cwd?: string): Promise<GitOpenResult> {
-    return this.dispatcher.call<GitOpenResult>('git.open', cwd ? { sessionId, cwd } : { sessionId })
+  open(sessionId: string, cwd?: string, origin?: CallOrigin): Promise<GitOpenResult> {
+    return this.dispatcher.call<GitOpenResult>(
+      'git.open',
+      cwd ? { sessionId, cwd } : { sessionId },
+      undefined,
+      { origin },
+    )
   }
 
-  status(bindingId: string): Promise<GitStatusResult> {
-    return this.dispatcher.call<GitStatusResult>('git.status', { bindingId })
+  status(bindingId: string, origin?: CallOrigin): Promise<GitStatusResult> {
+    return this.dispatcher.call<GitStatusResult>('git.status', { bindingId }, undefined, {
+      origin,
+    })
   }
 
   /** One side of one file, bounded. `state` distinguishes a diff from binary,
@@ -129,8 +136,8 @@ class GitClient {
   /** Release a binding. Also the repair for a stale open: a successful open
    *  the store has already superseded has registered a live repository on the
    *  backend, so dropping the response without this leaks it. */
-  close(bindingId: string): Promise<GitCloseResult> {
-    return this.dispatcher.call<GitCloseResult>('git.close', { bindingId })
+  close(bindingId: string, origin?: CallOrigin): Promise<GitCloseResult> {
+    return this.dispatcher.call<GitCloseResult>('git.close', { bindingId }, undefined, { origin })
   }
 
   /** Subscribe to the server-initiated git.changed notification: the binding
@@ -149,8 +156,8 @@ class GitClient {
 /** The panel's entire backend surface, so a test can substitute a fake —
  *  the files pattern (files-client.ts:88). */
 export interface GitPanelServices {
-  open(sessionId: string, cwd?: string): Promise<GitOpenResult>
-  status(bindingId: string): Promise<GitStatusResult>
+  open(sessionId: string, cwd?: string, origin?: CallOrigin): Promise<GitOpenResult>
+  status(bindingId: string, origin?: CallOrigin): Promise<GitStatusResult>
   diff(bindingId: string, path: string, side: GitDiffSide, maxBytes: number): Promise<GitDiffResult>
   log(bindingId: string): Promise<GitLogResult>
   stage(bindingId: string, paths: string[]): Promise<GitStageResult>
@@ -161,7 +168,7 @@ export interface GitPanelServices {
   headMessage(bindingId: string): Promise<GitHeadMessageResult>
   remote(bindingId: string): Promise<GitRemoteResult>
   openUrl(url: string): Promise<ShellOpenUrl>
-  close(bindingId: string): Promise<GitCloseResult>
+  close(bindingId: string, origin?: CallOrigin): Promise<GitCloseResult>
   subscribeGitChanged(handler: (params: GitChangedNotification) => void): () => void
 }
 
@@ -172,8 +179,8 @@ export interface GitPanelServices {
 export function createGitPanelServices(dispatcher: Dispatcher): GitPanelServices {
   const client = new GitClient(dispatcher)
   return {
-    open: (sessionId, cwd) => client.open(sessionId, cwd),
-    status: (bindingId) => client.status(bindingId),
+    open: (sessionId, cwd, origin) => client.open(sessionId, cwd, origin),
+    status: (bindingId, origin) => client.status(bindingId, origin),
     diff: (bindingId, path, side, maxBytes) => client.diff(bindingId, path, side, maxBytes),
     log: (bindingId) => client.log(bindingId),
     stage: (bindingId, paths) => client.stage(bindingId, paths),
@@ -184,7 +191,7 @@ export function createGitPanelServices(dispatcher: Dispatcher): GitPanelServices
     headMessage: (bindingId) => client.headMessage(bindingId),
     remote: (bindingId) => client.remote(bindingId),
     openUrl: (url) => client.openUrl(url),
-    close: (bindingId) => client.close(bindingId),
+    close: (bindingId, origin) => client.close(bindingId, origin),
     subscribeGitChanged: (handler) => client.subscribeGitChanged(handler),
   }
 }

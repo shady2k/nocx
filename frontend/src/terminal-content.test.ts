@@ -4018,18 +4018,26 @@ describe("the pane's where-facts, fed from fake sources (nocx-9bpeq.16)", () => 
   function makeFakeSessionHome(): SessionHomeSource & {
     ensureCalls: Array<{ sessionId: string; cwd?: string | null; cwdVerified?: boolean }>
     resolveHome: (sessionId: string, home: string) => void
+    /** How many of the next `ensure` calls answer with a control-plane
+     *  refusal, so a test can drive the retry a background failure owes. */
+    failNext: number
   } {
     const homes = new Map<string, string>()
     const subs = new Map<string, Set<(home: string) => void>>()
     const ensureCalls: Array<{ sessionId: string; cwd?: string | null; cwdVerified?: boolean }> = []
-    return {
+    const fake = {
       ensureCalls,
-      home: (sessionId) => homes.get(sessionId),
-      ensure: (sessionId, cwd, cwdVerified) => {
+      failNext: 0,
+      home: (sessionId: string) => homes.get(sessionId),
+      ensure: (sessionId: string, cwd?: string | null, cwdVerified?: boolean) => {
         ensureCalls.push({ sessionId, cwd, cwdVerified })
+        if (fake.failNext > 0) {
+          fake.failNext -= 1
+          return Promise.reject(new Error('The request was refused'))
+        }
         return Promise.resolve({} as FilesOpenResult)
       },
-      subscribe: (sessionId, cb) => {
+      subscribe: (sessionId: string, cb: (home: string) => void) => {
         let set = subs.get(sessionId)
         if (!set) {
           set = new Set()
@@ -4038,11 +4046,12 @@ describe("the pane's where-facts, fed from fake sources (nocx-9bpeq.16)", () => 
         set.add(cb)
         return () => set?.delete(cb)
       },
-      resolveHome: (sessionId, home) => {
+      resolveHome: (sessionId: string, home: string) => {
         homes.set(sessionId, home)
         for (const cb of [...(subs.get(sessionId) ?? [])]) cb(home)
       },
     }
+    return fake
   }
 
   /** A minimal fake branch source: records every `request` and lets the
@@ -4132,6 +4141,42 @@ describe("the pane's where-facts, fed from fake sources (nocx-9bpeq.16)", () => 
       const block = withScrollback.scrollback.blockManager.runningBlock
       expect(block).not.toBeNull()
       expect(partText(block!.el, 'path')).toBe('~/project')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('asks for the home again after a refused open, instead of remembering the failure as done', async () => {
+    // The pane's home is a BACKGROUND ask (main.tsx gives it that origin):
+    // nobody pressed anything for it, so a refusal must stay quiet and be
+    // retried by its own next trigger — the next verified cwd. Claiming the
+    // session as "wired" before the call answered is what made one refusal
+    // permanent for the life of the tab (nocx-3an1s.1.1).
+    const client = makeClient()
+    const sessionHome = makeFakeSessionHome()
+    sessionHome.failNext = 1
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true, hooks: { sessionHome } },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      fireFrameMetadata(sessionOf(content), 1, { cwd: { host: '', path: '/home/nocx/one' } })
+      expect(sessionHome.ensureCalls).toHaveLength(1)
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // The next verified cwd is the natural trigger, and it asks again.
+      fireFrameMetadata(sessionOf(content), 2, { cwd: { host: '', path: '/home/nocx/two' } })
+      expect(sessionHome.ensureCalls).toHaveLength(2)
+      expect(sessionHome.ensureCalls[1]).toMatchObject({ cwd: '/home/nocx/two' })
+
+      // And once it lands, the `~` arrives with no further ask.
+      sessionHome.resolveHome(sessionOf(content).sessionId, '/home/nocx')
+      await Promise.resolve()
+      fireFrameMetadata(sessionOf(content), 3, { cwd: { host: '', path: '/home/nocx/two' } })
+      expect(sessionHome.ensureCalls).toHaveLength(2)
     } finally {
       teardown()
     }

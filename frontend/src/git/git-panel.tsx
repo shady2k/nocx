@@ -132,18 +132,16 @@ function diffSideFor(letter: FileStatus): GitDiffSide {
  *  mapped sentence stays a person's while the reason survives, exactly like
  *  ports.tsx's listingFailureMessage.
  *
- *  Returns null when the panel must not toast: a control-plane saturation
- *  refusal arrives with the fixed message "Control plane busy", and the
- *  dispatcher already raised its own deduplicated danger toast for it — a
- *  second toast would be the same news twice.
+ *  A control-plane refusal never reaches this mapper at all: the store keeps
+ *  it as its own state (mutationRefused) with a Retry, because it is not a
+ *  failed mutation — nothing ran and nothing is stale (ADR-8eej3e66 stage 1).
  *  Not mapped here: "git: unknown binding" (the store re-resolves that ONE
  *  refusal — reason "unknown-binding" on the wire, nocx-bpqil — through
  *  git.open before the error is stored; every other -32602 refusal reaches
  *  this mapper as itself) and a failed commit's OUTPUT (that is the commit
  *  state, shown in the panel, D11 — never a rejection).
  */
-function mutationFailureMessage(reason: string): string | null {
-  if (reason === 'Control plane busy') return null
+function mutationFailureMessage(reason: string): string {
   const r = reason.toLowerCase()
   if (
     /not connected|ws closed|closed|connection (lost|closed|reset|refused)/.test(r) ||
@@ -209,15 +207,13 @@ export function GitPanel(props: GitPanelProps) {
   // only when the value changes, so a persisted failure raises once, a
   // recovery (null, at the next mutation's start) followed by another
   // failure raises again, and a panel remount never re-toasts the same
-  // failure. `null` means the failure is already visible (the dispatcher's
-  // own saturation toast — mutationFailureMessage's contract).
+  // failure.
   createEffect(
     on(
       () => props.store.mutationError(),
       (err) => {
         if (err === null) return
-        const message = mutationFailureMessage(err.message)
-        if (message !== null) showToast({ level: 'danger', message })
+        showToast({ level: 'danger', message: mutationFailureMessage(err.message) })
       },
     ),
   )
@@ -756,6 +752,23 @@ export function GitPanel(props: GitPanelProps) {
                 Refresh
               </Button>
             </div>
+          </Show>
+          {/* ── A mutation the control plane REFUSED: nothing ran, so nothing
+               is stale — the person gets the sentence and the same action
+               again. Its own state, never a toast (ADR-8eej3e66 stage 1). ── */}
+          <Show when={props.store.mutationRefused()}>
+            {(refusal) => (
+              <div class="git-stale" data-testid="git-mutation-refused">
+                <span>{refusal()}</span>
+                <Button
+                  size="sm"
+                  data-testid="git-mutation-retry"
+                  onClick={() => props.store.retryRefusedMutation()}
+                >
+                  Retry
+                </Button>
+              </div>
+            )}
           </Show>
           {/* ── Whole-index controls. Refused, visibly, while any entry is
                conflicted (D19) — absent entirely on SSH (D14, the remote

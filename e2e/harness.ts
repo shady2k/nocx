@@ -231,14 +231,17 @@ async function injectWailsShim(page: Page, traceparent?: string): Promise<void> 
  * its helper's out of that very directory (e2e/failure-context.ts), so removing
  * it first would turn every failure into one that names no log.
  */
-const rootsCreatedByTest: string[] = []
-const rootsCreatedByFile: string[] = []
+const rootsCreatedByTest = new Set<string>()
+const rootsCreatedByFile = new Set<string>()
 let testInFlight = false
 
-/** Record a disposable root so the teardown below can remove it. Called by
- *  VaultBackend, which every spec that owns a backend builds on one. */
+/** Record a disposable root so the teardown below can remove it — once, in the
+ *  scope that first saw it. Called by VaultBackend's constructor and nowhere
+ *  else: a restart re-enters start() on the same root, and a root recorded twice
+ *  is a root removed in the wrong scope (see the constructor). */
 function rememberDisposableRoot(root: string): void {
-  ;(testInFlight ? rootsCreatedByTest : rootsCreatedByFile).push(root)
+  const scope = testInFlight ? rootsCreatedByTest : rootsCreatedByFile
+  if (!rootsCreatedByFile.has(root) && !rootsCreatedByTest.has(root)) scope.add(root)
 }
 
 /** Stop whatever serves this root, then remove it.
@@ -279,7 +282,8 @@ const failureContextFixture: [
       testInFlight = false
     }
     await reportFailureContext(info, traceIdForTest(info.testId))
-    for (const root of rootsCreatedByTest.splice(0)) removeDisposableRoot(root)
+    for (const root of rootsCreatedByTest) removeDisposableRoot(root)
+    rootsCreatedByTest.clear()
   },
   { auto: true },
 ]
@@ -415,7 +419,8 @@ export const test = base.extend<{ failureContext: void }, { appReady: void }>({
  * before this one, so a home they still want to read is still there.
  */
 base.afterAll(() => {
-  for (const root of rootsCreatedByFile.splice(0)) removeDisposableRoot(root)
+  for (const root of rootsCreatedByFile) removeDisposableRoot(root)
+  rootsCreatedByFile.clear()
 })
 
 export const standalone = base.extend<{ failureContext: void }>({
@@ -1462,6 +1467,17 @@ export class VaultBackend {
     if (!existsSync(binary)) {
       throw new Error(`nocx-server binary not found: ${binary}`)
     }
+    // ONCE, HERE, AND NOT IN start() (nocx-atpw5.1.40). The root belongs to the
+    // scope that made it, and a backend can be started more than once: restart()
+    // is stop() then start(), and a spec that restarts is exactly a spec whose
+    // on-disk state must outlive the first start. Recording in start() recorded
+    // the same root again, against whichever test happened to be running, so the
+    // FIRST restart moved a file-scope root into a test's scope and the next
+    // test's restart found its log directory gone — CI: `ENOENT: open
+    // '/tmp/nocx-x8s2-e2e-…/nocx-server.log'` in VaultBackend.start, through
+    // restart, from e2e/agent-ask.spec.ts:1043. The constructor runs once per
+    // backend, so the scope it sees is the scope that built the root.
+    rememberDisposableRoot(this.disposable.root)
   }
 
   /**
@@ -1498,9 +1514,6 @@ export class VaultBackend {
       overrideEnv,
       root: this.disposable.root,
     })
-    // This root is the harness's to remove once the test (or the file) that
-    // made it is over — see rememberDisposableRoot (nocx-atpw5.1.40).
-    rememberDisposableRoot(this.disposable.root)
     const env = this.isolation.env as Record<string, string>
 
     this.proc = spawn(this.binary, [], { env, stdio: ['ignore', logFd, logFd], detached: false })

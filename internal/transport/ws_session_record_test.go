@@ -12,7 +12,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -22,6 +26,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/log/logtest"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/waittest"
 )
@@ -78,6 +83,9 @@ type fakeRecorder struct {
 	failWith error
 	readErr  error
 	skipErr  error
+	// droppedEach is what every append reports it evicted from the store's
+	// cap: the pass-level fact the recorder turns into an episode.
+	droppedEach uint64
 }
 
 // fakeSkip is one hole the recorder asked the store to record. Kept as a
@@ -113,7 +121,7 @@ func (r *fakeRecorder) Append(_ context.Context, in content.SessionOutputAppend)
 	r.offsets = append(r.offsets, in.Offset)
 	r.stream = append(r.stream, in.Body...)
 	r.appends++
-	return content.SessionOutputResult{Kept: true}, nil
+	return content.SessionOutputResult{Kept: true, Dropped: r.droppedEach}, nil
 }
 
 // Read hands back what this fake kept, as ONE run: the fake never drops, so
@@ -208,6 +216,14 @@ func (r *fakeRecorder) setFailure(err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.failWith = err
+}
+
+// setDroppedEach makes every append report that it evicted bytes from the
+// store's output cap, the way a session held at its cap does pass after pass.
+func (r *fakeRecorder) setDroppedEach(n uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.droppedEach = n
 }
 
 func (r *fakeRecorder) appendCount() int {
@@ -718,4 +734,110 @@ func TestSessionRecording_StopDrainsFinalOutputAfterRxRemoval(t *testing.T) {
 			})
 		})
 	}
+}
+
+// ── the cap says it once per episode, not once per pass ──────────────────
+
+// capLines are the output-cap records a test's logger holds, as the numbers
+// each one names: the bytes since the previous line, and the episode's total.
+type capLine struct{ since, total int64 }
+
+var capLineNumbers = regexp.MustCompile(`bytes=(\d+) total=(\d+)`)
+
+func capLinesOf(sl *slog.Logger) []capLine {
+	var out []capLine
+	for _, line := range strings.Split(logtest.TextSlog(sl), "\n") {
+		if !strings.Contains(line, "output cap") {
+			continue
+		}
+		m := capLineNumbers.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		since, _ := strconv.ParseInt(m[1], 10, 64)
+		total, _ := strconv.ParseInt(m[2], 10, 64)
+		out = append(out, capLine{since: since, total: total})
+	}
+	return out
+}
+
+// A session held at its output cap for a sustained stream writes a bounded
+// number of these lines, and every byte it dropped is still on the record
+// (nocx-3an1s.1.7). Driven through the recorder itself, with virtual time: 200
+// passes two seconds apart are the measured flood, and the assertion is about
+// which pass writes, not about how fast this machine is.
+func TestSessionRecording_CapEvictionsAreOneLogEpisode(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sl := logtest.Slog(t)
+		logger := log.NewSlogAdapter(sl)
+		rec := newFakeRecorder()
+		rec.setDroppedEach(512)
+		ws := NewWSServer(logger, newRegWithStub(logger), WithSessionOutputRecorder(rec))
+		ring := newOutputRing()
+		done := make(chan struct{})
+		go func() {
+			ws.recordSessionOutput(context.Background(), session.ID("cap"), ring)
+			close(done)
+		}()
+
+		// 200 passes, 10 ms apart: two seconds of a session under ordinary
+		// output, held at its cap. At one line per pass that is 200 lines.
+		for i := 0; i < 200; i++ {
+			if err := ring.write(recordingStream(1024)); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			time.Sleep(10 * time.Millisecond)
+			synctest.Wait()
+		}
+		lines := capLinesOf(sl)
+		if len(lines) != 1 {
+			t.Fatalf("%d cap lines for 200 passes inside one interval, want 1", len(lines))
+		}
+		if lines[0] != (capLine{since: 512, total: 512}) {
+			t.Fatalf("the opening line = %+v, want the first pass's 512 bytes", lines[0])
+		}
+
+		// The next interval's first pass writes the second line, carrying
+		// every byte the 200 passes since the first one dropped.
+		time.Sleep(time.Minute)
+		if err := ring.write(recordingStream(1024)); err != nil {
+			t.Fatalf("write after the interval: %v", err)
+		}
+		synctest.Wait()
+		lines = capLinesOf(sl)
+		if len(lines) != 2 {
+			t.Fatalf("%d cap lines after the interval, want 2:\n%s", len(lines), logtest.TextSlog(sl))
+		}
+		if want := int64(200 * 512); lines[1].since != want {
+			t.Fatalf("the second line names %d bytes since the last, want %d", lines[1].since, want)
+		}
+		if want := int64(201 * 512); lines[1].total != want {
+			t.Fatalf("the second line's episode total = %d, want %d", lines[1].total, want)
+		}
+
+		// Five more passes, then the session ends: the closing line carries
+		// what had no line of its own yet, and no information leaves with the
+		// episode.
+		for i := 0; i < 5; i++ {
+			if err := ring.write(recordingStream(1024)); err != nil {
+				t.Fatalf("write before the end: %v", err)
+			}
+			time.Sleep(10 * time.Millisecond)
+			synctest.Wait()
+		}
+		ring.close()
+		<-done
+		lines = capLinesOf(sl)
+		if len(lines) != 3 {
+			t.Fatalf("%d cap lines for the whole episode, want 3:\n%s", len(lines), logtest.TextSlog(sl))
+		}
+		var summed int64
+		for _, l := range lines {
+			summed += l.since
+		}
+		if want := int64(206 * 512); summed != want || lines[2].total != want {
+			t.Fatalf("the lines sum to %d and the closing total is %d, want every dropped byte (%d)",
+				summed, lines[2].total, want)
+		}
+	})
 }

@@ -29,11 +29,12 @@
 // e2e/cross-tab-latency.spec.ts with the deterministic unit test beside the
 // pane (frontend/src/terminal-content.test.ts, nocx-07ymy).
 //
-// The bound is deliberately loose. It is not a performance target; it is the
-// shape that must not come back — a shared worker that put one session's work
-// in front of another's (nocx-5q0ej measured 7.5 s of it). A 3x ceiling on a
-// 1.35–2.09x measurement catches that with no chance of a flake on a loaded
-// runner.
+// The ceiling is deliberately loose, and set by the regression rather than by
+// today's numbers. It is not a performance target; it is the shape that must
+// not come back — a shared worker that put one session's work in front of
+// another's (nocx-5q0ej measured 7.5 s of it, ~750x). A 10x ceiling on a
+// 1.35–2.8x measurement catches that and cannot flake on a loaded runner;
+// every run prints the numbers so a trend is visible in the CI log.
 package app
 
 import (
@@ -834,12 +835,21 @@ func TestCrossTabLatencyAtTheWire(t *testing.T) {
 		t.Fatalf("A produced %.0f screen frames a second; the bound below would prove nothing", busyFramesPerSecond)
 	}
 
-	// THE BOUND, stated as a ratio against this run's own idle phase so a
-	// slow or loaded runner cannot fail it by being slow or loaded. Four runs
-	// on a quiet 2-core VM measured 1.35–1.99; the shape this exists to stop
-	// is the shared worker nocx-5q0ej removed, which cost 7.5 s against a
-	// 10 ms baseline — 750x.
-	const bound = 3.0
+	// THE CEILING IS SET BY THE REGRESSION THIS EXISTS TO CATCH, not by what
+	// the product does today. Every run prints what it measured; the
+	// assertion is only that B did not WAIT FOR A. nocx-5q0ej, #534, was one
+	// shared worker that put A's work in front of B's: a command in B waited
+	// 7.5 s for what takes 10 ms, a factor of ~750. The ceiling is 10x this
+	// run's own idle phase — two orders of magnitude under that regression,
+	// and x4 above the worst ratio measured here (2.8x, with a compiler
+	// running beside the test on a 2-core VM).
+	//
+	// ANYTHING TIGHTER IS NOISE. The same tree measures 1.35x–2.8x depending
+	// on what else the machine is doing, and a test may not depend on timing;
+	// what a fixed ceiling cannot say — that a hidden pane applies at most one
+	// frame per display frame — is asserted, deterministically, beside the
+	// renderer (frontend/src/terminal-content.test.ts, nocx-07ymy).
+	const bound = 10.0
 	for _, layer := range []struct {
 		name          string
 		idle, latency []time.Duration

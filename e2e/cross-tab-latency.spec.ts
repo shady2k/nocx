@@ -350,22 +350,24 @@ test('a hidden tab repainting 200 times a second does not slow the tab in use (n
   // THE PREMISE FIRST: a producer that did not load the page cannot pass.
   expect(framesPerSecond).toBeGreaterThan(MIN_PRODUCER_FRAMES_PER_SECOND)
 
-  // THE LAYER. Before the fix this was 27–32 % of the phase at ~300 frames a
-  // second — one thread, spent on a pane nobody was looking at. Coalesced it
-  // is under 3 %, and the bound is loose because the FRAME RATE the fixture
-  // reaches is the machine's, not the spec's: the discriminating check for
-  // the coalescing itself is the unit test beside the renderer
-  // (terminal-content.test.ts, "applies one hidden frame per animation frame
-  // and keeps the newest"), which is deterministic.
-  expect(handlerShare).toBeLessThan(0.2)
-
-  // THE OUTCOME, as a ratio against this page's own idle behaviour. The bound
-  // is a ceiling on gross degradation, not a proof of independence: on a
-  // 2-core container the browser, the backend and the helper share two cores,
-  // so a busy tab costs the whole machine, and seven runs here measured
-  // 1.45–2.07x for the keystroke and 1.60–2.07x for the command (and 2.8x
-  // with a compiler running beside them). What it exists to stop is the shape
-  // nocx-5q0ej removed, 7.5 s against a 10 ms baseline.
-  expect(busyKeyP50).toBeLessThanOrEqual(idleKeyP50 * 3)
-  expect(busyCommandP50).toBeLessThanOrEqual(idleCommandP50 * 3)
+  // THE CEILING IS SET BY THE REGRESSION THIS EXISTS TO CATCH, not by what
+  // the product does today (nocx-5q0ej, #534): one shared worker put A's work
+  // in front of B's, and a command in B waited 7.5 s for what takes 10 ms — a
+  // factor of ~750. A cross-tab delay of that shape is what must never come
+  // back, so the ceiling is 10x this page's own idle, two orders of magnitude
+  // under that regression and x3.5 above the worst ratio ever measured here
+  // (2.8x, with a compiler running beside the test on a 2-core VM).
+  //
+  // ANYTHING TIGHTER IS NOISE, and a noisy bound reddens somebody else's pull
+  // request: the same tree measures 1.45x to 2.8x depending on what else this
+  // machine is doing, `ci-e2e` repeats a changed spec ten times, and a test
+  // may not depend on timing. So this asserts only that B did not WAIT FOR A.
+  // What a fixed ceiling cannot say — that a hidden pane applies at most one
+  // frame per display frame — is asserted, deterministically, by
+  // frontend/src/terminal-content.test.ts ("applies one hidden frame per
+  // animation frame and keeps the newest"). The numbers above are printed for
+  // the CI log, which is where a trend is read.
+  const CEILING = 10
+  expect(busyKeyP50).toBeLessThanOrEqual(idleKeyP50 * CEILING)
+  expect(busyCommandP50).toBeLessThanOrEqual(idleCommandP50 * CEILING)
 })

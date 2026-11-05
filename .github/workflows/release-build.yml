@@ -24,9 +24,6 @@ on:
       sha:
         required: true
         type: string
-      release-tag:
-        required: true
-        type: string
       linux-only:
         required: false
         type: boolean
@@ -35,6 +32,13 @@ on:
         required: false
         type: boolean
         default: true
+    # The dated tag this build publishes under. `validate` computes it from the
+    # build's own instant; the caller names it in the proof and in the
+    # publication instead of deriving a second one.
+    outputs:
+      tag:
+        description: The dated nightly tag this build's bytes are published under
+        value: ${{ jobs.validate.outputs.tag }}
     secrets:
       MACOS_SIGNING_P12:
         required: true
@@ -51,21 +55,22 @@ jobs:
       version: ${{ steps.v.outputs.version }}
       build-date: ${{ steps.v.outputs.build-date }}
       build-number: ${{ steps.v.outputs.build-number }}
+      tag: ${{ steps.v.outputs.tag }}
     steps:
       - id: v
         env:
           VERSION: ${{ inputs.version }}
           SHA: ${{ inputs.sha || github.sha }}
-          TAG: ${{ inputs.release-tag || format('nightly-19700101-{0}', github.run_id) }}
         run: |
           set -euo pipefail
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$TAG" =~ ^(nightly-[0-9]{8}-[0-9]+|v[0-9]+\.[0-9]+\.[0-9]+)$ ]]
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           # One identity for both platforms and their signed manifest. A
           # publication or promotion time is not the time these bytes were built.
-          echo "build-date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          # READ ONCE: the build number is derived from this instant, and two
+          # `date` calls can straddle a minute boundary and stamp a build whose
+          # tag and whose manifest disagree.
+          build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           # THE BUILD NUMBER (nocx-vh2hr.1.5, the owner's decision of
           # 2026-10-30): the same instant as YYYYMMDDHHMM, in UTC, computed
           # HERE and nowhere else. It is stamped into the binary
@@ -73,14 +78,24 @@ jobs:
           # the manifest's own build.builtAt — signed for every reader, which is
           # what a CI run number cannot be: a rerun of an older revision takes a
           # higher run number for an older build.
-          echo "build-number=$(date -u +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
+          build_number="$(date -u -d "$build_date" +%Y%m%d%H%M)"
+          # THE TAG NUMBERS THIS BUILD (nocx-vh2hr.1.17, the owner's decision of
+          # 2026-11-02): v<version>-nightly.<build number>. Derived from the
+          # instant above rather than handed in, so the tag, the title About
+          # shows and the update notice cannot name different builds.
+          tag="v${VERSION}-nightly.${build_number}"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-nightly\.[0-9]{12}$ ]]
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build-date=$build_date" >> "$GITHUB_OUTPUT"
+          echo "build-number=$build_number" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
   helpers:
     needs: [validate]
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.validate.outputs.version }}
       BUILD_SHA: ${{ inputs.sha || github.sha }}
-      RELEASE_TAG: ${{ inputs.release-tag || format('nightly-19700101-{0}', github.run_id) }}
+      RELEASE_TAG: ${{ needs.validate.outputs.tag }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -403,7 +418,7 @@ jobs:
       BUILD_SHA: ${{ inputs.sha || github.sha }}
       BUILD_DATE: ${{ needs.validate.outputs.build-date }}
       BUILD_NUMBER: ${{ needs.validate.outputs.build-number }}
-      RELEASE_TAG: ${{ inputs.release-tag || format('nightly-19700101-{0}', github.run_id) }}
+      RELEASE_TAG: ${{ needs.validate.outputs.tag }}
       # WHICH PLATFORMS THIS APP CAN RUN ON, stated by the job that knows: the
       # macOS bundle is universal, so either slice may be the one executing and
       # its embed must carry BOTH darwin local variants. The gate step below
@@ -1057,7 +1072,7 @@ jobs:
       BUILD_SHA: ${{ inputs.sha || github.sha }}
       BUILD_DATE: ${{ needs.validate.outputs.build-date }}
       BUILD_NUMBER: ${{ needs.validate.outputs.build-number }}
-      RELEASE_TAG: ${{ inputs.release-tag || format('nightly-19700101-{0}', github.run_id) }}
+      RELEASE_TAG: ${{ needs.validate.outputs.tag }}
       # The AppImage is amd64 and nothing else, so one local variant. See the
       # macOS job's line for why this is a job-level fact.
       NOCX_REQUIRE_LOCAL_ARTIFACTS: linux/amd64
@@ -1325,7 +1340,7 @@ jobs:
       BUILD_SHA: ${{ inputs.sha || github.sha }}
       BUILD_DATE: ${{ needs.validate.outputs.build-date }}
       BUILD_NUMBER: ${{ needs.validate.outputs.build-number }}
-      RELEASE_TAG: ${{ inputs.release-tag || format('nightly-19700101-{0}', github.run_id) }}
+      RELEASE_TAG: ${{ needs.validate.outputs.tag }}
     steps:
       - uses: actions/checkout@v7
         with:

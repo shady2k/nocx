@@ -48,13 +48,12 @@ const publicKey = createPublicKey(privateKey)
 const keys = [publicKey]
 const signature = (body) => sign(null, body, privateKey).toString('base64') + '\n'
 
-function fixture(t) {
+function fixture(t, { tag = 'nightly-20261027-42' } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'nocx-promotion-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
   const source = join(root, 'source')
   mkdirSync(source)
   const version = '0.8.0'
-  const tag = 'nightly-20261027-42'
   const prefix = `https://github.com/shady2k/nocx/releases/download/${tag}/`
   const payloads = [
     `nocx-${version}-darwin-universal.zip`,
@@ -450,6 +449,24 @@ test('README must have one status, published prerelease must be dated and versio
     const { input } = fixture(t)
     change(input)
     assert.throws(() => verifyCandidate(input))
+  }
+})
+
+// nocx-vh2hr.1.17 tags a build `v<version>-nightly.<build number>`. Promotion
+// accepts both dated spellings — the old copies stay published until the
+// pruner retires them — and still refuses the moving alias and a stable tag.
+test('a build tagged with the new dated spelling is a promotable nightly', (t) => {
+  const { input } = fixture(t, { tag: 'v0.8.0-nightly.202610270317' })
+  const candidate = verifyCandidate(input)
+  assert.equal(candidate.tag, 'v0.8.0-nightly.202610270317')
+  assert.equal(candidate.nightly.tag, 'v0.8.0-nightly.202610270317')
+  assert.equal(candidate.version, '0.8.0')
+})
+
+test('neither the moving alias nor a stable tag can name a promotion candidate', (t) => {
+  for (const tag of ['nightly', 'v0.8.0', 'v0.8.0-nightly.2026', 'nightly-20261027']) {
+    const { input } = fixture(t, { tag })
+    assert.throws(() => verifyCandidate(input), /dated nightly/, tag)
   }
 })
 

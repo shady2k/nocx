@@ -13,9 +13,25 @@ import {
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { generateKeyPairSync, sign, createHash } from 'node:crypto'
-import { decide, publish, prepare, attest, authorize, nextVersion } from './publish-nightly.mjs'
+import {
+  decide,
+  publish,
+  prepare,
+  attest,
+  authorize,
+  nextVersion,
+  buildNumberOf,
+  datedNightlyTags,
+  isDatedNightly,
+  nightlyTag,
+  nightlyTitle,
+  releaseNotes,
+} from './publish-nightly.mjs'
 
 const buildIdentity = { commit: 'a'.repeat(40), builtAt: '2026-10-27T03:17:00Z' }
+// The tag's suffix is the signed build instant's UTC minute (nocx-vh2hr.1.17),
+// so a fixture's tag is a function of its builtAt and never a free string.
+const buildTag = 'v0.8.0-nightly.202610270317'
 
 function writeSignedJSON(dir, name, value, privateKey) {
   const bytes = Buffer.from(JSON.stringify(value))
@@ -54,7 +70,7 @@ function fixture(t) {
       os: i ? 'linux' : 'darwin',
       arch: i ? 'amd64' : 'universal',
       format: i ? 'AppImage' : 'zip',
-      url: `https://github.com/shady2k/nocx/releases/download/nightly-20261027-42/${name}`,
+      url: `https://github.com/shady2k/nocx/releases/download/${buildTag}/${name}`,
       sha256: createHash('sha256').update(data).digest('hex'),
       size: data.length,
     }
@@ -65,7 +81,7 @@ function fixture(t) {
     {
       version: '0.8.0',
       released: '2026-10-27T03:25:00Z',
-      notesUrl: 'https://github.com/shady2k/nocx/releases/tag/nightly-20261027-42',
+      notesUrl: `https://github.com/shady2k/nocx/releases/tag/${buildTag}`,
       build: { ...buildIdentity },
       artifacts,
       helpers: [],
@@ -76,7 +92,12 @@ function fixture(t) {
     moved: true,
     sha: buildIdentity.commit,
     version: '0.8.0',
-    tag: 'nightly-20261027-42',
+    tag: buildTag,
+    previous: 'nightly-20261026-41',
+    commits: [
+      { sha: 'b'.repeat(40), subject: 'fix(update): keep the manifest URL immutable' },
+      { sha: 'c'.repeat(40), subject: 'feat(ui): name the build in the update notice' },
+    ],
     runId: '42',
     runAttempt: '1',
     dir,
@@ -303,13 +324,177 @@ test('nextVersion is the next patch after the highest stable tag, nightly tags e
   assert.throws(() => nextVersion(['v0.8', 'v0.8.0']), /unreadable release tag v0\.8/)
 })
 
+// THE TAG AND THE TITLE NAME THE BUILD (nocx-vh2hr.1.17). The suffix is the
+// UTC minute of the signed build instant — the same number internal/version
+// stamps into the binary, macOS CFBundleVersion, and the update notice — so a
+// reader can tell two nightlies of one version apart from the list alone.
+test('a dated tag and its title carry the signed build number', () => {
+  assert.equal(buildNumberOf('2026-11-02T11:01:00Z'), '202611021101')
+  assert.equal(nightlyTag('0.8.1', '202611021101'), 'v0.8.1-nightly.202611021101')
+  assert.equal(nightlyTitle('0.8.1', '202611021101'), 'nocx 0.8.1 nightly · build 202611021101')
+  // Only a canonical UTC-second instant has a number; a guessed one does not.
+  for (const instant of [
+    'unknown',
+    '',
+    '2026-11-02',
+    '2026-11-02T11:01:00',
+    '2026-11-02T11:01:00.500Z',
+  ])
+    assert.equal(buildNumberOf(instant), '', instant)
+  assert.throws(() => nightlyTag('0.8', '202611021101'), /MAJOR\.MINOR\.PATCH/)
+  assert.throws(() => nightlyTag('0.8.1', '2026-11-02'), /build number/)
+})
+
+test('the tag must number the signed build time, not another build of the version', (t) => {
+  const candidate = fixture(t)
+  // The URLs and the tag travel together — the real builder takes both from one
+  // variable — so the case that matters is a signed manifest for the 03:17Z
+  // build offered under a tag that numbers 03:25Z.
+  changeManifest(candidate, (manifest) => {
+    const wrong = 'v0.8.0-nightly.202610270325'
+    manifest.notesUrl = `https://github.com/shady2k/nocx/releases/tag/${wrong}`
+    for (const artifact of manifest.artifacts)
+      artifact.url = artifact.url.replace(candidate.input.tag, wrong)
+  })
+  assert.throws(
+    () => decide({ ...candidate.input, tag: 'v0.8.0-nightly.202610270325' }),
+    /does not number this build: the signed build time gives v0\.8\.0-nightly\.202610270317/,
+  )
+})
+
+test('a publish titles the dated copy and the alias by the build, never by a run id', async (t) => {
+  const { input } = fixture(t)
+  const calls = []
+  await publish(input, (args) => {
+    calls.push(args)
+    if (args[0] === 'api') return JSON.stringify([[]])
+    return ''
+  })
+  const dated = calls.find((c) => c[0] === 'release' && c[1] === 'create' && c[2] === input.tag)
+  assert.equal(dated[dated.indexOf('--title') + 1], 'nocx 0.8.0 nightly · build 202610270317')
+  assert.ok(dated.includes('--prerelease') && dated.includes('--latest=false'))
+  const alias = calls.find((c) => c[0] === 'release' && c[1] === 'create' && c[2] === 'nightly')
+  assert.equal(alias[alias.indexOf('--title') + 1], 'Nightly')
+  assert.ok(alias.includes('--latest=false'))
+})
+
+test('notes list the first-parent commits since the previous nightly, linked', async (t) => {
+  const { input } = fixture(t)
+  const calls = []
+  await publish(input, (args) => {
+    calls.push(args)
+    if (args[0] === 'api') return JSON.stringify([[]])
+    return ''
+  })
+  const dated = calls.find((c) => c[0] === 'release' && c[1] === 'create' && c[2] === input.tag)
+  const notes = dated[dated.indexOf('--notes') + 1]
+  assert.match(notes, /^`nocx 0\.8\.0` nightly, build 202610270317, from main at a{40}\./)
+  assert.match(notes, /Changes since nightly-20261026-41:/)
+  assert.match(
+    notes,
+    /- fix\(update\): keep the manifest URL immutable \(\[`bbbbbbb`\]\(https:\/\/github\.com\/shady2k\/nocx\/commit\/b{40}\)\)/,
+  )
+  assert.match(notes, /feat\(ui\): name the build in the update notice/)
+  // The commit list replaces the fixed sentence; the moving alias serves the
+  // same build and says the same thing.
+  assert.doesNotMatch(notes, /Signed update manifest/)
+  const alias = calls.find((c) => c[0] === 'release' && c[1] === 'create' && c[2] === 'nightly')
+  assert.equal(alias[alias.indexOf('--notes') + 1], notes)
+})
+
+test('release notes name the build, the comparison point and one line per commit', () => {
+  const notes = releaseNotes({
+    version: '0.8.1',
+    build: '202611021101',
+    sha: 'a'.repeat(40),
+    previous: 'v0.8.1-nightly.202611011830',
+    commits: [{ sha: 'd'.repeat(40), subject: 'fix(pty): keep the slave open' }],
+  })
+  assert.equal(
+    notes,
+    [
+      '`nocx 0.8.1` nightly, build 202611021101, from main at ' + 'a'.repeat(40) + '.',
+      '',
+      'Changes since v0.8.1-nightly.202611011830:',
+      '',
+      '- fix(pty): keep the slave open ([`ddddddd`](https://github.com/shady2k/nocx/commit/' +
+        'd'.repeat(40) +
+        '))',
+    ].join('\n'),
+  )
+  assert.match(
+    releaseNotes({ version: '0.8.1', build: '202611021101', sha: 'a'.repeat(40), previous: null }),
+    /first dated nightly/,
+  )
+})
+
+test('notes for the first dated nightly say there is nothing to compare with', async (t) => {
+  const { input } = fixture(t)
+  const calls = []
+  await publish({ ...input, previous: null, commits: [] }, (args) => {
+    calls.push(args)
+    if (args[0] === 'api') return JSON.stringify([[]])
+    return ''
+  })
+  const dated = calls.find((c) => c[0] === 'release' && c[1] === 'create' && c[2] === input.tag)
+  assert.match(dated[dated.indexOf('--notes') + 1], /first dated nightly/)
+})
+
+test('dated releases are read newest first in both spellings, drafts and stables excluded', () => {
+  const releases = [
+    {
+      tag_name: 'nightly-20261025-40',
+      prerelease: true,
+      draft: false,
+      published_at: '2026-10-25T03:20:00Z',
+    },
+    {
+      tag_name: 'v0.8.1-nightly.202610270317',
+      prerelease: true,
+      draft: false,
+      published_at: '2026-10-27T03:30:00Z',
+    },
+    {
+      tag_name: 'nightly-20261026-41',
+      prerelease: true,
+      draft: true,
+      published_at: '2026-10-26T03:20:00Z',
+    },
+    { tag_name: 'nightly', prerelease: true, draft: false, published_at: '2026-10-27T03:30:00Z' },
+    { tag_name: 'v0.8.0', prerelease: false, draft: false, published_at: '2026-10-21T03:30:00Z' },
+    {
+      tag_name: 'not-a-nightly',
+      prerelease: true,
+      draft: false,
+      published_at: '2026-10-24T03:30:00Z',
+    },
+  ]
+  assert.deepEqual(
+    datedNightlyTags(releases).map((r) => r.tag_name),
+    ['v0.8.1-nightly.202610270317', 'nightly-20261025-40'],
+  )
+  assert.ok(isDatedNightly('v0.8.1-nightly.202610270317'))
+  assert.ok(isDatedNightly('nightly-20261026-41'))
+  assert.ok(!isDatedNightly('nightly'))
+  assert.ok(!isDatedNightly('v0.8.0'))
+})
+
+test('the version still comes from stable tags when new nightly tags are reachable', () => {
+  // A nightly tag sorts above the stable tags of its minor in a plain version
+  // sort; counting it would name a version no stable release will carry.
+  assert.equal(nextVersion(['v0.8.0', 'v0.8.1-nightly.202610270317']), '0.8.1')
+  assert.equal(nextVersion(['v0.8.0', 'v0.9.0-nightly.202610270317', 'nightly']), '0.8.1')
+  assert.equal(nextVersion(['v0.8.1', 'v0.8.0', 'v0.9.0-nightly.202610270317']), '0.8.2')
+  assert.throws(() => nextVersion(['v0.9.0-nightly.202610270317']), /no stable release tag/)
+  // A near-miss is still unreadable: the dated rule is exact.
+  assert.throws(() => nextVersion(['v0.9.0-nightly.2026']), /unreadable release tag/)
+})
+
 test('prepare distinguishes moved, unchanged, and supporting-only commits', () => {
   const base = {
     sha: 'a'.repeat(40),
     previous: 'b'.repeat(40),
-    tags: ['v0.8.0', 'nightly-20261027-42'],
-    date: '20261027',
-    runId: '42',
+    tags: ['v0.8.0', 'nightly-20261027-42', 'v0.8.1-nightly.202610270317'],
   }
   assert.equal(prepare({ ...base, files: ['main.go'] }).moved, true)
   assert.equal(prepare({ ...base, previous: base.sha, files: [] }).moved, false)
@@ -337,8 +522,6 @@ test('prepare derives the version from the tags instead of reading VERSION', () 
     previous: null,
     files: [],
     tags: ['v0.8.0'],
-    date: '20261031',
-    runId: '7',
   })
   assert.equal(plan.version, '0.8.1')
   // A version handed in beside the tags is not a second source: the tags are.
@@ -348,8 +531,6 @@ test('prepare derives the version from the tags instead of reading VERSION', () 
     files: [],
     tags: ['v0.8.1', 'v0.8.0'],
     version: '0.0.0',
-    date: '20261031',
-    runId: '8',
   })
   assert.equal(after.version, '0.8.2')
 })
@@ -371,6 +552,38 @@ test('the nightly workflow reads the reachable tags and never the VERSION file',
   assert.match(release, /concurrency:\s*\n\s*group: nocx-release/)
   assert.match(release, /cancel-in-progress: false/)
   assert.doesNotMatch(release, /promotion-github\.mjs bump/)
+})
+
+// THE WORKFLOW DOES NOT INVENT A SECOND ANSWER (nocx-vh2hr.1.17). The tag comes
+// from the build that stamps the instant, the proofs read the module's own
+// predicate, and nothing selects nightlies by a tag prefix written by hand.
+test('the tag is made where the build instant is stamped, and the proofs read it from there', () => {
+  const nightly = readFileSync(new URL('../.github/workflows/nightly.yml', import.meta.url), 'utf8')
+  const build = readFileSync(
+    new URL('../.github/workflows/release-build.yml', import.meta.url),
+    'utf8',
+  )
+  // One instant, and the tag derived from it beside the number it numbers.
+  assert.match(build, /build_number="\$\(date -u -d "\$build_date" \+%Y%m%d%H%M\)"/)
+  assert.match(build, /tag="v\$\{VERSION\}-nightly\.\$\{build_number\}"/)
+  assert.match(
+    build,
+    /^ {4}outputs:\n {6}tag:\n {8}description:[^\n]*\n {8}value: \$\{\{ jobs\.validate\.outputs\.tag \}\}$/m,
+  )
+  assert.doesNotMatch(build, /inputs\.release-tag/)
+  // The nightly plan decides moved/version and never a tag.
+  assert.doesNotMatch(nightly, /needs\.prepare\.outputs\.tag/)
+  assert.match(nightly, /RELEASE_TAG: \$\{\{ needs\.build\.outputs\.tag \}\}/)
+  assert.match(nightly, /PUBLISHED_TAG: \$\{\{ needs\.build\.outputs\.tag \}\}/)
+  // Both proofs select the pair with the publication module, in both spellings.
+  assert.equal((nightly.match(/node scripts\/publish-nightly\.mjs dated-tags/g) || []).length, 2)
+  assert.doesNotMatch(nightly, /startswith\("nightly-"\)/)
+  // The notes are the commits since the previous nightly, first-parent only.
+  assert.match(nightly, /git\(\['log', '--first-parent', '--format=%H%x09%s'/s)
+  assert.match(nightly, /commits=\$\{JSON\.stringify\(commits\)\}/)
+  // A null previous is an empty output, never the string "null" a step would
+  // read back as a tag.
+  assert.match(nightly, /\$\{key\}=\$\{value \?\? ''\}/)
 })
 
 test('nightly workflow calls the shared build without CI or Homebrew and gates unchanged main', () => {
@@ -404,21 +617,64 @@ test('deliberately broken About.Wails refuses naming field before any gh call', 
   )
   assert.deepEqual(calls, [])
 })
-test('retention keeps seven dated copies and never removes stable releases', async (t) => {
+// THE NEWEST THREE DATED NIGHTLIES SURVIVE (nocx-vh2hr.1.17): this build, the
+// previous one the update proof updates FROM, and one spare. The old
+// nightly-<date>-<run> tags are in this list because they are what the first
+// run under the new scheme has to retire.
+test('retention keeps the three newest dated copies in both tag spellings', async (t) => {
   const { input } = fixture(t)
   const calls = []
-  const releases = Array.from({ length: 9 }, (_, i) => ({
-    tag_name: `nightly-202610${String(26 - i).padStart(2, '0')}-${i}`,
-    prerelease: true,
-    published_at: `2026-10-${String(26 - i).padStart(2, '0')}`,
-  }))
-  releases.push({ tag_name: 'v0.7.2', prerelease: false, published_at: '2026-10-26' })
+  const releases = [
+    { tag_name: 'nightly-20261026-41', prerelease: true, published_at: '2026-10-26T03:20:00Z' },
+    { tag_name: 'nightly-20261025-40', prerelease: true, published_at: '2026-10-25T03:20:00Z' },
+    { tag_name: 'nightly-20261024-39', prerelease: true, published_at: '2026-10-24T03:20:00Z' },
+    { tag_name: 'nightly-20261023-38', prerelease: true, published_at: '2026-10-23T03:20:00Z' },
+    {
+      tag_name: 'v0.8.0-nightly.202610221830',
+      prerelease: true,
+      published_at: '2026-10-22T18:30:00Z',
+    },
+    { tag_name: 'nightly', prerelease: true, published_at: '2026-10-27T03:30:00Z' },
+    { tag_name: 'v0.7.2', prerelease: false, published_at: '2026-10-20T03:30:00Z' },
+    { tag_name: 'v0.8.0', prerelease: false, published_at: '2026-10-21T03:30:00Z' },
+  ]
   await publish(input, (args) => {
     calls.push(args)
-    return args[0] === 'api' ? JSON.stringify([releases]) : ''
+    if (args[0] === 'api') return JSON.stringify([releases])
+    // The moving alias is replaced by the same publish; its backup is real.
+    if (args[1] === 'download')
+      cpSync(input.dir, args[args.indexOf('--dir') + 1], { recursive: true })
+    return ''
   })
-  assert.equal(calls.filter((c) => c[1] === 'delete').length, 3)
-  assert.ok(!calls.some((c) => c[1] === 'delete' && c.includes('v0.7.2')))
+  const deleted = calls.filter((c) => c[1] === 'delete' && c[2] !== 'nightly').map((c) => c[2])
+  // Kept: this build, 20261026-41 (the proof's previous) and 20261025-40.
+  assert.deepEqual(deleted.sort(), [
+    'nightly-20261023-38',
+    'nightly-20261024-39',
+    'v0.8.0-nightly.202610221830',
+  ])
+  // The proof's previous build is the second newest and is never deleted.
+  assert.ok(!deleted.includes('nightly-20261026-41'))
+})
+
+test('a nightly that is the only dated copy deletes nothing', async (t) => {
+  const { input } = fixture(t)
+  const calls = []
+  const releases = [
+    { tag_name: 'v0.8.0', prerelease: false, published_at: '2026-10-21T03:30:00Z' },
+    { tag_name: 'nightly', prerelease: true, published_at: '2026-10-27T03:30:00Z' },
+  ]
+  await publish(input, (args) => {
+    calls.push(args)
+    if (args[0] === 'api') return JSON.stringify([releases])
+    if (args[1] === 'download')
+      cpSync(input.dir, args[args.indexOf('--dir') + 1], { recursive: true })
+    return ''
+  })
+  assert.deepEqual(
+    calls.filter((c) => c[1] === 'delete' && c[2] !== 'nightly'),
+    [],
+  )
 })
 
 test('undeclared nightly.json-prefixed file is refused', (t) => {
@@ -452,7 +708,8 @@ test('failed alias replacement restores the previous signed nightly', async (t) 
 
 test('landing page stamps stable tags only, not the newer nightly aliases', () => {
   const result = execFileSync('bash', ['scripts/latest-stable-tag.sh'], {
-    input: 'nightly\nnightly-20261027-42\nv0.7.2\nv0.8.0-rc.1\nv0.6.1\nv0.10.0\n',
+    input:
+      'nightly\nnightly-20261027-42\nv0.8.1-nightly.202611021101\nv0.7.2\nv0.8.0-rc.1\nv0.6.1\nv0.10.0\n',
     encoding: 'utf8',
   })
   assert.equal(result.trim(), 'v0.10.0')

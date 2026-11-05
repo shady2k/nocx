@@ -23,7 +23,8 @@ import time
 from urllib.request import Request, urlopen
 
 from common import (ProofError, channel_pair, command, download_artifact,
-                    plain_version, read_pending, require, sha256, verify_manifest)
+                    is_dated_nightly, plain_version, read_pending, require, sha256,
+                    verify_manifest)
 from controls import (ACTIVATE, FOCUS, REFUSE, Channel, Option, Rail, Reveal,
                       channel_settled)
 from transport import Relay
@@ -692,9 +693,12 @@ def publication_status(channel="nightly", promoted=None):
         code, result = stable_status(tags, promoted)
         print(json.dumps(result))
         return code
+    # Both dated spellings count: the old nightly-<date>-<run> copies are still
+    # published until the pruner retires them, and a proof run right after the
+    # switch has to see them (nocx-vh2hr.1.17).
     tags = [release["tag_name"] for release in releases
             if release["prerelease"] and not release["draft"]
-            and release["tag_name"].startswith("nightly-")]
+            and is_dated_nightly(release["tag_name"])]
     result = {"result": "ready" if len(tags) >= 2 else "blocked",
               "reason": "two nightlies published" if len(tags) >= 2 else
                         "no nightly published yet" if not tags else

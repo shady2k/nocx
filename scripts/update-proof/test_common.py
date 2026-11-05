@@ -441,6 +441,58 @@ class CommonTests(unittest.TestCase):
                 common.nightly_pair(*pair, "linux", "amd64")
 
 
+class DatedNightlyTagTests(unittest.TestCase):
+    """Both dated spellings name one build, and the new one must number it.
+
+    nocx-vh2hr.1.17 tags a build `v<version>-nightly.<build number>`, where the
+    number is the signed build instant's UTC minute. The proof reads the tag
+    from the artifact URL, so the tag has to be held against the manifest that
+    was signed — otherwise any build of the same version could wear the name.
+    """
+
+    def manifest(self, *, version="0.8.0", built="2026-10-25T04:00:00Z",
+                 tag="v0.8.0-nightly.202610250400"):
+        artifact = {
+            "os": "linux", "arch": "amd64", "format": "AppImage",
+            "url": ("https://github.com/shady2k/nocx/releases/download/"
+                    f"{tag}/nocx-{version}-linux-amd64.AppImage"),
+            "sha256": hashlib.sha256(b"payload").hexdigest(), "size": 7,
+        }
+        return ({"version": version, "build": {"commit": "a" * 40, "builtAt": built},
+                 "released": "2026-10-25T04:10:00Z",
+                 "notesUrl": f"https://github.com/shady2k/nocx/releases/tag/{tag}",
+                 "artifacts": [artifact]}, artifact)
+
+    def test_new_tag_is_read_when_it_numbers_the_signed_build(self):
+        manifest, artifact = self.manifest()
+        self.assertEqual(common.nightly_tag(manifest, artifact),
+                         "v0.8.0-nightly.202610250400")
+
+    def test_old_tag_is_still_a_dated_nightly(self):
+        manifest, artifact = self.manifest(tag="nightly-20261025-12345")
+        self.assertEqual(common.nightly_tag(manifest, artifact), "nightly-20261025-12345")
+
+    def test_new_tag_must_number_the_signed_build_instant(self):
+        # Same version, a different build minute: another build's tag.
+        manifest, artifact = self.manifest(tag="v0.8.0-nightly.202610250401")
+        with self.assertRaises(common.ProofError) as refused:
+            common.nightly_tag(manifest, artifact)
+        self.assertIn("does not number this build", str(refused.exception))
+
+    def test_new_tag_must_name_the_manifest_version(self):
+        manifest, artifact = self.manifest(tag="v0.8.1-nightly.202610250400")
+        with self.assertRaises(common.ProofError) as refused:
+            common.nightly_tag(manifest, artifact)
+        self.assertIn("does not number this build", str(refused.exception))
+
+    def test_dated_predicate_excludes_the_alias_stables_and_near_misses(self):
+        for tag in ("v0.8.1-nightly.202611021101", "nightly-20261026-41"):
+            self.assertTrue(common.is_dated_nightly(tag), tag)
+        for tag in ("nightly", "v0.8.1", "v0.8.1-nightly.2026", "v0.8.1-nightly.202611021101x",
+                    "nightly-20261026", "", None):
+            self.assertFalse(common.is_dated_nightly(tag), tag)
+
+
 class StablePairTests(unittest.TestCase):
     """The stable channel's pair rules (nocx-86e2f), no key and no display."""
 

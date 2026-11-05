@@ -39,6 +39,7 @@ import { createFormValidation, required } from '../ui/validation'
 import { createSubmitGate } from '../ui/submit-gate'
 import { showToast } from '../ui/toast'
 import { log } from '../log'
+import { t } from '../i18n/locale-model'
 import { EditableHost } from '../ui/cm-host'
 import { markdownLanguage, viewerHighlighting } from '../ui/document-language'
 import { describeBody, type PreviewPart } from './preview'
@@ -219,7 +220,10 @@ export function SnippetsSection(props: SnippetsSectionProps) {
         await props.store.create(name, text)
       }
       closeDialog()
-      showToast({ level: 'success', message: `Saved "${name}"` })
+      showToast({
+        level: 'success',
+        message: `${t('snippets.saved.head', 'Saved "')}${name}${t('snippets.saved.tail', '"')}`,
+      })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       log.error('Failed to save snippet', { message })
@@ -232,11 +236,17 @@ export function SnippetsSection(props: SnippetsSectionProps) {
     if (!(await showConfirm(`Delete "${s.title}"?`))) return
     try {
       await props.store.remove(s.id)
-      showToast({ level: 'success', message: `Deleted "${s.title}"` })
+      showToast({
+        level: 'success',
+        message: `${t('snippets.deleted.head', 'Deleted "')}${s.title}${t('snippets.deleted.tail', '"')}`,
+      })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       log.error('Failed to delete snippet', { message })
-      showToast({ level: 'danger', message: `Could not delete "${s.title}": ${message}` })
+      showToast({
+        level: 'danger',
+        message: `${t('snippets.delete.failedHead', 'Could not delete "')}${s.title}${t('snippets.delete.failedTail', '": ')}${message}`,
+      })
     }
   }
 
@@ -262,7 +272,10 @@ export function SnippetsSection(props: SnippetsSectionProps) {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       log.error('Failed to reorder snippets', { message })
-      showToast({ level: 'danger', message: `Could not reorder: ${message}` })
+      showToast({
+        level: 'danger',
+        message: `${t('snippets.reorder.failedHead', 'Could not reorder:')} ${message}`,
+      })
     }
   }
 
@@ -372,14 +385,15 @@ export function SnippetsSection(props: SnippetsSectionProps) {
 
   const emptyContent = () => {
     const s = state()
-    if (s.kind === 'loading') return <EmptyState title="Loading snippets" />
+    if (s.kind === 'loading')
+      return <EmptyState title={t('snippets.loading.title', 'Loading snippets')} />
     if (s.kind === 'unavailable') {
       // The soft degrade, visible in the product and not only in a log
       // (§11.5): the reason, a retry, and NO create — there is nothing that
       // could accept one.
       return (
         <EmptyState
-          title="Couldn't load your snippets"
+          title={t('snippets.loadFailed.title', "Couldn't load your snippets")}
           description={s.message}
           action={
             <Button variant="default" onClick={() => void props.store.refresh()}>
@@ -391,11 +405,14 @@ export function SnippetsSection(props: SnippetsSectionProps) {
     }
     return (
       <EmptyState
-        title="No snippets yet"
-        description="Save a phrase once and fire it into whatever is taking input."
+        title={t('snippets.empty.title', 'No snippets yet')}
+        description={t(
+          'snippets.empty.desc',
+          'Save a phrase once and fire it into whatever is taking input.',
+        )}
         action={
           <Button variant="primary" onClick={openNew}>
-            + New snippet
+            {t('snippets.empty.add', '+ New snippet')}
           </Button>
         }
       />
@@ -414,20 +431,20 @@ export function SnippetsSection(props: SnippetsSectionProps) {
         actions={
           <Show when={state().kind === 'ready'}>
             <Button variant="primary" onClick={openNew}>
-              + New snippet
+              {t('snippets.empty.add', '+ New snippet')}
             </Button>
           </Show>
         }
         hasItems={snippets().length > 0}
         empty={emptyContent()}
       >
-        <div role="list" aria-label="Snippet list">
+        <div role="list" aria-label={t('snippets.list.aria', 'Snippet list')}>
           <For each={filtered()}>{(s) => renderRow(s)}</For>
         </div>
         <Show when={filtering() && filtered().length === 0}>
           <EmptyState
-            title="Nothing matches this filter"
-            description={`No snippet's title or body contains "${searchQuery().trim()}".`}
+            title={t('snippets.nomatch.title', 'Nothing matches this filter')}
+            description={`${t('snippets.nomatch.descHead', 'No snippet\'s title or body contains "')}${searchQuery().trim()}${t('snippets.nomatch.descTail', '".')}`}
           />
         </Show>
       </CollectionView>
@@ -441,7 +458,7 @@ export function SnippetsSection(props: SnippetsSectionProps) {
         footer={
           <>
             <Button variant="default" onClick={closeDialog}>
-              Cancel
+              {t('snippets.cancel', 'Cancel')}
             </Button>
             <Button variant="primary" onClick={() => void save()}>
               {editing() ? 'Save snippet' : 'Create snippet'}
@@ -452,13 +469,13 @@ export function SnippetsSection(props: SnippetsSectionProps) {
         <Stack>
           <TextField
             id="snippet-title"
-            label="Title"
+            label={t('snippets.field.title', 'Title')}
             required
             value={title()}
             onInput={setTitle}
             onBlur={() => validation.touch('title')}
             error={validation.error('title')}
-            placeholder="Deploy the staging service"
+            placeholder={t('snippets.field.titlePh', 'Deploy the staging service')}
           />
           {/* The editor is mounted per OPENING, not per page: the Dialog
               keeps its children in the DOM while it is closed, so a ref that
@@ -466,7 +483,7 @@ export function SnippetsSection(props: SnippetsSectionProps) {
               before there was a draft to put in it — and every later edit
               would have opened on the first snippet's body. */}
           <Show when={dialogOpen()}>
-            <Field for="snippet-body" label="Body">
+            <Field for="snippet-body" label={t('snippets.field.body', 'Body')}>
               <div
                 class="sn-body-editor"
                 id="snippet-body"
@@ -474,7 +491,11 @@ export function SnippetsSection(props: SnippetsSectionProps) {
               />
             </Field>
           </Show>
-          <div class="sn-preview" role="status" aria-label="What the snippet parser recognised">
+          <div
+            class="sn-preview"
+            role="status"
+            aria-label={t('snippets.field.body.aria', 'What the snippet parser recognised')}
+          >
             <Show
               when={parts().length > 0}
               fallback={
@@ -498,7 +519,7 @@ export function SnippetsSection(props: SnippetsSectionProps) {
           <Show when={saveError() !== ''}>
             <StatusCard
               tone="danger"
-              title="Could not save this snippet"
+              title={t('snippets.save.failed', 'Could not save this snippet')}
               description={saveError()}
             />
           </Show>

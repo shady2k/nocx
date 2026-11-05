@@ -32,6 +32,7 @@ import { Button } from './ui/button'
 import { PageSection } from './ui/page-section'
 import { RecordRow } from './ui/record-row'
 import { showToast } from './ui/toast'
+import { t } from './i18n/locale-model'
 
 export interface AgentAccessSectionProps {
   client: AgentAccessClient
@@ -59,7 +60,7 @@ export function AgentAccessSection(props: AgentAccessSectionProps) {
       // degrade AGENTS.md names.
       showToast({
         level: 'danger',
-        message: `Could not read which agents are allowed: ${message(err)}`,
+        message: `${t('agents.access.failedHead', 'Could not read which agents are allowed:')} ${message(err)}`,
         duration: 0,
       })
     }
@@ -79,7 +80,7 @@ export function AgentAccessSection(props: AgentAccessSectionProps) {
     } catch (err) {
       showToast({
         level: 'danger',
-        message: `Could not forget this answer: ${message(err)}`,
+        message: `${t('agents.access.forgetFailedHead', 'Could not forget this answer:')} ${message(err)}`,
         duration: 0,
       })
     } finally {
@@ -89,7 +90,7 @@ export function AgentAccessSection(props: AgentAccessSectionProps) {
 
   return (
     <PageSection
-      title="Agent access"
+      title={t('agents.access.title', 'Agent access')}
       description="Agents you started in a pane and answered for when they asked to use nocx's tools — starting other agents in new tabs, watching them, and stopping them. Forgetting an answer means the next start of that agent asks again."
     >
       <Show

@@ -26,6 +26,7 @@
 import { Show, type JSX } from 'solid-js'
 import { Badge, Button, Checkbox, FactList, Stack, StatusCard, type Fact } from '../ui'
 import { provenanceTone } from '../skills-presentation'
+import { t } from '../i18n/locale-model'
 import { formatTimestamp } from '../ui/format-time'
 import type { PinKind, Skill } from '../skills-store'
 
@@ -103,24 +104,27 @@ export function SkillViewIdentity(props: SkillViewIdentityProps): JSX.Element {
           <h1 class="skill-view__name">{props.skill.name}</h1>
           <Badge tone={provenanceTone(props.skill.provenance)}>{props.skill.provenance}</Badge>
         </div>
-        <FactList facts={recordFacts(props.skill)} ariaLabel="Where this skill lives" />
+        <FactList
+          facts={recordFacts(props.skill)}
+          ariaLabel={t('skillview.whereLives.aria', 'Where this skill lives')}
+        />
         <Checkbox
           variant="switch"
-          label="Offer this skill to the assistant"
+          label={t('skillview.offer.label', 'Offer this skill to the assistant')}
           checked={props.skill.enabled}
           disabled={props.busy}
           onChange={(enabled) => props.onToggle(enabled)}
         />
         <Checkbox
           variant="switch"
-          label="Keep enabled when unused"
+          label={t('skillview.keepEnabled.label', 'Keep enabled when unused')}
           checked={props.skill.pins.keepEnabled === true}
           disabled={props.busy}
           onChange={(on) => props.onPin('keepEnabled', on)}
         />
         <Checkbox
           variant="switch"
-          label="Keep unchanged by the assistant"
+          label={t('skillview.keepUnchanged.label', 'Keep unchanged by the assistant')}
           checked={props.skill.pins.keepUnchanged === true}
           disabled={props.busy}
           onChange={(on) => props.onPin('keepUnchanged', on)}
@@ -142,21 +146,21 @@ export function SkillViewHeader(props: SkillViewHeaderProps): JSX.Element {
       <Show when={props.state.kind === 'loading'}>
         <StatusCard
           tone="neutral"
-          title="Loading this skill"
+          title={t('skillview.loading.title', 'Loading this skill')}
           description={`Reading “${props.name}” from the discovered skills.`}
         />
       </Show>
       <Show when={unavailableMessage()}>
         <StatusCard
           tone="danger"
-          title="Skills could not be read"
+          title={t('skillview.loadFailed.title', 'Skills could not be read')}
           description={unavailableMessage()}
         />
       </Show>
       <Show when={readySkill()?.status === 'changed'}>
         <StatusCard
           tone="danger"
-          title="The bytes under this skill have changed"
+          title={t('skillview.bytesChanged.title', 'The bytes under this skill have changed')}
           description="They are no longer the bytes recorded for it, so the assistant is not offered it whatever the switch says. Read what is here now, and re-approve it if you want it back."
           action={
             <Button size="sm" disabled={props.busy} onClick={props.onApprove}>

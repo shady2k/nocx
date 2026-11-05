@@ -23,6 +23,7 @@
  *    a surface somebody else owns.
  */
 import type { QuickConnectItem, QuickConnectProvider } from '../quick-connect'
+import { t } from '../i18n/locale-model'
 import { CopyIcon, iconElement } from '../ui/icons'
 import { needsForm } from './resolve'
 import type {
@@ -103,7 +104,7 @@ function summary(body: string): string {
 
 export class SnippetsQuickConnectProvider implements QuickConnectProvider {
   readonly id = 'snippets'
-  readonly label = 'Snippets'
+  readonly label = t('snippets.quickConnect.label', 'Snippets')
   readonly kinds = ['snippet'] as const
 
   constructor(private readonly deps: SnippetsQuickConnectDeps) {}
@@ -178,7 +179,7 @@ export class SnippetsQuickConnectProvider implements QuickConnectProvider {
       {
         id: MANAGE_SNIPPETS_ROW_ID,
         kind: 'snippet',
-        label: 'Manage snippets…',
+        label: t('snippets.manage.label', 'Manage snippets…'),
         run: () => this.deps.onManage(),
       },
     ]
@@ -196,7 +197,7 @@ export class SnippetsQuickConnectProvider implements QuickConnectProvider {
       return [
         {
           id: 'snippets:unavailable',
-          label: "Couldn't load your snippets",
+          label: t('snippets.loadFailedQuick', "Couldn't load your snippets"),
           detail: state.message,
           kind: 'snippet',
           system: true,
@@ -224,7 +225,7 @@ export class SnippetsQuickConnectProvider implements QuickConnectProvider {
       // anything has gone wrong, and never learns it exists by being told no.
       action: {
         icon: () => iconElement(CopyIcon),
-        ariaLabel: `Copy "${snippet.title}" to the clipboard`,
+        ariaLabel: `${t('snippets.copy.ariaHead', 'Copy "')}${snippet.title}${t('snippets.copy.ariaTail', '" to the clipboard')}`,
         run: () => void this.copy(snippet),
       },
     }

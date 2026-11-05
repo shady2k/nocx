@@ -65,6 +65,7 @@ import {
 import { type TypingClient, type TypingResult } from './typing-client'
 import { PageSection, Section, Select, Badge, Button, EmptyState } from './ui'
 import { Spinner } from './ui/spinner'
+import { t } from './i18n/locale-model'
 
 /**
  * How often the open page asks again.
@@ -273,7 +274,7 @@ export function AgentCalibrationSection(props: AgentCalibrationSectionProps) {
   })
 
   const options = createMemo(() => [
-    { value: '', label: 'Choose a pane…' },
+    { value: '', label: t('agents.choosePane.ph', 'Choose a pane…') },
     ...panes().map((p) => ({
       value: p.sessionId,
       label: props.nameOf?.(p.sessionId) ?? `${p.agent} · ${p.sessionId.slice(0, 8)}`,
@@ -296,21 +297,24 @@ export function AgentCalibrationSection(props: AgentCalibrationSectionProps) {
 
   return (
     <PageSection
-      title="Calibrate an agent"
+      title={t('agents.calibrate.title', 'Calibrate an agent')}
       description="nocx asks you to drive your agent into one named state at a time and labels the screen with the state it asked for. The labelled set is what a detection rule is then checked against — a rule verified against a recording nobody produced on purpose proves nothing."
     >
       <Show when={error()}>
         <Badge tone="danger">{error()!}</Badge>
       </Show>
       <Show when={!loaded() && error() === null}>
-        <Spinner size="sm" label="Looking for panes nocx is watching" />
+        <Spinner
+          size="sm"
+          label={t('agents.lookingForPanes.label', 'Looking for panes nocx is watching')}
+        />
       </Show>
       <Show when={loaded()}>
         <Show
           when={panes().length > 0}
           fallback={
             <EmptyState
-              title="No pane is enrolled"
+              title={t('agents.noPane.title', 'No pane is enrolled')}
               description="nocx watches a pane only after an agent asks it to. Start an agent in a terminal tab and it appears here."
             />
           }
@@ -334,7 +338,10 @@ export function AgentCalibrationSection(props: AgentCalibrationSectionProps) {
         <Show when={state()} keyed>
           {(s) => (
             <>
-              <Section id="calibration-stored" title="What this agent is calibrated for">
+              <Section
+                id="calibration-stored"
+                title={t('agents.calibratedFor.title', 'What this agent is calibrated for')}
+              >
                 <div class="st-calibration__stored">
                   <Badge tone={s.stored?.complete ? 'success' : 'neutral'}>
                     {s.stored?.complete ? 'calibrated' : 'not calibrated'}
@@ -343,7 +350,10 @@ export function AgentCalibrationSection(props: AgentCalibrationSectionProps) {
                 </div>
               </Section>
 
-              <Section id="calibration-verdict" title="What this rule may do">
+              <Section
+                id="calibration-verdict"
+                title={t('agents.ruleMayDo.title', 'What this rule may do')}
+              >
                 <div
                   class="st-calibration__stored"
                   data-may-type={s.verification.mayType ? 'true' : 'false'}
@@ -409,7 +419,10 @@ export function AgentCalibrationSection(props: AgentCalibrationSectionProps) {
                 when={s.walk}
                 keyed
                 fallback={
-                  <Section id="calibration-start" title="Walk the calibration">
+                  <Section
+                    id="calibration-start"
+                    title={t('agents.walk.title', 'Walk the calibration')}
+                  >
                     <p class="st-calibration__detail">
                       You will be asked for each state in turn. Get your agent into the state, then
                       capture — nocx reads the pane as it is at that moment, so nothing is labelled
@@ -428,7 +441,10 @@ export function AgentCalibrationSection(props: AgentCalibrationSectionProps) {
                 }
               >
                 {(walk) => (
-                  <Section id="calibration-step" title="What to do now">
+                  <Section
+                    id="calibration-step"
+                    title={t('agents.nowWhat.title', 'What to do now')}
+                  >
                     <div
                       class="st-calibration__ask"
                       data-step={walk.pending}
@@ -486,7 +502,10 @@ export function AgentCalibrationSection(props: AgentCalibrationSectionProps) {
                 )}
               </Show>
 
-              <Section id="calibration-steps" title="The states, in the order you are asked">
+              <Section
+                id="calibration-steps"
+                title={t('agents.statesOrder.title', 'The states, in the order you are asked')}
+              >
                 <For each={s.steps}>
                   {(step, i) => (
                     <div

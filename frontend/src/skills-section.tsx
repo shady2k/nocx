@@ -75,6 +75,7 @@ import { EyeIcon, RefreshIcon, TrashIcon } from './ui/icons'
 import { showConfirm } from './ui/dialog'
 import { showToast } from './ui/toast'
 import { openSkill } from './skill-view'
+import { t } from './i18n/locale-model'
 import { provenanceTone, refusalLabel, shortDate, usageLine } from './skills-presentation'
 import type { Skill, SkillsState, SkillsStore } from './skills-store'
 
@@ -193,7 +194,10 @@ export function SkillsSection(props: SkillsSectionProps) {
     setBusy(skill.name)
     try {
       await props.store.remove(skill.name)
-      showToast({ level: 'success', message: `Deleted “${skill.name}”` })
+      showToast({
+        level: 'success',
+        message: `${t('skills.deleted.head', 'Deleted “')}${skill.name}${t('skills.deleted.tail', '”')}`,
+      })
     } catch (err) {
       showToast({ level: 'danger', message: err instanceof Error ? err.message : String(err) })
     } finally {
@@ -205,7 +209,10 @@ export function SkillsSection(props: SkillsSectionProps) {
     setBusy(skill.name)
     try {
       await props.store.approve(skill.name)
-      showToast({ level: 'success', message: `Re-approved “${skill.name}”` })
+      showToast({
+        level: 'success',
+        message: `${t('skills.reapproved.head', 'Re-approved “')}${skill.name}${t('skills.reapproved.tail', '”')}`,
+      })
     } catch (err) {
       showToast({ level: 'danger', message: err instanceof Error ? err.message : String(err) })
     } finally {
@@ -235,18 +242,18 @@ export function SkillsSection(props: SkillsSectionProps) {
   // rather than rows in this one — see the comment on it below.
   return (
     <>
-      <Section title="Discovered skills">
+      <Section title={t('skills.discovered.title', 'Discovered skills')}>
         <Show when={state().kind === 'loading'}>
           <StatusCard
             tone="neutral"
-            title="Loading skills"
-            description="Reading the discovered skills."
+            title={t('skills.loading.title', 'Loading skills')}
+            description={t('skills.loading.desc', 'Reading the discovered skills.')}
           />
         </Show>
         <Show when={unavailable()}>
           <StatusCard
             tone="danger"
-            title="Skills could not be read"
+            title={t('skills.loadFailed.title', 'Skills could not be read')}
             description={`${unavailable()?.message ?? 'Unknown error'} Path: ${unavailable()?.documentPath || 'skills.json'}`}
           />
         </Show>
@@ -255,7 +262,7 @@ export function SkillsSection(props: SkillsSectionProps) {
             when={readySkills().length > 0}
             fallback={
               <EmptyState
-                title="No skills discovered"
+                title={t('skills.empty.title', 'No skills discovered')}
                 description="Add a SKILL.md under your skills directory, or ask the assistant to remember a procedure."
               />
             }
@@ -333,8 +340,8 @@ export function SkillsSection(props: SkillsSectionProps) {
                           list need to say which record they belong to. */}
                         <IconButton
                           size="sm"
-                          title="Open"
-                          ariaLabel={`Open ${skill.name}`}
+                          title={t('skills.row.open', 'Open')}
+                          ariaLabel={`${t('skills.row.open', 'Open')} ${skill.name}`}
                           onClick={() => openSkill(skill.name)}
                         >
                           <EyeIcon />
@@ -346,8 +353,8 @@ export function SkillsSection(props: SkillsSectionProps) {
                         <Show when={skill.status === 'changed'}>
                           <IconButton
                             size="sm"
-                            title="Re-approve"
-                            ariaLabel={`Re-approve ${skill.name}`}
+                            title={t('skills.row.reapprove', 'Re-approve')}
+                            ariaLabel={`${t('skills.row.reapprove', 'Re-approve')} ${skill.name}`}
                             disabled={busy() === skill.name}
                             onClick={() => void approve(skill)}
                           >
@@ -362,8 +369,8 @@ export function SkillsSection(props: SkillsSectionProps) {
                         <Show when={skill.provenance !== 'builtin'}>
                           <IconButton
                             size="sm"
-                            title="Delete"
-                            ariaLabel={`Delete ${skill.name}`}
+                            title={t('skills.row.delete', 'Delete')}
+                            ariaLabel={`${t('skills.row.delete', 'Delete')} ${skill.name}`}
                             disabled={busy() === skill.name}
                             onClick={() => void remove(skill)}
                           >
@@ -394,7 +401,7 @@ export function SkillsSection(props: SkillsSectionProps) {
           person acts on, and the path beside it is the file to open. There
           are no actions: nocx cannot fix any of these, and a button that
           could only fail is the shape this page removes elsewhere. */}
-        <Section title="Not indexed">
+        <Section title={t('skills.notIndexed.title', 'Not indexed')}>
           <Stack divided dense>
             <For each={refused()}>
               {(entry) => (

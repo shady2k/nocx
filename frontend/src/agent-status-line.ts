@@ -9,6 +9,7 @@
 // is gone and 'sealed' means the vault cannot answer right now. 'not-required'
 // is the quiet completed state for an endpoint that explicitly needs no key.
 import type { AgentStatusResult } from './generated/agent.status'
+import { t } from './i18n/locale-model'
 
 export interface AgentStatusLine {
   tone: 'neutral' | 'warning' | 'danger' | 'success'
@@ -58,7 +59,7 @@ function unresolvedRoleLine(
       return {
         tone: 'neutral',
         text: 'Add an endpoint first',
-        fix: { label: 'Add an endpoint first', page: 'endpoints' },
+        fix: { label: t('agents.status.addEndpoint', 'Add an endpoint first'), page: 'endpoints' },
       }
     case 'no-models':
       // An endpoint exists and offers nothing, so the fix is on Endpoints —
@@ -66,25 +67,25 @@ function unresolvedRoleLine(
       return {
         tone: 'warning',
         text: 'That endpoint offers no models — check it',
-        fix: { label: 'Check the endpoint', page: 'endpoints' },
+        fix: { label: t('agents.status.checkEndpoint', 'Check the endpoint'), page: 'endpoints' },
       }
     case 'unassigned':
       return {
         tone: 'warning',
         text: 'Choose a model',
-        fix: { label: 'Choose a model', page: 'roles' },
+        fix: { label: t('agents.status.chooseModel', 'Choose a model'), page: 'roles' },
       }
     case 'endpoint-gone':
       return {
         tone: 'danger',
         text: "The model's endpoint is gone — choose another",
-        fix: { label: 'Choose a model', page: 'roles' },
+        fix: { label: t('agents.status.chooseModel', 'Choose a model'), page: 'roles' },
       }
     case 'model-gone':
       return {
         tone: 'danger',
         text: 'That model is no longer offered — choose another',
-        fix: { label: 'Choose a model', page: 'roles' },
+        fix: { label: t('agents.status.chooseModel', 'Choose a model'), page: 'roles' },
       }
     case 'unavailable':
       // No fix: a store that could not be read is not repaired on any page.

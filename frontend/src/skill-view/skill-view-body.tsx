@@ -80,6 +80,7 @@ import {
 } from '../ui'
 import { ResizeHandle } from '../ui/resize-handle'
 import { skillFileOutcome } from '../skills-presentation'
+import { t } from '../i18n/locale-model'
 import type { SkillsFile } from '../generated/skills.file'
 import type { SkillsScan } from '../generated/skills.scan'
 import type { Skill, SkillsStore } from '../skills-store'
@@ -665,7 +666,7 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
                 round asked for; Tab still reaches it, so nothing is
                 unreachable, only slower to reach by arrow key. */}
             <Show when={props.provenance !== 'builtin'}>
-              <Section id="skill-view-check" title="Check">
+              <Section id="skill-view-check" title={t('skillview.check.title', 'Check')}>
                 <Stack divided dense>
                   <RecordRow
                     title={checkRowTitle(checkState())}
@@ -713,11 +714,14 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
                 </Button>
               </Section>
             </Show>
-            <Section title="Files">
+            <Section title={t('skillview.files.title', 'Files')}>
               <Show when={filesRefusal()}>
                 <StatusCard
                   tone="danger"
-                  title="What this skill carries could not be listed"
+                  title={t(
+                    'skillview.files.listFailed',
+                    'What this skill carries could not be listed',
+                  )}
                   description={filesRefusal()}
                 />
               </Show>
@@ -729,14 +733,14 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
                     "clean" because the scan itself could not run. */}
                 <StatusCard
                   tone="warning"
-                  title="The static scan could not run"
+                  title={t('skillview.files.scanFailed', 'The static scan could not run')}
                   description={scanRefusal()}
                 />
               </Show>
               <Show when={truncationNotice()}>
                 <StatusCard
                   tone="warning"
-                  title="This list is not the whole skill"
+                  title={t('skillview.files.notWhole', 'This list is not the whole skill')}
                   description={truncationNotice()}
                 />
               </Show>
@@ -779,7 +783,7 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
             caller. */}
         <div class="skill-view__seam">
           <ResizeHandle
-            ariaLabel="Resize the file list"
+            ariaLabel={t('skillview.files.resizeAria', 'Resize the file list')}
             value={listWidth()}
             min={MIN_LIST_WIDTH}
             max={listMax()}
@@ -805,7 +809,7 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
                 fallback={
                   <StatusCard
                     tone="neutral"
-                    title="Reading this file"
+                    title={t('skillview.files.readingFile', 'Reading this file')}
                     description={readingSentence()}
                   />
                 }

@@ -181,6 +181,7 @@ import {
 } from './ui'
 import { EFFECT_LABEL } from './effect-labels'
 import { scanPatternWords } from './scan-pattern-words'
+import { t } from './i18n/locale-model'
 import type { AgentApprovalRequested } from './generated/agent.approvalRequested'
 import type { AgentApprove } from './generated/agent.approve'
 
@@ -386,7 +387,7 @@ const classifierNotice = (
   if (!classifier.consulted) {
     return {
       tone: 'warning',
-      title: 'The classifier gate did not run.',
+      title: t('approval.classifier.didNotRun', 'The classifier gate did not run.'),
       description: say(askedOf),
     }
   }
@@ -394,13 +395,19 @@ const classifierNotice = (
     case 'clear':
       return {
         tone: 'neutral',
-        title: 'A second model read this proposal and raised no suspicion.',
+        title: t(
+          'approval.classifier.noSuspicion',
+          'A second model read this proposal and raised no suspicion.',
+        ),
         description: say(verdictFrom),
       }
     case 'suspect':
       return {
         tone: 'warning',
-        title: 'A second model read this proposal and judged it suspect.',
+        title: t(
+          'approval.classifier.suspect',
+          'A second model read this proposal and judged it suspect.',
+        ),
         description: say(verdictFrom),
       }
     default:
@@ -408,7 +415,10 @@ const classifierNotice = (
       // inventing either verdict for it would be worse than saying so.
       return {
         tone: 'warning',
-        title: 'A second model was consulted and returned no verdict.',
+        title: t(
+          'approval.classifier.noVerdict',
+          'A second model was consulted and returned no verdict.',
+        ),
         description: say(askedOf),
       }
   }
@@ -473,8 +483,8 @@ export interface AgentApprovalPromptProps {
 }
 
 const TITLE: Record<AgentApprovalRequested['reason'], string> = {
-  policy: 'This action needs your approval',
-  egress: 'A tool result contained secret-shaped material',
+  policy: t('approval.title.policy', 'This action needs your approval'),
+  egress: t('approval.title.egress', 'A tool result contained secret-shaped material'),
 }
 
 /**
@@ -485,12 +495,12 @@ const TITLE: Record<AgentApprovalRequested['reason'], string> = {
  * focuses on open, since Prompt puts the caret on the first enabled button.
  */
 const SCOPES: ReadonlyArray<{ scope: ApprovalScope; label: string }> = [
-  { scope: 'once', label: 'once' },
+  { scope: 'once', label: t('approval.scope.once', 'once') },
   // "in this session", never "in this pane": the permission binds to the
   // terminal session, so restarting the shell is a new session and the
   // question comes back. Naming the pane would promise a lifetime it has not.
-  { scope: 'session', label: 'in this session' },
-  { scope: 'always', label: 'always' },
+  { scope: 'session', label: t('approval.scope.session', 'in this session') },
+  { scope: 'always', label: t('approval.scope.always', 'always') },
 ]
 
 /**
@@ -1090,7 +1100,12 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
               already does.
             */}
             <Show when={wideningOffered()}>
-              <ActionGroup ariaLabel="Allow this action and widen what it may reach">
+              <ActionGroup
+                ariaLabel={t(
+                  'approval.allowWiden.aria',
+                  'Allow this action and widen what it may reach',
+                )}
+              >
                 <Button
                   variant="default"
                   secondary={`— ${approvalScopeCoverage('expand', ask().standing, effectLabel())}`}
@@ -1166,7 +1181,10 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
             {(command) => (
               <>
                 <p>{runLead()}:</p>
-                <CodeBlock copy={props.copy} ariaLabel="The command this question is about">
+                <CodeBlock
+                  copy={props.copy}
+                  ariaLabel={t('approval.commandAbout.aria', 'The command this question is about')}
+                >
                   {command()}
                 </CodeBlock>
                 {/*
@@ -1188,7 +1206,10 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
                       </p>
                       <CodeBlock
                         copy={props.copy}
-                        ariaLabel="The same command with its variables read as the shell reads them now"
+                        ariaLabel={t(
+                          'approval.commandNow.aria',
+                          'The same command with its variables read as the shell reads them now',
+                        )}
                       >
                         {expanded()}
                       </CodeBlock>
@@ -1361,7 +1382,9 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
               {(f) => (
                 <p>
                   <Badge tone={f.source === 'known' ? 'warning' : 'info'}>
-                    {f.source === 'known' ? 'Known vault material' : 'Heuristic match'}
+                    {f.source === 'known'
+                      ? t('approval.finding.known', 'Known vault material')
+                      : t('approval.finding.heuristic', 'Heuristic match')}
                   </Badge>{' '}
                   {f.source === 'known' ? f.secretName : f.kind}
                   {' — bytes '}

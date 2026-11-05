@@ -29,6 +29,7 @@ import { TrashIcon } from '../ui/icons'
 import { showConfirm } from '../ui/dialog'
 import { showToast } from '../ui/toast'
 import { log } from '../log'
+import { t } from '../i18n/locale-model'
 import type { NoteRow, NotesState, NotesStore } from './notes-store'
 
 export interface NotesPanelProps {
@@ -80,7 +81,10 @@ export function NotesPanel(props: NotesPanelProps) {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       log.error('Failed to delete note', { message: msg })
-      showToast({ level: 'danger', message: `Could not delete the note: ${msg}` })
+      showToast({
+        level: 'danger',
+        message: `${t('notes.delete.failedHead', 'Could not delete the note:')} ${msg}`,
+      })
     }
   }
 
@@ -96,8 +100,11 @@ export function NotesPanel(props: NotesPanelProps) {
                 when={props.query().trim() !== ''}
                 fallback={
                   <EmptyState
-                    title="No notes yet"
-                    description="Write something down without leaving the terminal — ⌥⌘N."
+                    title={t('notes.empty.title', 'No notes yet')}
+                    description={t(
+                      'notes.empty.desc',
+                      'Write something down without leaving the terminal — ⌥⌘N.',
+                    )}
                     action={
                       <Button variant="primary" onClick={() => props.onCreate()}>
                         + New note
@@ -107,14 +114,14 @@ export function NotesPanel(props: NotesPanelProps) {
                 }
               >
                 <EmptyState
-                  title="Nothing matches"
+                  title={t('notes.nomatch.title', 'Nothing matches')}
                   description={`No note contains "${props.query().trim()}".`}
                 />
               </Show>
             }
           >
             <EmptyState
-              title="Couldn't load your notes"
+              title={t('notes.loadFailed.title', "Couldn't load your notes")}
               description={
                 props.state().kind === 'unavailable' ? unavailableMessage(props.state()) : ''
               }
@@ -127,7 +134,7 @@ export function NotesPanel(props: NotesPanelProps) {
           </Show>
         }
       >
-        <div class="notes-panel__list" role="list" aria-label="Notes">
+        <div class="notes-panel__list" role="list" aria-label={t('notes.panel.title', 'Notes')}>
           <For each={rows()}>
             {(row) => (
               <RecordRow

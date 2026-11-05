@@ -31,6 +31,7 @@ import { EmptyState } from './ui/empty-state'
 import { Spinner } from './ui/spinner'
 import { Button } from './ui/button'
 import { showToast } from './ui/toast'
+import { t } from './i18n/locale-model'
 import { log } from './log'
 import { EndpointClient, type Endpoint, type WireRole } from './endpoints'
 import type { RolesListResult } from './generated/roles.list'
@@ -259,7 +260,10 @@ export function RolesSection(props: RolesSectionProps) {
     } catch (err) {
       const message = (err as Error).message
       log.error('Failed to assign a model role', { role, message })
-      showToast({ level: 'danger', message: `Could not assign the role: ${message}` })
+      showToast({
+        level: 'danger',
+        message: `${t('roles.assign.failedHead', 'Could not assign the role:')} ${message}`,
+      })
       // The wire may have changed under us; re-read rather than trust the
       // draft to still mean anything.
       void load()
@@ -279,7 +283,10 @@ export function RolesSection(props: RolesSectionProps) {
     } catch (err) {
       const message = (err as Error).message
       log.error('Failed to set the default model', { message })
-      showToast({ level: 'danger', message: `Could not set the default model: ${message}` })
+      showToast({
+        level: 'danger',
+        message: `${t('roles.default.failedHead', 'Could not set the default model:')} ${message}`,
+      })
       void load()
     } finally {
       setDefaultBusy(false)
@@ -342,7 +349,7 @@ export function RolesSection(props: RolesSectionProps) {
       <div class="roles-default">
         <Stack>
           <div>
-            <div class="roles-default__title">Default model</div>
+            <div class="roles-default__title">{t('roles.defaultModel', 'Default model')}</div>
             <div class="roles-default__description">
               The pair every role without a model of its own answers with. Nothing is chosen until
               you choose it — the product never picks one for you.
@@ -350,21 +357,21 @@ export function RolesSection(props: RolesSectionProps) {
           </div>
           <div class="roles-default__controls">
             <label class="roles-default__field">
-              <span class="roles-default__label">Endpoint</span>
+              <span class="roles-default__label">{t('roles.endpoint', 'Endpoint')}</span>
               <Select
                 value={draft().endpointId}
                 disabled={defaultBusy()}
-                placeholder="— None —"
+                placeholder={t('roles.none.ph', '— None —')}
                 options={endpointOptions()}
                 onChange={(v) => onDefaultEndpointChange(v)}
               />
             </label>
             <label class="roles-default__field">
-              <span class="roles-default__label">Model</span>
+              <span class="roles-default__label">{t('roles.model', 'Model')}</span>
               <Select
                 value={draft().modelId}
                 disabled={defaultBusy() || draft().endpointId === ''}
-                placeholder="— pick a model —"
+                placeholder={t('roles.pickModel.ph', '— pick a model —')}
                 options={modelOptionsFor(draft().endpointId)}
                 onChange={(v) => onDefaultModelChange(v)}
               />
@@ -395,7 +402,7 @@ export function RolesSection(props: RolesSectionProps) {
           </div>
           <div class="roles-role__controls">
             <label class="roles-role__field">
-              <span class="roles-role__label">Endpoint</span>
+              <span class="roles-role__label">{t('roles.endpoint', 'Endpoint')}</span>
               <Select
                 value={draft().endpointId}
                 disabled={busy()}
@@ -405,11 +412,11 @@ export function RolesSection(props: RolesSectionProps) {
               />
             </label>
             <label class="roles-role__field">
-              <span class="roles-role__label">Model</span>
+              <span class="roles-role__label">{t('roles.model', 'Model')}</span>
               <Select
                 value={draft().modelId}
                 disabled={busy() || draft().endpointId === ''}
-                placeholder="— pick a model —"
+                placeholder={t('roles.pickModel.ph', '— pick a model —')}
                 options={modelOptionsFor(draft().endpointId)}
                 onChange={(v) => onModelChange(row, v)}
               />
@@ -434,12 +441,12 @@ export function RolesSection(props: RolesSectionProps) {
 
   const content = () => {
     if (loadState() === 'loading') {
-      return <Spinner size="sm" label="Loading model roles" />
+      return <Spinner size="sm" label={t('roles.loading.label', 'Loading model roles')} />
     }
     if (loadState() === 'failed') {
       return (
         <EmptyState
-          title="Couldn't load model roles"
+          title={t('roles.loadFailed.title', "Couldn't load model roles")}
           description={loadError()}
           action={
             <Button variant="default" onClick={() => void load()}>
@@ -453,8 +460,11 @@ export function RolesSection(props: RolesSectionProps) {
       <Stack divided>
         <Show when={endpoints().length === 0}>
           <EmptyState
-            title="No endpoints yet"
-            description="Add an AI endpoint on the Endpoints page first — a role assigns an endpoint's model."
+            title={t('roles.noEndpoints.title', 'No endpoints yet')}
+            description={t(
+              'roles.noEndpoints.desc',
+              "Add an AI endpoint on the Endpoints page first — a role assigns an endpoint's model.",
+            )}
           />
         </Show>
         {renderDefault()}

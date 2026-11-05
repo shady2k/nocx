@@ -127,7 +127,7 @@ store=$(printf '%s' "$status" | node -e 'let s="";process.stdin.on("data",d=>s+=
 
 if [ "$connect_status" -ne 0 ]; then
     # THE MECHANISM STOPS AT ITS FIRST PUSH, and a clone whose remote refuses
-    # this person's writes cannot satisfy that push. `pushOnce` in tracker-sync.mjs
+    # this person's writes cannot satisfy that push. `pushOid` in tracker-sync.mjs
     # (set-owned: never edited here) treats a refusal it does not recognise as
     # fatal, so connect gives up after it has already built and imported the
     # store - before it points the checkout at it. Everything from here is the

@@ -523,8 +523,12 @@ export function verifyCandidate(input) {
     run,
   } = input
   requireThat(repo === 'shady2k/nocx', 'unexpected promotion repository')
+  // Both dated spellings are promotable: the old `nightly-<date>-<run>` copies
+  // are published until the pruner retires them, and the new
+  // `v<version>-nightly.<build>` is what publication creates now
+  // (nocx-vh2hr.1.17). A stable `vX.Y.Z` tag and the moving alias are not.
   requireThat(
-    /^nightly-\d{8}-\d+$/.test(tag),
+    /^(?:nightly-\d{8}-\d+|v\d+\.\d+\.\d+-nightly\.\d{12})$/.test(tag),
     'name an immutable dated nightly, not the moving nightly alias',
   )
   requireThat(shaPattern.test(sha), 'nightly tag must resolve to a full commit SHA')

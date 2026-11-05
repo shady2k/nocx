@@ -124,13 +124,36 @@ export function logDecision(msg: string, fields?: LogFields): void {
  *  of ours: `keyCode` and `location` are legacy and deprecated, and they are
  *  exactly what a report has to quote for a defect that only one engine has. */
 export function logKeydown(where: 'composer' | 'grid', e: KeyboardEvent): void {
-  logDecision('keydown', {
-    where,
-    key: e.key,
-    code: e.code,
-    keyCode: e.keyCode,
-    location: e.location,
-  })
+  logDecision('keydown', { where, ...keyShape(e) })
+}
+
+/** What a keydown may be written down as: the surface that saw it, and the
+ *  key's CLASS — never the character (nocx-atpw5.1.39).
+ *
+ *  WHY. This trace exists to answer "which surface saw the key", and it was
+ *  written when only somebody in devtools with `window.nocxDebug` could read
+ *  it. It is now on in the e2e stand, whose console goes into the failure
+ *  block and from there into CI's log and its artifacts — a file that leaves
+ *  the machine. `e.key` is the CHARACTER for every printable key, so the old
+ *  fields would have written down exactly what a person typed, which is the
+ *  one thing AGENTS.md keeps out of every log: a password typed into a
+ *  running ssh arrives here as an ordinary letter.
+ *
+ *  A NAMED KEY IS NOT A CHARACTER. `Enter`, `Tab`, `ArrowLeft`, `Escape`,
+ *  `Backspace`, `F5` are control names from the DOM's fixed vocabulary and
+ *  carry nothing a person typed, so they stay — the numeric keypad's `Enter`
+ *  (the macOS defect this trace was written for, nocx-1ebrs.32) is exactly
+ *  such a name, and a report that could not tell `Enter` from `NumpadEnter`
+ *  would have lost the instrument for that bead. Everything with a
+ *  one-character `key` reports `char` and nothing else. */
+function keyShape(e: KeyboardEvent): { class: 'char' | 'named'; key?: string } {
+  // NOT `length === 1` ALONE: a lone surrogate half or a dead key's own name
+  // would slip through as neither. `Array.from` counts code points, so an
+  // astral character is one character and still `char`.
+  const characters = Array.from(e.key)
+  if (characters.length === 1) return { class: 'char' }
+  if (e.key === '') return { class: 'named', key: '(none)' }
+  return { class: 'named', key: e.key }
 }
 
 export const log = {

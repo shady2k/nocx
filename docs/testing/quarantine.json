@@ -48,6 +48,22 @@
     {
       "test": "e2e:e2e/agent-reads-the-screen.spec.ts › the assistant reads the screen of the pane it was asked in (nocx-avogl) › the answer names what was on that pane’s screen, and nothing else could have told it",
       "bead": "nocx-atpw5.1.28"
+    },
+    {
+      "test": "e2e:e2e/completion.spec.ts › tab completion › local paths complete through fs.complete — and only on a local session",
+      "bead": "nocx-atpw5.1.39"
+    },
+    {
+      "test": "e2e:e2e/completion.spec.ts › tab completion › cd onto a directory holding only a file names why there is nothing to choose",
+      "bead": "nocx-atpw5.1.39"
+    },
+    {
+      "test": "e2e:e2e/backend-clear-boundary.spec.ts › clear hides the earlier block, and the record still holds it",
+      "bead": "nocx-atpw5.1.36"
+    },
+    {
+      "test": "e2e:e2e/enhanced-input.spec.ts › enhanced input raw routing › read command receives input after enhanced submit",
+      "bead": "nocx-atpw5.1.38"
     }
   ]
 }

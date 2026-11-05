@@ -525,7 +525,16 @@ func (k *Kernel) SubmitAttempt(domain DomainID, command, cwd, host, submitID str
 	if err := k.requireActive(d, ls); err != nil {
 		return ExecutionAttempt{}, err
 	}
-	if ls.lifecycle != LifecyclePromptReady {
+	// A PRIMED ATTEMPT OVER A RUNNING LANE IS STILL A SUBMITTABLE PROMPT
+	// (nocx-atpw5.1.41): the lane stays Running over a submitted attempt the
+	// shell has not started (applyPromptReady), so a person's second Enter in
+	// that window must still close the first attempt and open its own rather
+	// than be refused. The open-attempt arm below is what closes it.
+	primed := false
+	if open := k.openAttemptFor(domain); open != nil && open.racedPromptReady && !open.Started {
+		primed = true
+	}
+	if ls.lifecycle != LifecyclePromptReady && !(ls.lifecycle == LifecycleRunning && primed) {
 		return ExecutionAttempt{}, ErrNotPromptReady
 	}
 	if len(command) > k.budgets.MaxCommandBytes {
@@ -904,12 +913,25 @@ func (k *Kernel) applyPromptReady(d *Domain, ls *laneState, env Envelope) ([]Out
 			k.setLifecycle(ls, LifecyclePromptReady, d.ID, "")
 			return nil, nil
 		}
-		// First prompt_ready over it: prime it and report the lane's own
-		// honest state — the shell really is at a prompt right now,
-		// whichever case this turns out to be — but leave the attempt
-		// itself untouched so an imminent start still attaches to it.
+		// First prompt_ready over it: prime it, and leave the attempt itself
+		// untouched so an imminent start still attaches to it.
+		//
+		// AND THE LANE STAYS RUNNING WHILE IT IS (nocx-atpw5.1.41). This is the
+		// same fact arriving in the other order — the shell's prompt mark for
+		// the prompt the person LEFT, delivered after the submit that left it
+		// (PROMPT_COMMAND's prompt_ready and the DEBUG trap's start for one
+		// command race; attempt.go's own note says so) — and reporting
+		// PromptReady for it told every pane the prompt was back the moment the
+		// person pressed Enter. The composer came back and took the keyboard,
+		// the shell's real start then took it away again, and a keystroke typed
+		// in that flicker went to the pty: a `printf` lost its `E` into
+		// readline. A submitter has left the prompt, so the only honest state
+		// until its start or its second prompt mark is running. Case 2 above
+		// still closes an attempt that never started.
 		open.racedPromptReady = true
-		k.setLifecycle(ls, LifecyclePromptReady, d.ID, "")
+		if ls.lifecycle != LifecycleRunning {
+			k.setLifecycle(ls, LifecyclePromptReady, d.ID, "")
+		}
 		return nil, nil
 	}
 	k.setLifecycle(ls, LifecyclePromptReady, d.ID, "")

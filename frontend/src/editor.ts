@@ -19,7 +19,7 @@
 // keymap at Prec.highest is W2's job; W1 only preserves today's behaviour.
 
 import { currentPlatform } from './platform'
-import { logKeydown } from './log'
+import { log, logKeydown } from './log'
 import { Compartment, EditorState, Extension } from '@codemirror/state'
 import { drawSelection, EditorView, keymap } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
@@ -874,33 +874,52 @@ export class CommandEditor {
     // second answer to "where does Enter go".
     if (doc.trim() === '') {
       this.clearDoc()
+      this.noteSubmit('empty', doc)
       if (this.actions.handoffToShell?.() ?? true) this.actions.submitEmpty?.()
       return
     }
     const hook = this.actions.beforeSubmit
     if (!hook) {
+      this.noteSubmit('command', doc)
       this.commit(doc)
       return
     }
-    if (this._submitInFlight) return
+    if (this._submitInFlight) {
+      this.noteSubmit('vetoed', doc)
+      return
+    }
     let result: SubmitPlan | Promise<SubmitPlan | false> | false
     try {
       result = hook(doc)
     } catch {
       // Fail-open: a throwing planner keeps the draft; the host reports.
+      this.noteSubmit('vetoed', doc)
       return
     }
-    if (result === false) return
+    if (result === false) {
+      this.noteSubmit('vetoed', doc)
+      return
+    }
     if (typeof (result as Promise<SubmitPlan | false>).then === 'function') {
       // The verdict is in flight (a line with references resolves over the
       // wire). A second Enter is swallowed; an edit to the draft drops the
       // stale plan — the user's new text is the draft.
       this._submitInFlight = true
       void Promise.resolve(result as Promise<SubmitPlan | false>)
-        .then((plan) => {
-          if (plan !== false && this.view.state.doc.toString() === doc)
-            this.commit(plan.sendLine, plan)
-        })
+        .then(
+          (plan) => {
+            if (plan !== false && this.view.state.doc.toString() === doc) {
+              this.noteSubmit('command', doc)
+              this.commit(plan.sendLine, plan)
+            } else {
+              this.noteSubmit('vetoed', doc)
+            }
+          },
+          () => {
+            // Fail-open: the draft stays, and nothing went out.
+            this.noteSubmit('vetoed', doc)
+          },
+        )
         .catch(() => {
           // Fail-open: the draft stays.
         })
@@ -914,7 +933,24 @@ export class CommandEditor {
     // fast-typed key change the draft and drop the commit under the stale-
     // plan guard, and it would break the sync-after-Enter observers.
     const plan = result as SubmitPlan
+    this.noteSubmit('command', doc)
     this.commit(plan.sendLine, plan)
+  }
+
+  /** Say which way ONE Enter went, and how long the line was — never the line
+   *  (nocx-atpw5.1.36).
+   *
+   *  WHY IT EXISTS. A `clear` that never reached the shell and a `clear` the
+   *  shell refused to run look identical from every other surface: the block
+   *  before it stays on screen and nothing else happens. The failure context
+   *  this suite prints carries the console, so this one line is what tells the
+   *  next red run whether the Enter met an empty document (`empty`), was
+   *  declined before any state moved (`vetoed`), or produced a command that
+   *  then went missing further down (`command`). The count is the whole of
+   *  what is knowable here and the whole of what may be written down: what a
+   *  person typed is theirs, and AGENTS.md keeps it out of logs. */
+  private noteSubmit(path: 'command' | 'empty' | 'vetoed', doc: string): void {
+    log.info('nocx: submit', { path, chars: doc.length })
   }
 
   /** The atomic handoff (ADR-0004 §2): clear + release input BEFORE sending,

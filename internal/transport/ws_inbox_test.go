@@ -38,12 +38,18 @@ package transport
 // slower machine simply waits longer for the same frames.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/session"
 )
 
 // errWaitExpired is what a wait returns when its deadline passed with the
@@ -119,7 +125,18 @@ func (b *wsInbox) keep(msg []byte) {
 // re-armed a full budget after a failed read spun at full speed until its
 // bound and then blamed the deadline for a socket that had already failed
 // (nocx-2bvy). One absolute deadline cannot do that.
+//
+// THE DEADLINE BELONGS TO THE WAIT, NOT TO THE CONNECTION (nocx-atpw5.1.37).
+// It is cleared before this returns, because the next read is not this wait's:
+// a test that goes on to read the DATA plane with a reader of its own —
+// newWSReader, drainWithAcks — was reading under a deadline set here, and it
+// fired 30 s later as an i/o timeout. That is TestWSServer_Resize's failure
+// exactly: it waited its full window and then reported "connection closed
+// before stty output arrived", which is the deadline talking, not the socket —
+// and gorilla stores the first read error for every later read, so the
+// connection was finished for the rest of the test.
 func awaitFrame(conn *websocket.Conn, deadline time.Time, want func([]byte) bool) ([]byte, error) {
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
 	b := inboxOf(conn)
 	if msg, ok := b.take(want); ok {
 		return msg, nil
@@ -131,6 +148,15 @@ func awaitFrame(conn *websocket.Conn, deadline time.Time, want func([]byte) bool
 		_ = conn.SetReadDeadline(deadline)
 		mt, msg, err := conn.ReadMessage()
 		if err != nil {
+			// A DEADLINE THAT PASSED IS NOT A BROKEN SOCKET (see errWaitExpired):
+			// gorilla reports it as a net timeout, and keeping "the server never
+			// sent this" apart from "the connection broke" is the whole reason
+			// the sentinel exists. Reported raw, every timed-out wait blamed the
+			// socket, and a test could not say which had happened.
+			var timeout net.Error
+			if errors.As(err, &timeout) && timeout.Timeout() {
+				return nil, errWaitExpired
+			}
 			return nil, err
 		}
 		if want(msg) {
@@ -212,4 +238,87 @@ func awaitNotification(conn *websocket.Conn, method string, d time.Duration) (js
 	}
 	f, _ := decodeFrame(msg)
 	return f.Params, nil
+}
+
+// TestAwaitFrame_LeavesNoReadDeadlineBehind (nocx-atpw5.1.37): a wait's
+// deadline is the WAIT's. The read that follows belongs to whoever makes it —
+// in TestWSServer_Resize, newWSReader reading the data plane — and a deadline
+// left behind by an earlier wait closed that reader's channel with an i/o
+// timeout, which the test then reported as "connection closed before stty
+// output arrived". Gorilla stores a read error for every later read, so that
+// one stale deadline was also the end of the connection.
+//
+// The wait here SUCCEEDS, because that is the shape that leaked: a wait that
+// found its frame returns with its deadline still armed, and the next reader
+// inherits it. The pause is the stimulus — it puts that deadline in the past —
+// and the assertion is that the reader still reads.
+func TestAwaitFrame_LeavesNoReadDeadlineBehind(t *testing.T) {
+	sess := newRegWithReal(log.NewSlogAdapter(nil))
+	ws := NewWSServer(log.NewSlogAdapter(nil), sess)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := jsonrpcCallWithID(t, conn, "open", map[string]uint16{
+		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
+	}, 1)
+	var r struct {
+		Result struct {
+			SessionID string `json:"sessionId"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(resp, &r); err != nil {
+		t.Fatalf("decode open result: %v", err)
+	}
+	sid := r.Result.SessionID
+
+	// ONE WAIT, SHORT, AND SATISFIED: exactly what jsonrpcCallWithID does,
+	// with a bound small enough that the pause below outlives it.
+	req, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 2, "method": "resize",
+		"params": map[string]any{"sessionId": sid, "cols": 100, "rows": 30, "xpixel": 0, "ypixel": 0},
+	})
+	if err != nil {
+		t.Fatalf("marshal resize: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, req); err != nil {
+		t.Fatalf("write resize: %v", err)
+	}
+	if _, err := awaitFrame(conn, time.Now().Add(2*time.Second), isResponseTo(2)); err != nil {
+		t.Fatalf("the resize wait answered %v, want its response", err)
+	}
+
+	// Past the wait's own bound, and nothing has happened on the wire.
+	time.Sleep(2200 * time.Millisecond)
+
+	sidBytes, _ := session.IDToBytes(session.ID(sid))
+	marker := Frame{Version: FrameVersion, MsgType: MsgTypeData, SessionID: sidBytes, Payload: []byte("echo READY-deadline\n")}
+	if err := conn.WriteMessage(websocket.BinaryMessage, marker.Encode()); err != nil {
+		t.Fatalf("write the marker: %v", err)
+	}
+
+	// NO DEADLINE OF OUR OWN: a stale one is then the only bound this read
+	// could have, and the watchdog is what keeps the bug from hanging the suite.
+	type readResult struct {
+		msg []byte
+		err error
+	}
+	done := make(chan readResult, 1)
+	go func() {
+		_, msg, err := conn.ReadMessage()
+		done <- readResult{msg: msg, err: err}
+	}()
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("the read after a satisfied wait failed: %v — the wait's deadline outlived the wait", got.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("no frame after a satisfied wait, and no error either")
+	}
 }

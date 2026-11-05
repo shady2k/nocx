@@ -106,9 +106,27 @@ export default defineConfig({
   // A higher number is correct on a dedicated machine and is one env var away.
   workers: process.env.PW_WORKERS ? Number(process.env.PW_WORKERS) : 1,
 
+  // WHAT A RUN KEEPS (nocx-atpw5.1.40). The default is 'always': every test's
+  // output directory survives, passing or failing. Measured on this machine, a
+  // green three-case spec left two backends' debug logs and their helpers'
+  // behind (17 MB), and the memory soak's two heap snapshots are 74 MB for a
+  // test that passed. Nothing reads a passing test's artifacts, and the
+  // failure block is printed at the moment of failure from the live files, so
+  // 'failures-only' removes bytes and no evidence: Playwright deletes the
+  // directory of a test that passed, and keeps it whole for one that did not.
+  preserveOutput: 'failures-only',
+
   use: {
     baseURL: BASE_URL,
-    trace: 'retain-on-failure',
+    // THE TRACE IS RECORDED FOR EVERY TEST AND KEPT ONLY FOR FAILURES, and
+    // what dominates its size is the screencast: measured here, one spec (10
+    // cases, 3 minutes) peaked at 56 MB of trace with screenshots and 31 MB
+    // without — the screenshots alone were 45% of it — while the longest case
+    // of the heaviest spec (transcript-scroll-budget, 4 minutes) peaked at
+    // 656 MB. The DOM snapshots, sources and network stay: they are what
+    // `show-trace` is for. The visual timeline is not, and the failure block
+    // never reads the trace at all.
+    trace: { mode: 'retain-on-failure', screenshots: false },
   },
   projects,
 })

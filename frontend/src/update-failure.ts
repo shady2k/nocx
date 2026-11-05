@@ -59,8 +59,33 @@ const REFUSAL_REMEDIES: readonly { match: string; message: string }[] = [
   },
 ]
 
+/**
+ * The two names reconcile owns, and the only refusal that names an exact path
+ * (nocx-vh2hr.1.14). A managed name holding somebody else's bundle stops every
+ * update, and retrying changes nothing; the person needs the path to clear it.
+ * The path is captured from its leading slash up to the fixed suffix — the
+ * backend builds it from the install directory, and everything around it stays
+ * the toast's own words, so no errno or plist detail reaches the person.
+ */
+const MANAGED_DEBRIS_PATH = /(\/[^\n]*?\.nocx-(?:swap|backup)\.app)/
+
+const MANAGED_DEBRIS_REFUSAL = "is not nocx's own"
+
+/** The managed bundle a refusal names, or null when it names none. ONE OWNER
+ *  for the pattern: the toast names the path inside its remedy and the copied
+ *  details list it as a field (nocx-vh2hr.1.16). */
+export function managedDebrisPath(text: string): string | null {
+  return MANAGED_DEBRIS_PATH.exec(text)?.[1] ?? null
+}
+
 export function updateFailureMessage(error: unknown): string {
   const text = error instanceof Error ? error.message : String(error)
+  if (text.includes(MANAGED_DEBRIS_REFUSAL)) {
+    const blocked = managedDebrisPath(text)
+    if (blocked) {
+      return `The update is blocked by ${blocked}, which is not nocx’s own. Move or remove it, then try again.`
+    }
+  }
   const remedied = REFUSAL_REMEDIES.find((row) => text.includes(row.match))
   if (remedied) return remedied.message
   const refusal = REFUSALS.find((message) => text.includes(message))

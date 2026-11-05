@@ -54,16 +54,17 @@ func agentStagesMCPConfigAndCleansLaunchDirectory(t *testing.T, start nestedPare
 	t.Helper()
 	k := newNestedKernel(t)
 	s := start(t, k, "claude", inspectingAgentBody)
-	_, err := s.ptmx.Write([]byte("mkdir -p \"$TMPDIR/nocx-agent-launch.stale\"; printf '999999999\\n' > \"$TMPDIR/nocx-agent-launch.stale/lease\"; export NOCX_TOOL_SOCKET=/tmp/nocx-tool.sock NOCX_AGENT_HELPER_PATH=/opt/nocx-helper; claude --model test user-prompt\n"))
-	if err != nil {
-		t.Fatalf("type staged claude command: %v", err)
+	// run(), not a bare write followed by a read (nocx-atpw5.1.33): the two
+	// render waits this test used to make — waitForPromptAfterComplete and
+	// waitForRenderedThroughPrompt — examine the whole event log, so an earlier
+	// command satisfies them and they return without waiting for this one. That
+	// was invisible here only because the pane has run exactly one command.
+	s.run(`mkdir -p "$TMPDIR/nocx-agent-launch.stale"; printf '999999999\n' > "$TMPDIR/nocx-agent-launch.stale/lease"; export NOCX_TOOL_SOCKET=/tmp/nocx-tool.sock NOCX_AGENT_HELPER_PATH=/opt/nocx-helper; claude --model test user-prompt`)
+	enrol := waitForEvent(t, k, "agent_enrol")
+	withdraw := waitForEvent(t, k, "agent_withdraw")
+	if withdraw.Seq <= enrol.Seq {
+		t.Fatalf("the agent's interval closed out of order: enrol=%d withdraw=%d", enrol.Seq, withdraw.Seq)
 	}
-
-	waitForEvent(t, k, "agent_enrol")
-	waitForEvent(t, k, "agent_withdraw")
-	waitUntil(t, "the agent output", func() bool { return strings.Contains(s.output(), "AGENT-RAN") })
-	s.waitForPromptAfterComplete()
-	s.waitForRenderedThroughPrompt()
 	out := strings.ReplaceAll(s.output(), "\r", "")
 	if strings.Contains(out, "USER_FILE_WRITTEN=") {
 		t.Fatalf("staging wrote a user-owned file: output=%q", out)
@@ -211,6 +212,11 @@ func TestBashAgentKeepsLiveLaunchLease(t *testing.T) {
 		out := s.output()
 		return strings.Contains(out, "AGENT-RAN") && strings.Contains(out, "STALE_PRESENT")
 	})
+	// The interval's other end before this test ends, for the reason the
+	// worker-literal test states in full: the wrapper withdraws when the agent
+	// exits, and a test that returns first closes the kernel connection under
+	// that answer (nocx-atpw5.1.34).
+	waitForEvent(t, k, "agent_withdraw")
 }
 
 const unchangedUserConfigAgentBody = `#!/bin/sh
@@ -237,6 +243,11 @@ func TestBashAgentLaunchLeavesUserConfigAndRepositoryUntouched(t *testing.T) {
 			strings.Contains(out, "USER_SETTINGS=settings-before") &&
 			strings.Contains(out, "REPO_FILE=repo-before")
 	})
+	// The agent has printed, but its wrapper has not returned: the withdrawal
+	// that closes the interval is still a frame in flight, and this test must
+	// not tear the kernel connection down under its answer (nocx-atpw5.1.34,
+	// the same shape as the worker-literal test's own interval end).
+	waitForEvent(t, k, "agent_withdraw")
 }
 
 func TestStage1CarriesOnlyNonSecretAgentPaths(t *testing.T) {
@@ -323,14 +334,31 @@ func TestBashAndZshAgentRestoreUserTrapByteForByte(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			k := newNestedKernel(t)
 			s := tc.start(t, k, "claude", fakeAgentBody)
-			cmd := `trap 'echo USER_INT_TRAP' INT; trap | grep ' INT$' > "$TMPDIR/trap.before"; export NOCX_TOOL_SOCKET=/tmp/nocx-tool.sock NOCX_AGENT_HELPER_PATH=/opt/nocx-helper; claude; trap | grep ' INT$' > "$TMPDIR/trap.after"; cmp "$TMPDIR/trap.before" "$TMPDIR/trap.after" && echo TRAP_RESTORED
-`
-			if _, err := s.ptmx.Write([]byte(cmd)); err != nil {
-				t.Fatalf("type claude: %v", err)
+			// ONE LINE, run through the harness's own wait (nocx-atpw5.1.34).
+			// The marker this test waits for is IN the line it types, so the
+			// terminal's echo of that line satisfies a wait on the pane's text
+			// before the shell has run a single command. Measured on this
+			// machine, five runs of five: the wait was met with 0 launch
+			// resolutions, 0 enrolments, 0 withdrawals and 0 completions
+			// accepted. The subtest then returned with the wrapper's launch
+			// round trip still in flight, the fixture's cleanup closed the
+			// kernel connection under it, and the answer was encoded onto the
+			// closed socket — CI's "encode agent_launch_resolved: write unix
+			// @->@: use of closed network connection".
+			//
+			// run() never reads the pane's text to decide: it waits for a NEW
+			// complete, then for that complete's render fence and the prompt
+			// after it. Everything this line printed is in the buffer, and the
+			// shell is back, before the assertion below looks at anything.
+			s.run(`trap 'echo USER_INT_TRAP' INT; trap | grep ' INT$' > "$TMPDIR/trap.before"; export NOCX_TOOL_SOCKET=/tmp/nocx-tool.sock NOCX_AGENT_HELPER_PATH=/opt/nocx-helper; claude; trap | grep ' INT$' > "$TMPDIR/trap.after"; cmp "$TMPDIR/trap.before" "$TMPDIR/trap.after" && echo TRAP_RESTORED`)
+			out := strings.ReplaceAll(s.output(), "\r", "")
+			if !strings.Contains(out, "TRAP_RESTORED") {
+				t.Fatalf("the user's trap was not restored byte for byte: output=%q", out)
 			}
-			waitUntil(t, "the restored user trap", func() bool {
-				return strings.Contains(s.output(), "TRAP_RESTORED")
-			})
+			// The interval's other end, for the reason the worker-literal test
+			// states in full: the wrapper withdraws when the agent exits, and a
+			// test that ends first tears the socket down under that answer.
+			waitForEvent(t, k, "agent_withdraw")
 		})
 	}
 }

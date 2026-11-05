@@ -7,7 +7,7 @@ the filesystem seam and counts calls across publish paths.
 ## Current maximum
 
 - Maximum filesystem-seam calls per publish: **63**.
-- Maximum bytes written per publish: **92,357**.
+- Maximum bytes written per publish: **92,949**.
 - Measured worst path: replacement plus sweep, with the launch carrier absent.
 - Fault position used for the reported worst case: `remove#4`.
 
@@ -119,3 +119,14 @@ during the wait is the `sleep` child, and an interrupt in the gap after that
 child exits reached no process, leaving the open-question wait (which has no
 deadline) unended. The Bash tier already had its equivalent (`set +m`); only
 the zsh tier moved, and the worst path is unchanged.
+
+The 2026-11-05 measurement on branch `fix/nocx-atpw5-1-42-ctrlc-resolution` is
+**592 bytes above** that 92,357-byte figure, at **92,949**, and keeps the
+**63**-call maximum. The growth is the launch's cancel fact (nocx-atpw5.1.42):
+the wrapper keeps one cancel fact for its whole resolution, because the
+resolution and the enrolment each arm an INT trap and each arm resets its own
+window flag — so an interrupt landing between the two windows was forgotten and
+the agent started. Three published lines per script tier carry it: the trap
+body sets the fact, the check after the enrolment prints the cancel sentence,
+and `__nocx_agent_launch_exec` refuses to run the agent on it. `nocx.bash` and
+`nocx.zsh` both moved; `nocx.posix` did not, and the worst path is unchanged.

@@ -11,7 +11,7 @@ on:
         default: true
         type: boolean
       nightly:
-        description: 'Immutable nightly tag you installed and tried (nightly-YYYYMMDD-RUNID)'
+        description: 'Immutable nightly tag you installed and tried (vX.Y.Z-nightly.<build number>)'
         required: false
         type: string
       tried:

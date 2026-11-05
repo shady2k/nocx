@@ -1,6 +1,6 @@
 // Package procwatch observes the lifecycle of processes THIS backend
 // started: it answers "is the executable I launched still the one running
-// under that pid, and if not, what is?".
+// under that pid, and if not, what is?" and "is that pid gone yet?" ([WaitForExit]).
 //
 // It exists because the product had exactly one detector for a shell that
 // will never integrate — the handshake bound expiring ten seconds later
@@ -68,7 +68,13 @@
 // process, and their p_comm is the basename of the path that was exec'd.
 package procwatch
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+	"time"
+
+	"golang.org/x/sys/unix"
+)
 
 // ErrUnsupported reports that this platform cannot observe a process being
 // replaced. It is typed rather than silent so a caller can tell "no takeover
@@ -129,3 +135,53 @@ func (u unsupported) Started(int, string, Sink) (func(), error) {
 }
 
 func (unsupported) Close() error { return nil }
+
+// ---------------------------------------------------------------------------
+// Waiting for a process to be gone
+// ---------------------------------------------------------------------------
+
+// WaitForExit blocks until the process named by pid is gone.
+//
+// THE KERNEL'S OWN ANSWER FIRST, WHERE IT EXISTS. waitForExitPidfd
+// (wait_linux.go) is one descriptor that becomes readable only when the
+// process it names has exited, so there is no polling window and no pid reuse
+// to get wrong. pidfd_open lives only in x/sys/unix's Linux half, so every
+// other platform answers supported=false and takes the poll below
+// (wait_other.go) — which is also where macOS lands, and macOS's update
+// restart never starts a waiter at all (`open -n` starts a second instance
+// beside the first).
+//
+// The poll is the same fact at a coarser grain: it asks whether the pid still
+// exists, never a sleep that assumes the answer.
+//
+// This is the second question this package asks the kernel about a pid, and
+// the two answer differently on purpose. "Has this process been replaced?" has
+// no Linux answer short of a race or a privilege (see the package comment),
+// while "is this process gone?" has had one since 5.3. Both are observations
+// about a pid the backend or its own waiter started — never about the bytes a
+// session produces (AD-6).
+func WaitForExit(pid int) error {
+	if supported, err := waitForExitPidfd(pid); supported {
+		return err
+	}
+	return pollExit(pid)
+}
+
+// pollExit asks whether pid still exists, until it does not.
+func pollExit(pid int) error {
+	for {
+		killErr := unix.Kill(pid, 0)
+		switch {
+		case errors.Is(killErr, unix.ESRCH):
+			return nil
+		case killErr != nil && !errors.Is(killErr, unix.EPERM):
+			return fmt.Errorf("poll pid %d: %w", pid, killErr)
+		}
+		time.Sleep(exitPollInterval)
+	}
+}
+
+// exitPollInterval is how often a platform without pidfd_open asks. It is a
+// poll interval, not a deadline: nothing here ever concludes that a process
+// is gone because time passed.
+const exitPollInterval = 20 * time.Millisecond

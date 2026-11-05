@@ -527,6 +527,14 @@ func agentWrapperCancelsTheLaunchOnCtrlCDuringResolution(t *testing.T, start nes
 	// neither has to sit out the resolution's own bound.
 	waitForOutput(t, s, "^C")
 	k.sendHeldLaunchAnswer()
+	// THE SHELL HAS TO BE BACK BEFORE THE NEXT LINE IS TYPED (nocx-atpw5.1.32,
+	// one window earlier). The answer above is read by a wrapper that is still
+	// inside its wait; a line typed there is echoed by the terminal and then
+	// swallowed by that wait, whose own read consumes it and reports its 130 —
+	// the echo never runs, and the failure reads as "did not report the
+	// interrupt". The sentence is what the cancel produces, and the wrapper has
+	// returned by the time it is on screen.
+	waitForOutput(t, s, "nocx: cancelled — claude was not started")
 	// Arithmetic in the line, so the pane's echo of what was typed cannot
 	// satisfy the wait for what the shell printed.
 	if _, err := s.ptmx.Write([]byte("echo \"RC=$(($?+0))-END\"\n")); err != nil {
@@ -630,6 +638,13 @@ func pressCtrlCBeforeTheAnswer(t *testing.T, k *nestedKernel, s *channelShell) {
 	// the interrupt has reached the shell and the answer can follow it.
 	waitForOutput(t, s, "^C")
 	k.sendHeldEnrolAnswer()
+	// THE SHELL HAS TO BE BACK BEFORE THE NEXT LINE IS TYPED (nocx-atpw5.1.32).
+	// The released answer is read by a wrapper that is still inside its
+	// enrolment wait; a line typed there is echoed by the terminal and then
+	// swallowed by that wait's own read, so the echo this test asks for never
+	// runs. The sentence is what the cancel produces, and the wrapper has
+	// returned by the time it is on screen.
+	waitForOutput(t, s, "nocx: cancelled — claude was not started")
 	// Arithmetic in the line, so the pane's echo of what was typed cannot
 	// satisfy the wait for what the shell printed.
 	if _, err := s.ptmx.Write([]byte("echo \"RC=$(($?+0))-END\"\n")); err != nil {
@@ -996,10 +1011,15 @@ func agentWrapperPointsAWorkerLaunchAtTheToolSurface(t *testing.T, start nestedP
 
 	line := "export NOCX_TOOL_SOCKET=" + ShellQuote(socket) +
 		" NOCX_AGENT_HELPER_PATH=" + ShellQuote(helper) +
-		"; claude --model test 'two words'\n"
-	if _, err := s.ptmx.Write([]byte(line)); err != nil {
-		t.Fatalf("type worker command: %v", err)
-	}
+		"; claude --model test 'two words'"
+	// run(), not a bare write (nocx-atpw5.1.33): it waits for a NEW completion
+	// and for that completion's own fence, so nothing below reads the pane or
+	// the fixture's record while the wrapper is still working. The two render
+	// waits this test used to make instead — waitForPromptAfterComplete and
+	// waitForRenderedThroughPrompt — examine the whole event log and are
+	// satisfied by ANY earlier command; they were sound here only because this
+	// pane has run exactly one.
+	s.run(line)
 	resolve := waitForEvent(t, k, "agent_launch_resolve")
 	enrol := waitForEvent(t, k, "agent_enrol")
 	if enrol.Seq <= resolve.Seq {
@@ -1013,12 +1033,9 @@ func agentWrapperPointsAWorkerLaunchAtTheToolSurface(t *testing.T, start nestedP
 	// argv.txt; a wait on the marker alone was satisfied while the file this
 	// test reads did not exist yet, which is the failure CI run 39176833066
 	// reported — `the worker agent recorded no argv: open .../003/argv.txt: no
-	// such file or directory`, with WORKER-AGENT-RAN in the same message. The
-	// marker is still waited for, because the typed program having run is a fact
-	// worth asserting; the record is a second fact and is waited for on its own.
-	waitUntil(t, "the worker agent to run", func() bool {
-		return strings.Contains(s.output(), "WORKER-AGENT-RAN")
-	})
+	// such file or directory`, with WORKER-AGENT-RAN in the same message. run()
+	// now puts a completed command between the marker and this read; the record
+	// is still waited for on its own, because a file is a second fact.
 	argv := waitForRecordedArgv(t, argvFile, s)
 	if len(argv) < 6 {
 		t.Fatalf("worker argv = %q, want the typed arguments plus --mcp-config and its file", argv)
@@ -1037,16 +1054,14 @@ func agentWrapperPointsAWorkerLaunchAtTheToolSurface(t *testing.T, start nestedP
 		t.Fatalf("the record's arguments reached the worker: argv=%q", argv)
 	}
 	// THE INTERVAL'S OTHER END: the staged directory is gone once the agent has
-	// returned, because it carried the pane's bearer. The agent has run and
-	// exited by now; wait for the withdrawal that closes the interval first.
+	// returned, because it carried the pane's bearer. The command has completed,
+	// so the withdrawal is already accepted; the sweep follows it.
 	waitForEvent(t, k, "agent_withdraw")
 	waitUntil(t, "the launch directory to be swept", func() bool {
 		_, statErr := os.Stat(filepath.Dir(configPath))
 		return os.IsNotExist(statErr)
 	})
 
-	s.waitForPromptAfterComplete()
-	s.waitForRenderedThroughPrompt()
 	out := strings.ReplaceAll(s.output(), "\r", "")
 	if strings.Contains(out, "tool surface unavailable") {
 		t.Fatalf("a worker pane with a configured socket refused its tool surface: %q", out)
@@ -1226,15 +1241,23 @@ func agentWrapperRunsANonLaunchSubcommandUnchanged(t *testing.T, start nestedPar
 	k.launchNonLaunch = []string{"update"}
 	s := start(t, k, "claude", inspectingAgentBody)
 
-	if _, err := s.ptmx.Write([]byte("export NOCX_TOOL_SOCKET=/tmp/nocx-tool.sock NOCX_AGENT_HELPER_PATH=/opt/nocx-helper; claude update\n")); err != nil {
-		t.Fatalf("type the maintenance subcommand: %v", err)
+	// BOTH HALVES ARE DRIVEN THROUGH run() (nocx-atpw5.1.33). The two waits
+	// this test used to make after a bare write — waitForPromptAfterComplete
+	// and waitForRenderedThroughPrompt — examine the whole event log, so once
+	// ANY command has completed they are already satisfied: measured here, they
+	// returned in 8–18µs with the shell still inside the wrapper. The FIRST
+	// half survived that only because its pane had no earlier completion to be
+	// satisfied by; the second half read the pane while the agent was still
+	// printing, which is CI's "a plain launch lost its tool surface" with the
+	// launch's own ARG_0 and ARG_1 in the message and no MCP_PATH after them.
+	//
+	// run() samples the completion count before it types and waits for a NEW
+	// one, then for that complete's own fence and the prompt after it — a
+	// marker no earlier command can supply.
+	s.run("export NOCX_TOOL_SOCKET=/tmp/nocx-tool.sock NOCX_AGENT_HELPER_PATH=/opt/nocx-helper; claude update")
+	if !hasEvent(k, "agent_launch_resolve") {
+		t.Fatalf("the maintenance invocation was never resolved: %v", k.events())
 	}
-	waitForEvent(t, k, "agent_launch_resolve")
-	waitUntil(t, "the maintenance subcommand to run", func() bool {
-		return strings.Contains(s.output(), "AGENT-RAN")
-	})
-	s.waitForPromptAfterComplete()
-	s.waitForRenderedThroughPrompt()
 	out := strings.ReplaceAll(s.output(), "\r", "")
 	if !strings.Contains(out, "ARG_0=update") {
 		t.Fatalf("the person's argv did not reach the program: %q", out)
@@ -1253,15 +1276,14 @@ func agentWrapperRunsANonLaunchSubcommandUnchanged(t *testing.T, start nestedPar
 	}
 
 	// …and the same wrapper still points a real launch at the surface.
-	if _, err := s.ptmx.Write([]byte("claude\n")); err != nil {
-		t.Fatalf("type the agent: %v", err)
+	s.run("claude")
+	if !hasEvent(k, "agent_enrol") {
+		t.Fatalf("a plain launch was never enrolled: %v", k.events())
 	}
-	waitForEvent(t, k, "agent_enrol")
-	waitUntil(t, "the plain launch to receive the tool surface", func() bool {
-		return strings.Contains(strings.ReplaceAll(s.output(), "\r", ""), "ARG_0=--mcp-config")
-	})
-	s.waitForPromptAfterComplete()
 	out = strings.ReplaceAll(s.output(), "\r", "")
+	if !strings.Contains(out, "ARG_0=--mcp-config") {
+		t.Fatalf("a plain launch was not given the tool surface: %q", out)
+	}
 	if !strings.Contains(out, "MCP_PATH=") {
 		t.Fatalf("a plain launch lost its tool surface: %q", out)
 	}

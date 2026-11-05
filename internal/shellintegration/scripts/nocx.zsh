@@ -719,7 +719,9 @@ __nocx_agent_cancel_on_int() {
     # interrupt reaches it. `localoptions` restores MONITOR when the wait ends;
     # the bash twin carries the same argument (nocx-xn63t.6.29).
     unsetopt monitor
-    trap '__nocx_agent_cancelled=1' INT
+    # BOTH FLAGS (nocx-atpw5.1.42): the window's own is reset at every arm; the
+    # wrapper's is not, so an interrupt between two windows still cancels.
+    trap '__nocx_agent_cancelled=1; __nocx_agent_launch_cancelled=1' INT
     "$@"
     __rc=$?
     __nocx_agent_cancelled=0
@@ -1039,6 +1041,9 @@ __nocx_agent_launch_maintenance() {
 __nocx_agent_launch_exec() {
     local __surface="$1" __assignment
     shift
+    # THE LAST DOOR (nocx-atpw5.1.42): a person's Ctrl+C anywhere in this
+    # launch's resolution stops the agent here rather than running it.
+    (( ${__nocx_agent_launch_cancelled:-0} )) && return 130
     if (( __nocx_agent_launch_local )); then
         (
             for __assignment in "${__nocx_agent_launch_env[@]}"; do
@@ -1062,6 +1067,8 @@ __nocx_agent_launch_exec() {
 __nocx_agent_run() {
     local __agent="$1" __rid __rc __stage_reason __staged=0
     shift
+    # The wrapper's own cancel fact, kept for its whole resolution.
+    __nocx_agent_launch_cancelled=0
     if [[ "${__nocx_lc_active:-0}" != "1" ]]; then
         builtin printf 'nocx: not orchestrated — this pane has no lifecycle channel\n' >&2
         # @NOCX_AGENT_UNORCHESTRATED@
@@ -1072,6 +1079,15 @@ __nocx_agent_run() {
     if (( __rc == 130 )); then
         # @NOCX_AGENT_LAUNCH_CANCEL@
         builtin printf '\nnocx: cancelled — %s was not started\n' "$__agent" >&2
+        return 130
+    fi
+    # AN INTERRUPT BETWEEN THE TWO WINDOWS IS STILL THE PERSON'S CANCELLATION
+    # (nocx-atpw5.1.42): the enrolment's arm resets its window flag, so the ^C
+    # of that gap was forgotten and the agent started.
+    if (( __nocx_agent_launch_cancelled )); then
+        builtin printf '\nnocx: cancelled — %s was not started\n' "$__agent" >&2
+        __nocx_agent_launch_cancel
+        __nocx_agent_launch_clear
         return 130
     fi
     __rid="$__nocx_agent_rid"

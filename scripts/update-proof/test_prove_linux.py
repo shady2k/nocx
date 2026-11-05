@@ -269,6 +269,16 @@ class PublicationStatusTests(unittest.TestCase):
         self.assertNotIn("nightly-20261025-1", result["tags"])
         self.assertNotIn("v0.9.0", result["tags"])
 
+    def test_nightly_readiness_counts_both_dated_spellings_and_the_alias_not(self):
+        releases = self.releases() + [
+            {"tag_name": "v0.8.1-nightly.202611021101", "prerelease": True, "draft": False},
+            {"tag_name": "nightly", "prerelease": True, "draft": False},
+        ]
+        code, result = self.status("nightly", releases=releases)
+        self.assertEqual(code, 0)
+        self.assertEqual(result["tags"], ["nightly-20261025-1",
+                                          "v0.8.1-nightly.202611021101"])
+
     def test_nightly_readiness_still_counts_only_dated_nightlies(self):
         code, result = self.status("nightly")
         self.assertEqual(code, 2)

@@ -494,9 +494,19 @@ connect` runs this connector before it checks the backlog inputs.
   Missing root formatter/linter binaries
   are installed from the locked root dependencies without install scripts; no Go,
   frontend or product build is started. It reports preflight missing files together,
-  then connects the tracker and external hooks before the final export/import and
-  permission checks. A later failure can leave the tracker connection in place;
-  the error names the unfinished step. Fix that prerequisite and rerun.
+  then imports the tracker successfully before connecting git hooks or clearing the
+  retired driver, and connects the tracker and external hooks before the final
+  export/import and permission checks. A failure before the tracker connector starts
+  leaves nothing connected; a later failure can leave the tracker connection in place,
+  and the error names the unfinished step. Fix that prerequisite and rerun.
+  A clone whose remote refuses its pushes is connected too (nocx-3n1ly): the four
+  hooks are linked and the tracker is checked before anything is published, so a
+  refused push ends with a line saying the clone cannot publish tracker state and
+  every local gate still running. The mechanism's own record hooks follow its push,
+  so such a clone also says that its revisions are not recorded yet. The tracker ref is fetched and required before the
+  mechanism builds a store, and a store that holds no issues while the ref carries
+  them is refused by name — a fetch that did not arrive never becomes an empty
+  tracker presented as the real one.
 - **CI:** `ci-backlog` in `.github/workflows/ci.yml` checks commit links and the
   present documents on a code pull request; it does not compare backlog states, since a
   code pull request carries none (nocx-fg79x.3). Pull requests use the merge base and

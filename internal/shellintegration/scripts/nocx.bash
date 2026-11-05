@@ -935,7 +935,11 @@ __nocx_agent_cancel_on_int() {
     __nocx_agent_cancelled=0
     [[ $- == *m* ]] && __monitor=1
     set +m
-    trap '__nocx_agent_cancelled=1' INT
+    # BOTH FLAGS: this window's own, and the wrapper's (nocx-atpw5.1.42). The
+    # window's flag is reset at every arm on purpose; the wrapper's is not, so
+    # an interrupt that lands between two windows still cancels the launch
+    # instead of being forgotten by the next arm.
+    trap '__nocx_agent_cancelled=1; __nocx_agent_launch_cancelled=1' INT
     "$@"
     __rc=$?
     trap - INT
@@ -1288,6 +1292,10 @@ __nocx_agent_launch_maintenance() {
 __nocx_agent_launch_exec() {
     local __surface="$1" __assignment
     shift
+    # THE LAST DOOR (nocx-atpw5.1.42): whatever the windows above decided, a
+    # person's Ctrl+C anywhere in this launch's resolution stops the agent
+    # here rather than running it. Nothing below this line checks anything.
+    (( ${__nocx_agent_launch_cancelled:-0} )) && return 130
     if (( __nocx_agent_launch_local )); then
         (
             for __assignment in "${__nocx_agent_launch_env[@]}"; do
@@ -1311,6 +1319,9 @@ __nocx_agent_launch_exec() {
 __nocx_agent_run() {
     local __agent="$1" __rid __rc __stage_reason __staged=0
     shift
+    # The wrapper's own cancel fact, kept for its whole resolution: see
+    # __nocx_agent_cancel_on_int and the check after the enrolment.
+    __nocx_agent_launch_cancelled=0
     if [[ "${__nocx_lc_active:-0}" != "1" ]]; then
         builtin printf 'nocx: not orchestrated — this pane has no lifecycle channel\n' >&2
         # @NOCX_AGENT_UNORCHESTRATED@
@@ -1321,6 +1332,18 @@ __nocx_agent_run() {
     if (( __rc == 130 )); then
         # @NOCX_AGENT_LAUNCH_CANCEL@
         builtin printf '\nnocx: cancelled — %s was not started\n' "$__agent" >&2
+        return 130
+    fi
+    # AN INTERRUPT BETWEEN THE TWO WINDOWS IS STILL THE PERSON'S CANCELLATION
+    # (nocx-atpw5.1.42). The resolution's trap is removed before the enrolment
+    # arms its own, and the enrolment's arm resets its window flag; without
+    # this check the ^C of that gap was forgotten and the agent started. The
+    # sentence and the words are the enrolment's own, because to a person this
+    # is the same gesture in the same second.
+    if (( __nocx_agent_launch_cancelled )); then
+        builtin printf '\nnocx: cancelled — %s was not started\n' "$__agent" >&2
+        __nocx_agent_launch_cancel
+        __nocx_agent_launch_clear
         return 130
     fi
     __rid="$__nocx_agent_rid"

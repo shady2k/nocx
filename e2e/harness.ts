@@ -13,6 +13,7 @@ import {
   reportFailureContext,
   watchPageForTest,
 } from './failure-context'
+import { PER_TEST_LOG_BYTES, tailOf } from './log-tail.mts'
 import { reportStandingModals } from './modal-report'
 import { readStand } from './stand'
 import { traceIdForTest, traceparentForTest } from './trace-context.mts'
@@ -173,6 +174,14 @@ async function injectWailsShim(page: Page, traceparent?: string): Promise<void> 
   const stand = readStand()
   await page.addInitScript(
     (opts: { p: number; t: string; tp: string }) => {
+      // THE DECISION TRACE IS ON IN THIS STAND (nocx-atpw5.1.39). `logKeydown`
+      // reports which surface saw each keydown, and the failure block prints
+      // the console — that one field is what tells "the composer dropped it"
+      // from "the grid was given it". It is safe to have on here only because
+      // `keyShape` (frontend/src/log.ts) writes the key's CLASS, never a
+      // character: a password typed into a running ssh reaches this listener
+      // as an ordinary letter.
+      ;(window as unknown as { nocxDebug?: unknown }).nocxDebug = true
       ;(window as unknown as { go: unknown }).go = {
         main: {
           WailsApp: {
@@ -205,6 +214,67 @@ async function injectWailsShim(page: Page, traceparent?: string): Promise<void> 
  * its snapshot by then, and every backend and client the test registered is
  * in.
  */
+/**
+ * THE DISPOSABLE ROOTS A TEST CREATED ARE REMOVED WHEN IT ENDS
+ * (nocx-atpw5.1.40).
+ *
+ * Every spec that runs a backend of its own makes a root for it — a fresh
+ * `mkdtempSync(join(tmpdir(), …))` — and nothing ever removed one. Measured on
+ * this machine after seven test runs: 31 roots left in /tmp, 683 MiB together,
+ * 21 MB for an ordinary one and 51 MB for the heaviest (the home keeps a copy of
+ * the helper binary, which is 21 MB of it, and a dev build's debug logs are the
+ * rest). A `nocx-helper serve` daemon was still running for each of them. CI pays
+ * this on the runner's disk, inside the container's overlay, once per test that
+ * starts a backend — the one thing in this suite that grows with the test count
+ * and never shrinks, and the shape the ci-e2e leg died in on 2026-11-05.
+ *
+ * THE SCOPE THE ROOT WAS CREATED IN IS THE SCOPE THAT REMOVES IT. A root made in
+ * `beforeAll` belongs to the file and goes at the end of it; one made inside a
+ * test (or its beforeEach) goes at the end of that test. The scope is read off
+ * the test fixture: it is set up before any `beforeEach` runs, so a root created
+ * from a hook or a test body is counted against that test, and a root from
+ * `beforeAll` — which runs before fixtures exist — is not.
+ *
+ * AFTER the failure report, never before: the report reads this backend's log and
+ * its helper's out of that very directory (e2e/failure-context.ts), so removing
+ * it first would turn every failure into one that names no log.
+ */
+const rootsCreatedByTest = new Set<string>()
+const rootsCreatedByFile = new Set<string>()
+let testInFlight = false
+
+/** Record a disposable root so the teardown below can remove it — once, in the
+ *  scope that first saw it. Called by VaultBackend's constructor and nowhere
+ *  else: a restart re-enters start() on the same root, and a root recorded twice
+ *  is a root removed in the wrong scope (see the constructor). */
+function rememberDisposableRoot(root: string): void {
+  const scope = testInFlight ? rootsCreatedByTest : rootsCreatedByFile
+  if (!rootsCreatedByFile.has(root) && !rootsCreatedByTest.has(root)) scope.add(root)
+}
+
+/** Stop whatever serves this root, then remove it.
+ *
+ *  The helper daemon outlives the backend on purpose — it serves the pane's
+ *  session across backend restarts — so the directory cannot just be unlinked
+ *  under it. `helperDaemonPids` is the harness's existing answer to "which
+ *  daemon serves this home"; it reads /proc, so on a host without one this is a
+ *  no-op and the removal still happens. Best effort throughout: a tidy-up that
+ *  throws while a test is failing replaces one failure with another. */
+function removeDisposableRoot(root: string): void {
+  for (const pid of helperDaemonPids(join(root, 'home'))) {
+    try {
+      process.kill(pid, 'SIGTERM')
+    } catch {
+      /* already gone */
+    }
+  }
+  try {
+    rmSync(root, { recursive: true, force: true })
+  } catch {
+    /* the run's own exit removes it */
+  }
+}
+
 const failureContextFixture: [
   (args: object, use: () => Promise<void>, info: TestInfo) => Promise<void>,
   { auto: true },
@@ -213,8 +283,15 @@ const failureContextFixture: [
   // destructuring pattern, so "none" has to be spelled as an empty one.
   // eslint-disable-next-line no-empty-pattern
   async ({}, use, info) => {
-    await use()
+    testInFlight = true
+    try {
+      await use()
+    } finally {
+      testInFlight = false
+    }
     await reportFailureContext(info, traceIdForTest(info.testId))
+    for (const root of rootsCreatedByTest) removeDisposableRoot(root)
+    rootsCreatedByTest.clear()
   },
   { auto: true },
 ]
@@ -342,6 +419,18 @@ export const test = base.extend<{ failureContext: void }, { appReady: void }>({
  * what keeps this a one-line change per spec rather than a rename sweep across
  * files that also use `base` as a local for something else.
  */
+/**
+ * THE FILE'S OWN DISPOSABLE ROOTS GO WHEN ITS LAST TEST DOES (nocx-atpw5.1.40):
+ * the ones a `beforeAll` made, which the per-test teardown above must not touch
+ * because every test in the file shares them. Registered here, at the module
+ * every spec imports, so no spec needs a line of its own; a file's own hooks run
+ * before this one, so a home they still want to read is still there.
+ */
+base.afterAll(() => {
+  for (const root of rootsCreatedByFile) removeDisposableRoot(root)
+  rootsCreatedByFile.clear()
+})
+
 export const standalone = base.extend<{ failureContext: void }>({
   failureContext: failureContextFixture,
 
@@ -665,7 +754,15 @@ function uuidv7(): string {
 //   const { port: p2, token: t2 } = await backend.restart()
 
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process'
-import { existsSync, readFileSync, readdirSync, openSync, mkdirSync, copyFileSync } from 'node:fs'
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  openSync,
+  mkdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { resolve, basename, join } from 'node:path'
 
 import { awaitCoordinator } from './coordinator.mjs'
@@ -1378,6 +1475,17 @@ export class VaultBackend {
     if (!existsSync(binary)) {
       throw new Error(`nocx-server binary not found: ${binary}`)
     }
+    // ONCE, HERE, AND NOT IN start() (nocx-atpw5.1.40). The root belongs to the
+    // scope that made it, and a backend can be started more than once: restart()
+    // is stop() then start(), and a spec that restarts is exactly a spec whose
+    // on-disk state must outlive the first start. Recording in start() recorded
+    // the same root again, against whichever test happened to be running, so the
+    // FIRST restart moved a file-scope root into a test's scope and the next
+    // test's restart found its log directory gone — CI: `ENOENT: open
+    // '/tmp/nocx-x8s2-e2e-…/nocx-server.log'` in VaultBackend.start, through
+    // restart, from e2e/agent-ask.spec.ts:1043. The constructor runs once per
+    // backend, so the scope it sees is the scope that built the root.
+    rememberDisposableRoot(this.disposable.root)
   }
 
   /**
@@ -1489,12 +1597,19 @@ export class VaultBackend {
       // entirely, which is the half that usually explains it.
       const name = this.starts <= 1 ? basename(this.logPath) : `nocx-server.start${this.starts}.log`
       const preserved = resolve(dir, name)
-      copyFileSync(this.logPath, preserved)
+      // BOUNDED (nocx-atpw5.1.40). A dev build logs at debug from its first
+      // line, so this copy is a whole debug log: measured on this machine, the
+      // longest case of the heaviest spec left 9.2 MB of backend log and 7.1 MB
+      // of helper log — and every test that starts a backend paid it, passing
+      // or failing. What a reader uses is the end (`logTail` prints the last few
+      // thousand bytes; the failure block prints the same), so the copy keeps
+      // PER_TEST_LOG_BYTES of it and says how much it dropped.
+      writeFileSync(preserved, tailOf(readFileSync(this.logPath, 'utf8'), PER_TEST_LOG_BYTES))
       this.preservedLogPath = preserved
       const helperLog = this.helperLogFile
       if (helperLog && existsSync(helperLog)) {
         const preservedHelper = resolve(dir, 'helper.log')
-        copyFileSync(helperLog, preservedHelper)
+        writeFileSync(preservedHelper, tailOf(readFileSync(helperLog, 'utf8'), PER_TEST_LOG_BYTES))
         this.preservedHelperLogPath = preservedHelper
       }
     } catch {

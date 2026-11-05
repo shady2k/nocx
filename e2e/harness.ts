@@ -173,6 +173,14 @@ async function injectWailsShim(page: Page, traceparent?: string): Promise<void> 
   const stand = readStand()
   await page.addInitScript(
     (opts: { p: number; t: string; tp: string }) => {
+      // THE DECISION TRACE IS ON IN THIS STAND (nocx-atpw5.1.39). `logKeydown`
+      // reports which surface saw each keydown, and the failure block prints
+      // the console — that one field is what tells "the composer dropped it"
+      // from "the grid was given it". It is safe to have on here only because
+      // `keyShape` (frontend/src/log.ts) writes the key's CLASS, never a
+      // character: a password typed into a running ssh reaches this listener
+      // as an ordinary letter.
+      ;(window as unknown as { nocxDebug?: unknown }).nocxDebug = true
       ;(window as unknown as { go: unknown }).go = {
         main: {
           WailsApp: {

@@ -184,6 +184,11 @@ export interface PageDiagnostics {
   captureSnapshot(): Promise<void>
   /** Whether a snapshot has been taken already. */
   hasSnapshot(): boolean
+  /** The session ids this page opened, live — NOT the bounded console ring,
+   *  which a chatty test can evict (nocx-atpw5.1.39). The lifecycle lines in
+   *  the backend log carry `session=`, so these are what finds them whatever
+   *  their trace. */
+  sessionIds(): string[]
   /** Read the page's `.cmd-block` DOM NOW, for the same reason and at the same
    *  moment as `captureSnapshot` — and, like it, only on a way out that is
    *  already known to be a failure. A page a SPEC owns is usually still open
@@ -218,6 +223,9 @@ const pagesByTestId = new Map<string, WatchedPage[]>()
  */
 export function attachFailureDiagnostics(page: Page): PageDiagnostics {
   const consoleLines = bounded<string>(MAX_CONSOLE_LINES)
+  /** Every session id this page has announced, kept outside the ring: the
+   *  announcement is one line early in the run and the ring is 50. */
+  const sessionIds = new Set<string>()
   const frames = bounded<RedactedFrame>(MAX_FRAMES)
   /** id → method of this page's open requests, so a response can be named and
    *  a `session.intent` answer can say whether it wrote anything. One map for
@@ -228,7 +236,9 @@ export function attachFailureDiagnostics(page: Page): PageDiagnostics {
   let blockDom: string | null = null
 
   page.on('console', (msg) => {
-    consoleLines.push(`[console:${msg.type()}] ${msg.text()}`)
+    const text = msg.text()
+    for (const match of text.matchAll(/"sid":"([0-9a-f]{32})"/g)) sessionIds.add(match[1])
+    consoleLines.push(`[console:${msg.type()}] ${text}`)
   })
   page.on('pageerror', (err) => {
     consoleLines.push(`[pageerror] ${err.message}`)
@@ -261,6 +271,9 @@ export function attachFailureDiagnostics(page: Page): PageDiagnostics {
     },
     hasSnapshot() {
       return snapshot !== null
+    },
+    sessionIds() {
+      return [...sessionIds]
     },
     async captureBlockDom() {
       try {
@@ -363,6 +376,11 @@ export async function reportFailureContext(info: TestInfo, traceId: string): Pro
 
     const sharedLines = traceId ? linesForTrace(standBackendLogTail(), traceId) : []
     sections.push(linesSection('shared stand backend log, filtered by trace_id', sharedLines))
+    const lifecycle = lifecycleSection(
+      standBackendLogTail(),
+      pages.flatMap((watched) => watched.diagnostics.sessionIds()),
+    )
+    if (lifecycle !== null) sections.push(lifecycle)
 
     for (const backend of backends) {
       const lines = backend.logTail(40_000).split('\n')
@@ -453,6 +471,42 @@ export async function reportFailureContext(info: TestInfo, traceId: string): Pro
         .catch(() => undefined)
     }
   }
+}
+
+/** The lifecycle's own start/complete lines for this test's panes, from the
+ *  stand's log, THROUGH THE TRACE FILTER (nocx-atpw5.1.39).
+ *
+ *  A trace-filtered window is what could not answer the question it was
+ *  printed for: the pane entered `running` with no command a spec had
+ *  submitted, and the lines that name the attempt (`kind=start` and
+ *  `kind=complete`, each with `domain=`, `session=` and the attempt id in the
+ *  envelope) had fallen outside the window — either the trace filter's own
+ *  lines or the 200-line bound behind it. The lifecycle lines carry
+ *  `session=`, so the session ids the page announced find them without the
+ *  trace, and this section takes the last of those rather than the first.
+ *
+ *  Absent rather than empty when the pane announced no session or the log has
+ *  no such line: a section that says `(none)` would read as "the lifecycle
+ *  said nothing", which is a different finding from "this test never got far
+ *  enough to have one".
+ */
+const LIFECYCLE_LINES = 200
+
+function lifecycleSection(logTail: string, sids: string[]): string | null {
+  if (sids.length === 0) return null
+  const kept = logTail
+    .split('\n')
+    .filter(
+      (line) =>
+        (line.includes('kind=start') || line.includes('kind=complete')) &&
+        sids.some((sid) => line.includes(`session=${sid}`)),
+    )
+  if (kept.length === 0) return null
+  return linesSection(
+    "lifecycle start/complete for this test's panes (every trace, by session)",
+    kept.slice(-LIFECYCLE_LINES),
+    kept.length - Math.min(kept.length, LIFECYCLE_LINES),
+  )
 }
 
 /** Render one source's lines, bounded to the last MAX_BACKEND_LINES with a

@@ -12,6 +12,7 @@ import {
   repaintStoredRows,
   paintUnreadableRows,
   parseStoredBlockRows,
+  storedBlockRowsForSelection,
   type StoredBlockRows,
 } from './block-rows'
 import { blockOutputText } from './blocks'
@@ -513,5 +514,54 @@ describe('stored block rows', () => {
     // three columns wide and put every later cell one column right of the
     // model (review of nocx-zg3k3.2, 2026-09-28; paint-row.ts skips it).
     expect(block.querySelector('.term-grid-row')?.textContent).toBe('汉')
+  })
+
+  // THE CACHE'S LIFETIME (nocx-3an1s.1.6). Selection resolves rows by the
+  // block element that painted them, and by the artifact version those rows
+  // carry. Both halves were once a module-global Map keyed by block id plus
+  // version with no deletion at all: a closed tab's rows stayed reachable, and
+  // every newer read of the same block left the older artifact beside it.
+  describe('the stored rows selection resolves', () => {
+    it('forgets a superseded artifact version when the newer one paints', () => {
+      const block = document.createElement('article')
+      block.dataset.entryId = 'versioned-block'
+      paintStoredRows(
+        block,
+        { ...stored, artifactVersion: 'artifact-v4' },
+        { metric: null, palette: DEFAULT_SNAPSHOT },
+      )
+      expect(storedBlockRowsForSelection(block, 'artifact-v4')).not.toBeNull()
+
+      paintStoredRows(
+        block,
+        { ...stored, artifactVersion: 'artifact-v5' },
+        { metric: null, palette: DEFAULT_SNAPSHOT },
+      )
+
+      // A pinned lookup for the replaced artifact answers nothing: serving it
+      // would map a logical row onto columns of an artifact that no longer
+      // describes this block.
+      expect(storedBlockRowsForSelection(block, 'artifact-v4')).toBeNull()
+      expect(storedBlockRowsForSelection(block, 'artifact-v5')?.artifactVersion).toBe('artifact-v5')
+    })
+
+    it('keeps the rows with the element that painted them, never with the block id alone', () => {
+      const painted = document.createElement('article')
+      painted.dataset.entryId = 'shared-block'
+      const other = document.createElement('article')
+      other.dataset.entryId = 'shared-block'
+
+      paintStoredRows(
+        painted,
+        { ...stored, artifactVersion: 'artifact-v1' },
+        { metric: null, palette: DEFAULT_SNAPSHOT },
+      )
+
+      expect(storedBlockRowsForSelection(painted, 'artifact-v1')).not.toBeNull()
+      // The visual freeze replaces a block's element; the replacement is its
+      // own owner and has painted nothing until it does. A lookup by id alone
+      // would hand it the discarded element's rows.
+      expect(storedBlockRowsForSelection(other, 'artifact-v1')).toBeNull()
+    })
   })
 })

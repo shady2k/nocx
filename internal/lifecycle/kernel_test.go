@@ -910,12 +910,16 @@ func TestPromptReadyOverUnstartedAttemptAttaches(t *testing.T) {
 	if stillOpen.State != AttemptOpen || stillOpen.Started {
 		t.Fatalf("a stray prompt_ready must not touch the pending attempt, got %+v", stillOpen)
 	}
-	// The lane's own state is honest either way — the shell really is at a
-	// prompt right now — but the ATTEMPT is what preserves the binding, and
+	// THE LANE STAYS RUNNING (nocx-atpw5.1.41). It used to report PromptReady
+	// here — "the shell really is at a prompt right now" — and that is the
+	// flicker this bead is about: the prompt this mark belongs to is the one
+	// the person LEFT by submitting, so every pane was told the prompt was
+	// back, the composer returned, and the real start below hid it again with
+	// a keystroke in between. The ATTEMPT is what preserves the binding, and
 	// that is what the rest of this test is about.
 	st := mustState(t, k, "L")
-	if st.Lifecycle != LifecyclePromptReady {
-		t.Fatalf("lane must report the shell's own honest state, got %v", st.Lifecycle)
+	if st.Lifecycle != LifecycleRunning {
+		t.Fatalf("a prompt mark over a submitted attempt must leave the lane Running, got %v", st.Lifecycle)
 	}
 
 	// The genuine, slightly-later start for the same command must attach to
@@ -990,6 +994,54 @@ func TestPromptReadyOverUnstartedAttemptClosesOnSecondPromptReady(t *testing.T) 
 	}
 	if att2.ID == att.ID {
 		t.Fatalf("the new attempt must not reuse the closed one's id")
+	}
+}
+
+// TestLatePromptOverSubmittedAttemptKeepsTheLaneRunning (nocx-atpw5.1.41): the
+// shell's own prompt mark for the prompt the person LEFT can arrive after the
+// submit that left it — PROMPT_COMMAND's prompt_ready and the DEBUG trap's
+// start for one command race, in either order (attempt.go, racedPromptReady).
+// Reporting PromptReady for it told every pane the prompt was back the moment
+// Enter was pressed: the composer returned and took the keyboard, the shell's
+// real start took it away again, and a keystroke typed in that flicker went to
+// the pty. A reported `printf` lost its `E` into readline that way.
+func TestLatePromptOverSubmittedAttemptKeepsTheLaneRunning(t *testing.T) {
+	k, _, _ := newTestKernel()
+	p := &fakePort{}
+	_ = k.BindTransport("T", p)
+	h := establish(t, k, "T", p, "L", nil)
+
+	att, err := k.SubmitAttempt(h.Domain, "printf 'UP-ROW\\n'", "/", "local", "submit-1")
+	if err != nil {
+		t.Fatalf("SubmitAttempt: %v", err)
+	}
+	if st := mustState(t, k, "L"); st.Lifecycle != LifecycleRunning {
+		t.Fatalf("after a submit the lane must be Running, got %v", st.Lifecycle)
+	}
+
+	// The late mark of the prompt the person left. It primes the attempt — the
+	// imminent start must still attach to it — and it must not report a prompt.
+	mustIngest(t, k, "T", env("L", h, 2, promptReadyEvt()))
+	if st := mustState(t, k, "L"); st.Lifecycle != LifecycleRunning {
+		t.Fatalf("a late prompt mark over a submitted attempt must leave the lane Running, got %v", st.Lifecycle)
+	}
+	if open, ok := k.OpenAttempt(h.Domain); !ok || open.ID != att.ID {
+		t.Fatalf("the submitted attempt must still be the open one, got %+v ok=%v", open, ok)
+	}
+
+	// Its real start attaches, as it always did, and the completion ends at the
+	// prompt — the recovery the priming exists for is unchanged.
+	mustIngest(t, k, "T", env("L", h, 3, startEvt(nil, "printf 'UP-ROW\\n'")))
+	if st := mustState(t, k, "L"); st.Lifecycle != LifecycleRunning {
+		t.Fatalf("the shell's own start must keep the lane Running, got %v", st.Lifecycle)
+	}
+	mustIngest(t, k, "T", env("L", h, 4, completeEvt(att.ID, 0, fence(0x41))))
+	// A completion leaves the lane Running with a completed attempt — the
+	// prompt mark is what ends the interval — so the next prompt must still
+	// reach PromptReady, which is the recovery this whole path exists for.
+	mustIngest(t, k, "T", env("L", h, 5, promptReadyEvt()))
+	if st := mustState(t, k, "L"); st.Lifecycle != LifecyclePromptReady {
+		t.Fatalf("the prompt after the completion must end at PromptReady, got %v", st.Lifecycle)
 	}
 }
 

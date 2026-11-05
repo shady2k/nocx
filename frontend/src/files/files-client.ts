@@ -6,7 +6,7 @@
 // FilesPanelServices so tests can substitute a fake without a WebSocket
 // (the ports pattern, nocx-wzc4).
 
-import type { Dispatcher } from '../dispatcher'
+import type { CallOrigin, Dispatcher } from '../dispatcher'
 import type { FilesOpenResult } from '../generated/files.open'
 import type { FilesListResult } from '../generated/files.list'
 import type { FilesStatResult } from '../generated/files.stat'
@@ -25,17 +25,30 @@ class FilesClient {
    *  later call echoes, plus the root the tree starts at (D1, D2). rootPath
    *  is the verified OSC 7 cwd when the composition layer has one — the one
    *  client-minted input that is an address, never an identity (D4). */
-  open(sessionId: string, rootPath?: string): Promise<FilesOpenResult> {
+  open(sessionId: string, rootPath?: string, origin?: CallOrigin): Promise<FilesOpenResult> {
     return this.dispatcher.call<FilesOpenResult>(
       'files.open',
       rootPath ? { sessionId, rootPath } : { sessionId },
+      undefined,
+      { origin },
     )
   }
 
   /** One page of one directory: ok, tooLarge or timedOut — state is the
    *  discriminator and the caller switches on it first (D14). */
-  list(bindingId: string, path: string, offset: number, limit: number): Promise<FilesListResult> {
-    return this.dispatcher.call<FilesListResult>('files.list', { bindingId, path, offset, limit })
+  list(
+    bindingId: string,
+    path: string,
+    offset: number,
+    limit: number,
+    origin?: CallOrigin,
+  ): Promise<FilesListResult> {
+    return this.dispatcher.call<FilesListResult>(
+      'files.list',
+      { bindingId, path, offset, limit },
+      undefined,
+      { origin },
+    )
   }
   /** Classify one path without enumerating its parent directory. */
   stat(bindingId: string, path: string): Promise<FilesStatResult> {
@@ -54,8 +67,10 @@ class FilesClient {
    *  a directory cannot leak a watch. Answers the refresh mode now serving
    *  the set (design §5.5), the only client-visible half of the watching
    *  machinery (D14). */
-  watch(bindingId: string, paths: string[]): Promise<FilesWatchResult> {
-    return this.dispatcher.call<FilesWatchResult>('files.watch', { bindingId, paths })
+  watch(bindingId: string, paths: string[], origin?: CallOrigin): Promise<FilesWatchResult> {
+    return this.dispatcher.call<FilesWatchResult>('files.watch', { bindingId, paths }, undefined, {
+      origin,
+    })
   }
 
   /** Whether the panel showing this binding's tree is on screen. While it
@@ -64,8 +79,13 @@ class FilesClient {
    *  collapsed sidebar used to cost exactly as much as an open one. A
    *  hidden→visible edge polls once immediately, so nobody waits an
    *  interval for a panel they just opened (design §5.5). */
-  visible(bindingId: string, visible: boolean): Promise<FilesVisibleResult> {
-    return this.dispatcher.call<FilesVisibleResult>('files.visible', { bindingId, visible })
+  visible(bindingId: string, visible: boolean, origin?: CallOrigin): Promise<FilesVisibleResult> {
+    return this.dispatcher.call<FilesVisibleResult>(
+      'files.visible',
+      { bindingId, visible },
+      undefined,
+      { origin },
+    )
   }
 
   /** Show a path in the OS file manager. The backend refuses a remote
@@ -111,41 +131,50 @@ class FilesClient {
 
   /** Release the binding — its provider, its pooled SSH reference, its
    *  watches. An empty result is still the contract. */
-  close(bindingId: string): Promise<FilesCloseResult> {
-    return this.dispatcher.call<FilesCloseResult>('files.close', { bindingId })
+  close(bindingId: string, origin?: CallOrigin): Promise<FilesCloseResult> {
+    return this.dispatcher.call<FilesCloseResult>('files.close', { bindingId }, undefined, {
+      origin,
+    })
   }
 }
 
 /** The panel's entire backend surface, so a test can substitute a fake. */
 export interface FilesPanelServices {
-  open(sessionId: string, rootPath?: string): Promise<FilesOpenResult>
+  open(sessionId: string, rootPath?: string, origin?: CallOrigin): Promise<FilesOpenResult>
   stat(bindingId: string, path: string): Promise<FilesStatResult>
-  list(bindingId: string, path: string, offset: number, limit: number): Promise<FilesListResult>
+  list(
+    bindingId: string,
+    path: string,
+    offset: number,
+    limit: number,
+    origin?: CallOrigin,
+  ): Promise<FilesListResult>
   read(bindingId: string, path: string, maxBytes: number): Promise<FilesReadResult>
-  watch(bindingId: string, paths: string[]): Promise<FilesWatchResult>
-  visible(bindingId: string, visible: boolean): Promise<FilesVisibleResult>
+  watch(bindingId: string, paths: string[], origin?: CallOrigin): Promise<FilesWatchResult>
+  visible(bindingId: string, visible: boolean, origin?: CallOrigin): Promise<FilesVisibleResult>
   reveal(bindingId: string, path: string): Promise<FilesRevealResult>
   subscribeFilesChanged(handler: (params: FilesChanged) => void): () => void
   subscribeFilesRefreshStateChanged(handler: (params: FilesRefreshStateChanged) => void): () => void
   onConnect(handler: () => void): () => void
-  close(bindingId: string): Promise<FilesCloseResult>
+  close(bindingId: string, origin?: CallOrigin): Promise<FilesCloseResult>
 }
 
 /** Real implementation over the dispatcher. */
 export function createFilesPanelServices(dispatcher: Dispatcher): FilesPanelServices {
   const client = new FilesClient(dispatcher)
   return {
-    open: (sessionId, rootPath) => client.open(sessionId, rootPath),
+    open: (sessionId, rootPath, origin) => client.open(sessionId, rootPath, origin),
     stat: (bindingId, path) => client.stat(bindingId, path),
-    list: (bindingId, path, offset, limit) => client.list(bindingId, path, offset, limit),
+    list: (bindingId, path, offset, limit, origin) =>
+      client.list(bindingId, path, offset, limit, origin),
     read: (bindingId, path, maxBytes) => client.read(bindingId, path, maxBytes),
-    watch: (bindingId, paths) => client.watch(bindingId, paths),
-    visible: (bindingId, isVisible) => client.visible(bindingId, isVisible),
+    watch: (bindingId, paths, origin) => client.watch(bindingId, paths, origin),
+    visible: (bindingId, isVisible, origin) => client.visible(bindingId, isVisible, origin),
     reveal: (bindingId, path) => client.reveal(bindingId, path),
     subscribeFilesRefreshStateChanged: (handler) =>
       client.subscribeFilesRefreshStateChanged(handler),
     subscribeFilesChanged: (handler) => client.subscribeFilesChanged(handler),
     onConnect: (handler) => client.onConnect(handler),
-    close: (bindingId) => client.close(bindingId),
+    close: (bindingId, origin) => client.close(bindingId, origin),
   }
 }

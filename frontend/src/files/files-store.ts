@@ -40,6 +40,7 @@ import type { FilesListResult, FilesListEntry } from '../generated/files.list'
 import type { FilesChanged } from '../generated/files.changed'
 import type { FilesRefreshStateChanged } from '../generated/files.refreshStateChanged'
 import type { FilesPanelServices } from './files-client'
+import type { CallOrigin } from '../dispatcher'
 import type { ActiveOrigin } from '../pane-content'
 import { isExpandable, type TreeRowKind } from '../ui/tree-row-kind'
 
@@ -307,6 +308,14 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
   /** True between dispose() and the next rescope(): late responses from a
    *  previous life of this store must not touch the reset state. */
   let closed = true
+  /** Whether the panel showing this tree is on screen. FALSE until the
+   *  sidebar first shows Files, which is the state in which this store does
+   *  no work at all (ADR-8eej3e66 §9, setVisible). */
+  let panelVisible = false
+  /** The session the open binding belongs to, so the panel showing on a tab
+   *  that moved while it was hidden can tell that the tree is the wrong one
+   *  without keeping a second copy of the origin. */
+  let openedSession: string | null = null
 
   const [phase, setPhase] = createSignal<FilesPanelPhase>('no-origin')
   const [openError, setOpenError] = createSignal<string | null>(null)
@@ -900,15 +909,18 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
 
   /** The last (binding, visibility) pair the backend was actually told, so
    *  a re-render cannot re-send what it already knows and a NEW binding
-   *  re-sends even when the flag itself did not move — a fresh watcher
-   *  starts visible, so a rescope while the panel is hidden must correct it.
+   *  re-sends even when the flag itself did not move.
    *
    *  Cleared on failure rather than left standing: a refused "I am hidden"
    *  would otherwise be remembered as sent, and the poll it was meant to
    *  stop would run until the next transition. */
   let publishedVisible: { bindingId: string; visible: boolean } | null = null
 
-  function setVisible(visible: boolean): void {
+  /** Tell the backend whether the panel showing this tree is on screen. A
+   *  refused signal is not worth a message in the panel — the next
+   *  transition retries, and the cost of losing one is a poll that keeps
+   *  running. */
+  function publishVisibility(visible: boolean): void {
     const ctx = captureCtx()
     if (ctx === null) return
     const bindingId = ctx.bindingId as string
@@ -920,10 +932,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
       return
     }
     publishedVisible = { bindingId, visible }
-    void services.visible(bindingId, visible).catch(() => {
-      // Sticky nothing: the next transition retries. A visibility signal is
-      // not worth a message in the panel — the cost of losing one is a poll
-      // that keeps running, which the next transition corrects.
+    void services.visible(bindingId, visible, 'background').catch(() => {
       if (
         publishedVisible !== null &&
         publishedVisible.bindingId === bindingId &&
@@ -934,15 +943,82 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     })
   }
 
+  /**
+   * Whether the panel showing this tree is on screen — and the switch that
+   * makes the store do any work at all (ADR-8eej3e66 §9).
+   *
+   * The panel is MOUNTED while the sidebar is collapsed, and it is mounted
+   * again whenever another view is not in front, so "mounted" has never
+   * meant "looked at". Until this is true the store opens no binding,
+   * lists nothing, watches nothing and walks no reveal: a tab switch or a
+   * `cd` updates the origin it would open at and stops there. That is what
+   * a closed panel costs, which is nothing.
+   *
+   * On the way in, the work starts: a binding that is gone (or was never
+   * made) is opened for the origin recorded while hidden, a failed open is
+   * asked again, and a watch that was refused in the background is
+   * re-sent. On the way out, a reveal in flight is stopped and the backend
+   * is told to stop its poll — the binding survives, because closing and
+   * re-opening it on every glance at another view is the churn this flag
+   * exists to avoid.
+   */
+  function setVisible(visible: boolean): void {
+    const was = panelVisible
+    panelVisible = visible
+    if (!visible) {
+      if (was) {
+        // A walk nobody can see is work for nothing, and its pending
+        // promise belongs to whatever asked for it — settle it.
+        revealing = false
+        revealWalkId++
+        cancelReveal()
+      }
+      if (binding() !== null) publishVisibility(false)
+      return
+    }
+    if (was && binding() !== null) return
+    ensureScope()
+  }
+
+  /** Start (or resume) the scope's work now that the panel is on screen. */
+  function ensureScope(): void {
+    if (!panelVisible) return
+    const o = untrack(origin)
+    if (o === null) return
+    const b = untrack(binding)
+    if (b === null) {
+      if (phase() === 'opening') return
+      // A fresh open, or the re-ask of one refused while hidden. Both are
+      // the same call: nothing on screen had a tree, and now something does.
+      openScope(o)
+      return
+    }
+    if (openedSession !== o.sessionId) {
+      // The tab moved to another machine while nobody was looking. The
+      // binding cannot serve the tree now wanted, so it is swapped the same
+      // way a visible rescope swaps it.
+      restartScope(o)
+      return
+    }
+    publishVisibility(true)
+    // Background work refused while hidden is asked again by its natural
+    // trigger, and this is it: the panel is being looked at.
+    if (watchFailed() !== null || publishedWatchPaths === null) {
+      forgetPublishedWatchSet()
+      void syncWatchSet()
+    }
+  }
+
   function issueList(
     dir: FilesRoot | FilesNode,
     offset: number,
     limit: number,
     ctx: ListCtx,
+    origin: CallOrigin = 'person',
   ): Promise<void> {
     dir.busy = true
     bumpTree()
-    return services.list(ctx.bindingId as string, dir.path, offset, limit).then(
+    return services.list(ctx.bindingId as string, dir.path, offset, limit, origin).then(
       (res) =>
         untrack(() => {
           applyListing(dir, ctx, res)
@@ -1006,7 +1082,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
   function refreshDir(dir: FilesRoot | FilesNode, ctx?: ListCtx): void {
     const next = ctx ?? captureCtx()
     if (next === null) return
-    void issueList(dir, 0, refreshLimit(dir), next)
+    void issueList(dir, 0, refreshLimit(dir), next, 'background')
   }
 
   /** Send the watch set the panel currently renders — files.watch REPLACES
@@ -1022,14 +1098,14 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
   function pushWatchSet(): Promise<void> {
     const ctx = captureCtx()
     const r = untrack(root)
-    if (ctx === null || r === null) return Promise.resolve()
+    if (!panelVisible || ctx === null || r === null) return Promise.resolve()
     // Recorded at the point the paths are read, and NOT rolled back on
     // failure: a rejected watch is a sticky failure the user retries through
     // the header refresh (§5.5), so re-sending the identical set on the next
     // listing would erase the message it is supposed to leave up.
     const paths = currentWatchPaths(r)
     publishedWatchPaths = paths
-    watchInFlight = services.watch(ctx.bindingId as string, paths).then(
+    watchInFlight = services.watch(ctx.bindingId as string, paths, 'background').then(
       (res) => {
         if (!scopeCurrent(ctx)) return
         setWatchFailed(null)
@@ -1054,7 +1130,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
    *  in the set, so publishing per level would baseline the growing path N
    *  times over. The walk's end calls this once. */
   function syncWatchSet(): Promise<void> {
-    if (revealing) return watchInFlight
+    if (!panelVisible || revealing) return watchInFlight
     const r = untrack(root)
     if (r === null) return watchInFlight
     const want = currentWatchPaths(r)
@@ -1156,7 +1232,8 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     // from the panel — the panel is a file manager from / whether or not
     // the shell reports where it is.
     const ctx = { paneId: o.paneId, generation }
-    const opening = services.open(o.sessionId, '/')
+    openedSession = o.sessionId
+    const opening = services.open(o.sessionId, '/', 'background')
     opening
       .then((res) => {
         if (!openCurrent(ctx)) return
@@ -1184,7 +1261,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
         const r = untrack(root)
         if (b !== null && r !== null) {
           const listCtx: ListCtx = { paneId: o.paneId, generation, bindingId: b.bindingId }
-          void issueList(r, 0, FILES_PAGE_SIZE, listCtx).then(async () => {
+          void issueList(r, 0, FILES_PAGE_SIZE, listCtx, 'background').then(async () => {
             if (!scopeCurrent(listCtx)) {
               cancelReveal()
               return
@@ -1206,7 +1283,13 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
             // origin — the cwd may have moved while open/list/watch were in
             // flight, and the walk reads the committed root.
             const live = untrack(origin)
-            if (live !== null && live.cwdVerified && live.cwd !== null && live.cwdFollow) {
+            if (
+              panelVisible &&
+              live !== null &&
+              live.cwdVerified &&
+              live.cwd !== null &&
+              live.cwdFollow
+            ) {
               void revealPath(live.cwd)
             }
           })
@@ -1216,7 +1299,12 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
         if (!openCurrent(ctx)) return
         pendingReveal = null
         cancelReveal()
+        openedSession = null
         setPhase('failed')
+        // The panel names what failed and keeps the Retry — the header
+        // refresh re-asks (phase 'failed' with no binding). A refusal here
+        // is a named local failure, never a sentence about the terminal
+        // being busy: `refusalSentence` owns those words (ADR-8eej3e66 §8).
         setOpenError(messageOf(e))
       })
   }
@@ -1224,6 +1312,19 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
   function rescope(next: ActiveOrigin | null): void {
     const prev = origin()
     const prevBinding = binding()
+    // NOTHING ON SCREEN DOES NO WORK. The origin is recorded — it is where
+    // the panel would open — and no binding, listing, watch or reveal is
+    // started for it. `setVisible(true)` starts the scope from this record
+    // (ensureScope), which is why a tab switch with the sidebar collapsed
+    // costs nothing at all.
+    if (!panelVisible) {
+      // Not disposed by this: the store is live and recording where it will
+      // open; it simply has no reason to open yet.
+      closed = false
+      setOrigin(next)
+      if (next === null) releaseScope()
+      return
+    }
     // Rule 1: the same session scope keeps its binding and its tree — a
     // later OSC 7 cwd must not re-root the tree, and neither may a viewer
     // tab that answers the origin it was opened from (design §5.4): the
@@ -1272,12 +1373,24 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
       setOrigin(next)
       return
     }
+    restartScope(next)
+  }
+
+  /** Drop whatever the store holds for the old scope and open the new one.
+   *  Shared by a visible re-scope, a re-scope that happens while the panel
+   *  is shown again after the tab moved, and the origin going away. */
+  function restartScope(next: ActiveOrigin | null): void {
+    const prevBinding = binding()
     closed = false
     generation++
     if (next === null) discardFilterProjection()
     if (prevBinding !== null) {
-      void services.close(prevBinding.bindingId).catch(() => {})
+      // The store's own bookkeeping, not a person's action: the binding is
+      // released because the tree it served is gone.
+      void services.close(prevBinding.bindingId, 'background').catch(() => {})
+      publishedVisible = null
     }
+    openedSession = null
     setOrigin(next)
     setBinding(null)
     setRoot(null)
@@ -1287,6 +1400,34 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
       return
     }
     openScope(next)
+  }
+
+  /** The origin went away (no tab in front). A binding nobody can read is
+   *  released; nothing else is started. */
+  function releaseScope(): void {
+    const prevBinding = binding()
+    if (prevBinding !== null) {
+      void services.close(prevBinding.bindingId, 'background').catch(() => {})
+      publishedVisible = null
+    }
+    openedSession = null
+    closed = false
+    generation++
+    discardFilterProjection()
+    setBinding(null)
+    setRoot(null)
+    setPhase('no-origin')
+    setOpenError(null)
+    setWatchMode(null)
+    setWatchDegradedReason(null)
+    setWatchFailed(null)
+    setRefreshState(null)
+    setRevealTarget(null)
+    pendingReveal = null
+    cancelReveal()
+    revealing = false
+    revealWalkId++
+    bumpTree()
   }
 
   function toggle(node: FilesNode): void {
@@ -1530,7 +1671,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
       resumePendingPage(dir)
     }
     services
-      .list(ctx.bindingId as string, dir.path, dir.nextOffset, FILES_PAGE_SIZE)
+      .list(ctx.bindingId as string, dir.path, dir.nextOffset, FILES_PAGE_SIZE, 'background')
       .then(apply, (e) =>
         untrack(() => {
           if (!scopeCurrent(ctx)) return
@@ -1812,6 +1953,9 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
 
   function dispose(): void {
     closed = true
+    panelVisible = false
+    openedSession = null
+    publishedVisible = null
     discardFilterProjection()
     const b = binding()
     setOrigin(null)
@@ -1832,7 +1976,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     cancelReveal()
     revealWalkId++
     bumpTree()
-    if (b !== null) void services.close(b.bindingId).catch(() => {})
+    if (b !== null) void services.close(b.bindingId, 'background').catch(() => {})
     unsubChanged()
     unsubConnect()
     unsubRefreshState()

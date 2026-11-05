@@ -158,6 +158,9 @@ describe('files client over the real composition seam', () => {
     const store = createFilesTreeStore(services)
     const socket = lastSocket()
 
+    // A panel somebody is looking at: the store does no work until it is
+    // shown (ADR-8eej3e66 §9), and this test is about the wire it then uses.
+    store.setVisible(true)
     store.rescope(LOCAL_A)
     await settle()
     answer(socket, 'files.open', OPEN_RESULT)
@@ -210,6 +213,9 @@ describe('files client over the real composition seam', () => {
     const store = createFilesTreeStore(services)
     const socket = lastSocket()
 
+    // A panel somebody is looking at: the store does no work until it is
+    // shown (ADR-8eej3e66 §9), and this test is about the wire it then uses.
+    store.setVisible(true)
     store.rescope(LOCAL_A)
     await settle()
     answer(socket, 'files.open', OPEN_RESULT)

@@ -85,7 +85,7 @@ import { LifecycleKernel, shouldShowEditor } from './lifecycle/state'
 import { ProfileClient, type SSHProfile } from './profiles'
 import { Dispatcher, RpcError } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
-import type { SessionHandle, SessionRecovery, WSClient } from './ipc'
+import type { SessionHandle, SessionRecovery, SessionSize, WSClient } from './ipc'
 import type { SessionIntentResult } from './generated/session.intent'
 import type { SessionSignal } from './generated/session.signal'
 import {
@@ -21280,83 +21280,120 @@ describe('an alternate-screen switch holds input for its applied grid (nocx-1ebr
       globalThis.requestAnimationFrame = raf
       mounted.teardown()
     }
-    tab.setActive(true)
-    const session = sessionOf(content)
-    const scrollback = scrollbackFor(content)
-    Object.defineProperty(scrollback.scrollbackArea, 'clientWidth', {
-      configurable: true,
-      value: PANE.width,
-    })
-    Object.defineProperty(scrollback.scrollbackArea, 'clientHeight', {
-      configurable: true,
-      value: PANE.height,
-    })
-    // The pane's own box, delivered the way the presentation host delivers it.
-    content.viewportChanged({ width: PANE.width, height: PANE.height })
-    const lifecycle = lifecycleHandler(client)
-    lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
-    lifecycle({
-      lane: 'lane-1',
-      lifecycle: 'running',
-      domain: 'd1',
-      epoch: 1,
-      attempt: { id: 'alt-command', state: 'open', origin: 'shell', command: 'top' },
-    })
-    // A first frame in the normal buffer gives the pane a committed cell
-    // metric, which is what its fit measures with.
-    session.fireScreenFrame(screenFrame(1, ['$ prompt'], CELL))
-    flushFrames()
-    await vi.waitFor(() =>
-      expect(session.sendResize).toHaveBeenCalledWith({
+    try {
+      tab.setActive(true)
+      const session = sessionOf(content)
+      const scrollback = scrollbackFor(content)
+      Object.defineProperty(scrollback.scrollbackArea, 'clientWidth', {
+        configurable: true,
+        value: PANE.width,
+      })
+      Object.defineProperty(scrollback.scrollbackArea, 'clientHeight', {
+        configurable: true,
+        value: PANE.height,
+      })
+      // The pane's own box, delivered the way the presentation host delivers it.
+      content.viewportChanged({ width: PANE.width, height: PANE.height })
+      const lifecycle = lifecycleHandler(client)
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      lifecycle({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'alt-command', state: 'open', origin: 'shell', command: 'top' },
+      })
+      // A first frame in the normal buffer gives the pane a committed cell
+      // metric, which is what its fit measures with.
+      session.fireScreenFrame(screenFrame(1, ['$ prompt'], CELL))
+      flushFrames()
+      // THE MEASUREMENT IS SYNCHRONOUS, SO THERE IS NOTHING TO WAIT FOR
+      // (nocx-atpw5.1.46). What follows is the report the settle timer would
+      // send 80 ms later. Waiting for that timer through vi.waitFor gives it a
+      // one-second wall-clock budget, and a stopped event loop — a long GC
+      // pause in the whole-suite worker, a preempted runner — holds the timer
+      // past the budget. The wait then reports zero sendResize calls although
+      // flushFrames has already fitted the pane, which is the flake this
+      // fixture caused. `_reportedSize` computes that same report now, from the
+      // fit flushFrames just made, so the assertion keeps its meaning and
+      // loses its clock.
+      const measured = (content as unknown as { _reportedSize(): SessionSize })._reportedSize()
+      expect(measured).toEqual({
         cols: FITTED.cols,
         rows: FITTED.rows,
         xpixel: PANE.width,
         ypixel: GRID_HEIGHT,
-      }),
-    )
-    session.sendResize.mockClear()
-    // Setup may seat and focus the program input. Only intents produced
-    // after this boundary belong to the alternate-screen fence under test.
-    session.intent.mockClear()
-    const grid = () => tab.pane.querySelector<HTMLElement>('.term-grid')!
-    const receipts: Array<(outcome: 'applied' | 'superseded' | 'closed') => void> = []
-    const failures: Array<(error: Error) => void> = []
-    session.resizeApplied.mockImplementation(
-      () =>
-        new Promise<'applied' | 'superseded' | 'closed'>((resolve, reject) => {
-          receipts.push(resolve)
-          failures.push(reject)
-        }),
-    )
-    const switchFrame = (): SessionFrame => {
-      const frame = screenFrame(2, ['ALT-READY'], { ...CELL, cols: 40, rows: 20 })
-      frame.state.bufferKind = 'alternate'
-      frame.state.mouseTracking = true
-      session.fireScreenFrame(frame)
-      return frame
-    }
-    const drawProgramFrame = (revision: number, cols = 100): SessionFrame => {
-      const frame = screenFrame(revision, ['ALT-READY'], { ...CELL, cols, rows: 20 })
-      frame.state.bufferKind = 'alternate'
-      frame.state.mouseTracking = true
-      session.fireScreenFrame(frame)
-      return frame
-    }
-    return {
-      content,
-      session,
-      tab,
-      grid,
-      // `receipt`/`fail` answer the NEWEST request, the way the transport's
-      // newest request owns the pending slot.
-      receipt: (outcome) => receipts[receipts.length - 1]?.(outcome),
-      receiptAt: (index, outcome) => receipts[index]?.(outcome),
-      fail: (error) => failures[failures.length - 1]?.(error),
-      switchFrame,
-      drawProgramFrame,
-      requested: () => receipts.length,
-      flushFrames,
-      teardown,
+      })
+      // The settle itself is left armed. Nothing between this point and the
+      // first switch yields to a timer — the switch is the test body's first
+      // act, one microtask away — and the switch's own request cancels it.
+      // THE SETUP'S OWN INTENTS HAVE TO LAND BEFORE THIS BOUNDARY (nocx-atpw5.1.46).
+      // prompt_ready seats the grid's keyboard, and the focus intent that
+      // produces is accepted and queued; the queue delivers over microtasks,
+      // so a clear taken now would let a setup focus land during the test —
+      // which is what a load-sensitive wait for the settle timer used to hide.
+      // Drain the product's own queue in microtasks and hold the boundary to
+      // it: no clock, and a queue that needs anything else fails here once.
+      const callQueue = content as unknown as {
+        _sessionCallQueue: unknown[]
+        _sessionCallSending: boolean
+      }
+      for (
+        let turn = 0;
+        turn < 100 && (callQueue._sessionCallQueue.length > 0 || callQueue._sessionCallSending);
+        turn++
+      ) {
+        await Promise.resolve()
+      }
+      expect(callQueue._sessionCallQueue).toHaveLength(0)
+      expect(callQueue._sessionCallSending).toBe(false)
+      session.sendResize.mockClear()
+      // Setup may seat and focus the program input. Only intents produced
+      // after this boundary belong to the alternate-screen fence under test.
+      session.intent.mockClear()
+      const grid = () => tab.pane.querySelector<HTMLElement>('.term-grid')!
+      const receipts: Array<(outcome: 'applied' | 'superseded' | 'closed') => void> = []
+      const failures: Array<(error: Error) => void> = []
+      session.resizeApplied.mockImplementation(
+        () =>
+          new Promise<'applied' | 'superseded' | 'closed'>((resolve, reject) => {
+            receipts.push(resolve)
+            failures.push(reject)
+          }),
+      )
+      const switchFrame = (): SessionFrame => {
+        const frame = screenFrame(2, ['ALT-READY'], { ...CELL, cols: 40, rows: 20 })
+        frame.state.bufferKind = 'alternate'
+        frame.state.mouseTracking = true
+        session.fireScreenFrame(frame)
+        return frame
+      }
+      const drawProgramFrame = (revision: number, cols = 100): SessionFrame => {
+        const frame = screenFrame(revision, ['ALT-READY'], { ...CELL, cols, rows: 20 })
+        frame.state.bufferKind = 'alternate'
+        frame.state.mouseTracking = true
+        session.fireScreenFrame(frame)
+        return frame
+      }
+      return {
+        content,
+        session,
+        tab,
+        grid,
+        // `receipt`/`fail` answer the NEWEST request, the way the transport's
+        // newest request owns the pending slot.
+        receipt: (outcome) => receipts[receipts.length - 1]?.(outcome),
+        receiptAt: (index, outcome) => receipts[index]?.(outcome),
+        fail: (error) => failures[failures.length - 1]?.(error),
+        switchFrame,
+        drawProgramFrame,
+        requested: () => receipts.length,
+        flushFrames,
+        teardown,
+      }
+    } catch (err) {
+      teardown()
+      throw err
     }
   }
 

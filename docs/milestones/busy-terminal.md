@@ -100,7 +100,13 @@ v0-8 took 17 findings against its budget of 10.
 
 ## Finding budget
 
-**10**, raised from 5 by the owner on 2026-10-30 when the fifth finding (the agent TUI
+**12**, raised from 10 on 2026-11-05 when the owner approved implementing both
+findings from the #692 multi-tab investigation ("let's implement the improvements",
+translated from Russian):
+synthetic focus intents delaying input (`nocx-nxww4`) and repeated retained-output
+painting in visible and hidden panes (`nocx-aqrem`). Both serve O1; no planned work
+is displaced. The separate Files and output-gap findings are not admitted by this
+decision. It was **10**, raised from 5 by the owner on 2026-10-30 when the fifth finding (the agent TUI
 pane flipping between views) arrived; the milestone had absorbed unplanned pipeline repairs (the nightly's
 sign and proof steps, the tracker move) beside its five findings. It was **5**, set in `.githooks/backlog-gate/config.json`. The work is small and already
 written; v0-8 took 17 findings against 10, mostly flakes, so a larger budget would let

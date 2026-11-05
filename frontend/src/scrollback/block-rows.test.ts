@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 import type { LedgerBlockRowsLine, Mark } from '../generated/ledger.blockRows'
 import { styleOf, wireRowOf, type CellSpec } from '../painter/fixtures'
 import { CommandSnapshotStore } from '../command-snapshot'
-import { DEFAULT_SNAPSHOT } from './serializer'
+import { DEFAULT_SNAPSHOT, type TerminalSnapshot } from './serializer'
 import { restoredBlock } from './restored-block'
 import {
   blockColumnsOf,
@@ -13,9 +13,11 @@ import {
   paintUnreadableRows,
   parseStoredBlockRows,
   storedBlockRowsForSelection,
+  storedBlockRowsText,
   type StoredBlockRows,
 } from './block-rows'
 import { blockOutputText } from './blocks'
+import type { RunMetric } from './run-geometry'
 
 const PLAIN = styleOf()
 
@@ -100,6 +102,47 @@ describe('stored block rows', () => {
       'abc',
     ])
     expect(block.querySelector('.cmd-output')?.classList.contains('cmd-output-evicted')).toBe(false)
+  })
+
+  it('replaces a restored eviction sentence with the rows that are its real body', () => {
+    // A command whose body is a rows artifact answers `body: null` to the
+    // restore, so the block is built saying "Output is no longer kept"; the
+    // artifact's rows are then the body. Keeping both leaves a person
+    // reading real output and its own obituary side by side, and leaves two
+    // `.cmd-output` elements where the product has one body.
+    const container = document.createElement('div')
+    const block = restoredBlock(
+      {
+        id: 1,
+        command: 'make test',
+        cwd: '/repo',
+        location: '',
+        durationMs: 1200,
+        exitCode: 0,
+        status: 'success',
+        body: null,
+        author: 'shell',
+        kind: 'command',
+        entryId: 'entry-evicted',
+      },
+      DEFAULT_SNAPSHOT,
+      () => container,
+      () => {},
+      new CommandSnapshotStore(),
+    )
+    expect(block.querySelector('.cmd-output-evicted')).not.toBeNull()
+
+    paintStoredRows(
+      block,
+      { ...stored, artifactVersion: 'v1' },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+
+    const outputs = [...block.querySelectorAll('.cmd-output')]
+    expect(outputs).toHaveLength(1)
+    expect(outputs[0].textContent).toContain('ok')
+    expect(outputs[0].classList.contains('cmd-output-evicted')).toBe(false)
+    expect(block.dataset.outputEvicted).toBeUndefined()
   })
 
   it("warms cell-fit with every row's cells before painting a single one (nocx-2v80t.3.18)", () => {
@@ -197,6 +240,253 @@ describe('stored block rows', () => {
     expect(rows[1].querySelector('span')?.getAttribute('style')).toContain(
       'background: rgb(1, 2, 3)',
     )
+  })
+
+  describe('incremental retained output', () => {
+    const options = { metric: null, palette: DEFAULT_SNAPSHOT }
+    const artifact = (
+      lines: readonly LedgerBlockRowsLine[],
+      artifactVersion = 'v1',
+    ): StoredBlockRows => ({ ...stored, lines, artifactVersion })
+    const line = (from: number, text: string): LedgerBlockRowsLine => ({ from, row: { text } })
+    const rowsOf = (block: HTMLElement) => [
+      ...block.querySelectorAll<HTMLElement>('.term-grid-row'),
+    ]
+
+    it('keeps selected text, links and scroll position while warming only appended rows', () => {
+      const block = document.createElement('article')
+      block.dataset.entryId = 'growing'
+      document.body.appendChild(block)
+      const text = 'see docs/architecture.md:101'
+      paintStoredRows(block, artifact([line(40, text)]), options)
+      const output = block.querySelector<HTMLElement>('.cmd-output')!
+      const first = rowsOf(block)[0]
+      const link = first.querySelector('.term-link')!
+      const selectedText = link.firstChild!
+      const selection = window.getSelection()!
+      const range = document.createRange()
+      range.setStart(selectedText, 0)
+      range.setEnd(selectedText, 4)
+      selection.removeAllRanges()
+      selection.addRange(range)
+      output.scrollLeft = 19
+      const warmed: string[] = []
+      try {
+        paintStoredRows(block, artifact([line(40, text), line(41, 'new')], 'v2'), {
+          ...options,
+          palette: { ...DEFAULT_SNAPSHOT, palette: [...DEFAULT_SNAPSHOT.palette] },
+          warm: (candidates) => {
+            for (const candidate of candidates) warmed.push(candidate.chars)
+          },
+        })
+        expect(block.querySelector('.cmd-output')).toBe(output)
+        expect(rowsOf(block)[0]).toBe(first)
+        expect(first.querySelector('.term-link')).toBe(link)
+        expect(selection.anchorNode).toBe(selectedText)
+        expect(selection.toString()).toBe('docs')
+        expect(output.scrollLeft).toBe(19)
+        expect(rowsOf(block)[1].textContent?.trimEnd()).toBe('new')
+        expect(warmed).toEqual(['n', 'e', 'w'])
+        expect(first.dataset.artifactVersion).toBe('v2')
+        expect(storedBlockRowsForSelection(block, 'v1')).toBeNull()
+        expect(storedBlockRowsForSelection(block, 'v2')?.lines).toHaveLength(2)
+      } finally {
+        selection.removeAllRanges()
+        block.remove()
+      }
+    })
+
+    it('reconciles by ledger position through prefix eviction, replacement and insertion', () => {
+      const block = document.createElement('article')
+      paintStoredRows(block, artifact([line(10, 'aaa'), line(11, 'bbb'), line(13, 'ddd')]), options)
+      const [evicted, retained, changed] = rowsOf(block)
+      const output = block.querySelector('.cmd-output')
+      paintStoredRows(
+        block,
+        artifact([line(11, 'bbb'), line(12, 'ccc'), line(13, 'new')], 'v2'),
+        options,
+      )
+      expect(block.querySelector('.cmd-output')).toBe(output)
+      expect(rowsOf(block).map((row) => row.textContent)).toEqual(['bbb', 'ccc', 'new'])
+      expect(rowsOf(block).map((row) => row.dataset.logicalLine)).toEqual(['11', '12', '13'])
+      expect(rowsOf(block)[0]).toBe(retained)
+      expect(block.contains(evicted)).toBe(false)
+      expect(block.contains(changed)).toBe(false)
+    })
+
+    it('updates compact marks, runs and wrap facts without repainting an unaffected line', () => {
+      const block = document.createElement('article')
+      block.dataset.entryId = 'compact'
+      const keeper = line(2, 'xxxx')
+      paintStoredRows(block, artifact([line(1, 'ab'), keeper]), options)
+      const retained = rowsOf(block)[1]
+      const variants: LedgerBlockRowsLine['row'][] = [
+        { text: 'ab', marks: [[0, 1, 2]] },
+        { text: 'ab', marks: [[0, 1, 2]], runs: [[[0, 257 + 0x010203, 0, 0, 0], 3]] },
+        { text: 'ab', marks: [[0, 1, 2]], runs: [[[0, 257 + 0x010203, 0, 0, 0], 3]], wrap: true },
+        {
+          text: 'ab',
+          marks: [[0, 1, 2]],
+          runs: [[[0, 257 + 0x010203, 0, 0, 0], 3]],
+          continuation: true,
+        },
+      ]
+      for (const [index, row] of variants.entries()) {
+        const version = `compact-${index}`
+        paintStoredRows(block, artifact([{ from: 1, row }, line(2, 'xxxx')], version), options)
+        expect(rowsOf(block)[1]).toBe(retained)
+        expect(rowsOf(block)[0].textContent).toBe('ab ')
+        expect(storedBlockRowsForSelection(block, version)?.lines[0].row).toEqual(row)
+        if (row.runs)
+          expect(rowsOf(block)[0].querySelector('span')?.style.background).toBe('rgb(1, 2, 3)')
+      }
+    })
+
+    it('repads all lines when the widest retained row grows or is evicted', () => {
+      const block = document.createElement('article')
+      paintStoredRows(block, artifact([line(1, 'a'), line(2, 'bb')]), options)
+      const output = block.querySelector('.cmd-output')
+      paintStoredRows(block, artifact([line(1, 'a'), line(2, 'bb'), line(3, 'cccc')]), options)
+      expect(block.querySelector('.cmd-output')).toBe(output)
+      expect(rowsOf(block).map((row) => row.textContent)).toEqual(['a   ', 'bb  ', 'cccc'])
+      paintStoredRows(block, artifact([line(1, 'a'), line(2, 'bb')]), options)
+      expect(rowsOf(block).map((row) => row.textContent)).toEqual(['a ', 'bb'])
+    })
+
+    it('updates notices and artifact metadata without replacing retained rows', () => {
+      const block = document.createElement('article')
+      block.dataset.entryId = 'metadata'
+      paintStoredRows(block, artifact([line(1, 'abc')]), options)
+      const row = rowsOf(block)[0]
+      paintUnreadableRows(block)
+      paintStoredRows(block, { ...artifact([line(1, 'abc')], 'v2'), lostRows: 2 }, options)
+      expect(rowsOf(block)[0]).toBe(row)
+      expect(row.dataset.artifactVersion).toBe('v2')
+      expect(block.querySelector('[data-output-unreadable]')).toBeNull()
+      expect(block.querySelector('[data-output-incomplete]')?.textContent).toContain('lost 2 times')
+      paintStoredRows(block, artifact([line(1, 'abc')], 'v3'), options)
+      expect(rowsOf(block)[0]).toBe(row)
+      expect(block.querySelector('[data-output-incomplete]')).toBeNull()
+      paintStoredRows(block, { ...stored, lines: [line(1, 'abc')] }, options)
+      expect(rowsOf(block)[0]).toBe(row)
+      expect(row.dataset.artifactVersion).toBeUndefined()
+      expect(storedBlockRowsForSelection(block, 'v3')).toBeNull()
+    })
+
+    it('drops old paint state on empty or malformed reads and recovers on later output', () => {
+      const block = document.createElement('article')
+      paintStoredRows(block, artifact([line(1, 'abc')]), options)
+      paintStoredRows(block, { ...artifact([]), sealed: true }, options)
+      expect(block.querySelector('.cmd-output')).toBeNull()
+      expect(block.querySelector('[data-output-empty]')).not.toBeNull()
+      paintUnreadableRows(block)
+      paintStoredRows(block, artifact([line(1, 'abc')]), options)
+      expect(rowsOf(block)[0].textContent).toBe('abc')
+      expect(block.querySelector('[data-output-empty], [data-output-unreadable]')).toBeNull()
+      paintStoredRows(block, artifact([{ from: 1, row: { text: 'abc', runs: [[0, 1]] } }]), options)
+      expect(block.querySelector('.cmd-output')).toBeNull()
+      paintStoredRows(block, artifact([line(1, 'abc')]), options)
+      expect(rowsOf(block)[0].textContent).toBe('abc')
+    })
+
+    it('compares metric values and palette colors, and refreshes its state after font repaint', () => {
+      const container = document.createElement('div')
+      const block = document.createElement('article')
+      block.dataset.entryId = 'style-repaint'
+      container.appendChild(block)
+      const metric = (signature: string, advance: number): RunMetric => ({
+        cellWidth: 10,
+        defaultSpacing: 0,
+        signature,
+        advanceOf: () => advance,
+      })
+      const colored: LedgerBlockRowsLine = {
+        from: 1,
+        row: { text: 'abc', runs: [[[2, 0, 0, 0, 0], 3]] },
+      }
+      const initial = artifact([colored])
+      paintStoredRows(block, initial, { ...options, metric: metric('font-a', 8) })
+      const first = rowsOf(block)[0]
+      paintStoredRows(block, artifact([colored], 'v2'), {
+        metric: metric('font-a', 8),
+        palette: { ...DEFAULT_SNAPSHOT, palette: [...DEFAULT_SNAPSHOT.palette] },
+      })
+      expect(rowsOf(block)[0]).toBe(first)
+      expect(first.querySelector('span')?.style.letterSpacing).toBe('2px')
+      repaintStoredRows(container, { ...options, metric: metric('font-b', 6) })
+      const repainted = rowsOf(block)[0]
+      expect(repainted.querySelector('span')?.style.letterSpacing).toBe('4px')
+      paintStoredRows(block, artifact([colored, line(2, 'new')], 'v3'), {
+        ...options,
+        metric: metric('font-b', 6),
+      })
+      expect(rowsOf(block)[0]).toBe(repainted)
+      const colors: [...TerminalSnapshot['palette']] = [...DEFAULT_SNAPSHOT.palette]
+      colors[1] = '#abcdef'
+      const palette = { ...DEFAULT_SNAPSHOT, palette: colors }
+      paintStoredRows(block, artifact([colored]), { palette, metric: metric('font-b', 6) })
+      expect(rowsOf(block)[0].querySelector('span')?.style.color).toBe('rgb(171, 205, 239)')
+    })
+  })
+
+  it('preserves painted whitespace, links and procedural ink without needing DOM paint', () => {
+    const rows: StoredBlockRows = {
+      ...stored,
+      lines: [
+        { from: 10, row: { text: ' 界x ', marks: [[1, 1, 2]] } },
+        { from: 11, row: { text: 'next' } },
+        { from: 12, row: { text: 'docs/a.md' } },
+        {
+          from: 13,
+          row: wireRowOf([
+            ['█', 1, true],
+            ['', 1, false],
+            ['a', 1, true],
+            ['', 4, false],
+          ]),
+        },
+      ],
+      lostRows: 2,
+    }
+    const expected = [
+      ` 界x ${' '.repeat(4)}`,
+      `next${' '.repeat(5)}`,
+      'docs/a.md',
+      `█ a${' '.repeat(6)}`,
+    ].join('\n')
+    expect(storedBlockRowsText(rows)).toBe(expected)
+    const block = document.createElement('article')
+    paintStoredRows(block, rows, {
+      metric: {
+        cellWidth: 10,
+        defaultSpacing: 0,
+        pitch: 20,
+        signature: 'text-equivalence',
+        advanceOf: (_chars, columns) => columns * 10,
+      },
+      palette: DEFAULT_SNAPSHOT,
+    })
+    expect(block.querySelector('.term-link')?.textContent).toBe('docs/a.md')
+    expect(block.querySelector('[data-procedural] .term-cell-glyph')?.textContent).toBe('█')
+    expect(blockOutputText(block)).toBe(expected)
+    expect(storedBlockRowsText(rows)).toBe(blockOutputText(block))
+  })
+
+  it('uses the same missing-output sentences only when no readable rows exist', () => {
+    const missing: StoredBlockRows = {
+      ...stored,
+      lines: [],
+      droppedRows: 3,
+      truncated: 'cap',
+      lostRows: 2,
+    }
+    const block = document.createElement('article')
+    paintStoredRows(block, missing, { metric: null, palette: DEFAULT_SNAPSHOT })
+    expect(storedBlockRowsText(missing)).toBe(blockOutputText(block))
+    expect(storedBlockRowsText(missing)).toContain('3 rows are missing')
+    expect(storedBlockRowsText(missing)).toContain('lost 2 times')
+    expect(storedBlockRowsText({ ...stored, lines: [], sealed: true })).toBe('')
+    expect(storedBlockRowsText({ ...stored, lines: [] })).toBe('')
   })
 
   // The causes reach the card separately (ledger.get carries the artifact's

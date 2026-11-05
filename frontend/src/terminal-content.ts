@@ -164,7 +164,12 @@ import {
   toolResultForEntry,
 } from './restore-client'
 import { restoredBlock, restoredTurn } from './scrollback/restored-block'
-import { blockColumnsOf, paintStoredRows, repaintStoredRows } from './scrollback/block-rows'
+import {
+  blockColumnsOf,
+  paintStoredRows,
+  repaintStoredRows,
+  storedBlockRowsText,
+} from './scrollback/block-rows'
 import { recordStoredBlock } from './scrollback/cell-drift'
 import { toolCallTitle } from './scrollback/tool-call-title'
 import { TailFollow } from './scrollback/tail-follow'
@@ -1152,6 +1157,7 @@ export class TerminalContent extends BasePaneContent {
   private _fontMetricObserver: ResizeObserver | null = null
   private _fontUnsub: (() => void) | null = null
   private _fontRefreshFrame = 0
+  private _fontRefreshPending = false
   /** The scroller's width moved while a program held the pane; the refit
    *  waits for the next prompt (nocx-zg3k3.30). */
   private _scrollerRefitOwed = false
@@ -3039,6 +3045,7 @@ export class TerminalContent extends BasePaneContent {
           if (following) this._liveHistory?.tailReengaged()
         },
       })
+      this.scrollback.blockManager.setVisible(this._active)
 
       // ── THE LIVE REGION'S PAINTER (nocx-zg3k3.2.5) ─────────────────────
       // What a person SEES in the live region is the cell painter drawing
@@ -3088,31 +3095,12 @@ export class TerminalContent extends BasePaneContent {
       // Font identity changes can keep the same probe size. Both the explicit
       // choice and late metric changes invalidate ink through one batched path.
       const inner = this.scrollback.scrollbackInner
-      const refreshFontMetrics = (): void => {
-        if (this._disposed || this._fontRefreshFrame !== 0) return
-        this._fontRefreshFrame = requestAnimationFrame(() => {
-          this._fontRefreshFrame = 0
-          if (this._disposed) return
-          this.scrollback?.cellMetricsChanged()
-          const fit = this._cellFit
-          if (fit?.begin()) {
-            repaintStoredRows(inner, {
-              metric: metricOf(fit),
-              palette: fromITheme(getCurrentTheme()),
-              warm: (candidates) => fit.warm(candidates),
-            })
-          }
-          this._liveHistory?.fontMetricsChanged()
-          const current = this._cellModel?.current()
-          if (current) this._paintFrame(current)
-        })
-      }
-      this._fontUnsub = subscribeTerminalFontChanges(refreshFontMetrics)
+      this._fontUnsub = subscribeTerminalFontChanges(() => this._refreshFontMetrics())
       if (typeof ResizeObserver !== 'undefined') {
         measureNaturalAdvance(inner)
         const probe = inner.querySelector<HTMLElement>('.cell-metric-probe')
         if (probe) {
-          this._fontMetricObserver = new ResizeObserver(refreshFontMetrics)
+          this._fontMetricObserver = new ResizeObserver(() => this._refreshFontMetrics())
           this._fontMetricObserver.observe(probe)
         }
       }
@@ -6339,6 +6327,32 @@ export class TerminalContent extends BasePaneContent {
     this.takeKeyboardToGrid()
   }
 
+  /** Font work needs a visible measuring surface, just like retained paint.
+   *  Keep the invalidation, not a frame callback, while the pane is hidden. */
+  private _refreshFontMetrics(): void {
+    if (this._disposed) return
+    this._fontRefreshPending = true
+    if (!this._active || this._fontRefreshFrame !== 0) return
+    this._fontRefreshFrame = requestAnimationFrame(() => {
+      this._fontRefreshFrame = 0
+      if (this._disposed || !this._active) return
+      this._fontRefreshPending = false
+      const sb = this.scrollback
+      sb?.cellMetricsChanged()
+      const fit = this._cellFit
+      if (sb && fit?.begin()) {
+        repaintStoredRows(sb.scrollbackInner, {
+          metric: metricOf(fit),
+          palette: fromITheme(getCurrentTheme()),
+          warm: (candidates) => fit.warm(candidates),
+        })
+      }
+      this._liveHistory?.fontMetricsChanged()
+      const current = this._cellModel?.current()
+      if (current) this._paintFrame(current)
+    })
+  }
+
   /**
    * Visibility belongs to BasePaneContent, not keyboard focus: an unfocused
    * split still paints. Hidden panes keep accepting state without painting,
@@ -6346,8 +6360,23 @@ export class TerminalContent extends BasePaneContent {
    * applies the frame it is holding and schedules that through the paint batch.
    */
   setVisible(visible: boolean): void {
+    const wasVisible = this._active
     super.setVisible(visible)
+    const sb = this.scrollback
+    if (visible && !wasVisible && sb && !this._disposed) {
+      sb.settleAround(() => {
+        sb.blockManager.setVisible(true)
+        sb.scrollToBottomIfFollowing()
+      })
+    } else {
+      sb?.blockManager.setVisible(visible)
+    }
+    if (visible && this._fontRefreshPending) this._refreshFontMetrics()
     if (!visible) {
+      if (this._fontRefreshFrame !== 0) {
+        cancelAnimationFrame(this._fontRefreshFrame)
+        this._fontRefreshFrame = 0
+      }
       if (this._paintFrameHandle !== 0) {
         cancelAnimationFrame(this._paintFrameHandle)
         this._paintFrameHandle = 0
@@ -6617,11 +6646,9 @@ export class TerminalContent extends BasePaneContent {
       this.scrollback?.scrollbackInner ?? document.createElement('div')
     const nextId = (): number => this.scrollback!.blockManager.nextRestoredId()
     const snapshotStore = this.scrollback.snapshotStore
-    const fit = this._cellFit
-    const metric = fit !== null && fit.begin() ? metricOf(fit) : null
     const paintRows = (el: HTMLElement, entryId: string): HTMLElement => {
       const rows = bodies.get(entryId)?.rows
-      if (rows) paintStoredRows(el, rows, { metric, palette: snapshot })
+      if (rows) this.scrollback!.blockManager.paintStoredRows(el, rows)
       return el
     }
     /** One page row as the facts a restored block is built from. */
@@ -9615,6 +9642,7 @@ export class TerminalContent extends BasePaneContent {
     this._fontUnsub = null
     if (this._fontRefreshFrame !== 0) cancelAnimationFrame(this._fontRefreshFrame)
     this._fontRefreshFrame = 0
+    this._fontRefreshPending = false
     this._themeUnsub?.()
     this._themeUnsub = null
     this._historyRecordedUnsub?.()
@@ -10303,6 +10331,10 @@ export class TerminalContent extends BasePaneContent {
         return
       }
       const rows = read.rows
+      if (!this._active) {
+        sb.blockManager.applyStoredRows(entryId, rows)
+        return
+      }
       // The rows arrive asynchronously, well after the block that owns
       // them has already been laid out — a running block's own live
       // growth is followed inline (controller.ts's own height guard), but
@@ -10388,16 +10420,11 @@ export class TerminalContent extends BasePaneContent {
     const waiter = this.agentRuns.get(rec)
     if (!waiter) return
     this.agentRuns.delete(rec)
-    // `blockOutputText` reads `.cmd-output` AS IT STANDS RIGHT NOW, and at
-    // this instant the closing rows may not be painted yet: block.closed
-    // STARTS the closing read (`_refreshBlockRows`'s `blockRowsForEntry`, two
-    // more RPC round trips) and then closes the block, so the read is still
-    // in flight here. Reading now sent the run's output to the model as empty
-    // or partial text (nocx-2v80t.3.19, nocx-2v80t.3.27). `_ensureBlockRows`
-    // waits for that read, and starts one only when nothing is in flight and
-    // the record holds no rows.
+    // A close starts the final artifact read, which may still be in flight.
+    // Wait for its model, never for DOM paint: hidden panes deliberately
+    // defer that presentation until they return.
     const buildBody = (): Omit<AgentRunCompletion, 'entryId'> => {
-      const all = blockOutputText(rec.el)
+      const all = rec.storedRows ? storedBlockRowsText(rec.storedRows) : blockOutputText(rec.el)
       const lines = all.split('\n')
       let end = 0
       let chars = 0

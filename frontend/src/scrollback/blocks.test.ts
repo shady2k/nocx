@@ -21,6 +21,7 @@ import {
   type BlockKind,
 } from './blocks'
 import { paintStoredRows } from './block-rows'
+import { restoredBlock } from './restored-block'
 import type { Row } from '../generated/ledger.blockRows'
 import { wireRowOf, type CellSpec } from '../painter/fixtures'
 import { DEFAULT_SNAPSHOT } from './serializer'
@@ -4734,6 +4735,208 @@ describe('backend-owned block rows', () => {
     })
     return { inner, manager, liveContainer }
   }
+
+  it('keeps the real input focused without focus transitions while retained output grows', () => {
+    const { manager, inner, liveContainer } = newManager()
+    const input = document.createElement('textarea')
+    liveContainer.append(input)
+    manager.startBlock('printf rows', '~', 0)
+    manager.bindAttempt('entry-focus')
+    input.focus()
+    const focus = vi.fn()
+    const blur = vi.fn()
+    input.addEventListener('focus', focus)
+    input.addEventListener('blur', blur)
+    try {
+      for (let count = 1; count <= 4; count += 1) {
+        manager.applyStoredRows('entry-focus', {
+          lines: Array.from({ length: count }, (_, from) => ({ from, row: row(`row ${from}`) })),
+          droppedRows: count > 2 ? 1 : 0,
+          lostRows: 0,
+          truncated: null,
+        })
+        expect(document.activeElement).toBe(input)
+        expect(manager.runningBlock!.el.lastChild).toBe(liveContainer)
+      }
+      expect(focus).not.toHaveBeenCalled()
+      expect(blur).not.toHaveBeenCalled()
+      const other = document.createElement('button')
+      inner.append(other)
+      other.focus()
+      expect(document.activeElement).toBe(other)
+      expect(blur).toHaveBeenCalledOnce()
+      input.focus()
+      expect(focus).toHaveBeenCalledOnce()
+    } finally {
+      manager.dispose()
+      inner.remove()
+    }
+  })
+
+  it('accepts pending and newer rows while hidden, then paints only the latest on the current owner', () => {
+    const { manager, inner } = newManager()
+    const earlier = {
+      lines: [{ from: 0, row: row('earlier') }],
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+    }
+    const latest = { ...earlier, lines: [...earlier.lines, { from: 1, row: row('latest') }] }
+    try {
+      manager.setVisible(false)
+      manager.applyStoredRows('entry-hidden', earlier)
+      const rec = manager.startBlock('printf rows', '~', 0)
+      manager.bindAttempt('entry-hidden')
+      expect(rec.storedRows).toBe(earlier)
+      expect(rec.el.querySelector('.cmd-output')).toBeNull()
+      manager.applyStoredRows('entry-hidden', latest)
+      manager.applyStoredRows('entry-hidden', earlier)
+      expect(rec.storedRows).toBe(latest)
+      const old = rec.el
+      closeRunningBlock(manager)
+      expect(rec.el).not.toBe(old)
+      expect(rec.el.querySelector('.cmd-output')).toBeNull()
+      manager.setVisible(true)
+      expect(
+        blockOutputText(rec.el)
+          .split('\n')
+          .map((line) => line.trimEnd()),
+      ).toEqual(['earlier', 'latest'])
+      expect(old.querySelector('.cmd-output')).toBeNull()
+    } finally {
+      manager.dispose()
+      inner.remove()
+    }
+  })
+
+  it('forgets hidden output after clear and disposal but keeps the clear-boundary owner', () => {
+    const { manager, inner } = newManager()
+    const rows = {
+      lines: [{ from: 0, row: row('kept') }],
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+    }
+    try {
+      manager.setVisible(false)
+      const removed = manager.startBlock('old', '~', 0)
+      manager.bindAttempt('old')
+      manager.applyStoredRows('old', rows)
+      closeRunningBlock(manager)
+      const kept = manager.startBlock('clear', '~', 1)
+      manager.bindAttempt('keep')
+      manager.applyStoredRows('keep', rows)
+      manager.applyClearBoundary('keep')
+      manager.setVisible(true)
+      expect(removed.el.querySelector('.cmd-output')).toBeNull()
+      expect(blockOutputText(kept.el)).toBe('kept')
+      manager.setVisible(false)
+      manager.applyStoredRows('keep', { ...rows, lines: [{ from: 1, row: row('unpainted') }] })
+      manager.dispose()
+      manager.setVisible(true)
+      expect(blockOutputText(kept.el)).toBe('kept')
+      expect(inner.querySelector('.cmd-output')).toBeNull()
+    } finally {
+      inner.remove()
+    }
+  })
+
+  it('defers restored nested rows and unreadable notices until their pane returns', () => {
+    const { manager, inner } = newManager()
+    const restored = document.createElement('div')
+    restored.className = 'cmd-block'
+    const turn = document.createElement('div')
+    turn.className = 'cmd-block'
+    turn.append(restored)
+    try {
+      manager.setVisible(false)
+      manager.paintStoredRows(restored, {
+        lines: [{ from: 0, row: row('restored') }],
+        droppedRows: 0,
+        lostRows: 0,
+        truncated: null,
+      })
+      manager.restorePast([turn])
+      const rec = manager.startBlock('unreadable', '~', 0)
+      manager.bindAttempt('unreadable')
+      manager.markRowsUnreadable('unreadable', 'socket closed')
+      expect(rec.rowsUnreadable).toBe('socket closed')
+      expect(rec.el.querySelector('[data-output-unreadable]')).toBeNull()
+      expect(restored.querySelector('.cmd-output')).toBeNull()
+      manager.setVisible(true)
+      expect(blockOutputText(restored)).toBe('restored')
+      expect(rec.el.querySelector('[data-output-unreadable]')).not.toBeNull()
+    } finally {
+      manager.dispose()
+      inner.remove()
+    }
+  })
+
+  it('paints deferred restoration when ownership arrives after the pane was shown', () => {
+    const { manager, inner } = newManager()
+    const restored = document.createElement('div')
+    restored.className = 'cmd-block'
+    try {
+      manager.setVisible(false)
+      manager.paintStoredRows(restored, {
+        lines: [{ from: 0, row: row('late restore') }],
+        droppedRows: 0,
+        lostRows: 0,
+        truncated: null,
+      })
+      manager.setVisible(true)
+      expect(restored.querySelector('.cmd-output')).toBeNull()
+      manager.restorePast([restored])
+      expect(blockOutputText(restored)).toBe('late restore')
+    } finally {
+      manager.dispose()
+      inner.remove()
+    }
+  })
+
+  it('replaces a restored eviction sentence when deferred rows paint', () => {
+    const { manager, inner } = newManager()
+    const restored = restoredBlock(
+      {
+        id: 1,
+        command: 'printf rows',
+        cwd: '~',
+        location: '',
+        durationMs: 10,
+        exitCode: 0,
+        status: 'success',
+        body: null,
+        author: 'shell',
+        kind: 'command',
+        entryId: 'entry-deferred',
+      },
+      DEFAULT_SNAPSHOT,
+      () => inner,
+      () => {},
+      freshStore(),
+    )
+    try {
+      manager.setVisible(false)
+      manager.paintStoredRows(restored, {
+        lines: [{ from: 0, row: row('real output') }],
+        droppedRows: 0,
+        lostRows: 0,
+        truncated: null,
+      })
+      manager.restorePast([restored])
+      expect(restored.querySelectorAll('.cmd-output')).toHaveLength(2)
+
+      manager.setVisible(true)
+
+      const outputs = [...restored.querySelectorAll('.cmd-output')]
+      expect(outputs).toHaveLength(1)
+      expect(outputs[0].textContent?.trimEnd()).toBe('real output')
+      expect(restored.dataset.outputEvicted).toBeUndefined()
+    } finally {
+      manager.dispose()
+      inner.remove()
+    }
+  })
 
   it('paints streamed rows while running and replaces them as history grows', () => {
     // A real row never carries a literal '\n' cell — the grid has no such

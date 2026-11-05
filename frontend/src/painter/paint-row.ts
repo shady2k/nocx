@@ -54,6 +54,19 @@ export function fitCandidatesOf(rows: Iterable<ScreenSnapshot['rows'][number]>):
   return out
 }
 
+/** Exact painted text without building DOM. Unlike snapshotRowText's normalized
+ * active-grid text, retained command results preserve indentation and blanks. */
+export function paintedRowText(row: ScreenSnapshot['rows'][number]): string {
+  let text = ''
+  for (const cell of row.cells) text += paintedCellText(cell) ?? ''
+  return text
+}
+
+function paintedCellText(cell: ScreenSnapshot['rows'][number]['cells'][number]): string | null {
+  if (cell.width === 3) return null
+  return cell.hasText ? cell.grapheme : ' '
+}
+
 export function paintRow(
   row: ScreenSnapshot['rows'][number],
   opts: PaintRowOptions,
@@ -68,14 +81,12 @@ export function paintRow(
   // pushed every later cell one column right of the model and the mapping.
   // The frozen path's walk steps over the same blank spacer cell. A
   // spacerHead (width 4) is its own column, and paints as a blank.
-  const cells: GridCell<Style>[] = row.cells
-    .filter((cell) => cell.width !== 3)
-    .map((cell) => ({
-      chars: cell.hasText ? cell.grapheme : ' ',
-      cols: cell.span,
-      attrs: cell.style,
-      blank: !cell.hasText,
-    }))
+  const cells: GridCell<Style>[] = []
+  for (const cell of row.cells) {
+    const chars = paintedCellText(cell)
+    if (chars === null) continue
+    cells.push({ chars, cols: cell.span, attrs: cell.style, blank: !cell.hasText })
+  }
   const runs = runsOf(
     cells,
     styleEquals,

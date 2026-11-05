@@ -1,7 +1,7 @@
 import type { SessionFrame } from '../generated/session.frame'
 import type { LedgerBlockRowsLine } from '../generated/ledger.blockRows'
-import { createCellModel, rowColumnsOf, type ScreenSnapshot } from '../cell-model'
-import { fitCandidatesOf, paintRow } from '../painter/paint-row'
+import { createCellModel, rowColumnsOf } from '../cell-model'
+import { fitCandidatesOf, paintedRowText, paintRow } from '../painter/paint-row'
 import { decorateLinks } from '../terminal-links/decorate'
 import type { FitCandidate } from './cell-fit'
 import type { RunMetric } from './run-geometry'
@@ -103,7 +103,9 @@ export function parseStoredBlockRows(
  *  block shares this one count, unlike the retired live-buffer path, which
  *  handed out one column count per line. */
 export function blockColumnsOf(lines: readonly LedgerBlockRowsLine[]): number {
-  return lines.length === 0 ? 0 : Math.max(...lines.map((line) => rowColumnsOf(line.row)))
+  let cols = 0
+  for (const line of lines) cols = Math.max(cols, rowColumnsOf(line.row))
+  return cols
 }
 
 /** A stored block carries no frame geometry of its own (nocx-zg3k3.2.12):
@@ -117,9 +119,13 @@ export function blockColumnsOf(lines: readonly LedgerBlockRowsLine[]): number {
  *  the [grapheme, width, hasText]-per-column shape's own bookkeeping, and
  *  the compact wire does not carry cells to pad. */
 export function snapshotForRows(lines: readonly LedgerBlockRowsLine[]) {
-  if (lines.length === 0) return null
-  const cols = blockColumnsOf(lines)
-  if (cols === 0) return null
+  return snapshotAtColumns(lines, blockColumnsOf(lines))
+}
+
+/** Decode only the rows being painted, against the whole block's width.
+ * Selection still requests its complete snapshot through snapshotForRows. */
+function snapshotAtColumns(lines: readonly LedgerBlockRowsLine[], cols: number) {
+  if (lines.length === 0 || cols === 0) return null
   const frame: SessionFrame = {
     revision: 1,
     geometry: {
@@ -174,10 +180,10 @@ export function storedBlockRowsForSelection(
 export interface StoredBlockPaintOptions {
   readonly metric: RunMetric | null
   readonly palette: TerminalSnapshot
-  /** Cell-fit's batch write, run once for the WHOLE block before any row
-   *  paints (nocx-2v80t.3.18): cell-fit.ts's own rule is "every write, then
-   *  every read" — one forced layout for every candidate this block's rows
-   *  carry, so `boxOf` is a pure cache read for the paint pass that
+  /** Cell-fit's batch write, run once for all rows being repainted before
+   *  any of them paints (nocx-2v80t.3.18): cell-fit.ts's own rule is "every
+   *  write, then every read" — one forced layout for their candidates, so
+   *  `boxOf` is a pure cache read for the paint pass that
    *  follows. Without it every cell measures as unclassified and no glyph
    *  is ever boxed, whatever the metric says — cell-fit.ts's `warm`,
    *  wired by the caller that owns the CellFit instance (this module holds
@@ -273,7 +279,21 @@ const MISSING_ROW_CAUSES: readonly RowsMissingCause[] = [
  *  its own readable state, never an unexplained empty body (nocx-zg3k3.5.5). */
 const EMPTY_OUTPUT_SENTENCE = 'This command printed no output.'
 
-/** Replace a command block's body with rows read from the ledger artifact. */
+function missingOutputText(stored: StoredBlockRows): string {
+  return MISSING_ROW_CAUSES.filter((cause) => cause.present(stored))
+    .map((cause) => cause.sentence(cause.count(stored)))
+    .join(' ')
+}
+
+/** A completion can read backend-owned output even while its pane defers DOM
+ * paint. Use the painter's text spelling after the cell model decodes, so
+ * indentation, blanks and wide-cell spacers agree with visible output. */
+export function storedBlockRowsText(stored: StoredBlockRows): string {
+  const snapshot = snapshotForRows(stored.lines)
+  return snapshot ? snapshot.rows.map(paintedRowText).join('\n') : missingOutputText(stored)
+}
+
+/** Reconcile a command block's body with rows read from the ledger artifact. */
 export function paintStoredRows(
   block: HTMLElement,
   stored: StoredBlockRows,
@@ -281,20 +301,33 @@ export function paintStoredRows(
 ): void {
   const blockId = block.dataset.entryId
   if (blockId && stored.artifactVersion) selectionRows.set(block, stored)
+  else selectionRows.delete(block)
   block
     .querySelectorAll(
-      ':scope > .cmd-output, :scope > [data-output-incomplete], :scope > [data-output-empty], :scope > [data-output-unreadable]',
+      ':scope > [data-output-incomplete], :scope > [data-output-empty], :scope > [data-output-unreadable]',
     )
     .forEach((el) => el.remove())
-  const snapshot = snapshotForRows(stored.lines)
-  if (snapshot !== null) block.appendChild(paintOutput(block, stored, snapshot, opts))
+  // The eviction sentence says a body is not here, and a rows read IS that
+  // body. A restored command answers `body: null` whenever its rows artifact
+  // exists (restore-client.ts), so every one of them starts with the
+  // sentence and then paints its real rows; keeping both left two
+  // `.cmd-output` elements, one showing the output and one saying it is
+  // gone. The sentence and the block's `data-output-evicted` are one fact,
+  // written together by restored-block.ts, so they are taken back together.
+  // A turn's prose notice is a claim about a different body and is never
+  // this paint's to take back.
+  if (block.dataset.blockKind !== 'ask' && block.dataset.outputEvicted === 'true') {
+    block.querySelectorAll(':scope > .cmd-output.cmd-output-evicted').forEach((el) => el.remove())
+    delete block.dataset.outputEvicted
+  }
+  paintOutput(block, stored, opts)
   // The notice is the kit's own statement line (ui/README.md BlockNotice),
   // one per block by its data attribute, naming EACH cause the store sent —
   // two causes both named, with their counts where the store counted them.
-  const causes = MISSING_ROW_CAUSES.filter((cause) => cause.present(stored))
-  if (causes.length > 0) {
+  const missing = missingOutputText(stored)
+  if (missing !== '') {
     const notice = new BlockNotice({
-      text: causes.map((cause) => cause.sentence(cause.count(stored))).join(' '),
+      text: missing,
       tone: 'warning',
     })
     notice.root.dataset.outputIncomplete = 'true'
@@ -320,38 +353,185 @@ export function repaintStoredRows(container: HTMLElement, opts: StoredBlockPaint
     const version = row?.dataset.artifactVersion
     if (!block || !id || !version) continue
     const stored = storedBlockRowsForSelection(block, version)
-    const snapshot = stored ? snapshotForRows(stored.lines) : null
-    if (stored && snapshot) {
-      const painted = paintOutput(block, stored, snapshot, opts)
-      const fragment = document.createDocumentFragment()
-      while (painted.firstChild) fragment.appendChild(painted.firstChild)
-      output.replaceChildren(fragment)
+    if (stored) paintOutput(block, stored, opts, true)
+  }
+}
+
+interface PaintedStoredRow {
+  readonly row: LedgerBlockRowsLine['row']
+  readonly columns: number
+  readonly element: HTMLElement
+}
+
+type PaintMetric = Pick<
+  RunMetric,
+  'cellWidth' | 'defaultSpacing' | 'padY' | 'pitch' | 'signature'
+> & {
+  readonly hasBox: boolean
+}
+
+interface StoredPaintState {
+  readonly output: HTMLElement
+  readonly rows: Map<number, PaintedStoredRow>
+  readonly columns: number
+  readonly metric: PaintMetric | null
+  readonly palette: TerminalSnapshot
+}
+
+/** Only the currently retained rows, weakly owned by their block. Compact
+ * comparison snapshots are not another decoded model or selection source:
+ * the existing cell model still decodes and selectionRows still owns copy. */
+const paintedRows = new WeakMap<HTMLElement, StoredPaintState>()
+
+function sameRow(a: LedgerBlockRowsLine['row'], b: LedgerBlockRowsLine['row']): boolean {
+  if (a.text !== b.text || a.wrap !== b.wrap || a.continuation !== b.continuation) return false
+  if ((a.marks?.length ?? 0) !== (b.marks?.length ?? 0)) return false
+  for (let index = 0; index < (a.marks?.length ?? 0); index++) {
+    const left = a.marks![index]
+    const right = b.marks![index]
+    if (left[0] !== right[0] || left[1] !== right[1] || left[2] !== right[2]) return false
+  }
+  if ((a.runs?.length ?? 0) !== (b.runs?.length ?? 0)) return false
+  for (let index = 0; index < (a.runs?.length ?? 0); index++) {
+    const [left, length] = a.runs![index]
+    const [right, otherLength] = b.runs![index]
+    if (length !== otherLength) return false
+    if (left === 0 || right === 0) {
+      if (left !== right) return false
+    } else {
+      for (let field = 0; field < left.length; field++) {
+        if (left[field] !== right[field]) return false
+      }
     }
   }
+  return true
+}
+
+function samePaintOptions(previous: StoredPaintState, opts: StoredBlockPaintOptions): boolean {
+  const before = previous.metric
+  const now = opts.metric
+  if (before === null || now === null) {
+    if (before !== now) return false
+  } else if (
+    before.cellWidth !== now.cellWidth ||
+    before.defaultSpacing !== now.defaultSpacing ||
+    before.padY !== now.padY ||
+    before.pitch !== now.pitch ||
+    before.signature !== now.signature ||
+    before.hasBox !== (now.boxOf !== undefined)
+  ) {
+    return false
+  }
+  // metricOf/fromITheme may return fresh wrappers on every read. The fit
+  // signature, not closure identity, names its measurement epoch; explicit
+  // font repaint also forces invalidation when no signature is available.
+  const palette = previous.palette
+  return (
+    palette.defaultFg === opts.palette.defaultFg &&
+    palette.defaultBg === opts.palette.defaultBg &&
+    palette.palette.every((color, index) => color === opts.palette.palette[index])
+  )
 }
 
 function paintOutput(
   block: HTMLElement,
   stored: StoredBlockRows,
-  snapshot: ScreenSnapshot,
   opts: StoredBlockPaintOptions,
-): HTMLElement {
-  opts.warm?.(fitCandidatesOf(snapshot.rows))
-  const output = document.createElement('div')
-  output.className = 'cmd-output'
-  for (let index = 0; index < snapshot.rows.length; index++) {
-    const painted = paintRow(snapshot.rows[index], opts)
-    const storedLine = stored.lines[index]
-    if (storedLine) {
-      painted.dataset.blockId = block.dataset.entryId ?? ''
-      if (stored.artifactVersion !== undefined)
-        painted.dataset.artifactVersion = stored.artifactVersion
-      painted.dataset.logicalLine = String(storedLine.from)
+  force = false,
+): void {
+  const cached = paintedRows.get(block)
+  const previous = cached?.output.parentElement === block ? cached : undefined
+  const output =
+    previous?.output ??
+    block.querySelector<HTMLElement>(':scope > .cmd-output') ??
+    document.createElement('div')
+  const next = new Map<number, PaintedStoredRow>()
+  const changed: LedgerBlockRowsLine[] = []
+  const changedWidths = new Map<number, number>()
+  let columns = 0
+  for (const line of stored.lines) {
+    const old = previous?.rows.get(line.from)
+    if (old && old.element.parentElement === output && sameRow(old.row, line.row)) {
+      next.set(line.from, old)
+      columns = Math.max(columns, old.columns)
+    } else {
+      const width = rowColumnsOf(line.row)
+      columns = Math.max(columns, width)
+      changedWidths.set(line.from, width)
+      changed.push(line)
     }
-    output.appendChild(painted)
   }
-  decorateLinks(output)
-  return output
+  const all =
+    force || !previous || previous.columns !== columns || !samePaintOptions(previous, opts)
+  const toPaint = all ? stored.lines : changed
+  const snapshot = toPaint.length > 0 ? snapshotAtColumns(toPaint, columns) : null
+  if (columns === 0 || (toPaint.length > 0 && snapshot === null)) {
+    output.remove()
+    paintedRows.delete(block)
+    return
+  }
+  if (snapshot) {
+    opts.warm?.(fitCandidatesOf(snapshot.rows))
+    for (let index = 0; index < toPaint.length; index++) {
+      const line = toPaint[index]
+      const element = paintRow(snapshot.rows[index], opts)
+      decorateLinks(element)
+      next.set(line.from, {
+        // Copy compact fields only when a row changes. This also detects a
+        // caller updating a row in place without retaining older artifacts.
+        row: {
+          ...line.row,
+          marks: line.row.marks?.map((mark) => [...mark]),
+          runs: line.row.runs?.map(([style, length]) => [style === 0 ? 0 : [...style], length]),
+        },
+        columns: changedWidths.get(line.from) ?? next.get(line.from)!.columns,
+        element,
+      })
+    }
+  }
+  if (previous) {
+    for (const [from, old] of previous.rows) {
+      if (next.get(from)?.element !== old.element) old.element.remove()
+    }
+  } else {
+    output.replaceChildren()
+  }
+  let cursor = output.firstChild
+  for (const line of stored.lines) {
+    const element = next.get(line.from)!.element
+    const blockId = block.dataset.entryId ?? ''
+    if (element.dataset.blockId !== blockId) element.dataset.blockId = blockId
+    if (element.dataset.artifactVersion !== stored.artifactVersion) {
+      if (stored.artifactVersion === undefined) delete element.dataset.artifactVersion
+      else element.dataset.artifactVersion = stored.artifactVersion
+    }
+    const logicalLine = String(line.from)
+    if (element.dataset.logicalLine !== logicalLine) element.dataset.logicalLine = logicalLine
+    // The common append/evict path never detaches an unchanged row, keeping
+    // its selected text and decorated links in place.
+    if (element !== cursor) output.insertBefore(element, cursor)
+    cursor = element.nextSibling
+  }
+  output.className = 'cmd-output'
+  if (output.parentElement !== block) block.appendChild(output)
+  const metric = opts.metric
+  paintedRows.set(block, {
+    output,
+    rows: next,
+    columns,
+    metric:
+      metric === null
+        ? null
+        : {
+            cellWidth: metric.cellWidth,
+            defaultSpacing: metric.defaultSpacing,
+            padY: metric.padY,
+            pitch: metric.pitch,
+            signature: metric.signature,
+            hasBox: metric.boxOf !== undefined,
+          },
+    palette: { ...opts.palette, palette: [...opts.palette.palette] },
+  })
 }
 
 /** Say, on the block, that its stored rows could not be read

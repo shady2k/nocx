@@ -1381,6 +1381,52 @@ func TestFilesPoll_HiddenPanelIssuesNoListing(t *testing.T) {
 	}
 }
 
+// TestFilesVisible_StatedBeforeWatchLeavesTheWatcherHidden is the ordering
+// half of the gate. The renderer's visibility effect and its watch effect run
+// independently, so files.visible can arrive first: a person collapses the
+// panel before its tree has ever been watched. The expectation is unchanged —
+// a folded panel costs nothing. Broken, the signal is answered OK and
+// forgotten, the watcher files.watch then creates starts visible, and that
+// directory is fully enumerated every tick behind a panel nobody can see until
+// something folds and unfolds it again — for a panel the person never
+// reopens, for ever.
+func TestFilesVisible_StatedBeforeWatchLeavesTheWatcherHidden(t *testing.T) {
+	e, count := newCountingFilesEnv(t)
+	// Slowed so the window after the transition fits the catch-up poll alone:
+	// the ordinary tick that follows it is a whole interval away.
+	e.ws.filesPollInterval = slowFilesPollInterval
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	dir := filepath.Join(root, "watched")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	// The order this test exists for: the panel is hidden before there is
+	// anything to hide.
+	e.setVisible(t, bid, false, 3)
+	e.watchDir(t, bid, []string{dir}, 4)
+
+	// files.watch's baseline listed the path, and a tick already in flight may
+	// still land, so the measurement starts after one interval has passed.
+	interval := e.ws.filesPollInterval
+	time.Sleep(2 * interval)
+	before := count(dir)
+	time.Sleep(10 * interval)
+	if got := count(dir) - before; got != 0 {
+		t.Errorf("hidden panel issued %d listings over 10 intervals, want 0", got)
+	}
+
+	// And opening the panel is still owed the truth now, not at the next tick.
+	e.setVisible(t, bid, true, 5)
+	waittest.WaitForTimeout(t, "the becoming-visible poll", wantWithin, func() bool {
+		return count(dir) > before
+	})
+	if got := count(dir) - before; got != 1 {
+		t.Errorf("becoming visible issued %d listings, want exactly 1", got)
+	}
+}
+
 // TestFilesPoll_BecomingVisiblePollsImmediately is the other half, and it is
 // what keeps the gate from costing freshness: a person who opens a panel is
 // owed the truth now, not at the next tick. The interval here is an hour, so

@@ -6,6 +6,13 @@ package app
 // This is event ordering, not a latency benchmark: no elapsed-time threshold
 // distinguishes success from failure. Timeouts only stop a broken test.
 //
+// THIS FILE OWNS ORDERING. The latency the same arrangement costs B — start to
+// completion, keystroke to echo, per layer — is measured by
+// cross_tab_latency_wire_test.go (nocx-07ymy), which is a second file because
+// the two harnesses need opposite things from a producer: this one holds a
+// focus-out until B has finished, and that one never holds anything and times
+// every hop while an unpaced producer runs.
+//
 // A real producer cannot guarantee the kernel never presents EAGAIN. Therefore
 // real_flood alone is not claimed to fail every scheduling run on the old
 // implementation. held_helper_boundary additionally parks A's focus-out at the

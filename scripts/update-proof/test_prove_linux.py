@@ -339,3 +339,47 @@ class LowerProbeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReplacementWarningTests(unittest.TestCase):
+    """What the proof requires when a protocol change replaces a coordinator.
+
+    nocx-vh2hr.1.19: the new window must tell the person the old one was
+    stopped, the update must finalise while that warning is UNPRESSED, and OK
+    must then take it away. Whether a warning is required at all is decided by
+    the new window's own log line, not by the manifest — two builds that speak
+    one protocol replace nothing (ADR-0104).
+    """
+
+    def observation(self, home):
+        return proof.RestartObservation(
+            {"version": "0.8.1"}, {"version": "0.8.1"}, [],
+            {"coordinator": "c", "window": "w"},
+            home / "nocx.AppImage", set(), home, home / "journal.json", home / "backup.app")
+
+    def test_a_protocol_change_is_announced_and_required(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            log = proof.window_log(home)
+            log.parent.mkdir(parents=True)
+            log.write_text('level=WARN msg="coordinator: replacing an incompatible coordinator" '
+                           'reason="it speaks discovery protocol 12 and this build speaks 13"\n')
+            observation = self.observation(home)
+            observation.observe()
+            self.assertTrue(observation.replaced_coordinator())
+
+    def test_a_pair_that_replaced_nothing_is_not_required_to_warn(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            log = proof.window_log(home)
+            log.parent.mkdir(parents=True)
+            log.write_text('level=INFO msg="coordinator: found a running coordinator"\n')
+            observation = self.observation(home)
+            observation.observe()
+            self.assertFalse(observation.replaced_coordinator())
+
+    def test_an_absent_log_is_not_a_replacement(self):
+        with tempfile.TemporaryDirectory() as temp:
+            observation = self.observation(Path(temp))
+            observation.observe()
+            self.assertFalse(observation.replaced_coordinator())

@@ -49,6 +49,98 @@ export function authorize({ ref, dryRun, linuxOnly }) {
   return { publish: !dryRun }
 }
 const STABLE_TAG = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/
+/**
+ * A dated nightly tag is `v<version>-nightly.<build>` (nocx-vh2hr.1.17) or the
+ * older `nightly-<date>-<run>`. Both are dated copies, neither is a release, and
+ * a rule that reads tags has to recognise both: the old ones are still published
+ * and are what the first run under the new scheme prunes.
+ */
+const DATED_NIGHTLY =
+  /^(?:nightly-\d{8}-\d+|v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)-nightly\.\d{12})$/
+/** The newest three dated nightlies: this build, the one the update proof
+ * updates FROM, and one spare (nocx-vh2hr.1.17, the owner's decision). */
+const DATED_NIGHTLIES_KEPT = 3
+
+/** True for a dated nightly tag in either spelling. Never true for `nightly`. */
+export function isDatedNightly(name) {
+  return typeof name === 'string' && DATED_NIGHTLY.test(name)
+}
+
+/**
+ * The number one build instant carries: its UTC date and minute, `YYYYMMDDHHMM`
+ * (nocx-vh2hr.1.5). internal/version.BuildNumberOf owns this rule for the
+ * binary, the About panel and the update notice, and the tag must carry the same
+ * number those show, so this is that derivation and not a second one. An
+ * instant that is not canonical UTC-second RFC 3339 answers "" — the number is
+ * absent rather than invented, exactly as the Go function answers.
+ */
+export function buildNumberOf(builtAt) {
+  if (typeof builtAt !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(builtAt))
+    return ''
+  const instant = new Date(builtAt)
+  if (
+    !Number.isFinite(instant.getTime()) ||
+    instant.toISOString() !== `${builtAt.slice(0, -1)}.000Z`
+  )
+    return ''
+  const pad = (value) => String(value).padStart(2, '0')
+  return (
+    String(instant.getUTCFullYear()) +
+    pad(instant.getUTCMonth() + 1) +
+    pad(instant.getUTCDate()) +
+    pad(instant.getUTCHours()) +
+    pad(instant.getUTCMinutes())
+  )
+}
+
+/** The immutable dated tag for one build. */
+export function nightlyTag(version, build) {
+  if (!/^\d+\.\d+\.\d+$/.test(String(version)))
+    fail(`nightly version ${version} is not MAJOR.MINOR.PATCH`)
+  if (!/^\d{12}$/.test(String(build)))
+    fail(`nightly build number ${build} is not the UTC build minute YYYYMMDDHHMM`)
+  return `v${version}-nightly.${build}`
+}
+
+/** The release title a person reads in the releases list. */
+export function nightlyTitle(version, build) {
+  return `nocx ${version} nightly · build ${build}`
+}
+
+/**
+ * Release notes for one dated build: the first-parent commits since the
+ * previous nightly, newest first, each linked to its commit. `commits` is
+ * collected by the workflow (`git log --first-parent --format=%H%x09%s`), so
+ * this function owns the wording and the links and nothing about git.
+ */
+export function releaseNotes({ version, build, sha, previous, commits = [] }) {
+  const lines = [`\`nocx ${version}\` nightly, build ${build}, from main at ${sha}.`, '']
+  if (!previous) {
+    lines.push('This is the first dated nightly on the channel: there is no build to compare with.')
+    return lines.join('\n')
+  }
+  lines.push(`Changes since ${previous}:`, '')
+  for (const commit of commits)
+    lines.push(
+      `- ${commit.subject} ([\`${commit.sha.slice(0, 7)}\`](https://github.com/shady2k/nocx/commit/${commit.sha}))`,
+    )
+  return lines.join('\n')
+}
+
+/**
+ * The dated nightlies in `releases`, newest first by publication. Drafts and
+ * everything that is not a dated nightly — stable releases, the moving
+ * `nightly` alias — are excluded here, which is why no caller prunes by hand.
+ */
+export function datedNightlyTags(releases) {
+  if (!Array.isArray(releases)) fail('releases must be the release list gh api printed')
+  return releases
+    .filter(
+      (release) =>
+        release && isDatedNightly(release.tag_name) && release.prerelease && !release.draft,
+    )
+    .sort((a, b) => String(b.published_at).localeCompare(String(a.published_at)))
+}
 
 /**
  * The version a nightly embeds: the next patch after the highest STABLE tag
@@ -60,17 +152,21 @@ const STABLE_TAG = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/
  * `git describe` is not used: its "nearest tag" is a different policy, and it
  * walks toward a commit rather than answering "which release is the newest".
  *
- * The nightly's own tags are excluded by name, and every other tag must be a
- * stable `vX.Y.Z` — a release tag the version is read from cannot be one this
- * function guesses about, so an unreadable one fails the nightly closed rather
- * than silently picking the next lower release.
+ * The nightly's own tags are excluded by name — both spellings, moving and
+ * dated — and every other tag must be a stable `vX.Y.Z` — a release tag the
+ * version is read from cannot be one this function guesses about, so an
+ * unreadable one fails the nightly closed rather than silently picking the next
+ * lower release. A tag like `v0.9.0-nightly.202611021101` is therefore skipped
+ * by the dated rule and never mistaken for a release: it sorts above the stable
+ * tags of the same minor in a plain version sort, and counting it would name a
+ * version that no stable release will ever carry.
  */
 export function nextVersion(tags) {
   if (!Array.isArray(tags)) fail('tags must be the tag names reachable from the nightly revision')
   let best = null
   for (const name of tags) {
     if (typeof name !== 'string' || name === '') continue
-    if (name.startsWith('nightly')) continue
+    if (isDatedNightly(name) || name === 'nightly') continue
     const match = STABLE_TAG.exec(name)
     if (!match)
       fail(
@@ -91,17 +187,19 @@ export function nextVersion(tags) {
   return `${best[0]}.${best[1]}.${best[2] + 1}`
 }
 
-export function prepare({ sha, previous, files, tags, date, runId }) {
+export function prepare({ sha, previous, files, tags }) {
   if (!/^[a-f0-9]{40}$/.test(sha)) fail('sha must be a full main revision')
   const version = nextVersion(tags)
-  if (!/^\d{8}$/.test(date) || !/^\d+$/.test(runId)) fail('invalid dated tag inputs')
   if (previous && previous !== sha && files.length === 0)
     fail('empty diff between different main revisions')
+  // No tag here: the tag numbers the build's own signed instant
+  // (buildNumberOf), and that instant is chosen by the build job, so naming it
+  // before the build would be a second, guessed answer to the same question.
   return {
     moved: previous !== sha && (!previous || touchesProduct(files)),
     sha,
     version,
-    tag: `nightly-${date}-${runId}`,
+    previous: previous ?? null,
   }
 }
 export function attest(input) {
@@ -175,8 +273,7 @@ export function decide(input) {
   if (input.moved === false) return { published: false }
   if (input.moved !== true) fail('moved must be explicitly true or false')
   const { dir, version, sha, tag, keyring } = input
-  if (!/^[a-f0-9]{40}$/.test(sha) || !/^nightly-\d{8}-\d+$/.test(tag))
-    fail('invalid nightly identity')
+  if (!/^[a-f0-9]{40}$/.test(sha) || !isDatedNightly(tag)) fail('invalid nightly identity')
   const manifest = verifyFile(dir, 'manifest.json', keyring)
   const contract = JSON.parse(
     readFileSync(new URL('../contracts/update/manifest.schema.json', import.meta.url), 'utf8'),
@@ -229,6 +326,14 @@ export function decide(input) {
     if (!report.updater?.signature || !report.updater?.sha256 || !report.updater?.manifest?.version)
       fail(`${platform}.updater has no live verified manifest evidence`)
   }
+  // THE TAG NUMBERS THE BUILD (nocx-vh2hr.1.17): its suffix is the number About
+  // and the update notice show, which is the UTC minute of the SIGNED build
+  // instant. The title names that number too, so a tag, a title and a build
+  // cannot disagree about which build a person is looking at.
+  const build = buildNumberOf(manifest.build.builtAt)
+  const expected = nightlyTag(version, build)
+  if (tag !== expected)
+    fail(`nightly tag ${tag} does not number this build: the signed build time gives ${expected}`)
   for (const name of [
     `nocx-${version}-darwin-universal.dmg`,
     ...['linux-amd64', 'linux-arm64', 'darwin-amd64', 'darwin-arm64'].map(
@@ -251,6 +356,17 @@ export function decide(input) {
     fail('nightly.artifacts differ from signed provenance')
   return {
     published: true,
+    tag,
+    version,
+    build,
+    title: nightlyTitle(version, build),
+    notes: releaseNotes({
+      version,
+      build,
+      sha,
+      previous: input.previous ?? null,
+      commits: input.commits ?? [],
+    }),
     files: readdirSync(dir)
       .sort()
       .map((name) => join(dir, name)),
@@ -290,18 +406,18 @@ export async function publish(
 ) {
   const plan = decide(input)
   if (!plan.published) return plan
-  const notes = `Built from main ${input.sha}. Signed update manifest; macOS first launch needs the quarantine step. No notarization.`
+  const notes = plan.notes
   // Dated copy first. If it fails, the existing moving nightly stays untouched.
   await run([
     'release',
     'create',
-    input.tag,
+    plan.tag,
     '--target',
     input.sha,
     '--prerelease',
     '--latest=false',
     '--title',
-    input.tag,
+    plan.title,
     '--notes',
     notes,
     ...plan.files,
@@ -371,15 +487,18 @@ export async function publish(
   } finally {
     rmSync(backup, { recursive: true, force: true })
   }
-  const dated = releases
-    .filter((r) => /^nightly-\d{8}-\d+$/.test(r.tag_name) && r.prerelease && !r.draft)
-    .sort((a, b) => b.published_at.localeCompare(a.published_at))
-  // The new dated copy is not in the previously fetched list in test fixtures;
-  // exclude it explicitly, retaining six previous copies plus the new one.
-  for (const old of dated.filter((r) => r.tag_name !== input.tag).slice(6)) {
-    await run(['release', 'delete', old.tag_name, '--yes', '--cleanup-tag'])
+  // PRUNE TO THE NEWEST THREE DATED NIGHTLIES (nocx-vh2hr.1.17): this build,
+  // the one the update proof updates FROM, and one spare. The list was fetched
+  // before this build existed, so the new tag leads it explicitly; the filter
+  // admits both tag spellings and nothing else, which is what keeps the stable
+  // releases and the moving 'Nightly' alias out of it by construction. The
+  // proof's previous build is therefore always the second entry and is never a
+  // candidate for deletion.
+  const ordered = [...new Set([plan.tag, ...datedNightlyTags(releases).map((r) => r.tag_name)])]
+  for (const old of ordered.slice(DATED_NIGHTLIES_KEPT)) {
+    await run(['release', 'delete', old, '--yes', '--cleanup-tag'])
   }
-  return { published: true }
+  return { published: true, tag: plan.tag, title: plan.title }
 }
 async function main() {
   const [mode, path] = process.argv.slice(2)
@@ -390,7 +509,12 @@ async function main() {
   else if (mode === 'publish') {
     if (input.moved) input.keyring = releaseKeys(input.keyringPath)
     console.log(JSON.stringify(await publish(input)))
-  } else fail('usage: publish-nightly.mjs prepare|attest|publish input.json')
+  } else if (mode === 'dated-tags') {
+    // The workflow's one reader of "which published nightlies exist": newest
+    // first, `<tag>\t<published_at>` per line, both tag spellings, drafts out.
+    for (const release of datedNightlyTags(JSON.parse(readFileSync(path, 'utf8')).flat()))
+      console.log(`${release.tag_name}\t${release.published_at}`)
+  } else fail('usage: publish-nightly.mjs prepare|attest|publish|dated-tags input.json')
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)
   main().catch((error) => {

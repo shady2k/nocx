@@ -30,6 +30,15 @@ committed designated requirement and bundle seal, not Apple notarization.
 rehearsal. It has no publish job. Its `dry-run` input documents that boundary;
 changing it cannot authorize publication.
 
+Each release's notes are the first-parent commits since the previous nightly,
+newest first, each linked to its commit; the title is
+`nocx <version> nightly · build <build number>`, and the dated tag is
+`v<version>-nightly.<build number>`. The dated tag is computed by
+`release-build.yml`'s `validate` job from the instant it stamps into the
+binaries, never by hand, and `decide()` refuses a tag whose number is not the
+signed `build.builtAt`. Nothing is marked latest: both the dated copy and the
+moving alias are prereleases with `--latest=false`.
+
 A failed publication is recovered by a **fresh dispatch**, not "rerun failed
 jobs". The run attempt and immutable dated tag are part of signed provenance.
 The script restores the old signed alias after a failed replacement. If GitHub
@@ -70,8 +79,12 @@ is the channel/tag, not a prerelease version suffix.
 There are **no channel or tag fields** in the updater manifest: adding them would
 change its strict wire schema. Channel is the signed document's serving URL
 (`/releases/download/nightly/manifest.json`); all artifact and helper URLs use
-`/releases/download/nightly-YYYYMMDD-RUNID/<name>`, the immutable dated tag.
-The moving tag and dated tag carry the same manifest bytes.
+`/releases/download/v<version>-nightly.<build>/<name>`, the immutable dated tag,
+where `<build>` is the signed build instant's UTC minute (`202610270317` for
+`2026-10-27T03:17:00Z`) — the same number `internal/version.Build` stamps into
+the binary, macOS `CFBundleVersion` carries, and the update notice shows. The
+releases list therefore reads `nocx 0.8.1 nightly · build 202610270317` instead
+of a run id. The moving tag and dated tag carry the same manifest bytes.
 
 The cask generator receives the Darwin zip entry's **sha256** verbatim. This is
 the SHA-256 of the actual signed, packaged zip; not the DMG hash, not the
@@ -84,7 +97,13 @@ payloads, Darwin DMG, four helper binaries, `manifest.json`, `manifest.json.sig`
 `verified-darwin.json`, and `verified-linux.json`. Promotion must independently
 verify the successful outer `nightly.yml` run at that SHA/runId/attempt and the
 dated tag's SHA; provenance does not claim a run is successful before it ends.
-The last seven dated releases are kept, plus the moving alias.
+The newest three dated releases are kept — this build, the one the update proof
+updates FROM, and one spare — plus the moving alias. Every older dated copy is
+deleted with its tag after a successful publish, in either spelling, so the
+first run under the current tag scheme also retires the `nightly-YYYYMMDD-RUNID`
+copies. A stable release and the moving alias are never candidates for pruning:
+`datedNightlyTags` in `scripts/publish-nightly.mjs` is the one rule that decides
+what a dated nightly is.
 
 Both signatures are detached Ed25519 over the **exact JSON bytes**: raw 64-byte
 signature, standard base64 plus optional trailing newline, in `<name>.sig`.

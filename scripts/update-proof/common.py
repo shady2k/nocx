@@ -75,15 +75,40 @@ def artifact(manifest, platform, arch):
     return item
 
 
+# A dated nightly is `v<version>-nightly.<build>` (nocx-vh2hr.1.17) or the older
+# `nightly-<date>-<run>`. Both spellings are held to the same rule at the same
+# time, because the old copies stay published until the pruner retires them, and
+# the proof has to read whichever pair it is handed. The publication module
+# (scripts/publish-nightly.mjs, isDatedNightly) decides the same question for the
+# workflow and the pruner; this is the proof's own copy of the predicate, written
+# independently on purpose — a proof that reuses the publisher's parser proves
+# nothing about the publisher.
+DATED_NIGHTLY = re.compile(r"(?:nightly-[0-9]{8}-[0-9]+|"
+                           r"v[0-9]+\.[0-9]+\.[0-9]+-nightly\.[0-9]{12})")
+
+
+def is_dated_nightly(tag):
+    return isinstance(tag, str) and DATED_NIGHTLY.fullmatch(tag) is not None
+
+
 def nightly_tag(manifest, item):
     url = urlparse(item["url"])
-    match = re.fullmatch(r"/shady2k/nocx/releases/download/"
-                         r"(nightly-[0-9]{8}-[0-9]+)/[^/]+", url.path)
+    match = re.fullmatch(r"/shady2k/nocx/releases/download/(" + DATED_NIGHTLY.pattern +
+                         r")/[^/]+", url.path)
     require(url.netloc == "github.com" and not url.query and not url.fragment
             and match is not None, "artifact must use an immutable dated nightly URL")
     tag = match.group(1)
     require(manifest["notesUrl"] == "https://github.com/shady2k/nocx/releases/tag/" + tag,
             "manifest notes and artifact must name the same dated nightly")
+    if tag.startswith("v"):
+        # The new tag carries the build's own number, which the signed manifest
+        # already stamps: the tag must name this version and this build instant,
+        # or it is some other build wearing this manifest's name.
+        build = stamped_build_time(manifest, "nightly")
+        expected = "v%s-nightly.%s" % (manifest["version"], build.strftime("%Y%m%d%H%M"))
+        require(tag == expected,
+                "dated nightly tag %s does not number this build; the signed build "
+                "time gives %s" % (tag, expected))
     return tag
 
 

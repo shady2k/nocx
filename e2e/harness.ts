@@ -13,6 +13,7 @@ import {
   reportFailureContext,
   watchPageForTest,
 } from './failure-context'
+import { PER_TEST_LOG_BYTES, tailOf } from './log-tail.mts'
 import { reportStandingModals } from './modal-report'
 import { readStand } from './stand'
 import { traceIdForTest, traceparentForTest } from './trace-context.mts'
@@ -665,7 +666,7 @@ function uuidv7(): string {
 //   const { port: p2, token: t2 } = await backend.restart()
 
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process'
-import { existsSync, readFileSync, readdirSync, openSync, mkdirSync, copyFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, openSync, mkdirSync, writeFileSync } from 'node:fs'
 import { resolve, basename, join } from 'node:path'
 
 import { awaitCoordinator } from './coordinator.mjs'
@@ -1489,12 +1490,19 @@ export class VaultBackend {
       // entirely, which is the half that usually explains it.
       const name = this.starts <= 1 ? basename(this.logPath) : `nocx-server.start${this.starts}.log`
       const preserved = resolve(dir, name)
-      copyFileSync(this.logPath, preserved)
+      // BOUNDED (nocx-atpw5.1.40). A dev build logs at debug from its first
+      // line, so this copy is a whole debug log: measured on this machine, the
+      // longest case of the heaviest spec left 9.2 MB of backend log and 7.1 MB
+      // of helper log — and every test that starts a backend paid it, passing
+      // or failing. What a reader uses is the end (`logTail` prints the last few
+      // thousand bytes; the failure block prints the same), so the copy keeps
+      // PER_TEST_LOG_BYTES of it and says how much it dropped.
+      writeFileSync(preserved, tailOf(readFileSync(this.logPath, 'utf8'), PER_TEST_LOG_BYTES))
       this.preservedLogPath = preserved
       const helperLog = this.helperLogFile
       if (helperLog && existsSync(helperLog)) {
         const preservedHelper = resolve(dir, 'helper.log')
-        copyFileSync(helperLog, preservedHelper)
+        writeFileSync(preservedHelper, tailOf(readFileSync(helperLog, 'utf8'), PER_TEST_LOG_BYTES))
         this.preservedHelperLogPath = preservedHelper
       }
     } catch {

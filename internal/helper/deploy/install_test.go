@@ -344,6 +344,10 @@ type fakeFS struct {
 	// operation returns this error and clears the entry, so one Ensure can
 	// be broken at exactly one boundary and the retry after it is honest.
 	fail map[string]error
+	// afterWrite, when set, runs after every accepted binary write with the
+	// total written so far. It is how a test puts a cancellation in the
+	// middle of an upload instead of before it.
+	afterWrite func(written int)
 }
 
 func newFakeFS() *fakeFS {
@@ -374,6 +378,12 @@ func (f *fakeFS) failAfterBytes(n int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.failAt = n
+}
+
+func (f *fakeFS) bytesWritten() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.written
 }
 
 func (f *fakeFS) binaryCreateCount() int {
@@ -618,6 +628,9 @@ func (ff *fakeFile) Write(p []byte) (int, error) {
 	}
 	ff.buf = append(ff.buf, p...)
 	ff.fs.written += len(p)
+	if ff.fs.afterWrite != nil {
+		ff.fs.afterWrite(ff.fs.written)
+	}
 	return len(p), nil
 }
 
@@ -741,4 +754,32 @@ func leaveIncompleteTree(t *testing.T, fs *fakeFS) {
 	dir := "/home/u/.nocx/helper/" + proto.Version + "-linux-amd64-" + syntheticHash
 	fs.mkdirAll(dir)
 	fs.touch(filepath.Join(dir, "nocx-helper"))
+}
+
+// TestACancelDuringTheUploadStopsAtTheNextChunk is the half
+// TestEnsureHonoursContextCancellation cannot see: it cancels BEFORE Ensure,
+// so the one check at the top answers. A person pressing Cancel during a slow
+// upload cancels in the middle of it, and the loop used to check the context
+// only before and after the whole payload — so the install ploughed through
+// the rest of the binary (38 s on the e2e fixture's 500 KB/s link, then
+// answered "deploy: write helper: context canceled") instead of stopping at
+// the next chunk.
+func TestACancelDuringTheUploadStopsAtTheNextChunk(t *testing.T) {
+	src := newBigSource(t, 6<<20) // many chunks
+	fs := newFakeFS()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var once sync.Once
+	fs.afterWrite = func(int) { once.Do(cancel) } // the person's Cancel, mid-upload
+
+	_, _, err := deploy.Ensure(ctx, fs, src, "/home/u", deploy.Platform{GOOS: "linux", GOARCH: "amd64"}, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("a cancelled upload answered %v, want context.Canceled", err)
+	}
+	if wrote := fs.bytesWritten(); wrote > src.size/2 {
+		t.Fatalf("the upload wrote %d of %d bytes after the cancellation; it was not stopped between chunks", wrote, src.size)
+	}
+	if fs.hasMarker("/home/u/" + proto.Version + "-linux-amd64-" + src.hash) {
+		t.Fatal("a cancelled upload left a complete-looking tree")
+	}
 }

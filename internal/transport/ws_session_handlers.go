@@ -367,6 +367,19 @@ func (h openHandlers) answerOpenFailure(ctx context.Context, r Responder, req js
 		_ = respond(r, newJSONRPCError(req.ID, -32602, "Invalid params: "+err.Error()))
 		return
 	}
+	// A PERSON'S WITHDRAWAL IS NOT AN UNREACHABLE HOST. When the open is
+	// cancelled by rpc.cancel the work stops with context.Canceled, and the
+	// ssh taxonomy below has no class for it: it answered -32603
+	// "unreachable: deploy: write helper: context canceled", a sentence that
+	// sends the person to check a machine that was never the problem — and
+	// logged it at ERROR, as a failure. Withdrawing a call is an ordinary
+	// ending, so it is answered as one, with the JSON-RPC cancellation code
+	// the renderer already knows how to ignore when the caller is gone.
+	if errors.Is(err, context.Canceled) {
+		log.From(ctx).Debug("open withdrawn before it finished", "error", err)
+		_ = respond(r, newJSONRPCError(req.ID, -32800, "Request cancelled: it was withdrawn before the session opened"))
+		return
+	}
 	// THE REQUEST AND THE TRACE RIDE IT (nocx-3an1s.1.8). This line used the
 	// server's logger, so the one line saying an open FAILED carried no
 	// request_id — and a person grepping their log by the id the other lines

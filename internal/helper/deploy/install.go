@@ -343,6 +343,17 @@ func install(ctx context.Context, fs RemoteFS, dir, binary, contentHash string, 
 	written := 0
 	werr := ctx.Err()
 	for werr == nil && written < len(payload) {
+		// A CANCEL BETWEEN CHUNKS IS THE POINT OF CHUNKING. This loop used
+		// to read ctx.Err() only before the first chunk and after the last,
+		// so a person's Cancel during a slow upload was answered by the
+		// whole payload going out anyway — 38 s on the e2e fixture's
+		// 500 KB/s link — and then "deploy: write helper: context canceled".
+		// The comment above has promised this check since the chunking
+		// landed; it was never there.
+		if err := ctx.Err(); err != nil {
+			werr = err
+			break
+		}
 		size := min(writeChunk, len(payload)-written)
 		n, writeErr := f.Write(payload[written : written+size])
 		if writeErr != nil {

@@ -20,6 +20,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -55,6 +56,11 @@ type operationRowParamsFor struct {
 	Machine   string          `json:"machine"`
 	Done      int64           `json:"done"`
 	Total     int64           `json:"total"`
+}
+
+// operationRowDoneParamsFor decodes one operation.rowDone's params.
+type operationRowDoneParamsFor struct {
+	RequestID json.RawMessage `json:"requestId"`
 }
 
 // installRowStand is the far stand plus the socket both tests read.
@@ -276,16 +282,39 @@ func TestCancellingTheInstallEndsTheOpenAndNothingLaterTrustsIt(t *testing.T) {
 	}
 	release()
 
-	// The open ends with an error — a cancelled open is not a pane.
-	for {
-		frame := readFrame(t, stand.conn, "the cancelled open to answer")
+	// The open ends with an error — a cancelled open is not a pane — and the
+	// error SAYS it was cancelled. It used to be answered as -32603
+	// "unreachable: deploy: write helper: context canceled": the ssh
+	// taxonomy classified the person's own withdrawal as an unreachable
+	// host, which is a sentence that sends them to check a machine that was
+	// never the problem.
+	rowDone := false
+	answered := false
+	for !answered || !rowDone {
+		frame := readFrame(t, stand.conn, "the cancelled open to answer and its row to go")
+		if frame.Method == "operation.rowDone" {
+			var p operationRowDoneParamsFor
+			if err := json.Unmarshal(frame.Params, &p); err != nil {
+				t.Fatalf("decode rowDone: %v", err)
+			}
+			if string(p.RequestID) == "1" {
+				rowDone = true
+			}
+			continue
+		}
 		if frame.ID == nil || string(*frame.ID) != "1" {
 			continue
 		}
 		if frame.Error == nil {
 			t.Fatal("a cancelled open answered a session result")
 		}
-		break
+		if frame.Error.Code != -32800 {
+			t.Fatalf("a cancelled open answered %d %q, want -32800 (cancelled)", frame.Error.Code, frame.Error.Message)
+		}
+		if !strings.Contains(strings.ToLower(frame.Error.Message), "cancel") {
+			t.Fatalf("a cancelled open answered %q; the sentence must say it was cancelled", frame.Error.Message)
+		}
+		answered = true
 	}
 	if stand.inst.hasCompleteInstall(stand.home) {
 		t.Fatal("the cancelled install left a complete install behind: a later open would trust a half-written helper")

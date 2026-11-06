@@ -68,7 +68,10 @@ func pendingUpdate(t *testing.T, from, to string) (installPath, jp string) {
 		ToVersion:      to,
 		ToBuild:        version.Identity(),
 		ArtifactSHA256: "abc",
-		LaunchAttempts: 1,
+		// The attempt this fixture stands for was spent by the installed
+		// build's own earlier start, so the count names it (nocx-vh2hr.1.20).
+		LaunchAttempts:        1,
+		LaunchAttemptsOwnedBy: version.Identity(),
 	}
 	if err := writeJournal(jp, rec); err != nil {
 		t.Fatal(err)

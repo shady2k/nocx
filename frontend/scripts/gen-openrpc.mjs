@@ -32,7 +32,7 @@ function ref(file) {
   return { $ref: `${baseURL}${file}` }
 }
 
-function methodEntry(name, resultFiles) {
+function methodEntry(name, resultFiles, operation) {
   const resultFile = resultFiles.has(`${name}.schema.json`)
     ? `${name}.schema.json`
     : resultAliases.get(name)
@@ -63,6 +63,11 @@ function methodEntry(name, resultFiles) {
     ],
     'x-nocx-agent-disposition': 'operation-owned',
   }
+  // The declaration is attached in full, not by reference, because the
+  // manifest is the one method-level index: a reader asking what a method's
+  // lifetime is must not have to join two files, and a test compares the
+  // complete metadata rather than only the ids (ADR-8eej3e66 §1).
+  entry['x-nocx-operation'] = operation
   if (resultFile) {
     entry.result = { name: `${name}Result`, schema: ref(resultFile) }
   } else {
@@ -76,14 +81,34 @@ function methodEntry(name, resultFiles) {
 
 async function build() {
   const names = (await readdir(contractsDir)).sort()
+  const catalogue = JSON.parse(await readFile(resolve(contractsDir, 'operations.json'), 'utf8'))
+  const operations = new Map(
+    catalogue.operations.filter((op) => op.kind === 'method').map((op) => [op.id, op]),
+  )
   const params = names.filter((name) => name.endsWith('.params.schema.json'))
   const results = names.filter(
     (name) =>
       name.endsWith('.schema.json') &&
       !name.endsWith('.params.schema.json') &&
-      name !== 'rpc.error.schema.json',
+      name !== 'rpc.error.schema.json' &&
+      // The operation catalogue is a manifest of declarations, not a JSON-RPC
+      // result. It is produced by internal/operation/catalog's Go generator;
+      // passing it through the result-type generator would produce a second,
+      // meaningless `operations.ts`.
+      name !== 'operations.schema.json',
   )
   const resultFiles = new Set(results)
+  const schemaMethods = new Set(params.map((file) => file.replace(/\.params\.schema\.json$/, '')))
+  for (const id of schemaMethods) {
+    if (!operations.has(id)) {
+      throw new Error(`${id}: params schema has no operation declaration`)
+    }
+  }
+  for (const id of operations.keys()) {
+    if (!schemaMethods.has(id)) {
+      throw new Error(`${id}: operation declaration has no params schema`)
+    }
+  }
   return {
     openrpc: '1.3.2',
     info: {
@@ -92,9 +117,10 @@ async function build() {
       description:
         'The JSON-RPC control-plane contract. Binary session data is outside this manifest.',
     },
-    methods: params.map((file) =>
-      methodEntry(file.replace(/\.params\.schema\.json$/, ''), resultFiles),
-    ),
+    methods: params.map((file) => {
+      const name = file.replace(/\.params\.schema\.json$/, '')
+      return methodEntry(name, resultFiles, operations.get(name))
+    }),
     'x-nocx-schemaRefs': results.map(ref),
   }
 }

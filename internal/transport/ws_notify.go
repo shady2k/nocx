@@ -20,6 +20,8 @@ import (
 	"strconv"
 	"unicode/utf8"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/commandnames"
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/session"
@@ -208,7 +210,7 @@ func (h notifyRaiseHandlers) handleNotifyRaise(ctx context.Context, req jsonrpcR
 // kind could have named a different one.
 func (s *WSServer) notifySpecs() []methodSpec {
 	return []methodSpec{
-		reg(s.lane, "notify.raise", params(validateNotifyRaiseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(s.lane, catalog.OpNotifyRaise, params(validateNotifyRaiseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			return notifyRaiseHandlers{
 				raiser:   s.notifyRaiser,
 				registry: s.registry,

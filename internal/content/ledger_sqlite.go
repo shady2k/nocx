@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/shady2k/nocx/internal/operation/catalog"
 )
 
 // The v1 methods hang off *sqliteContent and are promoted into ledgerRepo,
@@ -213,6 +215,8 @@ func (s *sqliteContent) RecordObservation(ctx context.Context, obs Observation) 
 // is the backstop. Two entries submitted in the same millisecond get
 // distinct, ordered sequences — wall time is not a key.
 func (s *sqliteContent) Submit(ctx context.Context, in SubmitEntry) (SubmitResult, error) {
+	scope := catalog.BeginInternal(ctx, catalog.OpInternalContentHistoryWrite)
+	defer scope.Complete()
 	if in.ID == "" {
 		return SubmitResult{}, errors.New("content: submit: entry id is required")
 	}

@@ -207,7 +207,7 @@ jobs:
         run: |
           node --test scripts/publish-nightly.test.mjs scripts/product-change.test.mjs scripts/quarantine.test.mjs scripts/changed-tests.test.mjs scripts/import-branch-beads.test.mjs scripts/workflow-wiring.test.mjs scripts/helper-hashes.test.mjs scripts/build-identity.test.mjs
           python3 -m unittest discover -s scripts -p 'verify_built_artifact_test.py'
-          node --test .githooks/check-log-context.test.mjs
+          node --test .githooks/check-log-context.test.mjs .githooks/check-operation-scopes.test.mjs frontend/scripts/operations-contract.test.mjs
       - name: Promotion and cask fixtures by path
         run: |
           shopt -s nullglob

@@ -44,6 +44,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/session"
@@ -1500,27 +1502,27 @@ func (s *WSServer) filesSpecs(lane control.Admission, sessionGate, fsGate contro
 	openSub := s.operationQueue("files-open")
 	bindingSub := s.operationQueue("files")
 	specs := []methodSpec{
-		reg(openSub, "files.open", params(validateFilesOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(openSub, catalog.OpFilesOpen, params(validateFilesOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := filesOpenHandlers{op: openOp, factory: factory, machine: s, revealAvailable: s.revealer != nil, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, state, req) }
 		}),
-		reg(bindingSub, "files.list", params(validateFilesListRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(bindingSub, catalog.OpFilesList, params(validateFilesListRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleList(ctx, state, req) }
 		}),
-		reg(bindingSub, "files.stat", params(validateFilesStatRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(bindingSub, catalog.OpFilesStat, params(validateFilesStatRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleStat(ctx, state, req) }
 		}),
-		reg(bindingSub, "files.read", params(validateFilesReadRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(bindingSub, catalog.OpFilesRead, params(validateFilesReadRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleRead(ctx, state, req) }
 		}),
-		reg(bindingSub, "files.visible", params(validateFilesVisibleRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(bindingSub, catalog.OpFilesVisible, params(validateFilesVisibleRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
 			return func(_ context.Context, req jsonrpcRequest) { h.handleVisible(state, req) }
 		}),
-		reg(bindingSub, "files.watch", params(validateFilesWatchRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(bindingSub, catalog.OpFilesWatch, params(validateFilesWatchRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := filesBindingHandlers{
 				op:       bindingOp,
 				machine:  s,
@@ -1529,19 +1531,19 @@ func (s *WSServer) filesSpecs(lane control.Admission, sessionGate, fsGate contro
 			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleWatch(ctx, state, req) }
 		}),
-		reg(bindingSub, "files.close", params(validateFilesCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(bindingSub, catalog.OpFilesClose, params(validateFilesCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleClose(ctx, state, req) }
 		}),
-		reg(bindingSub, "files.reveal", params(validateFilesRevealRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(bindingSub, catalog.OpFilesReveal, params(validateFilesRevealRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleReveal(ctx, state, req) }
 		}),
-		reg(bindingSub, "files.upload", params(validateFilesUploadRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(bindingSub, catalog.OpFilesUpload, params(validateFilesUploadRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := uploadHandlers{op: bindingOp, machine: s, sources: s.sources, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleUpload(ctx, state, req) }
 		}),
-		reg(bindingSub, "files.uploadCancel", params(validateFilesUploadCancelRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(bindingSub, catalog.OpFilesUploadCancel, params(validateFilesUploadCancelRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := uploadHandlers{op: bindingOp, machine: s, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleUploadCancel(ctx, state, req) }
 		}),
@@ -1721,6 +1723,10 @@ func (s *WSServer) filesPollLoop(w *filesWatcher) {
 		}
 	}
 	runPoll := func() bool {
+		// Owner: the binding's poll loop, released by w.stop when files.close
+		// runs. Closing event: the iteration returning and this scope settling.
+		opScope := s.beginInternal(context.Background(), catalog.OpInternalFilesWatchPoll)
+		defer opScope.Complete()
 		result := s.filesPollTick(w)
 		if result == filesPollPathStopped {
 			return false
@@ -1795,6 +1801,10 @@ func (s *WSServer) filesBaseline(
 	paths []string,
 	known map[string]string,
 ) map[string]string {
+	// Owner: the files.watch request that takes the baseline before answering.
+	// Closing event: the baseline listing returning and the scope settling.
+	opScope := s.beginInternal(context.Background(), catalog.OpInternalFilesBaseline)
+	defer opScope.Complete()
 	base := make(map[string]string, len(paths))
 	for _, p := range paths {
 		if _, ok := known[p]; ok {

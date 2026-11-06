@@ -31,6 +31,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/assistant"
@@ -1336,6 +1338,8 @@ func logAgentStreamEnded(logger log.Logger, runID int64, started time.Time, reas
 // first, outside a capability admission and before any external request. A
 // sealed vault therefore waits and continues this same durable run.
 func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Responder) {
+	opScope := catalog.BeginInternal(log.WithLogger(ctx, h.log), catalog.OpInternalAgentRun)
+	defer opScope.Complete()
 	if rc.leaseDegradation != nil {
 		ctx = assistant.WithRunLeaseDegradation(ctx, rc.leaseDegradation)
 	}
@@ -2944,19 +2948,19 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 		return h
 	}
 	return []methodSpec{
-		reg(contentSub, "agent.ask", params(validateAgentAskRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(contentSub, catalog.OpAgentAsk, params(validateAgentAskRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := build(w, state, r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAsk(ctx, req) }
 		}),
-		reg(contentSub, "agent.cancel", params(validateAgentCancelRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(contentSub, catalog.OpAgentCancel, params(validateAgentCancelRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := build(w, state, r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleCancel(ctx, req) }
 		}),
-		reg(contentSub, "agent.approve", params(validateAgentApproveRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(contentSub, catalog.OpAgentApprove, params(validateAgentApproveRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := build(w, state, r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleApprove(ctx, req) }
 		}),
-		regResponder(contentSub, "agent.dump", params(validateAgentDumpRaw), func(r Responder) handlerFunc {
+		regResponder(contentSub, catalog.OpAgentDump, params(validateAgentDumpRaw), func(r Responder) handlerFunc {
 			h := agentDumpHandlers{op: dumpOp, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
 		}),

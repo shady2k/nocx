@@ -41,6 +41,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/notify"
+	"github.com/shady2k/nocx/internal/operation/catalog"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
@@ -3648,8 +3649,15 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 			return
 		}
 	}
+	// THE INVOCATION GETS A SCOPE (ADR-8eej3e66 §4). It carries the
+	// declaration's deadlines and the request's cancellation, and it owns the
+	// one settlement record. Stage 2 records settlement and logs expiry; it
+	// does not answer for it, so nothing a caller can do changes here yet.
+	scope := catalog.Begin(requestCtx, m.op, catalog.Invocation{})
+	requestCtx = catalog.WithScope(requestCtx, scope)
 	rej := m.submission.TrySubmit(requestCtx, control.Task{Key: key, Run: func(pctx context.Context) {
 		defer cancelRequest()
+		defer scope.Complete()
 		defer func() {
 			if cancelEntry != nil {
 				wconn.requestCancels.drop(req.ID, cancelEntry)
@@ -3660,6 +3668,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	if rej == nil {
 		return
 	}
+	scope.Refuse()
 	cancelRequest()
 	if cancelEntry != nil {
 		wconn.requestCancels.drop(req.ID, cancelEntry)
@@ -3675,6 +3684,14 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		return
 	}
 	s.emitSaturatedNotification(wconn, req.Method, rej)
+}
+
+// beginInternal starts an internal operation's scope. It is the one place a
+// backend-initiated operation takes the catalogue's handle, so the declaration
+// is live and the expiry log names the operation. Stage 2 records; it does not
+// cancel the work.
+func (s *WSServer) beginInternal(ctx context.Context, op catalog.Method) *catalog.Scope {
+	return catalog.BeginInternal(log.WithLogger(ctx, s.log), op)
 }
 
 // connMethodsFor returns the connection's materialised handler set. It is
@@ -3774,7 +3791,10 @@ func (s *WSServer) replayStoredForwards(profileID, host string, cfg *ssh.Connect
 	// option that copies it into the connector's ConnectConfig, so the
 	// forward is authorized and pool-keyed exactly like a tab (AD-4).
 	opts := []ssh.ConnectOption{func(dst *ssh.ConnectConfig) { *dst = *cfg }}
-	results := connectfwd.Replay(context.Background(), profileID, forwards, host, s.tunnelConnector, opts)
+	replayCtx := context.Background()
+	replayScope := s.beginInternal(replayCtx, catalog.OpInternalConnectfwdReplay)
+	results := connectfwd.Replay(replayCtx, profileID, forwards, host, s.tunnelConnector, opts)
+	replayScope.Complete()
 	for _, r := range results {
 		if r.Tunnel == nil {
 			// tunnel.New rejected the spec — no record exists to register.

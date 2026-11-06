@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/bootstrapstream"
 )
 
@@ -160,6 +162,8 @@ func (f *sessionFeed) Read(p []byte) (int, error) {
 // which is the user's terminal — sees it. That is what "a deadline may never
 // consume the user's bytes" means in code.
 func (f *sessionFeed) ReadLine(ctx context.Context, timeout time.Duration) (string, error) {
+	scope := catalog.BeginInternal(ctx, catalog.OpInternalHelperBootstrap)
+	defer scope.Complete()
 	deadline := f.after(timeout)
 	// line holds what has arrived but does not yet complete a line, and the
 	// terminator is searched for in line+pending rather than in pending

@@ -31,6 +31,8 @@ package app
 import (
 	"context"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/workers"
@@ -55,6 +57,8 @@ type openWindow interface {
 func restoreWorkerRecords(ctx context.Context, lg log.Logger,
 	store workers.RestartStore, window openWindow, probe workers.RestartProbe,
 ) []workers.Restoration {
+	scope := catalog.BeginInternal(ctx, catalog.OpInternalWorkspaceRestore)
+	defer scope.Complete()
 	records, err := store.Records(ctx)
 	if err != nil {
 		lg.Warn("worker restart: the restart record could not be read, so no worker can be resumed after this restart",

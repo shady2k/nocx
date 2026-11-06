@@ -37,6 +37,8 @@ import (
 	"context"
 	"sync"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/transport/control"
 )
 
@@ -151,7 +153,7 @@ func (h checkoutsStatusHandlers) handleCheckoutsStatus(_ context.Context, req js
 // unanswerable exactly when the answer matters.
 func (s *WSServer) checkoutsStatusSpecs(sub control.Submission) []methodSpec {
 	return []methodSpec{
-		regResponder(sub, "checkouts.status", noParams(), func(r Responder) handlerFunc {
+		regResponder(sub, catalog.OpCheckoutsStatus, noParams(), func(r Responder) handlerFunc {
 			h := checkoutsStatusHandlers{snapshot: s.checkoutsStatusSnapshot, r: r}
 			return h.handleCheckoutsStatus
 		}),

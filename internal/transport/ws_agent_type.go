@@ -42,6 +42,8 @@ import (
 	"encoding/json"
 	"unicode/utf8"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/agenttyping"
 	"github.com/shady2k/nocx/internal/session"
 )
@@ -150,7 +152,7 @@ func (s *WSServer) handleAgentType(ctx context.Context, state *connState, req js
 func (s *WSServer) agentTypeSpecs() []methodSpec {
 	return []methodSpec{
 		whenAvailable(
-			reg(s.lane, "agent.type", params(validateAgentTypeRaw),
+			reg(s.lane, catalog.OpAgentType, params(validateAgentTypeRaw),
 				func(_ *wsConn, state *connState, r Responder) handlerFunc {
 					return func(ctx context.Context, req jsonrpcRequest) {
 						s.handleAgentType(ctx, state, req, r)

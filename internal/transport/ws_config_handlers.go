@@ -23,6 +23,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/importer"
@@ -2324,27 +2326,27 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 	tabbySub := s.operationQueue("tabby")
 
 	specs := []methodSpec{
-		regResponder(configSub, "profiles.list", noParams(), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpProfilesList, noParams(), func(r Responder) handlerFunc {
 			h := profileHandlers{op: configOp, wired: profilesWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "profiles.create", params(validateProfileCreateRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpProfilesCreate, params(validateProfileCreateRaw), func(r Responder) handlerFunc {
 			h := profileHandlers{op: configOp, wired: profilesWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "profiles.update", params(validateProfileUpdateRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpProfilesUpdate, params(validateProfileUpdateRaw), func(r Responder) handlerFunc {
 			h := profileHandlers{op: configOp, wired: profilesWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "profiles.delete", params(validateProfileDeleteRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpProfilesDelete, params(validateProfileDeleteRaw), func(r Responder) handlerFunc {
 			h := profileHandlers{op: configOp, wired: profilesWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "profiles.effective", params(validateEffectiveRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpProfilesEffective, params(validateEffectiveRaw), func(r Responder) handlerFunc {
 			h := profileHandlers{op: configOp, wired: profilesWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "profiles.patch", params(validatePatchRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpProfilesPatch, params(validatePatchRaw), func(r Responder) handlerFunc {
 			h := profileHandlers{op: configOp, wired: profilesWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
@@ -2354,23 +2356,23 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 		// consent when the chosen method is helper. Registered here, under
 		// the config domain gate, rather than in seamSpecs: unlike
 		// connections.trustHostKey it can write the profile store.
-		regResponder(configSub, "connections.setIntegrationMethod", params(validateIntegrationMethodRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpConnectionsSetIntegrationMethod, params(validateIntegrationMethodRaw), func(r Responder) handlerFunc {
 			h := integrationMethodHandlers{op: configOp, wired: profilesWired, granter: s.helperConsentWriter, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
 		}),
-		regResponder(configSub, "endpoints.list", noParams(), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpEndpointsList, noParams(), func(r Responder) handlerFunc {
 			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "endpoints.create", params(validateEndpointCreateRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpEndpointsCreate, params(validateEndpointCreateRaw), func(r Responder) handlerFunc {
 			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "endpoints.update", params(validateEndpointUpdateRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpEndpointsUpdate, params(validateEndpointUpdateRaw), func(r Responder) handlerFunc {
 			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "endpoints.delete", params(validateEndpointDeleteRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpEndpointsDelete, params(validateEndpointDeleteRaw), func(r Responder) handlerFunc {
 			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
@@ -2379,15 +2381,15 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 		// as the endpoints they reference — one queue, so a default and an
 		// assignment can never be written against two different endpoint
 		// tables.
-		regResponder(configSub, "roles.list", noParams(), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpRolesList, noParams(), func(r Responder) handlerFunc {
 			h := roleHandlers{op: configOp, wired: endpointWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "roles.assign", params(validateRoleAssignRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpRolesAssign, params(validateRoleAssignRaw), func(r Responder) handlerFunc {
 			h := roleHandlers{op: configOp, wired: endpointWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "roles.setDefault", params(validateRoleSetDefaultRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpRolesSetDefault, params(validateRoleSetDefaultRaw), func(r Responder) handlerFunc {
 			h := roleHandlers{op: configOp, wired: endpointWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
@@ -2396,7 +2398,7 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 		// owns a capacity-one admission off the read loop exactly like
 		// connections.test; agent.status is a fast config read under the
 		// config queue.
-		regResponder(s.agentProbeSub, "endpoints.probe", params(validateProbeParamsRaw), func(r Responder) handlerFunc {
+		regResponder(s.agentProbeSub, catalog.OpEndpointsProbe, params(validateProbeParamsRaw), func(r Responder) handlerFunc {
 			// op + secrets are the credential resolution (nocx-reu5): the
 			// probe names a saved endpoint and the backend resolves the
 			// credential it owns — the same seams agent.status holds.
@@ -2407,43 +2409,43 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleEndpointProbe(ctx, req) }
 		}),
-		regResponder(configSub, "agent.status", noParams(), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpAgentStatus, noParams(), func(r Responder) handlerFunc {
 			h := assistantStatusHandlers{op: configOp, secrets: s.credentialResolver(), probes: s.assistantProbes, wired: endpointWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAgentStatus(ctx, req) }
 		}),
-		regResponder(configSub, "groups.list", noParams(), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpGroupsList, noParams(), func(r Responder) handlerFunc {
 			h := groupHandlers{op: configOp, wired: groupsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "groups.create", params(validateGroupCreateRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpGroupsCreate, params(validateGroupCreateRaw), func(r Responder) handlerFunc {
 			h := groupHandlers{op: configOp, wired: groupsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "groups.update", params(validateGroupUpdateRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpGroupsUpdate, params(validateGroupUpdateRaw), func(r Responder) handlerFunc {
 			h := groupHandlers{op: configOp, wired: groupsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "groups.delete", params(validateGroupDeleteRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpGroupsDelete, params(validateGroupDeleteRaw), func(r Responder) handlerFunc {
 			h := groupHandlers{op: configOp, wired: groupsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "groups.impact", params(validateGroupImpactRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpGroupsImpact, params(validateGroupImpactRaw), func(r Responder) handlerFunc {
 			h := groupHandlers{op: configOp, wired: groupsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleGroupImpact(ctx, req) }
 		}),
-		regResponder(configSub, "profiles.moveImpact", params(validateProfileMoveImpactRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpProfilesMoveImpact, params(validateProfileMoveImpactRaw), func(r Responder) handlerFunc {
 			h := groupHandlers{op: configOp, wired: groupsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleProfileMoveImpact(ctx, req) }
 		}),
-		regResponder(configSub, "groups.apply", params(validateGroupApplyRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpGroupsApply, params(validateGroupApplyRaw), func(r Responder) handlerFunc {
 			h := groupHandlers{op: configOp, wired: groupsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleGroupApply(ctx, req) }
 		}),
-		regResponder(configSub, "settings.describe", noParams(), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpSettingsDescribe, noParams(), func(r Responder) handlerFunc {
 			h := settingsHandlers{op: configOp, wired: settingsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "skills.list", noParams(), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpSkillsList, noParams(), func(r Responder) handlerFunc {
 			// checks and log are the only fields this registration sets that
 			// the other skills.* registrations below do not: every other
 			// method here never reads a stored check, so it never needs
@@ -2451,31 +2453,31 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 			h := skillSettingsHandlers{source: skillSource, checks: s.skillChecks, log: s.log, wired: skillWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "skills.setEnabled", params(validateSkillSetEnabledRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpSkillsSetEnabled, params(validateSkillSetEnabledRaw), func(r Responder) handlerFunc {
 			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "skills.setPin", params(validateSkillSetPinRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpSkillsSetPin, params(validateSkillSetPinRaw), func(r Responder) handlerFunc {
 			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "skills.remove", params(validateSkillRemoveRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpSkillsRemove, params(validateSkillRemoveRaw), func(r Responder) handlerFunc {
 			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "skills.file", params(validateSkillFileRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpSkillsFile, params(validateSkillFileRaw), func(r Responder) handlerFunc {
 			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "skills.files", params(validateSkillFilesRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpSkillsFiles, params(validateSkillFilesRaw), func(r Responder) handlerFunc {
 			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "skills.scan", params(validateSkillScanRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpSkillsScan, params(validateSkillScanRaw), func(r Responder) handlerFunc {
 			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "skills.audit", params(validateSkillAuditRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpSkillsAudit, params(validateSkillAuditRaw), func(r Responder) handlerFunc {
 			// The one method here that spends money, so it is the one that
 			// needs a model as well as the library: the skills source for
 			// the bytes, the config operation and the vault for the role
@@ -2488,7 +2490,7 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
 		}),
-		regResponder(configSub, "skills.check", params(validateSkillCheckRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpSkillsCheck, params(validateSkillCheckRaw), func(r Responder) handlerFunc {
 			// Spends nothing: no configOp, no credentials, no engine. The
 			// same skillSource skills.audit reads from (it composes the
 			// bundle, never a model) and the same store skills.audit writes
@@ -2496,83 +2498,83 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 			h := skillCheckHandlers{source: skillSource, checks: s.skillChecks, wired: skillWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
 		}),
-		regResponder(configSub, "skills.approve", params(validateSkillApproveRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpSkillsApprove, params(validateSkillApproveRaw), func(r Responder) handlerFunc {
 			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "settings.getSnapshot", noParams(), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpSettingsGetSnapshot, noParams(), func(r Responder) handlerFunc {
 			h := settingsHandlers{op: configOp, wired: settingsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "settings.set", params(validateSettingsSetRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpSettingsSet, params(validateSettingsSetRaw), func(r Responder) handlerFunc {
 			h := settingsHandlers{op: configOp, wired: settingsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "settings.reset", params(validateSettingsKeyRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpSettingsReset, params(validateSettingsKeyRaw), func(r Responder) handlerFunc {
 			h := settingsHandlers{op: configOp, wired: settingsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "settings.secretSet", params(validateSettingsSecretSetRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpSettingsSecretSet, params(validateSettingsSecretSetRaw), func(r Responder) handlerFunc {
 			h := settingsHandlers{op: configOp, wired: settingsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "settings.secretDelete", params(validateSettingsKeyRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpSettingsSecretDelete, params(validateSettingsKeyRaw), func(r Responder) handlerFunc {
 			h := settingsHandlers{op: configOp, wired: settingsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "settings.secretExists", params(validateSettingsKeyRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpSettingsSecretExists, params(validateSettingsKeyRaw), func(r Responder) handlerFunc {
 			h := settingsHandlers{op: configOp, wired: settingsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "snippets.list", noParams(), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpSnippetsList, noParams(), func(r Responder) handlerFunc {
 			h := snippetHandlers{op: snippetOp, wired: snippetWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "snippets.create", params(validateSnippetCreateRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpSnippetsCreate, params(validateSnippetCreateRaw), func(r Responder) handlerFunc {
 			h := snippetHandlers{op: snippetOp, wired: snippetWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "snippets.update", params(validateSnippetUpdateRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpSnippetsUpdate, params(validateSnippetUpdateRaw), func(r Responder) handlerFunc {
 			h := snippetHandlers{op: snippetOp, wired: snippetWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "snippets.delete", params(validateSnippetDeleteRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpSnippetsDelete, params(validateSnippetDeleteRaw), func(r Responder) handlerFunc {
 			h := snippetHandlers{op: snippetOp, wired: snippetWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "snippets.reorder", params(validateSnippetReorderRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpSnippetsReorder, params(validateSnippetReorderRaw), func(r Responder) handlerFunc {
 			h := snippetHandlers{op: snippetOp, wired: snippetWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "notes.list", noParams(), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpNotesList, noParams(), func(r Responder) handlerFunc {
 			h := noteHandlers{op: noteOp, wired: noteWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "notes.get", params(validateNoteIDRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpNotesGet, params(validateNoteIDRaw), func(r Responder) handlerFunc {
 			h := noteHandlers{op: noteOp, wired: noteWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "notes.create", params(validateNoteCreateRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpNotesCreate, params(validateNoteCreateRaw), func(r Responder) handlerFunc {
 			h := noteHandlers{op: noteOp, wired: noteWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "notes.update", params(validateNoteUpdateRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpNotesUpdate, params(validateNoteUpdateRaw), func(r Responder) handlerFunc {
 			h := noteHandlers{op: noteOp, wired: noteWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "notes.delete", params(validateNoteIDRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpNotesDelete, params(validateNoteIDRaw), func(r Responder) handlerFunc {
 			h := noteHandlers{op: noteOp, wired: noteWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "notes.search", params(validateNoteSearchRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpNotesSearch, params(validateNoteSearchRaw), func(r Responder) handlerFunc {
 			h := noteHandlers{op: noteOp, wired: noteWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "uistate.get", noParams(), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpUistateGet, noParams(), func(r Responder) handlerFunc {
 			h := uiStateHandlers{op: uiStateOp, wired: uiStateWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "uistate.set", params(validateUIStateSetRaw), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpUistateSet, params(validateUIStateSetRaw), func(r Responder) handlerFunc {
 			h := uiStateHandlers{op: uiStateOp, wired: uiStateWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
@@ -2581,24 +2583,24 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 		// sampler relays through the renderer. Both sit in the config
 		// conflict domain with the layout methods, because the document they
 		// touch lives in the config directory.
-		regResponder(configSub, "uistate.window.get", noParams(), func(r Responder) handlerFunc {
+		regResponder(configSub, catalog.OpUistateWindowGet, noParams(), func(r Responder) handlerFunc {
 			h := uiStateHandlers{op: uiStateOp, wired: uiStateWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		reg(configSub, "uistate.window.observe", params(validateUIStateWindowObserveRaw),
+		reg(configSub, catalog.OpUistateWindowObserve, params(validateUIStateWindowObserveRaw),
 			func(_ *wsConn, _ *connState, r Responder) handlerFunc {
 				h := uiStateHandlers{op: uiStateOp, wired: uiStateWired, r: r}
 				return h.handleWindowObserve
 			}),
-		regResponder(tabbySub, "profiles.importTabby", params(validateTabbyImportRaw), func(r Responder) handlerFunc {
+		regResponder(tabbySub, catalog.OpProfilesImportTabby, params(validateTabbyImportRaw), func(r Responder) handlerFunc {
 			h := tabbyHandlers{op: tabbyOp, configWired: profilesWired && groupsWired, executeWired: executeWired, storeWired: s.credentials != nil, plans: s, providerName: s.secretProviderName, log: s.log, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleImportTabby(ctx, req) }
 		}),
-		regResponder(tabbySub, "profiles.tabbyPreview", params(validateTabbyImportRaw), func(r Responder) handlerFunc {
+		regResponder(tabbySub, catalog.OpProfilesTabbyPreview, params(validateTabbyImportRaw), func(r Responder) handlerFunc {
 			h := tabbyHandlers{op: tabbyOp, configWired: profilesWired && groupsWired, executeWired: executeWired, storeWired: s.credentials != nil, plans: s, providerName: s.secretProviderName, log: s.log, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleTabbyPreview(ctx, req) }
 		}),
-		regResponder(tabbySub, "profiles.tabbyExecute", params(validateTabbyExecuteRaw), func(r Responder) handlerFunc {
+		regResponder(tabbySub, catalog.OpProfilesTabbyExecute, params(validateTabbyExecuteRaw), func(r Responder) handlerFunc {
 			h := tabbyHandlers{op: tabbyOp, configWired: profilesWired && groupsWired, executeWired: executeWired, storeWired: s.credentials != nil, plans: s, providerName: s.secretProviderName, log: s.log, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleTabbyExecute(ctx, req) }
 		}),

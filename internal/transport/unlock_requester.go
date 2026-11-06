@@ -10,6 +10,8 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/transport/control"
 	"github.com/shady2k/nocx/internal/vault"
 )
@@ -384,11 +386,11 @@ func (h askResolverHandlers) handleUnlockResolved(req jsonrpcRequest) {
 // (ImmediateSubmission): a resolution must never wait for a lane permit.
 func (s *WSServer) askResolverSpecs(immediate control.ImmediateSubmission) []methodSpec {
 	return []methodSpec{
-		reg(immediate, "vault.unlockResolved", params(validateUnlockResolvedRaw), func(w *wsConn, _ *connState, r Responder) handlerFunc {
+		reg(immediate, catalog.OpVaultUnlockResolved, params(validateUnlockResolvedRaw), func(w *wsConn, _ *connState, r Responder) handlerFunc {
 			h := askResolverHandlers{asks: &s.asks, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleUnlockResolved(req) }
 		}),
-		reg(immediate, "connections.passwordResolved", params(validatePasswordResolvedRaw), func(w *wsConn, _ *connState, r Responder) handlerFunc {
+		reg(immediate, catalog.OpConnectionsPasswordResolved, params(validatePasswordResolvedRaw), func(w *wsConn, _ *connState, r Responder) handlerFunc {
 			h := askResolverHandlers{asks: &s.asks, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePasswordResolved(req) }
 		}),

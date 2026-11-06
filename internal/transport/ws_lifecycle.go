@@ -30,6 +30,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclecommit"
@@ -662,6 +664,8 @@ func (s *WSServer) raiseLifecycleBlockFinished(data historyRecordedData, f lifec
 // advances the ledger's existing Submit → StartExecution → FinishExecution
 // lifecycle and never invents a second phase machine.
 func (s *WSServer) syncLifecycleLedger(ctx context.Context, f lifecyclepub.Fact) *historyRecordedData {
+	opScope := s.beginInternal(ctx, catalog.OpInternalLifecycleReconcile)
+	defer opScope.Complete()
 	if s.contentDB == nil || f.Attempt == nil {
 		return nil
 	}
@@ -1186,10 +1190,10 @@ func lifecycleSubmitErrorCode(err error) int {
 func (s *WSServer) lifecycleSpecs() []methodSpec {
 	sub := control.NewOrderedSubmission("lifecycle", lifecycleQueueDepth)
 	return []methodSpec{
-		reg(sub, "lifecycle.submitAttempt", params(validateLifecycleSubmitAttemptRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(sub, catalog.OpLifecycleSubmitAttempt, params(validateLifecycleSubmitAttemptRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			return func(ctx context.Context, req jsonrpcRequest) { s.handleLifecycleSubmitAttempt(ctx, w, r, state, req) }
 		}),
-		reg(sub, "lifecycle.recoverAck", params(validateLifecycleRecoverAckRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(sub, catalog.OpLifecycleRecoverAck, params(validateLifecycleRecoverAckRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			return func(_ context.Context, req jsonrpcRequest) { s.handleLifecycleRecoverAck(r, state, req) }
 		}),
 	}

@@ -44,6 +44,8 @@ import (
 	"context"
 	"sync"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
@@ -365,7 +367,7 @@ func (h historyStatusHandlers) handleHistoryStatus(_ context.Context, req jsonrp
 // matters.
 func (s *WSServer) historyStatusSpecs(sub control.Submission) []methodSpec {
 	return []methodSpec{
-		regResponder(sub, "history.status", noParams(), func(r Responder) handlerFunc {
+		regResponder(sub, catalog.OpHistoryStatus, noParams(), func(r Responder) handlerFunc {
 			h := historyStatusHandlers{snapshot: s.historyStatusSnapshot, r: r}
 			return h.handleHistoryStatus
 		}),

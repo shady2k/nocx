@@ -31,6 +31,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/shady2k/nocx/internal/operation/catalog"
 )
 
 // Kind is the event kind, stamped by the source adapter from the method
@@ -464,6 +466,8 @@ func (r *Router) Raise(ctx context.Context, ev Event) Outcome {
 // a sink that calls back after returning is ignored because there is no
 // handle left to reach.
 func (r *Router) deliver(ctx context.Context, p *pending) (out Outcome) {
+	scope := catalog.BeginInternal(ctx, catalog.OpInternalNotifyDelivery)
+	defer scope.Complete()
 	defer r.release()
 	out.Event = p.ev
 	out.Resolved = p.routes

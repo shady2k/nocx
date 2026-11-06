@@ -1,0 +1,259 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/operations.schema.json",
+  "title": "The operation catalogue",
+  "description": "Generated from internal/operation/catalog. Every operation declares its phases, resources, failure domains and finite lifetime here; the OpenRPC manifest and the renderer's deadline table are projections of this file.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "operations"],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/operation"
+      }
+    }
+  },
+  "$defs": {
+    "basis": {
+      "enum": ["read", "measured"]
+    },
+    "deadline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["millis", "basis", "note"],
+      "properties": {
+        "millis": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "basis": {
+          "$ref": "#/$defs/basis"
+        },
+        "note": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "bound": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "millis", "basis", "note"],
+      "properties": {
+        "kind": {
+          "enum": ["none", "deadline"]
+        },
+        "millis": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "basis": {
+          "type": "string",
+          "enum": ["", "read", "measured"]
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "deadline"
+              }
+            },
+            "required": ["kind"]
+          },
+          "then": {
+            "properties": {
+              "millis": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "basis": {
+                "enum": ["read", "measured"]
+              },
+              "note": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "none"
+              }
+            },
+            "required": ["kind"]
+          },
+          "then": {
+            "properties": {
+              "millis": {
+                "const": 0
+              },
+              "basis": {
+                "const": ""
+              },
+              "note": {
+                "const": ""
+              }
+            }
+          }
+        }
+      ]
+    },
+    "resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "name", "mode"],
+      "properties": {
+        "kind": {
+          "enum": ["session", "binding", "checkout", "store", "collection", "barrier"]
+        },
+        "name": {
+          "type": "string"
+        },
+        "mode": {
+          "enum": ["key", "shared", "exclusive"]
+        }
+      }
+    },
+    "domain": {
+      "enum": [
+        "config",
+        "vault",
+        "content",
+        "session",
+        "git",
+        "filesystem",
+        "api",
+        "ssh",
+        "helper",
+        "model",
+        "network",
+        "notify",
+        "loopback",
+        "server"
+      ]
+    },
+    "phase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "resources", "dependencies"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "resources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/resource"
+          }
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/domain"
+          }
+        }
+      }
+    },
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "owner",
+        "phases",
+        "resources",
+        "dependencies",
+        "turn",
+        "max",
+        "silence",
+        "answer",
+        "recovery",
+        "merge",
+        "preempts",
+        "waiting",
+        "row",
+        "expired"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^internal\\.[a-z][A-Za-z0-9]*(\\.[a-z][A-Za-z0-9]*)+$|^[a-z][A-Za-z0-9]*(\\.[a-zA-Z][A-Za-z0-9]*)*$"
+        },
+        "kind": {
+          "enum": ["method", "internal"]
+        },
+        "owner": {
+          "enum": ["request", "session", "binding", "server", "checkout"]
+        },
+        "phases": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/phase"
+          }
+        },
+        "resources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/resource"
+          }
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/domain"
+          }
+        },
+        "turn": {
+          "$ref": "#/$defs/deadline"
+        },
+        "max": {
+          "$ref": "#/$defs/deadline"
+        },
+        "silence": {
+          "$ref": "#/$defs/bound"
+        },
+        "answer": {
+          "$ref": "#/$defs/bound"
+        },
+        "recovery": {
+          "$ref": "#/$defs/bound"
+        },
+        "merge": {
+          "enum": ["none", "latest-value", "same-key"]
+        },
+        "preempts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "waiting": {
+          "type": "string",
+          "minLength": 1
+        },
+        "row": {
+          "enum": ["never", "past-wait", "always"]
+        },
+        "expired": {
+          "enum": ["not-started", "outcome-unknown", "retry-read"]
+        }
+      }
+    }
+  }
+}

@@ -49,6 +49,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/session"
@@ -1126,7 +1128,11 @@ func (s *WSServer) runUpload(rt *runningTransfer, sink transfer.Sink) {
 		}
 	}
 
+	// The transfer itself is the operation; waiting for its body above is
+	// the owner's wait and is not timed by the declaration.
+	opScope := s.beginInternal(rt.ctx, catalog.OpInternalFilesUpload)
 	out, err := sink.Put(rt.ctx, rt.upload, body, rt.progress)
+	opScope.Complete()
 	if body != nil {
 		_ = body.Close()
 	}

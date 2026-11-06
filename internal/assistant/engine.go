@@ -26,6 +26,8 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	openai "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/adk"
 	einoModel "github.com/cloudwego/eino/components/model"
@@ -80,6 +82,8 @@ func buildModel(httpClient *http.Client, key credential.Secret, baseURL, model s
 // outcome or a terminal run state; a nil return means a response was
 // received in full.
 func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.Client, key credential.Secret, baseURL, model string, headers []Header, msgs []*schema.Message, tools []tool.BaseTool, unknownTool func(ctx context.Context, name, rawArgs string) (string, error), handlers []adk.ChatModelAgentMiddleware, checkpoints *runCheckpoints, checkpointID string, onEvent func(AskEvent) error) error {
+	scope := catalog.BeginInternal(ctx, catalog.OpInternalAssistantAskStream)
+	defer scope.Complete()
 	cm, err := buildModel(httpClient, key, baseURL, model)
 	if err != nil {
 		return err

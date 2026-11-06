@@ -56,6 +56,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/lineage"
@@ -1113,34 +1115,34 @@ func (s *WSServer) layoutSpecs(contentSub control.Submission, lane control.Admis
 		return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 	}
 	specs := []struct {
-		method string
+		op catalog.Method
 		// validate is nil for the ONE method that takes no params: the read.
 		// noParams() is an assertion rather than an omission — a caller that
 		// sends some is refused, so "layout.read takes nothing" is checked
 		// rather than merely intended.
 		validate func(json.RawMessage) string
 	}{
-		{"layout.read", nil},
-		{"workspaces.create", validateWorkspaceCreateRaw},
-		{"workspaces.rename", validateWorkspaceRenameRaw},
-		{"workspaces.recolour", validateWorkspaceRecolourRaw},
-		{"workspaces.reorder", validateWorkspaceReorderRaw},
-		{"workspaces.close", validateLayoutCloseRaw},
-		{"tabs.create", validateTabCreateRaw},
-		{"tabs.rename", validateTabRenameRaw},
-		{"tabs.recolour", validateTabRecolourRaw},
-		{"tabs.pin", validateTabPinRaw},
-		{"tabs.reorder", validateTabReorderRaw},
-		{"tabs.close", validateLayoutCloseRaw},
-		{"panes.create", validatePaneCreateRaw},
-		{"panes.move", validatePaneMoveRaw},
-		{"panes.setCwd", validatePaneCwdRaw},
+		{catalog.OpLayoutRead, nil},
+		{catalog.OpWorkspacesCreate, validateWorkspaceCreateRaw},
+		{catalog.OpWorkspacesRename, validateWorkspaceRenameRaw},
+		{catalog.OpWorkspacesRecolour, validateWorkspaceRecolourRaw},
+		{catalog.OpWorkspacesReorder, validateWorkspaceReorderRaw},
+		{catalog.OpWorkspacesClose, validateLayoutCloseRaw},
+		{catalog.OpTabsCreate, validateTabCreateRaw},
+		{catalog.OpTabsRename, validateTabRenameRaw},
+		{catalog.OpTabsRecolour, validateTabRecolourRaw},
+		{catalog.OpTabsPin, validateTabPinRaw},
+		{catalog.OpTabsReorder, validateTabReorderRaw},
+		{catalog.OpTabsClose, validateLayoutCloseRaw},
+		{catalog.OpPanesCreate, validatePaneCreateRaw},
+		{catalog.OpPanesMove, validatePaneMoveRaw},
+		{catalog.OpPanesSetCwd, validatePaneCwdRaw},
 		// panes.close is DeletePane's wire caller, and it takes the same
 		// close params as tabs.close and workspaces.close because it is the
 		// same act one rung down: removing the last pane takes its tab, that
 		// tab's workspace if it was the last, and mints the replacement if
 		// the application is left with nothing.
-		{"panes.close", validateLayoutCloseRaw},
+		{catalog.OpPanesClose, validateLayoutCloseRaw},
 	}
 	out := make([]methodSpec, 0, len(specs))
 	for _, spec := range specs {
@@ -1148,7 +1150,7 @@ func (s *WSServer) layoutSpecs(contentSub control.Submission, lane control.Admis
 		if spec.validate != nil {
 			validator = params(spec.validate)
 		}
-		out = append(out, regResponder(contentSub, spec.method, validator, build))
+		out = append(out, regResponder(contentSub, spec.op, validator, build))
 	}
 	return out
 }

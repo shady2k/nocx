@@ -27,6 +27,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/lifecycle"
@@ -553,7 +555,7 @@ func validateLaneInteractivityRaw(raw json.RawMessage) string {
 // human now owns. The handler is a mutex-guarded state update — exactly
 // the microseconds immediate exists for.
 func (s *WSServer) laneInteractivitySpec(immediate control.ImmediateSubmission) methodSpec {
-	return reg(immediate, "agent.laneInteractivity", params(validateLaneInteractivityRaw),
+	return reg(immediate, catalog.OpAgentLaneInteractivity, params(validateLaneInteractivityRaw),
 		func(w *wsConn, _ *connState, r Responder) handlerFunc {
 			return func(_ context.Context, req jsonrpcRequest) {
 				var p laneInteractivityParams
@@ -575,7 +577,7 @@ func (s *WSServer) laneInteractivitySpec(immediate control.ImmediateSubmission) 
 // ingress so a pending command request can settle without waiting behind
 // the ordinary lane.
 func (s *WSServer) runResolutionSpec(immediate control.ImmediateSubmission) methodSpec {
-	return reg(immediate, "agent.runResolved", params(validateRunResolvedRaw),
+	return reg(immediate, catalog.OpAgentRunResolved, params(validateRunResolvedRaw),
 		func(w *wsConn, _ *connState, r Responder) handlerFunc {
 			return func(ctx context.Context, req jsonrpcRequest) {
 				perr := s.broker.Resolve("agent.runResolved", req.Params, w)

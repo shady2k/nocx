@@ -34,6 +34,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/ssh"
 )
@@ -223,6 +225,8 @@ func NewDetector(conn ExecConn, logger log.Logger, opts ...DetectorOption) *Dete
 // executing. Transient failures back off 10s → 30s → 2min → 10min; a sample
 // inside the backoff window returns the previous result without executing.
 func (d *Detector) Sample(ctx context.Context) Sample {
+	scope := catalog.BeginInternal(ctx, catalog.OpInternalDiscoverySample)
+	defer scope.Complete()
 	select {
 	case d.sem <- struct{}{}:
 		defer func() { <-d.sem }()

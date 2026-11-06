@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"unicode/utf8"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
@@ -67,7 +69,7 @@ func (s *WSServer) contentSpecs(lane control.Admission, contentGate control.Admi
 		contentOp = capability.NewContentOperation(contentGate, lane, s.contentDB)
 	}
 	specs := []methodSpec{
-		regResponder(contentSub, "history.query", params(validateHistoryQueryRaw), func(r Responder) handlerFunc {
+		regResponder(contentSub, catalog.OpHistoryQuery, params(validateHistoryQueryRaw), func(r Responder) handlerFunc {
 			h := historyQueryHandlers{op: contentOp, durable: s.historyDurableAvailable, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleHistoryQuery(ctx, req) }
 		}),

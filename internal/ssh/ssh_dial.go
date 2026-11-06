@@ -19,6 +19,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -379,6 +381,8 @@ func (d *dialer) dialDirect(ctx context.Context, addr string, cfg *gossh.ClientC
 
 // dialWithCtx dials a network address with context cancellation support.
 func (d *dialer) dialWithCtx(ctx context.Context, network, addr string, timeout time.Duration) (net.Conn, error) {
+	scope := catalog.BeginInternal(ctx, catalog.OpInternalSshDial)
+	defer scope.Complete()
 	netDialer := &net.Dialer{Timeout: timeout}
 	return netDialer.DialContext(ctx, network, addr)
 }

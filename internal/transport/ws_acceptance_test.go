@@ -19,6 +19,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/log"
@@ -304,7 +306,9 @@ func TestSaturationRefusalEmitsSafeDebugDiagnostic(t *testing.T) {
 	innerRequestValue := "inner-refusal-sensitive-value"
 	srv.methods["test.innerRefusal"] = reg(
 		control.NewBoundedSubmission(control.NewSemaphore("test-dispatch", 1)),
-		"test.innerRefusal",
+		// A handle from the catalogue is the only kind reg accepts; the map
+		// key is this test's own synthetic method name.
+		catalog.OpFsComplete,
 		// The merge: every method now declares a params validator (a method
 		// without one stopped building, nocx-q27y) and writes through the
 		// Responder, which is what the sealed normalizer wraps (nocx-k41yv).

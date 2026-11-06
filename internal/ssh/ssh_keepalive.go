@@ -1,8 +1,11 @@
 package ssh
 
 import (
+	"context"
 	"errors"
 	"time"
+
+	"github.com/shady2k/nocx/internal/operation/catalog"
 )
 
 // LivenessObserver is told what the keepalive prober learns about the far end
@@ -205,7 +208,9 @@ func startKeepalive(target keepaliveTarget, interval time.Duration, countMax int
 			select {
 			case <-ticker.C:
 				started := time.Now()
+				scope := catalog.BeginInternal(context.Background(), catalog.OpInternalSshKeepalive)
 				answered, err := sendProbe(target, budget)
+				scope.Complete()
 				rtt := time.Since(started)
 				if err != nil && errors.Is(err, errProbeSilent) {
 					// The probe never came back inside the budget. This is

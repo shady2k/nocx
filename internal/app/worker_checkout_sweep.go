@@ -33,6 +33,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/log"
@@ -119,6 +121,8 @@ func (s *checkoutSweeper) clock() time.Time {
 // the removal rule, held and abandoned untold apart, applies to a sweep
 // more than to any explicit ask, because nobody is standing here watching.
 func (s *checkoutSweeper) RunOnce(ctx context.Context) {
+	scope := catalog.BeginInternal(ctx, catalog.OpInternalWorkerCheckoutSweep)
+	defer scope.Complete()
 	lg := log.From(ctx)
 	c := s.checkouts
 	// THE MISSING INPUTS, the removal walk's own rule, applied to the whole

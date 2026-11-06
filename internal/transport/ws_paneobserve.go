@@ -15,6 +15,8 @@ import (
 	"context"
 	"time"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/paneobserve"
 	"github.com/shady2k/nocx/internal/session"
@@ -147,7 +149,9 @@ func (s *WSServer) runPaneObserverSweeps(ctx context.Context, done <-chan struct
 		case <-done:
 			return
 		case <-t.C:
+			opScope := s.beginInternal(ctx, catalog.OpInternalPaneObserver)
 			s.paneObserver.Sweep()
+			opScope.Complete()
 		}
 	}
 }

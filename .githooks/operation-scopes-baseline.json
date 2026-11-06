@@ -1,0 +1,200 @@
+[
+  {
+    "file": "internal/transport/screen_offer.go",
+    "text": "rx.screenOfferCtx, rx.screenOfferCancel = context.WithCancel(context.Background())",
+    "kind": "unscoped-context",
+    "reason": "the retry task outlives the request that armed it and is owned by inflight/Stop, not by that request context"
+  },
+  {
+    "file": "internal/transport/session_open.go",
+    "text": "s.pumpToRing(context.Background(), opened.Session, rx.ring)",
+    "kind": "unscoped-context",
+    "reason": "a session read pump is owned by the session (ADR-0009), not by the frame that opened it"
+  },
+  {
+    "file": "internal/transport/ws.go",
+    "text": "replayCtx := context.Background()",
+    "kind": "unscoped-context",
+    "reason": "the replay/notify path reports an event that outlives the frame which caused it; its owner is the connection or the notify router"
+  },
+  {
+    "file": "internal/transport/ws.go",
+    "text": "s.notifyRaiser.Raise(context.Background(), notify.Event{",
+    "kind": "unscoped-context",
+    "reason": "the replay/notify path reports an event that outlives the frame which caused it; its owner is the connection or the notify router"
+  },
+  {
+    "file": "internal/transport/ws_agent.go",
+    "text": "tctx := context.WithoutCancel(ctx)",
+    "kind": "unscoped-context",
+    "reason": "the run must outlive the request that started it; the run lease owns its cancellation (ADR-0020)"
+  },
+  {
+    "file": "internal/transport/ws_block_rows.go",
+    "text": "ctx := log.WithLogger(context.Background(), s.log)",
+    "kind": "unscoped-context",
+    "reason": "block-row projection runs after the frame and under the block stream lifetime"
+  },
+  {
+    "file": "internal/transport/ws_block_rows.go",
+    "text": "ctx := log.WithLogger(context.Background(), s.log)",
+    "kind": "unscoped-context",
+    "reason": "block-row projection runs after the frame and under the block stream lifetime"
+  },
+  {
+    "file": "internal/transport/ws_block_rows.go",
+    "text": "ctx := log.WithLogger(context.Background(), s.log)",
+    "kind": "unscoped-context",
+    "reason": "block-row projection runs after the frame and under the block stream lifetime"
+  },
+  {
+    "file": "internal/transport/ws_block_rows.go",
+    "text": "ctx := log.WithLogger(context.Background(), s.log)",
+    "kind": "unscoped-context",
+    "reason": "block-row projection runs after the frame and under the block stream lifetime"
+  },
+  {
+    "file": "internal/transport/ws_block_rows.go",
+    "text": "ctx := log.WithLogger(context.Background(), s.log)",
+    "kind": "unscoped-context",
+    "reason": "block-row projection runs after the frame and under the block stream lifetime"
+  },
+  {
+    "file": "internal/transport/ws_block_rows.go",
+    "text": "s.notifyBlockSubscriber(context.Background(), sid, \"block.outputStart\", blockOutputStartParams{",
+    "kind": "unscoped-context",
+    "reason": "block-row projection runs after the frame and under the block stream lifetime"
+  },
+  {
+    "file": "internal/transport/ws_block_rows.go",
+    "text": "ctx := log.WithLogger(context.Background(), s.log)",
+    "kind": "unscoped-context",
+    "reason": "block-row projection runs after the frame and under the block stream lifetime"
+  },
+  {
+    "file": "internal/transport/ws_block_rows.go",
+    "text": "ctx := log.WithLogger(context.Background(), s.log)",
+    "kind": "unscoped-context",
+    "reason": "block-row projection runs after the frame and under the block stream lifetime"
+  },
+  {
+    "file": "internal/transport/ws_block_rows.go",
+    "text": "ctx := log.WithLogger(context.Background(), s.log)",
+    "kind": "unscoped-context",
+    "reason": "block-row projection runs after the frame and under the block stream lifetime"
+  },
+  {
+    "file": "internal/transport/ws_block_rows.go",
+    "text": "ctx := log.WithLogger(context.Background(), s.log)",
+    "kind": "unscoped-context",
+    "reason": "block-row projection runs after the frame and under the block stream lifetime"
+  },
+  {
+    "file": "internal/transport/ws_download.go",
+    "text": "tctx, cancel := context.WithCancel(context.Background())",
+    "kind": "unscoped-context",
+    "reason": "a transfer outlives the request; the transfer context is its owner"
+  },
+  {
+    "file": "internal/transport/ws_end_hold.go",
+    "text": "opScope := s.beginInternal(context.Background(), catalog.OpInternalSessionEndHold)",
+    "kind": "unscoped-context",
+    "reason": "the end hold is owned by the session and released by its teardown, not by a request"
+  },
+  {
+    "file": "internal/transport/ws_files.go",
+    "text": "opScope := s.beginInternal(context.Background(), catalog.OpInternalFilesWatchPoll)",
+    "kind": "unscoped-context",
+    "reason": "the watch poll and baseline are binding-owned (the loop stop releases them); the two listings are inside files.watch before its response"
+  },
+  {
+    "file": "internal/transport/ws_files.go",
+    "text": "opScope := s.beginInternal(context.Background(), catalog.OpInternalFilesBaseline)",
+    "kind": "unscoped-context",
+    "reason": "the watch poll and baseline are binding-owned (the loop stop releases them); the two listings are inside files.watch before its response"
+  },
+  {
+    "file": "internal/transport/ws_files.go",
+    "text": "listing, err := h.List(context.Background(), p, filesystem.Page{Offset: 0, Limit: 1})",
+    "kind": "unscoped-context",
+    "reason": "the watch poll and baseline are binding-owned (the loop stop releases them); the two listings are inside files.watch before its response"
+  },
+  {
+    "file": "internal/transport/ws_files.go",
+    "text": "listing, err := h.List(context.Background(), path, filesystem.Page{Offset: 0, Limit: 1})",
+    "kind": "unscoped-context",
+    "reason": "the watch poll and baseline are binding-owned (the loop stop releases them); the two listings are inside files.watch before its response"
+  },
+  {
+    "file": "internal/transport/ws_installed_fact.go",
+    "text": "ctx, cancel := context.WithTimeout(context.Background(), installedFactResolveTimeout)",
+    "kind": "unscoped-context",
+    "reason": "the installed-fact probe is owned by the session record and has its own timeout"
+  },
+  {
+    "file": "internal/transport/ws_ledger.go",
+    "text": "h.raiser.Raise(context.Background(), blockFinishedEvent(",
+    "kind": "unscoped-context",
+    "reason": "a block-finished notification outlives the frame that reported it"
+  },
+  {
+    "file": "internal/transport/ws_lifecycle.go",
+    "text": "s.notifyRaiser.Raise(context.Background(), blockFinishedEvent(sess, data.Command, status, facts))",
+    "kind": "unscoped-context",
+    "reason": "a lifecycle notification outlives the fact that caused it"
+  },
+  {
+    "file": "internal/transport/ws_readopt.go",
+    "text": "s.pumpToRing(context.Background(), hosted.Session, rx.ring)",
+    "kind": "unscoped-context",
+    "reason": "a session read pump is session-owned (ADR-0009)"
+  },
+  {
+    "file": "internal/transport/ws_session_handlers.go",
+    "text": "h.sess.pumpToRing(context.Background(), sess, rx.ring)",
+    "kind": "unscoped-context",
+    "reason": "a session read pump is session-owned (ADR-0009)"
+  },
+  {
+    "file": "internal/transport/ws_session_ops.go",
+    "text": "ctx, cancel := context.WithCancel(context.Background())",
+    "kind": "unscoped-context",
+    "reason": "session teardown work survives the request that asked for the close; the session lane owns it"
+  },
+  {
+    "file": "internal/transport/ws_signal.go",
+    "text": "s.heldStops[attempt] = heldStop{sid: sid, ctx: context.WithoutCancel(ctx)}",
+    "kind": "unscoped-context",
+    "reason": "a held Stop belongs to the run attempt, not to the frame that delivered it"
+  },
+  {
+    "file": "internal/transport/ws_signal.go",
+    "text": "ctx := context.Background()",
+    "kind": "unscoped-context",
+    "reason": "a held Stop belongs to the run attempt, not to the frame that delivered it"
+  },
+  {
+    "file": "internal/transport/ws_transfer_notify.go",
+    "text": "s.notifyRaiser.Raise(context.Background(), transferFinishedEvent(sess, out))",
+    "kind": "unscoped-context",
+    "reason": "transfer completion outlives the request that started the transfer"
+  },
+  {
+    "file": "internal/transport/ws_upload.go",
+    "text": "tctx, cancel := context.WithCancel(context.Background())",
+    "kind": "unscoped-context",
+    "reason": "a transfer outlives the request; the transfer context is its owner"
+  },
+  {
+    "file": "internal/transport/ws_vault.go",
+    "text": "result, err := svc.Setup(context.Background(), vreq)",
+    "kind": "unscoped-context",
+    "reason": "vault setup and its snapshot are owned by the vault lifecycle, which outlives one frame"
+  },
+  {
+    "file": "internal/transport/ws_vault.go",
+    "text": "snap := s.vaultLifecycle.Snapshot(context.Background())",
+    "kind": "unscoped-context",
+    "reason": "vault setup and its snapshot are owned by the vault lifecycle, which outlives one frame"
+  }
+]

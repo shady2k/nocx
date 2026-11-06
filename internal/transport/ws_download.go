@@ -133,6 +133,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transfer"
@@ -339,7 +341,11 @@ func (s *WSServer) runDownload(rt *runningTransfer, source transfer.Source) {
 		return
 	}
 
+	// The transfer itself is the operation; waiting for its destination above
+	// is the owner's wait and is not timed by the declaration.
+	opScope := s.beginInternal(rt.ctx, catalog.OpInternalFilesDownload)
 	sent, err := source.Get(rt.ctx, rt.download, dst, rt.progress)
+	opScope.Complete()
 	rt.finish(downloadStateOf(err, rt.ctx.Err()), transfer.Outcome{}, err, s.transfers.clock())
 	s.transfers.retireTicket(rt.ticket)
 	// Before the deferred close(rt.done), on every path: anything that
@@ -917,11 +923,11 @@ func rfc5987(s string) string {
 // the filesystem domain's bound.
 func (s *WSServer) filesDownloadSpecs(bindingOp capability.FilesystemBindingOperation, bindingSub control.Submission) []methodSpec {
 	return []methodSpec{
-		reg(bindingSub, "files.download", params(validateFilesDownloadRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(bindingSub, catalog.OpFilesDownload, params(validateFilesDownloadRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := downloadHandlers{op: bindingOp, machine: s, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDownload(ctx, state, req) }
 		}),
-		reg(bindingSub, "files.downloadCancel", params(validateFilesDownloadCancelRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(bindingSub, catalog.OpFilesDownloadCancel, params(validateFilesDownloadCancelRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := downloadHandlers{op: bindingOp, machine: s, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDownloadCancel(ctx, state, req) }
 		}),

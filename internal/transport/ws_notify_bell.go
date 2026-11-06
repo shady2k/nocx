@@ -28,6 +28,8 @@ import (
 	"io"
 	"strconv"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/commandnames"
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/session"
@@ -175,7 +177,7 @@ func (h notifyBellHandlers) handleNotifyBell(ctx context.Context, req jsonrpcReq
 // ordinary lane for the same reason notify.raise does: Raise is synchronous
 // and can block on a sink invocation, so it must never run on the read loop.
 func (s *WSServer) notifyBellSpec() methodSpec {
-	return reg(s.lane, "notify.bell", params(validateNotifyBellRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+	return reg(s.lane, catalog.OpNotifyBell, params(validateNotifyBellRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 		return notifyBellHandlers{
 			raiser:   s.notifyRaiser,
 			registry: s.registry,

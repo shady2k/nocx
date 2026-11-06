@@ -28,6 +28,8 @@ import (
 	"context"
 	"time"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/log"
@@ -109,6 +111,12 @@ func (s *WSServer) recordHole(
 	ctx context.Context, rec SessionOutputRecorder, sid session.ID, ring *outputRing,
 	pos, resumeAt uint64, reason, resumed string,
 ) holeResult {
+	// One write, one operation. recordSessionOutput is a lifetime loop and
+	// must not sit inside one scope: the declaration bounds ONE store write,
+	// so a healthy session with nothing to say would expire it while it
+	// waited, then settle twice when it exited.
+	opScope := s.beginInternal(ctx, catalog.OpInternalSessionRecorder)
+	defer opScope.Complete()
 	res, err := rec.Skip(ctx, string(sid), resumeAt, reason)
 	if err != nil {
 		// Said where every other history write failure is said.
@@ -282,11 +290,15 @@ func (s *WSServer) recordSessionOutput(ctx context.Context, sid session.ID, ring
 			continue
 		}
 
+		// One append is one operation; the loop around it is the lifetime
+		// loop registered as loop.session.readPump.
+		opScope := s.beginInternal(ctx, catalog.OpInternalSessionRecorder)
 		res, err := rec.Append(ctx, content.SessionOutputAppend{
 			SessionID: string(sid),
 			Offset:    pos,
 			Body:      data,
 		})
+		opScope.Complete()
 		if err != nil {
 			// The store refused the write. Say it where the product says
 			// every other history write failure — history.status already

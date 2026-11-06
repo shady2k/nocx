@@ -44,6 +44,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/apicoll"
 	"github.com/shady2k/nocx/internal/apiimport"
 	"github.com/shady2k/nocx/internal/apisend"
@@ -2281,75 +2283,75 @@ func (s *WSServer) apiSpecs(lane control.Admission, apiGate, vaultGate control.A
 	}
 
 	return []methodSpec{
-		whenAvailable(regResponder(sub, "api.collections.list", noParams(), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(sub, catalog.OpApiCollectionsList, noParams(), func(r Responder) handlerFunc {
 			h := collHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}), collAvailable, apiCollectionsUnavailable),
-		whenAvailable(regResponder(sub, "api.collections.open", params(validateAPICollectionsOpenRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(sub, catalog.OpApiCollectionsOpen, params(validateAPICollectionsOpenRaw), func(r Responder) handlerFunc {
 			h := collHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}), collAvailable, apiCollectionsUnavailable),
-		whenAvailable(regResponder(sub, "api.collections.create", params(validateAPICollectionsCreateRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(sub, catalog.OpApiCollectionsCreate, params(validateAPICollectionsCreateRaw), func(r Responder) handlerFunc {
 			h := collHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}), collAvailable, apiCollectionsUnavailable),
-		whenAvailable(regResponder(sub, "api.collections.createFolder", params(validateAPICollectionsCreateFolderRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(sub, catalog.OpApiCollectionsCreateFolder, params(validateAPICollectionsCreateFolderRaw), func(r Responder) handlerFunc {
 			h := collHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}), collAvailable, apiCollectionsUnavailable),
-		whenAvailable(regResponder(sub, "api.collections.close", params(validateAPIHandleRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(sub, catalog.OpApiCollectionsClose, params(validateAPIHandleRaw), func(r Responder) handlerFunc {
 			h := collHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}), collAvailable, apiCollectionsUnavailable),
-		whenAvailable(regResponder(sub, "api.environment.read", params(validateAPIEnvironmentRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(sub, catalog.OpApiEnvironmentRead, params(validateAPIEnvironmentRaw), func(r Responder) handlerFunc {
 			h := collHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}), collAvailable, apiCollectionsUnavailable),
-		whenAvailable(regResponder(sub, "api.environment.write", params(validateAPIEnvironmentWriteRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(sub, catalog.OpApiEnvironmentWrite, params(validateAPIEnvironmentWriteRaw), func(r Responder) handlerFunc {
 			h := collHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}), collAvailable, apiCollectionsUnavailable),
-		whenAvailable(regResponder(sub, "api.request.read", params(validateAPIRequestRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(sub, catalog.OpApiRequestRead, params(validateAPIRequestRaw), func(r Responder) handlerFunc {
 			h := collHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}), collAvailable, apiCollectionsUnavailable),
-		whenAvailable(regResponder(sub, "api.request.delete", params(validateAPIRequestRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(sub, catalog.OpApiRequestDelete, params(validateAPIRequestRaw), func(r Responder) handlerFunc {
 			h := collHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}), collAvailable, apiCollectionsUnavailable),
-		whenAvailable(regResponder(sub, "api.request.write", params(validateAPIRequestWriteRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(sub, catalog.OpApiRequestWrite, params(validateAPIRequestWriteRaw), func(r Responder) handlerFunc {
 			h := collHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}), collAvailable, apiCollectionsUnavailable),
-		whenAvailable(regResponder(sub, "api.request.move", params(validateAPIRequestMoveRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(sub, catalog.OpApiRequestMove, params(validateAPIRequestMoveRaw), func(r Responder) handlerFunc {
 			h := collHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}), collAvailable, apiCollectionsUnavailable),
-		whenAvailable(reg(sub, "api.request.send", params(validateAPIRequestSendRaw), func(w *wsConn, _ *connState, r Responder) handlerFunc {
+		whenAvailable(reg(sub, catalog.OpApiRequestSend, params(validateAPIRequestSendRaw), func(w *wsConn, _ *connState, r Responder) handlerFunc {
 			h := sendHandlers(w, r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSend(ctx, req) }
 		}), func() bool { return sendWired }, "api sending not available"),
-		whenAvailable(reg(cancelSub, "api.request.cancel", params(validateAPIRequestCancelRaw), func(w *wsConn, _ *connState, r Responder) handlerFunc {
+		whenAvailable(reg(cancelSub, catalog.OpApiRequestCancel, params(validateAPIRequestCancelRaw), func(w *wsConn, _ *connState, r Responder) handlerFunc {
 			h := sendHandlers(w, r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleCancel(ctx, req) }
 		}), func() bool { return sendWired }, "api sending not available"),
-		whenAvailable(regResponder(sub, "api.import.postman", params(validateAPIImportPostmanRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(sub, catalog.OpApiImportPostman, params(validateAPIImportPostmanRaw), func(r Responder) handlerFunc {
 			h := apiImportHandlers{op: importOp, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePostman(ctx, req) }
 		}), func() bool { return importWired }, "api import not available"),
-		regResponder(sub, "api.import.curl", params(validateAPIImportCurlRaw), func(r Responder) handlerFunc {
+		regResponder(sub, catalog.OpApiImportCurl, params(validateAPIImportCurlRaw), func(r Responder) handlerFunc {
 			h := apiImportHandlers{r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleCurl(ctx, req) }
 		}),
-		whenAvailable(regResponder(sub, "api.folder.read", params(validateAPIFolderReadRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(sub, catalog.OpApiFolderRead, params(validateAPIFolderReadRaw), func(r Responder) handlerFunc {
 			h := collHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}), collAvailable, apiCollectionsUnavailable),
-		whenAvailable(regResponder(sub, "api.folder.write", params(validateAPIFolderWriteRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(sub, catalog.OpApiFolderWrite, params(validateAPIFolderWriteRaw), func(r Responder) handlerFunc {
 			h := collHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}), collAvailable, apiCollectionsUnavailable),
-		whenAvailable(regResponder(sub, "api.request.scope", params(validateAPIRequestScopeRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(sub, catalog.OpApiRequestScope, params(validateAPIRequestScopeRaw), func(r Responder) handlerFunc {
 			h := collHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}), collAvailable, apiCollectionsUnavailable),

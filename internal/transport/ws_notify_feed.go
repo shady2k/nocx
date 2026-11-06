@@ -11,6 +11,8 @@ import (
 	"context"
 	"time"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/notify"
 )
 
@@ -173,10 +175,10 @@ func (h notifyFeedHandlers) handleFeedMarkRead(_ context.Context, req jsonrpcReq
 func (s *WSServer) notifyFeedSpecs() []methodSpec {
 	wired := func() bool { return s.notifyFeed != nil }
 	return []methodSpec{
-		whenAvailable(regResponder(s.lane, "notify.feed.read", noParams(), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(s.lane, catalog.OpNotifyFeedRead, noParams(), func(r Responder) handlerFunc {
 			return notifyFeedHandlers{feed: s.notifyFeed, r: r}.handleFeedRead
 		}), wired, "notification feed not available"),
-		whenAvailable(regResponder(s.lane, "notify.feed.markRead", noParams(), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(s.lane, catalog.OpNotifyFeedMarkRead, noParams(), func(r Responder) handlerFunc {
 			return notifyFeedHandlers{feed: s.notifyFeed, r: r}.handleFeedMarkRead
 		}), wired, "notification feed not available"),
 	}

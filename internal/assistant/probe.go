@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -42,6 +44,8 @@ const probePrompt = "Reply with the single word: ok"
 // question askable of an endpoint nobody has typed a model into yet. The
 // result's Kind names which check ran.
 func (c *client) Probe(ctx context.Context, p ProbeParams) (ProbeResult, error) {
+	scope := catalog.BeginInternal(ctx, catalog.OpInternalAssistantProbe)
+	defer scope.Complete()
 	if strings.TrimSpace(p.BaseURL) == "" {
 		return ProbeResult{}, errProbeInvalid("base URL is required")
 	}

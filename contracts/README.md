@@ -65,6 +65,30 @@ The shared `rpc.error.schema.json` is referenced by every method's common
 JSON-RPC error entries. Domain-specific error data continues to use its existing
 schema where one exists.
 
+## The operation catalogue
+
+`operations.json` is the one declaration of every operation's lifetime
+(ADR-8eej3e66). It is generated from `internal/operation/catalog` by
+`go run ./internal/operation/catalog/gen`, validated by
+`operations.schema.json` (`additionalProperties: false`, every field required),
+and is the source of two projections that are never written by hand:
+
+- each method's `x-nocx-operation` in `openrpc.json`, carrying the complete
+  declaration. A test compares the complete metadata of the two files, not only
+  the ids, so a stale deadline or a dropped phase is caught.
+- the renderer's deadlines, waiting sentences and row rules. That projection
+  is **not generated in stage 2**: it belongs to `nocx-3an1s.2.2`, where the
+  renderer timers are armed and the module has a consumer. Until then Go and
+  this manifest are the catalogue's readers, and `contracts:check` covers the
+  OpenRPC manifest and its own generated types.
+
+A method with no entry cannot be registered: `internal/transport`'s `reg()`
+takes a typed handle that only the catalogue can mint, and `buildMethodSpecs`
+refuses a zero or mismatched handle. An entry whose handle no production file
+names is refused by the source check in `internal/operation/catalog`. The
+manifest is not a JSON-RPC result schema, so it is deliberately absent from
+`x-nocx-schemaRefs` and has its own generator.
+
 ## Adding a method
 
 1. Write `contracts/<method>.schema.json` for a result or

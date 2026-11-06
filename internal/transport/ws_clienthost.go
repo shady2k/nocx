@@ -36,6 +36,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
@@ -509,14 +511,14 @@ type clientHostHandlers struct {
 func (s *WSServer) clientHostSpecs(immediate control.ImmediateSubmission, lane control.Submission) []methodSpec {
 	holder := &attentionActivationHolder{mu: &s.attentionActivationMu, sink: &s.attentionActivation}
 	return []methodSpec{
-		reg(immediate, "host.resolved", params(validateHostResolvedRaw),
+		reg(immediate, catalog.OpHostResolved, params(validateHostResolvedRaw),
 			func(w *wsConn, _ *connState, r Responder) handlerFunc {
 				h := clientHostHandlers{broker: s.broker, activation: holder, log: s.log, r: r}
 				return func(_ context.Context, req jsonrpcRequest) {
 					h.handleHostResolved(w, req)
 				}
 			}),
-		reg(lane, "host.attentionActivated", params(validateHostAttentionActivatedRaw),
+		reg(lane, catalog.OpHostAttentionActivated, params(validateHostAttentionActivatedRaw),
 			func(_ *wsConn, _ *connState, r Responder) handlerFunc {
 				h := clientHostHandlers{broker: s.broker, activation: holder, log: s.log, r: r}
 				return h.handleAttentionActivated

@@ -35,6 +35,8 @@ package transport
 import (
 	"context"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
@@ -180,7 +182,12 @@ func (s *WSServer) offerScreenUntil(sid session.ID, rx *sessionRx, wconn *wsConn
 			// that was dropped. The runtime and this offer worker coalesce to
 			// one current state.
 		}
-		if err := s.screenResender.ResendScreen(workerCtx, string(sid)); err != nil {
+		// One resend is one operation; the retry loop around it is lifetime
+		// work and owns the waits, which the declaration does not time.
+		opScope := s.beginInternal(workerCtx, catalog.OpInternalScreenOfferRetry)
+		err := s.screenResender.ResendScreen(workerCtx, string(sid))
+		opScope.Complete()
+		if err != nil {
 			s.log.Warn("prompt boundary screen resend failed", "session_id", string(sid), "screen_revision", target, "error", err)
 			rx.failScreenOffer(wconn, target)
 			continue

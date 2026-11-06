@@ -42,6 +42,8 @@ import (
 	"io"
 	"strconv"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/commandnames"
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/session"
@@ -209,7 +211,7 @@ func (h notifyPaneWorkFinishedHandlers) handleNotifyPaneWorkFinished(ctx context
 // synchronous and can block on a sink invocation, so it must never run on the
 // read loop.
 func (s *WSServer) notifyPaneWorkFinishedSpec() methodSpec {
-	return reg(s.lane, "notify.paneWorkFinished", params(validateNotifyPaneWorkFinishedRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+	return reg(s.lane, catalog.OpNotifyPaneWorkFinished, params(validateNotifyPaneWorkFinishedRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 		return notifyPaneWorkFinishedHandlers{
 			raiser:   s.notifyRaiser,
 			registry: s.registry,

@@ -11,8 +11,16 @@ package coordinator
 //
 // The components of the surface, each through its existing owner:
 //
-//   - contracts/*.json — every wire schema, hashed by content. The OpenRPC
-//     manifest (contracts/openrpc.json) is one of them, and transport's
+//   - contracts/*.json — every wire schema, hashed by content. Two files are
+//     deliberately outside it: contracts/operations.json and its schema are
+//     the operation-lifetime catalogue (ADR-8eej3e66), not a thing either side
+//     sends, and the `x-nocx-operation` member the same catalogue projects
+//     into the OpenRPC methods is stripped before hashing that file. Those
+//     bytes can describe a timeout, never a frame, so treating them as a
+//     protocol change would demand a compatibility bump for metadata that no
+//     window or coordinator reads. Every other byte of the manifest — method
+//     names, params and result refs, errors — is still hashed.
+//   - The OpenRPC manifest (contracts/openrpc.json) is one of them, and transport's
 //     TestOpenRPCManifestMatchesRegisteredMethods already enforces that the
 //     manifest's method list IS the registered method set, exactly, in both
 //     directions — so the registered JSON-RPC method names reach this
@@ -152,11 +160,26 @@ func contractJSONs(t *testing.T) map[string][]byte {
 		if relErr != nil {
 			return relErr
 		}
+		rel = filepath.ToSlash(rel)
+		switch rel {
+		case "operations.json", "operations.schema.json":
+			// The operation-lifetime catalogue, not a wire schema. Nothing in
+			// these files can change a byte either side sends (see the file
+			// header); hashing them would make every declared deadline a
+			// protocol change.
+			return nil
+		}
 		data, readErr := os.ReadFile(path) //nolint:gosec // a repo-relative test path
 		if readErr != nil {
 			return readErr
 		}
-		files["contracts/"+filepath.ToSlash(rel)] = data
+		if rel == "openrpc.json" {
+			data, readErr = withoutOperationCatalogue(data)
+			if readErr != nil {
+				return readErr
+			}
+		}
+		files["contracts/"+rel] = data
 		return nil
 	})
 	if err != nil {
@@ -166,6 +189,132 @@ func contractJSONs(t *testing.T) map[string][]byte {
 		t.Fatalf("no *.json contracts found under %s — the tripwire has nothing to guard", contractsDir)
 	}
 	return files
+}
+
+// withoutOperationCatalogue removes every `"x-nocx-operation": {...}` member
+// from the OpenRPC manifest, and nothing else. The catalogue's projection into
+// the manifest is metadata about a method's lifetime; the generator adds it,
+// no window or coordinator reads it, and it cannot change a frame. Removing
+// the member textually (rather than re-marshalling the JSON) keeps every other
+// byte — key order, whitespace, string escaping — exactly as the manifest
+// carries it, so the fingerprint of an unchanged wire is the fingerprint it had
+// before the catalogue existed.
+func withoutOperationCatalogue(data []byte) ([]byte, error) {
+	const key = `"x-nocx-operation"`
+	out := data
+	for {
+		at := jsonKeyIndex(out, key)
+		if at < 0 {
+			return out, nil
+		}
+		end, err := jsonMemberEnd(out, at)
+		if err != nil {
+			return nil, err
+		}
+		start := at
+		if p := prevNonSpace(out, at); p >= 0 && out[p] == ',' {
+			start = p
+		} else {
+			// First member of its object: eat the comma that follows.
+			if q := nextNonSpace(out, end); q < len(out) && out[q] == ',' {
+				end = q + 1
+			}
+		}
+		out = append(out[:start:start], out[end:]...)
+	}
+}
+
+// jsonKeyIndex finds a JSON string token equal to key, outside every string.
+func jsonKeyIndex(data []byte, key string) int {
+	for i := 0; i < len(data); {
+		if data[i] != '"' {
+			i++
+			continue
+		}
+		j := i + 1
+		for j < len(data) {
+			if data[j] == '\\' {
+				j += 2
+				continue
+			}
+			if data[j] == '"' {
+				break
+			}
+			j++
+		}
+		if j >= len(data) {
+			return -1
+		}
+		if string(data[i:j+1]) == key {
+			return i
+		}
+		i = j + 1
+	}
+	return -1
+}
+
+// jsonMemberEnd returns the offset just past the value that follows the key at
+// keyAt (skipping `:` and whitespace). The value is the generated object; the
+// scanner still honours strings and nesting so a `}` inside a note cannot end
+// it early.
+func jsonMemberEnd(data []byte, keyAt int) (int, error) {
+	i := keyAt + len(`"x-nocx-operation"`)
+	if i = nextNonSpace(data, i); i >= len(data) || data[i] != ':' {
+		return 0, fmt.Errorf("x-nocx-operation at %d is not followed by a value", keyAt)
+	}
+	i = nextNonSpace(data, i+1)
+	if i >= len(data) || data[i] != '{' {
+		return 0, fmt.Errorf("x-nocx-operation at %d is not an object", keyAt)
+	}
+	depth := 0
+	inString := false
+	for ; i < len(data); i++ {
+		c := data[i]
+		if inString {
+			if c == '\\' {
+				i++
+				continue
+			}
+			if c == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString = true
+		case '{', '[':
+			depth++
+		case '}', ']':
+			depth--
+			if depth == 0 {
+				return i + 1, nil
+			}
+		}
+	}
+	return 0, fmt.Errorf("x-nocx-operation at %d has no end", keyAt)
+}
+
+func prevNonSpace(data []byte, i int) int {
+	for i--; i >= 0; i-- {
+		switch data[i] {
+		case ' ', '\t', '\r', '\n':
+		default:
+			return i
+		}
+	}
+	return -1
+}
+
+func nextNonSpace(data []byte, i int) int {
+	for ; i < len(data); i++ {
+		switch data[i] {
+		case ' ', '\t', '\r', '\n':
+		default:
+			return i
+		}
+	}
+	return len(data)
 }
 
 // protocolSurfaceFiles joins the surface's owners. Lifecycle envelopes are
@@ -638,5 +787,74 @@ func TestArtifactManifestIsOutsideTheCoordinatorProtocol(t *testing.T) {
 	}
 	if surfaceDigest(contractJSONs(t), nil) == baseline {
 		t.Fatal("actual wire contract no longer changes the protocol fingerprint")
+	}
+}
+
+// TestTheSurfaceIgnoresOperationCatalogueMetadataButNotTheWire proves both
+// halves of the rule stated in the file header: the catalogue projection is
+// removed byte for byte, and a real wire change still moves the fingerprint.
+func TestTheSurfaceIgnoresOperationCatalogueMetadataButNotTheWire(t *testing.T) {
+	wire := `{
+  "openrpc": "1.3.2",
+  "methods": [
+    {
+      "name": "a.b",
+      "params": [{"name": "params", "schema": {"$ref": "https://nocx.local/contracts/a.b.params.schema.json"}}],
+      "errors": [{"code": -32601, "message": "Method not found"}]
+    }
+  ]
+}
+`
+	withMetadata := `{
+  "openrpc": "1.3.2",
+  "methods": [
+    {
+      "name": "a.b",
+      "params": [{"name": "params", "schema": {"$ref": "https://nocx.local/contracts/a.b.params.schema.json"}}],
+      "errors": [{"code": -32601, "message": "Method not found"}],
+      "x-nocx-operation": {"id": "a.b", "max": {"millis": 5000, "basis": "read", "note": "a } in a note"}}
+    }
+  ]
+}
+`
+	scrubbed, err := withoutOperationCatalogue([]byte(withMetadata))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(scrubbed) != wire {
+		t.Fatalf("scrubbing did not restore the wire bytes:\n got: %s\nwant: %s", scrubbed, wire)
+	}
+	base := surfaceDigest(map[string][]byte{"contracts/openrpc.json": []byte(wire)}, nil)
+	got := surfaceDigest(map[string][]byte{"contracts/openrpc.json": scrubbed}, nil)
+	if got != base {
+		t.Fatalf("catalogue metadata moved the fingerprint: %s != %s", got, base)
+	}
+	// The same scrubber, with one real wire byte changed, must move it.
+	changed := []byte(strings.Replace(string(scrubbed), `"name": "a.b"`, `"name": "a.c"`, 1))
+	if surfaceDigest(map[string][]byte{"contracts/openrpc.json": changed}, nil) == base {
+		t.Fatal("a changed method name did not move the fingerprint")
+	}
+}
+
+// TestTheSurfaceFilesExcludeOnlyTheOperationCatalogue checks the rule against
+// the real tree: the catalogue files are absent, and the OpenRPC entry the
+// surface does hash carries no projection.
+func TestTheSurfaceFilesExcludeOnlyTheOperationCatalogue(t *testing.T) {
+	files := protocolSurfaceFiles(t)
+	if _, ok := files["contracts/operations.json"]; ok {
+		t.Fatal("contracts/operations.json must not be part of the protocol surface")
+	}
+	if _, ok := files["contracts/operations.schema.json"]; ok {
+		t.Fatal("contracts/operations.schema.json must not be part of the protocol surface")
+	}
+	openrpc, ok := files["contracts/openrpc.json"]
+	if !ok {
+		t.Fatal("contracts/openrpc.json is missing from the surface")
+	}
+	if strings.Contains(string(openrpc), "x-nocx-operation") {
+		t.Fatal("the surface hashes the catalogue projection into the OpenRPC manifest")
+	}
+	if !strings.Contains(string(openrpc), `"name"`) {
+		t.Fatal("the surface's OpenRPC entry carries no method names")
 	}
 }

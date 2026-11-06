@@ -18,6 +18,8 @@ import (
 	"context"
 	"encoding/json"
 	"unicode/utf8"
+
+	"github.com/shady2k/nocx/internal/operation/catalog"
 )
 
 // AgentAccessRecord is one answer in the terms this surface speaks: the four
@@ -145,11 +147,11 @@ type agentAccessHandlers struct {
 
 func (s *WSServer) agentAccessSpecs() []methodSpec {
 	return []methodSpec{
-		regResponder(s.lane, "agentAccess.list", noParams(), func(r Responder) handlerFunc {
+		regResponder(s.lane, catalog.OpAgentAccessList, noParams(), func(r Responder) handlerFunc {
 			h := agentAccessHandlers{store: s.agentAccess, wired: s.agentAccess != nil, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleList(ctx, req) }
 		}),
-		regResponder(s.lane, "agentAccess.forget", params(validateAgentAccessForgetRaw), func(r Responder) handlerFunc {
+		regResponder(s.lane, catalog.OpAgentAccessForget, params(validateAgentAccessForgetRaw), func(r Responder) handlerFunc {
 			h := agentAccessHandlers{store: s.agentAccess, wired: s.agentAccess != nil, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleForget(ctx, req) }
 		}),

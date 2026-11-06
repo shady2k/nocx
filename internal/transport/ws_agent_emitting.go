@@ -39,6 +39,8 @@ import (
 	"sort"
 	"unicode/utf8"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/paneview"
 	"github.com/shady2k/nocx/internal/session"
@@ -362,7 +364,7 @@ func (s *WSServer) emittingAvailable() bool {
 func (s *WSServer) agentEmittingSpecs() []methodSpec {
 	return []methodSpec{
 		whenAvailable(
-			regResponder(s.lane, "agent.emitting", params(validateAgentEmittingRaw), func(r Responder) handlerFunc {
+			regResponder(s.lane, catalog.OpAgentEmitting, params(validateAgentEmittingRaw), func(r Responder) handlerFunc {
 				return func(ctx context.Context, req jsonrpcRequest) { s.handleAgentEmitting(ctx, req, r) }
 			}),
 			s.emittingAvailable,

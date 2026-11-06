@@ -38,6 +38,8 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
 )
@@ -554,7 +556,7 @@ type liveRunRegistry interface {
 // config-shaped work, no domain gate of its own (the lane is the admission).
 func (s *WSServer) policySpecs() []methodSpec {
 	return []methodSpec{
-		regResponder(s.lane, "policy.get", noParams(), func(r Responder) handlerFunc {
+		regResponder(s.lane, catalog.OpPolicyGet, noParams(), func(r Responder) handlerFunc {
 			h := policyHandlers{store: s.agentPolicy, live: s.liveEffects, wired: s.agentPolicy != nil, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePolicyGet(ctx, req) }
 		}),
@@ -563,7 +565,7 @@ func (s *WSServer) policySpecs() []methodSpec {
 		// run is deciding under just as much as a rule is, and moving one
 		// used to reach the store in silence while a run started thirty
 		// seconds ago went on under the old row (nocx-4yjwk.8).
-		regResponder(s.lane, "policy.set", params(validatePolicySetRaw), func(r Responder) handlerFunc {
+		regResponder(s.lane, catalog.OpPolicySet, params(validatePolicySetRaw), func(r Responder) handlerFunc {
 			h := policyHandlers{store: s.agentPolicy, wired: s.agentPolicy != nil, runs: s, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePolicySet(ctx, req) }
 		}),
@@ -571,15 +573,15 @@ func (s *WSServer) policySpecs() []methodSpec {
 		// registry: a rule write is the one policy gesture a run already in
 		// flight can be left behind by, because a grant is minted from the
 		// whole policy and then frozen (ADR-0020 decision 5).
-		regResponder(s.lane, "policy.setRule", params(validatePolicySetRuleRaw), func(r Responder) handlerFunc {
+		regResponder(s.lane, catalog.OpPolicySetRule, params(validatePolicySetRuleRaw), func(r Responder) handlerFunc {
 			h := policyHandlers{store: s.agentPolicy, wired: s.agentPolicy != nil, runs: s, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePolicySetRule(ctx, req) }
 		}),
-		regResponder(s.lane, "policy.forgetRule", params(validatePolicyForgetRuleRaw), func(r Responder) handlerFunc {
+		regResponder(s.lane, catalog.OpPolicyForgetRule, params(validatePolicyForgetRuleRaw), func(r Responder) handlerFunc {
 			h := policyHandlers{store: s.agentPolicy, wired: s.agentPolicy != nil, runs: s, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePolicyForgetRule(ctx, req) }
 		}),
-		regResponder(s.lane, "policy.explain", params(validatePolicyExplainRaw), func(r Responder) handlerFunc {
+		regResponder(s.lane, catalog.OpPolicyExplain, params(validatePolicyExplainRaw), func(r Responder) handlerFunc {
 			h := policyHandlers{store: s.agentPolicy, wired: s.agentPolicy != nil, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePolicyExplain(ctx, req) }
 		}),
@@ -590,7 +592,7 @@ func (s *WSServer) policySpecs() []methodSpec {
 		// It is the mirror image of policy.explain above — that method
 		// deliberately does not derive an effect because the caller's is the
 		// fact; here there is no call, so deriving it is the whole point.
-		regResponder(s.lane, "policy.classify", params(validatePolicyClassifyRaw), func(r Responder) handlerFunc {
+		regResponder(s.lane, catalog.OpPolicyClassify, params(validatePolicyClassifyRaw), func(r Responder) handlerFunc {
 			h := policyHandlers{store: s.agentPolicy, live: s.liveEffects, wired: s.agentPolicy != nil, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePolicyClassify(ctx, req) }
 		}),

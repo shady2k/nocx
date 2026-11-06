@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/remoteprobe"
 )
 
@@ -35,6 +37,8 @@ type ExecOnce interface {
 // that does not translate is carried through verbatim so Artifact can answer
 // ErrUnsupportedPlatform with the host's own words — never a guessed platform.
 func Probe(ctx context.Context, exec ExecOnce) (Platform, error) {
+	scope := catalog.BeginInternal(ctx, catalog.OpInternalHelperProbe)
+	defer scope.Complete()
 	out, err := exec.Exec(ctx, remoteprobe.UnameCommand)
 	if err != nil {
 		return Platform{}, err

@@ -5,6 +5,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/log"
 	coresession "github.com/shady2k/nocx/internal/session"
@@ -174,7 +176,9 @@ func watchScrollback(reg *settings.Registry, s *scrollbackSetting, f *scrollback
 			s.lines.Store(uint64(v))
 			ctx, cancel := context.WithTimeout(context.Background(), pushScrollbackTimeout)
 			defer cancel()
+			scope := catalog.BeginInternal(ctx, catalog.OpInternalSshScrollbackPush)
 			f.apply(ctx, uint64(v))
+			scope.Complete()
 			return
 		}
 	})

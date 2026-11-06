@@ -51,6 +51,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
@@ -865,15 +867,15 @@ func (s *WSServer) ledgerSpecs(contentSub control.Submission, lane control.Admis
 		}
 	}
 	return []methodSpec{
-		reg(contentSub, "ledger.open", params(validateLedgerOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(contentSub, catalog.OpLedgerOpen, params(validateLedgerOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := build(w, state, r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, req) }
 		}),
-		reg(contentSub, "ledger.bind", params(validateLedgerBindRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(contentSub, catalog.OpLedgerBind, params(validateLedgerBindRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := build(w, state, r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleBind(ctx, req) }
 		}),
-		reg(contentSub, "ledger.close", params(validateLedgerCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(contentSub, catalog.OpLedgerClose, params(validateLedgerCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := build(w, state, r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleClose(ctx, req) }
 		}),
@@ -881,16 +883,16 @@ func (s *WSServer) ledgerSpecs(contentSub control.Submission, lane control.Admis
 		// connState: recall is a question about the ledger, not about this
 		// tab — an entry outlives its session (ADR-0019 §5) and sessionId is
 		// never a recall key.
-		regResponder(contentSub, "ledger.query", params(validateLedgerQueryRaw), func(r Responder) handlerFunc {
+		regResponder(contentSub, catalog.OpLedgerQuery, params(validateLedgerQueryRaw), func(r Responder) handlerFunc {
 			h := ledgerReadHandlers{op: op, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleQuery(ctx, req) }
 		}),
-		regResponder(contentSub, "ledger.get", params(validateLedgerGetRaw), func(r Responder) handlerFunc {
+		regResponder(contentSub, catalog.OpLedgerGet, params(validateLedgerGetRaw), func(r Responder) handlerFunc {
 			h := ledgerReadHandlers{op: op, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleGet(ctx, req) }
 		}),
 		// Artifact bodies are fetched separately so recall never hauls bytes.
-		regResponder(contentSub, "ledger.artifact", params(validateLedgerArtifactRaw), func(r Responder) handlerFunc {
+		regResponder(contentSub, catalog.OpLedgerArtifact, params(validateLedgerArtifactRaw), func(r Responder) handlerFunc {
 			h := ledgerReadHandlers{op: op, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleArtifact(ctx, req) }
 		}),

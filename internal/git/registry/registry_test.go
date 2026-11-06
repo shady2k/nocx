@@ -123,11 +123,11 @@ func (ownsNone) Owns(session.ID) bool { return false }
 
 func TestRegisterMintsUnguessableIDs(t *testing.T) {
 	reg := New()
-	id1, err := reg.Register(&stubRepo{}, "s1")
+	id1, err := reg.Register(&stubRepo{}, "s1", "/repo/one", "mount:1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	id2, err := reg.Register(&stubRepo{}, "s1")
+	id2, err := reg.Register(&stubRepo{}, "s1", "/repo/one", "mount:1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +137,7 @@ func TestRegisterMintsUnguessableIDs(t *testing.T) {
 	if len(id1) != 32 {
 		t.Fatalf("id %q is not 16 random bytes in hex", id1)
 	}
-	if _, err := reg.Register(nil, "s1"); err == nil {
+	if _, err := reg.Register(nil, "s1", "/repo/one", "mount:1"); err == nil {
 		t.Fatal("Register accepted a nil repo")
 	}
 }
@@ -148,7 +148,7 @@ func TestRegisterMintsUnguessableIDs(t *testing.T) {
 func TestRegisterRejectsTypedNilRepo(t *testing.T) {
 	reg := New()
 	var r *stubRepo // typed nil: non-nil interface, nil pointer
-	if _, err := reg.Register(r, "s1"); err == nil {
+	if _, err := reg.Register(r, "s1", "/repo/one", "mount:1"); err == nil {
 		t.Fatal("Register accepted a typed-nil repo")
 	}
 }
@@ -159,7 +159,7 @@ func TestRegisterMintingFailureLeavesNoBinding(t *testing.T) {
 	t.Cleanup(func() { newBindingID = orig })
 
 	reg := New()
-	id, err := reg.Register(&stubRepo{}, "s1")
+	id, err := reg.Register(&stubRepo{}, "s1", "/repo/one", "mount:1")
 	if err == nil {
 		t.Fatal("Register succeeded with a broken id mint")
 	}
@@ -176,7 +176,7 @@ func TestRegisterMintingFailureLeavesNoBinding(t *testing.T) {
 
 func TestAcquireChecksOwnership(t *testing.T) {
 	reg := New()
-	id, err := reg.Register(&stubRepo{}, "s1")
+	id, err := reg.Register(&stubRepo{}, "s1", "/repo/one", "mount:1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +205,7 @@ func TestAcquireChecksOwnership(t *testing.T) {
 
 func TestHandleInvalidAfterRelease(t *testing.T) {
 	reg := New()
-	id, _ := reg.Register(&stubRepo{}, "s1")
+	id, _ := reg.Register(&stubRepo{}, "s1", "/repo/one", "mount:1")
 	h, release, err := reg.Acquire(id, ownsAll{})
 	if err != nil {
 		t.Fatal(err)
@@ -225,7 +225,7 @@ func TestHandleInvalidAfterRelease(t *testing.T) {
 func TestBindingInterval(t *testing.T) {
 	repo := &stubRepo{block: make(chan struct{})}
 	reg := New()
-	id, err := reg.Register(repo, "s1")
+	id, err := reg.Register(repo, "s1", "/repo/one", "mount:1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +288,7 @@ func TestBindingInterval(t *testing.T) {
 func TestCloseWaitsForEveryMethodGuard(t *testing.T) {
 	repo := &stubRepo{block: make(chan struct{})}
 	reg := New()
-	id, _ := reg.Register(repo, "s1")
+	id, _ := reg.Register(repo, "s1", "/repo/one", "mount:1")
 	h, release, err := reg.Acquire(id, ownsAll{})
 	if err != nil {
 		t.Fatal(err)
@@ -327,7 +327,7 @@ func TestCloseWaitsForEveryMethodGuard(t *testing.T) {
 func TestMethodRefusedAfterCloseBegins(t *testing.T) {
 	repo := &stubRepo{block: make(chan struct{})}
 	reg := New()
-	id, _ := reg.Register(repo, "s1")
+	id, _ := reg.Register(repo, "s1", "/repo/one", "mount:1")
 	h, release, err := reg.Acquire(id, ownsAll{})
 	if err != nil {
 		t.Fatal(err)
@@ -361,7 +361,7 @@ func TestMethodRefusedAfterCloseBegins(t *testing.T) {
 func TestNoCallAfterCloseReturns(t *testing.T) {
 	reg := New()
 	repo := &stubRepo{}
-	id, _ := reg.Register(repo, "s1")
+	id, _ := reg.Register(repo, "s1", "/repo/one", "mount:1")
 	h, release, err := reg.Acquire(id, ownsAll{})
 	if err != nil {
 		t.Fatal(err)
@@ -378,7 +378,7 @@ func TestNoCallAfterCloseReturns(t *testing.T) {
 func TestCloseSurfacesRepoCloseError(t *testing.T) {
 	reg := New()
 	repo := &stubRepo{closeErr: errors.New("repo teardown failed")}
-	id, _ := reg.Register(repo, "s1")
+	id, _ := reg.Register(repo, "s1", "/repo/one", "mount:1")
 	err := reg.Close(id)
 	if err == nil || !errors.Is(err, repo.closeErr) {
 		t.Fatalf("Close returned %v, want the repo close error", err)
@@ -390,13 +390,13 @@ func TestCloseSessionClosesOnlyThatSession(t *testing.T) {
 	repoA := &stubRepo{}
 	repoB := &stubRepo{}
 	repoC := &stubRepo{}
-	if _, err := reg.Register(repoA, "s1"); err != nil {
+	if _, err := reg.Register(repoA, "s1", "/repo/one", "mount:1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reg.Register(repoB, "s1"); err != nil {
+	if _, err := reg.Register(repoB, "s1", "/repo/one", "mount:1"); err != nil {
 		t.Fatal(err)
 	}
-	idC, _ := reg.Register(repoC, "s2")
+	idC, _ := reg.Register(repoC, "s2", "/repo/two", "mount:2")
 
 	reg.CloseSession("s1")
 
@@ -416,4 +416,45 @@ func waitInflight(t *testing.T, repo *stubRepo) {
 	waittest.WaitFor(t, "repository method to enter", func() bool {
 		return repo.inflightCount() > 0
 	})
+}
+
+// Identity is a read: it names the checkout and domain without taking the use
+// guard, so an operation can order its work before Acquire.
+func TestIdentityNamesTheCheckoutWithoutAcquiring(t *testing.T) {
+	reg := New()
+	id, err := reg.Register(&stubRepo{}, "s1", "/repo/one", "mount:7")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	got, ok := reg.Identity(id)
+	if !ok {
+		t.Fatal("identity of a live binding not found")
+	}
+	if got.Checkout != "/repo/one" || got.Domain != "mount:7" || got.SessionID != "s1" {
+		t.Fatalf("identity = %+v", got)
+	}
+	if _, ok := reg.Identity("missing"); ok {
+		t.Fatal("identity of an unknown binding was found")
+	}
+	// An identity is not an acquisition: close still waits for a real handle.
+	h, release, err := reg.Acquire(id, ownsAll{})
+	if err != nil || h == nil {
+		t.Fatalf("acquire after identity: %v", err)
+	}
+	release()
+	if err := reg.Close(id); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}
+
+// A register without an identity is refused: an unkeyed binding cannot be
+// ordered or bounded, and guessing one is worse than refusing the open.
+func TestRegisterRefusesWithoutACheckoutIdentity(t *testing.T) {
+	reg := New()
+	if _, err := reg.Register(&stubRepo{}, "s1", "", "mount:1"); err == nil {
+		t.Fatal("register without a checkout succeeded")
+	}
+	if _, err := reg.Register(&stubRepo{}, "s1", "/repo/one", ""); err == nil {
+		t.Fatal("register without a domain succeeded")
+	}
 }

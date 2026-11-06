@@ -42,6 +42,7 @@ import (
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/operation/catalog"
+	"github.com/shady2k/nocx/internal/operation/schedule"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
@@ -2156,11 +2157,21 @@ func (s *WSServer) buildControlPlane() {
 		s.storeGuard = capability.NewStoreGuard(catalog.Declarations(), s.domainMaxQueue, s.domainWaitTimeout)
 	}
 	gates := s.domainGates()
+	// The git domain's stage-5 scheduler: one order gate for every checkout
+	// and one bulkhead for every mount, shared by all git.* methods.
+	gitOrder := schedule.NewKeyed("git-checkout", gitOrderCapacity)
+	gitBulkhead := schedule.NewBulkhead("git", schedule.Limits{
+		Capacity:           gitBulkheadCapacity,
+		PersonReserved:     gitPersonReserved,
+		Queue:              gitBulkheadQueue,
+		AbandonedPerDomain: gitAbandonedPerDomain,
+		AbandonedGlobal:    gitAbandonedGlobal,
+	})
 	// Every admission leaf this server built, for app.diagnostics. The lane
 	// first: it is the one a saturated server holds for days.
 	s.diagAdmits = []control.Admission{
 		lane, gates.config, gates.vault, gates.content, gates.session,
-		gates.git, gates.filesystem, gates.api, s.agentProbeAdmit, s.dialogAdmit,
+		gates.filesystem, gates.api, s.agentProbeAdmit, s.dialogAdmit,
 	}
 	immediate := control.ImmediateSubmission{}
 	// The signal lane, built here rather than inside signalSpecs because it
@@ -2200,7 +2211,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.notifySpecs()...)
 	specs = append(specs, s.notifyFeedSpecs()...)
 	specs = append(specs, s.secretSpecs(lane, gates.config, gates.vault, gates.content)...)
-	specs = append(specs, s.gitSpecs(lane, gates.session, gates.git)...)
+	specs = append(specs, s.gitSpecs(lane, gates.session, gitOrder, gitBulkhead)...)
 	specs = append(specs, s.filesSpecs(lane, gates.session, gates.filesystem)...)
 	specs = append(specs, s.apiSpecs(lane, gates.api, gates.vault)...)
 	contentSub := s.operationQueue("content")
@@ -2252,7 +2263,7 @@ func (s *WSServer) operationQueue(name string) control.Submission {
 // gate is constructed; operations take them as separate parameters and
 // compose in the canonical order.
 type domainGates struct {
-	config, vault, content, session, git, filesystem, api control.Admission
+	config, vault, content, session, filesystem, api control.Admission
 }
 
 func (s *WSServer) domainGates() domainGates {
@@ -2274,7 +2285,6 @@ func (s *WSServer) domainGates() domainGates {
 		vault:      capability.UnlockAnswering(s.storeGuard.Shared(capability.StoreVault)),
 		content:    s.storeGuard.Shared(capability.StoreContent),
 		session:    capability.Gate(capability.GateSession, 1, s.domainMaxQueue, s.domainWaitTimeout),
-		git:        capability.Gate(capability.GateGit, 1, s.domainMaxQueue, s.domainWaitTimeout),
 		filesystem: capability.Gate(capability.GateFilesystem, 1, s.domainMaxQueue, s.domainWaitTimeout),
 		api:        capability.Gate(capability.GateAPI, 1, s.domainMaxQueue, s.domainWaitTimeout),
 	}
@@ -2924,6 +2934,11 @@ type jsonrpcRequest struct {
 	ID      json.RawMessage `json:"id,omitempty"`
 	Method  string          `json:"method,omitempty"`
 	Params  json.RawMessage `json:"params,omitempty"`
+	// Origin is who asked (ADR-8eej3e66 §2): one read method serves a
+	// person's refresh and a background poll, so it travels with the call.
+	// Absent, the backend treats it as person — the side on which an error
+	// cannot silence somebody.
+	Origin catalog.Origin `json:"origin,omitempty"`
 }
 
 type jsonrpcResponse struct {
@@ -3670,7 +3685,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	// declaration's deadlines and the request's cancellation, and it owns the
 	// one settlement record. Stage 2 records settlement and logs expiry; it
 	// does not answer for it, so nothing a caller can do changes here yet.
-	scope := catalog.Begin(requestCtx, m.op, catalog.Invocation{})
+	scope := catalog.Begin(requestCtx, m.op, catalog.Invocation{Origin: invocationOrigin(req)})
 	requestCtx = catalog.WithScope(requestCtx, scope)
 	task := control.Task{Key: key, Run: func(pctx context.Context) {
 		defer cancelRequest()
@@ -3706,6 +3721,19 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		return
 	}
 	s.emitSaturatedNotification(wconn, req.Method, rej)
+}
+
+// invocationOrigin reads the caller's declared origin. Only the catalogue's
+// three values are accepted; anything else — including a missing field — is
+// person, because the wrong answer for a background poll is a quieter one
+// and the wrong answer for a person is an error nobody sees.
+func invocationOrigin(req jsonrpcRequest) catalog.Origin {
+	switch req.Origin {
+	case catalog.OriginBackground, catalog.OriginSystem:
+		return req.Origin
+	default:
+		return catalog.OriginPerson
+	}
 }
 
 // beginInternal starts an internal operation's scope. It is the one place a

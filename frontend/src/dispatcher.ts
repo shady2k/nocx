@@ -595,7 +595,7 @@ export class Dispatcher {
         return
       }
       pending.sent = true
-      ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }))
+      ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params, origin }))
       this._noteOutboundActivity(ws)
       if (origin === 'person' && intent === 'operation') {
         this.onCallPending?.({
@@ -757,7 +757,15 @@ export class Dispatcher {
                 p.reject(new Error('not connected'))
                 return
               }
-              ws.send(JSON.stringify({ jsonrpc: '2.0', id, method: p.method, params: p.params }))
+              ws.send(
+                JSON.stringify({
+                  jsonrpc: '2.0',
+                  id,
+                  method: p.method,
+                  params: p.params,
+                  origin: p.origin,
+                }),
+              )
               this._noteOutboundActivity(ws)
               // The listener was dropped with the first response; the caller's
               // signal still owns this call, so re-arm it against the new id.

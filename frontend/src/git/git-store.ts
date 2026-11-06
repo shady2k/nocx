@@ -307,6 +307,14 @@ function isGitErrorReason(data: unknown, reason: GitError['reason']): boolean {
   return d.reason === reason
 }
 
+/** True when the call never started: its turn expired while it waited for
+ *  the checkout or for capacity (ADR-8eej3e66 §2, -32005 reason
+ *  not-started). Nothing changed, so the remedy is the same action once
+ *  more — the same remedy a refusal owes, without the refusal's sentence. */
+function isOperationNotStarted(e: unknown): boolean {
+  return e instanceof RpcError && isGitErrorReason(e.data, 'not-started')
+}
+
 /** The status DTO is a complete wire snapshot; its arrays are ordered rows.
  *  JSON comparison is the cheapest honest equality here because it includes
  *  every field (including optional count fields) without maintaining a second
@@ -1037,11 +1045,13 @@ export function createGitStore(
       reResolve()
       return
     }
-    if (isSaturationRefusal(e)) {
+    if (isSaturationRefusal(e) || isOperationNotStarted(e)) {
       // The call never ran. Nothing is stale, nothing happened, and the one
       // useful thing to say is what failed plus the same action once more —
       // never a sentence about the terminal being busy, and never a toast
-      // over whatever else the person is doing (ADR-8eej3e66 stage 1).
+      // over whatever else the person is doing (ADR-8eej3e66 stage 1). A
+      // call that did not start answers in the same shape deliberately:
+      // "did not start" and "was refused" are both "nothing changed".
       refusedRetry = action.retry
       setMutationRefused(`${action.what}. ${messageOf(e)}`)
       finishMutationPoll(ctx)

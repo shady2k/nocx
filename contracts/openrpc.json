@@ -8709,14 +8709,14 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 660000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "re-read: the longest call a mutator queues behind is git.commit, whose hook deadline is 600 s; 660 s outlasts it, so a person is not refused for the work ahead of them"
         },
         "max": {
-          "millis": 600000,
+          "millis": 60000,
           "basis": "read",
-          "note": "read: a git mutator runs a process; no explicit bound today"
+          "note": "re-read: closing a local binding is immediate and a remote one is one helper round trip; the 30 s read ceiling covers the round trip and 60 s leaves it room"
         },
         "silence": {
           "kind": "none",
@@ -8827,14 +8827,14 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 660000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "re-read: the longest call a mutator queues behind is git.commit, whose hook deadline is 600 s; 660 s outlasts it, so a person is not refused for the work ahead of them"
         },
         "max": {
           "millis": 600000,
-          "basis": "read",
-          "note": "read: a commit runs hooks that may legitimately be silent and slow; no bound today (stage 5 adds the hook deadline)"
+          "basis": "measured",
+          "note": "measured: this repository's pre-commit hook took 107 s on a 2-CPU box (a failing run, so a lower bound); a hook is bounded here at ~5x that, since a legitimate hook may be silent and slow and a broken one may print for ever"
         },
         "silence": {
           "kind": "none",
@@ -8946,13 +8946,13 @@
         ],
         "turn": {
           "millis": 1000,
-          "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "basis": "measured",
+          "note": "measured: 8 concurrent git reads on a 2-CPU arm64 box take 33 ms; 1 s is ~30x that and a read now waits only for a bulkhead permit, the git gate being gone"
         },
         "max": {
           "millis": 60000,
-          "basis": "read",
-          "note": "read: a local git read process; no explicit bound today"
+          "basis": "measured",
+          "note": "measured: git status on this 5,539-file repository takes 8 ms warm and 140 ms cold; internal/git/local cuts status and log at 30 s, so 60 s is the outer envelope"
         },
         "silence": {
           "kind": "none",
@@ -9064,13 +9064,13 @@
         ],
         "turn": {
           "millis": 1000,
-          "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "basis": "measured",
+          "note": "measured: 8 concurrent git reads on a 2-CPU arm64 box take 33 ms; 1 s is ~30x that and a read now waits only for a bulkhead permit, the git gate being gone"
         },
         "max": {
           "millis": 60000,
-          "basis": "read",
-          "note": "read: a local git read process; no explicit bound today"
+          "basis": "measured",
+          "note": "measured: git status on this 5,539-file repository takes 8 ms warm and 140 ms cold; internal/git/local cuts status and log at 30 s, so 60 s is the outer envelope"
         },
         "silence": {
           "kind": "none",
@@ -9182,13 +9182,13 @@
         ],
         "turn": {
           "millis": 1000,
-          "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "basis": "measured",
+          "note": "measured: 8 concurrent git reads on a 2-CPU arm64 box take 33 ms; 1 s is ~30x that and a read now waits only for a bulkhead permit, the git gate being gone"
         },
         "max": {
           "millis": 60000,
-          "basis": "read",
-          "note": "read: a local git read process; no explicit bound today"
+          "basis": "measured",
+          "note": "measured: git status on this 5,539-file repository takes 8 ms warm and 140 ms cold; internal/git/local cuts status and log at 30 s, so 60 s is the outer envelope"
         },
         "silence": {
           "kind": "none",
@@ -9299,14 +9299,14 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 3000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "re-read: the resolve phase waits on the session gate, whose own wait is 1 s (DefaultDomainConflictWaitTimeout), and the open phase on the mount's bulkhead; 3 s covers the two waits in sequence"
         },
         "max": {
           "millis": 600000,
           "basis": "read",
-          "note": "read: a git mutator runs a process; no explicit bound today"
+          "note": "read: helper selection and the inline first status; internal.helper.install declares 600 s"
         },
         "silence": {
           "kind": "none",
@@ -9418,13 +9418,13 @@
         ],
         "turn": {
           "millis": 1000,
-          "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "basis": "measured",
+          "note": "measured: 8 concurrent git reads on a 2-CPU arm64 box take 33 ms; 1 s is ~30x that and a read now waits only for a bulkhead permit, the git gate being gone"
         },
         "max": {
           "millis": 60000,
-          "basis": "read",
-          "note": "read: a local git read process; no explicit bound today"
+          "basis": "measured",
+          "note": "measured: git status on this 5,539-file repository takes 8 ms warm and 140 ms cold; internal/git/local cuts status and log at 30 s, so 60 s is the outer envelope"
         },
         "silence": {
           "kind": "none",
@@ -9535,14 +9535,14 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 660000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "re-read: the longest call a mutator queues behind is git.commit, whose hook deadline is 600 s; 660 s outlasts it, so a person is not refused for the work ahead of them"
         },
         "max": {
-          "millis": 600000,
-          "basis": "read",
-          "note": "read: a git mutator runs a process; no explicit bound today"
+          "millis": 60000,
+          "basis": "measured",
+          "note": "measured: git add -A over this 5,539-file tree takes 10-19 ms; 60 s is ~3000x and matches the read ceiling on a stuck disk"
         },
         "silence": {
           "kind": "none",
@@ -9653,14 +9653,14 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 660000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "re-read: the longest call a mutator queues behind is git.commit, whose hook deadline is 600 s; 660 s outlasts it, so a person is not refused for the work ahead of them"
         },
         "max": {
-          "millis": 600000,
-          "basis": "read",
-          "note": "read: a git mutator runs a process; no explicit bound today"
+          "millis": 60000,
+          "basis": "measured",
+          "note": "measured: git add -A over this 5,539-file tree takes 10-19 ms; 60 s is ~3000x and matches the read ceiling on a stuck disk"
         },
         "silence": {
           "kind": "none",
@@ -9772,13 +9772,13 @@
         ],
         "turn": {
           "millis": 1000,
-          "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "basis": "measured",
+          "note": "measured: 8 concurrent git reads on a 2-CPU arm64 box take 33 ms; 1 s is ~30x that and a read now waits only for a bulkhead permit, the git gate being gone"
         },
         "max": {
           "millis": 60000,
-          "basis": "read",
-          "note": "read: a local git read process; no explicit bound today"
+          "basis": "measured",
+          "note": "measured: git status on this 5,539-file repository takes 8 ms warm and 140 ms cold; internal/git/local cuts status and log at 30 s, so 60 s is the outer envelope"
         },
         "silence": {
           "kind": "none",
@@ -9889,14 +9889,14 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 660000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "re-read: the longest call a mutator queues behind is git.commit, whose hook deadline is 600 s; 660 s outlasts it, so a person is not refused for the work ahead of them"
         },
         "max": {
-          "millis": 600000,
-          "basis": "read",
-          "note": "read: a git mutator runs a process; no explicit bound today"
+          "millis": 60000,
+          "basis": "measured",
+          "note": "measured: git add -A over this 5,539-file tree takes 10-19 ms; 60 s is ~3000x and matches the read ceiling on a stuck disk"
         },
         "silence": {
           "kind": "none",
@@ -10007,14 +10007,14 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 660000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "re-read: the longest call a mutator queues behind is git.commit, whose hook deadline is 600 s; 660 s outlasts it, so a person is not refused for the work ahead of them"
         },
         "max": {
-          "millis": 600000,
-          "basis": "read",
-          "note": "read: a git mutator runs a process; no explicit bound today"
+          "millis": 60000,
+          "basis": "measured",
+          "note": "measured: git add -A over this 5,539-file tree takes 10-19 ms; 60 s is ~3000x and matches the read ceiling on a stuck disk"
         },
         "silence": {
           "kind": "none",

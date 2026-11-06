@@ -113,14 +113,15 @@ func (s *WSServer) settleWhenEndHoldLifts(sid session.ID) bool {
 	go func() {
 		// Owner: the session's end hold, released by releaseSessionEndHolds or
 		// the hold's own drain. Closing event: hold.drained/released, then the
-		// scope settling.
-		opScope := s.beginInternal(context.Background(), catalog.OpInternalSessionEndHold)
-		defer opScope.Complete()
+		// settle. The WAIT is the owner's, not the operation's: it may last as
+		// long as the session does, so it is outside the scope.
 		select {
 		case <-hold.drained:
 		case <-hold.released:
 		}
+		opScope := s.beginInternal(context.Background(), catalog.OpInternalSessionEndHold)
 		s.settleAdoptedTerminalDomains(sid)
+		opScope.Complete()
 	}()
 	return true
 }

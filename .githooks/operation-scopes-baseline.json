@@ -30,12 +30,6 @@
     "reason": "the run must outlive the request that started it; the run lease owns its cancellation (ADR-0020)"
   },
   {
-    "file": "internal/transport/ws_agent.go",
-    "text": "attemptLedger = s.contentDB.Ledger()",
-    "kind": "provider-call",
-    "reason": "ledger handle accessor; the operation that runs the query takes it inside the ask run scope"
-  },
-  {
     "file": "internal/transport/ws_block_rows.go",
     "text": "ctx := log.WithLogger(context.Background(), s.log)",
     "kind": "unscoped-context",
@@ -91,21 +85,9 @@
   },
   {
     "file": "internal/transport/ws_block_rows.go",
-    "text": "return s.contentDB.Ledger()",
-    "kind": "provider-call",
-    "reason": "ledger handle accessor used to construct the block stream; no provider work at this point"
-  },
-  {
-    "file": "internal/transport/ws_block_rows.go",
     "text": "ctx := log.WithLogger(context.Background(), s.log)",
     "kind": "unscoped-context",
     "reason": "block-row projection runs after the frame and under the block stream lifetime"
-  },
-  {
-    "file": "internal/transport/ws_blocks.go",
-    "text": "return s.contentDB.Ledger()",
-    "kind": "provider-call",
-    "reason": "ledger handle accessor; the query runs under its caller operation"
   },
   {
     "file": "internal/transport/ws_download.go",
@@ -144,40 +126,10 @@
     "reason": "the watch poll and baseline are binding-owned (the loop stop releases them); the two listings are inside files.watch before its response"
   },
   {
-    "file": "internal/transport/ws_files.go",
-    "text": "s.filesys.CloseSession(sid)",
-    "kind": "provider-call",
-    "reason": "session teardown closes the binding after the session has retired; there is no request left to scope"
-  },
-  {
-    "file": "internal/transport/ws_files.go",
-    "text": "_ = s.filesys.Close(bid)",
-    "kind": "provider-call",
-    "reason": "session teardown closes the binding after the session has retired; there is no request left to scope"
-  },
-  {
-    "file": "internal/transport/ws_git.go",
-    "text": "s.git.CloseSession(sid)",
-    "kind": "provider-call",
-    "reason": "session teardown closes the git binding after the session has retired; there is no request left to scope"
-  },
-  {
     "file": "internal/transport/ws_installed_fact.go",
     "text": "ctx, cancel := context.WithTimeout(context.Background(), installedFactResolveTimeout)",
     "kind": "unscoped-context",
     "reason": "the installed-fact probe is owned by the session record and has its own timeout"
-  },
-  {
-    "file": "internal/transport/ws_installed_fact.go",
-    "text": "hc, err := s.sshConfigResolver.ResolveArgv(ctx, argv)",
-    "kind": "provider-call",
-    "reason": "ssh-config resolution reads the user config file; it is bounded by installedFactResolveTimeout and runs in a session-owned probe"
-  },
-  {
-    "file": "internal/transport/ws_layout_handlers.go",
-    "text": "return s.contentDB.Layout()",
-    "kind": "provider-call",
-    "reason": "store handle accessor used to construct the layout operation"
   },
   {
     "file": "internal/transport/ws_ledger.go",
@@ -187,27 +139,9 @@
   },
   {
     "file": "internal/transport/ws_lifecycle.go",
-    "text": "entry, err := s.contentDB.Ledger().EntryForShellAttempt(ctx, sess.PaneID(), f.Attempt.ID)",
-    "kind": "provider-call",
-    "reason": "ledger accessors in lifecycle reconciliation; the reconciliation operation is declared as internal.lifecycle.reconcile"
-  },
-  {
-    "file": "internal/transport/ws_lifecycle.go",
     "text": "s.notifyRaiser.Raise(context.Background(), blockFinishedEvent(sess, data.Command, status, facts))",
     "kind": "unscoped-context",
     "reason": "a lifecycle notification outlives the fact that caused it"
-  },
-  {
-    "file": "internal/transport/ws_lifecycle.go",
-    "text": "ledger := s.contentDB.Ledger()",
-    "kind": "provider-call",
-    "reason": "ledger accessors in lifecycle reconciliation; the reconciliation operation is declared as internal.lifecycle.reconcile"
-  },
-  {
-    "file": "internal/transport/ws_lifecycle.go",
-    "text": "ledger := s.contentDB.Ledger()",
-    "kind": "provider-call",
-    "reason": "ledger accessors in lifecycle reconciliation; the reconciliation operation is declared as internal.lifecycle.reconcile"
   },
   {
     "file": "internal/transport/ws_readopt.go",
@@ -220,12 +154,6 @@
     "text": "h.sess.pumpToRing(context.Background(), sess, rx.ring)",
     "kind": "unscoped-context",
     "reason": "a session read pump is session-owned (ADR-0009)"
-  },
-  {
-    "file": "internal/transport/ws_session_handlers.go",
-    "text": "sessionLedger = s.contentDB.Ledger()",
-    "kind": "provider-call",
-    "reason": "ledger handle accessor used to construct the session operation"
   },
   {
     "file": "internal/transport/ws_session_ops.go",

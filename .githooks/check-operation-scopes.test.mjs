@@ -4,16 +4,6 @@ import { collectViolations, partition } from './check-operation-scopes.mjs'
 
 const FILE = 'internal/transport/ws_fixture.go'
 
-test('a direct provider call in the handler layer is a violation', () => {
-  const violations = collectViolations({
-    [FILE]: `func (s *WSServer) handler() {
-	_ = s.filesys.Close("binding")
-}`,
-  })
-  assert.equal(violations.length, 1)
-  assert.equal(violations[0].kind, 'provider-call')
-})
-
 test('a background context in request work is a violation', () => {
   const violations = collectViolations({
     [FILE]: `func (s *WSServer) handler() {
@@ -39,16 +29,16 @@ test('an unchecked context detachment is a violation', () => {
 test('a baselined line passes and corrected code drops out of the baseline', () => {
   const source = {
     [FILE]: `func (s *WSServer) handler() {
-	_ = s.git.CloseSession("sid")
+	ctx := context.Background()
 }`,
   }
   const violations = collectViolations(source)
   const baseline = [
     {
       file: FILE,
-      text: '_ = s.git.CloseSession("sid")',
-      kind: 'provider-call',
-      reason: 'teardown after the session retired',
+      text: 'ctx := context.Background()',
+      kind: 'unscoped-context',
+      reason: 'owned by the session loop',
     },
   ]
   const { known, fresh } = partition(violations, baseline)
@@ -59,18 +49,30 @@ test('a baselined line passes and corrected code drops out of the baseline', () 
   assert.equal(partition(fixed, baseline).known.length, 0)
 })
 
-test('a provider call that is not in the baseline is fresh', () => {
+test('an unscoped context that is not in the baseline is fresh', () => {
   const { fresh } = partition(
-    collectViolations({ [FILE]: 'func (s *WSServer) handler() { _ = s.vault.Status() }' }),
+    collectViolations({
+      [FILE]: 'func (s *WSServer) handler() { _ = context.WithoutCancel(ctx) }',
+    }),
     [],
   )
   assert.equal(fresh.length, 1)
-  assert.equal(fresh[0].kind, 'provider-call')
+  assert.equal(fresh[0].kind, 'unscoped-context')
 })
 
 test('comments are not calls', () => {
   const violations = collectViolations({
     [FILE]: '// s.filesys.Close(bid) and context.Background() are named here, not called',
+  })
+  assert.equal(violations.length, 0)
+})
+
+test("provider calls are deliberately not this check's question", () => {
+  const violations = collectViolations({
+    [FILE]: `func (s *WSServer) handler() {
+	p := s.filesys
+	_ = p.Close("binding")
+}`,
   })
   assert.equal(violations.length, 0)
 })

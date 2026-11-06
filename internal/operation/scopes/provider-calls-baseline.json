@@ -1,0 +1,78 @@
+[
+  {
+    "key": "internal/transport/session_open.go:ssh.ConfigResolver.ResolveConfig#1",
+    "reason": "session open resolves ~/.ssh/config for a direct host; the open operation declares ssh and runs under its scope"
+  },
+  {
+    "key": "internal/transport/ws.go:transport.VaultLifecycle.Snapshot#1",
+    "reason": "in-memory lifecycle snapshot used to name where secrets live; no store or provider call"
+  },
+  {
+    "key": "internal/transport/ws_agent.go:assistant.Client.Ask#1",
+    "reason": "the model call is the agent run itself; internal.agent.run is open for the whole stream"
+  },
+  {
+    "key": "internal/transport/ws_agent.go:assistant.Client.Discard#1",
+    "reason": "terminalisation drops the run checkpoint inside the same agent run scope"
+  },
+  {
+    "key": "internal/transport/ws_agent.go:content.ContentDB.Ledger#1",
+    "reason": "store handle accessor used to construct the ask operation; no provider work here"
+  },
+  {
+    "key": "internal/transport/ws_assistant.go:assistant.Client.Probe#1",
+    "reason": "residual: the endpoint probe handler does not begin an operation scope yet; it is bounded by assistant probeTimeout and belongs to the assistant migration"
+  },
+  {
+    "key": "internal/transport/ws_block_rows.go:content.ContentDB.Ledger#1",
+    "reason": "store handle accessor used to construct the block stream; no provider work here"
+  },
+  {
+    "key": "internal/transport/ws_blocks.go:content.ContentDB.Ledger#1",
+    "reason": "store handle accessor used by its caller's operation; no provider work here"
+  },
+  {
+    "key": "internal/transport/ws_files.go:*filesystem.Registry.Close#1",
+    "reason": "session teardown closes the binding after the session retired; no request remains to scope"
+  },
+  {
+    "key": "internal/transport/ws_files.go:*filesystem.Registry.CloseSession#1",
+    "reason": "session teardown closes the files bindings after the session retired; no request remains to scope"
+  },
+  {
+    "key": "internal/transport/ws_git.go:*registry.Registry.CloseSession#1",
+    "reason": "session teardown closes the git bindings after the session retired; no request remains to scope"
+  },
+  {
+    "key": "internal/transport/ws_installed_fact.go:ssh.ConfigResolver.ResolveArgv#1",
+    "reason": "ssh-config read inside a session-owned probe bounded by installedFactResolveTimeout"
+  },
+  {
+    "key": "internal/transport/ws_layout_handlers.go:content.ContentDB.Layout#1",
+    "reason": "store handle accessor used to construct the layout operation"
+  },
+  {
+    "key": "internal/transport/ws_lifecycle.go:content.ContentDB.Ledger#1",
+    "reason": "store handle accessor in lifecycle reconciliation; internal.lifecycle.reconcile is declared for the pass"
+  },
+  {
+    "key": "internal/transport/ws_lifecycle.go:content.ContentDB.Ledger#2",
+    "reason": "store handle accessor in lifecycle reconciliation; internal.lifecycle.reconcile is declared for the pass"
+  },
+  {
+    "key": "internal/transport/ws_lifecycle.go:content.ContentDB.Ledger#3",
+    "reason": "store handle accessor in lifecycle reconciliation; internal.lifecycle.reconcile is declared for the pass"
+  },
+  {
+    "key": "internal/transport/ws_session_handlers.go:content.ContentDB.Ledger#1",
+    "reason": "store handle accessor used to construct the session operation"
+  },
+  {
+    "key": "internal/transport/ws_shell_footprint.go:ssh.ConfigResolver.ResolveArgv#1",
+    "reason": "residual: the footprint oracle reads ssh config outside an operation scope; it is bounded by the handler's own pass and belongs to the shell/helper migration"
+  },
+  {
+    "key": "internal/transport/ws_vault.go:transport.VaultLifecycle.Snapshot#1",
+    "reason": "in-memory lifecycle snapshot for the vault.changed fan-out; the notification owner is the connection set, not a request"
+  }
+]

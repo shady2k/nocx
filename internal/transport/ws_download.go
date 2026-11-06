@@ -321,8 +321,6 @@ func (s *WSServer) startDownload(rt *runningTransfer, source transfer.Source) er
 // files.download came from, and the use-guard that handle carried, were
 // both let go when files.download answered (D8).
 func (s *WSServer) runDownload(rt *runningTransfer, source transfer.Source) {
-	opScope := s.beginInternal(rt.ctx, catalog.OpInternalFilesDownload)
-	defer opScope.Complete()
 	defer close(rt.done)
 	// The pinned handle is closed on EVERY path out of this goroutine,
 	// including the one where nobody ever fetched. It is the closing end
@@ -343,7 +341,11 @@ func (s *WSServer) runDownload(rt *runningTransfer, source transfer.Source) {
 		return
 	}
 
+	// The transfer itself is the operation; waiting for its destination above
+	// is the owner's wait and is not timed by the declaration.
+	opScope := s.beginInternal(rt.ctx, catalog.OpInternalFilesDownload)
 	sent, err := source.Get(rt.ctx, rt.download, dst, rt.progress)
+	opScope.Complete()
 	rt.finish(downloadStateOf(err, rt.ctx.Err()), transfer.Outcome{}, err, s.transfers.clock())
 	s.transfers.retireTicket(rt.ticket)
 	// Before the deferred close(rt.done), on every path: anything that

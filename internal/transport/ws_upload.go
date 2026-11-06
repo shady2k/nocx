@@ -1113,8 +1113,6 @@ func (s *WSServer) registerAndMint(rt *runningTransfer, needsTicket bool) error 
 // answered (D8) — which is what makes files.close, session teardown and
 // shutdown able to cancel, wait a bounded moment and then close for real.
 func (s *WSServer) runUpload(rt *runningTransfer, sink transfer.Sink) {
-	opScope := s.beginInternal(rt.ctx, catalog.OpInternalFilesUpload)
-	defer opScope.Complete()
 	defer close(rt.done)
 
 	// A path upload already holds its reader; only a stream upload waits.
@@ -1130,7 +1128,11 @@ func (s *WSServer) runUpload(rt *runningTransfer, sink transfer.Sink) {
 		}
 	}
 
+	// The transfer itself is the operation; waiting for its body above is
+	// the owner's wait and is not timed by the declaration.
+	opScope := s.beginInternal(rt.ctx, catalog.OpInternalFilesUpload)
 	out, err := sink.Put(rt.ctx, rt.upload, body, rt.progress)
+	opScope.Complete()
 	if body != nil {
 		_ = body.Close()
 	}

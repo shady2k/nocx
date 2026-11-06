@@ -4,17 +4,17 @@
  * context that lost its invocation, must be a baselined decision.
  *
  * ADR-8eej3e66 §4 says nothing runs outside a scope: the catalogue's handle
- * hands out a scope carrying deadlines and cancellation, provider adapters take
- * it, and a static check refuses direct provider calls outside the adapters,
- * `context.Background()` in request work and unchecked context detachment.
+ * hands out a scope carrying deadlines and cancellation, and a static check
+ * refuses provider calls outside the adapters, `context.Background()` in
+ * request work and unchecked context detachment.
  *
- * This is the check the record asks for, in the manner of
- * check-control-goroutines.mjs: Go cannot prove a call is under a scope, so the
- * available structural check is a ratchet over the ONE package that serves
- * requests (internal/transport). A provider call there is a direct reach past
- * the capability layer; a background context or WithoutCancel there is a call
- * that escaped its invocation. Both are baselined with a reason; a new one
- * fails the gate and is a review decision in the diff.
+ * THIS FILE CHECKS ONLY THE CONTEXTS. A regex cannot answer "is this a
+ * provider call": `p := s.filesys; p.Close(...)` and
+ * `server.filesys.Close(...)` are the same call under other spellings. That
+ * half is `internal/operation/scopes`'s Go test, which resolves every call
+ * through go/types and reports the method it reaches, whatever the receiver is
+ * named. This ratchet keeps the two context shapes, where text is the whole
+ * question: a call that dropped its invocation.
  *
  * Scope, stated rather than implied: this checks internal/transport's
  * non-test Go files. The provider packages themselves are the adapters, and
@@ -36,22 +36,6 @@ const PROJECT_ROOT = resolve(__dirname, '..')
 const BASELINE_PATH = join(__dirname, 'operation-scopes-baseline.json')
 const SCOPED_DIR = 'internal/transport'
 
-// Provider adapters reachable from the handler package. Each is an external
-// failure domain: a store, a process, a connection or a model. `registry`,
-// `settings` and the policy store are deliberately absent: they are in-memory
-// reads whose loss is a missing row, not a hung dependency.
-const PROVIDER_FIELDS = [
-  'git',
-  'filesys',
-  'contentDB',
-  'vault',
-  'apiCollections',
-  'assistantClient',
-  'sshConfigResolver',
-  'backupService',
-]
-
-const PROVIDER_RE = new RegExp(`\\b(?:s|h\\.machine|h\\.sess)\\.(${PROVIDER_FIELDS.join('|')})\\.`)
 const BACKGROUND_RE = /context\.(?:Background\(\)|WithoutCancel\()/
 
 function lineKey(file, text) {
@@ -68,10 +52,9 @@ export function collectViolations(sources) {
     source.split('\n').forEach((line, i) => {
       const text = line.trim()
       if (text.startsWith('//') || text === '') return
-      let kind = null
-      if (PROVIDER_RE.test(text)) kind = 'provider-call'
-      else if (BACKGROUND_RE.test(text)) kind = 'unscoped-context'
-      if (kind) violations.push({ file, line: i + 1, text, kind })
+      if (BACKGROUND_RE.test(text)) {
+        violations.push({ file, line: i + 1, text, kind: 'unscoped-context' })
+      }
     })
   }
   return violations
@@ -109,11 +92,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     }
   }
   const { known, fresh } = partition(collectViolations(collectSources()), baseline)
-  const providers = known.filter((v) => v.kind === 'provider-call').length
-  const contexts = known.filter((v) => v.kind === 'unscoped-context').length
-  console.log(
-    `operation scopes: ${providers} baselined provider call(s), ${contexts} baselined unscoped context(s), 0 new`,
-  )
+  console.log(`operation scopes: ${known.length} baselined unscoped context(s), 0 new`)
+  console.log('provider calls are checked from types by internal/operation/scopes')
   if (fresh.length !== 0) {
     for (const v of fresh) console.error(`NEW ${v.kind}: ${v.file}:${v.line}  ${v.text}`)
     console.error(

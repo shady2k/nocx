@@ -132,7 +132,7 @@ func (s *inflightSubmission) TrySubmit(ctx context.Context, task control.Task) *
 	if !ok {
 		return &control.Rejection{Reason: "server shutting down", Scope: "control"}
 	}
-	rej := s.inner.TrySubmit(tctx, control.Task{Key: task.Key, Run: func(pctx context.Context) {
+	rej := s.inner.TrySubmit(tctx, control.Task{Key: task.Key, Start: task.Start, Run: func(pctx context.Context) {
 		defer release()
 		task.Run(pctx)
 	}})

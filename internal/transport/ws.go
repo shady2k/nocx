@@ -3636,6 +3636,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	// even though every frame on it opened a span. This is what a failing
 	// e2e test's printed block actually finds by trace_id.
 	log.From(ctx).Debug("jsonrpc dispatch", "method", req.Method)
+	ctx = withConnectionContext(ctx, ctx)
 	requestCtx := ctx
 	cancelRequest := func() {}
 	var cancelEntry *requestCancel
@@ -3644,9 +3645,11 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		var err error
 		cancelEntry, err = wconn.requestCancels.register(req.ID, cancelRequest)
 		if err != nil {
-			cancelRequest()
-			_ = respond(wconn, newJSONRPCError(req.ID, -32600, "Invalid Request"))
-			return
+			// A duplicate id cannot be tracked twice. The request still runs
+			// (ids are the renderer's to keep unique; refusing here would
+			// change what a client that reuses one can do), but this
+			// invocation is not the one a withdrawal for that id names.
+			cancelEntry = nil
 		}
 	}
 	// THE INVOCATION GETS A SCOPE (ADR-8eej3e66 §4). It carries the
@@ -3667,6 +3670,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	}}
 	if cancelEntry != nil {
 		task.Start = cancelEntry.begin
+		requestCtx = withRequestCancel(requestCtx, cancelEntry)
 	}
 	rej := m.submission.TrySubmit(requestCtx, task)
 	if rej == nil {

@@ -35,6 +35,7 @@ type requestCancel struct {
 	mu        sync.Mutex
 	withdrawn bool
 	started   bool
+	retained  []context.CancelFunc
 }
 
 // begin is the worker's start gate: false means the request was withdrawn
@@ -54,8 +55,45 @@ func (e *requestCancel) begin() bool {
 func (e *requestCancel) withdraw() {
 	e.mu.Lock()
 	e.withdrawn = true
+	retained := append([]context.CancelFunc(nil), e.retained...)
 	e.mu.Unlock()
 	e.cancel()
+	for _, cancel := range retained {
+		cancel()
+	}
+}
+
+// retainWork registers work that outlives the handler but belongs to this
+// request: agent.ask hands its stream to a background submission after the
+// response, so the handler's return must not cancel it, while a withdrawal
+// and a disconnect must. The request context itself remains cancellable for
+// everything that does not opt in.
+func (e *requestCancel) retainWork(cancel context.CancelFunc) {
+	e.mu.Lock()
+	if e.withdrawn {
+		e.mu.Unlock()
+		cancel()
+		return
+	}
+	e.retained = append(e.retained, cancel)
+	e.mu.Unlock()
+}
+
+type requestCancelContextKey struct{}
+
+func withRequestCancel(ctx context.Context, e *requestCancel) context.Context {
+	return context.WithValue(ctx, requestCancelContextKey{}, e)
+}
+
+// retainRequestWork marks cancel as belonging to the request in ctx. It
+// reports false for a context with no request cancellation registered.
+func retainRequestWork(ctx context.Context, cancel context.CancelFunc) bool {
+	e, ok := ctx.Value(requestCancelContextKey{}).(*requestCancel)
+	if !ok {
+		return false
+	}
+	e.retainWork(cancel)
+	return true
 }
 
 func newRequestCancels() *requestCancels {
@@ -92,9 +130,20 @@ func (c *requestCancels) cancel(id json.RawMessage) bool {
 func (c *requestCancels) drop(id json.RawMessage, entry *requestCancel) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.running[requestIDKey(id)] == entry {
-		delete(c.running, requestIDKey(id))
+	if c.running[requestIDKey(id)] != entry {
+		return
 	}
+	// Work the handler RETAINED outlives it, so its cancellation must remain
+	// reachable: a disconnect has to end the run, and rpc.cancel by the id
+	// the renderer holds must still find it. The entry stays until the
+	// connection closes.
+	entry.mu.Lock()
+	retained := len(entry.retained)
+	entry.mu.Unlock()
+	if retained != 0 {
+		return
+	}
+	delete(c.running, requestIDKey(id))
 }
 
 func (c *requestCancels) cancelAll() {
@@ -105,6 +154,10 @@ func (c *requestCancels) cancelAll() {
 	}
 	c.mu.Unlock()
 	for _, entry := range entries {
+		// The connection context is the parent of every run derived from it,
+		// so a disconnect reaches retained work without an explicit
+		// withdrawal. Retained cancels stay for rpc.cancel, which is a
+		// withdrawal of the request while the connection lives on.
 		entry.cancel()
 	}
 }
@@ -159,4 +212,22 @@ func rpcCancelSpec(immediate control.Submission) methodSpec {
 			}
 		}
 	})
+}
+
+type connectionContextKey struct{}
+
+// withConnectionContext makes the connection's own context reachable from a
+// request context. Work a handler starts that belongs to the connection or
+// session — a run stream, an output pump — must derive from it, not from the
+// request context, which ends when the handler returns; deriving from the
+// connection keeps disconnect semantics (a lost socket ends the work) while
+// the request's own withdrawal stays a separate signal.
+func withConnectionContext(ctx, connection context.Context) context.Context {
+	return context.WithValue(ctx, connectionContextKey{}, connection)
+}
+
+// connectionContext returns the context the connection's read loop owns.
+func connectionContext(ctx context.Context) (context.Context, bool) {
+	c, ok := ctx.Value(connectionContextKey{}).(context.Context)
+	return c, ok && c != nil
 }

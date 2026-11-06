@@ -450,6 +450,7 @@ func TestReconcile_ExchangeDidNotHappen_OldIDMatches(t *testing.T) {
 }
 
 func TestReconcile_ExchangeHappened_PendingRestart(t *testing.T) {
+	useStampedTestBuild(t)
 	dir := t.TempDir()
 	installPath := filepath.Join(dir, "nocx.AppImage")
 	makeMinimalAppImage(t, installPath)
@@ -469,17 +470,22 @@ func TestReconcile_ExchangeHappened_PendingRestart(t *testing.T) {
 		NewBundleID:    currentID,
 		FromVersion:    "0.1.0",
 		ToVersion:      "0.2.0",
+		ToBuild:        version.Identity(),
 		ArtifactSHA256: "abc",
 	}
 	if err := writeJournal(jp, rec); err != nil {
 		t.Fatal(err)
 	}
 
+	// The RESTARTED build: the exchange happened, and this process is the one
+	// that was installed (nocx-vh2hr.1.20). The applying build's reconcile is
+	// not a launch of it and is covered by
+	// TestReconcile_AProcessRunningAnotherBuildSpendsNothing.
 	u := NewUpdater(UpdaterConfig{
 		Platform:       newFakePlatform(),
 		Fetcher:        &mockFetcher{},
 		Keyring:        nil,
-		CurrentVersion: "0.1.0", InstallPath: installPath, StateDir: filepath.Join(filepath.Dir(installPath), "state"),
+		CurrentVersion: "0.2.0", InstallPath: installPath, StateDir: filepath.Join(filepath.Dir(installPath), "state"),
 	})
 
 	if err := u.Reconcile(context.Background()); err != nil {
@@ -499,6 +505,7 @@ func TestReconcile_ExchangeHappened_PendingRestart(t *testing.T) {
 }
 
 func TestReconcile_AutoRollback_AfterThreeLaunches(t *testing.T) {
+	useStampedTestBuild(t)
 	dir := t.TempDir()
 	installPath := filepath.Join(dir, "nocx.AppImage")
 	makeMinimalAppImage(t, installPath)
@@ -522,8 +529,12 @@ func TestReconcile_AutoRollback_AfterThreeLaunches(t *testing.T) {
 		NewBundleID:    currentID,
 		FromVersion:    "0.1.0",
 		ToVersion:      "0.2.0",
+		ToBuild:        version.Identity(),
 		ArtifactSHA256: "abc",
-		LaunchAttempts: 2, // one more launch triggers rollback
+		// Two starts of the installed build already spent, and the record
+		// names it: one more start rolls back (nocx-vh2hr.1.20).
+		LaunchAttempts:        2,
+		LaunchAttemptsOwnedBy: version.Identity(),
 	}
 	if err = writeJournal(jp, rec); err != nil {
 		t.Fatal(err)
@@ -533,7 +544,7 @@ func TestReconcile_AutoRollback_AfterThreeLaunches(t *testing.T) {
 		Platform:       newFakePlatform(),
 		Fetcher:        &mockFetcher{},
 		Keyring:        nil,
-		CurrentVersion: "0.1.0", InstallPath: installPath, StateDir: filepath.Join(filepath.Dir(installPath), "state"),
+		CurrentVersion: "0.2.0", InstallPath: installPath, StateDir: filepath.Join(filepath.Dir(installPath), "state"),
 	})
 
 	if err = u.Reconcile(context.Background()); err != nil {
@@ -888,7 +899,9 @@ func TestUpdater_Apply_HappyPath(t *testing.T) {
 		t.Error("swap peer does not hold the old bundle identity")
 	}
 
-	// 4. Reconcile must see pending health state (launch counter incremented).
+	// 4. The applying build's own reconcile is not a launch of the build it
+	// just installed, so it spends nothing (nocx-vh2hr.1.20). It is still the
+	// 0.1.0 binary, running from the bundle it swapped out.
 	if err := u.Reconcile(ctx); err != nil {
 		t.Fatalf("Reconcile after Apply failed: %v", err)
 	}
@@ -896,22 +909,27 @@ func TestUpdater_Apply_HappyPath(t *testing.T) {
 	if reread == nil {
 		t.Fatal("journal missing after Reconcile")
 	}
-	if reread.LaunchAttempts < 1 {
-		t.Errorf("launch attempts not incremented: got %d", reread.LaunchAttempts)
+	if reread.LaunchAttempts != 0 {
+		t.Errorf("the applier's reconcile spent %d launch attempts; it is not the installed build", reread.LaunchAttempts)
 	}
 
-	// 5. ReportHealthy must finalise (journal deleted, backup created) —
-	// but only for the RESTARTED application. Health certifies a pair,
-	// and `u` above is still the 0.1.0 build that applied the update, so
-	// it cannot certify its own work however healthy it feels. The
-	// restart is what the second updater stands for: the new binary, and
-	// a backend that is also the new binary.
+	// 5. The RESTARTED application: the new binary, and a backend that is
+	// also the new binary. Its first start is the launch the counter counts,
+	// and ReportHealthy then finalises (journal deleted, backup created).
+	// Health certifies a pair, so `u` above cannot do this however healthy it
+	// feels.
 	restarted := NewUpdater(UpdaterConfig{
 		Platform:       newFakePlatform(),
 		Fetcher:        &mockFetcher{body: manifestBody, sig: manifestSig},
 		Keyring:        pubs,
 		CurrentVersion: "0.2.0", InstallPath: installPath, StateDir: filepath.Join(filepath.Dir(installPath), "state"), Coordinator: &stubProbe{build: CoordinatorBuild{Version: "0.2.0", Commit: "testsha"}},
 	})
+	if err := restarted.Reconcile(ctx); err != nil {
+		t.Fatalf("Reconcile on the restarted build: %v", err)
+	}
+	if reread, _ := readJournal(jp); reread == nil || reread.LaunchAttempts != 1 {
+		t.Fatalf("the restarted build's first start did not count one launch: %+v", reread)
+	}
 	if err := restarted.ReportHealthy(ctx); err != nil {
 		t.Fatalf("ReportHealthy failed: %v", err)
 	}

@@ -218,10 +218,10 @@ This moves install **out of the open path**. The owner's reason: a struggling se
 **Silence and closing** (replaces today's keepalive verdict):
 
 - Probe interval default 15 s; each probe has a soft deadline of 15 s, after which the supervisor reports `stalled` while the call stays parked. Worst case 30 s, which is Q3. The old default was 30 s, so this doubles probes: one small packet per connection per 15 s.
-- An unanswered probe closes nothing by itself. The supervisor closes on a transport error at once, or after `silenceCloseBudget` = 5 minutes of silence, chosen from the owner's "three minutes and then it connected". A profile's keepalive settings still apply and map onto these.
-- **While `stalled`, the supervisor tries a look-only dial every 15 s:** TCP and the SSH version exchange on a new connection, no key exchange and no sign-in, on the same route. If it is answered and the established connection stays silent for 30 s more, that flow is dead (a reboot, a lost NAT entry), and the supervisor closes it and goes to `reconnecting`. A loaded host that answers neither stays `stalled`. A loaded host that answers the new one but not the old is the risk: `sshd` forks per connection, so a starved session process can read as dead and a live plain shell is lost; the 30 s grace limits it, and a helper-owned shell loses nothing.
-- **Q5's budget, worst case:** 15 s to the next look, 30 s grace, up to 15 s to sign in on a host that has just returned and is healthy. Sixty seconds, none spare, measured from the look being answerable, and only on an established connection. A connection already in `reconnecting` is faster: at most 15 s to the next attempt. A look can be logged as a preauth close, so its 15 s cadence stops as soon as it is answered once, and fail2ban's preauth filters are a named fault test.
-- **On a wake signal** the supervisor sends one probe at once, unless one is already parked: a parked `SendRequest` holds `globalSentMu`, so probes never accumulate and the parked one is the evidence. Unanswered for 5 s: `stalled`, which is Q4, and it means missing evidence, not a loss. Unanswered for 30 s: close and reconnect. The 30 s is shorter than the normal budget because a socket that crossed a sleep is usually dead. It is the design's one place of risk to a live plain shell on a host that was also struggling; a helper-owned shell loses nothing.
+- **Silence never ends a shell that would die with the connection. That is the person's choice (owner, 2026-11-06: "let us not decide for the user; let them choose to wait or to reconnect; checking in the background that a new connection works, we can of course do").** An unanswered probe closes nothing by itself. A transport error closes at once and reconnects unaided: nothing is left to lose. A connection on which every shell is helper-owned closes on the evidence below, or after `silenceCloseBudget` = 5 minutes of silence, chosen from the owner's "three minutes and then it connected", because reattaching loses nothing. A connection carrying any plain shell has no such budget: it stays `stalled` until it answers, the transport errors, or a person presses Reconnect. A profile's keepalive settings still apply and map onto these.
+- **While `stalled`, the supervisor tries a look-only dial every 15 s:** TCP and the SSH version exchange on a new connection, no key exchange and no sign-in, on the same route. The answer is evidence for the person and for helper-owned shells, never a verdict on a plain one. If it is answered and the established connection stays silent for 30 s more: helper-owned, the supervisor closes and goes to `reconnecting`; carrying a plain shell, the head says that the server answers new connections while this session has been silent for this long, and offers Reconnect, saying it ends that shell. Waiting is doing nothing. `sshd` forks per connection, so a starved session process and a dead flow look alike from here, which is why the person decides. A loaded host that answers neither stays `stalled`.
+- **Q5's budget, worst case, where nocx acts alone:** 15 s to the next look, 30 s grace, up to 15 s to sign in on a host that has just returned and is healthy. Sixty seconds, none spare, measured from the look being answerable, on a helper-owned connection. A connection already in `reconnecting` is faster: at most 15 s to the next attempt. A plain shell after a reboot usually needs no choice either: the parked probe's retransmission reaches a host holding no state for that flow, the reset is a transport error, and it reconnects unaided `[H: retransmission backoff decides how soon; the harness measures it]`. A flow lost in a firewall or NAT stays silent and asks. A look can be logged as a preauth close, so its 15 s cadence stops as soon as it is answered once and the evidence carries when it was answered; fail2ban's preauth filters are a named fault test.
+- **On a wake signal** the supervisor sends one probe at once, unless one is already parked: a parked `SendRequest` holds `globalSentMu`, so probes never accumulate and the parked one is the evidence. Unanswered for 5 s: `stalled`, which is Q4, and it means missing evidence, not a loss. Unanswered for 30 s: a helper-owned connection closes and reconnects, because a socket that crossed a sleep is usually dead; a connection carrying a plain shell follows the rule above and asks.
 - **sshd answers while the shell is hung:** nothing authoritative can see this for a plain channel, since terminal bytes create no authority (AD-6), and the design does not guess. The head stays `connected`, input is not blocked, and Stop and Reconnect work. On a helper-owned session the helper can say whether its process exists; that is the limit of the foundation.
 
 ### 5.4 After a return
@@ -239,7 +239,7 @@ Commands are never re-run. The drafted line in the editor stays and is not sent.
 Reconnect is the head button:
 
 - After a drop it acts at once.
-- Over a live shell without a helper it asks first, because it ends that shell.
+- Over a live shell without a helper it asks first, because it ends that shell. On a shared connection the question names how many plain shells end with it, since one transport serves them all. When `stalled` has already said so on the head, the press is the answer.
 - Over a live helper-owned shell it re-dials and reattaches without asking.
 
 ### 5.5 Lifetimes (ADR-8eej3e66)
@@ -269,6 +269,8 @@ Reconnect is the head button:
     "cause": "host-key-changed", // failed, ended
     "attempt": 3, // reconnecting only
     "stateMs": 72000, // time in this state at observation; renderer ticks locally
+    "lookAnsweredAt": "2026-11-06T12:00:00Z", // stalled only: a new connection answered
+    "plainShells": 1, // stalled only: shells that end if this connection closes
   },
   "quality": { "slow": true, "roundTripMs": 1200 }, // as session.liveness carries them
   "attempt": {
@@ -334,7 +336,7 @@ Per connection: stage entered and left with durations, server version, chosen al
 
 **Healthy host, helper installed.** About 1.4 s; the far spawn proves itself inside the pause; blocks paint; the raw shell was never opened. The connection block collapses.
 
-**Lid closed for an hour.** Wake signal. All supervisors probe. At 5 s tabs read `stalled`. At 30 s connections close and go to `reconnecting`, one per `poolKey`. Vault locked: one `waiting_person(vault-unlock)`, drawn on every tab of that host and asked once. Host answers: helper-held shells reattach, others open anew with a divider.
+**Lid closed for an hour.** Wake signal. All supervisors probe. At 5 s tabs read `stalled`. At 30 s helper-owned connections close and go to `reconnecting`, one per `poolKey`. A connection carrying a plain shell stays `stalled` and offers Reconnect, unless a transport error has already settled it; the offer is one per connection, not one per tab. Vault locked: one `waiting_person(vault-unlock)`, drawn on every tab of that host and asked once. Host answers: helper-held shells reattach, others open anew with a divider.
 
 **Changed key at reconnect.** The supervisor's `HostKeyCallback` refuses before any signature. `failed(host-key-changed)`. All tabs on that host say so. Nothing retries. The existing host-key recovery applies.
 
@@ -353,7 +355,7 @@ Per connection: stage entered and left with durations, server version, chosen al
 - **Least astonishment is bent** in two places: a typed `ssh` no longer runs in the shell it was typed into, and a person mid-wait can see a raw shell turn into blocks when nothing was typed.
 - **YAGNI is bent** once: the journal lands before its viewer, because the head's stage text and the review of a failed open both read it.
 - **Probes double** for each connection by default, and a silent connection adds a look-only dial every 15 s until one is answered.
-- **A plain shell may die on the wake budget or the look's grace** on a host that is starved rather than gone (§5.3). This trades priority 4 for Q5, and it is the owner's call to tighten if it bites.
+- **Priority 4 is held over Q5 for a plain shell:** on a silent flow nocx asks instead of closing it, so an unattended tab can sit `stalled` until someone comes back. The owner's choice: waiting costs a click, a wrong close costs the work.
 - **`open` changes meaning:** its answer no longer means a shell exists. Every caller of `open` for SSH, workers included, moves to adoption.
 - **Two shells on a struggling host** remain possible for the seconds of the race, which is the price of the owner's order; no double on a healthy host, which is Q10.
 
@@ -398,7 +400,7 @@ Per connection: stage entered and left with durations, server version, chosen al
 - **Handshake:** silent after accept (Q2), MaxStartups reset, no common algorithms, new key, changed key (also at reconnect).
 - **Sign-in:** key rejected, passphrase, empty agent, wrong password, 2FA, MaxAuthTries, closed port after bans, forced password change, LoginGraceTime, delayed fake agent for a touch.
 - **Shell:** `nologin`, `ForceCommand`, hung `.bashrc`, noisy `.bashrc`, no PTY, MaxSessions, full disk and noexec `/tmp` (install fails in background, session unaffected), other architecture, old helper, interrupted install.
-- **During work:** blackhole, one-way loss, reset, reboot behind a silent flow (Q5), a look answered while the old session process is starved, fail2ban preauth filter against looks, wake with a probe already parked, sshd restart (existing session lives) versus reboot, new address, idle cutoff, sleep and clock jump via an injected wake source and clock, far helper crash, jump host down, sshd answering while the shell is hung (Reconnect works, nothing claims a diagnosis).
+- **During work:** blackhole, one-way loss, reset, reboot behind a silent flow (Q5), a look answered while the old session process is starved (a plain shell stays alive and is offered Reconnect; a helper-owned one reattaches), a plain shell after a reboot (reconnects on the probe's reset), fail2ban preauth filter against looks, wake with a probe already parked, sshd restart (existing session lives) versus reboot, new address, idle cutoff, sleep and clock jump via an injected wake source and clock, far helper crash, jump host down, sshd answering while the shell is hung (Reconnect works, nothing claims a diagnosis).
 - **Ours:** update, WebSocket drop, six tabs, profile edited, reconnect needing a password with nobody present (waits; no failed sign-in accrues).
 
 **The epic's check (rule 2).** `e2e/ssh-foundation.spec.ts`: one host, by profile and typed, one key at the server; hold-banner; slow; cut; state right each time; raw input works. It is written first and stays red until the stages land.
@@ -447,3 +449,5 @@ Reviewer: OpenAI `gpt-6.1-sol` through `codex exec` read-only, one round, in ATA
 | Wake evidence and parked probes (comment)                                                       | Fixed: no accumulation; `stalled` means missing evidence                                                   |
 | AD-6 inventory wording (comment)                                                                | Fixed: the emulator's ownership stated; C11 reworded                                                       |
 | Exit 255 is not proof of a drop (comment)                                                       | Fixed: reads as an ssh error (§5.6)                                                                        |
+
+**After the review, by the owner (2026-11-06).** The reviewed text closed a silent connection after a 30 s grace or 5 minutes, whatever it carried. The owner moved that decision to the person for a plain shell. The change was not reviewed again.

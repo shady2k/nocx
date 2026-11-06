@@ -29,7 +29,7 @@ Owner's order: the terminal works; security; honest state; the session survives;
 2. **`pane.connection` replaces `session.liveness`,** keyed by pane because no session id exists while opening. `exit` still owns a session's end and `lifecycle.changed` still owns integration.
 3. **The shell comes first.** After sign-in an integrated attempt races a plain shell opened after a short pause (owner's decision, RFC 8305's shape). Blocks show only after an accepted domain reaches `prompt_ready`. A helper install is never part of an open. A working shell is never replaced by nocx.
 4. **Waiting is a state, not a failure.** `open` answers early, and each attempt and each ask is a catalogued operation with its own finite bound. Waiting for a person stops the no-progress clock and can last; an expired ask raises no new one until a person acts.
-5. **Silence closes nothing by itself.** The supervisor decides closing, helped by a look-only dial that tells a dead flow from a silent host. A dropped connection reconnects unaided, and only confirmed absence of a far-helper shell opens another. A changed key or a rejected sign-in stops it. No command is ever re-run.
+5. **Silence closes nothing by itself.** A transport error closes and reconnects unaided. Silence on a connection whose shells are all helper-owned closes on the evidence of a look-only dial, because reattaching loses nothing. Silence on a connection carrying a plain shell never closes it: the look-only dial's answer is shown, and the person chooses to wait or to reconnect (owner, 2026-11-06). A dropped connection reconnects unaided, and only confirmed absence of a far-helper shell opens another. A changed key or a rejected sign-in stops it. No command is ever re-run.
 6. **One resolver answers `ours` or `plain`,** with the reason, and one rule chooses the credential: an explicit identity wins, one matching saved connection applies, several apply none. A typed line our transport honours binds a hosted session over the parked local one, in the same tab.
 7. **A failure on our transport never falls through to plain ssh automatically,** because a rejected password and a changed key must not become other attempts. The head offers it on `failed`.
 
@@ -38,7 +38,7 @@ Owner's order: the terminal works; security; honest state; the session survives;
 - A typed `ssh` no longer runs in the shell it was typed into when it is `ours`: local history and `$?` need deliberate handling, and this is the riskiest part, so it lands last and behind a prototype.
 - `open` no longer means a shell exists, and every SSH caller moves to adoption.
 - Probes double by default (15 s instead of 30 s).
-- A plain shell can be lost to the wake budget or the look-only dial's grace (30 s each) on a host that is starved rather than gone. This trades the session's survival for reconnecting within a minute.
+- A plain shell on a silent flow waits for a person, so an unattended tab can sit `stalled` until someone returns. Waiting costs a click; a wrong close costs the work.
 - First session on a new host has no helper, so it cannot return to the same shell after a drop.
 - A hung shell behind a live sshd stays undiagnosed under AD-6; Stop and Reconnect are the answer.
 

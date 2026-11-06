@@ -71,7 +71,23 @@ type journalRecord struct {
 	// readable for rollback, but cannot certify a build by version alone.
 	ToBuild        version.BuildIdentity `json:"toBuild"`
 	ArtifactSHA256 string                `json:"artifactSHA256"`
-	LaunchAttempts int                   `json:"launchAttempts"`
+	// LaunchAttempts counts starts of the build this transaction installed:
+	// how many times a process running it reached startup without certifying
+	// health. §7.5 rolls back on the third.
+	//
+	// LaunchAttemptsOwnedBy names the build that wrote the count
+	// (nocx-vh2hr.1.20). A journal is the one file two builds share across an
+	// update, and the build being REPLACED can write it too — the build before
+	// nocx-vh2hr.1.19 reconciled on every state read, so one window spent two
+	// launches with no restart at all. Those are not starts of the installed
+	// build, and a count attributed to another build is discarded rather than
+	// acted on. A record without the field was written by a build that did not
+	// have it; its count is attributed to nobody and is discarded the same way.
+	// The zero value means exactly that, and an older binary ignores the field
+	// — which is why the schema version is unchanged: it refuses a version it
+	// does not know, and it must go on reading what this one writes.
+	LaunchAttempts        int                   `json:"launchAttempts"`
+	LaunchAttemptsOwnedBy version.BuildIdentity `json:"launchAttemptsOwnedBy"`
 
 	// HeldByCoordinator records that a healthy window reported against a
 	// protocol-compatible OLDER coordinator kept under ADR-0101 (new

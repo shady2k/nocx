@@ -224,7 +224,8 @@ func TestKeyedOrderedSubmissionNeverStartsAWithdrawnTask(t *testing.T) {
 	}
 	<-started
 	ran := make(chan struct{}, 1)
-	if rej := sub.TrySubmit(context.Background(), Task{Key: "A",
+	if rej := sub.TrySubmit(context.Background(), Task{
+		Key:   "A",
 		Start: func() bool { return false },
 		Run:   func(context.Context) { ran <- struct{}{} },
 	}); rej != nil {

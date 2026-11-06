@@ -321,7 +321,36 @@ func (u *updater) reconcileLocked(ctx context.Context) error {
 			u.log.Info("reconcile: update held by the running coordinator", "heldByVersion", rec.HeldByCoordinator, "toVersion", rec.ToVersion)
 			return nil
 		}
+		// A LAUNCH ATTEMPT IS A START OF THE INSTALLED BUILD (nocx-vh2hr.1.20).
+		// The journal outlives the build that wrote it, so the process reading
+		// it may be one the update is replacing — and until nocx-vh2hr.1.19
+		// that build counted a launch on every state read, so one window could
+		// hand the candidate a count of two with no restart at all. The
+		// candidate's first start then made three and a good update was
+		// exchanged back (nightly run 42183378724). Nothing here can change
+		// the old binary; what it can do is refuse to act on a count that is
+		// not this build's.
+		if !u.runsInstalledBuild(rec) {
+			u.log.Info("reconcile: this process is not the build the update installed; the launch count is the installed build's to spend",
+				"runningVersion", u.currentVersion, "installedVersion", rec.ToVersion,
+				"runningCommit", u.currentBuild.Commit, "installedCommit", rec.ToBuild.Commit)
+			return nil
+		}
+		if rec.LaunchAttemptsOwnedBy != u.currentBuild {
+			// The count belongs to a build that is not this one: the build
+			// this update replaced, or a record old enough not to name its
+			// writer. Its launches say nothing about this build, so this
+			// start is the first of its own three.
+			if rec.LaunchAttempts > 0 {
+				u.log.Info("reconcile: discarding a launch count that another build wrote",
+					"launchAttempts", rec.LaunchAttempts,
+					"ownedByCommit", rec.LaunchAttemptsOwnedBy.Commit,
+					"runningCommit", u.currentBuild.Commit)
+			}
+			rec.LaunchAttempts = 0
+		}
 		rec.LaunchAttempts++
+		rec.LaunchAttemptsOwnedBy = u.currentBuild
 		if err := writeJournal(jp, rec); err != nil {
 			return fmt.Errorf("reconcile: update launch count: %w", err)
 		}
@@ -333,6 +362,29 @@ func (u *updater) reconcileLocked(ctx context.Context) error {
 	default:
 		return fmt.Errorf("reconcile: install bundle at %s has unexpected identity %v — the journal recorded old=%v new=%v. The bundle was replaced by hand or by another process. Remove %s and consult the README rollback procedures.", rec.InstallPath, currentID, rec.OldBundleID, rec.NewBundleID, jp)
 	}
+}
+
+// runsInstalledBuild reports whether the process asking is a start of the
+// build the journal installed — the only launch the rollback counter counts
+// (nocx-vh2hr.1.20).
+//
+// The version always has to match. The build identity decides when the journal
+// records a complete one, and it is what tells two nightlies of one version
+// apart; that is the same fact certifyPair refuses certification on, read the
+// other way round. Certification can demand proof and refuse without it; a
+// launch count cannot, because a record written before identities were
+// recorded (2026-10-28) would then never roll back at all, which is the failure
+// §7.5's escape exists to prevent. So a journal that cannot answer the identity
+// half is answered by the version alone, and a count it carries is still
+// discarded unless it names this build.
+func (u *updater) runsInstalledBuild(rec *journalRecord) bool {
+	if u.currentVersion != rec.ToVersion {
+		return false
+	}
+	if _, ok := buildTime(rec.ToBuild); !ok {
+		return true
+	}
+	return u.currentBuild == rec.ToBuild
 }
 
 // settleUnjournaledDebris resolves the managed names when no journal explains
@@ -652,7 +704,10 @@ func (u *updater) certifyPair(ctx context.Context, rec *journalRecord) error {
 			// still refused, because the new server has not run.
 			rec.HeldByCoordinator = build.Version
 			rec.HeldAt = time.Now()
+			// The report proves this build started and reached its frontend,
+			// so it owns the counter from here (nocx-vh2hr.1.20).
 			rec.LaunchAttempts = 0
+			rec.LaunchAttemptsOwnedBy = u.currentBuild
 			u.log.Info("report healthy: the update is held by a kept coordinator",
 				"coordinator", build.Version, "coordinatorCommit", build.Commit,
 				"installed", rec.ToVersion)

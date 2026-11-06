@@ -17,6 +17,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/filesystem/local"
+	"github.com/shady2k/nocx/internal/operation/catalog"
 	"github.com/shady2k/nocx/internal/operation/domains"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/waittest"
@@ -179,25 +180,41 @@ func TestFilesOneBlockedMountDoesNotHoldUnrelatedWork(t *testing.T) {
 
 	// A third call on the wedged mount waits out its turn and answers the
 	// declared expired outcome, naming the bound, instead of hanging.
+	//
+	// THE WAIT IS THE DECLARED TURN, and that is thirty seconds: a person's
+	// call may wait that long before "did not start" (ADR-8eej3e66 §8, and
+	// the catalogue's personTurnMillis — one second was the busyness refusal
+	// in a new place). So the read's bound is that turn plus the usual grace
+	// rather than wantWithin, and the assertion below is against the same
+	// number instead of a hand-written five seconds.
+	turn := catalog.OpFilesList.Declaration().Turn.Duration()
 	start := time.Now()
-	state, result := filesListState(t, jsonrpcCallWithID(t, env.conn, "files.list", map[string]any{
+	state, result := filesListState(t, jsonrpcCallWithIDWithin(t, env.conn, "files.list", map[string]any{
 		"bindingId": hungBid, "path": hungRoot, "offset": 0, "limit": 1,
-	}, 104))
+	}, 104, turn+wantWithin))
 	elapsed := time.Since(start)
 	if state != "timedOut" {
 		t.Fatalf("a call on a saturated domain answered %q, want timedOut (%v)", state, result)
 	}
-	if elapsed > 5*time.Second {
-		t.Errorf("the turn deadline took %v to settle; it is declared at 1 s", elapsed)
+	if elapsed > turn+5*time.Second {
+		t.Errorf("the turn deadline took %v to settle; it is declared at %v", elapsed, turn)
 	}
 	t.Logf("the turn bound settled the third call after %v with state %q, timeout %v",
 		elapsed.Round(time.Millisecond), state, result["timeout"])
 
-	// Release the mount: every worker the episode held unwinds, and nothing it
+	// Release the mount: every WORKER the episode held unwinds, and nothing it
 	// grew is left behind.
+	//
+	// A QUEUED CALLER IS NOT A LEFTOVER. A call that arrived while the domain
+	// was saturated waits its declared turn — thirty seconds for a person —
+	// and this test's own poll traffic and expiry leave one in the queue
+	// while the mount unwinds, which is the design (ADR-8eej3e66 §8: it
+	// waits, visibly). What this asserts is the accounting the worker owns;
+	// the waiter count has its own test where the queue lives
+	// (internal/operation/domains, TestAWaitThatIsGrantedLeavesTheWaitingCount).
 	unblock()
 	if err := waitForFilesDomains(t, env.ws, func(s domains.Stats) bool {
-		return s.Running == 0 && s.Abandoned == 0 && s.Domains == 0
+		return s.Running == 0 && s.Abandoned == 0
 	}); err != nil {
 		t.Fatal(err)
 	}

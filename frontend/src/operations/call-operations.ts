@@ -18,7 +18,7 @@
 // stays in the log and diagnostics.
 
 import { createSignal } from 'solid-js'
-import type { CallSettlement, Dispatcher, PendingCallView } from '../dispatcher'
+import type { Dispatcher, PendingCallView } from '../dispatcher'
 import { callOperationDeclaration } from '../generated/operations'
 import { rendererDeadlineMs } from './renderer-deadlines'
 import type { Operation, OperationSource } from './operations'
@@ -26,7 +26,6 @@ import type { Operation, OperationSource } from './operations'
 /** Waiting under two seconds shows the action's own pending state. Two
  *  seconds is the owner's answer (ADR-8eej3e66 §8). */
 const WAIT_ROW_THRESHOLD_MS = 2000
-
 
 export interface CallOperations {
   /** The Operations source, read by the model. */
@@ -106,7 +105,7 @@ export function callOperations(
   // Cancel could not remove. The answer belongs to the call that was made,
   // whose own rejection carries it (AbortError for a withdrawal, the replay
   // refusal for a mutation the record already ran), not to a row.
-  const onSettled = (id: number, _settlement: CallSettlement): void => {
+  const onSettled = (id: number): void => {
     remove(id)
   }
 
@@ -119,7 +118,7 @@ export function callOperations(
       if (dispatcher.onCallSettled === onSettled) dispatcher.onCallSettled = undefined
       for (const entry of waiting.values()) {
         if (entry.timer !== null) clearTimeout(entry.timer)
-          }
+      }
       waiting.clear()
       setRows([])
     },

@@ -2070,15 +2070,6 @@ func WithControlLaneCapacity(n int) WSServerOption {
 	return func(s *WSServer) { s.laneCapacity = n }
 }
 
-// WithCreditWindow sets the ordinary credit window transport.credit
-// advertises. Zero (the default) is DefaultCreditWindow, which is what
-// production uses; a test names a smaller value to fill a window with a
-// known number of calls. The value is per connection: every connection of
-// this server is told the same window.
-func WithCreditWindow(n int) WSServerOption {
-	return func(s *WSServer) { s.creditWindow = n }
-}
-
 func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption) *WSServer {
 	s := &WSServer{
 		log:         logger,

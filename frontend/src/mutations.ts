@@ -26,8 +26,11 @@ import type { MutationReplayed } from './generated/mutation.replayed'
 import type { OperationOutcome } from './generated/operation.outcome'
 import { callOperationDeclaration } from './generated/operations'
 
-/** The wire's closed set of answers. */
-export type MutationAnswer = OperationOutcome['outcome']
+/** The wire's closed set of answers. Not exported: the one consumer that
+ *  named the type was the row that read an answer out, and a row is the wait
+ *  (ADR-8eej3e66 §8) — the answer belongs to the call's own rejection, whose
+ *  surface reads {@link MutationAssessment} instead. */
+type MutationAnswer = OperationOutcome['outcome']
 
 /** What one answer means to the person, in their terms. */
 export interface MutationAssessment {

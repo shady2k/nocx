@@ -28,9 +28,14 @@ async function build() {
   const methods = manifest.operations
     .filter((op) => op.kind === 'method')
     .sort((a, b) => a.id.localeCompare(b.id))
+  // `expired` is the catalogue's statement of what a deadline means for this
+  // operation. It is the renderer's one test for "this call may have changed
+  // something": an operation whose expiry is outcome-unknown is the one that
+  // needs a mutation identity, so the answer to "did it happen" exists at all
+  // (ADR-8eej3e66 §4). Nothing else in the renderer knows which methods mutate.
   const entries = methods.map(
     (op) =>
-      `  ${JSON.stringify(op.id)}: { waiting: ${JSON.stringify(op.waiting)}, row: ${JSON.stringify(op.row)} },`,
+      `  ${JSON.stringify(op.id)}: { waiting: ${JSON.stringify(op.waiting)}, row: ${JSON.stringify(op.row)}, expired: ${JSON.stringify(op.expired)} },`,
   )
   return `${BANNER}
 
@@ -39,6 +44,10 @@ export interface CallOperationDeclaration {
   readonly waiting: string
   /** When Operations may show it. */
   readonly row: 'never' | 'past-wait' | 'always'
+  /** The outcome at the deadline. 'outcome-unknown' is the catalogue's own
+   *  statement that this call may have changed something by then, and the one
+   *  test for "this is a mutation": only these calls carry an identity. */
+  readonly expired: 'not-started' | 'outcome-unknown' | 'retry-read'
 }
 
 const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {

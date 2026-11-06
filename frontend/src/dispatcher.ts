@@ -13,6 +13,14 @@ import type { ControlSaturated } from './generated/control.saturated'
 import type { TransportPingResult } from './generated/transport.ping'
 import type { ControlSaturatedNotification } from './generated/control.saturated.notification'
 import { log } from './log'
+import type { MutationReplayed } from './generated/mutation.replayed'
+import {
+  MutationNotReplayedError,
+  isMutationMethod,
+  newMutationIdentity,
+  replayedAssessment,
+  resolveMutationOutcome,
+} from './mutations'
 export type NotificationHandler = (params: unknown) => void
 export type LifecycleHandler = () => void
 
@@ -210,6 +218,9 @@ interface PendingCall {
   sealedRetried: boolean
   sent: boolean
   settled: boolean
+  /** The identity this mutating call carries (ADR-8eej3e66 §4). Absent on a
+   *  read: the catalogue decides, not the caller. */
+  mutation?: string
   /** The id the Operations row was announced under; it survives a sealed
    *  retry, which changes currentID. */
   observeID: number
@@ -231,13 +242,53 @@ export interface PendingCallView {
   readonly id: number
   readonly method: string
   readonly startedAt: number
+  /** The mutation identity the call carries, or absent for a read. A surface
+   *  that shows what became of a call asks with this. */
+  readonly mutation?: string
   cancel: () => void
 }
+
+/** How a person's call ended, as the Operations source needs to hear it. */
+export type CallSettlement =
+  /** The backend answered: a result or an error. */
+  | 'answered'
+  /** The renderer's own half ended with no answer — withdrawn, or the socket
+   *  went. For a mutation this is the moment the question starts. */
+  | 'no-answer'
 
 function abortError(): Error {
   const err = new Error('The operation was aborted')
   err.name = 'AbortError'
   return err
+}
+
+/** One request frame. The mutation identity rides the ENVELOPE, beside the id
+ *  and the method, because it is a fact about the invocation and not a param
+ *  any handler should see (ADR-8eej3e66 §4). */
+/** The data of the -32005 refusal, when this error is one. Code, not message
+ *  text: the code is the wire's discriminator, the reason is the second half. */
+function replayedPayload(code: number | undefined, data: unknown): MutationReplayed | null {
+  if (code !== -32005 || data === null || typeof data !== 'object') return null
+  const payload = data as { reason?: unknown; outcome?: unknown; operation?: unknown }
+  if (payload.reason !== 'mutation-replayed') return null
+  if (typeof payload.outcome !== 'string' || typeof payload.operation !== 'string') return null
+  return {
+    reason: 'mutation-replayed',
+    outcome: payload.outcome as MutationReplayed['outcome'],
+    operation: payload.operation,
+  }
+}
+
+function frameFor(id: number, pending: PendingCall): string {
+  const frame: Record<string, unknown> = {
+    jsonrpc: '2.0',
+    id,
+    method: pending.method,
+    params: pending.params,
+    origin: pending.origin,
+  }
+  if (pending.mutation !== undefined) frame.mutation = pending.mutation
+  return JSON.stringify(frame)
 }
 
 export type ConnectionState =
@@ -531,8 +582,9 @@ export class Dispatcher {
   /** Called when a person's operation call is on the wire. Background work
    *  never reaches it: it merges and is not shown. */
   onCallPending?: (call: PendingCallView) => void
-  /** Called once when that call has settled, however it settled. */
-  onCallSettled?: (id: number) => void
+  /** Called once when that call has settled, however it settled, with the
+   *  one thing a row cannot derive: whether an answer ever arrived. */
+  onCallSettled?: (id: number, settlement: CallSettlement) => void
 
   call<T = unknown>(
     method: string,
@@ -556,6 +608,10 @@ export class Dispatcher {
         settled: false,
         observeID: id,
         currentID: id,
+        // A MUTATION MINTS ITS IDENTITY HERE, once per call — not per attempt,
+        // so a sanctioned retry names the same work (ADR-8eej3e66 §4).
+        mutation:
+          intent === 'operation' && isMutationMethod(method) ? newMutationIdentity() : undefined,
       }
       const abort = (): void => {
         if (pending.settled) return
@@ -563,7 +619,9 @@ export class Dispatcher {
         const activeID = pending.currentID
         if (this.pending.get(activeID) === pending) this.pending.delete(activeID)
         pending.removeAbortListener?.()
-        this.notifyCallSettled(pending)
+        // NO ANSWER: for a mutation this is where the question starts, and
+        // the surface asks operation.outcome rather than sending it again.
+        this.notifyCallSettled(pending, 'no-answer')
         reject(abortError())
         const ws = this.ws
         if (pending.sent && ws && ws.readyState === WebSocket.OPEN) {
@@ -590,18 +648,19 @@ export class Dispatcher {
         this.pending.delete(id)
         pending.settled = true
         pending.removeAbortListener?.()
-        this.notifyCallSettled(pending)
+        this.notifyCallSettled(pending, 'no-answer')
         reject(new Error('not connected'))
         return
       }
       pending.sent = true
-      ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params, origin }))
+      ws.send(frameFor(id, pending))
       this._noteOutboundActivity(ws)
       if (origin === 'person' && intent === 'operation') {
         this.onCallPending?.({
           id,
           method,
           startedAt: Date.now(),
+          mutation: pending.mutation,
           cancel: () => this.cancel(id),
         })
       }
@@ -734,7 +793,18 @@ export class Dispatcher {
           // Keep the caller's promise pending: raise the unlock prompt (the
           // vault owns it), then re-send the request verbatim with a fresh
           // id. Exactly one retry — a second sealed error rejects as-is.
+          //
+          // A MUTATION ASKS FIRST (ADR-8eej3e66 §4). Re-sending is replaying,
+          // and a replay is only safe when the backend says the first attempt
+          // did not start. A sealed refusal normally is that answer — the
+          // vault refused before anything was touched — but the renderer does
+          // not get to assume it: the record does, and a record that says
+          // anything else ends the call with one of §8's three answers.
           p.sealedRetried = true
+          if (p.mutation !== undefined) {
+            void this.replayMutationAfterUnlock(p)
+            return
+          }
           void this.onVaultSealed(p.method).then(
             () => {
               if (p.signal?.aborted) {
@@ -757,15 +827,7 @@ export class Dispatcher {
                 p.reject(new Error('not connected'))
                 return
               }
-              ws.send(
-                JSON.stringify({
-                  jsonrpc: '2.0',
-                  id,
-                  method: p.method,
-                  params: p.params,
-                  origin: p.origin,
-                }),
-              )
+              ws.send(frameFor(id, p))
               this._noteOutboundActivity(ws)
               // The listener was dropped with the first response; the caller's
               // signal still owns this call, so re-arm it against the new id.
@@ -785,6 +847,13 @@ export class Dispatcher {
           return
         }
         this.notifyCallSettled(p)
+        // A replay the record refused. The answer is in the payload, so the
+        // person is told which of the three it is rather than "already ran".
+        const replayed = replayedPayload(msg.error.code, msg.error.data)
+        if (replayed !== null) {
+          p.reject(new MutationNotReplayedError(replayedAssessment(replayed)))
+          return
+        }
         if (
           msg.error.data &&
           typeof msg.error.data === 'object' &&
@@ -935,17 +1004,73 @@ export class Dispatcher {
     if (this._connectionState.kind === 'waiting') this.retryNow()
   }
 
+  /**
+   * The one re-send a mutation may have: ADR-0032's unlock retry, gated on the
+   * backend's record. It asks what became of the first attempt and re-sends
+   * only when the answer is `not-started` — under the SAME identity, so a
+   * second copy cannot slip past the record either.
+   */
+  private async replayMutationAfterUnlock(p: PendingCall): Promise<void> {
+    const assessment = await resolveMutationOutcome(this, p.mutation ?? '')
+    if (p.settled) return
+    if (assessment.answer !== 'not-started') {
+      // Nothing is re-sent. The person is told which of the three answers it
+      // is, and a timeout that reached this point never implies a rollback.
+      p.settled = true
+      p.removeAbortListener?.()
+      this.notifyCallSettled(p)
+      p.reject(new MutationNotReplayedError(assessment))
+      return
+    }
+    let unlocked = false
+    try {
+      await this.onVaultSealed?.(p.method)
+      unlocked = true
+    } catch (e) {
+      p.settled = true
+      this.notifyCallSettled(p)
+      p.reject(e instanceof Error ? e : new Error(String(e)))
+      return
+    }
+    if (!unlocked || p.settled) return
+    if (p.signal?.aborted) {
+      p.settled = true
+      this.notifyCallSettled(p, 'no-answer')
+      p.reject(abortError())
+      return
+    }
+    const id = this.nextID++
+    p.currentID = id
+    this.pending.set(id, p)
+    const ws = this.ws
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      this.pending.delete(id)
+      p.settled = true
+      this.notifyCallSettled(p, 'no-answer')
+      p.reject(new Error('not connected'))
+      return
+    }
+    ws.send(frameFor(id, p))
+    this._noteOutboundActivity(ws)
+    const signal = p.signal
+    const onAbort = p.onAbort
+    if (signal && onAbort) {
+      signal.addEventListener('abort', onAbort, { once: true })
+      p.removeAbortListener = () => signal.removeEventListener('abort', onAbort)
+    }
+  }
+
   /** Withdraw one call by the id its caller was given. Unknown ids are a
    *  normal race: the answer may have arrived first. */
   cancel(id: number): void {
     this.pending.get(id)?.abort?.()
   }
 
-  private notifyCallSettled(p: PendingCall): void {
+  private notifyCallSettled(p: PendingCall, settlement: CallSettlement = 'answered'): void {
     if (p.settledNotified) return
     p.settledNotified = true
     if (p.origin === 'person' && p.intent === 'operation') {
-      this.onCallSettled?.(p.observeID)
+      this.onCallSettled?.(p.observeID, settlement)
     }
   }
 

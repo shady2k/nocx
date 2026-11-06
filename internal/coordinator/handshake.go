@@ -30,7 +30,20 @@ package coordinator
 // embedded shell integration and lifecycle wire sources. A surface change
 // fails until this number moves and a new golden is written (ADR-0104, and
 // protocol_surface_internal_test.go for the mechanism).
-const ProtocolVersion = 15
+//
+// 15 (nocx-3an1s.2.4): git's per-checkout order and per-mount bulkhead
+// reached the control plane, and the declaration table's measured turns with
+// them.
+//
+// 16 (this integration): the operations surface gained what a waiting call
+// and a stopped one need — the install row (operation.row, operation.rowDone,
+// and the installer's progress behind them), a cancelled mutation's one of
+// three answers (operation.outcome and the mutation-replayed refusal), and the
+// credit window the renderer queues calls under. A window that shows a
+// waiting call or asks what became of one therefore speaks to a coordinator
+// that can answer, and one pairing the other way is refused at the handshake
+// instead of at the method.
+const ProtocolVersion = 16
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

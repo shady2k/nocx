@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/operation.outcome.params.schema.json",
+  "title": "OperationOutcomeParams",
+  "description": "Params for operation.outcome: the identity a mutating call carried on its request frame (ADR-8eej3e66 \u00a74). The identity is opaque text the backend never parses; it names one mutation, minted by the renderer, and the answer is what the backend retained about it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["mutation"],
+  "properties": {
+    "mutation": {
+      "description": "The mutation identity the call carried. 1 to 128 bytes of valid UTF-8 with no control characters.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    }
+  }
+}

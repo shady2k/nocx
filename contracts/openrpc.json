@@ -152,6 +152,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -279,6 +286,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -414,6 +428,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -1150,6 +1171,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -1374,6 +1402,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -1485,6 +1520,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -1854,6 +1896,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -1982,6 +2031,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -2093,6 +2149,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -2318,6 +2381,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -2429,6 +2499,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -2660,6 +2737,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -2777,6 +2861,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -3250,6 +3341,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -3486,6 +3584,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -3604,6 +3709,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -3721,6 +3833,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -3958,6 +4077,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -4075,6 +4201,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -4430,6 +4563,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -4547,6 +4687,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -4978,6 +5125,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -5214,6 +5368,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -5349,6 +5510,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -5570,6 +5738,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -5790,6 +5965,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -5906,6 +6088,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -6021,6 +6210,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -6581,6 +6777,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -6694,6 +6897,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -7037,6 +7247,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -7266,6 +7483,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -7629,6 +7853,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -7861,6 +8092,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -8092,6 +8330,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -8683,6 +8928,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -8800,6 +9052,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -9273,6 +9532,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -9509,6 +9775,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -9626,6 +9899,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -9863,6 +10143,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -9980,6 +10267,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -10099,6 +10393,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -10208,6 +10509,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -10316,6 +10624,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -10643,6 +10958,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -11401,6 +11723,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -11512,6 +11841,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -11737,6 +12073,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -11961,6 +12304,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -12074,6 +12424,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -12189,6 +12546,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -12300,6 +12664,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -12748,6 +13119,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -13497,6 +13875,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -13586,6 +13971,106 @@
       }
     },
     {
+      "name": "operation.outcome",
+      "params": [
+        {
+          "name": "params",
+          "required": false,
+          "schema": {
+            "$ref": "https://nocx.local/contracts/operation.outcome.params.schema.json"
+          }
+        }
+      ],
+      "errors": [
+        {
+          "code": -32601,
+          "message": "Method not found",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32603,
+          "message": "Internal error",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32004,
+          "message": "Control plane busy",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        }
+      ],
+      "x-nocx-agent-disposition": "operation-owned",
+      "x-nocx-operation": {
+        "id": "operation.outcome",
+        "kind": "method",
+        "owner": "request",
+        "phases": [
+          {
+            "name": "read",
+            "resources": [],
+            "dependencies": [
+              "server"
+            ]
+          }
+        ],
+        "turn": {
+          "millis": 1,
+          "basis": "read",
+          "note": "the lane refuses at submit today, so there is no wait to bound; the answer is a map lookup under one mutex and holds nothing"
+        },
+        "max": {
+          "millis": 1000,
+          "basis": "read",
+          "note": "read: one map lookup, no provider and no store; the bound is a hang detector, not a wait"
+        },
+        "silence": {
+          "kind": "none",
+          "millis": 0,
+          "basis": "",
+          "note": ""
+        },
+        "answer": {
+          "kind": "none",
+          "millis": 0,
+          "basis": "",
+          "note": ""
+        },
+        "recovery": {
+          "kind": "none",
+          "millis": 0,
+          "basis": "",
+          "note": ""
+        },
+        "merge": "none",
+        "waiting": "Checking what happened",
+        "row": "never",
+        "expired": "retry-read",
+        "resources": [],
+        "dependencies": [
+          "server"
+        ],
+        "preempts": []
+      },
+      "result": {
+        "name": "operation.outcomeResult",
+        "schema": {
+          "$ref": "https://nocx.local/contracts/operation.outcome.schema.json"
+        }
+      }
+    },
+    {
       "name": "panes.close",
       "params": [
         {
@@ -13623,6 +14108,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -13736,6 +14228,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -13848,6 +14347,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -13959,6 +14465,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -14296,6 +14809,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -14520,6 +15040,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -14631,6 +15158,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -15200,6 +15734,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -15308,6 +15849,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -15531,6 +16079,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -15859,6 +16414,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -15967,6 +16529,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -16186,6 +16755,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -16401,6 +16977,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -16626,6 +17209,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -16828,6 +17418,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -16941,6 +17538,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -17170,6 +17774,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -17283,6 +17894,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -17398,6 +18016,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -17511,6 +18136,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -18070,6 +18702,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -18727,6 +19366,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -18835,6 +19481,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -18945,6 +19598,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -19054,6 +19714,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -19162,6 +19829,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -19489,6 +20163,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -19701,6 +20382,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -19806,6 +20494,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -20019,6 +20714,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -20134,6 +20836,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -20715,6 +21424,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -20830,6 +21546,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -20947,6 +21670,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -21062,6 +21792,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -21179,6 +21916,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -21290,6 +22034,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -21515,6 +22266,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -21626,6 +22384,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -21933,6 +22698,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -22044,6 +22816,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -22157,6 +22936,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -22268,6 +23054,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -22381,6 +23174,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -22492,6 +23292,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -22704,6 +23511,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -23044,6 +23858,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -23473,6 +24294,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -23581,6 +24409,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -23695,6 +24530,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -23924,6 +24766,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -24032,6 +24881,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -24147,6 +25003,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -24260,6 +25123,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -24631,6 +25501,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -24739,6 +25616,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -24849,6 +25733,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -24957,6 +25848,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -25290,6 +26188,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -25408,6 +26313,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -25519,6 +26431,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -25632,6 +26551,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -25744,6 +26670,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
           }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -25855,6 +26788,13 @@
           "message": "Control plane busy",
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
           }
         }
       ],
@@ -26289,6 +27229,9 @@
       "$ref": "https://nocx.local/contracts/lifecycle.submitAttempt.schema.json"
     },
     {
+      "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+    },
+    {
       "$ref": "https://nocx.local/contracts/notes.create.schema.json"
     },
     {
@@ -26335,6 +27278,9 @@
     },
     {
       "$ref": "https://nocx.local/contracts/open.schema.json"
+    },
+    {
+      "$ref": "https://nocx.local/contracts/operation.outcome.schema.json"
     },
     {
       "$ref": "https://nocx.local/contracts/operation.row.schema.json"

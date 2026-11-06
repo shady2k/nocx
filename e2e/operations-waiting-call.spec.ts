@@ -1,8 +1,16 @@
 /**
  * e2e: a person's call waiting past two seconds takes a row in Operations,
- * with its catalogue sentence and Cancel; the row goes when the call settles
- * and leaves no finished entry. Ordinary work that answers quickly leaves the
- * list empty (ADR-8eej3e66 §8).
+ * with its catalogue sentence and Cancel. Ordinary work that answers quickly
+ * leaves the list empty (ADR-8eej3e66 §8).
+ *
+ * THE ROW KEEPS ONE OF THREE ANSWERS WHEN THE CALL IS A MUTATION, because the
+ * question does not go when the row does (nocx-3an1s.2.11). `connections.test`
+ * is a call the catalogue says may have reached a host by its deadline, so
+ * cancelling it ends the WAIT and opens the question: the row stops offering
+ * Cancel and says "did not start", "done" or "checking what happened". It is
+ * never a retry. The spec used to assert the row disappeared, which was the
+ * wait leaving rather than the answer being known — the guarantee it stood for
+ * is that an answer is always visible, and that is what it now asserts.
  *
  * The slow call is a real connections.test through the real backend: a local
  * listener accepts the SSH connection and never answers the handshake, so the
@@ -51,7 +59,9 @@ async function openConnections(page: Page): Promise<void> {
 
 test.use({ viewport: { width: 1280, height: 800 } })
 
-test('a waiting call takes a row, cancels, and leaves the list empty', async ({ page }) => {
+test('a waiting call takes a row, cancels, and leaves one of the three answers', async ({
+  page,
+}) => {
   const host = await silentSSHHost()
   const keyDir = mkdtempSync(join(tmpdir(), 'nocx-operations-key-'))
   const keyPath = join(keyDir, 'id_rsa')
@@ -96,9 +106,14 @@ test('a waiting call takes a row, cancels, and leaves the list empty', async ({ 
     const cancel = page.getByRole('button', { name: 'Cancel Checking the connection' })
     await expect(cancel).toBeVisible()
     await cancel.click()
-    await expect(row).toHaveCount(0)
-    await expect(page.getByTestId('operations-panel')).toContainText('Nothing is running')
-    await expect(page.locator('.ui-operation-row')).toHaveCount(0)
+    // The wait is over; the question is not. One of §8's three answers, and
+    // nothing left to cancel.
+    await expect(row).toContainText(/It did not start|It finished|Checking what happened/, {
+      timeout: 30_000,
+    })
+    await expect(page.getByRole('button', { name: 'Cancel Checking the connection' })).toHaveCount(
+      0,
+    )
   } finally {
     for (const socket of host.held) socket.destroy()
     await new Promise<void>((resolve) => host.server.close(() => resolve()))

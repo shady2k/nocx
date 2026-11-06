@@ -923,6 +923,11 @@ type WSServer struct {
 	// never one per refused frame.
 	satNotify *saturatedNotifyLimiter
 
+	// mutations retains what became of each mutation identity for a bounded
+	// time, in memory (ADR-8eej3e66 §4). Server-wide on purpose: a renderer
+	// that lost its socket must still get its answer on the next one.
+	mutations *catalog.MutationStore
+
 	// profileUsage tracks last-used timestamps for the sessions.status RPC.
 	// When nil, the handler reports live-state from the registry but
 	// last-used timestamps are unavailable (nocx-uxs5.4).
@@ -2067,6 +2072,7 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		sessionPolicy:              newSessionPolicyStore(),
 		laneInteractivity:          newLaneState(),
 		satNotify:                  newSaturatedNotifyLimiter(time.Second),
+		mutations:                  catalog.NewMutationStore(),
 		pendingRuns:                make(map[int64]askRunContext),
 		filesBindings:              make(map[string]*filesBinding),
 		filesBySession:             make(map[session.ID]map[string]struct{}),
@@ -2215,6 +2221,7 @@ func (s *WSServer) buildControlPlane() {
 	specs := make([]methodSpec, 0, 96)
 	inventorySub := s.operationQueue("session-inventory")
 	specs = append(specs, rpcCancelSpec(immediate))
+	specs = append(specs, s.operationOutcomeSpec(s.lane))
 	specs = append(specs, s.heartbeatSpecs(immediate)...)
 	specs = append(specs, s.sessionSpecs(lane, orders.session, gates.config)...)
 	specs = append(specs, whenAvailable(
@@ -2828,6 +2835,10 @@ type wsConn struct {
 	log            log.Logger
 	id             uint64
 	requestCancels *requestCancels
+	// mutations maps a request id to the mutation record its one response
+	// answers (ws_operation_outcome.go). The record itself lives on the
+	// server; this is only the connection's half of "which response is this".
+	mutations inFlightMutations
 	// methods is this connection's materialised control-handler set
 	// (registration.go): method → submission + handler closure. The handlers
 	// are constructed with THIS connection's Responder, so the set is
@@ -2854,10 +2865,23 @@ func newWSConn(s *WSServer, conn *websocket.Conn, id uint64) *wsConn {
 }
 
 func (w *wsConn) TryResult(id json.RawMessage, result json.RawMessage) error {
+	// THE ONE PLACE A MUTATION'S ANSWER IS LEARNED (ADR-8eej3e66 §4): every
+	// handler answers through this Responder, and a result is the record
+	// saying the work finished. The write is recorded even when the socket is
+	// gone — the person may still ask what happened.
+	w.mutations.take(id).Answered(catalog.AnsweredResult)
 	return w.out.TryEnqueueResponse(mustMarshal(newJSONRPCResult(id, result)))
 }
 
 func (w *wsConn) TryError(id json.RawMessage, rpcErr RPCError) error {
+	// A sealed-vault refusal is emitted before the operation touched
+	// anything, which is what makes ADR-0032's unlock replay safe; every other
+	// error still means the work finished, and nothing may replay it.
+	kind := catalog.AnsweredError
+	if sealedVaultReason(rpcErr) != "" {
+		kind = catalog.AnsweredSealed
+	}
+	w.mutations.take(id).Answered(kind)
 	obj := &jsonrpcErrorObj{Code: rpcErr.Code, Message: rpcErr.Message}
 	if rpcErr.Data != nil {
 		obj.Data = rpcErr.Data
@@ -2989,6 +3013,11 @@ type jsonrpcRequest struct {
 	// Absent, the backend treats it as person — the side on which an error
 	// cannot silence somebody.
 	Origin catalog.Origin `json:"origin,omitempty"`
+	// Mutation is the identity a mutating call carries so its outcome can be
+	// asked for after the caller stopped waiting (ADR-8eej3e66 §4). It is
+	// envelope metadata, beside the id and the method: a fact about the
+	// invocation, never a param, and no handler ever receives it.
+	Mutation string `json:"mutation,omitempty"`
 }
 
 type jsonrpcResponse struct {
@@ -3733,10 +3762,24 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	}
 	// THE INVOCATION GETS A SCOPE (ADR-8eej3e66 §4). It carries the
 	// declaration's deadlines and the request's cancellation, and it owns the
-	// one settlement record. Stage 2 records settlement and logs expiry; it
-	// does not answer for it, so nothing a caller can do changes here yet.
+	// one settlement record. Stage 2 recorded and logged it; here the
+	// settlement also decides the retained answer for a mutation, which is
+	// what a caller can ask for after it stopped waiting.
+	//
+	// A MUTATION'S IDENTITY IS REGISTERED BEFORE IT CAN RUN (ADR-8eej3e66
+	// §4). A second invocation of an identity whose work already ran — or is
+	// still running — is refused here, before admission, so no replay can
+	// reach a handler however the renderer behaves.
+	mutation, mutationRefusal := s.beginMutation(req, m.op)
+	if mutationRefusal != nil {
+		_ = wconn.TryError(req.ID, *mutationRefusal)
+		return
+	}
 	scope := catalog.Begin(requestCtx, m.op, catalog.Invocation{Origin: invocationOrigin(req)})
 	requestCtx = catalog.WithScope(requestCtx, scope)
+	if mutation != nil {
+		wconn.mutations.add(req.ID, mutation)
+	}
 	// THE RESOURCES THIS INVOCATION ORDERS ON (ADR-8eej3e66 section 5).
 	// The declaration names the keys it can — store:content, a named
 	// collection — and the validator above named the ones only the params
@@ -3758,7 +3801,22 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	}
 	task := control.Task{Key: key, Run: func(pctx context.Context) {
 		defer cancelRequest()
-		defer scope.Complete()
+		defer func() {
+			// THE INVOCATION'S OWN END, and what it means for the mutation
+			// record. The chosen outcome is the CAUSE, not whichever settle
+			// won the race: a withdrawn request records "cancelled" even when
+			// the handler happened to return first.
+			outcome := catalog.OutcomeCompleted
+			if requestCtx.Err() != nil {
+				outcome = catalog.OutcomeCancelled
+			}
+			scope.Settle(outcome)
+			settled, _ := scope.Outcome()
+			// A handler that returned without answering leaves the record to
+			// be settled here, and its request entry must not outlive it.
+			wconn.mutations.take(req.ID)
+			mutation.Settled(settled)
+		}()
 		defer func() {
 			if cancelEntry != nil {
 				wconn.requestCancels.drop(req.ID, cancelEntry)
@@ -3767,7 +3825,17 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		m.handle(pctx, req)
 	}}
 	if cancelEntry != nil {
-		task.Start = cancelEntry.begin
+		// A QUEUED MUTATION THAT NEVER STARTS ANSWERS "DID NOT START", and the
+		// scope is settled here because a withdrawn task never reaches the
+		// handler that would have settled it.
+		task.Start = func() bool {
+			if cancelEntry.begin() {
+				return true
+			}
+			mutation.NotStarted()
+			scope.Settle(catalog.OutcomeNotStarted)
+			return false
+		}
 		requestCtx = withRequestCancel(requestCtx, cancelEntry)
 	}
 	rej := m.submission.TrySubmit(requestCtx, task)
@@ -3775,6 +3843,8 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		return
 	}
 	scope.Refuse()
+	mutation.Settled(catalog.OutcomeRefused)
+	wconn.mutations.take(req.ID)
 	cancelRequest()
 	if cancelEntry != nil {
 		wconn.requestCancels.drop(req.ID, cancelEntry)

@@ -33,7 +33,9 @@ func TestGitOperationExpiryWireShape(t *testing.T) {
 		{"turn expired before start", &capability.NotStartedError{Operation: "git.stage"}, "not-started"},
 		{"mutation past its max", &capability.ExpiredError{Operation: "git.commit", Outcome: catalog.ExpiredOutcomeUnknown}, "outcome-unknown"},
 		{"read past its max", &capability.ExpiredError{Operation: "git.status", Outcome: catalog.ExpiredRetryRead}, "retry-read"},
-		{"suspect domain", &capability.ExpiredError{Operation: "git.status", Outcome: catalog.ExpiredRetryRead, Suspected: true}, "retry-read"},
+		// A suspect domain refused the work before it started, so even a
+		// mutation answers not-started: nothing took effect.
+		{"suspect domain", &capability.ExpiredError{Operation: "git.commit", Outcome: catalog.ExpiredOutcomeUnknown, Suspected: true}, "not-started"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

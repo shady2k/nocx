@@ -56,10 +56,18 @@ func answerGitOperationError(r Responder, req jsonrpcRequest, err error) {
 	}
 	var expired *capability.ExpiredError
 	if errors.As(err, &expired) {
+		// A suspect domain refused the call before any work started, so the
+		// declared outcome is not the answer even when the operation is a
+		// mutation: nothing took effect. A max expiry that reached the work
+		// keeps the declaration's own outcome.
+		reason := string(expired.Outcome)
+		if expired.Suspected {
+			reason = "not-started"
+		}
 		_ = r.TryError(req.ID, RPCError{
 			Code:    GitOperationExpiredCode,
 			Message: err.Error(),
-			Data:    &gitErrorData{Reason: string(expired.Outcome)},
+			Data:    &gitErrorData{Reason: reason},
 		})
 		return
 	}

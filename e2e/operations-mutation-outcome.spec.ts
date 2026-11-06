@@ -201,7 +201,7 @@ test('a mutation still running answers outcome-unknown, and stops saying so when
   }
 })
 
-test('cancelling a mutation from its row keeps one of the three answers and a Cancel no more', async ({
+test('cancelling a mutation from its row takes the row with it, and never re-sends it', async ({
   page,
 }) => {
   const host = await silentSSHHost()
@@ -249,14 +249,16 @@ test('cancelling a mutation from its row keeps one of the three answers and a Ca
     await expect(row).toBeVisible({ timeout: 6_000 })
     await page.getByRole('button', { name: 'Cancel Checking the connection' }).click()
 
-    // §8's three answers, and only those. The row stops offering a Cancel
-    // because there is nothing left to stop, and it never becomes a retry.
-    await expect(row).toContainText(/It did not start|It finished|Checking what happened/, {
-      timeout: 30_000,
-    })
-    await expect(page.getByRole('button', { name: 'Cancel Checking the connection' })).toHaveCount(
-      0,
-    )
+    // A ROW IS THE WAIT, AND IT GOES WHEN THE WAIT DOES (ADR-8eej3e66 §8):
+    // no finished entry, however the call ended. The answer for a mutation
+    // belongs to the call the person made — its own rejection carries it —
+    // and the row that stayed behind to read it out was the entry a Cancel
+    // could not remove. Nothing is re-sent: the mutation's identity makes a
+    // second send a replay the record refuses, and the test's proof of that is
+    // that the list settles empty and no retried call appears.
+    await expect(row).toHaveCount(0, { timeout: 30_000 })
+    await expect(page.getByTestId('operations-panel')).toContainText('Nothing is running')
+    await expect(page.locator('.ui-operation-row')).toHaveCount(0)
   } finally {
     for (const socket of host.held) socket.destroy()
     await new Promise<void>((resolve) => host.server.close(() => resolve()))

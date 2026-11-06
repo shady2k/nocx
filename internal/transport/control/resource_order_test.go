@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -219,4 +220,38 @@ func TestHoldsOrderFindsTheOrderInAComposite(t *testing.T) {
 	if HoldsOrder(NewComposite(NewSemaphore("lane", 1))) {
 		t.Fatal("HoldsOrder saw an order in a plain composite")
 	}
+}
+
+func TestResourceOrderRepeatedTimeoutsGrowNothing(t *testing.T) {
+	// The constraint table's "repeated timeouts cannot grow resources", for
+	// this admission: ten thousand calls that each expire on the same held
+	// resource leave no waiter, no queue and no goroutine behind.
+	synctest.Test(t, func(t *testing.T) {
+		before := runtime.NumGoroutine()
+		order := newTestOrder(t, 8, "session:")
+		held := mustAcquire(t, order, orderCtx([]string{"session:a"}, time.Second))
+		for i := 0; i < 10000; i++ {
+			_, rej := order.TryAcquire(orderCtx([]string{"session:a"}, 10*time.Millisecond))
+			if rej == nil {
+				t.Fatalf("call %d acquired a held key", i)
+			}
+		}
+		order.mu.Lock()
+		queues, admitted := len(order.queues), order.admitted
+		order.mu.Unlock()
+		if queues != 1 || admitted != 1 {
+			t.Fatalf("after 10,000 expiries: queues=%d admitted=%d, want the one held key", queues, admitted)
+		}
+		held.Release()
+		order.mu.Lock()
+		queues, admitted = len(order.queues), order.admitted
+		order.mu.Unlock()
+		if queues != 0 || admitted != 0 {
+			t.Fatalf("after release: queues=%d admitted=%d", queues, admitted)
+		}
+		synctest.Wait()
+		if after := runtime.NumGoroutine(); after > before {
+			t.Fatalf("goroutines grew from %d to %d", before, after)
+		}
+	})
 }

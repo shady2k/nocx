@@ -76,17 +76,27 @@
 //     mutex-guarded store, but lifecycle ops (seal, reset) and secret ops
 //     share the store; a seal between two secret operations is a conflict
 //     the gate excludes conservatively.
-//   - content, session, git, filesystem: reads participate in their
-//     domain's gate. Each is one store; the conservative posture is one
-//     gate per domain until per-id grain exists.
+//   - session and content: PER RESOURCE, not per domain (ADR-8eej3e66
+//     section 5, migration stage 6). Their operations are constructed with a
+//     control.ResourceOrder instead of a domain gate: it takes the keys the
+//     invocation's declaration names — one session, the content store, the
+//     layout collection — and a waiter on a different resource is not behind
+//     anybody. The key set and the wait bound arrive in the context from the
+//     dispatcher, which is the only layer that has both the declaration and
+//     the validated params, and capability reads neither. Reads order like
+//     writes: a read of one resource is a phase with the resource in it.
+//   - git, filesystem: reads participate in their domain's gate, and so does
+//     a staged read of one session inside those domains (git.open,
+//     files.open). Each is one store; the conservative posture is one gate
+//     per domain until those stages migrate.
 //   - api: reads participate in the api gate, and api.request.send holds it
 //     only long enough to snapshot the request — never across the dial
-//     (api.go).
+//     (api.go). The gate is now a per-collection ResourceOrder.
 //
 // # Refinements deliberately deferred
 //
-//   - per-session / per-binding gate grain (session:<id>, git-binding:<id>,
-//     filesystem-binding:<id>) — the current gates are whole-domain;
+//   - per-binding gate grain (git-binding:<id>, filesystem-binding:<id>) —
+//     those two gates are whole-domain until their stages migrate;
 //   - splitting config reads out of the [config, vault] pair once the row
 //     translation is measured.
 //

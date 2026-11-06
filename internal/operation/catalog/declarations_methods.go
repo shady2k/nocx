@@ -7,6 +7,19 @@
 // generated handles file. The registration cannot name a method with no entry,
 // because reg() takes a typed handle and only this table can mint one.
 
+// WHAT A TURN IS NOW, FOR THE THREE DOMAINS THAT ORDER PER RESOURCE. Every
+// entry below still records the turn it was written with — 1000 ms, read off
+// DefaultDomainConflictWaitTimeout — and that note is a provenance record: it
+// says where the number came from, not what waits on it. Since migration stage
+// 6 the session, content and API methods no longer wait on a domain gate at
+// all; their turn is the bound of a queue on ONE resource
+// (control.ResourceOrder). The value was re-read for that meaning and kept: a
+// person's action waiting longer than a second for its own session, store or
+// collection is a waiter that deserves a name in Operations, and the row
+// threshold there is two seconds. The config, vault, git and filesystem
+// entries still describe the gate they were read from, because those gates are
+// still there.
+
 package catalog
 
 var methodDeclarations = []Declaration{

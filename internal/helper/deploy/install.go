@@ -350,8 +350,8 @@ func install(ctx context.Context, fs RemoteFS, dir, binary, contentHash string, 
 		// 500 KB/s link — and then "deploy: write helper: context canceled".
 		// The comment above has promised this check since the chunking
 		// landed; it was never there.
-		if err := ctx.Err(); err != nil {
-			werr = err
+		if cerr := ctx.Err(); cerr != nil {
+			werr = cerr
 			break
 		}
 		size := min(writeChunk, len(payload)-written)

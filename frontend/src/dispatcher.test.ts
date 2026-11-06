@@ -153,10 +153,10 @@ class MockWebSocket {
     this._fire('message', event)
   }
 
-  requests(): { id?: number; method?: string }[] {
+  requests(): { id?: number; method?: string; origin?: string }[] {
     return this.sent
       .filter((m): m is string => typeof m === 'string')
-      .map((m) => JSON.parse(m) as { id?: number; method?: string })
+      .map((m) => JSON.parse(m) as { id?: number; method?: string; origin?: string })
   }
 }
 
@@ -1243,7 +1243,11 @@ describe('credit window (ADR-8eej3e66 §7)', () => {
     // The window frees: the queued call goes, and completes.
     answer(socket().requests()[0].id!, { sealed: true })
     await flush()
-    expect(socket().requests().map((r) => r.method)).toEqual(['vault.seal', 'vault.status'])
+    expect(
+      socket()
+        .requests()
+        .map((r) => r.method),
+    ).toEqual(['vault.seal', 'vault.status'])
     answer(socket().requests()[1].id!, { locked: false })
     await expect(queued).resolves.toEqual({ locked: false })
   })
@@ -1266,7 +1270,7 @@ describe('credit window (ADR-8eej3e66 §7)', () => {
     expect(socket().requests()).toHaveLength(1)
   })
 
-  it('merges calls on their key within one origin, and keeps a person\'s call its own', async () => {
+  it("merges calls on their key within one origin, and keeps a person's call its own", async () => {
     const d = new Dispatcher(new TestEndpointProvider())
     await connectedWith(d, 8)
 
@@ -1386,7 +1390,11 @@ describe('credit window (ADR-8eej3e66 §7)', () => {
     // The window frees and it runs; the row leaves with the answer.
     answer(socket().requests()[0].id!, { sealed: true })
     await flush()
-    expect(socket().requests().map((r) => r.method)).toEqual(['vault.seal', 'vault.status'])
+    expect(
+      socket()
+        .requests()
+        .map((r) => r.method),
+    ).toEqual(['vault.seal', 'vault.status'])
     answer(socket().requests()[1].id!, { locked: false })
     await expect(queued).resolves.toEqual({ locked: false })
     expect(settled).toEqual([announced[0].id])

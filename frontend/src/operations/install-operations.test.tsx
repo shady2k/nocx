@@ -59,7 +59,7 @@ function fakeDispatcher(): FakeDispatcher {
     pending: (id, method) => {
       dispatcher.onCallPending!({ id, method, startedAt: Date.now(), cancel: () => {} })
     },
-    settled: (id) => dispatcher.onCallSettled!(id),
+    settled: (id) => dispatcher.onCallSettled!(id, 'answered'),
     notify: (method, params) => {
       for (const handler of handlers.get(method) ?? []) handler(params)
     },

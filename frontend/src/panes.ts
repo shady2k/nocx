@@ -225,7 +225,12 @@ export class Pane implements PaneHost {
    * old that has no title yet.
    */
   get displayTitle(): string {
-    return tabLabel(this._tabName, [this._title]) || this.descriptor.defaultTitle
+    return (
+      tabLabel(this._tabName, [this._title]) ||
+      (this.descriptor.defaultTitleKey
+        ? t(this.descriptor.defaultTitleKey, this.descriptor.defaultTitle)
+        : this.descriptor.defaultTitle)
+    )
   }
 
   /** Whether the composed title came from an OSC program title. */
@@ -426,7 +431,10 @@ export class Pane implements PaneHost {
     if (this._disposed) return
 
     this._pushedTitle = title.trim()
-    const next = this._pushedTitle || this.descriptor.defaultTitle
+    const fallback = this.descriptor.defaultTitleKey
+      ? t(this.descriptor.defaultTitleKey, this.descriptor.defaultTitle)
+      : this.descriptor.defaultTitle
+    const next = this._pushedTitle || fallback
     if (next !== this._title) {
       this._title = next
       this.onDisplayChange?.()

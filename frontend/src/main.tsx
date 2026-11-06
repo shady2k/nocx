@@ -801,9 +801,11 @@ function main(): void {
     descriptor: {
       restoreDescriptor: null,
       supportsAttention: false,
-      // t() reads the live locale: the tab speaks the UI language even before
-      // any OSC title arrives (the command label above is already wrapped).
-      defaultTitle: t('app.page.settings', 'Settings'),
+      // The tab resolves its default title through the catalogue on every
+      // read, so a language switch re-renders the strip; the plain field
+      // carries the English fallback and the restore spelling.
+      defaultTitle: 'Settings',
+      defaultTitleKey: 'app.page.settings',
     },
   })
 

@@ -504,43 +504,43 @@
     },
     {
       "file": "src/backup-restore-section.tsx",
-      "line": 133,
+      "line": 131,
       "context": "prop:message",
       "snippet": "Backup failed:"
     },
     {
       "file": "src/backup-restore-section.tsx",
-      "line": 157,
+      "line": 155,
       "context": "prop:message",
       "snippet": "Could not read the backup file:"
     },
     {
       "file": "src/backup-restore-section.tsx",
-      "line": 189,
+      "line": 187,
       "context": "prop:message",
       "snippet": "Could not preview the backup:"
     },
     {
       "file": "src/backup-restore-section.tsx",
-      "line": 249,
+      "line": 247,
       "context": "prop:message",
       "snippet": "Restore failed:"
     },
     {
       "file": "src/backup-restore-section.tsx",
-      "line": 429,
+      "line": 439,
       "context": "jsx-text",
       "snippet": "connection credential binding(s) rem"
     },
     {
       "file": "src/backup-restore-section.tsx",
-      "line": 435,
+      "line": 445,
       "context": "jsx-text",
       "snippet": "group credential binding(s) removed"
     },
     {
       "file": "src/backup-restore-section.tsx",
-      "line": 441,
+      "line": 451,
       "context": "jsx-text",
       "snippet": "group default key(s) omitted from ba"
     },
@@ -1110,25 +1110,25 @@
     },
     {
       "file": "src/main.tsx",
-      "line": 1232,
+      "line": 1236,
       "context": "prop:message",
       "snippet": "Copied \"\" to the clipboard."
     },
     {
       "file": "src/main.tsx",
-      "line": 1643,
+      "line": 1647,
       "context": "prop:message",
       "snippet": "Forwarding on :"
     },
     {
       "file": "src/main.tsx",
-      "line": 1712,
+      "line": 1716,
       "context": "prop:label",
       "snippet": ":"
     },
     {
       "file": "src/main.tsx",
-      "line": 1723,
+      "line": 1727,
       "context": "prop:label",
       "snippet": "Ports:"
     },
@@ -1206,49 +1206,49 @@
     },
     {
       "file": "src/panes.ts",
-      "line": 1442,
+      "line": 1450,
       "context": "prop:message",
       "snippet": "The session this tab was running could not be taken back ()"
     },
     {
       "file": "src/panes.ts",
-      "line": 1518,
+      "line": 1526,
       "context": "prop:message",
       "snippet": "Could not open a tab:"
     },
     {
       "file": "src/panes.ts",
-      "line": 1738,
+      "line": 1746,
       "context": "prop:message",
       "snippet": "Saved \"\" as a connection"
     },
     {
       "file": "src/panes.ts",
-      "line": 1743,
+      "line": 1751,
       "context": "prop:message",
       "snippet": "Could not save:"
     },
     {
       "file": "src/panes.ts",
-      "line": 1763,
+      "line": 1771,
       "context": "prop:message",
       "snippet": "Opened \"\" as a connection"
     },
     {
       "file": "src/panes.ts",
-      "line": 1768,
+      "line": 1776,
       "context": "prop:message",
       "snippet": "Could not connect to :"
     },
     {
       "file": "src/panes.ts",
-      "line": 2129,
+      "line": 2137,
       "context": "prop:message",
       "snippet": ":"
     },
     {
       "file": "src/panes.ts",
-      "line": 2293,
+      "line": 2301,
       "context": "prop:message",
       "snippet": "Could not create the workspace:"
     },

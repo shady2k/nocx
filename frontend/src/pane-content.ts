@@ -303,4 +303,10 @@ export interface ContentDescriptor {
   /** Fixed title for view tabs; ignored when the title is set dynamically
    *  through PaneHost.setTitle. */
   readonly defaultTitle: string
+
+  /** Catalogue key the default title resolves through on every read, so a
+   *  locale switch re-renders the tab without any OSC title arriving.
+   *  `defaultTitle` stays the English fallback and the restore path's
+   *  static spelling. */
+  readonly defaultTitleKey?: string
 }

@@ -178,29 +178,41 @@ func TestFilesOneBlockedMountDoesNotHoldUnrelatedWork(t *testing.T) {
 		t.Fatal("sessions.live answered nothing")
 	}
 
-	// A third call on the wedged mount waits out its turn and answers the
-	// declared expired outcome, naming the bound, instead of hanging.
+	// A THIRD CALL ON THE WEDGED MOUNT WAITS FOR ITS TURN, and when that wait
+	// ends it answers the declared bound — timedOut, naming the turn it waited
+	// under — rather than hanging or being refused at once.
 	//
-	// THE WAIT IS THE DECLARED TURN, and that is thirty seconds: a person's
-	// call may wait that long before "did not start" (ADR-8eej3e66 §8, and
-	// the catalogue's personTurnMillis — one second was the busyness refusal
-	// in a new place). So the read's bound is that turn plus the usual grace
-	// rather than wantWithin, and the assertion below is against the same
-	// number instead of a hand-written five seconds.
+	// THE WAIT IS ENDED HERE BY THE CALLER'S OWN WITHDRAWAL, at one second, and
+	// the reason is the repeat budget: a person's turn is thirty seconds
+	// (ADR-8eej3e66 §8 and the catalogue's personTurnMillis), so twenty repeats
+	// of waiting it out put 600 s of pure sleep into one package binary whose
+	// bound is go test's ten minutes — which is how ci-backend's repeat step
+	// failed with no test hung. The domain's own expiry is proven where the wait
+	// lives (internal/operation/domains,
+	// TestATurnDeadlineThatExpiresNeverStartsTheWork, on a one-second bound);
+	// what this asserts is the transport's half: the queued call does not
+	// answer while it waits, and when the wait ends the answer carries the
+	// operation's DECLARED turn rather than a number of its own.
 	turn := catalog.OpFilesList.Declaration().Turn.Duration()
-	start := time.Now()
-	state, result := filesListState(t, jsonrpcCallWithIDWithin(t, env.conn, "files.list", map[string]any{
+	writeRequest(t, env.conn, "files.list", map[string]any{
 		"bindingId": hungBid, "path": hungRoot, "offset": 0, "limit": 1,
-	}, 104, turn+wantWithin))
-	elapsed := time.Since(start)
+	}, 104)
+	time.Sleep(time.Second)
+	// rpc.cancel ends the wait on the domain's permit the same way the turn's
+	// expiry does: acquire selects on the turn context, and the transport's
+	// answer for that ending is the same timedOut result.
+	jsonrpcCallWithID(t, env.conn, "rpc.cancel", map[string]any{"id": 104}, 105)
+	raw, ferr := awaitFrame(env.conn, time.Now().Add(wantWithin), isResponseTo(104))
+	if ferr != nil {
+		t.Fatalf("read the answer to a call whose wait ended: %v", ferr)
+	}
+	state, result := filesListState(t, raw)
 	if state != "timedOut" {
 		t.Fatalf("a call on a saturated domain answered %q, want timedOut (%v)", state, result)
 	}
-	if elapsed > turn+5*time.Second {
-		t.Errorf("the turn deadline took %v to settle; it is declared at %v", elapsed, turn)
+	if got, _ := result["timeout"].(float64); int64(got) != turn.Milliseconds() {
+		t.Fatalf("the answer names %v ms, want the declared turn %d ms", result["timeout"], turn.Milliseconds())
 	}
-	t.Logf("the turn bound settled the third call after %v with state %q, timeout %v",
-		elapsed.Round(time.Millisecond), state, result["timeout"])
 
 	// Release the mount: every WORKER the episode held unwinds, and nothing it
 	// grew is left behind.

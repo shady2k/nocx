@@ -1959,7 +1959,13 @@ export function VaultSection(props: VaultSectionProps) {
               label={t('vault.state.label', 'State')}
               orientation="horizontal"
             >
-              <Badge tone={diagStateTone()}>{status()!.state}</Badge>
+              <Badge tone={diagStateTone()}>
+                {status()!.state === 'uninitialized'
+                  ? t('vault.diag.state.uninitialized', 'uninitialized — protection is not set up')
+                  : status()!.state === 'sealed'
+                    ? t('vault.diag.state.sealed', 'sealed — locked')
+                    : t('vault.diag.state.unsealed', 'unsealed — unlocked')}
+              </Badge>
             </Field>
             <Show when={status()!.providers.length > 0}>
               <For each={status()!.providers}>

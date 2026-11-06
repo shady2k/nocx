@@ -38,7 +38,10 @@ export function UpdatesSection(props: UpdatesSectionProps) {
         <StatusCard
           tone="warning"
           title={t('updates.section.linux.title', 'Linux updates')}
-          description="AppImage installs can update themselves in nocx. deb and rpm installs update through their package manager; that is a different install from the AppImage."
+          description={t(
+            'updates.section.linux.desc',
+            'AppImage installs can update themselves in nocx. deb and rpm installs update through their package manager; that is a different install from the AppImage.',
+          )}
         />
       </PageSection>
     </Show>

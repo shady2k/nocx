@@ -1581,4 +1581,10 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'kit.dump.noDrive': 'No recorded drive.',
   'kit.dump.noMatch': 'No dump content matches this search.',
   "about.loadFailed.title": "Could not read this build's details",
+  'settings.page.updates.title': 'Updates',
+  'settings.page.about.title': 'About',
+  'vault.diag.state.uninitialized': 'uninitialized — protection is not set up',
+  'vault.diag.state.sealed': 'sealed — locked',
+  'vault.diag.state.unsealed': 'unsealed — unlocked',
+  'updates.section.linux.desc': 'AppImage installs can update themselves in nocx. deb and rpm installs update through their package manager; that is a different install from the AppImage.',
 }

@@ -921,7 +921,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
     const updatesPage: SettingsPage = {
       kind: 'component',
       id: 'updates',
-      title: 'Updates',
+      title: t('settings.page.updates.title', 'Updates'),
       groupId: 'application',
       scrollMode: 'page',
       ownsSection: UPDATES_SECTION,
@@ -933,7 +933,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
     const aboutPage: SettingsPage = {
       kind: 'component',
       id: 'about',
-      title: 'About',
+      title: t('settings.page.about.title', 'About'),
       groupId: 'application',
       scrollMode: 'page',
       // Registered unconditionally, like the pages above it: a surface that

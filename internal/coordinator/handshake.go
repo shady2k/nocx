@@ -30,7 +30,13 @@ package coordinator
 // embedded shell integration and lifecycle wire sources. A surface change
 // fails until this number moves and a new golden is written (ADR-0104, and
 // protocol_surface_internal_test.go for the mechanism).
-const ProtocolVersion = 14
+//
+// 15 (nocx-3an1s.2.11): the control plane gained operation.outcome and the
+// mutation-replayed refusal, and three new contracts under contracts/. A
+// window that asks what became of a mutation therefore speaks to a coordinator
+// that can answer, and one pairing the other way is refused at the handshake
+// instead of at the method.
+const ProtocolVersion = 15
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

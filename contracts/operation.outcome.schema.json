@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/operation.outcome.schema.json",
+  "title": "OperationOutcome",
+  "description": "The operation.outcome JSON-RPC result: what the backend retained about one mutation identity. It answers the person who stopped waiting, and it never implies a rollback \u2014 a timeout is not evidence that the effect did not happen.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["outcome", "operation"],
+  "properties": {
+    "outcome": {
+      "description": "The closed set of answers. 'not-started' \u2014 no work ran, so a retry cannot double an effect. 'done' \u2014 the work finished (it may have answered an error; it is not still running). 'outcome-unknown' \u2014 it has not finished, so the person is checking what happened and may ask again while the record is retained. 'unknown' \u2014 nothing is retained: the identity was never seen, its retention ran out, or the backend restarted.",
+      "type": "string",
+      "enum": ["not-started", "done", "outcome-unknown", "unknown"]
+    },
+    "operation": {
+      "description": "The catalogue operation the record belongs to, or the empty string where no record exists. It is what a surface names when it says what to look at instead of an answer.",
+      "type": "string"
+    }
+  }
+}

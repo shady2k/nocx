@@ -143,6 +143,12 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"app.diagnostics": {
 			[]byte(`{}`),
 		},
+		// operation.outcome asks what became of one mutation identity; the
+		// identity is opaque text with a 128-byte bound (nocx-3an1s.2.11).
+		"operation.outcome": {
+			[]byte(`{"mutation":"m-1"}`),
+			[]byte(`{"mutation":"0123456789abcdef0123456789abcdef"}`),
+		},
 		"backup.create": {
 			[]byte(`{}`),
 		},

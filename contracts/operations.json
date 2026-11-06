@@ -9903,6 +9903,57 @@
       "preempts": []
     },
     {
+      "id": "operation.outcome",
+      "kind": "method",
+      "owner": "request",
+      "phases": [
+        {
+          "name": "read",
+          "resources": [],
+          "dependencies": [
+            "server"
+          ]
+        }
+      ],
+      "turn": {
+        "millis": 1,
+        "basis": "read",
+        "note": "the lane refuses at submit today, so there is no wait to bound; the answer is a map lookup under one mutex and holds nothing"
+      },
+      "max": {
+        "millis": 1000,
+        "basis": "read",
+        "note": "read: one map lookup, no provider and no store; the bound is a hang detector, not a wait"
+      },
+      "silence": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "answer": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "recovery": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "merge": "none",
+      "waiting": "Checking what happened",
+      "row": "never",
+      "expired": "retry-read",
+      "resources": [],
+      "dependencies": [
+        "server"
+      ],
+      "preempts": []
+    },
+    {
       "id": "panes.close",
       "kind": "method",
       "owner": "request",

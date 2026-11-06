@@ -329,9 +329,9 @@ func TestGitBindingReadExpiresAtItsTurnOnASaturatedMount(t *testing.T) {
 		healthy <- healthyOp.Run(scopeCtx(context.Background(), catalog.OpGitStatus), healthyID, statusViaBinding(healthyID))
 	}()
 	select {
-	case err := <-healthy:
-		if err != nil {
-			t.Fatalf("healthy mount read: %v", err)
+	case herr := <-healthy:
+		if herr != nil {
+			t.Fatalf("healthy mount read: %v", herr)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("a read on a healthy mount waited behind a saturated one")

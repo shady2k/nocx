@@ -111,7 +111,7 @@ func (o *gitOpenOperation) Open(ctx context.Context, sess session.Session, cwd s
 		permit, rejection := o.lane.TryAcquire(waitCtx)
 		if rejection != nil {
 			lease.Release()
-			return nil, nil, refused(ctx, rejection)
+			return nil, nil, gitRefused(ctx, rejection)
 		}
 		return func() { permit.Release(); lease.Release() }, lease.Abandon, nil
 	}, func(workCtx context.Context) error {
@@ -301,7 +301,7 @@ func (o *gitBindingOperation) Run(ctx context.Context, bindingID string, fn func
 		permit, rejection := o.lane.TryAcquire(waitCtx)
 		if rejection != nil {
 			releaseAll()
-			return nil, nil, refused(ctx, rejection)
+			return nil, nil, gitRefused(ctx, rejection)
 		}
 		releases = append(releases, permit.Release)
 		return releaseAll, lease.Abandon, nil

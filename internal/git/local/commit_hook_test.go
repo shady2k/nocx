@@ -21,12 +21,12 @@ func TestCommitHookDiesAtTheCallersDeadline(t *testing.T) {
 	gitWrite(t, dir, "f.txt", "hello\n")
 
 	hook := filepath.Join(dir, ".git", "hooks", "pre-commit")
-	if err := os.MkdirAll(filepath.Dir(hook), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(hook), 0o755); err != nil { //nolint:gosec // a git hook directory is git's own 0755 shape
 		t.Fatal(err)
 	}
 	// The hook's shell dies with its process group; 30 s would outlast the
 	// test on its own if the kill did not work.
-	if err := os.WriteFile(hook, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil { // #nosec G306 — a git hook must be executable
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil { //nolint:gosec // a git hook must be executable
 		t.Fatal(err)
 	}
 

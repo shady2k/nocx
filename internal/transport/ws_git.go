@@ -64,7 +64,7 @@ import (
 // message for params that are absent or not a JSON object, and "" on
 // success. The decode shape of the exemplar (validateProbeParamsRaw),
 // shared by every validator in this sweep so none of them can forget the
-// object gate.
+// mount's bulkhead.
 func decodeParams(raw json.RawMessage, out any) string {
 	if len(raw) == 0 {
 		return "params are required"
@@ -533,7 +533,7 @@ func (s *WSServer) forgetBinding(bid string) {
 }
 
 // gitOpenHandlers answers git.open. It holds the GitOpenOperation (session +
-// git gates — the session resolve and the open+register run inside the
+// git's per-checkout order and mount bulkhead — the session resolve and the open+register run inside the
 // callback), the Responder, the transport's binding bookkeeping seam and a
 // logger. It needs the connection's connState per call: git.open is
 // authorised by connState (D15), and the inline first status acquires with
@@ -707,7 +707,7 @@ func (h gitOpenHandlers) handleOpen(ctx context.Context, state *connState, req j
 // gitBindingHandlers answers the git.* binding methods — status, diff,
 // stage, unstage, stageAll, unstageAll, commit, headMessage, log, remote,
 // close. Each call acquires the binding per call through the
-// GitBindingOperation (git gate) with the connection's connState as the
+// GitBindingOperation (per-checkout order and mount bulkhead) with the connection's connState as the
 // caller: bindings close at any moment, so validity is checked per call, not
 // at construction, and Registry.Acquire re-checks that the binding's session
 // is in the REQUESTING connection's connState (D15) in exactly one place. It
@@ -1268,8 +1268,8 @@ func gitErrorCode(err error) int {
 // and the inline first status, the binding methods as the caller for the
 // per-call Acquire. The operations are built here from the wired stores
 // (composition root for this domain), once per builder and shared across
-// the methods: GitOpenOperation (session + git gates) and
-// GitBindingOperation (git gate). When the git registry is absent every
+// the methods: GitOpenOperation (session + mount bulkhead) and
+// GitBindingOperation (per-checkout order + mount bulkhead). When the git registry is absent every
 // handler answers the old not-available error; a registry wired without a
 // repo factory leaves only git.open unavailable.
 func (s *WSServer) gitSpecs(lane control.Admission, sessionGate control.Admission, gitOrder *schedule.Keyed, gitBulkhead *schedule.Bulkhead) []methodSpec {

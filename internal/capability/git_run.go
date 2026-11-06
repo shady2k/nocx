@@ -123,9 +123,9 @@ func gitRun(ctx context.Context, allow gitAllowance, acquire func(context.Contex
 		}
 		// Start against cancel is decided here, once: a grant that arrived
 		// in the same instant as the turn's expiry did not start anything.
-		if err := turnCtx.Err(); err != nil {
+		if cerr := turnCtx.Err(); cerr != nil {
 			finish()
-			started <- start{err: err}
+			started <- start{err: cerr}
 			return
 		}
 		lifetime := allow.Max
@@ -201,9 +201,7 @@ func gitWaitError(ctx context.Context, allow gitAllowance, err error) error {
 		return ctx.Err()
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		if scope, ok := catalog.ScopeFrom(ctx); ok {
-			scope.Settle(catalog.OutcomeNotStarted)
-		}
+		settleScope(ctx, catalog.OutcomeNotStarted)
 		return &NotStartedError{Operation: allow.Operation, Waited: allow.Turn}
 	}
 	return err
@@ -216,12 +214,27 @@ func gitWaitError(ctx context.Context, allow gitAllowance, err error) error {
 func gitBulkheadError(ctx context.Context, allow gitAllowance, err error) error {
 	var refusal *schedule.Refusal
 	if errors.As(err, &refusal) && refusal.Reason == schedule.ReasonDomainSuspect {
+		settleScope(ctx, catalog.OutcomeNotStarted)
 		return &ExpiredError{Operation: allow.Operation, Outcome: allow.Expired, Domain: refusal.Domain, Suspected: true}
 	}
 	if errors.As(err, &refusal) {
-		return refused(ctx, &control.Rejection{Reason: refusal.Reason, Scope: refusal.Scope})
+		return gitRefused(ctx, &control.Rejection{Reason: refusal.Reason, Scope: refusal.Scope})
 	}
 	return err
+}
+
+// gitRefused is a capacity refusal at the git seam: it settles the scope as
+// refused before the dispatcher's own Complete can record a completion, so
+// the record says the call never ran.
+func gitRefused(ctx context.Context, rejection *control.Rejection) error {
+	settleScope(ctx, catalog.OutcomeRefused)
+	return refused(ctx, rejection)
+}
+
+func settleScope(ctx context.Context, outcome catalog.Outcome) {
+	if scope, ok := catalog.ScopeFrom(ctx); ok {
+		scope.Settle(outcome)
+	}
 }
 
 // domainName names a failure domain in a person's terms. The key is server

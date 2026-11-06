@@ -7254,8 +7254,8 @@
       },
       "max": {
         "millis": 600000,
-        "basis": "read",
-        "note": "read: a git process can run hooks; present behaviour has no bound (stage 5 adds the hook deadline)"
+        "basis": "measured",
+        "note": "measured: a commit's hook deadline is 600 s (git.commit's declared max, from this repository's 107 s pre-commit hook); a child stays within its parent's remainder and is killed by the context at that deadline"
       },
       "silence": {
         "kind": "none",

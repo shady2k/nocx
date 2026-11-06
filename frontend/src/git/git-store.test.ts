@@ -476,7 +476,7 @@ describe('race 3 — the mutation lane (D18)', () => {
     const stage = mockHandle(services, 'stage')
     stage.mockRejectedValueOnce(
       new RpcError(
-        'git.stage did not start: waited 11m0s for this checkout\'s turn and nothing changed',
+        "git.stage did not start: waited 11m0s for this checkout's turn and nothing changed",
         -32005,
         { reason: 'not-started' },
       ),

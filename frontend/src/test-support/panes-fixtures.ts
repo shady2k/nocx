@@ -91,12 +91,59 @@ export class MockWebSocket {
     }
   }
 
+  /** The credit advertisement this socket answers transport.credit with, and
+   *  whether it answers at all. A test that needs the window before the
+   *  advertisement sets answerCredit = false and calls deliverCredit itself.
+   *
+   *  The handshake is intercepted here rather than recorded in `sent`, so the
+   *  many tests that read `requests()[0]` keep reading the first CALL rather
+   *  than the connection's infrastructure. `creditRequests` is where a test
+   *  that cares about the advertisement looks. */
+  answerCredit = true
+  creditWindow = 8
+  creditExempt = [
+    'ack',
+    'vault.unlockResolved',
+    'connections.passwordResolved',
+    'agent.runResolved',
+    'host.resolved',
+    'agent.laneInteractivity',
+    'transport.ping',
+    'rpc.cancel',
+    'app.diagnostics',
+  ]
+  creditReserved = ['vault.unseal']
+  readonly creditRequests: number[] = []
+
   constructor(readonly url: string) {
     MockWebSocket.last = this
   }
 
   send(data: string | ArrayBuffer): void {
+    if (typeof data === 'string') {
+      const frame = JSON.parse(data) as { id?: number; method?: string }
+      if (frame.method === 'transport.credit') {
+        if (frame.id !== undefined) this.creditRequests.push(frame.id)
+        if (this.answerCredit) this.deliverCredit()
+        return
+      }
+    }
     this.sent.push(data)
+  }
+
+  /** Answer the outstanding credit request with this socket's advertisement. */
+  deliverCredit(params?: { window: number; exempt: string[]; reserved: string[] }): void {
+    const id = this.creditRequests[this.creditRequests.length - 1]
+    if (id === undefined) throw new Error('no transport.credit request to answer')
+    this.deliverText({
+      jsonrpc: '2.0',
+      id,
+      result: params ?? {
+        window: this.creditWindow,
+        exempt: this.creditExempt,
+        reserved: this.creditReserved,
+      },
+    })
   }
 
   close(): void {

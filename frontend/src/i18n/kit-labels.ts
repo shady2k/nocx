@@ -23,7 +23,8 @@ export const collisionLabels = (): CollisionLabels => ({
   skip: t('kit.collision.skip', 'Skip'),
   existsIn: t('kit.collision.existsIn', 'already exists in'),
   applyOne: t('ui.collision.applyOne', 'Apply to the 1 remaining file'),
-  applyMany: tPlural('ui.collision.applyMany', 2, 'Apply to the {count} remaining files'),
+  applyMany: (count: number) =>
+    tPlural('ui.collision.applyMany', count, 'Apply to the {count} remaining files'),
 })
 
 export const dumpLabels = (): DumpLabels => ({

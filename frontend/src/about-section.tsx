@@ -153,7 +153,7 @@ export function AboutSection(props: AboutSectionProps) {
                   <StatusCard
                     tone="warning"
                     title={t('about.updates.title', 'Updates')}
-                    description={t('about.checkFailedHead', 'update check failed: ') + reason()}
+                    description={t('about.checkFailedHead', 'update check failed:') + ' ' + reason()}
                   />
                 )}
               </Show>

@@ -86,8 +86,9 @@ export interface CollisionLabels {
   skip: string
   existsIn: string
   applyOne: string
-  /** `{count}` is substituted by the dialog. */
-  applyMany: string
+  /** The count is the files an "apply to all" would reach; the label
+   *  resolves it through the catalogue's plural forms at call time. */
+  applyMany: (count: number) => string
 }
 
 
@@ -141,7 +142,7 @@ export function CollisionDialog(props: CollisionDialogProps) {
             label={
               others() === 1
                 ? label('applyOne')
-                : label('applyMany').replace('{count}', String(others()))
+                : label('applyMany')(others())
             }
           />
         </Show>

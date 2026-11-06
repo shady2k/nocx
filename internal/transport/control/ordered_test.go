@@ -200,7 +200,10 @@ func TestOrderedSubmission_ShutdownRejectsNewWorkAndWaitsForAdmitted(t *testing.
 // start-against-cancel decision: cancellation does not have to beat the
 // worker to the queue, it has to beat the gate.
 func TestOrderedSubmissionNeverStartsAWithdrawnTask(t *testing.T) {
-	sub := NewOrderedSubmission("ordered-start-gate", 4).(*orderedSubmission)
+	sub, ok := NewOrderedSubmission("ordered-start-gate", 4).(*orderedSubmission)
+	if !ok {
+		t.Fatal("unexpected ordered submission implementation")
+	}
 	t.Cleanup(sub.Shutdown)
 	block := make(chan struct{})
 	started := make(chan struct{})

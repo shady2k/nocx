@@ -1202,6 +1202,11 @@ type WSServer struct {
 	// the shell channel's reader.
 	signalSub control.Submission
 	signalOps *capability.SessionOperations
+	// orders are the per-resource FIFOs that replaced the session, content
+	// and API domain gates (buildControlPlane). Kept on the server so a test
+	// drives the same queues a request does, and so app.diagnostics names the
+	// leaves it lists.
+	orders resourceOrders
 	// integrations is the per-session integration axis published as
 	// session.integrationChanged (nocx-dvql, ws_integration.go). Separate
 	// from lifecycleLanes because it answers a different question: that map
@@ -2167,11 +2172,27 @@ func (s *WSServer) buildControlPlane() {
 		AbandonedPerDomain: gitAbandonedPerDomain,
 		AbandonedGlobal:    gitAbandonedGlobal,
 	})
+	// The per-resource FIFOs stage 6 put where the session, content and API
+	// domain gates were (ADR-8eej3e66 section 5).
+	orders := s.resourceOrders()
+	s.orders = orders
+	// CONTENT'S ORDER AND ITS EXCLUSION HAVE TWO OWNERS, and each keeps the
+	// one it owns. Migration stage 6 gave content per-resource order (the
+	// FIFO); stage 7 gave every writer and coherent reader of the store set
+	// the shared barrier that backup.restore excludes them with. Taking the
+	// guard's whole shared plan for content would put every content write
+	// back behind one capacity-one store key — the domain grain stage 6
+	// removed — and taking the FIFO alone would let a restore rewrite the
+	// content store while a collection write was running. So: barrier first,
+	// then the FIFO, acquired as one composite.
+	contentOrder := control.NewComposite(
+		s.storeGuard.SharedBarrier(capability.StoreContent), orders.content)
 	// Every admission leaf this server built, for app.diagnostics. The lane
 	// first: it is the one a saturated server holds for days.
 	s.diagAdmits = []control.Admission{
-		lane, gates.config, gates.vault, gates.content, gates.session,
-		gates.filesystem, gates.api, s.agentProbeAdmit, s.dialogAdmit,
+		lane, gates.config, gates.vault, gates.session, gates.filesystem,
+		orders.session, orders.content, orders.api,
+		s.agentProbeAdmit, s.dialogAdmit,
 	}
 	immediate := control.ImmediateSubmission{}
 	// The signal lane, built here rather than inside signalSpecs because it
@@ -2179,7 +2200,7 @@ func (s *WSServer) buildControlPlane() {
 	// and the delivery of a Stop that was held for an attempt's start
 	// (nocx-zas0d, ws_signal.go). Both are the same act on the same session,
 	// so they share the bound and the serialisation.
-	s.signalOps = capability.NewSessionOperations(gates.session, lane, s.registry, s.profileUsage)
+	s.signalOps = capability.NewSessionOperations(orders.session, lane, s.registry, s.profileUsage)
 	s.signalSub = s.operationQueue("signal")
 	// The request broker is constructed here, once the server's connection
 	// set exists: its delivery seams are this server's own snapshot and
@@ -2195,7 +2216,7 @@ func (s *WSServer) buildControlPlane() {
 	inventorySub := s.operationQueue("session-inventory")
 	specs = append(specs, rpcCancelSpec(immediate))
 	specs = append(specs, s.heartbeatSpecs(immediate)...)
-	specs = append(specs, s.sessionSpecs(lane, gates.session, gates.config)...)
+	specs = append(specs, s.sessionSpecs(lane, orders.session, gates.config)...)
 	specs = append(specs, whenAvailable(
 		s.hostSessionInventorySpecs(inventorySub)[0],
 		func() bool { return s.hostSessionInventory != nil },
@@ -2210,20 +2231,20 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.vaultSpecs(lane, gates.config, gates.vault, s.storeGuard)...)
 	specs = append(specs, s.notifySpecs()...)
 	specs = append(specs, s.notifyFeedSpecs()...)
-	specs = append(specs, s.secretSpecs(lane, gates.config, gates.vault, gates.content)...)
+	specs = append(specs, s.secretSpecs(lane, gates.config, gates.vault, contentOrder)...)
 	specs = append(specs, s.gitSpecs(lane, gates.session, gitOrder, gitBulkhead)...)
 	specs = append(specs, s.filesSpecs(lane, gates.session, gates.filesystem)...)
-	specs = append(specs, s.apiSpecs(lane, gates.api, gates.vault)...)
+	specs = append(specs, s.apiSpecs(lane, orders.api, gates.vault)...)
 	contentSub := s.operationQueue("content")
-	specs = append(specs, s.contentSpecs(lane, gates.content, contentSub)...)
+	specs = append(specs, s.contentSpecs(lane, contentOrder, contentSub)...)
 	// history.status rides the plain lane, not the content queue: it is a
 	// mutex read of in-memory state and must stay answerable while the
 	// content domain is exactly what is broken.
 	specs = append(specs, s.historyStatusSpecs(s.lane)...)
 	specs = append(specs, s.checkoutsStatusSpecs(s.lane)...)
-	specs = append(specs, s.agentSpecs(contentSub, lane, gates.content, configOp, endpointWired, noteOp, snippetOp, s.skillLibrary, s.agentTools, s.credentialResolver(), s.assistantClient, s.askSub)...)
-	specs = append(specs, s.ledgerSpecs(contentSub, lane, gates.content)...)
-	specs = append(specs, s.layoutSpecs(contentSub, lane, gates.content)...)
+	specs = append(specs, s.agentSpecs(contentSub, lane, contentOrder, configOp, endpointWired, noteOp, snippetOp, s.skillLibrary, s.agentTools, s.credentialResolver(), s.assistantClient, s.askSub)...)
+	specs = append(specs, s.ledgerSpecs(contentSub, lane, contentOrder)...)
+	specs = append(specs, s.layoutSpecs(contentSub, lane, contentOrder)...)
 	specs = append(specs, s.shellSpecs(lane, gates.session)...)
 	specs = append(specs, s.aboutSpecs()...)
 	specs = append(specs, s.diagnosticsSpec())
@@ -2235,8 +2256,8 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.agentRuleStoreSpecs()...)
 	specs = append(specs, s.agentCalibrationSpecs()...)
 	specs = append(specs, s.agentTypeSpecs()...)
-	specs = append(specs, s.seamSpecs(lane, gates.session)...)
-	specs = append(specs, s.historyPageSpecs(lane, gates.session)...)
+	specs = append(specs, s.seamSpecs(lane, orders.session)...)
+	specs = append(specs, s.historyPageSpecs(lane, orders.session)...)
 	methods, err := buildMethodSpecs(specs)
 	if err != nil {
 		panic("nocx: control-plane registration: " + err.Error())
@@ -2263,16 +2284,47 @@ func (s *WSServer) operationQueue(name string) control.Submission {
 // gate is constructed; operations take them as separate parameters and
 // compose in the canonical order.
 type domainGates struct {
-	config, vault, content, session, filesystem, api control.Admission
+	config, vault, session, filesystem control.Admission
+}
+
+// resourceOrders builds the per-resource FIFOs that replace the session,
+// content and API domain gates (ADR-8eej3e66 section 5, migration stage 6).
+// Each names the canonical keys its domain owns: the session-plane methods
+// order on one session, the content-store methods on the store and on the
+// layout collection, and the api.* methods on one open collection. A key
+// belonging to another domain is never taken by a FIFO that does not own it;
+// the one textual overlap — the api prefix also matches the layout
+// collection's name — is unreachable, because an api key is a 32-hex handle
+// or an absolute folder path and never that name.
+//
+// The session gate is NOT replaced here for shell, git and filesystem: those
+// stage a read of one session under it and are the stages that migrate them.
+// Session's own methods stop taking it, because what it ordered — "a close
+// must not interleave an open of the same id" — is one registry lookup, which
+// is atomic on its own, and what needs order is two mutations of one session,
+// which the per-session FIFO orders.
+type resourceOrders struct {
+	session, content, api *control.ResourceOrder
+}
+
+func (s *WSServer) resourceOrders() resourceOrders {
+	return resourceOrders{
+		session: control.NewResourceOrder("session-order", control.DefaultOrderLimit, "session:"),
+		content: control.NewResourceOrder("content-order", control.DefaultOrderLimit,
+			"store:content", "collection:workspace-layout"),
+		api: control.NewResourceOrder("api-order", control.DefaultOrderLimit, "collection:"),
+	}
 }
 
 func (s *WSServer) domainGates() domainGates {
 	return domainGates{
-		// Config, vault and content are the store set of ADR-8eej3e66 §5:
-		// their domain admission is now the store guard's shared plan — every
+		// Config and vault are the store set of ADR-8eej3e66 §5: their
+		// domain admission is now the store guard's shared plan — every
 		// barrier that protects the store, then the store's own key. The
-		// canonical acquisition order is unchanged (config, vault, content,
-		// then the rest), and the guard keeps barriers ahead of keys.
+		// canonical acquisition order is unchanged (config, vault, then the
+		// rest), and the guard keeps barriers ahead of keys. Content's
+		// admission is not built here: stage 6 ordered it per resource, and
+		// contentOrder composes that order with this plan's shared barrier.
 		config: s.storeGuard.Shared(capability.StoreConfig),
 		// The vault admission is DECLARED as the one vault.unseal itself
 		// acquires (vaultSpecs builds VaultOperation from it). Every operation
@@ -2283,10 +2335,8 @@ func (s *WSServer) domainGates() domainGates {
 		// Unlock with "Control plane busy" (nocx-o3606, nocx-9fzkk). The
 		// marker travels on the store guard's plan unchanged.
 		vault:      capability.UnlockAnswering(s.storeGuard.Shared(capability.StoreVault)),
-		content:    s.storeGuard.Shared(capability.StoreContent),
 		session:    capability.Gate(capability.GateSession, 1, s.domainMaxQueue, s.domainWaitTimeout),
 		filesystem: capability.Gate(capability.GateFilesystem, 1, s.domainMaxQueue, s.domainWaitTimeout),
-		api:        capability.Gate(capability.GateAPI, 1, s.domainMaxQueue, s.domainWaitTimeout),
 	}
 }
 
@@ -3614,10 +3664,10 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		_ = respond(wconn, resp)
 		return
 	}
-	key := ""
+	runtimeKeys := []string(nil)
 	if m.key != nil {
 		var refusal *RPCError
-		key, refusal = m.key(req.Params)
+		runtimeKeys, refusal = m.key(req.Params)
 		if refusal != nil {
 			_ = wconn.TryError(req.ID, *refusal)
 			return
@@ -3687,6 +3737,25 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	// does not answer for it, so nothing a caller can do changes here yet.
 	scope := catalog.Begin(requestCtx, m.op, catalog.Invocation{Origin: invocationOrigin(req)})
 	requestCtx = catalog.WithScope(requestCtx, scope)
+	// THE RESOURCES THIS INVOCATION ORDERS ON (ADR-8eej3e66 section 5).
+	// The declaration names the keys it can — store:content, a named
+	// collection — and the validator above named the ones only the params
+	// know: which session, which collection. An operation's own admission
+	// takes the keys belonging to its domain and waits for them under the
+	// declared turn; a method whose keys belong to no migrated domain is
+	// unaffected, because no admission there reads them.
+	orderKeys := orderKeysFor(scope.Declaration(), runtimeKeys)
+	requestCtx = control.WithOrder(requestCtx, control.OrderRequest{
+		Keys: orderKeys,
+		Turn: scope.Declaration().Turn.Duration(),
+	})
+	// The per-key FIFO still receives the first runtime key: submissions
+	// that order by key (session-ops) keep their own arrival order, and a
+	// method with no runtime key is unkeyed there.
+	key := ""
+	if len(runtimeKeys) > 0 {
+		key = runtimeKeys[0]
+	}
 	task := control.Task{Key: key, Run: func(pctx context.Context) {
 		defer cancelRequest()
 		defer scope.Complete()

@@ -166,7 +166,19 @@ func TestSessionOperationsKeepFIFOAcrossOwnershipTransfer(t *testing.T) {
 	}
 }
 
-func TestSessionOrderingSaturationRemainsNonblockingAndValidatesBeforeAdmission(t *testing.T) {
+// The guarantee this test stands for was rewritten by ADR-8eej3e66 stage 6,
+// and what it asserts now is the record's rule rather than the gate's.
+//
+// It used to assert that one running task plus thirty-one queued tasks on
+// session A "consumed the entire server-wide bound" and refused session B's
+// request with the saturation error — "different keys do not multiply the
+// admitted-work allowance". That sentence is the whole-domain namespace the
+// record supersedes: a session's queue is its own, and another session's work
+// is not behind it. So the same saturation now has to leave B answerable, and
+// what must still hold is the other half: params are validated BEFORE
+// admission, so a malformed request is refused as malformed however busy the
+// session it names is.
+func TestSessionOrderingIsPerSessionAndValidatesBeforeAdmission(t *testing.T) {
 	source := &blockingPaneIntentSource{started: make(chan struct{}), release: make(chan struct{})}
 	ws, _, _ := newPanesWS(t, WithPaneIntentSource(source))
 	t.Cleanup(func() { close(source.release) })
@@ -179,15 +191,18 @@ func TestSessionOrderingSaturationRemainsNonblockingAndValidatesBeforeAdmission(
 	case <-time.After(5 * time.Second):
 		t.Fatal("A intent never reached helper")
 	}
-	// One running task plus 31 queued tasks consumes the entire server-wide
-	// bound. Different keys do not multiply the admitted-work allowance.
+	// Saturate session A: one running task and thirty-one queued behind it,
+	// none of which can finish until the source is released.
 	for id := 100; id < 131; id++ {
 		sendSessionIntentRaw(t, conn, sidA, "queued", id)
 	}
-	sendSessionIntentRaw(t, conn, sidB, "overflow", 200)
+	// Session B is a different resource, so it is admitted and answers.
+	sendSessionIntentRaw(t, conn, sidB, "other", 200)
+	// And a malformed request is still refused by the validator, on the read
+	// loop, before any queue sees it.
 	sendResizeRaw(t, conn, "", 100, 30, 201)
 	responses := collectResponses(t, conn, []int{200, 201}, 5*time.Second)
-	assertResponseError(t, responses[200], 200, -32004)
+	assertResponseOK(t, responses[200], 200)
 	assertResponseError(t, responses[201], 201, -32602)
 }
 

@@ -95,10 +95,16 @@ type methodSpec struct {
 	op         catalog.Method
 	submission control.Submission
 	build      func(w *wsConn, state *connState, r Responder) handlerFunc
-	// key optionally extracts the authoritative ordering key from validated
-	// params. Keyed methods validate before admission, so both the validator
-	// and extractor must do bounded, nonblocking ingress work.
-	key func(json.RawMessage) string
+	// key optionally extracts the invocation's runtime resource keys from
+	// validated params — the names a declaration cannot know, such as which
+	// session or which connection-held collection this call is about. Keyed
+	// methods validate before admission, so both the validator and extractor
+	// must do bounded, nonblocking ingress work.
+	//
+	// The declared keys that need no param (store:content,
+	// collection:workspace-layout) are added from the catalogue by
+	// orderKeysFor; this function answers only for nameless resources.
+	key func(json.RawMessage) []string
 	// available reports whether the method can answer at all — the domain
 	// it belongs to is wired. Optional: nil means "always available", which
 	// is true of most methods. Where it is NOT nil it is consulted BEFORE
@@ -221,7 +227,7 @@ type controlMethod struct {
 	op         catalog.Method
 	submission control.Submission
 	handle     func(ctx context.Context, req jsonrpcRequest)
-	key        func(json.RawMessage) (string, *RPCError)
+	key        func(json.RawMessage) ([]string, *RPCError)
 }
 
 // buildMethodSpecs validates and indexes the registration set. It rejects
@@ -299,9 +305,9 @@ func connMethods(specs map[string]methodSpec, w *wsConn, state *connState) map[s
 			// Validate once, before key allocation/admission rather than in
 			// the worker. Ownership remains a handler-time decision.
 			method.handle = next
-			method.key = func(raw json.RawMessage) (string, *RPCError) {
+			method.key = func(raw json.RawMessage) ([]string, *RPCError) {
 				if refusal := paramsRefusal(spec, raw); refusal != nil {
-					return "", refusal
+					return nil, refusal
 				}
 				return spec.key(raw), nil
 			}

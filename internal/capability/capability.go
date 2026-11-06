@@ -47,6 +47,14 @@
 // structurally impossible, and the order keeps it impossible if a blocking
 // admission is ever introduced.
 //
+// It governs the gates that remain. Migration stages 5–7 of ADR-8eej3e66
+// removed git's gate (a per-checkout key and a per-mount bulkhead in
+// internal/operation/schedule replace it) and the session, content and API
+// gates (per-resource FIFOs, internal/transport/control.ResourceOrder). The
+// store guard that replaced the config and vault gates keeps the same
+// sequence inside its own plan: every declared barrier, then config, vault,
+// content in that key order.
+//
 // # Conservative grain
 //
 // The initial operations take the whole domain where the conflict set is
@@ -67,26 +75,48 @@
 //
 // # Read policy (stated per domain, per the brief)
 //
-//   - config: reads PARTICIPATE in the config gate. The profile/group
-//     store gives a coherent single-file snapshot, but a config read that
-//     spans profiles + settings (export.configExport, vault inventory
-//     inputs) could otherwise observe two stores at different generations;
-//     the gate keeps multi-store readers coherent.
-//   - vault: reads participate in the vault gate. The vault is one
-//     mutex-guarded store, but lifecycle ops (seal, reset) and secret ops
-//     share the store; a seal between two secret operations is a conflict
-//     the gate excludes conservatively.
-//   - content, session, git, filesystem: reads participate in their
-//     domain's gate. Each is one store; the conservative posture is one
-//     gate per domain until per-id grain exists.
-//   - api: reads participate in the api gate, and api.request.send holds it
-//     only long enough to snapshot the request — never across the dial
-//     (api.go).
+//   - config: reads PARTICIPATE in the store guard's shared plan for the
+//     config store (stores.go: every barrier that protects it, then its own
+//     key). The profile/group store gives a coherent single-file snapshot,
+//     but a config read that spans profiles + settings (export.configExport,
+//     vault inventory inputs) could otherwise observe two stores at
+//     different generations; the plan keeps multi-store readers coherent and
+//     lets a restore exclude them.
+//   - vault: reads participate in the guard's shared plan for the vault. The
+//     vault is one mutex-guarded store, but lifecycle ops (seal, reset) and
+//     secret ops share the store; a seal between two secret operations is a
+//     conflict the plan excludes conservatively.
+//   - session and content: PER RESOURCE, not per domain (ADR-8eej3e66
+//     section 5, migration stage 6). Their operations are constructed with a
+//     control.ResourceOrder instead of a domain gate: it takes the keys the
+//     invocation's declaration names — one session, the content store, the
+//     layout collection — and a waiter on a different resource is not behind
+//     anybody. The key set and the wait bound arrive in the context from the
+//     dispatcher, which is the only layer that has both the declaration and
+//     the validated params, and capability reads neither. Reads order like
+//     writes: a read of one resource is a phase with the resource in it.
+//     Content composes that FIFO with the store guard's shared barrier
+//     (StoreGuard.SharedBarrier), barrier first, so a restore's exclusive
+//     claim excludes its writers without the FIFO's grain returning to one
+//     key for the whole store.
+//   - git: PER CHECKOUT AND PER MOUNT (ADR-8eej3e66 section 5, migration
+//     stage 5). A git operation orders on its checkout's key in
+//     internal/operation/schedule, and its execution is bounded by the
+//     mount's bulkhead; a staged read of one session inside git.open still
+//     takes the session gate, which stage 6 left for the domains that stage
+//     a registry lookup under it.
+//   - filesystem: reads participate in the filesystem gate, and so does a
+//     staged read of one session inside files.open. It is one store; the
+//     conservative posture is one gate per domain until its stage migrates.
+//   - api: reads order per open collection (a ResourceOrder keyed on the
+//     collection handle), and api.request.send holds that key only long
+//     enough to snapshot the request — never across the dial (api.go).
 //
 // # Refinements deliberately deferred
 //
-//   - per-session / per-binding gate grain (session:<id>, git-binding:<id>,
-//     filesystem-binding:<id>) — the current gates are whole-domain;
+//   - per-binding gate grain for filesystem (filesystem-binding:<id>) — that
+//     gate is whole-domain until its stage migrates; git took the
+//     per-checkout key in stage 5;
 //   - splitting config reads out of the [config, vault] pair once the row
 //     translation is measured.
 //
@@ -317,6 +347,12 @@ type operation[S any] struct {
 	// by newOperation, because the answer cannot change for the life of the
 	// operation and Run must not walk a composite per call.
 	answeringGate string
+	// ordered reports that the admission holds per-resource keys. The
+	// callback then runs inside that ordered scope, and a further ordered
+	// acquisition from it is the nesting ADR-8eej3e66 section 5 forbids: it
+	// would be two keys held in whatever order two handlers happened to
+	// acquire them, which is a deadlock waiting for a slow dependency.
+	ordered bool
 }
 
 // Disposition returns the operation's explicit assistant projection contract.
@@ -332,6 +368,13 @@ func (op *operation[S]) Run(ctx context.Context, fn func(context.Context, S) err
 	permit, rej := op.admission.TryAcquire(ctx)
 	if rej != nil {
 		return refused(ctx, rej)
+	}
+	// The callback's context says it holds the resources, so a nested
+	// ordered acquisition inside it panics instead of deadlocking
+	// (control.ResourceOrder.TryAcquire). Set after the permit exists: the
+	// acquisition itself must not see the mark.
+	if op.ordered {
+		ctx = control.WithOrderHeld(ctx)
 	}
 	// Release the permit only after the guard has gone cold: a service
 	// that escaped the callback must not observe a live guard in the

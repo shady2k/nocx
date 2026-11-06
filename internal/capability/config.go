@@ -981,5 +981,9 @@ func newOperation[S any](disposition Disposition, admission control.Admission, g
 	return &operation[S]{
 		admission: admission, guard: g, service: svc, disposition: disposition,
 		answeringGate: gate,
+		// Whether the callback runs inside a held resource set. Asked once,
+		// here, because the admission cannot change for the life of the
+		// operation and Run must not walk a composite per call.
+		ordered: control.HoldsOrder(admission),
 	}
 }

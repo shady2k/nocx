@@ -238,6 +238,33 @@ func (g *StoreGuard) Shared(store string) control.Admission {
 	return g.watch([]string{store}, control.NewComposite(parts...), name)
 }
 
+// SharedBarrier returns the barrier half of the shared plan: every barrier
+// that protects the store, taken shared, with the quarantine check and without
+// the store's own key. It is for a store whose ORDER belongs to another
+// admission. Content is that store: migration stage 6 replaced its domain gate
+// with a per-resource FIFO, so taking Shared(StoreContent) would put every
+// content write back behind one capacity-one key and undo that grain. What
+// stage 7 still owes content is the exclusion half — a restore that rewrites
+// the store set must see no content writer — and a barrier alone is exactly
+// that. A caller composes it with its own ordering admission, barrier first,
+// which is the order every holder here takes.
+func (g *StoreGuard) SharedBarrier(store string) control.Admission {
+	members, ok := g.members[store]
+	if !ok {
+		panic("capability: no store named " + store)
+	}
+	parts := make([]control.Admission, 0, len(members))
+	for _, name := range g.barrierOrder {
+		if contains(members, name) {
+			parts = append(parts, g.barriers[name].Shared())
+		}
+	}
+	if len(parts) == 0 {
+		panic("capability: store " + store + " is protected by no declared barrier")
+	}
+	return g.watch([]string{store}, control.NewComposite(parts...), "store:"+store+"+barrier")
+}
+
 // Exclusive returns the admission an operation that rewrites the stores of a
 // declaration takes: every barrier the declaration names, exclusive, then every
 // store it names, in the key order. It panics on a resource the guard does not

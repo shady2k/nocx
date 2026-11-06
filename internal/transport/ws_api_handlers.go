@@ -2282,7 +2282,7 @@ func (s *WSServer) apiSpecs(lane control.Admission, apiGate, vaultGate control.A
 		return h
 	}
 
-	return []methodSpec{
+	specs := []methodSpec{
 		whenAvailable(regResponder(sub, catalog.OpApiCollectionsList, noParams(), func(r Responder) handlerFunc {
 			h := collHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
@@ -2356,6 +2356,37 @@ func (s *WSServer) apiSpecs(lane control.Admission, apiGate, vaultGate control.A
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}), collAvailable, apiCollectionsUnavailable),
 	}
+	// Every api.* method orders on the collection it names, and a method that
+	// names none (a new collection, the cancel of a send) orders on nothing:
+	// it conflicts with no other collection.
+	for i := range specs {
+		specs[i] = keyedByCollection(specs[i])
+	}
+	return specs
+}
+
+// keyedByCollection binds the open collection's resource key. The handle is
+// the collection's identity while it is open, and apicoll answers one handle
+// per folder whichever connection opened it, so two connections on one
+// collection order on one key. The open itself and an import name a folder
+// rather than a handle; those keys are the folder, which is the same real
+// resource by the only name the caller has.
+func keyedByCollection(spec methodSpec) methodSpec {
+	spec.key = func(raw json.RawMessage) []string {
+		var target struct {
+			Handle string `json:"handle"`
+			Path   string `json:"path"`
+			Dest   string `json:"dest"`
+		}
+		_ = json.Unmarshal(raw, &target) // already validated by connMethods
+		for _, name := range []string{target.Handle, target.Path, target.Dest} {
+			if name != "" {
+				return []string{collectionKey(name)}
+			}
+		}
+		return nil
+	}
+	return spec
 }
 
 // apiCollectionsUnavailable is the sentence a caller gets when no collection

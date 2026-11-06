@@ -1171,17 +1171,20 @@ func answerOperationRefusal(r Responder, req jsonrpcRequest, err error) {
 	_ = r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 }
 
-// orderedBySession binds ordering to the protocol's authoritative sessionId,
-// never a tab/window/connection identity or a caller-selected queue name.
-// connMethods validates before admission so malformed requests cannot
-// allocate key state.
+// keyedBySession binds one session's resource key to a method whose params
+// carry the protocol's authoritative sessionId, never a tab/window/connection
+// identity or a caller-selected queue name. connMethods validates before
+// admission so malformed requests cannot allocate key state.
+//
 // Ownership is still checked when the queued handler runs: a preceding detach
 // or a concurrent ownership transfer may have changed it since admission.
-func orderedBySession(spec methodSpec) methodSpec {
-	spec.key = func(raw json.RawMessage) string {
-		var target closeParams
+func keyedBySession(spec methodSpec) methodSpec {
+	spec.key = func(raw json.RawMessage) []string {
+		var target struct {
+			SessionID string `json:"sessionId"`
+		}
 		_ = json.Unmarshal(raw, &target) // already validated by connMethods
-		return target.SessionID
+		return []string{sessionKey(target.SessionID)}
 	}
 	return spec
 }
@@ -1231,12 +1234,20 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 	sessionSub := s.operationQueue("session")
 	// Completion ordering belongs to a session, not the whole server. All
 	// sockets share this scheduler: a blocked intent holds only its own
-	// session's FIFO. The 32 slots count running AND queued work, bounding
+	// session's FIFO. The slots count running AND queued work, bounding
 	// active key workers as well as pending work. Inflight tracking makes
 	// Stop cancel and drain admitted tasks before session teardown.
+	//
+	// THE CAPACITY IS THE RESOURCE ORDER'S, not the old namespace's. It used
+	// to be 32, which was a bound on a whole-domain namespace: one tab with
+	// 32 queued resizes refused the 33rd request of every other session on
+	// the server. Below this submission each key has its own queue and the
+	// resource FIFO is what orders one session against itself, so the only
+	// thing left for this number to bound is the goroutines: one worker per
+	// active key, which the FIFO's own admission limit already caps.
 	ordered := &inflightSubmission{
 		inflight: &s.inflight,
-		inner:    control.NewKeyedOrderedSubmission("session-ops", 32),
+		inner:    control.NewKeyedOrderedSubmission("session-ops", control.DefaultOrderLimit),
 	}
 	// The instance identity is read ONCE, here, where the registry is: a
 	// handler judging a claim needs the value, never the registry.
@@ -1246,32 +1257,32 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 			h := openHandlers{opener: s.opener, sess: s, log: s.log, intents: s.paneIntentSource}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, w, r, state, req) }
 		}),
-		orderedBySession(reg(ordered, catalog.OpDetach, params(validateCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		keyedBySession(reg(ordered, catalog.OpDetach, params(validateCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, conn: w, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDetach(ctx, state, req) }
 		})),
-		orderedBySession(reg(ordered, catalog.OpSessionIntent, params(validateSessionIntentRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		keyedBySession(reg(ordered, catalog.OpSessionIntent, params(validateSessionIntentRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := sessionIntentHandler{source: s.paneIntentSource, r: r, state: state}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
 		})),
-		orderedBySession(reg(ordered, catalog.OpResize, params(validateResizeRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		keyedBySession(reg(ordered, catalog.OpResize, params(validateResizeRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleResize(ctx, state, req) }
 		})),
-		orderedBySession(reg(ordered, catalog.OpClose, params(validateCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		keyedBySession(reg(ordered, catalog.OpClose, params(validateCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleClose(ctx, state, req) }
 		})),
-		reg(sessionSub, catalog.OpAttach, params(validateAttachRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		keyedBySession(reg(sessionSub, catalog.OpAttach, params(validateAttachRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, machine: s, intents: s.paneIntentSource}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAttach(ctx, w, r, state, req) }
-		}),
+		})),
 		// Recovery metadata shares the session operation queue with attach and
 		// the live-session list; it is read as part of reclaiming one claim.
-		whenAvailable(regResponder(sessionSub, catalog.OpSessionRecoveryStatus, params(validateSessionRecoveryStatusRaw), func(r Responder) handlerFunc {
+		whenAvailable(keyedBySession(regResponder(sessionSub, catalog.OpSessionRecoveryStatus, params(validateSessionRecoveryStatusRaw), func(r Responder) handlerFunc {
 			h := sessionRecoveryStatusHandlers{ops: sessionOps, store: s.sessionRecorder, instance: instance, r: r}
 			return h.handle
-		}), func() bool { return s.sessionRecorder != nil }, "session recovery status is unavailable"),
+		})), func() bool { return s.sessionRecorder != nil }, "session recovery status is unavailable"),
 		// sessions.live is the session plane's read, and it rides the same
 		// per-operation queue as attach: the two are one act for a fresh
 		// client — ask what is alive, take one — and a list answered under a

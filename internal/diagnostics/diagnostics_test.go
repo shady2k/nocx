@@ -190,3 +190,35 @@ func TestARefusalNamesTheScopeItsHoldersAndHowLongTheyHeldIt(t *testing.T) {
 		}
 	}
 }
+
+// The overrun is a protocol violation, not a refusal: the text must say the
+// method, the class and the two counts, and must be bounded like the rest of
+// the record.
+func TestACreditOverrunNamesTheMethodTheClassAndBothCounts(t *testing.T) {
+	rec := NewRecorder()
+	rec.RecordCreditOverrun(time.Now(), CreditOverrun{
+		Conn: 7, Method: "profiles.list", Class: "ordinary", InFlight: 3, Window: 2,
+	})
+	text := Render(rec.Snapshot(), Facts{ServerStarted: time.Now()})
+	for _, want := range []string{
+		"credit overruns: 1", "conn=7", "method=profiles.list",
+		"class=ordinary", "in_flight=3", "window=2",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("text lacks %q:\n%s", want, text)
+		}
+	}
+	for i := 0; i < creditOverrunCap+10; i++ {
+		rec.RecordCreditOverrun(time.Now(), CreditOverrun{Method: "files.list", Class: "ordinary"})
+	}
+	if got := len(rec.Snapshot().CreditOverruns); got > creditOverrunCap {
+		t.Fatalf("credit overruns = %d, want <= %d", got, creditOverrunCap)
+	}
+}
+
+func TestNoCreditOverrunSaysSo(t *testing.T) {
+	text := Render(NewRecorder().Snapshot(), Facts{ServerStarted: time.Now()})
+	if !strings.Contains(text, "credit overruns: none") {
+		t.Fatalf("text lacks the empty overrun line:\n%s", text)
+	}
+}

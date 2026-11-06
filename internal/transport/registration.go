@@ -64,8 +64,14 @@ var ingressCriticalMethods = map[string]struct{}{
 	// waits on the awaiting-takeover transition it feeds, so it must never
 	// queue behind the lane either. Handler: a mutex update, microseconds.
 	"agent.laneInteractivity": {},
-	"transport.ping":          {},
-	"rpc.cancel":              {},
+	// transport.credit is the credit advertisement itself (ADR-8eej3e66
+	// §7). It is the first frame a client sends and must be answered before
+	// the client may send anything ordinary, so it takes no credit and no
+	// lane: a window whose own advertisement waited for the window is the
+	// deadlock the advertisement exists to prevent.
+	"transport.credit": {},
+	"transport.ping":   {},
+	"rpc.cancel":       {},
 	// app.diagnostics (nocx-3an1s.1.8): the moment a person needs it is the
 	// moment the lane is full, so a lane permit would make it unavailable at
 	// exactly the wrong time. Its handler is bounded by construction — a

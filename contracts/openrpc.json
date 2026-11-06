@@ -22579,6 +22579,106 @@
       }
     },
     {
+      "name": "transport.credit",
+      "params": [
+        {
+          "name": "params",
+          "required": false,
+          "schema": {
+            "$ref": "https://nocx.local/contracts/transport.credit.params.schema.json"
+          }
+        }
+      ],
+      "errors": [
+        {
+          "code": -32601,
+          "message": "Method not found",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32603,
+          "message": "Internal error",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32004,
+          "message": "Control plane busy",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        }
+      ],
+      "x-nocx-agent-disposition": "operation-owned",
+      "x-nocx-operation": {
+        "id": "transport.credit",
+        "kind": "method",
+        "owner": "request",
+        "phases": [
+          {
+            "name": "answer",
+            "resources": [],
+            "dependencies": [
+              "server"
+            ]
+          }
+        ],
+        "turn": {
+          "millis": 1000,
+          "basis": "read",
+          "note": "the read loop answers it inline; the turn exists so the renderer's first frame cannot wait forever for a window"
+        },
+        "max": {
+          "millis": 1000,
+          "basis": "read",
+          "note": "read: transport.credit reads the server's credit declaration and enqueues one response"
+        },
+        "silence": {
+          "kind": "none",
+          "millis": 0,
+          "basis": "",
+          "note": ""
+        },
+        "answer": {
+          "kind": "none",
+          "millis": 0,
+          "basis": "",
+          "note": ""
+        },
+        "recovery": {
+          "kind": "none",
+          "millis": 0,
+          "basis": "",
+          "note": ""
+        },
+        "merge": "none",
+        "waiting": "Reading the credit window",
+        "row": "never",
+        "expired": "not-started",
+        "resources": [],
+        "dependencies": [
+          "server"
+        ],
+        "preempts": []
+      },
+      "result": {
+        "name": "transport.creditResult",
+        "schema": {
+          "$ref": "https://nocx.local/contracts/transport.credit.schema.json"
+        }
+      }
+    },
+    {
       "name": "transport.ping",
       "params": [
         {
@@ -26566,6 +26666,9 @@
     },
     {
       "$ref": "https://nocx.local/contracts/tabs.reorder.schema.json"
+    },
+    {
+      "$ref": "https://nocx.local/contracts/transport.credit.schema.json"
     },
     {
       "$ref": "https://nocx.local/contracts/transport.ping.schema.json"

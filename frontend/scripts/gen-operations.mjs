@@ -30,7 +30,7 @@ async function build() {
     .sort((a, b) => a.id.localeCompare(b.id))
   const entries = methods.map(
     (op) =>
-      `  ${JSON.stringify(op.id)}: { waiting: ${JSON.stringify(op.waiting)}, row: ${JSON.stringify(op.row)}, domain: ${JSON.stringify(op.dependencies[0] ?? '')}, turnMs: ${op.turn.millis}, maxMs: ${op.max.millis}, answerMs: ${op.answer.kind === 'deadline' ? op.answer.millis : 'null'} },`,
+      `  ${JSON.stringify(op.id)}: { waiting: ${JSON.stringify(op.waiting)}, row: ${JSON.stringify(op.row)}, merge: ${JSON.stringify(op.merge)}, domain: ${JSON.stringify(op.dependencies[0] ?? '')}, turnMs: ${op.turn.millis}, maxMs: ${op.max.millis}, answerMs: ${op.answer.kind === 'deadline' ? op.answer.millis : 'null'} },`,
   )
   return `${BANNER}
 
@@ -39,6 +39,10 @@ export interface CallOperationDeclaration {
   readonly waiting: string
   /** When Operations may show it. */
   readonly row: 'never' | 'past-wait' | 'always'
+  /** What a later invocation of the same operation may do (ADR-8eej3e66
+   *  §2). "none" never merges; "same-key" and "latest-value" are keys the
+   *  renderer's credit queue may join an identical call on. */
+  readonly merge: 'none' | 'latest-value' | 'same-key'
   readonly domain: string
   readonly turnMs: number
   readonly maxMs: number

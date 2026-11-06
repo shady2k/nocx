@@ -429,6 +429,9 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		// The heartbeat asks nothing and carries nothing: the client sends
 		// `{}` (frontend/src/dispatcher.ts), which is the only shape worth
 		// probing for a noParams() method.
+		"transport.credit": {
+			[]byte(`{}`),
+		},
 		"transport.ping": {
 			[]byte(`{}`),
 		},

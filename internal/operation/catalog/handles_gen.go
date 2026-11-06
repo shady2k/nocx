@@ -239,6 +239,7 @@ var (
 	OpTabsRecolour                    = methodHandle("tabs.recolour")
 	OpTabsRename                      = methodHandle("tabs.rename")
 	OpTabsReorder                     = methodHandle("tabs.reorder")
+	OpTransportCredit                 = methodHandle("transport.credit")
 	OpTransportPing                   = methodHandle("transport.ping")
 	OpTunnelOpen                      = methodHandle("tunnel.open")
 	OpTunnelStop                      = methodHandle("tunnel.stop")

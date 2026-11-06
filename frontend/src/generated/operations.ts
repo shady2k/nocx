@@ -10,6 +10,10 @@ export interface CallOperationDeclaration {
   readonly waiting: string
   /** When Operations may show it. */
   readonly row: 'never' | 'past-wait' | 'always'
+  /** What a later invocation of the same operation may do (ADR-8eej3e66
+   *  §2). "none" never merges; "same-key" and "latest-value" are keys the
+   *  renderer's credit queue may join an identical call on. */
+  readonly merge: 'none' | 'latest-value' | 'same-key'
   readonly domain: string
   readonly turnMs: number
   readonly maxMs: number
@@ -20,6 +24,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   ack: {
     waiting: 'Acknowledging terminal output',
     row: 'never',
+    merge: 'none',
     domain: 'session',
     turnMs: 1,
     maxMs: 5000,
@@ -28,6 +33,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'agent.approve': {
     waiting: 'Waiting for your approval',
     row: 'past-wait',
+    merge: 'none',
     domain: 'session',
     turnMs: 1000,
     maxMs: 300000,
@@ -36,6 +42,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'agent.ask': {
     waiting: 'Waiting for the model',
     row: 'past-wait',
+    merge: 'none',
     domain: 'content',
     turnMs: 1000,
     maxMs: 300000,
@@ -44,6 +51,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'agent.calibration': {
     waiting: 'Calibrating the agent',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'config',
     turnMs: 1000,
     maxMs: 300000,
@@ -52,6 +60,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'agent.calibration.answer': {
     waiting: 'Calibrating the agent',
     row: 'never',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 300000,
@@ -60,6 +69,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'agent.cancel': {
     waiting: 'Stopping the agent run',
     row: 'past-wait',
+    merge: 'none',
     domain: 'session',
     turnMs: 1000,
     maxMs: 300000,
@@ -68,6 +78,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'agent.dump': {
     waiting: 'Reading the agent run',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'session',
     turnMs: 1000,
     maxMs: 300000,
@@ -76,6 +87,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'agent.emitting': {
     waiting: 'Waiting for the model',
     row: 'past-wait',
+    merge: 'none',
     domain: 'session',
     turnMs: 1000,
     maxMs: 300000,
@@ -84,6 +96,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'agent.laneInteractivity': {
     waiting: 'Waiting for the model',
     row: 'never',
+    merge: 'none',
     domain: 'session',
     turnMs: 1,
     maxMs: 300000,
@@ -92,6 +105,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'agent.rules': {
     waiting: 'Saving the agent rules',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -100,6 +114,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'agent.rules.delete': {
     waiting: 'Saving the agent rules',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -108,6 +123,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'agent.rules.set': {
     waiting: 'Saving the agent rules',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -116,6 +132,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'agent.rules.setEnabled': {
     waiting: 'Saving the agent rules',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -124,6 +141,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'agent.runResolved': {
     waiting: 'Waiting for the model',
     row: 'never',
+    merge: 'none',
     domain: 'session',
     turnMs: 1,
     maxMs: 300000,
@@ -132,6 +150,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'agent.status': {
     waiting: 'Waiting for the model',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'session',
     turnMs: 1000,
     maxMs: 300000,
@@ -140,6 +159,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'agent.type': {
     waiting: 'Waiting for the model',
     row: 'past-wait',
+    merge: 'none',
     domain: 'session',
     turnMs: 1000,
     maxMs: 300000,
@@ -148,6 +168,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'agentAccess.forget': {
     waiting: 'Reading the agent access list',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -156,6 +177,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'agentAccess.list': {
     waiting: 'Reading the agent access list',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -164,6 +186,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'agentRecords.list': {
     waiting: 'Reading the agent records',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'content',
     turnMs: 1000,
     maxMs: 60000,
@@ -172,6 +195,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'agentRecords.remove': {
     waiting: 'Reading the agent records',
     row: 'past-wait',
+    merge: 'none',
     domain: 'content',
     turnMs: 1000,
     maxMs: 60000,
@@ -180,6 +204,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'agentRecords.save': {
     waiting: 'Reading the agent records',
     row: 'past-wait',
+    merge: 'none',
     domain: 'content',
     turnMs: 1000,
     maxMs: 60000,
@@ -188,6 +213,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'api.collections.close': {
     waiting: 'Working on this collection',
     row: 'past-wait',
+    merge: 'none',
     domain: 'api',
     turnMs: 1000,
     maxMs: 120000,
@@ -196,6 +222,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'api.collections.create': {
     waiting: 'Working on this collection',
     row: 'past-wait',
+    merge: 'none',
     domain: 'api',
     turnMs: 1000,
     maxMs: 120000,
@@ -204,6 +231,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'api.collections.createFolder': {
     waiting: 'Working on this collection',
     row: 'past-wait',
+    merge: 'none',
     domain: 'api',
     turnMs: 1000,
     maxMs: 120000,
@@ -212,6 +240,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'api.collections.list': {
     waiting: 'Working on this collection',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'api',
     turnMs: 1000,
     maxMs: 120000,
@@ -220,6 +249,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'api.collections.open': {
     waiting: 'Working on this collection',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'api',
     turnMs: 1000,
     maxMs: 120000,
@@ -228,6 +258,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'api.environment.read': {
     waiting: 'Working on this collection',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'api',
     turnMs: 1000,
     maxMs: 120000,
@@ -236,6 +267,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'api.environment.write': {
     waiting: 'Working on this collection',
     row: 'past-wait',
+    merge: 'none',
     domain: 'api',
     turnMs: 1000,
     maxMs: 120000,
@@ -244,6 +276,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'api.folder.read': {
     waiting: 'Working on this collection',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'api',
     turnMs: 1000,
     maxMs: 120000,
@@ -252,6 +285,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'api.folder.write': {
     waiting: 'Working on this collection',
     row: 'past-wait',
+    merge: 'none',
     domain: 'api',
     turnMs: 1000,
     maxMs: 120000,
@@ -260,6 +294,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'api.import.curl': {
     waiting: 'Importing the curl command',
     row: 'past-wait',
+    merge: 'none',
     domain: 'api',
     turnMs: 1000,
     maxMs: 120000,
@@ -268,6 +303,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'api.import.postman': {
     waiting: 'Importing the Postman collection',
     row: 'past-wait',
+    merge: 'none',
     domain: 'api',
     turnMs: 1000,
     maxMs: 120000,
@@ -276,6 +312,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'api.request.cancel': {
     waiting: 'Working on this collection',
     row: 'past-wait',
+    merge: 'none',
     domain: 'api',
     turnMs: 1000,
     maxMs: 120000,
@@ -284,6 +321,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'api.request.delete': {
     waiting: 'Working on this collection',
     row: 'past-wait',
+    merge: 'none',
     domain: 'api',
     turnMs: 1000,
     maxMs: 120000,
@@ -292,6 +330,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'api.request.move': {
     waiting: 'Working on this collection',
     row: 'past-wait',
+    merge: 'none',
     domain: 'api',
     turnMs: 1000,
     maxMs: 120000,
@@ -300,6 +339,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'api.request.read': {
     waiting: 'Working on this collection',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'api',
     turnMs: 1000,
     maxMs: 120000,
@@ -308,6 +348,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'api.request.scope': {
     waiting: 'Working on this collection',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'api',
     turnMs: 1000,
     maxMs: 120000,
@@ -316,6 +357,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'api.request.send': {
     waiting: 'Sending this request',
     row: 'past-wait',
+    merge: 'none',
     domain: 'api',
     turnMs: 1000,
     maxMs: 120000,
@@ -324,6 +366,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'api.request.write': {
     waiting: 'Working on this collection',
     row: 'past-wait',
+    merge: 'none',
     domain: 'api',
     turnMs: 1000,
     maxMs: 120000,
@@ -332,6 +375,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'app.about': {
     waiting: 'Reading nocx’s build information',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'server',
     turnMs: 1000,
     maxMs: 10000,
@@ -340,6 +384,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'app.diagnostics': {
     waiting: 'Collecting diagnostics',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'server',
     turnMs: 1000,
     maxMs: 10000,
@@ -348,6 +393,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   attach: {
     waiting: 'Reattaching to this session',
     row: 'past-wait',
+    merge: 'none',
     domain: 'session',
     turnMs: 1000,
     maxMs: 120000,
@@ -356,6 +402,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'backup.create': {
     waiting: 'Backing up your settings',
     row: 'always',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 600000,
@@ -364,6 +411,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'backup.preview': {
     waiting: 'Reading the backup file',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'config',
     turnMs: 1000,
     maxMs: 120000,
@@ -372,6 +420,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'backup.restore': {
     waiting: 'Restoring your settings',
     row: 'always',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 900000,
@@ -380,6 +429,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'backup.saveToFile': {
     waiting: 'Writing the backup file',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 120000,
@@ -388,6 +438,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'checkouts.status': {
     waiting: 'Reading the checkouts',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'git',
     turnMs: 1000,
     maxMs: 60000,
@@ -396,6 +447,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   close: {
     waiting: 'Closing this session',
     row: 'past-wait',
+    merge: 'none',
     domain: 'session',
     turnMs: 1000,
     maxMs: 120000,
@@ -404,6 +456,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'connections.passwordResolved': {
     waiting: 'Checking the connection',
     row: 'never',
+    merge: 'none',
     domain: 'config',
     turnMs: 1,
     maxMs: 60000,
@@ -412,6 +465,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'connections.setIntegrationMethod': {
     waiting: 'Checking the connection',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -420,6 +474,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'connections.test': {
     waiting: 'Checking the connection',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -428,6 +483,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'connections.trustHostKey': {
     waiting: 'Waiting for you to accept the host key',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -436,6 +492,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   detach: {
     waiting: 'Detaching this session',
     row: 'past-wait',
+    merge: 'none',
     domain: 'session',
     turnMs: 1000,
     maxMs: 120000,
@@ -444,6 +501,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'dialog.openDirectory': {
     waiting: 'Waiting for you to choose a folder',
     row: 'past-wait',
+    merge: 'none',
     domain: 'loopback',
     turnMs: 1000,
     maxMs: 600000,
@@ -452,6 +510,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'dialog.openFile': {
     waiting: 'Waiting for you to choose a file',
     row: 'past-wait',
+    merge: 'none',
     domain: 'loopback',
     turnMs: 1000,
     maxMs: 600000,
@@ -460,6 +519,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'dialog.openFileForUpload': {
     waiting: 'Waiting for you to choose a file',
     row: 'past-wait',
+    merge: 'none',
     domain: 'loopback',
     turnMs: 1000,
     maxMs: 600000,
@@ -468,6 +528,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'endpoints.create': {
     waiting: 'Saving your endpoints',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -476,6 +537,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'endpoints.delete': {
     waiting: 'Saving your endpoints',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -484,6 +546,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'endpoints.list': {
     waiting: 'Saving your endpoints',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -492,6 +555,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'endpoints.probe': {
     waiting: 'Checking the model endpoint',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -500,6 +564,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'endpoints.update': {
     waiting: 'Saving your endpoints',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -508,6 +573,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'files.close': {
     waiting: 'Closing this folder',
     row: 'past-wait',
+    merge: 'none',
     domain: 'filesystem',
     turnMs: 1000,
     maxMs: 300000,
@@ -516,6 +582,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'files.download': {
     waiting: 'Downloading this file',
     row: 'always',
+    merge: 'none',
     domain: 'filesystem',
     turnMs: 1000,
     maxMs: 14400000,
@@ -524,6 +591,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'files.downloadCancel': {
     waiting: 'Reading this folder',
     row: 'past-wait',
+    merge: 'none',
     domain: 'filesystem',
     turnMs: 1000,
     maxMs: 10000,
@@ -532,6 +600,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'files.list': {
     waiting: 'Reading this folder',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'filesystem',
     turnMs: 1000,
     maxMs: 300000,
@@ -540,6 +609,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'files.open': {
     waiting: 'Opening this folder',
     row: 'past-wait',
+    merge: 'none',
     domain: 'filesystem',
     turnMs: 1000,
     maxMs: 300000,
@@ -548,6 +618,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'files.read': {
     waiting: 'Reading this file',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'filesystem',
     turnMs: 1000,
     maxMs: 300000,
@@ -556,6 +627,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'files.reveal': {
     waiting: 'Revealing this file',
     row: 'past-wait',
+    merge: 'none',
     domain: 'filesystem',
     turnMs: 1000,
     maxMs: 300000,
@@ -564,6 +636,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'files.stat': {
     waiting: 'Looking at this file',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'filesystem',
     turnMs: 1000,
     maxMs: 300000,
@@ -572,6 +645,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'files.upload': {
     waiting: 'Uploading this file',
     row: 'always',
+    merge: 'none',
     domain: 'filesystem',
     turnMs: 1000,
     maxMs: 14400000,
@@ -580,6 +654,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'files.uploadCancel': {
     waiting: 'Reading this folder',
     row: 'past-wait',
+    merge: 'none',
     domain: 'filesystem',
     turnMs: 1000,
     maxMs: 10000,
@@ -588,6 +663,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'files.visible': {
     waiting: 'Showing this folder',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'filesystem',
     turnMs: 1000,
     maxMs: 300000,
@@ -596,6 +672,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'files.watch': {
     waiting: 'Watching this folder',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'filesystem',
     turnMs: 1000,
     maxMs: 300000,
@@ -604,6 +681,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'fs.complete': {
     waiting: 'Reading this folder',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'filesystem',
     turnMs: 1000,
     maxMs: 10000,
@@ -612,6 +690,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'git.close': {
     waiting: 'Closing this checkout',
     row: 'past-wait',
+    merge: 'none',
     domain: 'git',
     turnMs: 1000,
     maxMs: 600000,
@@ -620,6 +699,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'git.commit': {
     waiting: 'Committing in this checkout',
     row: 'past-wait',
+    merge: 'none',
     domain: 'git',
     turnMs: 1000,
     maxMs: 600000,
@@ -628,6 +708,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'git.diff': {
     waiting: 'Reading this checkout’s changes',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'git',
     turnMs: 1000,
     maxMs: 60000,
@@ -636,6 +717,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'git.headMessage': {
     waiting: 'Waiting for git in this checkout',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'git',
     turnMs: 1000,
     maxMs: 60000,
@@ -644,6 +726,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'git.log': {
     waiting: 'Reading this checkout’s history',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'git',
     turnMs: 1000,
     maxMs: 60000,
@@ -652,6 +735,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'git.open': {
     waiting: 'Opening this checkout',
     row: 'past-wait',
+    merge: 'none',
     domain: 'git',
     turnMs: 1000,
     maxMs: 600000,
@@ -660,6 +744,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'git.remote': {
     waiting: 'Waiting for git in this checkout',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'git',
     turnMs: 1000,
     maxMs: 60000,
@@ -668,6 +753,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'git.stage': {
     waiting: 'Waiting for git in this checkout',
     row: 'past-wait',
+    merge: 'none',
     domain: 'git',
     turnMs: 1000,
     maxMs: 600000,
@@ -676,6 +762,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'git.stageAll': {
     waiting: 'Waiting for git in this checkout',
     row: 'past-wait',
+    merge: 'none',
     domain: 'git',
     turnMs: 1000,
     maxMs: 600000,
@@ -684,6 +771,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'git.status': {
     waiting: 'Reading this checkout',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'git',
     turnMs: 1000,
     maxMs: 60000,
@@ -692,6 +780,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'git.unstage': {
     waiting: 'Waiting for git in this checkout',
     row: 'past-wait',
+    merge: 'none',
     domain: 'git',
     turnMs: 1000,
     maxMs: 600000,
@@ -700,6 +789,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'git.unstageAll': {
     waiting: 'Waiting for git in this checkout',
     row: 'past-wait',
+    merge: 'none',
     domain: 'git',
     turnMs: 1000,
     maxMs: 600000,
@@ -708,6 +798,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'groups.apply': {
     waiting: 'Saving your groups',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -716,6 +807,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'groups.create': {
     waiting: 'Saving your groups',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -724,6 +816,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'groups.delete': {
     waiting: 'Saving your groups',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -732,6 +825,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'groups.impact': {
     waiting: 'Saving your groups',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -740,6 +834,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'groups.list': {
     waiting: 'Saving your groups',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -748,6 +843,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'groups.update': {
     waiting: 'Saving your groups',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -756,6 +852,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'history.query': {
     waiting: 'Looking through your history',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'content',
     turnMs: 1000,
     maxMs: 60000,
@@ -764,6 +861,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'history.status': {
     waiting: 'Checking history recording',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'content',
     turnMs: 1000,
     maxMs: 60000,
@@ -772,6 +870,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'host.attentionActivated': {
     waiting: 'Showing the window',
     row: 'never',
+    merge: 'none',
     domain: 'loopback',
     turnMs: 1000,
     maxMs: 10000,
@@ -780,6 +879,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'host.resolved': {
     waiting: 'Waiting for the window',
     row: 'never',
+    merge: 'none',
     domain: 'loopback',
     turnMs: 1,
     maxMs: 10000,
@@ -788,6 +888,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'layout.read': {
     waiting: 'Reading the window layout',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'content',
     turnMs: 1000,
     maxMs: 30000,
@@ -796,6 +897,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'ledger.artifact': {
     waiting: 'Reading the session ledger',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'content',
     turnMs: 1000,
     maxMs: 60000,
@@ -804,6 +906,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'ledger.bind': {
     waiting: 'Reading the session ledger',
     row: 'past-wait',
+    merge: 'none',
     domain: 'content',
     turnMs: 1000,
     maxMs: 60000,
@@ -812,6 +915,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'ledger.close': {
     waiting: 'Reading the session ledger',
     row: 'past-wait',
+    merge: 'none',
     domain: 'content',
     turnMs: 1000,
     maxMs: 60000,
@@ -820,6 +924,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'ledger.get': {
     waiting: 'Reading the session ledger',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'content',
     turnMs: 1000,
     maxMs: 60000,
@@ -828,6 +933,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'ledger.open': {
     waiting: 'Reading the session ledger',
     row: 'past-wait',
+    merge: 'none',
     domain: 'content',
     turnMs: 1000,
     maxMs: 60000,
@@ -836,6 +942,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'ledger.query': {
     waiting: 'Reading the session ledger',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'content',
     turnMs: 1000,
     maxMs: 60000,
@@ -844,6 +951,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'lifecycle.recoverAck': {
     waiting: 'Recording the recovery acknowledgement',
     row: 'past-wait',
+    merge: 'none',
     domain: 'session',
     turnMs: 1000,
     maxMs: 30000,
@@ -852,6 +960,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'lifecycle.submitAttempt': {
     waiting: 'Recording the command attempt',
     row: 'past-wait',
+    merge: 'none',
     domain: 'session',
     turnMs: 1000,
     maxMs: 30000,
@@ -860,6 +969,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'notes.create': {
     waiting: 'Reading your notes',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -868,6 +978,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'notes.delete': {
     waiting: 'Reading your notes',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -876,6 +987,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'notes.get': {
     waiting: 'Reading your notes',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -884,6 +996,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'notes.list': {
     waiting: 'Reading your notes',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -892,6 +1005,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'notes.search': {
     waiting: 'Reading your notes',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -900,6 +1014,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'notes.update': {
     waiting: 'Reading your notes',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -908,6 +1023,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'notify.bell': {
     waiting: 'Sending the notification',
     row: 'never',
+    merge: 'none',
     domain: 'notify',
     turnMs: 1000,
     maxMs: 10000,
@@ -916,6 +1032,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'notify.catalogue': {
     waiting: 'Sending the notification',
     row: 'never',
+    merge: 'same-key',
     domain: 'notify',
     turnMs: 1000,
     maxMs: 10000,
@@ -924,6 +1041,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'notify.feed.markRead': {
     waiting: 'Reading notifications',
     row: 'never',
+    merge: 'none',
     domain: 'notify',
     turnMs: 1000,
     maxMs: 10000,
@@ -932,6 +1050,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'notify.feed.read': {
     waiting: 'Reading notifications',
     row: 'never',
+    merge: 'same-key',
     domain: 'notify',
     turnMs: 1000,
     maxMs: 10000,
@@ -940,6 +1059,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'notify.paneWorkFinished': {
     waiting: 'Sending the notification',
     row: 'never',
+    merge: 'none',
     domain: 'notify',
     turnMs: 1000,
     maxMs: 10000,
@@ -948,6 +1068,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'notify.raise': {
     waiting: 'Sending the notification',
     row: 'never',
+    merge: 'none',
     domain: 'notify',
     turnMs: 1000,
     maxMs: 10000,
@@ -956,6 +1077,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   open: {
     waiting: 'Opening your terminal',
     row: 'always',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 300000,
@@ -964,6 +1086,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'panes.close': {
     waiting: 'Changing the pane layout',
     row: 'past-wait',
+    merge: 'none',
     domain: 'content',
     turnMs: 1000,
     maxMs: 30000,
@@ -972,6 +1095,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'panes.create': {
     waiting: 'Changing the pane layout',
     row: 'past-wait',
+    merge: 'none',
     domain: 'content',
     turnMs: 1000,
     maxMs: 30000,
@@ -980,6 +1104,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'panes.move': {
     waiting: 'Changing the pane layout',
     row: 'past-wait',
+    merge: 'none',
     domain: 'content',
     turnMs: 1000,
     maxMs: 30000,
@@ -988,6 +1113,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'panes.setCwd': {
     waiting: 'Changing the pane layout',
     row: 'past-wait',
+    merge: 'none',
     domain: 'content',
     turnMs: 1000,
     maxMs: 30000,
@@ -996,6 +1122,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'policy.classify': {
     waiting: 'Reading the agent policy',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'config',
     turnMs: 1000,
     maxMs: 10000,
@@ -1004,6 +1131,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'policy.explain': {
     waiting: 'Reading the agent policy',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'config',
     turnMs: 1000,
     maxMs: 10000,
@@ -1012,6 +1140,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'policy.forgetRule': {
     waiting: 'Reading the agent policy',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 10000,
@@ -1020,6 +1149,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'policy.get': {
     waiting: 'Reading the agent policy',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'config',
     turnMs: 1000,
     maxMs: 10000,
@@ -1028,6 +1158,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'policy.set': {
     waiting: 'Saving the agent policy',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 10000,
@@ -1036,6 +1167,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'policy.setRule': {
     waiting: 'Reading the agent policy',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 10000,
@@ -1044,6 +1176,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'ports.pause': {
     waiting: 'Sampling the listening ports',
     row: 'past-wait',
+    merge: 'none',
     domain: 'session',
     turnMs: 1000,
     maxMs: 30000,
@@ -1052,6 +1185,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'ports.sample': {
     waiting: 'Sampling the listening ports',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'session',
     turnMs: 1000,
     maxMs: 30000,
@@ -1060,6 +1194,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'ports.status': {
     waiting: 'Sampling the listening ports',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'session',
     turnMs: 1000,
     maxMs: 30000,
@@ -1068,6 +1203,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'ports.visible': {
     waiting: 'Sampling the listening ports',
     row: 'past-wait',
+    merge: 'none',
     domain: 'session',
     turnMs: 1000,
     maxMs: 30000,
@@ -1076,6 +1212,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'profiles.create': {
     waiting: 'Saving your profile',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -1084,6 +1221,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'profiles.delete': {
     waiting: 'Removing your profile',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -1092,6 +1230,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'profiles.effective': {
     waiting: 'Saving your profiles',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -1100,6 +1239,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'profiles.importTabby': {
     waiting: 'Saving your profiles',
     row: 'always',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -1108,6 +1248,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'profiles.list': {
     waiting: 'Reading your profiles',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -1116,6 +1257,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'profiles.moveImpact': {
     waiting: 'Saving your profiles',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -1124,6 +1266,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'profiles.patch': {
     waiting: 'Saving your profile',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -1132,6 +1275,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'profiles.tabbyExecute': {
     waiting: 'Saving your profiles',
     row: 'always',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -1140,6 +1284,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'profiles.tabbyPreview': {
     waiting: 'Saving your profiles',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -1148,6 +1293,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'profiles.update': {
     waiting: 'Saving your profile',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -1156,6 +1302,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   resize: {
     waiting: 'Resizing this terminal',
     row: 'past-wait',
+    merge: 'latest-value',
     domain: 'session',
     turnMs: 1000,
     maxMs: 30000,
@@ -1164,6 +1311,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'roles.assign': {
     waiting: 'Saving the model roles',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -1172,6 +1320,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'roles.list': {
     waiting: 'Saving the model roles',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -1180,6 +1329,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'roles.setDefault': {
     waiting: 'Saving the model roles',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -1188,6 +1338,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'rpc.cancel': {
     waiting: 'Stopping the operation',
     row: 'never',
+    merge: 'none',
     domain: 'server',
     turnMs: 1,
     maxMs: 5000,
@@ -1196,6 +1347,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'secrets.captureDismiss': {
     waiting: 'Saving the secret',
     row: 'never',
+    merge: 'none',
     domain: 'vault',
     turnMs: 1000,
     maxMs: 60000,
@@ -1204,6 +1356,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'secrets.captureSave': {
     waiting: 'Saving the captured secret',
     row: 'past-wait',
+    merge: 'none',
     domain: 'vault',
     turnMs: 1000,
     maxMs: 60000,
@@ -1212,6 +1365,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'secrets.detect': {
     waiting: 'Looking for secrets in the output',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'vault',
     turnMs: 1000,
     maxMs: 60000,
@@ -1220,6 +1374,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'secrets.paneClosed': {
     waiting: 'Saving the secret',
     row: 'never',
+    merge: 'none',
     domain: 'vault',
     turnMs: 1000,
     maxMs: 60000,
@@ -1228,6 +1383,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'secrets.saveKeyMaterial': {
     waiting: 'Saving the secret',
     row: 'past-wait',
+    merge: 'none',
     domain: 'vault',
     turnMs: 1000,
     maxMs: 60000,
@@ -1236,6 +1392,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'secrets.saveKeyPassphrase': {
     waiting: 'Saving the secret',
     row: 'past-wait',
+    merge: 'none',
     domain: 'vault',
     turnMs: 1000,
     maxMs: 60000,
@@ -1244,6 +1401,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'secrets.savePassword': {
     waiting: 'Saving the secret',
     row: 'past-wait',
+    merge: 'none',
     domain: 'vault',
     turnMs: 1000,
     maxMs: 60000,
@@ -1252,6 +1410,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'secrets.usage': {
     waiting: 'Saving the secret',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'vault',
     turnMs: 1000,
     maxMs: 60000,
@@ -1260,6 +1419,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'session.historyPage': {
     waiting: 'Reading this session’s history',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'session',
     turnMs: 1000,
     maxMs: 120000,
@@ -1268,6 +1428,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'session.intent': {
     waiting: 'Sending input to this terminal',
     row: 'past-wait',
+    merge: 'none',
     domain: 'session',
     turnMs: 1000,
     maxMs: 120000,
@@ -1276,6 +1437,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'session.recoveryStatus': {
     waiting: 'Reading this session’s record',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'session',
     turnMs: 1000,
     maxMs: 120000,
@@ -1284,6 +1446,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'session.signal': {
     waiting: 'Signalling this terminal',
     row: 'past-wait',
+    merge: 'none',
     domain: 'session',
     turnMs: 1000,
     maxMs: 120000,
@@ -1292,6 +1455,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'sessions.inventory': {
     waiting: 'Reading the helper sessions',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'helper',
     turnMs: 1000,
     maxMs: 30000,
@@ -1300,6 +1464,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'sessions.live': {
     waiting: 'Reading the live sessions',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'session',
     turnMs: 1000,
     maxMs: 30000,
@@ -1308,6 +1473,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'sessions.status': {
     waiting: 'Reading the sessions',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'session',
     turnMs: 1000,
     maxMs: 30000,
@@ -1316,6 +1482,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'settings.describe': {
     waiting: 'Reading your settings',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -1324,6 +1491,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'settings.getSnapshot': {
     waiting: 'Reading your settings',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -1332,6 +1500,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'settings.reset': {
     waiting: 'Resetting your settings',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -1340,6 +1509,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'settings.secretDelete': {
     waiting: 'Saving your settings',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -1348,6 +1518,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'settings.secretExists': {
     waiting: 'Saving your settings',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -1356,6 +1527,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'settings.secretSet': {
     waiting: 'Saving your settings',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -1364,6 +1536,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'settings.set': {
     waiting: 'Saving your settings',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -1372,6 +1545,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'shell.commandNames': {
     waiting: 'Installing shell integration',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'filesystem',
     turnMs: 1000,
     maxMs: 120000,
@@ -1380,6 +1554,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'shell.complete': {
     waiting: 'Installing shell integration',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'filesystem',
     turnMs: 1000,
     maxMs: 120000,
@@ -1388,6 +1563,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'shell.footprint.helperUninstall': {
     waiting: 'Installing shell integration',
     row: 'past-wait',
+    merge: 'none',
     domain: 'filesystem',
     turnMs: 1000,
     maxMs: 120000,
@@ -1396,6 +1572,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'shell.footprint.status': {
     waiting: 'Installing shell integration',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'filesystem',
     turnMs: 1000,
     maxMs: 120000,
@@ -1404,6 +1581,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'shell.footprint.uninstall': {
     waiting: 'Installing shell integration',
     row: 'past-wait',
+    merge: 'none',
     domain: 'filesystem',
     turnMs: 1000,
     maxMs: 120000,
@@ -1412,6 +1590,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'shell.integrate': {
     waiting: 'Installing shell integration',
     row: 'past-wait',
+    merge: 'none',
     domain: 'filesystem',
     turnMs: 1000,
     maxMs: 300000,
@@ -1420,6 +1599,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'shell.openUrl': {
     waiting: 'Installing shell integration',
     row: 'past-wait',
+    merge: 'none',
     domain: 'filesystem',
     turnMs: 1000,
     maxMs: 120000,
@@ -1428,6 +1608,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'skills.approve': {
     waiting: 'Reading your skills',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 300000,
@@ -1436,6 +1617,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'skills.audit': {
     waiting: 'Asking the model to audit this skill',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 600000,
@@ -1444,6 +1626,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'skills.check': {
     waiting: 'Reading your skills',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -1452,6 +1635,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'skills.file': {
     waiting: 'Reading your skills',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'config',
     turnMs: 1000,
     maxMs: 300000,
@@ -1460,6 +1644,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'skills.files': {
     waiting: 'Reading your skills',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'config',
     turnMs: 1000,
     maxMs: 300000,
@@ -1468,6 +1653,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'skills.list': {
     waiting: 'Reading your skills',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'config',
     turnMs: 1000,
     maxMs: 300000,
@@ -1476,6 +1662,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'skills.remove': {
     waiting: 'Reading your skills',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 300000,
@@ -1484,6 +1671,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'skills.scan': {
     waiting: 'Scanning your skills',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 300000,
@@ -1492,6 +1680,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'skills.setEnabled': {
     waiting: 'Reading your skills',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 300000,
@@ -1500,6 +1689,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'skills.setPin': {
     waiting: 'Reading your skills',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 300000,
@@ -1508,6 +1698,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'snippets.create': {
     waiting: 'Saving your snippets',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -1516,6 +1707,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'snippets.delete': {
     waiting: 'Saving your snippets',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -1524,6 +1716,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'snippets.list': {
     waiting: 'Saving your snippets',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -1532,6 +1725,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'snippets.reorder': {
     waiting: 'Saving your snippets',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -1540,6 +1734,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'snippets.update': {
     waiting: 'Saving your snippets',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 30000,
@@ -1548,6 +1743,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'sshConfig.aliases': {
     waiting: 'Reading your ssh config',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'filesystem',
     turnMs: 1000,
     maxMs: 10000,
@@ -1556,6 +1752,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'sshConfig.path': {
     waiting: 'Reading your ssh config',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'filesystem',
     turnMs: 1000,
     maxMs: 10000,
@@ -1564,6 +1761,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'tabs.close': {
     waiting: 'Changing the tab layout',
     row: 'past-wait',
+    merge: 'none',
     domain: 'content',
     turnMs: 1000,
     maxMs: 30000,
@@ -1572,6 +1770,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'tabs.create': {
     waiting: 'Changing the tab layout',
     row: 'past-wait',
+    merge: 'none',
     domain: 'content',
     turnMs: 1000,
     maxMs: 30000,
@@ -1580,6 +1779,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'tabs.pin': {
     waiting: 'Changing the tab layout',
     row: 'past-wait',
+    merge: 'none',
     domain: 'content',
     turnMs: 1000,
     maxMs: 30000,
@@ -1588,6 +1788,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'tabs.recolour': {
     waiting: 'Changing the tab layout',
     row: 'past-wait',
+    merge: 'none',
     domain: 'content',
     turnMs: 1000,
     maxMs: 30000,
@@ -1596,6 +1797,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'tabs.rename': {
     waiting: 'Changing the tab layout',
     row: 'past-wait',
+    merge: 'none',
     domain: 'content',
     turnMs: 1000,
     maxMs: 30000,
@@ -1604,14 +1806,25 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'tabs.reorder': {
     waiting: 'Changing the tab layout',
     row: 'past-wait',
+    merge: 'none',
     domain: 'content',
     turnMs: 1000,
     maxMs: 30000,
     answerMs: null,
   },
+  'transport.credit': {
+    waiting: 'Reading the credit window',
+    row: 'never',
+    merge: 'none',
+    domain: 'server',
+    turnMs: 1000,
+    maxMs: 1000,
+    answerMs: null,
+  },
   'transport.ping': {
     waiting: 'Checking the backend is alive',
     row: 'never',
+    merge: 'none',
     domain: 'server',
     turnMs: 1,
     maxMs: 500,
@@ -1620,6 +1833,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'tunnel.open': {
     waiting: 'Opening the tunnel',
     row: 'past-wait',
+    merge: 'none',
     domain: 'ssh',
     turnMs: 1000,
     maxMs: 60000,
@@ -1628,6 +1842,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'tunnel.stop': {
     waiting: 'Opening the tunnel',
     row: 'past-wait',
+    merge: 'none',
     domain: 'ssh',
     turnMs: 1000,
     maxMs: 60000,
@@ -1636,6 +1851,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'uistate.get': {
     waiting: 'Reading the window state',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'config',
     turnMs: 1000,
     maxMs: 10000,
@@ -1644,6 +1860,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'uistate.set': {
     waiting: 'Saving the window state',
     row: 'past-wait',
+    merge: 'none',
     domain: 'config',
     turnMs: 1000,
     maxMs: 10000,
@@ -1652,6 +1869,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'uistate.window.get': {
     waiting: 'Saving the window state',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'config',
     turnMs: 1000,
     maxMs: 10000,
@@ -1660,6 +1878,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'uistate.window.observe': {
     waiting: 'Saving the window state',
     row: 'never',
+    merge: 'none',
     domain: 'loopback',
     turnMs: 1000,
     maxMs: 5000,
@@ -1668,6 +1887,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'vault.activity': {
     waiting: 'Waiting for the vault',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'vault',
     turnMs: 1000,
     maxMs: 30000,
@@ -1676,6 +1896,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'vault.changePassphrase': {
     waiting: 'Changing the vault passphrase',
     row: 'past-wait',
+    merge: 'none',
     domain: 'vault',
     turnMs: 1000,
     maxMs: 120000,
@@ -1684,6 +1905,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'vault.createSecret': {
     waiting: 'Waiting for the vault',
     row: 'past-wait',
+    merge: 'none',
     domain: 'vault',
     turnMs: 1000,
     maxMs: 120000,
@@ -1692,6 +1914,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'vault.deleteSecret': {
     waiting: 'Waiting for the vault',
     row: 'past-wait',
+    merge: 'none',
     domain: 'vault',
     turnMs: 1000,
     maxMs: 120000,
@@ -1700,6 +1923,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'vault.inventory': {
     waiting: 'Waiting for the vault',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'vault',
     turnMs: 1000,
     maxMs: 30000,
@@ -1708,6 +1932,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'vault.regenerateRecovery': {
     waiting: 'Waiting for the vault',
     row: 'past-wait',
+    merge: 'none',
     domain: 'vault',
     turnMs: 1000,
     maxMs: 120000,
@@ -1716,6 +1941,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'vault.renameSecret': {
     waiting: 'Waiting for the vault',
     row: 'past-wait',
+    merge: 'none',
     domain: 'vault',
     turnMs: 1000,
     maxMs: 120000,
@@ -1724,6 +1950,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'vault.replaceSecret': {
     waiting: 'Waiting for the vault',
     row: 'past-wait',
+    merge: 'none',
     domain: 'vault',
     turnMs: 1000,
     maxMs: 120000,
@@ -1732,6 +1959,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'vault.reset': {
     waiting: 'Resetting the vault',
     row: 'past-wait',
+    merge: 'none',
     domain: 'vault',
     turnMs: 1000,
     maxMs: 600000,
@@ -1740,6 +1968,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'vault.resetPreview': {
     waiting: 'Checking what a vault reset would remove',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'vault',
     turnMs: 1000,
     maxMs: 30000,
@@ -1748,6 +1977,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'vault.resolveLine': {
     waiting: 'Waiting for the vault',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'vault',
     turnMs: 1000,
     maxMs: 30000,
@@ -1756,6 +1986,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'vault.seal': {
     waiting: 'Sealing the vault',
     row: 'past-wait',
+    merge: 'none',
     domain: 'vault',
     turnMs: 1000,
     maxMs: 120000,
@@ -1764,6 +1995,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'vault.setAutoSeal': {
     waiting: 'Waiting for the vault',
     row: 'past-wait',
+    merge: 'none',
     domain: 'vault',
     turnMs: 1000,
     maxMs: 120000,
@@ -1772,6 +2004,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'vault.setDefaultProvider': {
     waiting: 'Waiting for the vault',
     row: 'past-wait',
+    merge: 'none',
     domain: 'vault',
     turnMs: 1000,
     maxMs: 120000,
@@ -1780,6 +2013,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'vault.setup': {
     waiting: 'Setting up the vault',
     row: 'past-wait',
+    merge: 'none',
     domain: 'vault',
     turnMs: 1000,
     maxMs: 120000,
@@ -1788,6 +2022,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'vault.status': {
     waiting: 'Waiting for the vault',
     row: 'past-wait',
+    merge: 'same-key',
     domain: 'vault',
     turnMs: 1000,
     maxMs: 30000,
@@ -1796,6 +2031,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'vault.unlockResolved': {
     waiting: 'Waiting for the vault',
     row: 'never',
+    merge: 'none',
     domain: 'vault',
     turnMs: 1,
     maxMs: 120000,
@@ -1804,6 +2040,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'vault.unseal': {
     waiting: 'Waiting for you to unlock the vault',
     row: 'past-wait',
+    merge: 'none',
     domain: 'vault',
     turnMs: 1000,
     maxMs: 900000,
@@ -1812,6 +2049,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'workspaces.close': {
     waiting: 'Changing the window layout',
     row: 'past-wait',
+    merge: 'none',
     domain: 'content',
     turnMs: 1000,
     maxMs: 30000,
@@ -1820,6 +2058,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'workspaces.create': {
     waiting: 'Changing the window layout',
     row: 'past-wait',
+    merge: 'none',
     domain: 'content',
     turnMs: 1000,
     maxMs: 30000,
@@ -1828,6 +2067,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'workspaces.recolour': {
     waiting: 'Changing the window layout',
     row: 'past-wait',
+    merge: 'none',
     domain: 'content',
     turnMs: 1000,
     maxMs: 30000,
@@ -1836,6 +2076,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'workspaces.rename': {
     waiting: 'Changing the window layout',
     row: 'past-wait',
+    merge: 'none',
     domain: 'content',
     turnMs: 1000,
     maxMs: 30000,
@@ -1844,6 +2085,7 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
   'workspaces.reorder': {
     waiting: 'Changing the window layout',
     row: 'past-wait',
+    merge: 'none',
     domain: 'content',
     turnMs: 1000,
     maxMs: 30000,

@@ -42,6 +42,7 @@ func Render(s Snapshot, f Facts) string {
 		writeOpen(&b, "recent", o)
 	}
 	writeRefusals(&b, s.Refusals)
+	writeCreditOverruns(&b, s.CreditOverruns)
 	writeLosses(&b, s.Losses)
 	writeAdmissions(&b, f.Admissions)
 	count, top := GoroutineSummary()
@@ -131,6 +132,24 @@ func writeRefusals(b *strings.Builder, refusals []Refusal) {
 		fmt.Fprintf(b, "  %s method=%s scope=%s held=%s holders=%s\n",
 			r.At.UTC().Format("15:04:05.000"), orNone(r.Method), orNone(r.Scope),
 			shortDur(r.Held), holderText)
+	}
+}
+
+// writeCreditOverruns is the record of a peer that broke the one rule the
+// credit window states: never send more than you were told you may have
+// outstanding. It is deliberately separate from refusals: a refusal is the
+// server saying no, an overrun is the server ending the connection because
+// the client did not need to be told no.
+func writeCreditOverruns(b *strings.Builder, overruns []CreditOverrun) {
+	if len(overruns) == 0 {
+		b.WriteString("credit overruns: none\n")
+		return
+	}
+	fmt.Fprintf(b, "credit overruns: %d\n", len(overruns))
+	for _, o := range overruns {
+		fmt.Fprintf(b, "  %s conn=%d method=%s class=%s in_flight=%d window=%d\n",
+			o.At.UTC().Format("15:04:05.000"), o.Conn, orNone(o.Method), orNone(o.Class),
+			o.InFlight, o.Window)
 	}
 }
 

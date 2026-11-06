@@ -210,12 +210,28 @@ interface PendingCall {
   sealedRetried: boolean
   sent: boolean
   settled: boolean
+  /** The id the Operations row was announced under; it survives a sealed
+   *  retry, which changes currentID. */
+  observeID: number
+  /** The withdrawal the row's Cancel calls. */
+  abort?: () => void
+  /** Settlement is announced at most once. */
+  settledNotified?: boolean
   /** The id the BACKEND is working on. A vault-sealed retry re-sends the
    *  request under a fresh id, and a withdrawal must name that one. */
   currentID: number
   signal?: AbortSignal
   onAbort?: () => void
   removeAbortListener?: () => void
+}
+
+/** One call a person made, as the Operations source sees it. `cancel` is the
+ *  same withdrawal the caller's own AbortSignal performs. */
+export interface PendingCallView {
+  readonly id: number
+  readonly method: string
+  readonly startedAt: number
+  cancel: () => void
 }
 
 function abortError(): Error {
@@ -512,6 +528,12 @@ export class Dispatcher {
    */
   onVaultSealed?: (method: string) => Promise<void>
 
+  /** Called when a person's operation call is on the wire. Background work
+   *  never reaches it: it merges and is not shown. */
+  onCallPending?: (call: PendingCallView) => void
+  /** Called once when that call has settled, however it settled. */
+  onCallSettled?: (id: number) => void
+
   call<T = unknown>(
     method: string,
     params: unknown,
@@ -532,6 +554,7 @@ export class Dispatcher {
         sealedRetried: false,
         sent: false,
         settled: false,
+        observeID: id,
         currentID: id,
       }
       const abort = (): void => {
@@ -540,6 +563,7 @@ export class Dispatcher {
         const activeID = pending.currentID
         if (this.pending.get(activeID) === pending) this.pending.delete(activeID)
         pending.removeAbortListener?.()
+        this.notifyCallSettled(pending)
         reject(abortError())
         const ws = this.ws
         if (pending.sent && ws && ws.readyState === WebSocket.OPEN) {
@@ -549,6 +573,7 @@ export class Dispatcher {
           this._noteOutboundActivity(ws)
         }
       }
+      pending.abort = abort
       this.pending.set(id, pending)
       if (signal?.aborted) {
         abort()
@@ -565,12 +590,21 @@ export class Dispatcher {
         this.pending.delete(id)
         pending.settled = true
         pending.removeAbortListener?.()
+        this.notifyCallSettled(pending)
         reject(new Error('not connected'))
         return
       }
       pending.sent = true
       ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }))
       this._noteOutboundActivity(ws)
+      if (origin === 'person' && intent === 'operation') {
+        this.onCallPending?.({
+          id,
+          method,
+          startedAt: Date.now(),
+          cancel: () => this.cancel(id),
+        })
+      }
     })
   }
 
@@ -708,6 +742,7 @@ export class Dispatcher {
                 // has already been answered and the replacement was never
                 // sent, so nothing is in flight to cancel.
                 p.settled = true
+                this.notifyCallSettled(p)
                 p.reject(abortError())
                 return
               }
@@ -718,6 +753,7 @@ export class Dispatcher {
               if (!ws || ws.readyState !== WebSocket.OPEN) {
                 this.pending.delete(id)
                 p.settled = true
+                this.notifyCallSettled(p)
                 p.reject(new Error('not connected'))
                 return
               }
@@ -734,11 +770,13 @@ export class Dispatcher {
             },
             (e: unknown) => {
               p.settled = true
+              this.notifyCallSettled(p)
               p.reject(e instanceof Error ? e : new Error(String(e)))
             },
           )
           return
         }
+        this.notifyCallSettled(p)
         if (
           msg.error.data &&
           typeof msg.error.data === 'object' &&
@@ -754,6 +792,7 @@ export class Dispatcher {
         }
         p.reject(new RpcError(msg.error.message ?? 'rpc error', msg.error.code, msg.error.data))
       } else {
+        this.notifyCallSettled(p)
         p.resolve(msg.result)
       }
       return
@@ -888,8 +927,23 @@ export class Dispatcher {
     if (this._connectionState.kind === 'waiting') this.retryNow()
   }
 
+  /** Withdraw one call by the id its caller was given. Unknown ids are a
+   *  normal race: the answer may have arrived first. */
+  cancel(id: number): void {
+    this.pending.get(id)?.abort?.()
+  }
+
+  private notifyCallSettled(p: PendingCall): void {
+    if (p.settledNotified) return
+    p.settledNotified = true
+    if (p.origin === 'person' && p.intent === 'operation') {
+      this.onCallSettled?.(p.observeID)
+    }
+  }
+
   private rejectAllPending(reason: string): void {
     for (const p of this.pending.values()) {
+      this.notifyCallSettled(p)
       p.reject(new Error(reason))
     }
     this.pending.clear()

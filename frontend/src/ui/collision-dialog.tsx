@@ -94,7 +94,8 @@ export interface CollisionLabels {
 
 export function CollisionDialog(props: CollisionDialogProps) {
   const [applyToAll, setApplyToAll] = createSignal(false)
-  const label = (name: keyof CollisionLabels): string => props.labels[name]
+  const label = <K extends keyof CollisionLabels>(name: K): CollisionLabels[K] =>
+    props.labels[name]
 
   /** The files an "apply to all" would reach — the batch minus the one on screen. */
   const others = () => Math.max(0, props.request.remaining - 1)

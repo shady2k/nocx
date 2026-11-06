@@ -35,8 +35,6 @@ interface State {
   previewAttempt: number
 }
 
-const PLAINTEXT_WARNING = `The backup file is plaintext JSON. All settings values, hostnames, connection names, inline usernames, and auth modes are stored without encryption. Credential secrets (passwords, key passphrases) are never included, but the connection metadata may still be sensitive.`
-
 /** A file the person picked that `readBackupText` could not read, in their words. */
 function readBackupFileSentence(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err)
@@ -266,17 +264,29 @@ export function BackupRestoreSection(props: Props) {
         <MarkerList
           items={[
             {
-              text: 'Settings overrides (non-secret), SSH connections (without credential IDs), and connection groups (typed defaults subset without credential bindings).',
+              text: t(
+                'backup.markers.settingsIn',
+                'Settings overrides (non-secret), SSH connections (without credential IDs), and connection groups (typed defaults subset without credential bindings).',
+              ),
               tone: 'included',
             },
             {
-              text: 'Credential records, secret references, OS keychain material, ContentDB, and declared defaults.',
+              text: t(
+                'backup.markers.secretsOut',
+                'Credential records, secret references, OS keychain material, ContentDB, and declared defaults.',
+              ),
               tone: 'excluded',
             },
           ]}
         />
         <div class="backup-restore__warning">
-          <strong>{t('backup.plaintextWarning', 'Plaintext warning:')}</strong> {PLAINTEXT_WARNING}
+          <strong>
+            {t('backup.plaintextWarning', 'Plaintext warning:')}{' '}
+            {t(
+              'backup.plaintext.body',
+              'The backup file is plaintext JSON. All settings values, hostnames, connection names, inline usernames, and auth modes are stored without encryption. Credential secrets (passwords, key passphrases) are never included, but the connection metadata may still be sensitive.',
+            )}
+          </strong>
         </div>
         <Button
           variant="primary"

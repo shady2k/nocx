@@ -1712,4 +1712,9 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'vault.diag.state.sealed': 'sealed — locked',
   'vault.diag.state.unsealed': 'unsealed — unlocked',
 
+  'backup.markers.settingsIn': 'Settings overrides (non-secret), SSH connections (without credential IDs), and connection groups (typed defaults subset without credential bindings).',
+  'backup.markers.secretsOut': 'Credential records, secret references, OS keychain material, ContentDB, and declared defaults.',
+  'backup.plaintext.body': 'The backup file is plaintext JSON. All settings values, hostnames, connection names, inline usernames, and auth modes are stored without encryption. Credential secrets (passwords, key passphrases) are never included, but the connection metadata may still be sensitive.',
+  'about.checking': 'Checking…',
+  'about.checkForUpdates': 'Check for updates',
 }

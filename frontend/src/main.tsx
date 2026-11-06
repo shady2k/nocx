@@ -801,7 +801,9 @@ function main(): void {
     descriptor: {
       restoreDescriptor: null,
       supportsAttention: false,
-      defaultTitle: 'Settings',
+      // t() reads the live locale: the tab speaks the UI language even before
+      // any OSC title arrives (the command label above is already wrapped).
+      defaultTitle: t('app.page.settings', 'Settings'),
     },
   })
 

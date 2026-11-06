@@ -194,7 +194,9 @@ export function AboutSection(props: AboutSectionProps) {
                 <Button onClick={() => void copy()}>{t('about.copyDiagnostics', 'Copy diagnostics')}</Button>
                 <Show when={props.onCheckForUpdates}>
                   <Button onClick={() => void checkForUpdates()} disabled={checking()}>
-                    {checking() ? 'Checking…' : 'Check for updates'}
+                    {checking()
+                      ? t('about.checking', 'Checking…')
+                      : t('about.checkForUpdates', 'Check for updates')}
                   </Button>
                 </Show>
               </div>

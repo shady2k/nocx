@@ -423,3 +423,58 @@ func TestALateCancellationWritesNothingAfterSettlement(t *testing.T) {
 		t.Fatalf("a cancelled invocation wrote after it settled: %s", got)
 	}
 }
+
+// blockingExpiryHandler parks inside Warn until released, so a test can see
+// whether a caller that settles second waits for the timer's record.
+type blockingExpiryHandler struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+	buf     *bytes.Buffer
+}
+
+func (h *blockingExpiryHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *blockingExpiryHandler) Handle(_ context.Context, r slog.Record) error {
+	h.once.Do(func() { close(h.started) })
+	<-h.release
+	h.buf.WriteString(r.Message)
+	return nil
+}
+func (h *blockingExpiryHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *blockingExpiryHandler) WithGroup(string) slog.Handler      { return h }
+
+// The max timer may win the settlement and still be writing its expiry line
+// when the caller's Complete arrives. Complete must join that write before
+// returning; otherwise the caller reads its own log while the timer writes
+// (CI fdfc8d519's follow-up).
+func TestACompletedScopeWaitsForTheExpiryWriterItLostTo(t *testing.T) {
+	var buf bytes.Buffer
+	h := &blockingExpiryHandler{started: make(chan struct{}), release: make(chan struct{}), buf: &buf}
+	ctx := log.WithLogger(context.Background(), log.NewSlogAdapter(slog.New(h)))
+
+	s := Begin(ctx, OpTransportPing, Invocation{})
+	select {
+	case <-h.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the max timer never expired")
+	}
+	completed := make(chan bool, 1)
+	go func() { completed <- s.Complete() }()
+	select {
+	case <-completed:
+		t.Fatal("Complete returned while the expiry writer was still writing")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(h.release)
+	select {
+	case won := <-completed:
+		if won {
+			t.Fatal("Complete must lose to the expiry that already settled")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Complete never returned after the writer finished")
+	}
+	if got := buf.String(); got != "operation deadline expired" {
+		t.Fatalf("the expiry record was not completed before Complete returned: %q", got)
+	}
+}

@@ -20,8 +20,6 @@
 import { createSignal } from 'solid-js'
 import type { CallSettlement, Dispatcher, PendingCallView } from '../dispatcher'
 import { callOperationDeclaration } from '../generated/operations'
-import { resolveMutationOutcome, type MutationAnswer } from '../mutations'
-import type { OperationPhase } from '../ui/operation'
 import { rendererDeadlineMs } from './renderer-deadlines'
 import type { Operation, OperationSource } from './operations'
 
@@ -29,9 +27,6 @@ import type { Operation, OperationSource } from './operations'
  *  seconds is the owner's answer (ADR-8eej3e66 §8). */
 const WAIT_ROW_THRESHOLD_MS = 2000
 
-/** How often a row still asking re-asks. It is not a deadline: the backend's
- *  own retention ends the question, and every other answer ends it at once. */
-const REASK_INTERVAL_MS = 2000
 
 export interface CallOperations {
   /** The Operations source, read by the model. */
@@ -44,27 +39,14 @@ interface WaitingCall {
   call: PendingCallView
   timer: ReturnType<typeof setTimeout> | null
   timerFired: boolean
-  /** The re-ask still pending for a mutation whose answer is not final. */
-  reask: ReturnType<typeof setTimeout> | null
   /** The renderer deadline projection, present only for an armed domain.
    *  None is armed at this stage, so no call gets a timer from it. */
   deadlineMs: number | null
 }
 
-/** How one of §8's answers reads in the row. It is a mapping and not a second
- *  vocabulary: the phase names come from the operation vocabulary, and the
- *  sentence from mutations.ts — the one place the three answers are worded. */
-const ANSWER_PHASE: Record<MutationAnswer, OperationPhase> = {
-  'not-started': 'skipped',
-  done: 'written',
-  'outcome-unknown': 'unsettled',
-  unknown: 'outcome-unknown',
-}
-
 export function callOperations(
   dispatcher: Dispatcher,
   thresholdMs: number = WAIT_ROW_THRESHOLD_MS,
-  reaskMs: number = REASK_INTERVAL_MS,
 ): CallOperations {
   const [rows, setRows] = createSignal<Operation[]>([])
   const waiting = new Map<number, WaitingCall>()
@@ -73,7 +55,6 @@ export function callOperations(
     const entry = waiting.get(id)
     if (entry === undefined) return
     if (entry.timer !== null) clearTimeout(entry.timer)
-    if (entry.reask !== null) clearTimeout(entry.reask)
     waiting.delete(id)
     setRows((previous) => previous.filter((row) => row.id !== callRowID(id)))
   }
@@ -87,7 +68,6 @@ export function callOperations(
       call,
       timer: null,
       timerFired: false,
-      reask: null,
       deadlineMs: rendererDeadlineMs(call.method),
     }
     waiting.set(call.id, entry)
@@ -117,59 +97,17 @@ export function callOperations(
     }, thresholdMs)
   }
 
-  /** Ask what happened, and let the row say it. The row is not re-sent and
-   *  never becomes a retry: this is the only follow-up a mutation gets. */
-  const ask = (id: number, entry: WaitingCall): void => {
-    const mutation = entry.call.mutation
-    if (mutation === undefined) return
-    void resolveMutationOutcome(dispatcher, mutation).then((assessment) => {
-      const current = waiting.get(id)
-      if (current !== entry) return
-      setRows((previous) =>
-        previous.map((row) =>
-          row.id === callRowID(id)
-            ? {
-                ...row,
-                phase: ANSWER_PHASE[assessment.answer],
-                error: assessment.sentence,
-                // Cancelling an operation that already stopped would mean
-                // nothing, and the row stops offering it.
-                cancel: null,
-                endedAt: assessment.checking ? null : Date.now(),
-              }
-            : row,
-        ),
-      )
-      if (!assessment.checking) {
-        if (entry.reask !== null) clearTimeout(entry.reask)
-        entry.reask = null
-        return
-      }
-      // Still "checking what happened": the work has not finished, and the
-      // backend's retention ends the question even if nothing else does.
-      entry.reask = setTimeout(() => {
-        entry.reask = null
-        ask(id, entry)
-      }, reaskMs)
-    })
-  }
-
-  const onSettled = (id: number, settlement: CallSettlement): void => {
-    const entry = waiting.get(id)
-    if (entry === undefined || entry.call.mutation === undefined || settlement === 'answered') {
-      remove(id)
-      return
-    }
-    if (!entry.timerFired) {
-      // The call ended before it ever took a row. The surface that made it
-      // owns the answer there; a list of finished rows nobody waited in is
-      // the failure the threshold exists to prevent.
-      remove(id)
-      return
-    }
-    // The row stops waiting and starts answering. It keeps its title, so a
-    // person can still see what the question is about.
-    ask(id, entry)
+  // A ROW IS THE WAIT, AND IT GOES WHEN THE WAIT DOES (ADR-8eej3e66 §8): "a
+  // wait row goes the moment it settles and leaves no finished entry, because
+  // only transfers have an outcome worth keeping". A cancelled mutation's row
+  // used to stay behind to say which of the three answers it was, re-asking
+  // the record every two seconds while the answer was still open — a finished
+  // entry in a list the record says is not a log, and the row a person's
+  // Cancel could not remove. The answer belongs to the call that was made,
+  // whose own rejection carries it (AbortError for a withdrawal, the replay
+  // refusal for a mutation the record already ran), not to a row.
+  const onSettled = (id: number, _settlement: CallSettlement): void => {
+    remove(id)
   }
 
   dispatcher.onCallPending = onPending
@@ -181,8 +119,7 @@ export function callOperations(
       if (dispatcher.onCallSettled === onSettled) dispatcher.onCallSettled = undefined
       for (const entry of waiting.values()) {
         if (entry.timer !== null) clearTimeout(entry.timer)
-        if (entry.reask !== null) clearTimeout(entry.reask)
-      }
+          }
       waiting.clear()
       setRows([])
     },

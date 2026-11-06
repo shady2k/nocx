@@ -130,10 +130,15 @@ describe('a waiting call', () => {
     expect(rows()).toHaveLength(0)
   })
 
-  it("keeps a cancelled mutation's row and answers which of the three it is", async () => {
+  it('a cancelled call takes its row with it, mutation or not', async () => {
+    // ADR-8eej3e66 §8: A WAIT ROW GOES THE MOMENT IT SETTLES and leaves no
+    // finished entry, because only transfers have an outcome worth keeping.
+    // A cancelled mutation's row used to stay behind to say which of the
+    // three answers it was, and that is the entry the record says Operations
+    // must not keep: the answer belongs to the call the person made, whose
+    // own rejection carries it, not to a row nobody can act on.
     vi.useFakeTimers()
     const { dispatcher, call } = fakeDispatcher()
-    call.mockResolvedValue({ outcome: 'not-started', operation: 'git.commit' })
     mount(dispatcher)
     dispatcher.onCallPending!(pending(1, 'git.commit', 'm-1'))
     vi.advanceTimersByTime(2000)
@@ -143,45 +148,24 @@ describe('a waiting call', () => {
     dispatcher.onCallSettled!(1, 'no-answer')
     await settle()
 
-    expect(call).toHaveBeenCalledExactlyOnceWith(
-      'operation.outcome',
-      { mutation: 'm-1' },
-      undefined,
-      { intent: 'report' },
-    )
-    // The row stays, says the answer, and offers nothing to cancel: the work
-    // is over. It is NOT re-sent — one ask is the whole follow-up.
-    expect(rows()).toHaveLength(1)
-    expect(rows()[0].textContent).toContain('Committing in this checkout')
-    expect(rows()[0].textContent).toContain('It did not start')
-    expect(document.querySelector('[aria-label^="Cancel"]')).toBeNull()
+    expect(rows()).toHaveLength(0)
+    expect(call).not.toHaveBeenCalled()
   })
 
-  it('keeps asking while the work has not finished', async () => {
+  it('a call that settles leaves nothing to re-ask about', async () => {
+    // The row is the WAIT. Once the call settles there is nothing waiting,
+    // so nothing is asked and nothing is kept — however the call ended.
     vi.useFakeTimers()
     const { dispatcher, call } = fakeDispatcher()
-    call.mockResolvedValue({ outcome: 'outcome-unknown', operation: 'git.commit' })
-    mount(dispatcher, 2000, 1000)
+    mount(dispatcher)
     dispatcher.onCallPending!(pending(1, 'git.commit', 'm-1'))
     vi.advanceTimersByTime(2000)
     dispatcher.onCallSettled!(1, 'no-answer')
     await settle()
-    openList()
-    expect(rows()[0].textContent).toContain('Checking what happened')
-
-    vi.advanceTimersByTime(1000)
-    await settle()
-    expect(call).toHaveBeenCalledTimes(2)
-
-    // And the answer that ends it stops the asking.
-    call.mockResolvedValue({ outcome: 'done', operation: 'git.commit' })
-    vi.advanceTimersByTime(1000)
-    await settle()
-    expect(call).toHaveBeenCalledTimes(3)
-    expect(rows()[0].textContent).toContain('It finished')
+    expect(rows()).toHaveLength(0)
     vi.advanceTimersByTime(10_000)
     await settle()
-    expect(call).toHaveBeenCalledTimes(3)
+    expect(call).not.toHaveBeenCalled()
   })
 
   it('a mutation that was answered keeps no row, and a read is never asked about', async () => {
@@ -203,18 +187,22 @@ describe('a waiting call', () => {
     expect(rows()).toHaveLength(0)
   })
 
-  it('says what to look at when the record is gone', async () => {
+  it('goes even when nothing can say what became of the call', async () => {
+    // The sentence for "nobody knows what happened" is mutations.ts's, and it
+    // reaches the person through the call the surface made. A row that waited
+    // for it was the one a Cancel could not remove.
     vi.useFakeTimers()
     const { dispatcher, call } = fakeDispatcher()
     call.mockResolvedValue({ outcome: 'unknown', operation: '' })
     mount(dispatcher)
     dispatcher.onCallPending!(pending(1, 'git.commit', 'm-1'))
     vi.advanceTimersByTime(2000)
-    dispatcher.onCallSettled!(1, 'no-answer')
-    await settle()
     openList()
     expect(rows()).toHaveLength(1)
-    expect(rows()[0].textContent).toContain('The outcome is unknown')
+    dispatcher.onCallSettled!(1, 'no-answer')
+    await settle()
+    expect(rows()).toHaveLength(0)
+    expect(call).not.toHaveBeenCalled()
   })
 
   it('shows nothing for ordinary work that answers inside the threshold', () => {

@@ -103,7 +103,19 @@ type rowsSource interface {
 }
 
 func bindBlockRowsTo(ctx context.Context, sink blockRowsSink, sid session.ID, src rowsSource, conf confirmer) func() {
-	ctx, cancel := context.WithCancel(ctx)
+	// THE RECORDING OUTLIVES THE REQUEST THAT OPENED THE PANE. Every control
+	// call is withdrawable (nocx-3an1s.2.2), so the request that opens a pane
+	// carries a cancellable context and the transport cancels it when the
+	// handler returns — milliseconds after this bind and long before the
+	// person's first command ends. The confirmer below runs for the pane's
+	// whole life: a mark it never sends is a row the helper keeps in its
+	// resend window, and when that window fills the helper drops the output
+	// it can no longer hold (measured: a 5000-row command ended at row 3626,
+	// 1374 rows of a person's output never stored, and the block sealed
+	// incomplete). WithoutCancel keeps the request's values — the log fields
+	// this file logs with — and leaves the cancellation to its one owner: the
+	// returned stop, which the session's end calls.
+	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	marks := newMarkSlot()
 	sink.BlockOutputStartPlaneAttached(sid)
 	if withConfirmation, ok := sink.(blockRowsConfirmationSink); ok {

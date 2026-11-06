@@ -185,8 +185,6 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
     many: '{count} команд',
     other: '{count} команды',
   },
-  // 'i18n.sample.untranslated' is deliberately absent — see the header.
-
   // ── Kit chrome, passed as props from the surfaces (kit never imports i18n)
   'ui.collision.title': 'Файл уже существует',
   'ui.collision.overwrite': 'Перезаписать',
@@ -1563,7 +1561,7 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'updates.section.linuxInstall.title': 'Установка обновлений в Linux',
   'updates.section.linux.title': 'Обновления в Linux',
   'updates.section.linux.desc':
-    'AppImage обновляется прямо в nocx. deb и rpm обновляются средствами системы — это установка, отдельная от AppImage.',
+    'AppImage обновляется прямо в nocx. deb и rpm обновляются средствами системы — это другая установка, не AppImage.',
   'notify.chrome.count.of': 'из',
   'notify.chrome.count.shown': 'показано',
   'about.copied': 'Сведения о сборке скопированы',

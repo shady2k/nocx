@@ -91,5 +91,18 @@ type Task struct {
 	// Other submissions ignore it. Keyed submissions require a nonempty key;
 	// the caller validates and extracts it before admission.
 	Key string
-	Run func(context.Context)
+	// Start is the one-step start-against-cancel decision. A worker that is
+	// about to run a queued task asks it; false means the caller withdrew the
+	// request while it waited and Run must not be called. nil means "always
+	// start". It is supplied by the request owner, so admission can decide
+	// without knowing what cancellation means for that request.
+	Start func() bool
+	Run   func(context.Context)
+}
+
+// startAllowed applies the one-step gate. It is called immediately before
+// Run, in every submission's worker, so a queued task that was cancelled
+// while waiting never starts.
+func startAllowed(task Task) bool {
+	return task.Start == nil || task.Start()
 }

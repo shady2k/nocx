@@ -103,6 +103,8 @@ func (s *orderedSubmission) Shutdown() {
 func (s *orderedSubmission) worker() {
 	defer close(s.done)
 	for t := range s.ch {
-		t.task.Run(t.ctx)
+		if startAllowed(t.task) {
+			t.task.Run(t.ctx)
+		}
 	}
 }

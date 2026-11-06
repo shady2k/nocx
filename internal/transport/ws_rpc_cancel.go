@@ -12,19 +12,11 @@ import (
 	"github.com/shady2k/nocx/internal/transport/control"
 )
 
-// Only read-only completion calls are cancellable. Mutating control methods
-// deliberately keep their existing context and cannot be withdrawn by a
-// renderer-side supersession.
-var cancellableRequestMethods = map[string]struct{}{
-	"fs.complete":    {},
-	"history.query":  {},
-	"shell.complete": {},
-}
-
-func requestMethodCancellable(method string) bool {
-	_, ok := cancellableRequestMethods[method]
-	return ok
-}
+// Every call a person makes is cancellable (ADR-8eej3e66 §8). The method
+// name is not a filter any more: a withdrawal reaches the request's context,
+// and whether the work can stop is the handler's answer to that, not a list
+// kept here.
+func requestMethodCancellable(string) bool { return true }
 
 // requestCancels owns the cancellation interval for request-scoped control
 // work. A request ID is registered before submission, remains registered until
@@ -36,6 +28,34 @@ type requestCancels struct {
 
 type requestCancel struct {
 	cancel context.CancelFunc
+
+	// mu makes start-against-cancel one step. A queued worker asks begin
+	// immediately before Run; a withdrawal sets withdrawn under the same
+	// lock. Exactly one of them decides whether Run is called.
+	mu        sync.Mutex
+	withdrawn bool
+	started   bool
+}
+
+// begin is the worker's start gate: false means the request was withdrawn
+// while it waited, so its handler must not run.
+func (e *requestCancel) begin() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.withdrawn {
+		return false
+	}
+	e.started = true
+	return true
+}
+
+// withdraw marks the request cancelled and ends its context. A running
+// handler sees the context end; a queued one will be refused by begin.
+func (e *requestCancel) withdraw() {
+	e.mu.Lock()
+	e.withdrawn = true
+	e.mu.Unlock()
+	e.cancel()
 }
 
 func newRequestCancels() *requestCancels {
@@ -65,7 +85,7 @@ func (c *requestCancels) cancel(id json.RawMessage) bool {
 	if !ok {
 		return false
 	}
-	entry.cancel()
+	entry.withdraw()
 	return true
 }
 

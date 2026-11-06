@@ -3655,7 +3655,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	// does not answer for it, so nothing a caller can do changes here yet.
 	scope := catalog.Begin(requestCtx, m.op, catalog.Invocation{})
 	requestCtx = catalog.WithScope(requestCtx, scope)
-	rej := m.submission.TrySubmit(requestCtx, control.Task{Key: key, Run: func(pctx context.Context) {
+	task := control.Task{Key: key, Run: func(pctx context.Context) {
 		defer cancelRequest()
 		defer scope.Complete()
 		defer func() {
@@ -3664,7 +3664,11 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 			}
 		}()
 		m.handle(pctx, req)
-	}})
+	}}
+	if cancelEntry != nil {
+		task.Start = cancelEntry.begin
+	}
+	rej := m.submission.TrySubmit(requestCtx, task)
 	if rej == nil {
 		return
 	}

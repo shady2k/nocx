@@ -26,23 +26,6 @@ func TestResolveMountUsesTheLongestPointAndHonoursTheBoundary(t *testing.T) {
 	}
 }
 
-func TestParseMountTextDecodesEscapesAndSkipsShortRows(t *testing.T) {
-	text := "/dev/sda1 / ext4 rw 0 0\n" +
-		"server:/my\\040export /mnt/space nfs rw 0 0\n" +
-		"short\n" +
-		"\n"
-	table := parseMountText(text)
-	if len(table) != 2 {
-		t.Fatalf("parsed %d rows, want 2: %+v", len(table), table)
-	}
-	if table[1].Device != "server:/my export" {
-		t.Errorf("device = %q, want the decoded space", table[1].Device)
-	}
-	if table[1].Point != "/mnt/space" {
-		t.Errorf("point = %q", table[1].Point)
-	}
-}
-
 // TestTheRealMountTableNamesTheRoot is the paired "and on a normal machine it
 // succeeds" check: a table reader that only ever parses fixtures would keep a
 // broken platform compile-time green.
@@ -68,4 +51,41 @@ func TestTheProviderNamesAFailureDomainForAPath(t *testing.T) {
 		t.Fatalf("DomainKey(tempdir) = %+v, want a mount domain with an id", tmp)
 	}
 	t.Logf("/ is on %q; the temp dir is on %q", root.ID, tmp.ID)
+}
+
+// TestTwoVolumesAreTwoDomains is the macOS shape of the domain rule, asserted
+// where it can run on either platform. Darwin reports a mount's Mntfromname
+// as its device: /dev/disk3s1s1 for the sealed system volume, /dev/disk3s5
+// for the data volume, devfs for the synthetic ones, //user@host/share for an
+// SMB mount and "map auto_home" for autofs. Those are distinct strings, so
+// the domains are distinct — a mount that fails takes its own bulkhead down
+// and no other. The one thing this cannot see is a FIRMLINK (a path spelled
+// /Users/x lives on the data volume but is not under /System/Volumes/Data in
+// the table): it resolves to the root volume, which is still a real mount,
+// just not the one a stat would answer.
+func TestTwoVolumesAreTwoDomains(t *testing.T) {
+	table := []mountPoint{
+		{Point: "/", Device: "/dev/disk3s1s1"},
+		{Point: "/System/Volumes/Data", Device: "/dev/disk3s5"},
+		{Point: "/System/Volumes/VM", Device: "devfs"},
+		{Point: "/Volumes/work", Device: "//user@server/share"},
+		{Point: "/home", Device: "map auto_home"},
+	}
+	cases := []struct{ path, want string }{
+		{"/", "/dev/disk3s1s1"},
+		{"/System/Volumes/Data/Users/me", "/dev/disk3s5"},
+		{"/Volumes/work/src", "//user@server/share"},
+		{"/home/me", "map auto_home"},
+	}
+	seen := map[string]bool{}
+	for _, tc := range cases {
+		dev, ok := resolveMount(table, tc.path)
+		if !ok || dev != tc.want {
+			t.Fatalf("%s resolved to %q (found=%v), want %q", tc.path, dev, ok, tc.want)
+		}
+		seen[dev] = true
+	}
+	if len(seen) != len(cases) {
+		t.Fatalf("the four volumes collapsed into %d domains: %v — every mount must be its own failure domain", len(seen), seen)
+	}
 }

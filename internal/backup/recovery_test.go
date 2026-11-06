@@ -183,8 +183,6 @@ func newRestoreFixture(budget time.Duration) *restoreFixture {
 // generation different from the fixture's current one in every store.
 func backupFrom(t *testing.T) string {
 	t.Helper()
-	other := &backupFixtureForDoc{}
-	_ = other
 	src := newRestoreFixture(time.Minute)
 	src.conn.snap = profile.ConnectionSnapshot{
 		Profiles: []profile.SSHProfile{{Base: profile.Base{ID: "new", Type: "ssh", Name: "new"}, Options: profile.StoredSSHProfileOptions{Host: "new.example"}}},
@@ -200,8 +198,6 @@ func backupFrom(t *testing.T) string {
 	}
 	return created.Contents
 }
-
-type backupFixtureForDoc struct{}
 
 func restoreTo(t *testing.T, f *restoreFixture, contents string) error {
 	t.Helper()

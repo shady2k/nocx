@@ -89,10 +89,20 @@ type restoreOperation struct {
 
 func (r *restoreOperation) Disposition() Disposition { return r.inner.Disposition() }
 
+// Run reacts to the recovery signal INSIDE the guarded callback, before the
+// exclusive permit is released. That placement is the invariant, not a
+// convenience: the permit is what keeps every reader out while the stores hold
+// two generations, and quarantining after it is released would leave a window
+// in which a reader is admitted to exactly the state the quarantine exists to
+// hide. The callback answers nothing itself, so the response still carries the
+// quarantine's sentence.
 func (r *restoreOperation) Run(ctx context.Context, fn func(context.Context, BackupService) error) error {
-	err := r.inner.Run(ctx, fn)
-	var recovery *backup.RecoveryError
-	if errors.As(err, &recovery) {
+	return r.inner.Run(ctx, func(ctx context.Context, svc BackupService) error {
+		err := fn(ctx, svc)
+		var recovery *backup.RecoveryError
+		if !errors.As(err, &recovery) {
+			return err
+		}
 		store := r.stores[0]
 		r.guard.Quarantine(r.stores, recoveryCause(recovery))
 		return &UnavailableError{
@@ -100,8 +110,7 @@ func (r *restoreOperation) Run(ctx context.Context, fn func(context.Context, Bac
 			Reason: unavailableSentence(store, recoveryCause(recovery)),
 			Err:    err,
 		}
-	}
-	return err
+	})
 }
 
 // recoveryCause is the short clause the person's sentence carries. The full

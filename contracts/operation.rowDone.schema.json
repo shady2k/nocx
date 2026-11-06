@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/operation.rowDone.schema.json",
+  "title": "OperationRowDone",
+  "description": "The operation.rowDone JSON-RPC notification: the row operation.row started goes away because the work it reported has settled (ADR-8eej3e66 \u00a78). It leaves no finished entry, because only transfers have an outcome worth keeping \u2014 a wait row exists only while it means something. Sent once per request that ever showed a row, so an `open` that installed nothing costs the connection no frame at all. It is droppable like operation.row, and a renderer that missed it loses the row only until the request it names settles, which is the same moment by construction.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["requestId"],
+  "properties": {
+    "requestId": {
+      "description": "The JSON-RPC id of the call whose row this removes \u2014 the same value operation.row carried, so the two are one row's start and end and a renderer needs no second key.",
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 0
+        },
+        {
+          "type": "string",
+          "minLength": 1
+        }
+      ]
+    }
+  }
+}

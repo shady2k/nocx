@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/operation/catalog"
+	"github.com/shady2k/nocx/internal/operation/rows"
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
@@ -412,6 +413,22 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		resp := newJSONRPCError(req.ID, -32602, "Invalid params: cols and rows required")
 		_ = respond(r, resp)
 		return
+	}
+
+	// THE ROW THE INSTALL MAY TAKE (ADR-8eej3e66 §8). A first far open
+	// installs the helper inside this call, and that install is work a person
+	// is watching; the catalogue declares it `row: always`, so it appears for
+	// its whole duration rather than after a threshold. The work reports
+	// through the reporter this binds to the request's context — and does so
+	// only when there is something to report, which is why an open that
+	// installs nothing costs this connection no frame at all.
+	if req.ID != nil {
+		reporter := newOperationRowReporter(r, req.ID)
+		ctx = rows.WithReporter(ctx, reporter)
+		// The wire's own half of "the row goes on settle": the work ends it
+		// when it finishes, and this covers every path where the handler
+		// returns without the work having reached its own end.
+		defer reporter.End()
 	}
 
 	spec := OpenSpec{

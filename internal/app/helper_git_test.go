@@ -455,6 +455,15 @@ type fakeInstallConn struct {
 	files   map[string][]byte
 	home    string
 	uploads int
+
+	// holdWrite, when non-nil, parks the FIRST payload write until it is
+	// closed, and writeStarted is closed when that write parks. Together they
+	// are a link moving a binary slowly enough for a person to look at the
+	// Operations row: the install is provably mid-transfer while the test
+	// asserts, and nothing waits on a clock (nocx-3an1s.2.10). Both are nil
+	// for an ordinary instant install.
+	holdWrite    chan struct{}
+	writeStarted chan struct{}
 }
 
 func newFakeInstallConn(home string) *fakeInstallConn {
@@ -605,6 +614,17 @@ type fakeInstallFile struct {
 }
 
 func (ff *fakeInstallFile) Write(p []byte) (int, error) {
+	ff.fs.mu.Lock()
+	gate := ff.fs.holdWrite
+	started := ff.fs.writeStarted
+	ff.fs.holdWrite = nil
+	ff.fs.mu.Unlock()
+	if gate != nil {
+		if started != nil {
+			close(started)
+		}
+		<-gate
+	}
 	ff.fs.mu.Lock()
 	defer ff.fs.mu.Unlock()
 	ff.buf = append(ff.buf, p...)

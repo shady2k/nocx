@@ -56,7 +56,7 @@ import { IconButton } from './icon-button'
 import { CollectionRow } from './collection-view'
 import { formatFinished, formatProgress } from './format-bytes'
 import { formatTimestamp } from './format-time'
-import { ArrowDownIcon, ArrowRightIcon, ArrowUpIcon, CloseIcon } from './icons'
+import { ArrowDownIcon, ArrowRightIcon, ArrowUpIcon, CloseIcon, ServerIcon } from './icons'
 import { ProgressBar } from './progress-bar'
 import {
   isTerminalPhase,
@@ -76,6 +76,11 @@ const KIND_ICON: Record<OperationKind, Component> = {
   // A waiting call moves no bytes; the arrow reads as "in flight" without
   // inventing a progress bar for something with no size.
   call: ArrowRightIcon,
+  // A helper install is a transfer TO a machine, and the machine is the
+  // thing it is about (ADR-8eej3e66 §8). The same glyph the file tree uses
+  // for a machine's own plumbing, because it is the same idea: this is
+  // happening on the far end, not in a file.
+  install: ServerIcon,
 }
 
 /** How a finished operation reads. See the module doc for why `cancelled`

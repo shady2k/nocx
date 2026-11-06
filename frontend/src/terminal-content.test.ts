@@ -310,6 +310,9 @@ interface MountOpts {
   visibleBeforeMount?: boolean
   /** The pane's real box, measured by its presentation host during mount. */
   viewportBeforeMount?: ContentViewport
+  /** What the pane asks its manager to do when the content ends the tab
+   *  itself — the Operations row's Cancel on a first open does. */
+  onCloseRequested?: () => void
 }
 /** Mount a real TerminalContent inside a Tab and return the live editor view. */
 async function mountTerminal(
@@ -353,6 +356,7 @@ async function mountTerminal(
     99,
     'tab-99',
   )
+  if (opts.onCloseRequested) tab.onCloseRequested = opts.onCloseRequested
   const paneParent = document.createElement('div')
   paneParent.append(tab.pane)
   if (opts.attachToDocument) document.body.append(paneParent)
@@ -21765,6 +21769,65 @@ describe('an alternate-screen switch holds input for its applied grid (nocx-1ebr
       // The second switch's own receipt does.
       receiptAt(1, 'applied')
       await vi.waitFor(() => expect(deliveredActs(session)).toEqual(['text:a', 'text:b']))
+    } finally {
+      teardown()
+    }
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A cancelled open ends cleanly (nocx-3an1s.2.10, ADR-8eej3e66 §8)
+// ═══════════════════════════════════════════════════════════════════════════
+// The Operations row's Cancel withdraws the open by its request id, and the
+// dispatcher rejects the call with AbortError. That is a person's decision and
+// not a failure: a tab that was opening goes away, and nothing is drawn as if
+// the connection had broken.
+describe('a cancelled open', () => {
+  it('ends the first bind without an error card and asks for the tab to close', async () => {
+    const client = makeClient()
+    const abort = new Error('The operation was aborted')
+    abort.name = 'AbortError'
+    client.openSSHSession.mockRejectedValue(abort)
+    const closed = vi.fn()
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        ssh: { profileId: 'ssh:cancelled', host: 'web-01' },
+        expectedReady: false,
+        onCloseRequested: closed,
+      },
+      client,
+    )
+    try {
+      expect(closed).toHaveBeenCalledTimes(1)
+      expect(document.body.textContent ?? '').not.toContain('Terminal failed to start')
+      expect(document.querySelector('.pane-error')).toBeNull()
+      expect(tab).toBeTruthy()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('still reports an ordinary open failure as a failure', async () => {
+    // The paired half: an open that fails for any other reason keeps its
+    // notice and does not close the tab, so the Cancel path cannot quietly
+    // swallow every failure.
+    const client = makeClient()
+    client.openSSHSession.mockRejectedValue(new Error('host is down'))
+    const closed = vi.fn()
+    const { teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        ssh: { profileId: 'ssh:down', host: 'web-01' },
+        expectedReady: false,
+        attachToDocument: true,
+        onCloseRequested: closed,
+      },
+      client,
+    )
+    try {
+      expect(closed).not.toHaveBeenCalled()
+      expect(document.body.textContent ?? '').toContain('Terminal failed to start')
     } finally {
       teardown()
     }

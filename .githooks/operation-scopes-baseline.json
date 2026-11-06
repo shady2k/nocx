@@ -25,6 +25,12 @@
   },
   {
     "file": "internal/transport/ws_agent.go",
+    "text": "parent := context.WithoutCancel(ctx)",
+    "kind": "unscoped-context",
+    "reason": "the agent run's parent context outlives the frame: a run is retained work whose cancellation belongs to the run lease and the connection (ADR-0020), so the request's own end must not cancel it"
+  },
+  {
+    "file": "internal/transport/ws_agent.go",
     "text": "tctx := context.WithoutCancel(ctx)",
     "kind": "unscoped-context",
     "reason": "the run must outlive the request that started it; the run lease owns its cancellation (ADR-0020)"
@@ -154,6 +160,18 @@
     "text": "h.sess.pumpToRing(context.Background(), sess, rx.ring)",
     "kind": "unscoped-context",
     "reason": "a session read pump is session-owned (ADR-0009)"
+  },
+  {
+    "file": "internal/transport/ws_session_handlers.go",
+    "text": "pumpCtx := context.WithoutCancel(ctx)",
+    "kind": "unscoped-context",
+    "reason": "the ring-to-connection relay outlives the open/attach handler that starts it: its lifetime is the CONNECTION's, not the request's — a relay cancelled with the request would stop delivering a live session's output, and the connection context is what ends it (AD-9, ADR-0062; nocx-3an1s.2.2)"
+  },
+  {
+    "file": "internal/transport/ws_session_handlers.go",
+    "text": "pumpCtx := context.WithoutCancel(ctx)",
+    "kind": "unscoped-context",
+    "reason": "the ring-to-connection relay outlives the open/attach handler that starts it: its lifetime is the CONNECTION's, not the request's — a relay cancelled with the request would stop delivering a live session's output, and the connection context is what ends it (AD-9, ADR-0062; nocx-3an1s.2.2)"
   },
   {
     "file": "internal/transport/ws_session_ops.go",

@@ -5095,6 +5095,23 @@ export class TerminalContent extends BasePaneContent {
     try {
       session = await this.openSessionWithHostKeyRecovery(signal)
     } catch (err) {
+      // A PERSON'S CANCEL IS AN END, NOT A FAILURE (ADR-8eej3e66 §8). The
+      // Operations row's Cancel withdraws the open by its request id, and
+      // the dispatcher rejects the call with AbortError — the same
+      // outcome this method already has for a mount nobody wants any
+      // more. A first bind takes the tab with it (the person cancelled
+      // the connection they asked for, so the tab they were waiting on
+      // has nothing left to show), and a rebind or a recovery leaves the
+      // pane exactly as it was.
+      if (err instanceof Error && err.name === 'AbortError') {
+        if (mode === 'first') {
+          editor.dispose()
+          scrollback.dispose()
+          this._readyResolve(false)
+          host.requestClose()
+        }
+        return 'aborted'
+      }
       if (!(err instanceof LiveSessionUncertainError)) throw err
       // THE SHELL IS NOT PROVEN GONE, SO NO REPLACEMENT IS OPENED
       // (nocx-3an1s.1.5). This pane keeps its surface and its scrollback and

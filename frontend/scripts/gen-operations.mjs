@@ -30,7 +30,7 @@ async function build() {
     .sort((a, b) => a.id.localeCompare(b.id))
   const entries = methods.map(
     (op) =>
-      `  ${JSON.stringify(op.id)}: { waiting: ${JSON.stringify(op.waiting)}, row: ${JSON.stringify(op.row)} },`,
+      `  ${JSON.stringify(op.id)}: { waiting: ${JSON.stringify(op.waiting)}, row: ${JSON.stringify(op.row)}, domain: ${JSON.stringify(op.dependencies[0] ?? '')}, turnMs: ${op.turn.millis}, maxMs: ${op.max.millis}, answerMs: ${op.answer.kind === 'deadline' ? op.answer.millis : 'null'} },`,
   )
   return `${BANNER}
 
@@ -39,6 +39,10 @@ export interface CallOperationDeclaration {
   readonly waiting: string
   /** When Operations may show it. */
   readonly row: 'never' | 'past-wait' | 'always'
+  readonly domain: string
+  readonly turnMs: number
+  readonly maxMs: number
+  readonly answerMs: number | null
 }
 
 const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {

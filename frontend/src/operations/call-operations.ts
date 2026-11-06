@@ -15,6 +15,7 @@
 import { createSignal } from 'solid-js'
 import type { Dispatcher, PendingCallView } from '../dispatcher'
 import { callOperationDeclaration } from '../generated/operations'
+import { rendererDeadlineMs } from './renderer-deadlines'
 import type { Operation, OperationSource } from './operations'
 
 /** Waiting under two seconds shows the action's own pending state. Two
@@ -32,6 +33,9 @@ interface WaitingCall {
   call: PendingCallView
   timer: ReturnType<typeof setTimeout> | null
   timerFired: boolean
+  /** The renderer deadline projection, present only for an armed domain.
+   *  None is armed at this stage, so no call gets a timer from it. */
+  deadlineMs: number | null
 }
 
 export function callOperations(
@@ -54,7 +58,12 @@ export function callOperations(
     // A method outside the catalogue, or one the catalogue says never shows,
     // takes no row. The call itself is unaffected.
     if (declaration === undefined || declaration.row === 'never') return
-    const entry: WaitingCall = { call, timer: null, timerFired: false }
+    const entry: WaitingCall = {
+      call,
+      timer: null,
+      timerFired: false,
+      deadlineMs: rendererDeadlineMs(call.method),
+    }
     waiting.set(call.id, entry)
     entry.timer = setTimeout(() => {
       entry.timer = null

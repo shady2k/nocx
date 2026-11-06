@@ -41,10 +41,55 @@ test.describe('enhanced input raw routing', () => {
     // letters must reach `read` wherever the keyboard was at the keystroke.
     await expect(page.locator(GRID_INPUT)).toBeFocused({ timeout: 5000 })
 
+    // AND THE SAMPLE IS NOT THE CLAIM (nocx-atpw5.1.38). `toBeFocused` reads a
+    // fact one round trip before the keys; a keyboard that moves in between —
+    // a lifecycle fact returning the composer — sends the letters somewhere
+    // else, and the last assertion can only report "the program missed the
+    // input". The step that loses them has a name and it is knowable at the
+    // keystroke, so it is read there: an observer records WHICH surface held
+    // the keyboard for every keydown the browser dispatches. Only the surface
+    // and the key's class are recorded — never the character (AGENTS.md).
+    await page.evaluate(() => {
+      const record = window as unknown as { __readKeys: string[] }
+      record.__readKeys = []
+      document.addEventListener(
+        'keydown',
+        (e) => {
+          const holder = document.activeElement
+          const classes = holder instanceof HTMLElement ? holder.className : ''
+          const surface =
+            holder === null || holder === document.body
+              ? 'unclaimed'
+              : classes.includes('ui-terminal-input')
+                ? 'grid'
+                : classes.includes('nocx-editor-input')
+                  ? 'composer'
+                  : `other:${classes}`
+          record.__readKeys.push(`${surface}:${e.key === 'Enter' ? 'Enter' : 'char'}`)
+        },
+        true,
+      )
+    })
+
     // The `read` builtin is now waiting for stdin. Typing must reach the running
     // program (RUNNING_RAW → editor hidden), not the editor.
     await page.keyboard.type('hello')
     await page.keyboard.press('Enter')
+
+    // Every one of those keys was READ BY THE GRID. A composer that took them
+    // (or a body that swallowed the letters) is named here, where it happened,
+    // rather than arriving as a timeout on an output block that never printed.
+    const readBy = await page.evaluate(
+      () => (window as unknown as { __readKeys: string[] }).__readKeys,
+    )
+    expect(readBy).toEqual([
+      'grid:char',
+      'grid:char',
+      'grid:char',
+      'grid:char',
+      'grid:char',
+      'grid:Enter',
+    ])
 
     // The completed block proves the input reached `read`, not the editor.
     await expect(page.locator('.cmd-block', { hasText: 'got-hello' }).first()).toBeVisible({

@@ -24,10 +24,11 @@
 /**
  * What kind of work this is.
  *
- * Two members, and the second cost exactly what the first one's comment
- * predicted: download (nocx-9le.8.3) joined by adding a member here and a
+ * Three members. Download (nocx-9le.8.3) joined by adding a member here and a
  * glyph in `operation-row.tsx`'s table, and nothing in the indicator, the
- * model or the row switches on kind, so nothing else changed. What is
+ * model or the row switches on kind, so nothing else changed. `call` is the
+ * same addition for a person's waiting control-plane call (ADR-8eej3e66 §8):
+ * a row, a sentence and Cancel, with no progress to draw. What is
  * deliberately NOT here is a framework for operations that do not exist —
  * no priorities, no retry policy, and no scheduler. The one queue there is
  * belongs to `files/upload-store.ts` and is not a policy: design §4 sends
@@ -35,7 +36,7 @@
  * not anything models it, and the bead this cost was about it not being
  * modelled.
  */
-export type OperationKind = 'upload' | 'download'
+export type OperationKind = 'upload' | 'download' | 'call'
 
 /**
  * Where an operation is. Five of the eight values are terminal, and three

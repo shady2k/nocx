@@ -98,7 +98,9 @@ func (s *keyedOrderedSubmission) worker(key string, queue *keyedQueue) {
 		// Only this worker advances head. Submitters only append to tail,
 		// under mu, so reading the current task needs no lock.
 		next := queue.head
-		next.task.Run(next.ctx)
+		if startAllowed(next.task) {
+			next.task.Run(next.ctx)
+		}
 
 		s.mu.Lock()
 		s.admitted--

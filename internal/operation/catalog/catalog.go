@@ -539,6 +539,7 @@ type Scope struct {
 	ctx         context.Context
 	strict      bool
 	settled     atomic.Bool
+	settleDone  chan struct{}
 	outcome     atomic.Value // Outcome
 	expiry      *time.Timer
 	cancelReg   func() bool
@@ -570,6 +571,7 @@ func begin(ctx context.Context, op Method, inv Invocation, strict bool) *Scope {
 	s := &Scope{
 		op: op, decl: d, origin: inv.Origin, owner: inv.Owner,
 		started: time.Now(), ctx: ctx, strict: strict,
+		settleDone: make(chan struct{}),
 	}
 	// MAX IS THE ONLY DEADLINE STAGE 2 CAN OBSERVE. Turn is the wait for
 	// resources and capacity; nothing queues on a catalogue resource yet, so a
@@ -658,6 +660,11 @@ func (s *Scope) Settle(outcome Outcome) bool {
 			prev, _ := s.Outcome()
 			panic(fmt.Sprintf("operation/catalog: %s settled twice: %q then %q", s.decl.ID, prev, outcome))
 		}
+		// The winner may be the max timer's goroutine, still writing its one
+		// expiry record. A caller that settles second must not return until
+		// that write is finished: after the operation returned, nothing it
+		// owns may still be writing (CI fdfc8d519's follow-up).
+		<-s.settleDone
 		return false
 	}
 	s.outcome.Store(outcome)
@@ -667,6 +674,7 @@ func (s *Scope) Settle(outcome Outcome) bool {
 			"operation", string(s.decl.ID), "owner", string(s.owner), "origin", string(s.origin),
 			"max_ms", s.decl.Max.Millis, "elapsed_ms", time.Since(s.started).Milliseconds())
 	}
+	close(s.settleDone)
 	return true
 }
 

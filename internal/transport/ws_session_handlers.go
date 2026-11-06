@@ -615,7 +615,15 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	})
 
 	sidBytes, _ := session.IDToBytes(sess.ID())
-	go h.sess.ringToConn(ctx, wconn, sidBytes, rx, 0)
+	// The pump is session/connection-owned, not request-owned: the request
+	// context is cancelled when this handler returns, and a pump that stopped
+	// there would deliver nothing (the output ring would fill and the session
+	// would look dead). The pump exits on displacement or a failed enqueue.
+	pumpCtx := context.WithoutCancel(ctx)
+	if conn, ok := connectionContext(ctx); ok {
+		pumpCtx = conn
+	}
+	go h.sess.ringToConn(pumpCtx, wconn, sidBytes, rx, 0)
 
 	// The screen, for the window the lifecycle replay above covers
 	// (nocx-zg3k3.2.15): whatever the shell drew between the spawn and the
@@ -1069,7 +1077,11 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 		h.machine.replayPaneObservation(sid)
 		sidBytes, _ := session.IDToBytes(sid)
 		if gapQueued {
-			go h.machine.ringToConn(ctx, wconn, sidBytes, rx, from)
+			pumpCtx := context.WithoutCancel(ctx)
+			if conn, ok := connectionContext(ctx); ok {
+				pumpCtx = conn
+			}
+			go h.machine.ringToConn(pumpCtx, wconn, sidBytes, rx, from)
 		}
 		attached = true
 		return nil

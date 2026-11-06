@@ -56,7 +56,7 @@ import { IconButton } from './icon-button'
 import { CollectionRow } from './collection-view'
 import { formatFinished, formatProgress } from './format-bytes'
 import { formatTimestamp } from './format-time'
-import { ArrowDownIcon, ArrowUpIcon, CloseIcon } from './icons'
+import { ArrowDownIcon, ArrowRightIcon, ArrowUpIcon, CloseIcon } from './icons'
 import { ProgressBar } from './progress-bar'
 import {
   isTerminalPhase,
@@ -73,6 +73,9 @@ import {
 const KIND_ICON: Record<OperationKind, Component> = {
   upload: ArrowUpIcon,
   download: ArrowDownIcon,
+  // A waiting call moves no bytes; the arrow reads as "in flight" without
+  // inventing a progress bar for something with no size.
+  call: ArrowRightIcon,
 }
 
 /** How a finished operation reads. See the module doc for why `cancelled`

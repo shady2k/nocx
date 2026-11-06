@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"go/ast"
+	"go/token"
 	"go/types"
 	"os"
 	"path/filepath"
@@ -56,6 +57,7 @@ func providerCalls(pkg *packages.Package, root, structName string, fields []stri
 		return nil, fmt.Errorf("%s: %s is not a struct", pkg.PkgPath, structName)
 	}
 	providers := map[*types.Func]string{}
+	providerTypes := map[types.Type]bool{}
 	wanted := map[string]bool{}
 	for _, f := range fields {
 		wanted[f] = true
@@ -66,6 +68,7 @@ func providerCalls(pkg *packages.Package, root, structName string, fields []stri
 			continue
 		}
 		fieldType := field.Type()
+		providerTypes[fieldType] = true
 		label := types.TypeString(fieldType, func(p *types.Package) string { return p.Name() })
 		ms := types.NewMethodSet(fieldType)
 		for j := 0; j < ms.Len(); j++ {
@@ -80,47 +83,203 @@ func providerCalls(pkg *packages.Package, root, structName string, fields []stri
 		return nil, fmt.Errorf("%s: no method set found for any provider field %v", pkg.PkgPath, fields)
 	}
 
+	// A method value (`closeBinding := s.filesys.Close`) and a provider value
+	// assigned to a redeclared interface lose the direct selector the first
+	// check relied on. Track the variables they land in, then treat a call
+	// through one as a provider call.
+	isProviderType := func(t types.Type) bool {
+		if t == nil {
+			return false
+		}
+		for pt := range providerTypes {
+			if types.Identical(t, pt) {
+				return true
+			}
+		}
+		return false
+	}
+	objectOf := func(id *ast.Ident) types.Object {
+		if obj := pkg.TypesInfo.Defs[id]; obj != nil {
+			return obj
+		}
+		return pkg.TypesInfo.Uses[id]
+	}
+	escapedValues := map[types.Object]bool{}
+	handled := map[*ast.SelectorExpr]bool{}
+
+	// First pass: assignments and var declarations.
+	for _, file := range pkg.Syntax {
+		ast.Inspect(file, func(n ast.Node) bool {
+			switch node := n.(type) {
+			case *ast.AssignStmt:
+				for i, rhs := range node.Rhs {
+					if i >= len(node.Lhs) {
+						break
+					}
+					trackAssignment(pkg, providers, isProviderType, escapedValues, handled, node.Lhs[i], rhs)
+				}
+			case *ast.ValueSpec:
+				for i, rhs := range node.Values {
+					if i >= len(node.Names) {
+						break
+					}
+					trackAssignment(pkg, providers, isProviderType, escapedValues, handled, node.Names[i], rhs)
+				}
+			}
+			return true
+		})
+	}
+
 	occurrences := map[string]int{}
 	var out []providerCall
+	add := func(pos token.Pos, label, name string) {
+		position := pkg.Fset.Position(pos)
+		rel, err := filepath.Rel(root, position.Filename)
+		if err != nil {
+			rel = position.Filename
+		}
+		base := fmt.Sprintf("%s:%s.%s", filepath.ToSlash(rel), label, name)
+		occurrences[base]++
+		out = append(out, providerCall{
+			Key:  fmt.Sprintf("%s#%d", base, occurrences[base]),
+			Pos:  position.String(),
+			Func: name,
+		})
+	}
+	providerMethod := func(sel *ast.SelectorExpr) (*types.Func, string, bool) {
+		selection := pkg.TypesInfo.Selections[sel]
+		if selection == nil {
+			return nil, "", false
+		}
+		fn, ok := selection.Obj().(*types.Func)
+		if !ok {
+			return nil, "", false
+		}
+		label, ok := providers[fn]
+		return fn, label, ok
+	}
+	escapedVar := func(expr ast.Expr) bool {
+		switch e := expr.(type) {
+		case *ast.Ident:
+			obj := objectOf(e)
+			return obj != nil && escapedValues[obj]
+		case *ast.SelectorExpr:
+			if id, ok := e.X.(*ast.Ident); ok {
+				obj := objectOf(id)
+				return obj != nil && escapedValues[obj]
+			}
+		}
+		return false
+	}
+
+	// Second pass: calls through a selector or through a tracked value.
 	for _, file := range pkg.Syntax {
 		ast.Inspect(file, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
 			if !ok {
 				return true
 			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
+			switch fun := call.Fun.(type) {
+			case *ast.Ident:
+				obj := objectOf(fun)
+				if obj != nil && escapedValues[obj] {
+					add(call.Pos(), "provider-value", fun.Name)
+				}
+			case *ast.SelectorExpr:
+				if fn, label, ok := providerMethod(fun); ok {
+					handled[fun] = true
+					add(call.Pos(), label, fn.Name())
+					return true
+				}
+				if escapedVar(fun) {
+					add(call.Pos(), "provider-value", fun.Sel.Name)
+				}
+			}
+			return true
+		})
+	}
+
+	// Third pass: a provider method value that is not a direct call and not
+	// assigned to a tracked local escapes — a callback, a return value, a
+	// field write, an argument to something this check cannot follow.
+	for _, file := range pkg.Syntax {
+		ast.Inspect(file, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
 			if !ok {
 				return true
 			}
-			selection := pkg.TypesInfo.Selections[sel]
-			if selection == nil {
-				return true
+			if fn, label, ok := providerMethod(sel); ok && !handled[sel] {
+				add(sel.Pos(), label, fn.Name()+".value")
 			}
-			fn, ok := selection.Obj().(*types.Func)
-			if !ok {
-				return true
-			}
-			label, ok := providers[fn]
-			if !ok {
-				return true
-			}
-			pos := pkg.Fset.Position(call.Pos())
-			rel, err := filepath.Rel(root, pos.Filename)
-			if err != nil {
-				rel = pos.Filename
-			}
-			base := fmt.Sprintf("%s:%s.%s", filepath.ToSlash(rel), label, fn.Name())
-			occurrences[base]++
-			out = append(out, providerCall{
-				Key:  fmt.Sprintf("%s#%d", base, occurrences[base]),
-				Pos:  pos.String(),
-				Func: fn.FullName(),
-			})
 			return true
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out, nil
+}
+
+// trackAssignment records the two shapes that lose the direct selector: a
+// method value assigned to a local, and a provider value assigned to an
+// interface declared here. It marks a method-value selector handled so the
+// call through the local is the reported occurrence.
+func trackAssignment(
+	pkg *packages.Package,
+	providers map[*types.Func]string,
+	isProviderType func(types.Type) bool,
+	values map[types.Object]bool,
+	handled map[*ast.SelectorExpr]bool,
+	lhs, rhs ast.Expr,
+) {
+	objectOf := func(id *ast.Ident) types.Object {
+		if obj := pkg.TypesInfo.Defs[id]; obj != nil {
+			return obj
+		}
+		return pkg.TypesInfo.Uses[id]
+	}
+	var lhsObj types.Object
+	if id, ok := lhs.(*ast.Ident); ok {
+		lhsObj = objectOf(id)
+	}
+	if sel, ok := rhs.(*ast.SelectorExpr); ok {
+		if selection := pkg.TypesInfo.Selections[sel]; selection != nil {
+			if fn, ok := selection.Obj().(*types.Func); ok {
+				if _, ok := providers[fn]; ok {
+					handled[sel] = true
+					if lhsObj != nil {
+						values[lhsObj] = true
+					}
+					return
+				}
+			}
+		}
+	}
+	// A provider value assigned to a value of another type: the declared
+	// interface is the one that can hide the provider's own method object.
+	rhsType := pkg.TypesInfo.Types[rhs].Type
+	lhsType := pkg.TypesInfo.Types[lhs].Type
+	if lhsType == nil && lhsObj != nil {
+		lhsType = lhsObj.Type()
+	}
+	if rhsType == nil && lhsObj != nil {
+		// `var c closer = s.filesys`: the RHS selector of a field may not be
+		// in Types, but its object type is the provider field's type.
+		if sel, ok := rhs.(*ast.SelectorExpr); ok {
+			if selection := pkg.TypesInfo.Selections[sel]; selection != nil {
+				rhsType = selection.Recv()
+			}
+		}
+	}
+	if lhsObj != nil && lhsType != nil && rhsType != nil && isProviderType(rhsType) && types.IsInterface(lhsType) {
+		values[lhsObj] = true
+	}
+	// An alias of an already-tracked value stays tracked.
+	if lhsObj != nil {
+		if id, ok := rhs.(*ast.Ident); ok {
+			if obj := objectOf(id); obj != nil && values[obj] {
+				values[lhsObj] = true
+			}
+		}
+	}
 }
 
 func loadTransport(t *testing.T) *packages.Package {
@@ -245,12 +404,26 @@ func TestTheProviderCallCheckCatchesAnAliasedReceiver(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(calls) != 3 {
-		t.Fatalf("fixture produced %d provider calls, want 3 (direct, alias, other receiver): %v", len(calls), calls)
+	if len(calls) != 6 {
+		t.Fatalf("fixture produced %d provider calls, want 6 (direct, alias, other receiver, method value, callback, redeclared interface): %v", len(calls), calls)
 	}
+	seen := map[string]bool{}
 	for _, c := range calls {
 		if strings.Contains(c.Func, "Lookalike") {
 			t.Fatalf("a lookalike method was reported as a provider call: %+v", c)
+		}
+		seen[c.Key[strings.Index(c.Key, ":")+1:]] = true
+	}
+	for _, want := range []string{
+		"providerfixture.Provider.Close#1",       // direct
+		"providerfixture.Provider.Close#2",       // alias through the same interface type
+		"providerfixture.Provider.Close#3",       // other receiver field
+		"provider-value.closeBinding#1",          // method value, called through the local
+		"providerfixture.Provider.Close.value#1", // method passed as a callback
+		"provider-value.Close#1",                 // provider value through a redeclared interface
+	} {
+		if !seen[want] {
+			t.Fatalf("missing planted shape %q in %v", want, calls)
 		}
 	}
 }

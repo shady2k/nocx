@@ -614,6 +614,18 @@ async function resetStand(): Promise<void> {
  */
 export interface ControlPlane {
   call: (method: string, params: unknown) => Promise<unknown>
+  /** One call carrying a mutation identity on its request frame, answered with
+   *  the raw envelope so a spec can assert a refusal as well as a result
+   *  (ADR-8eej3e66 §4). */
+  callWithMutation: (method: string, params: unknown, mutation: string) => Promise<ControlAnswer>
+  /** Send a mutating call WITHOUT waiting for its answer, and return the
+   *  request id `answer` and `cancel` take. A spec that hangs a mutation, asks
+   *  what became of it, and withdraws it needs the id. */
+  startMutation: (method: string, params: unknown, mutation: string) => number
+  /** The answer to a request `startMutation` sent. */
+  answer: (id: number) => Promise<ControlAnswer>
+  /** Withdraw one request by id, through rpc.cancel. */
+  cancel: (id: number) => Promise<void>
   close: () => void
 }
 
@@ -622,7 +634,11 @@ export interface ControlPlane {
 interface ControlAnswer {
   id?: number
   result?: unknown
-  error?: { code?: number; message?: string; data?: { retryAfterMs?: number } }
+  error?: {
+    code?: number
+    message?: string
+    data?: { retryAfterMs?: number; reason?: string; outcome?: string; operation?: string }
+  }
 }
 
 /**
@@ -654,6 +670,7 @@ function sendOnce(
   id: number,
   method: string,
   params: unknown,
+  mutation?: string,
 ): Promise<ControlAnswer> {
   const answer = Promise.withResolvers<ControlAnswer>()
   const onMessage = (ev: MessageEvent): void => {
@@ -664,7 +681,11 @@ function sendOnce(
     answer.resolve(msg)
   }
   ws.addEventListener('message', onMessage)
-  ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }))
+  const frame: Record<string, unknown> = { jsonrpc: '2.0', id, method, params }
+  // The mutation identity rides the envelope, beside the id and the method:
+  // it describes the invocation, not the params (ADR-8eej3e66 §4).
+  if (mutation !== undefined) frame.mutation = mutation
+  ws.send(JSON.stringify(frame))
   return answer.promise
 }
 
@@ -703,7 +724,29 @@ export async function openControlPlane(port: number, token: string): Promise<Con
       throw new Error(`e2e: ${method} refused${spent}: ${error.message ?? ''}`)
     }
   }
-  return { call, close: () => ws.close() }
+  const outstanding = new Map<number, Promise<ControlAnswer>>()
+  const startMutation = (method: string, params: unknown, mutation: string): number => {
+    const id = ++nextId
+    outstanding.set(id, sendOnce(ws, id, method, params, mutation))
+    return id
+  }
+  const answer = (id: number): Promise<ControlAnswer> => {
+    const pending = outstanding.get(id)
+    if (pending === undefined) throw new Error(`e2e: no request ${String(id)} is outstanding`)
+    return pending
+  }
+  const callWithMutation = async (
+    method: string,
+    params: unknown,
+    mutation: string,
+  ): Promise<ControlAnswer> => {
+    const id = startMutation(method, params, mutation)
+    return answer(id)
+  }
+  const cancel = async (id: number): Promise<void> => {
+    await call('rpc.cancel', { id })
+  }
+  return { call, callWithMutation, startMutation, answer, cancel, close: () => ws.close() }
 }
 
 /**

@@ -562,6 +562,146 @@ describe('dispatcher vault intent', () => {
   })
 })
 
+describe('dispatcher mutations', () => {
+  // ADR-8eej3e66 §4: a mutation carries an identity minted here, and the one
+  // automatic re-send in the renderer — the vault unlock — is allowed only
+  // when the backend's record says the first attempt did not start. A timeout
+  // never implies a rollback, so it never authorises a replay.
+
+  function frames(): { jsonrpc?: string; id?: number; method?: string; mutation?: string }[] {
+    return socket()
+      .sent.filter((message): message is string => typeof message === 'string')
+      .map((message) => JSON.parse(message) as { method?: string; mutation?: string })
+  }
+
+  function methodFrames(method: string) {
+    return frames().filter((frame) => frame.method === method)
+  }
+
+  it('carries an identity on a mutating call and none on a read', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    await connected(d)
+    const write = d.call('settings.set', { key: 'theme', value: 'dark' })
+    const read = d.call('vault.status', {})
+    write.catch(() => {})
+    read.catch(() => {})
+
+    const [writeFrame, readFrame] = frames()
+    expect(typeof writeFrame.mutation).toBe('string')
+    expect(writeFrame.mutation).not.toBe('')
+    expect(readFrame).not.toHaveProperty('mutation')
+    d.close()
+  })
+
+  it('does not re-send a mutation whose record says it ran, and says which answer it is', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    const unlock = vi.fn().mockResolvedValue(undefined)
+    d.onVaultSealed = unlock
+    await connected(d)
+    const pending = d.call('settings.set', { key: 'theme', value: 'dark' })
+    pending.catch(() => {})
+    const first = methodFrames('settings.set')[0]
+
+    socket().deliverText({
+      jsonrpc: '2.0',
+      id: first.id,
+      error: { code: -32001, message: 'vault is sealed', data: { reason: 'vault-sealed' } },
+    })
+    await flush()
+    await flush()
+
+    // It asks before it would re-send, and it names the same identity.
+    const asks = methodFrames('operation.outcome')
+    expect(asks).toHaveLength(1)
+    expect((asks[0] as { params?: { mutation?: string } }).params).toEqual({
+      mutation: first.mutation,
+    })
+
+    socket().deliverText({
+      jsonrpc: '2.0',
+      id: asks[0].id,
+      result: { outcome: 'done', operation: 'settings.set' },
+    })
+    await expect(pending).rejects.toMatchObject({
+      name: 'MutationNotReplayedError',
+      message: 'It finished.',
+    })
+    // No second copy of the write, and no unlock prompt for work that is over.
+    expect(methodFrames('settings.set')).toHaveLength(1)
+    expect(unlock).not.toHaveBeenCalled()
+    d.close()
+  })
+
+  it('re-sends a mutation once when the record says it did not start, under the same identity', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    d.onVaultSealed = vi.fn().mockResolvedValue(undefined)
+    await connected(d)
+    const pending = d.call('settings.set', { key: 'theme', value: 'dark' })
+    const first = methodFrames('settings.set')[0]
+
+    socket().deliverText({
+      jsonrpc: '2.0',
+      id: first.id,
+      error: { code: -32001, message: 'vault is sealed', data: { reason: 'vault-sealed' } },
+    })
+    await flush()
+    await flush()
+    const ask = methodFrames('operation.outcome')[0]
+    socket().deliverText({
+      jsonrpc: '2.0',
+      id: ask.id,
+      result: { outcome: 'not-started', operation: 'settings.set' },
+    })
+    await flush()
+    await flush()
+    await flush()
+
+    expect(d.onVaultSealed).toHaveBeenCalledExactlyOnceWith('settings.set')
+    const writes = methodFrames('settings.set')
+    expect(writes).toHaveLength(2)
+    expect(writes[1].id).not.toBe(first.id)
+    expect(writes[1].mutation).toBe(first.mutation)
+    socket().deliverText({ jsonrpc: '2.0', id: writes[1].id, result: { saved: true } })
+    await expect(pending).resolves.toEqual({ saved: true })
+    d.close()
+  })
+
+  it('turns a replay refusal into the answer the record carries', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    await connected(d)
+    const pending = d.call('settings.set', { key: 'theme' })
+    pending.catch(() => {})
+    const [write] = methodFrames('settings.set')
+    socket().deliverText({
+      jsonrpc: '2.0',
+      id: write.id,
+      error: {
+        code: -32005,
+        message: 'This mutation already ran',
+        data: { reason: 'mutation-replayed', outcome: 'done', operation: 'settings.set' },
+      },
+    })
+    await expect(pending).rejects.toMatchObject({
+      name: 'MutationNotReplayedError',
+      message: 'It finished.',
+    })
+    d.close()
+  })
+
+  it('never re-sends a withdrawn mutation, whatever the backend would say', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    await connected(d)
+    const abort = new AbortController()
+    const pending = d.call('settings.set', { key: 'theme' }, abort.signal)
+    pending.catch(() => {})
+    abort.abort()
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+    expect(methodFrames('settings.set')).toHaveLength(1)
+    expect(methodFrames('operation.outcome')).toHaveLength(0)
+    d.close()
+  })
+})
+
 describe('dispatcher heartbeat', () => {
   it('pings an idle socket and stays online when the response arrives', async () => {
     const d = new Dispatcher(new TestEndpointProvider())

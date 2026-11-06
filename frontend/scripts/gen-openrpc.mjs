@@ -32,7 +32,7 @@ function ref(file) {
   return { $ref: `${baseURL}${file}` }
 }
 
-function methodEntry(name, resultFiles, operation) {
+function methodEntry(name, resultFiles, operation, mutating) {
   const resultFile = resultFiles.has(`${name}.schema.json`)
     ? `${name}.schema.json`
     : resultAliases.get(name)
@@ -63,6 +63,13 @@ function methodEntry(name, resultFiles, operation) {
     ],
     'x-nocx-agent-disposition': 'operation-owned',
   }
+  if (mutating) {
+    entry.errors.push({
+      code: -32005,
+      message: 'This mutation already ran',
+      'x-nocx-errorSchema': ref('mutation.replayed.schema.json'),
+    })
+  }
   // The declaration is attached in full, not by reference, because the
   // manifest is the one method-level index: a reader asking what a method's
   // lifetime is must not have to join two files, and a test compares the
@@ -84,6 +91,16 @@ async function build() {
   const catalogue = JSON.parse(await readFile(resolve(contractsDir, 'operations.json'), 'utf8'))
   const operations = new Map(
     catalogue.operations.filter((op) => op.kind === 'method').map((op) => [op.id, op]),
+  )
+  // A MUTATION MAY BE REFUSED AS A REPLAY (ADR-8eej3e66 §4). The refusal is
+  // produced by dispatch, before any handler runs, and only for a method the
+  // catalogue says may have changed something by its deadline: that is the
+  // class of call that carries an identity, so it is the class that can name
+  // this error. Its data shape is its own schema, like the saturation refusal.
+  const mutating = new Set(
+    catalogue.operations
+      .filter((op) => op.kind === 'method' && op.expired === 'outcome-unknown')
+      .map((op) => op.id),
   )
   const params = names.filter((name) => name.endsWith('.params.schema.json'))
   const results = names.filter(
@@ -119,7 +136,7 @@ async function build() {
     },
     methods: params.map((file) => {
       const name = file.replace(/\.params\.schema\.json$/, '')
-      return methodEntry(name, resultFiles, operations.get(name))
+      return methodEntry(name, resultFiles, operations.get(name), mutating.has(name))
     }),
     'x-nocx-schemaRefs': results.map(ref),
   }

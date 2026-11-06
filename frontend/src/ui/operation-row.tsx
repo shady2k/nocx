@@ -85,6 +85,7 @@ const PHASE_TONE: Record<TerminalOperationPhase, BadgeTone> = {
   sent: 'success',
   skipped: 'neutral',
   cancelled: 'neutral',
+  'outcome-unknown': 'neutral',
   failed: 'danger',
 }
 
@@ -100,6 +101,7 @@ const PHASE_LABEL: Record<TerminalOperationPhase, string> = {
   sent: 'Done',
   skipped: 'Skipped',
   cancelled: 'Cancelled',
+  'outcome-unknown': 'Outcome unknown',
   failed: 'Failed',
 }
 
@@ -234,9 +236,12 @@ export function OperationRow(props: OperationRowProps) {
               <Show when={props.phase === 'unsettled'}>
                 {/* The reason is the badge's hover detail: the person was
                     already told it as a toast when it happened, and the row
-                    is not where a sentence belongs. */}
+                    is not where a sentence belongs. A CALL's unsettled row is
+                    a different fact — the action stopped and the backend is
+                    being asked what became of it — so it says so with the
+                    person's words instead of the transfer's. */}
                 <Badge tone="warning" title={props.error ?? undefined}>
-                  Waiting for the server
+                  {props.kind === 'call' ? 'Checking what happened' : 'Waiting for the server'}
                 </Badge>
               </Show>
             </span>
@@ -262,19 +267,26 @@ export function OperationRow(props: OperationRowProps) {
                 </span>
               </Match>
               <Match when={running()}>
-                <ProgressBar value={fraction()} ariaLabel={`${props.title} progress`} size="md" />
+                {/* A CALL MOVES NO BYTES, so nothing may draw a bar or a size
+                    for it. Its live rows are a wait and then "checking what
+                    happened"; a bar at zero would say it is stalled. */}
+                <Show when={props.kind !== 'call'}>
+                  <ProgressBar value={fraction()} ariaLabel={`${props.title} progress`} size="md" />
+                </Show>
                 {/* Its OWN class, not `__detail`. The two shared one, and they
                     want opposite things: a failure reason is a sentence and
                     must wrap, while these numbers must never — they change
                     several times a second, and a wrap made the row's height
                     twitch as the digits changed width (owner, 2026-08-22). */}
-                <span class="ui-operation-row__progress">
-                  {formatProgress({
-                    done: props.done,
-                    total: props.total,
-                    speedBytesPerSecond: props.speedBytesPerSecond ?? null,
-                  })}
-                </span>
+                <Show when={props.kind !== 'call'}>
+                  <span class="ui-operation-row__progress">
+                    {formatProgress({
+                      done: props.done,
+                      total: props.total,
+                      speedBytesPerSecond: props.speedBytesPerSecond ?? null,
+                    })}
+                  </span>
+                </Show>
               </Match>
               <Match when={isTerminalPhase(props.phase)}>
                 <>

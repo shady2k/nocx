@@ -393,6 +393,19 @@ export const REFUSAL_SURFACES: readonly RefusalSurface[] = [
     },
     note: "uistate.* and layout.read are the window's own bookkeeping and are BACKGROUND; tabs/panes/workspaces are a person's gestures and are PERSON.",
   },
+  // ── a mutation whose answer was lost
+  {
+    methods: ['operation.outcome'],
+    origin: 'mixed',
+    report: {
+      kind: 'own-state',
+      where:
+        'the Operations row for that call (operations/call-operations.ts): it stops saying "checking what happened" and says the outcome is unknown, naming what to look at',
+      retry:
+        'nothing re-sends: a mutation is never replayed, and asking for the change again is the person’s own next action',
+    },
+    note: "A person's Cancel, or the renderer noticing that the answer never arrived, is what asks (mutations.ts, and the dispatcher's vault-unlock gate for a background call); either way the answer lands in the row that person was watching, and a refused ask becomes one of the three answers rather than a failure of its own.",
+  },
   // ── notifications the running program raises
   {
     methods: ['notify.raise', 'notify.bell', 'notify.paneWorkFinished', 'notify.catalogue'],

@@ -65,7 +65,19 @@ export type OperationKind = 'upload' | 'download' | 'call'
  * somebody.
  */
 export type OperationPhase =
-  'queued' | 'running' | 'unsettled' | 'written' | 'sent' | 'skipped' | 'cancelled' | 'failed'
+  | 'queued'
+  | 'running'
+  | 'unsettled'
+  | 'written'
+  | 'sent'
+  | 'skipped'
+  | 'cancelled'
+  | 'failed'
+  // A mutation whose record is gone: the backend cannot say whether it ran,
+  // and neither may this list. It is TERMINAL because no answer is coming —
+  // that is exactly what "unknown" means here — and it names what to look at
+  // in the row's detail rather than pretending either side (ADR-8eej3e66 §8).
+  | 'outcome-unknown'
 
 /** The values that mean nothing more can happen. Exported because a surface
  *  that labels an outcome needs the CLOSED set of outcomes; a second

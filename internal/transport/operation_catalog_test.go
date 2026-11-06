@@ -22,8 +22,10 @@ import (
 func TestEveryRegisteredMethodHasOneDeclaration(t *testing.T) {
 	server := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)))
 	declared := map[string]catalog.Declaration{}
-	for _, d := range catalog.Methods() {
-		declared[string(d.ID)] = d
+	for _, d := range catalog.Declarations() {
+		if d.Kind == catalog.KindMethod {
+			declared[string(d.ID)] = d
+		}
 	}
 	for method := range server.methods {
 		if _, ok := declared[method]; !ok {

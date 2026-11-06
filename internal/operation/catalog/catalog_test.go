@@ -57,11 +57,22 @@ func copyDeclarations() []Declaration {
 
 func declarationByID(t *testing.T, id ID) Declaration {
 	t.Helper()
-	d, ok := DeclarationOf(id)
-	if !ok {
-		t.Fatalf("no declaration for %s", id)
+	for _, d := range Declarations() {
+		if d.ID == id {
+			return d
+		}
 	}
-	return d
+	t.Fatalf("no declaration for %s", id)
+	return Declaration{}
+}
+
+// beginStrictForTest is the test-built scope: a second settlement panics.
+// It lives here rather than in catalog.go because nothing in production wants
+// it, and the dead-code ratchet is right about that.
+func beginStrictForTest(ctx context.Context, op Method, inv Invocation) *Scope {
+	s := Begin(ctx, op, inv)
+	s.strict = true
+	return s
 }
 
 func TestEveryDeclarationIsCompleteAndFinite(t *testing.T) {
@@ -209,7 +220,7 @@ func testContext(t *testing.T) context.Context {
 }
 
 func TestSettlementIsExclusiveAndStrictScopesPanicOnASecondSettle(t *testing.T) {
-	s := BeginStrict(testContext(t), OpTransportPing, Invocation{})
+	s := beginStrictForTest(testContext(t), OpTransportPing, Invocation{})
 	if !s.Settle(OutcomeCompleted) {
 		t.Fatal("first settlement must win")
 	}
@@ -245,7 +256,7 @@ func TestAnExpiredScopeRecordsTheExpiry(t *testing.T) {
 	if d.Max.Duration() > time.Second {
 		t.Fatalf("transport.ping max is %s; the test needs a short one", d.Max.Duration())
 	}
-	s := BeginStrict(testContext(t), OpTransportPing, Invocation{})
+	s := beginStrictForTest(testContext(t), OpTransportPing, Invocation{})
 	deadline := time.Now().Add(d.Max.Duration() + 2*time.Second)
 	for time.Now().Before(deadline) {
 		if outcome, ok := s.Outcome(); ok {
@@ -290,7 +301,7 @@ func TestAPlantedNamelessPhaseIsRefused(t *testing.T) {
 }
 
 func TestEveryLoopNamesAnInternalOperationAndABoundedStop(t *testing.T) {
-	if errs := ValidateLoops(Loops(), Declarations()); len(errs) != 0 {
+	if errs := ValidateLoops(loopTable, Declarations()); len(errs) != 0 {
 		for _, err := range errs {
 			t.Error(err)
 		}
@@ -298,7 +309,7 @@ func TestEveryLoopNamesAnInternalOperationAndABoundedStop(t *testing.T) {
 }
 
 func TestAPlantedUnboundedLoopStopIsRefused(t *testing.T) {
-	loops := Loops()
+	loops := append([]Loop(nil), loopTable...)
 	loops[0].Stop = Deadline{}
 	if errs := ValidateLoops(loops, Declarations()); len(errs) == 0 {
 		t.Fatal("a loop with no finite stop must be refused")
@@ -306,7 +317,7 @@ func TestAPlantedUnboundedLoopStopIsRefused(t *testing.T) {
 }
 
 func TestAPlantedLoopWithNoIterationIsRefused(t *testing.T) {
-	loops := Loops()
+	loops := append([]Loop(nil), loopTable...)
 	loops[0].Iteration = "no.such.operation"
 	if errs := ValidateLoops(loops, Declarations()); len(errs) == 0 {
 		t.Fatal("a loop whose iteration has no declaration must be refused")
@@ -318,7 +329,7 @@ func TestAPlantedLoopWithNoIterationIsRefused(t *testing.T) {
 // pushed the readiness line out of it (run 42139974476).
 func TestASettledOperationWritesNoRecord(t *testing.T) {
 	ctx, sl := testContextAndSlog(t)
-	s := BeginStrict(ctx, OpTransportPing, Invocation{})
+	s := beginStrictForTest(ctx, OpTransportPing, Invocation{})
 	if !s.Complete() {
 		t.Fatal("the first settlement must win")
 	}
@@ -331,7 +342,7 @@ func TestASettledOperationWritesNoRecord(t *testing.T) {
 // watching any more. Exactly one, and it says so.
 func TestAnExpiredOperationWritesExactlyOneRecord(t *testing.T) {
 	ctx, sl := testContextAndSlog(t)
-	s := BeginStrict(ctx, OpTransportPing, Invocation{})
+	s := beginStrictForTest(ctx, OpTransportPing, Invocation{})
 	if !logtest.WaitForSlog(sl, 3*time.Second, func(r logtest.Record) bool {
 		return r.Message == "operation deadline expired"
 	}) {
@@ -368,5 +379,22 @@ func TestDeclarationsReturnsAnIndependentCopy(t *testing.T) {
 	}
 	if len(after.Preempts) != len(before.Preempts) {
 		t.Fatalf("a planted mutation changed the real preemptions: %d -> %d", len(before.Preempts), len(after.Preempts))
+	}
+}
+
+// A child operation's max is the minimum of its own and its parent's
+// remainder (ADR-8eej3e66 §3). Stage 2 records that bound; it does not cancel.
+func TestAChildScopeStaysWithinItsParentsRemainder(t *testing.T) {
+	ctx, _ := testContextAndSlog(t)
+	parent := Begin(ctx, OpTransportPing, Invocation{})
+	child := Begin(WithScope(ctx, parent), OpAck, Invocation{})
+	if child.maxDeadline.After(parent.maxDeadline) {
+		t.Fatalf("child max %s is later than parent max %s", child.maxDeadline, parent.maxDeadline)
+	}
+
+	shortParent := Begin(ctx, OpAck, Invocation{})
+	shortChild := Begin(WithScope(ctx, shortParent), OpTransportPing, Invocation{})
+	if !shortChild.maxDeadline.Before(shortParent.maxDeadline) {
+		t.Fatalf("a child with its own shorter max was stretched: child %s parent %s", shortChild.maxDeadline, shortParent.maxDeadline)
 	}
 }

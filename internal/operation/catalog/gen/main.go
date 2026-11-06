@@ -19,15 +19,22 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "internal/operation/catalog/handles_gen.go"), catalog.HandleSource(), 0o644); err != nil { //nolint:gosec // generated Go source, 0644 is the committed mode
+	missing, err := catalog.CheckHandleReferences(root)
+	if err != nil {
 		fail(err)
+	}
+	if len(missing) != 0 {
+		fail(fmt.Errorf("%d declaration(s) have no production reference: %v", len(missing), missing))
+	}
+	if writeErr := os.WriteFile(filepath.Join(root, "internal/operation/catalog/handles_gen.go"), catalog.HandleSource(), 0o644); writeErr != nil { //nolint:gosec // generated Go source, 0644 is the committed mode
+		fail(writeErr)
 	}
 	manifest, err := catalog.ManifestJSON()
 	if err != nil {
 		fail(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "contracts/operations.json"), manifest, 0o644); err != nil { //nolint:gosec // generated JSON manifest, 0644 is the committed mode
-		fail(err)
+	if writeErr := os.WriteFile(filepath.Join(root, "contracts/operations.json"), manifest, 0o644); writeErr != nil { //nolint:gosec // generated JSON manifest, 0644 is the committed mode
+		fail(writeErr)
 	}
 }
 

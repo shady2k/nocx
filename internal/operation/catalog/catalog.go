@@ -338,32 +338,6 @@ func Declarations() []Declaration {
 	return out
 }
 
-// Declaration looks one operation up by id.
-func DeclarationOf(id ID) (Declaration, bool) {
-	d, ok := declarationIndex[id]
-	return d, ok
-}
-
-// Methods returns every declaration of kind method, sorted by id.
-func Methods() []Declaration {
-	return ofKind(KindMethod)
-}
-
-// Internals returns every internal-operation declaration, sorted by id.
-func Internals() []Declaration {
-	return ofKind(KindInternal)
-}
-
-func ofKind(k Kind) []Declaration {
-	var out []Declaration
-	for _, d := range Declarations() {
-		if d.Kind == k {
-			out = append(out, d)
-		}
-	}
-	return out
-}
-
 var declarationTable = func() []Declaration {
 	out := make([]Declaration, 0, len(methodDeclarations)+len(internalDeclarations))
 	out = append(out, methodDeclarations...)
@@ -554,32 +528,26 @@ const (
 // is dropped and logged. A later stage arms the response path on the same
 // record, which is why the race is exercised under -race now.
 type Scope struct {
-	op        Method
-	decl      Declaration
-	origin    Origin
-	owner     Owner
-	started   time.Time
-	ctx       context.Context
-	strict    bool
-	settled   atomic.Bool
-	outcome   atomic.Value // Outcome
-	expiry    *time.Timer
-	cancelReg func() bool
-	mu        sync.Mutex
-	closed    bool
+	op          Method
+	decl        Declaration
+	origin      Origin
+	owner       Owner
+	started     time.Time
+	maxDeadline time.Time
+	ctx         context.Context
+	strict      bool
+	settled     atomic.Bool
+	outcome     atomic.Value // Outcome
+	expiry      *time.Timer
+	cancelReg   func() bool
+	mu          sync.Mutex
+	closed      bool
 }
 
 // Begin starts an invocation's scope. It never fails: a missing declaration is
 // a programming error the handle itself prevents, so a zero handle panics.
 func Begin(ctx context.Context, op Method, inv Invocation) *Scope {
 	return begin(ctx, op, inv, false)
-}
-
-// BeginStrict is Begin for tests: a second settlement panics instead of being
-// dropped and logged. The test build is where a double settle is a defect we
-// want to see, not a line in a log nobody reads.
-func BeginStrict(ctx context.Context, op Method, inv Invocation) *Scope {
-	return begin(ctx, op, inv, true)
 }
 
 // BeginInternal starts a backend-initiated operation. Its origin is background
@@ -609,9 +577,19 @@ func begin(ctx context.Context, op Method, inv Invocation, strict bool) *Scope {
 	// The timer and the cancellation registration are installed under the
 	// mutex: either can fire before begin returns, and a settlement that wins
 	// that race must not be followed by a timer nobody will stop.
+	maxLifetime := d.Max.Duration()
+	// A child operation's deadline is the minimum of its own and its parent's
+	// remainder (ADR-8eej3e66 §3). Stage 2 applies it to the recorded expiry
+	// only; nothing is cancelled.
+	if parent, ok := ScopeFrom(ctx); ok {
+		if remaining := time.Until(parent.maxDeadline); remaining > 0 && remaining < maxLifetime {
+			maxLifetime = remaining
+		}
+	}
+	s.maxDeadline = s.started.Add(maxLifetime)
 	s.mu.Lock()
 	if !s.settled.Load() {
-		s.expiry = time.AfterFunc(d.Max.Duration(), s.expire)
+		s.expiry = time.AfterFunc(maxLifetime, s.expire)
 		if ctx != nil {
 			s.cancelReg = context.AfterFunc(ctx, func() { s.Settle(OutcomeCancelled) })
 		}

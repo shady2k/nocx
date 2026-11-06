@@ -57,13 +57,6 @@ var loopTable = []Loop{
 	},
 }
 
-// Loops returns the registered loops.
-func Loops() []Loop {
-	out := make([]Loop, len(loopTable))
-	copy(out, loopTable)
-	return out
-}
-
 // ValidateLoops checks a loop table against the operation table: every loop
 // names an internal operation, and its owner and stop are finite and explicit.
 func ValidateLoops(loops []Loop, decls []Declaration) []error {

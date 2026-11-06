@@ -229,6 +229,87 @@ describe('session.intent', () => {
     )
   })
 
+  // EVERY OTHER REFUSAL THAT WROTE NOTHING IS ALSO THE PERSON'S TO MAKE
+  // (nocx-atpw5.1.38). design §6.5's `refused` wrote nothing, so one more
+  // presentation is the first write, not a second one — and the causes that
+  // cannot change their answer are the only ones left alone.
+  it('presents a keystroke again when a refusal wrote nothing and named a cause it can change', async () => {
+    const { session, ws } = await connectedSession()
+    const pending = session.intent('text', 'h')
+    const first = ws.requests().filter((candidate) => candidate.method === 'session.intent')[0]
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: first.id,
+      result: {
+        state: 'refused',
+        bytesWritten: 0,
+        fenceAfter: 4,
+        accessEpoch: 3,
+        refusal: { cause: 'busy' },
+      },
+    })
+    await flushMicrotasks()
+    const resent = ws.requests().filter((candidate) => candidate.method === 'session.intent')
+    expect(resent).toHaveLength(2)
+    // The epoch it already held: a busy session is not a re-seating, and the
+    // intent is unchanged.
+    expect(resent[1].params).toEqual({
+      sessionId: SID,
+      accessEpoch: 3,
+      kind: 'text',
+      payload: btoa('h'),
+    })
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: resent[1].id,
+      result: { state: 'executed', bytesWritten: 1, fenceAfter: 5, accessEpoch: 3 },
+    })
+    await expect(pending).resolves.toMatchObject({ state: 'executed', bytesWritten: 1 })
+  })
+
+  // ONCE. A second refusal is the answer: retrying again would be a livelock
+  // around a control-plane call on every keystroke.
+  it('returns the second refusal rather than presenting a third time', async () => {
+    const { session, ws } = await connectedSession()
+    const pending = session.intent('text', 'h')
+    const first = ws.requests().filter((candidate) => candidate.method === 'session.intent')[0]
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: first.id,
+      result: { state: 'refused', bytesWritten: 0, fenceAfter: 4, refusal: { cause: 'busy' } },
+    })
+    await flushMicrotasks()
+    const resent = ws.requests().filter((candidate) => candidate.method === 'session.intent')
+    expect(resent).toHaveLength(2)
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: resent[1].id,
+      result: { state: 'refused', bytesWritten: 0, fenceAfter: 4, refusal: { cause: 'busy' } },
+    })
+    await expect(pending).resolves.toMatchObject({ state: 'refused' })
+    expect(ws.requests().filter((candidate) => candidate.method === 'session.intent')).toHaveLength(
+      2,
+    )
+  })
+
+  // AND NOT THE ONES THAT CANNOT CHANGE THEIR ANSWER. `closing` means this
+  // incarnation is going away; a second attempt costs a round trip and is
+  // refused for the same reason.
+  it('does not present a keystroke again when the refusal cannot change', async () => {
+    const { session, ws } = await connectedSession()
+    const pending = session.intent('text', 'h')
+    const first = ws.requests().filter((candidate) => candidate.method === 'session.intent')[0]
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: first.id,
+      result: { state: 'refused', bytesWritten: 0, fenceAfter: 4, refusal: { cause: 'closing' } },
+    })
+    await expect(pending).resolves.toMatchObject({ state: 'refused' })
+    expect(ws.requests().filter((candidate) => candidate.method === 'session.intent')).toHaveLength(
+      1,
+    )
+  })
+
   // A PARTIAL WRITE IS NEVER RE-PRESENTED. bytesWritten > 0 means the program
   // received bytes, and sending them again would type the person's input twice.
   it('never re-presents an intent that wrote something', async () => {

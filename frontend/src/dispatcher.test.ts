@@ -1213,11 +1213,50 @@ describe('credit window (ADR-8eej3e66 §7)', () => {
     expect(socket().requests()).toHaveLength(1)
   })
 
-  it('does not start a call whose turn expires while it waits for credit', async () => {
+  it('a person-friendly queued call waits past the row threshold, shows Cancel, and completes when credit frees', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    await connectedWith(d, 1)
+
+    const announced: Array<{ id: number; method: string; cancel: () => void }> = []
+    const settled: Array<[number, string]> = []
+    d.onCallPending = (call) => announced.push(call)
+    d.onCallSettled = (id, settlement) => settled.push([id, settlement])
+
+    void d.call('vault.seal', {}) // the whole window
+    const queued = d.call('vault.status', {})
+    await flush()
+    expect(socket().requests()).toHaveLength(1)
+    // The row exists from the moment the person acted, and it carries Cancel.
+    const row = announced.find((call) => call.method === 'vault.status')
+    expect(row).toBeDefined()
+    expect(typeof row!.cancel).toBe('function')
+
+    // THREE SECONDS: past the two-second row (ADR-8eej3e66 §8) and past the
+    // one-second turn the catalogue used to give every call. A person's call
+    // is still waiting and nothing has answered it.
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(settled).toEqual([])
+    await expect(
+      Promise.race([queued.then(() => 'settled'), Promise.resolve('waiting')]),
+    ).resolves.toBe('waiting')
+
+    // The window frees: the queued call goes, and completes.
+    answer(socket().requests()[0].id!, { sealed: true })
+    await flush()
+    expect(socket().requests().map((r) => r.method)).toEqual(['vault.seal', 'vault.status'])
+    answer(socket().requests()[1].id!, { locked: false })
+    await expect(queued).resolves.toEqual({ locked: false })
+  })
+
+  it('does not start a BACKGROUND call whose turn expires while it waits for credit', async () => {
     const d = new Dispatcher(new TestEndpointProvider())
     await connectedWith(d, 1)
     void d.call('vault.seal', {}) // fills the window
-    const waiting = d.call('vault.status', {})
+    // BACKGROUND KEEPS THE SHORT BOUND: a poll that never got credit is not
+    // worth thirty seconds of a window, and a queue of them must still end.
+    // A person's call keeps waiting — the next test holds it for three
+    // seconds.
+    const waiting = d.call('vault.status', {}, undefined, { origin: 'background' })
     waiting.catch(() => {})
     await flush()
     expect(socket().requests()).toHaveLength(1)
@@ -1310,7 +1349,7 @@ describe('credit window (ADR-8eej3e66 §7)', () => {
     expect(fresh.requests().map((r) => r.method)).toEqual(['vault.seal'])
   })
 
-  it("tells the Operations source as soon as a person's call is queued, and settles it on the turn", async () => {
+  it("tells the Operations source as soon as a person's call is queued, and settles it when it runs", async () => {
     const d = new Dispatcher(new TestEndpointProvider())
     await connectedWith(d, 1)
     const announced: { id: number; method: string; startedAt: number }[] = []
@@ -1334,9 +1373,22 @@ describe('credit window (ADR-8eej3e66 §7)', () => {
         .map((r) => r.method),
     ).toEqual(['vault.seal'])
 
-    // Past the declaration's turn it leaves the source, having never started.
-    vi.advanceTimersByTime(1000)
-    await expect(queued).rejects.toMatchObject({ name: 'CallNotStartedError' })
+    // A PERSON'S CALL IS NOT SETTLED BY ITS TURN BEFORE IT CAN BE SEEN
+    // (ADR-8eej3e66 §8): three seconds in, still waiting, still announced.
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(settled).toEqual([])
+    expect(
+      socket()
+        .requests()
+        .map((r) => r.method),
+    ).toEqual(['vault.seal'])
+
+    // The window frees and it runs; the row leaves with the answer.
+    answer(socket().requests()[0].id!, { sealed: true })
+    await flush()
+    expect(socket().requests().map((r) => r.method)).toEqual(['vault.seal', 'vault.status'])
+    answer(socket().requests()[1].id!, { locked: false })
+    await expect(queued).resolves.toEqual({ locked: false })
     expect(settled).toEqual([announced[0].id])
   })
 })

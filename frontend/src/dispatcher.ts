@@ -297,6 +297,24 @@ function mergeKey(
   return method + '\n' + intent + '\n' + origin + '\n' + canonicalJSON(params)
 }
 
+/** The bound a queued call waits under before it is answered "not started".
+ *
+ *  A PERSON'S CALL GETS ITS DECLARATION'S TURN — thirty seconds — because the
+ *  wait must be long enough to be seen: the row appears past two seconds with
+ *  Cancel, and a refusal after one second would be the busyness answer in a
+ *  new place (ADR-8eej3e66 §8, and the catalogue's personTurnMillis).
+ *
+ *  A BACKGROUND CALL KEEPS THE OLD ONE SECOND. Nobody is watching it, it is
+ *  never shown as a row, and a queue made of polls must still end: a poll
+ *  that never got credit is not worth thirty seconds of a window.
+ */
+const BACKGROUND_QUEUE_TURN_MS = 1000
+
+function queueTurnMs(slot: CallSlot, declaredTurnMs: number): number {
+  if (slot.origin === 'person') return declaredTurnMs
+  return Math.min(declaredTurnMs, BACKGROUND_QUEUE_TURN_MS)
+}
+
 /** JSON with object keys sorted, so two equal params produce one key. */
 function canonicalJSON(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null'
@@ -826,7 +844,7 @@ export class Dispatcher {
     slot.state = 'queued'
     this.queue.push(slot)
     if (slot.deadline === null) {
-      slot.deadline = setTimeout(() => this.expire(slot), declaration.turnMs)
+      slot.deadline = setTimeout(() => this.expire(slot), queueTurnMs(slot, declaration.turnMs))
     }
   }
 

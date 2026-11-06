@@ -478,3 +478,36 @@ func TestACompletedScopeWaitsForTheExpiryWriterItLostTo(t *testing.T) {
 		t.Fatalf("the expiry record was not completed before Complete returned: %q", got)
 	}
 }
+
+// A PERSON'S WAIT IS NOT ONE SECOND (ADR-8eej3e66 §8, and the integration's
+// review of stage 12). Every method entry is a call a person can make, and the
+// renderer's credit queue holds it under the declaration's turn before it
+// answers CallNotStartedError. At one second that was the busyness refusal in
+// a new place: with the window full, a person's call was refused before the
+// two-second row that is supposed to appear could. The turn now gives every
+// person-facing call at least thirty seconds — long enough that no legitimate
+// wait for one resource outlasts it — and it remains a bound, so a stuck queue
+// still ends. Background work keeps its own short bound in the renderer.
+// rescueTurnMethods never wait for credit or a resource: the transport runs
+// them inline on the read loop (internal/transport/registration.go's
+// ingressCriticalMethods) and the renderer exempts them from its window, so
+// their turn is a hang detector rather than a person's wait. They keep the
+// bound they were declared with.
+var rescueTurnMethods = map[ID]bool{
+	"ack": true, "vault.unlockResolved": true, "connections.passwordResolved": true,
+	"agent.runResolved": true, "host.resolved": true, "agent.laneInteractivity": true,
+	"transport.credit": true, "transport.ping": true, "rpc.cancel": true,
+	"app.diagnostics": true,
+}
+
+func TestEveryPersonFacingTurnWaitsLongEnoughToBeSeen(t *testing.T) {
+	for _, d := range Declarations() {
+		if d.Kind != KindMethod || rescueTurnMethods[d.ID] {
+			continue
+		}
+		if d.Turn.Millis < 30000 {
+			t.Errorf("%s: turn is %d ms; a person's call must be allowed to wait at least 30000 ms",
+				d.ID, d.Turn.Millis)
+		}
+	}
+}

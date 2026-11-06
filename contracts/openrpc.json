@@ -190,9 +190,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 300000,
@@ -332,9 +332,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 300000,
@@ -460,9 +460,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 300000,
@@ -574,9 +574,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 300000,
@@ -695,9 +695,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 300000,
@@ -823,9 +823,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 300000,
@@ -951,9 +951,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 300000,
@@ -1201,9 +1201,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -1313,9 +1313,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -1432,9 +1432,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -1551,9 +1551,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -1799,9 +1799,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 300000,
@@ -1934,9 +1934,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 300000,
@@ -2061,9 +2061,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -2180,9 +2180,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -2292,9 +2292,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 60000,
@@ -2411,9 +2411,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 60000,
@@ -2530,9 +2530,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 60000,
@@ -2645,9 +2645,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -2770,9 +2770,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -2895,9 +2895,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -3013,9 +3013,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -3131,9 +3131,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -3249,9 +3249,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -3374,9 +3374,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -3492,9 +3492,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -3617,9 +3617,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -3742,9 +3742,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -3867,9 +3867,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -3985,9 +3985,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -4110,9 +4110,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -4235,9 +4235,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -4353,9 +4353,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -4471,9 +4471,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -4596,9 +4596,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -4721,9 +4721,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -4830,9 +4830,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 10000,
@@ -5036,9 +5036,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -5158,9 +5158,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 600000,
@@ -5276,9 +5276,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -5544,9 +5544,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -5654,9 +5654,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 60000,
@@ -5768,9 +5768,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -5997,9 +5997,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -6120,9 +6120,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -6243,9 +6243,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -6357,9 +6357,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -6464,9 +6464,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 600000,
@@ -6576,9 +6576,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 600000,
@@ -6688,9 +6688,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 600000,
@@ -6808,9 +6808,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -6929,9 +6929,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -7043,9 +7043,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -7157,9 +7157,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -7278,9 +7278,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -7393,9 +7393,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
-          "basis": "measured",
-          "note": "the wait for a failure-domain permit (internal/operation/domains), measured 2026-11-06: 200 concurrent 2 ms listings on one domain, p100 wait 58 ms at the declared capacity of 8; 1000 ms is ~17x that and is the declared wait, not a gate's"
+          "millis": 30000,
+          "basis": "read",
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 15000,
@@ -7530,9 +7530,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
-          "basis": "measured",
-          "note": "the wait for a failure-domain permit (internal/operation/domains), measured 2026-11-06: 200 concurrent 2 ms listings on one domain, p100 wait 58 ms at the declared capacity of 8; 1000 ms is ~17x that and is the declared wait, not a gate's"
+          "millis": 30000,
+          "basis": "read",
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 14400000,
@@ -7646,9 +7646,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
-          "basis": "measured",
-          "note": "the wait for a failure-domain permit (internal/operation/domains), measured 2026-11-06: 200 concurrent 2 ms listings on one domain, p100 wait 58 ms at the declared capacity of 8; 1000 ms is ~17x that and is the declared wait, not a gate's"
+          "millis": 30000,
+          "basis": "read",
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 10000,
@@ -7762,9 +7762,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
-          "basis": "measured",
-          "note": "the wait for a failure-domain permit (internal/operation/domains), measured 2026-11-06: 200 concurrent 2 ms listings on one domain, p100 wait 58 ms at the declared capacity of 8; 1000 ms is ~17x that and is the declared wait, not a gate's"
+          "millis": 30000,
+          "basis": "read",
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -7885,9 +7885,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
-          "basis": "measured",
-          "note": "the wait for a failure-domain permit (internal/operation/domains), measured 2026-11-06: 200 concurrent 2 ms listings on one domain, p100 wait 58 ms at the declared capacity of 8; 1000 ms is ~17x that and is the declared wait, not a gate's"
+          "millis": 30000,
+          "basis": "read",
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 300000,
@@ -8001,9 +8001,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
-          "basis": "measured",
-          "note": "the wait for a failure-domain permit (internal/operation/domains), measured 2026-11-06: 200 concurrent 2 ms listings on one domain, p100 wait 58 ms at the declared capacity of 8; 1000 ms is ~17x that and is the declared wait, not a gate's"
+          "millis": 30000,
+          "basis": "read",
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -8124,9 +8124,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
-          "basis": "measured",
-          "note": "the wait for a failure-domain permit (internal/operation/domains), measured 2026-11-06: 200 concurrent 2 ms listings on one domain, p100 wait 58 ms at the declared capacity of 8; 1000 ms is ~17x that and is the declared wait, not a gate's"
+          "millis": 30000,
+          "basis": "read",
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 300000,
@@ -8240,9 +8240,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
-          "basis": "measured",
-          "note": "the wait for a failure-domain permit (internal/operation/domains), measured 2026-11-06: 200 concurrent 2 ms listings on one domain, p100 wait 58 ms at the declared capacity of 8; 1000 ms is ~17x that and is the declared wait, not a gate's"
+          "millis": 30000,
+          "basis": "read",
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -8377,9 +8377,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
-          "basis": "measured",
-          "note": "the wait for a failure-domain permit (internal/operation/domains), measured 2026-11-06: 200 concurrent 2 ms listings on one domain, p100 wait 58 ms at the declared capacity of 8; 1000 ms is ~17x that and is the declared wait, not a gate's"
+          "millis": 30000,
+          "basis": "read",
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 14400000,
@@ -8493,9 +8493,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
-          "basis": "measured",
-          "note": "the wait for a failure-domain permit (internal/operation/domains), measured 2026-11-06: 200 concurrent 2 ms listings on one domain, p100 wait 58 ms at the declared capacity of 8; 1000 ms is ~17x that and is the declared wait, not a gate's"
+          "millis": 30000,
+          "basis": "read",
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 10000,
@@ -8609,9 +8609,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
-          "basis": "measured",
-          "note": "the wait for a failure-domain permit (internal/operation/domains), measured 2026-11-06: 200 concurrent 2 ms listings on one domain, p100 wait 58 ms at the declared capacity of 8; 1000 ms is ~17x that and is the declared wait, not a gate's"
+          "millis": 30000,
+          "basis": "read",
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 5000,
@@ -8725,9 +8725,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
-          "basis": "measured",
-          "note": "the wait for a failure-domain permit (internal/operation/domains), measured 2026-11-06: 200 concurrent 2 ms listings on one domain, p100 wait 58 ms at the declared capacity of 8; 1000 ms is ~17x that and is the declared wait, not a gate's"
+          "millis": 30000,
+          "basis": "read",
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -8839,9 +8839,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 10000,
@@ -9204,9 +9204,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
-          "basis": "measured",
-          "note": "measured: 8 concurrent git reads on a 2-CPU arm64 box take 33 ms; 1 s is ~30x that and a read now waits only for a bulkhead permit, the git gate being gone"
+          "millis": 30000,
+          "basis": "read",
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 60000,
@@ -9322,9 +9322,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
-          "basis": "measured",
-          "note": "measured: 8 concurrent git reads on a 2-CPU arm64 box take 33 ms; 1 s is ~30x that and a read now waits only for a bulkhead permit, the git gate being gone"
+          "millis": 30000,
+          "basis": "read",
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 60000,
@@ -9440,9 +9440,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
-          "basis": "measured",
-          "note": "measured: 8 concurrent git reads on a 2-CPU arm64 box take 33 ms; 1 s is ~30x that and a read now waits only for a bulkhead permit, the git gate being gone"
+          "millis": 30000,
+          "basis": "read",
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 60000,
@@ -9565,9 +9565,9 @@
           }
         ],
         "turn": {
-          "millis": 3000,
+          "millis": 30000,
           "basis": "read",
-          "note": "re-read: the resolve phase waits on the session gate, whose own wait is 1 s (DefaultDomainConflictWaitTimeout), and the open phase on the mount's bulkhead; 3 s covers the two waits in sequence"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 600000,
@@ -9683,9 +9683,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
-          "basis": "measured",
-          "note": "measured: 8 concurrent git reads on a 2-CPU arm64 box take 33 ms; 1 s is ~30x that and a read now waits only for a bulkhead permit, the git gate being gone"
+          "millis": 30000,
+          "basis": "read",
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 60000,
@@ -10051,9 +10051,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
-          "basis": "measured",
-          "note": "measured: 8 concurrent git reads on a 2-CPU arm64 box take 33 ms; 1 s is ~30x that and a read now waits only for a bulkhead permit, the git gate being gone"
+          "millis": 30000,
+          "basis": "read",
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 60000,
@@ -10424,9 +10424,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -10540,9 +10540,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -10656,9 +10656,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -10765,9 +10765,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -10874,9 +10874,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -10990,9 +10990,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -11098,9 +11098,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 60000,
@@ -11210,9 +11210,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 60000,
@@ -11316,9 +11316,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 10000,
@@ -11522,9 +11522,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -11634,9 +11634,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 60000,
@@ -11753,9 +11753,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 60000,
@@ -11872,9 +11872,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 60000,
@@ -11984,9 +11984,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 60000,
@@ -12103,9 +12103,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 60000,
@@ -12215,9 +12215,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 60000,
@@ -12335,9 +12335,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -12456,9 +12456,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -12576,9 +12576,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -12695,9 +12695,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -12807,9 +12807,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -12919,9 +12919,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -13031,9 +13031,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -13150,9 +13150,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -13257,9 +13257,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 10000,
@@ -13359,9 +13359,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 10000,
@@ -13467,9 +13467,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 10000,
@@ -13581,9 +13581,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 10000,
@@ -13689,9 +13689,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 10000,
@@ -13791,9 +13791,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 10000,
@@ -13916,9 +13916,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 300000,
@@ -14026,9 +14026,9 @@
           }
         ],
         "turn": {
-          "millis": 1,
+          "millis": 30000,
           "basis": "read",
-          "note": "the lane refuses at submit today, so there is no wait to bound; the answer is a map lookup under one mutex and holds nothing"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 1000,
@@ -14139,9 +14139,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -14258,9 +14258,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -14377,9 +14377,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -14496,9 +14496,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -14608,9 +14608,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 10000,
@@ -14720,9 +14720,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 10000,
@@ -14839,9 +14839,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 10000,
@@ -14951,9 +14951,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 10000,
@@ -15070,9 +15070,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 10000,
@@ -15189,9 +15189,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 10000,
@@ -15302,9 +15302,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -15416,9 +15416,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -15530,9 +15530,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -15644,9 +15644,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -15765,9 +15765,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -15881,9 +15881,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -15990,9 +15990,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -16111,9 +16111,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -16220,9 +16220,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -16329,9 +16329,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -16445,9 +16445,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -16561,9 +16561,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -16670,9 +16670,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -16786,9 +16786,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -16894,9 +16894,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -17008,9 +17008,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -17120,9 +17120,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -17239,9 +17239,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -17449,9 +17449,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 60000,
@@ -17570,9 +17570,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 60000,
@@ -17684,9 +17684,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 60000,
@@ -17805,9 +17805,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 60000,
@@ -17926,9 +17926,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 60000,
@@ -18047,9 +18047,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 60000,
@@ -18168,9 +18168,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 60000,
@@ -18282,9 +18282,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 60000,
@@ -18390,9 +18390,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -18502,9 +18502,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -18614,9 +18614,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -18733,9 +18733,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -18840,9 +18840,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -18947,9 +18947,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -19059,9 +19059,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -19167,9 +19167,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -19281,9 +19281,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -19397,9 +19397,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -19513,9 +19513,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -19629,9 +19629,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -19745,9 +19745,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -19861,9 +19861,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -19971,9 +19971,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -20077,9 +20077,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -20190,9 +20190,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -20296,9 +20296,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -20409,9 +20409,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -20522,9 +20522,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 300000,
@@ -20628,9 +20628,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -20746,9 +20746,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 300000,
@@ -20869,9 +20869,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 600000,
@@ -20985,9 +20985,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -21101,9 +21101,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 300000,
@@ -21217,9 +21217,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 300000,
@@ -21333,9 +21333,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 300000,
@@ -21456,9 +21456,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 300000,
@@ -21579,9 +21579,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 300000,
@@ -21702,9 +21702,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 300000,
@@ -21825,9 +21825,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 300000,
@@ -21946,9 +21946,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -22065,9 +22065,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -22177,9 +22177,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -22296,9 +22296,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -22415,9 +22415,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -22522,9 +22522,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 10000,
@@ -22619,9 +22619,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 10000,
@@ -22728,9 +22728,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -22847,9 +22847,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -22966,9 +22966,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -23085,9 +23085,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -23204,9 +23204,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -23323,9 +23323,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -23643,9 +23643,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 60000,
@@ -23757,9 +23757,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 60000,
@@ -23870,9 +23870,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 10000,
@@ -23989,9 +23989,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 10000,
@@ -24101,9 +24101,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 10000,
@@ -24207,9 +24207,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 5000,
@@ -24309,9 +24309,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -24425,9 +24425,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -24541,9 +24541,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -24662,9 +24662,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -24776,9 +24776,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -24897,9 +24897,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -25013,9 +25013,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -25134,9 +25134,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -25397,9 +25397,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -25511,9 +25511,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -25632,9 +25632,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -25748,9 +25748,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -25864,9 +25864,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -25980,9 +25980,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 120000,
@@ -26089,9 +26089,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -26327,9 +26327,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 900000,
@@ -26443,9 +26443,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -26562,9 +26562,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -26681,9 +26681,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -26800,9 +26800,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,
@@ -26919,9 +26919,9 @@
           }
         ],
         "turn": {
-          "millis": 1000,
+          "millis": 30000,
           "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
         },
         "max": {
           "millis": 30000,

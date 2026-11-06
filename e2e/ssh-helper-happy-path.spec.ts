@@ -628,6 +628,23 @@ test.describe('one ssh connection per host, answered unwatched, surviving the co
       const shellPid = Number(/NOCXJOB=(\d+)/.exec(readFileSync(pidFile, 'utf8'))?.[1] ?? 0)
       expect(shellPid).toBeGreaterThan(0)
 
+      // THE LINE IS TYPED AT THE PROMPT, BECAUSE THAT IS WHERE A LINE GOES
+      // (nocx-atpw5.1.21). The poll above waits for the file the command WRITES:
+      // the far shell has run `echo` and has not yet returned to its prompt, so
+      // the composer is still hidden and the keyboard is the grid's — i.e. it is
+      // the running command's. A line typed in that interval is type-ahead, and
+      // it is split the moment the prompt returns: the head reaches the pty's
+      // readline and the tail lands in the composer the prompt just showed. The
+      // composed tail is then submitted on its own, which is a one-row error
+      // block that finishes in milliseconds while the probe, whose path lost its
+      // end, never starts at all — the failure CI recorded (18 ms, one row).
+      //
+      // So the prompt is waited for as an OBSERVABLE, the same one every other
+      // line in this spec is typed at: the composer holding the keyboard is the
+      // product's statement that the shell is ready to read a line, and the
+      // whole line then goes out as ONE paste that no later fact can split.
+      // Nothing is waited out, and no bound is widened.
+      await promptReady(first)
       await first.keyboard.type(`bash ${path.join(remoteHome, PROBE)}`)
       await first.keyboard.press('Enter')
       await expect

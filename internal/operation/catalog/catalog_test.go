@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -396,5 +397,29 @@ func TestAChildScopeStaysWithinItsParentsRemainder(t *testing.T) {
 	shortChild := Begin(WithScope(ctx, shortParent), OpTransportPing, Invocation{})
 	if !shortChild.maxDeadline.Before(shortParent.maxDeadline) {
 		t.Fatalf("a child with its own shorter max was stretched: child %s parent %s", shortChild.maxDeadline, shortParent.maxDeadline)
+	}
+}
+
+// A cancellation after the scope settled must write nothing, and must not do
+// it from the AfterFunc goroutine while the caller reads the log. The root
+// package's release-diagnostics test owns its own unsynchronised buffer; this
+// is the same shape (run 42139974476's follow-up, CI fdfc8d519).
+func TestALateCancellationWritesNothingAfterSettlement(t *testing.T) {
+	var buf bytes.Buffer
+	lg := log.NewSlogAdapter(slog.New(slog.NewTextHandler(&buf, nil)))
+	for i := 0; i < 200; i++ {
+		ctx := log.WithLogger(context.Background(), lg)
+		ctx, cancel := context.WithCancel(ctx)
+		cancel() // the callback is already due when Begin registers it
+		s := Begin(ctx, OpTransportPing, Invocation{})
+		s.Complete()
+		// The callback runs on its own goroutine and cannot be joined. Yield
+		// so it reaches its settlement while this goroutine is about to read
+		// the buffer the caller owns.
+		runtime.Gosched()
+		_ = buf.String()
+	}
+	if got := buf.String(); got != "" {
+		t.Fatalf("a cancelled invocation wrote after it settled: %s", got)
 	}
 }

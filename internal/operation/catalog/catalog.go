@@ -525,8 +525,10 @@ const (
 //
 // Stage 2 records settlement; it does not gate the wire. The first of
 // completion, cancellation and expiry wins the record, and every later attempt
-// is dropped and logged. A later stage arms the response path on the same
-// record, which is why the race is exercised under -race now.
+// is dropped silently: a later attempt may come from a timer goroutine the
+// caller cannot wait for, and nothing may be written after the operation has
+// settled. A later stage arms the response path on the same record, which is
+// why the race is exercised under -race now.
 type Scope struct {
 	op          Method
 	decl        Declaration
@@ -639,27 +641,27 @@ func (s *Scope) Outcome() (Outcome, bool) {
 }
 
 // Settle records the first outcome and drops every later one. It is the one
-// settlement authority of section 4. A second settlement panics in a strict
-// (test-built) scope and is logged otherwise.
+// settlement authority of section 4.
+//
+// NOTHING IS WRITTEN AFTER THE FIRST SETTLEMENT. A second settlement can arrive
+// from a goroutine the caller cannot wait for — the max timer, or the
+// context.AfterFunc callback that settles a cancellation — and a warning there
+// races whoever reads the log after the operation returned (CI fdfc8d519).
+// Routine outcomes write nothing whether they win or lose: a completion, a
+// cancellation and a refusal are ordinary control-plane traffic. Only an
+// expiry that WINS the settlement writes, and that is by definition an
+// operation still running. A strict (test-built) scope panics on the second
+// settlement instead, so the defect stays visible in a test.
 func (s *Scope) Settle(outcome Outcome) bool {
 	if !s.settled.CompareAndSwap(false, true) {
-		prev, _ := s.Outcome()
 		if s.strict {
+			prev, _ := s.Outcome()
 			panic(fmt.Sprintf("operation/catalog: %s settled twice: %q then %q", s.decl.ID, prev, outcome))
 		}
-		log.From(s.logContext()).Warn("operation settlement dropped: already settled",
-			"operation", string(s.decl.ID), "first", string(prev), "dropped", string(outcome))
 		return false
 	}
 	s.outcome.Store(outcome)
 	s.stopTimers()
-	// A ROUTINE SUCCESS WRITES NO RECORD. The log has a size ceiling that the
-	// e2e transcript test reads (run 42139974476): one line per completed
-	// operation pushed the readiness line out of it. A completion, a
-	// cancellation and a refusal are the ordinary traffic of the control
-	// plane and say nothing a reader of the log needs. The two records worth
-	// keeping are an expired deadline — work nobody is watching any more —
-	// and a double settlement, which is a defect (logged above).
 	if outcome == OutcomeExpired {
 		log.From(s.logContext()).Warn("operation deadline expired",
 			"operation", string(s.decl.ID), "owner", string(s.owner), "origin", string(s.origin),

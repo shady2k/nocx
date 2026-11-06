@@ -334,6 +334,15 @@ const (
 
 // acquire waits for a permit, bounded by turn.
 func (r *Registry) acquire(key Key, origin catalog.Origin, turn context.Context) error {
+	// waited says this call has already joined the waiting count, so a grant
+	// after a wait has to take it back out. The turn-expiry arm below always
+	// did; the arm that finally finds capacity did not, and the counter
+	// therefore never came down: Stats reported a waiter for ever, and
+	// dropIfIdleLocked would not drop a domain that had none. The defect is
+	// invisible while every waiter expires (the turn used to be one second);
+	// it bites as soon as a wait is granted, which a person's thirty-second
+	// turn makes ordinary (catalogue personTurnMillis).
+	waited := false
 	for {
 		r.mu.Lock()
 		d := r.domainLocked(key)
@@ -354,6 +363,9 @@ func (r *Registry) acquire(key Key, origin catalog.Origin, turn context.Context)
 		}
 		if r.fitsLocked(d, origin) {
 			d.running++
+			if waited {
+				d.waiters--
+			}
 			if origin == catalog.OriginBackground {
 				d.background++
 			}
@@ -362,6 +374,7 @@ func (r *Registry) acquire(key Key, origin catalog.Origin, turn context.Context)
 			return nil
 		}
 		d.waiters++
+		waited = true
 		changed := d.changed
 		r.mu.Unlock()
 

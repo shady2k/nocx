@@ -480,3 +480,52 @@ func TestTenThousandTimeoutsOnChangingHostsStayBounded(t *testing.T) {
 		t.Fatalf("%v (baseline %d, now %d)", err, baseline, runtime.NumGoroutine())
 	}
 }
+
+// TestAWaitThatIsGrantedLeavesTheWaitingCount is the accounting half of the
+// same wait: a call that waited and then took a permit must leave the waiting
+// count. The grant arm used to return without taking it back out, so a domain
+// reported a waiter for ever and would not be reclaimed — invisible while
+// every waiter expired at its one-second turn, and ordinary once a person's
+// turn is thirty seconds and a wait is granted rather than refused.
+func TestAWaitThatIsGrantedLeavesTheWaitingCount(t *testing.T) {
+	opts := testOptions()
+	opts.PerDomain = 1
+	opts.PersonReserve = 0
+	opts.AbandonedPerDomain = 8
+	opts.AbandonedGlobal = 16
+	opts.HealthyReserve = 0
+	r := New(opts)
+	release := make(chan struct{})
+	blocked := make(chan struct{})
+	go func() {
+		_ = r.Do(Request{
+			Key: mount("m"), Origin: catalog.OriginPerson,
+			Turn: turnCtx(t, time.Minute), Work: turnCtx(t, time.Minute),
+			Run: blockingRun(blocked, release),
+		})
+	}()
+	<-blocked
+
+	done := make(chan error, 1)
+	go func() {
+		done <- r.Do(Request{
+			Key: mount("m"), Origin: catalog.OriginPerson,
+			Turn: turnCtx(t, time.Minute), Work: turnCtx(t, time.Minute),
+			Run: func(context.Context) error { return nil },
+		})
+	}()
+	if err := waitFor(t, "the second call to wait", func() bool { return r.Stats().Waiting == 1 }); err != nil {
+		t.Fatal(err)
+	}
+
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("the call granted the permit: %v", err)
+	}
+	if err := waitFor(t, "the granted waiter to leave the waiting count", func() bool {
+		s := r.Stats()
+		return s.Waiting == 0 && s.Running == 0
+	}); err != nil {
+		t.Fatal(err)
+	}
+}

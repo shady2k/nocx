@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/log"
@@ -575,7 +577,9 @@ func (d *typedDelivery) awaitOwnership(ctx context.Context) (TypedMaster, error)
 	defer tick.Stop()
 	var last error
 	for {
+		scope := catalog.BeginInternal(ctx, catalog.OpInternalTypedLineOwnership)
 		m, err := d.runner.dial(d.controlPath)
+		scope.Complete()
 		if err == nil {
 			return m, nil
 		}

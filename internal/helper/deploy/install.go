@@ -23,6 +23,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/helper/proto"
 )
 
@@ -201,6 +203,8 @@ func InstalledBinary(dir string) string {
 // exactly as reusable as one followed by a start that succeeds. Liveness has
 // one authority and it is the endpoint socket.
 func Ensure(ctx context.Context, fs RemoteFS, src ArtifactSource, home string, p Platform) (binaryPath, contentHash string, err error) {
+	scope := catalog.BeginInternal(ctx, catalog.OpInternalHelperInstall)
+	defer scope.Complete()
 	data, contentHash, err := src.Artifact(p)
 	if err != nil {
 		return "", "", err

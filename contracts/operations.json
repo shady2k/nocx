@@ -2898,11 +2898,6 @@
               "kind": "barrier",
               "name": "store-set",
               "mode": "shared"
-            },
-            {
-              "kind": "barrier",
-              "name": "store-set",
-              "mode": "exclusive"
             }
           ],
           "dependencies": [
@@ -2950,11 +2945,6 @@
           "kind": "barrier",
           "name": "store-set",
           "mode": "shared"
-        },
-        {
-          "kind": "barrier",
-          "name": "store-set",
-          "mode": "exclusive"
         }
       ],
       "dependencies": [
@@ -2977,11 +2967,6 @@
               "kind": "barrier",
               "name": "store-set",
               "mode": "shared"
-            },
-            {
-              "kind": "barrier",
-              "name": "store-set",
-              "mode": "exclusive"
             }
           ],
           "dependencies": [
@@ -3029,11 +3014,6 @@
           "kind": "barrier",
           "name": "store-set",
           "mode": "shared"
-        },
-        {
-          "kind": "barrier",
-          "name": "store-set",
-          "mode": "exclusive"
         }
       ],
       "dependencies": [
@@ -6684,9 +6664,9 @@
         "note": "the operation waits on its owner’s resources; the smallest non-zero turn is declared until the resource scheduler lands"
       },
       "max": {
-        "millis": 30000,
+        "millis": 60000,
         "basis": "read",
-        "note": "read: probeTimeout (30 s) in internal/assistant/probe.go"
+        "note": "read: probeTimeout (30 s) in internal/assistant/probe.go; 60 s is the declared envelope"
       },
       "silence": {
         "kind": "none",
@@ -6980,6 +6960,69 @@
       "resources": [],
       "dependencies": [
         "network"
+      ],
+      "preempts": []
+    },
+    {
+      "id": "internal.files.baseline",
+      "kind": "internal",
+      "owner": "session",
+      "phases": [
+        {
+          "name": "run",
+          "resources": [
+            {
+              "kind": "binding",
+              "name": "",
+              "mode": "key"
+            }
+          ],
+          "dependencies": [
+            "filesystem"
+          ]
+        }
+      ],
+      "turn": {
+        "millis": 1000,
+        "basis": "read",
+        "note": "the operation waits on its owner’s resources; the smallest non-zero turn is declared until the resource scheduler lands"
+      },
+      "max": {
+        "millis": 10000,
+        "basis": "read",
+        "note": "read: one watch baseline lists each added path; the adapter has a per-call hard bound"
+      },
+      "silence": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "answer": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "recovery": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "merge": "none",
+      "waiting": "Taking the folder baseline",
+      "row": "never",
+      "expired": "retry-read",
+      "resources": [
+        {
+          "kind": "binding",
+          "name": "",
+          "mode": "key"
+        }
+      ],
+      "dependencies": [
+        "filesystem"
       ],
       "preempts": []
     },
@@ -7317,6 +7360,71 @@
       "preempts": []
     },
     {
+      "id": "internal.helper.gitOpen",
+      "kind": "internal",
+      "owner": "binding",
+      "phases": [
+        {
+          "name": "run",
+          "resources": [
+            {
+              "kind": "binding",
+              "name": "",
+              "mode": "key"
+            }
+          ],
+          "dependencies": [
+            "helper",
+            "ssh"
+          ]
+        }
+      ],
+      "turn": {
+        "millis": 1000,
+        "basis": "read",
+        "note": "the operation waits on its owner’s resources; the smallest non-zero turn is declared until the resource scheduler lands"
+      },
+      "max": {
+        "millis": 120000,
+        "basis": "read",
+        "note": "read: gitOpenTimeout (60 s) bounds the helper git open in internal/app/helper_git.go; 120 s is the declared envelope"
+      },
+      "silence": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "answer": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "recovery": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "merge": "none",
+      "waiting": "Opening git on the helper",
+      "row": "never",
+      "expired": "outcome-unknown",
+      "resources": [
+        {
+          "kind": "binding",
+          "name": "",
+          "mode": "key"
+        }
+      ],
+      "dependencies": [
+        "helper",
+        "ssh"
+      ],
+      "preempts": []
+    },
+    {
       "id": "internal.helper.install",
       "kind": "internal",
       "owner": "binding",
@@ -7382,6 +7490,59 @@
         "ssh",
         "filesystem",
         "network"
+      ],
+      "preempts": []
+    },
+    {
+      "id": "internal.helper.probe",
+      "kind": "internal",
+      "owner": "server",
+      "phases": [
+        {
+          "name": "run",
+          "resources": [],
+          "dependencies": [
+            "helper",
+            "ssh"
+          ]
+        }
+      ],
+      "turn": {
+        "millis": 1000,
+        "basis": "read",
+        "note": "the operation waits on its owner’s resources; the smallest non-zero turn is declared until the resource scheduler lands"
+      },
+      "max": {
+        "millis": 30000,
+        "basis": "read",
+        "note": "read: deploy.Probe runs one uname on the helper; no explicit bound today"
+      },
+      "silence": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "answer": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "recovery": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "merge": "none",
+      "waiting": "Probing the helper platform",
+      "row": "never",
+      "expired": "retry-read",
+      "resources": [],
+      "dependencies": [
+        "helper",
+        "ssh"
       ],
       "preempts": []
     },
@@ -7551,6 +7712,71 @@
       "dependencies": [
         "session",
         "content"
+      ],
+      "preempts": []
+    },
+    {
+      "id": "internal.pane.screenRead",
+      "kind": "internal",
+      "owner": "session",
+      "phases": [
+        {
+          "name": "run",
+          "resources": [
+            {
+              "kind": "session",
+              "name": "",
+              "mode": "key"
+            }
+          ],
+          "dependencies": [
+            "session",
+            "helper"
+          ]
+        }
+      ],
+      "turn": {
+        "millis": 1000,
+        "basis": "read",
+        "note": "the operation waits on its owner’s resources; the smallest non-zero turn is declared until the resource scheduler lands"
+      },
+      "max": {
+        "millis": 30000,
+        "basis": "read",
+        "note": "read: paneScreenTimeout (10 s) bounds one screen read in internal/app/panescreen.go; 30 s is the declared envelope"
+      },
+      "silence": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "answer": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "recovery": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "merge": "same-key",
+      "waiting": "Reading the pane screen",
+      "row": "never",
+      "expired": "retry-read",
+      "resources": [
+        {
+          "kind": "session",
+          "name": "",
+          "mode": "key"
+        }
+      ],
+      "dependencies": [
+        "session",
+        "helper"
       ],
       "preempts": []
     },
@@ -7746,69 +7972,6 @@
       "preempts": []
     },
     {
-      "id": "internal.session.screenBaseline",
-      "kind": "internal",
-      "owner": "session",
-      "phases": [
-        {
-          "name": "run",
-          "resources": [
-            {
-              "kind": "session",
-              "name": "",
-              "mode": "key"
-            }
-          ],
-          "dependencies": [
-            "session"
-          ]
-        }
-      ],
-      "turn": {
-        "millis": 1000,
-        "basis": "read",
-        "note": "the operation waits on its owner’s resources; the smallest non-zero turn is declared until the resource scheduler lands"
-      },
-      "max": {
-        "millis": 10000,
-        "basis": "read",
-        "note": "read: one screen baseline capture; no explicit bound today"
-      },
-      "silence": {
-        "kind": "none",
-        "millis": 0,
-        "basis": "",
-        "note": ""
-      },
-      "answer": {
-        "kind": "none",
-        "millis": 0,
-        "basis": "",
-        "note": ""
-      },
-      "recovery": {
-        "kind": "none",
-        "millis": 0,
-        "basis": "",
-        "note": ""
-      },
-      "merge": "none",
-      "waiting": "Capturing the screen baseline",
-      "row": "never",
-      "expired": "retry-read",
-      "resources": [
-        {
-          "kind": "session",
-          "name": "",
-          "mode": "key"
-        }
-      ],
-      "dependencies": [
-        "session"
-      ],
-      "preempts": []
-    },
-    {
       "id": "internal.ssh.dial",
       "kind": "internal",
       "owner": "server",
@@ -7919,6 +8082,73 @@
       "preempts": []
     },
     {
+      "id": "internal.ssh.scrollbackPush",
+      "kind": "internal",
+      "owner": "binding",
+      "phases": [
+        {
+          "name": "run",
+          "resources": [
+            {
+              "kind": "binding",
+              "name": "",
+              "mode": "key"
+            }
+          ],
+          "dependencies": [
+            "ssh",
+            "helper",
+            "config"
+          ]
+        }
+      ],
+      "turn": {
+        "millis": 1000,
+        "basis": "read",
+        "note": "the operation waits on its owner’s resources; the smallest non-zero turn is declared until the resource scheduler lands"
+      },
+      "max": {
+        "millis": 60000,
+        "basis": "read",
+        "note": "read: the push fan-out is bounded by pushScrollbackTimeout (30 s) in internal/app/scrollback.go; 60 s is the declared envelope"
+      },
+      "silence": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "answer": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "recovery": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "merge": "same-key",
+      "waiting": "Sending the scrollback setting",
+      "row": "never",
+      "expired": "retry-read",
+      "resources": [
+        {
+          "kind": "binding",
+          "name": "",
+          "mode": "key"
+        }
+      ],
+      "dependencies": [
+        "ssh",
+        "helper",
+        "config"
+      ],
+      "preempts": []
+    },
+    {
       "id": "internal.typedLine.ownership",
       "kind": "internal",
       "owner": "session",
@@ -7978,6 +8208,59 @@
       ],
       "dependencies": [
         "session"
+      ],
+      "preempts": []
+    },
+    {
+      "id": "internal.update.apply",
+      "kind": "internal",
+      "owner": "server",
+      "phases": [
+        {
+          "name": "run",
+          "resources": [],
+          "dependencies": [
+            "network",
+            "filesystem"
+          ]
+        }
+      ],
+      "turn": {
+        "millis": 1000,
+        "basis": "read",
+        "note": "the operation waits on its owner’s resources; the smallest non-zero turn is declared until the resource scheduler lands"
+      },
+      "max": {
+        "millis": 300000,
+        "basis": "read",
+        "note": "read: an update apply writes a binary and swaps it; no explicit bound today"
+      },
+      "silence": {
+        "kind": "deadline",
+        "millis": 60000,
+        "basis": "read",
+        "note": "declared install progress bound; present behaviour has none"
+      },
+      "answer": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "recovery": {
+        "kind": "deadline",
+        "millis": 120000,
+        "basis": "read",
+        "note": "an interrupted apply must be finished or rolled back by the update journal"
+      },
+      "merge": "none",
+      "waiting": "Applying the update",
+      "row": "always",
+      "expired": "outcome-unknown",
+      "resources": [],
+      "dependencies": [
+        "network",
+        "filesystem"
       ],
       "preempts": []
     },
@@ -14755,7 +15038,7 @@
         "note": "the lane refuses at submit today, so there is no wait to bound; the smallest non-zero turn is declared until flow control lands (stage 3)"
       },
       "max": {
-        "millis": 5000,
+        "millis": 500,
         "basis": "read",
         "note": "read: ping reads the clock and enqueues a response"
       },
@@ -15721,9 +16004,9 @@
         "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
       },
       "max": {
-        "millis": 120000,
+        "millis": 600000,
         "basis": "read",
-        "note": "read: a vault write or lifecycle call; no explicit bound today"
+        "note": "read: reset rewrites the vault and config references; no explicit bound today"
       },
       "silence": {
         "kind": "none",
@@ -15739,9 +16022,9 @@
       },
       "recovery": {
         "kind": "deadline",
-        "millis": 10000,
+        "millis": 120000,
         "basis": "read",
-        "note": "metadata-first vault write; recovery finishes the material store"
+        "note": "reset is a committed mutation: finish the generation or leave the previous one readable"
       },
       "merge": "none",
       "waiting": "Resetting the vault",
@@ -16324,9 +16607,9 @@
         "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
       },
       "max": {
-        "millis": 120000,
+        "millis": 900000,
         "basis": "read",
-        "note": "read: a vault write or lifecycle call; no explicit bound today"
+        "note": "read: an unlock asks a person and then opens the store; present behaviour waits without a bound"
       },
       "silence": {
         "kind": "none",
@@ -16344,7 +16627,7 @@
         "kind": "deadline",
         "millis": 10000,
         "basis": "read",
-        "note": "declared bound read from the path it guards; see the operation family note"
+        "note": "the unlock may have opened the store; recovery seals it again if the answer arrived after expiry"
       },
       "merge": "none",
       "waiting": "Waiting for you to unlock the vault",

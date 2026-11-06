@@ -41,20 +41,27 @@ export function validate(schema, value, path = '$', root = schema) {
   if (schema.type) {
     const types = Array.isArray(schema.type) ? schema.type : [schema.type]
     const actual = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value
-    if (!types.includes(actual) && !(types.includes('integer') && actual === 'number' && Number.isInteger(value))) {
+    if (
+      !types.includes(actual) &&
+      !(types.includes('integer') && actual === 'number' && Number.isInteger(value))
+    ) {
       fail(path, `expected ${types.join('|')}, got ${actual}`)
     }
   }
   if (typeof value === 'string') {
-    if (schema.minLength !== undefined && value.length < schema.minLength) fail(path, `shorter than ${schema.minLength}`)
-    if (schema.pattern && !new RegExp(schema.pattern).test(value)) fail(path, `does not match ${schema.pattern}`)
+    if (schema.minLength !== undefined && value.length < schema.minLength)
+      fail(path, `shorter than ${schema.minLength}`)
+    if (schema.pattern && !new RegExp(schema.pattern).test(value))
+      fail(path, `does not match ${schema.pattern}`)
   }
   if (typeof value === 'number' && schema.minimum !== undefined && value < schema.minimum) {
     fail(path, `${value} is below ${schema.minimum}`)
   }
   if (Array.isArray(value)) {
-    if (schema.minItems !== undefined && value.length < schema.minItems) fail(path, `fewer than ${schema.minItems} items`)
-    if (schema.items) value.forEach((item, i) => validate(schema.items, item, `${path}[${i}]`, root))
+    if (schema.minItems !== undefined && value.length < schema.minItems)
+      fail(path, `fewer than ${schema.minItems} items`)
+    if (schema.items)
+      value.forEach((item, i) => validate(schema.items, item, `${path}[${i}]`, root))
     return
   }
   if (value && typeof value === 'object') {

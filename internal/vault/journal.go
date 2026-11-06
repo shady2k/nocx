@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/credential"
 )
 
@@ -76,6 +78,8 @@ func (e JournalEntry) String() string {
 // doc is modified in place. The caller must save the document after Reconcile
 // returns.
 func Reconcile(ctx context.Context, doc *Document, reg *Registry) []JournalEntry {
+	scope := catalog.BeginInternal(ctx, catalog.OpInternalVaultRecovery)
+	defer scope.Complete()
 	var blocked []JournalEntry
 
 	for i := range doc.Journal {

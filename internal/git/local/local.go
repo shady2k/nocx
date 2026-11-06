@@ -21,6 +21,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/git/spawn"
 	"github.com/shady2k/nocx/internal/proc"
@@ -149,6 +151,8 @@ type execResult struct {
 // race a read. The stopSink turns the sink's "enough" — the deliberate
 // stop — into the kill signal.
 func run(ctx context.Context, spec spec) execResult {
+	scope := catalog.BeginInternal(ctx, catalog.OpInternalGitProcess)
+	defer scope.Complete()
 	var res execResult
 
 	if spec.sink == nil {

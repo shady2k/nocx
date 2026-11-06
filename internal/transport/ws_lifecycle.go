@@ -664,6 +664,8 @@ func (s *WSServer) raiseLifecycleBlockFinished(data historyRecordedData, f lifec
 // advances the ledger's existing Submit → StartExecution → FinishExecution
 // lifecycle and never invents a second phase machine.
 func (s *WSServer) syncLifecycleLedger(ctx context.Context, f lifecyclepub.Fact) *historyRecordedData {
+	opScope := s.beginInternal(ctx, catalog.OpInternalLifecycleReconcile)
+	defer opScope.Complete()
 	if s.contentDB == nil || f.Attempt == nil {
 		return nil
 	}

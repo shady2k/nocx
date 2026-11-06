@@ -49,6 +49,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/session"
@@ -1111,6 +1113,8 @@ func (s *WSServer) registerAndMint(rt *runningTransfer, needsTicket bool) error 
 // answered (D8) — which is what makes files.close, session teardown and
 // shutdown able to cancel, wait a bounded moment and then close for real.
 func (s *WSServer) runUpload(rt *runningTransfer, sink transfer.Sink) {
+	opScope := s.beginInternal(rt.ctx, catalog.OpInternalFilesUpload)
+	defer opScope.Complete()
 	defer close(rt.done)
 
 	// A path upload already holds its reader; only a stream upload waits.

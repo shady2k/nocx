@@ -40,6 +40,8 @@ import (
 	"sync"
 	"unsafe"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/google/uuid"
 
 	"github.com/shady2k/nocx/internal/content"
@@ -3568,6 +3570,8 @@ func (bs *blockStream) openFinished(ctx context.Context, s *WSServer, sid sessio
 }
 
 func (bs *blockStream) flushPendingRows(ctx context.Context, s *WSServer, sid session.ID, block *openBlock, pending []pendingRows, confirm func(uint64)) {
+	opScope := s.beginInternal(ctx, catalog.OpInternalContentBlockRowFlush)
+	defer opScope.Complete()
 	if !block.kept {
 		// A refused keep stores nothing, so it confirms nothing (the mark
 		// means stored, nocx-zg3k3.5.3): the queued rows were dropped with

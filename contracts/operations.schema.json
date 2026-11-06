@@ -5,10 +5,7 @@
   "description": "Generated from internal/operation/catalog. Every operation declares its phases, resources, failure domains and finite lifetime here; the OpenRPC manifest and the renderer's deadline table are projections of this file.",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "version",
-    "operations"
-  ],
+  "required": ["version", "operations"],
   "properties": {
     "version": {
       "const": 1
@@ -23,19 +20,12 @@
   },
   "$defs": {
     "basis": {
-      "enum": [
-        "read",
-        "measured"
-      ]
+      "enum": ["read", "measured"]
     },
     "deadline": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "millis",
-        "basis",
-        "note"
-      ],
+      "required": ["millis", "basis", "note"],
       "properties": {
         "millis": {
           "type": "integer",
@@ -53,18 +43,10 @@
     "bound": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "kind",
-        "millis",
-        "basis",
-        "note"
-      ],
+      "required": ["kind", "millis", "basis", "note"],
       "properties": {
         "kind": {
-          "enum": [
-            "none",
-            "deadline"
-          ]
+          "enum": ["none", "deadline"]
         },
         "millis": {
           "type": "integer",
@@ -72,11 +54,7 @@
         },
         "basis": {
           "type": "string",
-          "enum": [
-            "",
-            "read",
-            "measured"
-          ]
+          "enum": ["", "read", "measured"]
         },
         "note": {
           "type": "string"
@@ -90,9 +68,7 @@
                 "const": "deadline"
               }
             },
-            "required": [
-              "kind"
-            ]
+            "required": ["kind"]
           },
           "then": {
             "properties": {
@@ -101,10 +77,7 @@
                 "minimum": 1
               },
               "basis": {
-                "enum": [
-                  "read",
-                  "measured"
-                ]
+                "enum": ["read", "measured"]
               },
               "note": {
                 "type": "string",
@@ -120,9 +93,7 @@
                 "const": "none"
               }
             },
-            "required": [
-              "kind"
-            ]
+            "required": ["kind"]
           },
           "then": {
             "properties": {
@@ -143,31 +114,16 @@
     "resource": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "kind",
-        "name",
-        "mode"
-      ],
+      "required": ["kind", "name", "mode"],
       "properties": {
         "kind": {
-          "enum": [
-            "session",
-            "binding",
-            "checkout",
-            "store",
-            "collection",
-            "barrier"
-          ]
+          "enum": ["session", "binding", "checkout", "store", "collection", "barrier"]
         },
         "name": {
           "type": "string"
         },
         "mode": {
-          "enum": [
-            "key",
-            "shared",
-            "exclusive"
-          ]
+          "enum": ["key", "shared", "exclusive"]
         }
       }
     },
@@ -192,11 +148,7 @@
     "phase": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "name",
-        "resources",
-        "dependencies"
-      ],
+      "required": ["name", "resources", "dependencies"],
       "properties": {
         "name": {
           "type": "string",
@@ -243,19 +195,10 @@
           "pattern": "^internal\\.[a-z][A-Za-z0-9]*(\\.[a-z][A-Za-z0-9]*)+$|^[a-z][A-Za-z0-9]*(\\.[a-zA-Z][A-Za-z0-9]*)*$"
         },
         "kind": {
-          "enum": [
-            "method",
-            "internal"
-          ]
+          "enum": ["method", "internal"]
         },
         "owner": {
-          "enum": [
-            "request",
-            "session",
-            "binding",
-            "server",
-            "checkout"
-          ]
+          "enum": ["request", "session", "binding", "server", "checkout"]
         },
         "phases": {
           "type": "array",
@@ -292,11 +235,7 @@
           "$ref": "#/$defs/bound"
         },
         "merge": {
-          "enum": [
-            "none",
-            "latest-value",
-            "same-key"
-          ]
+          "enum": ["none", "latest-value", "same-key"]
         },
         "preempts": {
           "type": "array",
@@ -309,18 +248,10 @@
           "minLength": 1
         },
         "row": {
-          "enum": [
-            "never",
-            "past-wait",
-            "always"
-          ]
+          "enum": ["never", "past-wait", "always"]
         },
         "expired": {
-          "enum": [
-            "not-started",
-            "outcome-unknown",
-            "retry-read"
-          ]
+          "enum": ["not-started", "outcome-unknown", "retry-read"]
         }
       }
     }

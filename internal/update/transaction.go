@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/log"
 
 	"github.com/shady2k/nocx/internal/version"
@@ -19,6 +21,8 @@ import (
 
 // Check implements [Updater.Check].
 func (u *updater) Check(ctx context.Context) (*UpdateInfo, error) {
+	scope := catalog.BeginInternal(ctx, catalog.OpInternalUpdateCheck)
+	defer scope.Complete()
 	// Refuse dev builds — wails dev must never offer an update.
 	if u.currentVersion == "dev" {
 		u.log.Debug("update check: dev build, skipping")
@@ -71,6 +75,8 @@ func (u *updater) Check(ctx context.Context) (*UpdateInfo, error) {
 
 // Apply implements [Updater.Apply].
 func (u *updater) Apply(ctx context.Context, info *UpdateInfo) error {
+	scope := catalog.BeginInternal(ctx, catalog.OpInternalUpdateApply)
+	defer scope.Complete()
 	// Refusals must not leave even a lock or journal behind.
 	if err := u.platform.Preflight(ctx, u.installPath); err != nil {
 		return fmt.Errorf("update apply: preflight refused: %w", err)

@@ -236,16 +236,6 @@ func buildMethodSpecs(specs []methodSpec) (map[string]methodSpec, error) {
 		if _, dup := m[spec.method]; dup {
 			return nil, fmt.Errorf("transport: duplicate registration for control method %q", spec.method)
 		}
-		if !spec.op.Valid() {
-			return nil, fmt.Errorf(
-				"transport: control method %q registered without a catalogue handle — declare the operation in "+
-					"internal/operation/catalog and pass its handle to reg(); a method with no declaration does not exist",
-				spec.method)
-		}
-		if want := string(spec.op.ID()); want != spec.method {
-			return nil, fmt.Errorf(
-				"transport: control method %q is registered with the handle for %q", spec.method, want)
-		}
 		if spec.validate == nil {
 			// The architectural prohibition: a control method with no
 			// declared params validator does not get to exist. Declare
@@ -255,6 +245,16 @@ func buildMethodSpecs(specs []methodSpec) (map[string]methodSpec, error) {
 				"transport: control method %q registered without a params validator — "+
 					"declare params(fn) or noParams(); validation is a field of the "+
 					"registration, not a habit inside the handler", spec.method)
+		}
+		if !spec.op.Valid() {
+			return nil, fmt.Errorf(
+				"transport: control method %q registered without a catalogue handle — declare the operation in "+
+					"internal/operation/catalog and pass its handle to reg(); a method with no declaration does not exist",
+				spec.method)
+		}
+		if want := string(spec.op.ID()); want != spec.method {
+			return nil, fmt.Errorf(
+				"transport: control method %q is registered with the handle for %q", spec.method, want)
 		}
 		_, immediate := spec.submission.(control.ImmediateSubmission)
 		if immediate {

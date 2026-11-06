@@ -380,23 +380,10 @@ var declarationIndex = func() map[ID]Declaration {
 }()
 
 func init() {
-	errs := Validate(declarationTable)
-	if len(errs) != 0 && strictCatalogInit {
+	if errs := Validate(declarationTable); len(errs) != 0 {
 		panic(fmt.Sprintf("operation/catalog: %d invalid declaration(s): %v", len(errs), errs[0]))
 	}
-	validationErrors = errs
 }
-
-// strictCatalogInit is set by the build tag catalogtest. Production init
-// refuses an invalid table; the tag exists so a test can print every problem
-// at once instead of the first.
-var strictCatalogInit = true
-
-// validationErrors is the table's validation result, exposed to tests.
-var validationErrors []error
-
-// ValidationErrors returns the table's validation result.
-func ValidationErrors() []error { return validationErrors }
 
 // Validate checks every declaration field and the table-level rules: ids are
 // unique, a preempts target exists, a preemption is between two operations
@@ -569,7 +556,7 @@ type Scope struct {
 	origin    Origin
 	owner     Owner
 	started   time.Time
-	log       log.Logger
+	ctx       context.Context
 	strict    bool
 	settled   atomic.Bool
 	outcome   atomic.Value // Outcome
@@ -609,26 +596,27 @@ func begin(ctx context.Context, op Method, inv Invocation, strict bool) *Scope {
 	}
 	s := &Scope{
 		op: op, decl: d, origin: inv.Origin, owner: inv.Owner,
-		started: time.Now(), log: loggerFrom(ctx), strict: strict,
+		started: time.Now(), ctx: ctx, strict: strict,
 	}
 	// MAX IS THE ONLY DEADLINE STAGE 2 CAN OBSERVE. Turn is the wait for
 	// resources and capacity; nothing queues on a catalogue resource yet, so a
 	// turn timer would fire on every ordinary request and report a wait that
 	// never happened. The stage that first makes an operation wait starts it.
-	s.expiry = time.AfterFunc(d.Max.Duration(), s.expire)
-	// Cancellation is settled through the request context, so completion
-	// against disconnect is the same one-step race the later stages need.
-	if ctx != nil {
-		s.cancelReg = context.AfterFunc(ctx, func() { s.Settle(OutcomeCancelled) })
+	//
+	// The timer and the cancellation registration are installed under the
+	// mutex: either can fire before begin returns, and a settlement that wins
+	// that race must not be followed by a timer nobody will stop.
+	s.mu.Lock()
+	if !s.settled.Load() {
+		s.expiry = time.AfterFunc(d.Max.Duration(), s.expire)
+		if ctx != nil {
+			s.cancelReg = context.AfterFunc(ctx, func() { s.Settle(OutcomeCancelled) })
+		}
+	} else {
+		s.closed = true
 	}
+	s.mu.Unlock()
 	return s
-}
-
-func loggerFrom(ctx context.Context) log.Logger {
-	if ctx == nil {
-		return log.From(context.Background())
-	}
-	return log.From(ctx)
 }
 
 // ScopeFrom returns the scope an invocation put in the context, if any.
@@ -672,7 +660,7 @@ func (s *Scope) Settle(outcome Outcome) bool {
 		if s.strict {
 			panic(fmt.Sprintf("operation/catalog: %s settled twice: %q then %q", s.decl.ID, prev, outcome))
 		}
-		s.log.Warn("operation settlement dropped: already settled",
+		log.From(s.logContext()).Warn("operation settlement dropped: already settled",
 			"operation", string(s.decl.ID), "first", string(prev), "dropped", string(outcome))
 		return false
 	}
@@ -680,11 +668,11 @@ func (s *Scope) Settle(outcome Outcome) bool {
 	s.stopTimers()
 	switch outcome {
 	case OutcomeExpired:
-		s.log.Warn("operation deadline expired",
+		log.From(s.logContext()).Warn("operation deadline expired",
 			"operation", string(s.decl.ID), "owner", string(s.owner), "origin", string(s.origin),
 			"max_ms", s.decl.Max.Millis, "elapsed_ms", time.Since(s.started).Milliseconds())
 	case OutcomeCompleted:
-		s.log.Debug("operation settled", "operation", string(s.decl.ID),
+		log.From(s.logContext()).Debug("operation settled", "operation", string(s.decl.ID),
 			"origin", string(s.origin), "outcome", string(outcome),
 			"elapsed_ms", time.Since(s.started).Milliseconds())
 	}
@@ -709,6 +697,13 @@ func (s *Scope) expire() {
 	// tracking, so it records the declared expired outcome and says so in the
 	// log line, which is the whole of what this stage does with a deadline.
 	s.Settle(OutcomeExpired)
+}
+
+func (s *Scope) logContext() context.Context {
+	if s.ctx != nil {
+		return s.ctx
+	}
+	return context.Background()
 }
 
 func (s *Scope) stopTimers() {

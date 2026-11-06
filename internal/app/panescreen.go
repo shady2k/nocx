@@ -16,6 +16,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/agentcapture"
 	"github.com/shady2k/nocx/internal/assistant"
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
@@ -101,6 +103,8 @@ func (p *paneScreen) Available(paneID string) error {
 func (p *paneScreen) Screen(paneID string) (paneview.Frame, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), paneScreenTimeout)
 	defer cancel()
+	scope := catalog.BeginInternal(ctx, catalog.OpInternalPaneScreenRead)
+	defer scope.Complete()
 	c, id, err := p.owner(ctx, paneID)
 	if err != nil {
 		return paneview.Frame{}, err

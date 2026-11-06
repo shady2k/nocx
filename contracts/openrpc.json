@@ -4993,11 +4993,6 @@
                 "kind": "barrier",
                 "name": "store-set",
                 "mode": "shared"
-              },
-              {
-                "kind": "barrier",
-                "name": "store-set",
-                "mode": "exclusive"
               }
             ],
             "dependencies": [
@@ -5045,11 +5040,6 @@
             "kind": "barrier",
             "name": "store-set",
             "mode": "shared"
-          },
-          {
-            "kind": "barrier",
-            "name": "store-set",
-            "mode": "exclusive"
           }
         ],
         "dependencies": [
@@ -5121,11 +5111,6 @@
                 "kind": "barrier",
                 "name": "store-set",
                 "mode": "shared"
-              },
-              {
-                "kind": "barrier",
-                "name": "store-set",
-                "mode": "exclusive"
               }
             ],
             "dependencies": [
@@ -5173,11 +5158,6 @@
             "kind": "barrier",
             "name": "store-set",
             "mode": "shared"
-          },
-          {
-            "kind": "barrier",
-            "name": "store-set",
-            "mode": "exclusive"
           }
         ],
         "dependencies": [
@@ -22659,7 +22639,7 @@
           "note": "the lane refuses at submit today, so there is no wait to bound; the smallest non-zero turn is declared until flow control lands (stage 3)"
         },
         "max": {
-          "millis": 5000,
+          "millis": 500,
           "basis": "read",
           "note": "read: ping reads the clock and enqueues a response"
         },
@@ -24340,9 +24320,9 @@
           "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
         },
         "max": {
-          "millis": 120000,
+          "millis": 600000,
           "basis": "read",
-          "note": "read: a vault write or lifecycle call; no explicit bound today"
+          "note": "read: reset rewrites the vault and config references; no explicit bound today"
         },
         "silence": {
           "kind": "none",
@@ -24358,9 +24338,9 @@
         },
         "recovery": {
           "kind": "deadline",
-          "millis": 10000,
+          "millis": 120000,
           "basis": "read",
-          "note": "metadata-first vault write; recovery finishes the material store"
+          "note": "reset is a committed mutation: finish the generation or leave the previous one readable"
         },
         "merge": "none",
         "waiting": "Resetting the vault",
@@ -25359,9 +25339,9 @@
           "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
         },
         "max": {
-          "millis": 120000,
+          "millis": 900000,
           "basis": "read",
-          "note": "read: a vault write or lifecycle call; no explicit bound today"
+          "note": "read: an unlock asks a person and then opens the store; present behaviour waits without a bound"
         },
         "silence": {
           "kind": "none",
@@ -25379,7 +25359,7 @@
           "kind": "deadline",
           "millis": 10000,
           "basis": "read",
-          "note": "declared bound read from the path it guards; see the operation family note"
+          "note": "the unlock may have opened the store; recovery seals it again if the answer arrived after expiry"
         },
         "merge": "none",
         "waiting": "Waiting for you to unlock the vault",
@@ -26367,9 +26347,6 @@
     },
     {
       "$ref": "https://nocx.local/contracts/open.schema.json"
-    },
-    {
-      "$ref": "https://nocx.local/contracts/operations.schema.json"
     },
     {
       "$ref": "https://nocx.local/contracts/panes.close.schema.json"

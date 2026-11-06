@@ -4,7 +4,13 @@ graphify-out/
 dist/
 build/
 frontend/dist/
-frontend/bindings/
+frontend/bindings/# Generated wire manifests. Their format is the generator's, and
+# `npm run contracts:check` is their gate: reformatting them by hand makes that
+# check fail while changing nothing a reader sees. The schemas beside them are
+# hand-written and stay formatted.
+contracts/openrpc.json
+contracts/operations.json
+
 frontend/node_modules/
 package-lock.json
 spike/

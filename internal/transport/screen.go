@@ -35,6 +35,8 @@ package transport
 import (
 	"context"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
@@ -148,6 +150,8 @@ func (s *WSServer) ensureScreenOffer(sid session.ID, rx *sessionRx, wconn *wsCon
 }
 
 func (s *WSServer) offerScreenUntil(sid session.ID, rx *sessionRx, wconn *wsConn, workerCtx context.Context) {
+	opScope := s.beginInternal(workerCtx, catalog.OpInternalScreenOfferRetry)
+	defer opScope.Complete()
 	for {
 		ctx, target, offered, failed, frameBytes, wake, ok := rx.screenOfferSnapshot(wconn)
 		if !ok {

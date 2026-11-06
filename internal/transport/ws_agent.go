@@ -1338,6 +1338,8 @@ func logAgentStreamEnded(logger log.Logger, runID int64, started time.Time, reas
 // first, outside a capability admission and before any external request. A
 // sealed vault therefore waits and continues this same durable run.
 func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Responder) {
+	opScope := catalog.BeginInternal(log.WithLogger(ctx, h.log), catalog.OpInternalAgentRun)
+	defer opScope.Complete()
 	if rc.leaseDegradation != nil {
 		ctx = assistant.WithRunLeaseDegradation(ctx, rc.leaseDegradation)
 	}

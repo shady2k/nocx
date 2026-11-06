@@ -8,6 +8,7 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { format } from 'prettier'
 import { validate } from './operations-contract.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -36,7 +37,8 @@ function bound(b) {
 
 function entry(op) {
   const waiting = JSON.stringify(op.waiting)
-  const preempts = op.preempts.length === 0 ? '[]' : `[${op.preempts.map((p) => JSON.stringify(p)).join(', ')}]`
+  const preempts =
+    op.preempts.length === 0 ? '[]' : `[${op.preempts.map((p) => JSON.stringify(p)).join(', ')}]`
   return `  ${JSON.stringify(op.id)}: {
     kind: ${JSON.stringify(op.kind)},
     owner: ${JSON.stringify(op.owner)},
@@ -100,11 +102,14 @@ export function operationDeclaration(id: string): OperationDeclaration | undefin
 `
 }
 
-const generated = await build()
+const style = JSON.parse(await readFile(resolve(root, '.prettierrc.json'), 'utf8'))
+const generated = await format(await build(), { ...style, parser: 'typescript' })
 if (process.argv.includes('--check')) {
   const current = await readFile(target, 'utf8').catch(() => null)
   if (current !== generated) {
-    console.error('stale: frontend/src/generated/operations.ts does not match contracts/operations.json')
+    console.error(
+      'stale: frontend/src/generated/operations.ts does not match contracts/operations.json',
+    )
     process.exit(1)
   }
 } else {

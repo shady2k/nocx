@@ -90,7 +90,12 @@ async function build() {
     (name) =>
       name.endsWith('.schema.json') &&
       !name.endsWith('.params.schema.json') &&
-      name !== 'rpc.error.schema.json',
+      name !== 'rpc.error.schema.json' &&
+      // The operation catalogue is a manifest of declarations, not a JSON-RPC
+      // result. It has its own generator (gen-operations.mjs) and its own
+      // renderer projection; passing it through the result-type generator
+      // would produce a second, meaningless `operations.ts`.
+      name !== 'operations.schema.json',
   )
   const resultFiles = new Set(results)
   const schemaMethods = new Set(params.map((file) => file.replace(/\.params\.schema\.json$/, '')))

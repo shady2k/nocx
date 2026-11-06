@@ -26,8 +26,11 @@ package transport
 // the hold's state, and no muxer to leak.
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
+
+	"github.com/shady2k/nocx/internal/operation/catalog"
 
 	"github.com/shady2k/nocx/internal/session"
 )
@@ -108,6 +111,11 @@ func (s *WSServer) settleWhenEndHoldLifts(sid session.ID) bool {
 		return false
 	}
 	go func() {
+		// Owner: the session's end hold, released by releaseSessionEndHolds or
+		// the hold's own drain. Closing event: hold.drained/released, then the
+		// scope settling.
+		opScope := s.beginInternal(context.Background(), catalog.OpInternalSessionEndHold)
+		defer opScope.Complete()
 		select {
 		case <-hold.drained:
 		case <-hold.released:

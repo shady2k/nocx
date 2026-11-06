@@ -28,6 +28,8 @@ import (
 	"context"
 	"time"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/log"
@@ -157,6 +159,8 @@ func (s *WSServer) recordHole(
 // the ring and never a subscriber — it reads by offset and moves the
 // persistence cursor, which is not an acknowledgement and never becomes one.
 func (s *WSServer) recordSessionOutput(ctx context.Context, sid session.ID, ring *outputRing) {
+	opScope := s.beginInternal(ctx, catalog.OpInternalSessionRecorder)
+	defer opScope.Complete()
 	rec := s.sessionRecorder
 	if rec == nil {
 		return

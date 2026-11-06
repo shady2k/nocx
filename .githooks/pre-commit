@@ -48,7 +48,7 @@ if [ "${#CHANGED[@]}" -gt 0 ]; then
             # they do not change product behavior. Ratchets still invalidate
             # product scoping because they decide what product code is checked.
             .githooks/backlog-gate/*|.githooks/pre-commit|.githooks/commit-msg|.githooks/pre-merge-commit|.githooks/pre-push|scripts/connect-clone.sh) ;;
-            .githooks/check-deadcode*|.githooks/check-log-context*|.githooks/check-control-goroutines*|.githooks/images/*|Makefile|.golangci.yml)
+            .githooks/check-deadcode*|.githooks/check-log-context*|.githooks/check-control-goroutines*|.githooks/check-operation-scopes*|.githooks/images/*|Makefile|.golangci.yml)
                 RUN_GO=1; RUN_FE=1; RUN_E2E=1 ;;
             .githooks/*) ;;
             *.go|go.mod|go.sum)                 RUN_GO=1 ;;
@@ -279,6 +279,18 @@ if [ "$RUN_GO" = 1 ]; then
     host_gate "log-context ratchet" node .githooks/check-log-context.mjs
 else
     ok "log-context ratchet — skipped (no Go changes staged)"
+fi
+
+# --- 3d2. operation-scope ratchet (Go changes only, same reasoning: a regex
+# over the handler package, ~10ms). ADR-8eej3e66 §4 says nothing runs outside a
+# scope; the gate refuses a NEW direct provider call or a new background /
+# WithoutCancel context in internal/transport, and the baseline names each
+# existing one with its reason. Regenerate:
+# node .githooks/update-operation-scopes-baseline.mjs ----------------------
+if [ "$RUN_GO" = 1 ]; then
+    host_gate "operation-scope ratchet" node .githooks/check-operation-scopes.mjs
+else
+    ok "operation-scope ratchet — skipped (no Go changes staged)"
 fi
 
 # --- 3e. decision records: one identifier, one record (nocx-hyh2p) ---------

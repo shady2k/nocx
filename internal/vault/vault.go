@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/storage"
 )
@@ -844,7 +846,13 @@ func (v *Vault) autoSealLoop() {
 			v.mu.Unlock()
 
 			if !isSealed && epoch == armEpoch {
+				// Owner: the vault's auto-seal loop, which ends at
+				// autoSealQuit. Closing event: Seal returns and this scope
+				// settles; the wait BEFORE the timer is not part of the
+				// operation and is not timed.
+				scope := catalog.BeginInternal(context.Background(), catalog.OpInternalVaultAutoSeal)
 				v.Seal()
+				scope.Complete()
 			}
 		}
 	}

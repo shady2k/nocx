@@ -26,6 +26,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
+
 	"github.com/shady2k/nocx/internal/diagnostics"
 	"github.com/shady2k/nocx/internal/git"
 	helpergit "github.com/shady2k/nocx/internal/git/helper"
@@ -1955,6 +1957,8 @@ func (h *hostHelper) connectLocked(ctx context.Context) (*client.Client, git.Ope
 // It only redials an entry that had already opened a helper; an unstarted
 // entry must not make inventory claim a helper exists.
 func (h *hostHelper) inventoryClient(ctx context.Context) (*client.Client, error) {
+	scope := catalog.BeginInternal(ctx, catalog.OpInternalHelperGitOpen)
+	defer scope.Complete()
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.client == nil && h.factory == nil && !h.dead {

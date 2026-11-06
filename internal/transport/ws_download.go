@@ -321,6 +321,8 @@ func (s *WSServer) startDownload(rt *runningTransfer, source transfer.Source) er
 // files.download came from, and the use-guard that handle carried, were
 // both let go when files.download answered (D8).
 func (s *WSServer) runDownload(rt *runningTransfer, source transfer.Source) {
+	opScope := s.beginInternal(rt.ctx, catalog.OpInternalFilesDownload)
+	defer opScope.Complete()
 	defer close(rt.done)
 	// The pinned handle is closed on EVERY path out of this goroutine,
 	// including the one where nobody ever fetched. It is the closing end

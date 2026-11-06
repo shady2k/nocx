@@ -1723,6 +1723,10 @@ func (s *WSServer) filesPollLoop(w *filesWatcher) {
 		}
 	}
 	runPoll := func() bool {
+		// Owner: the binding's poll loop, released by w.stop when files.close
+		// runs. Closing event: the iteration returning and this scope settling.
+		opScope := s.beginInternal(context.Background(), catalog.OpInternalFilesWatchPoll)
+		defer opScope.Complete()
 		result := s.filesPollTick(w)
 		if result == filesPollPathStopped {
 			return false
@@ -1797,6 +1801,10 @@ func (s *WSServer) filesBaseline(
 	paths []string,
 	known map[string]string,
 ) map[string]string {
+	// Owner: the files.watch request that takes the baseline before answering.
+	// Closing event: the baseline listing returning and the scope settling.
+	opScope := s.beginInternal(context.Background(), catalog.OpInternalFilesBaseline)
+	defer opScope.Complete()
 	base := make(map[string]string, len(paths))
 	for _, p := range paths {
 		if _, ok := known[p]; ok {

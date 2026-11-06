@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { Dispatcher, PendingCallView } from '../dispatcher'
 import { mountSidebar, type SidebarHandle } from '../sidebar'
-import { ArrowUpIcon, SettingsIcon } from '../ui/icons'
+import { SettingsIcon } from '../ui/icons'
 import { callOperations } from './call-operations'
 import { createOperationsModel } from './operations'
 import { createOperationsView, OPERATIONS_VIEW_ID } from './operations-view'
@@ -41,7 +41,9 @@ function mount(dispatcher: Dispatcher): void {
 }
 
 function icon(): HTMLElement {
-  return document.querySelector<HTMLElement>(`button[data-view="${OPERATIONS_VIEW_ID}"]`)!
+  const found = document.querySelector<HTMLElement>(`button[data-view="${OPERATIONS_VIEW_ID}"]`)
+  if (found === null) throw new Error('operations view button missing')
+  return found
 }
 
 function openList(): void {
@@ -75,7 +77,7 @@ describe('a waiting call', () => {
     vi.advanceTimersByTime(1)
     openList()
     expect(rows()).toHaveLength(1)
-    expect(rows()[0]!.textContent).toContain('Committing in this checkout')
+    expect(rows()[0].textContent).toContain('Committing in this checkout')
   })
 
   it('goes on settle and leaves no finished entry', () => {

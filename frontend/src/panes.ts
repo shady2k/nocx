@@ -71,6 +71,7 @@ import type { Pane as PaneRow, Workspace as WorkspaceRow } from './generated/lay
 import { leftRunningMessage, liveDescendants, type LineageNode } from './lineage'
 import { closingWorkspaceMessage, type WorkspaceMember } from './live-work'
 import { log } from './log'
+import { t } from './i18n/locale-model'
 import type { TabStrip } from './tab-strip'
 import type {
   PaneHost,
@@ -1458,7 +1459,7 @@ export class PaneManager {
       log.warn('nocx: the layout store is unavailable', { error: message })
       showToast({
         level: 'warning',
-        message: 'Tabs are not being remembered — the layout store is unavailable',
+        message: t('tabs.notRemembered', 'Tabs are not being remembered — the layout store is unavailable'),
       })
     }
   }
@@ -2253,7 +2254,7 @@ export class PaneManager {
     if (!this.layoutAvailable) {
       showToast({
         level: 'warning',
-        message: 'Workspaces are unavailable — the layout store could not be read',
+        message: t('ws.unavailable', 'Workspaces are unavailable — the layout store could not be read'),
       })
       return
     }

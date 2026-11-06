@@ -26,6 +26,7 @@ import { render } from 'solid-js/web'
 import { Button } from './ui/button'
 import { Spinner } from './ui/spinner'
 import { StatusCard } from './ui/status-card'
+import { t } from './i18n/locale-model'
 import type { SessionAttachment } from './ipc'
 
 export interface ReconnectOfferProps {
@@ -43,7 +44,7 @@ export interface ReconnectOfferProps {
  *  a tracked scope and the card would keep its first sentence for good — which
  *  for this card means saying "Reconnecting…" after the attempt is over. */
 function title(attempting: boolean, host: string): string {
-  if (attempting) return 'Reconnecting…'
+  if (attempting) return t('reconnect.reconnecting', 'Reconnecting') + '…'
   return host ? `The connection to ${host} is gone` : 'The connection is gone'
 }
 
@@ -71,9 +72,9 @@ function ReconnectOffer(props: ReconnectOfferProps) {
       title={title(props.attempting, props.host)}
       description={description(props.attempting, props.attempt, props.host)}
       action={
-        <Show when={!props.attempting} fallback={<Spinner label="Reconnecting" size="sm" />}>
+        <Show when={!props.attempting} fallback={<Spinner label={t('reconnect.reconnecting', 'Reconnecting')} size="sm" />}>
           <Button variant="primary" onClick={() => props.onReconnect()}>
-            Reconnect
+            {t('reconnect.attach', 'Reconnect')}
           </Button>
         </Show>
       }
@@ -141,10 +142,10 @@ export function mountAttachOffer(
         action={
           <Show
             when={state().kind === 'unavailable'}
-            fallback={<Spinner label="Attaching" size="sm" />}
+            fallback={<Spinner label={t('reconnect.attaching', 'Attaching')} size="sm" />}
           >
             <Button variant="primary" onClick={onRetry}>
-              Retry attachment
+              {t('reconnect.retryAttach', 'Retry attachment')}
             </Button>
           </Show>
         }

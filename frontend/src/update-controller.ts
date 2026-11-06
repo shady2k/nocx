@@ -8,6 +8,7 @@ import {
 import { showToast, dismissToast, type ToastOptions } from './ui/toast'
 import { log } from './log'
 import { updateFailureMessage } from './update-failure'
+import { t } from './i18n/locale-model'
 
 /** What an offer says about the build behind it (nocx-vh2hr.1.5).
  *
@@ -212,13 +213,17 @@ export function createUpdateController(deps: UpdateControllerDeps = {}): UpdateC
               }),
           actions: [
             { label: installLabel, variant: 'primary', onClick: () => void apply() },
-            { label: 'Later', onClick: () => {} },
+            { label: t('update.later', 'Later'), onClick: () => {} },
           ],
         })
         return
       }
       case 'finishing':
-        present({ message: `Finishing the update to nocx ${current.version}…` })
+        present({
+          message:
+            t('update.finishingHead', 'Finishing the update to nocx') +
+            ` ${current.version}…`,
+        })
         return
       case 'downloading':
         present({
@@ -231,8 +236,13 @@ export function createUpdateController(deps: UpdateControllerDeps = {}): UpdateC
       case 'pending':
         present({
           level: 'success',
-          message: `nocx ${current.version} installed — restart to apply`,
-          actions: [{ label: 'Restart now', variant: 'primary', onClick: restart }],
+          message:
+            t('update.installedRestart.head', 'nocx') +
+            ` ${current.version} ` +
+            t('update.installedRestart.tail', 'installed — restart to apply'),
+          actions: [
+            { label: t('update.restartNow', 'Restart now'), variant: 'primary', onClick: restart },
+          ],
         })
         return
       case 'held':
@@ -242,8 +252,14 @@ export function createUpdateController(deps: UpdateControllerDeps = {}): UpdateC
           // finishing stops the coordinator this window has outlived and
           // QUITS — it does not relaunch, so calling it a restart told the
           // person to expect a window that would not appear.
-          message: `nocx ${current.version} installed — close nocx and open it again to finish (this closes open sessions)`,
-          actions: [{ label: 'Close nocx', variant: 'primary', onClick: finish }],
+          message:
+            t('update.installedClose.head', 'nocx') +
+            ` ${current.version} ` +
+            t(
+              'update.installedClose.tail',
+              'installed — close nocx and open it again to finish (this closes open sessions)',
+            ),
+          actions: [{ label: t('update.closeNocx', 'Close nocx'), variant: 'primary', onClick: finish }],
         })
         return
     }

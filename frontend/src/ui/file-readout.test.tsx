@@ -9,6 +9,7 @@
 // viewer that went blank or drew a red box would pass a test that only asked
 // "did it render", and would lie about what is on disk.
 import { readFileSync } from 'node:fs'
+import { fileReadoutLabels } from '../i18n/kit-labels'
 import { resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { cleanup, render } from '@solidjs/testing-library'
@@ -27,7 +28,12 @@ const CSS = readFileSync(resolve(process.cwd(), 'src/styles/components/file-read
 
 function draw(outcome: FileReadoutOutcome): HTMLElement {
   const { container } = render(() => (
-    <FileReadout facts={FACTS} ariaLabel="The whole of SKILL.md" outcome={outcome} />
+    <FileReadout
+      labels={fileReadoutLabels()}
+      facts={FACTS}
+      ariaLabel="The whole of SKILL.md"
+      outcome={outcome}
+    />
   ))
   const el = container.querySelector<HTMLElement>('.ui-file-readout')
   if (!el) throw new Error('FileReadout rendered no ui-file-readout')
@@ -219,6 +225,7 @@ describe('FileReadout in a caller that owns the height', () => {
   it('says nothing above the bytes when the caller has nothing left to say', () => {
     const { container } = render(() => (
       <FileReadout
+        labels={fileReadoutLabels()}
         facts={[]}
         ariaLabel="The whole of SKILL.md"
         outcome={{ kind: 'text', text: '# Skill\n' }}
@@ -236,6 +243,7 @@ describe('FileReadout in a caller that owns the height', () => {
   it('hands the height to the block when the caller says it owns one', () => {
     const { container } = render(() => (
       <FileReadout
+        labels={fileReadoutLabels()}
         facts={[]}
         fill
         ariaLabel="The whole of SKILL.md"

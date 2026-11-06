@@ -15,6 +15,7 @@ import { Button, FileInput, Radio, MarkerList, PageSection } from './ui'
 import { showToast } from './ui/toast'
 import { showConfirm } from './ui/dialog'
 import { isSaturationRefusal } from './dispatcher'
+import { t } from './i18n/locale-model'
 
 interface Props {
   profileClient: ProfileClient
@@ -108,7 +109,7 @@ export function BackupRestoreSection(props: Props) {
       }
 
       if (dialogAvailable && savedPath === null) {
-        showToast({ message: 'Backup discarded — save was cancelled.', level: 'info' })
+        showToast({ message: t('backup.discarded', 'Backup discarded — save was cancelled.'), level: 'info' })
       } else {
         // What was left behind is the part worth reading, and it is the same
         // whether the file went through the dialog or the download — the two
@@ -256,8 +257,11 @@ export function BackupRestoreSection(props: Props) {
   return (
     <div class="backup-restore">
       <PageSection
-        title="Create backup"
-        description="Download a versioned backup file containing your non-secret settings, SSH connections, and connection groups. Credential records and secrets are never included."
+        title={t('backup.create.title', 'Create backup')}
+        description={t(
+          'backup.create.desc',
+          'Download a versioned backup file containing your non-secret settings, SSH connections, and connection groups. Credential records and secrets are never included.',
+        )}
       >
         <MarkerList
           items={[
@@ -272,7 +276,7 @@ export function BackupRestoreSection(props: Props) {
           ]}
         />
         <div class="backup-restore__warning">
-          <strong>Plaintext warning:</strong> {PLAINTEXT_WARNING}
+          <strong>{t('backup.plaintextWarning', 'Plaintext warning:')}</strong> {PLAINTEXT_WARNING}
         </div>
         <Button
           variant="primary"
@@ -281,19 +285,24 @@ export function BackupRestoreSection(props: Props) {
             void handleCreate()
           }}
         >
-          {state.creating ? 'Creating…' : 'Create backup'}
+          {state.creating ? 'Creating…' : t('backup.create.title', 'Create backup')}
         </Button>
       </PageSection>
 
       <PageSection
-        title="Restore backup"
-        description={`Select a nocx-backup JSON file to preview and restore. Maximum file size: ${MAX_BACKUP_BYTES / 1024 / 1024} MiB.`}
+        title={t('backup.restore.title', 'Restore backup')}
+        description={
+          t(
+            'backup.restore.desc',
+            'Select a nocx-backup JSON file to preview and restore.',
+          ) + ` Maximum file size: ${MAX_BACKUP_BYTES / 1024 / 1024} MiB.`
+        }
       >
         <FileInput
           accept=".json"
           disabled={busy()}
           resetKey={state.fileInputResetKey}
-          buttonLabel="Choose backup file…"
+          buttonLabel={t('backup.choose.buttonLabel', 'Choose backup file…')}
           onChange={(f) => {
             void loadPreview(f)
           }}
@@ -301,14 +310,17 @@ export function BackupRestoreSection(props: Props) {
 
         <Show when={state.contents}>
           <div class="backup-restore__strategy">
-            <label>Restore strategy</label>
+            <label>{t('backup.strategy', 'Restore strategy')}</label>
             <Radio
               name="backup-strategy"
               value="merge"
               checked={state.strategy === 'merge'}
               onChange={(val) => setState('strategy', val as RestoreStrategy)}
               disabled={busy()}
-              label="Merge — apply backup on top of current configuration (default)"
+              label={t(
+              'backup.strategy.merge',
+              'Merge — apply backup on top of current configuration (default)',
+            )}
             />
             <Radio
               name="backup-strategy"
@@ -316,46 +328,49 @@ export function BackupRestoreSection(props: Props) {
               checked={state.strategy === 'replace'}
               onChange={(val) => setState('strategy', val as RestoreStrategy)}
               disabled={busy()}
-              label="Replace — reset to exact backup snapshot (destroys extra connections/settings)"
+              label={t(
+              'backup.strategy.replace',
+              'Replace — reset to exact backup snapshot (destroys extra connections/settings)',
+            )}
             />
           </div>
         </Show>
 
         <Show when={state.previewing}>
-          <p class="backup-restore__status">Generating preview…</p>
+          <p class="backup-restore__status">{t('backup.preview.generating', 'Generating preview…')}</p>
         </Show>
 
         <Show when={state.contents && state.previewRefused && !state.previewing}>
           <p class="backup-restore__status">
-            The preview was refused because the terminal was busy.
+            {t('backup.preview.busy', 'The preview was refused because the terminal was busy.')}
           </p>
           <Button
             disabled={busy()}
             onClick={() => setState('previewAttempt', state.previewAttempt + 1)}
           >
-            Preview again
+            {t('backup.preview.again', 'Preview again')}
           </Button>
         </Show>
 
         <Show when={preview()}>
           {(p) => (
             <div class="backup-restore__preview">
-              <h4>Preview — {p().strategy}</h4>
-              <p>Backup created: {p().createdAt}</p>
+              <h4>{t('backup.preview.head', 'Preview —')} {p().strategy}</h4>
+              <p>{t('backup.createdHead', 'Backup created:')} {p().createdAt}</p>
               <table class="backup-restore__counts">
                 <thead>
                   <tr>
                     <th />
-                    <th>Settings</th>
-                    <th>Connections</th>
-                    <th>Groups</th>
-                    <th>Snippets</th>
-                    <th>Notes</th>
+                    <th>{t('backup.cat.settings', 'Settings')}</th>
+                    <th>{t('backup.cat.connections', 'Connections')}</th>
+                    <th>{t('backup.cat.groups', 'Groups')}</th>
+                    <th>{t('backup.cat.snippets', 'Snippets')}</th>
+                    <th>{t('backup.cat.notes', 'Notes')}</th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr>
-                    <td>Included</td>
+                    <td>{t('backup.diff.included', 'Included')}</td>
                     <td>{p().settings.included}</td>
                     <td>{p().connections.included}</td>
                     <td>{p().groups.included}</td>
@@ -363,7 +378,7 @@ export function BackupRestoreSection(props: Props) {
                     <td>{p().notes.included}</td>
                   </tr>
                   <tr>
-                    <td>Added</td>
+                    <td>{t('backup.diff.added', 'Added')}</td>
                     <td>—</td>
                     <td>{p().connections.added}</td>
                     <td>{p().groups.added}</td>
@@ -371,7 +386,7 @@ export function BackupRestoreSection(props: Props) {
                     <td>—</td>
                   </tr>
                   <tr>
-                    <td>Changed/Updated</td>
+                    <td>{t('backup.diff.changed', 'Changed/Updated')}</td>
                     <td>{p().settings.changed}</td>
                     <td>{p().connections.updated}</td>
                     <td>{p().groups.updated}</td>
@@ -379,7 +394,7 @@ export function BackupRestoreSection(props: Props) {
                     <td>—</td>
                   </tr>
                   <tr>
-                    <td>Removed/Reset</td>
+                    <td>{t('backup.diff.removed', 'Removed/Reset')}</td>
                     <td>{p().settings.reset}</td>
                     <td>{p().connections.removed}</td>
                     <td>{p().groups.removed}</td>
@@ -391,7 +406,7 @@ export function BackupRestoreSection(props: Props) {
 
               <Show when={p().connectionsRequiringCredential.length > 0}>
                 <div class="backup-restore__warning">
-                  <strong>Connections requiring credential reassignment:</strong>
+                  <strong>{t('backup.reassign.head', 'Connections requiring credential reassignment:')}</strong>
                   <ul>
                     <For each={p().connectionsRequiringCredential}>{(c) => <li>{c.name}</li>}</For>
                   </ul>
@@ -407,7 +422,7 @@ export function BackupRestoreSection(props: Props) {
                 }
               >
                 <div class="backup-restore__warning">
-                  <strong>Omissions:</strong>
+                  <strong>{t('backup.omissions.head', 'Omissions:')}</strong>
                   <ul>
                     <Show when={p().omissions.credentialBindingsRemoved > 0}>
                       <li>

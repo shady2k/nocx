@@ -41,6 +41,7 @@ import { Spinner } from './ui/spinner'
 import { Stack } from './ui/stack'
 import { showToast } from './ui/toast'
 import { LOCAL_TARGET_ID } from './ports-client'
+import { t } from './i18n/locale-model'
 
 /** Split a `user@host` target into its parts, the way the product spells
  *  the target: W1's `portsUnavailableReason` reuses locationLine's
@@ -162,8 +163,8 @@ export function createPortsFilter(control: PortsFilterControl): Component {
       <SearchField
         value={control.query()}
         onInput={(v) => control.setQuery(v)}
-        placeholder="Filter ports"
-        ariaLabel="Filter ports"
+        placeholder={t('ports.filter.ph', 'Filter ports')}
+        ariaLabel={t('ports.filter.aria', 'Filter ports')}
         onKeyDown={(e) => {
           if (e.key === 'Escape' && control.query() !== '') {
             e.stopPropagation()
@@ -451,8 +452,8 @@ export function PortsPanel(props: PortsPanelProps) {
   const copyAddress = (addr: string): void => {
     void navigator.clipboard
       .writeText(addr)
-      .then(() => showToast({ level: 'success', message: `Copied ${addr}` }))
-      .catch(() => showToast({ level: 'warning', message: 'Could not copy' }))
+      .then(() => showToast({ level: 'success', message: `${t('ports.copied', 'Copied')} ${addr}` }))
+      .catch(() => showToast({ level: 'warning', message: t('ports.copyFailed', 'Could not copy') }))
   }
 
   const openAddress = (addr: string): void => {
@@ -637,8 +638,11 @@ export function PortsPanel(props: PortsPanelProps) {
           when={unavailableTarget()}
           fallback={
             <EmptyState
-              title="No active connection"
-              description="Switch to an SSH tab — the ports it listens on will appear here."
+              title={t('ports.noConnection.title', 'No active connection')}
+              description={t(
+                'ports.noConnection.desc',
+                'Switch to an SSH tab — the ports it listens on will appear here.',
+              )}
             />
           }
         >
@@ -674,8 +678,8 @@ export function PortsPanel(props: PortsPanelProps) {
           when={!loading()}
           fallback={
             <div class="ports-loading" data-testid="ports-loading">
-              <Spinner label="Reading ports" />
-              <span>Reading ports…</span>
+              <Spinner label={t('ports.reading.label', 'Reading ports')} />
+              <span>{t('ports.reading.text', 'Reading ports…')}</span>
             </div>
           }
         >
@@ -683,16 +687,19 @@ export function PortsPanel(props: PortsPanelProps) {
               to wait for until the user opens one. */}
           <Show when={!host() && st()?.state === 'pending' && !isLocal()}>
             <EmptyState
-              title="No active connection"
+              title={t('ports.noConnection.title', 'No active connection')}
               description="Open an SSH session to this profile first — the ports it listens on will appear here."
             />
           </Show>
           <Show when={host() || (st()?.state ?? '') !== 'pending'}>
             <Show when={st()?.connLost}>
               <EmptyState
-                title="Connection lost"
-                description="Discovery stopped with the connection. It resumes automatically after you reconnect."
-                action={<Button onClick={() => void sampleNow()}>Retry</Button>}
+                title={t('ports.lost.title', 'Connection lost')}
+                description={t(
+                  'ports.lost.desc',
+                  'Discovery stopped with the connection. It resumes automatically after you reconnect.',
+                )}
+                action={<Button onClick={() => void sampleNow()}>{t('ports.retry', 'Retry')}</Button>}
               />
             </Show>
             <Show when={!st()?.connLost}>
@@ -709,7 +716,7 @@ export function PortsPanel(props: PortsPanelProps) {
                     by construction and filtering them could only hide a
                     forward the user must still be able to stop or retry
                     (nocx-cdub decision 3). */}
-              <Section title="Detected" divided dense>
+              <Section title={t('ports.detected.title', 'Detected')} divided dense>
                 {/* Whose listeners these are, said out loud and always. The
                     panel had no such statement, so a tab titled
                     `pi@host-2` showed this machine's listeners and
@@ -728,43 +735,49 @@ export function PortsPanel(props: PortsPanelProps) {
                 </div>
                 <Show when={unhandledState()}>
                   <EmptyState
-                    title="Discovery is in a state this panel does not know"
-                    description={`The backend reported "${unhandledState()}". This is a bug in nocx, not on the host.`}
-                    action={<Button onClick={() => void sampleNow()}>Retry</Button>}
+                    title={t(
+                      'ports.unknownState.title',
+                      'Discovery is in a state this panel does not know',
+                    )}
+                    description={`${t('ports.unknownState.descHead', 'The backend reported "')}${unhandledState()}${t('ports.unknownState.descTail', '". This is a bug in nocx, not on the host.')}`}
+                    action={<Button onClick={() => void sampleNow()}>{t('ports.retry', 'Retry')}</Button>}
                   />
                 </Show>
                 <Show when={st()?.state === 'unavailable'}>
                   <EmptyState
-                    title="Could not determine what is listening"
+                    title={t('ports.undetermined.title', 'Could not determine what is listening')}
                     description={st()?.classification || 'No probe tool is usable on this host.'}
                   />
                 </Show>
                 <Show when={st()?.state === 'failed-transiently'}>
                   <EmptyState
-                    title="Discovery failed transiently"
-                    description={`${st()?.classification ?? 'The probe failed.'} Retrying automatically with backoff.`}
+                    title={t('ports.transient.title', 'Discovery failed transiently')}
+                    description={`${st()?.classification ?? 'The probe failed.'} ${t('ports.transient.desc', 'Retrying automatically with backoff.')}`}
                   />
                 </Show>
                 <Show when={st()?.state === 'permission-or-policy-refused'}>
                   <EmptyState
-                    title="Discovery refused on this host"
+                    title={t('ports.refused.title', 'Discovery refused on this host')}
                     description={
                       st()?.classification ?? 'The server refused the additional session.'
                     }
-                    action={<Button onClick={() => void sampleNow()}>Retry</Button>}
+                    action={<Button onClick={() => void sampleNow()}>{t('ports.retry', 'Retry')}</Button>}
                   />
                 </Show>
                 <Show when={st()?.state === 'pending' && host()}>
                   <EmptyState
-                    title="Waiting for the first sample"
-                    description="The settle sample runs shortly after the connection comes up."
+                    title={t('ports.settle.title', 'Waiting for the first sample')}
+                    description={t(
+                      'ports.settle.desc',
+                      'The settle sample runs shortly after the connection comes up.',
+                    )}
                   />
                 </Show>
                 <Show when={listAvailable()}>
                   {/* Stated once, above the rows it applies to. */}
                   <Show when={hiddenOwners()}>
                     <p class="ports-note" data-testid="ports-owners-note">
-                      Some owners are hidden — run as root to see them.
+                      {t('ports.hiddenOwners', 'Some owners are hidden — run as root to see them.')}
                     </p>
                   </Show>
                   <Show when={visibleRows().length > 0}>
@@ -846,7 +859,7 @@ export function PortsPanel(props: PortsPanelProps) {
                                             rows reads as one thing before the
                                             words do (W2). */}
                                         <Badge tone="info" truncate>
-                                          Forwarded
+                                          {t('ports.forwarded', 'Forwarded')}
                                         </Badge>
                                       </>
                                     )
@@ -861,8 +874,8 @@ export function PortsPanel(props: PortsPanelProps) {
                                       <IconButton
                                         data-testid="ports-copy"
                                         size="xs"
-                                        ariaLabel={`Copy ${running.actualBind.host}:${running.actualBind.port}`}
-                                        title={`Copy ${running.actualBind.host}:${running.actualBind.port}`}
+                                        ariaLabel={t('ports.copy.head', 'Copy') + ' ' + running.actualBind.host + ':' + running.actualBind.port}
+                                        title={t('ports.copy.head', 'Copy') + ' ' + running.actualBind.host + ':' + running.actualBind.port}
                                         onClick={() =>
                                           copyAddress(
                                             `${running.actualBind.host}:${running.actualBind.port}`,
@@ -874,8 +887,8 @@ export function PortsPanel(props: PortsPanelProps) {
                                       <IconButton
                                         data-testid="ports-open"
                                         size="xs"
-                                        ariaLabel={`Open ${running.actualBind.host}:${running.actualBind.port}`}
-                                        title={`Open ${running.actualBind.host}:${running.actualBind.port}`}
+                                        ariaLabel={t('ports.open.head', 'Open') + ' ' + running.actualBind.host + ':' + running.actualBind.port}
+                                        title={t('ports.open.head', 'Open') + ' ' + running.actualBind.host + ':' + running.actualBind.port}
                                         onClick={() =>
                                           openAddress(
                                             `${running.actualBind.host}:${running.actualBind.port}`,
@@ -887,8 +900,8 @@ export function PortsPanel(props: PortsPanelProps) {
                                       <IconButton
                                         data-testid="ports-stop"
                                         size="xs"
-                                        ariaLabel={`Stop forward ${running.destination}`}
-                                        title={`Stop forward ${running.destination}`}
+                                        ariaLabel={t('ports.stopForward', 'Stop forward') + ' ' + running.destination}
+                                        title={t('ports.stopForward', 'Stop forward') + ' ' + running.destination}
                                         onClick={() => void stop(running.id)}
                                       >
                                         <SquareIcon />
@@ -899,15 +912,15 @@ export function PortsPanel(props: PortsPanelProps) {
                                       data-testid="ports-retry-forward"
                                       onClick={() => retry(failed)}
                                     >
-                                      Retry
+                                      {t('ports.retry', 'Retry')}
                                     </Button>
                                   ) : (
                                     <div class="ports-row__actions">
                                       <IconButton
                                         data-testid="ports-forward"
                                         size="xs"
-                                        ariaLabel={`Forward ${destinationFor(l)}`}
-                                        title={`Forward ${destinationFor(l)}`}
+                                        ariaLabel={t('ports.forward', 'Forward') + ' ' + destinationFor(l)}
+                                        title={t('ports.forward', 'Forward') + ' ' + destinationFor(l)}
                                         onClick={() => void forward(destinationFor(l), l.port)}
                                       >
                                         <ArrowRightIcon />
@@ -920,8 +933,8 @@ export function PortsPanel(props: PortsPanelProps) {
                                   <IconButton
                                     data-testid="ports-copy"
                                     size="xs"
-                                    ariaLabel={`Copy ${destinationFor(l)}`}
-                                    title={`Copy ${destinationFor(l)}`}
+                                    ariaLabel={t('ports.copy.head', 'Copy') + ' ' + destinationFor(l)}
+                                    title={t('ports.copy.head', 'Copy') + ' ' + destinationFor(l)}
                                     onClick={() => copyAddress(destinationFor(l))}
                                   >
                                     <CopyIcon />
@@ -946,14 +959,14 @@ export function PortsPanel(props: PortsPanelProps) {
                       when={query().trim() === ''}
                       fallback={
                         <EmptyState
-                          title="No ports match that"
-                          description="Clear the filter to see the full list."
+                          title={t('ports.nomatch.title', 'No ports match that')}
+                          description={t('ports.nomatch.desc', 'Clear the filter to see the full list.')}
                         />
                       }
                     >
                       <EmptyState
-                        title="Nothing is listening"
-                        description={`No listeners observed on ${host()}.`}
+                        title={t('ports.nothing.title', 'Nothing is listening')}
+                        description={`${t('ports.nothing.descHead', 'No listeners observed on')} ${host()}${t('ports.nothing.descTail', '.')}`}
                       />
                     </Show>
                   </Show>
@@ -976,7 +989,7 @@ export function PortsPanel(props: PortsPanelProps) {
                     must be able to retry. The Stopped section is deleted: a
                     stop the user performed is not information, and a detected
                     port's state lives on its own row (W2). */}
-                <Section title="Orphaned forwards" divided dense>
+                <Section title={t('ports.orphaned.title', 'Orphaned forwards')} divided dense>
                   <For each={orphanForwards()}>
                     {(f) => (
                       <Show
@@ -996,7 +1009,7 @@ export function PortsPanel(props: PortsPanelProps) {
                                 </Badge>
                               </div>
                               <Button data-testid="ports-retry-forward" onClick={() => retry(f)}>
-                                Retry
+                                {t('ports.retry', 'Retry')}
                               </Button>
                             </div>
                           </div>
@@ -1019,8 +1032,8 @@ export function PortsPanel(props: PortsPanelProps) {
                               <IconButton
                                 data-testid="ports-copy"
                                 size="xs"
-                                ariaLabel={`Copy ${f.actualBind.host}:${f.actualBind.port}`}
-                                title={`Copy ${f.actualBind.host}:${f.actualBind.port}`}
+                                ariaLabel={t('ports.copy.head', 'Copy') + ' ' + f.actualBind.host + ':' + f.actualBind.port}
+                                title={t('ports.copy.head', 'Copy') + ' ' + f.actualBind.host + ':' + f.actualBind.port}
                                 onClick={() =>
                                   copyAddress(`${f.actualBind.host}:${f.actualBind.port}`)
                                 }
@@ -1030,8 +1043,8 @@ export function PortsPanel(props: PortsPanelProps) {
                               <IconButton
                                 data-testid="ports-open"
                                 size="xs"
-                                ariaLabel={`Open ${f.actualBind.host}:${f.actualBind.port}`}
-                                title={`Open ${f.actualBind.host}:${f.actualBind.port}`}
+                                ariaLabel={t('ports.open.head', 'Open') + ' ' + f.actualBind.host + ':' + f.actualBind.port}
+                                title={t('ports.open.head', 'Open') + ' ' + f.actualBind.host + ':' + f.actualBind.port}
                                 onClick={() =>
                                   openAddress(`${f.actualBind.host}:${f.actualBind.port}`)
                                 }
@@ -1041,8 +1054,8 @@ export function PortsPanel(props: PortsPanelProps) {
                               <IconButton
                                 data-testid="ports-stop"
                                 size="xs"
-                                ariaLabel={`Stop forward ${f.destination}`}
-                                title={`Stop forward ${f.destination}`}
+                                ariaLabel={t('ports.stopForward', 'Stop forward') + ' ' + f.destination}
+                                title={t('ports.stopForward', 'Stop forward') + ' ' + f.destination}
                                 onClick={() => void stop(f.id)}
                               >
                                 <SquareIcon />
@@ -1074,7 +1087,7 @@ export function PortsPanel(props: PortsPanelProps) {
               the rows genuinely stop tracking the host, and it names why. */}
           <Show when={paused()}>
             <p class="ports-meta" data-testid="ports-meta">
-              paused
+              {t('ports.paused', 'paused')}
             </p>
           </Show>
         </Show>

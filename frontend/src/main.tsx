@@ -4,6 +4,7 @@ import { render } from 'solid-js/web'
 import { Show, createSignal, untrack } from 'solid-js'
 import App from './App'
 import { log } from './log'
+import { t } from './i18n/locale-model'
 import { hasWailsWebview, installBrowserTransport } from './wails-runtime'
 import { WSClient } from './ipc'
 import { createDesktopEndpointProvider } from './endpoint-desktop'
@@ -1361,7 +1362,7 @@ function main(): void {
   const portsFilter = createPortsFilterControl()
   const PORTS_VIEW: SidebarViewDescriptor = {
     id: 'ports',
-    title: 'Ports',
+    title: t('app.page.ports', 'Ports'),
     icon: PlugIcon,
     filter: createPortsFilter(portsFilter),
     // Refresh, not Pause (nocx-wzc4.11). One sample costs ~12ms, so there is
@@ -1371,8 +1372,8 @@ function main(): void {
       <IconButton
         data-testid="ports-refresh"
         size="sm"
-        ariaLabel="Refresh ports"
-        title="Refresh ports"
+        ariaLabel={t('app.ports.refresh', 'Refresh ports')}
+        title={t('app.ports.refresh', 'Refresh ports')}
         disabled={portsTargetId() === null}
         onClick={() => void portsServices.sample(portsTargetId() as string)}
       >
@@ -1472,7 +1473,7 @@ function main(): void {
   subscribeNotifyToast(dispatcher)
   const NOTIFICATIONS_VIEW: SidebarViewDescriptor = {
     id: 'notifications',
-    title: 'Notifications',
+    title: t('app.page.notifications', 'Notifications'),
     icon: BellIcon,
     // Read by the ACTIVITY BAR while the panel is elsewhere. Quiet where there
     // is nothing to show (nocx-708q.1): at zero the bar renders no badge
@@ -1491,8 +1492,8 @@ function main(): void {
       <IconButton
         data-testid="notifications-mark-read"
         size="sm"
-        ariaLabel="Mark all notifications read"
-        title="Mark all read"
+        ariaLabel={t('app.markAllRead.aria', 'Mark all notifications read')}
+        title={t('app.markAllRead', 'Mark all read')}
         disabled={feedStore.unreadCount() === 0}
         onClick={() => feedStore.markRead()}
       >
@@ -1550,7 +1551,7 @@ function main(): void {
         apiSidebarAction(),
         {
           id: 'settings',
-          title: 'Settings',
+          title: t('app.page.settings', 'Settings'),
           icon: SettingsIcon,
           onActivate: () => {
             log.info('nocx: opening Settings tab')
@@ -1577,7 +1578,7 @@ function main(): void {
       sidebarWidthCtrl,
       () => activeSurfaceType() === SURFACE_SETTINGS,
       {
-        title: 'Update available',
+        title: t('app.update.available', 'Update available'),
         icon: ArrowDownIcon,
         level: () => {
           switch (updateController.state().kind) {
@@ -1667,7 +1668,7 @@ function main(): void {
 
   const forwardPortCommand: DrillCommand = {
     id: '__forward_port__',
-    label: 'Forward a port',
+    label: t('app.forwardPort', 'Forward a port'),
     detail: 'Expose one of the server\u2019s ports on this machine',
     steps: [
       {
@@ -1694,7 +1695,7 @@ function main(): void {
               return [
                 {
                   id: '__no_listeners__',
-                  label: 'No listening ports',
+                  label: t('app.noListeningPorts', 'No listening ports'),
                   detail: 'This server has nothing listening right now',
                   system: true,
                 },
@@ -1785,7 +1786,10 @@ function main(): void {
   async function insertSecretIntoActivePane(name: string): Promise<void> {
     const content = tm.activeTerminalContent()
     if (content === null) {
-      showToast({ message: 'Open a terminal to insert a secret into', level: 'warning' })
+      showToast({
+        message: t('app.secret.openTerminalHead', 'Open a terminal to insert a secret into'),
+        level: 'warning',
+      })
       return
     }
     try {
@@ -1795,12 +1799,17 @@ function main(): void {
       // longer needed. It still has to say something: a password prompt
       // echoes nothing, and an answer the user cannot see is an answer they
       // will give twice.
-      if (where === 'value') showToast({ message: 'Secret sent — the prompt echoes nothing' })
+      if (where === 'value')
+        showToast({ message: t('app.secret.sent', 'Secret sent — the prompt echoes nothing') })
       else if (where === 'unavailable')
-        showToast({ message: `"${name}" could not be inserted`, level: 'danger' })
+        showToast(
+          { message: '"' + name + '" ' + t('app.secret.insertFailedTail', 'could not be inserted'), level: 'danger' },
+        )
     } catch (err) {
       log.warn('nocx: inserting a secret failed', { error: err })
-      showToast({ message: `"${name}" could not be inserted`, level: 'danger' })
+      showToast(
+        { message: '"' + name + '" ' + t('app.secret.insertFailedTail', 'could not be inserted'), level: 'danger' },
+      )
     }
   }
 

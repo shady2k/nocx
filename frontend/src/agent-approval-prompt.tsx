@@ -182,6 +182,7 @@ import {
 import { EFFECT_LABEL } from './effect-labels'
 import { scanPatternWords } from './scan-pattern-words'
 import { t } from './i18n/locale-model'
+import { fileReadoutLabels } from './i18n/kit-labels'
 import type { AgentApprovalRequested } from './generated/agent.approvalRequested'
 import type { AgentApprove } from './generated/agent.approve'
 
@@ -1278,6 +1279,7 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
                         facts={[{ name: 'path', value: file.path }]}
                         ariaLabel={`${file.path}, which installing “${skill.name}” would write`}
                         outcome={installFileOutcome(file)}
+                        labels={fileReadoutLabels()}
                       />
                     )}
                   </For>
@@ -1319,6 +1321,7 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
                 ]}
                 ariaLabel={`What ${reading.path} holds right now`}
                 outcome={scriptOutcome(reading)}
+                labels={fileReadoutLabels()}
               />
             )}
           </For>

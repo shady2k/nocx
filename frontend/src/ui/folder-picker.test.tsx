@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { folderPickerLabels } from '../i18n/kit-labels'
 import { cleanup, fireEvent, render } from '@solidjs/testing-library'
 import { FolderPicker, showFolderPicker, type FolderEntry } from './folder-picker'
 import { clearStack } from './overlay/stack'
@@ -51,6 +52,7 @@ async function open(props: {
 }) {
   const r = render(() => (
     <FolderPicker
+      labels={folderPickerLabels()}
       initialPath={props.initialPath ?? '/home/dev'}
       list={props.list}
       onResolve={props.onResolve}
@@ -235,7 +237,7 @@ describe('FolderPicker', () => {
 
 describe('showFolderPicker', () => {
   it('resolves the chosen path and tears its host down', async () => {
-    const promise = showFolderPicker({ initialPath: '/home/dev', list: tree() })
+    const promise = showFolderPicker({ initialPath: '/home/dev', list: tree(), labels: folderPickerLabels() })
 
     await vi.waitFor(() => {
       expect(document.querySelector('.ui-folder-picker__row')).toBeTruthy()
@@ -249,7 +251,7 @@ describe('showFolderPicker', () => {
   })
 
   it('resolves null when cancelled', async () => {
-    const promise = showFolderPicker({ initialPath: '/home/dev', list: tree() })
+    const promise = showFolderPicker({ initialPath: '/home/dev', list: tree(), labels: folderPickerLabels() })
 
     await vi.waitFor(() => {
       expect(document.querySelector('.ui-folder-picker')).toBeTruthy()

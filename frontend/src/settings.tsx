@@ -563,7 +563,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
     const backupPage: SettingsPage = {
       kind: 'component',
       id: 'backup',
-      title: 'Backup & Restore',
+      title: t('settings.page.backup.title', 'Backup & Restore'),
       groupId: 'application',
       scrollMode: 'page',
       renderContent: () => <BackupRestoreSection profileClient={props.profileClient} />,
@@ -572,7 +572,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
       kind: 'component',
       id: 'connections',
       scrollMode: 'contained',
-      title: 'Connections',
+      title: t('settings.page.connections.title', 'Connections'),
       renderContent: () => (
         <ConnectionsView
           client={props.profileClient}
@@ -590,15 +590,15 @@ export function SettingsComponent(props: SettingsComponentProps) {
     const secretsPage: SettingsPage = {
       kind: 'component',
       id: 'secrets',
-      title: 'Secrets',
+      title: t('settings.fallback.secrets.title', 'Secrets'),
       groupId: 'vault',
       scrollMode: 'contained',
       renderContent: () => (
         <Show
           when={props.vaultClient && props.vaultController}
           fallback={
-            <PageSection title="Secrets">
-              Vault secrets are not available in this window.
+            <PageSection title={t('settings.fallback.secrets.title', 'Secrets')}>
+              {t('settings.fallback.secrets.body', 'Vault secrets are not available in this window.')}
             </PageSection>
           }
         >
@@ -617,7 +617,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
     const vaultPage: SettingsPage = {
       kind: 'component',
       id: 'vault',
-      title: 'Protection',
+      title: t('settings.fallback.protection.title', 'Protection'),
       groupId: 'vault',
       scrollMode: 'page',
       // The section is listed unconditionally — a surface that appears only
@@ -629,7 +629,9 @@ export function SettingsComponent(props: SettingsComponentProps) {
         <Show
           when={props.vaultClient && props.vaultController}
           fallback={
-            <PageSection title="Protection">Vault is not available in this window.</PageSection>
+            <PageSection title={t('settings.fallback.protection.title', 'Protection')}>
+              {t('settings.fallback.protection.body', 'Vault is not available in this window.')}
+            </PageSection>
           }
         >
           <VaultSection vaultClient={props.vaultClient!} vaultController={props.vaultController!} />
@@ -639,7 +641,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
     const endpointsPage: SettingsPage = {
       kind: 'component',
       id: 'endpoints',
-      title: 'Endpoints',
+      title: t('settings.fallback.endpoints.title', 'Endpoints'),
       groupId: 'assistant',
       scrollMode: 'contained',
       // Registered unconditionally for the same reason vaultPage is: a
@@ -649,8 +651,8 @@ export function SettingsComponent(props: SettingsComponentProps) {
         <Show
           when={props.endpointsClient}
           fallback={
-            <PageSection title="Endpoints">
-              AI endpoints are not available in this window.
+            <PageSection title={t('settings.fallback.endpoints.title', 'Endpoints')}>
+              {t('settings.fallback.endpoints.body', 'AI endpoints are not available in this window.')}
             </PageSection>
           }
         >
@@ -668,7 +670,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
     const snippetsPage: SettingsPage = {
       kind: 'component',
       id: 'snippets',
-      title: 'Snippets',
+      title: t('settings.fallback.snippets.title', 'Snippets'),
       groupId: 'application',
       scrollMode: 'contained',
       // Registered unconditionally for the same reason vaultPage is: a
@@ -679,7 +681,9 @@ export function SettingsComponent(props: SettingsComponentProps) {
         <Show
           when={props.snippetsStore}
           fallback={
-            <PageSection title="Snippets">Snippets are not available in this window.</PageSection>
+            <PageSection title={t('settings.fallback.snippets.title', 'Snippets')}>
+              {t('settings.fallback.snippets.body', 'Snippets are not available in this window.')}
+            </PageSection>
           }
         >
           <SnippetsSection store={props.snippetsStore!} />
@@ -696,7 +700,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
     const skillsPage: SettingsPage = {
       kind: 'component',
       id: 'skills',
-      title: 'Skills',
+      title: t('settings.fallback.skills.title', 'Skills'),
       groupId: 'assistant',
       scrollMode: 'page',
       ownsSection: SKILLS_SECTION,
@@ -704,7 +708,9 @@ export function SettingsComponent(props: SettingsComponentProps) {
         <Show
           when={props.skillsStore}
           fallback={
-            <PageSection title="Skills">Skills are not available in this window.</PageSection>
+            <PageSection title={t('settings.fallback.skills.title', 'Skills')}>
+              {t('settings.fallback.skills.body', 'Skills are not available in this window.')}
+            </PageSection>
           }
         >
           <SkillsSection store={props.skillsStore!} />
@@ -715,7 +721,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
     const rolesPage: SettingsPage = {
       kind: 'component',
       id: 'roles',
-      title: 'Roles',
+      title: t('settings.fallback.roles.title', 'Roles'),
       groupId: 'assistant',
       scrollMode: 'page',
       // Registered unconditionally for the same reason endpointsPage is: a
@@ -725,7 +731,9 @@ export function SettingsComponent(props: SettingsComponentProps) {
         <Show
           when={props.endpointsClient}
           fallback={
-            <PageSection title="Roles">Model roles are not available in this window.</PageSection>
+            <PageSection title={t('settings.fallback.roles.title', 'Roles')}>
+              {t('settings.fallback.roles.body', 'Model roles are not available in this window.')}
+            </PageSection>
           }
         >
           <RolesSection client={props.endpointsClient} />
@@ -736,15 +744,18 @@ export function SettingsComponent(props: SettingsComponentProps) {
     const policyPage: SettingsPage = {
       kind: 'component',
       id: 'policy',
-      title: 'Assistant permissions',
+      title: t('settings.fallback.perms.title', 'Assistant permissions'),
       groupId: 'assistant',
       scrollMode: 'page',
       renderContent: () => (
         <Show
           when={props.policyClient}
           fallback={
-            <PageSection title="Assistant permissions">
-              Your assistant permissions are not available in this window.
+            <PageSection title={t('settings.fallback.perms.title', 'Assistant permissions')}>
+              {t(
+                'settings.fallback.perms.body',
+                'Your assistant permissions are not available in this window.',
+              )}
             </PageSection>
           }
         >
@@ -769,15 +780,18 @@ export function SettingsComponent(props: SettingsComponentProps) {
     const agentAccessPage: SettingsPage = {
       kind: 'component',
       id: 'agent-access',
-      title: 'Agent access',
+      title: t('settings.fallback.access.title', 'Agent access'),
       groupId: 'assistant',
       scrollMode: 'page',
       renderContent: () => (
         <Show
           when={props.agentAccessClient}
           fallback={
-            <PageSection title="Agent access">
-              Which agents are allowed is not available in this window.
+            <PageSection title={t('settings.fallback.access.title', 'Agent access')}>
+              {t(
+                'settings.fallback.access.body',
+                'Which agents are allowed is not available in this window.',
+              )}
             </PageSection>
           }
         >
@@ -789,15 +803,18 @@ export function SettingsComponent(props: SettingsComponentProps) {
     const agentRecordsPage: SettingsPage = {
       kind: 'component',
       id: 'agents',
-      title: 'Agents',
+      title: t('settings.fallback.agents.title', 'Agents'),
       groupId: 'assistant',
       scrollMode: 'page',
       renderContent: () => (
         <Show
           when={props.agentRecordsClient}
           fallback={
-            <PageSection title="Agents">
-              Agent launch records are not available in this window.
+            <PageSection title={t('settings.fallback.agents.title', 'Agents')}>
+              {t(
+                'settings.fallback.agents.body',
+                'Agent launch records are not available in this window.',
+              )}
             </PageSection>
           }
         >
@@ -809,7 +826,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
     const emittingPage: SettingsPage = {
       kind: 'component',
       id: 'emitting',
-      title: 'Agent screens',
+      title: t('settings.fallback.screens.title', 'Agent screens'),
       groupId: 'assistant',
       // 'page' rather than 'contained': the grid is inside a kit CodeBlock,
       // which owns its own scroll cap, so this page has no second scroll
@@ -820,8 +837,11 @@ export function SettingsComponent(props: SettingsComponentProps) {
         <Show
           when={props.emittingClient}
           fallback={
-            <PageSection title="Agent screens">
-              What an agent is emitting is not available in this window.
+            <PageSection title={t('settings.fallback.screens.title', 'Agent screens')}>
+              {t(
+                'settings.fallback.screens.body',
+                'What an agent is emitting is not available in this window.',
+              )}
             </PageSection>
           }
         >
@@ -841,15 +861,18 @@ export function SettingsComponent(props: SettingsComponentProps) {
     const rulesPage: SettingsPage = {
       kind: 'component',
       id: 'rules',
-      title: 'Agent rules',
+      title: t('settings.fallback.rules.title', 'Agent rules'),
       groupId: 'assistant',
       scrollMode: 'page',
       renderContent: () => (
         <Show
           when={props.rulesClient}
           fallback={
-            <PageSection title="Agent rules">
-              Editing the rules nocx reads your agents with is not available in this window.
+            <PageSection title={t('settings.fallback.rules.title', 'Agent rules')}>
+              {t(
+                'settings.fallback.rules.body',
+                'Editing the rules nocx reads your agents with is not available in this window.',
+              )}
             </PageSection>
           }
         >
@@ -861,7 +884,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
     const calibrationPage: SettingsPage = {
       kind: 'component',
       id: 'calibration',
-      title: 'Calibrate an agent',
+      title: t('settings.fallback.calibrate.title', 'Calibrate an agent'),
       groupId: 'assistant',
       scrollMode: 'page',
       renderContent: () => (
@@ -873,8 +896,11 @@ export function SettingsComponent(props: SettingsComponentProps) {
           // draw a claim it has no way to test.
           when={props.calibrationClient && props.typingClient}
           fallback={
-            <PageSection title="Calibrate an agent">
-              Calibrating an agent is not available in this window.
+            <PageSection title={t('settings.fallback.calibrate.title', 'Calibrate an agent')}>
+              {t(
+                'settings.fallback.calibrate.body',
+                'Calibrating an agent is not available in this window.',
+              )}
             </PageSection>
           }
         >
@@ -1494,7 +1520,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
           <IconButton
             size="xs"
             ariaLabel={'Reset "' + declLabel(decl) + '" to default'}
-            title="Reset to default"
+            title={t('settings.reset.title', 'Reset to default')}
             onClick={() => void resetSetting(decl.key)}
           >
             <ResetIcon />
@@ -1781,7 +1807,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
   return (
     <div class="ui-settings" onKeyDown={handleKeydown}>
       <Page
-        title="Settings"
+        title={t('settings.title', 'Settings')}
         titleHidden
         leading={
           <div class="ui-settings-rail">
@@ -1790,8 +1816,8 @@ export function SettingsComponent(props: SettingsComponentProps) {
               <SearchField
                 value={searchQuery()}
                 onInput={handleSearchInput}
-                placeholder="Search settings…"
-                ariaLabel="Search settings"
+                placeholder={t('settings.search.ph', 'Search settings…')}
+                ariaLabel={t('settings.search.aria', 'Search settings')}
               />
             </div>
 
@@ -1802,7 +1828,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
                 onChange={(c) => {
                   setModifiedOnly(c)
                 }}
-                label={' Modified'}
+                label={t('settings.modified.label', 'Modified')}
               />
               <Show when={modifiedCount() > 0}>
                 <Badge tone="warning">{String(modifiedCount())}</Badge>
@@ -1816,7 +1842,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
                 the guard refuses an empty catalogue with named pages. */}
             <Show when={loadState() === 'ready'}>
               <GroupedRail
-                label="Settings sections"
+                label={t('settings.sections.aria', 'Settings sections')}
                 groups={groups().map((g) => ({
                   id: g.id,
                   title: g.key ? t(g.key, g.title) : g.title,
@@ -1872,14 +1898,14 @@ export function SettingsComponent(props: SettingsComponentProps) {
         {/* Generated settings sections — hidden when a component page is active. */}
         <Show when={activeComponentPage() === null}>
           <Show when={loadState() === 'loading'}>
-            <div class="ui-settings-status ui-settings-loading">Loading settings…</div>
+            <div class="ui-settings-status ui-settings-loading">{t('settings.loading', 'Loading settings…')}</div>
           </Show>
 
           <Show when={loadState() === 'failed'}>
             <div class="ui-settings-status ui-settings-failed">
-              <span>Failed to load settings.</span>
+              <span>{t('settings.loadFailed', 'Failed to load settings.')}</span>
               <Button variant="default" onClick={() => void refresh()}>
-                Retry
+                {t('settings.retry', 'Retry')}
               </Button>
             </div>
           </Show>
@@ -1891,7 +1917,9 @@ export function SettingsComponent(props: SettingsComponentProps) {
               declarations().length > 0
             }
           >
-            <div class="ui-settings-status ui-settings-nomatch">No settings match your search.</div>
+            <div class="ui-settings-status ui-settings-nomatch">
+              {t('settings.nomatch', 'No settings match your search.')}
+            </div>
           </Show>
 
           {/* The sections with something to show, and no others — see
@@ -1922,7 +1950,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
                         CodeBlock owns the fixed scroll cap, so this long
                         read-only text cannot push the person's field away. */}
                     <Show when={section === INSTRUCTIONS_SECTION}>
-                      <CodeBlock ariaLabel="nocx system prompt">{systemPromptText}</CodeBlock>
+                      <CodeBlock ariaLabel={t('settings.prompt.aria', 'nocx system prompt')}>{systemPromptText}</CodeBlock>
                     </Show>
                     {/* The animal itself, above the controls that govern it.
                         It runs the real overlay over a mock scrollback rather
@@ -1993,7 +2021,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
                         </For>
                       }
                     >
-                      <Section title="What the person added" divided>
+                      <Section title={t('settings.added.title', 'What the person added')} divided>
                         <For each={sectionDecls()}>
                           {(decl) => (
                             <SettingRow decl={decl} visible={visibleKeys().has(decl.key)} />

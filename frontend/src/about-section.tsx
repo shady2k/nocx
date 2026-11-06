@@ -20,6 +20,7 @@ import { showToast } from './ui/toast'
 import type { AppAbout } from './generated/app.about'
 import type { ClipboardAccess } from './clipboard'
 import type { UpdateCheckOutcome } from './update-check'
+import { t } from './i18n/locale-model'
 
 /** The application's own icon, served from `public/` and therefore addressed
  *  as a URL rather than imported as a module. Vite copies that directory into
@@ -58,14 +59,14 @@ export interface AboutSectionProps {
  *  The clipboard takes the whole list including it. Two hand-kept lists would
  *  have been the obvious shape and would have drifted the first time a field
  *  was added to one of them. */
-const FACTS: { label: string; of: (a: AppAbout) => string; headline?: true }[] = [
-  { label: 'Version', of: (a) => a.version, headline: true },
-  { label: 'Build', of: (a) => a.build },
-  { label: 'Commit', of: (a) => a.commit },
-  { label: 'Built', of: (a) => a.date },
-  { label: 'Platform', of: (a) => a.platform },
-  { label: 'Go', of: (a) => a.go },
-  { label: 'Wails', of: (a) => a.wails },
+const FACTS: { labelKey: string; en: string; of: (a: AppAbout) => string; headline?: true }[] = [
+  { labelKey: 'about.facts.version', en: 'Version', of: (a) => a.version, headline: true },
+  { labelKey: 'about.facts.build', en: 'Build', of: (a) => a.build },
+  { labelKey: 'about.facts.commit', en: 'Commit', of: (a) => a.commit },
+  { labelKey: 'about.facts.built', en: 'Built', of: (a) => a.date },
+  { labelKey: 'about.facts.platform', en: 'Platform', of: (a) => a.platform },
+  { labelKey: 'about.facts.go', en: 'Go', of: (a) => a.go },
+  { labelKey: 'about.facts.wails', en: 'Wails', of: (a) => a.wails },
 ]
 
 /** The facts the list draws: everything the headline has not already said. */
@@ -76,7 +77,10 @@ const ROWS = FACTS.filter((f) => !f.headline)
  *  into issue trackers, chat and mail alike, and only one of those renders
  *  markdown. */
 function diagnosticsText(about: AppAbout): string {
-  return ['nocx', ...FACTS.map((fact) => `${fact.label}: ${fact.of(about)}`)].join('\n')
+  return [
+    'nocx',
+    ...FACTS.map((fact) => `${t(fact.labelKey, fact.en)}: ${fact.of(about)}`),
+  ].join('\n')
 }
 
 export function AboutSection(props: AboutSectionProps) {
@@ -113,31 +117,31 @@ export function AboutSection(props: AboutSectionProps) {
     if (!value) return
     try {
       await props.clipboard.writeText(diagnosticsText(value))
-      showToast({ message: 'Build details copied' })
+      showToast({ message: t('about.copied', 'Build details copied') })
     } catch (err) {
       // The clipboard is a platform capability that can refuse — a non-secure
       // context, a platform that declined the write. A button that silently
       // does nothing is worse than one that is not there.
       showToast({
-        message: `Could not copy: ${err instanceof Error ? err.message : String(err)}`,
+        message: t('about.copyFailedHead', 'Could not copy: ') + (err instanceof Error ? err.message : String(err)),
         level: 'danger',
       })
     }
   }
 
   return (
-    <PageSection title="About">
+    <PageSection title={t('about.title', 'About')}>
       <Show
         when={!about.error}
         fallback={
           <StatusCard
             tone="danger"
-            title="Could not read this build's details"
-            description="The backend answered with an error."
+            title={t('about.loadFailed.title', "Could not read this build's details")}
+            description={t('about.loadFailed.desc', 'The backend answered with an error.')}
           />
         }
       >
-        <Show when={about()} fallback={<p class="ab-loading">Reading the build…</p>}>
+        <Show when={about()} fallback={<p class="ab-loading">{t('about.reading', 'Reading the build…')}</p>}>
           {(build) => (
             <Stack gap="loose">
               {/* A soft degrade is visible in the product, not only in a log:
@@ -148,8 +152,8 @@ export function AboutSection(props: AboutSectionProps) {
                 {(reason) => (
                   <StatusCard
                     tone="warning"
-                    title="Updates"
-                    description={`update check failed: ${reason()}`}
+                    title={t('about.updates.title', 'Updates')}
+                    description={t('about.checkFailedHead', 'update check failed: ') + reason()}
                   />
                 )}
               </Show>
@@ -165,7 +169,7 @@ export function AboutSection(props: AboutSectionProps) {
                         question this page is asked is "is this the build with
                         the fix in it". Saying so is the answer; printing "dev"
                         where a version goes is not. */}
-                    <Badge tone="warning">Development build</Badge>
+                    <Badge tone="warning">{t('about.devBuild', 'Development build')}</Badge>
                   </Show>
                 </div>
               </div>
@@ -179,7 +183,7 @@ export function AboutSection(props: AboutSectionProps) {
                 <For each={ROWS}>
                   {(row) => (
                     <>
-                      <dt>{row.label}</dt>
+                      <dt>{t(row.labelKey, row.en)}</dt>
                       <dd>{row.of(build())}</dd>
                     </>
                   )}
@@ -187,7 +191,7 @@ export function AboutSection(props: AboutSectionProps) {
               </dl>
 
               <div class="ab-actions">
-                <Button onClick={() => void copy()}>Copy diagnostics</Button>
+                <Button onClick={() => void copy()}>{t('about.copyDiagnostics', 'Copy diagnostics')}</Button>
                 <Show when={props.onCheckForUpdates}>
                   <Button onClick={() => void checkForUpdates()} disabled={checking()}>
                     {checking() ? 'Checking…' : 'Check for updates'}

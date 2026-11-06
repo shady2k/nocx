@@ -193,23 +193,23 @@ export function NotificationsPanel(props: NotificationsPanelProps) {
   const axes: readonly Axis[] = [
     {
       id: 'host',
-      label: 'Host',
-      placeholder: 'All hosts',
+      label: t('notify.chrome.host', 'Host'),
+      placeholder: t('notify.chrome.allHosts.ph', 'All hosts'),
       identity: (o) => o.host,
       optionLabel: (o) => (o.host === '' ? 'This machine' : o.host),
     },
     {
       id: 'session',
-      label: 'Session',
-      placeholder: 'All sessions',
+      label: t('notify.chrome.session', 'Session'),
+      placeholder: t('notify.chrome.allSessions.ph', 'All sessions'),
       identity: (o) =>
         sessionName(o) === null ? UNAVAILABLE_SESSION : `${o.backendId}/${o.sessionId}`,
       optionLabel: (o) => sessionName(o) ?? 'Unavailable sessions',
     },
     {
       id: 'kind',
-      label: 'Kind',
-      placeholder: 'All kinds',
+      label: t('notify.chrome.kind', 'Kind'),
+      placeholder: t('notify.chrome.allKinds.ph', 'All kinds'),
       identity: (o) => o.kind,
       optionLabel: (o) => kindLabel(o.kind, catalogue()),
     },
@@ -324,8 +324,11 @@ export function NotificationsPanel(props: NotificationsPanelProps) {
         when={props.store.readKnown()}
         fallback={
           <EmptyState
-            title="Could not read notifications"
-            description="Reconnect or try again to check for notifications."
+            title={t('notify.chrome.loadFailed.title', 'Could not read notifications')}
+            description={t(
+              'notify.chrome.loadFailed.desc',
+              'Reconnect or try again to check for notifications.',
+            )}
           />
         }
       >
@@ -333,8 +336,11 @@ export function NotificationsPanel(props: NotificationsPanelProps) {
           when={all().length > 0}
           fallback={
             <EmptyState
-              title="Nothing to catch up on"
-              description="Notifications raised while you are elsewhere collect here."
+              title={t('notify.chrome.empty.title', 'Nothing to catch up on')}
+              description={t(
+                'notify.chrome.empty.desc',
+                'Notifications raised while you are elsewhere collect here.',
+              )}
             />
           }
         >
@@ -342,12 +348,15 @@ export function NotificationsPanel(props: NotificationsPanelProps) {
             when={visible().length > 0}
             fallback={
               <EmptyState
-                title="Nothing matches"
-                description="No notification is from every one of the things you narrowed to."
+                title={t('notify.chrome.nomatch.title', 'Nothing matches')}
+                description={t(
+                  'notify.chrome.nomatch.desc',
+                  'No notification is from every one of the things you narrowed to.',
+                )}
               />
             }
           >
-            <div class="notifications-panel__list" role="list" aria-label="Notifications">
+            <div class="notifications-panel__list" role="list" aria-label={t('notify.chrome.label', 'Notifications')}>
               <For each={visible()}>
                 {(o) => {
                   const live = () => {
@@ -406,8 +415,9 @@ export function NotificationsPanel(props: NotificationsPanelProps) {
         {/* Outside the list and never activatable: a soft degrade must be
             visible in the product, not only in a log. */}
         <div class="notifications-panel__dropped" data-testid="notifications-dropped">
-          {dropped().count} notifications dropped from the feed between{' '}
-          {formatWhen(dropped().oldest)} and {formatWhen(dropped().newest)}
+          {dropped().count} {t('notify.chrome.dropped.head', 'notifications dropped from the feed between')}{' '}
+          {formatWhen(dropped().oldest)} {t('notify.chrome.and', 'and')}{' '}
+          {formatWhen(dropped().newest)}
         </div>
       </Show>
     </div>
@@ -429,7 +439,7 @@ function Run(props: { occurrence: Occurrence }) {
     <div
       class="notifications-panel__run"
       role="list"
-      aria-label={`Occurrences of ${props.occurrence.title}`}
+      aria-label={t('notify.chrome.occurrences.aria', 'Occurrences of') + ' ' + props.occurrence.title}
     >
       <For each={props.occurrence.run}>
         {(member: RunMember) => (

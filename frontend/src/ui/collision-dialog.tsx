@@ -73,10 +73,27 @@ export interface CollisionDialogProps {
   request: CollisionRequest
   /** Called exactly once per user decision, with the answer and its reach. */
   onResolve: (result: CollisionResult) => void
+  /** The dialog's copy, resolved by the caller so the kit never imports
+   *  i18n. The i18n layer's `collisionLabels()` builds it. */
+  labels: CollisionLabels
 }
+
+/** The kit's copy, threaded in from the surface (see the header comment). */
+export interface CollisionLabels {
+  title: string
+  overwrite: string
+  keepBoth: string
+  skip: string
+  existsIn: string
+  applyOne: string
+  /** `{count}` is substituted by the dialog. */
+  applyMany: string
+}
+
 
 export function CollisionDialog(props: CollisionDialogProps) {
   const [applyToAll, setApplyToAll] = createSignal(false)
+  const label = (name: keyof CollisionLabels): string => props.labels[name]
 
   /** The files an "apply to all" would reach — the batch minus the one on screen. */
   const others = () => Math.max(0, props.request.remaining - 1)
@@ -94,25 +111,25 @@ export function CollisionDialog(props: CollisionDialogProps) {
   return (
     <Dialog
       open
-      title="File already exists"
+      title={label('title')}
       onClose={() => resolve('skip')}
       footer={
         <>
           <Button variant="danger" onClick={() => resolve('overwrite')}>
-            Overwrite
+            {label('overwrite')}
           </Button>
           <Button variant="primary" onClick={() => resolve('keepBoth')}>
-            Keep both
+            {label('keepBoth')}
           </Button>
           <Button variant="default" onClick={() => resolve('skip')} autofocus>
-            Skip
+            {label('skip')}
           </Button>
         </>
       }
     >
       <Stack gap="loose">
         <p>
-          <code>{props.request.name}</code> already exists in{' '}
+          <code>{props.request.name}</code> {label('existsIn')}{' '}
           <code>{props.request.destination}</code>.
         </p>
         <Show when={asksAboutAll()}>
@@ -123,8 +140,8 @@ export function CollisionDialog(props: CollisionDialogProps) {
             }}
             label={
               others() === 1
-                ? 'Apply to the 1 remaining file'
-                : `Apply to the ${others()} remaining files`
+                ? label('applyOne')
+                : label('applyMany').replace('{count}', String(others()))
             }
           />
         </Show>

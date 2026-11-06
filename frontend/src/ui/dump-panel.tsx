@@ -31,6 +31,23 @@ export interface DumpPanelProps {
   dump: DumpData
   copy: (text: string) => Promise<void>
   onClose: () => void
+  /** The kit's copy, threaded in from the surface so this file never
+   *  imports i18n. The i18n layer's `dumpLabels()` builds it. */
+  labels: DumpLabels
+}
+
+/** The kit's copy, threaded in from the surface (kit never imports i18n). */
+export interface DumpLabels {
+  title: string
+  openPage: string
+  searchAria: string
+  searchPh: string
+  request: string
+  response: string
+  rawChunks: string
+  truncated: string
+  noDrive: string
+  noMatch: string
 }
 
 type HighlightMode = 'json' | 'sse' | 'plain'
@@ -174,6 +191,7 @@ function DriveList(props: {
   copy: (text: string) => Promise<void>
   response: boolean
   searchQuery: () => string
+  labels: DumpLabels
 }): JSX.Element {
   const matching = () =>
     props.drives.filter((drive) => {
@@ -183,8 +201,8 @@ function DriveList(props: {
   return (
     <section class="ui-dump-panel__drive">
       <h3>{props.label}</h3>
-      <Show when={props.drives.length > 0} fallback={<p>No recorded drive.</p>}>
-        <Show when={matching().length > 0} fallback={<p>No dump content matches this search.</p>}>
+      <Show when={props.drives.length > 0} fallback={<p>{props.labels.noDrive}</p>}>
+        <Show when={matching().length > 0} fallback={<p>{props.labels.noMatch}</p>}>
           <Stack>
             <For each={matching()}>
               {(drive, index) => {
@@ -212,7 +230,7 @@ function DriveList(props: {
                     </Show>
                     <Show when={props.response}>
                       <details class="ui-dump-panel__raw">
-                        <summary>Raw chunks</summary>
+                        <summary>{props.labels.rawChunks}</summary>
                         <CodeBlock
                           ariaLabel={`${props.label} drive ${index() + 1} raw chunks`}
                           variant="dump"
@@ -223,7 +241,7 @@ function DriveList(props: {
                       </details>
                     </Show>
                     <Show when={drive.truncated}>
-                      <p>Truncated at the 1 MiB capture limit.</p>
+                      <p>{props.labels.truncated}</p>
                     </Show>
                   </div>
                 )
@@ -239,8 +257,9 @@ function DriveList(props: {
 export function DumpPanel(props: DumpPanelProps) {
   const [fullPage, setFullPage] = createSignal(false)
   const [searchQuery, setSearchQuery] = createSignal('')
+  const labels = (): DumpLabels => props.labels
   return (
-    <Dialog open title="Model dump" size="full" onClose={props.onClose}>
+    <Dialog open title={labels().title} size="full" onClose={props.onClose}>
       <div class="ui-dump-panel" data-reader={fullPage() ? 'full-page' : undefined}>
         <Stack>
           <div class="ui-dump-panel__toolbar">
@@ -248,31 +267,37 @@ export function DumpPanel(props: DumpPanelProps) {
               Recorded provider bytes. Requests are formatted JSON; responses show the assembled
               answer above raw chunks.
             </p>
-            <Button variant="ghost" ariaLabel="Open full page" onClick={() => setFullPage(true)}>
-              Open full page
+            <Button
+              variant="ghost"
+              ariaLabel={labels().openPage}
+              onClick={() => setFullPage(true)}
+            >
+              {labels().openPage}
             </Button>
           </div>
           <Show when={fullPage()}>
             <SearchField
               value={searchQuery()}
               onInput={setSearchQuery}
-              ariaLabel="Search dump"
-              placeholder="Search dump"
+              ariaLabel={labels().searchAria}
+              placeholder={labels().searchPh}
             />
           </Show>
           <DriveList
-            label="Request"
+            label={labels().request}
             drives={props.dump.request}
             copy={props.copy}
             response={false}
             searchQuery={searchQuery}
+            labels={labels()}
           />
           <DriveList
-            label="Response"
+            label={labels().response}
             drives={props.dump.response}
             copy={props.copy}
             response
             searchQuery={searchQuery}
+            labels={labels()}
           />
         </Stack>
       </div>
@@ -290,7 +315,7 @@ export function mountDumpPanel(
     host.remove()
   }
   lifecycle.dispose = render(
-    () => <DumpPanel dump={props.dump} copy={props.copy} onClose={close} />,
+    () => <DumpPanel dump={props.dump} copy={props.copy} labels={props.labels} onClose={close} />,
     host,
   )
   return () => {

@@ -26,6 +26,7 @@ import { createAnswerBody, type AnswerBody } from './answer-body'
 import { toolCallTitle } from './tool-call-title'
 import { paintShellInto } from './shell-paint'
 import { mountDumpPanel } from '../ui/dump-panel'
+import { dumpLabels } from '../i18n/kit-labels'
 import { decorateLinks } from '../terminal-links/decorate'
 import { cwdLabel } from '../cwd-label'
 import { createBadge } from '../ui/badge-element'
@@ -1367,7 +1368,7 @@ function buildOverflowMenu(
             const result = await dump(entryId)
             const host = document.createElement('div')
             document.body.appendChild(host)
-            mountDumpPanel(host, { dump: result, copy: copyToClipboard })
+            mountDumpPanel(host, { dump: result, copy: copyToClipboard, labels: dumpLabels() })
           } catch {
             showToast({ level: 'danger', message: 'Could not load the model dump' })
           }

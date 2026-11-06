@@ -89,7 +89,22 @@ export interface FolderPickerProps {
    *  knows nothing about JSON-RPC, bindings or which machine it is reading. */
   list: (path: string) => Promise<{ path: string; entries: FolderEntry[] }>
   onResolve: (chosen: string | null) => void
+  /** The kit's copy, threaded in from the surface so this file never
+   *  imports i18n. The i18n layer builds it (see ask-collision). */
+  labels: FolderPickerLabels
 }
+
+/** The kit's copy, threaded in from the surface (kit never imports i18n). */
+export interface FolderPickerLabels {
+  title: string
+  cancel: string
+  choose: string
+  folder: string
+  upOne: string
+  contents: string
+  empty: string
+}
+
 
 /* ── The one place this component reasons about the shape of a path ───────
    POSIX separator: nocx's desktop shell is macOS and its backend targets
@@ -133,6 +148,7 @@ interface ListingFailure {
 }
 
 export const FolderPicker: Component<FolderPickerProps> = (props) => {
+  const labels = (): FolderPickerLabels => props.labels
   /** The directory whose entries are on screen — only ever a path a listing
    *  SUCCEEDED for, which is what keeps a failure from emptying the tree. */
   const [dir, setDir] = createSignal(props.initialPath)
@@ -192,16 +208,16 @@ export const FolderPicker: Component<FolderPickerProps> = (props) => {
     <Dialog
       open
       size="lg"
-      title="Choose a folder"
+      title={labels().title}
       onClose={cancel}
       onSubmit={choose}
       footer={
         <>
           <Button variant="default" onClick={cancel}>
-            Cancel
+            {labels().cancel}
           </Button>
           <Button variant="primary" disabled={chosen() === ''} onClick={choose}>
-            Choose
+            {labels().choose}
           </Button>
         </>
       }
@@ -209,7 +225,7 @@ export const FolderPicker: Component<FolderPickerProps> = (props) => {
       <div class="ui-folder-picker">
         <div class="ui-folder-picker__path">
           <TextField
-            label="Folder"
+            label={labels().folder}
             value={answer()}
             onInput={setAnswer}
             autoFocus
@@ -224,8 +240,8 @@ export const FolderPicker: Component<FolderPickerProps> = (props) => {
           </Button>
           <Button
             variant="default"
-            ariaLabel="Up one level"
-            title="Up one level"
+            ariaLabel={labels().upOne}
+            title={labels().upOne}
             disabled={parent() === null}
             onClick={() => {
               const up = parent()
@@ -245,14 +261,14 @@ export const FolderPicker: Component<FolderPickerProps> = (props) => {
         <div
           class="ui-folder-picker__list"
           role="listbox"
-          aria-label="Folder contents"
+          aria-label={labels().contents}
           aria-busy={busy() ? 'true' : undefined}
         >
           <Show
             when={entries().length > 0}
             fallback={
               <Show when={!busy() && failure() === null}>
-                <EmptyState title="This folder is empty" />
+                <EmptyState title={labels().empty} />
               </Show>
             }
           >
@@ -342,7 +358,14 @@ export function showFolderPicker(
     }
 
     dispose = render(
-      () => <FolderPicker initialPath={props.initialPath} list={props.list} onResolve={finish} />,
+      () => (
+        <FolderPicker
+          initialPath={props.initialPath}
+          list={props.list}
+          labels={props.labels}
+          onResolve={finish}
+        />
+      ),
       host,
     )
   })

@@ -81,6 +81,7 @@ import {
 import { ResizeHandle } from '../ui/resize-handle'
 import { skillFileOutcome } from '../skills-presentation'
 import { t } from '../i18n/locale-model'
+import { fileReadoutLabels } from '../i18n/kit-labels'
 import type { SkillsFile } from '../generated/skills.file'
 import type { SkillsScan } from '../generated/skills.scan'
 import type { Skill, SkillsStore } from '../skills-store'
@@ -818,7 +819,13 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
                   <Show
                     when={documentText(said())}
                     fallback={
-                      <FileReadout facts={[]} fill ariaLabel={readoutLabel()} outcome={said()} />
+                      <FileReadout
+                        facts={[]}
+                        fill
+                        ariaLabel={readoutLabel()}
+                        outcome={said()}
+                        labels={fileReadoutLabels()}
+                      />
                     }
                   >
                     {(doc) => (

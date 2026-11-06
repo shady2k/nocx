@@ -38,6 +38,7 @@ import { StatusDot } from '../ui/status-dot'
 import { overviewGroups, paneCountLabel, stateLabel, stateTone } from './overview-model'
 import type { OverviewCard, OverviewGroup } from './overview-model'
 import type { OverviewPort } from './overview-port'
+import { t } from '../i18n/locale-model'
 
 export interface OverviewPanelProps {
   port: OverviewPort
@@ -236,7 +237,7 @@ export function OverviewPanel(props: OverviewPanelProps) {
       class="overview"
       role="dialog"
       aria-modal="true"
-      aria-label="Workspace overview"
+      aria-label={t('overview.aria', 'Workspace overview')}
       tabIndex={-1}
       ref={root}
       onKeyDown={onKeyDown}
@@ -248,8 +249,8 @@ export function OverviewPanel(props: OverviewPanelProps) {
     >
       <div class="overview__close">
         <IconButton
-          ariaLabel="Close workspace overview"
-          title="Close"
+          ariaLabel={t('overview.closeAria', 'Close workspace overview')}
+          title={t('overview.close', 'Close')}
           type="button"
           onClick={props.onClose}
         >
@@ -345,8 +346,8 @@ export function OverviewPanel(props: OverviewPanelProps) {
                     <Badge>{paneCountLabel(group.cards.length)}</Badge>
                     <Show when={!group.isDefault && distance() === 0}>
                       <IconButton
-                        ariaLabel={`Close ${displayName} workspace`}
-                        title={`Close ${displayName}`}
+                        ariaLabel={t('overview.closeWs.head', 'Close') + ' ' + displayName + t('overview.closeWs.tail', '')}
+                        title={t('overview.closeWs.head', 'Close') + ' ' + displayName}
                         type="button"
                         size="sm"
                         disabled={closingWorkspaceId() !== null}
@@ -382,7 +383,7 @@ export function OverviewPanel(props: OverviewPanelProps) {
                         }}
                       >
                         <PlusIcon />
-                        New tab
+                        {t('overview.newTab', 'New tab')}
                       </Button>
                     </footer>
                   </Show>
@@ -403,7 +404,7 @@ export function OverviewPanel(props: OverviewPanelProps) {
             }}
           >
             <PlusIcon />
-            New workspace
+            {t('overview.newWorkspace', 'New workspace')}
           </Button>
         </div>
       </div>

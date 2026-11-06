@@ -3,6 +3,7 @@ import { IconButton } from './ui/icon-button'
 import { TAB_DRAG_TYPE } from './layout/strip-drag'
 import { ChevronDownIcon, CloseIcon, PinIcon, PlusIcon } from './ui/icons'
 import type { PaneActivity, PaneActivitySource } from './pane-observation'
+import { t } from './i18n/locale-model'
 
 /**
  * Tab — a feature component for a terminal tab button.
@@ -310,7 +311,11 @@ export function Tab(props: TabProps) {
               order to be surprising, which is the moment it is least
               welcome. */}
           <Show when={props.pinned === true}>
-            <span class="nocx-tab-pin" aria-label="Pinned" title="Pinned">
+            <span
+              class="nocx-tab-pin"
+              aria-label={t('tabs.pinned', 'Pinned')}
+              title={t('tabs.pinned', 'Pinned')}
+            >
               <PinIcon />
             </span>
           </Show>
@@ -354,7 +359,7 @@ export function Tab(props: TabProps) {
       <Show when={props.adoptable === true}>
         <IconButton
           size="sm"
-          ariaLabel="Save as connection"
+          ariaLabel={t('tabs.saveAsConnection', 'Save as connection')}
           onClick={(e: MouseEvent) => {
             e.stopPropagation()
             props.onAdopt?.()
@@ -366,7 +371,7 @@ export function Tab(props: TabProps) {
       </Show>
       <IconButton
         size="sm"
-        ariaLabel="Close tab"
+        ariaLabel={t('tabs.close', 'Close tab')}
         onClick={(e: MouseEvent) => {
           e.stopPropagation()
           props.onClose(props.paneId)

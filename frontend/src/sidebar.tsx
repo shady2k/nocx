@@ -54,6 +54,7 @@ import {
   type SidebarWidthController,
 } from './sidebar-width'
 import { createAppVisibility, type AppVisibility } from './app-visible'
+import { t } from './i18n/locale-model'
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -240,7 +241,7 @@ function PanelRoot(props: PanelRootProps) {
           reports belongs to the pane on the far side of it. */}
       <Show when={props.resize}>
         <ResizeHandle
-          ariaLabel="Resize sidebar"
+          ariaLabel={t('sidebar.resize', 'Resize sidebar')}
           pane="after"
           value={width()}
           min={SIDEBAR_WIDTH_MIN}
@@ -501,9 +502,18 @@ function SidebarSolid(props: SidebarSolidProps) {
 
   // ── Render ─────────────────────────────────────────────────────────────
   return (
-    <div role="toolbar" aria-label="Activity bar" class="activity-bar" onKeyDown={handleKeyDown}>
+    <div
+      role="toolbar"
+      aria-label={t('sidebar.activityBar', 'Activity bar')}
+      class="activity-bar"
+      onKeyDown={handleKeyDown}
+    >
       {/* Top zone: views */}
-      <div class="activity-bar-zone activity-bar-top" role="group" aria-label="Views">
+      <div
+        class="activity-bar-zone activity-bar-top"
+        role="group"
+        aria-label={t('sidebar.views', 'Views')}
+      >
         <For each={props.views}>
           {(view) => {
             const status = () => view.status?.() ?? null
@@ -552,7 +562,7 @@ function SidebarSolid(props: SidebarSolidProps) {
                         see. */}
                     <ProgressBar
                       value={progress() as number}
-                      ariaLabel={`${view.title} progress`}
+                      ariaLabel={view.title + ' ' + t('ops.progress.aria', 'progress')}
                     />
                   </span>
                 </Show>
@@ -566,7 +576,11 @@ function SidebarSolid(props: SidebarSolidProps) {
       <div class="activity-bar-spacer" />
 
       {/* Bottom zone: actions. */}
-      <div class="activity-bar-zone activity-bar-bottom" role="group" aria-label="Actions">
+      <div
+        class="activity-bar-zone activity-bar-bottom"
+        role="group"
+        aria-label={t('sidebar.actions', 'Actions')}
+      >
         <For each={props.actions}>
           {(action) => (
             <IconButton

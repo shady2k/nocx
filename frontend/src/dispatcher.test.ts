@@ -764,16 +764,59 @@ describe('dispatcher mutations', () => {
     d.close()
   })
 
-  it('never re-sends a withdrawn mutation, whatever the backend would say', async () => {
+  it('never re-sends a withdrawn mutation, and the rejection carries its answer', async () => {
     const d = new Dispatcher(new TestEndpointProvider())
-    await connected(d)
+    await connectedWith(d, 8)
     const abort = new AbortController()
     const pending = d.call('settings.set', { key: 'theme' }, abort.signal)
     pending.catch(() => {})
+    await flush()
     abort.abort()
-    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+    await flush()
+    // No second settings.set, whatever the backend would say: a withdrawal
+    // re-sends nothing. The one ask is the ANSWER — §8's three sentences
+    // reach the person through the call's own rejection, because the row that
+    // used to read them out is the row that goes when the call settles.
     expect(methodFrames('settings.set')).toHaveLength(1)
-    expect(methodFrames('operation.outcome')).toHaveLength(0)
+    const ask = socket()
+      .requests()
+      .find((request) => request.method === 'operation.outcome')
+    expect(ask).toBeDefined()
+    socket().deliverText({
+      jsonrpc: '2.0',
+      id: ask!.id!,
+      result: { outcome: 'outcome-unknown', operation: 'settings.set' },
+    })
+    await expect(pending).rejects.toMatchObject({
+      name: 'AbortError',
+      message: 'Checking what happened…',
+    })
+    expect(methodFrames('settings.set')).toHaveLength(1)
+    d.close()
+  })
+
+  it('a mutation withdrawn before it was sent answers did-not-start without asking', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    await connectedWith(d, 1)
+    void d.call('vault.seal', {}) // the whole window
+    const abort = new AbortController()
+    const queued = d.call('git.commit', { message: 'x' }, abort.signal)
+    queued.catch(() => {})
+    await flush()
+    abort.abort()
+    // Nothing reached the backend and no credit was spent, so the record has
+    // never heard of this identity and must not be asked. "Did not start" is
+    // known here, and it is the sentence the caller gets.
+    await expect(queued).rejects.toMatchObject({
+      name: 'AbortError',
+      message: 'It did not start — nothing was changed.',
+    })
+    expect(
+      socket()
+        .requests()
+        .filter((request) => request.method === 'operation.outcome'),
+    ).toHaveLength(0)
+    expect(methodFrames('git.commit')).toHaveLength(0)
     d.close()
   })
 })

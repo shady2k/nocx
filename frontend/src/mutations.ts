@@ -128,3 +128,22 @@ export async function resolveMutationOutcome(
     return assessmentOf({ outcome: 'unknown', operation: '' })
   }
 }
+
+/** A mutation the person withdrew. The name stays 'AbortError' — the call WAS
+ *  withdrawn, and a surface that stays quiet for a person's own cancel keeps
+ *  doing so — while the message is §8's sentence for it: one of "It did not
+ *  start", "It finished" or "Checking what happened…". A row is the wait and
+ *  goes when the call settles, so this is where a withdrawn mutation's answer
+ *  reaches the surface that asked. */
+export class MutationWithdrawnError extends Error {
+  constructor(readonly assessment: MutationAssessment) {
+    super(assessment.sentence)
+    this.name = 'AbortError'
+  }
+}
+
+/** The answer for a mutation withdrawn before it was ever sent: nothing ran,
+ *  so the record is never asked. */
+export function withdrawnBeforeStart(method: string): MutationAssessment {
+  return assessmentOf({ outcome: 'not-started', operation: method })
+}

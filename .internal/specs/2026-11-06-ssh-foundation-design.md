@@ -170,17 +170,19 @@ A new block beside the pool, instead of methods on it: a pool entry today exists
 
 Added after the review, on the owner's question. **Read against `go list -tags 'gtk3 nocx_local_ssh'` of 2026-11-06; nothing here has been compiled.** Go refuses an import cycle at build time, so the risk is not a cycle shipping but a design that cannot compile, or logic pushed somewhere odd to dodge one. Three such traps exist, and each is settled here:
 
-| Where                                                                                                             | What goes there                                                                                                        | May import                                              | May never import                                              |
-| ----------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------- |
-| `internal/helper/proto/connection.go`                                                                             | Wire events and state names between helper and coordinator                                                             | Nothing, as today                                       | Anything internal                                             |
-| `internal/helper/sshconn/` (`machine.go`, `supervisor.go`, `prober.go`, `look.go`, tagged `nocx_local_ssh`)       | Pure state machine, one supervisor per `poolKey`, prober, look-only dial                                               | `internal/ssh`, `helper/proto`, `monoclock`, `log`      | `helper/sshsvc`, `helper/session`, `helper/host`, `transport` |
-| `internal/helper/sshsvc/`                                                                                         | Serves `sshconn` over the helper protocol; shell and lane acquire through it                                           | `sshconn`, as well as what it imports today             | `helper/session` (which imports it)                           |
-| `internal/connection/resolve.go`                                                                                  | One entry: `ours{config}` or `plain{reason}`                                                                           | As today: `credential`, `profile`, `ssh`, `vault`       | `panedriver`, `transport`, `app`                              |
-| `internal/panedriver/` (`driver.go`, `order.go`, `return.go`)                                                     | Open order, reconnect, reattach, behind interfaces it declares itself                                                  | `connection`, `helper/proto`, `monoclock`, `log`        | `transport`, `app`, `session`, `helper/client`                |
-| `internal/diagnostics/journal.go`                                                                                 | The journal, fed by the coordinator from proto events                                                                  | `log`, as today                                         | Anything else                                                 |
-| `internal/transport/ws_pane_connection.go`, `contracts/pane.connection.schema.json`                               | The notification and the wake call. Replaces `ws_liveness.go`; the seam `transport` calls is an interface it declares  | As today                                                | `panedriver`, `app`                                           |
-| `internal/app/pane_driver.go`                                                                                     | Composition only: adapts the far and local openers and readopt to `panedriver`, and `panedriver` to `transport`'s seam | Everything, and nothing but `cmd/` imports it (checked) | n/a                                                           |
-| `frontend/src/connection/` (`connection-store.ts`, `connection-head.tsx`), `frontend/src/connection-condition.ts` | Subscription, the one fold, the head's text and button                                                                 | `ui/`, `generated/`, `ipc` types                        | `panes.ts`, `terminal-content.ts`                             |
+| Where                                                                                                             | What goes there                                                                                                        | May import                                                   | May never import                                              |
+| ----------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------- |
+| `internal/helper/proto/connection.go`                                                                             | Wire events and state names between helper and coordinator                                                             | Nothing, as today                                            | Anything internal                                             |
+| `internal/hostconn/` (`machine.go`, `supervisor.go`, `carrier.go`, no build tag)                                  | Pure state machine, one supervisor per connection key, the `Carrier` interface                                         | `monoclock`, `log`                                           | `internal/ssh`, `x/crypto`, `helper/*`, `transport`           |
+| `internal/helper/sshconn/` (tagged `nocx_local_ssh`)                                                              | The `x/crypto` carrier: dial with stages, prober, look-only dial, over the `internal/ssh` pool                         | `hostconn`, `internal/ssh`, `helper/proto`, `log`            | `helper/sshsvc`, `helper/session`, `helper/host`, `transport` |
+| `internal/plainssh/`                                                                                              | The system-ssh carrier: a process and its exit status, no stages or liveness                                           | `hostconn`, `log`                                            | `internal/ssh`, `x/crypto`, `transport`                       |
+| `internal/helper/sshsvc/`                                                                                         | Serves `sshconn` over the helper protocol; shell and lane acquire through it                                           | `sshconn`, as well as what it imports today                  | `helper/session` (which imports it)                           |
+| `internal/connection/resolve.go`                                                                                  | One entry: `ours{config}` or `plain{reason}`                                                                           | As today: `credential`, `profile`, `ssh`, `vault`            | `panedriver`, `transport`, `app`                              |
+| `internal/panedriver/` (`driver.go`, `order.go`, `return.go`)                                                     | Open order, reconnect, reattach, behind interfaces it declares itself                                                  | `hostconn`, `connection`, `helper/proto`, `monoclock`, `log` | `transport`, `app`, `session`, `helper/client`, `x/crypto`    |
+| `internal/diagnostics/journal.go`                                                                                 | The journal, fed by the coordinator from proto events                                                                  | `log`, as today                                              | Anything else                                                 |
+| `internal/transport/ws_pane_connection.go`, `contracts/pane.connection.schema.json`                               | The notification and the wake call. Replaces `ws_liveness.go`; the seam `transport` calls is an interface it declares  | As today                                                     | `panedriver`, `app`                                           |
+| `internal/app/pane_driver.go`                                                                                     | Composition only: adapts the far and local openers and readopt to `panedriver`, and `panedriver` to `transport`'s seam | Everything, and nothing but `cmd/` imports it (checked)      | n/a                                                           |
+| `frontend/src/connection/` (`connection-store.ts`, `connection-head.tsx`), `frontend/src/connection-condition.ts` | Subscription, the one fold, the head's text and button                                                                 | `ui/`, `generated/`, `ipc` types                             | `panes.ts`, `terminal-content.ts`                             |
 
 **The three traps.**
 
@@ -191,6 +193,46 @@ Added after the review, on the owner's question. **Read against `go list -tags '
 `frontend/src/terminal-content.ts` is 10,960 lines and is where the renderer's connection state lives now. The new code goes beside it and the old fields leave it; none is added to it beyond the calls.
 
 **The frontend has no cycle check at all:** no `madge`, no `import/no-cycle`, no dependency rule in its lint or `package.json`. A cycle there does not fail the build, it fails at load order. So stage 2 adds one, scoped to `src/connection/` at first (C18).
+
+### 5.1.2 The transport is replaceable
+
+Owner, 2026-11-06: the SSH transport must be replaceable by any other implementation, and extensible. Read as a choice made when nocx is built, at the composition root (AD-8), not plugins loaded at run time: nothing asks for those, and a plugin that holds connections is a security surface of its own.
+
+There are already two implementations of this job, x/crypto and the system's `ssh`, so the seam is paid for today rather than speculative. What exists: `session.Channel` and `ssh.SSH` hide the channel, but the state, the prober and the pool are x/crypto's, and `gossh.ExitError` is read in `internal/session/session.go:1575`.
+
+```go
+// internal/hostconn/carrier.go, the shape rather than the final text
+type Carrier interface {
+	Name() string
+	Capabilities() Capabilities
+	// Dial reports stages and asks for a person through the sink; it returns
+	// once the host is usable, however long that takes.
+	Dial(ctx context.Context, plan Plan, sink EventSink) (Link, error)
+}
+
+type Link interface {
+	OpenShell(ctx context.Context, spec ShellSpec) (Shell, error)
+	Done() <-chan struct{} // ended, with a cause from Err
+	Err() error
+	Close() error
+}
+
+// Optional, found by capability: a carrier without them stays honest.
+type Prober interface{ Probe(ctx context.Context) (time.Duration, error) }
+type Looker interface{ Look(ctx context.Context) error }
+
+type Capabilities struct {
+	Stages, Liveness, Multiplex, ResumableShell, Channels bool
+}
+```
+
+- **The resolver's answer names a carrier,** `ours` and `plain` being its first two values, and the contract carries the carrier's name and capabilities. No surface tests a name: "nocx sees only the process" is `Liveness: false`. A third carrier is a package and one line at the root.
+- **The machine and the supervisor know no carrier.** A silent carrier without `Prober` simply never reads `stalled`.
+- **`gossh.ExitError` moves into the x/crypto carrier,** which maps it to a neutral exit cause, in stage 1.
+
+**Where replaceability stops, said plainly.** The shell and the connection's life are behind this seam. Files, Git, ports, tunnels and the helper's install ride SSH channels (`proto.ChannelKind` is a closed set: `sftp`, `direct-tcpip`) and the consent is keyed by a host-key fingerprint (ADR-0034). A carrier without `Channels` has those panels say they are unavailable, or reach them through a far helper. Replacing them too is a much larger change and not this feature. Reading a key for a vault entry (`internal/transport/ws.go:4645`, `ws_secrets.go:376`) and checking a host key (`internal/app/helper_reverse.go`) use `x/crypto` as a key format, not as a transport, and stay.
+
+**The proof is a third implementation in the tests:** an in-memory carrier drives the machine, the supervisor and the driver through the fault scenarios with no sshd (C19). If those tests need anything from `internal/ssh`, the seam is wrong.
 
 ### 5.2 Open order (owner's decision)
 
@@ -417,6 +459,8 @@ Per connection: stage entered and left with durations, server version, chosen al
 | C16 | Another shell opens only on confirmed absence                                                             | Frame, priority 4                    | C-inventory-unavailable-no-second-shell                                                                  |
 | C17 | Imports run only as §5.1.1 says                                                                           | AD-8, owner's question of 2026-11-06 | A Go test over `go list` refuses each forbidden edge, in the shape of `helper/deploy/dependency_test.go` |
 | C18 | `frontend/src/connection/` is in no import cycle and imports neither `panes.ts` nor `terminal-content.ts` | AD-8, owner's question of 2026-11-06 | A lint rule added in stage 2, run by the frontend gate                                                   |
+| C19 | The machine, supervisor and driver pass the fault scenarios on an in-memory carrier                       | Owner, 2026-11-06                    | Those tests build without `internal/ssh`                                                                 |
+| C20 | `hostconn` and `panedriver` import neither `internal/ssh` nor `x/crypto`                                  | Owner, 2026-11-06, AD-8              | The C17 test                                                                                             |
 
 ## 10. Fault harness and checks
 
@@ -481,3 +525,5 @@ Reviewer: OpenAI `gpt-6.1-sol` through `codex exec` read-only, one round, in ATA
 **After the review, by the owner (2026-11-06).** The reviewed text closed a silent connection after a 30 s grace or 5 minutes, whatever it carried. The owner moved that decision to the person for a plain shell. The change was not reviewed again.
 
 **Also after the review, by the owner's question.** §5.1.1 and C17–C18 were added, moving the driver out of `internal/app` and the supervisor into its own package. Not reviewed again and not compiled.
+
+**Also after the review, by the owner.** §5.1.2 and C19–C20 were added: the machine moved to a carrier-neutral `internal/hostconn`. Not reviewed again and not compiled.

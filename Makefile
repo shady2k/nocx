@@ -570,8 +570,15 @@ ci-full: ci-os-split ci-local-ssh-split ci ci-mac ci-backend ci-linux ci-fronten
 # package, and with it its tests, from the portable job to the OS one. That is
 # the whole edit: one list owns both partitions, so no test command names it
 # a second time.
+#
+# internal/filesystem/local joined beside it for the same reason, from the
+# same integration (nocx-3an1s.2.3): a local binding asks the kernel's mount
+# table which device a path belongs to, and that question has one answer per
+# platform (mounts_darwin.go / mounts_linux.go). A provider that can say
+# neither still gets a domain of its own, but the reading is the OS's.
 OS_PKG_DIRS := cmd/e2e-sshd internal/apicoll internal/app internal/contentkey \
-               internal/coordinator internal/desktopidentity internal/git \
+               internal/coordinator internal/desktopidentity \
+               internal/filesystem/local internal/git \
                internal/helper/endpoint internal/helper/fishchannel \
                internal/helper/session internal/lifecyclechannel \
                internal/loginshell internal/nativeports internal/procwatch \

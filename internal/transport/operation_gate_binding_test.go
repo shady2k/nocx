@@ -68,7 +68,7 @@ func TestMethodSpecOperationsAcquireEachDomainGateOnce(t *testing.T) {
 	log := &gateAcquisitionLog{counts: make(map[string]int)}
 	gates := map[string]*recordingDomainAdmission{}
 	for _, name := range []string{
-		"config", "vault", "content", "session", "git", "filesystem", "api",
+		"config", "vault", "content", "session", "filesystem", "api",
 	} {
 		gates[name] = &recordingDomainAdmission{name: name, log: log}
 	}
@@ -108,13 +108,6 @@ func TestMethodSpecOperationsAcquireEachDomainGateOnce(t *testing.T) {
 			specs:  server.seamSpecs(lane, gates["session"]),
 			method: "sessions.status",
 			raw:    `{"profileIds":[]}`,
-		},
-		{
-			name:   "git",
-			gate:   "git",
-			specs:  server.gitSpecs(lane, gates["session"], gates["git"]),
-			method: "git.status",
-			raw:    `{"bindingId":"0123456789abcdef0123456789abcdef"}`,
 		},
 		{
 			name:   "filesystem",

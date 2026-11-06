@@ -152,6 +152,27 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
+describe('the invocation origin on the wire', () => {
+  // ADR-8eej3e66 §2: origin travels with the call, and the backend reads it
+  // to decide the bulkhead class. Absent, the backend treats a call as
+  // person, so the renderer must actually send background.
+  it('sends the call origin, and person is explicit', async () => {
+    const provider = new TestEndpointProvider()
+    const d = new Dispatcher(provider)
+    await connected(d)
+
+    void d.call('git.status', { bindingId: 'b1' }, undefined, { origin: 'background' })
+    void d.call('git.status', { bindingId: 'b1' })
+    await flush()
+
+    const frames = socket()
+      .sent.filter((m): m is string => typeof m === 'string')
+      .map((m) => JSON.parse(m) as { method?: string; origin?: string })
+      .filter((f) => f.method === 'git.status')
+    expect(frames.map((f) => f.origin)).toEqual(['background', 'person'])
+  })
+})
+
 describe('dispatcher endpoint state machine', () => {
   it('asks the provider on every attempt and connects to its returned endpoint', async () => {
     const provider = new TestEndpointProvider()
@@ -544,6 +565,7 @@ describe('dispatcher vault intent', () => {
       id: reportRequest.id,
       method: 'vault.inventory',
       params: {},
+      origin: 'person',
     })
     socket().deliverText({ jsonrpc: '2.0', id: reportRequest.id, error })
     await expect(report).rejects.toMatchObject(error)

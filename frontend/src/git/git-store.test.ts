@@ -471,6 +471,32 @@ describe('race 3 — the mutation lane (D18)', () => {
     expect(mockHandle(services, 'stageAll')).not.toHaveBeenCalled()
     expect(mockHandle(services, 'unstageAll')).not.toHaveBeenCalled()
   })
+  it('a mutation that did not start is offered its same action once more, not a stale view', async () => {
+    const { store, services } = await openStore()
+    const stage = mockHandle(services, 'stage')
+    stage.mockRejectedValueOnce(
+      new RpcError(
+        'git.stage did not start: waited 11m0s for this checkout\'s turn and nothing changed',
+        -32005,
+        { reason: 'not-started' },
+      ),
+    )
+
+    store.stage(['a.txt'])
+    await settle()
+    expect(store.mutationInFlight()).toBe(false)
+    expect(store.mutationRefused()).toContain('nothing changed')
+    // "Did not start" is not "the view is stale": nothing happened, so the
+    // panel must not start claiming a stale status.
+    expect(store.mutationError()).toBeNull()
+
+    stage.mockResolvedValueOnce(statusResult())
+    store.retryRefusedMutation()
+    await settle()
+    expect(store.mutationRefused()).toBeNull()
+    expect(mockHandle(services, 'stage')).toHaveBeenCalledTimes(2)
+  })
+
   it('a mutation answers unknownBinding (reason unknown-binding) → the store re-resolves through git.open', async () => {
     const { store, services } = await openStore()
     const open = mockHandle(services, 'open')

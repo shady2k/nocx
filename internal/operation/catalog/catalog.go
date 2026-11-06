@@ -536,6 +536,7 @@ type Scope struct {
 	owner       Owner
 	started     time.Time
 	maxDeadline time.Time
+	parent      *Scope
 	ctx         context.Context
 	strict      bool
 	settled     atomic.Bool
@@ -589,6 +590,9 @@ func begin(ctx context.Context, op Method, inv Invocation, strict bool) *Scope {
 		}
 	}
 	s.maxDeadline = s.started.Add(maxLifetime)
+	if parent, ok := ScopeFrom(ctx); ok {
+		s.parent = parent
+	}
 	s.mu.Lock()
 	if !s.settled.Load() {
 		s.expiry = time.AfterFunc(maxLifetime, s.expire)
@@ -600,6 +604,50 @@ func begin(ctx context.Context, op Method, inv Invocation, strict bool) *Scope {
 	}
 	s.mu.Unlock()
 	return s
+}
+
+// Deadline returns the instant this scope's max expires. It is zero when the
+// scope has settled: a settled operation has no budget left to enforce.
+func (s *Scope) Deadline() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.settled.Load() {
+		return time.Time{}
+	}
+	return s.maxDeadline
+}
+
+// StartWork re-arms the maximum lifetime from now and returns the effective
+// budget. ADR-8eej3e66 §3: max begins when WORK begins and is never renewed.
+// The scope's timer starts at Begin so stage 2 can record an invocation that
+// never reaches work; a stage that enforces the deadline calls StartWork at
+// the moment the work starts, so a wait for a key or a capacity permit does
+// not eat the work's own budget.
+//
+// It never extends a child beyond its parent's remainder: a child operation's
+// deadline is the minimum of its own and its parent's.
+func (s *Scope) StartWork() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.settled.Load() {
+		return 0
+	}
+	now := time.Now()
+	deadline := now.Add(s.decl.Max.Duration())
+	if s.parent != nil {
+		if parentDeadline := s.parent.Deadline(); !parentDeadline.IsZero() && parentDeadline.Before(deadline) {
+			deadline = parentDeadline
+		}
+	}
+	lifetime := deadline.Sub(now)
+	if lifetime <= 0 {
+		return 0
+	}
+	s.maxDeadline = deadline
+	if s.expiry != nil {
+		s.expiry.Reset(lifetime)
+	}
+	return lifetime
 }
 
 // ScopeFrom returns the scope an invocation put in the context, if any.

@@ -187,6 +187,17 @@ func (k *Keyed) release(key string) {
 	k.cleanup(key, q)
 }
 
+// Waiting reports how many callers are queued behind key's holder. It is a
+// read for diagnostics and tests: no decision uses it.
+func (k *Keyed) Waiting(key string) int {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if q := k.queues[key]; q != nil {
+		return len(q.waiters)
+	}
+	return 0
+}
+
 // Domains reports how many keys are active; it exists for diagnostics and
 // tests (an idle key must leave nothing behind).
 func (k *Keyed) Keys() int {

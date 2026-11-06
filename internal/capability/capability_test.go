@@ -14,6 +14,7 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/git/registry"
+	"github.com/shady2k/nocx/internal/operation/schedule"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
@@ -852,7 +853,7 @@ func TestOverlappingOperationsBothComplete(t *testing.T) {
 // one global lock: an operation blocked in its callback on the content gate
 // does not stop a git-domain operation from completing.
 func TestNonConflictingOperationsOverlap(t *testing.T) {
-	_, _, contentGate, _, gitGate, _ := testGates()
+	_, _, contentGate, _, _, _ := testGates()
 	db := newFakeContentDB()
 	contentOp := capability.NewContentOperation(contentGate, testLane(), db)
 
@@ -870,10 +871,12 @@ func TestNonConflictingOperationsOverlap(t *testing.T) {
 
 	// A git-binding operation (different domain) completes while the
 	// content callback is still blocked.
-	gitOp := capability.NewGitBindingOperation(gitGate, testLane(), newFakeGitRegistry())
+	gitOp := capability.NewGitBindingOperation(schedule.NewKeyed("git", 8), schedule.NewBulkhead("git", schedule.Limits{
+		Capacity: 8, PersonReserved: 2, Queue: 32, AbandonedPerDomain: 8, AbandonedGlobal: 32,
+	}), testLane(), newFakeGitRegistry())
 	gitDone := make(chan error, 1)
 	go func() {
-		gitDone <- gitOp.Run(context.Background(), func(ctx context.Context, svc capability.GitBindingService) error {
+		gitDone <- gitOp.Run(context.Background(), "", func(ctx context.Context, svc capability.GitBindingService) error {
 			_, _, err := svc.Acquire("nope", noCaller{})
 			_ = err // unknown binding is a domain error, not a refusal
 			return nil

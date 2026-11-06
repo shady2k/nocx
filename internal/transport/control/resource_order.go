@@ -233,9 +233,9 @@ func (r *ResourceOrder) TryAcquire(ctx context.Context) (Permit, *Rejection) {
 		}
 		return w.permit, nil
 	case <-ctx.Done():
-		return nil, r.abandon(w)
+		return nil, r.abandon(w, "cancelled")
 	case <-timer.C:
-		return nil, r.abandon(w)
+		return nil, r.abandon(w, "wait exceeded")
 	}
 }
 
@@ -304,7 +304,7 @@ func (r *ResourceOrder) startLocked(w *orderWaiter) {
 
 // abandon settles a waiter that gave up before it started. A waiter promoted
 // a moment earlier holds the keys and is released here.
-func (r *ResourceOrder) abandon(w *orderWaiter) *Rejection {
+func (r *ResourceOrder) abandon(w *orderWaiter, reason string) *Rejection {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if w.started {
@@ -317,7 +317,7 @@ func (r *ResourceOrder) abandon(w *orderWaiter) *Rejection {
 		r.admitted--
 		r.forgetLocked(w)
 	}
-	return &Rejection{Reason: "wait exceeded", Scope: r.name, Holders: r.book.snapshot()}
+	return &Rejection{Reason: reason, Scope: r.name, Holders: r.book.snapshot()}
 }
 
 // releaseLocked returns the keys. Callers hold mu.

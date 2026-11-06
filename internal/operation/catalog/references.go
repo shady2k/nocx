@@ -57,7 +57,7 @@ func CheckHandleReferences(root string) ([]ID, error) {
 			if !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
 				return nil
 			}
-			data, err := os.ReadFile(p)
+			data, err := os.ReadFile(p) //nolint:gosec // p comes from WalkDir over the repository root, never caller input
 			if err != nil {
 				return err
 			}

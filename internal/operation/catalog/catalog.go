@@ -10,9 +10,12 @@
 //     table, so a JSON-RPC method with no entry cannot be registered;
 //   - contracts/operations.json is generated from Declarations() and is
 //     validated by contracts/operations.schema.json;
-//   - contracts/openrpc.json carries each declaration as x-nocx-operation;
-//   - frontend/src/generated/operations.ts carries the renderer's copy of the
-//     deadlines and sentences.
+//   - contracts/openrpc.json carries each declaration as x-nocx-operation.
+//
+// The renderer's copy of the deadlines and sentences is NOT generated yet.
+// It belongs to nocx-3an1s.2.2, the stage that arms renderer timers: a
+// generated TypeScript module nothing imports is a dead export, and this stage
+// has no user for it. Go and contracts/operations.json are the consumers.
 //
 // The package imports nothing from internal/transport. Startup recovery and
 // other work that precedes buildMethodSpecs can read the same declarations.
@@ -648,7 +651,13 @@ func (s *Scope) Outcome() (Outcome, bool) {
 	if v == nil {
 		return "", false
 	}
-	return v.(Outcome), true
+	outcome, ok := v.(Outcome)
+	if !ok {
+		// atomic.Value only ever receives an Outcome from Settle; a wrong
+		// type is a programming error, not a value to invent.
+		return "", false
+	}
+	return outcome, true
 }
 
 // Settle records the first outcome and drops every later one. It is the one
@@ -666,15 +675,17 @@ func (s *Scope) Settle(outcome Outcome) bool {
 	}
 	s.outcome.Store(outcome)
 	s.stopTimers()
-	switch outcome {
-	case OutcomeExpired:
+	// A ROUTINE SUCCESS WRITES NO RECORD. The log has a size ceiling that the
+	// e2e transcript test reads (run 42139974476): one line per completed
+	// operation pushed the readiness line out of it. A completion, a
+	// cancellation and a refusal are the ordinary traffic of the control
+	// plane and say nothing a reader of the log needs. The two records worth
+	// keeping are an expired deadline — work nobody is watching any more —
+	// and a double settlement, which is a defect (logged above).
+	if outcome == OutcomeExpired {
 		log.From(s.logContext()).Warn("operation deadline expired",
 			"operation", string(s.decl.ID), "owner", string(s.owner), "origin", string(s.origin),
 			"max_ms", s.decl.Max.Millis, "elapsed_ms", time.Since(s.started).Milliseconds())
-	case OutcomeCompleted:
-		log.From(s.logContext()).Debug("operation settled", "operation", string(s.decl.ID),
-			"origin", string(s.origin), "outcome", string(outcome),
-			"elapsed_ms", time.Since(s.started).Milliseconds())
 	}
 	return true
 }

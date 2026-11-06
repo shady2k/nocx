@@ -64,7 +64,7 @@ type operationManifest struct {
 
 func manifestOperations(t *testing.T) map[string]json.RawMessage {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(contractDir, "operations.json"))
+	raw, err := os.ReadFile(filepath.Join(contractDir, "operations.json")) //nolint:gosec // repo-relative contract fixture
 	if err != nil {
 		t.Fatalf("read operations manifest: %v", err)
 	}
@@ -89,7 +89,7 @@ func manifestOperations(t *testing.T) map[string]json.RawMessage {
 // metadata, not the ids: a manifest entry with a stale deadline or a dropped
 // phase is exactly the drift a method-set comparison cannot see.
 func TestOpenRPCManifestCarriesEveryDeclarationInFull(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join(contractDir, "openrpc.json"))
+	raw, err := os.ReadFile(filepath.Join(contractDir, "openrpc.json")) //nolint:gosec // repo-relative contract fixture
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,11 @@ func TestAPlantedStaleManifestEntryIsCaught(t *testing.T) {
 	if err := json.Unmarshal(declarations["ack"], &stale); err != nil {
 		t.Fatal(err)
 	}
-	stale["max"].(map[string]any)["millis"] = float64(1)
+	max, ok := stale["max"].(map[string]any)
+	if !ok {
+		t.Fatal("the fixture has no max object")
+	}
+	max["millis"] = float64(1)
 	raw, err := json.Marshal(stale)
 	if err != nil {
 		t.Fatal(err)

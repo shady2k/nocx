@@ -19,14 +19,14 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "internal/operation/catalog/handles_gen.go"), catalog.HandleSource(), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "internal/operation/catalog/handles_gen.go"), catalog.HandleSource(), 0o644); err != nil { //nolint:gosec // generated Go source, 0644 is the committed mode
 		fail(err)
 	}
 	manifest, err := catalog.ManifestJSON()
 	if err != nil {
 		fail(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "contracts/operations.json"), manifest, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "contracts/operations.json"), manifest, 0o644); err != nil { //nolint:gosec // generated JSON manifest, 0644 is the committed mode
 		fail(err)
 	}
 }

@@ -92,9 +92,9 @@ async function build() {
       !name.endsWith('.params.schema.json') &&
       name !== 'rpc.error.schema.json' &&
       // The operation catalogue is a manifest of declarations, not a JSON-RPC
-      // result. It has its own generator (gen-operations.mjs) and its own
-      // renderer projection; passing it through the result-type generator
-      // would produce a second, meaningless `operations.ts`.
+      // result. It is produced by internal/operation/catalog's Go generator;
+      // passing it through the result-type generator would produce a second,
+      // meaningless `operations.ts`.
       name !== 'operations.schema.json',
   )
   const resultFiles = new Set(results)

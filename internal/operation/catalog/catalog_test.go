@@ -3,6 +3,7 @@ package catalog
 import (
 	"bytes"
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,10 +33,25 @@ func repoRoot(t *testing.T) string {
 	}
 }
 
+// copyDeclarations is a DEEP copy: Declarations() copies the slice header but
+// the phase, resource, dependency and preemption slices inside it are shared.
+// A planted test that appends to one of them with spare capacity wrote into
+// the real table, and the next -count run saw ack with a nameless phase
+// (run 42139974476).
 func copyDeclarations() []Declaration {
 	table := Declarations()
 	out := make([]Declaration, len(table))
-	copy(out, table)
+	for i, d := range table {
+		phases := make([]Phase, len(d.Phases))
+		for j, p := range d.Phases {
+			p.Resources = append([]Resource(nil), p.Resources...)
+			p.Dependencies = append([]Domain(nil), p.Dependencies...)
+			phases[j] = p
+		}
+		d.Phases = phases
+		d.Preempts = append([]ID(nil), d.Preempts...)
+		out[i] = d
+	}
 	return out
 }
 
@@ -148,7 +164,7 @@ func TestEveryDeclaredHandleIsReferencedInProduction(t *testing.T) {
 
 func TestGeneratedHandlesMatchTheTable(t *testing.T) {
 	path := filepath.Join("handles_gen.go")
-	committed, err := os.ReadFile(path)
+	committed, err := os.ReadFile(path) //nolint:gosec // repo-relative generated file
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +183,7 @@ func TestGeneratedHandlesMatchTheTable(t *testing.T) {
 
 func TestManifestMatchesTheTable(t *testing.T) {
 	path := filepath.Join(repoRoot(t), "contracts/operations.json")
-	committed, err := os.ReadFile(path)
+	committed, err := os.ReadFile(path) //nolint:gosec // repo-relative generated file
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,6 +194,12 @@ func TestManifestMatchesTheTable(t *testing.T) {
 	if !bytes.Equal(committed, want) {
 		t.Fatal("contracts/operations.json is stale; run go run ./internal/operation/catalog/gen")
 	}
+}
+
+func testContextAndSlog(t *testing.T) (context.Context, *slog.Logger) {
+	t.Helper()
+	sl := logtest.Slog(t)
+	return log.WithLogger(context.Background(), log.NewSlogAdapter(sl)), sl
 }
 
 func testContext(t *testing.T) context.Context {
@@ -288,5 +310,63 @@ func TestAPlantedLoopWithNoIterationIsRefused(t *testing.T) {
 	loops[0].Iteration = "no.such.operation"
 	if errs := ValidateLoops(loops, Declarations()); len(errs) == 0 {
 		t.Fatal("a loop whose iteration has no declaration must be refused")
+	}
+}
+
+// A routine success is not worth a record. The log is read by the e2e suite's
+// transcript test and has a size ceiling; one line per completed operation
+// pushed the readiness line out of it (run 42139974476).
+func TestASettledOperationWritesNoRecord(t *testing.T) {
+	ctx, sl := testContextAndSlog(t)
+	s := BeginStrict(ctx, OpTransportPing, Invocation{})
+	if !s.Complete() {
+		t.Fatal("the first settlement must win")
+	}
+	if got := logtest.RecordsSlog(sl); len(got) != 0 {
+		t.Fatalf("a routine completion wrote %d record(s): %v", len(got), got)
+	}
+}
+
+// An expiry is the record that matters: it is the operation nobody is
+// watching any more. Exactly one, and it says so.
+func TestAnExpiredOperationWritesExactlyOneRecord(t *testing.T) {
+	ctx, sl := testContextAndSlog(t)
+	s := BeginStrict(ctx, OpTransportPing, Invocation{})
+	if !logtest.WaitForSlog(sl, 3*time.Second, func(r logtest.Record) bool {
+		return r.Message == "operation deadline expired"
+	}) {
+		t.Fatal("the max deadline wrote no expiry record")
+	}
+	records := logtest.RecordsSlog(sl)
+	if len(records) != 1 {
+		t.Fatalf("expiry wrote %d records, want exactly 1: %v", len(records), records)
+	}
+	if outcome, ok := s.Outcome(); !ok || outcome != OutcomeExpired {
+		t.Fatalf("outcome = %q (settled=%v), want expired", outcome, ok)
+	}
+}
+
+// A mutation of the copy a planted test works on must never reach the
+// catalogue another test (or the generator) reads.
+func TestDeclarationsReturnsAnIndependentCopy(t *testing.T) {
+	before := Declarations()[0]
+	table := copyDeclarations()
+	table[0].Phases[0].Name = "planted"
+	table[0].Phases[0].Resources = append(table[0].Phases[0].Resources, Resource{Kind: ResourceStore, Mode: ModeKey})
+	table[0].Phases[0].Dependencies = append(table[0].Phases[0].Dependencies, Domain("nowhere"))
+	table[0].Preempts = append(table[0].Preempts, ID("no.such.operation"))
+
+	after := Declarations()[0]
+	if after.Phases[0].Name != before.Phases[0].Name {
+		t.Fatalf("a planted mutation changed the real phase name: %q -> %q", before.Phases[0].Name, after.Phases[0].Name)
+	}
+	if len(after.Phases[0].Resources) != len(before.Phases[0].Resources) {
+		t.Fatalf("a planted mutation changed the real resources: %d -> %d", len(before.Phases[0].Resources), len(after.Phases[0].Resources))
+	}
+	if len(after.Phases[0].Dependencies) != len(before.Phases[0].Dependencies) {
+		t.Fatalf("a planted mutation changed the real dependencies: %d -> %d", len(before.Phases[0].Dependencies), len(after.Phases[0].Dependencies))
+	}
+	if len(after.Preempts) != len(before.Preempts) {
+		t.Fatalf("a planted mutation changed the real preemptions: %d -> %d", len(before.Preempts), len(after.Preempts))
 	}
 }

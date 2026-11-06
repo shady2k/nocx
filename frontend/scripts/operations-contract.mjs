@@ -79,9 +79,3 @@ export function validate(schema, value, path = '$', root = schema) {
     }
   }
 }
-
-/** Validate the catalogue manifest and return it. */
-export function loadCatalogue(schema, manifest) {
-  validate(schema, manifest)
-  return manifest
-}

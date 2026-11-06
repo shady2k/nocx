@@ -855,8 +855,27 @@ func TestPromptReadyOverOpenAttemptRejected(t *testing.T) {
 	h := establish(t, k, "T", p, "L", nil)
 	att, _ := k.SubmitAttempt(h.Domain, "x", "/", "local", "")
 	mustIngest(t, k, "T", env("L", h, 2, startEvt(&att.ID, "x")))
+	// What this refusal buys is the state a program waiting on stdin is in
+	// (nocx-atpw5.1.38). A submitted command whose shell has started owns the
+	// pty, so a person's keys belong to the grid; the composer is hidden and
+	// has handed the keyboard over. The prompt mark for the prompt the person
+	// LEFT can still arrive late — the race nocx-atpw5.1.41 names — and if it
+	// were reported as a prompt the composer would come back and take the
+	// next letters away from a `read` that is already waiting for them. So
+	// the refusal is asserted by what a pane would SEE: no fact, and the lane
+	// still Running with its attempt untouched.
+	p.reset()
 	if _, err := k.Ingest("T", env("L", h, 3, promptReadyEvt())); !errors.Is(err, ErrPromptOverAttempt) {
 		t.Fatalf("prompt_ready over an open attempt must be rejected, got %v", err)
+	}
+	if st := mustState(t, k, "L"); st.Lifecycle != LifecycleRunning {
+		t.Fatalf("a prompt mark over a started command must leave the lane Running, got %v", st.Lifecycle)
+	}
+	if got := p.kinds(); len(got) != 0 {
+		t.Fatalf("a prompt mark over a started command must report nothing to a pane, got %v", got)
+	}
+	if got, ok := k.Attempt(att.ID); !ok || !got.Started || got.State != AttemptOpen {
+		t.Fatalf("the running attempt must be untouched, got %+v ok=%v", got, ok)
 	}
 }
 

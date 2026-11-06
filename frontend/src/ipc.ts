@@ -33,6 +33,18 @@ import type { SessionIntentResult } from './generated/session.intent'
 import type { SessionObservationChanged } from './generated/session.observationChanged'
 import type { SessionIntegrationChanged } from './generated/session.integrationChanged'
 import { log } from './log'
+
+/** Refusals whose answer cannot change for this incarnation of the session: a
+ *  second attempt costs a round trip and is refused for the same reason. Every
+ *  other cause is worth one more presentation when nothing was written
+ *  (nocx-atpw5.1.38). */
+const RETRY_HOPELESS_REFUSALS = new Set([
+  'closing',
+  'completeness_unknown',
+  'cannot_encode',
+  'forged',
+  'token_spent',
+])
 import { isDriverState, isPaneProgress, readPaneChildren } from './pane-observation'
 import type { SessionSignal } from './generated/session.signal'
 import type { SecretsPaneClosed } from './generated/secrets.paneClosed'
@@ -643,6 +655,33 @@ export class SessionHandle {
       this.accessEpoch !== presented
     ) {
       return this._intent(kind, payload, false)
+    }
+    // THE SAME RULE, FOR EVERY OTHER REFUSAL THAT WROTE NOTHING
+    // (nocx-atpw5.1.38). The wire's contract is that `refused` wrote nothing
+    // (design §6.5), so a refusal is the intent still being the person's to
+    // make; presenting it once more is a round trip, not a keystroke lost. The
+    // causes that cannot change their answer for this incarnation are left
+    // alone — a second attempt there costs a round trip and buys nothing — and
+    // access_revoked keeps its own rule above, which is about re-seating the
+    // epoch rather than retrying.
+    //
+    // WHAT THIS DOES NOT DO. It does not say why the session refused. A run of
+    // `refused` answers with the closed set's own catch-all cause ("refused",
+    // an error the helper has no sentinel for) was observed in a loaded
+    // chromium run's failure context, and the keystrokes were simply dropped;
+    // the cause is a helper-side fact this layer cannot name. The warning below
+    // is that fact reaching a log, so the next failure block says which cause
+    // reached a person's key rather than printing nothing.
+    if (mayRepresent && result.state === 'refused' && result.bytesWritten === 0) {
+      const cause = result.refusal?.cause ?? 'unknown'
+      if (cause !== 'access_revoked' && !RETRY_HOPELESS_REFUSALS.has(cause)) {
+        log.warn('nocx: a keystroke was refused with nothing written; presenting it once more', {
+          sid: this.sessionId,
+          kind,
+          cause,
+        })
+        return this._intent(kind, payload, false)
+      }
     }
     return result
   }

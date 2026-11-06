@@ -1782,7 +1782,10 @@ describe('VaultSection', () => {
       b.textContent,
       b.getAttribute('data-tone'),
     ])
-    expect(badges).toContainEqual(['unsealed', 'success'])
+    // The state line goes through t() so it speaks the UI language; the
+    // en value pairs the raw code with its meaning, per the owner-approved
+    // diagnostics badge wording.
+    expect(badges).toContainEqual(['unsealed — unlocked', 'success'])
     expect(badges).toContainEqual(['Not ready', 'danger'])
     expect(badges).toContainEqual(['Ready', 'success'])
     // The raw reason code, verbatim — this is the line that goes in a bug

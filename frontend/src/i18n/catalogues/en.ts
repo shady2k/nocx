@@ -673,6 +673,12 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'vault.setup.deleteWarnHead':
     'This deletes every password and key passphrase nocx has saved, and cannot be undone. There is no way to recover them afterwards.',
   'vault.reset.chainTail': 'will ask for a password again.',
+  'vault.reset.chainTail2': 'will be deleted.',
+  'vault.change.requiresHead': 'Changing the passphrase requires your current passphrase or',
+  'vault.change.requiresTail':
+    'a recovery code. An OS-held key alone is not sufficient — a factor that only unlocks must not be able to replace the factor that recovers.',
+  'vault.recovery.newShownHead': 'Your new recovery code is shown below. Copy it now — it will',
+  'vault.recovery.newShownTail': 'not be displayed again. Keep it in a safe place.',
   // ── Vault stage 3c residual (vault.tsx only) ──
   'vault.reason.noService': 'No system keyring available. Use a passphrase to unlock.',
   'vault.reason.locked': 'Your login keychain is locked. Unlock it and try again.',
@@ -1210,6 +1216,12 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'skills.row.reapprove': 'Re-approve',
   'skills.row.delete': 'Delete',
   'skills.notIndexed.title': 'Not indexed',
+  'skills.path.descHead': 'Path:',
+  'skills.unknownError': 'Unknown error',
+  'skills.empty.desc':
+    'Add a SKILL.md under your skills directory, or ask the assistant to remember a procedure.',
+  'skills.enabled.aria': 'enabled',
+  'skills.actions.aria': 'actions',
   'skillview.whereLives.aria': 'Where this skill lives',
   'skillview.offer.label': 'Offer this skill to the assistant',
   'skillview.keepEnabled.label': 'Keep enabled when unused',
@@ -1249,6 +1261,10 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'snippets.empty.desc': 'Save a phrase once and fire it into whatever is taking input.',
   'snippets.empty.add': '+ New snippet',
   'snippets.list.aria': 'Snippet list',
+  'snippets.row.edit.ariaHead': 'Edit',
+  'snippets.row.delete.ariaHead': 'Delete',
+  'snippets.retry': 'Retry',
+  'snippets.nothingToFill': 'Nothing to fill in — the body is sent as it is.',
   'snippets.nomatch.title': 'Nothing matches this filter',
   'snippets.field.title': 'Title',
   'snippets.field.titlePh': 'Deploy the staging service',
@@ -1265,6 +1281,9 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'roles.assign.failedHead': 'Could not assign the role:',
   'roles.default.failedHead': 'Could not set the default model:',
   'roles.defaultModel': 'Default model',
+  'roles.defaultModel.desc':
+    'The pair every role without a model of its own answers with. Nothing is chosen until you choose it — the product never picks one for you.',
+  'roles.retry': 'Retry',
   'roles.endpoint': 'Endpoint',
   'roles.none.ph': '— None —',
   'roles.model': 'Model',
@@ -1293,10 +1312,56 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'perms.mayDo.title': 'What the assistant may do',
   'perms.namedCommands.title': 'Commands you have named',
   'perms.addAnswer.aria': 'Add an answer',
+  'perms.answerFor.ariaHead': 'Your answer for',
+  'perms.mayQ.title': 'May the assistant',
+  'perms.detailsFor.ariaHead': 'Details for',
+  'perms.details': 'Details',
+  'perms.review.aria': 'Review',
+  'perms.review': 'Review',
+  'perms.places.none':
+    'nocx has not learned any places yet. A place is named the first time you widen an answer to cover somewhere a call actually reached, and it can be picked here afterwards.',
+  'perms.coversNoCommand':
+    'This answer covers work the assistant does without a command line, so there is no single call to walk through. Open Why on one of your command answers to see the steps.',
+  'perms.nothingChanged':
+    'Nothing has changed yet. What the assistant may do is fixed when it starts writing an answer, so this reaches everything it starts from now on either way — you are choosing what happens to the',
+  'perms.inProgress': 'in progress.',
+  'perms.coversEverything':
+    'This answer covers everything of its kind, not one command, so this is every piece of work whose permissions still say what you have just changed.',
+  'perms.leaveRunning': 'Leave them running',
+  'perms.readCommand': 'Read this command',
+  'perms.mayDo.desc':
+    'What the assistant may do on its own. Anything you have not answered is asked every time it comes up.',
+  'perms.noToolAsks':
+    'No tool the assistant can reach today asks for anything, so there is nothing to answer yet.',
+  'perms.writeRefusal': '+ Write a refusal',
+  'perms.cancel': 'Cancel',
+  'perms.forget': 'Forget it',
   'agents.access.failedHead': 'Could not read which agents are allowed:',
   'agents.access.forgetFailedHead': 'Could not forget this answer:',
   'agents.access.title': 'Agent access',
+  'agents.access.desc':
+    "Agents you started in a pane and answered for when they asked to use nocx's tools — starting other agents in new tabs, watching them, and stopping them. Forgetting an answer means the next start of that agent asks again.",
+  'agents.access.noAskYet':
+    'No agent has asked yet. The question comes up the first time you start one in a pane.',
+  'agents.access.forget.ariaHead': 'Forget the answer for',
+  'agents.access.forget.ariaOn': 'on',
   'agents.calibrate.title': 'Calibrate an agent',
+  'agents.cal.desc':
+    'nocx asks you to drive your agent into one named state at a time and labels the screen with the state it asked for. The labelled set is what a detection rule is then checked against — a rule verified against a recording nobody produced on purpose proves nothing.',
+  'agents.cal.noPane.desc':
+    'nocx watches a pane only after an agent asks it to. Start an agent in a terminal tab and it appears here.',
+  'agents.cal.typesUnless':
+    "nocx types unless something here says its rule is wrong: a state you calibrated that it read differently, or no way to read this agent's screen at all. Calibrating narrows that check to the states you actually produced; skipping it does not turn typing off. So an agent whose update changes what its screen looks like loses typing here, the next time this is checked, rather than somewhere a keystroke lands in a dialog.",
+  'agents.cal.typeTestLine': 'Type a test line into this pane',
+  'agents.cal.typesOnlyInto':
+    'nocx types only into a pane its rule reads as waiting for input, and it looks again in the instant before each write — so if your agent starts working, or asks you to approve something, between now and then, nothing is typed and this says which of those it was.',
+  'agents.cal.walk.desc':
+    'You will be asked for each state in turn. Get your agent into the state, then capture — nocx reads the pane as it is at that moment, so nothing is labelled that you did not produce for it. Starting again leaves the set you already have alone until a new walk finishes.',
+  'agents.cal.start': 'Start calibration',
+  'agents.cal.capture': 'Capture the pane now',
+  'agents.cal.skip': 'Skip this state',
+  'agents.cal.again': 'Do the previous step again',
+  'agents.cal.stop': 'Stop',
   'agents.choosePane.ph': 'Choose a pane…',
   'agents.lookingForPanes.label': 'Looking for panes nocx is watching',
   'agents.noPane.title': 'No pane is enrolled',
@@ -1306,6 +1371,14 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'agents.nowWhat.title': 'What to do now',
   'agents.statesOrder.title': 'The states, in the order you are asked',
   'agents.emitting.title': 'What this agent is emitting',
+  'agents.emit.desc':
+    "The screen an enrolled pane's detection rule is reading, and what the rule sees on it — which anchor bound where, which branch answered, and for a branch that did not, the predicate it stopped at.",
+  'agents.emit.noPane.desc':
+    'nocx watches a pane only after an agent asks it to. Start an agent in a terminal tab and it appears here.',
+  'agents.emit.noRule': 'nocx has no rule for this agent, so nothing is reading this screen yet',
+  'agents.emit.frameOf.aria': 'Frame of',
+  'agents.emit.frameBy.aria': 'by',
+  'agents.emit.fullWidth': 'full-width rule',
   'agents.ruleAnswered.title': 'What the rule answered',
   'agents.screen.title': 'The screen, as the rule sees it',
   'agents.frame.label': 'Frame',
@@ -1313,6 +1386,23 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'agents.branches.title': 'The branches, in the order they were tried',
   'agents.extractors.title': 'What the extractors read',
   'agents.rules.title': 'Agent rules',
+  'agents.rules.desc':
+    "nocx reads an agent's screen with a rule. These are the rules it ships and the ones you have written: edit a document for an agent nocx reads wrongly, switch detection off for one it should leave alone, or remove your document to go back to the shipped rule.",
+  'agents.rules.readAgain': 'Read again',
+  'agents.rules.none.desc':
+    'A rule is written per agent, and this build ships none — so there is nothing here to edit.',
+  'agents.rules.docFailed.head': 'The document for',
+  'agents.rules.docFailed.mid': 'could not be read',
+  'agents.rules.docFailed.desc': 'Fix the file, or remove it below to go back to the shipped rule.',
+  'agents.rules.ruleFor.label': 'Rule for',
+  'agents.rules.json.desc':
+    'One JSON document, in the same grammar the shipped rules are written in. The backend compiles it before it is stored, so a document it could not read is refused here rather than quietly leaving the pane unread.',
+  'agents.rules.readScreen.label': 'Read',
+  'agents.rules.readScreen.mid': "'s screen",
+  'agents.rules.filesNote.head':
+    'These are files as well as a page: one document per agent in',
+  'agents.rules.filesNote.tail':
+    ', so a rule can be written or repaired in an editor and nocx picks it up on the next pane it reads.',
   'agents.rules.reading.label': 'Reading the rules',
   'agents.rules.none.title': 'No agent has a rule in this build',
   'agents.rules.save': 'Save this rule',
@@ -1324,6 +1414,13 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'agents.records.offer': 'Offer this agent in new shells',
   'agents.records.saved': 'Saved. The next launch will use these settings.',
   'agents.records.title': 'Agents',
+  'agents.records.desc':
+    'Edit the commands nocx offers in new shells. Changes apply to the next agent launch; built-in agents can be edited but not removed.',
+  'agents.records.idColon': 'Agent ID:',
+  'agents.records.unreadable': 'This record could not be read:',
+  'agents.records.save': 'Save agent',
+  'agents.records.remove': 'Remove agent',
+  'agents.records.add': 'Add agent',
   'agents.records.loading': 'Loading agent records…',
   'agents.records.add.title': 'Add an agent',
   'agents.records.id': 'Agent ID',
@@ -1452,6 +1549,10 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'overview.newWorkspace': 'New workspace',
   'updates.section.linuxInstall.title': 'Installing updates on Linux',
   'updates.section.linux.title': 'Linux updates',
+  'updates.section.linux.desc':
+    'AppImage installs can update themselves in nocx. deb and rpm installs update through their package manager; that is a different install from the AppImage.',
+  'notify.chrome.count.of': 'of',
+  'notify.chrome.count.shown': 'shown',
   'about.copied': 'Build details copied',
   'about.title': 'About',
   'about.loadFailed.desc': 'The backend answered with an error.',
@@ -1570,6 +1671,30 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'kit.fileReadout.readFailed': 'This file could not be read',
   'kit.fileReadout.what.aria': 'What this file is',
   'kit.fileReadout.scanNotice': 'Highlighted lines below matched a static scan',
+  'footprint.read.failedHead': 'Could not read the remote footprint:',
+  'footprint.removed.head': 'Removed',
+  'footprint.removed.files': 'file(s) from',
+  'footprint.kept.head': 'modified file(s) kept:',
+  'footprint.uninstall.failedHead': 'Uninstall failed:',
+  'footprint.title': 'Remote footprint',
+  'footprint.desc':
+    'nocx installs shell integration on a remote host automatically. This is what it wrote, where, and when it was last seen — no connection is made to show it. Only a saved connection to the host can remove it.',
+  'footprint.loading': 'Loading the remote footprint',
+  'footprint.nothing.title': 'Nothing installed',
+  'footprint.nothing.desc':
+    'nocx has not left shell integration on any host. A host appears here the first time its integration was observed.',
+  'footprint.refresh': 'Refresh',
+  'footprint.uninstall.ariaHead': 'Uninstall from',
+  'footprint.manual.head': 'Removal needs a saved connection — remove',
+  'footprint.manual.byHand': 'by hand',
+  'footprint.helper.title': 'Remote helper',
+  'footprint.helper.word': 'helper',
+  'footprint.helper.ariaHead': 'Uninstall the helper from',
+  'footprint.helper.desc':
+    'The helper serves git and other remote features on this machine.',
+  'footprint.helper.manualHead':
+    'Removal and consent revocation need a saved connection — remove',
+  'footprint.helper.revokeTail': ' by hand, then revoke consent from the saved connection',
   'kit.dump.title': 'Model dump',
   'kit.dump.openPage': 'Open full page',
   'kit.dump.search.aria': 'Search dump',
@@ -1586,5 +1711,5 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'vault.diag.state.uninitialized': 'uninitialized — protection is not set up',
   'vault.diag.state.sealed': 'sealed — locked',
   'vault.diag.state.unsealed': 'unsealed — unlocked',
-  'updates.section.linux.desc': 'AppImage installs can update themselves in nocx. deb and rpm installs update through their package manager; that is a different install from the AppImage.',
+
 }

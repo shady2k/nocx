@@ -316,7 +316,8 @@ export function NotificationsPanel(props: NotificationsPanelProps) {
           the rest of the time. */}
       <Show when={narrowed()}>
         <div class="notifications-panel__shown" data-testid="notifications-shown-count">
-          {visible().length} of {all().length} shown
+          {visible().length} {t('notify.chrome.count.of', 'of')} {all().length}{' '}
+          {t('notify.chrome.count.shown', 'shown')}
         </div>
       </Show>
 
@@ -456,7 +457,8 @@ function Run(props: { occurrence: Occurrence }) {
           twenty of four thousand as the whole is the failure D2 names. */}
       <Show when={o().runDropped > 0}>
         <div class="notifications-panel__run-dropped" data-testid="notifications-run-dropped">
-          {held()} of {o().count} shown
+          {held()} {t('notify.chrome.count.of', 'of')} {o().count}{' '}
+          {t('notify.chrome.count.shown', 'shown')}
         </div>
       </Show>
     </div>

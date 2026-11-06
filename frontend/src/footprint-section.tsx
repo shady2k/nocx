@@ -21,6 +21,7 @@
  * component, never repainted here.
  */
 import { For, Show, createSignal, onMount } from 'solid-js'
+import { t } from './i18n/locale-model'
 import { Button } from './ui/button'
 import { RecordRow } from './ui/record-row'
 import { EmptyState } from './ui/empty-state'
@@ -72,7 +73,10 @@ export function FootprintSection(props: FootprintSectionProps) {
       setHelpers(res.helpers ?? [])
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      showToast({ level: 'danger', message: `Could not read the remote footprint: ${msg}` })
+      showToast({
+        level: 'danger',
+        message: `${t('footprint.read.failedHead', 'Could not read the remote footprint:')} ${msg}`,
+      })
       setDestinations([])
       setHelpers([])
     }
@@ -95,18 +99,21 @@ export function FootprintSection(props: FootprintSectionProps) {
       const res = await props.client.uninstall(d.removableProfileId)
       showToast({
         level: 'success',
-        message: `Removed ${res.removed.length} file(s) from ${d.identity}`,
+        message: `${t('footprint.removed.head', 'Removed')} ${res.removed.length} ${t('footprint.removed.files', 'file(s) from')} ${d.identity}`,
       })
       if (res.conflicts.length > 0) {
         showToast({
           level: 'warning',
-          message: `${res.conflicts.length} modified file(s) kept: ${res.conflicts.join(', ')}`,
+          message: `${res.conflicts.length} ${t('footprint.kept.head', 'modified file(s) kept:')} ${res.conflicts.join(', ')}`,
         })
       }
       await load()
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      showToast({ level: 'danger', message: `Uninstall failed: ${msg}` })
+      showToast({
+        level: 'danger',
+        message: `${t('footprint.uninstall.failedHead', 'Uninstall failed:')} ${msg}`,
+      })
     } finally {
       setBusy(null)
     }
@@ -132,7 +139,10 @@ export function FootprintSection(props: FootprintSectionProps) {
       await load()
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      showToast({ level: 'danger', message: `Uninstall failed: ${msg}` })
+      showToast({
+        level: 'danger',
+        message: `${t('footprint.uninstall.failedHead', 'Uninstall failed:')} ${msg}`,
+      })
     } finally {
       setBusy(null)
     }
@@ -152,20 +162,26 @@ export function FootprintSection(props: FootprintSectionProps) {
     <Show when={props.client}>
       <PageSection
         id="remote-footprint"
-        title="Remote footprint"
-        description="nocx installs shell integration on a remote host automatically. This is what it wrote, where, and when it was last seen — no connection is made to show it. Only a saved connection to the host can remove it."
+        title={t('footprint.title', 'Remote footprint')}
+        description={t(
+          'footprint.desc',
+          'nocx installs shell integration on a remote host automatically. This is what it wrote, where, and when it was last seen — no connection is made to show it. Only a saved connection to the host can remove it.',
+        )}
       >
         <Show when={destinations() === null}>
-          <Spinner label="Loading the remote footprint" size="sm" />
+          <Spinner label={t('footprint.loading', 'Loading the remote footprint')} size="sm" />
         </Show>
         <Show when={destinations() !== null && destinations()!.length === 0}>
           <EmptyState
-            title="Nothing installed"
-            description="nocx has not left shell integration on any host. A host appears here the first time its integration was observed."
+            title={t('footprint.nothing.title', 'Nothing installed')}
+            description={t(
+              'footprint.nothing.desc',
+              'nocx has not left shell integration on any host. A host appears here the first time its integration was observed.',
+            )}
             action={
               <Button variant="ghost" size="sm" onClick={refresh}>
                 <RefreshIcon />
-                Refresh
+                {t('footprint.refresh', 'Refresh')}
               </Button>
             }
           />
@@ -185,27 +201,29 @@ export function FootprintSection(props: FootprintSectionProps) {
                         size="sm"
                         disabled={busy() !== null}
                         onClick={() => void uninstall(d)}
-                        ariaLabel={`Uninstall from ${d.identity}`}
+                        ariaLabel={`${t('footprint.uninstall.ariaHead', 'Uninstall from')} ${d.identity}`}
                       >
                         <TrashIcon />
                         {busy() === d.identity ? 'Removing…' : 'Uninstall'}
                       </Button>
                     ) : (
-                      <span>Removal needs a saved connection &mdash; remove {d.path} by hand</span>
-                    )
-                  }
+                      <span>
+                        {t('footprint.manual.head', 'Removal needs a saved connection — remove')}{' '}
+                        {d.path} {t('footprint.manual.byHand', 'by hand')}
+                      </span>
+                    )}
                 />
               )}
             </For>
           </Stack>
         </Show>
         <Show when={helpers() !== null && helpers()!.length > 0}>
-          <Section title="Remote helper" divided dense>
+          <Section title={t('footprint.helper.title', 'Remote helper')} divided dense>
             <For each={helpers()}>
               {(h) => (
                 <RecordRow
                   title={h.identity}
-                  kind={{ label: 'helper', tone: 'info' }}
+                  kind={{ label: t('footprint.helper.word', 'helper'), tone: 'info' }}
                   meta={`${h.path} · hash ${h.hash.slice(0, 12)}… · installed ${formatLastSeen(h.installedAt)}`}
                   actions={
                     h.removableProfileId !== null ? (
@@ -214,19 +232,28 @@ export function FootprintSection(props: FootprintSectionProps) {
                         size="sm"
                         disabled={busy() !== null}
                         onClick={() => void uninstallHelper(h)}
-                        ariaLabel={`Uninstall the helper from ${h.identity}`}
+                        ariaLabel={`${t('footprint.helper.ariaHead', 'Uninstall the helper from')} ${h.identity}`}
                       >
                         <TrashIcon />
                         {busy() === h.identity ? 'Removing…' : 'Uninstall'}
                       </Button>
                     ) : (
                       <span>
-                        The helper serves git and other remote features on this machine. Removal and
-                        consent revocation need a saved connection &mdash; remove {h.path} by hand,
-                        then revoke consent from a saved connection
+                        {t(
+                          'footprint.helper.desc',
+                          'The helper serves git and other remote features on this machine.',
+                        )}{' '}
+                        {t(
+                          'footprint.helper.manualHead',
+                          'Removal and consent revocation need a saved connection — remove',
+                        )}{' '}
+                        {h.path}
+                        {t(
+                          'footprint.helper.revokeTail',
+                          ' by hand, then revoke consent from the saved connection',
+                        )}
                       </span>
-                    )
-                  }
+                    )}
                 />
               )}
             </For>

@@ -1004,7 +1004,7 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
     const subject = subjectOf(answer)
     return (
       <Select
-        ariaLabel={`Your answer for ${subject}`}
+        ariaLabel={`${t('perms.answerFor.ariaHead', 'Your answer for')} ${subject}`}
         value={answerValue(answer)}
         options={answerOptions(answer)}
         disabled={busy()}
@@ -1029,7 +1029,7 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
     return (
       <div class="st-permissions__answer" data-answer={answer.key}>
         <RecordRow
-          title={`May the assistant ${subject}?`}
+          title={`${t('perms.mayQ.title', 'May the assistant')} ${subject}?`}
           meta={placesLine(answer)}
           status={dormant() ? { tone: 'neutral' as const, text: 'Governs nothing yet' } : undefined}
           actions={
@@ -1039,10 +1039,10 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
                 variant="ghost"
                 size="sm"
                 disabled={busy()}
-                ariaLabel={`Details for ${subject}`}
+                ariaLabel={`${t('perms.detailsFor.ariaHead', 'Details for')} ${subject}`}
                 onClick={() => openPanel('details', answer)}
               >
-                Details
+                {t('perms.details', 'Details')}
               </Button>
             </>
           }
@@ -1089,22 +1089,22 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
                   variant="default"
                   size="sm"
                   disabled={busy()}
-                  ariaLabel={`Review ${subject}`}
+                  ariaLabel={`${t('perms.review.aria', 'Review')} ${subject}`}
                   onClick={() => {
                     if (answer.kind === 'rule') void review(answer.rule)
                   }}
                 >
-                  Review
+                  {t('perms.review', 'Review')}
                 </Button>
               </Show>
               <Button
                 variant="ghost"
                 size="sm"
                 disabled={busy()}
-                ariaLabel={`Details for ${subject}`}
+                ariaLabel={`${t('perms.detailsFor.ariaHead', 'Details for')} ${subject}`}
                 onClick={() => openPanel('details', answer)}
               >
-                Details
+                {t('perms.details', 'Details')}
               </Button>
             </>
           }
@@ -1200,9 +1200,10 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
               when={places().length > 0}
               fallback={
                 <Caption>
-                  nocx has not learned any places yet. A place is named the first time you widen an
-                  answer to cover somewhere a call actually reached, and it can be picked here
-                  afterwards.
+                  {t(
+                    'perms.places.none',
+                    'nocx has not learned any places yet. A place is named the first time you widen an answer to cover somewhere a call actually reached, and it can be picked here afterwards.',
+                  )}
                 </Caption>
               }
             >
@@ -1226,9 +1227,10 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
               when={answer.kind === 'rule'}
               fallback={
                 <Caption>
-                  This answer covers work the assistant does without a command line, so there is no
-                  single call to walk through. Open Why on one of your command answers to see the
-                  steps.
+                  {t(
+                    'perms.coversNoCommand',
+                    'This answer covers work the assistant does without a command line, so there is no single call to walk through. Open Why on one of your command answers to see the steps.',
+                  )}
                 </Caption>
               }
             >
@@ -1358,9 +1360,10 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
                   ariaLabel={t('perms.stillUsing.aria', 'What is still using this answer')}
                 />
                 <Caption>
-                  Nothing has changed yet. What the assistant may do is fixed when it starts writing
-                  an answer, so this reaches everything it starts from now on either way — you are
-                  choosing what happens to the {q.count === 1 ? 'one' : q.count} in progress.
+                  {`${t(
+                    'perms.nothingChanged',
+                    'Nothing has changed yet. What the assistant may do is fixed when it starts writing an answer, so this reaches everything it starts from now on either way — you are choosing what happens to the',
+                  )} ${q.count === 1 ? 'one' : q.count} ${t('perms.inProgress', 'in progress.')}`}
                 </Caption>
                 {/* WHAT THE NUMBER MEANS, and it is not the same sentence for
                     the two kinds of answer. A standing answer names a command,
@@ -1373,8 +1376,10 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
                     runs instead of counting answers. */}
                 <Show when={q.gesture.kind === 'row'}>
                   <Caption>
-                    This answer covers everything of its kind, not one command, so this is every
-                    piece of work whose permissions still say what you have just changed.
+                    {t(
+                      'perms.coversEverything',
+                      'This answer covers everything of its kind, not one command, so this is every piece of work whose permissions still say what you have just changed.',
+                    )}
                   </Caption>
                 </Show>
                 <ActionGroup
@@ -1388,7 +1393,7 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
                     disabled={busy()}
                     onClick={() => answerRunsQuestion('future')}
                   >
-                    Leave them running
+                    {t('perms.leaveRunning', 'Leave them running')}
                   </Button>
                   <Button
                     variant="danger"
@@ -1449,7 +1454,7 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
             disabled={busy() || typed().trim() === ''}
             onClick={() => readTyped()}
           >
-            Read this command
+            {t('perms.readCommand', 'Read this command')}
           </Button>
         </ActionGroup>
         <Show when={reading()}>{(r) => (mode === 'allow' ? allowOffer(r) : refusalOffer(r))}</Show>
@@ -1561,7 +1566,10 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
   return (
     <PageSection
       title={t('perms.title', 'Assistant permissions')}
-      description="What the assistant may do on its own. Anything you have not answered is asked every time it comes up."
+      description={t(
+        'perms.mayDo.desc',
+        'What the assistant may do on its own. Anything you have not answered is asked every time it comes up.',
+      )}
     >
       <Show when={loadError()}>
         <Badge tone="danger">{`Your permissions could not be read: ${loadError()}`}</Badge>
@@ -1580,8 +1588,10 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
             when={questions().length > 0}
             fallback={
               <Caption>
-                No tool the assistant can reach today asks for anything, so there is nothing to
-                answer yet.
+                {t(
+                  'perms.noToolAsks',
+                  'No tool the assistant can reach today asks for anything, so there is nothing to answer yet.',
+                )}
               </Caption>
             }
           >
@@ -1621,7 +1631,7 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
             and neither says "add a rule". */}
         <ActionGroup ariaLabel={t('perms.addAnswer.aria', 'Add an answer')}>
           <Button variant="default" disabled={busy()} onClick={() => openWriter('refuse')}>
-            + Write a refusal
+            {t('perms.writeRefusal', '+ Write a refusal')}
           </Button>
           <Button variant="default" disabled={busy()} onClick={() => openWriter('allow')}>
             {ALLOW_A_COMMAND}
@@ -1644,7 +1654,7 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
             title={mode === 'allow' ? 'Allow a command' : 'Write a refusal'}
             footer={
               <Button variant="default" onClick={closeWriter}>
-                Cancel
+                {t('perms.cancel', 'Cancel')}
               </Button>
             }
           >
@@ -1685,7 +1695,7 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
                       void writeRow(on.effect, { decision: 'ask', scopes: [] }, closePanel)
                     }}
                   >
-                    Forget it
+                    {t('perms.forget', 'Forget it')}
                   </Button>
                 </Show>
               </>

@@ -73,8 +73,8 @@ describe('skills section renders through the catalogue', () => {
     )
     const { container } = render(() => <SkillsSection store={store} />)
 
-    await waitFor(() => expect(container.textContent).toContain('Найденные навыки'))
-    expect(container.textContent).toContain('Навыки не найдены')
+    await waitFor(() => expect(container.textContent).toContain('Найденные скиллы'))
+    expect(container.textContent).toContain('Скиллы не найдены')
   })
 
   it('shows a Russian aria-label under ru on a row control', async () => {
@@ -88,7 +88,7 @@ describe('skills section renders through the catalogue', () => {
     const { container } = render(() => <SkillsSection store={store} />)
 
     // The section heading is the visible proof the catalogue answered.
-    await waitFor(() => expect(container.textContent).toContain('Найденные навыки'))
+    await waitFor(() => expect(container.textContent).toContain('Найденные скиллы'))
     // And the row's Open control names its row in Russian — an aria-label is
     // attribute copy, not textContent.
     const labels = Array.from(container.querySelectorAll('button')).map(

@@ -370,10 +370,16 @@ export function SnippetsSection(props: SnippetsSectionProps) {
           onActivate={() => openEdit(s)}
           actions={
             <>
-              <IconButton ariaLabel={`Edit ${s.title}`} onClick={() => openEdit(s)}>
+              <IconButton
+                ariaLabel={`${t('snippets.row.edit.ariaHead', 'Edit')} ${s.title}`}
+                onClick={() => openEdit(s)}
+              >
                 <PencilIcon />
               </IconButton>
-              <IconButton ariaLabel={`Delete ${s.title}`} onClick={() => void remove(s)}>
+              <IconButton
+                ariaLabel={`${t('snippets.row.delete.ariaHead', 'Delete')} ${s.title}`}
+                onClick={() => void remove(s)}
+              >
                 <TrashIcon />
               </IconButton>
             </>
@@ -397,7 +403,7 @@ export function SnippetsSection(props: SnippetsSectionProps) {
           description={s.message}
           action={
             <Button variant="default" onClick={() => void props.store.refresh()}>
-              Retry
+              {t('snippets.retry', 'Retry')}
             </Button>
           }
         />
@@ -499,9 +505,7 @@ export function SnippetsSection(props: SnippetsSectionProps) {
             <Show
               when={parts().length > 0}
               fallback={
-                <span class="sn-preview__none">
-                  Nothing to fill in — the body is sent as it is.
-                </span>
+                <span class="sn-preview__none">{t('snippets.nothingToFill', 'Nothing to fill in — the body is sent as it is.')}</span>
               }
             >
               <For each={parts()}>

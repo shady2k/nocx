@@ -17,24 +17,6 @@
       "snippet": "nocx"
     },
     {
-      "file": "src/agent-access-section.tsx",
-      "line": 94,
-      "context": "attr:description",
-      "snippet": "Agents you started in a pane and answered for when they aske"
-    },
-    {
-      "file": "src/agent-access-section.tsx",
-      "line": 100,
-      "context": "jsx-text",
-      "snippet": "No agent has asked yet. The question comes up the first time"
-    },
-    {
-      "file": "src/agent-access-section.tsx",
-      "line": 122,
-      "context": "attr:ariaLabel",
-      "snippet": "Forget the answer for on"
-    },
-    {
       "file": "src/agent-approval-prompt.tsx",
       "line": 1068,
       "context": "jsx-text",
@@ -177,198 +159,6 @@
       "line": 271,
       "context": "prop:label",
       "snippet": "Undo"
-    },
-    {
-      "file": "src/agent-calibration-section.tsx",
-      "line": 301,
-      "context": "attr:description",
-      "snippet": "nocx asks you to drive your agent into one named state at a"
-    },
-    {
-      "file": "src/agent-calibration-section.tsx",
-      "line": 318,
-      "context": "attr:description",
-      "snippet": "nocx watches a pane only after an agent asks it to. Start an"
-    },
-    {
-      "file": "src/agent-calibration-section.tsx",
-      "line": 368,
-      "context": "jsx-text",
-      "snippet": "nocx types unless something here says its rule is wrong: a s"
-    },
-    {
-      "file": "src/agent-calibration-section.tsx",
-      "line": 391,
-      "context": "jsx-text",
-      "snippet": "Type a test line into this pane"
-    },
-    {
-      "file": "src/agent-calibration-section.tsx",
-      "line": 395,
-      "context": "jsx-text",
-      "snippet": "nocx types only into a pane its rule reads as waiting for in"
-    },
-    {
-      "file": "src/agent-calibration-section.tsx",
-      "line": 426,
-      "context": "jsx-text",
-      "snippet": "You will be asked for each state in turn. Get your agent int"
-    },
-    {
-      "file": "src/agent-calibration-section.tsx",
-      "line": 437,
-      "context": "jsx-text",
-      "snippet": "Start calibration"
-    },
-    {
-      "file": "src/agent-calibration-section.tsx",
-      "line": 469,
-      "context": "jsx-text",
-      "snippet": "Capture the pane now"
-    },
-    {
-      "file": "src/agent-calibration-section.tsx",
-      "line": 478,
-      "context": "jsx-text",
-      "snippet": "Skip this state"
-    },
-    {
-      "file": "src/agent-calibration-section.tsx",
-      "line": 488,
-      "context": "jsx-text",
-      "snippet": "Do the previous step again"
-    },
-    {
-      "file": "src/agent-calibration-section.tsx",
-      "line": 497,
-      "context": "jsx-text",
-      "snippet": "Stop"
-    },
-    {
-      "file": "src/agent-emitting-section.tsx",
-      "line": 184,
-      "context": "attr:description",
-      "snippet": "The screen an enrolled pane's detection rule is reading, and"
-    },
-    {
-      "file": "src/agent-emitting-section.tsx",
-      "line": 201,
-      "context": "attr:description",
-      "snippet": "nocx watches a pane only after an agent asks it to. Start an"
-    },
-    {
-      "file": "src/agent-emitting-section.tsx",
-      "line": 233,
-      "context": "jsx-text",
-      "snippet": "nocx has no rule for this agent, so nothing is reading this"
-    },
-    {
-      "file": "src/agent-emitting-section.tsx",
-      "line": 246,
-      "context": "attr:ariaLabel",
-      "snippet": "Frame of , by"
-    },
-    {
-      "file": "src/agent-emitting-section.tsx",
-      "line": 271,
-      "context": "jsx-text",
-      "snippet": "full-width rule"
-    },
-    {
-      "file": "src/agent-records-section.tsx",
-      "line": 105,
-      "context": "jsx-text",
-      "snippet": "Agent ID:"
-    },
-    {
-      "file": "src/agent-records-section.tsx",
-      "line": 142,
-      "context": "jsx-text",
-      "snippet": "This record could not be read:"
-    },
-    {
-      "file": "src/agent-records-section.tsx",
-      "line": 153,
-      "context": "jsx-text",
-      "snippet": "Save agent"
-    },
-    {
-      "file": "src/agent-records-section.tsx",
-      "line": 157,
-      "context": "jsx-text",
-      "snippet": "Remove agent"
-    },
-    {
-      "file": "src/agent-records-section.tsx",
-      "line": 261,
-      "context": "attr:description",
-      "snippet": "Edit the commands nocx offers in new shells. Changes apply t"
-    },
-    {
-      "file": "src/agent-records-section.tsx",
-      "line": 323,
-      "context": "jsx-text",
-      "snippet": "Add agent"
-    },
-    {
-      "file": "src/agent-rules-section.tsx",
-      "line": 201,
-      "context": "attr:description",
-      "snippet": "nocx reads an agent's screen with a rule. These are the rule"
-    },
-    {
-      "file": "src/agent-rules-section.tsx",
-      "line": 220,
-      "context": "jsx-text",
-      "snippet": "Read again"
-    },
-    {
-      "file": "src/agent-rules-section.tsx",
-      "line": 231,
-      "context": "attr:description",
-      "snippet": "A rule is written per agent, and this build ships none — so"
-    },
-    {
-      "file": "src/agent-rules-section.tsx",
-      "line": 246,
-      "context": "attr:title",
-      "snippet": "The document for could not be read"
-    },
-    {
-      "file": "src/agent-rules-section.tsx",
-      "line": 247,
-      "context": "attr:description",
-      "snippet": "Fix the file, or remove it below to go back to the shipped r"
-    },
-    {
-      "file": "src/agent-rules-section.tsx",
-      "line": 254,
-      "context": "attr:label",
-      "snippet": "Rule for"
-    },
-    {
-      "file": "src/agent-rules-section.tsx",
-      "line": 255,
-      "context": "attr:description",
-      "snippet": "One JSON document, in the same grammar the shipped rules are"
-    },
-    {
-      "file": "src/agent-rules-section.tsx",
-      "line": 269,
-      "context": "attr:label",
-      "snippet": "Read 's screen"
-    },
-    {
-      "file": "src/agent-rules-section.tsx",
-      "line": 293,
-      "context": "jsx-text",
-      "snippet": "These are files as well as a page: one document per agent in"
-    },
-    {
-      "file": "src/agent-rules-section.tsx",
-      "line": 294,
-      "context": "jsx-text",
-      "snippet": ", so a rule can be written or repaired in an edi"
     },
     {
       "file": "src/api/api-pane.tsx",
@@ -713,126 +503,6 @@
       "snippet": "download"
     },
     {
-      "file": "src/assistant-permissions-section.tsx",
-      "line": 1007,
-      "context": "attr:ariaLabel",
-      "snippet": "Your answer for"
-    },
-    {
-      "file": "src/assistant-permissions-section.tsx",
-      "line": 1032,
-      "context": "attr:title",
-      "snippet": "May the assistant ?"
-    },
-    {
-      "file": "src/assistant-permissions-section.tsx",
-      "line": 1042,
-      "context": "attr:ariaLabel",
-      "snippet": "Details for"
-    },
-    {
-      "file": "src/assistant-permissions-section.tsx",
-      "line": 1044,
-      "context": "jsx-text",
-      "snippet": "Details"
-    },
-    {
-      "file": "src/assistant-permissions-section.tsx",
-      "line": 1092,
-      "context": "attr:ariaLabel",
-      "snippet": "Review"
-    },
-    {
-      "file": "src/assistant-permissions-section.tsx",
-      "line": 1096,
-      "context": "jsx-text",
-      "snippet": "Review"
-    },
-    {
-      "file": "src/assistant-permissions-section.tsx",
-      "line": 1104,
-      "context": "attr:ariaLabel",
-      "snippet": "Details for"
-    },
-    {
-      "file": "src/assistant-permissions-section.tsx",
-      "line": 1106,
-      "context": "jsx-text",
-      "snippet": "Details"
-    },
-    {
-      "file": "src/assistant-permissions-section.tsx",
-      "line": 1202,
-      "context": "jsx-text",
-      "snippet": "nocx has not learned any places yet. A place is named the fi"
-    },
-    {
-      "file": "src/assistant-permissions-section.tsx",
-      "line": 1228,
-      "context": "jsx-text",
-      "snippet": "This answer covers work the assistant does without a command"
-    },
-    {
-      "file": "src/assistant-permissions-section.tsx",
-      "line": 1360,
-      "context": "jsx-text",
-      "snippet": "Nothing has changed yet. What the assistant may do is fixed"
-    },
-    {
-      "file": "src/assistant-permissions-section.tsx",
-      "line": 1363,
-      "context": "jsx-text",
-      "snippet": "in progress."
-    },
-    {
-      "file": "src/assistant-permissions-section.tsx",
-      "line": 1375,
-      "context": "jsx-text",
-      "snippet": "This answer covers everything of its kind, not one command,"
-    },
-    {
-      "file": "src/assistant-permissions-section.tsx",
-      "line": 1390,
-      "context": "jsx-text",
-      "snippet": "Leave them running"
-    },
-    {
-      "file": "src/assistant-permissions-section.tsx",
-      "line": 1451,
-      "context": "jsx-text",
-      "snippet": "Read this command"
-    },
-    {
-      "file": "src/assistant-permissions-section.tsx",
-      "line": 1564,
-      "context": "attr:description",
-      "snippet": "What the assistant may do on its own. Anything you have not"
-    },
-    {
-      "file": "src/assistant-permissions-section.tsx",
-      "line": 1582,
-      "context": "jsx-text",
-      "snippet": "No tool the assistant can reach today asks for anything, so"
-    },
-    {
-      "file": "src/assistant-permissions-section.tsx",
-      "line": 1623,
-      "context": "jsx-text",
-      "snippet": "+ Write a refusal"
-    },
-    {
-      "file": "src/assistant-permissions-section.tsx",
-      "line": 1646,
-      "context": "jsx-text",
-      "snippet": "Cancel"
-    },
-    {
-      "file": "src/assistant-permissions-section.tsx",
-      "line": 1687,
-      "context": "jsx-text",
-      "snippet": "Forget it"
-    },
-    {
       "file": "src/backup-restore-section.tsx",
       "line": 133,
       "context": "prop:message",
@@ -1077,120 +747,6 @@
       "line": 387,
       "context": "attr:ariaLabel",
       "snippet": ":"
-    },
-    {
-      "file": "src/footprint-section.tsx",
-      "line": 75,
-      "context": "prop:message",
-      "snippet": "Could not read the remote footprint:"
-    },
-    {
-      "file": "src/footprint-section.tsx",
-      "line": 98,
-      "context": "prop:message",
-      "snippet": "Removed file(s) from"
-    },
-    {
-      "file": "src/footprint-section.tsx",
-      "line": 103,
-      "context": "prop:message",
-      "snippet": "modified file(s) kept:"
-    },
-    {
-      "file": "src/footprint-section.tsx",
-      "line": 109,
-      "context": "prop:message",
-      "snippet": "Uninstall failed:"
-    },
-    {
-      "file": "src/footprint-section.tsx",
-      "line": 135,
-      "context": "prop:message",
-      "snippet": "Uninstall failed:"
-    },
-    {
-      "file": "src/footprint-section.tsx",
-      "line": 155,
-      "context": "attr:title",
-      "snippet": "Remote footprint"
-    },
-    {
-      "file": "src/footprint-section.tsx",
-      "line": 156,
-      "context": "attr:description",
-      "snippet": "nocx installs shell integration on a remote host automatical"
-    },
-    {
-      "file": "src/footprint-section.tsx",
-      "line": 159,
-      "context": "attr:label",
-      "snippet": "Loading the remote footprint"
-    },
-    {
-      "file": "src/footprint-section.tsx",
-      "line": 163,
-      "context": "attr:title",
-      "snippet": "Nothing installed"
-    },
-    {
-      "file": "src/footprint-section.tsx",
-      "line": 164,
-      "context": "attr:description",
-      "snippet": "nocx has not left shell integration on any host. A host appe"
-    },
-    {
-      "file": "src/footprint-section.tsx",
-      "line": 167,
-      "context": "jsx-text",
-      "snippet": "Refresh"
-    },
-    {
-      "file": "src/footprint-section.tsx",
-      "line": 188,
-      "context": "attr:ariaLabel",
-      "snippet": "Uninstall from"
-    },
-    {
-      "file": "src/footprint-section.tsx",
-      "line": 194,
-      "context": "jsx-text",
-      "snippet": "Removal needs a saved connection — remove"
-    },
-    {
-      "file": "src/footprint-section.tsx",
-      "line": 194,
-      "context": "jsx-text",
-      "snippet": "by hand"
-    },
-    {
-      "file": "src/footprint-section.tsx",
-      "line": 203,
-      "context": "attr:title",
-      "snippet": "Remote helper"
-    },
-    {
-      "file": "src/footprint-section.tsx",
-      "line": 208,
-      "context": "prop:label",
-      "snippet": "helper"
-    },
-    {
-      "file": "src/footprint-section.tsx",
-      "line": 217,
-      "context": "attr:ariaLabel",
-      "snippet": "Uninstall the helper from"
-    },
-    {
-      "file": "src/footprint-section.tsx",
-      "line": 223,
-      "context": "jsx-text",
-      "snippet": "The helper serves git and other remote features on this mach"
-    },
-    {
-      "file": "src/footprint-section.tsx",
-      "line": 225,
-      "context": "jsx-text",
-      "snippet": "by hand, then revoke consent from a"
     },
     {
       "file": "src/git/git-diff/git-diff-content.tsx",
@@ -1643,30 +1199,6 @@
       "snippet": "Delete"
     },
     {
-      "file": "src/notify/notifications-panel.tsx",
-      "line": 319,
-      "context": "jsx-text",
-      "snippet": "of"
-    },
-    {
-      "file": "src/notify/notifications-panel.tsx",
-      "line": 319,
-      "context": "jsx-text",
-      "snippet": "shown"
-    },
-    {
-      "file": "src/notify/notifications-panel.tsx",
-      "line": 459,
-      "context": "jsx-text",
-      "snippet": "of"
-    },
-    {
-      "file": "src/notify/notifications-panel.tsx",
-      "line": 459,
-      "context": "jsx-text",
-      "snippet": "shown"
-    },
-    {
       "file": "src/operations/operations-view.tsx",
       "line": 215,
       "context": "attr:description",
@@ -1853,18 +1385,6 @@
       "snippet": "Dismiss"
     },
     {
-      "file": "src/roles-section.tsx",
-      "line": 353,
-      "context": "jsx-text",
-      "snippet": "The pair every role without a model of its own answers with."
-    },
-    {
-      "file": "src/roles-section.tsx",
-      "line": 452,
-      "context": "jsx-text",
-      "snippet": "Retry"
-    },
-    {
       "file": "src/scrollback/blocks.ts",
       "line": 989,
       "context": "prop:label",
@@ -1980,49 +1500,37 @@
     },
     {
       "file": "src/settings.tsx",
-      "line": 925,
-      "context": "prop:title",
-      "snippet": "Updates"
-    },
-    {
-      "file": "src/settings.tsx",
-      "line": 937,
-      "context": "prop:title",
-      "snippet": "About"
-    },
-    {
-      "file": "src/settings.tsx",
-      "line": 1186,
+      "line": 1185,
       "context": "prop:message",
       "snippet": "Could not save \"\":"
     },
     {
       "file": "src/settings.tsx",
-      "line": 1213,
+      "line": 1212,
       "context": "prop:message",
       "snippet": "Could not reset \"\":"
     },
     {
       "file": "src/settings.tsx",
-      "line": 1229,
+      "line": 1228,
       "context": "prop:message",
       "snippet": "Could not save \"\":"
     },
     {
       "file": "src/settings.tsx",
-      "line": 1245,
+      "line": 1244,
       "context": "prop:message",
       "snippet": "Could not clear \"\":"
     },
     {
       "file": "src/settings.tsx",
-      "line": 1789,
+      "line": 1788,
       "context": "jsx-text",
       "snippet": "Replace"
     },
     {
       "file": "src/settings.tsx",
-      "line": 1792,
+      "line": 1791,
       "context": "jsx-text",
       "snippet": "Clear"
     },
@@ -2073,54 +1581,6 @@
       "line": 166,
       "context": "jsx-text",
       "snippet": "Re-approve"
-    },
-    {
-      "file": "src/skills-section.tsx",
-      "line": 257,
-      "context": "attr:description",
-      "snippet": "Path:"
-    },
-    {
-      "file": "src/skills-section.tsx",
-      "line": 266,
-      "context": "attr:description",
-      "snippet": "Add a SKILL.md under your skills directory, or ask the assis"
-    },
-    {
-      "file": "src/skills-section.tsx",
-      "line": 301,
-      "context": "attr:ariaLabel",
-      "snippet": "enabled"
-    },
-    {
-      "file": "src/skills-section.tsx",
-      "line": 314,
-      "context": "attr:ariaLabel",
-      "snippet": "actions"
-    },
-    {
-      "file": "src/snippets/snippets-settings.tsx",
-      "line": 373,
-      "context": "attr:ariaLabel",
-      "snippet": "Edit"
-    },
-    {
-      "file": "src/snippets/snippets-settings.tsx",
-      "line": 376,
-      "context": "attr:ariaLabel",
-      "snippet": "Delete"
-    },
-    {
-      "file": "src/snippets/snippets-settings.tsx",
-      "line": 399,
-      "context": "jsx-text",
-      "snippet": "Retry"
-    },
-    {
-      "file": "src/snippets/snippets-settings.tsx",
-      "line": 502,
-      "context": "jsx-text",
-      "snippet": "Nothing to fill in — the body is sent as it is."
     },
     {
       "file": "src/tab-strip.tsx",
@@ -2625,30 +2085,6 @@
       "line": 57,
       "context": "prop:message",
       "snippet": "this is not a distributed AppImage build — download the AppI"
-    },
-    {
-      "file": "src/updates-section.tsx",
-      "line": 41,
-      "context": "attr:description",
-      "snippet": "AppImage installs can update themselves in nocx. deb and rpm"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1014,
-      "context": "jsx-text",
-      "snippet": "will be deleted."
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1422,
-      "context": "jsx-text",
-      "snippet": "Changing the passphrase requires your current passphrase or"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1558,
-      "context": "jsx-text",
-      "snippet": "Your new recovery code is shown below. Copy it now — it will"
     },
     {
       "file": "src/workspace-chip.tsx",

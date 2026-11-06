@@ -103,7 +103,7 @@ function AgentRecordCard(props: {
     <Section title={props.agent.displayName || props.agent.id}>
       <Stack gap="loose">
         <p>
-          Agent ID: {props.agent.id}
+          {t('agents.records.idColon', 'Agent ID:')} {props.agent.id}
           {props.agent.builtin ? ' · Built in' : ''}
         </p>
         <TextField
@@ -139,7 +139,9 @@ function AgentRecordCard(props: {
           onChange={changeOffering}
         />
         <Show when={props.agent.state === 'unreadable'}>
-          <p role="alert">This record could not be read: {props.agent.problem}</p>
+          <p role="alert">
+            {t('agents.records.unreadable', 'This record could not be read:')} {props.agent.problem}
+          </p>
         </Show>
         <Show when={props.saved}>
           <p role="status">
@@ -151,11 +153,11 @@ function AgentRecordCard(props: {
         </Show>
         <div>
           <Button variant="primary" disabled={busy()} onClick={() => void save()}>
-            Save agent
+            {t('agents.records.save', 'Save agent')}
           </Button>
           <Show when={!props.agent.builtin}>
             <Button variant="danger" disabled={busy()} onClick={() => void remove()}>
-              Remove agent
+              {t('agents.records.remove', 'Remove agent')}
             </Button>
           </Show>
         </div>
@@ -258,7 +260,10 @@ export function AgentRecordsSection(props: AgentRecordsSectionProps) {
   return (
     <PageSection
       title={t('agents.records.title', 'Agents')}
-      description="Edit the commands nocx offers in new shells. Changes apply to the next agent launch; built-in agents can be edited but not removed."
+      description={t(
+        'agents.records.desc',
+        'Edit the commands nocx offers in new shells. Changes apply to the next agent launch; built-in agents can be edited but not removed.',
+      )}
     >
       <Stack gap="loose">
         <Show when={loading()}>
@@ -321,7 +326,7 @@ export function AgentRecordsSection(props: AgentRecordsSectionProps) {
               <p role="alert">{createError()}</p>
             </Show>
             <Button variant="primary" disabled={creating()} onClick={() => void saveNew()}>
-              Add agent
+              {t('agents.records.add', 'Add agent')}
             </Button>
           </Stack>
         </Section>

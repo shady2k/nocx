@@ -254,7 +254,7 @@ export function SkillsSection(props: SkillsSectionProps) {
           <StatusCard
             tone="danger"
             title={t('skills.loadFailed.title', 'Skills could not be read')}
-            description={`${unavailable()?.message ?? 'Unknown error'} Path: ${unavailable()?.documentPath || 'skills.json'}`}
+            description={`${unavailable()?.message ?? t('skills.unknownError', 'Unknown error')} ${t('skills.path.descHead', 'Path:')} ${unavailable()?.documentPath || 'skills.json'}`}
           />
         </Show>
         <Show when={state().kind === 'ready'}>
@@ -263,7 +263,10 @@ export function SkillsSection(props: SkillsSectionProps) {
             fallback={
               <EmptyState
                 title={t('skills.empty.title', 'No skills discovered')}
-                description="Add a SKILL.md under your skills directory, or ask the assistant to remember a procedure."
+                description={t(
+                  'skills.empty.desc',
+                  'Add a SKILL.md under your skills directory, or ask the assistant to remember a procedure.',
+                )}
               />
             }
           >
@@ -298,7 +301,7 @@ export function SkillsSection(props: SkillsSectionProps) {
                         variant="switch"
                         checked={skill.enabled}
                         disabled={busy() === skill.name}
-                        ariaLabel={`${skill.name} enabled`}
+                        ariaLabel={`${skill.name} ${t('skills.enabled.aria', 'enabled')}`}
                         onChange={(enabled) => toggle(skill, enabled)}
                       />
                     }
@@ -311,7 +314,7 @@ export function SkillsSection(props: SkillsSectionProps) {
                      control and the guard would now be a condition that is
                      true on every row the product can produce. */
                     actions={
-                      <ActionGroup ariaLabel={`${skill.name} actions`}>
+                      <ActionGroup ariaLabel={`${skill.name} ${t('skills.actions.aria', 'actions')}`}>
                         {/* EVERY row, every provenance. Reading is not
                           writing, so a builtin is as readable as a skill the
                           person wrote — and the builtin is the row that needs

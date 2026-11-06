@@ -1011,7 +1011,8 @@ export const ResetVaultDialog: Component<ResetVaultDialogProps> = (props) => {
             <>
               <Show when={p().secretCount > 0}>
                 <p class="ui-vault-reset-impact">
-                  {countPhrase(p().secretCount, 'saved secret', 'saved secrets')} will be deleted.{' '}
+                  {countPhrase(p().secretCount, 'saved secret', 'saved secrets')}{' '}
+                  {t('vault.reset.chainTail2', 'will be deleted.')}{' '}
                   {countPhrase(p().profileCount, 'connection', 'connections')}{' '}
                   {t('vault.reset.chainTail', 'will ask for a password again.')}
                 </p>
@@ -1420,9 +1421,14 @@ export const ChangePassphraseDialog: Component<ChangePassphraseDialogProps> = (p
         />
 
         <p class="ui-vault-desc-text">
-          Changing the passphrase requires your current passphrase or a recovery code. An OS-held
-          key alone is not sufficient — a factor that only unlocks must not be able to replace the
-          factor that recovers.
+          {t(
+            'vault.change.requiresHead',
+            'Changing the passphrase requires your current passphrase or',
+          )}{' '}
+          {t(
+            'vault.change.requiresTail',
+            'a recovery code. An OS-held key alone is not sufficient — a factor that only unlocks must not be able to replace the factor that recovers.',
+          )}
         </p>
       </Stack>
     </Prompt>
@@ -1556,8 +1562,11 @@ export const RecoveryCodeDialog: Component<RecoveryCodeDialogProps> = (props) =>
       <Show when={recoveryCode() !== null}>
         <Stack>
           <p class="ui-vault-desc-text">
-            Your new recovery code is shown below. Copy it now — it will not be displayed again.
-            Keep it in a safe place.
+            {t(
+              'vault.recovery.newShownHead',
+              'Your new recovery code is shown below. Copy it now — it will',
+            )}{' '}
+            {t('vault.recovery.newShownTail', 'not be displayed again. Keep it in a safe place.')}
           </p>
           <div class="ui-vault-recovery-row">
             <CodeBlock>{recoveryCode() ?? ''}</CodeBlock>

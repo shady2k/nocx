@@ -351,8 +351,10 @@ export function RolesSection(props: RolesSectionProps) {
           <div>
             <div class="roles-default__title">{t('roles.defaultModel', 'Default model')}</div>
             <div class="roles-default__description">
-              The pair every role without a model of its own answers with. Nothing is chosen until
-              you choose it — the product never picks one for you.
+              {t(
+                'roles.defaultModel.desc',
+                'The pair every role without a model of its own answers with. Nothing is chosen until you choose it — the product never picks one for you.',
+              )}
             </div>
           </div>
           <div class="roles-default__controls">
@@ -450,7 +452,7 @@ export function RolesSection(props: RolesSectionProps) {
           description={loadError()}
           action={
             <Button variant="default" onClick={() => void load()}>
-              Retry
+              {t('roles.retry', 'Retry')}
             </Button>
           }
         />

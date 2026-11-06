@@ -181,7 +181,10 @@ export function AgentEmittingSection(props: AgentEmittingSectionProps) {
   return (
     <PageSection
       title={t('agents.emitting.title', 'What this agent is emitting')}
-      description="The screen an enrolled pane's detection rule is reading, and what the rule sees on it — which anchor bound where, which branch answered, and for a branch that did not, the predicate it stopped at."
+      description={t(
+        'agents.emit.desc',
+        "The screen an enrolled pane's detection rule is reading, and what the rule sees on it — which anchor bound where, which branch answered, and for a branch that did not, the predicate it stopped at.",
+      )}
     >
       <Show when={error()}>
         <Badge tone="danger">{`Could not read the pane: ${error()}`}</Badge>
@@ -198,7 +201,10 @@ export function AgentEmittingSection(props: AgentEmittingSectionProps) {
           fallback={
             <EmptyState
               title={t('agents.noPane.title', 'No pane is enrolled')}
-              description="nocx watches a pane only after an agent asks it to. Start an agent in a terminal tab and it appears here."
+              description={t(
+                'agents.emit.noPane.desc',
+                'nocx watches a pane only after an agent asks it to. Start an agent in a terminal tab and it appears here.',
+              )}
             />
           }
         >
@@ -231,7 +237,10 @@ export function AgentEmittingSection(props: AgentEmittingSectionProps) {
                 </div>
                 <Show when={!r.hasRule}>
                   <Badge tone="warning">
-                    nocx has no rule for this agent, so nothing is reading this screen yet
+                    {t(
+                      'agents.emit.noRule',
+                      'nocx has no rule for this agent, so nothing is reading this screen yet',
+                    )}
                   </Badge>
                 </Show>
               </Section>
@@ -243,7 +252,17 @@ export function AgentEmittingSection(props: AgentEmittingSectionProps) {
                 <CodeBlock
                   wrap={false}
                   label={t('agents.frame.label', 'Frame')}
-                  ariaLabel={`Frame of ${r.agent}, ${r.frame.cols} by ${r.frame.rows}`}
+                  ariaLabel={
+                    t('agents.emit.frameOf.aria', 'Frame of') +
+                    ' ' +
+                    r.agent +
+                    ', ' +
+                    r.frame.cols +
+                    ' ' +
+                    t('agents.emit.frameBy.aria', 'by') +
+                    ' ' +
+                    r.frame.rows
+                  }
                 >
                   <For each={r.frame.lines}>
                     {(line, y) => (
@@ -268,7 +287,7 @@ export function AgentEmittingSection(props: AgentEmittingSectionProps) {
                         </span>
                         <span class="st-emitting__marks">
                           <Show when={line.rule}>
-                            <span class="st-emitting__mark">full-width rule</span>
+                            <span class="st-emitting__mark">{t('agents.emit.fullWidth', 'full-width rule')}</span>
                           </Show>
                           <For each={anchorsByRow().get(y()) ?? []}>
                             {(name) => <span class="st-emitting__mark">{name}</span>}

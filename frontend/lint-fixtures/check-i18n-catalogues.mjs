@@ -4,19 +4,17 @@
  *
  * Compares the key sets of src/i18n/catalogues/en.ts and ru.ts — the parity
  * rule the localisation design fixes (nocx-dej6, design §"Frontend catalogue
- * shape"):
+ * shape"), TIGHTENED at stage 3's close:
  *
  *   - a key missing from `en` is an ERROR: the English catalogue is the
  *     completeness check, and a key that exists nowhere in it is dead;
- *   - a key missing from `ru` is a WARNING, printed to stderr but never
- *     exiting nonzero: the Russian catalogue is deliberately partial while
- *     coverage grows, and `t()` falls back to the English value at runtime,
- *     so the gap is review-visible without blocking the commit.
- *
- * Warnings therefore must not break `npm run lint` (`eslint --max-warnings 0`
- * runs first and gates eslint's own warnings only), and this fixture keeps
- * its exit code clean while a ru gap exists — the same informational-not-
- * gating split check-dead-exports.mjs applies to dependency noise.
+ *   - a key missing from `ru` is an ERROR too: the Russian catalogue is
+ *     complete by policy since the epic's ru-l10n completion. A wording no
+ *     approval round has ruled on carries its English AS the ru value — the
+ *     visible fallback lives in the data, not in a tolerated hole.
+ *   - a literal t()/tPlural() call-site key absent from `en` is an ERROR:
+ *     a call whose key exists in neither catalogue renders its fallback
+ *     forever and can never gain a ru entry (measured as nocx-dej6.3.8).
  *
  * The catalogues are parsed as text rather than imported: they are .ts
  * modules and this fixture runs under plain node, with no loader.
@@ -193,10 +191,11 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   }
 
   if (missingFromRu.length > 0) {
-    console.warn(
-      `I18N CATALOGUES: ${missingFromRu.length} key(s) have no ru translation (runtime falls back to en):`,
+    failed = true
+    console.error(
+      `I18N CATALOGUES: ${missingFromRu.length} key(s) have no ru translation — the Russian catalogue is complete by policy since stage 3's close; add the ru entry (or mint the key's English as its ru value when a round has not ruled yet):`,
     )
-    for (const key of missingFromRu) console.warn(`  untranslated in ru: ${key}`)
+    for (const key of missingFromRu) console.error(`  untranslated in ru: ${key}`)
   }
 
   if (callSiteHits.some((h) => h.key === 'PARSE')) {
@@ -216,8 +215,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 
   if (failed) process.exit(1)
 
-  const warnNote = missingFromRu.length ? ` (${missingFromRu.length} untranslated in ru)` : ''
+  const ruNote = missingFromRu.length ? ` (${missingFromRu.length} MISSING in ru)` : ''
   console.error(
-    `I18N CATALOGUES: ${enKeys.size} keys, ${callSiteHits.length} call-site key(s), en complete${warnNote}.`,
+    `I18N CATALOGUES: ${enKeys.size} keys, ${callSiteHits.length} call-site key(s), en↔ru parity enforced${ruNote}.`,
   )
 }

@@ -77,7 +77,6 @@ const ROUTE_KINDS = [
   'paneWorkFinished',
 ] as const
 const ROUTE_CHANNELS = ['banner', 'toast'] as const
-const CENTRE_KINDS = ROUTE_KINDS
 
 // The sections settings.go declares (Section: sites, deduplicated) plus the
 // notifications section internal/notify declares (RouteSettingSection).

@@ -1,12 +1,11 @@
 /**
- * The Russian catalogue — deliberately PARTIAL by design.
- *
- * A key missing here is not an error: `t()` falls back to the English entry,
- * and the parity lint fixture (lint-fixtures/check-i18n-catalogues.mjs)
- * warns about the gap so it is visible in review without blocking a commit
- * that adds an untranslated key. After stage 2 (nocx-dej6.2) the only
- * deliberate gap is `i18n.sample.untranslated`, which exists to prove the
- * fallback at runtime.
+ * The Russian catalogue — COMPLETE by policy since stage 3's close
+ * (nocx-dej6.3, the epic's ru-l10n completion). The parity lint fixture
+ * (lint-fixtures/check-i18n-catalogues.mjs) FAILS on a key missing here,
+ * exactly as it fails on one missing from en: `t()` falls back to the
+ * English entry at runtime, but a hole is a bug now, not a tolerated gap.
+ * A key whose wording no round has approved yet carries its ENGLISH value
+ * as the ru entry — the visible fallback, stated in the data.
  *
  * Everything committed in this repo is English — comments included — but
  * catalogue VALUES are the product's Russian, the one place the repository
@@ -174,6 +173,10 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   // ── Mechanism samples ───────────────────────────────────────────────────
   // A plain string.
   'i18n.sample.greeting': 'С возвращением',
+  // The former deliberate gap, minted when the catalogue turned complete at
+  // stage 3's close: the English-fallback order is proven by the
+  // call-site-literal test in locale-model.test.ts, not by a catalogue hole.
+  'i18n.sample.untranslated': 'This key has no Russian translation yet',
   // A plural object: Russian needs one/few/many (1 команда / 2 команды /
   // 5 команд), resolved with Intl.PluralRules('ru').
   'i18n.sample.commandCount': {

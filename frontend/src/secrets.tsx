@@ -694,7 +694,7 @@ export function SecretsSection(props: SecretsSectionProps) {
               options={ADD_KINDS.map((k) => ({
                 value: k.value,
                 label: t(k.tKey, k.tFallback),
-              })) as unknown as { value: string; label: string }[]}
+              }))}
               value={addKind()}
               onChange={(v) => setAddKind(v as AddKind)}
               ariaLabel={t('secrets.field.kind', 'Kind')}

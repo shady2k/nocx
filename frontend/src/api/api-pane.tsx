@@ -61,7 +61,7 @@ import { WatchBadge } from '../ui/watch-badge'
 import { showConfirm } from '../ui/dialog'
 import { dismissToast, showToast } from '../ui/toast'
 import { createClipboardAccess } from '../clipboard'
-import { t, tPlural } from '../i18n/locale-model'
+import { t } from '../i18n/locale-model'
 import {
   contentsOf,
   directoryOf,

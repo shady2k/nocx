@@ -24,7 +24,8 @@ describe('t resolution order', () => {
   })
 
   it('falls back to the English catalogue when the active locale misses the key', () => {
-    // 'i18n.sample.untranslated' is deliberately absent from ru.
+    // The key's ru value IS the English sentence: its wording was never
+    // approved as Russian, so the data carries the visible fallback.
     setActiveLocale('ru')
     expect(t('i18n.sample.untranslated')).toBe('This key has no Russian translation yet')
   })

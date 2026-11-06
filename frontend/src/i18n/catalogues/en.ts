@@ -1,10 +1,11 @@
 /**
  * The English catalogue — the source language and the completeness check.
  *
- * A key that exists nowhere in `en` is dead: a missing `en` entry fails the
- * parity lint fixture (lint-fixtures/check-i18n-catalogues.mjs), while a
- * missing `ru` entry only warns and falls back to the English value at
- * runtime. The same fixture also extracts the literal keys of every
+ * A key that exists nowhere in `en` is dead, and a key missing from `ru`
+ * fails the parity lint fixture the same way: since stage 3's close the
+ * Russian catalogue is complete by policy, and a wording no round approved
+ * yet carries its English AS the ru value. The same fixture also extracts
+ * the literal keys of every
  * t()/tPlural() call site under src/ (tests and generated code excluded) and
  * fails on one absent from `en` — a call whose key exists in NEITHER
  * catalogue can never render anything but its fallback. Every user-visible

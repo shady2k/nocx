@@ -59,7 +59,6 @@ import {
   fieldSaveError,
   isSettingModified,
   monotonicRevisionPolicy,
-  numberRangeCaption,
   numberRangeCaptionResolved,
   numberRangeError,
   textLengthCaption,

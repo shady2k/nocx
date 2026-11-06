@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/operation.row.schema.json",
+  "title": "OperationRow",
+  "description": "The operation.row JSON-RPC notification: one row in the Operations list for work the BACKEND is doing inside a person's call (ADR-8eej3e66 \u00a78). A first helper install is the case it exists for: the catalogue declares the install as work a person is watching (`row: always`), and without this the renderer can see only the call it made \u2014 \"Opening your terminal\" \u2014 for the several minutes a 15.3 MB upload takes on a slow link. It is an INDICATOR and never a ledger: frames are droppable, address the connection that made the call, and are not replayed, so nothing may be derived from having seen one. The row's identity is the REQUEST: the renderer keys it on the same JSON-RPC id as the call that carries it, which is what makes one operation one row, and the Cancel on that row is the ordinary rpc.cancel for that id. The row exists from its first frame until operation.rowDone, and it leaves no finished entry \u2014 only transfers have an outcome worth keeping.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["requestId", "kind", "title", "machine", "done", "total"],
+  "properties": {
+    "requestId": {
+      "description": "The JSON-RPC id of the call this work belongs to, exactly as the caller sent it (a number from this product's renderer, or a string from another client). It is the row's identity and the id a Cancel names, so a renderer never has to map between two identities for one piece of work.",
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 0
+        },
+        {
+          "type": "string",
+          "minLength": 1
+        }
+      ]
+    },
+    "kind": {
+      "description": "What sort of work the row is, in the renderer's own vocabulary (frontend/src/ui/operation.ts, OperationKind). The backend names it because the backend started the work; a renderer that had to guess from the title would be a second author of the row's glyph and its cancel.",
+      "type": "string",
+      "enum": ["install"]
+    },
+    "title": {
+      "description": "What the work is doing right now, in the person's terms. It may change while the row stays one row \u2014 \"Copying the nocx helper\" while bytes move, \"Checking the nocx helper\" while the verification read runs \u2014 because the row's identity is the request and not the sentence.",
+      "type": "string",
+      "minLength": 1
+    },
+    "machine": {
+      "description": "Which machine the work is on, as a person names it (frontend/src/machine-name.ts): user@host, or the bare host when no account is known. The list is global, so a row that named no machine would be ambiguous the moment a second connection was open. Empty only where the destination is genuinely unknown.",
+      "type": "string"
+    },
+    "done": {
+      "description": "How many bytes of the work have been accepted so far. It is the count after the last chunk the REMOTE accepted, so it can only move forwards. Zero is legitimate \u2014 it is the state at the first frame, which is what tells a person the transfer just started.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "total": {
+      "description": "The size the work has to move, in bytes, repeated on every frame on purpose: a client that missed earlier frames can still draw a complete bar from the one it received. Zero means the stage counts nothing \u2014 the verification read is one read of the whole binary, so a row shows no bar rather than one that is full or empty by accident.",
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

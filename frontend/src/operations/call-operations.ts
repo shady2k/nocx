@@ -100,6 +100,12 @@ export function callOperations(
   }
 }
 
-function callRowID(id: number): string {
+/** The row identity of an INVOCATION, as this source and
+ *  `install-operations.ts` both spell it. One call can have two rows worth of
+ *  news — it is waiting, and something the backend is doing inside it is worth
+ *  watching — and the model shows one row per id, so both report under the
+ *  call's own key and the more specific one wins. Exported rather than copied:
+ *  a second spelling of the key is how one operation becomes two rows. */
+export function callRowID(id: number | string): string {
   return `call:${id}`
 }

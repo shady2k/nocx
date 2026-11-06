@@ -24,7 +24,7 @@
 /**
  * What kind of work this is.
  *
- * Three members. Download (nocx-9le.8.3) joined by adding a member here and a
+ * Four members. Download (nocx-9le.8.3) joined by adding a member here and a
  * glyph in `operation-row.tsx`'s table, and nothing in the indicator, the
  * model or the row switches on kind, so nothing else changed. `call` is the
  * same addition for a person's waiting control-plane call (ADR-8eej3e66 §8):
@@ -35,8 +35,14 @@
  * one file at a time per binding, so a batch has a waiting half whether or
  * not anything models it, and the bead this cost was about it not being
  * modelled.
+ *
+ * `install` is the fourth, and the first one the BACKEND starts inside a
+ * call a person made (ADR-8eej3e66 §8): a first open's helper upload. It
+ * has a size, so it draws a bar; it has stages, so its title changes while
+ * the row stays one row; and it has a Cancel, which is the open's own.
+ * `operations/install-operations.ts` is its source.
  */
-export type OperationKind = 'upload' | 'download' | 'call'
+export type OperationKind = 'upload' | 'download' | 'call' | 'install'
 
 /**
  * Where an operation is. Five of the eight values are terminal, and three

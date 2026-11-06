@@ -109,6 +109,8 @@ func run() error {
 		"the signature algorithms this host accepts for a public key, comma separated: its PubkeyAcceptedAlgorithms. The default is a modern sshd's, which EXCLUDES ssh-rsa (SHA-1)")
 	repo := flag.String("repo", "", "seed a git repository at this path for the git acceptance spec: an initial commit, an untracked file whose name has a space, a quote, a leading dash and a newline, and a pre-commit hook that writes a marker outside the repository and prints more than one packet of output; the fixture chdirs into it, so a shell this process serves directly starts inside the repository — a helper-hosted shell does not: the far nocx-helper spawns it and starts it in the login user's home, like any real sshd's login shell")
 	legacyIntegration := flag.Bool("legacy-integration", false, "plant an installer-era loader with retired accept semantics and production rc gates")
+	flag.StringVar(&sftpSlowUntil, "sftp-slow-until", "", "while this path does not exist, SFTP uploads are read at -sftp-upload-bps: a link slow enough for a spec to watch a helper install for as long as it needs, ended by creating the file")
+	flag.IntVar(&sftpUploadBps, "sftp-upload-bps", 0, "bytes per second SFTP uploads are read at while -sftp-slow-until is absent; 0 disables pacing")
 	flag.Parse()
 	if fixtureLoginShell != "" {
 		resolved, err := exec.LookPath(fixtureLoginShell)
@@ -887,7 +889,7 @@ func startSFTP(ch gossh.Channel, st *sessionState) {
 	if !st.claim() {
 		return
 	}
-	srv, err := sftp.NewServer(ch, sftp.WithServerWorkingDirectory(accountHome()))
+	srv, err := sftp.NewServer(&pacedSFTP{Channel: ch}, sftp.WithServerWorkingDirectory(accountHome()))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "e2e-sshd: sftp server:", err)
 		_ = ch.Close()
@@ -908,6 +910,70 @@ func startSFTP(ch gossh.Channel, st *sessionState) {
 		_, _ = ch.SendRequest("exit-status", false, gossh.Marshal(struct{ Status uint32 }{Status: status}))
 		_ = ch.Close()
 	}()
+}
+
+// sftpSlowUntil and sftpUploadBps are the fixture's slow link. While the
+// first names a path that does not exist, bytes ARRIVING over SFTP — the
+// client's writes, which is what a helper upload is — are read at the
+// second's rate, and go to full speed the moment the file is created. That is
+// a state a spec controls rather than a duration it waits out, and it is the
+// same shape a WAN has: the bytes take as long as they take, and nothing
+// tells either end when the link will come up.
+//
+// THE READ SIDE IS THE UPLOAD. An SFTP server reads the client's packets; its
+// own writes carry responses and, on the verification pass, the whole binary
+// back. Pacing writes would slow the READ that proves the install instead of
+// the transfer a person is watching — measured, the first version of this did
+// exactly that and left the upload full speed (nocx-3an1s.2.10).
+var (
+	sftpSlowUntil string
+	sftpUploadBps int
+)
+
+// pacedSFTP is the channel the SFTP server reads through. It is the fixture's
+// own link shaping and nothing about the product.
+type pacedSFTP struct {
+	gossh.Channel
+	mu      sync.Mutex
+	read    int64
+	started time.Time
+}
+
+func (p *pacedSFTP) Read(b []byte) (int, error) {
+	n, err := p.Channel.Read(b)
+	if n > 0 {
+		p.pace(int64(n))
+	}
+	return n, err
+}
+
+func (p *pacedSFTP) pace(n int64) {
+	rate := sftpUploadRate()
+	if rate <= 0 {
+		return
+	}
+	p.mu.Lock()
+	if p.started.IsZero() {
+		p.started = time.Now()
+	}
+	p.read += n
+	due := p.started.Add(time.Duration(float64(p.read) / float64(rate) * float64(time.Second)))
+	p.mu.Unlock()
+	if wait := time.Until(due); wait > 0 {
+		time.Sleep(wait)
+	}
+}
+
+// sftpUploadRate answers the pacing for the next read: the flag's rate while
+// the gate file is absent, and zero — a normal link — once it exists.
+func sftpUploadRate() int {
+	if sftpUploadBps <= 0 || sftpSlowUntil == "" {
+		return 0
+	}
+	if _, err := os.Stat(sftpSlowUntil); err == nil {
+		return 0
+	}
+	return sftpUploadBps
 }
 
 func startCommand(ch gossh.Channel, st *sessionState, command string) {

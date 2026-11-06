@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/operation/catalog"
+	"github.com/shady2k/nocx/internal/operation/rows"
 
 	"github.com/shady2k/nocx/internal/diagnostics"
 	"github.com/shady2k/nocx/internal/git"
@@ -434,7 +435,13 @@ func installHelperAt(ctx context.Context, host string, opts []ssh.ConnectOption,
 		return installedHelper{}, fmt.Errorf("remote home for %s: %w", host, err)
 	}
 	fsys := installFS{conn}
-	command, hash, err := deploy.Ensure(ctx, fsys, source, home, platform)
+	progress, endRow := installRowReporter(ctx, installMachine(host, opts))
+	// The row is about the INSTALL and nothing after it: a completed install
+	// has no duration left to show, and the prune below is cleanup rather
+	// than the work the person was watching. Both ends are deferred, so a
+	// failed or cancelled install takes its row with it.
+	defer endRow()
+	command, hash, err := deploy.Ensure(ctx, fsys, source, home, platform, progress)
 	if err != nil {
 		return installedHelper{}, err
 	}
@@ -442,6 +449,63 @@ func installHelperAt(ctx context.Context, host string, opts []ssh.ConnectOption,
 		return installedHelper{}, fmt.Errorf("prune for %s: %w", host, err)
 	}
 	return installedHelper{dir: path.Dir(command), generation: hash, command: command}, nil
+}
+
+// installRowReporter binds the install's progress to the Operations row the
+// caller's invocation carries (ADR-8eej3e66 §8), and answers a Progress that
+// is nil when nobody is watching — the ordinary case for the git path, which
+// installs on a background consultation with no row at all.
+//
+// The row appears on the FIRST progress the install reports, which is after
+// the completeness check and the removal of an unfinished tree. That is the
+// point of the requirement rather than an accident: an install that is not
+// needed reports nothing, so no row exists for it — and a repeat open of a
+// host whose helper is already complete is therefore silent.
+func installRowReporter(ctx context.Context, machine string) (deploy.Progress, func()) {
+	reporter, ok := rows.ReporterFrom(ctx)
+	if !ok {
+		return nil, func() {}
+	}
+	return func(stage deploy.Stage, written, total int64) {
+		reporter.Show(rows.Row{
+			Kind:    "install",
+			Title:   installRowTitle(stage),
+			Machine: machine,
+			Done:    written,
+			Total:   total,
+		})
+	}, reporter.End
+}
+
+// installRowTitle is what the install is doing, in the person's terms. The
+// stages are the deploy package's closed set; an unknown one says the least it
+// can rather than claiming a stage it is not in.
+func installRowTitle(stage deploy.Stage) string {
+	switch stage {
+	case deploy.StageCopying:
+		return "Copying the nocx helper"
+	case deploy.StageChecking:
+		return "Checking the nocx helper"
+	default:
+		return "Installing the nocx helper"
+	}
+}
+
+// installMachine names the destination the way the rest of the product does
+// (frontend/src/machine-name.ts): user@host, or the bare host when no account
+// is known. The port is not part of that name — the resolver hands this
+// package "host:port" and the tab strip would say "host" — so it is stripped
+// here rather than left for a row to disagree with the tab it came from. The
+// two are one spelling of one machine, and the one the renderer already owns
+// is the authority.
+func installMachine(host string, opts []ssh.ConnectOption) string {
+	if h, _, err := net.SplitHostPort(host); err == nil && h != "" {
+		host = h
+	}
+	if account := accountFromOptions(opts); account != "" {
+		return account + "@" + host
+	}
+	return host
 }
 
 // installedHelper is a COMPLETED install of the helper artifact on one host, in

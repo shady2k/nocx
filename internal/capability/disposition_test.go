@@ -9,6 +9,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/operation/catalog"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
@@ -18,6 +19,7 @@ func TestOperationDispositionsMatchMap(t *testing.T) {
 		return Gate(name, 1, 8, time.Second)
 	}
 	db := content.NewStub(log.NewSlogAdapter(nil))
+	stores := NewStoreGuard(catalog.Declarations(), 8, time.Second)
 	targetOp, err := NewSessionOperations(gate(GateSession), gate("lane"), dispositionRegistry{}, nil).ForSessionTarget("s1")
 	if err != nil {
 		t.Fatalf("ForSessionTarget: %v", err)
@@ -55,7 +57,8 @@ func TestOperationDispositionsMatchMap(t *testing.T) {
 		{"SnippetOperation", NewSnippetOperation(gate(GateConfig), gate("lane"), nil), DispositionDirect},
 		{"UIStateOperation", NewUIStateOperation(gate(GateConfig), gate("lane"), nil), DispositionExcluded},
 		{"VaultOperation", NewVaultOperation(gate(GateVault), gate("lane"), nil), DispositionDirect},
-		{"VaultResetOperation", NewVaultResetOperation(gate(GateConfig), gate(GateVault), gate("lane"), nil), DispositionDirect},
+		{"VaultResetOperation", NewVaultResetOperation(stores, catalog.OpVaultReset.Declaration(), gate("lane"), nil), DispositionDirect},
+		{"RestoreOperation", NewRestoreOperation(stores, catalog.OpBackupRestore.Declaration(), gate("lane"), nil), DispositionDirect},
 	}
 
 	for _, tc := range cases {

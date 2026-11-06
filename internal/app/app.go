@@ -1220,7 +1220,12 @@ func New(opts ...Option) (*App, error) {
 	}
 
 	backupService := backup.NewService(profileStore, settingsRegistry, docStore, snippetStore, noteBackup, skills)
-	if recoverErr := backupService.Recover(); recoverErr != nil {
+	// Recovery runs BEFORE anything serves, and under its declared budget
+	// (ADR-8eej3e66 §5, stage 7): a rollback that cannot finish inside it must
+	// stop the start rather than hand a half-applied generation to the first
+	// caller. Failing to start is the strongest form of "the store is not
+	// available until a restart repairs it".
+	if recoverErr := backupService.RecoverWithin(ctx, 0); recoverErr != nil {
 		return nil, fmt.Errorf("backup recovery: %w", recoverErr)
 	}
 

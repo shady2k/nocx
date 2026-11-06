@@ -17,7 +17,7 @@ package credential
 //
 // WHICH GATES CARRY THE MARK IS DECLARED, NEVER DETECTED. Only the gate
 // vault.unseal itself acquires qualifies, and the composition root says which
-// one that is (internal/capability.UnlockAnsweringGate, wired in
+// one that is (internal/capability.UnlockAnswering, wired in
 // transport.domainGates). It is deliberately NOT every admission: the ssh
 // dial resolves a key passphrase inside an admission holding only the
 // execution lane, which vault.unseal shares with capacity to spare — a

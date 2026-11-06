@@ -148,18 +148,26 @@ func Gate(domain string, capacity, maxQueue int, waitTimeout time.Duration) cont
 	return control.NewWaitingSemaphore(domain, capacity, maxQueue, waitTimeout)
 }
 
-// UnlockAnsweringGate is Gate for a domain whose gate THE ANSWER TO A VAULT
-// UNLOCK must itself acquire, and the declaration is the whole of it: an
-// operation composed from such a gate marks its callback's context, and an
-// operation-stance credential read that sees the mark fails rather than
+// UnlockAnswering marks an admission whose acquisition THE ANSWER TO A VAULT
+// UNLOCK must itself make, and the declaration is the whole of it: an
+// operation composed from such an admission marks its callback's context, and
+// an operation-stance credential read that sees the mark fails rather than
 // waiting for a dialog nobody can satisfy (credential/unlock_fence.go).
 //
-// Today that is exactly one gate — the vault's, because vault.unseal runs
+// Today that is exactly one admission — the vault's, because vault.unseal runs
 // under it (transport.vaultSpecs) — and the composition root says so rather
-// than this package inferring it from the domain name, which is metrics-only
+// than this package inferring it from a domain name, which is metrics-only
 // (AD-8). Two handlers have already raised an unanswerable unlock by holding
-// this gate across a resolve (nocx-o3606, nocx-9fzkk); the mark is what stops
-// the third.
+// this admission across a resolve (nocx-o3606, nocx-9fzkk); the mark is what
+// stops the third.
+//
+// It takes an Admission rather than a domain name and a capacity because the
+// vault's admission is not a plain domain gate any more: stage 7 of
+// ADR-8eej3e66 replaced it with the store key and the barrier plan
+// (stores.go), and the fence has to travel with that object unchanged. The
+// question the marker answers — "does the answer to this unlock need the
+// admission I am holding" — is a property of the admission, not of how it was
+// constructed.
 //
 // It is deliberately NOT applied to the execution lane, which vault.unseal
 // also acquires. The lane has capacity for several holders and the ssh dial
@@ -167,8 +175,8 @@ func Gate(domain string, capacity, maxQueue int, waitTimeout time.Duration) cont
 // Dial phase, which holds no domain gate at all). Whether enough lane permits
 // can be held across one wait to starve the unseal is a bound, not an
 // exclusion, and it is nocx-0dvf2.
-func UnlockAnsweringGate(domain string, capacity, maxQueue int, waitTimeout time.Duration) control.Admission {
-	return unlockAnsweringGate{Admission: Gate(domain, capacity, maxQueue, waitTimeout)}
+func UnlockAnswering(a control.Admission) control.Admission {
+	return unlockAnsweringGate{Admission: a}
 }
 
 // unlockAnsweringGate is the marker wrapper. It is a type rather than a flag
@@ -210,8 +218,31 @@ var ErrOperationUnavailable = errors.New("capability: operation service unavaila
 // from the scope the record kept.
 func refused(ctx context.Context, rej *control.Rejection) error {
 	control.ReportRefusal(ctx, *rej)
+	if rej.Kind == control.RejectionUnavailable {
+		return &UnavailableError{Scope: rej.Scope, Reason: rej.Reason}
+	}
 	return &RefusedError{Rejection: *rej}
 }
+
+// UnavailableError is returned by Run when the store an operation needs is
+// quarantined: it will not serve until restart, so the answer is not the busy
+// dialogue and not a retry (ADR-8eej3e66 §5). It is deliberately NOT a
+// *RefusedError: the transport maps that type to control.saturated, and a
+// store that is unavailable is not busy.
+type UnavailableError struct {
+	// Scope names the store as "store:<name>".
+	Scope string
+	// Reason is the sentence a person reads. It names the store, says what
+	// happened and says that a restart ends it.
+	Reason string
+	// Err is the cause, when there is one: a restore that quarantined the set
+	// keeps its recovery failure reachable here.
+	Err error
+}
+
+func (e *UnavailableError) Error() string { return e.Reason }
+
+func (e *UnavailableError) Unwrap() error { return e.Err }
 
 // RefusedError is returned by Run when the operation's conflict gates
 // refused the work. It carries the control.Rejection the transport already

@@ -2,8 +2,10 @@ package backup
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/note"
+	"github.com/shady2k/nocx/internal/operation/catalog"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/skill"
@@ -29,6 +32,13 @@ type Service struct {
 	snippets    SnippetStore // nil → the backup has no snippets section
 	notes       NoteStore    // nil → the backup has no notes section
 	skills      SkillStore   // nil → the backup has no skills section
+	// recoveryBudget bounds the rollback of a committed restore. Stage 7 of
+	// ADR-8eej3e66 enforces the catalogue's `recovery` bound for
+	// backup.restore, and the default is READ from the declaration rather
+	// than restated here: the declaration is the one place a lifetime is
+	// written (§1). A test constructs the service with a short budget to
+	// reach the expiry without waiting for the production value.
+	recoveryBudget time.Duration
 }
 
 // NewService wires the backup service from its dependencies. A nil library
@@ -43,13 +53,108 @@ func NewService(
 	skills SkillStore,
 ) *Service {
 	return &Service{
-		connections: connections,
-		settings:    settingsStore,
-		doc:         doc,
-		snippets:    snippets,
-		notes:       notes,
-		skills:      skills,
+		connections:    connections,
+		settings:       settingsStore,
+		doc:            doc,
+		snippets:       snippets,
+		notes:          notes,
+		skills:         skills,
+		recoveryBudget: declaredRestoreRecoveryBudget(),
 	}
+}
+
+// SetRecoveryBudget replaces the rollback budget. Tests use it to reach the
+// expiry without waiting for the declaration's production value; nothing in
+// the shipped path calls it.
+func (s *Service) SetRecoveryBudget(d time.Duration) { s.recoveryBudget = d }
+
+// RecoveryBudget is the bound a rollback gets.
+func (s *Service) RecoveryBudget() time.Duration {
+	if s.recoveryBudget > 0 {
+		return s.recoveryBudget
+	}
+	return declaredRestoreRecoveryBudget()
+}
+
+// declaredRestoreRecoveryBudget reads backup.restore's declared recovery bound
+// from the catalogue. The catalogue is a pure table with no transport import,
+// so reading it here is the projection ADR-8eej3e66 §1 asks for, not a second
+// declaration.
+func declaredRestoreRecoveryBudget() time.Duration {
+	if d, ok := catalog.OpBackupRestore.Declaration().Recovery.Deadline(); ok {
+		return d.Duration()
+	}
+	return 0
+}
+
+// ErrRollbackTimeout is the cause of a recovery that ran out of its budget. It
+// is not an error a handler shows on its own: the store set is quarantined and
+// the sentence a person reads is the quarantine's.
+var ErrRollbackTimeout = errors.New("rollback did not finish within its recovery budget")
+
+// RecoveryError reports that a committed restore could not be rolled back:
+// either the rollback failed, or it did not finish inside the declared budget.
+// It is the ONE signal that the stores may hold two generations, and the caller
+// that receives it must quarantine them (ADR-8eej3e66 §5) rather than answer
+// with an ordinary failure and keep serving.
+type RecoveryError struct {
+	// Err is the failure underneath; ErrRollbackTimeout for an expiry.
+	Err error
+	// TimedOut says the budget expired. The rollback's goroutine is still
+	// running at that moment and is not cancelled: a filesystem write cannot
+	// be interrupted, and the quarantine is what makes its late effects
+	// unobservable.
+	TimedOut bool
+	// Budget is the bound that was enforced.
+	Budget time.Duration
+}
+
+func (e *RecoveryError) Error() string {
+	if e.TimedOut {
+		return fmt.Sprintf("restore rollback did not finish within %s; the stores must not be read until restart", e.Budget)
+	}
+	return fmt.Sprintf("restore rollback failed: %v; the stores must not be read until restart", e.Err)
+}
+
+func (e *RecoveryError) Unwrap() error { return e.Err }
+
+// RecoverWithin runs the journal recovery under a bound. A zero or negative
+// budget means the service's declared one. An expiry returns a *RecoveryError
+// with TimedOut set while the recovery goroutine keeps running — see the type.
+func (s *Service) RecoverWithin(ctx context.Context, budget time.Duration) error {
+	if budget <= 0 {
+		budget = s.RecoveryBudget()
+	}
+	if budget <= 0 {
+		return s.Recover()
+	}
+	done := make(chan error, 1)
+	go func() { done <- s.Recover() }()
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		if err == nil {
+			return nil
+		}
+		// A FAILED rollback is the same fact as a timed-out one: the stores may
+		// hold two generations. Wrapping both in the one type is what makes a
+		// caller's quarantine decision a single check instead of a list of
+		// errors somebody must remember to extend.
+		return &RecoveryError{Err: err, Budget: budget}
+	case <-ctx.Done():
+		return &RecoveryError{Err: ctx.Err(), Budget: budget}
+	case <-timer.C:
+		return &RecoveryError{Err: ErrRollbackTimeout, TimedOut: true, Budget: budget}
+	}
+}
+
+// rollback is the one call the restore path makes when a step after the
+// prepared journal fails: the same recovery a restart would run, under the
+// same budget, so a failure can never be reported without either the old
+// generation being back or a quarantine.
+func (s *Service) rollback() error {
+	return s.RecoverWithin(context.Background(), s.RecoveryBudget())
 }
 
 // ── Result types ─────────────────────────────────────────────────────────
@@ -321,7 +426,7 @@ func (s *Service) Restore(contents string, strategy RestoreStrategy, previewToke
 	}
 
 	if cerr := s.connections.ReplaceConnectionSnapshot(targetSnap); cerr != nil {
-		if recErr := s.Recover(); recErr != nil {
+		if recErr := s.rollback(); recErr != nil {
 			return nil, fmt.Errorf("replace connections: %w; recovery failed: %w", cerr, recErr)
 		}
 		return nil, fmt.Errorf("replace connections: %w", cerr)
@@ -330,7 +435,7 @@ func (s *Service) Restore(contents string, strategy RestoreStrategy, previewToke
 	var pn settings.PendingNotification
 	pn, err = s.settings.ReplaceNonSecretOverrides(targetOverrides)
 	if err != nil {
-		if recErr := s.Recover(); recErr != nil {
+		if recErr := s.rollback(); recErr != nil {
 			return nil, fmt.Errorf("replace settings: %w; recovery failed: %w", err, recErr)
 		}
 		return nil, fmt.Errorf("replace settings: %w", err)
@@ -341,7 +446,7 @@ func (s *Service) Restore(contents string, strategy RestoreStrategy, previewToke
 	// settings, or the restore looks successful everywhere it was not.
 	if writeSnips {
 		if serr := s.snippets.SaveAll(targetSnips); serr != nil {
-			if recErr := s.Recover(); recErr != nil {
+			if recErr := s.rollback(); recErr != nil {
 				return nil, fmt.Errorf("replace snippets: %w; recovery failed: %w", serr, recErr)
 			}
 			return nil, fmt.Errorf("replace snippets: %w", serr)
@@ -353,7 +458,7 @@ func (s *Service) Restore(contents string, strategy RestoreStrategy, previewToke
 	// the restore looks successful everywhere it was not.
 	if writeNotes {
 		if nerr := s.notes.ReplaceNotes(targetNotes); nerr != nil {
-			if recErr := s.Recover(); recErr != nil {
+			if recErr := s.rollback(); recErr != nil {
 				return nil, fmt.Errorf("replace notes: %w; recovery failed: %w", nerr, recErr)
 			}
 			return nil, fmt.Errorf("replace notes: %w", nerr)
@@ -365,7 +470,7 @@ func (s *Service) Restore(contents string, strategy RestoreStrategy, previewToke
 	// after any rename is rolled back by Recover before the error returns.
 	if doc.Skills != nil {
 		if serr := s.skills.RestoreSnapshot(*doc.Skills); serr != nil {
-			if recErr := s.Recover(); recErr != nil {
+			if recErr := s.rollback(); recErr != nil {
 				return nil, fmt.Errorf("replace skills: %w; recovery failed: %w", serr, recErr)
 			}
 			return nil, fmt.Errorf("replace skills: %w", serr)
@@ -373,7 +478,7 @@ func (s *Service) Restore(contents string, strategy RestoreStrategy, previewToke
 		result.Skills = doc.Skills.TreeCount()
 	}
 	if werr := writeJournal(s.doc, "committed", &beforeSnap, &beforeOverrides, beforeSnippets, beforeNotes, beforeSkills); werr != nil {
-		if recErr := s.Recover(); recErr != nil {
+		if recErr := s.rollback(); recErr != nil {
 			return nil, fmt.Errorf("journal committed: %w; recovery failed: %w", werr, recErr)
 		}
 		return nil, fmt.Errorf("journal committed: %w", werr)

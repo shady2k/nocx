@@ -6,12 +6,15 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/apicoll"
+	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/filesystem"
 	gitregistry "github.com/shady2k/nocx/internal/git/registry"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/operation/catalog"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
@@ -91,7 +94,7 @@ func TestMethodSpecOperationsAcquireEachDomainGateOnce(t *testing.T) {
 		{
 			name:   "vault",
 			gate:   "vault",
-			specs:  server.vaultSpecs(lane, gates["config"], gates["vault"]),
+			specs:  server.vaultSpecs(lane, gates["config"], gates["vault"], capability.NewStoreGuard(catalog.Declarations(), 8, time.Second)),
 			method: "vault.status",
 			raw:    `{}`,
 		},

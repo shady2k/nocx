@@ -595,6 +595,11 @@ type WSServer struct {
 	// Structured backup capability and native file saver. The operation is
 	// constructed after all options so it shares the current config gate.
 	backupService *backup.Service
+	// storeGuard owns the store-set barrier, the per-store keys and the
+	// quarantine (ADR-8eej3e66 §5, stage 7). It is built once, unless the
+	// composition root supplies one, so the config, vault and content
+	// admissions every operation already takes are projections of one plan.
+	storeGuard *capability.StoreGuard
 	// paneScreens is the store a watched pane's frame is read from
 	// (ADR-0066): the coordinator holds no emulator, so this is a question
 	// asked of the helper that owns the pane. Nil is the normal state: a
@@ -2147,6 +2152,9 @@ func (s *WSServer) buildControlPlane() {
 	// lane inside Run, on the task goroutine, so waiting conflict work never
 	// occupies a worker permit and the read loop never blocks on a conflict.
 	// The per-operation queue submissions bound in-flight tasks per operation.
+	if s.storeGuard == nil {
+		s.storeGuard = capability.NewStoreGuard(catalog.Declarations(), s.domainMaxQueue, s.domainWaitTimeout)
+	}
 	gates := s.domainGates()
 	// Every admission leaf this server built, for app.diagnostics. The lane
 	// first: it is the one a saturated server holds for days.
@@ -2187,8 +2195,8 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.runResolutionSpec(immediate))
 	specs = append(specs, s.clientHostSpecs(immediate, s.lane)...)
 	specs = append(specs, s.configSpecs(lane, gates.config, gates.vault, configOp, endpointWired, noteOp, snippetOp)...)
-	specs = append(specs, s.backupSpecs(lane, gates.config)...)
-	specs = append(specs, s.vaultSpecs(lane, gates.config, gates.vault)...)
+	specs = append(specs, s.backupSpecs(lane, gates.config, s.storeGuard)...)
+	specs = append(specs, s.vaultSpecs(lane, gates.config, gates.vault, s.storeGuard)...)
 	specs = append(specs, s.notifySpecs()...)
 	specs = append(specs, s.notifyFeedSpecs()...)
 	specs = append(specs, s.secretSpecs(lane, gates.config, gates.vault, gates.content)...)
@@ -2249,16 +2257,22 @@ type domainGates struct {
 
 func (s *WSServer) domainGates() domainGates {
 	return domainGates{
-		config: capability.Gate(capability.GateConfig, 1, s.domainMaxQueue, s.domainWaitTimeout),
-		// The vault gate is DECLARED as the one vault.unseal itself acquires
-		// (vaultSpecs builds VaultOperation from it). Every operation that
-		// composes this gate therefore fences the operation-stance credential
-		// reads inside its callback, because such a read waits for a person to
-		// answer an unlock whose answer needs this gate back — twice now a
-		// handler has shown somebody that dialog and refused their Unlock with
-		// "Control plane busy" (nocx-o3606, nocx-9fzkk).
-		vault:      capability.UnlockAnsweringGate(capability.GateVault, 1, s.domainMaxQueue, s.domainWaitTimeout),
-		content:    capability.Gate(capability.GateContent, 1, s.domainMaxQueue, s.domainWaitTimeout),
+		// Config, vault and content are the store set of ADR-8eej3e66 §5:
+		// their domain admission is now the store guard's shared plan — every
+		// barrier that protects the store, then the store's own key. The
+		// canonical acquisition order is unchanged (config, vault, content,
+		// then the rest), and the guard keeps barriers ahead of keys.
+		config: s.storeGuard.Shared(capability.StoreConfig),
+		// The vault admission is DECLARED as the one vault.unseal itself
+		// acquires (vaultSpecs builds VaultOperation from it). Every operation
+		// that composes this gate therefore fences the operation-stance
+		// credential reads inside its callback, because such a read waits for a
+		// person to answer an unlock whose answer needs this gate back — twice
+		// now a handler has shown somebody that dialog and refused their
+		// Unlock with "Control plane busy" (nocx-o3606, nocx-9fzkk). The
+		// marker travels on the store guard's plan unchanged.
+		vault:      capability.UnlockAnswering(s.storeGuard.Shared(capability.StoreVault)),
+		content:    s.storeGuard.Shared(capability.StoreContent),
 		session:    capability.Gate(capability.GateSession, 1, s.domainMaxQueue, s.domainWaitTimeout),
 		git:        capability.Gate(capability.GateGit, 1, s.domainMaxQueue, s.domainWaitTimeout),
 		filesystem: capability.Gate(capability.GateFilesystem, 1, s.domainMaxQueue, s.domainWaitTimeout),

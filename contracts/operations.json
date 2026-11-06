@@ -3044,27 +3044,21 @@
             },
             {
               "kind": "store",
-              "name": "vault",
-              "mode": "exclusive"
-            },
-            {
-              "kind": "store",
               "name": "content",
               "mode": "exclusive"
             }
           ],
           "dependencies": [
             "config",
-            "vault",
             "content",
             "filesystem"
           ]
         }
       ],
       "turn": {
-        "millis": 1000,
+        "millis": 30000,
         "basis": "read",
-        "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+        "note": "stage 7 enforces this wait: the exclusive barrier must drain every shared holder of two stores, and a content read behind the filesystem adapter's 10 s listing bound is one of them; 30 s covers one such read"
       },
       "max": {
         "millis": 900000,
@@ -3087,7 +3081,7 @@
         "kind": "deadline",
         "millis": 600000,
         "basis": "read",
-        "note": "restore must finish or roll back the committed generation"
+        "note": "re-read at stage 7 and now enforced: Recover is at most six atomic document writes (connections, settings, snippets, notes, skills, journal), so the envelope is generous; the operation enforces it and a test reaches the expiry with a short budget"
       },
       "merge": "none",
       "waiting": "Restoring your settings",
@@ -3106,18 +3100,12 @@
         },
         {
           "kind": "store",
-          "name": "vault",
-          "mode": "exclusive"
-        },
-        {
-          "kind": "store",
           "name": "content",
           "mode": "exclusive"
         }
       ],
       "dependencies": [
         "config",
-        "vault",
         "content",
         "filesystem"
       ],
@@ -15999,9 +15987,9 @@
         }
       ],
       "turn": {
-        "millis": 1000,
+        "millis": 30000,
         "basis": "read",
-        "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+        "note": "stage 7 enforces this wait: the reset barrier drains the vault and config readers in flight; a config read is milliseconds and a vault lifecycle call declares 120 s, so 30 s covers the in-flight work reset can actually meet"
       },
       "max": {
         "millis": 600000,

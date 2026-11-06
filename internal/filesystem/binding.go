@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
+	"time"
 
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transfer"
@@ -33,11 +34,21 @@ type Binding struct {
 	// cannot be streamed refuses because it holds nothing to stream
 	// through, not because a handler remembered to ask where the tab is.
 	source transfer.Source
+	// domain names the failure domain a path draws on, or nil. Immutable,
+	// like sink and source: resolved once where the provider is still in
+	// hand, and read for the binding's whole life.
+	domain func(path string) Domain
 
 	mu       sync.Mutex
-	cond     *sync.Cond
 	closed   bool
 	inflight int // use-guard: Acquire takes it, release drops it, close waits on it
+	// drained is closed once the binding is closed and its last use-guard is
+	// gone. A channel rather than a sync.Cond because the wait is BOUNDED:
+	// close waits at most closeDrainTimeout for a guard, then closes anyway.
+	// A cond cannot carry a deadline, and an unbounded wait in a close path
+	// is the shape that hangs shutdown (ADR-8eej3e66 §15).
+	drained     chan struct{}
+	drainClosed bool
 
 	watchMu sync.Mutex
 	watches map[string]Watch // the binding's watch set, replaced whole (spec §5.2)
@@ -87,6 +98,12 @@ type Handle interface {
 	// close therefore fails and names what it stranded; it never writes
 	// through a torn-down lease, and it never holds the close open.
 	Uploader() (transfer.Sink, error)
+	// DomainKey names the failure domain a path of this binding draws on.
+	// It never touches the filesystem: naming a mount must not stat it, or a
+	// hung mount would hang the lookup that exists to contain it. A binding
+	// whose provider could not name one answers a domain of its own, so two
+	// bindings never share a bulkhead by accident.
+	DomainKey(path string) Domain
 	// Downloader returns the binding's read-stream half — the source one
 	// download runs on — or *ErrDownloadUnsupported when the binding has
 	// none. It is Uploader's mirror in every respect that matters, and the
@@ -129,6 +146,13 @@ type Caller interface {
 type Capabilities struct {
 	Sink   transfer.Sink
 	Source transfer.Source
+	// Domain names the failure domain one of this binding's paths draws on,
+	// or nil when the provider cannot say (a provider that implements
+	// filesystem.DomainNamer supplies its own through the composition site).
+	// A nil Domain is not "no domain": the binding then forms one domain of
+	// its own, which is the conservative answer and never merges two
+	// machines' work into one bulkhead.
+	Domain func(path string) Domain
 }
 
 // Registry maps bindingId → Binding (spec §5.1 "Bindings"). It is where a
@@ -166,9 +190,10 @@ func (r *Registry) Register(p Provider, sessionID session.ID, endpointID string,
 		provider:   p,
 		sink:       caps.Sink,
 		source:     caps.Source,
+		domain:     caps.Domain,
 		watches:    make(map[string]Watch),
+		drained:    make(chan struct{}),
 	}
-	b.cond = sync.NewCond(&b.mu)
 	r.mu.Lock()
 	r.bindings[id] = b
 	r.mu.Unlock()
@@ -237,14 +262,18 @@ func (r *Registry) Close(id string) error {
 }
 
 // CloseSession closes every binding of a session and waits for all of their
-// guards to drain. Closing the terminal closes its bindings (spec §5.1): a
-// binding is bounded by its session, never by a WebSocket, and an in-flight
-// read is protected by the pooled reference the composition layer took, not
-// by this call racing it. It deliberately returns nothing: session teardown
-// is fire-and-forget — the session itself is already dying and no caller
-// awaits this — while Registry.Close, the RPC-reachable path, surfaces close
-// failures.
-func (r *Registry) CloseSession(sessionID session.ID) {
+// guards to drain, each bounded by closeDrainTimeout. Closing the terminal
+// closes its bindings (spec §5.1): a binding is bounded by its session, never
+// by a WebSocket, and an in-flight read is protected by the pooled reference
+// the composition layer took, not by this call racing it.
+//
+// The bindings are drained CONCURRENTLY, and the whole set shares one bound
+// in effect: a hung mount hangs every local binding at once, so closing ten
+// of them one after another would spend the bound ten times over. The error
+// is the one Registry.Close returns, joined across bindings, so a teardown
+// that had to abandon a guard names it rather than staying silent
+// (ADR-8eej3e66 §15: this call was the unbounded half of Stop).
+func (r *Registry) CloseSession(sessionID session.ID) error {
 	r.mu.Lock()
 	var doomed []*Binding
 	for id, b := range r.bindings {
@@ -254,10 +283,25 @@ func (r *Registry) CloseSession(sessionID session.ID) {
 		}
 	}
 	r.mu.Unlock()
-	for _, b := range doomed {
-		_ = b.close()
+	errs := make([]error, len(doomed))
+	var wg sync.WaitGroup
+	for i, b := range doomed {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = b.close()
+		}()
 	}
+	wg.Wait()
+	return errors.Join(errs...)
 }
+
+// closeDrainTimeout bounds how long a closing binding waits for its
+// use-guards. It is the same five seconds the transport's control drain uses,
+// because it answers the same question: a dependency that ignores
+// cancellation must not hold teardown open past a documented maximum
+// (ADR-8eej3e66 §15).
+const closeDrainTimeout = 5 * time.Second
 
 // close drains the use-guard, then tears down watches, then closes the
 // provider, and returns every close error it collected.
@@ -269,17 +313,33 @@ func (r *Registry) CloseSession(sessionID session.ID) {
 // and nothing is installed after the cleanup and leaked. The provider is
 // closed only after the guard drained, so no handler can be mid-call on it.
 func (b *Binding) close() error {
+	var errs []error
 	b.mu.Lock()
 	b.closed = true
-	for b.inflight > 0 {
-		b.cond.Wait()
+	waiting := b.inflight
+	if waiting == 0 && !b.drainClosed {
+		b.drainClosed = true
+		close(b.drained)
 	}
+	drained := b.drained
 	b.mu.Unlock()
+	if waiting > 0 {
+		timer := time.NewTimer(closeDrainTimeout)
+		defer timer.Stop()
+		select {
+		case <-drained:
+		case <-timer.C:
+			// The guard did not drain. Close anyway: closing an SFTP lease
+			// is exactly what unblocks a call already inside it, and a
+			// readdir on a hung mount cannot be unblocked by waiting for
+			// it. Name what was abandoned rather than hanging teardown.
+			errs = append(errs, &ErrCloseAbandoned{BindingID: b.id, Guards: waiting})
+		}
+	}
 	b.watchMu.Lock()
 	ws := b.watches
 	b.watches = nil
 	b.watchMu.Unlock()
-	var errs []error
 	for _, w := range ws {
 		if err := w.Close(); err != nil {
 			errs = append(errs, err)
@@ -295,7 +355,10 @@ func (b *Binding) close() error {
 func (b *Binding) drop() {
 	b.mu.Lock()
 	b.inflight--
-	b.cond.Broadcast()
+	if b.closed && b.inflight == 0 && !b.drainClosed {
+		b.drainClosed = true
+		close(b.drained)
+	}
 	b.mu.Unlock()
 }
 
@@ -455,6 +518,18 @@ func (h *handle) Stat(ctx context.Context, path string) (Stat, error) {
 	}
 	defer drop()
 	return h.b.provider.Stat(ctx, path)
+}
+
+// DomainKey reports the path's failure domain without taking the use-guard:
+// it reaches no provider call, and a lookup that could be refused by a
+// closing binding would make a domain name depend on teardown timing.
+func (h *handle) DomainKey(path string) Domain {
+	if h.b.domain != nil {
+		if d := h.b.domain(path); d.ID != "" {
+			return d
+		}
+	}
+	return Domain{Kind: "binding", ID: h.b.id}
 }
 
 func (h *handle) Watch(ctx context.Context, paths []string) (WatchMode, error) {

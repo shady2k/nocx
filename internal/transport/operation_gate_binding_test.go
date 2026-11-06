@@ -77,54 +77,71 @@ func TestMethodSpecOperationsAcquireEachDomainGateOnce(t *testing.T) {
 	}
 
 	configOp, endpointWired := server.buildConfigOp(lane, gates["config"], gates["vault"])
+	// wantGate is how many times the domain gate is acquired. It is one
+	// everywhere except filesystem, whose whole-domain gate went in stage 4
+	// of ADR-8eej3e66: filesystem work is ordered per binding and bounded per
+	// failure domain, so a call acquires NO domain gate — the assertion now
+	// guards against the gate being reintroduced as much as against a
+	// double acquisition.
 	cases := []struct {
-		name   string
-		gate   string
-		specs  []methodSpec
-		method string
-		raw    string
+		name     string
+		gate     string
+		wantGate int
+		specs    []methodSpec
+		method   string
+		raw      string
 	}{
 		{
-			name:   "config",
-			gate:   "config",
-			specs:  server.configSpecs(lane, gates["config"], gates["vault"], configOp, endpointWired, nil, nil),
-			method: "groups.list",
-			raw:    `{}`,
+			name:     "config",
+			gate:     "config",
+			wantGate: 1,
+			specs:    server.configSpecs(lane, gates["config"], gates["vault"], configOp, endpointWired, nil, nil),
+			method:   "groups.list",
+			raw:      `{}`,
 		},
 		{
-			name:   "vault",
-			gate:   "vault",
-			specs:  server.vaultSpecs(lane, gates["config"], gates["vault"], capability.NewStoreGuard(catalog.Declarations(), 8, time.Second)),
-			method: "vault.status",
-			raw:    `{}`,
+			name:     "vault",
+			gate:     "vault",
+			wantGate: 1,
+			specs:    server.vaultSpecs(lane, gates["config"], gates["vault"], capability.NewStoreGuard(catalog.Declarations(), 8, time.Second)),
+			method:   "vault.status",
+			raw:      `{}`,
 		},
 		{
-			name:   "content",
-			gate:   "content",
-			specs:  server.contentSpecs(lane, gates["content"], control.ImmediateSubmission{}),
-			method: "history.query",
-			raw:    `{"scope":"everywhere"}`,
+			name:     "content",
+			gate:     "content",
+			wantGate: 1,
+			specs:    server.contentSpecs(lane, gates["content"], control.ImmediateSubmission{}),
+			method:   "history.query",
+			raw:      `{"scope":"everywhere"}`,
 		},
 		{
-			name:   "session",
-			gate:   "session",
-			specs:  server.seamSpecs(lane, gates["session"]),
-			method: "sessions.status",
-			raw:    `{"profileIds":[]}`,
+			name:     "session",
+			gate:     "session",
+			wantGate: 1,
+			specs:    server.seamSpecs(lane, gates["session"]),
+			method:   "sessions.status",
+			raw:      `{"profileIds":[]}`,
 		},
 		{
-			name:   "filesystem",
-			gate:   "filesystem",
-			specs:  server.filesSpecs(lane, gates["session"], gates["filesystem"]),
-			method: "files.list",
-			raw:    `{"bindingId":"0123456789abcdef0123456789abcdef","path":"/","limit":1}`,
+			// NO GIT ROW: stage 5 removed the git domain gate (per-checkout
+			// order and a per-mount bulkhead replaced it), so there is no
+			// gate left to count. Filesystem keeps its row at zero, which is
+			// stage 4's assertion that the gate was not reintroduced.
+			name:     "filesystem",
+			gate:     "filesystem",
+			wantGate: 0,
+			specs:    server.filesSpecs(lane, gates["session"]),
+			method:   "files.list",
+			raw:      `{"bindingId":"0123456789abcdef0123456789abcdef","path":"/","limit":1}`,
 		},
 		{
-			name:   "api",
-			gate:   "api",
-			specs:  server.apiSpecs(lane, gates["api"], gates["vault"]),
-			method: "api.collections.list",
-			raw:    `{}`,
+			name:     "api",
+			gate:     "api",
+			wantGate: 1,
+			specs:    server.apiSpecs(lane, gates["api"], gates["vault"]),
+			method:   "api.collections.list",
+			raw:      `{}`,
 		},
 	}
 
@@ -150,8 +167,8 @@ func TestMethodSpecOperationsAcquireEachDomainGateOnce(t *testing.T) {
 				Params: json.RawMessage(tc.raw),
 			})
 
-			if got := log.count(tc.gate) - before; got != 1 {
-				t.Fatalf("domain gate %q acquired %d times; want exactly once by the operation (responder=%+v)", tc.gate, got, r)
+			if got := log.count(tc.gate) - before; got != tc.wantGate {
+				t.Fatalf("domain gate %q acquired %d times; want %d by the operation (responder=%+v)", tc.gate, got, tc.wantGate, r)
 			}
 		})
 	}

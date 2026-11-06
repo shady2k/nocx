@@ -329,7 +329,7 @@ func TestCloseSessionClosesOnlyThatSessionsBindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reg.CloseSession("s1")
+	_ = reg.CloseSession("s1")
 	var ub *ErrUnknownBinding
 	if _, _, err := reg.Acquire(idA, owner("s1")); !errors.As(err, &ub) {
 		t.Errorf("Acquire on closed session's binding A = %v, want ErrUnknownBinding", err)
@@ -559,7 +559,7 @@ func TestRegistryConcurrentUse(t *testing.T) {
 			return false
 		}
 	})
-	reg.CloseSession("s1")
+	_ = reg.CloseSession("s1")
 	wg.Wait()
 }
 
@@ -771,5 +771,80 @@ func TestRegisterRejectsTypedNilProvider(t *testing.T) {
 	var p *stubProvider // typed nil: non-nil interface, nil pointer
 	if _, err := reg.Register(p, "s1", "", Capabilities{}); err == nil {
 		t.Fatal("Register accepted a typed-nil provider")
+	}
+}
+
+// TestCloseIsBoundedAndNamesWhatItAbandoned is the repair of the close path
+// that hung teardown (ADR-8eej3e66 §15): a binding whose use-guard is held by
+// an uninterruptible call must still close, within the documented bound, and
+// must say what it left behind rather than staying silent.
+func TestCloseIsBoundedAndNamesWhatItAbandoned(t *testing.T) {
+	reg := New()
+	sp := newStubProvider()
+	bid, err := reg.Register(sp, "s1", "", Capabilities{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	caller := owner("s1")
+	_, release, err := reg.Acquire(bid, caller)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() { done <- reg.Close(bid) }()
+	select {
+	case err := <-done:
+		t.Fatalf("close returned %v before the drain bound; it must wait for the guard", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// The guard never drains within the bound; close must give up, close the
+	// provider anyway and name the abandoned guard.
+	select {
+	case err := <-done:
+		elapsed := time.Since(start)
+		var abandoned *ErrCloseAbandoned
+		if !errors.As(err, &abandoned) {
+			t.Fatalf("close error = %v, want *ErrCloseAbandoned", err)
+		}
+		if abandoned.Guards != 1 {
+			t.Errorf("abandoned guards = %d, want 1", abandoned.Guards)
+		}
+		if elapsed > closeDrainTimeout+2*time.Second {
+			t.Errorf("close took %v, above its %v bound", elapsed, closeDrainTimeout)
+		}
+		if !sp.closed.Load() {
+			t.Error("the provider was not closed; an abandoned guard must not keep the lease open")
+		}
+	case <-time.After(closeDrainTimeout + 2*time.Second):
+		t.Fatal("close did not return within its bound — teardown can still hang")
+	}
+	release()
+}
+
+// TestCloseReturnsCleanlyWhenNothingHoldsTheBinding is the paired ordinary
+// case: on a working binding the bounded path is not a new failure.
+func TestCloseReturnsCleanlyWhenNothingHoldsTheBinding(t *testing.T) {
+	reg := New()
+	sp := newStubProvider()
+	bid, err := reg.Register(sp, "s1", "", Capabilities{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, release, err := reg.Acquire(bid, owner("s1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.List(context.Background(), "/", Page{Offset: 0, Limit: 1}); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if err := reg.Close(bid); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if !sp.closed.Load() {
+		t.Error("the provider was not closed")
 	}
 }

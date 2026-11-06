@@ -30,10 +30,16 @@ func TestPersonActionCompletesBesideSaturatedOtherSessions(t *testing.T) {
 	saturated := openSSHOverSocket(t, ws, conn, 1)
 	person := openSSHOverSocket(t, ws, conn, 2)
 
-	// Saturate one session's own queue: forty resizes at A, each behind the
-	// one in flight. None of them can complete, so nothing but the first is
-	// running — a queue of work that cannot finish.
-	const background = 40
+	// Saturate one session's own queue: every resize the connection may have
+	// outstanding at A, each behind the one in flight. None of them can
+	// complete, so nothing but the first is running — a queue of work that
+	// cannot finish.
+	//
+	// THE WINDOW IS THE BOUND (ADR-8eej3e66 §7): a connection may have the
+	// advertised number of requests in flight and the renderer queues beyond
+	// it, so a client that kept one more would be the peer the backend
+	// disconnects. One credit is left for the person's own resize below.
+	const background = DefaultCreditWindow - 1
 	for i := 0; i < background; i++ {
 		sendResizeRaw(t, conn, saturated, 100, 30, 100+i)
 	}

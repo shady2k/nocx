@@ -608,8 +608,11 @@ func begin(ctx context.Context, op Method, inv Invocation, strict bool) *Scope {
 	return s
 }
 
-// Deadline returns the instant this scope's max expires. It is zero when the
-// scope has settled: a settled operation has no budget left to enforce.
+// Deadline is the absolute end of the scope's max bound: work must stop by
+// then. It is the instant the timer in begin() fires, exposed so the caller
+// that enforces the bound derives its context from the same value the record
+// uses rather than recomputing it and drifting. It is zero when the scope has
+// settled: a settled operation has no budget left to enforce.
 func (s *Scope) Deadline() time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -674,6 +677,12 @@ func (s *Scope) Origin() Origin           { return s.origin }
 func (s *Scope) Owner() Owner             { return s.owner }
 func (s *Scope) Declaration() Declaration { return s.decl }
 func (s *Scope) Started() time.Time       { return s.started }
+
+// TurnDeadline is the absolute end of the scope's turn budget: the bound on
+// waiting for resources and capacity. It is not armed in stage 2, which had
+// nothing to wait for; the stage that first makes an operation wait enforces
+// it, and this is the value it enforces.
+func (s *Scope) TurnDeadline() time.Time { return s.started.Add(s.decl.Turn.Duration()) }
 
 // Outcome returns the settled outcome and whether the scope has settled.
 func (s *Scope) Outcome() (Outcome, bool) {

@@ -74,6 +74,36 @@ type Stat struct {
 	Kind Kind
 }
 
+// Domain names the failure domain a path draws on: what fails together for
+// this provider. ADR-8eej3e66 §6 — a mount (by device id) for local work, a
+// resolved host for far work.
+//
+// It is a value rather than a bulkhead handle so the provider stays ignorant
+// of scheduling: naming the domain is a property of the filesystem it views,
+// and bounding execution in it is the caller's business.
+type Domain struct {
+	Kind string
+	ID   string
+}
+
+func (d Domain) String() string {
+	if d.Kind == "" {
+		return d.ID
+	}
+	return d.Kind + ":" + d.ID
+}
+
+// DomainNamer is the optional provider seam that names a path's failure
+// domain. A local provider implements it from the kernel's mount table — by
+// device id, and without touching the path, because a stat on a hung mount
+// blocks in the uninterruptible syscall that makes the domain matter. A
+// provider that does not implement it contributes no domain, and each of its
+// bindings then holds its own single domain: the conservative answer, and the
+// one that cannot share a bulkhead between two unrelated machines.
+type DomainNamer interface {
+	DomainKey(path string) Domain
+}
+
 // Uploader is the optional write seam (upload design D7). A provider that
 // can write a file onto the machine it views implements it. BOTH providers
 // do: sftp writes over the tab's lease, local writes through os.

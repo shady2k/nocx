@@ -137,11 +137,16 @@ import (
 // Domain gate names. They label the gates for metrics only
 // (control.Admission.Name); no implementation may branch on them (AD-8).
 const (
-	GateConfig     = "config"
-	GateVault      = "vault"
-	GateContent    = "content"
-	GateSession    = "session"
-	GateGit        = "git"
+	GateConfig  = "config"
+	GateVault   = "vault"
+	GateContent = "content"
+	GateSession = "session"
+	GateGit     = "git"
+	// GateFilesystem names the domain, and no gate is constructed for it
+	// since stage 4 of ADR-8eej3e66: filesystem work is ordered per binding
+	// and bounded per failure domain (internal/operation/domains). The name
+	// stays because CanonicalOrder is a fixed order and a future barrier
+	// would need the slot; a gate built here again would be the regression.
 	GateFilesystem = "filesystem"
 	// GateAPI is the API-testing collection's own domain (api.go). It is
 	// NOT the config gate: snippets, notes and UI state hold that one

@@ -80,6 +80,13 @@ func newHolderBook() *holderBook {
 
 func (b *holderBook) add(ctx context.Context, now time.Time) uint64 {
 	h, _ := HolderFrom(ctx)
+	return b.addHolder(h, now)
+}
+
+// addHolder records a holder that was captured earlier — a waiter records the
+// request that made it when it enqueues, and the record is written when the
+// waiter is promoted, which can happen on another goroutine.
+func (b *holderBook) addHolder(h Holder, now time.Time) uint64 {
 	h.Since = now
 	b.mu.Lock()
 	b.next++

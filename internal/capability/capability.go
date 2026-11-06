@@ -286,6 +286,12 @@ type operation[S any] struct {
 	// by newOperation, because the answer cannot change for the life of the
 	// operation and Run must not walk a composite per call.
 	answeringGate string
+	// ordered reports that the admission holds per-resource keys. The
+	// callback then runs inside that ordered scope, and a further ordered
+	// acquisition from it is the nesting ADR-8eej3e66 section 5 forbids: it
+	// would be two keys held in whatever order two handlers happened to
+	// acquire them, which is a deadlock waiting for a slow dependency.
+	ordered bool
 }
 
 // Disposition returns the operation's explicit assistant projection contract.
@@ -301,6 +307,13 @@ func (op *operation[S]) Run(ctx context.Context, fn func(context.Context, S) err
 	permit, rej := op.admission.TryAcquire(ctx)
 	if rej != nil {
 		return refused(ctx, rej)
+	}
+	// The callback's context says it holds the resources, so a nested
+	// ordered acquisition inside it panics instead of deadlocking
+	// (control.ResourceOrder.TryAcquire). Set after the permit exists: the
+	// acquisition itself must not see the mark.
+	if op.ordered {
+		ctx = control.WithOrderHeld(ctx)
 	}
 	// Release the permit only after the guard has gone cold: a service
 	// that escaped the callback must not observe a live guard in the

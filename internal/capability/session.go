@@ -150,6 +150,9 @@ func (op *sessionEndOperation) Run(ctx context.Context, before func(session.Sess
 		return nil, refused(ctx, rej)
 	}
 	defer sessionPermit.Release()
+	if control.HoldsOrder(op.sessionGate) {
+		ctx = control.WithOrderHeld(ctx)
+	}
 	if cancelled := refuseCancelled(); cancelled != nil {
 		return nil, cancelled
 	}
@@ -213,6 +216,9 @@ func (op *sessionTargetOperation) Run(ctx context.Context, fn func(context.Conte
 		return refused(ctx, rej)
 	}
 	defer sessionPermit.Release()
+	if control.HoldsOrder(op.sessionGate) {
+		ctx = control.WithOrderHeld(ctx)
+	}
 
 	// Preserve canonical order: conflict admission before the scarce lane.
 	// The lane remains held for the callback; only the session gate ends

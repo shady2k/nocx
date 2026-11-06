@@ -58,9 +58,32 @@ type NonblockingAdmission interface {
 // here enforces it with a sync.Once; one supplied from outside must too.
 type Permit interface{ Release() }
 
+// RejectionKind classifies a refusal. The zero value is RejectionCapacity, so
+// every admission that predates the field keeps its meaning: "this resource is
+// at its bound". The transport maps a capacity refusal to control.saturated and
+// nothing else, which is why the class is a typed field rather than a prefix
+// anybody could spell differently: a store that is UNAVAILABLE is not busy, and
+// answering it with the busy discriminator would send a person to retry
+// something that cannot succeed until restart.
+type RejectionKind string
+
+const (
+	// RejectionCapacity is the zero value: the admission was full, or its
+	// waiter queue was. Saturation is transient by definition.
+	RejectionCapacity RejectionKind = ""
+	// RejectionWaitExceeded is a bounded wait that ran out.
+	RejectionWaitExceeded RejectionKind = "wait-exceeded"
+	// RejectionCancelled is the caller's own context ending the wait.
+	RejectionCancelled RejectionKind = "cancelled"
+	// RejectionUnavailable is a resource that will not become available
+	// without a restart — the quarantined store set of ADR-8eej3e66 §5.
+	RejectionUnavailable RejectionKind = "unavailable"
+)
+
 // Rejection describes why TryAcquire or TrySubmit refused work. A nil
 // *Rejection means success.
 type Rejection struct {
+	Kind       RejectionKind
 	Reason     string
 	Scope      string
 	RetryAfter time.Duration

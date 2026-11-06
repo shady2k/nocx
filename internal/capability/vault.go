@@ -3,6 +3,7 @@ package capability
 import (
 	"context"
 
+	"github.com/shady2k/nocx/internal/operation/catalog"
 	"github.com/shady2k/nocx/internal/transport/control"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vaultreset"
@@ -167,12 +168,15 @@ type VaultResetOperation interface {
 	Run(context.Context, func(context.Context, VaultResetService) error) error
 }
 
-// NewVaultResetOperation builds a VaultResetOperation that acquires
-// configGate before vaultGate (the canonical order), then the execution
-// lane, for every Run.
-func NewVaultResetOperation(configGate, vaultGate, lane control.Admission, reset VaultReset) VaultResetOperation {
+// NewVaultResetOperation builds a VaultResetOperation over the store guard's
+// EXCLUSIVE plan for vault.reset: the reset barrier, then the vault and config
+// stores it rewrites. Reset already excluded the two domain gates; what the
+// exclusive plan adds is exclusion of every READER of those stores, which a
+// capacity-one gate never promised and restore now needs (ADR-8eej3e66 §5).
+func NewVaultResetOperation(stores *StoreGuard, decl catalog.Declaration, lane control.Admission, reset VaultReset) VaultResetOperation {
 	g := &guard{}
-	return newOperation[VaultResetService](Direct("VaultResetOperation"), control.NewComposite(configGate, vaultGate, lane), g, newVaultResetService(g, reset))
+	return newOperation[VaultResetService](Direct("VaultResetOperation"),
+		control.NewComposite(stores.Exclusive(decl), lane), g, newVaultResetService(g, reset))
 }
 
 // newVaultResetService builds the concrete reset service bound to guard g.

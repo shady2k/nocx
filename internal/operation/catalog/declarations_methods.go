@@ -406,13 +406,20 @@ var methodDeclarations = []Declaration{
 		within(600000, BasisRead, "declared bound read from the path it guards; see the operation family note"),
 		MergeSameKey, nil,
 		"Reading the backup file", RowPastWait, ExpiredRetryRead),
+	// The store set restore rewrites, audited in stage 7 (nocx-3an1s.2.6). The
+	// audit found the vault is NOT one of them: a backup never carries secret
+	// material and restore writes only the profile/settings documents and the
+	// snippet, note and skill libraries (ADR-0027). Its earlier exclusive claim
+	// on store:vault was conservative, and enforcing it would have made an
+	// unlock wait behind a restore for no consistency gained — the sealed-vault
+	// check in ADR-8eej3e66's constraint table exists to forbid exactly that.
 	decl("backup.restore", KindMethod, OwnerRequest,
-		[]Phase{ph("restore", []Resource{{Kind: ResourceBarrier, Name: "store-set", Mode: ModeExclusive}, {Kind: ResourceStore, Name: "config", Mode: ModeExclusive}, {Kind: ResourceStore, Name: "vault", Mode: ModeExclusive}, {Kind: ResourceStore, Name: "content", Mode: ModeExclusive}}, []Domain{DomainConfig, DomainVault, DomainContent, DomainFilesystem})},
-		d(1000, BasisRead, "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"),
+		[]Phase{ph("restore", []Resource{{Kind: ResourceBarrier, Name: "store-set", Mode: ModeExclusive}, {Kind: ResourceStore, Name: "config", Mode: ModeExclusive}, {Kind: ResourceStore, Name: "content", Mode: ModeExclusive}}, []Domain{DomainConfig, DomainContent, DomainFilesystem})},
+		d(30000, BasisRead, "stage 7 enforces this wait: the exclusive barrier must drain every shared holder of two stores, and a content read behind the filesystem adapter's 10 s listing bound is one of them; 30 s covers one such read"),
 		d(900000, BasisRead, "read: restore rewrites every store from one file; no explicit bound today"),
 		within(60000, BasisRead, "declared progress bound; present behaviour has none"),
 		none(),
-		within(600000, BasisRead, "restore must finish or roll back the committed generation"),
+		within(600000, BasisRead, "re-read at stage 7 and now enforced: Recover is at most six atomic document writes (connections, settings, snippets, notes, skills, journal), so the envelope is generous; the operation enforces it and a test reaches the expiry with a short budget"),
 		MergeNone, nil,
 		"Restoring your settings", RowAlways, ExpiredOutcomeUnknown),
 	decl("backup.saveToFile", KindMethod, OwnerRequest,
@@ -1938,7 +1945,7 @@ var methodDeclarations = []Declaration{
 		"Waiting for the vault", RowPastWait, ExpiredOutcomeUnknown),
 	decl("vault.reset", KindMethod, OwnerRequest,
 		[]Phase{ph("prepare", []Resource{}, []Domain{DomainVault, DomainConfig}), ph("reset", []Resource{{Kind: ResourceBarrier, Name: "vault-reset", Mode: ModeExclusive}, {Kind: ResourceStore, Name: "vault", Mode: ModeExclusive}, {Kind: ResourceStore, Name: "config", Mode: ModeExclusive}}, []Domain{DomainVault, DomainConfig})},
-		d(1000, BasisRead, "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"),
+		d(30000, BasisRead, "stage 7 enforces this wait: the reset barrier drains the vault and config readers in flight; a config read is milliseconds and a vault lifecycle call declares 120 s, so 30 s covers the in-flight work reset can actually meet"),
 		d(600000, BasisRead, "read: reset rewrites the vault and config references; no explicit bound today"),
 		none(),
 		none(),

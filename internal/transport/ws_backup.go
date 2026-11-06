@@ -103,15 +103,20 @@ func validateBackupSaveRaw(raw json.RawMessage) string {
 
 type backupSpecs struct {
 	operation capability.BackupOperation
+	// restoreOp is the exclusive operation: create and preview read the stores
+	// (shared), restore rewrites them and excludes every reader while it does.
+	restoreOp capability.BackupOperation
 	saver     func(string, string) (*backup.SaveResult, error)
 }
 
-func (s *WSServer) backupSpecs(lane control.Admission, configGate control.Admission) []methodSpec {
+func (s *WSServer) backupSpecs(lane control.Admission, configGate control.Admission, stores *capability.StoreGuard) []methodSpec {
 	var op capability.BackupOperation
+	var restoreOp capability.BackupOperation
 	if s.backupService != nil {
 		op = capability.NewBackupOperation(configGate, lane, s.backupService)
+		restoreOp = capability.NewRestoreOperation(stores, catalog.OpBackupRestore.Declaration(), lane, s.backupService)
 	}
-	h := backupSpecs{operation: op, saver: s.backupFileSaver}
+	h := backupSpecs{operation: op, restoreOp: restoreOp, saver: s.backupFileSaver}
 	return []methodSpec{
 		regResponder(s.operationQueue("backup"), catalog.OpBackupCreate, noParams(), func(r Responder) handlerFunc {
 			return func(ctx context.Context, req jsonrpcRequest) { h.create(ctx, r, req) }
@@ -186,7 +191,7 @@ func (h backupSpecs) preview(ctx context.Context, r Responder, req jsonrpcReques
 }
 
 func (h backupSpecs) restore(ctx context.Context, r Responder, req jsonrpcRequest) {
-	if h.operation == nil {
+	if h.restoreOp == nil {
 		_ = r.TryError(req.ID, RPCError{Code: -32601, Message: "backup not available"})
 		return
 	}
@@ -196,7 +201,7 @@ func (h backupSpecs) restore(ctx context.Context, r Responder, req jsonrpcReques
 		return
 	}
 	var result *backup.RestoreResult
-	err := h.operation.Run(ctx, func(ctx context.Context, svc capability.BackupService) error {
+	err := h.restoreOp.Run(ctx, func(ctx context.Context, svc capability.BackupService) error {
 		var err error
 		result, err = svc.Restore(params.Contents, backup.RestoreStrategy(params.Strategy), params.PreviewToken)
 		return err

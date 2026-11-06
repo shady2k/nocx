@@ -14,6 +14,7 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/git/registry"
+	"github.com/shady2k/nocx/internal/operation/catalog"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
@@ -1153,7 +1154,8 @@ func TestVaultLifecycleSetupSucceeds(t *testing.T) {
 func TestVaultResetAndConfigRunTogether(t *testing.T) {
 	cfgGate, vltGate, _, _, _, _ := testGates()
 	reset := &fakeReset{}
-	resetOp := capability.NewVaultResetOperation(cfgGate, vltGate, testLane(), reset)
+	stores := capability.NewStoreGuard(catalog.Declarations(), 8, time.Second)
+	resetOp := capability.NewVaultResetOperation(stores, catalog.OpVaultReset.Declaration(), testLane(), reset)
 	profiles := &fakeProfileRepo{}
 	groups := &fakeGroupRepo{}
 	cfgOp := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, nil, nil, newProfileService(t), nil, nil, nil)

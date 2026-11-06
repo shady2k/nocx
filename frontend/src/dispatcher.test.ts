@@ -81,13 +81,57 @@ class MockWebSocket {
     }
   }
 
+  /** The credit advertisement this socket answers transport.credit with.
+   *  A well-behaved server always answers; a test that needs the pre-advert
+   *  window sets answerCredit = false and calls deliverCredit later. */
+  creditWindow = 8
+  creditExempt = [
+    'ack',
+    'vault.unlockResolved',
+    'connections.passwordResolved',
+    'agent.runResolved',
+    'host.resolved',
+    'agent.laneInteractivity',
+    'transport.ping',
+    'rpc.cancel',
+    'app.diagnostics',
+  ]
+  creditReserved = ['vault.unseal']
+  answerCredit = true
+  /** The handshake request ids, kept out of `sent` and `requests()` so the
+   *  tests that inspect call traffic keep reading the calls they mean. */
+  readonly creditRequests: number[] = []
+
   constructor(readonly url: string) {
     MockWebSocket.last = this
     MockWebSocket.all.push(this)
   }
 
   send(data: string | ArrayBuffer): void {
+    if (typeof data === 'string') {
+      const frame = JSON.parse(data) as { id?: number; method?: string }
+      if (frame.method === 'transport.credit') {
+        if (frame.id !== undefined) this.creditRequests.push(frame.id)
+        if (this.answerCredit) this.deliverCredit()
+        return
+      }
+    }
     this.sent.push(data)
+  }
+
+  /** Answer the (one) outstanding credit request. */
+  deliverCredit(params?: { window: number; exempt: string[]; reserved: string[] }): void {
+    const id = this.creditRequests[this.creditRequests.length - 1]
+    if (id === undefined) throw new Error('no transport.credit request to answer')
+    this.deliverText({
+      jsonrpc: '2.0',
+      id,
+      result: params ?? {
+        window: this.creditWindow,
+        exempt: this.creditExempt,
+        reserved: this.creditReserved,
+      },
+    })
   }
 
   close(): void {
@@ -129,6 +173,16 @@ async function flush(): Promise<void> {
 async function connected(d: Dispatcher): Promise<void> {
   d.start()
   await flush()
+  socket().serverAccepts()
+  await flush()
+}
+
+/** Connect with a named credit window: the socket must be told before it
+ *  accepts, because the advertisement is the connection's first answer. */
+async function connectedWith(d: Dispatcher, window: number): Promise<void> {
+  d.start()
+  await flush()
+  socket().creditWindow = window
   socket().serverAccepts()
   await flush()
 }
@@ -1073,5 +1127,216 @@ describe('lifecycle event ordering', () => {
     socket().close()
 
     expect(seen).toBe(true)
+  })
+})
+
+describe('credit window (ADR-8eej3e66 §7)', () => {
+  const EXEMPT = [
+    'ack',
+    'vault.unlockResolved',
+    'connections.passwordResolved',
+    'agent.runResolved',
+    'host.resolved',
+    'agent.laneInteractivity',
+    'transport.ping',
+    'rpc.cancel',
+    'app.diagnostics',
+  ]
+
+  function answer(id: number, result: unknown = {}): void {
+    socket().deliverText({ jsonrpc: '2.0', id, result })
+  }
+
+  it('sends nothing ordinary until the backend has advertised the window', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    d.start()
+    await flush()
+    const ws = socket()
+    ws.answerCredit = false
+    ws.serverAccepts()
+    await flush()
+
+    const call = d.call('vault.seal', {})
+    call.catch(() => {})
+    await flush()
+    expect(ws.requests()).toHaveLength(0)
+
+    ws.deliverCredit({ window: 1, exempt: EXEMPT, reserved: ['vault.unseal'] })
+    await flush()
+    expect(ws.requests().map((r) => r.method)).toEqual(['vault.seal'])
+  })
+
+  it('sends no more than the window, and the next call waits for an answer', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    await connectedWith(d, 2)
+
+    const calls = [d.call('vault.seal', {}), d.call('vault.seal', {}), d.call('vault.seal', {})]
+    await flush()
+    expect(
+      socket()
+        .requests()
+        .map((r) => r.method),
+    ).toEqual(['vault.seal', 'vault.seal'])
+
+    answer(socket().requests()[0].id!)
+    await flush()
+    expect(
+      socket()
+        .requests()
+        .map((r) => r.method),
+    ).toEqual(['vault.seal', 'vault.seal', 'vault.seal'])
+    for (const call of calls) call.catch(() => {})
+  })
+
+  it("announces a person's queued call at once and cancels it before it is ever sent", async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    await connectedWith(d, 1)
+    const announced: number[] = []
+    const settled: number[] = []
+    d.onCallPending = (call) => announced.push(call.id)
+    d.onCallSettled = (id) => settled.push(id)
+
+    void d.call('vault.seal', {}) // fills the window
+    const waiting = d.call('vault.seal', {}, undefined, { origin: 'person' })
+    waiting.catch(() => {})
+    await flush()
+
+    // The row source hears about it the moment the person acts, not when
+    // credit finally arrives.
+    expect(announced).toHaveLength(2)
+    expect(settled).toHaveLength(0)
+    expect(socket().requests()).toHaveLength(1)
+
+    d.cancel(announced[1])
+    await expect(waiting).rejects.toMatchObject({ name: 'AbortError' })
+    expect(settled).toEqual([announced[1]])
+    expect(socket().requests()).toHaveLength(1)
+  })
+
+  it('does not start a call whose turn expires while it waits for credit', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    await connectedWith(d, 1)
+    void d.call('vault.seal', {}) // fills the window
+    const waiting = d.call('vault.status', {})
+    waiting.catch(() => {})
+    await flush()
+    expect(socket().requests()).toHaveLength(1)
+
+    vi.advanceTimersByTime(1000)
+    await expect(waiting).rejects.toMatchObject({ name: 'CallNotStartedError' })
+    expect(socket().requests()).toHaveLength(1)
+  })
+
+  it('merges calls on their key within one origin, and keeps a person\'s call its own', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    await connectedWith(d, 8)
+
+    const first = d.call('files.list', { path: '/tmp' }, undefined, { origin: 'background' })
+    const second = d.call('files.list', { path: '/tmp' }, undefined, { origin: 'background' })
+    // ORIGIN IS PART OF THE KEY (ADR-8eej3e66 §2). The two background polls
+    // above are one question and share one request; a person's identical
+    // action is a second invocation with its own verdict, and joining it to a
+    // request already on the wire would hand the person the background
+    // call's quiet refusal — the silence §2 exists to end.
+    const person = d.call('files.list', { path: '/tmp' })
+    const other = d.call('files.list', { path: '/var' })
+    await flush()
+
+    const requests = socket().requests()
+    expect(requests.map((r) => r.method)).toEqual(['files.list', 'files.list', 'files.list'])
+    expect(requests.map((r) => r.origin)).toEqual(['background', 'person', 'person'])
+
+    const [a, b, c] = requests
+    answer(a.id!, { entries: ['a'] })
+    answer(b.id!, { entries: ['a'] })
+    answer(c.id!, { entries: ['b'] })
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { entries: ['a'] },
+      { entries: ['a'] },
+    ])
+    await expect(person).resolves.toEqual({ entries: ['a'] })
+    await expect(other).resolves.toEqual({ entries: ['b'] })
+  })
+
+  it('lets the unlock and rescue traffic through a full window, and reserves vault.unseal', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    await connectedWith(d, 1)
+
+    void d.call('vault.seal', {}) // the whole ordinary window
+    void d.call('vault.unlockResolved', { id: 1 }) // exempt: the answer to the unlock
+    void d.call('vault.unseal', { means: 'passphrase', secret: 'x' }) // its own reserved credit
+    const secondUnseal = d.call('vault.unseal', { means: 'passphrase', secret: 'y' })
+    secondUnseal.catch(() => {})
+    await flush()
+
+    // The full-window unlock: the window is full of waiting calls and both
+    // the resolver and the unseal are on the wire. The second unseal waits
+    // for the reserved credit to come back.
+    expect(
+      socket()
+        .requests()
+        .map((r) => r.method),
+    ).toEqual(['vault.seal', 'vault.unlockResolved', 'vault.unseal'])
+  })
+
+  it('rejects what was queued on disconnect and asks the new connection for its window', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    await connectedWith(d, 1)
+    const first = d.call('vault.seal', {})
+    const queued = d.call('vault.seal', {})
+    first.catch(() => {})
+    queued.catch(() => {})
+    await flush()
+    expect(socket().requests()).toHaveLength(1)
+
+    const old = socket()
+    old.close()
+    await expect(first).rejects.toThrow('ws closed')
+    await expect(queued).rejects.toThrow('ws closed')
+    expect(d.connectionState.kind).toBe('waiting')
+
+    // The renderer's ordinary reconnection, and the advertisement it owes.
+    vi.advanceTimersByTime(300)
+    await flush()
+    const fresh = socket()
+    expect(fresh).not.toBe(old)
+    expect(fresh.creditRequests).toHaveLength(0)
+    fresh.serverAccepts()
+    await flush()
+    expect(fresh.creditRequests).toHaveLength(1)
+
+    void d.call('vault.seal', {})
+    await flush()
+    expect(fresh.requests().map((r) => r.method)).toEqual(['vault.seal'])
+  })
+
+  it("tells the Operations source as soon as a person's call is queued, and settles it on the turn", async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    await connectedWith(d, 1)
+    const announced: { id: number; method: string; startedAt: number }[] = []
+    const settled: number[] = []
+    d.onCallPending = (call) =>
+      announced.push({ id: call.id, method: call.method, startedAt: call.startedAt })
+    d.onCallSettled = (id) => settled.push(id)
+
+    void d.call('vault.seal', {}, undefined, { origin: 'background' }) // fills the window
+    const queued = d.call('vault.status', {}) // waits for credit under its turn
+    queued.catch(() => {})
+    await flush()
+
+    // The source hears about it the moment the person acts — the wait it
+    // reports is exactly the wait for credit — even though nothing is sent.
+    expect(announced).toHaveLength(1)
+    expect(announced[0].method).toBe('vault.status')
+    expect(
+      socket()
+        .requests()
+        .map((r) => r.method),
+    ).toEqual(['vault.seal'])
+
+    // Past the declaration's turn it leaves the source, having never started.
+    vi.advanceTimersByTime(1000)
+    await expect(queued).rejects.toMatchObject({ name: 'CallNotStartedError' })
+    expect(settled).toEqual([announced[0].id])
   })
 })

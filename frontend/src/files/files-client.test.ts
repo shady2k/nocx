@@ -17,6 +17,7 @@ import { createFilesTreeStore } from './files-store'
 import type { ActiveOrigin } from '../pane-content'
 import type { FilesListResult } from '../generated/files.list'
 import type { FilesStatResult } from '../generated/files.stat'
+import { creditHandshakeAnswer } from '../test-support/credit'
 
 class MockSocket {
   static readonly CONNECTING = 0
@@ -46,6 +47,11 @@ class MockSocket {
     this._listeners.get(type)?.delete(fn)
   }
   send(data: string): void {
+    const credit = creditHandshakeAnswer(data)
+    if (credit !== null) {
+      this.deliver(credit)
+      return
+    }
     this.sent.push(data)
   }
   close(): void {

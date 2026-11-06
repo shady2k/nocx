@@ -9,6 +9,7 @@ import { Dispatcher } from '../dispatcher'
 import { fixedEndpoint } from '../endpoint'
 import { LifecycleClient } from './client'
 import type { LifecycleChanged } from '../generated/lifecycle.changed'
+import { creditHandshakeAnswer } from '../test-support/credit'
 
 // The same minimal mock WebSocket the dispatcher tests use: property
 // callbacks + addEventListener, send recorded, deliver() synthesizes a frame.
@@ -42,6 +43,11 @@ class MockSocket {
   }
 
   send(data: string): void {
+    const credit = creditHandshakeAnswer(data)
+    if (credit !== null) {
+      this.deliver(credit)
+      return
+    }
     this.sent.push(data)
   }
 

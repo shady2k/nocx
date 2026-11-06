@@ -22,6 +22,7 @@ import type { CallSettlement, Dispatcher, PendingCallView } from '../dispatcher'
 import { callOperationDeclaration } from '../generated/operations'
 import { resolveMutationOutcome, type MutationAnswer } from '../mutations'
 import type { OperationPhase } from '../ui/operation'
+import { rendererDeadlineMs } from './renderer-deadlines'
 import type { Operation, OperationSource } from './operations'
 
 /** Waiting under two seconds shows the action's own pending state. Two
@@ -45,6 +46,9 @@ interface WaitingCall {
   timerFired: boolean
   /** The re-ask still pending for a mutation whose answer is not final. */
   reask: ReturnType<typeof setTimeout> | null
+  /** The renderer deadline projection, present only for an armed domain.
+   *  None is armed at this stage, so no call gets a timer from it. */
+  deadlineMs: number | null
 }
 
 /** How one of §8's answers reads in the row. It is a mapping and not a second
@@ -79,7 +83,13 @@ export function callOperations(
     // A method outside the catalogue, or one the catalogue says never shows,
     // takes no row. The call itself is unaffected.
     if (declaration === undefined || declaration.row === 'never') return
-    const entry: WaitingCall = { call, timer: null, timerFired: false, reask: null }
+    const entry: WaitingCall = {
+      call,
+      timer: null,
+      timerFired: false,
+      reask: null,
+      deadlineMs: rendererDeadlineMs(call.method),
+    }
     waiting.set(call.id, entry)
     entry.timer = setTimeout(() => {
       entry.timer = null

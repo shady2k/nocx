@@ -11,6 +11,7 @@ import { createUploadServices, type FetchLike, type UploadDecision } from './upl
 import type { FilesUploadDone } from '../generated/files.uploadDone'
 import type { FilesUploadProgress } from '../generated/files.uploadProgress'
 import type { FilesDropped } from '../generated/files.dropped'
+import { creditHandshakeAnswer } from '../test-support/credit'
 
 class MockSocket {
   static readonly CONNECTING = 0
@@ -40,6 +41,11 @@ class MockSocket {
     this._listeners.get(type)?.delete(fn)
   }
   send(data: string): void {
+    const credit = creditHandshakeAnswer(data)
+    if (credit !== null) {
+      this.deliver(credit)
+      return
+    }
     this.sent.push(data)
   }
   close(): void {

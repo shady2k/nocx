@@ -15059,6 +15059,57 @@
       "preempts": []
     },
     {
+      "id": "transport.credit",
+      "kind": "method",
+      "owner": "request",
+      "phases": [
+        {
+          "name": "answer",
+          "resources": [],
+          "dependencies": [
+            "server"
+          ]
+        }
+      ],
+      "turn": {
+        "millis": 1000,
+        "basis": "read",
+        "note": "the read loop answers it inline; the turn exists so the renderer's first frame cannot wait forever for a window"
+      },
+      "max": {
+        "millis": 1000,
+        "basis": "read",
+        "note": "read: transport.credit reads the server's credit declaration and enqueues one response"
+      },
+      "silence": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "answer": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "recovery": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "merge": "none",
+      "waiting": "Reading the credit window",
+      "row": "never",
+      "expired": "not-started",
+      "resources": [],
+      "dependencies": [
+        "server"
+      ],
+      "preempts": []
+    },
+    {
       "id": "transport.ping",
       "kind": "method",
       "owner": "request",

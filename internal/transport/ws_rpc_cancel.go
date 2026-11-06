@@ -207,6 +207,14 @@ func rpcCancelSpec(immediate control.Submission) methodSpec {
 			// cancellation gets a normal empty response for harnesses and
 			// diagnostics; an unknown target is deliberately idempotent.
 			w.requestCancels.cancel(p.ID)
+			// THE CREDIT IS RETURNED HERE, on the read loop (ADR-8eej3e66
+			// §7). The client frees its slot the moment it withdraws, so the
+			// server must free the same slot before it reads the client's
+			// next frame — otherwise a well-behaved client that cancels and
+			// immediately acts again would briefly be over the window and be
+			// disconnected for it. The handler runs inline, so this release
+			// is ordered before every later request on this connection.
+			w.credit.releaseByID(p.ID)
 			if req.ID != nil {
 				_ = r.TryResult(req.ID, json.RawMessage(`{}`))
 			}

@@ -922,6 +922,16 @@ type WSServer struct {
 	// notification (no id) triggers — one per class+scope per interval,
 	// never one per refused frame.
 	satNotify *saturatedNotifyLimiter
+	// credit is the per-connection flow-control declaration every connection
+	// is told by transport.credit (credit.go): the ordinary window, the
+	// rescue methods that take no credit, and the reserved methods with one
+	// credit outside the window. Built with the control plane, after every
+	// option has been applied.
+	credit creditConfig
+	// creditWindow overrides the ordinary window; zero derives it from the
+	// lane with DefaultCreditWindow. Tests name it to fill a window with a
+	// known number of calls; production leaves it zero.
+	creditWindow int
 
 	// mutations retains what became of each mutation identity for a bounded
 	// time, in memory (ADR-8eej3e66 §4). Server-wide on purpose: a renderer
@@ -2050,6 +2060,15 @@ func WithControlLaneCapacity(n int) WSServerOption {
 	return func(s *WSServer) { s.laneCapacity = n }
 }
 
+// WithCreditWindow sets the ordinary credit window transport.credit
+// advertises. Zero (the default) is DefaultCreditWindow, which is what
+// production uses; a test names a smaller value to fill a window with a
+// known number of calls. The value is per connection: every connection of
+// this server is told the same window.
+func WithCreditWindow(n int) WSServerOption {
+	return func(s *WSServer) { s.creditWindow = n }
+}
+
 func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption) *WSServer {
 	s := &WSServer{
 		log:         logger,
@@ -2120,6 +2139,16 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 func (s *WSServer) buildControlPlane() {
 	lane := control.NewSemaphore("control", s.laneCapacity)
 	s.lane = control.NewBoundedSubmission(lane)
+	// THE CREDIT DECLARATION (credit.go). The exempt set is the transport's
+	// existing ingress-critical set, not a second list: both ask the same
+	// question — "must this method never wait behind the work it rescues?" —
+	// and one owner for that answer is what keeps the wire and the read loop
+	// from drifting apart.
+	window := s.creditWindow
+	if window == 0 {
+		window = DefaultCreditWindow
+	}
+	s.credit = newCreditConfig(window, ingressCriticalMethods, reservedCreditMethods)
 	// Probe and agent probe keep their own capacity-one resource admissions
 	// composed with the lane (canonical order: resource before execution
 	// permit): a second probe is refused even while the lane has free
@@ -2222,6 +2251,7 @@ func (s *WSServer) buildControlPlane() {
 	inventorySub := s.operationQueue("session-inventory")
 	specs = append(specs, rpcCancelSpec(immediate))
 	specs = append(specs, s.operationOutcomeSpec(s.lane))
+	specs = append(specs, s.creditSpec())
 	specs = append(specs, s.heartbeatSpecs(immediate)...)
 	specs = append(specs, s.sessionSpecs(lane, orders.session, gates.config)...)
 	specs = append(specs, whenAvailable(
@@ -2839,6 +2869,10 @@ type wsConn struct {
 	// answers (ws_operation_outcome.go). The record itself lives on the
 	// server; this is only the connection's half of "which response is this".
 	mutations inFlightMutations
+	// credit holds this connection's flow-control accounting (credit.go).
+	// Nil in a hand-built wsConn that never dispatches; every method is
+	// nil-safe.
+	credit *creditWindow
 	// methods is this connection's materialised control-handler set
 	// (registration.go): method → submission + handler closure. The handlers
 	// are constructed with THIS connection's Responder, so the set is
@@ -2861,15 +2895,26 @@ func newWSConn(s *WSServer, conn *websocket.Conn, id uint64) *wsConn {
 		log:            s.log,
 		id:             id,
 		requestCancels: newRequestCancels(),
+		// One accounting per connection: the window is the connection's, and
+		// a reconnection is a new peer with a new set of credits.
+		credit: s.credit.forConnection(),
 	}
 }
 
+// TryResult and TryError are the ONE response seam, so they are also where a
+// request's credit ends: the moment the answer is enqueued the client may
+// send the call that replaces it. The task goroutine also releases the
+// permit when it returns, for a request withdrawn or failed without an
+// answer; Release is idempotent, so the two owners cannot free one credit
+// twice.
 func (w *wsConn) TryResult(id json.RawMessage, result json.RawMessage) error {
 	// THE ONE PLACE A MUTATION'S ANSWER IS LEARNED (ADR-8eej3e66 §4): every
 	// handler answers through this Responder, and a result is the record
 	// saying the work finished. The write is recorded even when the socket is
 	// gone — the person may still ask what happened.
 	w.mutations.take(id).Answered(catalog.AnsweredResult)
+	// The answer ends this request's credit: the client may send one more.
+	w.credit.releaseByID(id)
 	return w.out.TryEnqueueResponse(mustMarshal(newJSONRPCResult(id, result)))
 }
 
@@ -2882,6 +2927,7 @@ func (w *wsConn) TryError(id json.RawMessage, rpcErr RPCError) error {
 		kind = catalog.AnsweredSealed
 	}
 	w.mutations.take(id).Answered(kind)
+	w.credit.releaseByID(id)
 	obj := &jsonrpcErrorObj{Code: rpcErr.Code, Message: rpcErr.Message}
 	if rpcErr.Data != nil {
 		obj.Data = rpcErr.Data
@@ -3604,14 +3650,22 @@ func (s *WSServer) readLoop(ctx context.Context, wconn *wsConn, state *connState
 		}
 		switch msgType {
 		case websocket.TextMessage:
-			s.handleControlFrame(ctx, wconn, state, data)
+			if !s.handleControlFrame(ctx, wconn, state, data) {
+				// A protocol violation: the peer has been told (the log and
+				// the record) and the connection ends here. The deferred
+				// out.Close in handleSession closes the socket.
+				return
+			}
 		case websocket.BinaryMessage:
 			s.handleDataFrame(state, data)
 		}
 	}
 }
 
-func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state *connState, data []byte) {
+// handleControlFrame dispatches one control frame. It returns false when the
+// connection must end: the one case is a peer sending an ordinary request
+// beyond the credit window it was advertised (ADR-8eej3e66 §7).
+func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state *connState, data []byte) bool {
 	// Envelope-only decode through a capped stdlib tokenizer: the read loop
 	// learns jsonrpc, id and method and stops there. The tokenizer reads at
 	// most envelopeScanCap bytes (io.LimitReader), so a frame's size cannot
@@ -3633,13 +3687,13 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 			resp := newJSONRPCError(json.RawMessage("null"), -32700, "Parse error")
 			_ = respond(wconn, resp)
 		}
-		return
+		return true
 	}
 
 	if req.JSONRPC != "2.0" || req.Method == "" {
 		resp := newJSONRPCError(req.ID, -32600, "Invalid Request")
 		_ = respond(wconn, resp)
-		return
+		return true
 	}
 
 	// Per-method params budget: an oversized frame is refused by length
@@ -3651,7 +3705,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		resp := newJSONRPCError(req.ID, -32602, fmt.Sprintf(
 			"params exceed the size budget for method %s (%d bytes)", req.Method, budget))
 		_ = respond(wconn, resp)
-		return
+		return true
 	}
 
 	// The frame is within budget: decode it fully. This validates
@@ -3661,7 +3715,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.log.Warn("jsonrpc parse error", "len", len(data), "category", "syntax_error")
 		resp := newJSONRPCError(json.RawMessage("null"), -32700, "Parse error")
 		_ = respond(wconn, resp)
-		return
+		return true
 	}
 	// An explicit null id behaves exactly like an absent one: the response
 	// carries no id field (parity with the envelope pass and the old
@@ -3679,7 +3733,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.log.Warn("jsonrpc invalid request", "len", len(data), "category", "method_mismatch")
 		resp := newJSONRPCError(req.ID, -32600, "Invalid Request")
 		_ = respond(wconn, resp)
-		return
+		return true
 	}
 
 	// Dispatch through the registration set: the method's submission decides
@@ -3691,7 +3745,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	if !ok {
 		resp := newJSONRPCError(req.ID, -32601, "Method not found")
 		_ = respond(wconn, resp)
-		return
+		return true
 	}
 	runtimeKeys := []string(nil)
 	if m.key != nil {
@@ -3699,7 +3753,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		runtimeKeys, refusal = m.key(req.Params)
 		if refusal != nil {
 			_ = wconn.TryError(req.ID, *refusal)
-			return
+			return true
 		}
 	}
 	// THE CHAIN STARTS HERE (nocx-d6gn4.8.1): the frame names itself in the
@@ -3744,6 +3798,21 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	// even though every frame on it opened a span. This is what a failing
 	// e2e test's printed block actually finds by trace_id.
 	log.From(ctx).Debug("jsonrpc dispatch", "method", req.Method)
+	// THE CREDIT WINDOW (ADR-8eej3e66 §7). A request beyond what the
+	// connection was advertised is a protocol violation, not a capacity
+	// answer: the client was TOLD what it may have outstanding, so a peer
+	// that sends more is logged, recorded and disconnected. Notifications
+	// have no answer and therefore take no credit; rescue methods and the
+	// reserved unlock never count against the window (credit.go).
+	var credit *creditPermit
+	if req.ID != nil {
+		var over *creditOverrun
+		credit, over = wconn.credit.admit(req.Method, req.ID)
+		if over != nil {
+			s.noteCreditOverrun(ctx, wconn, req.Method, over)
+			return false
+		}
+	}
 	ctx = withConnectionContext(ctx, ctx)
 	requestCtx := ctx
 	cancelRequest := func() {}
@@ -3773,7 +3842,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	mutation, mutationRefusal := s.beginMutation(req, m.op)
 	if mutationRefusal != nil {
 		_ = wconn.TryError(req.ID, *mutationRefusal)
-		return
+		return true
 	}
 	scope := catalog.Begin(requestCtx, m.op, catalog.Invocation{Origin: invocationOrigin(req)})
 	requestCtx = catalog.WithScope(requestCtx, scope)
@@ -3817,6 +3886,11 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 			wconn.mutations.take(req.ID)
 			mutation.Settled(settled)
 		}()
+		// The task is the second owner of this credit: a request withdrawn
+		// or failed without an answer would otherwise hold its window slot
+		// until the connection ended. Release is idempotent, so the response
+		// path may already have freed it.
+		defer credit.Release()
 		defer func() {
 			if cancelEntry != nil {
 				wconn.requestCancels.drop(req.ID, cancelEntry)
@@ -3840,7 +3914,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	}
 	rej := m.submission.TrySubmit(requestCtx, task)
 	if rej == nil {
-		return
+		return true
 	}
 	scope.Refuse()
 	mutation.Settled(catalog.OutcomeRefused)
@@ -3857,9 +3931,10 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	control.ReportRefusal(requestCtx, *rej)
 	if req.ID != nil {
 		_ = wconn.TryError(req.ID, saturationRPCError(req.Method, rej))
-		return
+		return true
 	}
 	s.emitSaturatedNotification(wconn, req.Method, rej)
+	return true
 }
 
 // invocationOrigin reads the caller's declared origin. Only the catalogue's

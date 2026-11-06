@@ -180,7 +180,11 @@ func TestSessionOperationsKeepFIFOAcrossOwnershipTransfer(t *testing.T) {
 // session it names is.
 func TestSessionOrderingIsPerSessionAndValidatesBeforeAdmission(t *testing.T) {
 	source := &blockingPaneIntentSource{started: make(chan struct{}), release: make(chan struct{})}
-	ws, _, _ := newPanesWS(t, WithPaneIntentSource(source))
+	// The session queue's bound is the subject here, not the credit window:
+	// this client deliberately sends more calls at once than a renderer
+	// would, so it names a window wide enough to reach the admission it is
+	// testing.
+	ws, _, _ := newPanesWS(t, WithPaneIntentSource(source), WithCreditWindow(64))
 	t.Cleanup(func() { close(source.release) })
 	conn := connectWS(t, ws)
 	sidA := openSessionOnConn(t, ws, conn, 1)

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/transport.credit.schema.json",
+  "title": "TransportCreditResult",
+  "description": "Result of the transport.credit JSON-RPC method: the per-connection credit window the renderer must respect (ADR-8eej3e66 section 7). window is how many ordinary calls may be outstanding; exempt methods take no credit; each reserved method has one credit outside the window. A peer that sends more than this is violating the protocol and is disconnected.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["window", "exempt", "reserved"],
+  "properties": {
+    "window": {
+      "description": "How many ordinary calls this connection may have outstanding at once. Notifications and the methods named in exempt do not count.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "exempt": {
+      "description": "Methods that take no credit and are never counted against the window: cancel, ack, the resolvers, the heartbeat and diagnostics. Server vocabulary, never request text.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "reserved": {
+      "description": "Methods with one credit of their own outside the window, so a window full of work waiting on an unlock cannot hold up the answer that releases them.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}

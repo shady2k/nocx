@@ -35,7 +35,7 @@ async function build() {
   // (ADR-8eej3e66 §4). Nothing else in the renderer knows which methods mutate.
   const entries = methods.map(
     (op) =>
-      `  ${JSON.stringify(op.id)}: { waiting: ${JSON.stringify(op.waiting)}, row: ${JSON.stringify(op.row)}, expired: ${JSON.stringify(op.expired)} },`,
+      `  ${JSON.stringify(op.id)}: { waiting: ${JSON.stringify(op.waiting)}, row: ${JSON.stringify(op.row)}, expired: ${JSON.stringify(op.expired)}, merge: ${JSON.stringify(op.merge)}, domain: ${JSON.stringify(op.dependencies[0] ?? '')}, turnMs: ${op.turn.millis}, maxMs: ${op.max.millis}, answerMs: ${op.answer.kind === 'deadline' ? op.answer.millis : 'null'} },`,
   )
   return `${BANNER}
 
@@ -48,6 +48,14 @@ export interface CallOperationDeclaration {
    *  statement that this call may have changed something by then, and the one
    *  test for "this is a mutation": only these calls carry an identity. */
   readonly expired: 'not-started' | 'outcome-unknown' | 'retry-read'
+  /** What a later invocation of the same operation may do (ADR-8eej3e66
+   *  §2). "none" never merges; "same-key" and "latest-value" are keys the
+   *  renderer's credit queue may join an identical call on. */
+  readonly merge: 'none' | 'latest-value' | 'same-key'
+  readonly domain: string
+  readonly turnMs: number
+  readonly maxMs: number
+  readonly answerMs: number | null
 }
 
 const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {

@@ -14,6 +14,7 @@ import { fixedEndpoint } from '../endpoint'
 import { createDownloadServices } from './download-client'
 import type { FilesDownloadDone } from '../generated/files.downloadDone'
 import type { FilesDownloadProgress } from '../generated/files.downloadProgress'
+import { creditHandshakeAnswer } from '../test-support/credit'
 
 class MockSocket {
   static readonly OPEN = 1
@@ -34,6 +35,11 @@ class MockSocket {
     this.listeners.get(type)?.delete(fn)
   }
   send(data: string): void {
+    const credit = creditHandshakeAnswer(data)
+    if (credit !== null) {
+      this.deliver(credit)
+      return
+    }
     this.sent.push(data)
   }
   close(): void {

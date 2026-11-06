@@ -90,7 +90,7 @@ func openBindingHarness(t *testing.T, factory capability.ProviderFactory) (
 	s := &fakeSession{id: "s1", kind: session.KindRemote, host: "srv-01"}
 	registry.sessions[s.id] = s
 	op := capability.NewFilesystemOpenOperation(
-		gate("session"), gate("filesystem"), gate("lane"),
+		gate("session"), gate("lane"),
 		registry, factory, filesystem.New(),
 	)
 	return func(fn func(context.Context, capability.FilesystemOpenService) error) error {

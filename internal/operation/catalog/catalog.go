@@ -625,6 +625,18 @@ func (s *Scope) Owner() Owner             { return s.owner }
 func (s *Scope) Declaration() Declaration { return s.decl }
 func (s *Scope) Started() time.Time       { return s.started }
 
+// Deadline is the absolute end of the scope's max bound: work must stop by
+// then. It is the instant the timer in begin() fires, exposed so the caller
+// that enforces the bound derives its context from the same value the record
+// uses rather than recomputing it and drifting.
+func (s *Scope) Deadline() time.Time { return s.maxDeadline }
+
+// TurnDeadline is the absolute end of the scope's turn budget: the bound on
+// waiting for resources and capacity. It is not armed in stage 2, which had
+// nothing to wait for; the stage that first makes an operation wait enforces
+// it, and this is the value it enforces.
+func (s *Scope) TurnDeadline() time.Time { return s.started.Add(s.decl.Turn.Duration()) }
+
 // Outcome returns the settled outcome and whether the scope has settled.
 func (s *Scope) Outcome() (Outcome, bool) {
 	v := s.outcome.Load()

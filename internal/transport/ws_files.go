@@ -45,6 +45,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/operation/catalog"
+	"github.com/shady2k/nocx/internal/operation/domains"
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/filesystem"
@@ -699,6 +700,17 @@ type filesMachine interface {
 	// and waits, bounded, for them to unwind — files.close's half of D8.
 	// It never waits for an upload: the bound expires and the close goes on.
 	cancelBindingTransfers(bid string)
+	// filesDomainDo runs one provider call under its path's failure domain
+	// and the invocation's two bounds (ADR-8eej3e66 §6). namer is the handle
+	// or provider the call is about to use — anything that can name its own
+	// domains; a value that cannot gets a domain of its own.
+	filesDomainDo(ctx context.Context, namer filesDomainNamer, path string, fn func(context.Context) error) error
+}
+
+// filesDomainNamer is the slice of filesystem.Handle (and of a provider that
+// implements filesystem.DomainNamer) that names a path's failure domain.
+type filesDomainNamer interface {
+	DomainKey(path string) filesystem.Domain
 }
 
 // ── wire shapes (contracts/files.*.schema.json) ──────────────────────────
@@ -932,10 +944,22 @@ func (h filesOpenHandlers) handleOpen(ctx context.Context, state *connState, req
 			_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
 			return nil
 		}
-		root, err := handle.Root(ctx)
+		var root filesystem.Root
+		// The root acquisition is a local stat or a far RealPath+Stat; its
+		// domain is the requested root when one was sent, and the shared
+		// unplaced domain otherwise — files.open has no binding identity to
+		// name before the root comes back.
+		err = h.machine.filesDomainDo(ctx, handle, params.RootPath, func(callCtx context.Context) error {
+			var rerr error
+			root, rerr = handle.Root(callCtx)
+			return rerr
+		})
 		release()
 		if err != nil {
 			h.machine.dropFilesBinding(bid, sid)
+			if answerFilesExpiry(ctx, h.r, req, err) {
+				return nil
+			}
 			_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
 			return nil
 		}
@@ -1013,11 +1037,29 @@ func (h filesBindingHandlers) handleList(ctx context.Context, state *connState, 
 			}
 			watcher.mu.Unlock()
 		})
-		listing, err := handle.List(ctx, params.Path, filesystem.Page{Offset: params.Offset, Limit: params.Limit})
+		var listing filesystem.Listing
+		err = h.machine.filesDomainDo(ctx, handle, params.Path, func(callCtx context.Context) error {
+			var lerr error
+			listing, lerr = handle.List(callCtx, params.Path, filesystem.Page{Offset: params.Offset, Limit: params.Limit})
+			return lerr
+		})
 		if err != nil {
 			var tooLarge *filesystem.ErrTooLarge
 			var timedOut *filesystem.ErrTimedOut
+			var refusal *domains.Refusal
 			switch {
+			case errors.As(err, &refusal) || errors.Is(err, context.DeadlineExceeded):
+				// The declared bound, not the provider's own cap: a call
+				// that waited out its turn or outlived its max answers the
+				// same "timedOut" state the provider's D14 cap answers, so
+				// the renderer needs no new branch (ADR-8eej3e66 §8).
+				if scope, ok := catalog.ScopeFrom(ctx); ok {
+					scope.Settle(catalog.OutcomeExpired)
+				}
+				_ = h.r.TryResult(req.ID, mustMarshal(filesListTimedOut{
+					State:   "timedOut",
+					Timeout: filesBoundMillis(ctx, err),
+				}))
 			case errors.As(err, &tooLarge):
 				_ = h.r.TryResult(req.ID, mustMarshal(filesListTooLarge{
 					State:         "tooLarge",
@@ -1092,8 +1134,16 @@ func (h filesBindingHandlers) handleStat(ctx context.Context, state *connState, 
 			return nil
 		}
 		defer release()
-		stat, err := handle.Stat(ctx, params.Path)
+		var stat filesystem.Stat
+		err = h.machine.filesDomainDo(ctx, handle, params.Path, func(callCtx context.Context) error {
+			var serr error
+			stat, serr = handle.Stat(callCtx, params.Path)
+			return serr
+		})
 		if err != nil {
+			if answerFilesExpiry(ctx, h.r, req, err) {
+				return nil
+			}
 			_ = h.r.TryError(req.ID, RPCError{
 				Code:    filesErrorCode(err),
 				Message: err.Error(),
@@ -1129,8 +1179,16 @@ func (h filesBindingHandlers) handleRead(ctx context.Context, state *connState, 
 			return nil
 		}
 		defer release()
-		content, err := handle.Read(ctx, params.Path, params.MaxBytes)
+		var content filesystem.Content
+		err = h.machine.filesDomainDo(ctx, handle, params.Path, func(callCtx context.Context) error {
+			var rerr error
+			content, rerr = handle.Read(callCtx, params.Path, params.MaxBytes)
+			return rerr
+		})
 		if err != nil {
+			if answerFilesExpiry(ctx, h.r, req, err) {
+				return nil
+			}
 			_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
 			return nil
 		}
@@ -1189,11 +1247,25 @@ func (h filesBindingHandlers) handleWatch(ctx context.Context, state *connState,
 			_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
 			return nil
 		}
-		mode, err := handle.Watch(ctx, params.Paths)
+		var mode filesystem.WatchMode
+		// A watch set normally lives on one mount; the first path names the
+		// domain, and an empty set (which only stops watching) names none.
+		watchDomainPath := ""
+		if len(params.Paths) > 0 {
+			watchDomainPath = params.Paths[0]
+		}
+		err = h.machine.filesDomainDo(ctx, handle, watchDomainPath, func(callCtx context.Context) error {
+			var werr error
+			mode, werr = handle.Watch(callCtx, params.Paths)
+			return werr
+		})
 		if err != nil {
 			var unavail *filesystem.ErrWatchUnavailable
 			if !errors.As(err, &unavail) {
 				release()
+				if answerFilesExpiry(ctx, h.r, req, err) {
+					return nil
+				}
 				_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
 				return nil
 			}
@@ -1486,7 +1558,7 @@ func (h filesBindingHandlers) handleReveal(ctx context.Context, state *connState
 // FilesystemBindingOperation are built here from the wired stores
 // (composition root for this domain); when no filesystem registry is wired,
 // every handler answers -32601 "files not available".
-func (s *WSServer) filesSpecs(lane control.Admission, sessionGate, fsGate control.Admission) []methodSpec {
+func (s *WSServer) filesSpecs(lane control.Admission, sessionGate control.Admission) []methodSpec {
 	var openOp capability.FilesystemOpenOperation
 	var bindingOp capability.FilesystemBindingOperation
 	var factory capability.ProviderFactory
@@ -1496,11 +1568,18 @@ func (s *WSServer) filesSpecs(lane control.Admission, sessionGate, fsGate contro
 		// stays filesystem ← capability). nil converts to nil, preserving
 		// the old "no provider factory wired" answer.
 		factory = capability.ProviderFactory(s.filesProviderFor)
-		openOp = capability.NewFilesystemOpenOperation(sessionGate, fsGate, lane, s.registry, factory, s.filesys)
-		bindingOp = capability.NewFilesystemBindingOperation(fsGate, lane, s.filesys)
+		openOp = capability.NewFilesystemOpenOperation(sessionGate, lane, s.registry, factory, s.filesys)
+		bindingOp = capability.NewFilesystemBindingOperation(lane, s.filesys)
 	}
 	openSub := s.operationQueue("files-open")
 	bindingSub := s.operationQueue("files")
+	// One FIFO per binding for the operations that CHANGE it, shared by every
+	// connection on this server. The 32 slots count running and queued work
+	// together, which also bounds the number of active key workers.
+	bindingOrder := &inflightSubmission{
+		inflight: &s.inflight,
+		inner:    control.NewKeyedOrderedSubmission("files-binding-ops", 32),
+	}
 	specs := []methodSpec{
 		reg(openSub, catalog.OpFilesOpen, params(validateFilesOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := filesOpenHandlers{op: openOp, factory: factory, machine: s, revealAvailable: s.revealer != nil, r: r}
@@ -1518,11 +1597,11 @@ func (s *WSServer) filesSpecs(lane control.Admission, sessionGate, fsGate contro
 			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleRead(ctx, state, req) }
 		}),
-		reg(bindingSub, catalog.OpFilesVisible, params(validateFilesVisibleRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		orderedByBinding(reg(bindingOrder, catalog.OpFilesVisible, params(validateFilesVisibleRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
 			return func(_ context.Context, req jsonrpcRequest) { h.handleVisible(state, req) }
-		}),
-		reg(bindingSub, catalog.OpFilesWatch, params(validateFilesWatchRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		})),
+		orderedByBinding(reg(bindingOrder, catalog.OpFilesWatch, params(validateFilesWatchRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := filesBindingHandlers{
 				op:       bindingOp,
 				machine:  s,
@@ -1530,11 +1609,11 @@ func (s *WSServer) filesSpecs(lane control.Admission, sessionGate, fsGate contro
 				r:        r,
 			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleWatch(ctx, state, req) }
-		}),
-		reg(bindingSub, catalog.OpFilesClose, params(validateFilesCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		})),
+		orderedByBinding(reg(bindingOrder, catalog.OpFilesClose, params(validateFilesCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleClose(ctx, state, req) }
-		}),
+		})),
 		reg(bindingSub, catalog.OpFilesReveal, params(validateFilesRevealRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleReveal(ctx, state, req) }
@@ -1725,9 +1804,13 @@ func (s *WSServer) filesPollLoop(w *filesWatcher) {
 	runPoll := func() bool {
 		// Owner: the binding's poll loop, released by w.stop when files.close
 		// runs. Closing event: the iteration returning and this scope settling.
-		opScope := s.beginInternal(context.Background(), catalog.OpInternalFilesWatchPoll)
+		// The scope carries the iteration's bounds to the provider call below:
+		// one listing, bounded by internal.files.watchPoll's max, in the
+		// binding's failure domain (ADR-8eej3e66 §4, §6).
+		pollCtx := context.Background()
+		opScope := s.beginInternal(pollCtx, catalog.OpInternalFilesWatchPoll)
 		defer opScope.Complete()
-		result := s.filesPollTick(w)
+		result := s.filesPollTick(catalog.WithScope(pollCtx, opScope), w)
 		if result == filesPollPathStopped {
 			return false
 		}
@@ -1803,8 +1886,12 @@ func (s *WSServer) filesBaseline(
 ) map[string]string {
 	// Owner: the files.watch request that takes the baseline before answering.
 	// Closing event: the baseline listing returning and the scope settling.
-	opScope := s.beginInternal(context.Background(), catalog.OpInternalFilesBaseline)
+	baselineCtx := context.Background()
+	opScope := s.beginInternal(baselineCtx, catalog.OpInternalFilesBaseline)
 	defer opScope.Complete()
+	// One budget for the whole call, not one per path: the declaration bounds
+	// the baseline, and a per-path deadline would renew it (ADR-8eej3e66 §3).
+	baselineCtx = catalog.WithScope(baselineCtx, opScope)
 	base := make(map[string]string, len(paths))
 	for _, p := range paths {
 		if _, ok := known[p]; ok {
@@ -1815,9 +1902,16 @@ func (s *WSServer) filesBaseline(
 		// session per spec §5.1, never by a WebSocket), so it keeps a
 		// background context. The closing event is the binding teardown —
 		// stopFilesWatcher, filesSessionClosed or filesBindingClosed.
-		listing, err := h.List(context.Background(), p, filesystem.Page{Offset: 0, Limit: 1})
+		var listing filesystem.Listing
+		err := s.filesDomainDo(baselineCtx, h, p, func(callCtx context.Context) error {
+			var lerr error
+			listing, lerr = h.List(callCtx, p, filesystem.Page{Offset: 0, Limit: 1})
+			return lerr
+		})
 		if err != nil {
-			s.log.Debug("files watch baseline failed", "path", p, "error", err)
+			if !errors.Is(err, domains.ErrDomainSuspect) {
+				s.log.Debug("files watch baseline failed", "path", p, "error", err)
+			}
 			base[p] = "" // unbaselined: the first successful poll announces
 			continue
 		}
@@ -1829,7 +1923,7 @@ func (s *WSServer) filesBaseline(
 // filesPollTick performs exactly one bounded dispatch: one selected path,
 // never the entire watch set. It returns the path outcome so the loop can
 // stop when the binding has gone away.
-func (s *WSServer) filesPollTick(w *filesWatcher) filesPollPathResult {
+func (s *WSServer) filesPollTick(ctx context.Context, w *filesWatcher) filesPollPathResult {
 	w.mu.Lock()
 	h := w.handle
 	w.mu.Unlock()
@@ -1840,13 +1934,14 @@ func (s *WSServer) filesPollTick(w *filesWatcher) filesPollPathResult {
 	if selection == nil {
 		return filesPollPathOK
 	}
-	return s.filesPollPath(w, h, selection)
+	return s.filesPollPath(ctx, w, h, selection)
 }
 
 // filesPollPath re-lists one selected watched path and updates only that
 // path's ladder. The pointer and generation check prevents a stale completion
 // from mutating a remove-and-readded path.
 func (s *WSServer) filesPollPath(
+	ctx context.Context,
 	w *filesWatcher,
 	h filesystem.Handle,
 	selection *filesPollSelection,
@@ -1858,7 +1953,12 @@ func (s *WSServer) filesPollPath(
 	// Same owner and closing event as filesBaseline: the poll loop is
 	// binding-owned (spec §5.1) and outlives any connection, so it runs on
 	// a background context until the binding is torn down.
-	listing, err := h.List(context.Background(), path, filesystem.Page{Offset: 0, Limit: 1})
+	var listing filesystem.Listing
+	err := s.filesDomainDo(ctx, h, path, func(callCtx context.Context) error {
+		var lerr error
+		listing, lerr = h.List(callCtx, path, filesystem.Page{Offset: 0, Limit: 1})
+		return lerr
+	})
 	if err != nil {
 		var released *filesystem.ErrHandleReleased
 		var notFound *filesystem.ErrNotFound
@@ -1903,7 +2003,11 @@ func (s *WSServer) filesPollPath(
 				))
 			}
 			w.mu.Unlock()
-			s.log.Debug("files poll error", "binding_id", w.bindingID, "path", path, "error", err)
+			if !errors.Is(err, domains.ErrDomainSuspect) {
+				// One line per failed poll, and none for a suspect domain: that
+				// episode was announced once when it began (domains.Registry).
+				s.log.Debug("files poll error", "binding_id", w.bindingID, "path", path, "error", err)
+			}
 			return filesPollPathFailed
 		}
 	}
@@ -1993,7 +2097,13 @@ func (s *WSServer) filesSessionClosed(sid session.ID) {
 	// closed. CloseSession does not wait for it either way.
 	s.cancelSessionTransfers(sid)
 	if s.filesys != nil {
-		s.filesys.CloseSession(sid)
+		// A binding whose guard did not drain within its bound was abandoned,
+		// and that is named here: a hung disk must be visible in the log
+		// rather than only as a process that closes slowly (ADR-8eej3e66 §15).
+		if err := s.filesys.CloseSession(sid); err != nil {
+			s.log.Warn("files binding abandoned at session teardown",
+				"session_id", string(sid), "error", err)
+		}
 	}
 }
 
@@ -2092,6 +2202,136 @@ func (s *WSServer) withFilesBinding(bid string, f func(b *filesBinding)) bool {
 		return false
 	}
 	f(b)
+	return true
+}
+
+// orderedByBinding binds ordering to the protocol's authoritative bindingId,
+// never a tab, window or connection identity. It is the filesystem half of
+// ADR-8eej3e66 §5's per-resource order: files.watch REPLACES a binding's
+// watch set and files.close tears the binding down, so two of them racing on
+// one binding is a lost watch or a watch installed after its teardown. Reads
+// are deliberately not ordered — independent reads run concurrently, and only
+// the operations that change one binding's state share its FIFO.
+//
+// connMethods validates before admission, so a request without a bindingId
+// never allocates key state; ownership is still decided when the queued
+// handler runs, because a close may have happened while it waited.
+func orderedByBinding(spec methodSpec) methodSpec {
+	spec.key = func(raw json.RawMessage) string {
+		var target filesCloseParams
+		_ = json.Unmarshal(raw, &target) // already validated by connMethods
+		return target.BindingID
+	}
+	return spec
+}
+
+// ── failure domains and enforced deadlines ────────────────────────────────
+
+// filesOrigin is who asked. The origin travels with the invocation on the
+// scope, not with the declaration (ADR-8eej3e66 §2); a caller with no scope is
+// a test driving a handler directly, and person is the side on which an error
+// cannot silence anybody.
+func filesOrigin(ctx context.Context) catalog.Origin {
+	if scope, ok := catalog.ScopeFrom(ctx); ok {
+		return scope.Origin()
+	}
+	return catalog.OriginPerson
+}
+
+// filesTurnContext and filesWorkContext derive the two bounds one filesystem
+// call runs under, from the scope the dispatch began (ADR-8eej3e66 §3):
+//
+//   - turn bounds the wait for a failure-domain permit. It starts when the
+//     invocation was made.
+//   - max bounds the work and starts when the work starts. It is never
+//     renewed.
+//
+// A context with no scope keeps the caller's own end and adds nothing: every
+// files.* call on the wire has a scope, and the fallback is for a handler
+// driven directly by a test.
+func filesTurnContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if scope, ok := catalog.ScopeFrom(ctx); ok {
+		return context.WithDeadline(ctx, scope.TurnDeadline())
+	}
+	return context.WithCancel(ctx)
+}
+
+func filesWorkContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if scope, ok := catalog.ScopeFrom(ctx); ok {
+		return context.WithDeadline(ctx, scope.Deadline())
+	}
+	return context.WithCancel(ctx)
+}
+
+// filesDomainDo runs one provider call under its path's failure domain and
+// the invocation's bounds.
+//
+// This is where a hung mount stops costing anything but itself: the call
+// holds a permit of ITS domain, a call on another mount runs beside it, and
+// when this call's bound expires it settles while its worker keeps the permit
+// until the provider really returns (ADR-8eej3e66 §6).
+func (s *WSServer) filesDomainDo(
+	ctx context.Context,
+	namer filesDomainNamer,
+	path string,
+	fn func(context.Context) error,
+) error {
+	key := domains.Key{Kind: "binding", ID: "unknown"}
+	if namer != nil {
+		if d := namer.DomainKey(path); d.ID != "" {
+			key = domains.Key{Kind: d.Kind, ID: d.ID}
+		}
+	}
+	turn, cancelTurn := filesTurnContext(ctx)
+	defer cancelTurn()
+	work, cancelWork := filesWorkContext(ctx)
+	defer cancelWork()
+	return s.filesDomains.Do(domains.Request{
+		Key:    key,
+		Origin: filesOrigin(ctx),
+		Turn:   turn,
+		Work:   work,
+		Run:    fn,
+	})
+}
+
+// filesBoundMillis is the declared bound an expiry should report: the turn
+// when nothing started, the max when the work outlived it.
+func filesBoundMillis(ctx context.Context, err error) int64 {
+	scope, ok := catalog.ScopeFrom(ctx)
+	if !ok {
+		return 0
+	}
+	d := scope.Declaration()
+	if errors.Is(err, domains.ErrTurnExpired) {
+		return d.Turn.Millis
+	}
+	return d.Max.Millis
+}
+
+// answerFilesExpiry answers a call the failure domain refused or a work bound
+// that expired, and reports whether it answered. Nothing was written and
+// nothing will be: the scope settles as expired, which is the first and only
+// settlement, and the caller's own completion is dropped by the record.
+//
+// The words name the domain, because "the disk is not answering" is the fact
+// a person needs and the only one that tells them what to do next. The
+// sentences and the operations row belong to the stage that arms the
+// renderer's timers; this is the backend half.
+func answerFilesExpiry(ctx context.Context, r Responder, req jsonrpcRequest, err error) bool {
+	expired := errors.Is(err, context.DeadlineExceeded)
+	var refusal *domains.Refusal
+	if !expired && !errors.As(err, &refusal) {
+		return false
+	}
+	if scope, ok := catalog.ScopeFrom(ctx); ok {
+		scope.Settle(catalog.OutcomeExpired)
+	}
+	message := "this call reached its declared deadline"
+	if refusal != nil {
+		message = refusal.Sentence()
+	}
+	_ = r.TryError(req.ID, RPCError{Code: -32603, Message: message})
 	return true
 }
 

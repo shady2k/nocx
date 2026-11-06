@@ -7189,13 +7189,13 @@
         ],
         "turn": {
           "millis": 1000,
-          "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "basis": "measured",
+          "note": "the wait for a failure-domain permit (internal/operation/domains), measured 2026-11-06: 200 concurrent 2 ms listings on one domain, p100 wait 58 ms at the declared capacity of 8; 1000 ms is ~17x that and is the declared wait, not a gate's"
         },
         "max": {
-          "millis": 300000,
+          "millis": 15000,
           "basis": "read",
-          "note": "read: local and SFTP calls have a per-call hard bound in the adapter; the handler adds none"
+          "note": "re-read at stage 4: the close path is the binding's 5 s drain (filesystem.closeDrainTimeout) plus the provider close, which is the lease close"
         },
         "silence": {
           "kind": "none",
@@ -7319,8 +7319,8 @@
         ],
         "turn": {
           "millis": 1000,
-          "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "basis": "measured",
+          "note": "the wait for a failure-domain permit (internal/operation/domains), measured 2026-11-06: 200 concurrent 2 ms listings on one domain, p100 wait 58 ms at the declared capacity of 8; 1000 ms is ~17x that and is the declared wait, not a gate's"
         },
         "max": {
           "millis": 14400000,
@@ -7435,8 +7435,8 @@
         ],
         "turn": {
           "millis": 1000,
-          "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "basis": "measured",
+          "note": "the wait for a failure-domain permit (internal/operation/domains), measured 2026-11-06: 200 concurrent 2 ms listings on one domain, p100 wait 58 ms at the declared capacity of 8; 1000 ms is ~17x that and is the declared wait, not a gate's"
         },
         "max": {
           "millis": 10000,
@@ -7551,13 +7551,13 @@
         ],
         "turn": {
           "millis": 1000,
-          "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "basis": "measured",
+          "note": "the wait for a failure-domain permit (internal/operation/domains), measured 2026-11-06: 200 concurrent 2 ms listings on one domain, p100 wait 58 ms at the declared capacity of 8; 1000 ms is ~17x that and is the declared wait, not a gate's"
         },
         "max": {
-          "millis": 300000,
+          "millis": 30000,
           "basis": "read",
-          "note": "read: local and SFTP calls have a per-call hard bound in the adapter; the handler adds none"
+          "note": "re-read at stage 4: the SFTP lease's fsHardTimeout is 30 s (internal/ssh/ssh_fsconn.go) and the local listing cap is 10 s (internal/filesystem/local), so 30 s is the adapter's own ceiling"
         },
         "silence": {
           "kind": "none",
@@ -7667,13 +7667,13 @@
         ],
         "turn": {
           "millis": 1000,
-          "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "basis": "measured",
+          "note": "the wait for a failure-domain permit (internal/operation/domains), measured 2026-11-06: 200 concurrent 2 ms listings on one domain, p100 wait 58 ms at the declared capacity of 8; 1000 ms is ~17x that and is the declared wait, not a gate's"
         },
         "max": {
           "millis": 300000,
           "basis": "read",
-          "note": "read: local and SFTP calls have a per-call hard bound in the adapter; the handler adds none"
+          "note": "read: an open builds a provider, and on a helper-hosted session that may install the helper (600 s budget, internal.helper.install); 300 s is the declared envelope"
         },
         "silence": {
           "kind": "none",
@@ -7783,13 +7783,13 @@
         ],
         "turn": {
           "millis": 1000,
-          "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "basis": "measured",
+          "note": "the wait for a failure-domain permit (internal/operation/domains), measured 2026-11-06: 200 concurrent 2 ms listings on one domain, p100 wait 58 ms at the declared capacity of 8; 1000 ms is ~17x that and is the declared wait, not a gate's"
         },
         "max": {
-          "millis": 300000,
+          "millis": 30000,
           "basis": "read",
-          "note": "read: local and SFTP calls have a per-call hard bound in the adapter; the handler adds none"
+          "note": "re-read at stage 4: the SFTP lease's fsHardTimeout is 30 s (internal/ssh/ssh_fsconn.go) and the local listing cap is 10 s (internal/filesystem/local), so 30 s is the adapter's own ceiling"
         },
         "silence": {
           "kind": "none",
@@ -7899,13 +7899,13 @@
         ],
         "turn": {
           "millis": 1000,
-          "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "basis": "measured",
+          "note": "the wait for a failure-domain permit (internal/operation/domains), measured 2026-11-06: 200 concurrent 2 ms listings on one domain, p100 wait 58 ms at the declared capacity of 8; 1000 ms is ~17x that and is the declared wait, not a gate's"
         },
         "max": {
           "millis": 300000,
           "basis": "read",
-          "note": "read: local and SFTP calls have a per-call hard bound in the adapter; the handler adds none"
+          "note": "read: a native file-manager call has no bound today; 300 s is the declared envelope"
         },
         "silence": {
           "kind": "none",
@@ -8015,13 +8015,13 @@
         ],
         "turn": {
           "millis": 1000,
-          "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "basis": "measured",
+          "note": "the wait for a failure-domain permit (internal/operation/domains), measured 2026-11-06: 200 concurrent 2 ms listings on one domain, p100 wait 58 ms at the declared capacity of 8; 1000 ms is ~17x that and is the declared wait, not a gate's"
         },
         "max": {
-          "millis": 300000,
+          "millis": 30000,
           "basis": "read",
-          "note": "read: local and SFTP calls have a per-call hard bound in the adapter; the handler adds none"
+          "note": "re-read at stage 4: the SFTP lease's fsHardTimeout is 30 s (internal/ssh/ssh_fsconn.go) and the local listing cap is 10 s (internal/filesystem/local), so 30 s is the adapter's own ceiling"
         },
         "silence": {
           "kind": "none",
@@ -8145,8 +8145,8 @@
         ],
         "turn": {
           "millis": 1000,
-          "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "basis": "measured",
+          "note": "the wait for a failure-domain permit (internal/operation/domains), measured 2026-11-06: 200 concurrent 2 ms listings on one domain, p100 wait 58 ms at the declared capacity of 8; 1000 ms is ~17x that and is the declared wait, not a gate's"
         },
         "max": {
           "millis": 14400000,
@@ -8261,8 +8261,8 @@
         ],
         "turn": {
           "millis": 1000,
-          "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "basis": "measured",
+          "note": "the wait for a failure-domain permit (internal/operation/domains), measured 2026-11-06: 200 concurrent 2 ms listings on one domain, p100 wait 58 ms at the declared capacity of 8; 1000 ms is ~17x that and is the declared wait, not a gate's"
         },
         "max": {
           "millis": 10000,
@@ -8377,13 +8377,13 @@
         ],
         "turn": {
           "millis": 1000,
-          "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "basis": "measured",
+          "note": "the wait for a failure-domain permit (internal/operation/domains), measured 2026-11-06: 200 concurrent 2 ms listings on one domain, p100 wait 58 ms at the declared capacity of 8; 1000 ms is ~17x that and is the declared wait, not a gate's"
         },
         "max": {
-          "millis": 300000,
+          "millis": 5000,
           "basis": "read",
-          "note": "read: local and SFTP calls have a per-call hard bound in the adapter; the handler adds none"
+          "note": "read: a flag write under the binding bookkeeping lock; 5 s is the declared envelope"
         },
         "silence": {
           "kind": "none",
@@ -8493,13 +8493,13 @@
         ],
         "turn": {
           "millis": 1000,
-          "basis": "read",
-          "note": "DefaultDomainConflictWaitTimeout (internal/transport/ws.go), the wait a conflicting call gets on its domain gate today"
+          "basis": "measured",
+          "note": "the wait for a failure-domain permit (internal/operation/domains), measured 2026-11-06: 200 concurrent 2 ms listings on one domain, p100 wait 58 ms at the declared capacity of 8; 1000 ms is ~17x that and is the declared wait, not a gate's"
         },
         "max": {
-          "millis": 300000,
+          "millis": 30000,
           "basis": "read",
-          "note": "read: local and SFTP calls have a per-call hard bound in the adapter; the handler adds none"
+          "note": "re-read at stage 4: the SFTP lease's fsHardTimeout is 30 s (internal/ssh/ssh_fsconn.go) and the local listing cap is 10 s (internal/filesystem/local), so 30 s is the adapter's own ceiling"
         },
         "silence": {
           "kind": "none",

@@ -468,6 +468,17 @@ func (p *Provider) Canonical(ctx context.Context, path string) (string, error) {
 // lifecycle (spec §5.1).
 func (p *Provider) Close() error { return nil }
 
+// DomainKey names the failure domain a path draws on: the mount it belongs
+// to, by device id (ADR-8eej3e66 §6). It reads the kernel's mount table and
+// never touches the path — see mounts.go for why that distinction is the
+// whole point.
+func (p *Provider) DomainKey(path string) filesystem.Domain {
+	if dev, ok := mountDevice(path); ok {
+		return filesystem.Domain{Kind: "mount", ID: dev}
+	}
+	return filesystem.Domain{Kind: "mount", ID: "unknown"}
+}
+
 // checkPath enforces the provider's path syntax (spec §5.2: paths absolute
 // and cleaned by the provider's rules). The provider owns path syntax and
 // rejects rather than silently rewriting a caller's path.

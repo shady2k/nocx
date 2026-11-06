@@ -42,6 +42,7 @@ import (
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/operation/catalog"
+	"github.com/shady2k/nocx/internal/operation/domains"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
@@ -907,6 +908,11 @@ type WSServer struct {
 	// control work to finish after cancelling it. Work that ignores
 	// cancellation is abandoned at this bound.
 	controlDrainTimeout time.Duration
+	// recorderDrainTimeout is how long Stop waits for session output
+	// recorders to append their buffered tail. It is the same documented
+	// maximum as the control drain, for the same reason: a store that has
+	// stopped answering must not hold shutdown open for ever.
+	recorderDrainTimeout time.Duration
 	// methods is the validated control-method registration set: method →
 	// submission + per-connection handler builder. Built once at
 	// construction (registration.go); the per-connection materialisation
@@ -963,7 +969,11 @@ type WSServer struct {
 	// (fm-w8). When nil, those methods return -32601. The provider
 	// factories and the revealer ride separate options; the transport
 	// never constructs a provider itself (AD-8).
-	filesys                    *filesystem.Registry
+	filesys *filesystem.Registry
+	// filesDomains bounds filesystem work per failure domain (ADR-8eej3e66
+	// §6): one mount or one resolved host, so a hung disk holds its own
+	// permits and every other disk's listings go on.
+	filesDomains               *domains.Registry
 	filesProviderFor           FilesystemProviderFactory
 	revealer                   FilesRevealer
 	filesPollInterval          time.Duration // transport-side digest-poll cadence (files.watch)
@@ -2071,6 +2081,7 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		domainMaxQueue:             DefaultDomainMaxQueue,
 		domainQueueDepth:           DefaultDomainQueueDepth,
 		controlDrainTimeout:        defaultControlDrainTimeout,
+		recorderDrainTimeout:       defaultControlDrainTimeout,
 		gitBindings:                make(map[string]*gitBinding),
 		gitBySession:               make(map[session.ID]map[string]struct{}),
 		paneObserverSweep:          DefaultPaneObserverSweep,
@@ -2148,11 +2159,12 @@ func (s *WSServer) buildControlPlane() {
 	// occupies a worker permit and the read loop never blocks on a conflict.
 	// The per-operation queue submissions bound in-flight tasks per operation.
 	gates := s.domainGates()
+	s.filesDomains = domains.New(domains.FilesystemDefaults())
 	// Every admission leaf this server built, for app.diagnostics. The lane
 	// first: it is the one a saturated server holds for days.
 	s.diagAdmits = []control.Admission{
 		lane, gates.config, gates.vault, gates.content, gates.session,
-		gates.git, gates.filesystem, gates.api, s.agentProbeAdmit, s.dialogAdmit,
+		gates.git, gates.api, s.agentProbeAdmit, s.dialogAdmit,
 	}
 	immediate := control.ImmediateSubmission{}
 	// The signal lane, built here rather than inside signalSpecs because it
@@ -2193,7 +2205,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.notifyFeedSpecs()...)
 	specs = append(specs, s.secretSpecs(lane, gates.config, gates.vault, gates.content)...)
 	specs = append(specs, s.gitSpecs(lane, gates.session, gates.git)...)
-	specs = append(specs, s.filesSpecs(lane, gates.session, gates.filesystem)...)
+	specs = append(specs, s.filesSpecs(lane, gates.session)...)
 	specs = append(specs, s.apiSpecs(lane, gates.api, gates.vault)...)
 	contentSub := s.operationQueue("content")
 	specs = append(specs, s.contentSpecs(lane, gates.content, contentSub)...)
@@ -2243,8 +2255,12 @@ func (s *WSServer) operationQueue(name string) control.Submission {
 // plane is busy. The composition root (this function) is the only place a
 // gate is constructed; operations take them as separate parameters and
 // compose in the canonical order.
+// filesystem has no gate: ADR-8eej3e66 stage 4 removed the whole-domain
+// filesystem gate, and filesystem work is now ordered per binding and bounded
+// per failure domain (internal/operation/domains). A field here would be a
+// second answer to "may this filesystem call run".
 type domainGates struct {
-	config, vault, content, session, git, filesystem, api control.Admission
+	config, vault, content, session, git, api control.Admission
 }
 
 func (s *WSServer) domainGates() domainGates {
@@ -2257,12 +2273,11 @@ func (s *WSServer) domainGates() domainGates {
 		// answer an unlock whose answer needs this gate back — twice now a
 		// handler has shown somebody that dialog and refused their Unlock with
 		// "Control plane busy" (nocx-o3606, nocx-9fzkk).
-		vault:      capability.UnlockAnsweringGate(capability.GateVault, 1, s.domainMaxQueue, s.domainWaitTimeout),
-		content:    capability.Gate(capability.GateContent, 1, s.domainMaxQueue, s.domainWaitTimeout),
-		session:    capability.Gate(capability.GateSession, 1, s.domainMaxQueue, s.domainWaitTimeout),
-		git:        capability.Gate(capability.GateGit, 1, s.domainMaxQueue, s.domainWaitTimeout),
-		filesystem: capability.Gate(capability.GateFilesystem, 1, s.domainMaxQueue, s.domainWaitTimeout),
-		api:        capability.Gate(capability.GateAPI, 1, s.domainMaxQueue, s.domainWaitTimeout),
+		vault:   capability.UnlockAnsweringGate(capability.GateVault, 1, s.domainMaxQueue, s.domainWaitTimeout),
+		content: capability.Gate(capability.GateContent, 1, s.domainMaxQueue, s.domainWaitTimeout),
+		session: capability.Gate(capability.GateSession, 1, s.domainMaxQueue, s.domainWaitTimeout),
+		git:     capability.Gate(capability.GateGit, 1, s.domainMaxQueue, s.domainWaitTimeout),
+		api:     capability.Gate(capability.GateAPI, 1, s.domainMaxQueue, s.domainWaitTimeout),
 	}
 }
 
@@ -2472,12 +2487,25 @@ func (s *WSServer) Stop(ctx context.Context) error {
 	}
 	s.ringsMu.Unlock()
 
+	// Files bindings are torn down CONCURRENTLY, after the sessions they
+	// belong to are gone. Each binding waits at most closeDrainTimeout for an
+	// in-flight call (filesystem.Binding.close), so doing them one after
+	// another would multiply that bound by the number of tabs — and a hung
+	// mount hangs every local binding at once, which is exactly the shutdown
+	// this bound exists for (ADR-8eej3e66 §15). Nothing in this phase reads
+	// the session object: it takes the id, the transport's bookkeeping, the
+	// transfer ledger and the filesystem registry.
+	var filesCleanup sync.WaitGroup
 	for _, sess := range s.registry.List() {
 		s.closeLane(sess.ID())
 		_ = s.registry.Close(sess.ID())
 		// Files (fm-w8): Stop closes every session, which closes its
 		// bindings (spec §5.1); the watcher goroutines stop with them.
-		s.filesSessionClosed(sess.ID())
+		filesCleanup.Add(1)
+		go func(sid session.ID) {
+			defer filesCleanup.Done()
+			s.filesSessionClosed(sid)
+		}(sess.ID())
 		// Git (spec §5.5): Stop closes every session, which closes its git
 		// bindings too. No subscriber is attached at shutdown — nobody to
 		// notify, and gitSessionClosed's nil capture is exactly that case.
@@ -2493,13 +2521,39 @@ func (s *WSServer) Stop(ctx context.Context) error {
 	if s.captures != nil {
 		s.captures.DestroyAll()
 	}
+	filesCleanup.Wait()
+
 	// Recorder admission was fenced by stopped under ringsMu. Closed rings
 	// leave their buffered tail available, which each admitted recorder
 	// appends before it exits; this group includes recorders whose rx was
-	// removed before shutdown.
-	s.sessionRecorders.Wait()
+	// removed before shutdown. The join is BOUNDED: a recorder is a commit
+	// interval, so Stop waits for it, but a store that stopped answering must
+	// not hold shutdown for ever (ADR-8eej3e66 §15).
+	if !waitGroupWithin(&s.sessionRecorders, s.recorderDrainTimeout) {
+		s.log.Warn("abandoning session recorders at shutdown", "maxWait", s.recorderDrainTimeout)
+	}
 
 	return shutdownErr
+}
+
+// waitGroupWithin waits for wg up to the bound and reports whether it
+// finished. A sync.WaitGroup has no timed wait, so the join runs on its own
+// goroutine; that goroutine ends when the wait does, so a timeout leaves one
+// goroutine behind, which is the abandonment the caller has already recorded.
+func waitGroupWithin(wg *sync.WaitGroup, bound time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(bound)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
 }
 
 // stopping reports whether Stop has begun tearing this server down.

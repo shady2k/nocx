@@ -181,6 +181,28 @@ func (s *Session) refreshOutputPrefixesLocked() {
 	if screen != emulator.ScreenPrimary {
 		return
 	}
+	needsPrefix := s.observation != nil && s.observation.OutputStartTrack != nil
+	if !needsPrefix {
+		for _, e := range s.rendezvous {
+			if c := e.captured; c != nil && c.OutputStartTrack != nil {
+				needsPrefix = true
+				break
+			}
+		}
+	}
+	if !needsPrefix {
+		// No pin can use a grid read. Drop old eligibility rather than let
+		// a later resize apply evidence belonging to a released pin.
+		if o := s.observation; o != nil {
+			o.OutputPrefixBasis = outputPrefixBasis{}
+		}
+		for _, e := range s.rendezvous {
+			if c := e.captured; c != nil {
+				c.OutputPrefixBasis = outputPrefixBasis{}
+			}
+		}
+		return
+	}
 	scr, ok := s.takeObservationScreenLocked()
 	if !ok || scr.AltScreen {
 		return

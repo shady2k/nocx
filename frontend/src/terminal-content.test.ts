@@ -10845,6 +10845,68 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
 // Visibility gates live painting, never acceptance or correlated processing.
 describe('TerminalContent visibility preserves the accepted painter frame', () => {
   it.each([false, true])(
+    'keeps arriving rows until their block binds, binding before response: %s',
+    async (bindBeforeResponse) => {
+      const client = makeClient()
+      const body = `${JSON.stringify({
+        from: 0,
+        row: wireRowOf(Array.from('pending output', (char) => [char, 1, true] as CellSpec)),
+      })}\n`
+      let release: (() => void) | undefined
+      client.call.mockImplementation((method: string) => {
+        if (method === 'ledger.get') {
+          return Promise.resolve({
+            entry: {},
+            edges: [],
+            artifacts: [{ id: 'arriving-artifact', mediaType: 'application/x-nocx-rows' }],
+          })
+        }
+        if (method === 'ledger.artifact') {
+          return new Promise<unknown>((resolve) => {
+            release = () =>
+              resolve({
+                id: 'arriving-artifact',
+                mediaType: 'application/x-nocx-rows',
+                body,
+                byteLen: body.length,
+                truncated: null,
+              })
+          })
+        }
+        return Promise.reject(new Error('no store wired (fake)'))
+      })
+      const { content, teardown } = await mountTerminal(
+        makeClipboard(),
+        { attachToDocument: true, visibleBeforeMount: true },
+        client,
+      )
+      const sb = scrollbackFor(content)
+      const refresh = content as unknown as {
+        _refreshBlockRows(entryId: string): Promise<void>
+      }
+      const bind = (): void => {
+        sb.blockManager.startBlock('produce', '~', 0)
+        sb.blockManager.bindAttempt('arriving-entry')
+      }
+      try {
+        const reading = refresh._refreshBlockRows('arriving-entry')
+        await vi.waitFor(() => expect(release).toBeDefined())
+        if (bindBeforeResponse) bind()
+        release!()
+        await reading
+        if (!bindBeforeResponse) {
+          expect(sb.scrollbackInner.textContent).not.toContain('pending output')
+          bind()
+        }
+        const block = sb.blockManager.blockForAttempt('arriving-entry')
+        expect(blockOutputText(block!.el)).toBe('pending output')
+      } finally {
+        teardown()
+      }
+    },
+  )
+
+  it.each([false, true])(
     'applies initial visibility %s to retained rows and resumes unfocused with the latest model',
     async (visibleBeforeMount) => {
       let text = 'first'

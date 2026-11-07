@@ -76,6 +76,10 @@ construction, keeping geometry, cursor, buffer identity, modes, title and cwd at
 revision. It does not extract the unused text `Screen`; public `Snapshot` and commit
 checks add that text through the existing reader, preserving spacer and blank trimming.
 An unreadable screen still produces no new frame, never a partial one.
+Prefix eligibility still observes every successful buffer read, but extracts
+rows only when a live observation or captured rendezvous holds an output-start
+pin. Active, tracked and history rows share the private bulk emulator traversal;
+returned Go cell storage remains owned by the caller.
 
 ## Module Map
 
@@ -112,6 +116,9 @@ unchanged row DOM and invalidating painted rows when geometry or palette changes
 Output and notices are inserted before the stationary live region: appending output
 must not move the focused input or manufacture blur/focus intents (`nocx-nxww4`).
 Actual focus changes and live-region ownership changes retain their existing behavior.
+Stored rows received before a local block binds remain pending without settling
+the visible pane. The asynchronous response checks its current block binding;
+a matching visible block retains ordinary follow-tail behavior.
 
 | Module     | SRP responsibility                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -119,11 +126,14 @@ Actual focus changes and live-region ownership changes retain their existing beh
 | `ui`       | Render tabs, menus, config, and map OSC/cwd events to user actions. Built on **SolidJS** ([ADR-0012](decisions/0012-solidjs-as-the-application-ui-layer.md)); it creates an empty host for `terminal` and never renders into it.                                                                                                                                                                                                                                                                                        |
 | `ipc`      | Speak the WebSocket protocol: binary data plane (PTY I/O) + JSON-RPC control plane; ack received byte-offsets (AD-9).                                                                                                                                                                                                                                                                                                                                                                                                   |
 
-On `session.frame` intake, the client cell model decodes each row's Unicode
-positions and marks once, validates the whole frame, and reuses those positions
-to build its immutable cell snapshot. That intermediate data belongs to one
-`apply` call, not a cross-revision cache. A refused frame leaves the installed
-snapshot unchanged.
+On `session.frame` intake, the client cell model compares compact rows with owned
+comparison facts for the current accepted frame. Unchanged rows in the same
+geometry, buffer and row position share immutable model storage; changed rows
+decode their Unicode positions and marks once. Whole-frame validation precedes
+atomic installation of both snapshot and comparison facts. New revision, cursor
+and state metadata advance even when every row is shared. Comparison facts never
+alias the caller's mutable wire arrays or retain a history of frames; a refused
+frame changes neither the installed snapshot nor those facts.
 
 ## Architectural Decisions
 

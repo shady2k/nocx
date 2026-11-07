@@ -10348,7 +10348,9 @@ export class TerminalContent extends BasePaneContent {
         return
       }
       const rows = read.rows
-      if (!this._active) {
+      // Pending rows belong to a future local binding, not this pane's
+      // current layout. Check ownership now, not when the read started.
+      if (!this._active || !sb.blockManager.blockForAttempt(entryId)) {
         sb.blockManager.applyStoredRows(entryId, rows)
         return
       }

@@ -89,6 +89,12 @@ func (e *ExpiredError) Error() string {
 // the bulkhead that this worker outlived its request, so the failure domain's
 // breaker can count it.
 //
+// Whether the call STARTED has one owner, startDecision: the worker claiming
+// its start and the caller's turn running out race for it under one lock, and
+// the loser reads the winner's answer. Two independent selects would let both
+// win at the turn's edge — a start published and a mutation entered while the
+// caller answered "nothing changed" (ADR-8eej3e66 §4).
+//
 // Without a catalogue scope (a direct capability test), the call runs with no
 // deadline: there is nothing to enforce and inventing one would be a second
 // declaration.
@@ -105,27 +111,21 @@ func gitRun(ctx context.Context, allow gitAllowance, acquire func(context.Contex
 	turnCtx, cancelTurn := context.WithTimeout(ctx, allow.Turn)
 	defer cancelTurn()
 
-	type start struct {
-		workCtx context.Context
-		expired chan struct{}
-		finish  func()
-		abandon func()
-		err     error
-	}
-	started := make(chan start, 1)
+	decision := newStartDecision()
 	done := make(chan error, 1)
 
 	go func() {
 		finish, abandon, err := acquire(turnCtx)
 		if err != nil {
-			started <- start{err: err}
+			decision.fail(err)
 			return
 		}
-		// Start against cancel is decided here, once: a grant that arrived
-		// in the same instant as the turn's expiry did not start anything.
+		// A grant that arrived in the same instant as the turn's expiry did
+		// not start anything. It is decided against the caller's answer in
+		// one step below, never here alone.
 		if cerr := turnCtx.Err(); cerr != nil {
 			finish()
-			started <- start{err: cerr}
+			decision.fail(cerr)
 			return
 		}
 		lifetime := allow.Max
@@ -156,13 +156,19 @@ func gitRun(ctx context.Context, allow gitAllowance, acquire func(context.Contex
 				done <- err
 			})
 		}
+		if !decision.begin(gitStart{expired: expired, abandon: abandon}) {
+			// The caller's turn ran out while this worker was acquiring, and
+			// it answered that nothing changed. Nothing may change.
+			cancelWork()
+			finish()
+			return
+		}
 		var timer *time.Timer
 		if lifetime > 0 {
 			timer = time.AfterFunc(lifetime, func() {
 				once.Do(func() { close(expired) })
 			})
 		}
-		started <- start{workCtx: workCtx, expired: expired, finish: finish, abandon: abandon}
 		err = fn(workCtx)
 		if timer != nil {
 			timer.Stop()
@@ -171,14 +177,18 @@ func gitRun(ctx context.Context, allow gitAllowance, acquire func(context.Contex
 		finish()
 	}()
 
-	var s start
 	select {
-	case s = <-started:
-		if s.err != nil {
-			return gitWaitError(ctx, allow, s.err)
-		}
+	case <-decision.ready:
 	case <-turnCtx.Done():
-		return gitWaitError(ctx, allow, turnCtx.Err())
+		if decision.expire(turnCtx.Err()) {
+			return gitWaitError(ctx, allow, turnCtx.Err())
+		}
+		// The worker claimed the start first, so this call settles with the
+		// work's own outcome rather than with "nothing changed".
+	}
+	s, err := decision.outcome()
+	if err != nil {
+		return gitWaitError(ctx, allow, err)
 	}
 
 	select {
@@ -192,6 +202,87 @@ func gitRun(ctx context.Context, allow gitAllowance, acquire func(context.Contex
 		s.abandon()
 		return &ExpiredError{Operation: allow.Operation, Outcome: allow.Expired, Budget: allow.Max}
 	}
+}
+
+// gitStart is what the caller needs to watch a call that began: the channel
+// that says its max deadline arrived, and the way to tell the bulkhead the
+// worker outlived the request. Everything else the worker keeps to itself.
+type gitStart struct {
+	expired chan struct{}
+	abandon func()
+}
+
+// startDecision is the ONE owner of "did this call start". The worker that
+// acquired the resources and the caller whose turn ran out race for it under
+// one lock, and the loser reads the winner's answer.
+//
+// TWO SELECTS COULD NOT DO THIS. The worker used to check the turn, publish
+// its start and enter the mutation while the caller's own select — with its
+// start arm and its deadline arm both ready — took whichever Go happened to
+// pick. A mutation could therefore apply while the person was told nothing
+// changed, which is the one sentence a timeout must never say wrongly
+// (ADR-8eej3e66 §4).
+type startDecision struct {
+	mu      sync.Mutex
+	settled bool
+	start   gitStart
+	err     error
+	ready   chan struct{}
+}
+
+func newStartDecision() *startDecision {
+	return &startDecision{ready: make(chan struct{})}
+}
+
+// begin is the worker's claim, taken once the resources are acquired and the
+// turn is still live. It answers false when the caller has already settled —
+// its turn ran out while this worker was acquiring — and the worker must then
+// give its resources back without running anything.
+func (d *startDecision) begin(s gitStart) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.settled {
+		return false
+	}
+	d.settled, d.start = true, s
+	close(d.ready)
+	return true
+}
+
+// fail is the worker's answer when it could not acquire: the call never
+// started, for the reason given. A decision already settled by the caller's
+// turn keeps the caller's answer — the worker's late failure describes a wait
+// nobody is waiting for.
+func (d *startDecision) fail(err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.settled {
+		return
+	}
+	d.settled, d.err = true, err
+	close(d.ready)
+}
+
+// expire is the caller's turn running out. It answers whether that answer
+// stands: false means the worker claimed the start first, so the call is
+// running and the caller must wait for its outcome.
+func (d *startDecision) expire(err error) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.settled {
+		return false
+	}
+	d.settled, d.err = true, err
+	close(d.ready)
+	return true
+}
+
+// outcome is the settled decision: the start when the call began, otherwise
+// why it did not. Read it only after ready is closed.
+func (d *startDecision) outcome() (gitStart, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.start, d.err
 }
 
 // gitWaitError turns a failed wait into the declaration's answer. A cancelled

@@ -79,6 +79,7 @@ func NewGitOpenOperation(
 		resolve:  newOperation[GitOpenService](disposition, control.NewComposite(sessionGate), g, newGitOpenService(g, registry, factory, reg)),
 		bulkhead: bulkhead, guard: g,
 		svc: newGitOpenService(g, registry, factory, reg), disposition: disposition,
+		domain: openFailureDomain,
 	}
 }
 
@@ -90,6 +91,11 @@ type gitOpenOperation struct {
 	guard       *guard
 	svc         GitOpenService
 	disposition Disposition
+	// domain is where the open's failure domain is read. It is a field rather
+	// than a direct call so the test that holds a stat open can prove the
+	// derivation runs on the bounded worker; the constructor supplies the
+	// real one.
+	domain func(session.Session, string) string
 }
 
 func (o *gitOpenOperation) Disposition() Disposition { return o.disposition }
@@ -100,8 +106,15 @@ func (o *gitOpenOperation) Resolve(ctx context.Context, fn func(context.Context,
 
 func (o *gitOpenOperation) Open(ctx context.Context, sess session.Session, cwd string, fn func(context.Context, GitOpenService) error) error {
 	allow, _ := allowanceFromContext(ctx)
-	domain := openFailureDomain(sess, cwd)
 	return gitRun(ctx, allow, func(waitCtx context.Context) (func(), func(), error) {
+		// THE DOMAIN IS DERIVED HERE, ON THE WORKER. The derivation reads the
+		// cwd's device — one stat — and a stat on a hung NFS or FUSE mount
+		// never returns. On the caller that ran before gitRun's lifetime
+		// existed, so the turn, the cancellation and the max all arrived at a
+		// goroutine blocked in the kernel and the action's promise stayed
+		// pending for ever. Here it is work, and work that has not started
+		// settles as not-started when the turn ends.
+		domain := o.domain(sess, cwd)
 		lease, err := o.bulkhead.Acquire(waitCtx, domain, schedule.Class(gitClass(allow.Origin)))
 		if err != nil {
 			return nil, nil, gitBulkheadError(ctx, allow, err)

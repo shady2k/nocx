@@ -30,8 +30,9 @@ func TestOperationHoldingTheAnsweringGateFencesAMaterialRead(t *testing.T) {
 	resolver := credential.NewResolver(store, nil, store)
 
 	op := capability.NewConfigOperation(
-		capability.Gate(capability.GateConfig, 1, time.Second),
-		capability.UnlockAnswering(capability.Gate(capability.GateVault, 1, time.Second)),
+		capability.UnlockAnswering(storePlan(
+			capability.Gate(capability.GateConfig, 1, time.Second),
+			capability.Gate(capability.GateVault, 1, time.Second))),
 		&fakeProfileRepo{}, &fakeGroupRepo{}, nil, nil, newProfileService(t), nil, nil, nil)
 
 	var got error
@@ -57,8 +58,9 @@ func TestTheSameReadAfterTheOperationSucceeds(t *testing.T) {
 	resolver := credential.NewResolver(store, nil, store)
 
 	op := capability.NewConfigOperation(
-		capability.Gate(capability.GateConfig, 1, time.Second),
-		capability.UnlockAnswering(capability.Gate(capability.GateVault, 1, time.Second)),
+		capability.UnlockAnswering(storePlan(
+			capability.Gate(capability.GateConfig, 1, time.Second),
+			capability.Gate(capability.GateVault, 1, time.Second))),
 		&fakeProfileRepo{}, &fakeGroupRepo{}, nil, nil, newProfileService(t), nil, nil, nil)
 
 	ctx := context.Background()

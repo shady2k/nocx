@@ -532,15 +532,15 @@ func validateSecretsCaptureDismissRaw(raw json.RawMessage) string {
 }
 
 // secretSpecs declares the secrets.* control methods: the vault-secret mint
-// and usage surface under one SecretOperation ([config, vault] gates), the
-// pure detector (no capability), and the capture settlement under the
-// CaptureSaveOperation ([vault, content] gates — the capture operation needs
-// the content gate, so this builder takes four gates). The operations are
+// and usage surface under one SecretOperation (the one plan for the config and
+// vault stores), the pure detector (no capability), and the capture settlement
+// under the CaptureSaveOperation (the vault's plan and the content order — two
+// admissions that share nothing). The operations are
 // built once here from the wired stores (composition root for this domain);
 // the handlers carry the wired flags that reproduce the old dispatchers'
 // unwired answers.
-func (s *WSServer) secretSpecs(configGate, vaultGate, contentGate control.Admission) []methodSpec {
-	secretOp := capability.NewSecretOperation(configGate, vaultGate, s.profiles, s.groups, s.vaultLifecycle, s.credentials)
+func (s *WSServer) secretSpecs(configVault, vaultGate, contentGate control.Admission) []methodSpec {
+	secretOp := capability.NewSecretOperation(configVault, s.profiles, s.groups, s.vaultLifecycle, s.credentials)
 	secretResolver := s.credentialResolver()
 	captureOp := capability.NewCaptureSaveOperation(vaultGate, contentGate, s.vaultLifecycle, s.contentDB)
 	vaultWired := s.vaultLifecycle != nil

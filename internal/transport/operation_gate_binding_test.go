@@ -75,7 +75,12 @@ func TestMethodSpecOperationsAcquireEachDomainGateOnce(t *testing.T) {
 		gates[name] = &recordingDomainAdmission{name: name, log: log}
 	}
 
-	configOp, endpointWired := server.buildConfigOp(gates["config"], gates["vault"])
+	// The two stubs stand for the ONE plan production builds for a caller
+	// that writes both stores; composing them here costs nothing because they
+	// are two distinct objects, and each row below still counts the gate it
+	// names.
+	configVault := control.NewComposite(gates["config"], gates["vault"])
+	configOp, endpointWired := server.buildConfigOp(configVault)
 	// wantGate is how many times the domain gate is acquired. It is one
 	// everywhere except filesystem, whose whole-domain gate went in stage 4
 	// of ADR-8eej3e66: filesystem work is ordered per binding and bounded per
@@ -94,7 +99,7 @@ func TestMethodSpecOperationsAcquireEachDomainGateOnce(t *testing.T) {
 			name:     "config",
 			gate:     "config",
 			wantGate: 1,
-			specs:    server.configSpecs(gates["config"], gates["vault"], configOp, endpointWired, nil, nil),
+			specs:    server.configSpecs(gates["config"], configVault, configOp, endpointWired, nil, nil),
 			method:   "groups.list",
 			raw:      `{}`,
 		},

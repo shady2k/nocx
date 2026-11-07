@@ -220,22 +220,48 @@ func (g *StoreGuard) BarriersOf(store string) []string {
 }
 
 // Shared returns the admission a reader or a single-store writer takes: every
-// barrier that protects the store, shared, then the store's key. It panics on
-// an unknown store — that is a wiring mistake, not a runtime condition.
-func (g *StoreGuard) Shared(store string) control.Admission {
-	members, ok := g.members[store]
-	if !ok {
-		panic("capability: no store named " + store)
+// barrier that protects the stores, shared, then each store's key, in the one
+// acquisition order. It panics on an unknown store — that is a wiring mistake,
+// not a runtime condition.
+//
+// A CALLER THAT WRITES TWO STORES ASKS FOR THEM TOGETHER, in one call with
+// both names. Composing two of these plans instead takes every barrier they
+// share TWICE: the second acquisition is a real one, and a barrier with an
+// exclusive holder queued refuses it (writer preference) while that holder
+// waits for the first. That is the self-deadlock a config call — which writes
+// the config document and resolves vault row handles — hit against a queued
+// vault.reset, and it is why the set is built here, once, and never nested
+// (ADR-8eej3e66 §5: a phase acquires its complete set together).
+func (g *StoreGuard) Shared(stores ...string) control.Admission {
+	if len(stores) == 0 {
+		panic("capability: a store plan names no store")
 	}
-	parts := make([]control.Admission, 0, len(members)+1)
+	members := make(map[string]bool, len(g.barrierOrder))
+	keys := make([]string, 0, len(stores))
+	for _, store := range stores {
+		protecting, ok := g.members[store]
+		if !ok {
+			panic("capability: no store named " + store)
+		}
+		for _, name := range protecting {
+			members[name] = true
+		}
+		keys = append(keys, store)
+	}
+	parts := make([]control.Admission, 0, len(members)+len(keys))
 	for _, name := range g.barrierOrder {
-		if contains(members, name) {
+		if members[name] {
 			parts = append(parts, g.barriers[name].Shared())
 		}
 	}
-	parts = append(parts, g.keys[store])
-	name := "store:" + store + "+shared"
-	return g.watch([]string{store}, control.NewComposite(parts...), name)
+	// The keys are taken in the guard's own order, never in the caller's: that
+	// order is the whole deadlock argument for two callers of one pair.
+	for _, store := range g.stores {
+		if contains(keys, store) {
+			parts = append(parts, g.keys[store])
+		}
+	}
+	return g.watch(stores, control.NewComposite(parts...), "store:"+strings.Join(stores, "+")+"+shared")
 }
 
 // SharedBarrier returns the barrier half of the shared plan: every barrier

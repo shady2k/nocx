@@ -140,8 +140,8 @@ func TestSecretOperation_ADismissedUnlockIsTheCancellation(t *testing.T) {
 // THE SAME INVARIANT, ON THE PATH THAT RESOLVES A MODEL (nocx-9fzkk).
 //
 // skills.audit resolves its endpoint's credential through the CONFIG
-// operation, and that operation holds the vault gate as well as the config
-// one (buildConfigOp takes both). So a resolution done inside its callback
+// operation, and that operation holds the vault's store as well as the config
+// one (buildConfigOp takes the set). So a resolution done inside its callback
 // raises the unlock while holding the very gate vault.unseal needs, and the
 // person is shown the "Unlock the vault to audit a skill" dialog whose
 // Unlock button answers "Control plane busy".

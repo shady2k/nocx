@@ -2274,7 +2274,7 @@ func (h tabbyHandlers) planTabbyImport(ctx context.Context, svc capability.Tabby
 // config handlers; a second construction would be a second wiring). It
 // returns whether the endpoint repository is wired, the "endpoints not
 // available" gate the handlers check first.
-func (s *WSServer) buildConfigOp(configGate, vaultGate control.Admission) (capability.ConfigOperation, bool) {
+func (s *WSServer) buildConfigOp(stores control.Admission) (capability.ConfigOperation, bool) {
 	// Endpoints ride the profile store (ADR-0030): the same JSON document,
 	// so the profile store satisfies the endpoint repository. The nil guard
 	// is real: the type assertion panics on a nil interface, and profiles
@@ -2294,7 +2294,7 @@ func (s *WSServer) buildConfigOp(configGate, vaultGate control.Admission) (capab
 		}
 	}
 	return capability.NewConfigOperation(
-		configGate, vaultGate,
+		stores,
 		s.profiles, s.groups, endpointsRepo, rolesRepo, s.profileSvc, s.settings,
 		s.vaultRowResolver(), s.vaultEndpointSecrets(),
 	), endpointsRepo != nil
@@ -2303,7 +2303,7 @@ func (s *WSServer) buildConfigOp(configGate, vaultGate control.Admission) (capab
 // configSpecs declares the config-domain control methods. The ConfigOperation
 // is built ONCE by buildConfigOp (in buildControlPlane) and shared with the
 // agent specs; the handler families receive it.
-func (s *WSServer) configSpecs(configGate, vaultGate control.Admission, configOp capability.ConfigOperation, endpointWired bool, noteOp capability.NoteOperation, snippetOp capability.SnippetOperation) []methodSpec {
+func (s *WSServer) configSpecs(configGate, configVault control.Admission, configOp capability.ConfigOperation, endpointWired bool, noteOp capability.NoteOperation, snippetOp capability.SnippetOperation) []methodSpec {
 	profilesWired := s.profiles != nil
 	groupsWired := s.groups != nil
 	settingsWired := s.settings != nil
@@ -2317,7 +2317,7 @@ func (s *WSServer) configSpecs(configGate, vaultGate control.Admission, configOp
 	var tabbyOp capability.TabbyImportOperation
 	if profilesWired || groupsWired || s.credentials != nil {
 		tabbyOp = capability.NewTabbyImportOperation(
-			configGate, vaultGate,
+			configVault,
 			s.profiles, s.groups, s.profileSvc,
 			s.vaultSecretSeam(), s.credentials,
 		)

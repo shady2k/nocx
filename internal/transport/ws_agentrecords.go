@@ -144,15 +144,15 @@ type agentRecordsHandlers struct {
 
 func (s *WSServer) agentRecordsSpecs() []methodSpec {
 	return []methodSpec{
-		regResponder(s.lane, catalog.OpAgentRecordsList, noParams(), func(r Responder) handlerFunc {
+		regResponder(s.work, catalog.OpAgentRecordsList, noParams(), func(r Responder) handlerFunc {
 			h := agentRecordsHandlers{store: s.agentRecords, wired: s.agentRecords != nil, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleList(ctx, req) }
 		}),
-		regResponder(s.lane, catalog.OpAgentRecordsSave, params(validateAgentRecordsSave), func(r Responder) handlerFunc {
+		regResponder(s.work, catalog.OpAgentRecordsSave, params(validateAgentRecordsSave), func(r Responder) handlerFunc {
 			h := agentRecordsHandlers{store: s.agentRecords, wired: s.agentRecords != nil, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSave(ctx, req) }
 		}),
-		regResponder(s.lane, catalog.OpAgentRecordsRemove, params(validateAgentRecordsRemove), func(r Responder) handlerFunc {
+		regResponder(s.work, catalog.OpAgentRecordsRemove, params(validateAgentRecordsRemove), func(r Responder) handlerFunc {
 			h := agentRecordsHandlers{store: s.agentRecords, wired: s.agentRecords != nil, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleRemove(ctx, req) }
 		}),

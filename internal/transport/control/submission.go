@@ -2,9 +2,10 @@ package control
 
 import "context"
 
-// ImmediateSubmission runs every task inline on the caller's goroutine and
-// never refuses. It is for ingress-critical resolvers that must never wait
-// for a slot: they get no bound, but also no scheduling delay.
+// ImmediateSubmission runs every task inline on the caller's goroutine. It is
+// for ingress-critical resolvers that must never wait for a slot: they get no
+// bound, but also no scheduling delay, and nothing can be refused in front of
+// them.
 type ImmediateSubmission struct{}
 
 func (ImmediateSubmission) TrySubmit(ctx context.Context, task Task) *Rejection {
@@ -14,41 +15,23 @@ func (ImmediateSubmission) TrySubmit(ctx context.Context, task Task) *Rejection 
 	return nil
 }
 
-// boundedSubmission runs tasks on their own goroutines under an Admission.
-type boundedSubmission struct {
-	admission Admission
-}
-
-// NewBoundedSubmission returns a Submission that acquires a Permit from the
-// given NON-BLOCKING admission, runs the task on its own goroutine, and
-// releases the Permit when the task returns. If the Admission refuses, the
-// task is NOT run and the rejection is returned without blocking — the read
-// loop may submit and move on either way.
+// AsyncSubmission runs every task on its own goroutine and never refuses.
 //
-// The parameter type is the guard: only a NonblockingAdmission can be wired
-// here, so a waiting admission (NewWaitingSemaphore — TryAcquire may block up
-// to its wait timeout) cannot reach a Submission's TrySubmit, which the read
-// loop calls. The miswiring is a compile error (ADR-0026).
-func NewBoundedSubmission(a NonblockingAdmission) Submission {
-	return &boundedSubmission{admission: a}
-}
+// IT IS WHAT A SUBMISSION IS ONCE NOTHING REFUSES ADMISSION (ADR-8eej3e66
+// §7, stage 8). The read loop hands the work over and moves on; what bounds
+// accepted work is the per-connection credit window (transport/credit.go),
+// and what bounds each call is its declaration's turn and max. A worker pool
+// that answered "all busy" was the last capacity refusal, and it is gone.
+//
+// A panic is deliberately not swallowed: it propagates and crashes the
+// process, exactly as a panicking task anywhere else does.
+type AsyncSubmission struct{}
 
-func (s *boundedSubmission) TrySubmit(ctx context.Context, task Task) *Rejection {
-	permit, rej := s.admission.TryAcquire(ctx)
-	if rej != nil {
-		return rej
-	}
-	go runAndRelease(permit, ctx, task)
+func (AsyncSubmission) TrySubmit(ctx context.Context, task Task) *Rejection {
+	go func() {
+		if startAllowed(task) {
+			task.Run(ctx)
+		}
+	}()
 	return nil
-}
-
-// runAndRelease guarantees the Permit is released on every exit path: normal
-// return, context cancellation, or panic (the deferred Release runs during
-// panic unwinding). A panic is deliberately not swallowed: it propagates and
-// crashes the process, but never leaks the Permit.
-func runAndRelease(permit Permit, ctx context.Context, task Task) {
-	defer permit.Release()
-	if startAllowed(task) {
-		task.Run(ctx)
-	}
 }

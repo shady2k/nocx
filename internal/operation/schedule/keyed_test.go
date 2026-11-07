@@ -3,6 +3,7 @@ package schedule
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -36,7 +37,7 @@ func await(t *testing.T, ch <-chan acquired) acquired {
 // A mutation on one checkout never starts while another holds it; the same
 // work on a different checkout is not held behind it.
 func TestKeyedOrdersOneCheckoutAndNotAnother(t *testing.T) {
-	k := NewKeyed("test", 8)
+	k := NewKeyed("test")
 	releaseA, err := k.Acquire(context.Background(), "/repo")
 	if err != nil {
 		t.Fatalf("first acquire: %v", err)
@@ -68,7 +69,7 @@ func TestKeyedOrdersOneCheckoutAndNotAnother(t *testing.T) {
 // A cancelled waiter is removed from its queue before it starts: it never
 // receives a release, and the key is free for the next caller.
 func TestKeyedCancelledWaiterNeverStarts(t *testing.T) {
-	k := NewKeyed("test", 8)
+	k := NewKeyed("test")
 	release, err := k.Acquire(context.Background(), "repo")
 	if err != nil {
 		t.Fatalf("first acquire: %v", err)
@@ -100,7 +101,7 @@ func TestKeyedCancelledWaiterNeverStarts(t *testing.T) {
 // caller's context then fired, and the caller must give the key back rather
 // than run or strand it.
 func TestKeyedGrantThenCancelReleasesTheKey(t *testing.T) {
-	k := NewKeyed("test", 8)
+	k := NewKeyed("test")
 	first, err := k.Acquire(context.Background(), "repo")
 	if err != nil {
 		t.Fatalf("first acquire: %v", err)
@@ -129,22 +130,35 @@ func TestKeyedGrantThenCancelReleasesTheKey(t *testing.T) {
 	next()
 }
 
-func TestKeyedRefusesBeyondCapacity(t *testing.T) {
-	k := NewKeyed("test", 1)
+// There is no count bound at all (ADR-8eej3e66 stage 8): many keys are served
+// at once while each key keeps its own order. What ends a wait on ONE key is
+// the caller's context, not an admission.
+func TestKeyedHasNoCountBound(t *testing.T) {
+	k := NewKeyed("test")
 	release, err := k.Acquire(context.Background(), "a")
 	if err != nil {
 		t.Fatalf("first acquire: %v", err)
 	}
-	defer release()
-	_, err = k.Acquire(context.Background(), "b")
-	var refusal *Refusal
-	if !errors.As(err, &refusal) || refusal.Reason != ReasonQueueFull {
-		t.Fatalf("second acquire err = %v, want a queue-full refusal", err)
+	const keys = 64
+	for i := range keys {
+		key := "repo-" + strconv.Itoa(i)
+		r, err := k.Acquire(context.Background(), key)
+		if err != nil {
+			t.Fatalf("acquire %s: %v", key, err)
+		}
+		r()
 	}
+	// A waiter on the held key ends at its context, not at a queue bound.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if _, err := k.Acquire(ctx, "a"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("waiter on the held key err = %v, want the turn deadline", err)
+	}
+	release()
 }
 
 func TestKeyedDropsAnIdleKey(t *testing.T) {
-	k := NewKeyed("test", 4)
+	k := NewKeyed("test")
 	release, err := k.Acquire(context.Background(), "repo")
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
@@ -161,7 +175,7 @@ func TestKeyedDropsAnIdleKey(t *testing.T) {
 // ── bulkhead ──────────────────────────────────────────────────────────────
 
 func bulkheadLimits() Limits {
-	return Limits{Capacity: 3, PersonReserved: 1, Queue: 8, AbandonedPerDomain: 2, AbandonedGlobal: 4}
+	return Limits{Capacity: 3, PersonReserved: 1, AbandonedPerDomain: 2, AbandonedGlobal: 4}
 }
 
 func acquireLease(t *testing.T, b *Bulkhead, domain string, class Class) *Lease {
@@ -268,7 +282,7 @@ func TestBulkheadPersonWaiterIsServedBeforeBackground(t *testing.T) {
 func TestBulkheadAbandonedWorkMakesItsDomainSuspectOnly(t *testing.T) {
 	// A worker that abandoned its request still holds its permit: two of
 	// two permits at capacity, neither reclaimed, so the next caller waits.
-	held := NewBulkhead("git", Limits{Capacity: 2, PersonReserved: 1, Queue: 8, AbandonedPerDomain: 3, AbandonedGlobal: 4})
+	held := NewBulkhead("git", Limits{Capacity: 2, PersonReserved: 1, AbandonedPerDomain: 3, AbandonedGlobal: 4})
 	l1 := acquireLease(t, held, "mount:1", ClassPerson)
 	l2 := acquireLease(t, held, "mount:1", ClassPerson)
 	l1.Abandon()
@@ -284,7 +298,7 @@ func TestBulkheadAbandonedWorkMakesItsDomainSuspectOnly(t *testing.T) {
 
 	// At the abandoned bound the domain is suspect: no new worker starts,
 	// while another domain is unaffected.
-	suspect := NewBulkhead("git", Limits{Capacity: 4, PersonReserved: 1, Queue: 8, AbandonedPerDomain: 1, AbandonedGlobal: 4})
+	suspect := NewBulkhead("git", Limits{Capacity: 4, PersonReserved: 1, AbandonedPerDomain: 1, AbandonedGlobal: 4})
 	a := acquireLease(t, suspect, "mount:1", ClassPerson)
 	a.Abandon()
 	_, err := suspect.Acquire(context.Background(), "mount:1", ClassPerson)
@@ -302,7 +316,7 @@ func TestBulkheadAbandonedWorkMakesItsDomainSuspectOnly(t *testing.T) {
 }
 
 func TestBulkheadGlobalAbandonedBoundRefusesOnlyDomainsWithAbandonedWork(t *testing.T) {
-	b := NewBulkhead("git", Limits{Capacity: 4, PersonReserved: 1, Queue: 8, AbandonedPerDomain: 4, AbandonedGlobal: 1})
+	b := NewBulkhead("git", Limits{Capacity: 4, PersonReserved: 1, AbandonedPerDomain: 4, AbandonedGlobal: 1})
 	a := acquireLease(t, b, "mount:1", ClassPerson)
 	a.Abandon()
 

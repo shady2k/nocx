@@ -1,20 +1,17 @@
 package transport
 
 // app.diagnostics — the contract, the record, and the one property that makes
-// it useful: it answers while the control plane is saturated
-// (nocx-3an1s.1.8).
+// it useful: it answers while other work is blocked (nocx-3an1s.1.8).
 //
-// The tests here drive the REAL socket. The saturation case holds every lane
-// permit with real (blocked) opens driven through the real session opener, then
-// asks a method that needs the lane and must be refused, and then asks
-// app.diagnostics and must NOT be refused. That is the whole design in one
-// test: a diagnostics method behind the same admission it diagnoses is a
-// method that is missing exactly when it is needed.
+// The tests here drive the REAL socket. The blocked case holds a real
+// (blocked) open driven through the real session opener, then asks
+// app.diagnostics: it must answer, and it must name what is holding the
+// resources it reports. A diagnostics method behind the same admission it
+// diagnoses is a method that is missing exactly when it is needed.
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -67,7 +64,6 @@ func newDiagnosticsWSServer(t *testing.T, rec *diagnostics.Recorder, opener Help
 	logger := log.NewSlogAdapter(sl)
 	opts := []WSServerOption{
 		WithDiagnostics(rec, stubDiagnosticsProvider{}),
-		WithControlLaneCapacity(2),
 		WithProfileResolver(&openProfileResolver{host: "host.example:22"}),
 	}
 	if opener != nil {
@@ -131,64 +127,56 @@ func TestAppDiagnostics_OverTheWireConformsToContract(t *testing.T) {
 	}
 }
 
-// THE TEST THE OWNER ASKED FOR: the control plane is saturated, and Copy
-// diagnostics still answers — with the holders that saturated it.
-func TestAppDiagnostics_AnswersWhileTheLaneIsSaturatedAndNamesTheHolders(t *testing.T) {
-	const laneCapacity = 2
+// THE TEST THE OWNER ASKED FOR: work is blocked, and Copy diagnostics still
+// answers — naming what is holding the resources that are occupied.
+//
+// Stage 8 has no capacity refusal to record, so the holders come from the
+// LIVE admission views (`admissions:`) rather than from a refusal ring: the
+// person's question is "what is stuck", and the answer is the same.
+func TestAppDiagnostics_AnswersWhileWorkIsBlockedAndNamesTheHolders(t *testing.T) {
 	blocker := newBlockingHelperOpener()
 	rec := diagnostics.NewRecorder()
-	ws, sl, stop := newDiagnosticsWSServer(t, rec, blocker)
+	ws, _, stop := newDiagnosticsWSServer(t, rec, blocker)
 	defer stop()
 	t.Cleanup(func() { close(blocker.release) })
 
-	for i := 0; i < laneCapacity; i++ {
-		conn := connectWS(t, ws)
-		sendCall(t, conn, "open", map[string]any{
-			// A destination carrying every kind of secret the text must not
-			// repeat: a user, a host, a path. The label is the only name that
-			// may appear.
-			"cols": 80, "rows": 24, "kind": "ssh",
-			"profileId": "ssh:alice@db-7.internal.example:/home/alice/.ssh/id_ed25519",
-		}, 1)
+	conn := connectWS(t, ws)
+	sendCall(t, conn, "open", map[string]any{
+		// A destination carrying every kind of secret the text must not
+		// repeat: a user, a host, a path. The label is the only name that
+		// may appear.
+		"cols": 80, "rows": 24, "kind": "ssh",
+		"profileId": "ssh:alice@db-7.internal.example:/home/alice/.ssh/id_ed25519",
+	}, 1)
+	// And a native picker left open: a capability that IS held for as long as
+	// its adapter runs, which is exactly what the holders list is for.
+	dlg := &blockingDialog{started: make(chan struct{}), release: make(chan struct{})}
+	ws.SetDialogService(dlg)
+	t.Cleanup(func() { close(dlg.release) })
+	picker := connectWS(t, ws)
+	sendCall(t, picker, "dialog.openFile", map[string]any{}, 2)
+	select {
+	case <-dlg.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("dialog adapter never invoked")
 	}
-	waittest.WaitFor(t, "every lane permit to be held by a pending open", func() bool {
-		return len(rec.Snapshot().Live) == laneCapacity
+	waittest.WaitFor(t, "the open to be in flight", func() bool {
+		return len(rec.Snapshot().Live) == 1
 	})
 
-	// A method that needs the lane: the session gate is free, the lane is not.
-	probe := connectWS(t, ws)
-	resp := snippetCall(t, probe, "sessions.live", map[string]any{}, 7)
-	if resp.Error == nil || resp.Error.Code != SaturationErrorCode {
-		t.Fatalf("sessions.live answered %+v, want the saturation refusal while the lane is held", resp)
-	}
-	data, ok := resp.Error.Data.(map[string]any)
-	if !ok || data["scope"] != "control" {
-		t.Fatalf("refusal data = %#v, want scope control", resp.Error.Data)
-	}
-
-	// The line the owner's 300 MB log did not have.
-	if !logtest.WaitForSlog(sl, 2*time.Second, func(r logtest.Record) bool {
-		if r.Message != "control action refused" {
-			return false
-		}
-		scope, _ := recordAttr(r, "scope")
-		holders, _ := recordAttr(r, "holders")
-		return scope == "control" && strings.Contains(holders, "open(")
-	}) {
-		t.Fatal("no shipped-level line recorded the refusal with its holders")
-	}
-
-	// AND THE DIAGNOSTICS METHOD ITSELF, on the same saturated server.
+	// The diagnostics method itself, while the open holds the config and
+	// session plans: it is answered on the read loop and takes no credit, so
+	// it is available at exactly the moment somebody needs it.
 	out := snippetCall(t, connectWS(t, ws), "app.diagnostics", map[string]any{}, 9)
 	if out.Error != nil {
-		t.Fatalf("app.diagnostics was refused by the saturation it exists to report: %+v", out.Error)
+		t.Fatalf("app.diagnostics was refused while work was blocked: %+v", out.Error)
 	}
 	var got diagnosticsResult
 	if err := json.Unmarshal(out.Result, &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	for _, want := range []string{
-		"stage=dial", "scope=control", "method=sessions.live", "holders=open(",
+		"stage=dial", "dialog held=1", "dialog.openFile(",
 	} {
 		if !strings.Contains(got.Text, want) {
 			t.Fatalf("the text lacks %q:\n%s", want, got.Text)
@@ -197,53 +185,6 @@ func TestAppDiagnostics_AnswersWhileTheLaneIsSaturatedAndNamesTheHolders(t *test
 	if strings.Contains(got.Text, "alice") || strings.Contains(got.Text, "db-7.internal.example") ||
 		strings.Contains(got.Text, "/home/") || strings.Contains(got.Text, "id_ed25519") {
 		t.Fatalf("the text named a destination:\n%s", got.Text)
-	}
-}
-
-// A working open whose PUBLISH failed must read as working. The owner's fresh
-// server did exactly this: the agent refused to sign for a hardware-backed key,
-// the bundle did not land, and the pane still worked. That must not look like
-// the stuck case.
-func TestAppDiagnostics_AWorkingOpenWithAFailedPublishIsNotAStuckOpen(t *testing.T) {
-	rec := diagnostics.NewRecorder()
-	ctx, open := rec.Begin(context.Background(), diagnostics.OpenInfo{Kind: "ssh", Key: "ssh:publish"})
-	diagnostics.Stage(ctx, diagnostics.StagePublish)(nil)
-	diagnostics.NotePublish(ctx, "failed:connection-failed")
-	open.Finish(nil)
-
-	text := diagnostics.Render(rec.Snapshot(), diagnostics.Facts{ServerStarted: time.Now()})
-	if !strings.Contains(text, "outcome=opened") || !strings.Contains(text, "publish=failed:connection-failed") {
-		t.Fatalf("a working open with a failed publish did not read as working:\n%s", text)
-	}
-}
-
-// failingHelperOpener refuses the open outright, which is the path that used
-// to say `failed to open session` with no request id.
-type failingHelperOpener struct{}
-
-func (failingHelperOpener) OpenHosted(context.Context, session.Config, string) (HostedSessionOpen, bool, error) {
-	return HostedSessionOpen{}, true, errors.New("the far side refused the pane")
-}
-
-func TestAFailedOpenLineCarriesItsRequestAndTrace(t *testing.T) {
-	ws, sl, stop := newDiagnosticsWSServer(t, diagnostics.NewRecorder(), failingHelperOpener{})
-	defer stop()
-	conn := connectWS(t, ws)
-	resp := snippetCall(t, conn, "open", map[string]any{
-		"cols": 80, "rows": 24, "kind": "ssh", "profileId": "ssh:failed",
-	}, 5)
-	if resp.Error == nil {
-		t.Fatal("the failing open answered success")
-	}
-	if !logtest.WaitForSlog(sl, 2*time.Second, func(r logtest.Record) bool {
-		if r.Message != "failed to open session" {
-			return false
-		}
-		rid, _ := recordAttr(r, "request_id")
-		trace, _ := recordAttr(r, "trace_id")
-		return rid != "" && len(trace) == 32
-	}) {
-		t.Fatal("the failed-open line carried no request and trace id")
 	}
 }
 

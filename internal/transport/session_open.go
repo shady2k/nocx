@@ -331,7 +331,7 @@ func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec) (_ OpenedSessio
 		return OpenedSession{}, prepareErr
 	}
 
-	// PHASE TWO — dial, on the execution lane and no domain gate.
+	// PHASE TWO — dial, with no domain gate held.
 	var (
 		sess   session.Session
 		hosted *HostedSessionOpen

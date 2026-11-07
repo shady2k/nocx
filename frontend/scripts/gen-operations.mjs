@@ -66,6 +66,17 @@ ${entries.join('\n')}
 export function callOperationDeclaration(method: string): CallOperationDeclaration | undefined {
   return CALL_OPERATIONS[method]
 }
+
+/** Every failure domain the catalogue names, sorted. The renderer arms its
+ *  per-call deadline from this set (operations/renderer-deadlines.ts), so a
+ *  domain nobody armed cannot exist: a new one is armed by existing. */
+export function catalogueDomains(): string[] {
+  const domains = new Set<string>()
+  for (const declaration of Object.values(CALL_OPERATIONS)) {
+    if (declaration.domain !== '') domains.add(declaration.domain)
+  }
+  return [...domains].sort()
+}
 `
 }
 

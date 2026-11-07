@@ -42,7 +42,7 @@ func TestEveryRegisteredMethodHasOneDeclaration(t *testing.T) {
 func TestARegistrationWithoutADeclarationIsRefused(t *testing.T) {
 	if _, err := buildMethodSpecs([]methodSpec{{
 		method:     "planted.method",
-		submission: control.NewBoundedSubmission(control.NewSemaphore("planted", 1)),
+		submission: control.AsyncSubmission{},
 		validate:   noParams(),
 	}}); err == nil {
 		t.Fatal("a methodSpec with no catalogue handle must not build")
@@ -53,7 +53,7 @@ func TestARegistrationWithTheWrongHandleIsRefused(t *testing.T) {
 	if _, err := buildMethodSpecs([]methodSpec{{
 		method:     "planted.method",
 		op:         catalog.OpAck,
-		submission: control.NewBoundedSubmission(control.NewSemaphore("planted", 1)),
+		submission: control.AsyncSubmission{},
 		validate:   noParams(),
 	}}); err == nil {
 		t.Fatal("a methodSpec whose handle names another method must not build")
@@ -186,7 +186,7 @@ func TestADispatchedInvocationCarriesItsScope(t *testing.T) {
 	server := NewWSServer(logger, newRegWithStub(logger))
 	seen := make(chan *catalog.Scope, 1)
 	server.methods["test.scope"] = reg(
-		control.NewBoundedSubmission(control.NewSemaphore("test-scope", 1)),
+		control.AsyncSubmission{},
 		catalog.OpFsComplete,
 		noParams(),
 		func(_ *wsConn, _ *connState, r Responder) handlerFunc {

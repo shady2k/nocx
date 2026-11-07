@@ -75,7 +75,7 @@ type OpenService interface {
 
 // OpenOperation is the typed operation for the "open" control method, and
 // it is two-phase: Prepare resolves under [config, session], Dial opens the
-// session under the execution lane alone. Run keeps the whole-open form for
+// session with no admission at all. Run keeps the whole-open form for
 // the short compensating paths (closing a session whose ring could not be
 // built), which touch the registry and nothing slow.
 //
@@ -88,17 +88,17 @@ type OpenOperation interface {
 	// Prepare runs fn under the [config, session] conflict gates and no
 	// lane permit — the resolve is store work, not execution.
 	Prepare(context.Context, func(context.Context, OpenService) error) error
-	// Dial runs fn on the execution lane with no domain gate held.
+	// Dial runs fn with no admission held.
 	Dial(context.Context, func(context.Context, OpenService) error) error
 	// Run holds [config, session] and the lane for the whole callback.
 	Run(context.Context, func(context.Context, OpenService) error) error
 }
 
 // NewOpenOperation builds an OpenOperation whose phases acquire configGate
-// before sessionGate (the canonical order), and the execution lane after
-// both have been released.
+// before sessionGate (the canonical order), and nothing after both have been
+// released — the dial is bounded by its own max, not by a worker pool.
 func NewOpenOperation(
-	configGate, sessionGate, lane control.Admission,
+	configGate, sessionGate control.Admission,
 	resolver ProfileResolver,
 	registry session.Registry,
 ) OpenOperation {
@@ -106,8 +106,8 @@ func NewOpenOperation(
 	svc := newOpenService(g, resolver, registry)
 	return &openOperation{
 		prepare: newOperation[OpenService](Adapted("terminal.connect", "opening a terminal uses connection/session ownership and registration"), control.NewComposite(configGate, sessionGate), g, svc),
-		dial:    newOperation[OpenService](Adapted("terminal.connect", "opening a terminal uses connection/session ownership and registration"), control.NewComposite(lane), g, svc),
-		full:    newOperation[OpenService](Adapted("terminal.connect", "opening a terminal uses connection/session ownership and registration"), control.NewComposite(configGate, sessionGate, lane), g, svc),
+		dial:    newOperation[OpenService](Adapted("terminal.connect", "opening a terminal uses connection/session ownership and registration"), control.Unrestricted(), g, svc),
+		full:    newOperation[OpenService](Adapted("terminal.connect", "opening a terminal uses connection/session ownership and registration"), control.NewComposite(configGate, sessionGate), g, svc),
 	}
 }
 

@@ -5,7 +5,7 @@ package transport
 // # Why it rides the IMMEDIATE submission
 //
 // The moment a person needs this method is the moment the control plane is
-// saturated: on 2026-11-05 killing the helper left the server answering
+// overloaded: on 2026-11-05 killing the helper left the server answering
 // "Control plane busy" for every pane, and a diagnostics method that queued
 // behind the same permits would have been refused at exactly that moment.
 // `app.about` already rides the bounded lane and inherits that problem; this
@@ -113,15 +113,14 @@ func admissionViews(admits []control.Admission, now time.Time) []diagnostics.Adm
 	return out
 }
 
-// noteRefusal is the ONE place a control-plane refusal is logged and recorded
-// (nocx-3an1s.1.8). Two callers reach it: the dispatcher for a submission
-// refusal, and capability's operations through the sink the dispatcher put on
-// the request context for a gate or lane refusal.
+// noteRefusal is the ONE place a control-plane admission's answer is logged and
+// recorded (nocx-3an1s.1.8). It records a WAIT that ended: the invocation did
+// not start because its turn ran out, it was cancelled, or its resource is
+// unavailable (ADR-8eej3e66 stage 8 — there is no capacity refusal to record).
 //
 // It is at WARN, in the shipped build, because the owner's 300 MB log held no
-// line about the refusals that were on screen: a request refused at a gate
-// answered with an RPC error and nothing else. `control.saturated` remains the
-// renderer's toast; this is the server's own record of the same fact.
+// line about the refusals that were on screen: a request a gate would not
+// grant answered with an RPC error and nothing else.
 func (s *WSServer) noteRefusal(ctx context.Context, request, method, disposition string, rej control.Rejection) {
 	now := time.Now()
 	holders := make([]diagnostics.Holder, 0, len(rej.Holders))
@@ -148,13 +147,12 @@ func (s *WSServer) noteRefusal(ctx context.Context, request, method, disposition
 	// Through log.From(ctx): the refusal line carries the request id and the
 	// trace id of the frame it refused, the same as every other line of that
 	// exchange, and the log-context ratchet's rule holds for a new call site.
-	log.From(ctx).Warn("control action refused",
+	log.From(ctx).Warn("control action did not start",
 		"method", method,
-		"methodClass", methodClassFor(method),
+		"kind", string(rej.Kind),
 		"request", request,
 		"scope", rej.Scope,
 		"disposition", disposition,
-		"retryAfterMs", rej.RetryAfter.Milliseconds(),
 		"held_ms", oldest.Milliseconds(),
 		"holders", holderText(holders))
 }

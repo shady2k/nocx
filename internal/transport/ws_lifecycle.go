@@ -1188,7 +1188,7 @@ func lifecycleSubmitErrorCode(err error) int {
 // session ownership via connState, so the handlers need connection
 // identity, not just a writer.
 func (s *WSServer) lifecycleSpecs() []methodSpec {
-	sub := control.NewOrderedSubmission("lifecycle", lifecycleQueueDepth)
+	sub := control.NewOrderedSubmission("lifecycle")
 	return []methodSpec{
 		reg(sub, catalog.OpLifecycleSubmitAttempt, params(validateLifecycleSubmitAttemptRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			return func(ctx context.Context, req jsonrpcRequest) { s.handleLifecycleSubmitAttempt(ctx, w, r, state, req) }
@@ -1198,10 +1198,3 @@ func (s *WSServer) lifecycleSpecs() []methodSpec {
 		}),
 	}
 }
-
-// lifecycleQueueDepth bounds the ordered lifecycle queue. The traffic is one
-// submit per command and an occasional recovery ack on a single connection,
-// so the depth only has to absorb a burst; beyond it the submission refuses
-// with the ordinary saturation contract, which both methods answer
-// fail-open.
-const lifecycleQueueDepth = 32

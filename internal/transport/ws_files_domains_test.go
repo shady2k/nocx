@@ -318,3 +318,87 @@ func waitForFilesDomains(t *testing.T, ws *WSServer, ok func(domains.Stats) bool
 	}
 	return fmt.Errorf("filesystem domains never reached the wanted state; last = %+v", last)
 }
+
+// TestFilesWorkBudgetStartsWhenThePermitIsTaken is finding 2 of
+// nocx-3an1s.2.14. ADR-8eej3e66 §3: turn bounds the WAIT and starts at the
+// invocation; max bounds the WORK and starts when the work starts, never
+// renewed. filesDomainDo derived the work context before the bulkhead took a
+// permit, from a deadline measured at the invocation, and never called
+// StartWork — so a read granted after 29 s of waiting had about 1 s of its 30 s
+// budget left, and expired inside a domain that had just started answering.
+//
+// The wait here is 1.2 s rather than 29 s for the reason the neighbouring test
+// gives: a person's turn is thirty seconds and repeating it puts minutes of
+// sleep into one package binary. What is asserted is not a duration but the
+// relation — the budget the work receives is the declaration's max measured
+// from the moment the permit was granted, and the second call waited.
+func TestFilesWorkBudgetStartsWhenThePermitIsTaken(t *testing.T) {
+	base, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	s := &WSServer{filesDomains: domains.New(domains.Options{
+		PerDomain: 1, PersonReserve: 0,
+		AbandonedPerDomain: 4, AbandonedGlobal: 8, HealthyReserve: 2,
+	})}
+
+	// Two invocations, both made now: a real second call began before the
+	// first one's permit was free.
+	heldScope := catalog.Begin(base, catalog.OpFilesList, catalog.Invocation{Origin: catalog.OriginPerson})
+	heldCtx := catalog.WithScope(base, heldScope)
+	queuedScope := catalog.Begin(base, catalog.OpFilesList, catalog.Invocation{Origin: catalog.OriginPerson})
+	queuedCtx := catalog.WithScope(base, queuedScope)
+	t.Cleanup(func() {
+		heldScope.Settle(catalog.OutcomeCompleted)
+		queuedScope.Settle(catalog.OutcomeCompleted)
+	})
+
+	release := make(chan struct{})
+	holding := make(chan struct{})
+	go func() {
+		_ = s.filesDomainDo(heldCtx, nil, "/held", func(context.Context) error {
+			close(holding)
+			<-release
+			return nil
+		})
+	}()
+	<-holding
+
+	started := make(chan time.Duration, 1)
+	done := make(chan error, 1)
+	waiting := make(chan struct{})
+	go func() {
+		done <- s.filesDomainDo(queuedCtx, nil, "/queued", func(callCtx context.Context) error {
+			close(waiting)
+			deadline, ok := callCtx.Deadline()
+			if !ok {
+				started <- 0
+				return nil
+			}
+			started <- time.Until(deadline)
+			return nil
+		})
+	}()
+
+	// The queued call is provably waiting, not merely slow: the only permit is
+	// held by the call above until release closes.
+	select {
+	case <-waiting:
+		t.Fatal("the second call took a permit while the only one was held")
+	case <-time.After(1200 * time.Millisecond):
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("the granted call returned %v", err)
+	}
+	budget := <-started
+
+	max := catalog.OpFilesList.Declaration().Max.Duration()
+	if budget < max-500*time.Millisecond {
+		t.Fatalf("work that began after waiting 1.2 s received %v of its %v budget: max is measured from the invocation, not from the grant",
+			budget.Round(time.Millisecond), max)
+	}
+	// The scope's own record moved with it, so the timer, the record and the
+	// context the provider sees agree: this is the half StartWork owns.
+	if deadline := queuedScope.Deadline(); time.Until(deadline) < max-500*time.Millisecond {
+		t.Fatalf("the scope's max deadline is %v away after the grant, want %v", time.Until(deadline).Round(time.Millisecond), max)
+	}
+}

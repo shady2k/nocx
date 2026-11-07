@@ -1302,9 +1302,9 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
         openedSession = null
         setPhase('failed')
         // The panel names what failed and keeps the Retry — the header
-        // refresh re-asks (phase 'failed' with no binding). A refusal here
+        // refresh re-asks (phase 'failed' with no binding). A failure here
         // is a named local failure, never a sentence about the terminal
-        // being busy: `refusalSentence` owns those words (ADR-8eej3e66 §8).
+        // being busy (ADR-8eej3e66 §8).
         setOpenError(messageOf(e))
       })
   }

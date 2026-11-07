@@ -2753,7 +2753,7 @@ func classifyAskFailure(err error, model string) (content.TerminationReason, str
 
 // answerError maps ask transaction failures to JSON-RPC errors. A conflict
 // in an id supplied by the renderer is invalid params; a gate refusal keeps
-// its control.saturated shape (answerOperationRefusal); anything else is an
+// answerOperationRefusal's shape; anything else is an
 // internal error.
 func (h agentHandlers) answerError(req jsonrpcRequest, err error) {
 	switch {
@@ -2922,14 +2922,14 @@ func derefOrEmpty(s *string) string {
 // agentSpecs declares the agent.* control methods on the CONTENT operation
 // queue (the ask transaction is the ledger — ADR-0019's one writer — so it
 // shares the content domain's gate and queue).
-func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admission, contentGate control.Admission, configOp capability.ConfigOperation, endpointWired bool, noteOp capability.NoteOperation, snippetOp capability.SnippetOperation, skills assistant.SkillLibrary, agentTools agenttools.Registry, credentials credential.Resolver, client assistant.Client, askSub control.Submission) []methodSpec {
+func (s *WSServer) agentSpecs(contentSub control.Submission, contentGate control.Admission, configOp capability.ConfigOperation, endpointWired bool, noteOp capability.NoteOperation, snippetOp capability.SnippetOperation, skills assistant.SkillLibrary, agentTools agenttools.Registry, credentials credential.Resolver, client assistant.Client, askSub control.Submission) []methodSpec {
 	var agentOp capability.AgentOperation
 	if s.contentDB != nil {
-		agentOp = capability.NewAgentOperation(contentGate, lane, s.contentDB)
+		agentOp = capability.NewAgentOperation(contentGate, s.contentDB)
 	}
 	var dumpOp capability.LedgerOperation
 	if s.contentDB != nil {
-		dumpOp = capability.NewLedgerOperation(contentGate, lane, s.contentDB)
+		dumpOp = capability.NewLedgerOperation(contentGate, s.contentDB)
 	}
 	var attemptLedger assistant.AttemptLedger
 	if s.contentDB != nil {

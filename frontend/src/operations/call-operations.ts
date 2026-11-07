@@ -21,6 +21,7 @@ import { createSignal } from 'solid-js'
 import type { Dispatcher, PendingCallView } from '../dispatcher'
 import { callOperationDeclaration } from '../generated/operations'
 import { rendererDeadlineMs } from './renderer-deadlines'
+import { waitingSentence } from './waiting-sentences'
 import type { Operation, OperationSource } from './operations'
 
 /** Waiting under two seconds shows the action's own pending state. Two
@@ -38,8 +39,8 @@ interface WaitingCall {
   call: PendingCallView
   timer: ReturnType<typeof setTimeout> | null
   timerFired: boolean
-  /** The renderer deadline projection, present only for an armed domain.
-   *  None is armed at this stage, so no call gets a timer from it. */
+  /** The renderer deadline projection: turn + max plus the margin, armed for
+   *  every migrated domain (renderer-deadlines.ts). */
   deadlineMs: number | null
 }
 
@@ -78,7 +79,7 @@ export function callOperations(
         {
           id: callRowID(call.id),
           kind: 'call',
-          title: declaration.waiting,
+          title: waitingSentence(call.method, declaration.waiting),
           destination: '',
           machine: '',
           // It has not completed and it has no bytes: the row is the wait
@@ -109,13 +110,14 @@ export function callOperations(
     remove(id)
   }
 
-  dispatcher.onCallPending = onPending
-  dispatcher.onCallSettled = onSettled
+  // A subscription, not an assignment: the call's own settlement is read by
+  // every source that draws the call (install-operations.ts draws the work
+  // the backend does inside it), and one of them must not displace the other.
+  const unsubscribe = [dispatcher.onCallPending(onPending), dispatcher.onCallSettled(onSettled)]
   return {
     source: rows,
     dispose: () => {
-      if (dispatcher.onCallPending === onPending) dispatcher.onCallPending = undefined
-      if (dispatcher.onCallSettled === onSettled) dispatcher.onCallSettled = undefined
+      for (const stop of unsubscribe) stop()
       for (const entry of waiting.values()) {
         if (entry.timer !== null) clearTimeout(entry.timer)
       }

@@ -84,13 +84,13 @@ func openBindingHarness(t *testing.T, factory capability.ProviderFactory) (
 ) {
 	t.Helper()
 	gate := func(name string) control.Admission {
-		return control.NewWaitingSemaphore(name, 1, 4, time.Second)
+		return control.NewWaitingSemaphore(name, 1, time.Second)
 	}
 	registry := newFakeSessionRegistry()
 	s := &fakeSession{id: "s1", kind: session.KindRemote, host: "srv-01"}
 	registry.sessions[s.id] = s
 	op := capability.NewFilesystemOpenOperation(
-		gate("session"), gate("lane"),
+		gate("session"),
 		registry, factory, filesystem.New(),
 	)
 	return func(fn func(context.Context, capability.FilesystemOpenService) error) error {

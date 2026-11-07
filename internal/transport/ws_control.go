@@ -132,6 +132,21 @@ func (s *inflightSubmission) TrySubmit(ctx context.Context, task control.Task) *
 	if !ok {
 		return &control.Rejection{Reason: "server shutting down", Scope: "control"}
 	}
+	// THE START GATE IS AN END TOO (nocx-3an1s.2.17). A queued task whose
+	// owner withdrew it is refused by Start, and the inner submission then
+	// never calls Run — so the release deferred around Run never runs either,
+	// and the registration would sit in the inflight set until the process
+	// ended. Wrap Start: a refusal releases here, before the worker moves on.
+	start := task.Start
+	if start != nil {
+		task.Start = func() bool {
+			if start() {
+				return true
+			}
+			release()
+			return false
+		}
+	}
 	rej := s.inner.TrySubmit(tctx, control.Task{Key: task.Key, Start: task.Start, Run: func(pctx context.Context) {
 		defer release()
 		task.Run(pctx)
@@ -148,39 +163,4 @@ func (s *inflightSubmission) Shutdown() {
 	if inner, ok := s.inner.(control.Shutdownable); ok {
 		inner.Shutdown()
 	}
-}
-
-// saturatedNotifyLimiter rate-limits the control.saturated notification that
-// a refused NOTIFICATION (no id) triggers: it has no response to carry the
-// -32004 error, so the server emits the notification instead — but one per
-// refused frame would flood the wire when a burst of notifications is
-// refused, so the emission is bounded to at most one per (class, scope) per
-// interval. The renderer also deduplicates its toast over a 10 s window;
-// this bound protects the wire itself, independent of the renderer.
-type saturatedNotifyLimiter struct {
-	mu       sync.Mutex
-	interval time.Duration
-	last     map[string]time.Time
-}
-
-// newSaturatedNotifyLimiter builds a limiter that allows at most one
-// notification per key per interval.
-func newSaturatedNotifyLimiter(interval time.Duration) *saturatedNotifyLimiter {
-	return &saturatedNotifyLimiter{interval: interval, last: make(map[string]time.Time)}
-}
-
-// allow reports whether a notification for the key may be emitted now. The
-// key is (methodClass, scope) — server vocabulary both, so no request data
-// reaches the limiter.
-func (l *saturatedNotifyLimiter) allow(class, scope string) bool {
-	key := class + "\x00" + scope
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	now := time.Now()
-	last, ok := l.last[key]
-	if !ok || now.Sub(last) >= l.interval {
-		l.last[key] = now
-		return true
-	}
-	return false
 }

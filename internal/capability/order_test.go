@@ -23,9 +23,8 @@ func orderCtx(turn time.Duration, keys ...string) context.Context {
 }
 
 func TestOrderedOperationsOrderOnTheirOwnResourceOnly(t *testing.T) {
-	order := control.NewResourceOrder("content-order", control.DefaultOrderLimit,
+	order := control.NewResourceOrder("content-order",
 		"store:content", "collection:workspace-layout")
-	lane := control.NewSemaphore("test-lane", 4)
 
 	// A content write is in flight on the store.
 	held, rej := order.TryAcquire(orderCtx(time.Second, "store:content"))
@@ -37,7 +36,7 @@ func TestOrderedOperationsOrderOnTheirOwnResourceOnly(t *testing.T) {
 	// A layout write is a different resource of the same domain: it runs
 	// while the store is held. Under the content gate this was the whole
 	// domain, so it waited.
-	layout := NewLayoutOperation(order, lane, stubDB())
+	layout := NewLayoutOperation(order, stubDB())
 	layoutRan := make(chan struct{})
 	go func() {
 		err := layout.Run(orderCtx(time.Second, "collection:workspace-layout"), func(context.Context, LayoutService) error {
@@ -55,7 +54,7 @@ func TestOrderedOperationsOrderOnTheirOwnResourceOnly(t *testing.T) {
 	}
 
 	// A second content write does wait, and its turn bounds the wait.
-	content := NewContentOperation(order, lane, stubDB())
+	content := NewContentOperation(order, stubDB())
 	err := content.Run(orderCtx(50*time.Millisecond, "store:content"), func(context.Context, ContentService) error {
 		t.Error("the second content write ran while the store was held")
 		return nil
@@ -66,9 +65,8 @@ func TestOrderedOperationsOrderOnTheirOwnResourceOnly(t *testing.T) {
 }
 
 func TestACancelledQueuedMutationNeverStarts(t *testing.T) {
-	order := control.NewResourceOrder("content-order", control.DefaultOrderLimit, "store:content")
-	lane := control.NewSemaphore("test-lane", 4)
-	ledger := NewLedgerOperation(order, lane, stubDB())
+	order := control.NewResourceOrder("content-order", "store:content")
+	ledger := NewLedgerOperation(order, stubDB())
 
 	held, rej := order.TryAcquire(orderCtx(time.Second, "store:content"))
 	if rej != nil {
@@ -104,9 +102,8 @@ func TestACancelledQueuedMutationNeverStarts(t *testing.T) {
 }
 
 func TestAnOrderedOperationMarksItsCallbackAndRefusesNesting(t *testing.T) {
-	order := control.NewResourceOrder("content-order", control.DefaultOrderLimit, "store:content")
-	lane := control.NewSemaphore("test-lane", 4)
-	ledger := NewLedgerOperation(order, lane, stubDB())
+	order := control.NewResourceOrder("content-order", "store:content")
+	ledger := NewLedgerOperation(order, stubDB())
 
 	err := ledger.Run(orderCtx(time.Second, "store:content"), func(ctx context.Context, _ LedgerService) error {
 		if !control.OrderHeld(ctx) {

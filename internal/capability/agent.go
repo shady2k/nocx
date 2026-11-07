@@ -66,10 +66,10 @@ type AgentOperation interface {
 }
 
 // NewAgentOperation builds an AgentOperation that acquires the content gate
-// before the execution lane.
-func NewAgentOperation(contentGate, lane control.Admission, db content.ContentDB) AgentOperation {
+// alone.
+func NewAgentOperation(contentGate control.Admission, db content.ContentDB) AgentOperation {
 	g := &guard{}
-	return newOperation[AgentService](Direct("AgentOperation"), control.NewComposite(contentGate, lane), g, newAgentService(g, db))
+	return newOperation[AgentService](Direct("AgentOperation"), control.NewComposite(contentGate), g, newAgentService(g, db))
 }
 
 func newAgentService(g *guard, db content.ContentDB) *agentService {

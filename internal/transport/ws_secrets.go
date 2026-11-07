@@ -532,28 +532,28 @@ func validateSecretsCaptureDismissRaw(raw json.RawMessage) string {
 }
 
 // secretSpecs declares the secrets.* control methods: the vault-secret mint
-// and usage surface under one SecretOperation ([config, vault] gates), the
-// pure detector (no capability), and the capture settlement under the
-// CaptureSaveOperation ([vault, content] gates — the capture operation needs
-// the content gate, so this builder takes four gates). The operations are
+// and usage surface under one SecretOperation (the one plan for the config and
+// vault stores), the pure detector (no capability), and the capture settlement
+// under the CaptureSaveOperation (the vault's plan and the content order — two
+// admissions that share nothing). The operations are
 // built once here from the wired stores (composition root for this domain);
 // the handlers carry the wired flags that reproduce the old dispatchers'
 // unwired answers.
-func (s *WSServer) secretSpecs(lane control.Admission, configGate, vaultGate, contentGate control.Admission) []methodSpec {
-	secretOp := capability.NewSecretOperation(configGate, vaultGate, lane, s.profiles, s.groups, s.vaultLifecycle, s.credentials)
+func (s *WSServer) secretSpecs(configVault, vaultGate, contentGate control.Admission) []methodSpec {
+	secretOp := capability.NewSecretOperation(configVault, s.profiles, s.groups, s.vaultLifecycle, s.credentials)
 	secretResolver := s.credentialResolver()
-	captureOp := capability.NewCaptureSaveOperation(vaultGate, contentGate, lane, s.vaultLifecycle, s.contentDB)
+	captureOp := capability.NewCaptureSaveOperation(vaultGate, contentGate, s.vaultLifecycle, s.contentDB)
 	vaultWired := s.vaultLifecycle != nil
 	configWired := s.profiles != nil && s.groups != nil
 	contentWired := s.contentDB != nil
-	secretSub := s.operationQueue("secrets")
+	secretSub := s.work
 	// captureSub is ORDERED, not the ordinary bounded queue: captureSave and
 	// secrets.paneClosed share it, and their arrival order is load-bearing. A pane's
 	// destruction is the same registry operation family as a save, and a
 	// save submitted after the pane's close must observe the destruction
 	// (nocx-tsajw) — the single FIFO worker guarantees it, where a bounded
 	// queue would race the two goroutines.
-	captureSub := control.NewOrderedSubmission("capture", s.domainQueueDepth)
+	captureSub := control.NewOrderedSubmission("capture")
 	return []methodSpec{
 		whenAvailable(regResponder(secretSub, catalog.OpSecretsUsage, params(validateSecretsUsageRaw), func(r Responder) handlerFunc {
 			h := secretsHandlers{op: secretOp, r: r, vaultWired: vaultWired, configWired: configWired, secrets: secretResolver}
@@ -571,7 +571,7 @@ func (s *WSServer) secretSpecs(lane control.Admission, configGate, vaultGate, co
 			h := secretsHandlers{op: secretOp, r: r, vaultWired: vaultWired, configWired: configWired, secrets: secretResolver}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMint(ctx, req) }
 		}), func() bool { return secretOp != nil }, "vault not available"),
-		regResponder(s.lane, catalog.OpSecretsDetect, params(validateSecretsDetectRaw), func(r Responder) handlerFunc {
+		regResponder(s.work, catalog.OpSecretsDetect, params(validateSecretsDetectRaw), func(r Responder) handlerFunc {
 			h := secretsDetectHandlers{log: s.log, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDetect(req) }
 		}),
@@ -579,7 +579,7 @@ func (s *WSServer) secretSpecs(lane control.Admission, configGate, vaultGate, co
 			h := captureSaveHandlers{op: captureOp, captures: s.captures, r: r, vaultWired: vaultWired, contentWired: contentWired}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleCaptureSave(ctx, req) }
 		}), func() bool { return captureOp != nil }, "vault not available"),
-		regResponder(s.lane, catalog.OpSecretsCaptureDismiss, params(validateSecretsCaptureDismissRaw), func(r Responder) handlerFunc {
+		regResponder(s.work, catalog.OpSecretsCaptureDismiss, params(validateSecretsCaptureDismissRaw), func(r Responder) handlerFunc {
 			h := captureDismissHandlers{captures: s.captures, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleCaptureDismiss(ctx, req) }
 		}),

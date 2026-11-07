@@ -203,11 +203,9 @@ func TestSessionInputFlowsWhileOutboundSaturated(t *testing.T) {
 	// A fresh connection attaches to the same session and types into it —
 	// BEFORE the flood starts. The session and its input path must survive
 	// the saturated connection (AD-9); the read loop must never wait behind
-	// outbound. The attach is itself an admitted control method now, so it
-	// must land while the lane is free: under the wired executor a
-	// saturated ordinary lane refuses control work with the retryable
-	// -32004 (the saturation contract), and what this test watches is the
-	// DATA path.
+	// outbound. The attach is itself a control method, so it must land while
+	// the data plane is stalled: nothing refuses admission (ADR-8eej3e66
+	// stage 8), and what this test watches is the DATA path.
 	connB := connectWS(t, ws)
 	t.Cleanup(func() { _ = connB.Close() })
 	attachResp := jsonrpcCallWithID(t, connB, "attach", map[string]any{"sessionId": sid, "offset": 0}, 2)

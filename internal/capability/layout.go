@@ -72,10 +72,10 @@ type LayoutOperation interface {
 }
 
 // NewLayoutOperation builds a LayoutOperation that acquires the content gate
-// before the execution lane.
-func NewLayoutOperation(contentGate, lane control.Admission, db content.ContentDB) LayoutOperation {
+// before nothing else.
+func NewLayoutOperation(contentGate control.Admission, db content.ContentDB) LayoutOperation {
 	g := &guard{}
-	return newOperation[LayoutService](Direct("LayoutOperation"), control.NewComposite(contentGate, lane), g, newLayoutService(g, db))
+	return newOperation[LayoutService](Direct("LayoutOperation"), control.NewComposite(contentGate), g, newLayoutService(g, db))
 }
 
 func newLayoutService(g *guard, db content.ContentDB) *layoutService {

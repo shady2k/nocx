@@ -9,13 +9,18 @@ import (
 // Reasons a Refusal carries. They are fixed server vocabulary: a handler maps
 // them to the declaration's outcome, and nothing a caller sends can reach
 // them.
+//
+// THERE IS NO QUEUE-FULL REASON (ADR-8eej3e66 stage 8). A caller that cannot
+// start waits under its declared turn, and a wait that runs out answers the
+// declaration's "did not start"; the only refusal left is a failure domain
+// whose abandoned workers reached their bound, which is a named outcome
+// rather than a capacity answer.
 const (
-	ReasonQueueFull     = "queue full"
 	ReasonDomainSuspect = "domain suspect"
 )
 
-// Refusal is a bound that refused work without waiting: the queue is full, or
-// the failure domain has exhausted its abandoned workers and is suspect.
+// Refusal is a bound that refused work without waiting: the failure domain
+// has exhausted its abandoned workers and is suspect.
 type Refusal struct {
 	Scope  string
 	Domain string
@@ -38,14 +43,14 @@ func (r *Refusal) Error() string {
 // finds its context cancelled gives the key back without running; neither
 // order can start a cancelled mutation or strand the key.
 //
-// Capacity bounds running and queued callers across every key, so a burst of
-// new checkouts cannot allocate one worker each without limit.
+// There is no count bound: a caller that cannot have its key waits under its
+// declared turn (ADR-8eej3e66 stage 8). What bounds the queue is what bounded
+// the work — one connection may have only its credit window outstanding, and
+// every waiter leaves at its turn.
 type Keyed struct {
-	name     string
-	capacity int
-	mu       sync.Mutex
-	admitted int // running + queued, across every key
-	queues   map[string]*keyQueue
+	name   string
+	mu     sync.Mutex
+	queues map[string]*keyQueue
 }
 
 type keyQueue struct {
@@ -61,13 +66,9 @@ type keyWaiter struct {
 	ready   chan struct{}
 }
 
-// NewKeyed returns a per-key gate. Capacity bounds every admitted caller,
-// running and queued; a negative capacity is a programming error.
-func NewKeyed(name string, capacity int) *Keyed {
-	if capacity < 0 {
-		panic("schedule: negative keyed capacity for " + name)
-	}
-	return &Keyed{name: name, capacity: capacity, queues: make(map[string]*keyQueue)}
+// NewKeyed returns a per-key gate.
+func NewKeyed(name string) *Keyed {
+	return &Keyed{name: name, queues: make(map[string]*keyQueue)}
 }
 
 // Name identifies the gate for diagnostics.
@@ -93,22 +94,12 @@ func (k *Keyed) Acquire(ctx context.Context, key string) (func(), error) {
 	k.mu.Lock()
 	q := k.queues[key]
 	if q == nil {
-		if k.admitted >= k.capacity {
-			k.mu.Unlock()
-			return nil, &Refusal{Scope: k.name, Reason: ReasonQueueFull}
-		}
 		k.queues[key] = &keyQueue{held: true}
-		k.admitted++
 		k.mu.Unlock()
 		return k.releaseFunc(key), nil
 	}
-	if k.admitted >= k.capacity {
-		k.mu.Unlock()
-		return nil, &Refusal{Scope: k.name, Reason: ReasonQueueFull}
-	}
 	w := &keyWaiter{ready: make(chan struct{})}
 	q.waiters = append(q.waiters, w)
-	k.admitted++
 	k.mu.Unlock()
 
 	select {
@@ -132,7 +123,6 @@ func (k *Keyed) Acquire(ctx context.Context, key string) (func(), error) {
 			return nil, ctx.Err()
 		}
 		k.removeWaiter(q, w)
-		k.admitted--
 		k.cleanup(key, q)
 		k.mu.Unlock()
 		return nil, ctx.Err()
@@ -183,7 +173,6 @@ func (k *Keyed) release(key string) {
 		return
 	}
 	q.held = false
-	k.admitted--
 	k.cleanup(key, q)
 }
 
@@ -226,9 +215,6 @@ type Limits struct {
 	// PersonReserved is the part of Capacity background work may never hold:
 	// the permits left for a person while background saturates a domain.
 	PersonReserved int
-	// Queue bounds waiters per domain; a caller beyond it is refused rather
-	// than queued without limit.
-	Queue int
 	// AbandonedPerDomain is how many workers whose deadline expired may still
 	// be running on one domain before the domain is suspect.
 	AbandonedPerDomain int
@@ -243,7 +229,7 @@ func (l Limits) validate(name string) {
 	if l.PersonReserved < 0 || l.PersonReserved > l.Capacity {
 		panic("schedule: bulkhead " + name + " reserves more than it holds")
 	}
-	if l.Queue < 0 || l.AbandonedPerDomain <= 0 || l.AbandonedGlobal <= 0 {
+	if l.AbandonedPerDomain <= 0 || l.AbandonedGlobal <= 0 {
 		panic("schedule: bulkhead " + name + " has an invalid bound")
 	}
 }
@@ -290,7 +276,8 @@ func NewBulkhead(name string, limits Limits) *Bulkhead {
 func (b *Bulkhead) Name() string { return b.name }
 
 // Acquire takes one permit on domain for class, waiting for capacity up to
-// ctx's deadline. A suspect domain and a full queue refuse immediately.
+// ctx's deadline. Only a suspect domain refuses immediately; a caller that
+// cannot have a permit waits under its declared turn.
 func (b *Bulkhead) Acquire(ctx context.Context, domain string, class Class) (*Lease, error) {
 	if domain == "" {
 		return nil, &Refusal{Scope: b.name, Reason: "failure domain required"}
@@ -320,11 +307,6 @@ func (b *Bulkhead) Acquire(ctx context.Context, domain string, class Class) (*Le
 		b.takeLocked(st, class)
 		b.mu.Unlock()
 		return &Lease{bulkhead: b, domain: domain, class: class}, nil
-	}
-	if st.waiting() >= b.limits.Queue {
-		b.dropIfIdleLocked(domain, st)
-		b.mu.Unlock()
-		return nil, &Refusal{Scope: b.name, Domain: domain, Reason: ReasonQueueFull}
 	}
 	w := &bulkWaiter{ready: make(chan struct{})}
 	if class == ClassPerson {

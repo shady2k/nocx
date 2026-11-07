@@ -173,22 +173,15 @@ func (h probeHandlers) handleConnectionsTest(ctx context.Context, req jsonrpcReq
 		return
 	}
 
-	// The probe runs OFF the read loop under the probe admission
-	// (ws_control.go): a 30-second SSH probe must not freeze the socket that
-	// feeds every other tab, and a disconnect must be able to cancel it. The
-	// task context derives from the connection context, so the disconnect
-	// cancels the probe; the admission permit is released when the task
-	// returns, cancelled or not — that frees the slot for the next
-	// connection. A refused submit (one probe already in flight) answers the
-	// control-saturated error.
-	// The dispatch admitted this task via the probe submission (the probe
-	// admission composed with the lane, registered in the inflight set
-	// BEFORE TrySubmit so shutdown cancels it and waits, bounded, for it).
-	// The task context derives from the connection, so a disconnect cancels
-	// the probe; the admission permit frees when the task returns, cancelled
-	// or not — that frees the slot for the next connection. A refusal (one
-	// probe already in flight) was answered by the dispatcher with the
-	// control-saturated error.
+	// The probe runs OFF the read loop: a 30-second SSH probe must not freeze
+	// the socket that feeds every other tab, and a disconnect must be able to
+	// cancel it. The task context derives from the connection context, so the
+	// disconnect cancels the probe.
+	// The dispatch handed this task to the work submission, registered in the
+	// inflight set BEFORE TrySubmit so shutdown cancels it and waits, bounded,
+	// for it. The task context derives from the connection, so a disconnect
+	// cancels the probe. Nothing is refused for capacity (ADR-8eej3e66 §7):
+	// another probe running beside this one costs a goroutine, not a permit.
 	h.runProbe(ctx, h.r, req.ID, host, connectCfg)
 }
 

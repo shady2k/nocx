@@ -68,6 +68,47 @@ func TestAMutationThatNeverStartedMayBeRetriedUnderItsOwnIdentity(t *testing.T) 
 	}
 }
 
+// TestAReplacedAttemptCannotWriteTheRetryItSanctioned is the identity's
+// window (nocx-3an1s.2.17): the record is the ATTEMPT's handle, not the
+// identity's. An invocation that expired while queued records "not started",
+// which sanctions the retry; the retry is admitted, and only then does the
+// expired invocation reach its own end. That end answers its own caller and
+// must change nothing — the retry is running, so a third invocation is refused,
+// and the retry's answer is the one retained.
+func TestAReplacedAttemptCannotWriteTheRetryItSanctioned(t *testing.T) {
+	s := newMutationStore(newClock().now)
+	first, _ := s.Begin("m-1", "vault.unseal")
+	first.NotStarted()
+
+	second, refusal := s.Begin("m-1", "vault.unseal")
+	if second == nil {
+		t.Fatalf("the sanctioned retry was refused: %+v", refusal)
+	}
+	if second == first {
+		t.Fatal("the retry holds the replaced attempt's record; its answer is not its own")
+	}
+
+	// The expired attempt ends after the retry took the identity over.
+	first.NotStarted()
+	first.Settled(OutcomeNotStarted)
+
+	if got := s.Answer("m-1"); got.Answer != AnswerUnknown {
+		t.Fatalf("answer while the retry runs = %+v, want outcome-unknown", got)
+	}
+	third, refused := s.Begin("m-1", "vault.unseal")
+	if third != nil {
+		t.Fatal("a second invocation was admitted beside the retry")
+	}
+	if refused.Answer != AnswerUnknown || refused.Operation != "vault.unseal" {
+		t.Fatalf("replay refusal = %+v, want outcome-unknown for vault.unseal", refused)
+	}
+
+	second.Answered(AnsweredResult)
+	if got := s.Answer("m-1"); got.Answer != AnswerDone {
+		t.Fatalf("answer after the retry answered = %+v, want done", got)
+	}
+}
+
 func TestAWithdrawnOrExpiredMutationAnswersOutcomeUnknown(t *testing.T) {
 	for _, outcome := range []Outcome{OutcomeCancelled, OutcomeExpired} {
 		s := newMutationStore(newClock().now)
@@ -79,6 +120,71 @@ func TestAWithdrawnOrExpiredMutationAnswersOutcomeUnknown(t *testing.T) {
 			t.Fatalf("%s: answer = %+v, want outcome-unknown", outcome, got)
 		}
 	}
+}
+
+// TestARecordReadmittedAsTheOrderCompactsStaysEvictable (nocx-3an1s.2.17):
+// the map and the insertion order are one fact, and a record in the map with
+// no entry in the order is one eviction can never pick.
+//
+// Begin removes an expired record and then compacts the order, which drops the
+// removed key's entry — the map no longer holds it. A new record inserted
+// afterwards, under a key already "seen", was never appended, so it lived in
+// the map and in no order entry.
+func TestARecordReadmittedAsTheOrderCompactsStaysEvictable(t *testing.T) {
+	c := newClock()
+	s := newMutationStore(c.now)
+
+	// A full store, every record settled so all of them are evictable.
+	for i := 0; i < MaxRetained; i++ {
+		record, _ := s.Begin(fmt.Sprintf("m-%d", i), "settings.set")
+		record.Answered(AnsweredResult)
+	}
+
+	// Past the retention bound, and most of them asked for once: those are
+	// forgotten while the order keeps their entries, which is what makes the
+	// next prune compact.
+	c.advance(time.Duration(RetentionMillis)*time.Millisecond + time.Second)
+	const gone = MaxRetained/2 + 200
+	for i := 0; i < gone; i++ {
+		if got := s.Answer(fmt.Sprintf("m-%d", i)); got.Answer != AnswerNoRecord {
+			t.Fatalf("m-%d did not expire: %+v", i, got)
+		}
+	}
+
+	// An expired identity still in the map, retried at the moment the prune
+	// compacts. Its key must keep exactly one place in the order.
+	const retried = "m-900"
+	record, refusal := s.Begin(retried, "settings.set")
+	if record == nil {
+		t.Fatalf("the retry was refused: %+v", refusal)
+	}
+	if n := orderCount(s, retried); n != 1 {
+		t.Fatalf("the readmitted key holds %d places in the insertion order, want 1", n)
+	}
+
+	// And eviction must be able to reach it: settle it, then admit past the
+	// bound until every older record has gone.
+	record.Answered(AnsweredResult)
+	for i := 0; i < MaxRetained; i++ {
+		next, _ := s.Begin(fmt.Sprintf("n-%d", i), "settings.set")
+		next.Answered(AnsweredResult)
+		if len(s.byKey) > MaxRetained {
+			t.Fatalf("the store holds %d records, want at most %d", len(s.byKey), MaxRetained)
+		}
+	}
+	if _, ok := s.byKey[retried]; ok {
+		t.Fatal("the readmitted record is in the map and in no order entry; eviction can never pick it")
+	}
+}
+
+func orderCount(s *MutationStore, key string) int {
+	n := 0
+	for _, k := range s.order {
+		if k == key {
+			n++
+		}
+	}
+	return n
 }
 
 func TestAnAnswerArrivingAfterACancelIsKept(t *testing.T) {

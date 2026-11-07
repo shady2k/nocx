@@ -2,7 +2,7 @@ package app
 
 // After a typed ssh attempt whose child domain never helloed, and whose
 // session has closed with a nonzero status, the next control requests on the
-// same connection must be answered — not refused with the -32004 saturation
+// same connection must be answered — not refused for capacity
 // error ("Control plane busy", nocx-3an1s.1.2).
 //
 // The incident has no backend log, so this is the first DONE WHEN test: it
@@ -120,7 +120,7 @@ func (p *blockingEndPTY) EndSession(context.Context) error {
 }
 
 // typedBusyResponse is one JSON-RPC answer, kept raw so the assertion can see
-// the -32004 payload rather than a flattened message.
+// the error code rather than a flattened message.
 type typedBusyResponse struct {
 	id    int
 	raw   json.RawMessage
@@ -254,19 +254,25 @@ func (w *typedBusyWire) awaitExit(t *testing.T, sid string) typedBusyExit {
 	}
 }
 
+// capacityRefusalCode is the -32004 the control plane used to answer a
+// refusal with. ADR-8eej3e66 stage 8 removed it; these tests assert it never
+// comes back, which is why the number is spelled here and nowhere in the
+// product.
+const capacityRefusalCode = -32004
+
 // assertAnsweredNotBusy is the bead's assertion: an answer arrived, and it is
-// not the saturation refusal. Any other error passes — the claim is about
-// admission, not about the answer's own subject.
+// not the removed capacity refusal. Any other error passes — the claim is
+// about admission, not about the answer's own subject.
 func assertAnsweredNotBusy(t *testing.T, resp typedBusyResponse, what string) {
 	t.Helper()
-	if !resp.error || resp.code != transport.SaturationErrorCode {
+	if !resp.error || resp.code != capacityRefusalCode {
 		return
 	}
 	var data struct {
 		Scope string `json:"scope"`
 	}
 	_ = json.Unmarshal(resp.data, &data)
-	t.Fatalf("%s was refused as busy (scope=%q): %s", what, data.Scope, resp.raw)
+	t.Fatalf("%s was refused for capacity (scope=%q): %s", what, data.Scope, resp.raw)
 }
 
 // typedBusyStack is the production typed-path composition plus a real
@@ -289,22 +295,18 @@ type typedBusyStack struct {
 
 func startTypedBusyStack(t *testing.T, helloTimeout time.Duration) *typedBusyStack {
 	t.Helper()
-	return startTypedBusyStackWith(t, helloTimeout, 0, newExitPTY())
+	return startTypedBusyStackWith(t, helloTimeout, newExitPTY())
 }
 
-// startTypedBusyStackWith is the same stack with the two levers a test needs
-// to name a holder: the execution lane's capacity, and the session channel
-// whose teardown the test can hold. Zero lane capacity keeps the production
-// default.
-func startTypedBusyStackWith(t *testing.T, helloTimeout time.Duration, laneCapacity int, pt pty.Pty) *typedBusyStack {
+// startTypedBusyStackWith is the same stack with the session channel whose
+// teardown the test can hold. There is no execution-lane capacity to name any
+// more: ADR-8eej3e66 stage 8 removed the lane, so the only holder a test can
+// create is the session's own teardown.
+func startTypedBusyStackWith(t *testing.T, helloTimeout time.Duration, pt pty.Pty) *typedBusyStack {
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
 	reg := session.New(logger, &onePTYFactory{pt: pt})
-	opts := []transport.WSServerOption{}
-	if laneCapacity > 0 {
-		opts = append(opts, transport.WithControlLaneCapacity(laneCapacity))
-	}
-	ws := transport.NewWSServer(logger, reg, opts...)
+	ws := transport.NewWSServer(logger, reg)
 	ctx, cancel := context.WithCancel(context.Background())
 	if err := ws.Start(ctx); err != nil {
 		cancel()
@@ -434,7 +436,7 @@ func askEveryAdmissionScopeWithClosed(
 		method string
 		params any
 	}{
-		{"global scope (the execution lane)", "app.about", map[string]any{}},
+		{"global scope (no admission at all)", "app.about", map[string]any{}},
 		{"session scope (the session domain gate)", "sessions.status", map[string]any{"profileIds": []string{}}},
 		{"the closed session's id", closedMethod, closedParams},
 	}
@@ -496,12 +498,11 @@ func TestTypedSSHHelloWindowHoldsNoAdmissionOfItsOwn(t *testing.T) {
 // completion is still in flight. The next control requests on the same
 // connection must be answered.
 //
-// The lane capacity is stated at one so a single holder is observable; with
-// the production capacity it takes eight such holders to exhaust the lane,
-// which is the same defect observed later.
+// The teardown is held, and the control plane must go on answering beside it:
+// there is no lane for it to exhaust, and no capacity answer to give.
 func TestTypedSSHCloseInFlightLeavesTheControlPlaneAnswering(t *testing.T) {
 	pt := newBlockingEndPTY()
-	s := startTypedBusyStackWith(t, 25*time.Millisecond, 1, pt)
+	s := startTypedBusyStackWith(t, 25*time.Millisecond, pt)
 
 	select {
 	case cause := <-s.loss:

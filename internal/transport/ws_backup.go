@@ -109,22 +109,22 @@ type backupSpecs struct {
 	saver     func(string, string) (*backup.SaveResult, error)
 }
 
-func (s *WSServer) backupSpecs(lane control.Admission, configGate control.Admission, stores *capability.StoreGuard) []methodSpec {
+func (s *WSServer) backupSpecs(configGate control.Admission, stores *capability.StoreGuard) []methodSpec {
 	var op capability.BackupOperation
 	var restoreOp capability.BackupOperation
 	if s.backupService != nil {
-		op = capability.NewBackupOperation(configGate, lane, s.backupService)
-		restoreOp = capability.NewRestoreOperation(stores, catalog.OpBackupRestore.Declaration(), lane, s.backupService)
+		op = capability.NewBackupOperation(configGate, s.backupService)
+		restoreOp = capability.NewRestoreOperation(stores, catalog.OpBackupRestore.Declaration(), s.backupService)
 	}
 	h := backupSpecs{operation: op, restoreOp: restoreOp, saver: s.backupFileSaver}
 	return []methodSpec{
-		regResponder(s.operationQueue("backup"), catalog.OpBackupCreate, noParams(), func(r Responder) handlerFunc {
+		regResponder(s.work, catalog.OpBackupCreate, noParams(), func(r Responder) handlerFunc {
 			return func(ctx context.Context, req jsonrpcRequest) { h.create(ctx, r, req) }
 		}),
-		regResponder(s.operationQueue("backup"), catalog.OpBackupPreview, params(validateBackupPreviewRaw), func(r Responder) handlerFunc {
+		regResponder(s.work, catalog.OpBackupPreview, params(validateBackupPreviewRaw), func(r Responder) handlerFunc {
 			return func(ctx context.Context, req jsonrpcRequest) { h.preview(ctx, r, req) }
 		}),
-		regResponder(s.operationQueue("backup"), catalog.OpBackupRestore, params(validateBackupRestoreRaw), func(r Responder) handlerFunc {
+		regResponder(s.work, catalog.OpBackupRestore, params(validateBackupRestoreRaw), func(r Responder) handlerFunc {
 			return func(ctx context.Context, req jsonrpcRequest) { h.restore(ctx, r, req) }
 		}),
 		regResponder(s.dialogSub, catalog.OpBackupSaveToFile, params(validateBackupSaveRaw), func(r Responder) handlerFunc {
@@ -161,7 +161,7 @@ func (h backupSpecs) create(ctx context.Context, r Responder, req jsonrpcRequest
 		return err
 	})
 	if err != nil {
-		h.error(r, req.ID, "backup.create", err)
+		h.error(ctx, r, req, err)
 		return
 	}
 	_ = r.TryResult(req.ID, mustMarshal(result))
@@ -184,7 +184,7 @@ func (h backupSpecs) preview(ctx context.Context, r Responder, req jsonrpcReques
 		return err
 	})
 	if err != nil {
-		h.error(r, req.ID, "backup.preview", err)
+		h.error(ctx, r, req, err)
 		return
 	}
 	_ = r.TryResult(req.ID, mustMarshal(result))
@@ -207,7 +207,7 @@ func (h backupSpecs) restore(ctx context.Context, r Responder, req jsonrpcReques
 		return err
 	})
 	if err != nil {
-		h.error(r, req.ID, "backup.restore", err)
+		h.error(ctx, r, req, err)
 		return
 	}
 	_ = r.TryResult(req.ID, mustMarshal(result))
@@ -231,12 +231,14 @@ func (h backupSpecs) saveToFile(_ context.Context, r Responder, req jsonrpcReque
 	_ = r.TryResult(req.ID, mustMarshal(result))
 }
 
-func (h backupSpecs) error(r Responder, id json.RawMessage, method string, err error) {
+func (h backupSpecs) error(ctx context.Context, r Responder, req jsonrpcRequest, err error) {
 	var refused *capability.RefusedError
 	if errors.As(err, &refused) {
-		_ = r.TryError(id, saturationRPCError(method, &refused.Rejection))
+		answerSubmissionRejection(ctx, r, req, &refused.Rejection)
 		return
 	}
+	id := req.ID
+	method := req.Method
 	code := -32603
 	if errors.Is(err, backup.ErrInvalidDocument) {
 		code = -32602

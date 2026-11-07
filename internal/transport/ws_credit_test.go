@@ -105,7 +105,6 @@ func newCreditTestServerWithLog(t *testing.T, lane, window int, rec *diagnostics
 	sl := logtest.Slog(t)
 	logger := log.NewSlogAdapter(sl)
 	opts := []WSServerOption{
-		WithControlLaneCapacity(lane),
 		WithCreditWindow(window),
 		WithProfileResolver(&openProfileResolver{host: "host.example:22"}),
 	}
@@ -174,7 +173,7 @@ func TestTheReservedUnsealGetsThroughAFullWindowAndAnOverrunIsDisconnected(t *te
 
 	// The window is full of ordinary work and the unlock still gets through.
 	unseal := snippetCall(t, conn, "vault.unseal", map[string]any{"means": "passphrase", "secret": "x"}, 3)
-	if unseal.Error != nil && unseal.Error.Code == SaturationErrorCode {
+	if unseal.Error != nil && unseal.Error.Code == RemovedCapacityCode {
 		t.Fatalf("vault.unseal was refused for capacity while the ordinary window was full: %+v", unseal.Error)
 	}
 
@@ -234,7 +233,7 @@ func TestAClientWithinItsWindowReceivesNoCapacityAnswer(t *testing.T) {
 	conn := connectWS(t, ws)
 	for i := 0; i < 6; i++ {
 		resp := snippetCall(t, conn, "profiles.list", map[string]any{}, 100+i)
-		if resp.Error != nil && resp.Error.Code == SaturationErrorCode {
+		if resp.Error != nil && resp.Error.Code == RemovedCapacityCode {
 			t.Fatalf("call %d of a one-at-a-time client was refused for capacity: %+v", i+1, resp.Error)
 		}
 	}
@@ -296,7 +295,7 @@ func TestACancelledCallReturnsItsCreditBeforeTheNextFrame(t *testing.T) {
 	// call is admitted even though the cancelled handler has not returned.
 	snippetCall(t, conn, "rpc.cancel", map[string]any{"id": 1}, 2)
 	resp := snippetCall(t, conn, "profiles.list", map[string]any{}, 3)
-	if resp.Error != nil && resp.Error.Code == SaturationErrorCode {
+	if resp.Error != nil && resp.Error.Code == RemovedCapacityCode {
 		t.Fatalf("the call after a cancellation was refused for capacity: %+v", resp.Error)
 	}
 }

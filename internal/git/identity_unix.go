@@ -14,11 +14,11 @@ import (
 func mountDomain(path string) string {
 	info, err := os.Stat(path)
 	if err != nil {
-		return "checkout:" + path
+		return PathFailureDomain(path)
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
-		return "checkout:" + path
+		return PathFailureDomain(path)
 	}
 	return "mount:" + strconv.FormatUint(uint64(stat.Dev), 10) //nolint:unconvert,gosec // stat.Dev is int32 on darwin (conversion required; device id, overflow benign), uint64 on linux
 }

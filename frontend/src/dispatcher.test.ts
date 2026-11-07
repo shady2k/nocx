@@ -1,24 +1,24 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { EndpointProvider, EndpointResult } from './endpoint'
-import { CONNECT_ATTEMPT_TIMEOUT_MS, Dispatcher, HEARTBEAT_IDLE_WINDOW_MS } from './dispatcher'
-import { log } from './log'
+import {
+  CONNECT_ATTEMPT_TIMEOUT_MS,
+  Dispatcher,
+  HEARTBEAT_IDLE_WINDOW_MS,
+  isNotStartedAnswer,
+} from './dispatcher'
 import { clearToasts, toasts } from './ui/toast'
 
 /**
- * The saturation error the executor sends for a refused control request
- * (contracts/control.saturated.schema.json): code -32004, fixed reason
- * vocabulary, the admission's scope, retryable, and a retry hint.
+ * The answer a call that never started carries
+ * (contracts/operation.expired.schema.json): code -32005 with the catalogue's
+ * fixed reason. ADR-8eej3e66 stage 8 replaced the -32004 capacity refusal with
+ * this, and the mutation-replay answer shares the code.
  */
-const SATURATION_ERROR = {
-  code: -32004,
-  message: 'Control plane busy',
-  data: {
-    reason: 'control-saturated',
-    scope: 'exec',
-    retryable: true,
-    retryAfterMs: 250,
-  },
+const NOT_STARTED = {
+  code: -32005,
+  message: 'The call did not start',
+  data: { reason: 'not-started' },
 }
 
 const SUCCESS: EndpointResult = {
@@ -187,8 +187,8 @@ async function connectedWith(d: Dispatcher, window: number): Promise<void> {
   await flush()
 }
 
-function deliverSaturation(id: number): void {
-  socket().deliverText({ jsonrpc: '2.0', id, error: SATURATION_ERROR })
+function deliverNotStarted(id: number): void {
+  socket().deliverText({ jsonrpc: '2.0', id, error: NOT_STARTED })
 }
 
 beforeEach(() => {
@@ -1031,116 +1031,45 @@ describe('dispatcher heartbeat', () => {
   })
 })
 
-describe('control-plane refusals (ADR-8eej3e66 stage 1)', () => {
-  // Stage 1 removes the refusal TOAST and nothing underneath: the backend
-  // still refuses, the wire discriminator still arrives, and every surface a
-  // person uses now owns the refusal it caused. What the dispatcher owes is
-  // (a) a sentence that names the cause without the words "busy" or "try
-  // again in a moment", (b) a record with the invocation's origin, and (c) no
-  // toast on either path — the failure is shown where it happened or not at
-  // all, never centrally over whatever the person is doing.
-  it('rejects a person call with a sentence naming the cause, and raises no toast', async () => {
+describe('a call that did not start (ADR-8eej3e66 stage 8)', () => {
+  // There is no capacity refusal any more: the backend answers a call whose
+  // declared lifetime ran out before it started with -32005 and the reason
+  // `not-started`. The dispatcher's whole debt is to expose that fact to the
+  // surface that asked — no sentence of its own, no toast, no invented cause —
+  // and `isNotStartedAnswer` is the one place it is recognised.
+  it('rejects the caller with the wire answer and raises no toast', async () => {
     const provider = new TestEndpointProvider()
     const d = new Dispatcher(provider)
     await connected(d)
     const call = d.call('ssh.connect', {})
-    const id = socket().requests()[0].id!
-    socket().deliverText({
-      jsonrpc: '2.0',
-      id,
-      error: { ...SATURATION_ERROR, data: { ...SATURATION_ERROR.data, scope: 'filesystem' } },
-    })
+    deliverNotStarted(socket().requests()[0].id!)
 
-    // The refusal still rejects the caller's promise with the full error, so
-    // a surface can branch on the discriminator.
-    await expect(call).rejects.toMatchObject({ code: -32004 })
+    await expect(call).rejects.toMatchObject({ code: -32005 })
     const err = (await call.catch((e: unknown) => e)) as Error
-    expect(err.message).toContain('refused')
-    expect(err.message).toContain('file operations')
+    expect(err.message).toBe('The call did not start')
     expect(err.message.toLowerCase()).not.toContain('busy')
-    expect(err.message.toLowerCase()).not.toContain('try again in a moment')
+    expect(isNotStartedAnswer(err)).toBe(true)
 
     await vi.dynamicImportSettled()
     expect(toasts()).toHaveLength(0)
   })
 
-  it('a background refusal is quiet to the person and recorded with its origin', async () => {
+  it('does not claim a different failure is "not started"', async () => {
     const provider = new TestEndpointProvider()
     const d = new Dispatcher(provider)
     await connected(d)
-    const warn = vi.spyOn(log, 'warn')
-    const call = d.call('files.list', {}, undefined, { origin: 'background' })
-    const id = socket().requests()[0].id!
-
-    deliverSaturation(id)
-
-    await expect(call).rejects.toMatchObject({ code: -32004 })
-    await vi.dynamicImportSettled()
-    expect(toasts()).toHaveLength(0)
-    const record = warn.mock.calls.find((c) => String(c[0]).includes('control request refused'))
-    expect(record).toBeDefined()
-    expect(record?.[1]).toMatchObject({ origin: 'background', method: 'files.list' })
-  })
-
-  it('records a person refusal with origin person, and treats an absent origin as person', async () => {
-    const provider = new TestEndpointProvider()
-    const d = new Dispatcher(provider)
-    await connected(d)
-    const warn = vi.spyOn(log, 'warn')
-
-    const implicit = d.call('profiles.list', {})
-    implicit.catch(() => {})
-    deliverSaturation(socket().requests()[0].id!)
-    await expect(implicit).rejects.toMatchObject({ code: -32004 })
-
-    const explicit = d.call('profiles.list', {}, undefined, { origin: 'person' })
-    explicit.catch(() => {})
-    deliverSaturation(socket().requests()[1].id!)
-    await expect(explicit).rejects.toMatchObject({ code: -32004 })
-
-    const origins = warn.mock.calls
-      .filter((c) => String(c[0]).includes('control request refused'))
-      .map((c) => (c[1] as { origin?: string }).origin)
-    expect(origins).toEqual(['person', 'person'])
-  })
-
-  it('records a refused notification instead of toasting it (control.saturated carries no id)', async () => {
-    const provider = new TestEndpointProvider()
-    const d = new Dispatcher(provider)
-    await connected(d)
-    const warn = vi.spyOn(log, 'warn')
-
+    const call = d.call('files.list', {})
     socket().deliverText({
       jsonrpc: '2.0',
-      method: 'control.saturated',
-      params: { methodClass: 'ssh', scope: 'probe' },
-    })
-    await vi.dynamicImportSettled()
-
-    expect(toasts()).toHaveLength(0)
-    const record = warn.mock.calls.find((c) => String(c[0]).includes('control action refused'))
-    expect(record).toBeDefined()
-    expect(record?.[1]).toMatchObject({ methodClass: 'ssh', scope: 'probe' })
-  })
-
-  it('names a scope this build does not know without inventing a cause', async () => {
-    const provider = new TestEndpointProvider()
-    const d = new Dispatcher(provider)
-    await connected(d)
-    const call = d.call('ssh.connect', {})
-    const id = socket().requests()[0].id!
-    socket().deliverText({
-      jsonrpc: '2.0',
-      id,
+      id: socket().requests()[0].id!,
       error: {
-        ...SATURATION_ERROR,
-        data: { ...SATURATION_ERROR.data, scope: 'exec' },
+        code: -32005,
+        message: 'This mutation already ran',
+        data: { reason: 'mutation-replayed' },
       },
     })
     const err = (await call.catch((e: unknown) => e)) as Error
-    expect(err.message).toContain('refused')
-    expect(err.message).not.toContain('exec')
-    expect(err.message.toLowerCase()).not.toContain('busy')
+    expect(isNotStartedAnswer(err)).toBe(false)
   })
 
   it('leaves an ordinary RPC error untouched — rejects with its own message', async () => {
@@ -1277,8 +1206,8 @@ describe('credit window (ADR-8eej3e66 §7)', () => {
     await connectedWith(d, 1)
     const announced: number[] = []
     const settled: number[] = []
-    d.onCallPending = (call) => announced.push(call.id)
-    d.onCallSettled = (id) => settled.push(id)
+    d.onCallPending((call) => announced.push(call.id))
+    d.onCallSettled((id) => settled.push(id))
 
     void d.call('vault.seal', {}) // fills the window
     const waiting = d.call('vault.seal', {}, undefined, { origin: 'person' })
@@ -1303,8 +1232,8 @@ describe('credit window (ADR-8eej3e66 §7)', () => {
 
     const announced: Array<{ id: number; method: string; cancel: () => void }> = []
     const settled: Array<[number, string]> = []
-    d.onCallPending = (call) => announced.push(call)
-    d.onCallSettled = (id, settlement) => settled.push([id, settlement])
+    d.onCallPending((call) => announced.push(call))
+    d.onCallSettled((id, settlement) => settled.push([id, settlement]))
 
     void d.call('vault.seal', {}) // the whole window
     const queued = d.call('vault.status', {})
@@ -1442,9 +1371,10 @@ describe('credit window (ADR-8eej3e66 §7)', () => {
     await connectedWith(d, 1)
     const announced: { id: number; method: string; startedAt: number }[] = []
     const settled: number[] = []
-    d.onCallPending = (call) =>
-      announced.push({ id: call.id, method: call.method, startedAt: call.startedAt })
-    d.onCallSettled = (id) => settled.push(id)
+    d.onCallPending((call) =>
+      announced.push({ id: call.id, method: call.method, startedAt: call.startedAt }),
+    )
+    d.onCallSettled((id) => settled.push(id))
 
     void d.call('vault.seal', {}, undefined, { origin: 'background' }) // fills the window
     const queued = d.call('vault.status', {}) // waits for credit under its turn
@@ -1482,5 +1412,137 @@ describe('credit window (ADR-8eej3e66 §7)', () => {
     answer(socket().requests()[1].id!, { locked: false })
     await expect(queued).resolves.toEqual({ locked: false })
     expect(settled).toEqual([announced[0].id])
+  })
+
+  // THE WITHDRAWAL GIVES THE CREDIT BACK WITH THE CANCEL, AND BEFORE ANYTHING
+  // SPENDS IT (ADR-8eej3e66 §7). The server releases a withdrawn request's
+  // credit when it handles `rpc.cancel` on the read loop
+  // (internal/transport/ws_rpc_cancel.go), and a peer that sends one past its
+  // window is disconnected there and then (internal/transport/credit.go).
+  // Freeing the slot here and pumping the queue first puts one request past
+  // the window on the wire, so the backend hangs up on a well-behaved client
+  // and every waiting call loses its answer.
+  it('asks the backend to give the credit back BEFORE the call that spends it', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    await connectedWith(d, 1)
+    const announced: number[] = []
+    d.onCallPending((call) => announced.push(call.id))
+
+    const first = d.call('agent.cancel', {})
+    first.catch(() => {})
+    const queued = d.call('files.close', { path: '/tmp/x' })
+    queued.catch(() => {})
+    await flush()
+    expect(
+      socket()
+        .requests()
+        .map((r) => r.method),
+    ).toEqual(['agent.cancel'])
+    const wire = socket().requests()[0].id!
+
+    d.cancel(announced[0])
+    await flush()
+
+    const frames = socket().requests()
+    expect(frames.map((r) => r.method)).toEqual(['agent.cancel', 'rpc.cancel', 'files.close'])
+    // The cancel names the id the backend is working on, not the call's.
+    expect((frames[1] as { params?: { id?: number } }).params).toEqual({ id: wire })
+    await expect(first).rejects.toMatchObject({ name: 'AbortError' })
+  })
+
+  it('asks the backend to give the credit back BEFORE the call that spends it, for a mutation too', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    await connectedWith(d, 1)
+    const announced: number[] = []
+    d.onCallPending((call) => announced.push(call.id))
+
+    const mutation = d.call('vault.seal', {}) // outcome-unknown: a mutation
+    mutation.catch(() => {})
+    const queued = d.call('vault.status', {})
+    queued.catch(() => {})
+    await flush()
+
+    d.cancel(announced[0])
+    await flush()
+
+    // The first three frames, because a withdrawn mutation goes on to ask the
+    // record what became of it — and that ask waits for credit like any call.
+    expect(
+      socket()
+        .requests()
+        .slice(0, 3)
+        .map((r) => r.method),
+    ).toEqual(['vault.seal', 'rpc.cancel', 'vault.status'])
+
+    // The record's answer is what the caller is owed, so the withdrawal does
+    // not settle the caller until it lands.
+    answer(socket().requests()[2].id!, { locked: false })
+    await flush()
+    const ask = socket().requests()[3]
+    expect(ask.method).toBe('operation.outcome')
+    answer(ask.id!, { outcome: 'not-started', operation: 'vault.seal' })
+    await expect(mutation).rejects.toMatchObject({ name: 'AbortError' })
+  })
+})
+
+// THE TWO IDENTITIES OF ONE CALL (ADR-8eej3e66 §8). The wire id is per
+// attempt and it is all the backend knows: `rpc.cancel` names it, and so does
+// `operation.row` (internal/transport/ws_operation_rows.go). The id a row and
+// `cancel()` name is this renderer's, and it survives a sealed retry. The two
+// counters are separate, so they agree only while every call is sent in the
+// order it was made — one queued call that a person's call overtakes, or one
+// that expires before it is sent, and every later wire id names a different
+// call.
+describe('a call has two identities, and the backend only knows one', () => {
+  function answer(id: number, result: unknown = {}): void {
+    socket().deliverText({ jsonrpc: '2.0', id, result })
+  }
+
+  it('answers the wire id with the id its row and cancel() use, and never the other way', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    await connectedWith(d, 1)
+    const announced: { id: number; method: string }[] = []
+    d.onCallPending((call) => announced.push({ id: call.id, method: call.method }))
+
+    const filler = d.call('agent.cancel', {}) // observe 1, wire 1
+    filler.catch(() => {})
+    // A background poll takes the second call's place and waits.
+    const poll = d.call('files.close', { path: '/poll' }, undefined, { origin: 'background' })
+    poll.catch(() => {})
+    // A person's call is made third and goes first: it is sent as wire id 2
+    // while its own id is 3, and the poll keeps id 2.
+    const send = d.call('files.close', { path: '/send' })
+    send.catch(() => {})
+    await flush()
+    // The background poll is not announced: its row is a person's question
+    // (ADR-8eej3e66 §8), so only the two person calls are.
+    expect(announced.map((call) => call.method)).toEqual(['agent.cancel', 'files.close'])
+    answer(socket().requests()[0].id!, {})
+    await flush()
+    expect(
+      socket()
+        .requests()
+        .map((r) => r.method),
+    ).toEqual(['agent.cancel', 'files.close'])
+
+    // THE CALL ON THE WIRE IS A DIFFERENT CALL FROM THE ONE THAT HOLDS THE
+    // SAME NUMBER.
+    expect(d.callIDForRequest(2)).toBe(3)
+    expect(d.callIDForRequest(1)).toBeNull() // answered: no live call
+    expect(d.callIDForRequest('2')).toBeNull() // ids this renderer mints are numbers
+
+    // And the withdrawal of the call on the wire reaches THAT call, not the
+    // one whose own id happens to be its wire id.
+    d.cancel(d.callIDForRequest(2)!)
+    await flush()
+    await expect(send).rejects.toMatchObject({ name: 'AbortError' })
+    // The poll was not withdrawn: it is sent as the credit comes back.
+    expect(
+      socket()
+        .requests()
+        .map((r) => r.method),
+    ).toEqual(['agent.cancel', 'files.close', 'rpc.cancel', 'files.close'])
+    answer(socket().requests()[3].id!, {})
+    await expect(poll).resolves.toEqual({})
   })
 })

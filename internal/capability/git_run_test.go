@@ -3,6 +3,7 @@ package capability
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,7 +14,7 @@ import (
 
 func testGitBulkhead() *schedule.Bulkhead {
 	return schedule.NewBulkhead("git", schedule.Limits{
-		Capacity: 8, PersonReserved: 2, Queue: 32, AbandonedPerDomain: 8, AbandonedGlobal: 32,
+		Capacity: 8, PersonReserved: 2, AbandonedPerDomain: 8, AbandonedGlobal: 32,
 	})
 }
 
@@ -27,8 +28,9 @@ func TestGitRunStartsAfterItsTurnAndCompletes(t *testing.T) {
 	var ran atomic.Bool
 	var finished atomic.Int32
 	allow := testAllowance(time.Second, time.Second)
-	err := gitRun(context.Background(), allow, func(context.Context) (func(), func(), error) {
-		return func() { finished.Add(1) }, func() { t.Error("abandoned a completed call") }, nil
+	err := gitRun(context.Background(), allow, func(_ context.Context, h *holdings) error {
+		h.took(func() { finished.Add(1) }, func() { t.Error("abandoned a completed call") })
+		return nil
 	}, func(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			t.Errorf("work ctx already dead: %v", err)
@@ -56,10 +58,10 @@ func TestGitRunTurnExpiryNeverStarts(t *testing.T) {
 	allow := testAllowance(30*time.Millisecond, time.Second)
 
 	start := make(chan struct{})
-	err := gitRun(ctx, allow, func(actx context.Context) (func(), func(), error) {
+	err := gitRun(ctx, allow, func(actx context.Context, _ *holdings) error {
 		close(start)
 		<-actx.Done() // the queue: the turn deadline arrives here
-		return nil, nil, actx.Err()
+		return actx.Err()
 	}, func(context.Context) error {
 		ran.Store(true)
 		return nil
@@ -90,8 +92,9 @@ func TestGitRunMaxExpiryAbandonsTheWorker(t *testing.T) {
 	workDone := make(chan error, 1)
 	allow := testAllowance(time.Second, 60*time.Millisecond)
 
-	err := gitRun(context.Background(), allow, func(context.Context) (func(), func(), error) {
-		return func() { finished.Add(1) }, func() { abandoned.Add(1) }, nil
+	err := gitRun(context.Background(), allow, func(_ context.Context, h *holdings) error {
+		h.took(func() { finished.Add(1) }, func() { abandoned.Add(1) })
+		return nil
 	}, func(ctx context.Context) error {
 		<-ctx.Done() // a hung provider that honours cancellation
 		workDone <- ctx.Err()
@@ -130,8 +133,9 @@ func TestGitRunCallerCancellationIsNotAnExpiry(t *testing.T) {
 	var abandons atomic.Int32
 	done := make(chan error, 1)
 	go func() {
-		done <- gitRun(ctx, allow, func(context.Context) (func(), func(), error) {
-			return func() {}, func() { abandons.Add(1) }, nil
+		done <- gitRun(ctx, allow, func(_ context.Context, h *holdings) error {
+			h.took(func() {}, func() { abandons.Add(1) })
+			return nil
 		}, func(wctx context.Context) error {
 			close(started)
 			<-wctx.Done()
@@ -154,9 +158,106 @@ func TestGitRunCallerCancellationIsNotAnExpiry(t *testing.T) {
 func TestGitRunAcquireFailurePassesThrough(t *testing.T) {
 	want := errors.New("domain suspect")
 	err := gitRun(context.Background(), testAllowance(time.Second, time.Second),
-		func(context.Context) (func(), func(), error) { return nil, nil, want },
+		func(context.Context, *holdings) error { return want },
 		func(context.Context) error { t.Fatal("work ran after a failed acquire"); return nil })
 	if !errors.Is(err, want) {
 		t.Fatalf("gitRun err = %v, want the acquire failure", err)
+	}
+}
+
+// ── who decides that a call started ──────────────────────────────────────
+
+// A start the worker claimed is never overridden by the caller's turn: this
+// is the race the two selects lost. The worker acquired, looked at the turn,
+// published its start and entered the mutation; then the caller's select had
+// BOTH arms ready and could take its deadline arm, answering "did not start —
+// nothing changed" while the mutation ran (ADR-8eej3e66 §4).
+func TestAStartTheWorkerClaimedIsNeverAnsweredNotStarted(t *testing.T) {
+	d := newStartDecision()
+	want := gitStart{expired: make(chan struct{})}
+	if !d.begin(want) {
+		t.Fatal("the worker's claim was refused with nobody else settled")
+	}
+	if d.expire(context.DeadlineExceeded) {
+		t.Fatal("the caller's turn overrode a start the worker had already claimed")
+	}
+	got, err := d.outcome()
+	if err != nil {
+		t.Fatalf("outcome after a claimed start = %v, want the start", err)
+	}
+	if got.expired != want.expired {
+		t.Fatal("the caller did not read the start the worker published")
+	}
+}
+
+// The other order: a caller whose turn ran out first owns the answer, and the
+// worker that arrives afterwards must not run anything.
+func TestATurnThatExpiredFirstRefusesTheLateWorker(t *testing.T) {
+	d := newStartDecision()
+	if !d.expire(context.DeadlineExceeded) {
+		t.Fatal("the expiry did not settle a decision nobody else had taken")
+	}
+	if d.begin(gitStart{expired: make(chan struct{})}) {
+		t.Fatal("a worker started after the caller had answered that nothing did")
+	}
+	if _, err := d.outcome(); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("outcome = %v, want the turn's deadline", err)
+	}
+	if d.expire(errors.New("second")) {
+		t.Fatal("a settled decision was settled a second time")
+	}
+}
+
+// A worker whose acquisition failed answers with its own reason, and a caller
+// whose turn ends after that reads the worker's reason rather than its own.
+func TestAFailedAcquisitionSettlesTheDecisionOnce(t *testing.T) {
+	d := newStartDecision()
+	want := errors.New("domain suspect")
+	d.fail(want)
+	if d.expire(context.DeadlineExceeded) {
+		t.Fatal("the caller's turn overrode the worker's own failure")
+	}
+	if _, err := d.outcome(); !errors.Is(err, want) {
+		t.Fatalf("outcome = %v, want the acquire failure", err)
+	}
+	if d.begin(gitStart{expired: make(chan struct{})}) {
+		t.Fatal("the work started after its acquisition failed")
+	}
+}
+
+// Exactly one side settles, however the two arrive: a worker claiming its
+// start and a caller whose turn ran out, raced a hundred times under -race.
+// Nothing here can be true of two independent selects — that shape let both
+// of them answer.
+func TestTheStartDecisionSettlesExactlyOnceUnderContention(t *testing.T) {
+	for round := 0; round < 100; round++ {
+		d := newStartDecision()
+		claims := make(chan bool, 2)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			claims <- d.begin(gitStart{expired: make(chan struct{})})
+		}()
+		go func() {
+			defer wg.Done()
+			claims <- d.expire(context.DeadlineExceeded)
+		}()
+		wg.Wait()
+		close(claims)
+		wins := 0
+		for ok := range claims {
+			if ok {
+				wins++
+			}
+		}
+		if wins != 1 {
+			t.Fatalf("round %d: %d sides settled one decision, want exactly 1", round, wins)
+		}
+		<-d.ready // settled, so the caller may read it
+		start, err := d.outcome()
+		if (err == nil) != (start.expired != nil) {
+			t.Fatalf("round %d: the decision carries a start and an error, or neither: %v", round, err)
+		}
 	}
 }

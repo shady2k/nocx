@@ -32,11 +32,11 @@ type SnippetOperation interface {
 }
 
 // NewSnippetOperation builds a SnippetOperation that acquires configGate
-// then the execution lane, and hands the callback a guard-bound snippet
+// and hands the callback a guard-bound snippet
 // service.
-func NewSnippetOperation(configGate, lane control.Admission, svc *snippet.Service) SnippetOperation {
+func NewSnippetOperation(configGate control.Admission, svc *snippet.Service) SnippetOperation {
 	g := &guard{}
-	return newOperation[SnippetService](Direct("SnippetOperation"), control.NewComposite(configGate, lane), g, newSnippetService(g, svc))
+	return newOperation[SnippetService](Direct("SnippetOperation"), control.NewComposite(configGate), g, newSnippetService(g, svc))
 }
 
 // newSnippetService builds the concrete guard-bound snippet service.

@@ -72,7 +72,7 @@
 // states it.
 
 import { createMemo, createSignal, untrack } from 'solid-js'
-import { isSaturationRefusal, RpcError } from '../dispatcher'
+import { isNotStartedAnswer, RpcError } from '../dispatcher'
 import { POLL_INTERVAL_MS } from '../ports'
 import type { ActiveOrigin } from '../pane-content'
 import type { GitPanelServices, GitDiffSide } from './git-client'
@@ -298,21 +298,12 @@ function isUnknownBinding(e: unknown): boolean {
 }
 
 /** True when `data` is a git error payload (contracts/git.error.schema.json)
- *  carrying exactly the given reason. Mirrors the dispatcher's
- *  isSaturationData: the payload is checked by shape, then the fixed reason
- *  discriminates. */
+ *  carrying exactly the given reason: the payload is checked by shape, then
+ *  the fixed reason discriminates. */
 function isGitErrorReason(data: unknown, reason: GitError['reason']): boolean {
   if (typeof data !== 'object' || data === null) return false
   const d = data as GitError
   return d.reason === reason
-}
-
-/** True when the call never started: its turn expired while it waited for
- *  the checkout or for capacity (ADR-8eej3e66 §2, -32005 reason
- *  not-started). Nothing changed, so the remedy is the same action once
- *  more — the same remedy a refusal owes, without the refusal's sentence. */
-function isOperationNotStarted(e: unknown): boolean {
-  return e instanceof RpcError && isGitErrorReason(e.data, 'not-started')
 }
 
 /** The status DTO is a complete wire snapshot; its arrays are ordered rows.
@@ -1045,13 +1036,11 @@ export function createGitStore(
       reResolve()
       return
     }
-    if (isSaturationRefusal(e) || isOperationNotStarted(e)) {
+    if (isNotStartedAnswer(e)) {
       // The call never ran. Nothing is stale, nothing happened, and the one
       // useful thing to say is what failed plus the same action once more —
       // never a sentence about the terminal being busy, and never a toast
-      // over whatever else the person is doing (ADR-8eej3e66 stage 1). A
-      // call that did not start answers in the same shape deliberately:
-      // "did not start" and "was refused" are both "nothing changed".
+      // over whatever else the person is doing (ADR-8eej3e66 §8).
       refusedRetry = action.retry
       setMutationRefused(`${action.what}. ${messageOf(e)}`)
       finishMutationPoll(ctx)

@@ -6,7 +6,7 @@ package transport
 // switch: it looks the method up and calls registration.Submission.TrySubmit
 // — the submission decides whether the work runs now (immediate), on a worker
 // goroutine under the lane (admission-backed), or never (refused, which the
-// caller answers with the saturation error / notification).
+// caller is answered with the declaration's own outcome).
 //
 // The ingress-critical set is closed and VALIDATED at construction. A handler
 // that wrongly claims immediate recreates the original bug: a blocking
@@ -30,20 +30,30 @@ import (
 )
 
 // ingressCriticalMethods is the closed set of methods that run inline on the
-// read loop via control.ImmediateSubmission. buildMethodSpecs enforces the
-// set in both directions: a method in it must be registered immediate, and no
-// other method may be. The set is deliberate and closed — a handler that
-// wrongly claims immediate recreates the original bug (a blocking handler on
-// the read loop freezes every tab). It grows only for a handler whose
-// non-blocking shape is proven and whose latency the read loop can afford:
+// read loop via control.ImmediateSubmission, and take no credit. buildMethodSpecs
+// enforces the set in both directions: a method in it must be registered
+// immediate, and no other method may be. The set is deliberate and closed — a
+// handler that wrongly claims immediate recreates the original bug (a blocking
+// handler on the read loop freezes every tab). It grows only for a handler
+// whose non-blocking shape is proven and whose latency the read loop can
+// afford, and its members are ADR-8eej3e66 §7's rescue traffic: a resolution,
+// a cancellation, a liveness probe, the credit advertisement itself and the
+// diagnostics a person reads when everything else is stuck.
+//
 // agent.laneInteractivity is a mutex-guarded state update whose consumer —
 // the run lease, a pending requestor under the ask stream — waits on the
-// transition, so a report queued behind a full lane would delay the
-// awaiting-takeover transition and a lease that has not seen it would keep
-// enforcing its bounds on a TUI the human now owns.
-// transport.ping is a liveness probe and must remain answerable while the
-// ordinary lane is busy; its handler only reads the clock and enqueues a
-// response.
+// transition, so a report queued behind other work would delay the
+// awaiting-takeover transition. transport.ping is a liveness probe; its
+// handler only reads the clock and enqueues a response.
+// ingressCritical reports whether a method is answered inline on the read
+// loop. It is the one question the dispatch path asks of the set (whether a
+// turn deadline can even apply: an inline answer never queues), and it keeps
+// the map itself private to this file.
+func ingressCritical(method string) bool {
+	_, ok := ingressCriticalMethods[method]
+	return ok
+}
+
 var ingressCriticalMethods = map[string]struct{}{
 	"ack":                          {},
 	"vault.unlockResolved":         {},
@@ -62,19 +72,19 @@ var ingressCriticalMethods = map[string]struct{}{
 	"host.resolved": {},
 	// The lane interactivity report (ADR-0020 decision 3): the run lease
 	// waits on the awaiting-takeover transition it feeds, so it must never
-	// queue behind the lane either. Handler: a mutex update, microseconds.
+	// queue behind other work. Handler: a mutex update, microseconds.
 	"agent.laneInteractivity": {},
 	// transport.credit is the credit advertisement itself (ADR-8eej3e66
 	// §7). It is the first frame a client sends and must be answered before
-	// the client may send anything ordinary, so it takes no credit and no
-	// lane: a window whose own advertisement waited for the window is the
-	// deadlock the advertisement exists to prevent.
+	// the client may send anything ordinary, so it takes no credit: a window
+	// whose own advertisement waited for the window is the deadlock the
+	// advertisement exists to prevent.
 	"transport.credit": {},
 	"transport.ping":   {},
 	"rpc.cancel":       {},
 	// app.diagnostics (nocx-3an1s.1.8): the moment a person needs it is the
-	// moment the lane is full, so a lane permit would make it unavailable at
-	// exactly the wrong time. Its handler is bounded by construction — a
+	// moment everything else is stuck, so a wait or a credit would make it
+	// unavailable at exactly the wrong time. Its handler is bounded by construction — a
 	// mutex-guarded snapshot of fixed-size rings, one stat, and a goroutine
 	// COUNT; the stack summary is read only while the process is small enough
 	// for it to be a millisecond (see GoroutineSummary). It runs on a person's
@@ -380,51 +390,4 @@ func whenAvailable(spec methodSpec, available func() bool, unavailable string) m
 // the *wsConn directly.
 func regResponder(sub control.Submission, op catalog.Method, v paramsValidator, build func(r Responder) handlerFunc) methodSpec {
 	return reg(sub, op, v, func(_ *wsConn, _ *connState, r Responder) handlerFunc { return build(r) })
-}
-
-// methodClassFor maps a refused method to its coarse server-side class for
-// the control.saturated notification. The class is server vocabulary (the
-// schema's "never the raw method name"): the first dot-segment, with the
-// session-plane methods mapped to "session".
-func methodClassFor(method string) string {
-	for i := range len(method) {
-		if method[i] == '.' {
-			prefix := method[:i]
-			if class, ok := coarseMethodClasses[prefix]; ok {
-				return class
-			}
-			return prefix
-		}
-	}
-	return "session"
-}
-
-// coarseMethodClasses maps the known method-name prefixes to their coarse
-// classes. Unknown prefixes pass through as their own segment; the classes
-// exist so the renderer groups refusals by product area, never by raw method.
-var coarseMethodClasses = map[string]string{
-	"profiles":    "config",
-	"groups":      "config",
-	"endpoints":   "config",
-	"settings":    "config",
-	"uistate":     "config",
-	"secrets":     "secrets",
-	"vault":       "vault",
-	"git":         "git",
-	"files":       "fs",
-	"fs":          "fs",
-	"history":     "history",
-	"export":      "export",
-	"shell":       "shell",
-	"sshConfig":   "ssh",
-	"tunnel":      "tunnel",
-	"ports":       "ports",
-	"dialog":      "dialog",
-	"connections": "connections",
-	"sessions":    "session",
-	// The api.* surface is one product area to a person — "API testing" —
-	// however many method families it grows, so both prefixes map to one
-	// class. The renderer groups refusals by product area, never by raw
-	// method name.
-	"api": "api",
 }

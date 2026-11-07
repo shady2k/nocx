@@ -468,10 +468,11 @@ func (p *Provider) Canonical(ctx context.Context, path string) (string, error) {
 // lifecycle (spec §5.1).
 func (p *Provider) Close() error { return nil }
 
-// DomainKey names the failure domain a path draws on: the mount it belongs
-// to, by device id (ADR-8eej3e66 §6). It reads the kernel's mount table and
-// never touches the path — see mounts.go for why that distinction is the
-// whole point.
+// DomainKey names the failure domain a path draws on: the mount its reads
+// really reach, by device id (ADR-8eej3e66 §6). The mount table answers for
+// the path's own mount without touching it, and the symlinks that lead out of
+// that mount are followed by reading them where they live, never by reading the
+// mount they name — see mounts.go for why that line is the whole point.
 func (p *Provider) DomainKey(path string) filesystem.Domain {
 	if dev, ok := mountDevice(path); ok {
 		return filesystem.Domain{Kind: "mount", ID: dev}

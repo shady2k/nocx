@@ -49,7 +49,7 @@ type GitOpenService interface {
 // GitOpenOperation is the typed operation for git.open, and it is two-phase
 // for the reason OpenOperation is (nocx-l21ib.1, nocx-zg3k3.14.17): Resolve
 // runs under the session gate alone, Open under the checkout's failure-domain
-// bulkhead and the execution lane. On an ssh session the open is a helper
+// bulkhead. On an ssh session the open is a helper
 // round trip — a lease, a uname, the open, the first status — and the session
 // gate is capacity one for every session request of every pane. Held across
 // that, a reloaded window's few ssh panes filled its wait queue and every
@@ -63,23 +63,24 @@ type GitOpenOperation interface {
 	AssistantOperation
 	// Resolve runs fn under the session gate and nothing else.
 	Resolve(context.Context, func(context.Context, GitOpenService) error) error
-	// Open runs fn under the checkout's bulkhead and the execution lane, no
-	// session gate held. The declaration's turn and max are enforced; the
+	// Open runs fn under the checkout's bulkhead, no session gate held. The declaration's turn and max are enforced; the
 	// failure domain is read from the session and the cwd the open names.
 	Open(ctx context.Context, sess session.Session, cwd string, fn func(context.Context, GitOpenService) error) error
 }
 
 // NewGitOpenOperation builds the git.open operation.
 func NewGitOpenOperation(
-	sessionGate control.Admission, bulkhead *schedule.Bulkhead, lane control.Admission,
+	sessionGate control.Admission, bulkhead *schedule.Bulkhead,
 	registry session.Registry, factory GitOpenFactory, reg *registry.Registry,
 ) GitOpenOperation {
 	g := &guard{}
 	disposition := Adapted("git.open", "opening a repository resolves a session and selects its helper or local binding")
 	return &gitOpenOperation{
 		resolve:  newOperation[GitOpenService](disposition, control.NewComposite(sessionGate), g, newGitOpenService(g, registry, factory, reg)),
-		bulkhead: bulkhead, lane: lane, guard: g,
+		bulkhead: bulkhead, guard: g,
 		svc: newGitOpenService(g, registry, factory, reg), disposition: disposition,
+		provisionalDomain: openProvisionalDomain,
+		domain:            openFailureDomain,
 	}
 }
 
@@ -88,10 +89,17 @@ func NewGitOpenOperation(
 type gitOpenOperation struct {
 	resolve     *operation[GitOpenService]
 	bulkhead    *schedule.Bulkhead
-	lane        control.Admission
 	guard       *guard
 	svc         GitOpenService
 	disposition Disposition
+	// provisionalDomain and domain are where the open's failure domain is
+	// read: the first without touching the disk, the second with the stat
+	// that names the mount. They are fields rather than direct calls so the
+	// tests that hold the derivation open can prove the permit is taken
+	// before it and that the caller's answer counts the worker abandoned;
+	// the constructor supplies the real ones.
+	provisionalDomain func(session.Session, string) string
+	domain            func(session.Session, string) string
 }
 
 func (o *gitOpenOperation) Disposition() Disposition { return o.disposition }
@@ -102,18 +110,45 @@ func (o *gitOpenOperation) Resolve(ctx context.Context, fn func(context.Context,
 
 func (o *gitOpenOperation) Open(ctx context.Context, sess session.Session, cwd string, fn func(context.Context, GitOpenService) error) error {
 	allow, _ := allowanceFromContext(ctx)
-	domain := openFailureDomain(sess, cwd)
-	return gitRun(ctx, allow, func(waitCtx context.Context) (func(), func(), error) {
-		lease, err := o.bulkhead.Acquire(waitCtx, domain, schedule.Class(gitClass(allow.Origin)))
+	class := schedule.Class(gitClass(allow.Origin))
+	return gitRun(ctx, allow, func(waitCtx context.Context, h *holdings) error {
+		// THE PERMIT IS TAKEN BEFORE THE DOMAIN IS DERIVED. The derivation
+		// reads the cwd's device — one stat — and a stat on a hung NFS or
+		// FUSE mount never returns. On the caller it ran before gitRun's
+		// lifetime existed, so the turn, the cancellation and the max all
+		// arrived at a goroutine blocked in the kernel and the action's
+		// promise stayed pending for ever; on the worker it was work, but work
+		// that held nothing, so its stuck goroutines were invisible to the
+		// domain's breaker and repeated opens grew them without limit. Now the
+		// provisional domain is held while the disk is read, and the caller's
+		// answer counts it abandoned (ADR-8eej3e66 §6).
+		provisional := o.provisionalDomain(sess, cwd)
+		lease, err := o.bulkhead.Acquire(waitCtx, provisional, class)
 		if err != nil {
-			return nil, nil, gitBulkheadError(ctx, allow, err)
+			return gitBulkheadError(ctx, allow, err)
 		}
-		permit, rejection := o.lane.TryAcquire(waitCtx)
-		if rejection != nil {
-			lease.Release()
-			return nil, nil, gitRefused(ctx, rejection)
+		h.took(lease.Release, lease.Abandon)
+
+		// A stat that answers names the mount, and the open draws on that
+		// one: the provisional key is the path, which is what the derivation
+		// itself answers when it cannot read the mount. The two permits are
+		// taken one at a time, never nested.
+		resolved := o.domain(sess, cwd)
+		if resolved == provisional {
+			return nil
 		}
-		return func() { permit.Release(); lease.Release() }, lease.Abandon, nil
+		lease.Release()
+		if cerr := waitCtx.Err(); cerr != nil {
+			// The call settled while the domain was being read. Nothing may
+			// start, and nothing more may be taken.
+			return cerr
+		}
+		lease, err = o.bulkhead.Acquire(waitCtx, resolved, class)
+		if err != nil {
+			return gitBulkheadError(ctx, allow, err)
+		}
+		h.took(lease.Release, lease.Abandon)
+		return nil
 	}, func(workCtx context.Context) error {
 		o.guard.begin()
 		defer o.guard.end()
@@ -126,10 +161,26 @@ func (o *gitOpenOperation) Open(ctx context.Context, sess session.Session, cwd s
 // remote one.
 func openFailureDomain(sess session.Session, cwd string) string {
 	if sess.Kind() != session.KindLocal {
-		return "remote:" + string(sess.ID())
+		return remoteFailureDomain(sess)
 	}
 	return git.FailureDomain(cwd)
 }
+
+// openProvisionalDomain is the same question asked without reading the disk:
+// a remote open reads nothing for its answer, and a local one has its path's
+// own domain until the stat names the mount. It is the key the permit is
+// taken on before openFailureDomain runs, and the two agree wherever the
+// derivation cannot reach the disk at all (git.PathFailureDomain).
+func openProvisionalDomain(sess session.Session, cwd string) string {
+	if sess.Kind() != session.KindLocal {
+		return remoteFailureDomain(sess)
+	}
+	return git.PathFailureDomain(cwd)
+}
+
+// remoteFailureDomain is what fails together for work on a far host: the
+// helper session that reaches it.
+func remoteFailureDomain(sess session.Session) string { return "remote:" + string(sess.ID()) }
 
 // newGitOpenService builds the concrete git.open service bound to guard g.
 func newGitOpenService(g *guard, registry session.Registry, factory GitOpenFactory, reg *registry.Registry) *gitOpenService {
@@ -245,12 +296,13 @@ type GitBindingOperation interface {
 }
 
 // NewGitBindingOperation builds the git-binding operation. order serialises
-// mutations per checkout; bulkhead bounds execution per checkout mount; lane
-// is the execution lane this migration still holds.
-func NewGitBindingOperation(order *schedule.Keyed, bulkhead *schedule.Bulkhead, lane control.Admission, reg *registry.Registry) GitBindingOperation {
+// mutations per checkout; bulkhead bounds execution per checkout mount. There
+// is no third admission: the execution lane went with the rest of the capacity
+// answers (ADR-8eej3e66 stage 8).
+func NewGitBindingOperation(order *schedule.Keyed, bulkhead *schedule.Bulkhead, reg *registry.Registry) GitBindingOperation {
 	g := &guard{}
 	return &gitBindingOperation{
-		order: order, bulkhead: bulkhead, lane: lane, reg: reg, g: g,
+		order: order, bulkhead: bulkhead, reg: reg, g: g,
 		svc:         newGitBindingService(g, reg),
 		disposition: Adapted("git.refresh", "git calls require an assistant-owned repository lease"),
 	}
@@ -259,7 +311,6 @@ func NewGitBindingOperation(order *schedule.Keyed, bulkhead *schedule.Bulkhead, 
 type gitBindingOperation struct {
 	order       *schedule.Keyed
 	bulkhead    *schedule.Bulkhead
-	lane        control.Admission
 	reg         *registry.Registry
 	g           *guard
 	svc         GitBindingService
@@ -272,12 +323,12 @@ func (o *gitBindingOperation) Run(ctx context.Context, bindingID string, fn func
 	allow, hasAllowance := allowanceFromContext(ctx)
 	identity, known := o.reg.Identity(bindingID)
 	ordered := hasAllowance && allow.Merge == catalog.MergeNone
-	return gitRun(ctx, allow, func(waitCtx context.Context) (func(), func(), error) {
+	return gitRun(ctx, allow, func(waitCtx context.Context, h *holdings) error {
 		if !known {
 			// The binding is gone. Nothing to order or bound: Acquire answers
 			// the unknown-binding error inside the work, in the one place
 			// that checks ownership.
-			return func() {}, func() {}, nil
+			return nil
 		}
 		var releases []func()
 		releaseAll := func() {
@@ -288,23 +339,21 @@ func (o *gitBindingOperation) Run(ctx context.Context, bindingID string, fn func
 		if ordered {
 			release, err := o.order.Acquire(waitCtx, identity.Checkout)
 			if err != nil {
-				return nil, nil, err
+				return err
 			}
 			releases = append(releases, release)
 		}
 		lease, err := o.bulkhead.Acquire(waitCtx, identity.Domain, schedule.Class(gitClass(allow.Origin)))
 		if err != nil {
 			releaseAll()
-			return nil, nil, gitBulkheadError(ctx, allow, err)
+			return gitBulkheadError(ctx, allow, err)
 		}
 		releases = append(releases, lease.Release)
-		permit, rejection := o.lane.TryAcquire(waitCtx)
-		if rejection != nil {
-			releaseAll()
-			return nil, nil, gitRefused(ctx, rejection)
-		}
-		releases = append(releases, permit.Release)
-		return releaseAll, lease.Abandon, nil
+		// The order key is what this call holds from the moment it is taken,
+		// and it is published with the permit: a caller that answers while
+		// the bulkhead wait is still in hand counts the whole holding.
+		h.took(releaseAll, lease.Abandon)
+		return nil
 	}, func(workCtx context.Context) error {
 		o.g.begin()
 		defer o.g.end()

@@ -109,27 +109,15 @@
   },
   {
     "file": "internal/transport/ws_files.go",
-    "text": "opScope := s.beginInternal(context.Background(), catalog.OpInternalFilesWatchPoll)",
+    "text": "pollCtx := context.Background()",
     "kind": "unscoped-context",
-    "reason": "the watch poll and baseline are binding-owned (the loop stop releases them); the two listings are inside files.watch before its response"
+    "reason": "the binding's watch poll (ADR-8eej3e66 stage 4): an internal operation owned by the poll loop and ended by files.close, not by any request. The scope started from it carries the iteration's declared max into the provider call below, which is the accounting that matters; the context has no caller to inherit."
   },
   {
     "file": "internal/transport/ws_files.go",
-    "text": "opScope := s.beginInternal(context.Background(), catalog.OpInternalFilesBaseline)",
+    "text": "baselineCtx := context.Background()",
     "kind": "unscoped-context",
-    "reason": "the watch poll and baseline are binding-owned (the loop stop releases them); the two listings are inside files.watch before its response"
-  },
-  {
-    "file": "internal/transport/ws_files.go",
-    "text": "listing, err := h.List(context.Background(), p, filesystem.Page{Offset: 0, Limit: 1})",
-    "kind": "unscoped-context",
-    "reason": "the watch poll and baseline are binding-owned (the loop stop releases them); the two listings are inside files.watch before its response"
-  },
-  {
-    "file": "internal/transport/ws_files.go",
-    "text": "listing, err := h.List(context.Background(), path, filesystem.Page{Offset: 0, Limit: 1})",
-    "kind": "unscoped-context",
-    "reason": "the watch poll and baseline are binding-owned (the loop stop releases them); the two listings are inside files.watch before its response"
+    "reason": "the watch baseline (ADR-8eej3e66 stage 4): an internal operation owned by the files.watch request that takes the baseline, scoped immediately with the declaration's budget. Its caller is a request context, but the baseline outlives the answer it precedes, so the ownership is the scope's and not the frame's."
   },
   {
     "file": "internal/transport/ws_installed_fact.go",

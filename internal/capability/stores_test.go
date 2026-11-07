@@ -17,8 +17,8 @@ import (
 	"github.com/shady2k/nocx/internal/waittest"
 )
 
-func newStoreGuard(maxQueue int) *capability.StoreGuard {
-	return capability.NewStoreGuard(catalog.Declarations(), maxQueue, 3*time.Second)
+func newStoreGuard() *capability.StoreGuard {
+	return capability.NewStoreGuard(catalog.Declarations(), 3*time.Second)
 }
 
 // The plan is READ OFF the catalogue, so the audit's conclusion is the one the
@@ -26,7 +26,7 @@ func newStoreGuard(maxQueue int) *capability.StoreGuard {
 // clears its secret references), the vault joins only the reset barrier, and
 // content joins the restore barrier.
 func TestStoreGuard_PlanIsTheCatalogue(t *testing.T) {
-	stores := newStoreGuard(8)
+	stores := newStoreGuard()
 
 	if got := stores.Barriers(); len(got) != 2 || got[0] != capability.BarrierStoreSet || got[1] != capability.BarrierVaultReset {
 		t.Fatalf("barriers = %v, want [%s %s]", got, capability.BarrierStoreSet, capability.BarrierVaultReset)
@@ -57,7 +57,7 @@ func TestStoreGuard_PlanIsTheCatalogue(t *testing.T) {
 // refusal of a new reader is how the test observes that the exclusive waiter
 // is registered, without depending on a duration.
 func TestStoreGuard_RestoreExcludesReaders(t *testing.T) {
-	stores := newStoreGuard(8)
+	stores := newStoreGuard()
 	reader, rej := stores.Shared(capability.StoreConfig).TryAcquire(context.Background())
 	if rej != nil {
 		t.Fatalf("reader refused: %+v", rej)
@@ -107,11 +107,10 @@ func TestStoreGuard_RestoreExcludesReaders(t *testing.T) {
 // restart ends it, it is not the saturation error, and the stores it does not
 // name keep serving.
 func TestStoreGuard_QuarantineIsANamedFailureUntilRestart(t *testing.T) {
-	stores := newStoreGuard(8)
-	lane := control.NewSemaphore("test-lane", 4)
+	stores := newStoreGuard()
 	stores.Quarantine([]string{capability.StoreConfig}, "the rollback did not finish within 10m0s")
 
-	config := capability.NewSnippetOperation(stores.Shared(capability.StoreConfig), lane, nil)
+	config := capability.NewSnippetOperation(stores.Shared(capability.StoreConfig), nil)
 	ran := false
 	err := config.Run(context.Background(), func(context.Context, capability.SnippetService) error {
 		ran = true
@@ -140,7 +139,7 @@ func TestStoreGuard_QuarantineIsANamedFailureUntilRestart(t *testing.T) {
 	}
 
 	// The vault is its own store and stays available.
-	vault := capability.NewVaultOperation(stores.Shared(capability.StoreVault), lane, nil)
+	vault := capability.NewVaultOperation(stores.Shared(capability.StoreVault), nil)
 	if err := vault.Run(context.Background(), func(context.Context, capability.VaultService) error {
 		return nil
 	}); err != nil {
@@ -148,15 +147,17 @@ func TestStoreGuard_QuarantineIsANamedFailureUntilRestart(t *testing.T) {
 	}
 }
 
-// Sealed vault work must not wait behind a restore. The vault's plan names the
-// reset barrier only, so a restore queued for the store-set barrier has no
-// admission the vault path needs — and that is true with capacity exhausted,
-// because the vault's barrier and key are a different failure domain.
+// The quarantine checked WHILE a caller waits is the guard's own decision, and
+// the wait it is about cannot be reached through the composition root here any
+// more: the guard has no queue bound since ADR-8eej3e66 stage 8, so a caller
+// is never refused for capacity and the order has to be forced from outside.
+// TestStoreGuard_QuarantineDuringTheWaitRefusesTheGrantedCaller does that on
+// the admission itself, where the test can hold the grant.
+
 func TestSealedVaultWorkDoesNotWaitBehindAPendingRestore(t *testing.T) {
-	// maxQueue 1: the pending restore fills the store-set queue by itself, so
-	// the queue really is exhausted while the vault path is exercised.
-	stores := newStoreGuard(1)
-	lane := control.NewSemaphore("test-lane", 4)
+	// The pending restore is waiting on the store-set barrier while a reader
+	// holds it, which is the state the vault path must not share.
+	stores := newStoreGuard()
 
 	reader, rej := stores.Shared(capability.StoreConfig).TryAcquire(context.Background())
 	if rej != nil {
@@ -182,7 +183,7 @@ func TestSealedVaultWorkDoesNotWaitBehindAPendingRestore(t *testing.T) {
 			p.Release()
 			return false
 		}
-		return r.Kind == control.RejectionCapacity || r.Kind == control.RejectionCancelled || r.Kind == control.RejectionWaitExceeded
+		return r.Kind == control.RejectionWaitExceeded || r.Kind == control.RejectionCancelled
 	})
 	select {
 	case got := <-restore:
@@ -202,7 +203,7 @@ func TestSealedVaultWorkDoesNotWaitBehindAPendingRestore(t *testing.T) {
 	}
 	read.Release()
 
-	vault := capability.NewVaultOperation(stores.Shared(capability.StoreVault), lane, nil)
+	vault := capability.NewVaultOperation(stores.Shared(capability.StoreVault), nil)
 	if err := vault.Run(context.Background(), func(context.Context, capability.VaultService) error {
 		return nil
 	}); err != nil {
@@ -332,9 +333,8 @@ func TestRestoreOperation_QuarantinesTheStoresAfterAFailedRollback(t *testing.T)
 		t.Fatalf("preview: %v", err)
 	}
 
-	guard := newStoreGuard(8)
-	lane := control.NewSemaphore("test-lane", 2)
-	op := capability.NewRestoreOperation(guard, catalog.OpBackupRestore.Declaration(), lane, svc)
+	guard := newStoreGuard()
+	op := capability.NewRestoreOperation(guard, catalog.OpBackupRestore.Declaration(), svc)
 
 	err = op.Run(context.Background(), func(_ context.Context, s capability.BackupService) error {
 		_, rerr := s.Restore(created.Contents, backup.RestoreReplace, preview.PreviewToken)
@@ -355,7 +355,7 @@ func TestRestoreOperation_QuarantinesTheStoresAfterAFailedRollback(t *testing.T)
 
 	// A read that arrives afterwards is refused with the quarantine, not let
 	// through to a half-applied generation.
-	read := capability.NewSnippetOperation(guard.Shared(capability.StoreConfig), lane, nil)
+	read := capability.NewSnippetOperation(guard.Shared(capability.StoreConfig), nil)
 	if err := read.Run(context.Background(), func(context.Context, capability.SnippetService) error {
 		t.Fatal("a read ran over a quarantined store")
 		return nil

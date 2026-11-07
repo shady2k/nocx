@@ -19,7 +19,7 @@ func newAgentOp(t *testing.T) capability.AgentOperation {
 	t.Helper()
 	configGate, _, contentGate, _, _, _ := testGates()
 	_ = configGate
-	op := capability.NewAgentOperation(contentGate, testLane(), content.NewStub(log.NewSlogAdapter(nil)))
+	op := capability.NewAgentOperation(contentGate, content.NewStub(log.NewSlogAdapter(nil)))
 	return op
 }
 

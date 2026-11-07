@@ -95,8 +95,10 @@ func (d Domain) String() string {
 
 // DomainNamer is the optional provider seam that names a path's failure
 // domain. A local provider implements it from the kernel's mount table — by
-// device id, and without touching the path, because a stat on a hung mount
-// blocks in the uninterruptible syscall that makes the domain matter. A
+// device id, and without touching the mount it names, because a stat on a hung
+// mount blocks in the uninterruptible syscall that makes the domain matter. It
+// does follow the symlinks that lead out of the path's own mount, by reading
+// them on the disk the access has to touch anyway. A
 // provider that does not implement it contributes no domain, and each of its
 // bindings then holds its own single domain: the conservative answer, and the
 // one that cannot share a bulkhead between two unrelated machines.

@@ -2,7 +2,6 @@ package control
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,7 +16,7 @@ import (
 // per-task context propagation.
 
 func TestOrderedSubmission_RunsInSubmissionOrder(t *testing.T) {
-	sub := NewOrderedSubmission("session", 8)
+	sub := NewOrderedSubmission("session")
 	ctx := context.Background()
 	var mu sync.Mutex
 	var ran []int
@@ -50,7 +49,7 @@ func TestOrderedSubmission_RunsInSubmissionOrder(t *testing.T) {
 }
 
 func TestOrderedSubmission_SecondTaskWaitsForFirst(t *testing.T) {
-	sub := NewOrderedSubmission("session", 4)
+	sub := NewOrderedSubmission("session")
 	ctx := context.Background()
 	firstStarted := make(chan struct{})
 	firstDone := make(chan struct{})
@@ -85,61 +84,44 @@ func TestOrderedSubmission_SecondTaskWaitsForFirst(t *testing.T) {
 	}
 }
 
-func TestOrderedSubmission_RefusesWhenFull(t *testing.T) {
-	sub := NewOrderedSubmission("session", 2)
+// TestOrderedSubmission_NeverRefusesWhileOpen is the stage-8 guarantee the
+// capacity test stood for: a queue longer than any fixed depth is accepted and
+// drains in order. What bounds how much a client may have outstanding is the
+// credit window, not the submission (ADR-8eej3e66 §7).
+func TestOrderedSubmission_NeverRefusesWhileOpen(t *testing.T) {
+	sub := NewOrderedSubmission("session")
 	ctx := context.Background()
 	release := make(chan struct{})
 	running := make(chan struct{})
-	var n int64
+	go func() {
+		<-running
+	}()
 
-	// OCCUPY THE WORKER FIRST, then fill the queue. Submitting exactly
-	// `capacity` tasks does not fill it: the worker starts on the first
-	// submit and dequeues immediately, so one of those tasks is in flight
-	// rather than queued and a slot is free. The next submit was then
-	// admitted and the refusal never came — instantly, with no timeout to
-	// hint at why. It held on an idle machine, where the worker had not got
-	// round to dequeuing yet, and failed under load (nocx-8b47).
-	//
-	// Once this task is inside Run and blocked on release, the single worker
-	// is occupied and nothing drains the channel, so the buffer's occupancy
-	// is fully determined by what is submitted after this point.
-	if rej := sub.TrySubmit(ctx, Task{Run: func(context.Context) {
-		atomic.AddInt64(&n, 1)
-		close(running)
-		<-release
-	}}); rej != nil {
-		t.Fatalf("first submit refused: %+v", rej)
-	}
-	<-running
-
-	// Now fill the queue itself — capacity tasks, none of which can be
-	// dequeued while the worker is blocked.
-	for i := range 2 {
+	const queued = 64
+	var ran int64
+	done := make(chan struct{})
+	for i := range queued {
 		if rej := sub.TrySubmit(ctx, Task{Run: func(context.Context) {
-			atomic.AddInt64(&n, 1)
+			if atomic.AddInt64(&ran, 1) == queued {
+				close(done)
+			}
 		}}); rej != nil {
-			t.Fatalf("queued submit %d refused while the queue had room: %+v", i, rej)
+			t.Fatalf("submit %d refused: %+v", i, rej)
 		}
 	}
-
-	// One more must be refused, never queued.
-	rej := sub.TrySubmit(ctx, Task{Run: func(context.Context) {}})
-	if rej == nil {
-		t.Fatal("a submit past capacity must be refused when the queue is full")
-	}
-	if rej.Scope != "session" {
-		t.Fatalf("rejection scope = %q, want the submission's name", rej.Scope)
-	}
 	close(release)
-	// All THREE admitted tasks complete — the one that occupied the worker
-	// and the two that were queued behind it. The refused one never ran.
-	waittest.WaitForTimeoutDetail(t, "all admitted tasks to complete", 5*time.Second,
-		func() string { return fmt.Sprintf("%d of 3 ran", atomic.LoadInt64(&n)) },
-		func() bool { return atomic.LoadInt64(&n) >= 3 })
+	waittest.WaitFor(t, "every queued task ran", func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	})
 }
 
 func TestOrderedSubmission_PropagatesTaskContext(t *testing.T) {
-	sub := NewOrderedSubmission("session", 4)
+	sub := NewOrderedSubmission("session")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	observed := make(chan bool, 1)
@@ -164,7 +146,7 @@ func TestOrderedSubmission_PropagatesTaskContext(t *testing.T) {
 }
 
 func TestOrderedSubmission_ShutdownRejectsNewWorkAndWaitsForAdmitted(t *testing.T) {
-	sub, ok := NewOrderedSubmission("session", 2).(*orderedSubmission)
+	sub, ok := NewOrderedSubmission("session").(*orderedSubmission)
 	if !ok {
 		t.Fatal("NewOrderedSubmission returned an unexpected implementation")
 	}
@@ -200,7 +182,7 @@ func TestOrderedSubmission_ShutdownRejectsNewWorkAndWaitsForAdmitted(t *testing.
 // start-against-cancel decision: cancellation does not have to beat the
 // worker to the queue, it has to beat the gate.
 func TestOrderedSubmissionNeverStartsAWithdrawnTask(t *testing.T) {
-	sub, ok := NewOrderedSubmission("ordered-start-gate", 4).(*orderedSubmission)
+	sub, ok := NewOrderedSubmission("ordered-start-gate").(*orderedSubmission)
 	if !ok {
 		t.Fatal("unexpected ordered submission implementation")
 	}

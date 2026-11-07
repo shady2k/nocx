@@ -42,6 +42,21 @@ func blockingRun(started chan<- struct{}, release <-chan struct{}) func(context.
 	}
 }
 
+// workBound is the Request.Work factory for a test that is not about the
+// grant: a fresh work context with its own deadline, made when the permit is
+// taken — which is the moment the real caller makes it too.
+func workBound(d time.Duration) func() (context.Context, context.CancelFunc) {
+	return func() (context.Context, context.CancelFunc) {
+		return context.WithTimeout(context.Background(), d)
+	}
+}
+
+// settledWork hands Do a work context the test itself cancels, which is how a
+// call settles while its worker keeps running and is counted abandoned.
+func settledWork(ctx context.Context) func() (context.Context, context.CancelFunc) {
+	return func() (context.Context, context.CancelFunc) { return ctx, func() {} }
+}
+
 func turnCtx(t *testing.T, d time.Duration) context.Context {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), d)
@@ -63,7 +78,7 @@ func TestAHealthyDomainCompletesBesideABlockedOne(t *testing.T) {
 		defer wg.Done()
 		_ = r.Do(Request{
 			Key: mount("hung"), Origin: catalog.OriginPerson,
-			Turn: turnCtx(t, time.Second), Work: turnCtx(t, time.Minute),
+			Turn: turnCtx(t, time.Second), Work: workBound(time.Minute),
 			Run: blockingRun(blocked, release),
 		})
 	}()
@@ -74,7 +89,7 @@ func TestAHealthyDomainCompletesBesideABlockedOne(t *testing.T) {
 		done <- r.Do(Request{
 			Key: mount("healthy"), Origin: catalog.OriginPerson,
 			Turn: turnCtx(t, time.Second),
-			Work: turnCtx(t, time.Second),
+			Work: workBound(time.Second),
 			Run: func(context.Context) error {
 				return nil
 			},
@@ -103,7 +118,7 @@ func TestBackgroundCannotTakeTheLastPermitFromAPerson(t *testing.T) {
 		go func() {
 			_ = r.Do(Request{
 				Key: mount("m"), Origin: catalog.OriginBackground,
-				Turn: turnCtx(t, time.Second), Work: turnCtx(t, time.Minute),
+				Turn: turnCtx(t, time.Second), Work: workBound(time.Minute),
 				Run: func(context.Context) error {
 					started <- struct{}{}
 					<-release
@@ -127,7 +142,7 @@ func TestBackgroundCannotTakeTheLastPermitFromAPerson(t *testing.T) {
 		person <- r.Do(Request{
 			Key: mount("m"), Origin: catalog.OriginPerson,
 			Turn: turnCtx(t, time.Second),
-			Work: turnCtx(t, time.Second),
+			Work: workBound(time.Second),
 			Run:  func(context.Context) error { return nil },
 		})
 	}()
@@ -157,7 +172,7 @@ func TestADomainAtItsAbandonedBoundRefusesAtOnce(t *testing.T) {
 		go func() {
 			_ = r.Do(Request{
 				Key: mount("hung"), Origin: catalog.OriginPerson,
-				Turn: turnCtx(t, time.Second), Work: workCtx,
+				Turn: turnCtx(t, time.Second), Work: settledWork(workCtx),
 				Run: blockingRun(nil, release),
 			})
 		}()
@@ -176,7 +191,7 @@ func TestADomainAtItsAbandonedBoundRefusesAtOnce(t *testing.T) {
 	start := time.Now()
 	err := r.Do(Request{
 		Key: mount("hung"), Origin: catalog.OriginPerson,
-		Turn: turnCtx(t, time.Second), Work: turnCtx(t, time.Second),
+		Turn: turnCtx(t, time.Second), Work: workBound(time.Second),
 		Run: func(context.Context) error {
 			called.Store(true)
 			return nil
@@ -219,7 +234,7 @@ func TestTheGlobalAbandonedBoundStopsWorkersEverywhere(t *testing.T) {
 		go func() {
 			_ = r.Do(Request{
 				Key: key, Origin: catalog.OriginPerson,
-				Turn: turnCtx(t, time.Second), Work: workCtx,
+				Turn: turnCtx(t, time.Second), Work: settledWork(workCtx),
 				Run: blockingRun(nil, release),
 			})
 		}()
@@ -239,7 +254,7 @@ func TestTheGlobalAbandonedBoundStopsWorkersEverywhere(t *testing.T) {
 	}
 	err := r.Do(Request{
 		Key: mount("fresh"), Origin: catalog.OriginPerson,
-		Turn: turnCtx(t, time.Second), Work: turnCtx(t, time.Second),
+		Turn: turnCtx(t, time.Second), Work: workBound(time.Second),
 		Run: func(context.Context) error { return nil },
 	})
 	if err == nil {
@@ -259,7 +274,7 @@ func TestAnIdleDomainIsReclaimed(t *testing.T) {
 		key := Key{Kind: "host", ID: fmt.Sprintf("host-%05d", i)}
 		err := r.Do(Request{
 			Key: key, Origin: catalog.OriginBackground,
-			Turn: turnCtx(t, time.Second), Work: turnCtx(t, time.Second),
+			Turn: turnCtx(t, time.Second), Work: workBound(time.Second),
 			Run: func(context.Context) error { return nil },
 		})
 		if err != nil {
@@ -290,7 +305,7 @@ func TestATurnDeadlineThatExpiresNeverStartsTheWork(t *testing.T) {
 	go func() {
 		_ = r.Do(Request{
 			Key: mount("m"), Origin: catalog.OriginPerson,
-			Turn: turnCtx(t, time.Second), Work: turnCtx(t, time.Minute),
+			Turn: turnCtx(t, time.Second), Work: workBound(time.Minute),
 			Run: blockingRun(blocked, release),
 		})
 	}()
@@ -298,7 +313,7 @@ func TestATurnDeadlineThatExpiresNeverStartsTheWork(t *testing.T) {
 	called := atomic.Bool{}
 	err := r.Do(Request{
 		Key: mount("m"), Origin: catalog.OriginPerson,
-		Turn: turnCtx(t, 20*time.Millisecond), Work: turnCtx(t, time.Second),
+		Turn: turnCtx(t, 20*time.Millisecond), Work: workBound(time.Second),
 		Run: func(context.Context) error {
 			called.Store(true)
 			return nil
@@ -332,7 +347,7 @@ func TestAnAbandonedWorkerKeepsItsPermitUntilItReturns(t *testing.T) {
 	go func() {
 		_ = r.Do(Request{
 			Key: mount("m"), Origin: catalog.OriginPerson,
-			Turn: turnCtx(t, time.Second), Work: workCtx,
+			Turn: turnCtx(t, time.Second), Work: settledWork(workCtx),
 			Run: func(context.Context) error {
 				close(started)
 				<-release
@@ -394,7 +409,7 @@ func TestMeasuredBulkheadSizes(t *testing.T) {
 				issued := time.Now()
 				_ = r.Do(Request{
 					Key: mount("one"), Origin: catalog.OriginPerson,
-					Turn: turnCtx(t, time.Minute), Work: turnCtx(t, time.Minute),
+					Turn: turnCtx(t, time.Minute), Work: workBound(time.Minute),
 					Run: func(context.Context) error {
 						waits[i] = time.Since(issued)
 						time.Sleep(workTime)
@@ -433,7 +448,7 @@ func TestTenThousandTimeoutsOnChangingHostsStayBounded(t *testing.T) {
 		work, cancel := context.WithTimeout(context.Background(), time.Millisecond)
 		err := r.Do(Request{
 			Key: key, Origin: catalog.OriginBackground,
-			Turn: turnCtx(t, time.Second), Work: work,
+			Turn: turnCtx(t, time.Second), Work: settledWork(work),
 			Run: blockingRun(nil, release),
 		})
 		cancel()
@@ -500,7 +515,7 @@ func TestAWaitThatIsGrantedLeavesTheWaitingCount(t *testing.T) {
 	go func() {
 		_ = r.Do(Request{
 			Key: mount("m"), Origin: catalog.OriginPerson,
-			Turn: turnCtx(t, time.Minute), Work: turnCtx(t, time.Minute),
+			Turn: turnCtx(t, time.Minute), Work: workBound(time.Minute),
 			Run: blockingRun(blocked, release),
 		})
 	}()
@@ -510,7 +525,7 @@ func TestAWaitThatIsGrantedLeavesTheWaitingCount(t *testing.T) {
 	go func() {
 		done <- r.Do(Request{
 			Key: mount("m"), Origin: catalog.OriginPerson,
-			Turn: turnCtx(t, time.Minute), Work: turnCtx(t, time.Minute),
+			Turn: turnCtx(t, time.Minute), Work: workBound(time.Minute),
 			Run: func(context.Context) error { return nil },
 		})
 	}()
@@ -527,5 +542,66 @@ func TestAWaitThatIsGrantedLeavesTheWaitingCount(t *testing.T) {
 		return s.Waiting == 0 && s.Running == 0
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestTheWorkBoundIsMadeWhenThePermitIsTaken is this package's half of finding
+// 2 of nocx-3an1s.2.14. Request.Work is a factory — not a context — so that a
+// wait for capacity cannot spend the work's own budget: the factory must not
+// run while the call is queued, and must run once the permit is free.
+func TestTheWorkBoundIsMadeWhenThePermitIsTaken(t *testing.T) {
+	opts := testOptions()
+	opts.PerDomain = 1
+	opts.PersonReserve = 0
+	r := New(opts)
+	release := make(chan struct{})
+	held := make(chan struct{})
+
+	var holder sync.WaitGroup
+	holder.Add(1)
+	go func() {
+		defer holder.Done()
+		_ = r.Do(Request{
+			Key: mount("m"), Origin: catalog.OriginPerson,
+			Turn: turnCtx(t, time.Second), Work: workBound(time.Minute),
+			Run: func(context.Context) error {
+				close(held)
+				<-release
+				return nil
+			},
+		})
+	}()
+	<-held
+
+	var made atomic.Int32
+	queued := make(chan error, 1)
+	go func() {
+		queued <- r.Do(Request{
+			Key: mount("m"), Origin: catalog.OriginPerson,
+			Turn: turnCtx(t, time.Second),
+			Work: func() (context.Context, context.CancelFunc) {
+				made.Add(1)
+				return context.WithCancel(context.Background())
+			},
+			Run: func(context.Context) error { return nil },
+		})
+	}()
+
+	select {
+	case <-time.After(100 * time.Millisecond):
+	case <-queued:
+		t.Fatal("the queued call ran while the only permit was held")
+	}
+	if got := made.Load(); got != 0 {
+		t.Fatalf("the work bound was made %d time(s) while the call was still waiting for a permit", got)
+	}
+
+	close(release)
+	if err := <-queued; err != nil {
+		t.Fatalf("the granted call: %v", err)
+	}
+	holder.Wait()
+	if got := made.Load(); got != 1 {
+		t.Fatalf("the work bound was made %d time(s); want exactly once, at the grant", got)
 	}
 }

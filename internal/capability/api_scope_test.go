@@ -34,8 +34,7 @@ func TestAPICollectionService_RequestScopeReturnsTheResolvedChain(t *testing.T) 
 	// The constructor owns the collection root, so it is given the path the
 	// fixture files were written under.
 	op := capability.NewAPICollectionOperation(
-		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
-		capability.Gate("lane", 8, 64, 5*time.Second),
+		capability.Gate(capability.GateAPI, 1, 5*time.Second),
 		apicoll.NewCollections(apiPaths{root: root}),
 	)
 
@@ -95,8 +94,7 @@ func TestAPICollectionService_RequestScopeMarksSecretReferencesAndOverrides(t *t
 		`,"route":{"kind":"direct"}}`)
 
 	op := capability.NewAPICollectionOperation(
-		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
-		capability.Gate("lane", 8, 64, 5*time.Second),
+		capability.Gate(capability.GateAPI, 1, 5*time.Second),
 		apicoll.NewCollections(apiPaths{root: root}),
 	)
 	opened, err := openScopeCollection(op, root)

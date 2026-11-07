@@ -162,22 +162,24 @@ type SecretOperation interface {
 // runtime. ForSecret returns an error for an unknown id and never nil — a
 // nil handle is not enforcement.
 type SecretOperations struct {
-	configGate control.Admission
-	vaultGate  control.Admission
-	lane       control.Admission
-	profiles   profile.ProfileRepository
-	groups     profile.GroupRepository
-	vault      SecretVault
-	store      credential.SecretStore
+	// stores is the ONE plan both stores are read through (StoreGuard.Shared
+	// with config and vault); the pair composed as two plans would take the
+	// shared vault-reset barrier twice — stores.go says why that deadlocks.
+	stores   control.Admission
+	profiles profile.ProfileRepository
+	groups   profile.GroupRepository
+	vault    SecretVault
+	store    credential.SecretStore
 	// exists answers whether id names a stored secret. Wired from the
 	// vault's own existence check; nil means "no check" (a test seam).
 	exists func(context.Context, credential.SecretID) (bool, error)
 }
 
 // NewSecretOperations wires the per-secret factory. Each ForSecret call
-// returns a fresh operation with its own guarded service.
+// returns a fresh operation with its own guarded service, over the plan its
+// stores are read through — never over two composed per-store plans.
 func NewSecretOperations(
-	configGate, vaultGate, lane control.Admission,
+	stores control.Admission,
 	profiles profile.ProfileRepository,
 	groups profile.GroupRepository,
 	v SecretVault,
@@ -185,14 +187,12 @@ func NewSecretOperations(
 	exists func(context.Context, credential.SecretID) (bool, error),
 ) *SecretOperations {
 	return &SecretOperations{
-		configGate: configGate,
-		vaultGate:  vaultGate,
-		lane:       lane,
-		profiles:   profiles,
-		groups:     groups,
-		vault:      v,
-		store:      store,
-		exists:     exists,
+		stores:   stores,
+		profiles: profiles,
+		groups:   groups,
+		vault:    v,
+		store:    store,
+		exists:   exists,
 	}
 }
 
@@ -211,7 +211,7 @@ func (f *SecretOperations) ForSecret(ctx context.Context, id credential.SecretID
 	g := &guard{}
 	return newOperation[SecretService](
 		Direct("SecretOperation"),
-		control.NewComposite(f.configGate, f.vaultGate, f.lane),
+		f.stores,
 		g,
 		newSecretService(g, f.profiles, f.groups, f.vault, f.store),
 	), nil
@@ -221,7 +221,7 @@ func (f *SecretOperations) ForSecret(ctx context.Context, id credential.SecretID
 // keyed form; most handlers use NewSecretOperations + ForSecret). It is
 // for handlers whose operation is fixed at construction.
 func NewSecretOperation(
-	configGate, vaultGate, lane control.Admission,
+	stores control.Admission,
 	profiles profile.ProfileRepository,
 	groups profile.GroupRepository,
 	v SecretVault,
@@ -230,7 +230,7 @@ func NewSecretOperation(
 	g := &guard{}
 	return newOperation[SecretService](
 		Direct("SecretOperation"),
-		control.NewComposite(configGate, vaultGate, lane),
+		stores,
 		g,
 		newSecretService(g, profiles, groups, v, store),
 	)

@@ -12,7 +12,6 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/operation/catalog"
 	"github.com/shady2k/nocx/internal/profile"
-	"github.com/shady2k/nocx/internal/transport/control"
 )
 
 // A QUARANTINED STORE IS UNAVAILABLE, NOT BUSY (ADR-8eej3e66 §5).
@@ -31,14 +30,13 @@ func TestConfigCall_OverAQuarantinedStoreIsANamedFailure(t *testing.T) {
 		log:    logger,
 		groups: profile.NewJSONStore(filepath.Join(t.TempDir(), "profiles.json")),
 	}
-	guard := capability.NewStoreGuard(catalog.Declarations(), 8, time.Second)
-	lane := control.NewSemaphore("test-lane", 8)
+	guard := capability.NewStoreGuard(catalog.Declarations(), time.Second)
 	configGate := guard.Shared(capability.StoreConfig)
-	vaultGate := guard.Shared(capability.StoreVault)
-	op, endpointWired := server.buildConfigOp(lane, configGate, vaultGate)
+	configVault := guard.Shared(capability.StoreConfig, capability.StoreVault)
+	op, endpointWired := server.buildConfigOp(configVault)
 
 	var groupsList methodSpec
-	for _, spec := range server.configSpecs(lane, configGate, vaultGate, op, endpointWired, nil, nil) {
+	for _, spec := range server.configSpecs(configGate, configVault, op, endpointWired, nil, nil) {
 		if spec.method == "groups.list" {
 			groupsList = spec
 			break
@@ -66,7 +64,7 @@ func TestConfigCall_OverAQuarantinedStoreIsANamedFailure(t *testing.T) {
 	if r.code == 0 {
 		t.Fatal("groups.list answered a result over a quarantined store")
 	}
-	if r.code == SaturationErrorCode {
+	if r.code == RemovedCapacityCode {
 		t.Fatalf("a quarantined store answered the saturation error (%d), which tells a person to retry", r.code)
 	}
 	if !strings.Contains(r.msg, "Restart nocx") || !strings.Contains(r.msg, "settings and connection") {

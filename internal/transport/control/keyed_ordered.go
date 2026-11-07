@@ -11,7 +11,6 @@ import (
 // idle worker either joins its FIFO or creates the next worker, never both.
 type keyedOrderedSubmission struct {
 	name     string
-	capacity int
 	mu       sync.Mutex
 	admitted int
 	keys     map[string]*keyedQueue
@@ -31,20 +30,19 @@ type keyedTask struct {
 
 // NewKeyedOrderedSubmission preserves submission order within each Task.Key,
 // shared across every caller of this submission. Different keys run
-// independently. Capacity bounds ALL admitted tasks, running plus queued,
-// and therefore also bounds active keys and worker goroutines. Admission
-// never waits for a task: a full submission refuses immediately. Capacity 0
-// refuses every task; a negative capacity is a programming error.
+// independently, and an idle key keeps neither a queue nor a worker.
 //
-// Empty keys are refused without allocating per-key state. Idle keys retain
-// neither a queue nor a worker, even before Shutdown. Shutdown fences further
-// admission and lets admitted tasks finish in order, including cancelled
-// tasks (their Run receives the original context, just like ordered work).
-func NewKeyedOrderedSubmission(name string, capacity int) Submission {
-	if capacity < 0 {
-		panic("control: negative capacity for keyed ordered submission " + name)
-	}
-	return &keyedOrderedSubmission{name: name, capacity: capacity, done: make(chan struct{})}
+// THERE IS NO COUNT BOUND (ADR-8eej3e66 stage 8): the queue grows with what
+// clients actually sent, which the credit window bounds, and a queued task
+// that its owner withdrew or gave up on is dropped by the one-step start
+// decision before it runs. A capacity refusal here was one of the capacity
+// answers stage 8 removes.
+//
+// Empty keys are refused without allocating per-key state. Shutdown fences
+// further admission and lets admitted tasks finish in order, including
+// cancelled tasks (their Run receives the original context).
+func NewKeyedOrderedSubmission(name string) Submission {
+	return &keyedOrderedSubmission{name: name, done: make(chan struct{})}
 }
 
 func (s *keyedOrderedSubmission) Name() string { return s.name }
@@ -57,9 +55,6 @@ func (s *keyedOrderedSubmission) TrySubmit(ctx context.Context, task Task) *Reje
 	}
 	if task.Key == "" {
 		return &Rejection{Reason: "ordering key required", Scope: s.name}
-	}
-	if s.admitted == s.capacity {
-		return &Rejection{Reason: "capacity exhausted", Scope: s.name}
 	}
 	next := &keyedTask{orderedTask: orderedTask{ctx: ctx, task: task}}
 	if queue := s.keys[task.Key]; queue != nil {

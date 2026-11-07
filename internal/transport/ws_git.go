@@ -1216,7 +1216,7 @@ func (s *WSServer) gitSessionClosed(sid session.ID, wconn *wsConn) {
 // -32602. The vault surface uses the same pattern (vaultErrorData,
 // reasonForError) for the same reason: a bare code is indistinguishable,
 // and matching on message text is the brittleness a discriminator exists
-// to avoid (ADR-0026 §6, the control-saturated precedent; nocx-bpqil).
+// to avoid (ADR-0026 §6, the saturation precedent; nocx-bpqil).
 type gitErrorData struct {
 	Reason string `json:"reason"`
 }
@@ -1272,7 +1272,7 @@ func gitErrorCode(err error) int {
 // GitBindingOperation (per-checkout order + mount bulkhead). When the git registry is absent every
 // handler answers the old not-available error; a registry wired without a
 // repo factory leaves only git.open unavailable.
-func (s *WSServer) gitSpecs(lane control.Admission, sessionGate control.Admission, gitOrder *schedule.Keyed, gitBulkhead *schedule.Bulkhead) []methodSpec {
+func (s *WSServer) gitSpecs(sessionGate control.Admission, gitOrder *schedule.Keyed, gitBulkhead *schedule.Bulkhead) []methodSpec {
 	gitWired := s.git != nil
 	var openOp capability.GitOpenOperation
 	if gitWired && s.gitFactory != nil {
@@ -1292,14 +1292,14 @@ func (s *WSServer) gitSpecs(lane control.Admission, sessionGate control.Admissio
 			}
 			return s.gitFactory
 		})
-		openOp = capability.NewGitOpenOperation(sessionGate, gitBulkhead, lane, s.registry, factoryFor, s.git)
+		openOp = capability.NewGitOpenOperation(sessionGate, gitBulkhead, s.registry, factoryFor, s.git)
 	}
 	var bindingOp capability.GitBindingOperation
 	if gitWired {
-		bindingOp = capability.NewGitBindingOperation(gitOrder, gitBulkhead, lane, s.git)
+		bindingOp = capability.NewGitBindingOperation(gitOrder, gitBulkhead, s.git)
 	}
-	openSub := s.operationQueue("git-open")
-	bindingSub := s.operationQueue("git")
+	openSub := s.work
+	bindingSub := s.work
 
 	return []methodSpec{
 		reg(openSub, catalog.OpGitOpen, params(validateGitOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {

@@ -75,7 +75,7 @@ func shellIntegrateResultFromPlan(plan shellintegration.InBandPlan) shellIntegra
 // sessionShellHandlers answers shell.complete and shell.integrate. Completion
 // uses a staged SessionTargetOperation: copy immutable route facts while the
 // session gate is held, then release it before remote I/O while retaining the
-// ordinary execution lane. Integration remains a regular SessionOperation.
+// ordinary work submission. Integration remains a regular SessionOperation.
 // The handler holds the operation factory, the Responder and its seams —
 // never the *WSServer.
 type sessionShellHandlers struct {
@@ -147,9 +147,9 @@ func (h sessionShellHandlers) handleIntegrate(ctx context.Context, req jsonrpcRe
 // handlers on the ordinary lane under no operation, holding only the seams
 // the migration map names. The SessionOperations factory is built here from
 // the wired stores and shared across the shell methods.
-func (s *WSServer) shellSpecs(lane control.Admission, sessionGate control.Admission) []methodSpec {
-	sessionOps := capability.NewSessionOperations(sessionGate, lane, s.registry, s.profileUsage)
-	shellSub := s.operationQueue("shell")
+func (s *WSServer) shellSpecs(sessionGate control.Admission) []methodSpec {
+	sessionOps := capability.NewSessionOperations(sessionGate, s.registry, s.profileUsage)
+	shellSub := s.work
 	return []methodSpec{
 		regResponder(shellSub, catalog.OpShellComplete, params(validateShellCompleteRaw), func(r Responder) handlerFunc {
 			h := sessionShellHandlers{ops: sessionOps, r: r, local: s.localCompleter, remote: s.sshCompleter}
@@ -172,7 +172,7 @@ func (s *WSServer) shellSpecs(lane control.Admission, sessionGate control.Admiss
 		// the marker latch ADR-0024 forbids, and the branch deleted their
 		// handler, contracts and generated types (nocx-292k). The footprint
 		// methods below outlive them — they read the fact store, which stays.
-		regResponder(s.lane, catalog.OpShellFootprintStatus, noParams(), func(r Responder) handlerFunc {
+		regResponder(s.work, catalog.OpShellFootprintStatus, noParams(), func(r Responder) handlerFunc {
 			h := footprintHandlers{
 				r:              r,
 				facts:          s.installedFacts,
@@ -183,7 +183,7 @@ func (s *WSServer) shellSpecs(lane control.Admission, sessionGate control.Admiss
 			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleFootprintStatus(ctx, req) }
 		}),
-		regResponder(s.lane, catalog.OpShellFootprintUninstall, params(validateFootprintUninstallRaw), func(r Responder) handlerFunc {
+		regResponder(s.work, catalog.OpShellFootprintUninstall, params(validateFootprintUninstallRaw), func(r Responder) handlerFunc {
 			h := footprintHandlers{
 				r:           r,
 				uninstaller: s.remoteUninstaller,
@@ -192,7 +192,7 @@ func (s *WSServer) shellSpecs(lane control.Admission, sessionGate control.Admiss
 			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleFootprintUninstall(ctx, req) }
 		}),
-		regResponder(s.lane, catalog.OpShellFootprintHelperUninstall, params(validateFootprintHelperUninstallRaw), func(r Responder) handlerFunc {
+		regResponder(s.work, catalog.OpShellFootprintHelperUninstall, params(validateFootprintHelperUninstallRaw), func(r Responder) handlerFunc {
 			h := footprintHandlers{
 				r:                 r,
 				helperInstalls:    s.helperInstalls,

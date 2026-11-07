@@ -79,10 +79,10 @@ type LedgerOperation interface {
 }
 
 // NewLedgerOperation builds a LedgerOperation that acquires the content gate
-// before the execution lane.
-func NewLedgerOperation(contentGate, lane control.Admission, db content.ContentDB) LedgerOperation {
+// alone.
+func NewLedgerOperation(contentGate control.Admission, db content.ContentDB) LedgerOperation {
 	g := &guard{}
-	return newOperation[LedgerService](Excluded("the ledger records assistant transactions; it is not a user action"), control.NewComposite(contentGate, lane), g, newLedgerService(g, db))
+	return newOperation[LedgerService](Excluded("the ledger records assistant transactions; it is not a user action"), control.NewComposite(contentGate), g, newLedgerService(g, db))
 }
 
 func newLedgerService(g *guard, db content.ContentDB) *ledgerService {

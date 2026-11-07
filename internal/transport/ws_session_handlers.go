@@ -350,13 +350,11 @@ func (h openHandlers) answerOpenFailure(ctx context.Context, r Responder, req js
 	// A gate refusal: another operation holds the config or session
 	// domain — the request is refused, never queued.
 	if capability.IsRefused(err) {
-		var rej *capability.RefusedError
-		errors.As(err, &rej)
-		// Both sides of the merge: main's refusal now names the method
-		// it refused (nocx-rq9p), and this handler's writes go through
-		// the Responder rather than the raw connection, so the sealed
-		// normalizer sees them (nocx-k41yv).
-		_ = r.TryError(req.ID, saturationRPCError(req.Method, &rej.Rejection))
+		// Both sides of the merge: the answer names the operation that did
+		// not start (nocx-rq9p), and this handler's writes go through the
+		// Responder rather than the raw connection, so the sealed normalizer
+		// sees them (nocx-k41yv).
+		answerOperationRefusal(r, req, err)
 		return
 	}
 	// A refused parent edge is a bad claim in the params, not a server
@@ -1189,13 +1187,14 @@ func (h ackHandler) handleAck(req jsonrpcRequest) {
 	}
 }
 
-// answerOperationRefusal answers a *capability.RefusedError (a gate refusal)
-// with the saturation error; any other error is unexpected and answered as an
-// internal error. A nil error is a no-op.
+// answerOperationRefusal answers a *capability.RefusedError — an admission
+// that did not grant the invocation its resource (ADR-8eej3e66 stage 8: a
+// wait that ran out, a cancellation, a quarantine). Any other error is
+// unexpected and answered as an internal error. A nil error is a no-op.
 func answerOperationRefusal(r Responder, req jsonrpcRequest, err error) {
 	var rej *capability.RefusedError
 	if errors.As(err, &rej) {
-		_ = r.TryError(req.ID, saturationRPCError(req.Method, &rej.Rejection))
+		answerOperationRejection(r, req, &rej.Rejection)
 		return
 	}
 	_ = r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
@@ -1227,8 +1226,8 @@ func keyedBySession(spec methodSpec) methodSpec {
 // conflict gates (waiting) before the execution lane inside Run, so they
 // register on per-operation queue submissions rather than the lane
 // submission.
-func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate control.Admission) []methodSpec {
-	openOp := capability.NewOpenOperation(configGate, sessionGate, lane, s.resolver, s.registry)
+func (s *WSServer) sessionSpecs(sessionGate, configGate control.Admission) []methodSpec {
+	openOp := capability.NewOpenOperation(configGate, sessionGate, s.resolver, s.registry)
 	var sessionLedger content.LedgerRepository
 	if s.contentDB != nil {
 		sessionLedger = s.contentDB.Ledger()
@@ -1254,14 +1253,14 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 		// the vault's unlock ask is its sibling).
 		passwordAsk: s,
 	}
-	sessionOps := capability.NewSessionOperations(sessionGate, lane, s.registry, s.profileUsage)
+	sessionOps := capability.NewSessionOperations(sessionGate, s.registry, s.profileUsage)
 	// The whole-domain operation sessions.live reads the registry under, beside
 	// the per-session factory the other methods use: the list is about every
 	// session and no one of them.
-	liveOp := capability.NewSessionOperation(sessionGate, lane, s.registry, s.profileUsage)
+	liveOp := capability.NewSessionOperation(sessionGate, s.registry, s.profileUsage)
 	immediate := control.ImmediateSubmission{}
-	openSub := s.operationQueue("open")
-	sessionSub := s.operationQueue("session")
+	openSub := s.work
+	sessionSub := s.work
 	// Completion ordering belongs to a session, not the whole server. All
 	// sockets share this scheduler: a blocked intent holds only its own
 	// session's FIFO. The slots count running AND queued work, bounding
@@ -1277,7 +1276,7 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 	// active key, which the FIFO's own admission limit already caps.
 	ordered := &inflightSubmission{
 		inflight: &s.inflight,
-		inner:    control.NewKeyedOrderedSubmission("session-ops", control.DefaultOrderLimit),
+		inner:    control.NewKeyedOrderedSubmission("session-ops"),
 	}
 	// The instance identity is read ONCE, here, where the registry is: a
 	// handler judging a claim needs the value, never the registry.

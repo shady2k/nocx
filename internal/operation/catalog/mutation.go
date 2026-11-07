@@ -225,14 +225,18 @@ func (s *MutationStore) Begin(key string, op ID) (*MutationRecord, MutationAnswe
 		// is checked against the record the map now holds (record), so a
 		// replaced attempt's settlement can change nothing.
 	}
-	s.pruneOrderLocked()
 	s.evictLocked()
 	record := &MutationRecord{store: s, key: key, op: op, state: mutationRunning, began: now}
 	s.byKey[key] = record
+	// THE PRUNE RUNS WITH THE RECORD IN THE MAP, so a key that was here before
+	// — a retry, or an identity whose expired record was just removed — keeps
+	// the one place it already has. Compacting first dropped that place,
+	// because the map no longer held the key, and the record inserted
+	// afterwards was never appended: it lived in the map and in no order entry,
+	// where evictLocked cannot pick it (nocx-3an1s.2.17). A key the order does
+	// not hold yet gets its one entry here.
+	s.pruneOrderLocked()
 	if !seen {
-		// A key the store has not seen keeps its one place in the insertion
-		// order; one it has seen already has it, and a second entry per attempt
-		// would be a list only eviction could shorten.
 		s.order = append(s.order, key)
 	}
 	return record, MutationAnswer{}

@@ -372,3 +372,13 @@ The independent frontend CI container job passed on `c561c7700` in 496 s:
 root tooling checks and collection of 159 e2e spec files. Collection is not an
 e2e execution result. Subsequent repairs touch Go test fixtures, not product or
 frontend code.
+
+On `bafe62594`, host lint, both Go race configurations (including tagged app:
+513.763 s), shipped-profile and allocation checks, build and root static checks
+passed. The combined command then stopped at its 1800 s bound during a hook
+fixture failure: the fake `go env GOPATH` returned no path, making the real hook
+prepend `/bin` ahead of the stub tools on this host. The fixture now supplies
+its private GOPATH; all five real-hook subprocess scenarios passed in 5.366 s.
+The stopped aggregate command is not a full-gate pass. Its completed product
+checks remain evidence; remaining root/frontend, OS and container legs are
+verified separately.

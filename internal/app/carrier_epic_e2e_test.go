@@ -481,7 +481,9 @@ func TestEpicE2E_ASavedConnectionComesUpIntegratedAndLeaksNeitherBearer(t *testi
 
 func TestEpicE2E_ATypedSSHComesUpIntegratedAndLeaksNeitherBearer(t *testing.T) {
 	logs, logger := captureProductLogs(t)
-	fx := startLiveSshd(t, true, withFarSideRecording())
+	// This proves the enhanced helper-less Bash topology, not the native
+	// account's Fish topology, which has no TCP lifecycle adapter (AD-5).
+	fx := startLiveSshd(t, true, withFarSideRecording(), withAssemblyBashEndpoint(t))
 	fx.logger = logger
 	fx.rand = canaryRand{}
 

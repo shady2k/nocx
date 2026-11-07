@@ -37,7 +37,8 @@ package app
 // session, no file under the (fixture-owned) session home contains it. The
 // launcher's own ~/.nocx bundle (nocx-k47n, a pre-existing contract) is
 // expected; the CHANNEL adds no artifact beyond the rcfile text it already
-// carries, and the test asserts the home gains nothing else.
+// carries. The test compares exact paths against native-shell initialization
+// before bootstrap, and scans every retained file, including that baseline.
 
 import (
 	"context"

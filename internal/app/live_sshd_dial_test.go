@@ -42,6 +42,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
+	"github.com/shady2k/nocx/internal/loginshell"
 	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/waittest"
@@ -250,6 +251,7 @@ func terminalTail(out *outputBuffer, limit int) string {
 // render fence on the terminal.
 func TestLiveSshd_BashReachesAcceptedDomain(t *testing.T) {
 	fx := startLiveSshd(t, true)
+	baseline := initializeNativeShellHome(t, fx.home)
 	kernel := newRecordingKernel()
 	ch, out := fx.connect(t, kernel, ssh.ShellBash, liveBundleCarrier(t, fx))
 
@@ -320,9 +322,9 @@ func TestLiveSshd_BashReachesAcceptedDomain(t *testing.T) {
 			}
 		})
 
-	// Nothing installed: the session home holds only the fixture .bashrc and
-	// the launcher's own ~/.nocx bundle, and no file carries the capability.
-	assertSessionLeftOnlyTheLauncherBundle(t, fx.home, kernel.capabilityHex())
+	// The channel adds only the launcher's ~/.nocx bundle to the native
+	// shell's initialized home, and no retained file carries the capability.
+	assertSessionLeftOnlyTheLauncherBundle(t, fx.home, baseline, kernel.capabilityHex())
 }
 
 // TestLiveSshd_RemoteBundleRepublishReplacesManifest proves nocx-340t
@@ -648,48 +650,96 @@ func (fx *liveSshd) knownHostsPath(t *testing.T) string {
 	return path
 }
 
+// initializeNativeShellHome observes the account shell's own first-run files
+// before any product bootstrap can write here. OpenSSH invokes that shell
+// even when the requested command later launches Bash. Fish creates cache,
+// config and data files on a plain noninteractive `true`; those are not channel
+// artifacts. No SSH connection is made, so authentication-count proofs retain
+// their original meaning. All baseline files remain inside the scanned home.
+func initializeNativeShellHome(t *testing.T, home string) map[string]struct{} {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	shell := loginshell.New().Resolve().Path
+	cmd := exec.CommandContext(ctx, shell, "-c", "true") // #nosec G204 — the production resolver names the native account shell; the command is fixed.
+	cmd.Dir = home
+	// Do not inherit XDG paths or startup-file overrides from the developer.
+	// This mirrors sshd's fresh environment, with HOME owned by the fixture.
+	cmd.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}
+	cmd.WaitDelay = fixtureWaitDelay
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("initialize native shell home with %s: %v\n%s", shell, err, output)
+	}
+	baseline := make(map[string]struct{})
+	for _, entry := range homeEntries(t, home) {
+		baseline[entry] = struct{}{}
+	}
+	return baseline
+}
+
 // homeEntries lists the session home recursively, relative paths.
-func homeEntries(root string) []string {
+func homeEntries(t *testing.T, root string) []string {
+	t.Helper()
 	var out []string
-	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || p == root {
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if p == root {
 			return nil
 		}
-		rel, _ := filepath.Rel(root, p)
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return err
+		}
 		out = append(out, rel)
 		return nil
 	})
+	if err != nil {
+		t.Fatalf("enumerate session home: %v", err)
+	}
 	sort.Strings(out)
 	return out
 }
 
-// assertSessionLeftOnlyTheLauncherBundle fails unless the session home holds
-// nothing but the fixture's .bashrc and the launcher's own ~/.nocx bundle
-// (nocx-k47n), and no file anywhere contains the per-epoch capability — the
-// channel installs nothing and persists nothing beyond the rcfile text
-// (ADR-0024 decision 2).
-func assertSessionLeftOnlyTheLauncherBundle(t *testing.T, home, capability string) {
+// assertSessionLeftOnlyTheLauncherBundle permits exactly the native-shell
+// baseline paths plus the launcher's ~/.nocx bundle (nocx-k47n). In particular,
+// a pre-existing .cache directory does not permit any new child path. Every
+// retained file, including the baseline, is scanned for the per-epoch
+// capability: the channel persists nothing (ADR-0024 decision 2).
+func assertSessionLeftOnlyTheLauncherBundle(t *testing.T, home string, baseline map[string]struct{}, capability string) {
 	t.Helper()
-	for _, e := range homeEntries(home) {
-		if e == ".bashrc" || e == ".nocx" || strings.HasPrefix(e, ".nocx/") {
+	if capability == "" {
+		t.Fatal("the kernel minted no capability to check against")
+	}
+	for _, e := range homeEntries(t, home) {
+		if _, existed := baseline[e]; existed {
 			continue
 		}
-		t.Fatalf("session left an artifact in the remote home: %s", e)
+		if e == ".nocx" || strings.HasPrefix(e, ".nocx/") {
+			continue
+		}
+		t.Errorf("session left an artifact in the remote home: %s", e)
 	}
-	found := ""
-	_ = filepath.WalkDir(home, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || found != "" {
+	err := filepath.WalkDir(home, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
 			return nil
 		}
 		b, err := os.ReadFile(p) // #nosec G304 — p comes from WalkDir over the fixture-owned session home.
-		if err == nil && strings.Contains(string(b), capability) {
-			found = p
+		if err != nil {
+			return err
+		}
+		if strings.Contains(string(b), capability) {
+			t.Errorf("the per-epoch capability persisted on the remote host at %s — "+
+				"the channel must install nothing and persist nothing", p)
 		}
 		return nil
 	})
-	if found != "" {
-		t.Fatalf("the per-epoch capability persisted on the remote host at %s — "+
-			"the channel must install nothing and persist nothing", found)
+	if err != nil {
+		t.Fatalf("scan every retained session-home file for the capability: %v", err)
 	}
 }
 

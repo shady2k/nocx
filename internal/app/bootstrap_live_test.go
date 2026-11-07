@@ -39,6 +39,7 @@ import (
 // whole epic, watched end to end.
 func TestLiveSshd_CarrierBootstrapReachesAcceptedDomain(t *testing.T) {
 	fx := startLiveSshd(t, true)
+	baseline := initializeNativeShellHome(t, fx.home)
 	installer := liveBundleCarrier(t, fx)
 	kernel := newRecordingKernel()
 	ch, out := fx.connect(t, kernel, ssh.ShellBash, installer)
@@ -89,7 +90,7 @@ func TestLiveSshd_CarrierBootstrapReachesAcceptedDomain(t *testing.T) {
 	// Nothing installed beyond the bundle, and no file on the far host
 	// holds the capability — including the temp root, which the bootstrap
 	// wrote to and unlinked before writing a byte.
-	assertSessionLeftOnlyTheLauncherBundle(t, fx.home, cap)
+	assertSessionLeftOnlyTheLauncherBundle(t, fx.home, baseline, cap)
 }
 
 // TestLiveSshd_WithNothingPublishedTheSessionStillReachesAPrompt is the same
@@ -99,7 +100,9 @@ func TestLiveSshd_CarrierBootstrapReachesAcceptedDomain(t *testing.T) {
 // case that used to HANG before the writer existed — the loader waited for a
 // frame that never came.
 func TestLiveSshd_WithNothingPublishedTheSessionStillReachesAPrompt(t *testing.T) {
-	fx := startLiveSshd(t, true)
+	// ShellBash selects a bootstrap, not the account's shell. The fallback
+	// must really reach Bash on this endpoint, including on a Fish host.
+	fx := startLiveSshd(t, true, withAssemblyBashEndpoint(t))
 	kernel := newRecordingKernel()
 	ch, out := fx.connect(t, kernel, ssh.ShellBash)
 

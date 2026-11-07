@@ -188,7 +188,8 @@ type boundsRecorder struct {
 	sid session.ID
 	ws  *WSServer
 
-	confirmations chan uint64
+	confirmations chan struct{}
+	confirmMark   uint64
 	confirmDone   chan struct{}
 	confirmErrors chan error
 	stopConfirm   sync.Once
@@ -230,21 +231,40 @@ func (r *boundsRecorder) onRows(o client.OutputRows) {
 	// the helper's retained resend copy only after the store accepts these
 	// rows, and cannot run synchronously on the client's read loop.
 	if upTo, confirm := r.ws.BlockRowsArrived(r.sid, o.FromRow, o.LostRows, o.Rows, ""); confirm {
-		r.confirmations <- upTo
+		r.offerConfirmation(upTo)
 	}
 }
 
-func (r *boundsRecorder) startConfirmations(attached *client.AttachedSession) {
-	// The test emits fewer than 6,000 rows across all three intervals, so
-	// even one confirmation per row fits without blocking the client's read
-	// loop on a response that the same loop must receive.
-	r.confirmations = make(chan uint64, 8192)
+// offerConfirmation mirrors the app binding's latest-wins watermark slot:
+// pending acknowledgements are one cumulative mark, not a queue of RPCs.
+func (r *boundsRecorder) offerConfirmation(upTo uint64) {
+	r.mu.Lock()
+	if upTo > r.confirmMark {
+		r.confirmMark = upTo
+	}
+	r.mu.Unlock()
+	select {
+	case r.confirmations <- struct{}{}:
+	default:
+	}
+}
+
+func (r *boundsRecorder) startConfirmations(confirm func(context.Context, uint64) error) {
+	r.confirmations = make(chan struct{}, 1)
 	r.confirmDone = make(chan struct{})
 	r.confirmErrors = make(chan error, 1)
 	go func() {
 		defer close(r.confirmDone)
-		for upTo := range r.confirmations {
-			if err := attached.ConfirmWritten(context.Background(), upTo); err != nil {
+		var sent uint64
+		for range r.confirmations {
+			r.mu.Lock()
+			upTo := r.confirmMark
+			r.mu.Unlock()
+			if upTo <= sent {
+				continue
+			}
+			sent = upTo
+			if err := confirm(context.Background(), upTo); err != nil {
 				select {
 				case r.confirmErrors <- err:
 				default:
@@ -328,17 +348,25 @@ func waitForEnds(t *testing.T, r *boundsRecorder, n int) client.IntervalEnd {
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		r.mu.Lock()
-		got := len(r.ends)
+		got, frames, incomplete := len(r.ends), r.frames, r.sawIncomplete
 		var end client.IntervalEnd
 		if got >= n {
 			end = r.ends[n-1]
 		}
 		r.mu.Unlock()
+		select {
+		case err := <-r.confirmErrors:
+			t.Fatalf("confirm rows written to the block store: %v", err)
+		default:
+		}
+		if incomplete {
+			t.Fatalf("the helper's row buffer overflowed before end marker %d (%d frames): the flood measured the wrong bound", n, frames)
+		}
 		if got >= n {
 			return end
 		}
 		if !time.Now().Before(deadline) {
-			t.Fatalf("the stream never delivered end marker %d (has %d, %d frames)", n, got, r.frames)
+			t.Fatalf("the stream never delivered end marker %d (has %d, %d frames)", n, got, frames)
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
@@ -461,8 +489,8 @@ func TestTheThreeOutputBoundsHoldTogetherAtRealGeometry(t *testing.T) {
 
 			// The real pane: a real shell on a real PTY at this geometry,
 			// with the helper's default retained window and row budget. The
-			// recorder confirms each stored batch asynchronously, like the app,
-			// so the resend copy does not accumulate while the flood runs.
+			// recorder confirms the newest stored prefix asynchronously, like
+			// the app, without queuing obsolete per-frame acknowledgement RPCs.
 			spawnIn := proto.SpawnParams{
 				Cwd: "/", Cols: uint16(g.cols), Rows: uint16(g.rows), //nolint:gosec // the shipped geometries
 				WindowBytes:    8 << 20,
@@ -484,7 +512,7 @@ func TestTheThreeOutputBoundsHoldTogetherAtRealGeometry(t *testing.T) {
 			if err != nil {
 				t.Fatalf("attach: %v", err)
 			}
-			rec.startConfirmations(attached)
+			rec.startConfirmations(attached.ConfirmWritten)
 			attached.OnOutputRows(rec.onRows)
 			attached.OnIntervalEnd(rec.onEnd)
 			// The block stream is attached for the session, exactly as the

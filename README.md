@@ -17,7 +17,7 @@ Tabs, command output, notes and interface layout restore after restart; running 
 
 **Stack:** Go backend (PTY, SSH, session, transport) + client-painted cell renderer + Wails v3 desktop shell. Wails uses the platform WebView (WKWebView on macOS and WebKitGTK on Linux; the Linux AppImage carries WebKitGTK).
 
-**Status:** `v0.8.0`, early release, no formal support. macOS (universal) and Linux (x86_64 AppImage). See the [0.8.0 release notes](docs/release-notes/v0.8.0.md).
+**Status:** `v0.8.1`, early release, no formal support. macOS (universal) and Linux (x86_64 AppImage). See the [0.8.1 release notes](docs/release-notes/v0.8.1.md).
 
 ## What makes it different
 

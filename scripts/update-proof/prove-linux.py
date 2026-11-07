@@ -239,6 +239,16 @@ class Desktop:
         require(actions.nActions > 0 and actions.doAction(0), "control refused activation: " + name)
 
     NOTICE = "has been stopped and replaced"
+    # THE SURFACE THE TOOLKIT GIVES THIS WARNING (nocx-vh2hr.1.22). The notice
+    # is a Wails message dialog, which is a GtkMessageDialog, and GTK gives
+    # that widget's own accessible the role ALERT — not DIALOG, which is what a
+    # plain GtkDialog reports. Measured against the GTK 3.24.33 the AppImage
+    # bundles: the sentence's chain is label → filler → filler → filler →
+    # alert, and the stock OK is a push button two fillers below the alert.
+    # Looking for "dialog" walked past the message, out of the application and
+    # into nothing, so the proof reported a warning with no button while the
+    # accessibility snapshot listed the button.
+    NOTICE_SURFACES = ("alert", "dialog")
 
     def notice(self):
         """The replacement warning as a person sees it, or ''.
@@ -246,7 +256,7 @@ class Desktop:
         D4 says the loss of the old coordinator's sessions must be said out
         loud, and ADR-0104 makes a protocol change the case that has to say it.
         Read from the real accessibility tree: the sentence is a node in the
-        dialog, and the dialog is a child of this profile's application.
+        alert, and the alert is a child of this profile's application.
         """
         node = self.named_notice()
         return (node.name or "") if node is not None else ""
@@ -254,7 +264,7 @@ class Desktop:
     def named_notice(self):
         """The accessible carrying the warning's sentence, or None.
 
-        The node, not its text: dismissing needs the dialog around it.
+        The node, not its text: dismissing needs the alert around it.
         """
         for node in self.nodes():
             try:
@@ -264,38 +274,69 @@ class Desktop:
                 continue
         return None
 
+    def notice_surface(self, message):
+        """The message surface the warning sits in, and the roles on the way up.
+
+        Stops at the FIRST ancestor that is a message dialog. Nothing above it
+        is ever searched: the application holds the window's own controls, and
+        the first push button there belongs to the terminal, not to the
+        warning.
+        """
+        node = message
+        roles = []
+        for _ in range(8):
+            try:
+                role = node.getRoleName()
+            except (RuntimeError, AttributeError):
+                return None, roles
+            roles.append(role)
+            if role in self.NOTICE_SURFACES:
+                return node, roles
+            try:
+                node = node.parent
+            except (RuntimeError, AttributeError):
+                return None, roles
+            if node is None:
+                return None, roles
+        return None, roles
+
     def dismiss_notice(self):
         """Press the warning's own button; the name it pressed, or ''.
 
         The dialog is deliberately LEFT UP until this is called
         (nocx-vh2hr.1.19): a window that only reports healthy once somebody
         presses OK is an update that depends on a person.
+
+        A surface it cannot find, or one without a pressable control in it, is
+        refused with the roles it did see, so the failure names the tree
+        instead of the symptom.
         """
         message = self.named_notice()
         if message is None:
             return ""
-        # From the sentence up to its dialog, then the button the toolkit put
-        # there. GTK's stock OK is localised, so the label is not the anchor.
-        node = message
-        for _ in range(8):
-            try:
-                if node.getRoleName() == "dialog":
-                    break
-                node = node.parent
-            except (RuntimeError, AttributeError):
-                return ""
-            if node is None:
-                return ""
-        for child in descendants(node):
+        surface, roles = self.notice_surface(message)
+        if surface is None:
+            raise ProofError("the replacement warning is not inside a message "
+                             "dialog; from its sentence the tree reads "
+                             + " → ".join(roles))
+        for child in descendants(surface):
             try:
                 if child.getRoleName() != "push button":
                     continue
                 actions = child.queryAction()
-                if actions.nActions > 0 and actions.doAction(0):
-                    return child.name or ""
+                if actions.nActions == 0:
+                    continue
+                # THE NAME IS READ BEFORE THE PRESS (nocx-vh2hr.1.22). The
+                # action destroys the dialog, and GTK answers '' for the name
+                # of the accessible that just went away — which the caller read
+                # as "no button", after one had been pressed.
+                name = child.name or ""
+                if actions.doAction(0):
+                    return name
             except (RuntimeError, AttributeError):
                 continue
-        return ""
+        raise ProofError("the replacement warning has no pressable control; "
+                         "from its sentence the tree reads " + " → ".join(roles))
 
     def select_channel(self, channel):
         """Set the update channel through the shipped select, by its own value."""
@@ -650,8 +691,12 @@ def run(args, evidence):
                     "the new window replaced a coordinator and never showed the person "
                     "why: no replacement warning appeared while the update was pending")
             evidence["replacementNotice"] = restarted.notice_seen
+            # dismiss_notice refuses, with the roles it read, a warning that
+            # is not in a message surface or has nothing pressable in it; ''
+            # therefore means the warning went away before it could be
+            # dismissed, which is the other way this assertion still fails.
             pressed = desktop.dismiss_notice()
-            require(pressed, "the replacement warning has no button to press")
+            require(pressed, "the replacement warning vanished before it could be dismissed")
             evidence["replacementNoticeDismissedWith"] = pressed
             wait_for("the replacement warning to close", lambda: not desktop.notice())
             evidence["updateFinalisedWhileNoticeUnpressed"] = True

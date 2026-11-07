@@ -27,6 +27,11 @@ concurrency:
   cancel-in-progress: false
 jobs:
   prepare:
+    # Reading the pull request behind a commit needs `pull-requests: read`;
+    # naming one permission here sets every unnamed one to none.
+    permissions:
+      contents: read
+      pull-requests: read
     # `proof-only` reads no plan: it proves what is published now, and a plan
     # that decided nothing moved would otherwise skip the proof with it.
     if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.proof-only) }}
@@ -85,15 +90,23 @@ jobs:
           const plan = prepare({ sha, previous, files, tags });
           // The tag is NOT decided here: its suffix is the build's own signed
           // instant, which release-build chooses and signs (nocx-vh2hr.1.17).
-          // What a person reads in the release is the first-parent history since
-          // the previous nightly, so it is collected here, where git and that
-          // commit are both in hand, and carried to publication.
+          // What a person reads in the release is the pull requests of the
+          // first-parent history since the previous nightly, so each commit is
+          // resolved here, where git and that commit are both in hand, and the
+          // result is carried to publication. A failed lookup throws: the plan
+          // step must fail rather than publish notes with a change missing.
           const commits = previous
             ? git(['log', '--first-parent', '--format=%H%x09%s', `${previous}..${sha}`])
                 .split('\n').filter(Boolean)
                 .map(line => {
                   const [commit, ...subject] = line.split('\t');
-                  return { sha: commit, subject: subject.join('\t') };
+                  const pulls = JSON.parse(gh(['api', `repos/{owner}/{repo}/commits/${commit}/pulls`]));
+                  const pull = pulls[0];
+                  return {
+                    sha: commit,
+                    subject: subject.join('\t'),
+                    pull: pull ? { number: pull.number, title: pull.title, body: pull.body ?? '' } : null,
+                  };
                 })
             : [];
           if (process.env.DRY_RUN === 'true') plan.moved = true;

@@ -25,6 +25,7 @@ import {
   isDatedNightly,
   nightlyTag,
   nightlyTitle,
+  parseWhatChangesForYou,
   releaseNotes,
 } from './publish-nightly.mjs'
 
@@ -95,8 +96,20 @@ function fixture(t) {
     tag: buildTag,
     previous: 'nightly-20261026-41',
     commits: [
-      { sha: 'b'.repeat(40), subject: 'fix(update): keep the manifest URL immutable' },
-      { sha: 'c'.repeat(40), subject: 'feat(ui): name the build in the update notice' },
+      {
+        sha: 'b'.repeat(40),
+        subject: 'Merge pull request #41 from shady2k/update-url (nocx-x)',
+        pull: {
+          number: 41,
+          title: 'Keep the update manifest URL immutable',
+          body: '## What changes for you\r\n\r\n- The update check no longer loses the manifest URL.\r\n- The update notice names the build you are running.\r\n',
+        },
+      },
+      {
+        sha: 'c'.repeat(40),
+        subject: 'Merge pull request #42 from shady2k/tech (nocx-y)',
+        pull: { number: 42, title: 'Refactor the nightly publisher', body: 'No section here.' },
+      },
     ],
     runId: '42',
     runAttempt: '1',
@@ -378,7 +391,7 @@ test('a publish titles the dated copy and the alias by the build, never by a run
   assert.ok(alias.includes('--latest=false'))
 })
 
-test('notes list the first-parent commits since the previous nightly, linked', async (t) => {
+test('notes list what changed for a user, each bullet linked to its pull request', async (t) => {
   const { input } = fixture(t)
   const calls = []
   await publish(input, (args) => {
@@ -390,25 +403,46 @@ test('notes list the first-parent commits since the previous nightly, linked', a
   const notes = dated[dated.indexOf('--notes') + 1]
   assert.match(notes, /^`nocx 0\.8\.0` nightly, build 202610270317, from main at a{40}\./)
   assert.match(notes, /Changes since nightly-20261026-41:/)
+  assert.match(notes, /## What changed/)
   assert.match(
     notes,
-    /- fix\(update\): keep the manifest URL immutable \(\[`bbbbbbb`\]\(https:\/\/github\.com\/shady2k\/nocx\/commit\/b{40}\)\)/,
+    /- The update check no longer loses the manifest URL\. \(\[#41\]\(https:\/\/github\.com\/shady2k\/nocx\/pull\/41\)\)/,
   )
-  assert.match(notes, /feat\(ui\): name the build in the update notice/)
-  // The commit list replaces the fixed sentence; the moving alias serves the
-  // same build and says the same thing.
-  assert.doesNotMatch(notes, /Signed update manifest/)
+  assert.match(
+    notes,
+    /- The update notice names the build you are running\. \(\[#41\]\(https:\/\/github\.com\/shady2k\/nocx\/pull\/41\)\)/,
+  )
+  assert.match(notes, /<summary>Technical changes<\/summary>/)
+  assert.match(
+    notes,
+    /- Refactor the nightly publisher \(\[#42\]\(https:\/\/github\.com\/shady2k\/nocx\/pull\/42\)\)/,
+  )
+  // A merge subject says which branch landed, not what changed, and never
+  // reaches the notes when the pull request is known.
+  assert.doesNotMatch(notes, /Merge pull request/)
+  // The moving alias serves the same build and says the same thing.
   const alias = calls.find((c) => c[0] === 'release' && c[1] === 'create' && c[2] === 'nightly')
   assert.equal(alias[alias.indexOf('--notes') + 1], notes)
 })
 
-test('release notes name the build, the comparison point and one line per commit', () => {
+test('release notes name the build, the comparison point and what changed in plain words', () => {
   const notes = releaseNotes({
     version: '0.8.1',
     build: '202611021101',
     sha: 'a'.repeat(40),
     previous: 'v0.8.1-nightly.202611011830',
-    commits: [{ sha: 'd'.repeat(40), subject: 'fix(pty): keep the slave open' }],
+    commits: [
+      {
+        sha: 'b'.repeat(40),
+        subject: 'Merge pull request #7 from shady2k/pty-fix',
+        pull: {
+          number: 7,
+          title: 'Keep the terminal open',
+          body: '## What changes for you\n\n- The terminal stays open when a program exits.\n',
+        },
+      },
+      { sha: 'd'.repeat(40), subject: 'fix(pty): keep the slave open', pull: null },
+    ],
   })
   assert.equal(
     notes,
@@ -417,15 +451,97 @@ test('release notes name the build, the comparison point and one line per commit
       '',
       'Changes since v0.8.1-nightly.202611011830:',
       '',
+      '## What changed',
+      '',
+      '- The terminal stays open when a program exits. ([#7](https://github.com/shady2k/nocx/pull/7))',
+      '',
+      '<details>',
+      '<summary>Technical changes</summary>',
+      '',
       '- fix(pty): keep the slave open ([`ddddddd`](https://github.com/shady2k/nocx/commit/' +
         'd'.repeat(40) +
         '))',
+      '',
+      '</details>',
     ].join('\n'),
   )
-  assert.match(
+  assert.doesNotMatch(notes, /Merge pull request/)
+})
+
+test('the first nightly reads as today: no comparison, no empty sections', () => {
+  assert.equal(
     releaseNotes({ version: '0.8.1', build: '202611021101', sha: 'a'.repeat(40), previous: null }),
-    /first dated nightly/,
+    '`nocx 0.8.1` nightly, build 202611021101, from main at ' +
+      'a'.repeat(40) +
+      '.\n\nThis is the first dated nightly on the channel: there is no build to compare with.',
   )
+})
+
+test('the what-changes heading is exact, tolerates CRLF and stops at the next heading', () => {
+  assert.deepEqual(
+    parseWhatChangesForYou(
+      'Intro\r\n\r\n## What changes for you\r\n\r\n- One user change.\r\n- Two user changes.\r\n\r\n## Reviewer notes\r\n- Not a user change.\r\n',
+    ),
+    ['One user change.', 'Two user changes.'],
+  )
+  // Heading matched exactly: another level, another suffix and a different
+  // bullet marker are not the section.
+  assert.deepEqual(parseWhatChangesForYou('### What changes for you\n\n- One\n'), [])
+  assert.deepEqual(parseWhatChangesForYou('## What changes for you?\n\n- One\n'), [])
+  assert.deepEqual(parseWhatChangesForYou('## What changes for you\n\n* One\n- Two\n'), ['Two'])
+  assert.deepEqual(parseWhatChangesForYou('## What changes for you\n\n## Details\n- One\n'), [])
+})
+
+test('a pull request without the section, a direct commit and an empty section are technical changes', () => {
+  const notes = releaseNotes({
+    version: '0.8.1',
+    build: '202611021101',
+    sha: 'a'.repeat(40),
+    previous: 'v0.8.1-nightly.202611011830',
+    commits: [
+      {
+        sha: 'b'.repeat(40),
+        subject: 'Merge pull request #8 from shady2k/tidy',
+        pull: {
+          number: 8,
+          title: 'Tidy the workflow',
+          body: '## What changes for you\r\n\r\n## Notes\r\n- Internal only.\r\n',
+        },
+      },
+      {
+        sha: 'c'.repeat(40),
+        subject: 'Merge pull request #9 from shady2k/deps',
+        pull: { number: 9, title: 'Drop an unused dependency', body: '' },
+      },
+      { sha: 'd'.repeat(40), subject: 'chore: refresh the lockfile', pull: null },
+    ],
+  })
+  assert.match(notes, /This build has only technical changes\./)
+  assert.doesNotMatch(notes, /## What changed/)
+  assert.match(notes, /- Tidy the workflow \(\[#8\]/)
+  assert.match(notes, /- Drop an unused dependency \(\[#9\]/)
+  assert.match(notes, /- chore: refresh the lockfile \(\[`ddddddd`\]/)
+  assert.doesNotMatch(notes, /Merge pull request/)
+})
+
+test('a pull request reached by several commits is listed once', () => {
+  const pull = {
+    number: 10,
+    title: 'One change',
+    body: '## What changes for you\n\n- One user change.\n',
+  }
+  const notes = releaseNotes({
+    version: '0.8.1',
+    build: '202611021101',
+    sha: 'a'.repeat(40),
+    previous: 'v0.8.1-nightly.202611011830',
+    commits: [
+      { sha: 'b'.repeat(40), subject: 'Merge pull request #10 from a', pull },
+      { sha: 'c'.repeat(40), subject: 'Merge pull request #10 from a again', pull },
+    ],
+  })
+  assert.equal((notes.match(/One user change\./g) || []).length, 1)
+  assert.equal((notes.match(/pull\/10/g) || []).length, 1)
 })
 
 test('notes for the first dated nightly say there is nothing to compare with', async (t) => {
@@ -578,12 +694,46 @@ test('the tag is made where the build instant is stamped, and the proofs read it
   // Both proofs select the pair with the publication module, in both spellings.
   assert.equal((nightly.match(/node scripts\/publish-nightly\.mjs dated-tags/g) || []).length, 2)
   assert.doesNotMatch(nightly, /startswith\("nightly-"\)/)
-  // The notes are the commits since the previous nightly, first-parent only.
+  // The notes are the pull requests of the first-parent commits since the
+  // previous nightly. A failed lookup is not caught, so the plan step fails
+  // rather than publishing notes that silently lost a change.
   assert.match(nightly, /git\(\['log', '--first-parent', '--format=%H%x09%s'/s)
   assert.match(nightly, /commits=\$\{JSON\.stringify\(commits\)\}/)
   // A null previous is an empty output, never the string "null" a step would
   // read back as a tag.
   assert.match(nightly, /\$\{key\}=\$\{value \?\? ''\}/)
+})
+
+test('the plan resolves every commit to its pull request and fails when a lookup fails', () => {
+  const nightly = readFileSync(new URL('../.github/workflows/nightly.yml', import.meta.url), 'utf8')
+  // The plan step asks GitHub for the pull request of every first-parent
+  // commit, and carries its title and body to publication.
+  assert.match(
+    nightly,
+    /gh\(\['api', `repos\/\{owner\}\/\{repo\}\/commits\/\$\{commit\}\/pulls`\]\)/,
+  )
+  assert.match(
+    nightly,
+    /pull: pull \? \{ number: pull\.number, title: pull\.title, body: pull\.body \?\? '' \} : null/,
+  )
+  // execFileSync throws on a failed lookup and nothing catches it, so the
+  // plan step fails instead of publishing notes with a change missing.
+  const start = nightly.indexOf('- id: plan')
+  const end = nightly.indexOf('\n          JS\n', start)
+  assert.ok(start >= 0 && end > start, 'the plan step script must be present')
+  assert.doesNotMatch(nightly.slice(start, end), /catch/)
+  // The job's token must be allowed to read pull requests, or every lookup
+  // fails.
+  const prepare = nightly.slice(nightly.indexOf('  prepare:'), nightly.indexOf('  build:'))
+  assert.match(prepare, /pull-requests: read/)
+})
+
+test('the pull request template asks for the user-facing section', () => {
+  const template = readFileSync(
+    new URL('../.github/pull_request_template.md', import.meta.url),
+    'utf8',
+  )
+  assert.match(template, /^## What changes for you$/m)
 })
 
 test('nightly workflow calls the shared build without CI or Homebrew and gates unchanged main', () => {

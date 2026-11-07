@@ -107,24 +107,82 @@ export function nightlyTitle(version, build) {
   return `nocx ${version} nightly · build ${build}`
 }
 
+const USER_CHANGES_HEADING = '## What changes for you'
+const NOCX_URL = 'https://github.com/shady2k/nocx'
+const pullLink = (number) => `([#${number}](${NOCX_URL}/pull/${number}))`
+const commitLink = (sha) => `([\`${sha.slice(0, 7)}\`](${NOCX_URL}/commit/${sha}))`
+
 /**
- * Release notes for one dated build: the first-parent commits since the
- * previous nightly, newest first, each linked to its commit. `commits` is
- * collected by the workflow (`git log --first-parent --format=%H%x09%s`), so
- * this function owns the wording and the links and nothing about git.
+ * The bullets of a pull request's `## What changes for you` section, which is
+ * what a person opening a nightly reads. The heading is matched exactly — no
+ * other level and no other suffix — and the section ends at the next `## `
+ * heading or at the end of the body. Only `- ` bullets survive. GitHub stores
+ * form bodies with CRLF, so both line endings read the same way. A missing,
+ * empty or bullet-less section is an empty list: the caller treats it as no
+ * section rather than inventing one.
+ */
+export function parseWhatChangesForYou(body) {
+  if (typeof body !== 'string' || body === '') return []
+  const lines = body.replace(/\r\n/g, '\n').split('\n')
+  const start = lines.findIndex((line) => line === USER_CHANGES_HEADING)
+  if (start === -1) return []
+  const bullets = []
+  for (const line of lines.slice(start + 1)) {
+    if (/^## /.test(line)) break
+    if (!line.startsWith('- ')) continue
+    const bullet = line.slice(2).trim()
+    if (bullet) bullets.push(bullet)
+  }
+  return bullets
+}
+
+/**
+ * Release notes for one dated build. `commits` is the first-parent history
+ * since the previous nightly, newest first, each entry `{sha, subject, pull}`
+ * as the workflow collected it. A pull request that carries the user-facing
+ * section supplies its bullets verbatim, each linked to that pull request; a
+ * pull request without one, and a commit with no pull request, is listed under
+ * a collapsed "Technical changes" group instead. This function owns all the
+ * wording and links and knows nothing about git or GitHub, so the same data
+ * renders the same notes in a test.
  */
 export function releaseNotes({ version, build, sha, previous, commits = [] }) {
-  const lines = [`\`nocx ${version}\` nightly, build ${build}, from main at ${sha}.`, '']
-  if (!previous) {
-    lines.push('This is the first dated nightly on the channel: there is no build to compare with.')
-    return lines.join('\n')
+  const header = `\`nocx ${version}\` nightly, build ${build}, from main at ${sha}.`
+  if (!previous)
+    return `${header}\n\nThis is the first dated nightly on the channel: there is no build to compare with.`
+  const changes = []
+  const technical = []
+  const seenPulls = new Set()
+  for (const commit of commits) {
+    const pull = commit.pull
+    if (!pull) {
+      technical.push(`- ${commit.subject} ${commitLink(commit.sha)}`)
+      continue
+    }
+    // A pull request reached by several first-parent commits is one change,
+    // not as many as the commits that carry it.
+    if (seenPulls.has(pull.number)) continue
+    seenPulls.add(pull.number)
+    const bullets = parseWhatChangesForYou(pull.body)
+    if (bullets.length)
+      for (const bullet of bullets) changes.push(`- ${bullet} ${pullLink(pull.number)}`)
+    else technical.push(`- ${pull.title} ${pullLink(pull.number)}`)
   }
-  lines.push(`Changes since ${previous}:`, '')
-  for (const commit of commits)
-    lines.push(
-      `- ${commit.subject} ([\`${commit.sha.slice(0, 7)}\`](https://github.com/shady2k/nocx/commit/${commit.sha}))`,
+  const blocks = [header, `Changes since ${previous}:`]
+  if (changes.length) blocks.push(['## What changed', '', ...changes].join('\n'))
+  else blocks.push('This build has only technical changes.')
+  if (technical.length)
+    blocks.push(
+      [
+        '<details>',
+        '<summary>Technical changes</summary>',
+        '',
+        ...technical,
+        '',
+        '</details>',
+      ].join('\n'),
     )
-  return lines.join('\n')
+  return blocks.join('\n\n')
 }
 
 /**

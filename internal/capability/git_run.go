@@ -79,8 +79,8 @@ func (e *ExpiredError) Error() string {
 }
 
 // gitRun is one git invocation's lifetime. acquire takes whatever the call
-// must hold — the checkout's key, the mount's permit, the lane — on the worker
-// goroutine, and answers the functions that give it back. fn is the work. The
+// must hold — the checkout's key, the mount's permit — on the worker
+// goroutine, and publishes each permit it takes to h. fn is the work. The
 // caller settles at whichever comes first: fn returns, the turn expires, or the
 // max expires.
 //
@@ -88,6 +88,12 @@ func (e *ExpiredError) Error() string {
 // keeps what it holds until it really returns (ADR-8eej3e66 §6). Abandon tells
 // the bulkhead that this worker outlived its request, so the failure domain's
 // breaker can count it.
+//
+// THE TURN RUNNING OUT IS THE SAME FACT FOR A PERMIT TAKEN DURING
+// ACQUISITION, and the permit has to be reachable from the caller for it to be
+// told. That is what h is for: acquisition is not instantaneous — the
+// failure-domain derivation is a stat of the checkout's mount — and a worker
+// blocked there holds a permit nobody would otherwise count.
 //
 // Whether the call STARTED has one owner, startDecision: the worker claiming
 // its start and the caller's turn running out race for it under one lock, and
@@ -98,13 +104,13 @@ func (e *ExpiredError) Error() string {
 // Without a catalogue scope (a direct capability test), the call runs with no
 // deadline: there is nothing to enforce and inventing one would be a second
 // declaration.
-func gitRun(ctx context.Context, allow gitAllowance, acquire func(context.Context) (finish, abandon func(), err error), fn func(context.Context) error) error {
+func gitRun(ctx context.Context, allow gitAllowance, acquire func(context.Context, *holdings) error, fn func(context.Context) error) error {
+	h := &holdings{}
 	if allow.Turn <= 0 && allow.Max <= 0 {
-		finish, _, err := acquire(ctx)
-		if err != nil {
+		if err := acquire(ctx, h); err != nil {
 			return err
 		}
-		defer finish()
+		defer h.give()
 		return fn(ctx)
 	}
 
@@ -115,8 +121,7 @@ func gitRun(ctx context.Context, allow gitAllowance, acquire func(context.Contex
 	done := make(chan error, 1)
 
 	go func() {
-		finish, abandon, err := acquire(turnCtx)
-		if err != nil {
+		if err := acquire(turnCtx, h); err != nil {
 			decision.fail(err)
 			return
 		}
@@ -124,7 +129,7 @@ func gitRun(ctx context.Context, allow gitAllowance, acquire func(context.Contex
 		// not start anything. It is decided against the caller's answer in
 		// one step below, never here alone.
 		if cerr := turnCtx.Err(); cerr != nil {
-			finish()
+			h.give()
 			decision.fail(cerr)
 			return
 		}
@@ -156,11 +161,11 @@ func gitRun(ctx context.Context, allow gitAllowance, acquire func(context.Contex
 				done <- err
 			})
 		}
-		if !decision.begin(gitStart{expired: expired, abandon: abandon}) {
+		if !decision.begin(gitStart{expired: expired, abandon: h.abandon}) {
 			// The caller's turn ran out while this worker was acquiring, and
 			// it answered that nothing changed. Nothing may change.
 			cancelWork()
-			finish()
+			h.give()
 			return
 		}
 		var timer *time.Timer
@@ -169,18 +174,24 @@ func gitRun(ctx context.Context, allow gitAllowance, acquire func(context.Contex
 				once.Do(func() { close(expired) })
 			})
 		}
-		err = fn(workCtx)
+		werr := fn(workCtx)
 		if timer != nil {
 			timer.Stop()
 		}
-		settle(err)
-		finish()
+		settle(werr)
+		h.give()
 	}()
 
 	select {
 	case <-decision.ready:
 	case <-turnCtx.Done():
 		if decision.expire(turnCtx.Err()) {
+			// The call is over, and whatever permit the worker holds at this
+			// moment it holds past the answer: a derivation blocked in the
+			// kernel is a stuck worker of that domain, and the breaker reads
+			// the count. Nothing here waits for it — the worker gives the
+			// permit back when the kernel finally answers.
+			h.abandon()
 			return gitWaitError(ctx, allow, turnCtx.Err())
 		}
 		// The worker claimed the start first, so this call settles with the
@@ -201,6 +212,65 @@ func gitRun(ctx context.Context, allow gitAllowance, acquire func(context.Contex
 	case <-s.expired:
 		s.abandon()
 		return &ExpiredError{Operation: allow.Operation, Outcome: allow.Expired, Budget: allow.Max}
+	}
+}
+
+// holdings is the permit an acquiring worker holds, published the moment it
+// is taken so the caller can reach it.
+//
+// Acquisition is not instantaneous. Deriving a call's failure domain reads the
+// disk — one stat of the checkout's mount — and on a hung NFS or FUSE mount
+// that syscall never returns. The permit is taken first, and without this
+// hand-off the caller's turn could settle the call while the worker blocked
+// holding a permit no one knew about: the failure domain's abandoned count
+// stayed at zero, its breaker never learned the disk had stopped answering,
+// and every further open left one more goroutine in the kernel, without
+// limit. The count is the whole of the defence, so the permit has to be
+// reachable at the moment the call ends.
+//
+// Both sides may arrive first, and both answers are the same one under the
+// lock: a permit taken after the call settled is abandoned as it is taken.
+type holdings struct {
+	mu            sync.Mutex
+	finish        func()
+	abandonPermit func()
+	settled       bool
+}
+
+// took publishes the permit the worker now holds. It is called after a
+// permit is acquired and after a switch from one to another, and it may be
+// called again as often as the acquisition changes its mind.
+func (h *holdings) took(finish, abandon func()) {
+	h.mu.Lock()
+	h.finish, h.abandonPermit = finish, abandon
+	settled := h.settled
+	h.mu.Unlock()
+	if settled {
+		abandon()
+	}
+}
+
+// give returns the permit. It is the worker's own path, and it answers
+// nothing when no permit was ever taken.
+func (h *holdings) give() {
+	h.mu.Lock()
+	finish := h.finish
+	h.mu.Unlock()
+	if finish != nil {
+		finish()
+	}
+}
+
+// abandon is the caller's: the call is over, so the permit the worker holds
+// at this moment is held past it, and the breaker must count it. A permit
+// taken later is abandoned at the moment it is taken.
+func (h *holdings) abandon() {
+	h.mu.Lock()
+	h.settled = true
+	abandon := h.abandonPermit
+	h.mu.Unlock()
+	if abandon != nil {
+		abandon()
 	}
 }
 

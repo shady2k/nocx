@@ -96,7 +96,7 @@ func (s *WSServer) seamSpecs(sessionGate control.Admission) []methodSpec {
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSessionsStatus(ctx, req) }
 		}),
 		regResponder(s.work, catalog.OpFsComplete, params(validateFsCompleteRaw), func(r Responder) handlerFunc {
-			h := fsCompleteHandlers{r: r}
+			h := s.newFsCompleteHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleFsComplete(ctx, req) }
 		}),
 		// tunnel.open needs the connection as the owner-map key (spec §7.3):

@@ -123,7 +123,7 @@ type MutationRecord struct {
 	key    string
 	op     ID
 	state  mutationState
-	answer bool // a response was recorded; the state must not be overwritten
+	answer bool // a terminal fact was recorded; the state must not be overwritten
 	began  time.Time
 	ended  time.Time // zero while running
 }
@@ -132,7 +132,13 @@ func (r *MutationRecord) notStarted() {
 	if r == nil {
 		return
 	}
-	r.store.record(r, mutationNotStarted, false)
+	// TERMINAL. A task that never began cannot acquire a handler answer
+	// afterwards, so the fact is recorded with the same finality as a
+	// response. Without it the transport's own expiry answer — an error
+	// written after this call — classified the record as "done", and the one
+	// retry a not-started identity sanctions was refused as a replay of work
+	// that never ran (nocx-3an1s.2.17).
+	r.store.record(r, mutationNotStarted, true)
 }
 
 func (r *MutationRecord) answered(kind AnsweredKind) {

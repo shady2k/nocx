@@ -132,6 +132,21 @@ func (s *inflightSubmission) TrySubmit(ctx context.Context, task control.Task) *
 	if !ok {
 		return &control.Rejection{Reason: "server shutting down", Scope: "control"}
 	}
+	// THE START GATE IS AN END TOO (nocx-3an1s.2.17). A queued task whose
+	// owner withdrew it is refused by Start, and the inner submission then
+	// never calls Run — so the release deferred around Run never runs either,
+	// and the registration would sit in the inflight set until the process
+	// ended. Wrap Start: a refusal releases here, before the worker moves on.
+	start := task.Start
+	if start != nil {
+		task.Start = func() bool {
+			if start() {
+				return true
+			}
+			release()
+			return false
+		}
+	}
 	rej := s.inner.TrySubmit(tctx, control.Task{Key: task.Key, Start: task.Start, Run: func(pctx context.Context) {
 		defer release()
 		task.Run(pctx)

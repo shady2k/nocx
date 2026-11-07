@@ -1601,6 +1601,12 @@ func New(opts ...Option) (*App, error) {
 		// channel rides the same pooled connection the pane does, so a terminal
 		// and its Files panel authenticate once (AD-4, plan §3).
 		transport.WithFilesystemProviderFactory(filesystemProviderFactory(sshLeases)),
+		// fs.complete reads the backend's own filesystem and has no binding
+		// to ask, so its failure domain comes from the same local provider's
+		// mount-table answer a local binding's handle gives. Without this the
+		// completion workers would share one domain and a hung mount would
+		// refuse completion on a healthy one (ADR-8eej3e66 §6).
+		transport.WithLocalFilesystemDomainNamer(local.New()),
 		// Git (spec §5.1). The registry is the only route to a bound
 		// repository; the factory is the local one, and it is what makes
 		// internal/git reachable from main() at all — until this line

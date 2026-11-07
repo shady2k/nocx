@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -971,8 +972,19 @@ type WSServer struct {
 	// filesDomains bounds filesystem work per failure domain (ADR-8eej3e66
 	// §6): one mount or one resolved host, so a hung disk holds its own
 	// permits and every other disk's listings go on.
-	filesDomains               *domains.Registry
-	filesProviderFor           FilesystemProviderFactory
+	filesDomains     *domains.Registry
+	filesProviderFor FilesystemProviderFactory
+	// fsCompleteReadDir is the directory read fs.complete performs. It is a
+	// field rather than a direct os.ReadDir so a test can hold one open, the
+	// way the filesystem tests hold a provider's listing open; nil is
+	// os.ReadDir. The read runs under filesDomains (nocx-3an1s.2.17).
+	fsCompleteReadDir func(string) ([]os.DirEntry, error)
+	// fsCompleteDomainNamer names the failure domain a completed path draws
+	// on. fs.complete has no binding, so it cannot get this from a
+	// filesystem.Handle; the composition root supplies the local provider's
+	// mount-table answer (filesystem.DomainNamer). Nil shares one
+	// conservative domain, which is still bounded.
+	fsCompleteDomainNamer      filesystem.DomainNamer
 	revealer                   FilesRevealer
 	filesPollInterval          time.Duration // transport-side digest-poll cadence (files.watch)
 	filesRefreshStateThreshold time.Duration // visible no-observation threshold
@@ -1804,6 +1816,17 @@ func WithFilesystemProviderFactory(f FilesystemProviderFactory) WSServerOption {
 	return func(s *WSServer) { s.filesProviderFor = f }
 }
 
+// WithLocalFilesystemDomainNamer attaches the seam that names the failure
+// domain of a path fs.complete reads. That method completes against the
+// backend's own filesystem and has no binding to ask, so the composition
+// root supplies the local provider's mount-table answer (filesystem.
+// DomainNamer) — the same answer a local binding's handle gives, from the
+// same owner. Without it, every completion shares one conservative domain,
+// which is bounded but cannot keep a hung mount away from a healthy one.
+func WithLocalFilesystemDomainNamer(n filesystem.DomainNamer) WSServerOption {
+	return func(s *WSServer) { s.fsCompleteDomainNamer = n }
+}
+
 // WithGitRegistry attaches the binding registry backing the git.* control
 // plane (spec §5.1). When absent, those methods return -32601. The
 // composition root constructs the registry (internal/app/app.go); without
@@ -2053,6 +2076,7 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		publishFailures:            make(map[session.ID]shellintegration.PublishFailureReason),
 		controlDrainTimeout:        defaultControlDrainTimeout,
 		recorderDrainTimeout:       defaultControlDrainTimeout,
+		fsCompleteReadDir:          os.ReadDir,
 		gitBindings:                make(map[string]*gitBinding),
 		gitBySession:               make(map[session.ID]map[string]struct{}),
 		paneObserverSweep:          DefaultPaneObserverSweep,
@@ -3807,6 +3831,14 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	// reach a handler however the renderer behaves.
 	mutation, mutationRefusal := s.beginMutation(req, m.op)
 	if mutationRefusal != nil {
+		// This invocation ends before a task exists, so nothing else will
+		// drop the cancellation registration made above. The replay refusal
+		// used to leave it in the connection's map for the connection's life
+		// (nocx-3an1s.2.17, the same early end as a skipped queued task).
+		if cancelEntry != nil {
+			wconn.requestCancels.drop(req.ID, cancelEntry)
+		}
+		cancelRequest()
 		_ = wconn.TryError(req.ID, *mutationRefusal)
 		return true
 	}
@@ -3834,9 +3866,24 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	if len(runtimeKeys) > 0 {
 		key = runtimeKeys[0]
 	}
-	task := control.Task{Key: key, Run: func(pctx context.Context) {
-		defer cancelRequest()
-		defer func() {
+	// ONE FINISHER FOR BOTH ENDS OF A TASK (nocx-3an1s.2.17). A task that
+	// ran calls it from Run's defer; a task the start gate refused calls it
+	// itself, because Run never runs and everything Run's defers would have
+	// released — the request's cancellation entry, its credit, its mutation
+	// mapping, its inflight registration (that one lives in the submission
+	// wrapper) — would otherwise stay behind. A withdrawn queued call used to
+	// leave its entry in requestCancels for the life of the connection.
+	var finishOnce sync.Once
+	finishInvocation := func() {
+		finishOnce.Do(func() {
+			if cancelEntry != nil {
+				wconn.requestCancels.drop(req.ID, cancelEntry)
+			}
+			// The task is the second owner of this credit: a request withdrawn
+			// or failed without an answer would otherwise hold its window slot
+			// until the connection ended. Release is idempotent, so the
+			// response path may already have freed it.
+			credit.Release()
 			// THE INVOCATION'S OWN END, and what it means for the mutation
 			// record. The chosen outcome is the CAUSE, not whichever settle
 			// won the race: a withdrawn request records "cancelled" even when
@@ -3851,17 +3898,11 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 			// be settled here, and its request entry must not outlive it.
 			wconn.mutations.take(req.ID)
 			mutation.Settled(settled)
-		}()
-		// The task is the second owner of this credit: a request withdrawn
-		// or failed without an answer would otherwise hold its window slot
-		// until the connection ended. Release is idempotent, so the response
-		// path may already have freed it.
-		defer credit.Release()
-		defer func() {
-			if cancelEntry != nil {
-				wconn.requestCancels.drop(req.ID, cancelEntry)
-			}
-		}()
+			cancelRequest()
+		})
+	}
+	task := control.Task{Key: key, Run: func(pctx context.Context) {
+		defer finishInvocation()
 		m.handle(pctx, req)
 	}}
 	// A QUEUED TASK THAT NEVER STARTS ANSWERS "DID NOT START" — and it is
@@ -3933,6 +3974,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		if cancelEntry != nil && !cancelEntry.begin() {
 			mutation.NotStarted()
 			scope.Settle(catalog.OutcomeNotStarted)
+			finishInvocation()
 			return false
 		}
 		if turnTimer != nil {
@@ -3940,6 +3982,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		}
 		if !claimRun() {
 			// The turn answered first: this task must not run.
+			finishInvocation()
 			return false
 		}
 		if !ingressCritical(req.Method) && !time.Now().Before(scope.TurnDeadline()) {
@@ -3948,6 +3991,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 			if req.ID != nil {
 				answerOperationExpiry(wconn, req, catalog.ExpiredNotStarted, "")
 			}
+			finishInvocation()
 			return false
 		}
 		return true

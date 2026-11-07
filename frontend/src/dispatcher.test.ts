@@ -1483,4 +1483,136 @@ describe('credit window (ADR-8eej3e66 §7)', () => {
     await expect(queued).resolves.toEqual({ locked: false })
     expect(settled).toEqual([announced[0].id])
   })
+
+  // THE WITHDRAWAL GIVES THE CREDIT BACK WITH THE CANCEL, AND BEFORE ANYTHING
+  // SPENDS IT (ADR-8eej3e66 §7). The server releases a withdrawn request's
+  // credit when it handles `rpc.cancel` on the read loop
+  // (internal/transport/ws_rpc_cancel.go), and a peer that sends one past its
+  // window is disconnected there and then (internal/transport/credit.go).
+  // Freeing the slot here and pumping the queue first puts one request past
+  // the window on the wire, so the backend hangs up on a well-behaved client
+  // and every waiting call loses its answer.
+  it('asks the backend to give the credit back BEFORE the call that spends it', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    await connectedWith(d, 1)
+    const announced: number[] = []
+    d.onCallPending = (call) => announced.push(call.id)
+
+    const first = d.call('agent.cancel', {})
+    first.catch(() => {})
+    const queued = d.call('files.close', { path: '/tmp/x' })
+    queued.catch(() => {})
+    await flush()
+    expect(
+      socket()
+        .requests()
+        .map((r) => r.method),
+    ).toEqual(['agent.cancel'])
+    const wire = socket().requests()[0].id!
+
+    d.cancel(announced[0])
+    await flush()
+
+    const frames = socket().requests()
+    expect(frames.map((r) => r.method)).toEqual(['agent.cancel', 'rpc.cancel', 'files.close'])
+    // The cancel names the id the backend is working on, not the call's.
+    expect((frames[1] as { params?: { id?: number } }).params).toEqual({ id: wire })
+    await expect(first).rejects.toMatchObject({ name: 'AbortError' })
+  })
+
+  it('asks the backend to give the credit back BEFORE the call that spends it, for a mutation too', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    await connectedWith(d, 1)
+    const announced: number[] = []
+    d.onCallPending = (call) => announced.push(call.id)
+
+    const mutation = d.call('vault.seal', {}) // outcome-unknown: a mutation
+    mutation.catch(() => {})
+    const queued = d.call('vault.status', {})
+    queued.catch(() => {})
+    await flush()
+
+    d.cancel(announced[0])
+    await flush()
+
+    // The first three frames, because a withdrawn mutation goes on to ask the
+    // record what became of it — and that ask waits for credit like any call.
+    expect(
+      socket()
+        .requests()
+        .slice(0, 3)
+        .map((r) => r.method),
+    ).toEqual(['vault.seal', 'rpc.cancel', 'vault.status'])
+
+    // The record's answer is what the caller is owed, so the withdrawal does
+    // not settle the caller until it lands.
+    answer(socket().requests()[2].id!, { locked: false })
+    await flush()
+    const ask = socket().requests()[3]
+    expect(ask.method).toBe('operation.outcome')
+    answer(ask.id!, { outcome: 'not-started', operation: 'vault.seal' })
+    await expect(mutation).rejects.toMatchObject({ name: 'AbortError' })
+  })
+})
+
+// THE TWO IDENTITIES OF ONE CALL (ADR-8eej3e66 §8). The wire id is per
+// attempt and it is all the backend knows: `rpc.cancel` names it, and so does
+// `operation.row` (internal/transport/ws_operation_rows.go). The id a row and
+// `cancel()` name is this renderer's, and it survives a sealed retry. The two
+// counters are separate, so they agree only while every call is sent in the
+// order it was made — one queued call that a person's call overtakes, or one
+// that expires before it is sent, and every later wire id names a different
+// call.
+describe('a call has two identities, and the backend only knows one', () => {
+  function answer(id: number, result: unknown = {}): void {
+    socket().deliverText({ jsonrpc: '2.0', id, result })
+  }
+
+  it('answers the wire id with the id its row and cancel() use, and never the other way', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    await connectedWith(d, 1)
+    const announced: { id: number; method: string }[] = []
+    d.onCallPending = (call) => announced.push({ id: call.id, method: call.method })
+
+    const filler = d.call('agent.cancel', {}) // observe 1, wire 1
+    filler.catch(() => {})
+    // A background poll takes the second call's place and waits.
+    const poll = d.call('files.close', { path: '/poll' }, undefined, { origin: 'background' })
+    poll.catch(() => {})
+    // A person's call is made third and goes first: it is sent as wire id 2
+    // while its own id is 3, and the poll keeps id 2.
+    const send = d.call('files.close', { path: '/send' })
+    send.catch(() => {})
+    await flush()
+    // The background poll is not announced: its row is a person's question
+    // (ADR-8eej3e66 §8), so only the two person calls are.
+    expect(announced.map((call) => call.method)).toEqual(['agent.cancel', 'files.close'])
+    answer(socket().requests()[0].id!, {})
+    await flush()
+    expect(
+      socket()
+        .requests()
+        .map((r) => r.method),
+    ).toEqual(['agent.cancel', 'files.close'])
+
+    // THE CALL ON THE WIRE IS A DIFFERENT CALL FROM THE ONE THAT HOLDS THE
+    // SAME NUMBER.
+    expect(d.callIDForRequest(2)).toBe(3)
+    expect(d.callIDForRequest(1)).toBeNull() // answered: no live call
+    expect(d.callIDForRequest('2')).toBeNull() // ids this renderer mints are numbers
+
+    // And the withdrawal of the call on the wire reaches THAT call, not the
+    // one whose own id happens to be its wire id.
+    d.cancel(d.callIDForRequest(2)!)
+    await flush()
+    await expect(send).rejects.toMatchObject({ name: 'AbortError' })
+    // The poll was not withdrawn: it is sent as the credit comes back.
+    expect(
+      socket()
+        .requests()
+        .map((r) => r.method),
+    ).toEqual(['agent.cancel', 'files.close', 'rpc.cancel', 'files.close'])
+    answer(socket().requests()[3].id!, {})
+    await expect(poll).resolves.toEqual({})
+  })
 })

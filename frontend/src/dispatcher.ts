@@ -977,7 +977,15 @@ export class Dispatcher {
   }
 
   /** Withdraw every caller of one slot. A queued call is simply dropped; a
-   *  sent one is cancelled BY THE ID THE BACKEND IS WORKING ON. */
+   *  sent one is cancelled BY THE ID THE BACKEND IS WORKING ON.
+   *
+   *  THE CANCEL GOES FIRST, BEFORE ANY CREDIT COMES BACK (ADR-8eej3e66 §7).
+   *  The backend releases a withdrawn request's credit when it handles the
+   *  cancel on its read loop, and it disconnects a peer that sends one past
+   *  its window. Settling the slot here frees the credit and pumps the queue
+   *  in the same breath, so a cancel sent after it would put the replacement
+   *  on the wire while the server still counts the withdrawn call — and every
+   *  call waiting behind it would lose its answer to a drop. */
   private withdraw(slot: CallSlot, last: CallMember[] = []): void {
     const wireID = slot.wireID
     const onTheWire = wireID !== null && !this.isExempt(slot.method)
@@ -985,13 +993,13 @@ export class Dispatcher {
       this.withdrawMutation(slot, onTheWire, wireID, last)
       return
     }
+    this.cancelOnWire(wireID, onTheWire)
     for (const member of last) {
       if (member.settled) continue
       member.settled = true
       member.reject(abortError())
     }
     this.settleSlot(slot, abortError(), undefined, onTheWire ? 'no-answer' : 'answered')
-    this.cancelOnWire(wireID, onTheWire)
   }
 
   /** A mutation's withdrawal ends the wait and answers the caller (§8).
@@ -1013,8 +1021,11 @@ export class Dispatcher {
     const held = slot.members
     for (const member of last) if (!member.settled) held.add(member)
     slot.members = new Set()
-    this.settleSlot(slot, undefined, undefined, onTheWire ? 'no-answer' : 'answered')
+    // The cancel precedes the settlement here for the reason `withdraw`
+    // gives: the credit the server gives back is spent by the pump, and the
+    // server must have been told first.
     this.cancelOnWire(wireID, onTheWire)
+    this.settleSlot(slot, undefined, undefined, onTheWire ? 'no-answer' : 'answered')
     if (!onTheWire) {
       this.answerWithdrawn(held, withdrawnBeforeStart(slot.method))
       return
@@ -1375,6 +1386,22 @@ export class Dispatcher {
   cancel(id: number): void {
     const slot = this.slots.get(id)
     if (slot !== undefined) this.withdraw(slot)
+  }
+
+  /** THE CALL A REQUEST ID NAMES (ADR-8eej3e66 §8). The backend knows a call
+   *  only by the id it was sent with: that is the id in `rpc.cancel` and the
+   *  one in `operation.row`. It is per ATTEMPT — a sealed retry sends under a
+   *  fresh one — while the id a row and `cancel()` name must survive that, so
+   *  the renderer keeps two counters and they are not the same number: one
+   *  queued call that a person's call overtakes, or one that expires before
+   *  it is sent, and every later wire id names a different call. This is the
+   *  one place that holds both, so this is where the translation lives; a
+   *  wire id that names no call of this renderer's answers null rather than a
+   *  guess, because a guessed id is another call's. */
+  callIDForRequest(requestID: number | string): number | null {
+    if (typeof requestID !== 'number') return null
+    const slot = this.pending.get(requestID)
+    return slot === undefined ? null : slot.observeID
   }
 
   /** One sealed refusal becomes one unlock and one re-send (ADR-0032). The

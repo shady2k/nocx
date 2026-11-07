@@ -206,26 +206,35 @@ func (s *MutationStore) Begin(key string, op ID) (*MutationRecord, MutationAnswe
 	now := s.now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if existing, ok := s.byKey[key]; ok {
+	existing, seen := s.byKey[key]
+	if seen {
 		if s.expired(existing, now) {
 			s.removeLocked(key, existing)
 		} else if existing.state != mutationNotStarted {
 			return nil, MutationAnswer{Answer: answerOf(existing.state), Operation: existing.op}
-		} else {
-			// A retry the record sanctions: the same identity may run again
-			// only because nothing ran the first time.
-			existing.state = mutationRunning
-			existing.answer = false
-			existing.began = now
-			existing.ended = time.Time{}
-			return existing, MutationAnswer{}
 		}
+		// WHATEVER RUNS NEXT GETS ITS OWN RECORD, and the record is the
+		// ATTEMPT's handle rather than the identity's (nocx-3an1s.2.17). A
+		// retry the record sanctions is admitted because nothing ran the first
+		// time, but the first attempt is not necessarily finished: an
+		// invocation that expired while queued reaches its start gate AFTER the
+		// retry was admitted, and it used to write "not started" onto the very
+		// record the retry was running under — because Begin handed the retry
+		// that record. The retry's effect then read as work that never ran, and
+		// a third call under the identity was admitted beside it. Every write
+		// is checked against the record the map now holds (record), so a
+		// replaced attempt's settlement can change nothing.
 	}
 	s.pruneOrderLocked()
 	s.evictLocked()
 	record := &MutationRecord{store: s, key: key, op: op, state: mutationRunning, began: now}
 	s.byKey[key] = record
-	s.order = append(s.order, key)
+	if !seen {
+		// A key the store has not seen keeps its one place in the insertion
+		// order; one it has seen already has it, and a second entry per attempt
+		// would be a list only eviction could shorten.
+		s.order = append(s.order, key)
+	}
 	return record, MutationAnswer{}
 }
 
@@ -249,6 +258,11 @@ func (s *MutationStore) record(r *MutationRecord, state mutationState, answered 
 	now := s.now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// ONLY THE ATTEMPT THE MAP HOLDS MAY WRITE IT. An identity that was
+	// retried — or whose record expired and started over — has a different
+	// record now, and the attempt it replaced may still reach its own end: its
+	// settlement belongs to its own caller and to nothing else
+	// (nocx-3an1s.2.17).
 	if current, ok := s.byKey[r.key]; !ok || current != r {
 		return
 	}

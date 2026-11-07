@@ -287,3 +287,85 @@ func TestAReplayRefusalLeavesNoCancellationRegistration(t *testing.T) {
 		return requestCancelEntries(wc) == 0
 	})
 }
+
+// TestATakenOverIdentityIsNotWrittenByTheAttemptItReplaced is the window the
+// other three tests leave open: the record an attempt settles belongs to that
+// ATTEMPT, not to the identity.
+//
+// An invocation that expired while queued records "not started", which is
+// exactly what sanctions the retry. If the retry is admitted before the
+// expired task reaches its start gate, that task still ends — and it used to
+// end by writing "not started" onto the record the retry was running under,
+// because Begin handed the retry the same record. The retry's work then looked
+// like work that never ran: a third call under the identity was admitted beside
+// it, and operation.outcome could say "did not start" after an effect had been
+// applied. The sequence is A, B, skip A, C-while-B-runs: C is refused, the
+// record reads running until B answers, and then done.
+func TestATakenOverIdentityIsNotWrittenByTheAttemptItReplaced(t *testing.T) {
+	_, logger := logtest.New(t)
+	held := newHeldSubmission()
+	srv := NewWSServer(logger, newRegWithStub(logger))
+	srv.methods["test.takenOver"] = reg(held, catalog.OpInternalFilesUpload, noParams(),
+		func(_ *wsConn, _ *connState, r Responder) handlerFunc {
+			return func(_ context.Context, req jsonrpcRequest) {
+				_ = r.TryResult(req.ID, json.RawMessage(`{"ran":true}`))
+			}
+		})
+	ctx := context.Background()
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Stop(ctx) })
+	conn := connectWS(t, srv)
+	t.Cleanup(func() { _ = conn.Close() })
+	const identity = "m-taken-over"
+
+	// A queues, and its one-second turn runs out while it waits — the real
+	// dispatcher's timer, not a test-invented deadline.
+	sendMutation(t, conn, 1, "test.takenOver", map[string]any{}, identity)
+	attemptA := held.next(t, wantWithin)
+	frame, err := awaitFrame(conn, time.Now().Add(5*time.Second), isResponseTo(1))
+	if err != nil || len(frame) == 0 {
+		t.Fatalf("the expired call answered nothing: %v", err)
+	}
+	if outcome, _ := askOutcome(t, conn, 2, identity); outcome != string(catalog.AnswerNotStarted) {
+		t.Fatalf("outcome before the retry = %q, want not-started", outcome)
+	}
+
+	// B is the sanctioned retry, admitted while A is still in the queue: A has
+	// not reached its start gate yet, and will after B holds the record.
+	sendMutation(t, conn, 3, "test.takenOver", map[string]any{}, identity)
+	attemptB := held.next(t, wantWithin)
+
+	// A's gate refuses it, because its turn already answered. Its end must not
+	// touch the record B is running under.
+	held.start(attemptA)
+
+	if outcome, _ := askOutcome(t, conn, 4, identity); outcome != string(catalog.AnswerUnknown) {
+		t.Fatalf("outcome while the retry runs = %q, want outcome-unknown", outcome)
+	}
+
+	// C arrives under the same identity while B works. B's effect may already
+	// have happened, so this is a replay and is refused before admission.
+	third := mutationCall(t, conn, 5, "test.takenOver", map[string]any{}, identity)
+	failure, ok := third["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("a second invocation ran beside the retry: %s", mustMarshal(third))
+	}
+	if code, _ := failure["code"].(float64); int(code) != MutationReplayErrorCode {
+		t.Fatalf("code = %v, want %d", failure["code"], MutationReplayErrorCode)
+	}
+	data, _ := failure["data"].(map[string]any)
+	if data["outcome"] != string(catalog.AnswerUnknown) || data["operation"] != string(catalog.OpInternalFilesUpload.ID()) {
+		t.Fatalf("refusal data = %+v, want outcome-unknown for the operation", data)
+	}
+
+	// B answers normally, and the record says the work finished.
+	held.start(attemptB)
+	if frame, err := awaitFrame(conn, time.Now().Add(wantWithin), isResponseTo(3)); err != nil || len(frame) == 0 {
+		t.Fatalf("the retry answered nothing: %v", err)
+	}
+	if outcome, _ := askOutcome(t, conn, 6, identity); outcome != string(catalog.AnswerDone) {
+		t.Fatalf("outcome after the retry answered = %q, want done", outcome)
+	}
+}

@@ -68,6 +68,47 @@ func TestAMutationThatNeverStartedMayBeRetriedUnderItsOwnIdentity(t *testing.T) 
 	}
 }
 
+// TestAReplacedAttemptCannotWriteTheRetryItSanctioned is the identity's
+// window (nocx-3an1s.2.17): the record is the ATTEMPT's handle, not the
+// identity's. An invocation that expired while queued records "not started",
+// which sanctions the retry; the retry is admitted, and only then does the
+// expired invocation reach its own end. That end answers its own caller and
+// must change nothing — the retry is running, so a third invocation is refused,
+// and the retry's answer is the one retained.
+func TestAReplacedAttemptCannotWriteTheRetryItSanctioned(t *testing.T) {
+	s := newMutationStore(newClock().now)
+	first, _ := s.Begin("m-1", "vault.unseal")
+	first.NotStarted()
+
+	second, refusal := s.Begin("m-1", "vault.unseal")
+	if second == nil {
+		t.Fatalf("the sanctioned retry was refused: %+v", refusal)
+	}
+	if second == first {
+		t.Fatal("the retry holds the replaced attempt's record; its answer is not its own")
+	}
+
+	// The expired attempt ends after the retry took the identity over.
+	first.NotStarted()
+	first.Settled(OutcomeNotStarted)
+
+	if got := s.Answer("m-1"); got.Answer != AnswerUnknown {
+		t.Fatalf("answer while the retry runs = %+v, want outcome-unknown", got)
+	}
+	third, refused := s.Begin("m-1", "vault.unseal")
+	if third != nil {
+		t.Fatal("a second invocation was admitted beside the retry")
+	}
+	if refused.Answer != AnswerUnknown || refused.Operation != "vault.unseal" {
+		t.Fatalf("replay refusal = %+v, want outcome-unknown for vault.unseal", refused)
+	}
+
+	second.Answered(AnsweredResult)
+	if got := s.Answer("m-1"); got.Answer != AnswerDone {
+		t.Fatalf("answer after the retry answered = %+v, want done", got)
+	}
+}
+
 func TestAWithdrawnOrExpiredMutationAnswersOutcomeUnknown(t *testing.T) {
 	for _, outcome := range []Outcome{OutcomeCancelled, OutcomeExpired} {
 		s := newMutationStore(newClock().now)

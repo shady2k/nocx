@@ -98,7 +98,7 @@ function portsView(
   const filter = createPortsFilterControl()
   return {
     id: PORTS_VIEW_ID,
-    title: 'Ports',
+    title: () => 'Ports',
     icon: PlugIcon,
     filter: createPortsFilter(filter),
     actions: () => (

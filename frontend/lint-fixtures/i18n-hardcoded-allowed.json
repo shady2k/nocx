@@ -1,0 +1,127 @@
+{
+  "//": [
+    "The reviewed register of permanently-English user-facing strings (nocx-dej6",
+    "stage 3, owner decision 2026-11-03): example values a person replaces",
+    "(\"gpt-4o\", \"X-Title\", sample URLs, charset symbols) and single technical",
+    "terms that are the protocol's own name (\"tls\", \"resolve\" in the timing",
+    "legend). Every entry states its reason and is reviewed when touched.",
+    "Anything else belongs in the baseline (which only shrinks) or in t().",
+    "Keys are the checker's: file:context:first-words — keep them in sync with",
+    "the source when editing a file around one."
+  ],
+  "violations": [
+    {
+      "file": "src/api/api-test-fixtures.ts",
+      "context": "prop:placeholder",
+      "snippet": "‹API_TOKEN›",
+      "reason": "example value — the fixture placeholder a person replaces with their own token"
+    },
+    {
+      "file": "src/api/timing-bar.tsx",
+      "context": "prop:label",
+      "snippet": "connect",
+      "reason": "technical term — the timing phase's own protocol name"
+    },
+    {
+      "file": "src/api/timing-bar.tsx",
+      "context": "prop:label",
+      "snippet": "resolve",
+      "reason": "technical term — the timing phase's own protocol name"
+    },
+    {
+      "file": "src/api/timing-bar.tsx",
+      "context": "prop:label",
+      "snippet": "tls",
+      "reason": "technical term — the protocol's own name"
+    },
+    {
+      "file": "src/assistant-permissions-section.tsx",
+      "context": "attr:title",
+      "snippet": "?",
+      "reason": "the trailing question mark of a composed question title; the words come from t(), the punctuation is the template literal static (same shape as the secrets name-composites)"
+    },
+    {
+      "file": "src/endpoints-section.tsx",
+      "context": "attr:placeholder",
+      "snippet": "X-Title",
+      "reason": "example value — a header name the person replaces"
+    },
+    {
+      "file": "src/endpoints-section.tsx",
+      "context": "attr:placeholder",
+      "snippet": "gpt-4o",
+      "reason": "example value — a model name the person replaces"
+    },
+    {
+      "file": "src/endpoints-section.tsx",
+      "context": "attr:placeholder",
+      "snippet": "https://api.example.com/v1",
+      "reason": "example value — a sample URL"
+    },
+    {
+      "file": "src/endpoints-section.tsx",
+      "context": "attr:placeholder",
+      "snippet": "nocx",
+      "reason": "example value — the product's own name"
+    },
+    {
+      "file": "src/environment-commands.ts",
+      "context": "prop:label",
+      "snippet": "su",
+      "reason": "technical term — the shell command's own name"
+    },
+    {
+      "file": "src/scrollback/blocks.ts",
+      "context": "dom:title",
+      "snippet": "ms",
+      "reason": "unit suffix — a number's unit, never a sentence"
+    },
+    {
+      "file": "src/scrollback/cell-fit.ts",
+      "context": "dom:textContent",
+      "snippet": "M",
+      "reason": "a measured glyph — the character cell-fit measures, never read as copy"
+    },
+    {
+      "file": "src/secrets.tsx",
+      "line": 767,
+      "context": "attr:title",
+      "snippet": "\"\"",
+      "reason": "straight quotes around the secret name in the Replace dialog title composite — punctuation only"
+    },
+    {
+      "file": "src/secrets.tsx",
+      "line": 352,
+      "context": "prop:message",
+      "snippet": "\"\"",
+      "reason": "straight quotes around the user-typed secret name in the Added toast composite — punctuation only, the words ride the secrets.add.* keys (same shape as the baselined connections.tsx composites)"
+    },
+    {
+      "file": "src/secrets.tsx",
+      "line": 396,
+      "context": "prop:message",
+      "snippet": "\"\"",
+      "reason": "straight quotes around the secret name in the Replaced toast composite — punctuation only"
+    },
+    {
+      "file": "src/secrets.tsx",
+      "line": 426,
+      "context": "prop:message",
+      "snippet": "\"\"",
+      "reason": "straight quotes around the new name in the Renamed toast composite — punctuation only"
+    },
+    {
+      "file": "src/secrets.tsx",
+      "line": 481,
+      "context": "prop:message",
+      "snippet": "\"\"",
+      "reason": "straight quotes around the secret name in the Deleted toast composite — punctuation only"
+    },
+    {
+      "file": "src/ui/dump-panel.tsx",
+      "context": "dom:textContent",
+      "snippet": "[DONE]",
+      "reason": "wire sentinel — the stream's own end marker, printed as the protocol spells it"
+    }
+  ]
+}

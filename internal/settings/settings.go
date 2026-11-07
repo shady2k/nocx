@@ -125,16 +125,22 @@ type Declaration struct {
 	// minted by labelKeyFor from the setting key, never declared by hand.
 	// The English strings above stay on the wire — they are the fallback a
 	// key with no catalogue entry renders (the epic's "never blank" rule).
-	LabelKey       string         `json:"labelKey,omitempty"`
-	DescriptionKey string         `json:"descriptionKey,omitempty"`
-	Control        ControlKind    `json:"control"`
-	DataClass      DataClass      `json:"dataClass"`
-	Default        any            `json:"default,omitempty"`
-	Options        []SelectOption `json:"options,omitempty"`
-	Min            *float64       `json:"min,omitempty"`
-	Max            *float64       `json:"max,omitempty"`
-	Unit           string         `json:"unit,omitempty"`
-	ZeroLabel      string         `json:"zeroLabel,omitempty"`
+	LabelKey       string `json:"labelKey,omitempty"`
+	DescriptionKey string `json:"descriptionKey,omitempty"`
+	// SectionKey and ZeroLabelKey are the same convention one row further:
+	// the rail page title's and the sentinel-zero sentence's translation
+	// keys, minted by SectionKeyFor/ZeroLabelKeyFor. The English strings
+	// stay the fallback.
+	SectionKey   string         `json:"sectionKey,omitempty"`
+	ZeroLabelKey string         `json:"zeroLabelKey,omitempty"`
+	Control      ControlKind    `json:"control"`
+	DataClass    DataClass      `json:"dataClass"`
+	Default      any            `json:"default,omitempty"`
+	Options      []SelectOption `json:"options,omitempty"`
+	Min          *float64       `json:"min,omitempty"`
+	Max          *float64       `json:"max,omitempty"`
+	Unit         string         `json:"unit,omitempty"`
+	ZeroLabel    string         `json:"zeroLabel,omitempty"`
 	// Multiline is the text control's paragraph variant (nocx-avogl.4):
 	// present only on control "text", and the screen renders the kit's
 	// multiline TextField for it. Max then bounds the text in characters
@@ -175,6 +181,50 @@ func DescriptionKeyFor(settingKey string) string {
 // key and the option value.
 func OptionLabelKeyFor(settingKey, optionValue string) string {
 	return "settings." + settingKey + ".option." + optionValue
+}
+
+// ZeroLabelKeyFor mints a number setting's zero-sentence translation key —
+// the same shape LabelKeyFor gives the label, for the sentinel-0 explanation
+// only four declarations carry ("Never switched off automatically", …). A
+// pure function of the setting key, so the declaration site cannot invent a
+// second spelling.
+func ZeroLabelKeyFor(settingKey string) string {
+	return "settings." + settingKey + ".zeroLabel"
+}
+
+// zeroLabelKeyIfAny mints the key only beside a ZeroLabel: a declaration
+// with no sentinel-0 sentence carries no key either — a key with no string
+// behind it would promise the catalogue a row that can never exist.
+func zeroLabelKeyIfAny(settingKey, zeroLabel string) string {
+	if zeroLabel == "" {
+		return ""
+	}
+	return ZeroLabelKeyFor(settingKey)
+}
+
+// SectionKeyFor mints a section's title translation key, the way
+// GroupKeyFor mints a group's: the section name, lowercased with dashes
+// ("Assistant permissions" → "settings.section.assistant-permissions"). The
+// rail renders section titles through it; one section, one key, by
+// construction.
+func SectionKeyFor(section string) string {
+	var b strings.Builder
+	b.WriteString("settings.section.")
+	for _, r := range section {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r - 'A' + 'a')
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		default:
+			// A space, an ampersand, any punctuation between two words: one
+			// dash, never two.
+			if b.Len() > len("settings.section.") && !strings.HasSuffix(b.String(), "-") {
+				b.WriteByte('-')
+			}
+		}
+	}
+	return strings.TrimSuffix(b.String(), "-")
 }
 
 // groupKeyFor mints a rail group's title translation key: the group label,
@@ -403,6 +453,7 @@ func (b *Bool) toDeclaration() Declaration {
 		Description:    b.description,
 		LabelKey:       LabelKeyFor(b.key),
 		DescriptionKey: DescriptionKeyFor(b.key),
+		SectionKey:     SectionKeyFor(b.section),
 		Control:        ControlToggle,
 		DataClass:      b.dataClass,
 		Default:        b.default_,
@@ -456,6 +507,7 @@ func (s *String) toDeclaration() Declaration {
 		Description:    s.description,
 		LabelKey:       LabelKeyFor(s.key),
 		DescriptionKey: DescriptionKeyFor(s.key),
+		SectionKey:     SectionKeyFor(s.section),
 		Control:        ControlText,
 		DataClass:      s.dataClass,
 		Default:        s.default_,
@@ -512,6 +564,8 @@ func (n *Number) toDeclaration() Declaration {
 		Description:    n.description,
 		LabelKey:       LabelKeyFor(n.key),
 		DescriptionKey: DescriptionKeyFor(n.key),
+		SectionKey:     SectionKeyFor(n.section),
+		ZeroLabelKey:   zeroLabelKeyIfAny(n.key, n.zeroLabel),
 		Control:        ControlNumber,
 		DataClass:      n.dataClass,
 		Default:        n.default_,
@@ -561,6 +615,7 @@ func (s *Select) toDeclaration() Declaration {
 		Description:    s.description,
 		LabelKey:       LabelKeyFor(s.key),
 		DescriptionKey: DescriptionKeyFor(s.key),
+		SectionKey:     SectionKeyFor(s.section),
 		Control:        ControlSelect,
 		DataClass:      s.dataClass,
 		Default:        s.default_,
@@ -597,6 +652,7 @@ func (s *Secret) toDeclaration() Declaration {
 		Description:    s.description,
 		LabelKey:       LabelKeyFor(s.key),
 		DescriptionKey: DescriptionKeyFor(s.key),
+		SectionKey:     SectionKeyFor(s.section),
 		Control:        ControlSecret,
 		DataClass:      s.dataClass,
 	}
@@ -1547,6 +1603,7 @@ func descriptorToDeclaration(d Descriptor) Declaration {
 			Description:    d.Description(),
 			LabelKey:       LabelKeyFor(d.Key()),
 			DescriptionKey: DescriptionKeyFor(d.Key()),
+			SectionKey:     SectionKeyFor(d.Section()),
 			Control:        d.Control(),
 			DataClass:      d.DataClass(),
 		}

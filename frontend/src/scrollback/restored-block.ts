@@ -25,6 +25,7 @@ import type { CommandAuthor } from '../command-ledger'
 import type { CommandSnapshotStore } from '../command-snapshot'
 import { attrsToStyle, type TerminalSnapshot } from './serializer'
 import { runsFromSGR } from './sgr-read'
+import { t } from '../i18n/locale-model'
 
 /** What a restored block is made of: the entry's facts, and its body. */
 export interface RestoredBlockFacts {
@@ -87,7 +88,7 @@ export interface RestoredBlockFacts {
 }
 
 /** The sentence a block shows where its output used to be. */
-const EVICTED = 'Output is no longer kept'
+const evictedSentence = (): string => t('scrollback.evicted', 'Output is no longer kept')
 
 /** Render a stored body as the rows the live path produces: one term-line
  *  per logical row, its runs styled through the serializer's own mapping. */
@@ -145,7 +146,7 @@ export function restoredBlock(
   const html =
     facts.kind === 'command'
       ? facts.body === null
-        ? `<span class="term-line cmd-output-evicted">${EVICTED}</span>`
+        ? `<span class="term-line cmd-output-evicted">${evictedSentence()}</span>`
         : bodyToHTML(snapshot, facts.body)
       : ''
   const el = createCommandBlock(
@@ -192,7 +193,7 @@ export function restoredBlock(
         ? 'cmd-output cmd-output-ask cmd-output-evicted'
         : 'cmd-output cmd-output-evicted'
     if (facts.kind === 'ask') notice.dataset.proseEvicted = 'true'
-    notice.textContent = EVICTED
+    notice.textContent = evictedSentence()
     el.appendChild(notice)
   } else if (proseKind && facts.body !== null) {
     // The same body element the live answer builds — the class comes from

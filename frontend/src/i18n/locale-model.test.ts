@@ -24,7 +24,8 @@ describe('t resolution order', () => {
   })
 
   it('falls back to the English catalogue when the active locale misses the key', () => {
-    // 'i18n.sample.untranslated' is deliberately absent from ru.
+    // The key's ru value IS the English sentence: its wording was never
+    // approved as Russian, so the data carries the visible fallback.
     setActiveLocale('ru')
     expect(t('i18n.sample.untranslated')).toBe('This key has no Russian translation yet')
   })
@@ -89,6 +90,22 @@ describe('plural resolution', () => {
   it('falls back to the call-site literal when the key is nowhere', () => {
     setActiveLocale('ru')
     expect(tPlural('i18n.sample.nowhere', 3, '3 items')).toBe('3 items')
+  })
+
+  // The fallback is still a sentence with a number in it, and `{count}` is
+  // how every plural says where the number goes (nocx-dej6.3.8's review,
+  // defect 6). A path that returns the fallback un-interpolated prints the
+  // placeholder at a person: "{count} уведомлений".
+  it('interpolates {count} on the fallback path too', () => {
+    setActiveLocale('ru')
+    expect(tPlural('i18n.sample.nowhere', 3, '{count} items')).toBe('3 items')
+  })
+
+  it('interpolates {count} from the English catalogue when the active locale misses the key', () => {
+    // A key minted in en and not yet translated arrives through the English
+    // entry, whose own {count} must be filled as well.
+    setActiveLocale('ru')
+    expect(tPlural('i18n.sample.onlyEnglishPlural', 4, 'irrelevant')).toBe('4 English-only things')
   })
 })
 

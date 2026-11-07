@@ -232,6 +232,8 @@ import { installLiveSelectionGesture, type LiveSelectionGesture } from './painte
 import { createCellFit, type CellFit } from './scrollback/cell-fit'
 import { devicePxToCssPx, displayDpr } from './painter/committed-metric'
 import { measureNaturalAdvance, measureNaturalLineHeight } from './scrollback/cell-metric'
+import { t } from './i18n/locale-model'
+import { blockReceiptLabels } from './i18n/kit-labels'
 
 // ── The pane's screen-plane test seam (nocx-zg3k3.2.8) ─────────────────────
 // An e2e spec reads the ACTIVE pane's cell model through
@@ -2004,7 +2006,13 @@ export class TerminalContent extends BasePaneContent {
       })
       this._applyAttachment({
         kind: 'unavailable',
-        message: `This tab\u2019s session could not be restored (${message}).`,
+        message: t(
+          'app.restore.couldNotRestore',
+          'This tab’s session could not be restored ({error}).',
+          {
+            error: message,
+          },
+        ),
       })
     }
   }
@@ -4760,7 +4768,9 @@ export class TerminalContent extends BasePaneContent {
       }
       const notice = document.createElement('pre')
       notice.className = 'pane-error'
-      notice.textContent = `Terminal failed to start:\n\n${err instanceof Error ? err.message : String(err)}`
+      notice.textContent = t('pane.failedToStart', 'Terminal failed to start:\n\n{error}', {
+        error: err instanceof Error ? err.message : String(err),
+      })
       // PREPEND, never replace (nocx-mb3x2). `replaceChildren` took out the
       // scrollback the restored blocks had just been drawn into, so a pane
       // whose session cannot start came back with a reason and no past — the
@@ -10624,6 +10634,7 @@ export class TerminalContent extends BasePaneContent {
         onHover: (captureId) => this.emphasiseChip(captureId),
         onExitReview: () => this.editor?.focus(),
       },
+      blockReceiptLabels(),
     )
     this.receipts.set(blockEl, receipt)
     this.receipt = receipt
@@ -10855,10 +10866,15 @@ export class TerminalContent extends BasePaneContent {
 
     const hostPart = dest.includes('@') ? dest.split('@')[1] : dest
 
-    const receipt = BlockReceipt.forConnection(dest, hostPart, {
-      onSave: (name) => void this._saveConnection(dest, name, last.el, receipt),
-      onDismiss: () => void this._dismissConnectionOffer(dest, last.el, receipt),
-    })
+    const receipt = BlockReceipt.forConnection(
+      dest,
+      hostPart,
+      {
+        onSave: (name) => void this._saveConnection(dest, name, last.el, receipt),
+        onDismiss: () => void this._dismissConnectionOffer(dest, last.el, receipt),
+      },
+      blockReceiptLabels(),
+    )
 
     this.receipts.set(last.el, receipt)
     this.receiptBlockEl = last.el

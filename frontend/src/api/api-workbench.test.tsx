@@ -59,6 +59,14 @@ import {
   watchFixture,
 } from './api-test-fixtures'
 import { createSecretChip } from '../ui/secret-chip'
+
+/** The chip's words, supplied the way a surface supplies them. */
+const CHIP_TITLES = {
+  resolved: (name: string) => `secret from the vault: ${name}`,
+  unresolved: () => 'a masked secret — pick a live value to run this command',
+  damaged: (name: string, damage: string) =>
+    `${name}: these bytes are no longer the secret — ${damage}`,
+}
 import { clearToasts, toasts, type Toast } from '../ui/toast'
 import { JSON_LAYOUT_LIMIT } from '../ui/format-json'
 import { malformedReason } from './malformed-reason'
@@ -1402,7 +1410,7 @@ describe('the raw view and the body', () => {
 
     // Different from the intact rendering by more than its colour — the
     // damage text is on it, and the glyph differs.
-    const intact = createSecretChip('API_TOKEN')
+    const intact = createSecretChip('API_TOKEN', CHIP_TITLES)
     expect(chip.dataset.tone).not.toBe(intact.dataset.tone)
     expect(chip.textContent).not.toBe(intact.textContent)
 
@@ -6562,7 +6570,14 @@ describe('a folder is something you open', () => {
     expect(row(CREATE_REL_PATH)).toBeTruthy()
 
     // And the disclosure still folds, which is now the only thing that does.
-    fireEvent.click(button('Collapse users'))
+    // Addressed by `aria-expanded`, because the disclosure's NAME is the row
+    // it discloses and no verb distinguishes it from the row any more
+    // (nocx-dej6.3.8: the kit may not own the word "Collapse").
+    const disclosure = [...workbench().querySelectorAll<HTMLElement>('button')].find(
+      (b) => b.getAttribute('aria-label') === 'users' && b.hasAttribute('aria-expanded'),
+    )
+    if (!disclosure) throw new Error('no disclosure for users')
+    fireEvent.click(disclosure)
     await vi.waitFor(() =>
       expect(workbench().querySelector(`[data-rel-path="${CREATE_REL_PATH}"]`)).toBeNull(),
     )

@@ -64,6 +64,7 @@ import { commandFragment } from './command-text'
 // (history-status.ts), because Settings says the same thing to the same
 // person a moment earlier and the two must not drift apart.
 import { HISTORY_UNAVAILABLE_RECALL_DESC, HISTORY_UNAVAILABLE_RECALL_TITLE } from './history-status'
+import { t, tPlural } from './i18n/locale-model'
 
 /**
  * The scrollTop that puts `row` FULLY inside `list`'s visible box — its top
@@ -194,19 +195,19 @@ export function nextScope(scope: RecallScope): RecallScope {
  *  persists). `endedAt: null` renders as running — never as the epoch,
  *  which would read as 1970. */
 export function relativeTime(endedAt: number | null, now: number): string {
-  if (endedAt === null) return 'running'
+  if (endedAt === null) return t('recall.time.running', 'running')
   const diff = Math.max(0, now - endedAt)
-  if (diff < 60_000) return 'just now'
+  if (diff < 60_000) return t('recall.time.justNow', 'just now')
   const minutes = Math.floor(diff / 60_000)
-  if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'} ago`
+  if (minutes < 60) return tPlural('recall.time.minutes', minutes, '{count} minutes ago')
   const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`
+  if (hours < 24) return tPlural('recall.time.hours', hours, '{count} hours ago')
   const days = Math.floor(hours / 24)
-  if (days < 7) return `${days} day${days === 1 ? '' : 's'} ago`
+  if (days < 7) return tPlural('recall.time.days', days, '{count} days ago')
   const weeks = Math.floor(days / 7)
-  if (weeks < 5) return `${weeks} week${weeks === 1 ? '' : 's'} ago`
+  if (weeks < 5) return tPlural('recall.time.weeks', weeks, '{count} weeks ago')
   const months = Math.floor(days / 30)
-  return `${months} month${months === 1 ? '' : 's'} ago`
+  return tPlural('recall.time.months', months, '{count} months ago')
 }
 
 /** Human duration from a millisecond span (the detail pane's "duration").
@@ -833,7 +834,7 @@ export class RecallOverlay {
 
     const title = document.createElement('span')
     title.className = 'ui-floating-panel__title'
-    title.textContent = 'history'
+    title.textContent = t('recall.panel.title', 'history')
     header.appendChild(title)
 
     const rung = document.createElement('span')
@@ -860,7 +861,10 @@ export class RecallOverlay {
       const note = document.createElement('span')
       note.className = 'ui-badge ui-floating-panel__source'
       note.dataset.tone = s.query.source === 'unavailable' ? 'danger' : 'warning'
-      note.textContent = s.query.source === 'unavailable' ? 'not being kept' : 'this session only'
+      note.textContent =
+        s.query.source === 'unavailable'
+          ? t('recall.source.unavailable', 'not being kept')
+          : t('recall.source.sessionOnly', 'this session only')
       header.appendChild(note)
     }
 
@@ -922,7 +926,9 @@ export class RecallOverlay {
     if (s.name !== 'loading' && s.query.coverage !== null) {
       const coverage = document.createElement('span')
       coverage.className = 'ui-floating-panel__coverage'
-      coverage.textContent = `oldest entry ${relativeTime(s.query.coverage, Date.now())}`
+      coverage.textContent = t('recall.coverage.oldest', 'oldest entry {when}', {
+        when: relativeTime(s.query.coverage, Date.now()),
+      })
       search.appendChild(coverage)
     }
 
@@ -1037,11 +1043,13 @@ export class RecallOverlay {
       emptyTitle.textContent = HISTORY_UNAVAILABLE_RECALL_TITLE
       emptyDesc.textContent = HISTORY_UNAVAILABLE_RECALL_DESC
     } else if (s.filter !== '') {
-      emptyTitle.textContent = `no matches for "${s.filter}"`
-      emptyDesc.textContent = 'backspace to clear the filter'
+      emptyTitle.textContent = t('recall.empty.noMatch', 'no matches for "{filter}"', {
+        filter: s.filter,
+      })
+      emptyDesc.textContent = t('recall.empty.noMatch.desc', 'backspace to clear the filter')
     } else {
-      emptyTitle.textContent = 'no history yet'
-      emptyDesc.textContent = 'commands you run will appear here'
+      emptyTitle.textContent = t('recall.empty.title', 'no history yet')
+      emptyDesc.textContent = t('recall.empty.desc', 'commands you run will appear here')
     }
     empty.appendChild(emptyTitle)
     empty.appendChild(emptyDesc)

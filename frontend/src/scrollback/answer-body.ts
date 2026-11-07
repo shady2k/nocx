@@ -33,6 +33,7 @@ import {
 } from '../ui/answer-markdown'
 import { mountCodeBlockCopyButton } from '../ui/code-block'
 import type { CommandSnapshotStore } from '../command-snapshot'
+import { codeBlockCopyWords } from '../i18n/kit-labels'
 
 // ── A fenced block's language ───────────────────────────────────────────────
 //
@@ -187,7 +188,7 @@ export function createAnswerBody(outputEl: HTMLElement, opts: AnswerBodyOpts): A
         container.appendChild(copyHost)
         mountCodeBlockCopyButton(copyHost, {
           getText: () => codeText(container),
-          copy: opts.copy,
+          copy: { ...codeBlockCopyWords(), write: opts.copy },
           keepHostInBlock: true,
         })
       }

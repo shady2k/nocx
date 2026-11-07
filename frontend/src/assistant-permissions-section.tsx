@@ -153,6 +153,7 @@ import {
 import type { Scope } from './generated/policy.get'
 import { EFFECT_LABEL } from './effect-labels'
 import { approvalScopeCoverage } from './agent-approval-prompt'
+import { t, tPlural } from './i18n/locale-model'
 import {
   ActionGroup,
   Badge,
@@ -244,8 +245,12 @@ const FEATURE_WORDS: Record<'writes-option-named-path', string> = {
  * rules and hard noes, and this surface may not speak that vocabulary.
  */
 function stepSentence(step: PolicyExplanationStep): string {
-  const row = step.effect ? `“${EFFECT_LABEL[step.effect]}”` : 'the matching answer'
-  const decided = step.decision ? ANSWER_LABEL[step.decision] : ''
+  const row = step.effect
+    ? `“${t(`perms.effect.${step.effect}`, EFFECT_LABEL[step.effect])}”`
+    : 'the matching answer'
+  const decided = step.decision
+    ? t(`perms.answer.${step.decision}`, ANSWER_LABEL[step.decision])
+    : ''
   switch (step.kind) {
     case 'unparsed':
       return 'The command could not be read, so nothing you have answered could speak about it. It is asked.'
@@ -459,13 +464,14 @@ function messageOf(e: unknown): string {
  * finished by itself tells a person something untrue about their own work.
  */
 function stoppedSentence(res: PolicyWriteRuns): string {
-  const stopped = res.stoppedRuns === 1 ? 'Stopped 1 answer' : `Stopped ${res.stoppedRuns} answers`
+  const stopped = tPlural('perms.stopped.answers', res.stoppedRuns, 'Stopped {count} answers')
   if (res.finishedBeforeStop === 0)
-    return `${stopped} that ${res.stoppedRuns === 1 ? 'was' : 'were'} using it.`
-  const already =
-    res.finishedBeforeStop === 1
-      ? '1 had already finished on its own'
-      : `${res.finishedBeforeStop} had already finished on their own`
+    return `${stopped} ${t('perms.stopped.thatUsingIt', 'that were using it.')}`
+  const already = tPlural(
+    'perms.stopped.finishedFirst',
+    res.finishedBeforeStop,
+    '{count} had already finished on their own',
+  )
   return `${stopped}; ${already}.`
 }
 
@@ -645,7 +651,10 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
       setRunsQuestion(null)
       after()
     } catch (e) {
-      showToast({ message: `That change was not saved: ${messageOf(e)}`, level: 'danger' })
+      showToast({
+        message: `${t('perms.save.failedHead', 'That change was not saved:')} ${messageOf(e)}`,
+        level: 'danger',
+      })
       await read()
       setRunsQuestion(null)
       after()
@@ -743,7 +752,10 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
       .classify(command)
       .then(setReading)
       .catch((e: unknown) => {
-        showToast({ message: `That command could not be read: ${messageOf(e)}`, level: 'danger' })
+        showToast({
+          message: `${t('perms.read.failedHead', 'That command could not be read:')} ${messageOf(e)}`,
+          level: 'danger',
+        })
       })
       .finally(() => setBusy(false))
   }
@@ -869,7 +881,10 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
       .explain(command, effect)
       .then(setExplanation)
       .catch((e: unknown) => {
-        showToast({ message: `Could not ask why: ${messageOf(e)}`, level: 'danger' })
+        showToast({
+          message: `${t('perms.askWhy.failedHead', 'Could not ask why:')} ${messageOf(e)}`,
+          level: 'danger',
+        })
       })
   }
 
@@ -928,8 +943,8 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
       value: decision,
       label:
         decision === 'permit' && blocked !== null
-          ? `${ANSWER_LABEL[decision]} — ${blocked}`
-          : ANSWER_LABEL[decision],
+          ? `${t(`perms.answer.${decision}`, ANSWER_LABEL[decision])} — ${blocked}`
+          : t(`perms.answer.${decision}`, ANSWER_LABEL[decision]),
       disabled: decision === 'permit' && blocked !== null,
     }))
   }
@@ -990,7 +1005,7 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
     const subject = subjectOf(answer)
     return (
       <Select
-        ariaLabel={`Your answer for ${subject}`}
+        ariaLabel={`${t('perms.answerFor.ariaHead', 'Your answer for')} ${subject}`}
         value={answerValue(answer)}
         options={answerOptions(answer)}
         disabled={busy()}
@@ -1015,7 +1030,7 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
     return (
       <div class="st-permissions__answer" data-answer={answer.key}>
         <RecordRow
-          title={`May the assistant ${subject}?`}
+          title={`${t('perms.mayQ.title', 'May the assistant')} ${subject}?`}
           meta={placesLine(answer)}
           status={dormant() ? { tone: 'neutral' as const, text: 'Governs nothing yet' } : undefined}
           actions={
@@ -1025,10 +1040,10 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
                 variant="ghost"
                 size="sm"
                 disabled={busy()}
-                ariaLabel={`Details for ${subject}`}
+                ariaLabel={`${t('perms.detailsFor.ariaHead', 'Details for')} ${subject}`}
                 onClick={() => openPanel('details', answer)}
               >
-                Details
+                {t('perms.details', 'Details')}
               </Button>
             </>
           }
@@ -1075,22 +1090,22 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
                   variant="default"
                   size="sm"
                   disabled={busy()}
-                  ariaLabel={`Review ${subject}`}
+                  ariaLabel={`${t('perms.review.aria', 'Review')} ${subject}`}
                   onClick={() => {
                     if (answer.kind === 'rule') void review(answer.rule)
                   }}
                 >
-                  Review
+                  {t('perms.review', 'Review')}
                 </Button>
               </Show>
               <Button
                 variant="ghost"
                 size="sm"
                 disabled={busy()}
-                ariaLabel={`Details for ${subject}`}
+                ariaLabel={`${t('perms.detailsFor.ariaHead', 'Details for')} ${subject}`}
                 onClick={() => openPanel('details', answer)}
               >
-                Details
+                {t('perms.details', 'Details')}
               </Button>
             </>
           }
@@ -1116,7 +1131,10 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
    *  instead of — the backend's trace. */
   function detailFacts(answer: Answer): Fact[] {
     const facts: Fact[] = [
-      { name: 'Your answer', value: ANSWER_LABEL[decisionOf(answer)] },
+      {
+        name: 'Your answer',
+        value: t(`perms.answer.${decisionOf(answer)}`, ANSWER_LABEL[decisionOf(answer)]),
+      },
       { name: 'It covers', value: coverage(subjectOf(answer)) },
     ]
     if (answer.kind === 'rule') {
@@ -1124,7 +1142,10 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
       if (answer.rule.grantedUnder) {
         facts.push({
           name: 'Given while the command was doing',
-          value: EFFECT_LABEL[answer.rule.grantedUnder],
+          value: t(
+            `perms.effect.${answer.rule.grantedUnder}`,
+            EFFECT_LABEL[answer.rule.grantedUnder],
+          ),
           note: 'It does not reach the same command doing something more serious.',
         })
       }
@@ -1153,7 +1174,10 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
   function detailsPanel(answer: Answer) {
     return (
       <Stack>
-        <FactList facts={detailFacts(answer)} ariaLabel="What this answer says" />
+        <FactList
+          facts={detailFacts(answer)}
+          ariaLabel={t('perms.answerSays.aria', 'What this answer says')}
+        />
         {/* Where the widest answer is withheld, why — and where it is given
             instead. The option in the select says the same thing in four
             words; this is the room those four words do not have. */}
@@ -1168,14 +1192,19 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
           </Show>
         </Show>
         <Show when={answer.kind === 'row'}>
-          <Section id="permissions-places" title="Where this applies" dense>
+          <Section
+            id="permissions-places"
+            title={t('perms.whereApplies.title', 'Where this applies')}
+            dense
+          >
             <Show
               when={places().length > 0}
               fallback={
                 <Caption>
-                  nocx has not learned any places yet. A place is named the first time you widen an
-                  answer to cover somewhere a call actually reached, and it can be picked here
-                  afterwards.
+                  {t(
+                    'perms.places.none',
+                    'nocx has not learned any places yet. A place is named the first time you widen an answer to cover somewhere a call actually reached, and it can be picked here afterwards.',
+                  )}
                 </Caption>
               }
             >
@@ -1199,13 +1228,14 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
               when={answer.kind === 'rule'}
               fallback={
                 <Caption>
-                  This answer covers work the assistant does without a command line, so there is no
-                  single call to walk through. Open Why on one of your command answers to see the
-                  steps.
+                  {t(
+                    'perms.coversNoCommand',
+                    'This answer covers work the assistant does without a command line, so there is no single call to walk through. Open Why on one of your command answers to see the steps.',
+                  )}
                 </Caption>
               }
             >
-              <Spinner size="sm" label="Asking why" />
+              <Spinner size="sm" label={t('perms.askingWhy.label', 'Asking why')} />
             </Show>
           }
         >
@@ -1231,7 +1261,7 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
                 {(resource) => (
                   <FactList
                     facts={[{ name: 'The place it touched', value: placeName(resource) }]}
-                    ariaLabel="The place this call touched"
+                    ariaLabel={t('perms.callPlace.aria', 'The place this call touched')}
                   />
                 )}
               </Show>
@@ -1275,13 +1305,16 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
       <Stack>
         <FactList
           facts={[
-            { name: 'Forgetting', value: `${ANSWER_LABEL[decision]} — ${coverage(subject)}` },
+            {
+              name: 'Forgetting',
+              value: `${t(`perms.answer.${decision}`, ANSWER_LABEL[decision])} — ${coverage(subject)}`,
+            },
             {
               name: 'The calls this changes',
               value: answer.kind === 'rule' ? subject : `everything under ${subject}`,
             },
           ]}
-          ariaLabel="What forgetting this releases"
+          ariaLabel={t('perms.forgetReleases.aria', 'What forgetting this releases')}
         />
         <Caption>
           {decision === 'permit'
@@ -1311,7 +1344,11 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
     return (
       <Show when={runsQuestion()} keyed>
         {(q) => (
-          <Section id="permissions-runs-question" title="The work already running" dense>
+          <Section
+            id="permissions-runs-question"
+            title={t('perms.runningWork.title', 'The work already running')}
+            dense
+          >
             <div data-permissions-runs={q.count}>
               <Stack>
                 <FactList
@@ -1321,12 +1358,13 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
                       value: `${q.count} ${q.count === 1 ? 'answer' : 'answers'} the assistant is writing right now`,
                     },
                   ]}
-                  ariaLabel="What is still using this answer"
+                  ariaLabel={t('perms.stillUsing.aria', 'What is still using this answer')}
                 />
                 <Caption>
-                  Nothing has changed yet. What the assistant may do is fixed when it starts writing
-                  an answer, so this reaches everything it starts from now on either way — you are
-                  choosing what happens to the {q.count === 1 ? 'one' : q.count} in progress.
+                  {`${t(
+                    'perms.nothingChanged',
+                    'Nothing has changed yet. What the assistant may do is fixed when it starts writing an answer, so this reaches everything it starts from now on either way — you are choosing what happens to the',
+                  )} ${q.count === 1 ? 'one' : q.count} ${t('perms.inProgress', 'in progress.')}`}
                 </Caption>
                 {/* WHAT THE NUMBER MEANS, and it is not the same sentence for
                     the two kinds of answer. A standing answer names a command,
@@ -1339,17 +1377,24 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
                     runs instead of counting answers. */}
                 <Show when={q.gesture.kind === 'row'}>
                   <Caption>
-                    This answer covers everything of its kind, not one command, so this is every
-                    piece of work whose permissions still say what you have just changed.
+                    {t(
+                      'perms.coversEverything',
+                      'This answer covers everything of its kind, not one command, so this is every piece of work whose permissions still say what you have just changed.',
+                    )}
                   </Caption>
                 </Show>
-                <ActionGroup ariaLabel="What happens to the work already running">
+                <ActionGroup
+                  ariaLabel={t(
+                    'perms.runningWorkFate.aria',
+                    'What happens to the work already running',
+                  )}
+                >
                   <Button
                     variant="default"
                     disabled={busy()}
                     onClick={() => answerRunsQuestion('future')}
                   >
-                    Leave them running
+                    {t('perms.leaveRunning', 'Leave them running')}
                   </Button>
                   <Button
                     variant="danger"
@@ -1390,9 +1435,9 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
       <Stack>
         <Caption>{WRITER_CAPTION[mode]}</Caption>
         <TextField
-          label="The command"
+          label={t('perms.command.label', 'The command')}
           value={typed()}
-          placeholder="df -h"
+          placeholder={t('perms.command.ph', 'df -h')}
           disabled={busy()}
           error={readingRefusal()}
           onInput={(value) => {
@@ -1404,13 +1449,13 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
           }}
           onCommit={() => readTyped()}
         />
-        <ActionGroup ariaLabel="Read the command">
+        <ActionGroup ariaLabel={t('perms.readCommand.aria', 'Read the command')}>
           <Button
             variant="default"
             disabled={busy() || typed().trim() === ''}
             onClick={() => readTyped()}
           >
-            Read this command
+            {t('perms.readCommand', 'Read this command')}
           </Button>
         </ActionGroup>
         <Show when={reading()}>{(r) => (mode === 'allow' ? allowOffer(r) : refusalOffer(r))}</Show>
@@ -1445,7 +1490,7 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
         {(effect) => (
           <>
             <FactList
-              ariaLabel="What allowing this command would cover"
+              ariaLabel={t('perms.allowCover.aria', 'What allowing this command would cover')}
               facts={[
                 {
                   name: 'It would allow',
@@ -1459,7 +1504,7 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
                 },
               ]}
             />
-            <ActionGroup ariaLabel="Save this answer">
+            <ActionGroup ariaLabel={t('perms.saveAnswer.aria', 'Save this answer')}>
               <Button variant="primary" disabled={busy()} onClick={() => saveWidened(r())}>
                 {`Allow ${selectorSubject({ program: r().program })}`}
               </Button>
@@ -1480,19 +1525,19 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
         {(exact) => (
           <>
             <FactList
-              ariaLabel="What this answer would stop"
+              ariaLabel={t('perms.wouldStop.aria', 'What this answer would stop')}
               facts={[
                 {
                   name: 'nocx read this as',
                   value:
                     r().effect === undefined
                       ? 'a command it could not place'
-                      : EFFECT_LABEL[r().effect!],
+                      : t(`perms.effect.${r().effect!}`, EFFECT_LABEL[r().effect!]),
                   note: 'It was read, not run.',
                 },
               ]}
             />
-            <ActionGroup ariaLabel="Save this answer">
+            <ActionGroup ariaLabel={t('perms.saveAnswer.aria', 'Save this answer')}>
               <Button variant="primary" disabled={busy()} onClick={() => saveExactRefusal(r())}>
                 {`Never allow ${selectorSubject({ exact: exact() })}`}
               </Button>
@@ -1521,27 +1566,41 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
 
   return (
     <PageSection
-      title="Assistant permissions"
-      description="What the assistant may do on its own. Anything you have not answered is asked every time it comes up."
+      title={t('perms.title', 'Assistant permissions')}
+      description={t(
+        'perms.mayDo.desc',
+        'What the assistant may do on its own. Anything you have not answered is asked every time it comes up.',
+      )}
     >
       <Show when={loadError()}>
         <Badge tone="danger">{`Your permissions could not be read: ${loadError()}`}</Badge>
       </Show>
       <Show when={view() === null && loadError() === null}>
-        <Spinner size="sm" label="Loading your permissions" />
+        <Spinner size="sm" label={t('perms.loading.label', 'Loading your permissions')} />
       </Show>
       <Show when={view() !== null}>
-        <Section id="permissions-questions" title="What the assistant may do" divided dense>
+        <Section
+          id="permissions-questions"
+          title={t('perms.mayDo.title', 'What the assistant may do')}
+          divided
+          dense
+        >
           <Show
             when={questions().length > 0}
             fallback={
               <Caption>
-                No tool the assistant can reach today asks for anything, so there is nothing to
-                answer yet.
+                {t(
+                  'perms.noToolAsks',
+                  'No tool the assistant can reach today asks for anything, so there is nothing to answer yet.',
+                )}
               </Caption>
             }
           >
-            <div role="list" aria-label="What the assistant may do" data-answers="questions">
+            <div
+              role="list"
+              aria-label={t('perms.mayDo.title', 'What the assistant may do')}
+              data-answers="questions"
+            >
               <For each={questions()}>{(answer) => questionRow(answer)}</For>
             </div>
           </Show>
@@ -1551,8 +1610,17 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
             a part of it they have never used; the two buttons under it are
             where one comes from, and they say so. */}
         <Show when={standing().length > 0}>
-          <Section id="permissions-rules" title="Commands you have named" divided dense>
-            <div role="list" aria-label="Commands you have named" data-answers="rules">
+          <Section
+            id="permissions-rules"
+            title={t('perms.namedCommands.title', 'Commands you have named')}
+            divided
+            dense
+          >
+            <div
+              role="list"
+              aria-label={t('perms.namedCommands.title', 'Commands you have named')}
+              data-answers="rules"
+            >
               <For each={standing()}>{(answer) => ruleRow(answer)}</For>
             </div>
           </Section>
@@ -1562,9 +1630,9 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
             can resolve; a permit may only be widened from a command the
             backend has READ, which is why one button says "allow a command"
             and neither says "add a rule". */}
-        <ActionGroup ariaLabel="Add an answer">
+        <ActionGroup ariaLabel={t('perms.addAnswer.aria', 'Add an answer')}>
           <Button variant="default" disabled={busy()} onClick={() => openWriter('refuse')}>
-            + Write a refusal
+            {t('perms.writeRefusal', '+ Write a refusal')}
           </Button>
           <Button variant="default" disabled={busy()} onClick={() => openWriter('allow')}>
             {ALLOW_A_COMMAND}
@@ -1584,10 +1652,14 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
           <Dialog
             open
             onClose={closeWriter}
-            title={mode === 'allow' ? 'Allow a command' : 'Write a refusal'}
+            title={
+              mode === 'allow'
+                ? t('perms.writer.allow', 'Allow a command')
+                : t('perms.writer.refuse', 'Write a refusal')
+            }
             footer={
               <Button variant="default" onClick={closeWriter}>
-                Cancel
+                {t('perms.cancel', 'Cancel')}
               </Button>
             }
           >
@@ -1628,7 +1700,7 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
                       void writeRow(on.effect, { decision: 'ask', scopes: [] }, closePanel)
                     }}
                   >
-                    Forget it
+                    {t('perms.forget', 'Forget it')}
                   </Button>
                 </Show>
               </>

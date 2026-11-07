@@ -212,7 +212,12 @@ export function RecordRow(props: RecordRowProps) {
                   type="button"
                   class="ui-record-row__disclosure"
                   aria-expanded={expanded() ? 'true' : 'false'}
-                  aria-label={expanded() ? `Collapse ${props.title}` : `Expand ${props.title}`}
+                  /* The button's NAME is the record it discloses; the state
+                     the verb used to spell out is `aria-expanded`, which a
+                     screen reader announces on its own (and which no
+                     translation can get wrong). The two words were also the
+                     kit's copy, which a kit component may not own. */
+                  aria-label={props.title}
                   onClick={(e: MouseEvent) => {
                     // The disclosure owns this click: expanding is not
                     // opening. Letting it reach the row would open the record

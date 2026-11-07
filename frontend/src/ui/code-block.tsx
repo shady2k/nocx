@@ -80,9 +80,28 @@ export interface CodeBlockProps {
   variant?: 'answer' | 'dump' | 'fill'
   /** Text represented by highlighted JSX children, for a safe copy operation. */
   copyText?: string
-  /** Injected platform clipboard operation. Existing callers with their own copy
-   *  affordance may omit this and render only the read-only block. */
-  copy?: (text: string) => Promise<void>
+  /** Injected platform clipboard operation, WITH the words its control says.
+   *  Existing callers with their own copy affordance may omit this and render
+   *  only the read-only block.
+   *
+   *  The words travel with the seam because the kit may not localise itself
+   *  (ui/README.md: a catalogue read inside a kit component freezes at the
+   *  locale of its first mount, so the copy arrives as props — nocx-dej6.3.8). */
+  copy?: CodeBlockCopy
+}
+
+/** One copy affordance: the platform write and the two names its control is
+ *  called by, resolved by the caller in the active language. */
+export interface CodeBlockCopy {
+  write: (text: string) => Promise<void>
+  /** The control's name and tooltip while there is something to copy. */
+  label: string
+  /** …and once this block has been copied. */
+  copiedLabel: string
+  /** What the toast says afterwards, and what it says when the platform
+   *  refused the write. */
+  copiedToast: string
+  failedToast: string
 }
 
 export interface CodeBlockCopyButtonProps {
@@ -90,7 +109,7 @@ export interface CodeBlockCopyButtonProps {
   getText: () => string
   /** Visible kind in the imperative copy header; defaults to `Code`. */
   label?: string
-  copy: (text: string) => Promise<void>
+  copy: CodeBlockCopy
   /** Keep the host inside an existing imperative code container. */
   keepHostInBlock?: boolean
 }
@@ -100,19 +119,19 @@ function CodeBlockCopyButton(props: CodeBlockCopyButtonProps) {
 
   const copy = async (): Promise<void> => {
     try {
-      await props.copy(props.getText())
+      await props.copy.write(props.getText())
       setCopied(true)
-      showToast({ level: 'success', message: 'Code copied' })
+      showToast({ level: 'success', message: props.copy.copiedToast })
     } catch {
       setCopied(false)
-      showToast({ level: 'danger', message: 'Could not copy code' })
+      showToast({ level: 'danger', message: props.copy.failedToast })
     }
   }
 
   return (
     <IconButton
-      ariaLabel={copied() ? 'Copied' : 'Copy code'}
-      title={copied() ? 'Copied' : 'Copy code'}
+      ariaLabel={copied() ? props.copy.copiedLabel : props.copy.label}
+      title={copied() ? props.copy.copiedLabel : props.copy.label}
       size="sm"
       onClick={() => void copy()}
     >

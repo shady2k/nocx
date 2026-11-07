@@ -14,6 +14,7 @@
 // which is a different mechanism for the same fact (see secret-chip.ts).
 import { findReferences } from './secret-reference'
 import { createSecretChip } from './ui/secret-chip'
+import { secretChipTitles } from './i18n/kit-labels'
 
 /** A highlighted range in the command text — the recall panel's search
  *  match. Offsets are UTF-16 code units, half-open. */
@@ -43,7 +44,7 @@ export function commandFragment(
   let pos = 0
   for (const ref of refs) {
     if (ref.from > pos) appendMarked(frag, command, pos, ref.from, marks, markClass)
-    frag.appendChild(createSecretChip(ref.name))
+    frag.appendChild(createSecretChip(ref.name, secretChipTitles()))
     pos = ref.to
   }
   if (pos < command.length) appendMarked(frag, command, pos, command.length, marks, markClass)

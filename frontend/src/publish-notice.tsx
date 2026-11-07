@@ -40,6 +40,7 @@ import type { SessionPublishFailed } from './generated/session.publishFailed'
 import { IconButton } from './ui/icon-button'
 import { CloseIcon } from './ui/icons'
 import { StatusCard } from './ui/status-card'
+import { t } from './i18n/locale-model'
 
 /** The closed wire vocabulary, as the generated type declares it: a member
  *  added to contracts/session.publishFailed.schema.json reaches this union
@@ -82,7 +83,8 @@ const INSTEAD =
 /** The card's title. One headline for every cause, because the question it
  *  answers — did the copy land — has one answer; the cause is the description's
  *  job. */
-export const PUBLISH_NOTICE_TITLE = 'Shell integration was not copied'
+export const publishNoticeTitle = (): string =>
+  t('shellintegration.publish.title', 'Shell integration was not copied')
 
 /** The whole of what the card says about one cause. */
 export function publishFailureSentence(reason: PublishFailureReason): string {
@@ -150,7 +152,7 @@ export function mountPublishNotice(
     () => (
       <StatusCard
         tone="warning"
-        title={PUBLISH_NOTICE_TITLE}
+        title={publishNoticeTitle()}
         description={publishFailureSentence(current())}
         action={
           <IconButton ariaLabel="Dismiss" size="sm" onClick={onDismiss}>

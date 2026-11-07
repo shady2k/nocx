@@ -179,6 +179,14 @@ arrives at, while `Skip` is last and carries the `autofocus` — `Dialog`'s own 
 on a destructive question the explicitly focused control is the safe one. Focus trapping
 is `Dialog`'s; nothing here builds a second one.
 
+## Text a person reads goes through the catalogue
+
+A word on screen is `t(key, english)` read while rendering, never a literal in the component
+and never `t()` at module scope, where it would be fixed to the language at load
+([ADR-nswp57x0](../../../docs/decisions/nswp57x0-catalogues-keys-and-the-translation-contract.md)).
+A key with no translation shows its English, so an untranslated string is not a defect.
+`npm run lint:static` refuses a new literal and an early `t()`.
+
 ## Vertical rhythm: Stack
 
 **Stack** (`stack.tsx`) is the only source of vertical spacing between kit components.

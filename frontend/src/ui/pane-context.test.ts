@@ -67,17 +67,27 @@ describe('createPaneContext — the DOM contract', () => {
     expect(el.querySelector('.ui-button')).toBeNull()
   })
 
-  it('program: Session actions renders only when the caller supplies the callback, and calling it fires the callback', () => {
+  it('program: Session actions renders only when the caller supplies the callback AND its words', () => {
+    // Both halves or neither (nocx-dej6.3.8): the callback makes the control
+    // work, the label is what it says, and the kit may not own a sentence it
+    // cannot localise — a control the kit would have to name in English is one
+    // it does not draw.
     const onSessionActions = vi.fn()
-    const el = createPaneContext(
+    const named = createPaneContext(
       { kind: 'program', program: 'nvim', path: '~' },
-      { onSessionActions },
+      { onSessionActions, sessionActionsLabel: 'Session actions' },
     )
-    const btn = el.querySelector<HTMLButtonElement>('.ui-button')
+    const btn = named.querySelector<HTMLButtonElement>('.ui-button')
     expect(btn).not.toBeNull()
     expect(btn?.textContent).toBe('Session actions')
     btn?.click()
     expect(onSessionActions).toHaveBeenCalledTimes(1)
+
+    const unnamed = createPaneContext(
+      { kind: 'program', program: 'nvim', path: '~' },
+      { onSessionActions },
+    )
+    expect(unnamed.querySelector('.ui-button')).toBeNull()
   })
 
   it('data-split and data-active reflect the split identity facts (spec §3: distinct from the active-TAB accent)', () => {

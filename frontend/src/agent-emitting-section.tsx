@@ -47,6 +47,7 @@ import {
 import { PageSection, Section, Select, Badge, EmptyState, FactList, CodeBlock } from './ui'
 import type { Fact } from './ui'
 import { Spinner } from './ui/spinner'
+import { t } from './i18n/locale-model'
 
 /**
  * How often the open view asks again.
@@ -136,7 +137,7 @@ export function AgentEmittingSection(props: AgentEmittingSectionProps) {
   })
 
   const options = createMemo(() => [
-    { value: '', label: 'Choose a pane…' },
+    { value: '', label: t('agents.choosePane.ph', 'Choose a pane…') },
     ...panes().map((p) => ({
       value: p.sessionId,
       label: props.nameOf?.(p.sessionId) ?? `${p.agent} · ${p.sessionId.slice(0, 8)}`,
@@ -179,22 +180,31 @@ export function AgentEmittingSection(props: AgentEmittingSectionProps) {
 
   return (
     <PageSection
-      title="What this agent is emitting"
-      description="The screen an enrolled pane's detection rule is reading, and what the rule sees on it — which anchor bound where, which branch answered, and for a branch that did not, the predicate it stopped at."
+      title={t('agents.emitting.title', 'What this agent is emitting')}
+      description={t(
+        'agents.emit.desc',
+        "The screen an enrolled pane's detection rule is reading, and what the rule sees on it — which anchor bound where, which branch answered, and for a branch that did not, the predicate it stopped at.",
+      )}
     >
       <Show when={error()}>
         <Badge tone="danger">{`Could not read the pane: ${error()}`}</Badge>
       </Show>
       <Show when={!loaded() && error() === null}>
-        <Spinner size="sm" label="Looking for panes nocx is watching" />
+        <Spinner
+          size="sm"
+          label={t('agents.lookingForPanes.label', 'Looking for panes nocx is watching')}
+        />
       </Show>
       <Show when={loaded()}>
         <Show
           when={panes().length > 0}
           fallback={
             <EmptyState
-              title="No pane is enrolled"
-              description="nocx watches a pane only after an agent asks it to. Start an agent in a terminal tab and it appears here."
+              title={t('agents.noPane.title', 'No pane is enrolled')}
+              description={t(
+                'agents.emit.noPane.desc',
+                'nocx watches a pane only after an agent asks it to. Start an agent in a terminal tab and it appears here.',
+              )}
             />
           }
         >
@@ -213,7 +223,10 @@ export function AgentEmittingSection(props: AgentEmittingSectionProps) {
         <Show when={reading()} keyed>
           {(r) => (
             <>
-              <Section id="emitting-verdict" title="What the rule answered">
+              <Section
+                id="emitting-verdict"
+                title={t('agents.ruleAnswered.title', 'What the rule answered')}
+              >
                 <div class="st-emitting__verdict">
                   <Badge tone={stateTone(r.state)}>{r.state}</Badge>
                   <span class="st-emitting__from">
@@ -224,16 +237,32 @@ export function AgentEmittingSection(props: AgentEmittingSectionProps) {
                 </div>
                 <Show when={!r.hasRule}>
                   <Badge tone="warning">
-                    nocx has no rule for this agent, so nothing is reading this screen yet
+                    {t(
+                      'agents.emit.noRule',
+                      'nocx has no rule for this agent, so nothing is reading this screen yet',
+                    )}
                   </Badge>
                 </Show>
               </Section>
 
-              <Section id="emitting-screen" title="The screen, as the rule sees it">
+              <Section
+                id="emitting-screen"
+                title={t('agents.screen.title', 'The screen, as the rule sees it')}
+              >
                 <CodeBlock
                   wrap={false}
-                  label="Frame"
-                  ariaLabel={`Frame of ${r.agent}, ${r.frame.cols} by ${r.frame.rows}`}
+                  label={t('agents.frame.label', 'Frame')}
+                  ariaLabel={
+                    t('agents.emit.frameOf.aria', 'Frame of') +
+                    ' ' +
+                    r.agent +
+                    ', ' +
+                    r.frame.cols +
+                    ' ' +
+                    t('agents.emit.frameBy.aria', 'by') +
+                    ' ' +
+                    r.frame.rows
+                  }
                 >
                   <For each={r.frame.lines}>
                     {(line, y) => (
@@ -258,7 +287,9 @@ export function AgentEmittingSection(props: AgentEmittingSectionProps) {
                         </span>
                         <span class="st-emitting__marks">
                           <Show when={line.rule}>
-                            <span class="st-emitting__mark">full-width rule</span>
+                            <span class="st-emitting__mark">
+                              {t('agents.emit.fullWidth', 'full-width rule')}
+                            </span>
                           </Show>
                           <For each={anchorsByRow().get(y()) ?? []}>
                             {(name) => <span class="st-emitting__mark">{name}</span>}
@@ -270,18 +301,27 @@ export function AgentEmittingSection(props: AgentEmittingSectionProps) {
                 </CodeBlock>
               </Section>
 
-              <Section id="emitting-anchors" title="Where the anchors bound">
+              <Section
+                id="emitting-anchors"
+                title={t('agents.anchors.title', 'Where the anchors bound')}
+              >
                 <FactList facts={anchorFacts()} />
               </Section>
 
-              <Section id="emitting-branches" title="The branches, in the order they were tried">
+              <Section
+                id="emitting-branches"
+                title={t('agents.branches.title', 'The branches, in the order they were tried')}
+              >
                 <For each={r.branches}>
                   {(branch, i) => <BranchRow branch={branch} index={i()} />}
                 </For>
               </Section>
 
               <Show when={r.extractors.length > 0}>
-                <Section id="emitting-extractors" title="What the extractors read">
+                <Section
+                  id="emitting-extractors"
+                  title={t('agents.extractors.title', 'What the extractors read')}
+                >
                   <For each={r.extractors}>
                     {(e) => (
                       <div class="st-emitting__extractor" data-extractor={e.name}>

@@ -5,6 +5,7 @@ import { Dialog } from './ui/dialog'
 import { FactList } from './ui/fact-list'
 import { SegmentedControl } from './ui/segmented-control'
 import { Stack } from './ui/stack'
+import { t } from './i18n/locale-model'
 
 interface HostKeyDecisionEvidence {
   host: string
@@ -80,8 +81,11 @@ export function HostKeyDialog(props: HostKeyDialogProps) {
   const [method, setMethod] = createSignal<IntegrationMethod | ''>('')
 
   const title = () => {
-    if (props.evidence) return props.evidence.changed ? 'Host key changed' : 'Unknown host key'
-    return 'Choose how nocx connects'
+    if (props.evidence)
+      return props.evidence.changed
+        ? t('connections.hostKey.changed', 'Host key changed')
+        : t('connections.hostKey.unknown', 'Unknown host key')
+    return t('connections.hostKey.choose', 'Choose how nocx connects')
   }
   return (
     <Dialog

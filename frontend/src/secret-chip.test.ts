@@ -29,9 +29,19 @@ const key = (view: EditorView, init: KeyboardEventInit) =>
     new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }),
   )
 
+/** The chip's words, supplied by a caller the way a surface supplies them
+ *  (the kit may not localise itself). English literals on purpose: the test is
+ *  about the DOM the kit builds, not about the catalogue. */
+const TITLES = {
+  resolved: (name: string) => `secret from the vault: ${name}`,
+  unresolved: () => 'a masked secret — pick a live value to run this command',
+  damaged: (name: string, damage: string) =>
+    `${name}: these bytes are no longer the secret — ${damage}`,
+}
+
 describe('createSecretChip (the emitter)', () => {
   it('renders the badge identity, the info tone and the name — never the value', () => {
-    const chip = createSecretChip('openai-key')
+    const chip = createSecretChip('openai-key', TITLES)
     expect(chip.className).toContain('ui-badge')
     expect(chip.className).toContain('ui-secret-chip')
     expect(chip.dataset.tone).toBe('info')
@@ -46,7 +56,7 @@ describe('createSecretChip (the emitter)', () => {
 // match" would print the beginning of a live credential in the clear.
 describe('createSecretChipDamaged (the emitter)', () => {
   it('names the secret and the SHAPE of the damage, and never a byte of it', () => {
-    const chip = createSecretChipDamaged('API_TOKEN', 'truncated, 24 of 214 bytes')
+    const chip = createSecretChipDamaged('API_TOKEN', 'truncated, 24 of 214 bytes', TITLES)
     expect(chip.className).toContain('ui-badge')
     expect(chip.className).toContain('ui-secret-chip')
     expect(chip.dataset.variant).toBe('damaged')
@@ -55,8 +65,8 @@ describe('createSecretChipDamaged (the emitter)', () => {
   })
 
   it('is visibly different from an intact chip by more than its colour', () => {
-    const intact = createSecretChip('API_TOKEN')
-    const damaged = createSecretChipDamaged('API_TOKEN', 'truncated, 24 of 214 bytes')
+    const intact = createSecretChip('API_TOKEN', TITLES)
+    const damaged = createSecretChipDamaged('API_TOKEN', 'truncated, 24 of 214 bytes', TITLES)
     // The tone differs…
     expect(damaged.dataset.tone).not.toBe(intact.dataset.tone)
     // …and so does the glyph and the text, because colour alone is not a

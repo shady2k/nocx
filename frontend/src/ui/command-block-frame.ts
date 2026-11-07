@@ -88,7 +88,10 @@ export function setHeaderInProgress(header: HTMLElement, inProgress: boolean): v
 export function createCommandSuccess(): HTMLElement {
   const el = document.createElement('span')
   el.className = 'ui-command-block-frame__success'
-  el.setAttribute('aria-label', 'Succeeded')
+  // The accessible name is the CALLER's: a kit module may not own a word it
+  // cannot localise, and this one is read out beside a measured duration
+  // (scrollback/blocks.ts names it in the active language).
+
   const icon = iconElement(CheckIcon)
   el.appendChild(icon)
   return el

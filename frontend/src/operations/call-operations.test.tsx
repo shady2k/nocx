@@ -78,7 +78,7 @@ function mount(dispatcher: Dispatcher, thresholdMs?: number): void {
     bar,
     panel,
     [createOperationsView(model)],
-    [{ id: 'settings', title: 'Settings', icon: SettingsIcon, onActivate: () => {} }],
+    [{ id: 'settings', title: () => 'Settings', icon: SettingsIcon, onActivate: () => {} }],
   )
 }
 

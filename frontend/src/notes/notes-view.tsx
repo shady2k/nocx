@@ -25,6 +25,7 @@ import { PlusIcon, StickyNoteIcon } from '../ui/icons'
 import { SearchField } from '../ui/search-field'
 import { NotesPanel } from './notes-panel'
 import type { NotesState, NotesStore } from './notes-store'
+import { t } from '../i18n/locale-model'
 
 const NOTES_VIEW_ID = 'notes'
 /** After Files (-1), Ports (0) and Git (1). */
@@ -76,8 +77,8 @@ export function createNotesView(deps: NotesViewDeps): SidebarViewDescriptor {
       <IconButton
         data-testid="notes-create"
         size="sm"
-        ariaLabel="New note"
-        title="New note"
+        ariaLabel={t('notes.new.title', 'New note')}
+        title={t('notes.new.title', 'New note')}
         onClick={() => deps.onCreate()}
       >
         <PlusIcon />
@@ -95,8 +96,8 @@ export function createNotesView(deps: NotesViewDeps): SidebarViewDescriptor {
     <SearchField
       value={query()}
       onInput={search}
-      placeholder="Search notes…"
-      ariaLabel="Search notes"
+      placeholder={t('notes.search.ph', 'Search notes…')}
+      ariaLabel={t('notes.search.aria', 'Search notes')}
       onKeyDown={(e) => {
         if (e.key === 'Escape' && query() !== '') {
           e.stopPropagation()
@@ -108,7 +109,7 @@ export function createNotesView(deps: NotesViewDeps): SidebarViewDescriptor {
 
   return {
     id: NOTES_VIEW_ID,
-    title: 'Notes',
+    title: () => t('notes.panel.title', 'Notes'),
     icon: StickyNoteIcon,
     actions: NotesActions,
     filter: NotesFilter,

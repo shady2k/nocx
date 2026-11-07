@@ -47,6 +47,10 @@ export interface Declaration {
    * Translation key the description resolves through: settings.<key>.description, minted in Go. Optional for the same reason as labelKey.
    */
   descriptionKey?: string
+  /**
+   * Translation key the section title resolves through: settings.section.<lowercased-with-dashes section>, minted in Go. Optional for the same reason as labelKey.
+   */
+  sectionKey?: string
   control: 'toggle' | 'text' | 'number' | 'select' | 'secret'
   dataClass: 'publicConfig' | 'privateMetadata' | 'privateContent' | 'secretAuthenticator'
   /**
@@ -71,6 +75,10 @@ export interface Declaration {
   max?: number
   unit?: string
   zeroLabel?: string
+  /**
+   * Translation key the zeroLabel resolves through: settings.<key>.zeroLabel, minted in Go. Present only beside a zeroLabel, for the same reason as labelKey.
+   */
+  zeroLabelKey?: string
   /**
    * The text control's paragraph variant; present only for control: text. The screen renders the kit's multiline TextField, where Enter inserts a newline instead of committing. A variant rather than a sixth control kind, matching the kit: TextField takes a multiline prop and there is no second component.
    */

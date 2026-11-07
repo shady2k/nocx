@@ -61,6 +61,7 @@ import { WatchBadge } from '../ui/watch-badge'
 import { showConfirm } from '../ui/dialog'
 import { dismissToast, showToast } from '../ui/toast'
 import { createClipboardAccess } from '../clipboard'
+import { t } from '../i18n/locale-model'
 import {
   contentsOf,
   directoryOf,
@@ -189,7 +190,8 @@ const API_DRAG_MIME = 'application/x-nocx-api-request'
  *  one handle — nocx-8aczn put cross-collection out of the METHOD, not
  *  just out of the gesture — so the drop is refused, and it SAYS so rather
  *  than silently doing nothing. */
-const CROSS_COLLECTION_REFUSAL = 'A request can only be moved within its own collection.'
+const crossCollectionRefusal = (): string =>
+  t('api.move.crossCollection', 'A request can only be moved within its own collection.')
 
 /** The two header names HTTP itself defines as carrying credentials. A LIST
  *  OF NAMES, not a detector: `internal/secrets.Detect` is the one owner of
@@ -937,7 +939,7 @@ export function ApiPane(props: ApiPaneProps) {
     standingReport = showToast({
       level: 'warning',
       duration: 0,
-      message: `Not imported from ${about}: ${notes.map((n) => `${n.what} — ${n.why}`).join('; ')}`,
+      message: `${t('api.notImportedHead', 'Not imported from ')}${about}${t('api.notImportedTail', ': ')}${notes.map((n) => `${n.what} — ${n.why}`).join('; ')}`,
     })
   }
 
@@ -1294,7 +1296,7 @@ export function ApiPane(props: ApiPaneProps) {
     if (carried === null) return
     const verdict = dropVerdict(carried, row)
     if (verdict === 'crossCollection') {
-      showToast({ level: 'warning', message: CROSS_COLLECTION_REFUSAL })
+      showToast({ level: 'warning', message: crossCollectionRefusal() })
       return
     }
     if (verdict !== 'legal') return
@@ -1318,7 +1320,10 @@ export function ApiPane(props: ApiPaneProps) {
       .catch(() => {
         // The store maps failures into error() and resolves; a rejection
         // here is unexpected but must not be silent.
-        showToast({ level: 'danger', message: 'The request could not be moved.' })
+        showToast({
+          level: 'danger',
+          message: t('api.move.failed', 'The request could not be moved.'),
+        })
       })
   }
 
@@ -1457,16 +1462,16 @@ export function ApiPane(props: ApiPaneProps) {
         <>
           <IconButton
             size="sm"
-            title="New request in this folder"
-            ariaLabel={`New request in ${entry.name}`}
+            title={t('api.tree.newRequestHere.title', 'New request in this folder')}
+            ariaLabel={`${t('api.tree.newRequestIn.head', 'New request in ')}${entry.name}`}
             onClick={() => void store.newRequest(entry.relPath).then(showRequest)}
           >
             <PlusIcon />
           </IconButton>
           <IconButton
             size="sm"
-            title="New folder inside this one"
-            ariaLabel={`New folder in ${entry.name}`}
+            title={t('api.tree.newFolderHere.title', 'New folder inside this one')}
+            ariaLabel={`${t('api.tree.newFolderIn.head', 'New folder in ')}${entry.name}`}
             onClick={() => askForNewFolder(handle, entry.relPath, entry.name)}
           >
             <FolderIcon />
@@ -1479,24 +1484,24 @@ export function ApiPane(props: ApiPaneProps) {
       <>
         <IconButton
           size="sm"
-          title="Duplicate"
-          ariaLabel={`Duplicate ${entry.name}`}
+          title={t('api.tree.duplicate.title', 'Duplicate')}
+          ariaLabel={`${t('api.tree.duplicate.head', 'Duplicate ')}${entry.name}`}
           onClick={() => duplicateRequest(target)}
         >
           <CopyIcon />
         </IconButton>
         <IconButton
           size="sm"
-          title="Move to folder…"
-          ariaLabel={`Move ${entry.name}`}
+          title={t('api.tree.move.title', 'Move to folder…')}
+          ariaLabel={`${t('api.tree.move.head', 'Move ')}${entry.name}`}
           onClick={() => askToMove(target)}
         >
           <FolderOpenIcon />
         </IconButton>
         <IconButton
           size="sm"
-          title="Delete request…"
-          ariaLabel={`Delete ${entry.name}`}
+          title={t('api.tree.delete.title', 'Delete request…')}
+          ariaLabel={`${t('api.tree.delete.head', 'Delete ')}${entry.name}`}
           onClick={() => askToDelete(target)}
         >
           <TrashIcon />
@@ -1608,8 +1613,10 @@ export function ApiPane(props: ApiPaneProps) {
    */
   const folderAskTitle = (): string => {
     const place = folderIn()
-    if (place === null) return 'New folder'
-    return `New folder in ${place.parentRelPath === '' ? place.label : place.parentRelPath}`
+    if (place === null) return t('api.folder.new', 'New folder')
+    return t('api.folder.newIn', 'New folder in {place}', {
+      place: place.parentRelPath === '' ? place.label : place.parentRelPath,
+    })
   }
 
   const createFolder = (typed: string): void => {
@@ -1622,7 +1629,7 @@ export function ApiPane(props: ApiPaneProps) {
       if (store.error() !== '') return
       setFoldering(false)
       revealFolder(place.handle, place.parentRelPath)
-      showToast({ level: 'success', message: `Created ${typed}` })
+      showToast({ level: 'success', message: `${t('api.createdHead', 'Created ')}${typed}` })
     })
   }
 
@@ -1656,7 +1663,7 @@ export function ApiPane(props: ApiPaneProps) {
       // the dialog stays, holding the name and the reason.
       if (store.error() !== '') return
       setNaming(false)
-      showToast({ level: 'success', message: `Created ${typed}` })
+      showToast({ level: 'success', message: `${t('api.createdHead', 'Created ')}${typed}` })
     })
   }
 
@@ -1687,7 +1694,7 @@ export function ApiPane(props: ApiPaneProps) {
       setPathRefused(refused)
       if (refused !== '') return
       setOpening(false)
-      showToast({ level: 'success', message: `Opened ${path}` })
+      showToast({ level: 'success', message: `${t('api.openedHead', 'Opened ')}${path}` })
     })
   }
 
@@ -2315,7 +2322,7 @@ export function ApiPane(props: ApiPaneProps) {
       return [
         {
           id: 'api-secret-replace',
-          label: 'Replace with another secret',
+          label: t('api.secret.replace', 'Replace with another secret'),
           icon: PencilIcon,
           onSelect: () => {
             const replace = varMenu()?.replace
@@ -2325,7 +2332,7 @@ export function ApiPane(props: ApiPaneProps) {
         },
         {
           id: 'api-secret-open',
-          label: 'Open in Secrets',
+          label: t('api.secret.openInSecrets', 'Open in Secrets'),
           icon: FolderOpenIcon,
           onSelect: () => {
             setVarMenu(null)
@@ -2339,14 +2346,19 @@ export function ApiPane(props: ApiPaneProps) {
     const env = store.activeEnvironment()
     const defineHere = {
       id: 'api-variable-define-request',
-      label: `Add ${name} to this request`,
+      label: `${t('api.param.add.head', 'Add ')}${name}${t('api.param.add.tail', ' to this request')}`,
       icon: PlusIcon,
       onSelect: () => defineOnRequest(name),
     }
     const defineThere = {
       id: 'api-variable-define',
       label:
-        env === '' ? `Add ${name} to a new environment` : `Add ${name} to ${environmentName(env)}`,
+        env === ''
+          ? t('api.variable.addNewEnv', 'Add {name} to a new environment', { name })
+          : t('api.variable.addToEnv', 'Add {name} to {env}', {
+              name,
+              env: environmentName(env),
+            }),
       icon: PlusIcon,
       onSelect: () => defineVariable(name),
     }
@@ -2354,7 +2366,7 @@ export function ApiPane(props: ApiPaneProps) {
       return [
         {
           id: 'api-variable-open-folder',
-          label: `Edit folder ${answer.from}`,
+          label: `${t('api.folder.edit.head', 'Edit folder ')}${answer.from}`,
           icon: PencilIcon,
           onSelect: () => {
             setVarMenu(null)
@@ -2371,7 +2383,7 @@ export function ApiPane(props: ApiPaneProps) {
       return [
         {
           id: 'api-variable-open-env',
-          label: `Edit ${environmentName(env)}`,
+          label: `${t('api.env.edit.head', 'Edit ')}${environmentName(env)}`,
           icon: PencilIcon,
           onSelect: () => {
             setVarMenu(null)
@@ -2521,7 +2533,7 @@ export function ApiPane(props: ApiPaneProps) {
         // an environment is sending under it — not choosing it a second time
         // from a list where it has just appeared.
         store.setEnvironment(relPath)
-        showToast({ level: 'success', message: `Saved ${named}` })
+        showToast({ level: 'success', message: `${t('api.savedHead', 'Saved ')}${named}` })
       })
   }
 
@@ -2672,11 +2684,14 @@ export function ApiPane(props: ApiPaneProps) {
         if (notOpened !== '') {
           showToast({
             level: 'danger',
-            message: `Imported into ${dest}, but it is not in the tree: ${notOpened}`,
+            message: `${t('api.importedHead', 'Imported into ')}${dest}${t('api.imported.notInTreeMiddle', ', but it is not in the tree: ')}${notOpened}`,
           })
           return
         }
-        showToast({ level: 'success', message: `Imported into ${dest}` })
+        showToast({
+          level: 'success',
+          message: `${t('api.importedHead', 'Imported into ')}${dest}${t('api.importedTail', '')}`,
+        })
       })
       .catch((err: unknown) => {
         refuseImport(err instanceof Error ? err.message : String(err))
@@ -2790,7 +2805,7 @@ export function ApiPane(props: ApiPaneProps) {
         ? [
             {
               id: 'api-insert-secret',
-              label: 'Insert a secret…',
+              label: t('api.secret.insert', 'Insert a secret…'),
               icon: PlusIcon,
               onSelect: () => {
                 const picker = openRequestSecretPicker
@@ -2802,7 +2817,7 @@ export function ApiPane(props: ApiPaneProps) {
         : []),
       {
         id: 'api-row-duplicate',
-        label: 'Duplicate',
+        label: t('api.tree.duplicate.title', 'Duplicate'),
         icon: CopyIcon,
         onSelect: () => {
           const target = requestMenuTarget
@@ -2811,7 +2826,7 @@ export function ApiPane(props: ApiPaneProps) {
       },
       {
         id: 'api-row-move',
-        label: 'Move to folder…',
+        label: t('api.tree.move.title', 'Move to folder…'),
         icon: FolderOpenIcon,
         onSelect: () => {
           const target = requestMenuTarget
@@ -2820,7 +2835,7 @@ export function ApiPane(props: ApiPaneProps) {
       },
       {
         id: 'api-row-delete',
-        label: 'Delete request…',
+        label: t('api.tree.delete.title', 'Delete request…'),
         icon: TrashIcon,
         onSelect: () => {
           const target = requestMenuTarget
@@ -2831,7 +2846,7 @@ export function ApiPane(props: ApiPaneProps) {
     if (requestIsOpen) {
       items.splice(items.length - 1, 0, {
         id: 'api-row-close',
-        label: 'Close request',
+        label: t('api.request.close', 'Close request'),
         icon: CloseIcon,
         onSelect: closeOpenRequest,
       })
@@ -2879,7 +2894,7 @@ export function ApiPane(props: ApiPaneProps) {
     const text = collection === undefined ? target.relPath : `${collection.path}/${target.relPath}`
     try {
       await clipboard.writeText(text)
-      showToast({ level: 'success', message: 'Copied absolute path' })
+      showToast({ level: 'success', message: t('api.path.copied', 'Copied absolute path') })
     } catch (e) {
       showToast({ level: 'danger', message: e instanceof Error ? e.message : String(e) })
     }
@@ -2900,7 +2915,7 @@ export function ApiPane(props: ApiPaneProps) {
   const malformedMenuItems = (): ContextMenuItem[] => [
     {
       id: 'api-malformed-delete',
-      label: 'Delete…',
+      label: t('api.delete.ellipsis', 'Delete…'),
       icon: TrashIcon,
       onSelect: () => {
         const target = malformedMenuTarget
@@ -2920,7 +2935,7 @@ export function ApiPane(props: ApiPaneProps) {
     },
     {
       id: 'api-malformed-copy-path',
-      label: 'Copy Absolute Path',
+      label: t('api.path.copyAbsolute', 'Copy Absolute Path'),
       icon: CopyIcon,
       onSelect: () => {
         const target = malformedMenuTarget
@@ -2944,7 +2959,7 @@ export function ApiPane(props: ApiPaneProps) {
     const items: ContextMenuItem[] = [
       {
         id: 'api-row-new-request',
-        label: 'New request',
+        label: t('api.request.new.title', 'New request'),
         icon: PlusIcon,
         onSelect: () => {
           const target = rowMenuTarget
@@ -2959,7 +2974,7 @@ export function ApiPane(props: ApiPaneProps) {
       },
       {
         id: 'api-row-new-folder',
-        label: 'New folder…',
+        label: t('api.folder.newEllipsis', 'New folder…'),
         // The kit has a folder glyph and no folder-plus one; the `+` is on
         // the sibling item, and what distinguishes these two is the word.
         icon: FolderIcon,
@@ -2979,7 +2994,7 @@ export function ApiPane(props: ApiPaneProps) {
         // "Close collection", not the path. The row this menu hangs off
         // already says WHICH collection, and a path elided in the middle
         // answers neither question — it is not readable and it is not needed.
-        label: 'Close collection',
+        label: t('api.collection.close', 'Close collection'),
         icon: CloseIcon,
         onSelect: () => {
           const target = rowMenuTarget
@@ -3023,8 +3038,8 @@ export function ApiPane(props: ApiPaneProps) {
         <div class="api-tree__filter">
           <TextField
             id="api-filter"
-            ariaLabel="Filter collections and requests"
-            placeholder="Filter…"
+            ariaLabel={t('api.filter.aria', 'Filter collections and requests')}
+            placeholder={t('api.filter.ph', 'Filter…')}
             value={filter()}
             onInput={setFilter}
           />
@@ -3046,25 +3061,25 @@ export function ApiPane(props: ApiPaneProps) {
           items={[
             {
               id: 'api-menu-new-collection',
-              label: 'New collection…',
+              label: t('api.collection.newEllipsis', 'New collection…'),
               icon: PlusIcon,
               onSelect: askForName,
             },
             {
               id: 'api-menu-open',
-              label: 'Open folder…',
+              label: t('api.folder.openEllipsis', 'Open folder…'),
               icon: FolderOpenIcon,
               onSelect: askForFolder,
             },
             {
               id: 'api-menu-import',
-              label: 'Import collection…',
+              label: t('api.collection.importEllipsis', 'Import collection…'),
               icon: ArrowDownIcon,
               onSelect: askForImport,
             },
             {
               id: 'api-menu-refresh',
-              label: 'Re-read the open folders',
+              label: t('api.error.reread', 'Re-read the open folders'),
               icon: RefreshIcon,
               onSelect: () => void store.refresh(),
             },
@@ -3151,7 +3166,7 @@ export function ApiPane(props: ApiPaneProps) {
         </Show>
         <CollectionDialog
           open={naming()}
-          title="New collection"
+          title={t('api.collection.new.title', 'New collection')}
           submitLabel="Create"
           fieldId="api-new-collection-name"
           fieldLabel="Name"
@@ -3168,7 +3183,7 @@ export function ApiPane(props: ApiPaneProps) {
         />
         <CollectionDialog
           open={opening()}
-          title="Open a collection folder"
+          title={t('api.collection.open.title', 'Open a collection folder')}
           submitLabel="Open"
           fieldId="api-collection-path"
           fieldLabel="Collection folder"
@@ -3302,9 +3317,13 @@ export function ApiPane(props: ApiPaneProps) {
         <Show when={store.error() !== '' && !anyAskOpen()}>
           <StatusCard
             tone="danger"
-            title="That did not work"
+            title={t('api.error.title', 'That did not work')}
             description={store.error()}
-            action={<Button onClick={() => void store.refresh()}>Re-read the open folders</Button>}
+            action={
+              <Button onClick={() => void store.refresh()}>
+                {t('api.error.reread', 'Re-read the open folders')}
+              </Button>
+            }
           />
         </Show>
         {/* The watch did not come up, so the tree has stopped following the
@@ -3316,9 +3335,9 @@ export function ApiPane(props: ApiPaneProps) {
         <Show when={store.watchFailed() !== ''}>
           <StatusCard
             tone="warning"
-            title="Not watching these folders"
-            description={`${store.watchFailed()} — changes on disk will not appear on their own until this recovers.`}
-            action={<Button onClick={() => void store.refresh()}>Retry</Button>}
+            title={t('api.watch.failedTitle', 'Not watching these folders')}
+            description={`${store.watchFailed()}${t('api.watch.failedTail', ' — changes on disk will not appear on their own until this recovers.')}`}
+            action={<Button onClick={() => void store.refresh()}>{t('api.retry', 'Retry')}</Button>}
           />
         </Show>
 
@@ -3328,7 +3347,7 @@ export function ApiPane(props: ApiPaneProps) {
             "the thing this line is about", wherever the line is. */}
         <Section
           id="api-collections"
-          title="Collections"
+          title={t('api.collections.title', 'Collections')}
           dense
           collapsible
           open={collectionsOpen()}
@@ -3349,8 +3368,8 @@ export function ApiPane(props: ApiPaneProps) {
               <IconButton
                 id="api-new-collection"
                 size="sm"
-                title="New collection"
-                ariaLabel="New collection"
+                title={t('api.collection.new.title', 'New collection')}
+                ariaLabel={t('api.collection.new.title', 'New collection')}
                 onClick={askForName}
               >
                 <PlusIcon />
@@ -3358,8 +3377,8 @@ export function ApiPane(props: ApiPaneProps) {
               <IconButton
                 id="api-collections-menu"
                 size="sm"
-                title="More collection actions"
-                ariaLabel="More collection actions"
+                title={t('api.collections.more', 'More collection actions')}
+                ariaLabel={t('api.collections.more', 'More collection actions')}
                 selected={menuOpen()}
                 onClick={openMenu}
               >
@@ -3371,7 +3390,7 @@ export function ApiPane(props: ApiPaneProps) {
           <div
             class="api-tree"
             role="tree"
-            aria-label="Collections"
+            aria-label={t('api.collections.title', 'Collections')}
             /* THE SCROLLED TREE'S EDGES (nocx-9db1m): the container itself
                is never a drop target, and a drag over the gap above the
                first row or below the last must clear the last row's
@@ -3389,14 +3408,17 @@ export function ApiPane(props: ApiPaneProps) {
                   when={filter().trim() === ''}
                   fallback={
                     <EmptyState
-                      title="Nothing matches"
-                      description={`No collection or request contains “${filter().trim()}”.`}
+                      title={t('api.filter.nomatch.title', 'Nothing matches')}
+                      description={`${t('api.filter.nomatch.descHead', 'No collection or request contains “')}${filter().trim()}${t('api.filter.nomatch.descTail', '”.')}`}
                     />
                   }
                 >
                   <EmptyState
-                    title="No collections open"
-                    description="Make one, open a folder you already have, or import a Postman export."
+                    title={t('api.empty.title', 'No collections open')}
+                    description={t(
+                      'api.empty.desc',
+                      'Make one, open a folder you already have, or import a Postman export.',
+                    )}
                   />
                 </Show>
               }
@@ -3538,8 +3560,8 @@ export function ApiPane(props: ApiPaneProps) {
                               <span class="api-tree__row-actions">
                                 <IconButton
                                   size="sm"
-                                  title="New request"
-                                  ariaLabel={`New request in ${row.name}`}
+                                  title={t('api.request.new.title', 'New request')}
+                                  ariaLabel={`${t('api.tree.newRequestIn.head', 'New request in ')}${row.name}`}
                                   onClick={(e: MouseEvent) => {
                                     e.stopPropagation()
                                     store.pointAt(row.handle)
@@ -3553,8 +3575,8 @@ export function ApiPane(props: ApiPaneProps) {
                                 </IconButton>
                                 <IconButton
                                   size="sm"
-                                  title="More"
-                                  ariaLabel={`More actions for ${row.name}`}
+                                  title={t('api.more.title', 'More')}
+                                  ariaLabel={`${t('api.more.actionsHead', 'More actions for ')}${row.name}`}
                                   onClick={(e: MouseEvent) => openRowMenu(e, row)}
                                 >
                                   <MoreIcon />
@@ -3589,7 +3611,7 @@ export function ApiPane(props: ApiPaneProps) {
         <Show when={store.activeCollection() !== ''}>
           <Section
             id="api-environments"
-            title="Environments"
+            title={t('api.env.title', 'Environments')}
             dense
             collapsible
             open={environmentsOpen()}
@@ -3599,8 +3621,8 @@ export function ApiPane(props: ApiPaneProps) {
                 <IconButton
                   id="api-new-environment"
                   size="sm"
-                  title="New environment"
-                  ariaLabel="New environment"
+                  title={t('api.env.new', 'New environment')}
+                  ariaLabel={t('api.env.new', 'New environment')}
                   onClick={() => {
                     setView('environments')
                     newEnvironment()
@@ -3611,8 +3633,8 @@ export function ApiPane(props: ApiPaneProps) {
                 <IconButton
                   id="api-environments-open"
                   size="sm"
-                  title="Manage environments"
-                  ariaLabel="Manage environments"
+                  title={t('api.env.manage', 'Manage environments')}
+                  ariaLabel={t('api.env.manage', 'Manage environments')}
                   selected={envOpen()}
                   onClick={openEnvironments}
                 >
@@ -3626,8 +3648,9 @@ export function ApiPane(props: ApiPaneProps) {
                 when={store.environments().length > 0}
                 fallback={
                   <p class="api-environments__note">
-                    None yet. A URL written in <code>{'{{baseUrl}}'}</code> resolves against one of
-                    these.
+                    {t('api.env.none.head', 'None yet. A URL written in ')}
+                    <code>{'{{baseUrl}}'}</code>
+                    {t('api.env.none.tail', ' resolves against one of these.')}
                   </p>
                 }
               >
@@ -3672,7 +3695,7 @@ export function ApiPane(props: ApiPaneProps) {
           the component itself. */}
       <div class="api-workbench__seam" data-seam="tree">
         <ResizeHandle
-          ariaLabel="Resize the collections column"
+          ariaLabel={t('api.resize.collectionsAria', 'Resize the collections column')}
           value={treeWidth()}
           min={MIN_TREE_WIDTH}
           max={treeMax()}
@@ -3698,13 +3721,13 @@ export function ApiPane(props: ApiPaneProps) {
             <span class="api-crumbs__sep" aria-hidden="true">
               ›
             </span>
-            <span class="api-crumbs__here">Environments</span>
+            <span class="api-crumbs__here">{t('api.env.title', 'Environments')}</span>
             <span class="api-crumbs__save">
               <IconButton
                 id="api-environments-close"
                 size="sm"
-                title="Back to the request"
-                ariaLabel="Back to the request"
+                title={t('api.back.title', 'Back to the request')}
+                ariaLabel={t('api.back.title', 'Back to the request')}
                 onClick={showRequest}
               >
                 <CloseIcon />
@@ -3731,8 +3754,8 @@ export function ApiPane(props: ApiPaneProps) {
               <IconButton
                 id="api-folder-new-request"
                 size="sm"
-                title="New request in this folder"
-                ariaLabel="New request in this folder"
+                title={t('api.tree.newRequestHere.title', 'New request in this folder')}
+                ariaLabel={t('api.tree.newRequestHere.title', 'New request in this folder')}
                 onClick={newRequestHere}
               >
                 <PlusIcon />
@@ -3740,8 +3763,8 @@ export function ApiPane(props: ApiPaneProps) {
               <IconButton
                 id="api-folder-import-curl"
                 size="sm"
-                title="Import a curl command into this folder"
-                ariaLabel="Import a curl command into this folder"
+                title={t('api.import.folderTitle', 'Import a curl command into this folder')}
+                ariaLabel={t('api.import.folderTitle', 'Import a curl command into this folder')}
                 onClick={askForCurl}
               >
                 <ArrowDownIcon />
@@ -3749,7 +3772,7 @@ export function ApiPane(props: ApiPaneProps) {
               <Show when={store.draft() !== null}>
                 <IconButton
                   id="api-folder-close"
-                  ariaLabel="Back to the request"
+                  ariaLabel={t('api.back.title', 'Back to the request')}
                   onClick={showRequest}
                 >
                   <CloseIcon />
@@ -3899,7 +3922,7 @@ export function ApiPane(props: ApiPaneProps) {
         }
       >
         <Show when={view() === 'request'}>
-          <section class="api-workbench__request" aria-label="Request">
+          <section class="api-workbench__request" aria-label={t('api.pane.requestAria', 'Request')}>
             <RequestEditor
               request={store.draft()}
               scopeVariables={store.scopeVariables()}
@@ -3929,7 +3952,7 @@ export function ApiPane(props: ApiPaneProps) {
             much of the width the request keeps. */}
           <div class="api-workbench__seam" data-seam="request">
             <ResizeHandle
-              ariaLabel="Resize the request half"
+              ariaLabel={t('api.pane.resizeRequestAria', 'Resize the request half')}
               value={requestWidth()}
               min={MIN_REQUEST_WIDTH}
               max={requestMax()}
@@ -3938,14 +3961,14 @@ export function ApiPane(props: ApiPaneProps) {
             />
           </div>
 
-          <section class="api-workbench__runs" aria-label="Runs">
+          <section class="api-workbench__runs" aria-label={t('api.pane.runsAria', 'Runs')}>
             {/* The column says what it is. Every run under it carries its own
               status, elapsed time and size (run-list.tsx), so this names the
               column and does not restate one run's numbers at the top of a
               list of many — which would be two owners of one fact the moment
               a second run arrived. */}
             <div class="api-workbench__runs-head">
-              <Caption>Response</Caption>
+              <Caption>{t('api.pane.response', 'Response')}</Caption>
               <Show when={store.runs().length > 0}>
                 <Badge tone="neutral">{String(store.runs().length)}</Badge>
               </Show>

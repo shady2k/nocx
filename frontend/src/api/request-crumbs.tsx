@@ -21,6 +21,7 @@ import { Button } from '../ui/button'
 import { IconButton } from '../ui/icon-button'
 import { ArrowDownIcon, MoreIcon, PlusIcon } from '../ui/icons'
 import { TextField } from '../ui/text-field'
+import { t } from '../i18n/locale-model'
 
 export interface RequestCrumbsProps {
   /** The collection the workbench is pointed at. '' when none is open. */
@@ -132,7 +133,7 @@ export function RequestCrumbs(props: RequestCrumbsProps) {
             // The surface PLACES it (the name reads as text in a crumb
             // trail) and does not repaint it.
             <span class="api-crumbs__name">
-              <Button variant="ghost" title="Rename" onClick={start}>
+              <Button variant="ghost" title={t('api.crumbs.rename', 'Rename')} onClick={start}>
                 {props.name}
               </Button>
             </span>
@@ -150,7 +151,7 @@ export function RequestCrumbs(props: RequestCrumbsProps) {
           >
             <TextField
               id="api-request-name"
-              ariaLabel="Request name"
+              ariaLabel={t('api.crumbs.name.aria', 'Request name')}
               value={typed()}
               onInput={setTyped}
               onBlur={commit}
@@ -175,8 +176,8 @@ export function RequestCrumbs(props: RequestCrumbsProps) {
             <IconButton
               id="api-new-request"
               size="sm"
-              title="New request"
-              ariaLabel="New request"
+              title={t('api.crumbs.newRequest', 'New request')}
+              ariaLabel={t('api.crumbs.newRequest', 'New request')}
               onClick={() => props.onNew?.()}
             >
               <PlusIcon />
@@ -189,8 +190,8 @@ export function RequestCrumbs(props: RequestCrumbsProps) {
             <IconButton
               id="api-import-curl-open"
               size="sm"
-              title="Import a curl command"
-              ariaLabel="Import a curl command"
+              title={t('api.crumbs.importCurl', 'Import a curl command')}
+              ariaLabel={t('api.crumbs.importCurl', 'Import a curl command')}
               onClick={() => props.onImportCurl?.()}
             >
               <ArrowDownIcon />
@@ -200,8 +201,8 @@ export function RequestCrumbs(props: RequestCrumbsProps) {
             <IconButton
               id="api-request-menu"
               size="sm"
-              title="More actions for this request"
-              ariaLabel="More actions for this request"
+              title={t('api.crumbs.more', 'More actions for this request')}
+              ariaLabel={t('api.crumbs.more', 'More actions for this request')}
               onClick={(e: MouseEvent) => props.onMore?.(e)}
             >
               <MoreIcon />

@@ -126,6 +126,90 @@ export async function settingsReady(page: Page): Promise<void> {
 }
 
 /**
+ * The interface has ONE language, the stand is SHARED, and every helper above
+ * finds its controls by their ENGLISH names — `settingsReady` waits for
+ * "Settings sections", the activity bar for "Activity bar", the quick connect
+ * for "Local shell". So a spec that switches the interface to Russian and
+ * leaves it there does not fail alone: every later spec in that shard reads
+ * Russian where it expects English and fails for a reason that has nothing to
+ * do with what it measures. Measured on the #745 run: one spec failed at its
+ * own assertion, and twenty-four in chromium-2 and eighteen in webkit-1 failed
+ * behind it (`proof-matrix`, `sidebar`, `tabs`, `notes`, `skills-switch-column`,
+ * `renderer-memory-soak` waiting for `[aria-label="Close tab"]`,
+ * `shell-startup-visibility` reading «Локальная оболочка`).
+ *
+ * TWO HALVES, and both are here rather than in the specs:
+ *
+ *   - `switchLanguage` is the only way a spec changes the language. It says
+ *     what it does in the language-free vocabulary the product keeps — the
+ *     settings rail's `data-item` is the Go section name, and the option labels
+ *     are the catalogue's endonyms («English», «Русский»), the same in both
+ *     catalogues — and it waits for the interface to actually be speaking the
+ *     language asked for.
+ *   - `restoreEnglishLanguage` runs after EVERY test through the module-level
+ *     hook below, on the failure path too (which is the point: the spec that
+ *     poisoned a shard failed at its own assertion, so nothing inside its body
+ *     was going to put the language back). It reads the locale the renderer
+ *     itself caches on every reconcile, so a test that never touched the
+ *     language pays one `page.evaluate` and a test that did is put back whether
+ *     it passed, failed, or timed out.
+ *
+ * A spec that needs another language is therefore a normal spec: it calls
+ * `switchLanguage(page, 'ru')`, reads what it came for, and the harness owns
+ * the promise that the next spec starts in English.
+ */
+export async function switchLanguage(page: Page, locale: 'en' | 'ru'): Promise<void> {
+  if ((await activeLocale(page)) !== locale) {
+    await page.keyboard.press('Escape')
+    await page.keyboard.press('Meta+,')
+    const railItem = page.locator('.ui-grouped-nav__item[data-item="Interface"]')
+    await baseExpect(railItem).toBeVisible({ timeout: 15_000 })
+    await railItem.click()
+    const select = page.locator('[data-key="ui.language"] select')
+    await baseExpect(select).toBeVisible({ timeout: 10_000 })
+    // The option's label is an endonym: «English» and «Русский» are the same
+    // words in both catalogues, so this locator works in either language.
+    await select.selectOption({ label: locale === 'en' ? 'English' : 'Русский' })
+  }
+  await baseExpect(
+    page.getByPlaceholder(locale === 'en' ? 'Search settings…' : 'Поиск настроек…'),
+  ).toBeVisible({
+    timeout: 10_000,
+  })
+}
+
+/** The locale the window is speaking, as the renderer's own bootstrap cache
+ *  records it on every reconcile (i18n/bootstrap.ts). Null when the page has
+ *  not written one yet, which is the same answer as "English". */
+async function activeLocale(page: Page): Promise<string | null> {
+  try {
+    return await page.evaluate(() => localStorage.getItem('nocx:bootstrap:locale:v1'))
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Put the interface back to English if this test left it elsewhere.
+ *
+ * Deliberately unconditional at the call site (the hook below runs it for every
+ * test) and free for the overwhelming majority: the probe is one evaluate, and
+ * the switch happens only when the answer is not English.
+ */
+export async function restoreEnglishLanguage(page: Page): Promise<void> {
+  if (page.isClosed()) return
+  const locale = await activeLocale(page)
+  if (locale === null || locale === 'en') return
+  await switchLanguage(page, 'en')
+}
+
+// Registered at the module every spec imports, like the file-root cleanup
+// below: a spec cannot forget it, and it runs on the failure path.
+base.afterEach(async ({ page }) => {
+  await restoreEnglishLanguage(page)
+})
+
+/**
  * Click into the active pane's prompt editor.
  *
  * Six specs used to spell this `page.mouse.click(box.x + box.width / 2, box.y +

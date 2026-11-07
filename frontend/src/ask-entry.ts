@@ -8,6 +8,7 @@ import { ViewPlugin } from '@codemirror/view'
 import type { BadgeTone } from './ui/badge'
 import { createModeIndicator, type ModeIndicatorMenuItem } from './ui/mode-indicator'
 import { blockKindRules, type BlockKind } from './scrollback/blocks'
+import { t } from './i18n/locale-model'
 
 export interface GrantBlock {
   readonly itemId: string
@@ -248,6 +249,9 @@ export class TargetIndicator {
     if (!this.host) return
     const button = createModeIndicator({
       word: this.word,
+      ariaLabel: t('composer.target.aria', 'Enter goes to {word}. Click to choose.', {
+        word: this.word,
+      }),
       tone: this.tone,
       targetId: this.targetId,
       items: TARGET_MENU_ITEMS,

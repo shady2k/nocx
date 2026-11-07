@@ -1,0 +1,11 @@
+{
+  "//": [
+    "DO NOT EDIT MANUALLY. Regenerate with `npm run baseline:i18n-timing-update`.",
+    "",
+    "Every t() call that resolves before render: at module scope, in a component",
+    "body, in a class field, or in a function the module invokes at its own top",
+    "level. Such a call keeps the language the window started in. The baseline may",
+    "only shrink; new code must resolve its strings where they are read."
+  ],
+  "violations": []
+}

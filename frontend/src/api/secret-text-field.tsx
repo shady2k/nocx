@@ -4,6 +4,7 @@ import { createSecretPickerField } from '../ui/secret-picker-field'
 import { LockIcon } from '../ui/icons'
 import { TextField, type TextFieldMark, type TextFieldProps } from '../ui/text-field'
 import type { SecretEntry, SecretPickerSource } from '../ui/secret-picker'
+import { t } from '../i18n/locale-model'
 
 export type { SecretEntry } from '../ui/secret-picker'
 
@@ -135,8 +136,8 @@ export function SecretTextField(props: SecretTextFieldProps) {
       trailingAction={
         picker !== null
           ? {
-              ariaLabel: 'Store in vault',
-              title: 'Store in vault',
+              ariaLabel: t('api.secret.storeInVault', 'Store in vault'),
+              title: t('api.secret.storeInVault', 'Store in vault'),
               onClick: (selection) => picker.openForStore(selection),
               children: <LockIcon />,
             }

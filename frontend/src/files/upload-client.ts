@@ -17,6 +17,7 @@
 // clients for one gesture.
 
 import type { Dispatcher } from '../dispatcher'
+import { t } from '../i18n/locale-model'
 import type { DialogOpenFileForUpload } from '../generated/dialog.openFileForUpload'
 import type { FilesDropped } from '../generated/files.dropped'
 import type { FilesUploadResult } from '../generated/files.upload'
@@ -159,7 +160,11 @@ class UploadClient {
     }
     const socket = this.dispatcher.socket
     if (socket === null) {
-      return { ok: false, kind: 'network', message: 'no connection to the backend' }
+      return {
+        ok: false,
+        kind: 'network',
+        message: t('files.upload.noConnection', 'no connection to the backend'),
+      }
     }
     const base = new URL(socket.url)
     base.protocol = base.protocol === 'wss:' ? 'https:' : 'http:'

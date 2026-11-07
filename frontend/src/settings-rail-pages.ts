@@ -35,7 +35,17 @@ import type { JSX } from 'solid-js'
  *   how the loser goes on advertising what it can no longer deliver.
  */
 export type SettingsPage =
-  | { kind: 'generated'; id: string; title: string; groupId?: string }
+  | {
+      kind: 'generated'
+      id: string
+      title: string
+      /** The section title's translation key, minted in Go
+       * (settings.section.<slug>) and shipped by settings.describe; the rail
+       * renders t(titleKey, title). Undefined on a payload from before the
+       * keys existed — the English title is the fallback. */
+      titleKey?: string
+      groupId?: string
+    }
   // A component page renders itself. It is a thunk rather than a bare
   // Component because such a page needs context the registry does not have —
   // Connections needs the ProfileClient and the connect callback — and binding

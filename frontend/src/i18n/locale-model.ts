@@ -117,11 +117,23 @@ function interpolate(form: string, params: Record<string, string | number>): str
  * fallback, which is what keeps an untranslated surface readable English
  * rather than blank. Reading this inside a component tracks the locale
  * signal, so a switch re-renders it.
+ *
+ * `params` fills `{name}` placeholders through [interpolate], which is the
+ * ONE substitution every resolved form goes through. A value built by
+ * `String.prototype.replace('{name}', …)` instead is a bug waiting for a
+ * `$&` in somebody's secret name (measured: nocx-dej6.3.8's review), so the
+ * catalogue's own placeholders and the caller's values meet here and nowhere
+ * else.
  */
-export function t(key: string, fallback?: string): string {
+export function t(
+  key: string,
+  fallback?: string,
+  params?: Record<string, string | number>,
+): string {
   const entry = resolveEntry(key)
-  if (entry === undefined) return fallback ?? key
-  return typeof entry === 'string' ? entry : pickForm(entry, 1)
+  const form =
+    entry === undefined ? (fallback ?? key) : typeof entry === 'string' ? entry : pickForm(entry, 1)
+  return interpolate(form, params ?? {})
 }
 
 /**
@@ -129,12 +141,16 @@ export function t(key: string, fallback?: string): string {
  * plain string resolves to that string regardless of the count (English
  * often needs no plural object); a plural object resolves the category with
  * `Intl.PluralRules` in the active locale, with `other` as the last resort.
+ *
+ * `{count}` is substituted on EVERY path — a catalogued form and a fallback
+ * alike. A key with no entry at all that renders its fallback with the
+ * placeholder left in it is the same defect as a blank: the sentence a
+ * person reads says `{count} files`.
  */
 export function tPlural(key: string, count: number, fallback?: string): string {
   const entry = resolveEntry(key)
-  if (entry === undefined) return fallback ?? key
-  const resolved = pickForm(entry, count)
-  return interpolate(resolved, { count })
+  const form = entry === undefined ? (fallback ?? key) : pickForm(entry, count)
+  return interpolate(form, { count })
 }
 
 /**

@@ -184,11 +184,14 @@ test('cd in the terminal reveals the directory in the tree — no click, no tab 
 test('expanding a directory lists a page and "show next" reveals the rest', async ({ page }) => {
   await openFilesAtFixture(page)
 
-  // Expand bigdir — the disclosure is the user's seam (aria-label from the
-  // kit row). The fixture sits under the revealed chain from / (its depth
-  // is its path's segment count minus the root), so bigdir's children sit
-  // one deeper than the fixture's row.
-  await page.locator('button[aria-label="Expand bigdir"]').click()
+  // Expand bigdir. The disclosure is the user's seam, and it is named by the
+  // ROW it discloses — `aria-label="bigdir"` with `aria-expanded` saying open
+  // or closed — because the kit may not own the word "Expand" in a language it
+  // cannot speak (nocx-dej6.3.8: the verb was the kit's copy, and a kit whose
+  // copy freezes at first mount renders it in the startup language). The
+  // selector pins the disclosure by its `aria-expanded`, which the row's name
+  // itself does not carry.
+  await page.locator('button[aria-label="bigdir"][aria-expanded]').click()
 
   // Counted by PARENT, not by depth. A depth counts every row at that level in
   // the whole tree, and the reveal walked here through directories with

@@ -41,6 +41,21 @@ export interface BlockReceiptCapture {
   readonly suggestedName: string
 }
 
+/** The words the receipt draws — resolved by the caller, because a kit module
+ *  may not own copy it cannot localise (ui/README.md, nocx-dej6.3.8). The i18n
+ *  layer's `blockReceiptLabels()` builds this. */
+export interface BlockReceiptLabels {
+  /** The receipt's own name, for a screen reader arriving at the group. */
+  aria: string
+  /** A row's name field: what the name is FOR, in the kind's own words. */
+  nameFor(kindLabel: string): string
+  /** The row's drop control, and its accessible name. */
+  dismiss: string
+  dismissAria(kindLabel: string): string
+  /** The primary action, for the number of rows still in play. */
+  save(count: number): string
+}
+
 export interface BlockReceiptCallbacks {
   /** The primary action (the Save button or ⌘S): save every row still in
    *  play, with the names as the inputs currently hold them. */
@@ -61,13 +76,19 @@ export class BlockReceipt {
     new Map()
   private readonly primaryBtn: HTMLButtonElement
   private readonly actionsEl: HTMLElement
+  private readonly labels: BlockReceiptLabels
 
-  constructor(captures: ReadonlyArray<BlockReceiptCapture>, callbacks: BlockReceiptCallbacks) {
+  constructor(
+    captures: ReadonlyArray<BlockReceiptCapture>,
+    callbacks: BlockReceiptCallbacks,
+    labels: BlockReceiptLabels,
+  ) {
+    this.labels = labels
     this.callbacks = callbacks
     this.root = document.createElement('div')
     this.root.className = 'ui-block-receipt'
     this.root.setAttribute('role', 'group')
-    this.root.setAttribute('aria-label', 'save detected secret')
+    this.root.setAttribute('aria-label', this.labels.aria)
 
     const rowEls: HTMLElement[] = []
     for (const capture of captures) {
@@ -189,7 +210,7 @@ export class BlockReceipt {
     input.className = 'ui-text-field__input'
     input.type = 'text'
     input.value = capture.suggestedName
-    input.setAttribute('aria-label', `vault name for ${capture.kindLabel}`)
+    input.setAttribute('aria-label', this.labels.nameFor(capture.kindLabel))
     input.autocomplete = 'off'
     input.spellcheck = false
 
@@ -199,8 +220,8 @@ export class BlockReceipt {
     // Not "Remove": nothing has been stored yet, so there is nothing to
     // remove, and a destructive word over an offer reads as though
     // declining will delete something.
-    drop.textContent = 'Dismiss'
-    drop.setAttribute('aria-label', `do not save this ${capture.kindLabel}`)
+    drop.textContent = this.labels.dismiss
+    drop.setAttribute('aria-label', this.labels.dismissAria(capture.kindLabel))
     drop.addEventListener('click', () => this.callbacks.onDismiss(capture.captureId))
 
     const children: Array<Node | string> = [badge, value]
@@ -219,7 +240,7 @@ export class BlockReceipt {
 
   private updatePrimaryLabel(): void {
     const n = this.rows.size
-    this.primaryBtn.textContent = n === 1 ? 'Save' : `Save ${n}`
+    this.primaryBtn.textContent = this.labels.save(n)
   }
 
   // ── Connection-offer variant (nocx-pu4.7) ───────────────────────────
@@ -238,6 +259,7 @@ export class BlockReceipt {
       onSave(name: string): void
       onDismiss(): void
     },
+    labels: BlockReceiptLabels,
   ): BlockReceipt {
     const capture: BlockReceiptCapture = {
       captureId: `conn-offer:${destination}`,
@@ -245,11 +267,15 @@ export class BlockReceipt {
       maskedValue: destination,
       suggestedName,
     }
-    return new BlockReceipt([capture], {
-      onSaveAll: (rows) => callbacks.onSave(rows[0].name),
-      onDismiss: () => callbacks.onDismiss(),
-      onHover: () => {},
-      onExitReview: () => {},
-    })
+    return new BlockReceipt(
+      [capture],
+      {
+        onSaveAll: (rows) => callbacks.onSave(rows[0].name),
+        onDismiss: () => callbacks.onDismiss(),
+        onHover: () => {},
+        onExitReview: () => {},
+      },
+      labels,
+    )
   }
 }

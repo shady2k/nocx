@@ -62,6 +62,7 @@ import {
   createAiEndpoint,
   setDefaultModel,
   settingsReady,
+  switchLanguage,
 } from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
@@ -220,5 +221,49 @@ test.describe('a proposed tool reaches the approval prompt (nocx-aospw)', () => 
     const prompt = page.getByRole('dialog', { name: APPROVAL_TITLE })
     await expect(prompt).toBeVisible({ timeout: 20_000 })
     await expect(prompt).toContainText('session.read')
+  })
+
+  // The same question, asked in Russian (nocx-dej6.3.8's review, defect 1).
+  //
+  // The prompt's title map and its width list were module-level literals:
+  // `t()` ran when the module was imported, which is BEFORE main.tsx
+  // bootstraps the locale, so a window reading Russian still showed the
+  // question in English — and the widths with it. Nothing but a real switch
+  // followed by a real question shows it, because the defect is invisible in
+  // English and invisible to a unit test that mounts after the switch.
+  test('the question and its widths follow the language a person switched to', async ({ page }) => {
+    await openApp(page)
+
+    // ── Switch the language through the surface that owns it. The helper is
+    // the harness's, so the way back is the harness's too: `restoreEnglishLanguage`
+    // runs after every test, on the failure path as well, which is what keeps
+    // this persisted setting from reaching the next spec in the shard.
+    await switchLanguage(page, 'ru')
+
+    // ── Back to the terminal, and ask again. The endpoint and the model are
+    // this file's own, set up by the test above (serial mode).
+    await page.locator(TITLE).first().click()
+    await expect(page.locator(INPUT)).toBeVisible({ timeout: 10_000 })
+    fake.setScript({
+      chunks: [],
+      toolCalls: [{ name: 'session.read', arguments: {} }],
+    })
+    await askFromPrompt(page, 'Прочитай экран и скажи, что там.')
+
+    // THE POINT: the title and the widths are Russian. The button's
+    // accessible name carries the width, and `Allow` stays English because
+    // the verb is the surface's own residue — what these assertions pin is
+    // that the string the catalogue owns is resolved where it is READ.
+    const prompt = page.getByRole('dialog', { name: 'Это действие требует вашего согласия' })
+    await expect(prompt).toBeVisible({ timeout: 20_000 })
+    await expect(prompt).toContainText('один раз')
+    await expect(prompt).toContainText('в этом сеансе')
+
+    // Leaving the window English is the harness's job, not this test's: the
+    // afterEach in e2e/harness.ts restores the language after every test,
+    // which is the only version of this that also runs when the assertions
+    // above fail. Nothing here reads an English name while Russian is on
+    // screen — `switchLanguage` drives the rail by `data-item`, the Go section
+    // name, and the option by its endonym.
   })
 })

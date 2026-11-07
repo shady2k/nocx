@@ -308,6 +308,14 @@ test('a person never sees busy under load', async ({ page }, testInfo) => {
   let churnerProc: ChildProcess | null = null
   let healthyProfile = ''
   let blockedProfile = ''
+  /** The ids the two profiles were created with. The stand's home is shared
+   *  with every other spec in the run, so they are removed by ID in the
+   *  finally — `profiles.list` answers an ARRAY (contracts/profiles.list has no
+   *  result schema: the method returns the list itself), and a cleanup that
+   *  reads `listed.profiles` silently deletes nothing and leaves two saved
+   *  connections for the next spec's picker. That is exactly how this spec
+   *  broke e2e/quick-connect.spec.ts on CI. */
+  const profileIDs: string[] = []
 
   try {
     // ── the corpus: 50,000 entries in one place, churning ────────────────
@@ -346,6 +354,7 @@ test('a person never sees busy under load', async ({ page }, testInfo) => {
           desiredMode: 'script',
         },
       })
+      profileIDs.push(created.id)
       return created.id
     }
     const stamp = Date.now()
@@ -463,22 +472,12 @@ test('a person never sees busy under load', async ({ page }, testInfo) => {
     // The tree is 200 MB: a leak here is 200 MB of `eslint .` input afterwards.
     rmSync(tree, { recursive: true, force: true })
     rmSync(churner, { force: true })
-    // The stand's home is shared with every other spec, so the profiles go.
+    // The stand's home is shared with every other spec, so the profiles go —
+    // by id, the way e2e/ssh-reconnect.spec.ts removes its own.
     try {
       const endpoint = await resolveBackend(page)
-      for (const name of [healthyProfile, blockedProfile]) {
-        if (name === '') continue
-        const listed = await rpc<{ profiles: { id: string; name: string }[] }>(
-          page,
-          endpoint,
-          'profiles.list',
-          {},
-        )
-        for (const profile of listed.profiles ?? []) {
-          if (profile.name === name) {
-            await rpc(page, endpoint, 'profiles.delete', { id: profile.id })
-          }
-        }
+      for (const id of profileIDs) {
+        await rpc(page, endpoint, 'profiles.delete', { id })
       }
     } catch {
       // A cleanup that throws would replace the real failure with its own.

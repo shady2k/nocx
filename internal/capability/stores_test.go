@@ -147,10 +147,13 @@ func TestStoreGuard_QuarantineIsANamedFailureUntilRestart(t *testing.T) {
 	}
 }
 
-// Sealed vault work must not wait behind a restore. The vault's plan names the
-// reset barrier only, so a restore queued for the store-set barrier has no
-// admission the vault path needs — and that is true with capacity exhausted,
-// because the vault's barrier and key are a different failure domain.
+// The quarantine checked WHILE a caller waits is the guard's own decision, and
+// the wait it is about cannot be reached through the composition root here any
+// more: the guard has no queue bound since ADR-8eej3e66 stage 8, so a caller
+// is never refused for capacity and the order has to be forced from outside.
+// TestStoreGuard_QuarantineDuringTheWaitRefusesTheGrantedCaller does that on
+// the admission itself, where the test can hold the grant.
+
 func TestSealedVaultWorkDoesNotWaitBehindAPendingRestore(t *testing.T) {
 	// The pending restore is waiting on the store-set barrier while a reader
 	// holds it, which is the state the vault path must not share.

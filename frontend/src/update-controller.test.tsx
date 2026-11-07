@@ -572,7 +572,7 @@ describe('the notice shows the download (nocx-vh2hr.1.15)', () => {
     Total: total,
   })
 
-  it('reports percent and size while the body arrives, then says it is installed', async () => {
+  it('draws a real progress bar with its figure while the body arrives, then says it is installed', async () => {
     let finishApply!: () => void
     const apply = vi.fn(
       () =>
@@ -580,7 +580,11 @@ describe('the notice shows the download (nocx-vh2hr.1.15)', () => {
           finishApply = resolve
         }),
     )
-    const readings = [progress(0, 150_000_000), progress(63_000_000, 150_000_000)]
+    const readings = [
+      progress(0, 150_000_000),
+      progress(63_000_000, 150_000_000),
+      progress(99_000_000, 150_000_000),
+    ]
     const getState = vi.fn(() => Promise.resolve(readings.shift() ?? { Downloading: false }))
     const controller = createUpdateController({ apply, getState })
     render(() => <ToastHost />)
@@ -589,16 +593,57 @@ describe('the notice shows the download (nocx-vh2hr.1.15)', () => {
 
     void controller.apply()
     await vi.waitFor(() => {
-      expect(screen.getByRole('status').textContent).toContain('Downloading 42%')
+      expect(
+        screen.getByRole('progressbar', { name: 'Update download' }).getAttribute('aria-valuenow'),
+      ).toBe('42')
     })
-    expect(screen.getByRole('status').textContent).toContain('63 of 150 MB')
+    // THE FIGURE SITS BESIDE THE BAR, in the catalogue's words: percent and
+    // both sizes, the two numbers update-details computes (nocx-vh2hr.1.25).
+    expect(screen.getByRole('status').textContent).toContain('42% · 63 of 150 MB')
     expect(screen.getByRole('status').textContent).toContain('nocx 0.9.0')
+    const bar = screen.getByRole('progressbar', { name: 'Update download' })
+    const notice = bar.closest('.ui-toast')
+    expect(notice).not.toBeNull()
+    expect(document.querySelectorAll('.ui-toast')).toHaveLength(1)
+
+    // THE NOTICE IS REPAINTED, NOT RE-RAISED: the next step moves the same
+    // bar inside the same toast — one animation, one announcement, one
+    // element the person is reading (nocx-vh2hr.1.25).
+    await vi.waitFor(() => {
+      expect(
+        screen.getByRole('progressbar', { name: 'Update download' }).getAttribute('aria-valuenow'),
+      ).toBe('66')
+    })
+    expect(screen.getByRole('progressbar', { name: 'Update download' })).toBe(bar)
+    expect(document.querySelectorAll('.ui-toast')).toHaveLength(1)
 
     finishApply()
     await vi.waitFor(() => {
       expect(screen.getByRole('status').textContent).toContain('restart to apply')
     })
+    expect(screen.queryByRole('progressbar')).toBeNull()
     expect(screen.getByRole('status').textContent).not.toContain('Downloading')
+  })
+
+  it('shows no bar until the size is known — a determinate bar at zero reads as stalled', async () => {
+    let finishApply!: () => void
+    const apply = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishApply = resolve
+        }),
+    )
+    const getState = vi.fn(() => Promise.resolve({ Downloading: true, Downloaded: 0, Total: 0 }))
+    const controller = createUpdateController({ apply, getState })
+    render(() => <ToastHost />)
+    mountIndicator(controller)
+    controller.showAvailable('0.9.0', '')
+    void controller.apply()
+    await vi.waitFor(() => {
+      expect(screen.getByRole('status').textContent).toContain('Downloading nocx 0.9.0')
+    })
+    expect(screen.queryByRole('progressbar')).toBeNull()
+    finishApply()
   })
 
   it('keeps the failure, not the progress, when the apply refuses', async () => {

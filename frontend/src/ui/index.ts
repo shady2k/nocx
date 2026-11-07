@@ -94,12 +94,14 @@ export {
 export {
   ToastHost,
   showToast,
+  updateToast,
   dismissToast,
   clearToasts,
   toasts,
   type Toast,
   type ToastLevel,
   type ToastOptions,
+  type ToastProgress,
 } from './toast'
 export { EditableRowList, type EditableRowListProps } from './row-list'
 export { ToggleMatrix, type ToggleMatrixAxis, type ToggleMatrixProps } from './toggle-matrix'

@@ -69,7 +69,15 @@ type journalRecord struct {
 	// ToBuild is the identity in the signed manifest, recorded before any
 	// download or exchange. Missing identities in older journals remain
 	// readable for rollback, but cannot certify a build by version alone.
-	ToBuild        version.BuildIdentity `json:"toBuild"`
+	ToBuild version.BuildIdentity `json:"toBuild"`
+	// FromBuild is the identity of the build that STARTED the transaction —
+	// what the log lines need to tell one nightly from the next when both sides
+	// carry the same version (ADR-79b6cy61, nocx-vh2hr.1.25). It is recorded
+	// here rather than re-read from the running process because the rollback
+	// runs in a LATER launch, whose own build is not the one being replaced.
+	// Absent in journals written before the field existed, and the log then
+	// says "unknown" rather than inventing a build.
+	FromBuild      version.BuildIdentity `json:"fromBuild"`
 	ArtifactSHA256 string                `json:"artifactSHA256"`
 	// LaunchAttempts counts starts of the build this transaction installed:
 	// how many times a process running it reached startup without certifying

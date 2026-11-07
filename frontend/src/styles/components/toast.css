@@ -130,6 +130,32 @@
   overflow-wrap: anywhere;
 }
 
+/* The measure a long-running toast reports, under its message: the kit's bar
+   taking the room, and the caller's figure beside it at a fixed size so the
+   bar does not resize as the digits grow (nocx-vh2hr.1.25). The bar is
+   ProgressBar's, not a second bar drawn here — a toast places the measure and
+   never paints it. */
+.ui-toast__progress {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+}
+
+.ui-toast__progress .ui-progress-bar {
+  flex: 1;
+}
+
+.ui-toast__figure {
+  flex: 0 0 auto;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  /* The figure is read as a number, so its digits keep one width while the
+     value grows and the bar beside it does not twitch. */
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 /* The actions sit in their own row-capable block after the message: they are
    the answer the toast asks for, so they are not squeezed onto the message's
    baseline. Buttons are the kit's own; this places them and nothing else. */

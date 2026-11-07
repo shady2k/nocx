@@ -1,0 +1,104 @@
+{
+  "kind": "contract-model-only",
+  "scenarios": [
+    {
+      "scenario": "continuous-append-eviction",
+      "configuredCap": 262144,
+      "rows": 1600,
+      "pages": 7,
+      "maxEncodedPage": 32375,
+      "restarts": 0
+    },
+    {
+      "scenario": "continuous-append-eviction",
+      "configuredCap": 4194304,
+      "rows": 30000,
+      "pages": 118,
+      "maxEncodedPage": 32633,
+      "restarts": 0
+    },
+    {
+      "scenario": "prepend-sparse-protected-ends",
+      "survivors": [90, 91, 97, 100]
+    },
+    {
+      "scenario": "metadata-only-seal-loss",
+      "revision": 8,
+      "bodies": 0
+    },
+    {
+      "scenario": "closing-row",
+      "rows": 1
+    },
+    {
+      "scenario": "availability-algebra",
+      "states": [
+        "present-empty",
+        "unavailable",
+        "entry-missing",
+        "artifact-missing",
+        "not-recorded",
+        "read-error"
+      ]
+    },
+    {
+      "scenario": "unavailable-during-read",
+      "latePageRejected": true
+    },
+    {
+      "scenario": "oversized-row-and-cell-fidelity",
+      "oversizedBytes": 9437184,
+      "pages": 210,
+      "maxEncodedPage": 60709,
+      "maxSourceFetch": 16384,
+      "digest": "a3420abdfe389eee70077117e301b0c84a9793ac80086a86ae19f9e4d9fdf1c2"
+    },
+    {
+      "scenario": "restart-binding-expiry",
+      "cleanup": true,
+      "blockState": "open"
+    },
+    {
+      "scenario": "identity-and-malformed-page",
+      "artifactReplacement": true,
+      "storeReplacement": true
+    },
+    {
+      "scenario": "capture-cancellation",
+      "cleanup": true
+    },
+    {
+      "scenario": "disk-pressure-cleanup",
+      "durableRowsUntouched": true
+    },
+    {
+      "scenario": "four-lease-admission",
+      "maximum": 4,
+      "coalesced": true,
+      "waitingThenAdmitted": true
+    },
+    {
+      "scenario": "owner-driven-expiry",
+      "nextOrCancelCalls": 0,
+      "reclaimedIdleLeases": 4,
+      "fifthReadAdmitted": true,
+      "absoluteExpiryReclaimed": true
+    },
+    {
+      "scenario": "exact-manifest-validation",
+      "rejected": ["outside", "reversed", "overlapping", "unsorted", "incomplete"],
+      "installedSnapshotPreserved": true
+    },
+    {
+      "scenario": "fixture-size-measurement",
+      "jsonlBytes": {
+        "18": 47,
+        "79": 108,
+        "120": 149,
+        "400": 429
+      }
+    }
+  ],
+  "productionEncryptedStoreExercised": false,
+  "productionFrontendExercised": false
+}

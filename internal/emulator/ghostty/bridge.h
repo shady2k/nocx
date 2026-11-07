@@ -89,48 +89,39 @@ GhosttyResult nocxGridRefAt(GhosttyTerminal terminal, GhosttyPointTag tag,
 GhosttyResult nocxStyleAt(const GhosttyGridRef *ref, nocxStyleFacts *out);
 
 /*
- * One row of the scrollback history, resolved ONCE and traversed HERE. A
- * grid reference's resolution walks the page list the point's tag names —
- * for history, potentially the whole of scrollback — so reading a row cell
- * by cell would pay that walk once per column. nocxHistoryRow resolves the
- * row's reference at column 0 and then moves the SAME reference across the
- * row, reading every cell off the page node it already holds: one resolution
- * per row, whatever the column count. nocxGridResolveCount reports the
- * shim's running total of resolutions, so that cost stays measured rather
- * than assumed.
+ * One row traversal for ACTIVE (live rectangle), SCREEN (tracked rows), or
+ * HISTORY (departed/live history), in the currently selected buffer. The
+ * caller holds its terminal lock and supplies the current column count and
+ * caller-owned buffers. Resolve column zero once, then move that reference
+ * across the row; no reference or pointer into emulator storage escapes.
  *
- * Per cell it writes a nocxRowCellFacts: has_text and the width class, the
- * style facts only when the cell HAS styling — a cell without any reads as
- * the default style downstream, which skips materialising a style for the
- * blank cells that fill most rows — and the grapheme cluster as UTF-8,
- * appended to the caller's row-wide buffer with the offset and length
- * recorded on the cell. GHOSTTY_OUT_OF_SPACE means the row overflowed that
- * buffer; the caller retries the whole call on a larger one. The traversal
- * DOES write partial state before that overflow — out_cells[0..x-1] already
- * hold correctly computed facts, and the buffer already holds their
- * grapheme bytes, for the columns read before column x's append failed —
- * but nothing in this ABI ever reads it: `used` starts at zero on every
- * call, so a retry recomputes every column from x=0 and overwrites it, and
- * the caller (terminal.go's historyRow) never inspects out_cells or the
- * buffer except after GHOSTTY_SUCCESS. So the partial state left by a
- * failed attempt is real but unobserved — never resumed, never read.
+ * Offsets and lengths are size_t, not a wire-format limit. On SUCCESS,
+ * out_graphemes_len is the written byte count and all output is valid. On
+ * OUT_OF_SPACE it is the complete required byte count: retry the whole row
+ * under the same lock, never consume partial cells/bytes. HISTORY retains
+ * its existing UINT16_MAX per-cluster ceiling; exceeding it also returns
+ * OUT_OF_SPACE (required count unspecified) for its bounded-retry caller.
+ * ACTIVE and SCREEN have no such ceiling. Arithmetic/allocation exhaustion
+ * returns OUT_OF_MEMORY; other upstream errors propagate unchanged.
+ * Unsupported tags and a zero column count return INVALID_VALUE.
  *
- * The soft-wrap pair travels with the row: the flags live on the line, and
- * the reference at column 0 is the line.
+ * Per-cell style facts are valid only when styled, including erased content
+ * backgrounds. The row's own wrap/continuation flags accompany the cells.
  */
 typedef struct {
   nocxStyleFacts style; /* valid only when styled */
   bool styled;
   bool has_text;
   GhosttyCellWide wide;
-  uint32_t grapheme_off;
-  uint16_t grapheme_len;
+  size_t grapheme_off;
+  size_t grapheme_len;
 } nocxRowCellFacts;
 
-GhosttyResult nocxHistoryRow(GhosttyTerminal terminal, uint32_t y,
-                             uint16_t cols, nocxRowCellFacts *out_cells,
-                             uint8_t *graphemes, size_t graphemes_cap,
-                             bool *out_wrap, bool *out_continuation);
+GhosttyResult nocxReadRow(GhosttyTerminal terminal, GhosttyPointTag tag,
+                          uint32_t y, uint16_t cols,
+                          nocxRowCellFacts *out_cells, uint8_t *graphemes,
+                          size_t graphemes_cap, size_t *out_graphemes_len,
+                          bool *out_wrap, bool *out_continuation);
 
 /*
  * A TRACKED grid reference for row y, column 0, of the coordinate space tag

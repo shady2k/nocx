@@ -99,4 +99,39 @@ func f(l *slog.Logger) {
 `
     expect(violations(src)).toHaveLength(1)
   })
+
+  it('ignores error values without hiding a logger on the same line', () => {
+    const src = `package x
+func f(cause error, lg Logger) string {
+	lg.Error("failed", "cause", cause.Error())
+	return cause.Error(
+		/* no arguments */
+	)
+}
+`
+    expect(violations(src)).toEqual([
+      expect.objectContaining({ text: 'lg.Error("failed", "cause", cause.Error())' }),
+    ])
+  })
+
+  it('recognizes the standard HTTP error response function', () => {
+    const src = `package x
+import "net/http"
+func f(w http.ResponseWriter) {
+	http.Error(w, "bad request", http.StatusBadRequest)
+}
+`
+    expect(violations(src)).toEqual([])
+  })
+
+  it('uses the HTTP import alias rather than exempting a logger named http', () => {
+    const src = `package x
+import web "net/http"
+func f(w web.ResponseWriter, http Logger) {
+	web.Error(w, "bad request", web.StatusBadRequest)
+	http.Error("actual log")
+}
+`
+    expect(violations(src)).toEqual([expect.objectContaining({ text: 'http.Error("actual log")' })])
+  })
 })

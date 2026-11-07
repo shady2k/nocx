@@ -2172,7 +2172,7 @@ func (s *WSServer) buildControlPlane() {
 	// ingress-critical set below (the resolution must never wait behind
 	// request work — a pending requestor blocks on it).
 	s.broker = NewBroker(s.rendererConns, s.rendererDeliver)
-	configOp, endpointWired := s.buildConfigOp(gates.config, gates.vault)
+	configOp, endpointWired := s.buildConfigOp(gates.configVault)
 	noteOp := capability.NewNoteOperation(gates.config, s.notes)
 	snippetOp := capability.NewSnippetOperation(gates.config, s.snippets)
 	_ = endpointWired
@@ -2191,12 +2191,12 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.laneInteractivitySpec(immediate))
 	specs = append(specs, s.runResolutionSpec(immediate))
 	specs = append(specs, s.clientHostSpecs(immediate, s.work)...)
-	specs = append(specs, s.configSpecs(gates.config, gates.vault, configOp, endpointWired, noteOp, snippetOp)...)
+	specs = append(specs, s.configSpecs(gates.config, gates.configVault, configOp, endpointWired, noteOp, snippetOp)...)
 	specs = append(specs, s.backupSpecs(gates.config, s.storeGuard)...)
-	specs = append(specs, s.vaultSpecs(gates.config, gates.vault, s.storeGuard)...)
+	specs = append(specs, s.vaultSpecs(gates.configVault, gates.vault, s.storeGuard)...)
 	specs = append(specs, s.notifySpecs()...)
 	specs = append(specs, s.notifyFeedSpecs()...)
-	specs = append(specs, s.secretSpecs(gates.config, gates.vault, contentOrder)...)
+	specs = append(specs, s.secretSpecs(gates.configVault, gates.vault, contentOrder)...)
 	specs = append(specs, s.gitSpecs(gates.session, gitOrder, gitBulkhead)...)
 	specs = append(specs, s.filesSpecs(gates.session)...)
 	specs = append(specs, s.apiSpecs(orders.api, gates.vault)...)
@@ -2238,6 +2238,13 @@ func (s *WSServer) buildControlPlane() {
 // compose in the canonical order.
 type domainGates struct {
 	config, vault, session control.Admission
+	// configVault is the plan for ONE operation that writes both stores —
+	// the config document and the vault row references into it. It is asked
+	// for once, because the two per-store plans share the vault-reset
+	// barrier and composing them takes it twice: a reset queued between the
+	// two acquisitions blocks the second by writer preference while it waits
+	// for the first (ADR-8eej3e66 §5; stores.go tells the whole story).
+	configVault control.Admission
 }
 
 // resourceOrders builds the per-resource FIFOs that replace the session,
@@ -2270,6 +2277,13 @@ func (s *WSServer) resourceOrders() resourceOrders {
 }
 
 func (s *WSServer) domainGates() domainGates {
+	// ONE statement of which admission the answer to a vault unlock needs: a
+	// plan that includes the vault's store. Every consumer of the vault's
+	// plan is marked here rather than marking each one, because the mark is a
+	// property of what the plan holds, not of who holds it.
+	answering := func(stores ...string) control.Admission {
+		return capability.UnlockAnswering(s.storeGuard.Shared(stores...))
+	}
 	return domainGates{
 		// Config and vault are the store set of ADR-8eej3e66 §5: their
 		// domain admission is now the store guard's shared plan — every
@@ -2287,8 +2301,9 @@ func (s *WSServer) domainGates() domainGates {
 		// now a handler has shown somebody that dialog and refused their
 		// Unlock with "Control plane busy" (nocx-o3606, nocx-9fzkk). The
 		// marker travels on the store guard's plan unchanged.
-		vault:   capability.UnlockAnswering(s.storeGuard.Shared(capability.StoreVault)),
-		session: capability.Gate(capability.GateSession, 1, s.domainWaitTimeout),
+		vault:       answering(capability.StoreVault),
+		configVault: answering(capability.StoreConfig, capability.StoreVault),
+		session:     capability.Gate(capability.GateSession, 1, s.domainWaitTimeout),
 	}
 }
 

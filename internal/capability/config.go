@@ -154,21 +154,26 @@ type ConfigService interface {
 	SetDefaultModel(d profile.DefaultModel) error
 }
 
-// ConfigOperation is the typed operation for the config domain. Its gates
-// are [config, vault]: the write paths resolve vault row handles and the
-// secret-class settings are vault-backed, so a config operation conflicts
-// with a vault operation even though the config handler itself never sees
-// the vault. See the package doc for the conservative-grain rationale.
+// ConfigOperation is the typed operation for the config domain. Its admission
+// is the store set it writes — config and vault together: the write paths
+// resolve vault row handles and the secret-class settings are vault-backed, so
+// a config operation conflicts with a vault operation even though the config
+// handler itself never sees the vault. It is ONE plan (StoreGuard.Shared with
+// both stores), never the config plan and the vault plan composed: the two
+// share the vault-reset barrier, and taking a shared barrier twice in one call
+// is the self-deadlock stores.go describes. See the package doc for the
+// conservative-grain rationale.
 type ConfigOperation interface {
 	AssistantOperation
 	Run(context.Context, func(context.Context, ConfigService) error) error
 }
 
-// NewConfigOperation builds a ConfigOperation that acquires configGate
-// before vaultGate (the canonical order): conflict admission is the only
-// admission, so waiting conflict work never occupies anything else.
+// NewConfigOperation builds a ConfigOperation over the plan its stores are
+// read and written through — StoreGuard.Shared(a config store, the vault
+// store), acquired once. Conflict admission is the only admission, so waiting
+// conflict work never occupies anything else.
 func NewConfigOperation(
-	configGate, vaultGate control.Admission,
+	stores control.Admission,
 	profiles profile.ProfileRepository,
 	groups profile.GroupRepository,
 	endpoints profile.EndpointRepository,
@@ -179,7 +184,7 @@ func NewConfigOperation(
 	secrets EndpointSecrets,
 ) ConfigOperation {
 	g := &guard{}
-	return newOperation[ConfigService](Direct("ConfigOperation"), control.NewComposite(configGate, vaultGate), g, newConfigService(g, profiles, groups, endpoints, roles, svc, reg, rows, secrets))
+	return newOperation[ConfigService](Direct("ConfigOperation"), stores, g, newConfigService(g, profiles, groups, endpoints, roles, svc, reg, rows, secrets))
 }
 
 // newConfigService builds the concrete config service bound to guard g.

@@ -158,9 +158,9 @@ type vaultLifecycleHandlers struct {
 
 // vaultSecretHandlers answers the vault-secret methods: inventory,
 // createSecret, renameSecret, replaceSecret, deleteSecret, resolveLine. It
-// holds the shared SecretOperation ([config, vault] gates) and the
-// vault.changed fan-out; the profile/group/credential stores are reachable
-// only through the operation's service.
+// holds the shared SecretOperation (the plan for the config and vault stores)
+// and the vault.changed fan-out; the profile/group/credential stores are
+// reachable only through the operation's service.
 type vaultSecretHandlers struct {
 	op      capability.SecretOperation // nil → not fully wired
 	r       Responder
@@ -1260,15 +1260,16 @@ func validateVaultResolveLineRaw(raw json.RawMessage) string {
 }
 
 // vaultSpecs declares the vault.* control methods: the lifecycle family
-// under the VaultOperation (vault gate), the secret family under the shared
-// SecretOperation ([config, vault] gates — the inventory inputs are computed
-// inside the service from the profile/group stores) and the reset family
+// under the VaultOperation (the vault's plan), the secret family under the
+// shared SecretOperation (the plan for both stores — the inventory inputs are
+// computed inside the service from the profile/group stores) and the reset
+// family
 // under the VaultResetOperation, which is built from the reset orchestrator
 // alone so a reset stays reachable on a vault that is broken or half-built.
 // The operations are built here from the wired stores (composition root for
 // this domain): nil when their stores are absent, and the handlers then
 // answer the old not-available errors.
-func (s *WSServer) vaultSpecs(configGate, vaultGate control.Admission, stores *capability.StoreGuard) []methodSpec {
+func (s *WSServer) vaultSpecs(configVault, vaultGate control.Admission, stores *capability.StoreGuard) []methodSpec {
 	var vaultOp capability.VaultOperation
 	if s.vaultLifecycle != nil {
 		vaultOp = capability.NewVaultOperation(vaultGate, s.vaultLifecycle)
@@ -1276,7 +1277,7 @@ func (s *WSServer) vaultSpecs(configGate, vaultGate control.Admission, stores *c
 	var secretOp capability.SecretOperation
 	if s.vaultLifecycle != nil && s.profiles != nil && s.groups != nil && s.credentials != nil {
 		secretOp = capability.NewSecretOperation(
-			configGate, vaultGate, s.profiles, s.groups,
+			configVault, s.profiles, s.groups,
 			s.vaultLifecycle, s.credentials,
 		)
 	}

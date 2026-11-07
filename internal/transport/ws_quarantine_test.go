@@ -32,11 +32,11 @@ func TestConfigCall_OverAQuarantinedStoreIsANamedFailure(t *testing.T) {
 	}
 	guard := capability.NewStoreGuard(catalog.Declarations(), time.Second)
 	configGate := guard.Shared(capability.StoreConfig)
-	vaultGate := guard.Shared(capability.StoreVault)
-	op, endpointWired := server.buildConfigOp(configGate, vaultGate)
+	configVault := guard.Shared(capability.StoreConfig, capability.StoreVault)
+	op, endpointWired := server.buildConfigOp(configVault)
 
 	var groupsList methodSpec
-	for _, spec := range server.configSpecs(configGate, vaultGate, op, endpointWired, nil, nil) {
+	for _, spec := range server.configSpecs(configGate, configVault, op, endpointWired, nil, nil) {
 		if spec.method == "groups.list" {
 			groupsList = spec
 			break

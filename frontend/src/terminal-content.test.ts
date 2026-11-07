@@ -19037,7 +19037,7 @@ describe('a reclaimed pane says what is missing (nocx-fz4qa)', () => {
       expect(tab.pane.querySelectorAll('.nocx-recovery-notice')).toHaveLength(1)
       expect(cardTitle(tab)).toBe("20 B of this session's output is missing")
       expect(cardDesc(tab)).toContain('5 B went missing as "hostWindow"')
-      expect(cardDesc(tab)).toContain("the recording's size limit dropped the oldest 15 B")
+      expect(cardDesc(tab)).toContain("this session's own size limit dropped the oldest 15 B")
       fireGap(session, 10, 20)
       expect(liveCard(tab)).toBeNull()
     } finally {
@@ -19255,7 +19255,7 @@ describe('a reclaimed pane says what is missing (nocx-fz4qa)', () => {
       )
       const historical = cards.find((card) => card.title.includes("of this session's output"))!
       expect(historical.description).toContain(
-        "the recording's size limit dropped the oldest 3.9 MB",
+        "this session's own size limit dropped the oldest 3.9 MB",
       )
       expect(historical.description).not.toContain('hostWindow')
     } finally {
@@ -19280,7 +19280,7 @@ describe('a reclaimed pane says what is missing (nocx-fz4qa)', () => {
       await vi.waitFor(() =>
         expect(cardTitle(tab)).toBe("3.3 MB of this session's output is missing"),
       )
-      expect(cardDesc(tab)).toContain("the recording's size limit dropped the oldest 3.3 MB")
+      expect(cardDesc(tab)).toContain("this session's own size limit dropped the oldest 3.3 MB")
 
       // …and the recording drops more while the person is reading it.
       session.fireRecoveryChanged({
@@ -19291,7 +19291,7 @@ describe('a reclaimed pane says what is missing (nocx-fz4qa)', () => {
       await vi.waitFor(() =>
         expect(cardTitle(tab)).toBe("3.9 MB of this session's output is missing"),
       )
-      expect(cardDesc(tab)).toContain("the recording's size limit dropped the oldest 3.9 MB")
+      expect(cardDesc(tab)).toContain("this session's own size limit dropped the oldest 3.9 MB")
     } finally {
       teardown()
     }
@@ -19402,7 +19402,7 @@ describe('a reclaimed pane says what is missing (nocx-fz4qa)', () => {
         '5 B went missing as "hostWindow"',
       )
       expect(historical.querySelector('.ui-status-card__desc')?.textContent).toContain(
-        "the recording's size limit dropped the oldest 10 B",
+        "this session's own size limit dropped the oldest 10 B",
       )
 
       const live = tab.pane.querySelector('[data-notice-kind="live-output-gap"]')!
@@ -19552,6 +19552,104 @@ describe('a reclaimed pane says what is missing (nocx-fz4qa)', () => {
       expect(cross).toBeDefined()
       cross!.click()
       await vi.waitFor(() => expect(tab.pane.querySelector('.nocx-recovery-notice')).toBeNull())
+    } finally {
+      teardown()
+    }
+  })
+  // nocx-ipuy3. THE WINDOW COMES BACK, and the hole it already told the
+  // person about has not changed. The card is a statement about a finished
+  // fact, so saying it again on every reopen reads as the close losing output
+  // again — the same bytes announced twice, and the second time as news.
+  it('does not announce the same hole again when the window reopens (nocx-ipuy3)', async () => {
+    window.localStorage.removeItem('nocx.recovery.announced.v1')
+    const session = makeSession({
+      recovered: { produced: 400, gaps: [{ start: 100, end: 300, reason: 'cap' }] },
+    })
+    const hooks = { adoptSession: () => Promise.resolve(asSessionHandleForTest(session)) }
+    const pane = anchoredPane('pane-reopen')
+
+    const first = await mountTerminal(makeClipboard(), { hooks, attachToDocument: true, pane })
+    try {
+      await vi.waitFor(() => expect(cardTitle(first.tab)).not.toBeNull())
+      expect(cardTitle(first.tab)).toBe("200 B of this session's output is missing")
+    } finally {
+      first.teardown()
+    }
+
+    const second = await mountTerminal(makeClipboard(), { hooks, attachToDocument: true, pane })
+    try {
+      await expect(second.content.ready).resolves.toBe(true)
+      expect(second.tab.pane.querySelector('.nocx-recovery-notice')).toBeNull()
+    } finally {
+      second.teardown()
+    }
+  })
+
+  // …AND A HOLE THAT GREW IS STILL ANNOUNCED, with only the growth: the bytes
+  // the person has not been told about are the whole of the new statement.
+  it('announces only the growth when the hole has grown since the last reopen (nocx-ipuy3)', async () => {
+    window.localStorage.removeItem('nocx.recovery.announced.v1')
+    const session = makeSession({
+      recovered: { produced: 400, gaps: [{ start: 20, end: 120, reason: 'cap' }] },
+    })
+    const hooks = { adoptSession: () => Promise.resolve(asSessionHandleForTest(session)) }
+    const pane = anchoredPane('pane-reopen-growth')
+
+    const first = await mountTerminal(makeClipboard(), { hooks, attachToDocument: true, pane })
+    try {
+      await vi.waitFor(() => expect(cardTitle(first.tab)).not.toBeNull())
+      expect(cardTitle(first.tab)).toBe("100 B of this session's output is missing")
+    } finally {
+      first.teardown()
+    }
+
+    // The retention bound has taken a further 60 bytes since that card.
+    session.recovered = { produced: 400, gaps: [{ start: 20, end: 180, reason: 'cap' }] }
+    const second = await mountTerminal(makeClipboard(), { hooks, attachToDocument: true, pane })
+    try {
+      await vi.waitFor(() => expect(cardTitle(second.tab)).not.toBeNull())
+      expect(cardTitle(second.tab)).toBe("60 B of this session's output is missing")
+      expect(cardDesc(second.tab)).toContain(
+        "this session's own size limit dropped the oldest 60 B",
+      )
+    } finally {
+      second.teardown()
+    }
+  })
+
+  // The same rule inside one window: a dismissal settles the hole as told, so
+  // a later revision of the SAME hole is silent and a grown one names the
+  // growth rather than resurrecting the whole statement.
+  it('re-announces after a dismissal only for the bytes the hole grew by (nocx-ipuy3)', async () => {
+    window.localStorage.removeItem('nocx.recovery.announced.v1')
+    const { session, hooks } = reclaiming({
+      produced: 400,
+      gaps: [{ start: 20, end: 120, reason: 'cap' }],
+    })
+    const { tab, teardown } = await mountTerminal(makeClipboard(), {
+      hooks,
+      attachToDocument: true,
+    })
+    try {
+      await vi.waitFor(() => expect(cardTitle(tab)).not.toBeNull())
+      const cross = [...tab.pane.querySelectorAll('button')].find(
+        (b) => b.getAttribute('aria-label') === 'Dismiss',
+      )
+      cross!.click()
+      await vi.waitFor(() => expect(tab.pane.querySelector('.nocx-recovery-notice')).toBeNull())
+
+      session.fireRecoveryChanged({
+        produced: 400,
+        gaps: [{ start: 20, end: 120, reason: 'cap' }],
+      })
+      expect(tab.pane.querySelector('.nocx-recovery-notice')).toBeNull()
+
+      session.fireRecoveryChanged({
+        produced: 400,
+        gaps: [{ start: 20, end: 150, reason: 'cap' }],
+      })
+      await vi.waitFor(() => expect(cardTitle(tab)).not.toBeNull())
+      expect(cardTitle(tab)).toBe("30 B of this session's output is missing")
     } finally {
       teardown()
     }

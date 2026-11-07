@@ -109,27 +109,15 @@
   },
   {
     "file": "internal/transport/ws_files.go",
-    "text": "opScope := s.beginInternal(context.Background(), catalog.OpInternalFilesWatchPoll)",
+    "text": "pollCtx := context.Background()",
     "kind": "unscoped-context",
-    "reason": "the watch poll and baseline are binding-owned (the loop stop releases them); the two listings are inside files.watch before its response"
+    "reason": "the existing binding-owned watch poll starts internal.files.watchPoll from this root, passes catalog.WithScope to filesPollTick and completes the scope when the iteration returns; the loop ends on the binding's stop"
   },
   {
     "file": "internal/transport/ws_files.go",
-    "text": "opScope := s.beginInternal(context.Background(), catalog.OpInternalFilesBaseline)",
+    "text": "baselineCtx := context.Background()",
     "kind": "unscoped-context",
-    "reason": "the watch poll and baseline are binding-owned (the loop stop releases them); the two listings are inside files.watch before its response"
-  },
-  {
-    "file": "internal/transport/ws_files.go",
-    "text": "listing, err := h.List(context.Background(), p, filesystem.Page{Offset: 0, Limit: 1})",
-    "kind": "unscoped-context",
-    "reason": "the watch poll and baseline are binding-owned (the loop stop releases them); the two listings are inside files.watch before its response"
-  },
-  {
-    "file": "internal/transport/ws_files.go",
-    "text": "listing, err := h.List(context.Background(), path, filesystem.Page{Offset: 0, Limit: 1})",
-    "kind": "unscoped-context",
-    "reason": "the watch poll and baseline are binding-owned (the loop stop releases them); the two listings are inside files.watch before its response"
+    "reason": "the existing files.watch baseline starts internal.files.baseline from this root before answering, passes its scope through filesDomainDo and completes it after the whole baseline returns; this is the same internal scope previously started with an inline Background call"
   },
   {
     "file": "internal/transport/ws_installed_fact.go",

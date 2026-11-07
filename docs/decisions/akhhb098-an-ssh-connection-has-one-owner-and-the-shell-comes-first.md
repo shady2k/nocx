@@ -38,7 +38,7 @@ Owner's order: the terminal works; security; honest state; the session survives;
 - A typed `ssh` no longer runs in the shell it was typed into when it is `ours`: local history and `$?` need deliberate handling, and this is the riskiest part, so it lands last and behind a prototype.
 - `open` no longer means a shell exists, and every SSH caller moves to adoption.
 - Probes double by default (15 s instead of 30 s).
-- A plain shell on a silent flow waits for a person, so an unattended tab can sit `stalled` until someone returns. Waiting costs a click; a wrong close costs the work.
+- A plain shell on a silent flow waits for a person, so an unattended tab can sit `stalled` until someone returns. Waiting costs a click; a wrong close costs the work. The kernel's retransmission limit is the floor: a flow with unacknowledged bytes ends in the end, whatever nocx decides.
 - First session on a new host has no helper, so it cannot return to the same shell after a drop.
 - A hung shell behind a live sshd stays undiagnosed under AD-6; Stop and Reconnect are the answer.
 

@@ -838,24 +838,38 @@ func withAssemblyBashEndpoint(t *testing.T) liveSshdOption {
 }
 
 // The forced endpoint must preserve the real subsystem, not merely reach a
-// Bash prompt. Exercise a real SFTP client before any carrier bootstrap can
-// turn a subsystem failure into a missing child hello.
+// Bash prompt. Transfer real bytes before any carrier bootstrap can turn a
+// subsystem failure into a missing child hello.
 func TestLiveSshd_AssemblyBashEndpointServesSFTP(t *testing.T) {
 	fx := startLiveSshd(t, true, withAssemblyBashEndpoint(t), func(c *liveSshdConfig) {
 		c.clientKeyFile = true
 	})
+	source := filepath.Join(t.TempDir(), "upload source")
+	destination := filepath.Join(fx.home, "uploaded fixture")
+	want := []byte("SFTP fixture payload\x00with exact binary bytes\n")
+	if err := os.WriteFile(source, want, 0o600); err != nil {
+		t.Fatalf("write private SFTP input: %v", err)
+	}
+	// SFTP batch syntax is not shell syntax: double-quote paths and escape
+	// its quote/backslash characters, rather than applying shellQuoteForSh.
+	escape := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+	quotePath := func(path string) string { return `"` + escape.Replace(path) + `"` }
 	wrapper := filepath.Join(installSSHWrapper(t, fx), "ssh")
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sftp", "-S", wrapper, "-o", "BatchMode=yes", "-i", fx.clientKey,
 		"-P", fmt.Sprint(fx.fixturePort()), "-b", "-", fx.user+"@127.0.0.1") // #nosec G204 — the wrapper and endpoint belong to this fixture.
-	cmd.Stdin = strings.NewReader("pwd\n")
+	cmd.Stdin = strings.NewReader("put " + quotePath(source) + " " + quotePath(destination) + "\n")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("SFTP subsystem exchange: %v\noutput: %s\nsshd: %s", err, output, fx.logBuf.String())
 	}
-	if !bytes.Contains(output, []byte("Remote working directory: /")) {
-		t.Fatalf("SFTP did not report its remote working directory: %s", output)
+	got, err := os.ReadFile(destination) // #nosec G304 — the destination is in this fixture's private home.
+	if err != nil {
+		t.Fatalf("read the SFTP-uploaded file: %v\nclient output: %s", err, output)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("SFTP uploaded %q, want exact bytes %q; client output: %s", got, want, output)
 	}
 }
 

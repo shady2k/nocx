@@ -8,7 +8,7 @@
 import { cleanup, fireEvent } from '@solidjs/testing-library'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import type { Dispatcher, PendingCallView } from '../dispatcher'
+import type { CallSettlement, Dispatcher, PendingCallView } from '../dispatcher'
 import { mountSidebar, type SidebarHandle } from '../sidebar'
 import { SettingsIcon } from '../ui/icons'
 import { callOperations } from './call-operations'
@@ -19,10 +19,42 @@ function fakeDispatcher(): {
   dispatcher: Dispatcher
   cancel: ReturnType<typeof vi.fn>
   call: ReturnType<typeof vi.fn>
+  /** A person's call on the wire, as the dispatcher announces it. */
+  pending: (call: PendingCallView) => void
+  /** That call settling, however it settled. */
+  settled: (id: number, settlement?: CallSettlement) => void
 } {
   const cancel = vi.fn()
   const call = vi.fn()
-  return { dispatcher: { cancel, call } as unknown as Dispatcher, cancel, call }
+  const pendingHandlers = new Set<(call: PendingCallView) => void>()
+  const settledHandlers = new Set<(id: number, settlement: CallSettlement) => void>()
+  const dispatcher = {
+    cancel,
+    call,
+    onCallPending(handler: (call: PendingCallView) => void) {
+      pendingHandlers.add(handler)
+      return () => {
+        pendingHandlers.delete(handler)
+      }
+    },
+    onCallSettled(handler: (id: number, settlement: CallSettlement) => void) {
+      settledHandlers.add(handler)
+      return () => {
+        settledHandlers.delete(handler)
+      }
+    },
+  } as unknown as Dispatcher
+  return {
+    dispatcher,
+    cancel,
+    call,
+    pending: (c) => {
+      for (const handler of pendingHandlers) handler(c)
+    },
+    settled: (id, settlement = 'answered') => {
+      for (const handler of settledHandlers) handler(id, settlement)
+    },
+  }
 }
 
 function pending(id: number, method: string, mutation?: string): PendingCallView {
@@ -79,9 +111,9 @@ afterEach(() => {
 describe('a waiting call', () => {
   it('takes no row inside two seconds and a row with its sentence after', () => {
     vi.useFakeTimers()
-    const { dispatcher } = fakeDispatcher()
-    mount(dispatcher)
-    dispatcher.onCallPending!(pending(1, 'git.commit'))
+    const fake = fakeDispatcher()
+    mount(fake.dispatcher)
+    fake.pending(pending(1, 'git.commit'))
     vi.advanceTimersByTime(1999)
     expect(rows()).toHaveLength(0)
     vi.advanceTimersByTime(1)
@@ -92,22 +124,23 @@ describe('a waiting call', () => {
 
   it('goes on settle and leaves no finished entry', () => {
     vi.useFakeTimers()
-    const { dispatcher } = fakeDispatcher()
-    mount(dispatcher)
-    dispatcher.onCallPending!(pending(1, 'git.commit'))
+    const fake = fakeDispatcher()
+    mount(fake.dispatcher)
+    fake.pending(pending(1, 'git.commit'))
     vi.advanceTimersByTime(2000)
     openList()
     expect(rows()).toHaveLength(1)
-    dispatcher.onCallSettled!(1, 'answered')
+    fake.settled(1, 'answered')
     expect(rows()).toHaveLength(0)
     expect(emptyState()).toContain('Nothing is running')
   })
 
   it('cancels through the dispatcher and the row leaves', () => {
     vi.useFakeTimers()
-    const { dispatcher, cancel } = fakeDispatcher()
-    mount(dispatcher)
-    dispatcher.onCallPending!(pending(7, 'git.commit'))
+    const fake = fakeDispatcher()
+    const { cancel } = fake
+    mount(fake.dispatcher)
+    fake.pending(pending(7, 'git.commit'))
     vi.advanceTimersByTime(2000)
     openList()
     const button = document.querySelector<HTMLElement>(
@@ -116,15 +149,15 @@ describe('a waiting call', () => {
     expect(button).not.toBeNull()
     fireEvent.click(button!)
     expect(cancel).toHaveBeenCalledWith(7)
-    dispatcher.onCallSettled!(7, 'answered')
+    fake.settled(7, 'answered')
     expect(rows()).toHaveLength(0)
   })
 
   it('never shows a method the catalogue says never', () => {
     vi.useFakeTimers()
-    const { dispatcher } = fakeDispatcher()
-    mount(dispatcher)
-    dispatcher.onCallPending!(pending(2, 'transport.ping'))
+    const fake = fakeDispatcher()
+    mount(fake.dispatcher)
+    fake.pending(pending(2, 'transport.ping'))
     vi.advanceTimersByTime(10_000)
     openList()
     expect(rows()).toHaveLength(0)
@@ -138,14 +171,15 @@ describe('a waiting call', () => {
     // must not keep: the answer belongs to the call the person made, whose
     // own rejection carries it, not to a row nobody can act on.
     vi.useFakeTimers()
-    const { dispatcher, call } = fakeDispatcher()
-    mount(dispatcher)
-    dispatcher.onCallPending!(pending(1, 'git.commit', 'm-1'))
+    const fake = fakeDispatcher()
+    const { call } = fake
+    mount(fake.dispatcher)
+    fake.pending(pending(1, 'git.commit', 'm-1'))
     vi.advanceTimersByTime(2000)
     openList()
     expect(rows()).toHaveLength(1)
 
-    dispatcher.onCallSettled!(1, 'no-answer')
+    fake.settled(1, 'no-answer')
     await settle()
 
     expect(rows()).toHaveLength(0)
@@ -156,11 +190,12 @@ describe('a waiting call', () => {
     // The row is the WAIT. Once the call settles there is nothing waiting,
     // so nothing is asked and nothing is kept — however the call ended.
     vi.useFakeTimers()
-    const { dispatcher, call } = fakeDispatcher()
-    mount(dispatcher)
-    dispatcher.onCallPending!(pending(1, 'git.commit', 'm-1'))
+    const fake = fakeDispatcher()
+    const { call } = fake
+    mount(fake.dispatcher)
+    fake.pending(pending(1, 'git.commit', 'm-1'))
     vi.advanceTimersByTime(2000)
-    dispatcher.onCallSettled!(1, 'no-answer')
+    fake.settled(1, 'no-answer')
     await settle()
     expect(rows()).toHaveLength(0)
     vi.advanceTimersByTime(10_000)
@@ -170,18 +205,19 @@ describe('a waiting call', () => {
 
   it('a mutation that was answered keeps no row, and a read is never asked about', async () => {
     vi.useFakeTimers()
-    const { dispatcher, call } = fakeDispatcher()
-    mount(dispatcher)
-    dispatcher.onCallPending!(pending(1, 'git.commit', 'm-1'))
+    const fake = fakeDispatcher()
+    const { call } = fake
+    mount(fake.dispatcher)
+    fake.pending(pending(1, 'git.commit', 'm-1'))
     vi.advanceTimersByTime(2000)
-    dispatcher.onCallSettled!(1, 'answered')
+    fake.settled(1, 'answered')
     await settle()
     expect(call).not.toHaveBeenCalled()
     expect(rows()).toHaveLength(0)
 
-    dispatcher.onCallPending!(pending(2, 'git.status'))
+    fake.pending(pending(2, 'git.status'))
     vi.advanceTimersByTime(2000)
-    dispatcher.onCallSettled!(2, 'no-answer')
+    fake.settled(2, 'no-answer')
     await settle()
     expect(call).not.toHaveBeenCalled()
     expect(rows()).toHaveLength(0)
@@ -192,14 +228,15 @@ describe('a waiting call', () => {
     // reaches the person through the call the surface made. A row that waited
     // for it was the one a Cancel could not remove.
     vi.useFakeTimers()
-    const { dispatcher, call } = fakeDispatcher()
+    const fake = fakeDispatcher()
+    const { call } = fake
     call.mockResolvedValue({ outcome: 'unknown', operation: '' })
-    mount(dispatcher)
-    dispatcher.onCallPending!(pending(1, 'git.commit', 'm-1'))
+    mount(fake.dispatcher)
+    fake.pending(pending(1, 'git.commit', 'm-1'))
     vi.advanceTimersByTime(2000)
     openList()
     expect(rows()).toHaveLength(1)
-    dispatcher.onCallSettled!(1, 'no-answer')
+    fake.settled(1, 'no-answer')
     await settle()
     expect(rows()).toHaveLength(0)
     expect(call).not.toHaveBeenCalled()
@@ -207,11 +244,11 @@ describe('a waiting call', () => {
 
   it('shows nothing for ordinary work that answers inside the threshold', () => {
     vi.useFakeTimers()
-    const { dispatcher } = fakeDispatcher()
-    mount(dispatcher)
+    const fake = fakeDispatcher()
+    mount(fake.dispatcher)
     for (let id = 1; id <= 20; id++) {
-      dispatcher.onCallPending!(pending(id, 'git.status'))
-      dispatcher.onCallSettled!(id, 'answered')
+      fake.pending(pending(id, 'git.status'))
+      fake.settled(id, 'answered')
     }
     vi.advanceTimersByTime(10_000)
     openList()

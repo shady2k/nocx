@@ -28,8 +28,9 @@ func TestGitRunStartsAfterItsTurnAndCompletes(t *testing.T) {
 	var ran atomic.Bool
 	var finished atomic.Int32
 	allow := testAllowance(time.Second, time.Second)
-	err := gitRun(context.Background(), allow, func(context.Context) (func(), func(), error) {
-		return func() { finished.Add(1) }, func() { t.Error("abandoned a completed call") }, nil
+	err := gitRun(context.Background(), allow, func(_ context.Context, h *holdings) error {
+		h.took(func() { finished.Add(1) }, func() { t.Error("abandoned a completed call") })
+		return nil
 	}, func(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			t.Errorf("work ctx already dead: %v", err)
@@ -57,10 +58,10 @@ func TestGitRunTurnExpiryNeverStarts(t *testing.T) {
 	allow := testAllowance(30*time.Millisecond, time.Second)
 
 	start := make(chan struct{})
-	err := gitRun(ctx, allow, func(actx context.Context) (func(), func(), error) {
+	err := gitRun(ctx, allow, func(actx context.Context, _ *holdings) error {
 		close(start)
 		<-actx.Done() // the queue: the turn deadline arrives here
-		return nil, nil, actx.Err()
+		return actx.Err()
 	}, func(context.Context) error {
 		ran.Store(true)
 		return nil
@@ -91,8 +92,9 @@ func TestGitRunMaxExpiryAbandonsTheWorker(t *testing.T) {
 	workDone := make(chan error, 1)
 	allow := testAllowance(time.Second, 60*time.Millisecond)
 
-	err := gitRun(context.Background(), allow, func(context.Context) (func(), func(), error) {
-		return func() { finished.Add(1) }, func() { abandoned.Add(1) }, nil
+	err := gitRun(context.Background(), allow, func(_ context.Context, h *holdings) error {
+		h.took(func() { finished.Add(1) }, func() { abandoned.Add(1) })
+		return nil
 	}, func(ctx context.Context) error {
 		<-ctx.Done() // a hung provider that honours cancellation
 		workDone <- ctx.Err()
@@ -131,8 +133,9 @@ func TestGitRunCallerCancellationIsNotAnExpiry(t *testing.T) {
 	var abandons atomic.Int32
 	done := make(chan error, 1)
 	go func() {
-		done <- gitRun(ctx, allow, func(context.Context) (func(), func(), error) {
-			return func() {}, func() { abandons.Add(1) }, nil
+		done <- gitRun(ctx, allow, func(_ context.Context, h *holdings) error {
+			h.took(func() {}, func() { abandons.Add(1) })
+			return nil
 		}, func(wctx context.Context) error {
 			close(started)
 			<-wctx.Done()
@@ -155,7 +158,7 @@ func TestGitRunCallerCancellationIsNotAnExpiry(t *testing.T) {
 func TestGitRunAcquireFailurePassesThrough(t *testing.T) {
 	want := errors.New("domain suspect")
 	err := gitRun(context.Background(), testAllowance(time.Second, time.Second),
-		func(context.Context) (func(), func(), error) { return nil, nil, want },
+		func(context.Context, *holdings) error { return want },
 		func(context.Context) error { t.Fatal("work ran after a failed acquire"); return nil })
 	if !errors.Is(err, want) {
 		t.Fatalf("gitRun err = %v, want the acquire failure", err)

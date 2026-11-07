@@ -13,7 +13,7 @@
 import { cleanup, fireEvent } from '@solidjs/testing-library'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import type { Dispatcher } from '../dispatcher'
+import type { CallSettlement, Dispatcher, PendingCallView } from '../dispatcher'
 import { mountSidebar, type SidebarHandle } from '../sidebar'
 import { SettingsIcon } from '../ui/icons'
 import { callOperations } from './call-operations'
@@ -43,11 +43,25 @@ function fakeDispatcher(): FakeDispatcher {
   // Wire id → the call it was sent under, as `Dispatcher.pending` holds it:
   // a response forgets the wire id, the call's own id lives on.
   const wireIDs = new Map<number, number>()
+  const pendingHandlers = new Set<(call: PendingCallView) => void>()
+  const settledHandlers = new Set<(id: number, settlement: CallSettlement) => void>()
   const dispatcher = {
     cancel,
     callIDForRequest(requestID: number | string): number | null {
       if (typeof requestID !== 'number') return null
       return wireIDs.get(requestID) ?? null
+    },
+    onCallPending(handler: (call: PendingCallView) => void) {
+      pendingHandlers.add(handler)
+      return () => {
+        pendingHandlers.delete(handler)
+      }
+    },
+    onCallSettled(handler: (id: number, settlement: CallSettlement) => void) {
+      settledHandlers.add(handler)
+      return () => {
+        settledHandlers.delete(handler)
+      }
     },
     subscribe(method: string, handler: Notify) {
       let set = handlers.get(method)
@@ -67,12 +81,14 @@ function fakeDispatcher(): FakeDispatcher {
     dispatcher,
     cancel,
     pending: (id, method) => {
-      dispatcher.onCallPending!({ id, method, startedAt: Date.now(), cancel: () => {} })
+      for (const handler of pendingHandlers) {
+        handler({ id, method, startedAt: Date.now(), cancel: () => {} })
+      }
     },
     wire: (requestID, callID) => wireIDs.set(requestID, callID),
     settled: (id) => {
       for (const [requestID, callID] of wireIDs) if (callID === id) wireIDs.delete(requestID)
-      dispatcher.onCallSettled!(id, 'answered')
+      for (const handler of settledHandlers) handler(id, 'answered')
     },
     notify: (method, params) => {
       for (const handler of handlers.get(method) ?? []) handler(params)
@@ -183,15 +199,33 @@ describe("a first open's helper install", () => {
     }
   })
 
-  it('goes on settle and leaves no finished entry', () => {
+  it('goes when the call it belongs to settles, with no row-done frame', () => {
     const fake = fakeDispatcher()
     mount(fake)
-    fake.pending(1, 'open')
-    fake.wire(1, 1)
-    fake.notify('operation.row', copying)
+    fake.pending(3, 'open') // the call's own id
+    fake.wire(11, 3) // the id the backend names the work with
+    fake.notify('operation.row', { ...copying, requestId: 11 })
     openList()
     expect(rows()).toHaveLength(1)
-    fake.notify('operation.rowDone', { requestId: 1 })
+    // The row IS the call, so the call's own settlement ends it — an answer,
+    // a withdrawal, or a socket that took the answer away. The row-done frame
+    // is the backend saying the install finished, which a dropped frame must
+    // not be able to leave a row behind for: Cancel settles the call, and a
+    // row that outlived its call could not be withdrawn by anything.
+    fake.settled(3)
+    expect(rows()).toHaveLength(0)
+    expect(emptyState()).toContain('Nothing is running')
+  })
+
+  it('goes on the row-done frame when the install ends before the open does', () => {
+    const fake = fakeDispatcher()
+    mount(fake)
+    fake.pending(3, 'open')
+    fake.wire(11, 3)
+    fake.notify('operation.row', { ...copying, requestId: 11 })
+    openList()
+    expect(rows()).toHaveLength(1)
+    fake.notify('operation.rowDone', { requestId: 11 })
     expect(rows()).toHaveLength(0)
     expect(emptyState()).toContain('Nothing is running')
   })

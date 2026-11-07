@@ -110,13 +110,14 @@ export function callOperations(
     remove(id)
   }
 
-  dispatcher.onCallPending = onPending
-  dispatcher.onCallSettled = onSettled
+  // A subscription, not an assignment: the call's own settlement is read by
+  // every source that draws the call (install-operations.ts draws the work
+  // the backend does inside it), and one of them must not displace the other.
+  const unsubscribe = [dispatcher.onCallPending(onPending), dispatcher.onCallSettled(onSettled)]
   return {
     source: rows,
     dispose: () => {
-      if (dispatcher.onCallPending === onPending) dispatcher.onCallPending = undefined
-      if (dispatcher.onCallSettled === onSettled) dispatcher.onCallSettled = undefined
+      for (const stop of unsubscribe) stop()
       for (const entry of waiting.values()) {
         if (entry.timer !== null) clearTimeout(entry.timer)
       }

@@ -389,6 +389,9 @@ export class Dispatcher {
   private connectHandlers = new Set<LifecycleHandler>()
   private disconnectHandlers = new Set<LifecycleHandler>()
   private connectionStateHandlers = new Set<(state: ConnectionState) => void>()
+  // Call observers: the sources that draw a person's call.
+  private callPendingHandlers = new Set<(call: PendingCallView) => void>()
+  private callSettledHandlers = new Set<(id: number, settlement: CallSettlement) => void>()
 
   // Reconnect state.
   private _connectionState: ConnectionState = { kind: 'waiting', backoffMs: MIN_BACKOFF_MS }
@@ -634,6 +637,8 @@ export class Dispatcher {
     this.connectHandlers.clear()
     this.disconnectHandlers.clear()
     this.connectionStateHandlers.clear()
+    this.callPendingHandlers.clear()
+    this.callSettledHandlers.clear()
   }
 
   // --- RPC -----------------------------------------------------------------
@@ -651,11 +656,29 @@ export class Dispatcher {
    */
   onVaultSealed?: (method: string) => Promise<void>
 
-  /** Called when a person's operation call is on the wire. Background work
-   *  never reaches it: it merges and is not shown. */
-  onCallPending?: (call: PendingCallView) => void
-  /** Called once when that call has settled, however it settled. */
-  onCallSettled?: (id: number, settlement: CallSettlement) => void
+  /** Observe a person's operation call the moment it is on the wire.
+   *  Background work never reaches it: it merges and is not shown.
+   *
+   *  More than one surface reads this, and each ends its own row by it: the
+   *  call's wait and the work the backend does inside the call are two
+   *  accounts of one call, not two calls. Returns an unsubscribe function,
+   *  like every other subscription here. */
+  onCallPending(handler: (call: PendingCallView) => void): () => void {
+    this.callPendingHandlers.add(handler)
+    return () => {
+      this.callPendingHandlers.delete(handler)
+    }
+  }
+
+  /** Observe the settlement of a call that was announced, however it
+   *  settled: answered, withdrawn, or left without an answer by the socket.
+   *  This is the end of anything that call was showing. */
+  onCallSettled(handler: (id: number, settlement: CallSettlement) => void): () => void {
+    this.callSettledHandlers.add(handler)
+    return () => {
+      this.callSettledHandlers.delete(handler)
+    }
+  }
 
   call<T = unknown>(
     method: string,
@@ -773,13 +796,14 @@ export class Dispatcher {
     if (slot.announced || slot.state === 'done') return
     if (slot.intent !== 'operation' || slot.origin !== 'person') return
     slot.announced = true
-    this.onCallPending?.({
+    const call: PendingCallView = {
       id: slot.observeID,
       method: slot.method,
       startedAt: slot.startedAt,
       mutation: slot.mutation,
       cancel: () => this.cancel(slot.observeID),
-    })
+    }
+    for (const handler of this.callPendingHandlers) handler(call)
   }
 
   /** Put a slot where it belongs: on the wire if it may go now, otherwise in
@@ -1438,7 +1462,8 @@ export class Dispatcher {
   }
 
   private notifyCallSettled(slot: CallSlot, settlement: CallSettlement = 'answered'): void {
-    if (slot.announced) this.onCallSettled?.(slot.observeID, settlement)
+    if (!slot.announced) return
+    for (const handler of this.callSettledHandlers) handler(slot.observeID, settlement)
   }
 
   /** A lost connection settles everything: sent calls have no answer coming,

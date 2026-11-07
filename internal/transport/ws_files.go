@@ -2259,9 +2259,21 @@ func filesTurnContext(ctx context.Context) (context.Context, context.CancelFunc)
 	return context.WithCancel(ctx)
 }
 
+// filesWorkContext derives the work bound from the moment the work starts, and
+// that moment is the grant: StartWork re-arms the scope's max from now and
+// answers the lifetime actually available — its own max, clamped to a parent
+// operation's remainder. Asking the scope rather than recomputing it keeps the
+// context the provider sees, the timer that settles the call and the bound the
+// expiry reports on ONE number (ADR-8eej3e66 §3).
 func filesWorkContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	if scope, ok := catalog.ScopeFrom(ctx); ok {
-		return context.WithDeadline(ctx, scope.Deadline())
+		if lifetime := scope.StartWork(); lifetime > 0 {
+			return context.WithDeadline(ctx, time.Now().Add(lifetime))
+		}
+		// The scope has settled or spent its budget: there is no work budget
+		// left to start with. An already-expired context makes that a
+		// deadline the caller answers with, not an unbounded call.
+		return context.WithDeadline(ctx, time.Now())
 	}
 	return context.WithCancel(ctx)
 }
@@ -2287,14 +2299,18 @@ func (s *WSServer) filesDomainDo(
 	}
 	turn, cancelTurn := filesTurnContext(ctx)
 	defer cancelTurn()
-	work, cancelWork := filesWorkContext(ctx)
-	defer cancelWork()
 	return s.filesDomains.Do(domains.Request{
 		Key:    key,
 		Origin: filesOrigin(ctx),
 		Turn:   turn,
-		Work:   work,
-		Run:    fn,
+		// The work's own bound is derived when the permit is taken, not here:
+		// the wait for capacity is the turn's to bound, and charging it to max
+		// left a read granted after 29 s of waiting about a second of its
+		// thirty (ADR-8eej3e66 §3, nocx-3an1s.2.14).
+		Work: func() (context.Context, context.CancelFunc) {
+			return filesWorkContext(ctx)
+		},
+		Run: fn,
 	})
 }
 

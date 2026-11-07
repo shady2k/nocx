@@ -1,24 +1,24 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { EndpointProvider, EndpointResult } from './endpoint'
-import { CONNECT_ATTEMPT_TIMEOUT_MS, Dispatcher, HEARTBEAT_IDLE_WINDOW_MS } from './dispatcher'
-import { log } from './log'
+import {
+  CONNECT_ATTEMPT_TIMEOUT_MS,
+  Dispatcher,
+  HEARTBEAT_IDLE_WINDOW_MS,
+  isNotStartedAnswer,
+} from './dispatcher'
 import { clearToasts, toasts } from './ui/toast'
 
 /**
- * The saturation error the executor sends for a refused control request
- * (contracts/control.saturated.schema.json): code -32004, fixed reason
- * vocabulary, the admission's scope, retryable, and a retry hint.
+ * The answer a call that never started carries
+ * (contracts/operation.expired.schema.json): code -32005 with the catalogue's
+ * fixed reason. ADR-8eej3e66 stage 8 replaced the -32004 capacity refusal with
+ * this, and the mutation-replay answer shares the code.
  */
-const SATURATION_ERROR = {
-  code: -32004,
-  message: 'Control plane busy',
-  data: {
-    reason: 'control-saturated',
-    scope: 'exec',
-    retryable: true,
-    retryAfterMs: 250,
-  },
+const NOT_STARTED = {
+  code: -32005,
+  message: 'The call did not start',
+  data: { reason: 'not-started' },
 }
 
 const SUCCESS: EndpointResult = {
@@ -187,8 +187,8 @@ async function connectedWith(d: Dispatcher, window: number): Promise<void> {
   await flush()
 }
 
-function deliverSaturation(id: number): void {
-  socket().deliverText({ jsonrpc: '2.0', id, error: SATURATION_ERROR })
+function deliverNotStarted(id: number): void {
+  socket().deliverText({ jsonrpc: '2.0', id, error: NOT_STARTED })
 }
 
 beforeEach(() => {
@@ -947,116 +947,45 @@ describe('dispatcher heartbeat', () => {
   })
 })
 
-describe('control-plane refusals (ADR-8eej3e66 stage 1)', () => {
-  // Stage 1 removes the refusal TOAST and nothing underneath: the backend
-  // still refuses, the wire discriminator still arrives, and every surface a
-  // person uses now owns the refusal it caused. What the dispatcher owes is
-  // (a) a sentence that names the cause without the words "busy" or "try
-  // again in a moment", (b) a record with the invocation's origin, and (c) no
-  // toast on either path — the failure is shown where it happened or not at
-  // all, never centrally over whatever the person is doing.
-  it('rejects a person call with a sentence naming the cause, and raises no toast', async () => {
+describe('a call that did not start (ADR-8eej3e66 stage 8)', () => {
+  // There is no capacity refusal any more: the backend answers a call whose
+  // declared lifetime ran out before it started with -32005 and the reason
+  // `not-started`. The dispatcher's whole debt is to expose that fact to the
+  // surface that asked — no sentence of its own, no toast, no invented cause —
+  // and `isNotStartedAnswer` is the one place it is recognised.
+  it('rejects the caller with the wire answer and raises no toast', async () => {
     const provider = new TestEndpointProvider()
     const d = new Dispatcher(provider)
     await connected(d)
     const call = d.call('ssh.connect', {})
-    const id = socket().requests()[0].id!
-    socket().deliverText({
-      jsonrpc: '2.0',
-      id,
-      error: { ...SATURATION_ERROR, data: { ...SATURATION_ERROR.data, scope: 'filesystem' } },
-    })
+    deliverNotStarted(socket().requests()[0].id!)
 
-    // The refusal still rejects the caller's promise with the full error, so
-    // a surface can branch on the discriminator.
-    await expect(call).rejects.toMatchObject({ code: -32004 })
+    await expect(call).rejects.toMatchObject({ code: -32005 })
     const err = (await call.catch((e: unknown) => e)) as Error
-    expect(err.message).toContain('refused')
-    expect(err.message).toContain('file operations')
+    expect(err.message).toBe('The call did not start')
     expect(err.message.toLowerCase()).not.toContain('busy')
-    expect(err.message.toLowerCase()).not.toContain('try again in a moment')
+    expect(isNotStartedAnswer(err)).toBe(true)
 
     await vi.dynamicImportSettled()
     expect(toasts()).toHaveLength(0)
   })
 
-  it('a background refusal is quiet to the person and recorded with its origin', async () => {
+  it('does not claim a different failure is "not started"', async () => {
     const provider = new TestEndpointProvider()
     const d = new Dispatcher(provider)
     await connected(d)
-    const warn = vi.spyOn(log, 'warn')
-    const call = d.call('files.list', {}, undefined, { origin: 'background' })
-    const id = socket().requests()[0].id!
-
-    deliverSaturation(id)
-
-    await expect(call).rejects.toMatchObject({ code: -32004 })
-    await vi.dynamicImportSettled()
-    expect(toasts()).toHaveLength(0)
-    const record = warn.mock.calls.find((c) => String(c[0]).includes('control request refused'))
-    expect(record).toBeDefined()
-    expect(record?.[1]).toMatchObject({ origin: 'background', method: 'files.list' })
-  })
-
-  it('records a person refusal with origin person, and treats an absent origin as person', async () => {
-    const provider = new TestEndpointProvider()
-    const d = new Dispatcher(provider)
-    await connected(d)
-    const warn = vi.spyOn(log, 'warn')
-
-    const implicit = d.call('profiles.list', {})
-    implicit.catch(() => {})
-    deliverSaturation(socket().requests()[0].id!)
-    await expect(implicit).rejects.toMatchObject({ code: -32004 })
-
-    const explicit = d.call('profiles.list', {}, undefined, { origin: 'person' })
-    explicit.catch(() => {})
-    deliverSaturation(socket().requests()[1].id!)
-    await expect(explicit).rejects.toMatchObject({ code: -32004 })
-
-    const origins = warn.mock.calls
-      .filter((c) => String(c[0]).includes('control request refused'))
-      .map((c) => (c[1] as { origin?: string }).origin)
-    expect(origins).toEqual(['person', 'person'])
-  })
-
-  it('records a refused notification instead of toasting it (control.saturated carries no id)', async () => {
-    const provider = new TestEndpointProvider()
-    const d = new Dispatcher(provider)
-    await connected(d)
-    const warn = vi.spyOn(log, 'warn')
-
+    const call = d.call('files.list', {})
     socket().deliverText({
       jsonrpc: '2.0',
-      method: 'control.saturated',
-      params: { methodClass: 'ssh', scope: 'probe' },
-    })
-    await vi.dynamicImportSettled()
-
-    expect(toasts()).toHaveLength(0)
-    const record = warn.mock.calls.find((c) => String(c[0]).includes('control action refused'))
-    expect(record).toBeDefined()
-    expect(record?.[1]).toMatchObject({ methodClass: 'ssh', scope: 'probe' })
-  })
-
-  it('names a scope this build does not know without inventing a cause', async () => {
-    const provider = new TestEndpointProvider()
-    const d = new Dispatcher(provider)
-    await connected(d)
-    const call = d.call('ssh.connect', {})
-    const id = socket().requests()[0].id!
-    socket().deliverText({
-      jsonrpc: '2.0',
-      id,
+      id: socket().requests()[0].id!,
       error: {
-        ...SATURATION_ERROR,
-        data: { ...SATURATION_ERROR.data, scope: 'exec' },
+        code: -32005,
+        message: 'This mutation already ran',
+        data: { reason: 'mutation-replayed' },
       },
     })
     const err = (await call.catch((e: unknown) => e)) as Error
-    expect(err.message).toContain('refused')
-    expect(err.message).not.toContain('exec')
-    expect(err.message.toLowerCase()).not.toContain('busy')
+    expect(isNotStartedAnswer(err)).toBe(false)
   })
 
   it('leaves an ordinary RPC error untouched — rejects with its own message', async () => {

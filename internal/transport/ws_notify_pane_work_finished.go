@@ -211,7 +211,7 @@ func (h notifyPaneWorkFinishedHandlers) handleNotifyPaneWorkFinished(ctx context
 // synchronous and can block on a sink invocation, so it must never run on the
 // read loop.
 func (s *WSServer) notifyPaneWorkFinishedSpec() methodSpec {
-	return reg(s.lane, catalog.OpNotifyPaneWorkFinished, params(validateNotifyPaneWorkFinishedRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+	return reg(s.work, catalog.OpNotifyPaneWorkFinished, params(validateNotifyPaneWorkFinishedRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 		return notifyPaneWorkFinishedHandlers{
 			raiser:   s.notifyRaiser,
 			registry: s.registry,

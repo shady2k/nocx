@@ -729,7 +729,9 @@ var gitOpenTimeout = 20 * time.Second
 // and went silent held the open, and with it one of the execution lane's
 // eight permits, until the server died. The owner met exactly that: eight
 // stuck opens, then "Control plane busy" on every other action until the
-// process was killed (nocx-3an1s.1.1).
+// process was killed (nocx-3an1s.1.1). The lane is gone now (ADR-8eej3e66
+// stage 8), and the bound stays because an open that never answers is still a
+// call that never settles.
 //
 // A timed-out spawn may still have forked a shell on the far host; the client
 // is closed with the failure, the helper keeps that session (D1) and the

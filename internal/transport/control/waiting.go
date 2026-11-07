@@ -6,66 +6,62 @@ import (
 	"time"
 )
 
-// waitingSemaphore is a semaphore whose TryAcquire WAITS (bounded) for
-// capacity instead of refusing instantly. It is the admission behind the
-// domain conflict gates: two operations on the config domain are not an
-// overload, they are a queue of length two — the second may proceed once the
-// first releases, and refusing it would tell a sequential client that did
-// nothing wrong that the control plane is busy (the response to its previous
-// request is enqueued before the permit is released, so the very next
-// request can arrive while the gate is still held).
+// waitingSemaphore is a semaphore whose TryAcquire WAITS for capacity instead
+// of refusing instantly. It is the admission behind the store keys, the
+// native picker, the agent probe and the session gate: two operations on one
+// resource are not an overload, they are a queue of length two — the second
+// proceeds once the first releases.
 //
-// The wait is bounded on BOTH ends, per the executor design review:
+// THE WAIT IS THE INVOCATION'S DECLARED TURN (ADR-8eej3e66 §3). The
+// dispatcher binds the declaration's turn to the request context
+// (OrderRequest.Turn), so a person's call waits as long as its catalogue entry
+// says it may and not one instant longer; a call with no catalogue scope (an
+// internal call, a test) falls back to the timeout the composition root named.
+// There is no waiter-count bound: a caller beyond it is not refused, because
+// no capacity answer exists any more. What bounds the queue is what bounded
+// the work in the first place — a connection may have only its credit window
+// outstanding, and every waiter leaves at its turn.
 //
-//   - waitTimeout: a waiter gives up after this long and returns a Rejection.
-//     The bound keeps a gate held by a hung operation (an abandoned task at
-//     shutdown, say) from making every conflicting request wait forever.
-//   - maxQueue: at most this many callers may be registered as waiters;
-//     a caller beyond the bound is refused INSTANTLY, never queued. The bound
-//     keeps a flood of conflicting requests from piling up without limit.
-//
-// Only exhausting a bound is a refusal. Within the bounds a conflicting
-// request waits for the gate, exactly like a queue of length two.
-//
-// TryAcquire may block (up to waitTimeout). That is why
-// NewWaitingSemaphore deliberately does NOT satisfy NonblockingAdmission: a
-// waiting admission can never be wired into a bounded Submission, whose
-// TrySubmit the read loop calls. Callers that must never block (the read
-// loop's synchronous path) must not call it; the composition root places this
-// admission inside the task goroutine's acquisition (operation Run), never in
-// a submission's TrySubmit. The two admission classes and the reason they
-// differ are ADR-0026 item 4.
-
+// TryAcquire may block (up to the turn). That is why NewWaitingSemaphore
+// deliberately does NOT satisfy a non-blocking admission: the composition
+// root places this admission on the task goroutine (the operation's Run,
+// never a submission's TrySubmit), so the read loop never blocks on it.
 type waitingSemaphore struct {
-	name     string
-	ch       chan struct{} // capacity tokens; one buffered token per permit
-	mu       sync.Mutex
-	waiters  int // registered waiters, under mu
-	maxQueue int
-	timeout  time.Duration
-	book     *holderBook
+	name    string
+	ch      chan struct{} // capacity tokens; one buffered token per permit
+	mu      sync.Mutex
+	waiters int // registered waiters, under mu
+	timeout time.Duration
+	book    *holderBook
 }
 
-func NewWaitingSemaphore(name string, capacity, maxQueue int, waitTimeout time.Duration) Admission {
+// NewWaitingSemaphore returns an Admission with the given capacity. timeout is
+// the wait bound for a caller whose context carries no declared turn.
+func NewWaitingSemaphore(name string, capacity int, timeout time.Duration) Admission {
 	if capacity < 0 {
 		panic("control: negative capacity for waiting semaphore " + name)
 	}
-	if maxQueue < 0 {
-		panic("control: negative maxQueue for waiting semaphore " + name)
-	}
-	if waitTimeout < 0 {
+	if timeout < 0 {
 		panic("control: negative waitTimeout for waiting semaphore " + name)
 	}
 	return &waitingSemaphore{
-		name:     name,
-		ch:       make(chan struct{}, capacity),
-		maxQueue: maxQueue,
-		timeout:  waitTimeout,
-		book:     newHolderBook(),
+		name:    name,
+		ch:      make(chan struct{}, capacity),
+		timeout: timeout,
+		book:    newHolderBook(),
 	}
 }
 
 func (s *waitingSemaphore) Name() string { return s.name }
+
+// waitBound is the turn the invocation declared, or the fallback this gate was
+// built with when the context carries none.
+func (s *waitingSemaphore) waitBound(ctx context.Context) time.Duration {
+	if req, ok := OrderFrom(ctx); ok && req.Turn > 0 {
+		return req.Turn
+	}
+	return s.timeout
+}
 
 func (s *waitingSemaphore) TryAcquire(ctx context.Context) (Permit, *Rejection) {
 	// Fast path: capacity available and nobody waiting. The waiter-count
@@ -83,14 +79,6 @@ func (s *waitingSemaphore) TryAcquire(ctx context.Context) (Permit, *Rejection) 
 		}
 		s.mu.Lock()
 	}
-	if s.waiters >= s.maxQueue {
-		s.mu.Unlock()
-		return nil, &Rejection{
-			Reason:  "conflict queue full",
-			Scope:   s.name,
-			Holders: s.book.snapshot(),
-		}
-	}
 	s.waiters++
 	s.mu.Unlock()
 	defer func() {
@@ -99,24 +87,27 @@ func (s *waitingSemaphore) TryAcquire(ctx context.Context) (Permit, *Rejection) 
 		s.mu.Unlock()
 	}()
 
-	// Capacity exhausted: wait, bounded by the timeout and the context. The
+	// Capacity exhausted: wait, bounded by the turn and the context. The
 	// send is the only permit-acquisition path here; the runtime hands the
 	// token to exactly one blocked sender per release, and a select that
 	// picks the timeout/cancellation case instead never completed the send,
 	// so no token is stranded.
-	timer := time.NewTimer(s.timeout)
+	bound := s.waitBound(ctx)
+	timer := time.NewTimer(bound)
 	defer timer.Stop()
 	select {
 	case s.ch <- struct{}{}:
 		return &waitingPermit{ch: s.ch, book: s.book, id: s.book.add(ctx, time.Now())}, nil
 	case <-ctx.Done():
 		return nil, &Rejection{
+			Kind:    RejectionCancelled,
 			Reason:  "cancelled",
 			Scope:   s.name,
 			Holders: s.book.snapshot(),
 		}
 	case <-timer.C:
 		return nil, &Rejection{
+			Kind:    RejectionWaitExceeded,
 			Reason:  "wait exceeded",
 			Scope:   s.name,
 			Holders: s.book.snapshot(),
@@ -124,7 +115,7 @@ func (s *waitingSemaphore) TryAcquire(ctx context.Context) (Permit, *Rejection) 
 	}
 }
 
-// waitingPermit returns its token exactly once, like semaphorePermit: a
+// waitingPermit returns its token exactly once, like every permit here: a
 // double release would hand back a token belonging to another held permit
 // and the bound could be silently exceeded.
 type waitingPermit struct {

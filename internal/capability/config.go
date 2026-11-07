@@ -165,11 +165,10 @@ type ConfigOperation interface {
 }
 
 // NewConfigOperation builds a ConfigOperation that acquires configGate
-// before vaultGate (the canonical order), then the execution lane: conflict
-// admission precedes the worker permit, so waiting conflict work never sits
-// on a lane slot.
+// before vaultGate (the canonical order): conflict admission is the only
+// admission, so waiting conflict work never occupies anything else.
 func NewConfigOperation(
-	configGate, vaultGate, lane control.Admission,
+	configGate, vaultGate control.Admission,
 	profiles profile.ProfileRepository,
 	groups profile.GroupRepository,
 	endpoints profile.EndpointRepository,
@@ -180,7 +179,7 @@ func NewConfigOperation(
 	secrets EndpointSecrets,
 ) ConfigOperation {
 	g := &guard{}
-	return newOperation[ConfigService](Direct("ConfigOperation"), control.NewComposite(configGate, vaultGate, lane), g, newConfigService(g, profiles, groups, endpoints, roles, svc, reg, rows, secrets))
+	return newOperation[ConfigService](Direct("ConfigOperation"), control.NewComposite(configGate, vaultGate), g, newConfigService(g, profiles, groups, endpoints, roles, svc, reg, rows, secrets))
 }
 
 // newConfigService builds the concrete config service bound to guard g.

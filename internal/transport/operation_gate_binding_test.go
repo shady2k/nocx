@@ -67,7 +67,6 @@ func TestMethodSpecOperationsAcquireEachDomainGateOnce(t *testing.T) {
 		filesys:        filesystem.New(),
 	}
 
-	lane := control.NewSemaphore("test-lane", 32)
 	log := &gateAcquisitionLog{counts: make(map[string]int)}
 	gates := map[string]*recordingDomainAdmission{}
 	for _, name := range []string{
@@ -76,7 +75,7 @@ func TestMethodSpecOperationsAcquireEachDomainGateOnce(t *testing.T) {
 		gates[name] = &recordingDomainAdmission{name: name, log: log}
 	}
 
-	configOp, endpointWired := server.buildConfigOp(lane, gates["config"], gates["vault"])
+	configOp, endpointWired := server.buildConfigOp(gates["config"], gates["vault"])
 	// wantGate is how many times the domain gate is acquired. It is one
 	// everywhere except filesystem, whose whole-domain gate went in stage 4
 	// of ADR-8eej3e66: filesystem work is ordered per binding and bounded per
@@ -95,7 +94,7 @@ func TestMethodSpecOperationsAcquireEachDomainGateOnce(t *testing.T) {
 			name:     "config",
 			gate:     "config",
 			wantGate: 1,
-			specs:    server.configSpecs(lane, gates["config"], gates["vault"], configOp, endpointWired, nil, nil),
+			specs:    server.configSpecs(gates["config"], gates["vault"], configOp, endpointWired, nil, nil),
 			method:   "groups.list",
 			raw:      `{}`,
 		},
@@ -103,7 +102,7 @@ func TestMethodSpecOperationsAcquireEachDomainGateOnce(t *testing.T) {
 			name:     "vault",
 			gate:     "vault",
 			wantGate: 1,
-			specs:    server.vaultSpecs(lane, gates["config"], gates["vault"], capability.NewStoreGuard(catalog.Declarations(), 8, time.Second)),
+			specs:    server.vaultSpecs(gates["config"], gates["vault"], capability.NewStoreGuard(catalog.Declarations(), time.Second)),
 			method:   "vault.status",
 			raw:      `{}`,
 		},
@@ -111,7 +110,7 @@ func TestMethodSpecOperationsAcquireEachDomainGateOnce(t *testing.T) {
 			name:     "content",
 			gate:     "content",
 			wantGate: 1,
-			specs:    server.contentSpecs(lane, gates["content"], control.ImmediateSubmission{}),
+			specs:    server.contentSpecs(gates["content"], control.ImmediateSubmission{}),
 			method:   "history.query",
 			raw:      `{"scope":"everywhere"}`,
 		},
@@ -119,7 +118,7 @@ func TestMethodSpecOperationsAcquireEachDomainGateOnce(t *testing.T) {
 			name:     "session",
 			gate:     "session",
 			wantGate: 1,
-			specs:    server.seamSpecs(lane, gates["session"]),
+			specs:    server.seamSpecs(gates["session"]),
 			method:   "sessions.status",
 			raw:      `{"profileIds":[]}`,
 		},
@@ -131,7 +130,7 @@ func TestMethodSpecOperationsAcquireEachDomainGateOnce(t *testing.T) {
 			name:     "filesystem",
 			gate:     "filesystem",
 			wantGate: 0,
-			specs:    server.filesSpecs(lane, gates["session"]),
+			specs:    server.filesSpecs(gates["session"]),
 			method:   "files.list",
 			raw:      `{"bindingId":"0123456789abcdef0123456789abcdef","path":"/","limit":1}`,
 		},
@@ -139,7 +138,7 @@ func TestMethodSpecOperationsAcquireEachDomainGateOnce(t *testing.T) {
 			name:     "api",
 			gate:     "api",
 			wantGate: 1,
-			specs:    server.apiSpecs(lane, gates["api"], gates["vault"]),
+			specs:    server.apiSpecs(gates["api"], gates["vault"]),
 			method:   "api.collections.list",
 			raw:      `{}`,
 		},

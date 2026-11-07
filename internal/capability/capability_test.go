@@ -662,20 +662,12 @@ func newProfileService(t *testing.T) *profile.ProfileService {
 // gates are real control.Admissions, so the tests exercise the same
 // acquire/release machinery the transport will.
 func testGates() (config, vault, content, sessionG, gitG, fsG control.Admission) {
-	return control.NewSemaphore(capability.GateConfig, 1),
-		control.NewSemaphore(capability.GateVault, 1),
-		control.NewSemaphore(capability.GateContent, 1),
-		control.NewSemaphore(capability.GateSession, 1),
-		control.NewSemaphore(capability.GateGit, 1),
-		control.NewSemaphore(capability.GateFilesystem, 1)
-}
-
-// testLane returns the execution admission for test operations: a plain
-// non-blocking semaphore of ample capacity, so tests exercise the conflict
-// gates (also plain non-blocking semaphores) exactly as before. The
-// transport's own tests cover the waiting-gate behavior over the socket.
-func testLane() control.Admission {
-	return control.NewSemaphore("test-lane", 8)
+	return control.NewWaitingSemaphore(capability.GateConfig, 1, time.Second),
+		control.NewWaitingSemaphore(capability.GateVault, 1, time.Second),
+		control.NewWaitingSemaphore(capability.GateContent, 1, time.Second),
+		control.NewWaitingSemaphore(capability.GateSession, 1, time.Second),
+		control.NewWaitingSemaphore(capability.GateGit, 1, time.Second),
+		control.NewWaitingSemaphore(capability.GateFilesystem, 1, time.Second)
 }
 
 // newFakeGitRegistry builds an empty git registry for gate tests.
@@ -704,7 +696,7 @@ func TestConfigOperationCannotReachVault(t *testing.T) {
 	groups := &fakeGroupRepo{}
 	vaultSeam := newFakeVault()
 
-	cfgOp := capability.NewConfigOperation(configGate, vaultGate, testLane(), profiles, groups, nil, nil, newProfileService(t), nil, nil, nil)
+	cfgOp := capability.NewConfigOperation(configGate, vaultGate, profiles, groups, nil, nil, newProfileService(t), nil, nil, nil)
 
 	// The handler-shaped consumer: it takes the operation and nothing else.
 	runConsumer := func(op capability.ConfigOperation) error {
@@ -758,7 +750,7 @@ func TestServiceCannotEscapeCallback(t *testing.T) {
 	configGate, vaultGate, _, _, _, _ := testGates()
 	profiles := &fakeProfileRepo{}
 	groups := &fakeGroupRepo{}
-	op := capability.NewConfigOperation(configGate, vaultGate, testLane(), profiles, groups, nil, nil, newProfileService(t), nil, nil, nil)
+	op := capability.NewConfigOperation(configGate, vaultGate, profiles, groups, nil, nil, newProfileService(t), nil, nil, nil)
 
 	var leaked capability.ConfigService
 	err := op.Run(context.Background(), func(ctx context.Context, svc capability.ConfigService) error {
@@ -775,9 +767,9 @@ func TestServiceCannotEscapeCallback(t *testing.T) {
 	// The void-method form: an escaped call silently does nothing rather
 	// than touching the store outside the exclusion. (VaultService.Seal
 	// is the void case; a leaked call must not reach the store.)
-	vaultGate2 := control.NewSemaphore(capability.GateVault, 1)
+	vaultGate2 := control.NewWaitingSemaphore(capability.GateVault, 1, time.Second)
 	seam := newFakeVault()
-	vop := capability.NewVaultOperation(vaultGate2, testLane(), seam)
+	vop := capability.NewVaultOperation(vaultGate2, seam)
 	var leakedVault capability.VaultService
 	if err := vop.Run(context.Background(), func(ctx context.Context, svc capability.VaultService) error {
 		leakedVault = svc
@@ -805,8 +797,8 @@ func TestOverlappingOperationsBothComplete(t *testing.T) {
 	seam := newFakeVault()
 	cfgSvc := newProfileService(t)
 
-	secretOp := capability.NewSecretOperation(cfgGate, vltGate, testLane(), profiles, groups, seam, seam)
-	tabbyOp := capability.NewTabbyImportOperation(cfgGate, vltGate, testLane(), profiles, groups, cfgSvc, seam, seam)
+	secretOp := capability.NewSecretOperation(cfgGate, vltGate, profiles, groups, seam, seam)
+	tabbyOp := capability.NewTabbyImportOperation(cfgGate, vltGate, profiles, groups, cfgSvc, seam, seam)
 
 	// Run both in both arrival orders, concurrently, repeatedly.
 	for i := 0; i < 20; i++ {
@@ -856,7 +848,7 @@ func TestOverlappingOperationsBothComplete(t *testing.T) {
 func TestNonConflictingOperationsOverlap(t *testing.T) {
 	_, _, contentGate, _, _, _ := testGates()
 	db := newFakeContentDB()
-	contentOp := capability.NewContentOperation(contentGate, testLane(), db)
+	contentOp := capability.NewContentOperation(contentGate, db)
 
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -872,9 +864,9 @@ func TestNonConflictingOperationsOverlap(t *testing.T) {
 
 	// A git-binding operation (different domain) completes while the
 	// content callback is still blocked.
-	gitOp := capability.NewGitBindingOperation(schedule.NewKeyed("git", 8), schedule.NewBulkhead("git", schedule.Limits{
-		Capacity: 8, PersonReserved: 2, Queue: 32, AbandonedPerDomain: 8, AbandonedGlobal: 32,
-	}), testLane(), newFakeGitRegistry())
+	gitOp := capability.NewGitBindingOperation(schedule.NewKeyed("git"), schedule.NewBulkhead("git", schedule.Limits{
+		Capacity: 8, PersonReserved: 2, AbandonedPerDomain: 8, AbandonedGlobal: 32,
+	}), newFakeGitRegistry())
 	gitDone := make(chan error, 1)
 	go func() {
 		gitDone <- gitOp.Run(context.Background(), "", func(ctx context.Context, svc capability.GitBindingService) error {
@@ -904,7 +896,7 @@ func TestSameDomainExclusion(t *testing.T) {
 	cfgGate, vltGate, _, _, _, _ := testGates()
 	profiles := &fakeProfileRepo{}
 	groups := &fakeGroupRepo{}
-	op := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, nil, nil, newProfileService(t), nil, nil, nil)
+	op := capability.NewConfigOperation(cfgGate, vltGate, profiles, groups, nil, nil, newProfileService(t), nil, nil, nil)
 
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -937,7 +929,7 @@ func TestForSecretUnknownID(t *testing.T) {
 	groups := &fakeGroupRepo{}
 
 	seam := newFakeVault()
-	factory := capability.NewSecretOperations(cfgGate, vltGate, testLane(), profiles, groups, seam, seam, seam.Exists)
+	factory := capability.NewSecretOperations(cfgGate, vltGate, profiles, groups, seam, seam, seam.Exists)
 
 	op, err := factory.ForSecret(context.Background(), "sec:v1:file:does-not-exist")
 	if err == nil {
@@ -961,7 +953,7 @@ func TestForSecretKnownIDSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed secret: %v", err)
 	}
-	factory := capability.NewSecretOperations(cfgGate, vltGate, testLane(), profiles, groups, seam, seam, seam.Exists)
+	factory := capability.NewSecretOperations(cfgGate, vltGate, profiles, groups, seam, seam, seam.Exists)
 	op, err := factory.ForSecret(context.Background(), id)
 	if err != nil {
 		t.Fatalf("ForSecret with a known id failed: %v", err)
@@ -992,7 +984,7 @@ func TestForSecretKnownIDSucceeds(t *testing.T) {
 func TestForSessionUnknownID(t *testing.T) {
 	sessionGate, _, _, _, _, _ := testGates()
 	reg := newFakeSessionRegistry()
-	factory := capability.NewSessionOperations(sessionGate, testLane(), reg, nil)
+	factory := capability.NewSessionOperations(sessionGate, reg, nil)
 
 	op, err := factory.ForSession("no-such-session")
 	if err == nil {
@@ -1008,7 +1000,7 @@ func TestForSessionKnownIDSucceeds(t *testing.T) {
 	sessionGate, _, _, _, _, _ := testGates()
 	reg := newFakeSessionRegistry()
 	reg.sessions["s1"] = &fakeSession{id: "s1"}
-	factory := capability.NewSessionOperations(sessionGate, testLane(), reg, nil)
+	factory := capability.NewSessionOperations(sessionGate, reg, nil)
 
 	op, err := factory.ForSession("s1")
 	if err != nil {
@@ -1033,11 +1025,10 @@ func TestForSessionKnownIDSucceeds(t *testing.T) {
 
 // TestSessionTargetOperationReleasesSessionGateBeforeWork pins the read
 // interval: immutable routing facts are copied while the session gate is
-// held, then remote work keeps only the ordinary lane. A slow completion
-// therefore cannot refuse resize or close on the session domain.
+// held, and the gate is released before the callback's remote work. A slow
+// completion therefore cannot make resize or close on the session domain wait.
 func TestSessionTargetOperationReleasesSessionGateBeforeWork(t *testing.T) {
-	sessionGate := control.NewSemaphore(capability.GateSession, 1)
-	lane := control.NewSemaphore("control", 1)
+	sessionGate := control.NewWaitingSemaphore(capability.GateSession, 1, time.Second)
 	reg := newFakeSessionRegistry()
 	reg.sessions["s1"] = &fakeSession{
 		id:   "s1",
@@ -1048,7 +1039,7 @@ func TestSessionTargetOperationReleasesSessionGateBeforeWork(t *testing.T) {
 			ssh.WithJumpHost("bastion.example", 2200, "jumper", "password"),
 		},
 	}
-	factory := capability.NewSessionOperations(sessionGate, lane, reg, nil)
+	factory := capability.NewSessionOperations(sessionGate, reg, nil)
 
 	op, err := factory.ForSessionTarget("s1")
 	if err != nil {
@@ -1071,10 +1062,6 @@ func TestSessionTargetOperationReleasesSessionGateBeforeWork(t *testing.T) {
 			t.Fatalf("session gate remained held during work: %+v", sessionRej)
 		}
 		sessionPermit.Release()
-		if lanePermit, laneRej := lane.TryAcquire(context.Background()); laneRej == nil {
-			lanePermit.Release()
-			t.Fatal("ordinary lane was released before work completed")
-		}
 		return nil
 	})
 	if err != nil {
@@ -1091,7 +1078,7 @@ func TestSecretDeleteUnknownRowFailsAndKnownRowSucceeds(t *testing.T) {
 	groups := &fakeGroupRepo{}
 
 	seam := newFakeVault()
-	op := capability.NewSecretOperation(cfgGate, vltGate, testLane(), profiles, groups, seam, seam)
+	op := capability.NewSecretOperation(cfgGate, vltGate, profiles, groups, seam, seam)
 
 	// Failure path: unknown row.
 	err := op.Run(context.Background(), func(ctx context.Context, svc capability.SecretService) error {
@@ -1133,9 +1120,9 @@ func TestSecretDeleteUnknownRowFailsAndKnownRowSucceeds(t *testing.T) {
 // for every "returns an error when…" there is a "on a normal machine it
 // succeeds".
 func TestVaultLifecycleSetupSucceeds(t *testing.T) {
-	vaultGate := control.NewSemaphore(capability.GateVault, 1)
+	vaultGate := control.NewWaitingSemaphore(capability.GateVault, 1, time.Second)
 	seam := newFakeVault()
-	op := capability.NewVaultOperation(vaultGate, testLane(), seam)
+	op := capability.NewVaultOperation(vaultGate, seam)
 
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.VaultService) error {
 		if _, err := svc.Setup(ctx, vault.SetupRequest{}); err != nil {
@@ -1157,11 +1144,11 @@ func TestVaultLifecycleSetupSucceeds(t *testing.T) {
 func TestVaultResetAndConfigRunTogether(t *testing.T) {
 	cfgGate, vltGate, _, _, _, _ := testGates()
 	reset := &fakeReset{}
-	stores := capability.NewStoreGuard(catalog.Declarations(), 8, time.Second)
-	resetOp := capability.NewVaultResetOperation(stores, catalog.OpVaultReset.Declaration(), testLane(), reset)
+	stores := capability.NewStoreGuard(catalog.Declarations(), time.Second)
+	resetOp := capability.NewVaultResetOperation(stores, catalog.OpVaultReset.Declaration(), reset)
 	profiles := &fakeProfileRepo{}
 	groups := &fakeGroupRepo{}
-	cfgOp := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, nil, nil, newProfileService(t), nil, nil, nil)
+	cfgOp := capability.NewConfigOperation(cfgGate, vltGate, profiles, groups, nil, nil, newProfileService(t), nil, nil, nil)
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -1191,11 +1178,11 @@ func TestVaultResetAndConfigRunTogether(t *testing.T) {
 // TestCaptureSaveWritesBothStores proves the [vault, content] cross-domain
 // operation reaches both stores inside one callback.
 func TestCaptureSaveWritesBothStores(t *testing.T) {
-	vltGate := control.NewSemaphore(capability.GateVault, 1)
-	contentGate := control.NewSemaphore(capability.GateContent, 1)
+	vltGate := control.NewWaitingSemaphore(capability.GateVault, 1, time.Second)
+	contentGate := control.NewWaitingSemaphore(capability.GateContent, 1, time.Second)
 	seam := newFakeVault()
 	db := newFakeContentDB()
-	op := capability.NewCaptureSaveOperation(vltGate, contentGate, testLane(), seam, db)
+	op := capability.NewCaptureSaveOperation(vltGate, contentGate, seam, db)
 
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.CaptureSaveService) error {
 		if _, _, err := svc.CreateSecret(ctx, credential.NewSecret("pw"), vault.SecretMeta{Name: "captured"}); err != nil {
@@ -1222,10 +1209,10 @@ func TestCaptureSaveWritesBothStores(t *testing.T) {
 // shape of the string: a decimal-looking handle goes to the ledger exactly
 // as a UUID does, and both arrive verbatim.
 func TestCaptureSaveSendsEveryIdShapeToTheLedger(t *testing.T) {
-	vltGate := control.NewSemaphore(capability.GateVault, 1)
-	contentGate := control.NewSemaphore(capability.GateContent, 1)
+	vltGate := control.NewWaitingSemaphore(capability.GateVault, 1, time.Second)
+	contentGate := control.NewWaitingSemaphore(capability.GateContent, 1, time.Second)
 	db := newFakeContentDB()
-	op := capability.NewCaptureSaveOperation(vltGate, contentGate, testLane(), newFakeVault(), db)
+	op := capability.NewCaptureSaveOperation(vltGate, contentGate, newFakeVault(), db)
 
 	const entryID = "0192f0aa-0000-7000-8000-00000000cafe"
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.CaptureSaveService) error {
@@ -1251,7 +1238,7 @@ func TestSettingsSurfaceSucceeds(t *testing.T) {
 	reg := settings.New(&fakeDoc{}, newFakeSecretStore())
 	profiles := &fakeProfileRepo{}
 	groups := &fakeGroupRepo{}
-	op := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, nil, nil, newProfileService(t), reg, nil, nil)
+	op := capability.NewConfigOperation(cfgGate, vltGate, profiles, groups, nil, nil, newProfileService(t), reg, nil, nil)
 
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.ConfigService) error {
 		snap, err := svc.Settings().GetSnapshot()
@@ -1274,7 +1261,7 @@ func TestConfigWriteWithRowButNoVaultFails(t *testing.T) {
 	cfgGate, vltGate, _, _, _, _ := testGates()
 	profiles := &fakeProfileRepo{}
 	groups := &fakeGroupRepo{}
-	op := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, nil, nil, newProfileService(t), nil, nil, nil)
+	op := capability.NewConfigOperation(cfgGate, vltGate, profiles, groups, nil, nil, newProfileService(t), nil, nil, nil)
 
 	err := op.Run(context.Background(), func(ctx context.Context, svc capability.ConfigService) error {
 		return svc.CreateProfile(profile.SSHProfile{
@@ -1304,7 +1291,7 @@ func TestConfigWriteResolvesRowWithVault(t *testing.T) {
 	groups := &fakeGroupRepo{}
 	seam := newFakeVault()
 	seam.rows["secrow:1"] = "sec:v1:file:fakea"
-	op := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, nil, nil, newProfileService(t), nil, seam, nil)
+	op := capability.NewConfigOperation(cfgGate, vltGate, profiles, groups, nil, nil, newProfileService(t), nil, seam, nil)
 
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.ConfigService) error {
 		return svc.CreateProfile(profile.SSHProfile{
@@ -1332,7 +1319,7 @@ func TestConfigWriteResolvesRowWithVault(t *testing.T) {
 func TestMintSecretReturnsTheMintedID(t *testing.T) {
 	cfgGate, vltGate, _, _, _, _ := testGates()
 	seam := newFakeVault()
-	op := capability.NewSecretOperation(cfgGate, vltGate, testLane(), &fakeProfileRepo{}, &fakeGroupRepo{}, seam, seam)
+	op := capability.NewSecretOperation(cfgGate, vltGate, &fakeProfileRepo{}, &fakeGroupRepo{}, seam, seam)
 
 	var minted credential.SecretID
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.SecretService) error {
@@ -1356,7 +1343,7 @@ func TestMintSecretReturnsTheMintedID(t *testing.T) {
 func TestMintSecretFallsBackToPlainStore(t *testing.T) {
 	cfgGate, vltGate, _, _, _, _ := testGates()
 	store := newFakeSecretStore()
-	op := capability.NewSecretOperation(cfgGate, vltGate, testLane(), &fakeProfileRepo{}, &fakeGroupRepo{}, nil, store)
+	op := capability.NewSecretOperation(cfgGate, vltGate, &fakeProfileRepo{}, &fakeGroupRepo{}, nil, store)
 
 	var minted credential.SecretID
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.SecretService) error {

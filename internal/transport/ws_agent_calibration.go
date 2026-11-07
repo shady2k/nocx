@@ -328,13 +328,13 @@ func (s *WSServer) calibrationAvailable() bool {
 func (s *WSServer) agentCalibrationSpecs() []methodSpec {
 	return []methodSpec{
 		whenAvailable(
-			regResponder(s.lane, catalog.OpAgentCalibration, params(validateAgentCalibrationRaw), func(r Responder) handlerFunc {
+			regResponder(s.work, catalog.OpAgentCalibration, params(validateAgentCalibrationRaw), func(r Responder) handlerFunc {
 				return func(ctx context.Context, req jsonrpcRequest) { s.handleAgentCalibration(ctx, req, r) }
 			}),
 			s.calibrationAvailable,
 			"method not found: pane observation not wired"),
 		whenAvailable(
-			regResponder(s.lane, catalog.OpAgentCalibrationAnswer, params(validateAgentCalibrationAnswerRaw), func(r Responder) handlerFunc {
+			regResponder(s.work, catalog.OpAgentCalibrationAnswer, params(validateAgentCalibrationAnswerRaw), func(r Responder) handlerFunc {
 				return func(ctx context.Context, req jsonrpcRequest) { s.handleAgentCalibrationAnswer(ctx, req, r) }
 			}),
 			s.calibrationAvailable,

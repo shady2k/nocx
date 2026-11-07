@@ -13,7 +13,7 @@ import (
 
 func testGitBulkhead() *schedule.Bulkhead {
 	return schedule.NewBulkhead("git", schedule.Limits{
-		Capacity: 8, PersonReserved: 2, Queue: 32, AbandonedPerDomain: 8, AbandonedGlobal: 32,
+		Capacity: 8, PersonReserved: 2, AbandonedPerDomain: 8, AbandonedGlobal: 32,
 	})
 }
 

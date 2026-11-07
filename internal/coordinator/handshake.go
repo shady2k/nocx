@@ -48,7 +48,15 @@ package coordinator
 // The number in a stage branch means only that ITS surface moved; this is the
 // number the integrated surface carries, and its golden is the one written by
 // the recipe over all four stages at once.
-const ProtocolVersion = 17
+//
+// 18 (nocx-3an1s.2.7): the capacity refusal left the wire. -32004 and the
+// control.saturated notification are gone (ADR-8eej3e66 §8, stage 8), the
+// lane with them, and a call whose declared lifetime ran out before it
+// started answers -32005 with the catalogue's own reason
+// (contracts/operation.expired.schema.json). A window built against 17
+// handled a refusal class that no longer exists and would meet the expiry
+// answer as an unknown code, so the two versions do not pair.
+const ProtocolVersion = 18
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

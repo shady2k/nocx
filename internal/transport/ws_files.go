@@ -1558,7 +1558,7 @@ func (h filesBindingHandlers) handleReveal(ctx context.Context, state *connState
 // FilesystemBindingOperation are built here from the wired stores
 // (composition root for this domain); when no filesystem registry is wired,
 // every handler answers -32601 "files not available".
-func (s *WSServer) filesSpecs(lane control.Admission, sessionGate control.Admission) []methodSpec {
+func (s *WSServer) filesSpecs(sessionGate control.Admission) []methodSpec {
 	var openOp capability.FilesystemOpenOperation
 	var bindingOp capability.FilesystemBindingOperation
 	var factory capability.ProviderFactory
@@ -1568,17 +1568,17 @@ func (s *WSServer) filesSpecs(lane control.Admission, sessionGate control.Admiss
 		// stays filesystem ← capability). nil converts to nil, preserving
 		// the old "no provider factory wired" answer.
 		factory = capability.ProviderFactory(s.filesProviderFor)
-		openOp = capability.NewFilesystemOpenOperation(sessionGate, lane, s.registry, factory, s.filesys)
-		bindingOp = capability.NewFilesystemBindingOperation(lane, s.filesys)
+		openOp = capability.NewFilesystemOpenOperation(sessionGate, s.registry, factory, s.filesys)
+		bindingOp = capability.NewFilesystemBindingOperation(s.filesys)
 	}
-	openSub := s.operationQueue("files-open")
-	bindingSub := s.operationQueue("files")
+	openSub := s.work
+	bindingSub := s.work
 	// One FIFO per binding for the operations that CHANGE it, shared by every
 	// connection on this server. The 32 slots count running and queued work
 	// together, which also bounds the number of active key workers.
 	bindingOrder := &inflightSubmission{
 		inflight: &s.inflight,
-		inner:    control.NewKeyedOrderedSubmission("files-binding-ops", 32),
+		inner:    control.NewKeyedOrderedSubmission("files-binding-ops"),
 	}
 	specs := []methodSpec{
 		reg(openSub, catalog.OpFilesOpen, params(validateFilesOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {

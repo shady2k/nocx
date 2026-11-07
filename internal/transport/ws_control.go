@@ -149,38 +149,3 @@ func (s *inflightSubmission) Shutdown() {
 		inner.Shutdown()
 	}
 }
-
-// saturatedNotifyLimiter rate-limits the control.saturated notification that
-// a refused NOTIFICATION (no id) triggers: it has no response to carry the
-// -32004 error, so the server emits the notification instead — but one per
-// refused frame would flood the wire when a burst of notifications is
-// refused, so the emission is bounded to at most one per (class, scope) per
-// interval. The renderer also deduplicates its toast over a 10 s window;
-// this bound protects the wire itself, independent of the renderer.
-type saturatedNotifyLimiter struct {
-	mu       sync.Mutex
-	interval time.Duration
-	last     map[string]time.Time
-}
-
-// newSaturatedNotifyLimiter builds a limiter that allows at most one
-// notification per key per interval.
-func newSaturatedNotifyLimiter(interval time.Duration) *saturatedNotifyLimiter {
-	return &saturatedNotifyLimiter{interval: interval, last: make(map[string]time.Time)}
-}
-
-// allow reports whether a notification for the key may be emitted now. The
-// key is (methodClass, scope) — server vocabulary both, so no request data
-// reaches the limiter.
-func (l *saturatedNotifyLimiter) allow(class, scope string) bool {
-	key := class + "\x00" + scope
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	now := time.Now()
-	last, ok := l.last[key]
-	if !ok || now.Sub(last) >= l.interval {
-		l.last[key] = now
-		return true
-	}
-	return false
-}

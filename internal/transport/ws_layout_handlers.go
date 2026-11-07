@@ -1104,10 +1104,10 @@ func (s *WSServer) layoutReader() paneWorkspaces {
 // layoutSpecs declares the layout methods on the CONTENT operation queue: the
 // layout chain is three tables in content's schema v1, so it shares the
 // content domain's gate and queue with the ledger and history.*.
-func (s *WSServer) layoutSpecs(contentSub control.Submission, lane control.Admission, contentGate control.Admission) []methodSpec {
+func (s *WSServer) layoutSpecs(contentSub control.Submission, contentGate control.Admission) []methodSpec {
 	var op capability.LayoutOperation
 	if s.contentDB != nil {
-		op = capability.NewLayoutOperation(contentGate, lane, s.contentDB)
+		op = capability.NewLayoutOperation(contentGate, s.contentDB)
 	}
 	wired := s.contentDB != nil
 	build := func(r Responder) handlerFunc {

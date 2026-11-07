@@ -43,8 +43,8 @@ type FilesystemOpenService interface {
 // FilesystemOpenOperation is the typed operation for files.open. It is
 // two-phase for the reason GitOpenOperation is (nocx-zg3k3.14.17): Resolve
 // runs under the session gate alone, Open — which on an ssh session builds
-// a helper-backed provider and reads its root over the wire — under the
-// execution lane alone. A binding registered for a session that closed
+// a helper-backed provider and reads its root over the wire — under no
+// admission at all. A binding registered for a session that closed
 // meanwhile is the handler's to drop, by the rule GitOpenOperation states.
 //
 // THE FILESYSTEM DOMAIN GATE IS GONE (ADR-8eej3e66 stage 4). It was
@@ -52,21 +52,19 @@ type FilesystemOpenService interface {
 // record exists to remove: one hung mount refused every other mount's open
 // after a one-second wait. What replaces it is order per binding (in the
 // transport) and a bulkhead per failure domain (internal/operation/domains),
-// so this operation declares the lane and nothing else.
+// so this operation declares no admission at all.
 type FilesystemOpenOperation interface {
 	AssistantOperation
 	// Resolve runs fn under the session gate and nothing else.
 	Resolve(context.Context, func(context.Context, FilesystemOpenService) error) error
-	// Open runs fn under [filesystem] and the execution lane, no session
-	// gate held.
+	// Open runs fn with no admission held.
 	Open(context.Context, func(context.Context, FilesystemOpenService) error) error
 }
 
 // NewFilesystemOpenOperation builds the files.open operation: the session
-// gate for Resolve, then — after releasing it — the filesystem gate and the
-// execution lane for Open.
+// gate for Resolve, then — after releasing it — nothing for Open.
 func NewFilesystemOpenOperation(
-	sessionGate, lane control.Admission,
+	sessionGate control.Admission,
 	registry session.Registry,
 	factory ProviderFactory,
 	reg *filesystem.Registry,
@@ -76,7 +74,7 @@ func NewFilesystemOpenOperation(
 	disposition := Adapted("files.browse", "opening a filesystem resolves and registers a connection-bound provider")
 	return &filesystemOpenOperation{
 		resolve: newOperation[FilesystemOpenService](disposition, control.NewComposite(sessionGate), g, svc),
-		open:    newOperation[FilesystemOpenService](disposition, control.NewComposite(lane), g, svc),
+		open:    newOperation[FilesystemOpenService](disposition, control.Unrestricted(), g, svc),
 	}
 }
 
@@ -197,19 +195,19 @@ type FilesystemBindingService interface {
 }
 
 // FilesystemBindingOperation is the typed operation for the
-// filesystem-binding domain. It holds the execution lane and no domain gate:
-// order is per binding and bounded execution is per failure domain
-// (ADR-8eej3e66 stage 4).
+// filesystem-binding domain. It holds no admission: order is per binding and
+// bounded execution is per failure domain (ADR-8eej3e66 stages 4 and 8).
 type FilesystemBindingOperation interface {
 	AssistantOperation
 	Run(context.Context, func(context.Context, FilesystemBindingService) error) error
 }
 
 // NewFilesystemBindingOperation builds the filesystem-binding operation,
-// acquiring the execution lane after nothing else.
-func NewFilesystemBindingOperation(lane control.Admission, reg *filesystem.Registry) FilesystemBindingOperation {
+// which acquires nothing: the binding's order is the transport's and the
+// execution bound is the failure domain's.
+func NewFilesystemBindingOperation(reg *filesystem.Registry) FilesystemBindingOperation {
 	g := &guard{}
-	return newOperation[FilesystemBindingService](Adapted("files.browse", "filesystem calls require an assistant-owned binding lease"), control.NewComposite(lane), g, newFilesystemBindingService(g, reg))
+	return newOperation[FilesystemBindingService](Adapted("files.browse", "filesystem calls require an assistant-owned binding lease"), control.Unrestricted(), g, newFilesystemBindingService(g, reg))
 }
 
 // newFilesystemBindingService builds the concrete filesystem-binding service

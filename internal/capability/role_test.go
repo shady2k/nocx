@@ -22,7 +22,7 @@ func newRoleEnv(t *testing.T) (capability.ConfigOperation, *profile.JSONStore) {
 	dir := t.TempDir()
 	store := profile.NewJSONStore(filepath.Join(dir, "profiles.json"))
 	configGate, vaultGate, _, _, _, _ := testGates()
-	op := capability.NewConfigOperation(configGate, vaultGate, testLane(),
+	op := capability.NewConfigOperation(configGate, vaultGate,
 		store, store, store, store, newProfileService(t), nil, nil, nil)
 	return op, store
 }

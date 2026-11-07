@@ -17,9 +17,9 @@ func orderCtx(keys []string, turn time.Duration) context.Context {
 	return WithHolder(ctx, Holder{Method: "session.resize", Request: "1/resize#1"})
 }
 
-func newTestOrder(t *testing.T, limit int, prefixes ...string) *ResourceOrder {
+func newTestOrder(t *testing.T, prefixes ...string) *ResourceOrder {
 	t.Helper()
-	return NewResourceOrder("test", limit, prefixes...)
+	return NewResourceOrder("test", prefixes...)
 }
 
 func mustAcquire(t *testing.T, order *ResourceOrder, ctx context.Context) Permit {
@@ -33,7 +33,7 @@ func mustAcquire(t *testing.T, order *ResourceOrder, ctx context.Context) Permit
 
 func TestResourceOrderLetsADifferentResourceThrough(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		order := newTestOrder(t, 8, "session:")
+		order := newTestOrder(t, "session:")
 		first := mustAcquire(t, order, orderCtx([]string{"session:a"}, time.Second))
 		ran := make(chan struct{})
 		go func() {
@@ -60,7 +60,7 @@ func TestResourceOrderLetsADifferentResourceThrough(t *testing.T) {
 
 func TestResourceOrderHoldsAKeySetTogether(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		order := newTestOrder(t, 8, "session:", "store:")
+		order := newTestOrder(t, "session:", "store:")
 		first := mustAcquire(t, order, orderCtx([]string{"session:a"}, time.Second))
 
 		setStarted := make(chan struct{})
@@ -104,7 +104,7 @@ func TestResourceOrderHoldsAKeySetTogether(t *testing.T) {
 
 func TestResourceOrderDropsACancelledWaiterBeforeItStarts(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		order := newTestOrder(t, 8, "session:")
+		order := newTestOrder(t, "session:")
 		held := mustAcquire(t, order, orderCtx([]string{"session:a"}, time.Second))
 
 		ctx, cancel := context.WithCancel(orderCtx([]string{"session:a"}, time.Second))
@@ -134,15 +134,15 @@ func TestResourceOrderDropsACancelledWaiterBeforeItStarts(t *testing.T) {
 		p.Release()
 		order.mu.Lock()
 		defer order.mu.Unlock()
-		if len(order.queues) != 0 || order.admitted != 0 {
-			t.Fatalf("order kept state after every release: queues=%d admitted=%d", len(order.queues), order.admitted)
+		if len(order.queues) != 0 {
+			t.Fatalf("order kept state after every release: queues=%d", len(order.queues))
 		}
 	})
 }
 
 func TestResourceOrderTurnBoundsTheWait(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		order := newTestOrder(t, 8, "session:")
+		order := newTestOrder(t, "session:")
 		held := mustAcquire(t, order, orderCtx([]string{"session:a"}, time.Second))
 		defer held.Release()
 		_, rej := order.TryAcquire(orderCtx([]string{"session:a"}, 25*time.Millisecond))
@@ -163,7 +163,7 @@ func TestResourceOrderStartAgainstCancelSettlesExactlyOnce(t *testing.T) {
 	// ran (permit returned) or did not (rejection), never both, and the key
 	// is free afterwards.
 	for i := 0; i < 200; i++ {
-		order := newTestOrder(t, 8, "session:")
+		order := newTestOrder(t, "session:")
 		held := mustAcquire(t, order, orderCtx([]string{"session:a"}, time.Second))
 		ctx, cancel := context.WithCancel(orderCtx([]string{"session:a"}, time.Second))
 		settled := make(chan bool, 1)
@@ -190,7 +190,7 @@ func TestResourceOrderStartAgainstCancelSettlesExactlyOnce(t *testing.T) {
 }
 
 func TestResourceOrderRefusesNestedAcquisition(t *testing.T) {
-	order := newTestOrder(t, 8, "session:")
+	order := newTestOrder(t, "session:")
 	permit := mustAcquire(t, order, orderCtx([]string{"session:a"}, time.Second))
 	defer permit.Release()
 	ctx := WithOrderHeld(orderCtx([]string{"session:b"}, time.Second))
@@ -202,22 +202,12 @@ func TestResourceOrderRefusesNestedAcquisition(t *testing.T) {
 	_, _ = order.TryAcquire(ctx)
 }
 
-func TestResourceOrderBoundsAdmission(t *testing.T) {
-	order := NewResourceOrder("test", 1, "session:")
-	held := mustAcquire(t, order, orderCtx([]string{"session:a"}, time.Second))
-	defer held.Release()
-	_, rej := order.TryAcquire(orderCtx([]string{"session:b"}, 20*time.Millisecond))
-	if rej == nil || !strings.Contains(rej.Reason, "resource order full") {
-		t.Fatalf("admission past the limit = %+v", rej)
-	}
-}
-
 func TestHoldsOrderFindsTheOrderInAComposite(t *testing.T) {
-	order := newTestOrder(t, 8, "session:")
-	if !HoldsOrder(NewComposite(order, NewSemaphore("lane", 1))) {
+	order := newTestOrder(t, "session:")
+	if !HoldsOrder(NewComposite(order, NewWaitingSemaphore("other", 1, time.Second))) {
 		t.Fatal("HoldsOrder did not see the order inside a composite")
 	}
-	if HoldsOrder(NewComposite(NewSemaphore("lane", 1))) {
+	if HoldsOrder(NewComposite(NewWaitingSemaphore("other", 1, time.Second))) {
 		t.Fatal("HoldsOrder saw an order in a plain composite")
 	}
 }
@@ -228,7 +218,7 @@ func TestResourceOrderRepeatedTimeoutsGrowNothing(t *testing.T) {
 	// resource leave no waiter, no queue and no goroutine behind.
 	synctest.Test(t, func(t *testing.T) {
 		before := runtime.NumGoroutine()
-		order := newTestOrder(t, 8, "session:")
+		order := newTestOrder(t, "session:")
 		held := mustAcquire(t, order, orderCtx([]string{"session:a"}, time.Second))
 		for i := 0; i < 10000; i++ {
 			_, rej := order.TryAcquire(orderCtx([]string{"session:a"}, 10*time.Millisecond))
@@ -237,17 +227,17 @@ func TestResourceOrderRepeatedTimeoutsGrowNothing(t *testing.T) {
 			}
 		}
 		order.mu.Lock()
-		queues, admitted := len(order.queues), order.admitted
+		queues := len(order.queues)
 		order.mu.Unlock()
-		if queues != 1 || admitted != 1 {
-			t.Fatalf("after 10,000 expiries: queues=%d admitted=%d, want the one held key", queues, admitted)
+		if queues != 1 {
+			t.Fatalf("after 10,000 expiries: queues=%d, want the one held key", queues)
 		}
 		held.Release()
 		order.mu.Lock()
-		queues, admitted = len(order.queues), order.admitted
+		queues = len(order.queues)
 		order.mu.Unlock()
-		if queues != 0 || admitted != 0 {
-			t.Fatalf("after release: queues=%d admitted=%d", queues, admitted)
+		if queues != 0 {
+			t.Fatalf("after release: queues=%d, want none", queues)
 		}
 		synctest.Wait()
 		if after := runtime.NumGoroutine(); after > before {

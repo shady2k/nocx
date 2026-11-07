@@ -70,9 +70,9 @@ type sessionOpenerSeam interface {
 // layer, there to (a) serialize a logical sequence that reads the chain and
 // then writes it — a reorder checked against a snapshot, a rename racing
 // another rename — against other RENDERER-INITIATED requests on the same
-// domain, and (b) refuse into the control.saturated wire contract when that
-// queue is full, which is a statement about *dispatch backpressure on one
-// WebSocket's request stream*. Neither reads as an authorization check: the
+// domain, and (b) answer a wait that ran out, which is a statement about
+// *dispatch backpressure on one WebSocket's request stream*. Neither reads as
+// an authorization check: the
 // guard's check() call trips only on a captured service handle escaping its
 // own Run, never on who is asking. The actual data-race protection for the
 // underlying SQLite tables is a layer BELOW capability entirely — every
@@ -84,9 +84,9 @@ type sessionOpenerSeam interface {
 // whether or not the spawn also holds capability's admission gate.
 //
 // What capability's gate would add here is only backpressure participation:
-// letting a worker spawn queue and wait behind a saturated content-domain
-// dispatch queue, or be refused with control.saturated, exactly as a
-// person's own tabs.create would be. That is the wrong shape for THIS
+// letting a worker spawn queue and wait behind a busy content-domain dispatch
+// queue, exactly as a person's own tabs.create would. That is the wrong shape
+// for THIS
 // caller. workers.spawn is already an authorized tool call by the time
 // Spawn runs — the delegate effect over the resource environment is checked
 // at the tool endpoint, before any pane is minted — and that check is a

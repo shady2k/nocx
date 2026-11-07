@@ -15,7 +15,7 @@ import { render, screen, fireEvent, waitFor, cleanup } from '@solidjs/testing-li
 import { BackupRestoreSection } from './backup-restore-section'
 import type { ProfileClient, BackupCreateResult, RestorePreview, RestoreResult } from './profiles'
 import { MAX_BACKUP_BYTES } from './backup-file'
-import { refusalSentence, RpcError } from './dispatcher'
+import { RpcError } from './dispatcher'
 
 const toasts: { message: string; level?: string }[] = []
 vi.mock('./ui/toast', () => ({
@@ -375,23 +375,18 @@ describe('restoring a backup', () => {
     expect(screen.queryByRole('button', { name: 'Preview again' })).toBeNull()
   })
 
-  it('a refused preview names the failure where it happened and can be asked for again', async () => {
-    // nocx-9ox05 plus ADR-8eej3e66 stage 1. The config admission is held by
-    // whatever wrote configuration last, and backup.preview is refused before
-    // it runs. The file is still chosen and nothing is wrong with it, so the
-    // section shows the refusal itself — never a toast over the whole app,
+  it('a preview that did not start names the failure where it happened and can be asked for again', async () => {
+    // nocx-9ox05 plus ADR-8eej3e66 §8. The config plan is held by whatever
+    // wrote configuration last, and backup.preview reaches its turn before it
+    // starts. The file is still chosen and nothing is wrong with it, so the
+    // section shows that answer itself — never a toast over the whole app,
     // never a sentence about the terminal being busy — with the one control
     // that can move it: the same preview, asked again.
     const { client, spies } = mockClient({
       preview: vi
         .fn()
         .mockRejectedValueOnce(
-          new RpcError(refusalSentence('config'), -32004, {
-            reason: 'control-saturated',
-            scope: 'config',
-            retryable: true,
-            retryAfterMs: 0,
-          }),
+          new RpcError('The call did not start', -32005, { reason: 'not-started' }),
         )
         .mockResolvedValue(PREVIEW),
     })
@@ -402,7 +397,7 @@ describe('restoring a backup', () => {
     expect(toasts.filter((t) => t.message.includes('could not be previewed'))).toEqual([])
     const refused = screen.getByTestId('backup-preview-refused')
     expect(refused.textContent).toContain('Could not build the preview')
-    expect(refused.textContent).toContain('refused')
+    expect(refused.textContent).toContain('did not start')
     expect(refused.textContent?.toLowerCase()).not.toContain('busy')
     expect(refused.textContent?.toLowerCase()).not.toContain('try again in a moment')
     expect(screen.getByText('backup.json')).toBeTruthy()

@@ -27,7 +27,7 @@ import (
 	"github.com/shady2k/nocx/internal/transport/control"
 )
 
-func (s *WSServer) seamSpecs(lane control.Admission, sessionGate control.Admission) []methodSpec {
+func (s *WSServer) seamSpecs(sessionGate control.Admission) []methodSpec {
 	// Seams shared across the methods of their domain. The holders point at
 	// the WSServer's own fields: the dialog and url services are assigned
 	// post-construction (SetDialogService / SetUrlOpener) while handlers may
@@ -40,8 +40,8 @@ func (s *WSServer) seamSpecs(lane control.Admission, sessionGate control.Admissi
 
 	// sessions.status is the one capability-gated method here: a whole-domain
 	// SessionOperation over the session gate (migration map).
-	sessionOp := capability.NewSessionOperation(sessionGate, lane, s.registry, s.profileUsage)
-	statusSub := s.operationQueue("sessions-status")
+	sessionOp := capability.NewSessionOperation(sessionGate, s.registry, s.profileUsage)
+	statusSub := s.work
 
 	return []methodSpec{
 		// connections.test owns its own admission (probe capacity-one
@@ -57,7 +57,7 @@ func (s *WSServer) seamSpecs(lane control.Admission, sessionGate control.Admissi
 			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleConnectionsTest(ctx, req) }
 		}),
-		regResponder(s.lane, catalog.OpConnectionsTrustHostKey, params(validateTrustHostKeyRaw), func(r Responder) handlerFunc {
+		regResponder(s.work, catalog.OpConnectionsTrustHostKey, params(validateTrustHostKeyRaw), func(r Responder) handlerFunc {
 			h := trustHostKeyHandlers{truster: s.hostKeyTruster, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleConnectionsTrustHostKey(ctx, req) }
 		}),
@@ -83,11 +83,11 @@ func (s *WSServer) seamSpecs(lane control.Admission, sessionGate control.Admissi
 			h := dialogHandlers{dialog: dialog, admit: s.dialogAdmit, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDialogOpenFileForUpload(ctx, req) }
 		}),
-		regResponder(s.lane, catalog.OpSshConfigAliases, noParams(), func(r Responder) handlerFunc {
+		regResponder(s.work, catalog.OpSshConfigAliases, noParams(), func(r Responder) handlerFunc {
 			h := sshConfigHandlers{resolver: s.sshConfigResolver, path: s.sshConfigPath, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSSHConfigAliases(ctx, req) }
 		}),
-		regResponder(s.lane, catalog.OpSshConfigPath, noParams(), func(r Responder) handlerFunc {
+		regResponder(s.work, catalog.OpSshConfigPath, noParams(), func(r Responder) handlerFunc {
 			h := sshConfigHandlers{resolver: s.sshConfigResolver, path: s.sshConfigPath, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSSHConfigPath(ctx, req) }
 		}),
@@ -95,38 +95,38 @@ func (s *WSServer) seamSpecs(lane control.Admission, sessionGate control.Admissi
 			h := sessionsStatusHandlers{op: sessionOp, log: s.log, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSessionsStatus(ctx, req) }
 		}),
-		regResponder(s.lane, catalog.OpFsComplete, params(validateFsCompleteRaw), func(r Responder) handlerFunc {
+		regResponder(s.work, catalog.OpFsComplete, params(validateFsCompleteRaw), func(r Responder) handlerFunc {
 			h := fsCompleteHandlers{r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleFsComplete(ctx, req) }
 		}),
 		// tunnel.open needs the connection as the owner-map key (spec §7.3):
 		// the forward's owner is the tab that opened it, so the handler
 		// receives the *wsConn per call.
-		reg(s.lane, catalog.OpTunnelOpen, params(validateTunnelOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(s.work, catalog.OpTunnelOpen, params(validateTunnelOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := tunnelHandlers{resolver: s.resolver, connector: s.tunnelConnector, ledger: ledger, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleTunnelOpen(ctx, w, r, req) }
 		}),
-		regResponder(s.lane, catalog.OpTunnelStop, params(validateTunnelStopRaw), func(r Responder) handlerFunc {
+		regResponder(s.work, catalog.OpTunnelStop, params(validateTunnelStopRaw), func(r Responder) handlerFunc {
 			h := tunnelHandlers{resolver: s.resolver, connector: s.tunnelConnector, ledger: ledger, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleTunnelStop(req) }
 		}),
-		regResponder(s.lane, catalog.OpPortsStatus, params(validatePortsProfileRaw), func(r Responder) handlerFunc {
+		regResponder(s.work, catalog.OpPortsStatus, params(validatePortsProfileRaw), func(r Responder) handlerFunc {
 			h := portsHandlers{sched: s.discoverySched, ledger: ledger, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePortsMethod(req) }
 		}),
-		regResponder(s.lane, catalog.OpPortsSample, params(validatePortsProfileRaw), func(r Responder) handlerFunc {
+		regResponder(s.work, catalog.OpPortsSample, params(validatePortsProfileRaw), func(r Responder) handlerFunc {
 			h := portsHandlers{sched: s.discoverySched, ledger: ledger, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePortsMethod(req) }
 		}),
-		regResponder(s.lane, catalog.OpPortsPause, params(validatePortsPauseRaw), func(r Responder) handlerFunc {
+		regResponder(s.work, catalog.OpPortsPause, params(validatePortsPauseRaw), func(r Responder) handlerFunc {
 			h := portsHandlers{sched: s.discoverySched, ledger: ledger, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePortsMethod(req) }
 		}),
-		regResponder(s.lane, catalog.OpPortsVisible, params(validatePortsPauseRaw), func(r Responder) handlerFunc {
+		regResponder(s.work, catalog.OpPortsVisible, params(validatePortsPauseRaw), func(r Responder) handlerFunc {
 			h := portsHandlers{sched: s.discoverySched, ledger: ledger, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePortsMethod(req) }
 		}),
-		regResponder(s.lane, catalog.OpShellOpenUrl, params(validateShellOpenUrlRaw), func(r Responder) handlerFunc {
+		regResponder(s.work, catalog.OpShellOpenUrl, params(validateShellOpenUrlRaw), func(r Responder) handlerFunc {
 			h := openUrlHandlers{opener: opener, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleShellOpenUrl(ctx, req) }
 		}),

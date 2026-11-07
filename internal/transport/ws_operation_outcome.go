@@ -42,7 +42,7 @@ const MutationIdentityLimit = 128
 // MutationReplayErrorCode is the JSON-RPC error code for a mutation whose
 // identity the backend has already seen with an outcome that forbids a second
 // run, in the server-error range without colliding with the vault's
-// -32000..-32003 or saturation's -32004.
+// -32000..-32005.
 const MutationReplayErrorCode = -32005
 
 // MutationReplayMessage is the fixed message of the refusal. The machine-
@@ -172,16 +172,17 @@ func validateOperationOutcomeRaw(raw json.RawMessage) string {
 	return ""
 }
 
-// operationOutcomeSpec registers operation.outcome on the ordinary lane.
+// operationOutcomeSpec registers operation.outcome on the ordinary work
+// submission.
 //
 // NOT on the ingress-critical submission. The answer is a map lookup and holds
 // nothing, but ADR-8eej3e66 §7 enumerates the traffic exempt from credit —
 // cancel, ack, the resolvers, ping, diagnostics — and this method is not among
 // them; the closed set in registration.go is not a place to route around a
-// record. So under a saturated lane the ask is refused with the saturation
-// error, which the renderer reads as "no answer" and reports as the outcome
-// being unknown. That is §4's own end of checking, and it is still never a
-// replay.
+// record. It is answered like any other call: it may wait for credit in the
+// renderer's own queue, and it is never refused for capacity (stage 8), so
+// "what became of my mutation" cannot be turned into the busyness answer it
+// exists to end.
 func (s *WSServer) operationOutcomeSpec(sub control.Submission) methodSpec {
 	return reg(sub, catalog.OpOperationOutcome, params(validateOperationOutcomeRaw),
 		func(_ *wsConn, _ *connState, r Responder) handlerFunc {

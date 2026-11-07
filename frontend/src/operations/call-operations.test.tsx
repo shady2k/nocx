@@ -36,8 +36,8 @@ async function settle(): Promise<void> {
 
 let handle: SidebarHandle | null = null
 
-function mount(dispatcher: Dispatcher, thresholdMs?: number, reaskMs?: number): void {
-  const ops = callOperations(dispatcher, thresholdMs, reaskMs)
+function mount(dispatcher: Dispatcher, thresholdMs?: number): void {
+  const ops = callOperations(dispatcher, thresholdMs)
   const model = createOperationsModel([ops.source])
   const bar = document.createElement('div')
   const panel = document.createElement('div')

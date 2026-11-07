@@ -18,15 +18,15 @@ import (
 
 func TestOperationDispositionsMatchMap(t *testing.T) {
 	gate := func(name string) control.Admission {
-		return Gate(name, 1, 8, time.Second)
+		return Gate(name, 1, time.Second)
 	}
 	db := content.NewStub(log.NewSlogAdapter(nil))
-	stores := NewStoreGuard(catalog.Declarations(), 8, time.Second)
-	targetOp, err := NewSessionOperations(gate(GateSession), gate("lane"), dispositionRegistry{}, nil).ForSessionTarget("s1")
+	stores := NewStoreGuard(catalog.Declarations(), time.Second)
+	targetOp, err := NewSessionOperations(gate(GateSession), dispositionRegistry{}, nil).ForSessionTarget("s1")
 	if err != nil {
 		t.Fatalf("ForSessionTarget: %v", err)
 	}
-	endOp, err := NewSessionOperations(gate(GateSession), gate("lane"), dispositionRegistry{}, nil).ForSessionEnd("s1")
+	endOp, err := NewSessionOperations(gate(GateSession), dispositionRegistry{}, nil).ForSessionEnd("s1")
 	if err != nil {
 		t.Fatalf("ForSessionEnd: %v", err)
 	}
@@ -36,31 +36,31 @@ func TestOperationDispositionsMatchMap(t *testing.T) {
 		op   AssistantOperation
 		kind DispositionKind
 	}{
-		{"AgentOperation", NewAgentOperation(gate(GateContent), gate("lane"), db), DispositionDirect},
-		{"APICollectionOperation", NewAPICollectionOperation(gate(GateAPI), gate("lane"), nil), DispositionDirect},
-		{"APIImportOperation", NewAPIImportOperation(gate(GateAPI), gate(GateVault), gate("lane"), nil, nil, nil), DispositionDirect},
-		{"BackupOperation", NewBackupOperation(gate(GateConfig), gate("lane"), nil), DispositionDirect},
-		{"CaptureSaveOperation", NewCaptureSaveOperation(gate(GateVault), gate(GateContent), gate("lane"), nil, nil), DispositionDirect},
-		{"TabbyImportOperation", NewTabbyImportOperation(gate(GateConfig), gate(GateVault), gate("lane"), nil, nil, nil, nil, nil), DispositionDirect},
-		{"ConfigOperation", NewConfigOperation(gate(GateConfig), gate(GateVault), gate("lane"), nil, nil, nil, nil, nil, nil, nil, nil), DispositionDirect},
-		{"ContentOperation", NewContentOperation(gate(GateContent), gate("lane"), db), DispositionDirect},
-		{"FilesystemOpenOperation", NewFilesystemOpenOperation(gate(GateSession), gate("lane"), nil, nil, nil), DispositionAdapted},
-		{"FilesystemBindingOperation", NewFilesystemBindingOperation(gate("lane"), nil), DispositionAdapted},
-		{"GitOpenOperation", NewGitOpenOperation(gate(GateSession), testGitBulkhead(), gate("lane"), nil, nil, nil), DispositionAdapted},
-		{"GitBindingOperation", NewGitBindingOperation(schedule.NewKeyed("git", 8), testGitBulkhead(), gate("lane"), nil), DispositionAdapted},
-		{"LayoutOperation", NewLayoutOperation(gate(GateContent), gate("lane"), db), DispositionDirect},
-		{"LedgerOperation", NewLedgerOperation(gate(GateContent), gate("lane"), db), DispositionExcluded},
-		{"NoteOperation", NewNoteOperation(gate(GateConfig), gate("lane"), nil), DispositionDirect},
-		{"OpenOperation", NewOpenOperation(gate(GateConfig), gate(GateSession), gate("lane"), nil, nil), DispositionAdapted},
-		{"SecretOperation", NewSecretOperation(gate(GateConfig), gate(GateVault), gate("lane"), nil, nil, nil, nil), DispositionDirect},
-		{"SessionOperation", NewSessionOperation(gate(GateSession), gate("lane"), nil, nil), DispositionAdapted},
+		{"AgentOperation", NewAgentOperation(gate(GateContent), db), DispositionDirect},
+		{"APICollectionOperation", NewAPICollectionOperation(gate(GateAPI), nil), DispositionDirect},
+		{"APIImportOperation", NewAPIImportOperation(gate(GateAPI), gate(GateVault), nil, nil, nil), DispositionDirect},
+		{"BackupOperation", NewBackupOperation(gate(GateConfig), nil), DispositionDirect},
+		{"CaptureSaveOperation", NewCaptureSaveOperation(gate(GateVault), gate(GateContent), nil, nil), DispositionDirect},
+		{"TabbyImportOperation", NewTabbyImportOperation(gate(GateConfig), gate(GateVault), nil, nil, nil, nil, nil), DispositionDirect},
+		{"ConfigOperation", NewConfigOperation(gate(GateConfig), gate(GateVault), nil, nil, nil, nil, nil, nil, nil, nil), DispositionDirect},
+		{"ContentOperation", NewContentOperation(gate(GateContent), db), DispositionDirect},
+		{"FilesystemOpenOperation", NewFilesystemOpenOperation(gate(GateSession), nil, nil, nil), DispositionAdapted},
+		{"FilesystemBindingOperation", NewFilesystemBindingOperation(nil), DispositionAdapted},
+		{"GitOpenOperation", NewGitOpenOperation(gate(GateSession), testGitBulkhead(), nil, nil, nil), DispositionAdapted},
+		{"GitBindingOperation", NewGitBindingOperation(schedule.NewKeyed("git"), testGitBulkhead(), nil), DispositionAdapted},
+		{"LayoutOperation", NewLayoutOperation(gate(GateContent), db), DispositionDirect},
+		{"LedgerOperation", NewLedgerOperation(gate(GateContent), db), DispositionExcluded},
+		{"NoteOperation", NewNoteOperation(gate(GateConfig), nil), DispositionDirect},
+		{"OpenOperation", NewOpenOperation(gate(GateConfig), gate(GateSession), nil, nil), DispositionAdapted},
+		{"SecretOperation", NewSecretOperation(gate(GateConfig), gate(GateVault), nil, nil, nil, nil), DispositionDirect},
+		{"SessionOperation", NewSessionOperation(gate(GateSession), nil, nil), DispositionAdapted},
 		{"SessionEndOperation", endOp, DispositionAdapted},
 		{"SessionTargetOperation", targetOp, DispositionAdapted},
-		{"SnippetOperation", NewSnippetOperation(gate(GateConfig), gate("lane"), nil), DispositionDirect},
-		{"UIStateOperation", NewUIStateOperation(gate(GateConfig), gate("lane"), nil), DispositionExcluded},
-		{"VaultOperation", NewVaultOperation(gate(GateVault), gate("lane"), nil), DispositionDirect},
-		{"VaultResetOperation", NewVaultResetOperation(stores, catalog.OpVaultReset.Declaration(), gate("lane"), nil), DispositionDirect},
-		{"RestoreOperation", NewRestoreOperation(stores, catalog.OpBackupRestore.Declaration(), gate("lane"), nil), DispositionDirect},
+		{"SnippetOperation", NewSnippetOperation(gate(GateConfig), nil), DispositionDirect},
+		{"UIStateOperation", NewUIStateOperation(gate(GateConfig), nil), DispositionExcluded},
+		{"VaultOperation", NewVaultOperation(gate(GateVault), nil), DispositionDirect},
+		{"VaultResetOperation", NewVaultResetOperation(stores, catalog.OpVaultReset.Declaration(), nil), DispositionDirect},
+		{"RestoreOperation", NewRestoreOperation(stores, catalog.OpBackupRestore.Declaration(), nil), DispositionDirect},
 	}
 
 	for _, tc := range cases {
@@ -100,17 +100,16 @@ func TestDispositionMissingRefusesAssembly(t *testing.T) {
 			t.Fatalf("panic = %v, want invalid operation disposition", got)
 		}
 	}()
-	_ = newOperation[any](Disposition{}, Gate("test", 1, 1, time.Second), &guard{}, nil)
+	_ = newOperation[any](Disposition{}, Gate("test", 1, time.Second), &guard{}, nil)
 }
 
-// This proves operation-owned domain-plus-lane acquisition, direct or wrapped.
-// It does NOT prove that a transport binding avoids acquiring the same gate a
-// second time; that assertion lives in nocx-o9era.3.
+// This proves operation-owned domain acquisition, direct or wrapped. It does
+// NOT prove that a transport binding avoids acquiring the same gate a second
+// time; that assertion lives in nocx-o9era.3.
 func TestOperationOwnsDomainGate(t *testing.T) {
 	log := make([]string, 0, 2)
 	contentGate := &recordingDispositionAdmission{name: GateContent, log: &log}
-	lane := &recordingDispositionAdmission{name: "lane", log: &log}
-	op := NewContentOperation(contentGate, lane, nil)
+	op := NewContentOperation(contentGate, nil)
 
 	if err := op.Run(context.Background(), func(context.Context, ContentService) error { return nil }); err != nil {
 		t.Fatalf("direct operation Run: %v", err)
@@ -126,7 +125,7 @@ func TestOperationOwnsDomainGate(t *testing.T) {
 	}
 	wrapped := strings.Join(log, ",")
 
-	want := "acquire:content,acquire:lane,release:lane,release:content"
+	want := "acquire:content,release:content"
 	if direct != want || wrapped != want {
 		t.Fatalf("operation traces = direct %q, wrapped %q, want %q", direct, wrapped, want)
 	}

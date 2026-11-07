@@ -2274,7 +2274,7 @@ func (h tabbyHandlers) planTabbyImport(ctx context.Context, svc capability.Tabby
 // config handlers; a second construction would be a second wiring). It
 // returns whether the endpoint repository is wired, the "endpoints not
 // available" gate the handlers check first.
-func (s *WSServer) buildConfigOp(lane, configGate, vaultGate control.Admission) (capability.ConfigOperation, bool) {
+func (s *WSServer) buildConfigOp(configGate, vaultGate control.Admission) (capability.ConfigOperation, bool) {
 	// Endpoints ride the profile store (ADR-0030): the same JSON document,
 	// so the profile store satisfies the endpoint repository. The nil guard
 	// is real: the type assertion panics on a nil interface, and profiles
@@ -2294,7 +2294,7 @@ func (s *WSServer) buildConfigOp(lane, configGate, vaultGate control.Admission) 
 		}
 	}
 	return capability.NewConfigOperation(
-		configGate, vaultGate, lane,
+		configGate, vaultGate,
 		s.profiles, s.groups, endpointsRepo, rolesRepo, s.profileSvc, s.settings,
 		s.vaultRowResolver(), s.vaultEndpointSecrets(),
 	), endpointsRepo != nil
@@ -2303,7 +2303,7 @@ func (s *WSServer) buildConfigOp(lane, configGate, vaultGate control.Admission) 
 // configSpecs declares the config-domain control methods. The ConfigOperation
 // is built ONCE by buildConfigOp (in buildControlPlane) and shared with the
 // agent specs; the handler families receive it.
-func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate control.Admission, configOp capability.ConfigOperation, endpointWired bool, noteOp capability.NoteOperation, snippetOp capability.SnippetOperation) []methodSpec {
+func (s *WSServer) configSpecs(configGate, vaultGate control.Admission, configOp capability.ConfigOperation, endpointWired bool, noteOp capability.NoteOperation, snippetOp capability.SnippetOperation) []methodSpec {
 	profilesWired := s.profiles != nil
 	groupsWired := s.groups != nil
 	settingsWired := s.settings != nil
@@ -2313,17 +2313,17 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 
 	noteWired := s.notes != nil
 	uiStateWired := s.uiState != nil
-	uiStateOp := capability.NewUIStateOperation(configGate, lane, s.uiState)
+	uiStateOp := capability.NewUIStateOperation(configGate, s.uiState)
 	var tabbyOp capability.TabbyImportOperation
 	if profilesWired || groupsWired || s.credentials != nil {
 		tabbyOp = capability.NewTabbyImportOperation(
-			configGate, vaultGate, lane,
+			configGate, vaultGate,
 			s.profiles, s.groups, s.profileSvc,
 			s.vaultSecretSeam(), s.credentials,
 		)
 	}
-	configSub := s.operationQueue("config")
-	tabbySub := s.operationQueue("tabby")
+	configSub := s.work
+	tabbySub := s.work
 
 	specs := []methodSpec{
 		regResponder(configSub, catalog.OpProfilesList, noParams(), func(r Responder) handlerFunc {

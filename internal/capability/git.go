@@ -49,7 +49,7 @@ type GitOpenService interface {
 // GitOpenOperation is the typed operation for git.open, and it is two-phase
 // for the reason OpenOperation is (nocx-l21ib.1, nocx-zg3k3.14.17): Resolve
 // runs under the session gate alone, Open under the checkout's failure-domain
-// bulkhead and the execution lane. On an ssh session the open is a helper
+// bulkhead. On an ssh session the open is a helper
 // round trip — a lease, a uname, the open, the first status — and the session
 // gate is capacity one for every session request of every pane. Held across
 // that, a reloaded window's few ssh panes filled its wait queue and every
@@ -63,22 +63,21 @@ type GitOpenOperation interface {
 	AssistantOperation
 	// Resolve runs fn under the session gate and nothing else.
 	Resolve(context.Context, func(context.Context, GitOpenService) error) error
-	// Open runs fn under the checkout's bulkhead and the execution lane, no
-	// session gate held. The declaration's turn and max are enforced; the
+	// Open runs fn under the checkout's bulkhead, no session gate held. The declaration's turn and max are enforced; the
 	// failure domain is read from the session and the cwd the open names.
 	Open(ctx context.Context, sess session.Session, cwd string, fn func(context.Context, GitOpenService) error) error
 }
 
 // NewGitOpenOperation builds the git.open operation.
 func NewGitOpenOperation(
-	sessionGate control.Admission, bulkhead *schedule.Bulkhead, lane control.Admission,
+	sessionGate control.Admission, bulkhead *schedule.Bulkhead,
 	registry session.Registry, factory GitOpenFactory, reg *registry.Registry,
 ) GitOpenOperation {
 	g := &guard{}
 	disposition := Adapted("git.open", "opening a repository resolves a session and selects its helper or local binding")
 	return &gitOpenOperation{
 		resolve:  newOperation[GitOpenService](disposition, control.NewComposite(sessionGate), g, newGitOpenService(g, registry, factory, reg)),
-		bulkhead: bulkhead, lane: lane, guard: g,
+		bulkhead: bulkhead, guard: g,
 		svc: newGitOpenService(g, registry, factory, reg), disposition: disposition,
 	}
 }
@@ -88,7 +87,6 @@ func NewGitOpenOperation(
 type gitOpenOperation struct {
 	resolve     *operation[GitOpenService]
 	bulkhead    *schedule.Bulkhead
-	lane        control.Admission
 	guard       *guard
 	svc         GitOpenService
 	disposition Disposition
@@ -108,12 +106,7 @@ func (o *gitOpenOperation) Open(ctx context.Context, sess session.Session, cwd s
 		if err != nil {
 			return nil, nil, gitBulkheadError(ctx, allow, err)
 		}
-		permit, rejection := o.lane.TryAcquire(waitCtx)
-		if rejection != nil {
-			lease.Release()
-			return nil, nil, gitRefused(ctx, rejection)
-		}
-		return func() { permit.Release(); lease.Release() }, lease.Abandon, nil
+		return func() { lease.Release() }, lease.Abandon, nil
 	}, func(workCtx context.Context) error {
 		o.guard.begin()
 		defer o.guard.end()
@@ -245,12 +238,13 @@ type GitBindingOperation interface {
 }
 
 // NewGitBindingOperation builds the git-binding operation. order serialises
-// mutations per checkout; bulkhead bounds execution per checkout mount; lane
-// is the execution lane this migration still holds.
-func NewGitBindingOperation(order *schedule.Keyed, bulkhead *schedule.Bulkhead, lane control.Admission, reg *registry.Registry) GitBindingOperation {
+// mutations per checkout; bulkhead bounds execution per checkout mount. There
+// is no third admission: the execution lane went with the rest of the capacity
+// answers (ADR-8eej3e66 stage 8).
+func NewGitBindingOperation(order *schedule.Keyed, bulkhead *schedule.Bulkhead, reg *registry.Registry) GitBindingOperation {
 	g := &guard{}
 	return &gitBindingOperation{
-		order: order, bulkhead: bulkhead, lane: lane, reg: reg, g: g,
+		order: order, bulkhead: bulkhead, reg: reg, g: g,
 		svc:         newGitBindingService(g, reg),
 		disposition: Adapted("git.refresh", "git calls require an assistant-owned repository lease"),
 	}
@@ -259,7 +253,6 @@ func NewGitBindingOperation(order *schedule.Keyed, bulkhead *schedule.Bulkhead, 
 type gitBindingOperation struct {
 	order       *schedule.Keyed
 	bulkhead    *schedule.Bulkhead
-	lane        control.Admission
 	reg         *registry.Registry
 	g           *guard
 	svc         GitBindingService
@@ -298,12 +291,6 @@ func (o *gitBindingOperation) Run(ctx context.Context, bindingID string, fn func
 			return nil, nil, gitBulkheadError(ctx, allow, err)
 		}
 		releases = append(releases, lease.Release)
-		permit, rejection := o.lane.TryAcquire(waitCtx)
-		if rejection != nil {
-			releaseAll()
-			return nil, nil, gitRefused(ctx, rejection)
-		}
-		releases = append(releases, permit.Release)
 		return releaseAll, lease.Abandon, nil
 	}, func(workCtx context.Context) error {
 		o.g.begin()

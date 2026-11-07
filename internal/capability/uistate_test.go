@@ -21,9 +21,9 @@ func newUIStateOpForTest(t *testing.T) (UIStateOperation, *uistate.Store) {
 	store := uistate.New(storage.NewDocumentStore(t.TempDir()), nil)
 	t.Cleanup(func() { _ = store.Close() })
 	gate := func(name string) control.Admission {
-		return Gate(name, 1, 8, time.Second)
+		return Gate(name, 1, time.Second)
 	}
-	return NewUIStateOperation(gate(GateConfig), gate("lane"), store), store
+	return NewUIStateOperation(gate(GateConfig), store), store
 }
 
 func TestUIStateWindow_RecordsAndReadsThroughOperation(t *testing.T) {

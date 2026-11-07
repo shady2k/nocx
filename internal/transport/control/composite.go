@@ -17,11 +17,9 @@ type composite struct {
 // in order and, if any of them refuses, releases every permit acquired so far
 // before returning that rejection.
 //
-// The order is the contract, not an accident: acquire the conflict admission
-// BEFORE the scarce execution permit, so work refused or waiting at the
-// conflict gate never occupies an active worker permit (AD-8, constraint 4 of
-// the executor contract). Otherwise conflicting requests fill every worker and
-// unrelated work stalls.
+// The order is the contract, not an accident: conflict order is acquired
+// BEFORE execution capacity, so waiting conflict work never occupies a
+// worker (AD-8, constraint 4 of the executor contract).
 func NewComposite(admissions ...Admission) Admission {
 	names := make([]string, len(admissions))
 	for i, a := range admissions {
@@ -29,41 +27,6 @@ func NewComposite(admissions ...Admission) Admission {
 	}
 	return &composite{name: strings.Join(names, "+"), admissions: admissions}
 }
-
-// NewCompositeNonblocking combines several NON-BLOCKING admissions into one
-// NonblockingAdmission, acquired in order with release of the parts already
-// held on failure of any. It is the composite for the submission path
-// (probe, dialog): every part's TryAcquire never blocks, so the composite's
-// never does either, and the result satisfies NonblockingAdmission — the
-// only type a bounded Submission accepts.
-//
-// The operation path composes WAITING domain gates with the lane through the
-// plain NewComposite, whose result is a plain Admission acquired inside the
-// task goroutine (operation Run); the two constructors encode the two
-// admission classes (ADR-0026). A composite containing a waiting admission
-// must not satisfy NonblockingAdmission, so it cannot be passed to
-// NewBoundedSubmission by accident.
-func NewCompositeNonblocking(admissions ...NonblockingAdmission) NonblockingAdmission {
-	names := make([]string, len(admissions))
-	plain := make([]Admission, len(admissions))
-	for i, a := range admissions {
-		names[i] = a.Name()
-		plain[i] = a
-	}
-	return &nonblockingComposite{composite{
-		name:       strings.Join(names, "+"),
-		admissions: plain,
-	}}
-}
-
-// nonblockingComposite is a composite whose parts are all non-blocking; the
-// marker method is what lets it satisfy NonblockingAdmission while the plain
-// composite (which may hold waiting gates) does not.
-type nonblockingComposite struct {
-	composite
-}
-
-func (n *nonblockingComposite) nonblocking() {}
 
 func (c *composite) Name() string { return c.name }
 
@@ -114,11 +77,7 @@ func (p *compositePermit) Release() {
 func Parts(a Admission) []Admission {
 	c, ok := a.(*composite)
 	if !ok {
-		if n, isNB := a.(*nonblockingComposite); isNB {
-			c = &n.composite
-		} else {
-			return []Admission{a}
-		}
+		return []Admission{a}
 	}
 	out := make([]Admission, 0, len(c.admissions))
 	for _, part := range c.admissions {

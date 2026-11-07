@@ -1268,25 +1268,25 @@ func validateVaultResolveLineRaw(raw json.RawMessage) string {
 // The operations are built here from the wired stores (composition root for
 // this domain): nil when their stores are absent, and the handlers then
 // answer the old not-available errors.
-func (s *WSServer) vaultSpecs(lane control.Admission, configGate, vaultGate control.Admission, stores *capability.StoreGuard) []methodSpec {
+func (s *WSServer) vaultSpecs(configGate, vaultGate control.Admission, stores *capability.StoreGuard) []methodSpec {
 	var vaultOp capability.VaultOperation
 	if s.vaultLifecycle != nil {
-		vaultOp = capability.NewVaultOperation(vaultGate, lane, s.vaultLifecycle)
+		vaultOp = capability.NewVaultOperation(vaultGate, s.vaultLifecycle)
 	}
 	var secretOp capability.SecretOperation
 	if s.vaultLifecycle != nil && s.profiles != nil && s.groups != nil && s.credentials != nil {
 		secretOp = capability.NewSecretOperation(
-			configGate, vaultGate, lane, s.profiles, s.groups,
+			configGate, vaultGate, s.profiles, s.groups,
 			s.vaultLifecycle, s.credentials,
 		)
 	}
 	var resetOp capability.VaultResetOperation
 	if s.vaultReset != nil {
-		resetOp = capability.NewVaultResetOperation(stores, catalog.OpVaultReset.Declaration(), lane, s.vaultReset)
+		resetOp = capability.NewVaultResetOperation(stores, catalog.OpVaultReset.Declaration(), s.vaultReset)
 	}
-	vaultSub := s.operationQueue("vault")
-	secretSub := s.operationQueue("vault-secret")
-	resetSub := s.operationQueue("vault-reset")
+	vaultSub := s.work
+	secretSub := s.work
+	resetSub := s.work
 
 	return []methodSpec{
 		whenAvailable(regResponder(vaultSub, catalog.OpVaultStatus, noParams(), func(r Responder) handlerFunc {

@@ -32,17 +32,18 @@ type SessionOperation interface {
 	Run(context.Context, func(context.Context, SessionService) error) error
 }
 
-// SessionEndOperation retires one authoritative ID under the session gate and
-// the execution lane, and releases BOTH at retirement. Before runs after
+// SessionEndOperation retires one authoritative ID under the session gate, and
+// releases it at retirement. Before runs after
 // retirement and before teardown, so transport can mark the expected exit and
 // cancel the session's resize lane without exposing the ID to another attach.
 // A non-nil returned session means retirement committed even if teardown failed.
 //
-// The lane's interval ends at the retirement commit, not at process completion.
-// A teardown can wait on a helper or an ssh channel, and a lane permit held
-// across that wait is a slow holder of the control plane: it refuses unrelated
-// work while the session is already retired. The close still does not RETURN
-// until teardown settles, so its caller still learns the teardown's outcome.
+// The session gate's interval ends at the retirement commit, not at process
+// completion. A teardown can wait on a helper or an ssh channel, and a gate
+// held across that wait is a slow holder of the control plane: it makes
+// unrelated session work wait while the session is already retired. The close
+// still does not RETURN until teardown settles, so its caller still learns the
+// teardown's outcome.
 type SessionEndOperation interface {
 	AssistantOperation
 	Run(context.Context, func(session.Session)) (session.Session, error)
@@ -50,7 +51,6 @@ type SessionEndOperation interface {
 
 type sessionEndOperation struct {
 	sessionGate control.Admission
-	lane        control.Admission
 	registry    session.Registry
 	id          session.ID
 }
@@ -66,9 +66,9 @@ type SessionTarget struct {
 }
 
 // SessionTargetOperation snapshots one live session under the session gate,
-// then releases that gate before running its callback while retaining the
-// ordinary execution lane. Slow remote I/O therefore stays bounded without
-// blocking resize, close, or another session lookup.
+// then releases that gate before running its callback. Slow remote I/O is
+// bounded by its own declared max without blocking resize, close, or another
+// session lookup.
 type SessionTargetOperation interface {
 	AssistantOperation
 	Run(context.Context, func(context.Context, SessionTarget) error) error
@@ -76,7 +76,6 @@ type SessionTargetOperation interface {
 
 type sessionTargetOperation struct {
 	sessionGate control.Admission
-	lane        control.Admission
 	registry    session.Registry
 	id          session.ID
 	disposition Disposition
@@ -89,7 +88,6 @@ type sessionTargetOperation struct {
 // the operation's Run; the per-call Get inside the callback then errors.
 type SessionOperations struct {
 	sessionGate control.Admission
-	lane        control.Admission
 	registry    session.Registry
 	usage       session.ProfileUsageTracker
 }
@@ -97,8 +95,8 @@ type SessionOperations struct {
 // NewSessionOperations wires the per-session factory. usage may be nil: an
 // unwired tracker answers an empty last-used map, exactly as the transport
 // handles a nil tracker today.
-func NewSessionOperations(sessionGate, lane control.Admission, registry session.Registry, usage session.ProfileUsageTracker) *SessionOperations {
-	return &SessionOperations{sessionGate: sessionGate, lane: lane, registry: registry, usage: usage}
+func NewSessionOperations(sessionGate control.Admission, registry session.Registry, usage session.ProfileUsageTracker) *SessionOperations {
+	return &SessionOperations{sessionGate: sessionGate, registry: registry, usage: usage}
 }
 
 // ForSession returns a SessionOperation scoped to id, or an error when the
@@ -108,7 +106,7 @@ func (f *SessionOperations) ForSession(id session.ID) (SessionOperation, error) 
 		return nil, fmt.Errorf("capability: unknown session %q", id)
 	}
 	g := &guard{}
-	return newOperation[SessionService](Adapted("terminal.resize", "session operations enforce assistant-owned session identity"), control.NewComposite(f.sessionGate, f.lane), g, newSessionService(g, f.registry, f.usage)), nil
+	return newOperation[SessionService](Adapted("terminal.resize", "session operations enforce assistant-owned session identity"), f.sessionGate, g, newSessionService(g, f.registry, f.usage)), nil
 }
 
 // ForSessionEnd builds the terminal operation for one live session. Ordinary
@@ -120,7 +118,6 @@ func (f *SessionOperations) ForSessionEnd(id session.ID) (SessionEndOperation, e
 	}
 	return &sessionEndOperation{
 		sessionGate: f.sessionGate,
-		lane:        f.lane,
 		registry:    f.registry,
 		id:          id,
 	}, nil
@@ -157,29 +154,17 @@ func (op *sessionEndOperation) Run(ctx context.Context, before func(session.Sess
 		return nil, cancelled
 	}
 
-	// Both permits precede retirement: a refused lane must leave the session
-	// live. Acquisition order remains domain gate before execution lane.
-	lanePermit, rej := op.lane.TryAcquire(ctx)
-	if rej != nil {
-		return nil, refused(ctx, rej)
-	}
-	defer lanePermit.Release()
-	if cancelled := refuseCancelled(); cancelled != nil {
-		return nil, cancelled
-	}
-
 	sess, finish, err := op.registry.PrepareEndSession(op.id)
 	if err != nil {
 		return nil, err
 	}
-	// Retirement is the commit point, and it is where BOTH intervals close:
-	// before it the close may still be refused and leave the session live;
-	// after it the identity is gone and nothing can conflict with it. The
-	// teardown below may wait on a helper or an ssh channel, and holding a
-	// lane permit across that wait refuses unrelated control work while the
-	// session is already retired. The deferred releases remain the failure
-	// path's answer; Release is idempotent.
-	lanePermit.Release()
+	// Retirement is the commit point, and it is where the gate's interval
+	// closes: before it the close may still be refused and leave the session
+	// live; after it the identity is gone and nothing can conflict with it.
+	// The teardown below may wait on a helper or an ssh channel, and holding
+	// the session gate across that wait refuses unrelated session work while
+	// the session is already retired. The deferred release remains the
+	// failure path's answer; Release is idempotent.
 	sessionPermit.Release()
 	// Cancellation or a failing callback may not strand the removed process;
 	// completion still runs before this call returns, so the caller is told
@@ -199,7 +184,6 @@ func (f *SessionOperations) ForSessionTarget(id session.ID) (SessionTargetOperat
 	}
 	return &sessionTargetOperation{
 		sessionGate: f.sessionGate,
-		lane:        f.lane,
 		registry:    f.registry,
 		id:          id,
 		disposition: Adapted("terminal.reattach", "session targets require an assistant-owned session scope"),
@@ -220,15 +204,6 @@ func (op *sessionTargetOperation) Run(ctx context.Context, fn func(context.Conte
 		ctx = control.WithOrderHeld(ctx)
 	}
 
-	// Preserve canonical order: conflict admission before the scarce lane.
-	// The lane remains held for the callback; only the session gate ends
-	// after the immutable facts have been copied.
-	lanePermit, rej := op.lane.TryAcquire(ctx)
-	if rej != nil {
-		return refused(ctx, rej)
-	}
-	defer lanePermit.Release()
-
 	sess, err := op.registry.Get(op.id)
 	if err != nil {
 		return err
@@ -245,9 +220,9 @@ func (op *sessionTargetOperation) Run(ctx context.Context, fn func(context.Conte
 // NewSessionOperation builds a single SessionOperation — for handlers whose
 // operation is fixed at construction (sessions.status, and the session
 // half of open) rather than keyed by a per-request id.
-func NewSessionOperation(sessionGate, lane control.Admission, registry session.Registry, usage session.ProfileUsageTracker) SessionOperation {
+func NewSessionOperation(sessionGate control.Admission, registry session.Registry, usage session.ProfileUsageTracker) SessionOperation {
 	g := &guard{}
-	return newOperation[SessionService](Adapted("terminal.resize", "session operations enforce assistant-owned session identity"), control.NewComposite(sessionGate, lane), g, newSessionService(g, registry, usage))
+	return newOperation[SessionService](Adapted("terminal.resize", "session operations enforce assistant-owned session identity"), control.NewComposite(sessionGate), g, newSessionService(g, registry, usage))
 }
 
 // newSessionService builds the concrete session service bound to guard g.

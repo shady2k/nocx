@@ -3408,9 +3408,9 @@ describe('a restored pane and the session the backend still holds', () => {
   })
 
   // THE DEFECT (nocx-3an1s.1.5). A claim that failed for a reason that is not
-  // a verdict — "Control plane busy", a dropped socket, a refused replay —
-  // says nothing about whether the helper's shell still exists. Falling back
-  // to `open` here is what duplicated ten helper sessions into eighteen.
+  // a verdict — a call that did not start, a dropped socket, a refused replay
+  // — says nothing about whether the helper's shell still exists. Falling
+  // back to `open` here is what duplicated ten helper sessions into eighteen.
   it('keeps the pane on the same session when the claim is refused without a verdict', async () => {
     const chain = makeLayoutStore()
     await mountPaneManager(makeClient(), undefined, undefined, undefined, chain)
@@ -3419,12 +3419,7 @@ describe('a restored pane and the session the backend still holds', () => {
     const returning = makeClient()
     returning.listLiveSessions.mockResolvedValue([liveEntry(paneId)])
     returning.reclaimSession.mockRejectedValue(
-      new RpcError('Control plane busy', -32004, {
-        reason: 'control-saturated',
-        scope: 'session',
-        retryable: true,
-        retryAfterMs: 50,
-      }),
+      new RpcError('The call did not start', -32005, { reason: 'not-started' }),
     )
     const mounted = await mountPaneManager(
       returning,
@@ -3494,7 +3489,7 @@ describe('a restored pane and the session the backend still holds', () => {
     const paneId = chain.backend.rows().panes[0].id
 
     const returning = makeClient()
-    returning.listLiveSessions.mockRejectedValue(new Error('Control plane busy'))
+    returning.listLiveSessions.mockRejectedValue(new Error('the connection dropped'))
     const mounted = await mountPaneManager(
       returning,
       undefined,

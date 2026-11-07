@@ -238,22 +238,22 @@ func (s *WSServer) agentRuleStoreSpecs() []methodSpec {
 	unavailable := "method not found: agent rules not wired"
 	return []methodSpec{
 		whenAvailable(
-			regResponder(s.lane, catalog.OpAgentRules, noParams(), func(r Responder) handlerFunc {
+			regResponder(s.work, catalog.OpAgentRules, noParams(), func(r Responder) handlerFunc {
 				return func(ctx context.Context, req jsonrpcRequest) { s.handleAgentRules(ctx, req, r) }
 			}),
 			s.agentRulesAvailable, unavailable),
 		whenAvailable(
-			regResponder(s.lane, catalog.OpAgentRulesSet, params(validateAgentRulesSetRaw), func(r Responder) handlerFunc {
+			regResponder(s.work, catalog.OpAgentRulesSet, params(validateAgentRulesSetRaw), func(r Responder) handlerFunc {
 				return func(ctx context.Context, req jsonrpcRequest) { s.handleAgentRulesSet(ctx, req, r) }
 			}),
 			s.agentRulesAvailable, unavailable),
 		whenAvailable(
-			regResponder(s.lane, catalog.OpAgentRulesSetEnabled, params(validateAgentRulesSetEnabledRaw), func(r Responder) handlerFunc {
+			regResponder(s.work, catalog.OpAgentRulesSetEnabled, params(validateAgentRulesSetEnabledRaw), func(r Responder) handlerFunc {
 				return func(ctx context.Context, req jsonrpcRequest) { s.handleAgentRulesSetEnabled(ctx, req, r) }
 			}),
 			s.agentRulesAvailable, unavailable),
 		whenAvailable(
-			regResponder(s.lane, catalog.OpAgentRulesDelete, params(validateAgentRulesDeleteRaw), func(r Responder) handlerFunc {
+			regResponder(s.work, catalog.OpAgentRulesDelete, params(validateAgentRulesDeleteRaw), func(r Responder) handlerFunc {
 				return func(ctx context.Context, req jsonrpcRequest) { s.handleAgentRulesDelete(ctx, req, r) }
 			}),
 			s.agentRulesAvailable, unavailable),

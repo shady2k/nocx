@@ -2,6 +2,7 @@ package transport
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/shady2k/nocx/internal/capability"
 )
@@ -25,31 +26,29 @@ const (
 	gitBulkheadQueue      = 32
 	gitAbandonedPerDomain = 8
 	gitAbandonedGlobal    = 32
-
-	// gitOrderCapacity bounds running and queued git work across every
-	// checkout: 8 permits on each of the 8 mounts this server admits at
-	// once. Beyond it a call waits at its turn like any other.
-	gitOrderCapacity = 64
 )
 
 // GitOperationExpiredCode answers a git call whose declared lifetime ran out
-// before the work finished. It is not the saturation code (-32004): the call
+// before the work finished. It is the one lifetime code: the call
 // was accepted and its outcome is the declaration's, not a refusal to run.
 const GitOperationExpiredCode = -32005
 
 // answerGitOperationError is the one error seam for git.* operations. A
 // declaration's expiry is answered with its own outcome; a lane or queue
-// refusal keeps the saturation class stage 8 removes; anything else is the
+// wait keeps the declaration's own answer; anything else is the
 // handler's ordinary internal error.
 func answerGitOperationError(r Responder, req jsonrpcRequest, err error) {
 	if err == nil {
 		return
 	}
+	// The message is the error's own text, taken once so both arms below carry
+	// the same sentence.
+	sentence := fmt.Sprint(err)
 	var notStarted *capability.NotStartedError
 	if errors.As(err, &notStarted) {
 		_ = r.TryError(req.ID, RPCError{
 			Code:    GitOperationExpiredCode,
-			Message: err.Error(),
+			Message: sentence,
 			Data:    &gitErrorData{Reason: "not-started"},
 		})
 		return
@@ -66,7 +65,7 @@ func answerGitOperationError(r Responder, req jsonrpcRequest, err error) {
 		}
 		_ = r.TryError(req.ID, RPCError{
 			Code:    GitOperationExpiredCode,
-			Message: err.Error(),
+			Message: sentence,
 			Data:    &gitErrorData{Reason: reason},
 		})
 		return

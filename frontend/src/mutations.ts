@@ -25,9 +25,10 @@ import type { Dispatcher } from './dispatcher'
 import type { MutationReplayed } from './generated/mutation.replayed'
 import type { OperationOutcome } from './generated/operation.outcome'
 import { callOperationDeclaration } from './generated/operations'
+import { waitingSentence } from './operations/waiting-sentences'
 
 /** The wire's closed set of answers. */
-export type MutationAnswer = OperationOutcome['outcome']
+type MutationAnswer = OperationOutcome['outcome']
 
 /** What one answer means to the person, in their terms. */
 export interface MutationAssessment {
@@ -81,7 +82,7 @@ export function assessmentOf(result: OperationOutcome): MutationAssessment {
  *  the sentence names what to look at instead of pretending either answer. */
 function unknownSentence(operation: string): string {
   const waiting = operation === '' ? undefined : callOperationDeclaration(operation)?.waiting
-  const subject = waiting === undefined ? 'the change' : `“${waiting}”`
+  const subject = waiting === undefined ? 'the change' : `“${waitingSentence(operation, waiting)}”`
   return `The outcome is unknown: nocx keeps no record of ${subject}. Check what it changed before trying again.`
 }
 

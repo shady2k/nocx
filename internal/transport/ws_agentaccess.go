@@ -147,11 +147,11 @@ type agentAccessHandlers struct {
 
 func (s *WSServer) agentAccessSpecs() []methodSpec {
 	return []methodSpec{
-		regResponder(s.lane, catalog.OpAgentAccessList, noParams(), func(r Responder) handlerFunc {
+		regResponder(s.work, catalog.OpAgentAccessList, noParams(), func(r Responder) handlerFunc {
 			h := agentAccessHandlers{store: s.agentAccess, wired: s.agentAccess != nil, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleList(ctx, req) }
 		}),
-		regResponder(s.lane, catalog.OpAgentAccessForget, params(validateAgentAccessForgetRaw), func(r Responder) handlerFunc {
+		regResponder(s.work, catalog.OpAgentAccessForget, params(validateAgentAccessForgetRaw), func(r Responder) handlerFunc {
 			h := agentAccessHandlers{store: s.agentAccess, wired: s.agentAccess != nil, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleForget(ctx, req) }
 		}),

@@ -226,20 +226,20 @@ func TestEndpointsProbe_RefusesControlCharacterHeaderBeforeAnyRequest(t *testing
 // release shape as profiles.tabbyExecute, here in a lane that refuses by
 // design rather than waits).
 //
-// Retrying is what the renderer does with a retryable refusal, and it is the
-// only correct wait here: the state being waited on is the lane answering
-// about this request. wantWithin bounds a lane that never frees at all; it is
-// not the mechanism, and a slower machine simply retries once more.
+// The probe is a serialisation point, not a scarce worker (ADR-8eej3e66 §5):
+// a second press WAITS for the first, so the answer this returns is the
+// probe's own result and never a capacity refusal. The deadline is the test's
+// own guard against a lane that never frees at all.
 func probeAnswer(t *testing.T, h *assistantHarness, params map[string]any) json.RawMessage {
 	t.Helper()
 	deadline := time.Now().Add(wantWithin)
 	for {
 		raw := jsonrpcCall(t, h.conn, "endpoints.probe", params)
-		if !strings.Contains(string(raw), `"reason":"control-saturated"`) {
+		if !strings.Contains(string(raw), `"code":-32004`) {
 			return raw
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the probe lane never freed: %s", raw)
+			t.Fatalf("the probe never answered: %s", raw)
 		}
 	}
 }

@@ -101,10 +101,10 @@ type StoreGuard struct {
 }
 
 // NewStoreGuard derives the plan from the catalogue and builds one barrier per
-// declared barrier name and one key per store. maxQueue and waitTimeout are the
-// bounds every acquisition carries; the composition root names them, the same
-// way it names the domain gates' bounds.
-func NewStoreGuard(decls []catalog.Declaration, maxQueue int, waitTimeout time.Duration) *StoreGuard {
+// declared barrier name and one key per store. waitTimeout is the wait bound a
+// caller without a declared turn inherits; a control call carries its own turn
+// (ADR-8eej3e66 §3), so the composition root's value is a fallback.
+func NewStoreGuard(decls []catalog.Declaration, waitTimeout time.Duration) *StoreGuard {
 	g := &StoreGuard{
 		barriers:   make(map[string]*control.Barrier),
 		keys:       make(map[string]control.Admission),
@@ -151,11 +151,11 @@ func NewStoreGuard(decls []catalog.Declaration, maxQueue int, waitTimeout time.D
 	}
 	sort.Strings(g.barrierOrder)
 	for _, name := range g.barrierOrder {
-		g.barriers[name] = control.NewBarrier(name, maxQueue, waitTimeout)
+		g.barriers[name] = control.NewBarrier(name, waitTimeout)
 	}
 	for _, store := range storeOrder {
 		g.stores = append(g.stores, store)
-		g.keys[store] = control.NewWaitingSemaphore("store:"+store, 1, maxQueue, waitTimeout)
+		g.keys[store] = control.NewWaitingSemaphore("store:"+store, 1, waitTimeout)
 		// Rebuild the member list in barrier order from the names collected
 		// above: the acquisition order may not depend on which declaration
 		// happened to be walked first.

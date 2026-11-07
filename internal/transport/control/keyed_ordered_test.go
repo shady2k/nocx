@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"strconv"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -17,9 +18,9 @@ func awaitKeyedTask(t *testing.T, ch <-chan struct{}, what string) {
 	}
 }
 
-func newTestKeyedOrdered(t *testing.T, name string, capacity int) *keyedOrderedSubmission {
+func newTestKeyedOrdered(t *testing.T, name string) *keyedOrderedSubmission {
 	t.Helper()
-	sub, ok := NewKeyedOrderedSubmission(name, capacity).(*keyedOrderedSubmission)
+	sub, ok := NewKeyedOrderedSubmission(name).(*keyedOrderedSubmission)
 	if !ok {
 		t.Fatal("unexpected keyed ordered submission implementation")
 	}
@@ -27,7 +28,7 @@ func newTestKeyedOrdered(t *testing.T, name string, capacity int) *keyedOrderedS
 }
 
 func TestKeyedOrderedSubmissionIsolatesKeysAndPreservesFIFO(t *testing.T) {
-	sub := newTestKeyedOrdered(t, "sessions", 4)
+	sub := newTestKeyedOrdered(t, "sessions")
 	t.Cleanup(sub.Shutdown)
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -78,7 +79,7 @@ func TestKeyedOrderedSubmissionIsolatesKeysAndPreservesFIFO(t *testing.T) {
 }
 
 func TestKeyedOrderedSubmissionDrainsInOrderAndReclaimsKeys(t *testing.T) {
-	sub := newTestKeyedOrdered(t, "sessions", 3)
+	sub := newTestKeyedOrdered(t, "sessions")
 	t.Cleanup(sub.Shutdown)
 	release := make(chan struct{})
 	released := false
@@ -120,60 +121,57 @@ func TestKeyedOrderedSubmissionDrainsInOrderAndReclaimsKeys(t *testing.T) {
 	}
 }
 
-func TestKeyedOrderedSubmissionBoundsRunningAndQueuedGlobally(t *testing.T) {
-	sub := newTestKeyedOrdered(t, "sessions", 3)
+// TestKeyedOrderedSubmissionAdmitsPastAnyFixedCount is the stage-8 guarantee
+// the capacity test stood for: more keys than any queue this submission used to
+// carry are all admitted and each key still runs in its own order
+// (ADR-8eej3e66 §7). What bounds what a client may have outstanding is the
+// credit window.
+func TestKeyedOrderedSubmissionAdmitsPastAnyFixedCount(t *testing.T) {
+	sub := newTestKeyedOrdered(t, "sessions")
 	t.Cleanup(sub.Shutdown)
-	release := make(chan struct{})
-	defer close(release)
-	started := make(chan struct{}, 2)
-	for _, key := range []string{"A", "B"} {
+	const keys = 64
+	var mu sync.Mutex
+	ran := make(map[string]int)
+	done := make(chan struct{})
+	remaining := keys
+	for i := range keys {
+		key := strconv.Itoa(i)
 		if rej := sub.TrySubmit(context.Background(), Task{Key: key, Run: func(context.Context) {
-			started <- struct{}{}
-			<-release
+			mu.Lock()
+			ran[key]++
+			remaining--
+			last := remaining == 0
+			mu.Unlock()
+			if last {
+				close(done)
+			}
 		}}); rej != nil {
 			t.Fatalf("submit %s: %+v", key, rej)
 		}
 	}
-	awaitKeyedTask(t, started, "first running key")
-	awaitKeyedTask(t, started, "second running key")
-	if rej := sub.TrySubmit(context.Background(), Task{Key: "A", Run: func(context.Context) {}}); rej != nil {
-		t.Fatalf("submit queued A: %+v", rej)
-	}
-	refused := make(chan *Rejection, 1)
-	go func() {
-		refused <- sub.TrySubmit(context.Background(), Task{Key: "C", Run: func(context.Context) { t.Error("refused task ran") }})
-	}()
-	select {
-	case rej := <-refused:
-		if rej == nil || rej.Reason != "capacity exhausted" || rej.Scope != "sessions" {
-			t.Fatalf("capacity refusal = %+v", rej)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("capacity admission blocked")
+	awaitKeyedTask(t, done, "every key to run")
+	mu.Lock()
+	defer mu.Unlock()
+	if len(ran) != keys {
+		t.Fatalf("%d keys ran, want %d", len(ran), keys)
 	}
 }
 
 func TestKeyedOrderedSubmissionRejectsEmptyKeysWithoutAllocatingState(t *testing.T) {
-	sub := newTestKeyedOrdered(t, "sessions", 2)
+	sub := newTestKeyedOrdered(t, "sessions")
 	if rej := sub.TrySubmit(context.Background(), Task{Run: func(context.Context) { t.Error("empty key ran") }}); rej == nil {
 		t.Fatal("empty key was admitted")
 	}
-	if sub.keys != nil || sub.admitted != 0 {
+	if sub.keys != nil {
 		t.Fatal("empty key allocated scheduling state")
 	}
 	sub.Shutdown()
 	awaitKeyedTask(t, sub.done, "empty submission shutdown")
 	sub.Shutdown()
-	zero := newTestKeyedOrdered(t, "zero", 0)
-	if rej := zero.TrySubmit(context.Background(), Task{Key: "A", Run: func(context.Context) { t.Error("zero capacity ran") }}); rej == nil {
-		t.Fatal("zero-capacity submission admitted a task")
-	}
-	zero.Shutdown()
-	awaitKeyedTask(t, zero.done, "zero-capacity submission shutdown")
 }
 
 func TestKeyedOrderedSubmissionPreservesCancelledTaskContext(t *testing.T) {
-	sub := newTestKeyedOrdered(t, "sessions", 1)
+	sub := newTestKeyedOrdered(t, "sessions")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	observed := make(chan error, 1)
@@ -189,7 +187,7 @@ func TestKeyedOrderedSubmissionPreservesCancelledTaskContext(t *testing.T) {
 
 func TestKeyedOrderedSubmissionReclaimsIdleKeysBeforeShutdown(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		sub := newTestKeyedOrdered(t, "sessions", 1)
+		sub := newTestKeyedOrdered(t, "sessions")
 		defer sub.Shutdown()
 		for i := range 64 {
 			ran := false
@@ -212,7 +210,7 @@ func TestKeyedOrderedSubmissionReclaimsIdleKeysBeforeShutdown(t *testing.T) {
 // The keyed form gives the same gate: a cancelled task queued behind a
 // running one is skipped and the queue advances to the next.
 func TestKeyedOrderedSubmissionNeverStartsAWithdrawnTask(t *testing.T) {
-	sub := newTestKeyedOrdered(t, "keyed-start-gate", 4)
+	sub := newTestKeyedOrdered(t, "keyed-start-gate")
 	t.Cleanup(sub.Shutdown)
 	block := make(chan struct{})
 	started := make(chan struct{})

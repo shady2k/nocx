@@ -832,7 +832,7 @@ export interface TerminalContentHooks {
    *  session: the backend listed a session for this pane and then said it
    *  holds no such session, or answered an inventory that names none. A
    *  REJECTION IS NOT A VERDICT (nocx-3an1s.1.5): a live list that could not
-   *  be read, a claim refused "Control plane busy", a dropped socket — none
+   *  be read, a claim that did not start, a dropped socket — none
    *  of those says the helper's shell ended, and falling back to `open` on
    *  one is what put a second shell over every live one. Such a thunk throws
    *  LiveSessionUncertainError instead; the pane keeps its surface, opens
@@ -2876,7 +2876,7 @@ export class TerminalContent extends BasePaneContent {
    * THE THREE ANSWERS ARE NOT TWO (nocx-3an1s.1.5). Null is the thunk's
    * proven absence, and a fresh shell is the right recovery. Anything else it
    * throws used to be read as absence too, and that is the defect: a claim
-   * refused "Control plane busy", or a live list that could not be read, says
+   * never got an answer, or a live list that could not be read, says
    * nothing about whether the shell ended. Those are rethrown as what they
    * are, and the caller keeps the pane instead of opening a second shell.
    */

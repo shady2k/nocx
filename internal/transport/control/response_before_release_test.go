@@ -15,23 +15,21 @@ import (
 // conflict gate (exactly the task tail of the real wiring). The second
 // submission must WAIT, never be refused.
 //
-// The wiring under test mirrors the transport's: the submission is a queue
-// (bounded spawner) and the TASK acquires the operation's composite —
-// conflict gates (waiting) before the lane — inside its Run, on the task
-// goroutine. Against the old non-blocking gates this test fails
-// deterministically: the second task's composite acquire refuses instantly.
+// The wiring under test mirrors the transport's: the submission hands the task
+// over and the TASK acquires the operation's composite — conflict gates
+// (waiting) — inside its Run, on the task goroutine. Against the old
+// non-blocking gates this test fails deterministically: the second task's
+// composite acquire refuses instantly.
 func TestResponseEnqueuedBeforeReleaseIsNotRefused(t *testing.T) {
-	conflict := NewWaitingSemaphore("config", 1, 8, time.Second)
-	lane := NewSemaphore("control", 8)
-	queue := NewSemaphore("config-queue", 8)
-	sub := NewBoundedSubmission(queue)
+	conflict := NewWaitingSemaphore("config", 1, time.Second)
+	sub := AsyncSubmission{}
 
 	responseSent := make(chan struct{})
 	releaseFirst := make(chan struct{})
 	if rej := sub.TrySubmit(context.Background(), Task{Run: func(ctx context.Context) {
 		// The operation's composite: conflict gates before the execution
 		// lane (canonical order), acquired on the task goroutine.
-		p, rej := NewComposite(conflict, lane).TryAcquire(ctx)
+		p, rej := conflict.TryAcquire(ctx)
 		if rej != nil {
 			return
 		}
@@ -53,7 +51,7 @@ func TestResponseEnqueuedBeforeReleaseIsNotRefused(t *testing.T) {
 	// request. It must not be refused at the queue...
 	ran := make(chan struct{}, 1)
 	if rej := sub.TrySubmit(context.Background(), Task{Run: func(ctx context.Context) {
-		p, rej := NewComposite(conflict, lane).TryAcquire(ctx)
+		p, rej := conflict.TryAcquire(ctx)
 		if rej == nil {
 			defer p.Release()
 		}

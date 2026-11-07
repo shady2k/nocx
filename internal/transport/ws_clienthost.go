@@ -508,7 +508,7 @@ type clientHostHandlers struct {
 //
 // host.attentionActivated is NOT: acting on a click issues further asks and
 // blocks, which is precisely what may never happen on the read loop.
-func (s *WSServer) clientHostSpecs(immediate control.ImmediateSubmission, lane control.Submission) []methodSpec {
+func (s *WSServer) clientHostSpecs(immediate, lane control.Submission) []methodSpec {
 	holder := &attentionActivationHolder{mu: &s.attentionActivationMu, sink: &s.attentionActivation}
 	return []methodSpec{
 		reg(immediate, catalog.OpHostResolved, params(validateHostResolvedRaw),

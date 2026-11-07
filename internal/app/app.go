@@ -1828,14 +1828,10 @@ func New(opts ...Option) (*App, error) {
 	tpOpts = append(tpOpts, transport.WithRemoteLifecycle(remoteLifecycle))
 	tpOpts = append(tpOpts, transport.WithLifecyclePublisher(lifecyclePub))
 
-	// The ordinary control lane's permit count, named here the way the D14
-	// bounds are named here: the number of control tasks that may run
-	// concurrently before new work is refused with the saturation error.
-	tpOpts = append(tpOpts, transport.WithControlLaneCapacity(transport.DefaultControlLaneCapacity))
-	// The domain-conflict wait bound, named here like the lane capacity: a
-	// conflict WAITS (bounded) rather than refusing instantly, so a
-	// sequential client's back-to-back requests are never told the control
-	// plane is busy; exhausting the wait is the only refusal.
+	// The wait bound for a call whose context carries no declared turn — an
+	// internal call, never a renderer's: a control call waits its catalogue
+	// entry's turn (ADR-8eej3e66 §3), so this is a fallback rather than the
+	// product value.
 	tpOpts = append(tpOpts, transport.WithDomainConflictWaitTimeout(transport.DefaultDomainConflictWaitTimeout))
 	// The run lease (ADR-0020 decision 2) every agent run is supervised
 	// under, named here the way the lane capacity is. What this line still

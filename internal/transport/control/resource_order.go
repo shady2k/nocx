@@ -54,13 +54,6 @@ import (
 // without a scope waits exactly as long as one with a declaration waits.
 const FallbackOrderTurn = time.Second
 
-// DefaultOrderLimit bounds the waiters and runners one ResourceOrder admits.
-// It is a safety net, not the real bound: an invocation reaches this admission
-// only after its operation queue admitted it, and it holds no execution permit
-// while it waits. The number is generous because the resources are — a server
-// with a hundred open sessions has a hundred independent queues.
-const DefaultOrderLimit = 256
-
 // OrderRequest is what the dispatcher knows and the operation does not: the
 // canonical resource keys this invocation orders on, and the turn it may wait
 // for them. It travels in the context because the admission is acquired by the
@@ -133,13 +126,11 @@ func HoldsOrder(a Admission) bool {
 // ordered by the content FIFO.
 type ResourceOrder struct {
 	name     string
-	limit    int
 	prefixes []string
 	book     *holderBook
 
-	mu       sync.Mutex
-	queues   map[string]*orderQueue
-	admitted int
+	mu     sync.Mutex
+	queues map[string]*orderQueue
 }
 
 type orderQueue struct {
@@ -156,21 +147,23 @@ type orderWaiter struct {
 	permit  *orderPermit
 }
 
-// NewResourceOrder builds the FIFO for one domain. A negative limit or an
-// empty name is a programming error, not a runtime surprise.
-func NewResourceOrder(name string, limit int, prefixes ...string) *ResourceOrder {
+// NewResourceOrder builds the FIFO for one domain. An empty name or an empty
+// prefix is a programming error, not a runtime surprise.
+//
+// THERE IS NO COUNT BOUND (ADR-8eej3e66 stage 8): a waiter that cannot start
+// waits under its declared turn and answers "did not start" when the turn
+// ends, so the queue is bounded by what a connection may have outstanding and
+// by time, not by an admission that would refuse a person's call.
+func NewResourceOrder(name string, prefixes ...string) *ResourceOrder {
 	if name == "" {
 		panic("control: resource order without a name")
-	}
-	if limit < 1 {
-		panic("control: resource order " + name + " needs a positive limit")
 	}
 	for _, p := range prefixes {
 		if p == "" {
 			panic("control: resource order " + name + " has an empty key prefix")
 		}
 	}
-	return &ResourceOrder{name: name, limit: limit, prefixes: prefixes, book: newHolderBook()}
+	return &ResourceOrder{name: name, prefixes: prefixes, book: newHolderBook()}
 }
 
 func (r *ResourceOrder) Name() string { return r.name }
@@ -198,11 +191,6 @@ func (r *ResourceOrder) TryAcquire(ctx context.Context) (Permit, *Rejection) {
 	holder, _ := HolderFrom(ctx)
 	w := &orderWaiter{keys: keys, ready: make(chan struct{}), holder: holder}
 	r.mu.Lock()
-	if r.admitted >= r.limit {
-		r.mu.Unlock()
-		return nil, &Rejection{Reason: "resource order full", Scope: r.name, Holders: r.book.snapshot()}
-	}
-	r.admitted++
 	for _, k := range keys {
 		q := r.queues[k]
 		if q == nil {
@@ -314,7 +302,6 @@ func (r *ResourceOrder) abandon(w *orderWaiter, reason string) *Rejection {
 		r.releaseLocked(w)
 	} else {
 		w.dropped = true
-		r.admitted--
 		r.forgetLocked(w)
 	}
 	return &Rejection{Reason: reason, Scope: r.name, Holders: r.book.snapshot()}
@@ -326,7 +313,6 @@ func (r *ResourceOrder) releaseLocked(w *orderWaiter) {
 		return
 	}
 	w.dropped = true
-	r.admitted--
 	r.forgetLocked(w)
 }
 

@@ -818,15 +818,11 @@ describe('row actions', () => {
     )
   })
 
-  it('a refused stage shows its own sentence and a retry that works — never a toast, never "busy"', async () => {
-    // ADR-8eej3e66 stage 1: a control-plane refusal is not a failed mutation.
-    // Nothing ran, nothing is stale, and the person gets the failure where
+  it('a stage that did not start shows its own sentence and a retry that works — never a toast, never "busy"', async () => {
+    // ADR-8eej3e66 §8: a call that did not start is not a failed mutation.
+    // Nothing ran, nothing is stale, and the person gets the answer where
     // they pressed with the one useful remedy, the same action again.
-    const refusal = new RpcError(
-      'The request was refused — nocx was already running as many git operations as it allows.',
-      -32004,
-      { reason: 'control-saturated', scope: 'git', retryable: true, retryAfterMs: 50 },
-    )
+    const refusal = new RpcError('The call did not start', -32005, { reason: 'not-started' })
     const stage = vi
       .fn()
       .mockRejectedValueOnce(refusal)
@@ -850,7 +846,7 @@ describe('row actions', () => {
     expect(panel.querySelector('[data-testid="git-status-stale"]')).toBeNull()
     const banner = panel.querySelector('[data-testid="git-mutation-refused"]')
     expect(banner?.textContent).toContain("Couldn't stage that file")
-    expect(banner?.textContent).toContain('refused')
+    expect(banner?.textContent).toContain('did not start')
     expect(banner?.textContent?.toLowerCase()).not.toContain('busy')
 
     // The explicit retry asks the same action again, and it lands.

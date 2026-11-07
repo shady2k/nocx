@@ -48,14 +48,14 @@ type CaptureSaveOperation interface {
 // vaultGate before contentGate (the canonical order), then the execution
 // lane.
 func NewCaptureSaveOperation(
-	vaultGate, contentGate, lane control.Admission,
+	vaultGate, contentGate control.Admission,
 	vaultLifecycle SecretVault,
 	contentDB content.ContentDB,
 ) CaptureSaveOperation {
 	g := &guard{}
 	return newOperation[CaptureSaveService](
 		Direct("CaptureSaveOperation"),
-		control.NewComposite(vaultGate, contentGate, lane),
+		control.NewComposite(vaultGate, contentGate),
 		g,
 		newCaptureSaveService(g, vaultLifecycle, contentDB),
 	)
@@ -132,7 +132,7 @@ type TabbyImportOperation interface {
 // configGate before vaultGate (the canonical order), then the execution
 // lane.
 func NewTabbyImportOperation(
-	configGate, vaultGate, lane control.Admission,
+	configGate, vaultGate control.Admission,
 	profiles profile.ProfileRepository,
 	groups profile.GroupRepository,
 	svc *profile.ProfileService,
@@ -142,7 +142,7 @@ func NewTabbyImportOperation(
 	g := &guard{}
 	return newOperation[TabbyImportService](
 		Direct("TabbyImportOperation"),
-		control.NewComposite(configGate, vaultGate, lane),
+		control.NewComposite(configGate, vaultGate),
 		g,
 		newTabbyImportService(g, profiles, groups, svc, vaultLifecycle, store),
 	)

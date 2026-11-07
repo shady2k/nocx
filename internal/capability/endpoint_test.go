@@ -93,7 +93,7 @@ func newEndpointEnv(t *testing.T, secrets *fakeEndpointSecrets) (capability.Conf
 	dir := t.TempDir()
 	store := profile.NewJSONStore(filepath.Join(dir, "profiles.json"))
 	configGate, vaultGate, _, _, _, _ := testGates()
-	op := capability.NewConfigOperation(configGate, vaultGate, testLane(),
+	op := capability.NewConfigOperation(configGate, vaultGate,
 		store, store, store, store, newProfileService(t), nil, secrets, secrets)
 	return op, store, filepath.Join(dir, "profiles.json")
 }
@@ -240,7 +240,7 @@ func TestEndpointCreate_StoreWriteFails_LeavesOnlyTheMintedOrphan(t *testing.T) 
 		t.Fatalf("Mkdir: %v", err)
 	}
 	configGate, vaultGate, _, _, _, _ := testGates()
-	badOp := capability.NewConfigOperation(configGate, vaultGate, testLane(),
+	badOp := capability.NewConfigOperation(configGate, vaultGate,
 		badStore, badStore, badStore, badStore, newProfileService(t), nil, nil, secrets)
 
 	if err := runConfig(t, badOp, func(ctx context.Context, svc capability.ConfigService) error {

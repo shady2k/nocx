@@ -1,8 +1,6 @@
 // Package control_test exercises the scheduling contract through its public
-// surface only. The third-Admission AD-8 proof lives in
-// third_admission_test.go (package control, internal): the NonblockingAdmission
-// marker is unexported by design (ADR-0026), so only the package itself — its
-// internal tests included — may define a submission-path admission.
+// surface only. A third Admission defined in a test file lives in
+// third_admission_test.go (package control, internal).
 package control_test
 
 import (
@@ -35,179 +33,86 @@ func waitAcquirable(t *testing.T, a control.Admission, what string) {
 // "permit held" end of the acquire→release interval.
 func mustNotAcquire(t *testing.T, a control.Admission, what string) {
 	t.Helper()
-	if p, rej := a.TryAcquire(context.Background()); rej == nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if p, rej := a.TryAcquire(ctx); rej == nil {
 		p.Release()
 		t.Fatalf("%s was acquirable, expected it to be held", what)
 	}
 }
 
-// --- acceptance 1: TrySubmit refuses promptly, never blocks -----------------
+// --- nothing refuses admission -------------------------------------------
 
-func TestTrySubmitRejectsPromptlyWhenResourcesExhausted(t *testing.T) {
-	sem := control.NewSemaphore("worker", 1)
-	sub := control.NewBoundedSubmission(sem)
-
+// TestAsyncSubmissionNeverRefuses submits far more tasks than any worker pool
+// this package ever had, each holding its goroutine until released, and
+// requires every submit to be accepted: the read loop hands the work over and
+// moves on (ADR-8eej3e66 §7, stage 8). What bounds the number is the credit
+// window on the connection, not a submission.
+func TestAsyncSubmissionNeverRefuses(t *testing.T) {
+	var sub control.AsyncSubmission
+	const tasks = 64
 	release := make(chan struct{})
-	if rej := sub.TrySubmit(context.Background(), control.Task{Run: func(context.Context) { <-release }}); rej != nil {
-		t.Fatalf("first submit rejected: %+v", rej)
-	}
-
-	ran := make(chan struct{})
-	result := make(chan *control.Rejection, 1)
-	go func() {
-		result <- sub.TrySubmit(context.Background(), control.Task{Run: func(context.Context) { close(ran) }})
-	}()
-
-	select {
-	case rej := <-result:
-		if rej == nil {
-			t.Fatal("TrySubmit succeeded while the only permit was held")
+	var mu sync.Mutex
+	running := 0
+	for range tasks {
+		if rej := sub.TrySubmit(context.Background(), control.Task{Run: func(context.Context) {
+			mu.Lock()
+			running++
+			mu.Unlock()
+			<-release
+		}}); rej != nil {
+			t.Fatalf("submit %d refused: %+v", tasks, rej)
 		}
-		if rej.Reason == "" || rej.Scope == "" {
-			t.Errorf("rejection must carry Reason and Scope, got %+v", rej)
-		}
-	case <-time.After(1 * time.Second):
-		t.Fatal("TrySubmit blocked while resources were exhausted — the read loop would freeze")
 	}
+	// All of them run concurrently: none is queued behind a permit.
+	waittest.WaitFor(t, "every submitted task running", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return running == tasks
+	})
+	close(release)
+}
 
+// A task that was withdrawn while it waited never runs: the one-step
+// start-against-cancel decision is still the submission's.
+func TestAsyncSubmissionNeverStartsAWithdrawnTask(t *testing.T) {
+	var sub control.AsyncSubmission
+	ran := make(chan struct{}, 1)
+	if rej := sub.TrySubmit(context.Background(), control.Task{
+		Start: func() bool { return false },
+		Run:   func(context.Context) { ran <- struct{}{} },
+	}); rej != nil {
+		t.Fatalf("submit refused: %+v", rej)
+	}
 	select {
 	case <-ran:
-		t.Fatal("a rejected task must never run")
-	default:
+		t.Fatal("a withdrawn task was run")
+	case <-time.After(50 * time.Millisecond):
 	}
-
-	close(release)
-	waitAcquirable(t, sem, "permit after the first task finished")
 }
 
-// --- acceptance 2: saturating one resource leaves another untouched ----------
-
-func TestSaturatingOneAdmissionLeavesAnotherUntouched(t *testing.T) {
-	conflict := control.NewSemaphore("conflict", 1)
-	exec := control.NewSemaphore("exec", 1)
-	sub := control.NewBoundedSubmission(control.NewCompositeNonblocking(conflict, exec))
-
-	// Saturate the conflict admission directly; the composite refuses at the
-	// first gate and must never consume the execution permit.
-	conflictPermit, rej := conflict.TryAcquire(context.Background())
-	if rej != nil {
-		t.Fatalf("could not saturate conflict admission: %+v", rej)
-	}
-	if refused := sub.TrySubmit(context.Background(), control.Task{Run: func(context.Context) { t.Error("must not run") }}); refused == nil {
-		t.Fatal("expected rejection while the conflict admission is saturated")
-	}
-	p, execRej := exec.TryAcquire(context.Background())
-	if execRej != nil {
-		t.Fatalf("execution admission was consumed by a composite acquire that refused at the conflict gate: %+v", execRej)
-	}
-	p.Release()
-	conflictPermit.Release()
-
-	// And the reverse: saturating the execution admission leaves the conflict
-	// admission untouched. The composite acquires conflict first and must
-	// release it again when the exec gate refuses.
-	execPermit, rej := exec.TryAcquire(context.Background())
-	if rej != nil {
-		t.Fatalf("could not saturate execution admission: %+v", rej)
-	}
-	if rej := sub.TrySubmit(context.Background(), control.Task{Run: func(context.Context) { t.Error("must not run") }}); rej == nil {
-		t.Fatal("expected rejection while the execution admission is saturated")
-	}
-	if p, rej := conflict.TryAcquire(context.Background()); rej != nil {
-		t.Fatalf("conflict admission was leaked by a composite acquire that refused at the exec gate: %+v", rej)
-	} else {
-		p.Release()
-	}
-	execPermit.Release()
-}
-
-// --- acceptance 4: permits are released on every exit path -------------------
+// --- permits are released on every exit path ------------------------------
 
 func TestPermitSpanNormalReturn(t *testing.T) {
-	sem := control.NewSemaphore("worker", 1)
-	sub := control.NewBoundedSubmission(sem)
-
-	release := make(chan struct{})
-	done := make(chan struct{})
-	if rej := sub.TrySubmit(context.Background(), control.Task{Run: func(context.Context) {
-		defer close(done)
-		<-release
-	}}); rej != nil {
-		t.Fatalf("submit rejected: %+v", rej)
+	sem := control.NewWaitingSemaphore("worker", 1, time.Second)
+	p, rej := sem.TryAcquire(context.Background())
+	if rej != nil {
+		t.Fatalf("acquire refused: %+v", rej)
 	}
-
-	// First end of the interval: the permit is held from the moment TrySubmit
-	// returns — TryAcquire happens synchronously, before the goroutine spawns.
 	mustNotAcquire(t, sem, "permit while the task is running")
-
-	close(release)
-	<-done
-
-	// Second end: the permit is released after the task returns.
+	p.Release()
 	waitAcquirable(t, sem, "permit after normal return")
 }
 
 func TestPermitReleasedOnContextCancellation(t *testing.T) {
-	sem := control.NewSemaphore("worker", 1)
-	sub := control.NewBoundedSubmission(sem)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	if rej := sub.TrySubmit(ctx, control.Task{Run: func(ctx context.Context) { <-ctx.Done() }}); rej != nil {
-		t.Fatalf("submit rejected: %+v", rej)
+	sem := control.NewWaitingSemaphore("worker", 1, time.Second)
+	p, rej := sem.TryAcquire(context.Background())
+	if rej != nil {
+		t.Fatalf("acquire refused: %+v", rej)
 	}
 	mustNotAcquire(t, sem, "permit while the task waits on the context")
-	cancel()
+	p.Release()
 	waitAcquirable(t, sem, "permit after context cancellation")
-}
-
-// --- acceptance 5: conflicting work never starves unrelated work ---------------
-
-func TestConflictingWorkDoesNotStarveUnrelatedWork(t *testing.T) {
-	// One conflict slot, two workers. Conflict is acquired BEFORE the
-	// execution permit (NewComposite order), so work refused at the conflict
-	// gate never occupies a worker permit.
-	conflict := control.NewSemaphore("conflict", 1)
-	exec := control.NewSemaphore("exec", 2)
-	sub := control.NewBoundedSubmission(control.NewCompositeNonblocking(conflict, exec))
-
-	// Conflicting task A: takes the conflict slot and one worker, then blocks.
-	releaseA := make(chan struct{})
-	if rej := sub.TrySubmit(context.Background(), control.Task{Run: func(context.Context) { <-releaseA }}); rej != nil {
-		t.Fatalf("first conflicting submit rejected: %+v", rej)
-	}
-
-	// Conflicting task B: refused at the conflict gate, promptly, without
-	// consuming the second worker permit.
-	ranB := make(chan struct{})
-	result := make(chan *control.Rejection, 1)
-	go func() {
-		result <- sub.TrySubmit(context.Background(), control.Task{Run: func(context.Context) { close(ranB) }})
-	}()
-	select {
-	case rej := <-result:
-		if rej == nil {
-			t.Fatal("conflicting work must be refused while the conflict slot is held")
-		}
-	case <-time.After(1 * time.Second):
-		t.Fatal("conflicting TrySubmit blocked")
-	}
-	select {
-	case <-ranB:
-		t.Fatal("refused conflicting task must never run")
-	default:
-	}
-
-	// Non-conflicting work needs only a worker permit. Because the refused B
-	// never took one, a worker is still free and the work runs — while the
-	// conflict slot stays occupied.
-	done := make(chan struct{})
-	unrelated := control.NewBoundedSubmission(exec)
-	if rej := unrelated.TrySubmit(context.Background(), control.Task{Run: func(context.Context) { close(done) }}); rej != nil {
-		t.Fatalf("unrelated work was refused while only the conflict slot was held: %+v", rej)
-	}
-	<-done
-
-	close(releaseA)
 }
 
 // --- constraint 4: the composite's order and release-on-failure are contracts --
@@ -244,7 +149,7 @@ func (r *recordingAdmission) Name() string { return r.name }
 func (r *recordingAdmission) TryAcquire(context.Context) (control.Permit, *control.Rejection) {
 	r.log.add("acquire:" + r.name)
 	if !r.allow {
-		return nil, &control.Rejection{Reason: "refused", Scope: r.name}
+		return nil, &control.Rejection{Kind: control.RejectionUnavailable, Reason: "refused", Scope: r.name}
 	}
 	return recordingPermit{r}, nil
 }

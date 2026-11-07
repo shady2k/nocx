@@ -2663,12 +2663,7 @@ describe('a failed claim and what it proves', () => {
     ).toBe(true)
     expect(
       isProvenSessionAbsence(
-        new RpcError('Control plane busy', -32004, {
-          reason: 'control-saturated',
-          scope: 'session',
-          retryable: true,
-          retryAfterMs: 50,
-        }),
+        new RpcError('The call did not start', -32005, { reason: 'not-started' }),
       ),
     ).toBe(false)
     expect(

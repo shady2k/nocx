@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/session"
@@ -29,7 +30,7 @@ func (r *heldSessionEndRegistry) PrepareEndSession(id session.ID) (session.Sessi
 	}, nil
 }
 
-func TestSessionEndRetiresBeforeTeardownAndReleasesItsLaneAtRetirement(t *testing.T) {
+func TestSessionEndRetiresBeforeTeardownAndReleasesItsGateAtRetirement(t *testing.T) {
 	for _, fail := range []bool{false, true} {
 		name := "success"
 		if fail {
@@ -43,9 +44,8 @@ func TestSessionEndRetiresBeforeTeardownAndReleasesItsLaneAtRetirement(t *testin
 			if fail {
 				reg.failure = errors.New("helper close failed")
 			}
-			sessionGate := control.NewSemaphore(capability.GateSession, 1)
-			lane := control.NewSemaphore("control", 1)
-			ops := capability.NewSessionOperations(sessionGate, lane, reg, nil)
+			sessionGate := control.NewWaitingSemaphore(capability.GateSession, 1, time.Second)
+			ops := capability.NewSessionOperations(sessionGate, reg, nil)
 			op, err := ops.ForSessionEnd("A")
 			if err != nil {
 				t.Fatal(err)
@@ -80,22 +80,17 @@ func TestSessionEndRetiresBeforeTeardownAndReleasesItsLaneAtRetirement(t *testin
 				}
 				permit.Release()
 			}
-			// Retirement is the commit point: the lane's interval ends there.
-			// Holding it across the teardown would refuse unrelated control
-			// work for as long as a helper or ssh channel takes to settle,
+			// Retirement is the commit point: the gate's interval ends there.
+			// Holding it across the teardown would make unrelated session work
+			// wait for as long as a helper or ssh channel takes to settle,
 			// while the session is already gone.
-			if permit, rej := lane.TryAcquire(context.Background()); rej != nil {
-				t.Error("a retired session's teardown still holds the execution lane")
-			} else {
-				permit.Release()
-			}
 			close(reg.release)
 			got := <-result
 			if got.sess == nil || got.sess.ID() != "A" || !errors.Is(got.err, reg.failure) {
 				t.Fatalf("completion = (%v, %v), want retired A and %v", got.sess, got.err, reg.failure)
 			}
-			if permit, rej := lane.TryAcquire(context.Background()); rej != nil {
-				t.Fatal("finished teardown leaked its execution allowance")
+			if permit, rej := sessionGate.TryAcquire(context.Background()); rej != nil {
+				t.Fatalf("finished teardown leaked its session permit: %+v", rej)
 			} else {
 				permit.Release()
 			}
@@ -106,17 +101,25 @@ func TestSessionEndRetiresBeforeTeardownAndReleasesItsLaneAtRetirement(t *testin
 func TestSessionEndAdmissionRefusalLeavesTheSessionLive(t *testing.T) {
 	reg := newFakeSessionRegistry()
 	reg.sessions["A"] = &fakeSession{id: "A"}
-	ops := capability.NewSessionOperations(control.NewSemaphore(capability.GateSession, 1), control.NewSemaphore("control", 0), reg, nil)
+	sessionGate := control.NewWaitingSemaphore(capability.GateSession, 1, time.Second)
+	held, rej := sessionGate.TryAcquire(context.Background())
+	if rej != nil {
+		t.Fatalf("hold the session gate: %+v", rej)
+	}
+	defer held.Release()
+	ops := capability.NewSessionOperations(sessionGate, reg, nil)
 	op, err := ops.ForSessionEnd("A")
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := op.Run(context.Background(), func(session.Session) { t.Error("refused close reached teardown preparation") })
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	got, err := op.Run(ctx, func(session.Session) { t.Error("a close that did not start reached teardown preparation") })
 	if got != nil || !capability.IsRefused(err) {
-		t.Fatalf("saturated close = (%v, %v), want refusal before retirement", got, err)
+		t.Fatalf("a close that could not have the gate = (%v, %v), want an answer before retirement", got, err)
 	}
 	if _, err := reg.Get("A"); err != nil {
-		t.Fatalf("refused close removed the session: %v", err)
+		t.Fatalf("a close that did not start removed the session: %v", err)
 	}
 }
 
@@ -141,9 +144,8 @@ func (a *reviewCountingAdmission) TryAcquire(ctx context.Context) (control.Permi
 func TestReviewSessionEndCancelledBeforeAdmissionLeavesSessionLive(t *testing.T) {
 	reg := newFakeSessionRegistry()
 	reg.sessions["A"] = &fakeSession{id: "A"}
-	gate := &reviewCountingAdmission{Admission: control.NewSemaphore(capability.GateSession, 1)}
-	lane := &reviewCountingAdmission{Admission: control.NewSemaphore("control", 1)}
-	ops := capability.NewSessionOperations(gate, lane, reg, nil)
+	gate := &reviewCountingAdmission{Admission: control.NewWaitingSemaphore(capability.GateSession, 1, time.Second)}
+	ops := capability.NewSessionOperations(gate, reg, nil)
 	op, err := ops.ForSessionEnd("A")
 	if err != nil {
 		t.Fatal(err)
@@ -154,8 +156,8 @@ func TestReviewSessionEndCancelledBeforeAdmissionLeavesSessionLive(t *testing.T)
 	if got != nil || !capability.IsRefused(err) {
 		t.Errorf("cancelled close = (%v, %v), want refusal", got, err)
 	}
-	if gate.calls != 0 || lane.calls != 0 {
-		t.Errorf("cancelled close acquired admissions: gate=%d lane=%d", gate.calls, lane.calls)
+	if gate.calls != 0 {
+		t.Errorf("cancelled close acquired its admission: gate=%d", gate.calls)
 	}
 	if _, err := reg.Get("A"); err != nil {
 		t.Fatalf("cancelled close retired A: %v", err)
@@ -163,41 +165,27 @@ func TestReviewSessionEndCancelledBeforeAdmissionLeavesSessionLive(t *testing.T)
 }
 
 func TestReviewSessionEndCancelledDuringAdmissionLeavesSessionLive(t *testing.T) {
-	for _, cancelAt := range []string{"gate", "lane"} {
-		t.Run(cancelAt, func(t *testing.T) {
-			reg := newFakeSessionRegistry()
-			reg.sessions["A"] = &fakeSession{id: "A"}
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			gate := &reviewCountingAdmission{Admission: control.NewSemaphore(capability.GateSession, 1)}
-			lane := &reviewCountingAdmission{Admission: control.NewSemaphore("control", 1)}
-			if cancelAt == "gate" {
-				gate.cancel = cancel
-			} else {
-				lane.cancel = cancel
-			}
-			op, err := capability.NewSessionOperations(gate, lane, reg, nil).ForSessionEnd("A")
-			if err != nil {
-				t.Fatal(err)
-			}
-			got, err := op.Run(ctx, func(session.Session) { t.Error("cancelled close reached teardown") })
-			if got != nil || !capability.IsRefused(err) {
-				t.Errorf("cancelled close = (%v, %v), want refusal", got, err)
-			}
-			if cancelAt == "gate" && lane.calls != 0 {
-				t.Error("close acquired execution lane after gate cancelled it")
-			}
-			if _, err := reg.Get("A"); err != nil {
-				t.Errorf("cancelled close retired A: %v", err)
-			}
-			for _, admission := range []control.Admission{gate.Admission, lane.Admission} {
-				permit, rejection := admission.TryAcquire(context.Background())
-				if rejection != nil {
-					t.Errorf("cancelled close leaked permit: %+v", rejection)
-				} else {
-					permit.Release()
-				}
-			}
-		})
+	reg := newFakeSessionRegistry()
+	reg.sessions["A"] = &fakeSession{id: "A"}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	gate := &reviewCountingAdmission{Admission: control.NewWaitingSemaphore(capability.GateSession, 1, time.Second)}
+	gate.cancel = cancel
+	op, err := capability.NewSessionOperations(gate, reg, nil).ForSessionEnd("A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := op.Run(ctx, func(session.Session) { t.Error("cancelled close reached teardown") })
+	if got != nil || !capability.IsRefused(err) {
+		t.Errorf("cancelled close = (%v, %v), want refusal", got, err)
+	}
+	if _, err := reg.Get("A"); err != nil {
+		t.Errorf("cancelled close retired A: %v", err)
+	}
+	permit, rejection := gate.Admission.TryAcquire(context.Background())
+	if rejection != nil {
+		t.Errorf("cancelled close leaked its permit: %+v", rejection)
+	} else {
+		permit.Release()
 	}
 }

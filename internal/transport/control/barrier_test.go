@@ -19,7 +19,7 @@ import (
 // shared acquisition must be REFUSED by its own bound instead of granted. That
 // refusal is the observable, and only the writer-preference rule produces it.
 func TestBarrier_AWaitingExclusiveAdmitsNoNewShared(t *testing.T) {
-	b := control.NewBarrier("store-set", 8, 5*time.Second)
+	b := control.NewBarrier("store-set", 5*time.Second)
 
 	held, rej := b.Shared().TryAcquire(context.Background())
 	if rej != nil {
@@ -77,7 +77,7 @@ func TestBarrier_AWaitingExclusiveAdmitsNoNewShared(t *testing.T) {
 // no waiter behind: the next acquisition after the holder releases succeeds
 // immediately.
 func TestBarrier_WaitIsBoundedAndLeavesNoWaiter(t *testing.T) {
-	b := control.NewBarrier("store-set", 8, 30*time.Millisecond)
+	b := control.NewBarrier("store-set", 30*time.Millisecond)
 	held, rej := b.Exclusive().TryAcquire(context.Background())
 	if rej != nil {
 		t.Fatalf("exclusive acquisition refused: %+v", rej)
@@ -96,26 +96,40 @@ func TestBarrier_WaitIsBoundedAndLeavesNoWaiter(t *testing.T) {
 
 // A full waiter queue is refused at once instead of growing: maxQueue 0 is the
 // bound with nothing in it.
-func TestBarrier_AQueueBeyondItsBoundIsRefusedInstantly(t *testing.T) {
-	b := control.NewBarrier("store-set", 0, 5*time.Second)
+// There is no waiter count (ADR-8eej3e66 stage 8): a burst of shared
+// acquisitions held behind one exclusive waiter is queued and served in turn,
+// never refused for its size.
+func TestBarrier_EverySharedWaiterBehindAnExclusiveHolderIsServed(t *testing.T) {
+	b := control.NewBarrier("store-set", 5*time.Second)
 	held, rej := b.Exclusive().TryAcquire(context.Background())
 	if rej != nil {
 		t.Fatalf("exclusive acquisition refused: %+v", rej)
 	}
-	start := time.Now()
-	if _, r := b.Shared().TryAcquire(context.Background()); r == nil || r.Kind != control.RejectionCapacity {
-		t.Fatalf("shared acquisition got %+v, want a capacity rejection", r)
-	}
-	if waited := time.Since(start); waited > time.Second {
-		t.Fatalf("a full queue took %s to refuse; it must refuse without waiting", waited)
+	const waiters = 12
+	served := make(chan struct{}, waiters)
+	for range waiters {
+		go func() {
+			p, rej := b.Shared().TryAcquire(context.Background())
+			if rej == nil {
+				p.Release()
+			}
+			served <- struct{}{}
+		}()
 	}
 	held.Release()
+	for range waiters {
+		select {
+		case <-served:
+		case <-time.After(5 * time.Second):
+			t.Fatal("a shared waiter was never served")
+		}
+	}
 }
 
 // Release is idempotent, and a double release must not leave the barrier
 // believing a mode is still held.
 func TestBarrier_DoubleReleaseIsHarmless(t *testing.T) {
-	b := control.NewBarrier("store-set", 8, 100*time.Millisecond)
+	b := control.NewBarrier("store-set", 100*time.Millisecond)
 	shared, _ := b.Shared().TryAcquire(context.Background())
 	shared.Release()
 	shared.Release()
@@ -138,7 +152,7 @@ func TestBarrier_DoubleReleaseIsHarmless(t *testing.T) {
 // writer gets the barrier, and nothing deadlocks. A deadlock here would hang
 // the test to its own deadline, which is the failure this asserts against.
 func TestBarrier_ReadersAndOneWriterAllFinish(t *testing.T) {
-	b := control.NewBarrier("store-set", 64, 5*time.Second)
+	b := control.NewBarrier("store-set", 5*time.Second)
 	var wg sync.WaitGroup
 	wg.Add(8)
 	for i := 0; i < 8; i++ {

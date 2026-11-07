@@ -53,10 +53,10 @@ type VaultOperation interface {
 }
 
 // NewVaultOperation builds a VaultOperation that acquires the vault gate
-// before the execution lane.
-func NewVaultOperation(vaultGate, lane control.Admission, lifecycle VaultLifecycle) VaultOperation {
+// and nothing after it.
+func NewVaultOperation(vaultGate control.Admission, lifecycle VaultLifecycle) VaultOperation {
 	g := &guard{}
-	return newOperation[VaultService](Direct("VaultOperation"), control.NewComposite(vaultGate, lane), g, newVaultService(g, lifecycle))
+	return newOperation[VaultService](Direct("VaultOperation"), control.NewComposite(vaultGate), g, newVaultService(g, lifecycle))
 }
 
 // newVaultService builds the concrete vault-lifecycle service bound to
@@ -173,10 +173,10 @@ type VaultResetOperation interface {
 // stores it rewrites. Reset already excluded the two domain gates; what the
 // exclusive plan adds is exclusion of every READER of those stores, which a
 // capacity-one gate never promised and restore now needs (ADR-8eej3e66 §5).
-func NewVaultResetOperation(stores *StoreGuard, decl catalog.Declaration, lane control.Admission, reset VaultReset) VaultResetOperation {
+func NewVaultResetOperation(stores *StoreGuard, decl catalog.Declaration, reset VaultReset) VaultResetOperation {
 	g := &guard{}
 	return newOperation[VaultResetService](Direct("VaultResetOperation"),
-		control.NewComposite(stores.Exclusive(decl), lane), g, newVaultResetService(g, reset))
+		control.NewComposite(stores.Exclusive(decl)), g, newVaultResetService(g, reset))
 }
 
 // newVaultResetService builds the concrete reset service bound to guard g.

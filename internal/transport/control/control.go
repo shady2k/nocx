@@ -1,18 +1,21 @@
 // Package control is the scheduling contract for the JSON-RPC control plane.
 //
-// Today internal/transport/ws.go runs ~86 control methods synchronously on
-// the WebSocket read loop, so a slow method (a 30-second SSH probe) freezes
-// every terminal tab on that socket. This package is the contract that lets
-// that work run off the read loop under a bound. It is deliberately
-// socket-free: it imports no websocket type and no internal/transport type,
-// and is fully testable with no connection.
+// The JSON-RPC control plane must never run a slow method on the WebSocket
+// read loop: a 30-second SSH probe would freeze every terminal tab on that
+// socket. This package is the contract that lets that work run off the read
+// loop. It is deliberately socket-free: it imports no websocket type and no
+// internal/transport type, and is fully testable with no connection.
 //
-// The model, in one line: work is handed over through a Submission; a bounded
-// Submission runs each task on its own goroutine only after acquiring a
-// Permit from an Admission; Admissions compose, and conflict admission is
-// acquired BEFORE the scarce execution permit (the order passed to
-// NewComposite), so refused or waiting conflict work never occupies an active
-// worker permit.
+// The model, in one line: work is handed over through a Submission, which
+// runs it on its own goroutine and never waits; an Admission is a resource
+// the work takes on that goroutine, and Admissions compose in a fixed order
+// so conflict work is acquired before execution capacity.
+//
+// AFTER ADR-8eej3e66 STAGE 8 NOTHING HERE REFUSES FOR CAPACITY. A busy
+// resource makes a caller WAIT under its declared turn, and a wait that runs
+// out answers "did not start". The remaining rejections are a wait that
+// ended, the caller's own cancellation, and a resource that is unavailable
+// until restart.
 //
 // Variation is expressed by the interface, never by a fork inside an
 // implementation (AD-8): a new kind of resource is added by constructing
@@ -22,30 +25,24 @@ package control
 
 import (
 	"context"
-	"time"
 )
 
 // Admission is a bounded resource. TryAcquire never blocks: it either returns
 // a Permit immediately or a *Rejection describing why not.
+//
+// After ADR-8eej3e66 stage 8 no admission refuses for CAPACITY: a resource
+// that is being used makes the next caller WAIT under its declared turn
+// (control.NewWaitingSemaphore, ResourceOrder, schedule.Keyed, schedule.
+// Bulkhead, operation/domains), and a wait that runs out answers the
+// declaration's "did not start". The remaining rejections are the ones a
+// person can act on — a wait that ended, the caller's own cancellation, a
+// store quarantined until restart — and they are classified by
+// RejectionKind.
 type Admission interface {
 	// Name identifies the resource for metrics only. No implementation may
 	// branch on it (AD-8).
 	Name() string
 	TryAcquire(context.Context) (Permit, *Rejection)
-}
-
-// NonblockingAdmission is an Admission whose TryAcquire never blocks: it
-// either returns a Permit immediately or a *Rejection. It is the only
-// admission a bounded Submission may hold, because a Submission's TrySubmit
-// is called by the read loop, which must never block on admission.
-//
-// The marker method is unexported, so only types in this package satisfy the
-// interface: NewSemaphore and NewCompositeNonblocking produce values of it,
-// and NewWaitingSemaphore deliberately does not. A waiting admission wired
-// into a Submission is a compile error, not a runtime surprise (ADR-0026).
-type NonblockingAdmission interface {
-	Admission
-	nonblocking()
 }
 
 // Permit is a held slice of an Admission's capacity. Release returns it.
@@ -58,20 +55,15 @@ type NonblockingAdmission interface {
 // here enforces it with a sync.Once; one supplied from outside must too.
 type Permit interface{ Release() }
 
-// RejectionKind classifies a refusal. The zero value is RejectionCapacity, so
-// every admission that predates the field keeps its meaning: "this resource is
-// at its bound". The transport maps a capacity refusal to control.saturated and
-// nothing else, which is why the class is a typed field rather than a prefix
-// anybody could spell differently: a store that is UNAVAILABLE is not busy, and
-// answering it with the busy discriminator would send a person to retry
-// something that cannot succeed until restart.
+// RejectionKind classifies why an admission did not grant its resource. Every
+// value is something a person can be told; there is deliberately no capacity
+// kind, because no admission refuses for capacity (ADR-8eej3e66 §7).
 type RejectionKind string
 
 const (
-	// RejectionCapacity is the zero value: the admission was full, or its
-	// waiter queue was. Saturation is transient by definition.
-	RejectionCapacity RejectionKind = ""
-	// RejectionWaitExceeded is a bounded wait that ran out.
+	// RejectionWaitExceeded is a bounded wait that ran out before the work
+	// started. The declaration's answer is "did not start": nothing took
+	// effect, and the same action may be asked again.
 	RejectionWaitExceeded RejectionKind = "wait-exceeded"
 	// RejectionCancelled is the caller's own context ending the wait.
 	RejectionCancelled RejectionKind = "cancelled"
@@ -80,19 +72,31 @@ const (
 	RejectionUnavailable RejectionKind = "unavailable"
 )
 
-// Rejection describes why TryAcquire or TrySubmit refused work. A nil
+// Rejection describes why TryAcquire or TrySubmit did not grant work. A nil
 // *Rejection means success.
 type Rejection struct {
-	Kind       RejectionKind
-	Reason     string
-	Scope      string
-	RetryAfter time.Duration
+	Kind   RejectionKind
+	Reason string
+	Scope  string
 	// Holders names the requests that held the refusing admission at the
 	// moment it refused (nocx-3an1s.1.8). It is empty for a refusal with no
 	// held capacity — a closed submission, a missing key — and for an
 	// admission that keeps no identity. Oldest first.
 	Holders []Holder
 }
+
+// Unrestricted is an Admission that grants at once and holds nothing. It is
+// the admission of an operation that orders on no resource and takes no
+// execution capacity, which after ADR-8eej3e66 stage 8 is a real thing to
+// declare rather than a placeholder: the work needs no exclusion and no
+// permit, and saying so is what makes the absence of a gate visible.
+func Unrestricted() Admission { return unrestricted{} }
+
+type unrestricted struct{}
+
+func (unrestricted) Name() string { return "unrestricted" }
+
+func (unrestricted) TryAcquire(context.Context) (Permit, *Rejection) { return noPermit{}, nil }
 
 // Submission is how work is handed over. It has one unconditional call site:
 // the read loop submits, and the Submission decides whether the work runs now,

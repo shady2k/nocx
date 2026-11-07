@@ -164,7 +164,6 @@ type SecretOperation interface {
 type SecretOperations struct {
 	configGate control.Admission
 	vaultGate  control.Admission
-	lane       control.Admission
 	profiles   profile.ProfileRepository
 	groups     profile.GroupRepository
 	vault      SecretVault
@@ -177,7 +176,7 @@ type SecretOperations struct {
 // NewSecretOperations wires the per-secret factory. Each ForSecret call
 // returns a fresh operation with its own guarded service.
 func NewSecretOperations(
-	configGate, vaultGate, lane control.Admission,
+	configGate, vaultGate control.Admission,
 	profiles profile.ProfileRepository,
 	groups profile.GroupRepository,
 	v SecretVault,
@@ -187,7 +186,6 @@ func NewSecretOperations(
 	return &SecretOperations{
 		configGate: configGate,
 		vaultGate:  vaultGate,
-		lane:       lane,
 		profiles:   profiles,
 		groups:     groups,
 		vault:      v,
@@ -211,7 +209,7 @@ func (f *SecretOperations) ForSecret(ctx context.Context, id credential.SecretID
 	g := &guard{}
 	return newOperation[SecretService](
 		Direct("SecretOperation"),
-		control.NewComposite(f.configGate, f.vaultGate, f.lane),
+		control.NewComposite(f.configGate, f.vaultGate),
 		g,
 		newSecretService(g, f.profiles, f.groups, f.vault, f.store),
 	), nil
@@ -221,7 +219,7 @@ func (f *SecretOperations) ForSecret(ctx context.Context, id credential.SecretID
 // keyed form; most handlers use NewSecretOperations + ForSecret). It is
 // for handlers whose operation is fixed at construction.
 func NewSecretOperation(
-	configGate, vaultGate, lane control.Admission,
+	configGate, vaultGate control.Admission,
 	profiles profile.ProfileRepository,
 	groups profile.GroupRepository,
 	v SecretVault,
@@ -230,7 +228,7 @@ func NewSecretOperation(
 	g := &guard{}
 	return newOperation[SecretService](
 		Direct("SecretOperation"),
-		control.NewComposite(configGate, vaultGate, lane),
+		control.NewComposite(configGate, vaultGate),
 		g,
 		newSecretService(g, profiles, groups, v, store),
 	)

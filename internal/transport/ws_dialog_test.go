@@ -4,14 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/gorilla/websocket"
-	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // fakeDialogService returns canned paths; "" means the user cancelled. The
@@ -251,7 +247,14 @@ func TestDialogOpenDirectory_AdapterFailureIsAnError(t *testing.T) {
 // from every connection is refused rather than queued — a second native
 // picker must never stack over the first. The adapter here is the
 // non-cooperative kind, which is the real Wails runtime.
-func TestDialogOpenDirectory_BusyRefusesSecondFromAnotherConnection(t *testing.T) {
+// ONE PICKER AT A TIME, AND THE SECOND WAITS (ADR-8eej3e66 §5, stage 8).
+//
+// While the native directory picker is open, another connection's
+// dialog.openDirectory is not answered — it waits for the capability, and it
+// reaches the adapter only once the first returns. Two pickers stacked over
+// one another is the defect; a capacity answer is not the remedy, so the
+// second call is held rather than refused.
+func TestDialogOpenDirectory_SecondFromAnotherConnectionWaitsForThePicker(t *testing.T) {
 	h := newInventoryHarness(t)
 	dlg := &blockingDirectoryDialog{started: make(chan struct{}), release: make(chan struct{})}
 	h.ws.SetDialogService(dlg)
@@ -265,18 +268,20 @@ func TestDialogOpenDirectory_BusyRefusesSecondFromAnotherConnection(t *testing.T
 
 	connB := connectWS(t, h.ws)
 	defer func() { _ = connB.Close() }()
-	resp := jsonrpcCall(t, connB, "dialog.openDirectory", map[string]any{})
-	var errEnv struct {
-		Error *jsonrpcErrorObj `json:"error"`
-	}
-	if err := json.Unmarshal(resp, &errEnv); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if errEnv.Error == nil {
-		t.Fatalf("a second dialog.openDirectory while the first adapter runs must be refused, got %s", resp)
-	}
-	if errEnv.Error.Code != SaturationErrorCode {
-		t.Fatalf("refusal code = %d, want %d (control plane busy)", errEnv.Error.Code, SaturationErrorCode)
+	answered := make(chan []byte, 1)
+	go func() {
+		_, resp, err := connB.ReadMessage()
+		if err != nil {
+			return
+		}
+		answered <- resp
+	}()
+	sendControl(t, connB, "dialog.openDirectory", map[string]any{}, 2)
+
+	select {
+	case resp := <-answered:
+		t.Fatalf("a second dialog.openDirectory was answered while the picker was open: %s", resp)
+	case <-time.After(200 * time.Millisecond):
 	}
 	dlg.mu.Lock()
 	calls := dlg.calls
@@ -287,13 +292,13 @@ func TestDialogOpenDirectory_BusyRefusesSecondFromAnotherConnection(t *testing.T
 
 	// The other end of the interval: only the adapter's actual return frees it.
 	close(dlg.release)
-	waitDirectoryDialogFree(t, connB, "/home/dev/collections")
+	assertDirectoryAnswerFrom(t, answered, "/home/dev/collections")
 }
 
 // One native capability, not two: while the FILE picker's adapter is still
-// running, dialog.openDirectory is refused as well. Two pickers open at once
-// is the defect, whichever method opened them.
-func TestDialogOpenDirectory_RefusedWhileOpenFileIsOutstanding(t *testing.T) {
+// running, dialog.openDirectory waits for the same capability — two pickers
+// open at once is the defect, whichever method opened them.
+func TestDialogOpenDirectory_WaitsWhileOpenFileIsOutstanding(t *testing.T) {
 	h := newInventoryHarness(t)
 	dlg := &blockingDialog{started: make(chan struct{}), release: make(chan struct{})}
 	h.ws.SetDialogService(dlg)
@@ -307,60 +312,26 @@ func TestDialogOpenDirectory_RefusedWhileOpenFileIsOutstanding(t *testing.T) {
 
 	connB := connectWS(t, h.ws)
 	defer func() { _ = connB.Close() }()
-	resp := jsonrpcCall(t, connB, "dialog.openDirectory", map[string]any{})
-	var errEnv struct {
-		Error *jsonrpcErrorObj `json:"error"`
-	}
-	if err := json.Unmarshal(resp, &errEnv); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if errEnv.Error == nil {
-		t.Fatalf("dialog.openDirectory while a file picker is open must be refused, got %s", resp)
-	}
-	if errEnv.Error.Code != SaturationErrorCode {
-		t.Fatalf("refusal code = %d, want %d (control plane busy)", errEnv.Error.Code, SaturationErrorCode)
+	answered := make(chan []byte, 1)
+	go func() {
+		_, resp, err := connB.ReadMessage()
+		if err != nil {
+			return
+		}
+		answered <- resp
+	}()
+	sendControl(t, connB, "dialog.openDirectory", map[string]any{}, 2)
+
+	select {
+	case resp := <-answered:
+		t.Fatalf("dialog.openDirectory was answered while a file picker was open: %s", resp)
+	case <-time.After(200 * time.Millisecond):
 	}
 
 	close(dlg.release)
-	waitDirectoryDialogFree(t, connB, "/home/dev/collections")
+	assertDirectoryAnswerFrom(t, answered, "/home/dev/collections")
 }
 
-// waitDirectoryDialogFree polls dialog.openDirectory until it succeeds,
-// asserting the capability is no longer busy. It waits on an observable state
-// change (the method answering a result), never on a duration.
-func waitDirectoryDialogFree(t *testing.T, conn *websocket.Conn, wantPath string) {
-	t.Helper()
-	var gotPath string
-	var lastResp json.RawMessage
-	waittest.WaitForTimeoutDetail(t, "directory dialog capability to become free", 3*time.Second,
-		func() string { return fmt.Sprintf("last response %s", lastResp) },
-		func() bool {
-			resp := jsonrpcCall(t, conn, "dialog.openDirectory", map[string]any{})
-			lastResp = resp
-			var env struct {
-				Error  *jsonrpcErrorObj `json:"error"`
-				Result *struct {
-					Path string `json:"path"`
-				} `json:"result"`
-			}
-			if err := json.Unmarshal(resp, &env); err != nil {
-				t.Fatalf("unmarshal: %v", err)
-			}
-			if env.Result == nil {
-				return false
-			}
-			gotPath = env.Result.Path
-			return true
-		})
-	if gotPath != wantPath {
-		t.Fatalf("path = %q, want %q", gotPath, wantPath)
-	}
-}
-
-// ── contract conformance ────────────────────────────────────────────────
-
-// The DTO's own conformance: an absolute path, or an empty string for a
-// cancelled picker. The `path` field is required and the key set is exact.
 func TestDialogOpenDirectory_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "dialog.openDirectory.schema.json")
 	raw, err := json.Marshal(struct {

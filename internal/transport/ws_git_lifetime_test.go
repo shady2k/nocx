@@ -6,6 +6,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/operation/catalog"
+	"github.com/shady2k/nocx/internal/transport/control"
 )
 
 type captureResponder struct {
@@ -51,20 +52,24 @@ func TestGitOperationExpiryWireShape(t *testing.T) {
 			if !ok || data.Reason != tc.reason {
 				t.Fatalf("data = %#v, want reason %q", r.data, tc.reason)
 			}
-			if r.err.Message == "" || r.err.Message == SaturationMessage {
-				t.Fatalf("message = %q; the declared outcome must be named, not the saturation sentence", r.err.Message)
+			if r.err.Message == "" || r.err.Message == operationExpiredMessage {
+				t.Fatalf("message = %q; the declared outcome must be named, not the fixed did-not-start sentence", r.err.Message)
 			}
 		})
 	}
 }
 
-// A saturated lane still answers the saturation class until stage 8 removes
-// it: expiry does not swallow a genuine capacity refusal.
-func TestGitOperationStillAnswersALaneRefusal(t *testing.T) {
+// A wait that ran out is answered as "did not start" for a git call too: one
+// shape for every domain (ADR-8eej3e66 stage 8).
+func TestGitsWaitThatRanOutAnswersNotStarted(t *testing.T) {
 	r := &captureResponder{}
 	answerGitOperationError(r, jsonrpcRequest{ID: json.RawMessage(`7`)},
-		&capability.RefusedError{})
-	if r.err == nil || r.err.Code != SaturationErrorCode {
-		t.Fatalf("err = %+v, want the saturation code %d", r.err, SaturationErrorCode)
+		&capability.RefusedError{Rejection: control.Rejection{Kind: control.RejectionWaitExceeded, Scope: "git-checkout"}})
+	if r.err == nil || r.err.Code != OperationExpiredCode {
+		t.Fatalf("err = %+v, want the expiry code %d", r.err, OperationExpiredCode)
+	}
+	data, ok := r.data.(operationExpiredData)
+	if !ok || data.Reason != string(catalog.ExpiredNotStarted) {
+		t.Fatalf("data = %#v, want reason %q", r.data, catalog.ExpiredNotStarted)
 	}
 }

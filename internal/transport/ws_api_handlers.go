@@ -2252,22 +2252,22 @@ func validateAPIImportCurlRaw(raw json.RawMessage) string {
 // apiSpecs declares the api.* control methods. The collection and sender
 // seams are independently wired; importing is available without either
 // because it writes the chosen destination through apiimport's filesystem.
-func (s *WSServer) apiSpecs(lane control.Admission, apiGate, vaultGate control.Admission) []methodSpec {
+func (s *WSServer) apiSpecs(apiGate, vaultGate control.Admission) []methodSpec {
 	collWired := s.apiCollections != nil
 	sendWired := collWired && s.apiSender != nil
 	importWired := true
 
 	var collOp capability.APICollectionOperation
 	if collWired {
-		collOp = capability.NewAPICollectionOperation(apiGate, lane, s.apiCollections)
+		collOp = capability.NewAPICollectionOperation(apiGate, s.apiCollections)
 	}
 	importOp := capability.NewAPIImportOperation(
-		apiGate, vaultGate, lane, apiimport.NewOSFS(), s.apiFetch,
+		apiGate, vaultGate, apiimport.NewOSFS(), s.apiFetch,
 		s.apiImportVaultSeam(),
 	)
 
-	sub := s.operationQueue("api")
-	cancelSub := s.operationQueue("api-cancel")
+	sub := s.work
+	cancelSub := s.work
 	cancels := newSendCancels()
 	collAvailable := func() bool { return collWired }
 	collHandlers := func(r Responder) apiCollectionHandlers {

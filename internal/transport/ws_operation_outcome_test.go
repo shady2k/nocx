@@ -84,7 +84,7 @@ func TestAMutationAnswersDoneAndIsNeverAcceptedTwice(t *testing.T) {
 	_, logger := logtest.New(t)
 	server := NewWSServer(logger, newRegWithStub(logger))
 	server.methods["test.mutation"] = reg(
-		control.NewBoundedSubmission(control.NewSemaphore("test-mutation", 2)),
+		control.AsyncSubmission{},
 		catalog.OpSettingsSet,
 		noParams(),
 		func(_ *wsConn, _ *connState, r Responder) handlerFunc {
@@ -127,9 +127,14 @@ func TestAMutationAnswersDoneAndIsNeverAcceptedTwice(t *testing.T) {
 func TestAMutationRefusedBeforeItStartsAnswersNotStarted(t *testing.T) {
 	_, logger := logtest.New(t)
 	server := NewWSServer(logger, newRegWithStub(logger))
-	// Capacity zero refuses every submission: the work never starts.
+	// A submission closed before the call arrives does not run it: the work
+	// never starts, and the outcome says so.
+	refusing := control.NewOrderedSubmission("test-mutation-refused")
+	if shutdownable, ok := refusing.(control.Shutdownable); ok {
+		shutdownable.Shutdown()
+	}
 	server.methods["test.mutation"] = reg(
-		control.NewOrderedSubmission("test-mutation-refused", 0),
+		refusing,
 		catalog.OpSettingsSet,
 		noParams(),
 		func(_ *wsConn, _ *connState, r Responder) handlerFunc {
@@ -161,7 +166,7 @@ func TestAMutationReplayedWhileItRunsIsRefused(t *testing.T) {
 	entered := make(chan struct{}, 4)
 	release := make(chan struct{})
 	server.methods["test.mutation"] = reg(
-		control.NewBoundedSubmission(control.NewSemaphore("test-mutation-running", 4)),
+		control.AsyncSubmission{},
 		catalog.OpSettingsSet,
 		noParams(),
 		func(_ *wsConn, _ *connState, r Responder) handlerFunc {
@@ -212,7 +217,7 @@ func TestASealedRefusalLeavesTheMutationNotStartedAndItsRetryRuns(t *testing.T) 
 	server := NewWSServer(logger, newRegWithStub(logger))
 	runs := 0
 	server.methods["test.mutation"] = reg(
-		control.NewBoundedSubmission(control.NewSemaphore("test-mutation-sealed", 2)),
+		control.AsyncSubmission{},
 		catalog.OpVaultUnseal,
 		noParams(),
 		func(_ *wsConn, _ *connState, r Responder) handlerFunc {
@@ -262,7 +267,7 @@ func TestAWithdrawnMutationAnswersOneOfThreeAndIsNeverReplayedItself(t *testing.
 	server := NewWSServer(logger, newRegWithStub(logger))
 	entered := make(chan struct{}, 4)
 	server.methods["test.mutation"] = reg(
-		control.NewBoundedSubmission(control.NewSemaphore("test-mutation-withdrawn", 4)),
+		control.AsyncSubmission{},
 		catalog.OpSettingsSet,
 		noParams(),
 		func(_ *wsConn, _ *connState, r Responder) handlerFunc {
@@ -306,7 +311,7 @@ func TestAnIdentityOnAReadRetainsNothing(t *testing.T) {
 	_, logger := logtest.New(t)
 	server := NewWSServer(logger, newRegWithStub(logger))
 	server.methods["test.read"] = reg(
-		control.NewBoundedSubmission(control.NewSemaphore("test-read", 2)),
+		control.AsyncSubmission{},
 		catalog.OpVaultStatus,
 		noParams(),
 		func(_ *wsConn, _ *connState, r Responder) handlerFunc {
@@ -335,7 +340,7 @@ func TestAnIdentityBoundedByLengthAndNoRecordAnswersUnknown(t *testing.T) {
 	_, logger := logtest.New(t)
 	server := NewWSServer(logger, newRegWithStub(logger))
 	server.methods["test.mutation"] = reg(
-		control.NewBoundedSubmission(control.NewSemaphore("test-mutation-limit", 2)),
+		control.AsyncSubmission{},
 		catalog.OpSettingsSet,
 		noParams(),
 		func(_ *wsConn, _ *connState, r Responder) handlerFunc {
@@ -374,7 +379,7 @@ func TestOperationOutcomeOverTheWireConformsToContract(t *testing.T) {
 	_, logger := logtest.New(t)
 	server := NewWSServer(logger, newRegWithStub(logger))
 	server.methods["test.mutation"] = reg(
-		control.NewBoundedSubmission(control.NewSemaphore("test-mutation-contract", 2)),
+		control.AsyncSubmission{},
 		catalog.OpSettingsSet,
 		noParams(),
 		func(_ *wsConn, _ *connState, r Responder) handlerFunc {

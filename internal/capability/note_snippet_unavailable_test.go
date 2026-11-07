@@ -12,7 +12,7 @@ import (
 )
 
 func TestNoteOperation_NilServiceReturnsError(t *testing.T) {
-	op := NewNoteOperation(testUnavailableGate(), testUnavailableGate(), nil)
+	op := NewNoteOperation(testUnavailableGate(), nil)
 	err := op.Run(context.Background(), func(ctx context.Context, svc NoteService) error {
 		_, err := svc.Create(ctx, "body")
 		return err
@@ -23,7 +23,7 @@ func TestNoteOperation_NilServiceReturnsError(t *testing.T) {
 }
 
 func TestSnippetOperation_NilServiceReturnsError(t *testing.T) {
-	op := NewSnippetOperation(testUnavailableGate(), testUnavailableGate(), nil)
+	op := NewSnippetOperation(testUnavailableGate(), nil)
 	err := op.Run(context.Background(), func(_ context.Context, svc SnippetService) error {
 		_, err := svc.Create("title", "body")
 		return err
@@ -34,11 +34,11 @@ func TestSnippetOperation_NilServiceReturnsError(t *testing.T) {
 }
 
 func testUnavailableGate() control.Admission {
-	return Gate("unavailable-test", 1, 8, time.Second)
+	return Gate("unavailable-test", 1, time.Second)
 }
 
 func TestNoteOperation_NonNilServiceReachesStore(t *testing.T) {
-	op := NewNoteOperation(testUnavailableGate(), testUnavailableGate(),
+	op := NewNoteOperation(testUnavailableGate(),
 		note.NewService(notePassthroughStore{}, func() string { return "note-1" }, func() time.Time { return time.Unix(1, 0) }))
 	err := op.Run(context.Background(), func(ctx context.Context, svc NoteService) error {
 		rows, err := svc.List(ctx)
@@ -56,7 +56,7 @@ func TestNoteOperation_NonNilServiceReachesStore(t *testing.T) {
 }
 
 func TestSnippetOperation_NonNilServiceReachesStore(t *testing.T) {
-	op := NewSnippetOperation(testUnavailableGate(), testUnavailableGate(),
+	op := NewSnippetOperation(testUnavailableGate(),
 		snippet.NewService(snippetPassthroughStore{}, func() string { return "snippet-1" }))
 	err := op.Run(context.Background(), func(_ context.Context, svc SnippetService) error {
 		rows, err := svc.List()

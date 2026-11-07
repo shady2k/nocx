@@ -787,6 +787,53 @@ func (p *composedLineProc) typeExit() {
 	p.wait()
 }
 
+// withAssemblyBashEndpoint declares the remote topology these enhanced-child
+// proofs require. AD-5 has no helper-less Fish TCP adapter. ForceCommand runs
+// the requested command in real Bash, so SHELL names the shell actually serving
+// this endpoint; it does not override the account or the local parent shell.
+func withAssemblyBashEndpoint(t *testing.T) liveSshdOption {
+	t.Helper()
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatalf("Bash is required for the enhanced remote assembly endpoint: %v", err)
+	}
+	// ForceCommand also receives subsystem requests. Preserve the real SFTP
+	// publish by dispatching those to OpenSSH's external subsystem executable.
+	sftpServer, err := exec.LookPath("sftp-server")
+	if err != nil {
+		sshdDir := filepath.Dir(sshdBinary(t))
+		for _, candidate := range []string{
+			filepath.Join(sshdDir, "sftp-server"),
+			filepath.Join(sshdDir, "..", "libexec", "sftp-server"),
+			"/usr/lib/openssh/sftp-server",
+			"/usr/lib/ssh/sftp-server",
+			"/usr/libexec/openssh/sftp-server",
+			"/usr/libexec/sftp-server",
+		} {
+			if executable, lookupErr := exec.LookPath(candidate); lookupErr == nil {
+				sftpServer = executable
+				break
+			}
+		}
+	}
+	if sftpServer == "" {
+		t.Fatal("OpenSSH sftp-server is required for the controlled Bash endpoint; install the OpenSSH SFTP server alongside sshd")
+	}
+	command := filepath.Join(t.TempDir(), "bash-endpoint")
+	script := "export SHELL=\"$BASH\"\n" +
+		"case \"$SSH_ORIGINAL_COMMAND\" in\n" +
+		"  internal-sftp) exec " + shellQuoteForSh(sftpServer) + " ;;\n" +
+		"  '') exec \"$BASH\" -l ;;\n" +
+		"  *) exec \"$BASH\" -c \"$SSH_ORIGINAL_COMMAND\" ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(command, []byte(script), 0o600); err != nil {
+		t.Fatalf("write controlled Bash endpoint: %v", err)
+	}
+	return func(c *liveSshdConfig) {
+		c.extraConfig = "ForceCommand " + shellQuoteForSh(bash) + " " + shellQuoteForSh(command)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // The happy path: the assembly, all links live.
 
@@ -797,7 +844,7 @@ func (p *composedLineProc) typeExit() {
 // The parent is Suspended for the whole interval and re-activates only
 // through its authenticated activation (protocol doc §9).
 func TestLiveSshd_SSHChildAssembly_ChildEstablishesOverComposedLine(t *testing.T) {
-	fx := startLiveSshd(t, true)
+	fx := startLiveSshd(t, true, withAssemblyBashEndpoint(t))
 	h := newSSHChildHarness(t, fx)
 	h.establishParent()
 	h.requestChild("127.0.0.1", fx.fixturePort(), fx.user)
@@ -885,7 +932,7 @@ func TestLiveSshd_SSHChildAssembly_ChildEstablishesOverComposedLine(t *testing.T
 // completion for it — and the parent comes back. Two blocks must end, and
 // only one of them can end with a status the far side reported.
 func TestLiveSshd_SSHChildAssembly_ExitFreezesTheChildBlockAndCompletesTheParent(t *testing.T) {
-	fx := startLiveSshd(t, true)
+	fx := startLiveSshd(t, true, withAssemblyBashEndpoint(t))
 	h := newSSHChildHarness(t, fx)
 	h.establishParent()
 	h.promptReadyParent()

@@ -66,6 +66,20 @@ func TestASessionsScreenOutlivesTheCoordinatorThatOpenedIt(t *testing.T) {
 		t.Fatalf("opening a local pane through the shipped opener: %v", openErr)
 	}
 	sid := opened.Session.ID()
+	awaitLocalPaneIntegration(t, first, sid)
+	if err := first.paneViews.Enrol(string(sid)); err != nil {
+		t.Fatalf("watching the pane: %v", err)
+	}
+	// Keep one POSIX foreground probe alive across the restart. The daemon's
+	// child remains the native account shell; the probe owns the trap state
+	// and receives the PTY's foreground SIGWINCH regardless of that shell's
+	// language. Its split prompt marker cannot match the echoed launch line.
+	const probeReady = "RESTART-PROBE-READY> "
+	probe := posixPaneCommand("PS1='RESTART-''PROBE-READY> '; export PS1; exec /bin/sh -i")
+	if _, err := opened.Session.Write([]byte(probe + "\n")); err != nil {
+		t.Fatalf("starting the POSIX foreground probe: %v", err)
+	}
+	waitForMarkerAnywhere(t, first, sid, probeReady)
 
 	// The program draws, and the marker is waited for THROUGH THE PRODUCT'S
 	// OWN READ — the store the observation, the emitting view and the typing
@@ -75,14 +89,11 @@ func TestASessionsScreenOutlivesTheCoordinatorThatOpenedIt(t *testing.T) {
 	if _, err := opened.Session.Write([]byte("printf '\\033[2J\\033[3;5H" + marker + "\\n'\n")); err != nil {
 		t.Fatalf("running a marker-drawing program: %v", err)
 	}
-	if err := first.paneViews.Enrol(string(sid)); err != nil {
-		t.Fatalf("watching the pane: %v", err)
-	}
 	before := waitForMarker(t, first, sid, marker)
-	// Keep a shell trap running across the coordinator restart. Its trap reads
-	// the live PTY winsize when SIGWINCH arrives from the post-restart resize.
+	// Keep the foreground probe's trap running across the coordinator restart.
+	// Its trap records SIGWINCH from the post-restart resize.
 	const winchMarker = "RESTART-RESIZE-WINCH"
-	if _, err := opened.Session.Write([]byte("trap 'WINCH_SEEN=1' WINCH; echo WINCH-TRAP-READY\n")); err != nil {
+	if _, err := opened.Session.Write([]byte("trap 'WINCH_SEEN=1' WINCH; echo WINCH-TRAP-''READY\n")); err != nil {
 		t.Fatalf("starting the SIGWINCH probe in the helper PTY: %v", err)
 	}
 	waitForMarkerAnywhere(t, first, sid, "WINCH-TRAP-READY")
@@ -215,8 +226,8 @@ func TestASessionsScreenOutlivesTheCoordinatorThatOpenedIt(t *testing.T) {
 		t.Logf("the out-of-band TIOCGWINSZ read is skipped here: %v", err)
 	}
 	// The PTY ioctl also raises SIGWINCH to the foreground process group. The
-	// shell remains in its normal prompt loop; ask it to report the trap state
-	// and the winsize directly from its tty after the ioctl.
+	// foreground probe remains in its POSIX prompt loop; ask it to report the
+	// trap state and the winsize directly from its tty after the ioctl.
 	if _, err := restored.Write([]byte("echo " + winchMarker + "-$WINCH_SEEN; stty size\n")); err != nil {
 		t.Fatalf("asking the re-adopted shell to report SIGWINCH: %v", err)
 	}

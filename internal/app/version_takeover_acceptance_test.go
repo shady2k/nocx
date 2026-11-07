@@ -26,6 +26,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/endpoint"
 	helperlocal "github.com/shady2k/nocx/internal/helper/local"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/storage/storagetest"
 	"github.com/shady2k/nocx/internal/transport"
 )
@@ -95,10 +96,17 @@ func TestAVersionTakeoverKeepsTheLiveShellAndRoutesNewPanesToTheInstalledGenerat
 	if enrolErr := first.paneViews.Enrol(string(sid)); enrolErr != nil {
 		t.Fatalf("watch the original pane: %v", enrolErr)
 	}
+	awaitLocalPaneIntegration(t, first, sid)
 	// The value exists only in the live shell, not in the pane's cwd,
 	// ledger or startup files. The expected output is absent from the
 	// command's echoed input: a marker wait cannot pass on tty echo alone.
-	if _, writeErr := opened.Session.Write([]byte("NOCX_TAKEOVER_STATE=held; printf 'BEFORE-%s\\n' \"$NOCX_TAKEOVER_STATE\"\n")); writeErr != nil {
+	// Set it in the native shell itself, not a child whose survival would
+	// leave the original shell's state untested.
+	setState := "NOCX_TAKEOVER_STATE=held"
+	if shellintegration.LocalShellKind(loginShellPath()) == shellintegration.ShellFish {
+		setState = "set -g NOCX_TAKEOVER_STATE held"
+	}
+	if _, writeErr := opened.Session.Write([]byte(setState + "; printf 'BEFORE-%s\\n' \"$NOCX_TAKEOVER_STATE\"\n")); writeErr != nil {
 		t.Fatalf("use the original shell: %v", writeErr)
 	}
 	waitForMarkerAnywhere(t, first, sid, "BEFORE-held")
@@ -194,6 +202,7 @@ func TestAVersionTakeoverKeepsTheLiveShellAndRoutesNewPanesToTheInstalledGenerat
 	if enrolErr := second.paneViews.Enrol(string(fresh.Session.ID())); enrolErr != nil {
 		t.Fatalf("watch the fresh pane: %v", enrolErr)
 	}
+	awaitLocalPaneIntegration(t, second, fresh.Session.ID())
 	if _, writeErr := fresh.Session.Write([]byte("printf 'FRESH-%s\\n' usable\n")); writeErr != nil {
 		t.Fatalf("type into the new generation's shell: %v", writeErr)
 	}

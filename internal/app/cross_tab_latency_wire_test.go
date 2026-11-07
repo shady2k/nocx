@@ -85,8 +85,8 @@ func TestCrossTabChildProcess(t *testing.T) {
 	}
 	switch mode {
 	case "worker":
-		// The foreground program B runs: raw mode (the shell execs it under
-		// `stty raw -echo`), echoing every byte back as it arrives and
+		// The foreground program B runs: raw mode (its POSIX launcher execs
+		// it under `stty raw -echo`), echoing every byte back as it arrives and
 		// answering a completed line with one marker. It never forks, so what
 		// is measured is the product's path and not a process spawn.
 		report("ready %d", time.Now().UnixNano())
@@ -767,11 +767,12 @@ func TestCrossTabLatencyAtTheWire(t *testing.T) {
 		return cmdScreen, keyScreen
 	}
 
-	// B's foreground program: raw mode, echo, one marker per finished line.
-	workerQuote := "'" + strings.ReplaceAll(binary, "'", "'\\''") + "'"
-	_, _ = w.intent(paneB, "text",
-		"\x15stty raw -echo; exec env NOCX_XT_MODE=worker NOCX_XT_SOCKET='"+socket+"' "+
-			workerQuote+" -test.run='^TestCrossTabChildProcess$'\n")
+	// B's POSIX launcher owns raw mode until exec. Setting it in Fish before
+	// a separate exec lets the interactive shell restore cooked tty settings
+	// between jobs, leaving the worker waiting for a line instead of a byte.
+	worker := posixPaneCommand("stty raw -echo; exec env NOCX_XT_MODE=worker NOCX_XT_SOCKET=" +
+		shellQuoteForSh(socket) + " " + shellQuoteForSh(binary) + " -test.run='^TestCrossTabChildProcess$'")
+	_, _ = w.intent(paneB, "text", "\x15"+worker+"\n")
 	select {
 	case <-workerReady:
 	case <-time.After(time.Minute):

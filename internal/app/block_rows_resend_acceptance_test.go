@@ -92,6 +92,7 @@ func TestABlockEndsWithTheWholeOutputAfterACoordinatorRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("opening a local pane through the shipped opener: %v", err)
 	}
+	awaitLocalPaneIntegration(t, a, opened.Session.ID())
 	p := &pane{sess: opened.Session}
 	watchCtx, cancelWatch := context.WithCancel(context.Background())
 	watchDone := make(chan error, 1)
@@ -112,9 +113,9 @@ func TestABlockEndsWithTheWholeOutputAfterACoordinatorRestart(t *testing.T) {
 
 	// The command prints its first two hundred rows at once, then holds
 	// on the release file: the restart happens while it is mid-command.
-	cmd := "r=" + release + "; i=1; while [ $i -le 200 ]; do echo R$i; i=$((i+1)); done; " +
-		"while [ ! -f $r ]; do sleep 0.1; done; " +
-		"while [ $i -le 300 ]; do echo R$i; i=$((i+1)); done; echo done > " + done
+	cmd := posixPaneCommand("r=" + shellQuoteForSh(release) + "; i=1; while [ $i -le 200 ]; do echo R$i; i=$((i+1)); done; " +
+		"while [ ! -f \"$r\" ]; do sleep 0.1; done; " +
+		"while [ $i -le 300 ]; do echo R$i; i=$((i+1)); done; echo done > " + shellQuoteForSh(done))
 	if _, writeErr := p.sess.Write([]byte(cmd + "\n")); writeErr != nil {
 		t.Fatalf("writing the command into the pane: %v", writeErr)
 	}
@@ -370,6 +371,7 @@ func TestAShellThatExitsWhileTheCoordinatorIsAwaySettlesItsBlockOnReturn(t *test
 	if err != nil {
 		t.Fatalf("opening a local pane through the shipped opener: %v", err)
 	}
+	awaitLocalPaneIntegration(t, a, opened.Session.ID())
 	p := &pane{sess: opened.Session}
 	watchCtx, cancelWatch := context.WithCancel(context.Background())
 	watchDone := make(chan error, 1)
@@ -392,15 +394,16 @@ func TestAShellThatExitsWhileTheCoordinatorIsAwaySettlesItsBlockOnReturn(t *test
 	// release file; releasing it lets the command finish, and the `exit`
 	// typed ahead behind it then ends the shell — both while the
 	// coordinator is away, in the second half below.
-	cmd := "echo started; while [ ! -f " + release + " ]; do sleep 0.1; done; " +
-		"echo bye > " + done
+	cmd := posixPaneCommand("echo started; while [ ! -f " + shellQuoteForSh(release) + " ]; do sleep 0.1; done; " +
+		"echo bye > " + shellQuoteForSh(done))
 	if _, writeErr := p.sess.Write([]byte(cmd + "\nexit\n")); writeErr != nil {
 		t.Fatalf("writing the command into the pane: %v", writeErr)
 	}
 	p.await(t, regexp.MustCompile("started"))
 	deadline := time.Now().Add(30 * time.Second)
-	// The block exists before the restart: the shell's DEBUG trap records
-	// the first simple command ("echo started") as the entry's command.
+	// The native shell records the foreground /bin/sh invocation as one
+	// command. Its quoted program still contains "echo started", so the same
+	// history query identifies the block before the restart.
 	for {
 		resp := callAppWS(t, conn, "history.query", map[string]any{
 			"scope": "everywhere", "text": "echo started", "limit": 50,

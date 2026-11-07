@@ -318,3 +318,23 @@ manifest membership. The separate real Adiantum probe copied a 9 MiB source
 through 16 KiB incremental BLOB slices into an encrypted transient spool, checked
 key/canary isolation and cleanup, and read the captured revision after the source
 advanced. Neither probe is the production frontend/read API.
+
+### Integrated-check fixture corrections
+
+The first full gate stopped in its host backend leg. Native-shell app fixtures
+assumed POSIX syntax or readiness before Fish's native reader was ready; the
+host also lacked the repository-pinned Zsh plugins. The applicable existing
+`nocx-ga29v.8.6` repairs were selectively integrated without replacing the
+account shell. The affected app checks, including restart, takeover, SSH child
+assembly and cross-tab input, then passed with `-race,nocx_framecheck` in 39.563 s.
+
+The real-geometry bounds fixture queued every confirmation RPC, unlike the
+application's latest-wins cumulative watermark. It exhausted the helper resend
+buffer at 200×50. Matching the production confirmation policy preserved every
+output, frame, storage and loss assertion, without raising budgets or deadlines.
+The real-helper checks passed at 80×24, 120×40 and 200×50 in 5.02 s under the race
+detector. A disposable blocked-confirmation probe also verified that pending
+watermarks coalesce to the highest accepted row.
+
+These are test-fixture corrections, not additional product optimizations; the
+product revision and performance measurements above remain unchanged.

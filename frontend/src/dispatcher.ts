@@ -23,6 +23,7 @@ import {
   replayedAssessment,
   resolveMutationOutcome,
   withdrawnBeforeStart,
+  withdrawnUnanswered,
   type MutationAssessment,
 } from './mutations'
 import { log } from './log'
@@ -1018,9 +1019,26 @@ export class Dispatcher {
       this.answerWithdrawn(held, withdrawnBeforeStart(slot.method))
       return
     }
-    void resolveMutationOutcome(this, slot.mutation ?? '').then((assessment) => {
-      this.answerWithdrawn(held, assessment)
-    })
+    void resolveMutationOutcome(this, slot.mutation ?? '').then(
+      (assessment) => {
+        this.answerWithdrawn(held, assessment)
+      },
+      // THE ASK IS THE DISPATCHER'S OWN REQUEST, so its failure is the
+      // dispatcher's to own. It fails when the connection goes before the
+      // record answers — expected on a close, and the one place an unhandled
+      // rejection could come from with nobody to catch it: the caller dropped
+      // nothing, the ask did. The caller is still settled, with the sentence
+      // that says nobody can say; the ask is not retried inline, because the
+      // record lives on the backend and the surface asks again on the next
+      // connection. Logged with its cause — handled, not swallowed.
+      (cause: unknown) => {
+        log.warn('nocx: the mutation answer could not be asked', {
+          method: slot.method,
+          cause: cause instanceof Error ? cause.message : String(cause),
+        })
+        this.answerWithdrawn(held, withdrawnUnanswered(slot.method))
+      },
+    )
   }
 
   private answerWithdrawn(members: Set<CallMember>, assessment: MutationAssessment): void {

@@ -764,6 +764,46 @@ describe('dispatcher mutations', () => {
     d.close()
   })
 
+  it('a close during a withdrawal answer ask leaves no unhandled rejection', async () => {
+    // THE ASK IS THE DISPATCHER'S OWN REQUEST. When the socket goes before the
+    // record answers, that promise must not reject with nobody listening: the
+    // caller is still settled, and vitest fails a run on an unhandled
+    // rejection even when every test passed (measured: ci-frontend's 7672
+    // green tests and "Error: ws closed" out of rejectAllPending).
+    const seen: unknown[] = []
+    const onUnhandled = (reason: unknown): void => {
+      seen.push(reason)
+    }
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      const d = new Dispatcher(new TestEndpointProvider())
+      await connectedWith(d, 8)
+      const abort = new AbortController()
+      const pending = d.call('settings.set', { key: 'theme' }, abort.signal)
+      pending.catch(() => {})
+      await flush()
+      abort.abort() // the withdrawal puts operation.outcome on the wire
+      await flush()
+      expect(
+        socket()
+          .requests()
+          .filter((request) => request.method === 'operation.outcome'),
+      ).toHaveLength(1)
+      d.close() // the socket goes before the answer comes back
+      await flush()
+      await flush()
+      // The caller is answered anyway, with the sentence that says nobody can
+      // say — and nothing was left to reject on its own.
+      await expect(pending).rejects.toMatchObject({
+        name: 'AbortError',
+        message: /unknown|Checking what happened/,
+      })
+      expect(seen).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+  })
+
   it('never re-sends a withdrawn mutation, and the rejection carries its answer', async () => {
     const d = new Dispatcher(new TestEndpointProvider())
     await connectedWith(d, 8)
@@ -798,7 +838,8 @@ describe('dispatcher mutations', () => {
   it('a mutation withdrawn before it was sent answers did-not-start without asking', async () => {
     const d = new Dispatcher(new TestEndpointProvider())
     await connectedWith(d, 1)
-    void d.call('vault.seal', {}) // the whole window
+    const filler = d.call('vault.seal', {}) // the whole window
+    filler.catch(() => {})
     const abort = new AbortController()
     const queued = d.call('git.commit', { message: 'x' }, abort.signal)
     queued.catch(() => {})

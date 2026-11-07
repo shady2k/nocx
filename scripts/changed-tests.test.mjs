@@ -124,7 +124,17 @@ test('the repeat is one go test per package, selecting exactly the changed names
     [
       {
         command: 'go',
-        args: ['test', '-race', '-count', '20', '-timeout', '1200s', '-run', '^(TestA|TestB)$', './internal/foo'],
+        args: [
+          'test',
+          '-race',
+          '-count',
+          '20',
+          '-timeout',
+          '1200s',
+          '-run',
+          '^(TestA|TestB)$',
+          './internal/foo',
+        ],
       },
     ],
   )
@@ -206,6 +216,14 @@ test('the repeat sets its own time bound: the count arithmetic, under a ceiling'
     race: true,
   })
   assert.deepEqual(small.args, [
-    'test', '-race', '-count', '2', '-timeout', '120s', '-run', '^(TestA)$', './internal/foo',
+    'test',
+    '-race',
+    '-count',
+    '2',
+    '-timeout',
+    '120s',
+    '-run',
+    '^(TestA)$',
+    './internal/foo',
   ])
 })

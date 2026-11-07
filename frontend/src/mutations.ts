@@ -147,3 +147,11 @@ export class MutationWithdrawnError extends Error {
 export function withdrawnBeforeStart(method: string): MutationAssessment {
   return assessmentOf({ outcome: 'not-started', operation: method })
 }
+
+/** The answer when the record could not be asked at all (its connection went
+ *  before the answer came back): the sentence names what to look at, and the
+ *  record is retained server-side, so the surface can ask again on the next
+ *  connection. */
+export function withdrawnUnanswered(method: string): MutationAssessment {
+  return assessmentOf({ outcome: 'unknown', operation: method })
+}

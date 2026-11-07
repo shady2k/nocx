@@ -1,7 +1,7 @@
 # Backlog integration
 
 Maintained by `setup-shady2k-skills`. This update installs setup protocol
-**0.63.0 from released plugin 0.134.0**, tracked by nocx-7z1zj. The release
+**0.66.0 from released plugin 0.137.0**, tracked by nocx-3an1s.3. The release
 includes the repairs for exact recording recovery (nocx-zjpwl), existing-hook
 upgrades (nocx-hm9qc), and the synchronized candidate-size proof (nocx-9v4x0);
 those upstream blockers are closed. The refreshed branch's checker selftests,
@@ -187,8 +187,8 @@ keeps every later change.
   `check-present.mjs` and `check-product.mjs`, with `time-format.mjs`,
   `document-format.mjs`, `regular-file.mjs` and `argv.mjs`, in [`.githooks/backlog-gate/`](../../.githooks/backlog-gate/).
   These are byte-for-byte copies of the plugin files under
-  `skills/backlog/setup-shady2k-skills/` of released plugin 0.134.0 (setup protocol
-  0.63.0), never edited here; the tracker recipe is `trackers/br.mjs` beside them.
+  `skills/backlog/setup-shady2k-skills/` of released plugin 0.137.0 (setup protocol
+  0.66.0), never edited here; the tracker recipe is `trackers/br.mjs` beside them.
   Compare each copy with that source. Run all five `--selftest` commands from
   the plugin directory, where their fixtures live; `check.mjs` additionally
   takes `--config <repo>/.githooks/backlog-gate/config.json` for portability.
@@ -324,12 +324,12 @@ connect` runs this connector before it checks the backlog inputs.
   (`--interval 60`). The user systemd unit
   (`~/.config/systemd/user/tracker-sync.service`) runs the machine's copy.
   `make connect` installs `tracker-sync.mjs`, `trackers/br.mjs`, `argv.mjs` and
-  `regular-file.mjs` from released plugin 0.134.0 under
+  `regular-file.mjs` from released plugin 0.137.0 under
   `~/.local/state/nocx/mechanism/`, with `tracker-sync.version` recording that
   version, so removing a worktree does not remove the mechanism. Copying files
   does not reload an already-running watcher: restarting the supervisor is a
   separate machine step. After that installation, check each machine with
-  `node ~/.local/state/nocx/mechanism/tracker-sync.mjs status --expect-version 0.134.0`.
+  `node ~/.local/state/nocx/mechanism/tracker-sync.mjs status --expect-version 0.137.0`.
   Pushing `refs/tracker/state` starts no code CI, so the
   backlog's own rules are checked on that ref's delta by
   `.github/workflows/tracker-gate.yml` rather than by a code push.
@@ -343,6 +343,12 @@ connect` runs this connector before it checks the backlog inputs.
   once the watcher's startup sync has finished (records in its first minute can still
   time out). Memory under 0.130.0 is about 50 MB, against 1.3–1.7 GB under the
   hand-patched 0.128 copy it replaced.
+  Measured 2026-11-07 on the same machine, one store (28 MB of tracked state, 1,345
+  store commits), peak RSS of the largest process: a `record` took 1,467 MiB and
+  368 s under 0.134.0, and 501 MiB and 3 s under 0.137.0; the watcher under 0.134.0
+  had reached 1.3 GiB, and a sync that merged a remote state 1,292 MiB and 181 s.
+  Refreshing the plugin does not refresh the copy the service runs, and that copy
+  stayed behind for days with the fix released: `status --expect-version` says so.
   0.134.0 retains the database/WAL change signal introduced in 0.132.0 to avoid
   exports while idle. The earlier CPU figures are not measurements of 0.134.0;
   the merge does not change the machine's existing CPU policy, and it neither
@@ -379,7 +385,7 @@ connect` runs this connector before it checks the backlog inputs.
   passed them:
 
   ```sh
-  PLUGIN="$HOME/.omp/plugins/cache/plugins/shady2k___shady2k-skills___0.134.0"
+  PLUGIN="$HOME/.omp/plugins/cache/plugins/shady2k___shady2k-skills___0.137.0"
   SETUP="$PLUGIN/skills/backlog/setup-shady2k-skills"
   REPO="$(git rev-parse --show-toplevel)"
   for f in check.mjs check-commits.mjs check-docs.mjs check-present.mjs check-product.mjs \
@@ -399,8 +405,8 @@ connect` runs this connector before it checks the backlog inputs.
   node "$PLUGIN/test/tracker-sync-proof.mjs" --only 24-candidates-are-small-and-swept
   ```
 
-  The mechanism's `version` output must be `0.134.0`; all five check versions must
-  be `0.63.0`. Repository wrapper tests, recoverable real-entry-point proofs
+  The mechanism's `version` output must be `0.137.0`; all five check versions must
+  be `0.66.0`. Repository wrapper tests, recoverable real-entry-point proofs
   (including clone-connection failure diagnostics), review and PR checks remain
   required before acceptance. Real reboot and a second real machine are not
   proved by these isolated suites.

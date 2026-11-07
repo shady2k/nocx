@@ -221,3 +221,100 @@ native phases from 931 renderer samples, checked the three model and four
 retained replay summaries, and compiled the workload above for JavaScript syntax.
 These are document/data checks, not a new native performance run or acceptance
 of any proposed implementation.
+
+## Implementation follow-on: measured, not merged
+
+The owner approved P1–P4 and P5's contract proof in PR #743. Product revision
+`f9f4128fa` includes the pin-demand guard, bulk active-row extraction with bounded
+scratch reuse, pending-only row acceptance without visible-pane settling, and
+immutable unchanged-row sharing. No production incremental-history API is added.
+The [follow-on measurements](2026-11-07-busy-terminal-improvement-measurements.json)
+retain component samples and per-process native samples separately from the
+original diagnosis above.
+
+### Runtime and cell-model components
+
+The same 120×40 runtime benchmark used 100 ingests per sample, three samples per
+case, on the same machine/toolchain. Baseline product code is unchanged at
+`3adac13bf`; medians below include both the prefix guard and final bulk scratch
+reuse. Allocated bytes are Go allocation traffic, **not retained RAM**.
+
+| Ingest bytes | Before, ms | After, ms | Before allocated, MB | After allocated, MB |
+| -----------: | ---------: | --------: | -------------------: | ------------------: |
+|          128 |      3.747 |     0.188 |                1.639 |               0.221 |
+|          800 |      4.329 |     0.239 |                2.103 |               0.257 |
+|         4096 |      4.663 |     0.387 |                2.678 |               0.403 |
+|        65536 |      9.056 |     3.405 |               12.828 |               3.076 |
+
+At 800 bytes, allocations fell from 75023 to 405 per ingest. The retained bridge
+scratch is only its geometry-sized starting budget; larger grapheme retries are
+temporary, and resize/close discard the scratch. Returned rows own their cells
+and immutable text.
+
+A separate Node component probe ran 1000 model applications with Unicode wide
+and combining cells. These are not native renderer timings. Its p50 is the
+upper-middle sorted sample; the JSON retains the original run summaries, not
+the individual application timings:
+
+| 120×40 workload           | Before p50, ms | After p50, ms |
+| ------------------------- | -------------: | ------------: |
+| Identical, plain          |         0.5653 |        0.0018 |
+| One changed row, styled   |         1.0910 |        0.0811 |
+| Every row changed, styled |         1.0774 |        1.0985 |
+
+The full-changing fallback is not a universal speedup: other measured sizes
+showed approximately 5–6% overhead. Sparse/identical frames avoid cell rebuilding;
+fully changed frames still pay comparison-fact ownership. Pinned selection and
+snapshot metadata remain correct. Mutation checks killed ignored style changes,
+aliased `cwd`, and borrowed mutable bulk-row text.
+
+### Real native six-tab comparison
+
+Both windows used Go 1.26.10 with `release,production,gtk3`; both coordinators and
+local helpers used Go 1.26.5 with their matching original tags. An initial
+development build was discarded before measurement because its profile/logging
+mode did not match the baseline. Each measured revision used a fresh isolated
+HOME/XDG profile, the same 1024×768 viewport, 79×40 active grid, Notes sidebar and
+generator above. No allocator overrides or preloads were used.
+
+The alternate workload first exercised 1/2/4/6 producers progressively. The
+six-producer phases below detached the inspector. Initial visible phases matched
+the last producer's warm-up counter; hidden scrolling began one 30-tick reporting
+bucket earlier after the fix (1260 versus 1290). Samples were taken once per
+second for 20 seconds, or 30 seconds for visible scrolling. CPU includes the
+window, coordinator, helper and WebKit,
+not workload Node processes or shells; **100% is one logical CPU**. PSS sums the
+same product processes.
+
+| Six active producers   | Before CPU | After CPU | Before median PSS, MiB | After median PSS, MiB |
+| ---------------------- | ---------: | --------: | ---------------------: | --------------------: |
+| Alternate, one visible |     124.3% |     91.7% |                  646.7 |                 623.8 |
+| Alternate, all hidden  |      92.2% |     60.7% |                  650.4 |                 626.4 |
+| Scrolling, one visible |     314.3% |    268.9% |                  968.7 |                 945.2 |
+| Scrolling, all hidden  |     278.7% |    232.9% |                  952.7 |                 929.3 |
+
+The generators advanced comparably, approximately 30 ticks/second; their files
+update only every 30 ticks. Every stopped command's final tick/row marker was
+observed after activating its tab. The existing retention-cap loss notice was
+visible, not suppressed. While another hidden tab kept printing, the visible
+pane stayed scrolled away at offset zero; activating the producer showed current
+output. Closing the six completed tabs left one tab, one shell and no workload
+Node processes.
+
+This is one fresh before/after cohort, not a randomized repeated study. Native
+PSS is only modestly lower and startup samples are not uniformly lower. After
+stopping output with tabs retained, median product PSS was 897.7 versus 872.4 MiB;
+CPU was 5.2% versus 7.7%, so no idle-CPU improvement is claimed. Raw spread and
+the after-close samples are retained in the JSON. These results support lower
+CPU/allocation cost, not a fixed native RAM leak, macOS equivalence, trusted-key
+latency, or the stage's sixteen-busy-session acceptance.
+
+### Incremental retained output remains a design result
+
+The [ledger contract design](../../.internal/specs/2026-11-07-incremental-ledger-read-design.md)
+keeps one content owner and an exact-revision response. Its reference model
+passes 16 scenarios, including owner-driven lease expiry and exact sparse
+manifest membership. The separate real Adiantum probe copied a 9 MiB source
+through 16 KiB incremental BLOB slices into an encrypted transient spool, checked
+key/canary isolation and cleanup, and read the captured revision after the source
+advanced. Neither probe is the production frontend/read API.

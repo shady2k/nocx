@@ -1,16 +1,16 @@
-# Prepare fidelity-preserving fixes for active-output tabs
+# Fidelity-preserving fixes for active-output tabs
 
 - **Status:** P1–P4 implementation and P5 contract design approved; implementation not yet accepted.
-- **Owner request:** 2026-11-07, “проведи подготовку к исправлению и сделай pr в репе”
-  (prepare the fixes and open a pull request).
+- **Owner request:** 2026-11-07, “Prepare the fixes and open a pull request”
+  (translated from the conversation).
 - **Preparation leaf:** `nocx-3an1s.1.11`, serving busy-terminal O1 under
   `nocx-3an1s.1`. This PR does not accept or close that stage.
 - **Base:** `cc53f3b844468c58320f3aad2d6126ee7faddab3`; investigated product paths
   are unchanged from measured revision `f49860272193af2bce04745c691b0ad621252092`.
 - **Evidence:** [diagnostic report](../../docs/research/2026-11-07-busy-terminal-performance.md)
   and [portable measurements](../../docs/research/2026-11-07-busy-terminal-measurements.json).
-- **Admission:** on 2026-11-07 the owner selected “Четыре исправления и контракт
-  истории” after seeing P1–P5 and the increase from 12 to 17 admitted findings.
+- **Admission:** on 2026-11-07 the owner selected “Four fixes and the history
+  contract” after seeing P1–P5 and the increase from 12 to 17 admitted findings.
   This approves the four bounded fixes and P5's design proof, not pagination
   implementation, an ADR supersession or a merge. The original preparation
   measurements and their limits remain unchanged.
@@ -65,7 +65,7 @@ Retention settings, final cumulative credit and durable confirmations stay where
 they are. The milestone explicitly excludes the bulk terminal carrier. No
 accepted decision is edited by this preparation.
 
-## Inventory: extend these owners
+## Baseline inventory: extend these owners
 
 | Job                              | Existing owner and reachability                                                                           | What is already delivered                                                                                                              |
 | -------------------------------- | --------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
@@ -79,9 +79,9 @@ The source seams are linked by existing production callers, not unwired packages
 The new work does not duplicate the delivered optimizations. `nocx-n275f` already
 made cap eviction one pass; the remaining scan is measured but not included here.
 
-## Proposed work packages
+## Approved work packages
 
-These are preparation scopes, not a markdown task-status list. `br` owns their
+These are implementation scopes, not a markdown task-status list. `br` owns their
 state and assignments. P1–P4 have concrete implementation boundaries; P5 is a
 bounded prerequisite design result, **not** a ready incremental implementation.
 
@@ -293,8 +293,8 @@ logging and failing-test context remain in use; no new telemetry is proposed.
 
 ## Out
 
-Implementation or merge of the five packages; claim that the earlier native RAM
-ramp is fixed; release/deployment; macOS proof not yet run; ledger eviction
+Production incremental-history implementation; merge; claim that the earlier native
+RAM ramp is fixed; release/deployment; macOS proof not yet run; ledger eviction
 optimization beyond its existing one-pass fix; logging/ack policy changes;
 retention-policy changes; the separate rapid-close race (`nocx-3an1s.1.10`);
 `nocx-7epsi`'s transition-observation defect; a second VT parser or state owner.
@@ -303,26 +303,27 @@ The RAM follow-on stays on `nocx-3an1s.1.9`. Its next investigation must preserv
 the earlier session sequence/runtime state and distinguish live native ownership
 from allocator retention. A lower-allocation patch alone cannot close it.
 
-## Preparation verification and approval boundary
+## Verification and approval boundary
 
-This supporting PR owes source/ADR review, portable-evidence consistency checks,
-Markdown/JSON formatting, valid local links, commit/task checks and the normal
-PR document checks. It changes no executable product/tooling code, so it owes no
-product suite or new permanent tests. The automatic document-readiness gate is
-not installed; readiness is reviewed manually and no passing receipt is invented.
+The original preparation contained no executable changes. The owner-approved
+follow-on now includes P1–P4 product changes and the P5 contract/proof, so it owes
+the product checks and real native comparison above, in addition to source/ADR
+review, valid links, formatting and commit/task checks. The automatic
+document-readiness gate is not installed; no passing receipt is invented.
 
-The preparation can be accepted independently of the proposed implementation.
-Owner approval/admission is still required before taking deferred leaves. P5 also
-requires its contract proof before a corresponding implementation can be called
-ready. Neither a clean gate nor merging this documentation silently raises the
-finding budget or changes the root's DONE WHEN.
+P5's result is the [incremental ledger design](2026-11-07-incremental-ledger-read-design.md)
+and its executable reference proof. That proof is not a production read API:
+implementation still needs its own admission, canonical wire contracts and
+end-to-end checks. The budget increase to 17 is explicitly approved; neither
+these optimizations nor a clean gate changes the root's DONE WHEN.
 
 ## DONE WHEN
 
-The preparation PR contains the portable measured evidence, current-owner
-inventory, binding constraints, five tracked deferred scopes, observable
-acceptance scenarios and honest design/admission gates; links and evidence agree,
-and independent review finds no unaddressed contradiction. Another worker can
-start an admitted P1/P2/P3/P4 scope without re-deriving the diagnostic findings and
-can see why incremental retained delivery must first finish P5. No optimization,
-stage acceptance or native RAM fix is represented as delivered by this document.
+The PR preserves the original portable measurements and constraints, implements
+the four bounded fixes through their existing owners, and records their
+behavioral checks and measured benefits without conflating component gains with
+native CPU or RAM. P5 supplies a reviewed incremental retained-read contract and
+executable evidence for its mutation, loss, identity and resource boundaries.
+Independent review findings are resolved, applicable checks pass, and remaining
+measurement limits are explicit. Merge, the stage's sixteen-busy-session
+acceptance and the separate native RAM investigation remain outside this result.

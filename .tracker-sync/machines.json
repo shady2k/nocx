@@ -3,6 +3,6 @@
     "vm-agents": 1,
     "homepc": 2
   },
-  "thisMachine": "homepc",
+  "thisMachine": "vm-agents",
   "recordsNext": 14000
 }

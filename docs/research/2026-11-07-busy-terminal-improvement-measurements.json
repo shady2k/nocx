@@ -11979,5 +11979,96 @@
         }
       }
     ]
+  },
+  "postIntegrationSmoke": {
+    "revision": "463677a9fc71",
+    "main": "c1dca8a75",
+    "visibleBefore": {
+      "pane": true,
+      "tabs": 6
+    },
+    "activeCounters": [
+      {
+        "pid": 3882820,
+        "tick": 1080,
+        "bytes": 881280,
+        "mode": "scroll"
+      },
+      {
+        "pid": 3882936,
+        "tick": 1050,
+        "bytes": 856800,
+        "mode": "scroll"
+      },
+      {
+        "pid": 3883049,
+        "tick": 1020,
+        "bytes": 832320,
+        "mode": "scroll"
+      },
+      {
+        "pid": 3883158,
+        "tick": 990,
+        "bytes": 807840,
+        "mode": "scroll"
+      },
+      {
+        "pid": 3883271,
+        "tick": 960,
+        "bytes": 783360,
+        "mode": "scroll"
+      },
+      {
+        "pid": 3883381,
+        "tick": 930,
+        "bytes": 758880,
+        "mode": "scroll"
+      }
+    ],
+    "completions": [
+      {
+        "id": "final1",
+        "tick": 1113,
+        "finalRowVisible": true,
+        "editorReady": true
+      },
+      {
+        "id": "final2",
+        "tick": 1089,
+        "finalRowVisible": true,
+        "editorReady": true
+      },
+      {
+        "id": "final3",
+        "tick": 1057,
+        "finalRowVisible": true,
+        "editorReady": true
+      },
+      {
+        "id": "final4",
+        "tick": 1024,
+        "finalRowVisible": true,
+        "editorReady": true
+      },
+      {
+        "id": "final5",
+        "tick": 989,
+        "finalRowVisible": true,
+        "editorReady": true
+      },
+      {
+        "id": "final6",
+        "tick": 967,
+        "finalRowVisible": true,
+        "editorReady": true
+      }
+    ],
+    "metricClaim": false,
+    "afterClose": {
+      "tabs": 1,
+      "shells": 1,
+      "producers": 0
+    },
+    "note": "Behavioral smoke after merging main c1dca8a75, not a new paired CPU/RAM measurement. Native release build at463677a9fc71, fresh isolated profile,1024x768, six scrolling producers; final output and editor readiness checked in every tab."
   }
 }

@@ -231,6 +231,8 @@ immutable unchanged-row sharing. No production incremental-history API is added.
 The [follow-on measurements](2026-11-07-busy-terminal-improvement-measurements.json)
 retain component samples and per-process native samples separately from the
 original diagnosis above.
+The paired performance cohort predates integration of main `c1dca8a75`; it is
+not a new CPU/RAM measurement of the final assembled tree.
 
 ### Runtime and cell-model components
 
@@ -338,3 +340,12 @@ watermarks coalesce to the highest accepted row.
 
 These are test-fixture corrections, not additional product optimizations; the
 product revision and performance measurements above remain unchanged.
+
+After main advanced, the branch integrated it as `463677a9fc71`. A fresh native
+release build then exercised six scrolling producers in an isolated profile.
+Every producer advanced while five tabs were hidden; activating a hidden tab
+showed current output. All six final output markers appeared with ready editors.
+Closing those six completed tabs left one fresh tab, one shell and no producers.
+The JSON retains this separately as `postIntegrationSmoke`, with no new
+performance claim. The native screenshot also showed the expected explicit
+history-cap loss notice, not silent completeness.

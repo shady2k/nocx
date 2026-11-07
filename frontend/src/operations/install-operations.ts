@@ -36,12 +36,18 @@
 // nothing: there is no call here to report on, no withdrawal to offer, and no
 // key to use that is not some other call's.
 //
-// ## The row goes on settle and leaves nothing behind
+// ## The row goes when the call does, and leaves nothing behind
 //
-// `operation.rowDone` removes it, and so does a lost connection: the work is
-// owned by the request, which dies with the socket, so a row that outlived the
-// socket would be a row about nothing. Neither is a finished entry — only
-// transfers have an outcome worth keeping.
+// Three things end it, and the call's own settlement is the one that must:
+// Cancel goes through `rpc.cancel`, the dispatcher settles the call at once,
+// and a row that waited for the backend's `operation.rowDone` frame would sit
+// there after a Cancel that had already worked — the frame need never come,
+// because the work it would report on has been withdrawn. `rowDone` still ends
+// the row on its own, for the install that finishes while the open goes on,
+// and a lost connection ends it too: the work is owned by the request, which
+// dies with the socket, so a row that outlived the socket would be a row about
+// nothing. None of them is a finished entry — only transfers have an outcome
+// worth keeping.
 
 import { createSignal } from 'solid-js'
 import type { Dispatcher } from '../dispatcher'
@@ -136,6 +142,22 @@ export function installOperations(dispatcher: Dispatcher): InstallOperations {
     setRows((previous) => previous.filter((r) => r.id !== row.rowID))
   }
 
+  /** End every row this call owns. It is keyed by the call rather than by the
+   *  wire id, because the call is what settles: the dispatcher forgets the wire
+   *  id with the answer, and Cancel settles a call that may still be waiting
+   *  for one. */
+  const callSettled = (callID: number): void => {
+    const rowID = callRowID(callID)
+    let found = false
+    for (const [key, entry] of drawn) {
+      if (entry.rowID !== rowID) continue
+      drawn.delete(key)
+      found = true
+    }
+    if (!found) return
+    setRows((previous) => previous.filter((row) => row.id !== rowID))
+  }
+
   const unsubscribe = [
     dispatcher.subscribe('operation.row', (params: unknown) => {
       if (isRowParams(params)) show(params)
@@ -144,6 +166,10 @@ export function installOperations(dispatcher: Dispatcher): InstallOperations {
       if (!isRowDoneParams(params)) return
       gone(params.requestId)
     }),
+    // THE ROW'S END IS THE CALL'S SETTLEMENT. Cancel is settled in the
+    // dispatcher, so the answer arrives here without the backend having to
+    // send anything at all.
+    dispatcher.onCallSettled(callSettled),
     // A DROPPED CONNECTION IS THE ROW'S END TOO. The work belongs to the
     // request, the request dies with the socket, and nothing replays a row on
     // reconnect — so a row that survived the socket would be a row about

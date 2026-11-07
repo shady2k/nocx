@@ -1206,8 +1206,8 @@ describe('credit window (ADR-8eej3e66 §7)', () => {
     await connectedWith(d, 1)
     const announced: number[] = []
     const settled: number[] = []
-    d.onCallPending = (call) => announced.push(call.id)
-    d.onCallSettled = (id) => settled.push(id)
+    d.onCallPending((call) => announced.push(call.id))
+    d.onCallSettled((id) => settled.push(id))
 
     void d.call('vault.seal', {}) // fills the window
     const waiting = d.call('vault.seal', {}, undefined, { origin: 'person' })
@@ -1232,8 +1232,8 @@ describe('credit window (ADR-8eej3e66 §7)', () => {
 
     const announced: Array<{ id: number; method: string; cancel: () => void }> = []
     const settled: Array<[number, string]> = []
-    d.onCallPending = (call) => announced.push(call)
-    d.onCallSettled = (id, settlement) => settled.push([id, settlement])
+    d.onCallPending((call) => announced.push(call))
+    d.onCallSettled((id, settlement) => settled.push([id, settlement]))
 
     void d.call('vault.seal', {}) // the whole window
     const queued = d.call('vault.status', {})
@@ -1371,9 +1371,10 @@ describe('credit window (ADR-8eej3e66 §7)', () => {
     await connectedWith(d, 1)
     const announced: { id: number; method: string; startedAt: number }[] = []
     const settled: number[] = []
-    d.onCallPending = (call) =>
-      announced.push({ id: call.id, method: call.method, startedAt: call.startedAt })
-    d.onCallSettled = (id) => settled.push(id)
+    d.onCallPending((call) =>
+      announced.push({ id: call.id, method: call.method, startedAt: call.startedAt }),
+    )
+    d.onCallSettled((id) => settled.push(id))
 
     void d.call('vault.seal', {}, undefined, { origin: 'background' }) // fills the window
     const queued = d.call('vault.status', {}) // waits for credit under its turn
@@ -1425,7 +1426,7 @@ describe('credit window (ADR-8eej3e66 §7)', () => {
     const d = new Dispatcher(new TestEndpointProvider())
     await connectedWith(d, 1)
     const announced: number[] = []
-    d.onCallPending = (call) => announced.push(call.id)
+    d.onCallPending((call) => announced.push(call.id))
 
     const first = d.call('agent.cancel', {})
     first.catch(() => {})
@@ -1453,7 +1454,7 @@ describe('credit window (ADR-8eej3e66 §7)', () => {
     const d = new Dispatcher(new TestEndpointProvider())
     await connectedWith(d, 1)
     const announced: number[] = []
-    d.onCallPending = (call) => announced.push(call.id)
+    d.onCallPending((call) => announced.push(call.id))
 
     const mutation = d.call('vault.seal', {}) // outcome-unknown: a mutation
     mutation.catch(() => {})
@@ -1501,7 +1502,7 @@ describe('a call has two identities, and the backend only knows one', () => {
     const d = new Dispatcher(new TestEndpointProvider())
     await connectedWith(d, 1)
     const announced: { id: number; method: string }[] = []
-    d.onCallPending = (call) => announced.push({ id: call.id, method: call.method })
+    d.onCallPending((call) => announced.push({ id: call.id, method: call.method }))
 
     const filler = d.call('agent.cancel', {}) // observe 1, wire 1
     filler.catch(() => {})

@@ -27,6 +27,11 @@ concurrency:
   cancel-in-progress: false
 jobs:
   prepare:
+    # Reading the pull request behind a commit needs `pull-requests: read`;
+    # naming one permission here sets every unnamed one to none.
+    permissions:
+      contents: read
+      pull-requests: read
     # `proof-only` reads no plan: it proves what is published now, and a plan
     # that decided nothing moved would otherwise skip the proof with it.
     if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.proof-only) }}
@@ -61,7 +66,7 @@ jobs:
           node --input-type=module <<'JS'
           import { execFileSync } from 'node:child_process';
           import { appendFileSync } from 'node:fs';
-          import { prepare, authorize, releaseKeys, verifyFile } from './scripts/publish-nightly.mjs';
+          import { prepare, authorize, releaseKeys, verifyFile, nightlyCommit } from './scripts/publish-nightly.mjs';
           authorize({ ref: process.env.GITHUB_REF, dryRun: process.env.DRY_RUN === 'true', linuxOnly: process.env.LINUX_ONLY === 'true' });
           const git = args => execFileSync('git', args, { encoding: 'utf8' }).trim();
           const sha = git(['rev-parse', 'HEAD']);
@@ -85,15 +90,21 @@ jobs:
           const plan = prepare({ sha, previous, files, tags });
           // The tag is NOT decided here: its suffix is the build's own signed
           // instant, which release-build chooses and signs (nocx-vh2hr.1.17).
-          // What a person reads in the release is the first-parent history since
-          // the previous nightly, so it is collected here, where git and that
-          // commit are both in hand, and carried to publication.
+          // What a person reads in the release is the pull requests of the
+          // first-parent history since the previous nightly, so each commit is
+          // resolved here, where git and that commit are both in hand, and the
+          // result is carried to publication. nightlyCommit keeps the parsed
+          // bullets and drops the body: the output and the publish step's
+          // environment are bounded, and the notes never read the body again.
+          // A failed lookup throws: the plan step must fail rather than publish
+          // notes with a change missing.
           const commits = previous
             ? git(['log', '--first-parent', '--format=%H%x09%s', `${previous}..${sha}`])
                 .split('\n').filter(Boolean)
                 .map(line => {
                   const [commit, ...subject] = line.split('\t');
-                  return { sha: commit, subject: subject.join('\t') };
+                  const pulls = JSON.parse(gh(['api', `repos/{owner}/{repo}/commits/${commit}/pulls`]));
+                  return nightlyCommit({ sha: commit, subject: subject.join('\t'), pull: pulls[0] });
                 })
             : [];
           if (process.env.DRY_RUN === 'true') plan.moved = true;

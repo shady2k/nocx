@@ -30,8 +30,14 @@ committed designated requirement and bundle seal, not Apple notarization.
 rehearsal. It has no publish job. Its `dry-run` input documents that boundary;
 changing it cannot authorize publication.
 
-Each release's notes are the first-parent commits since the previous nightly,
-newest first, each linked to its commit; the title is
+Each release's notes say what changed for a person using nocx. The publisher
+resolves the first-parent commits since the previous nightly to their pull
+requests and lists the `## What changes for you` bullets from each body, one to
+three a reader understands, each linked to its pull request.
+`.github/pull_request_template.md` asks every author for that section; a pull
+request without it, and a commit with no pull request, appears under a
+collapsed "Technical changes" group by its title. A range with no user-facing
+bullets says the build has only technical changes. The title is
 `nocx <version> nightly · build <build number>`, and the dated tag is
 `v<version>-nightly.<build number>`. The dated tag is computed by
 `release-build.yml`'s `validate` job from the instant it stamps into the

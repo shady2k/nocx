@@ -379,6 +379,37 @@ def alive(pid):
     return True
 
 
+def exchange_step(layout, candidate_sha, previous_sha):
+    """What a complete exchange leaves beside the bundle, before the restart.
+
+    The exchange is renameatx_np(RENAME_SWAP): it swaps the two directory
+    entries, so the install path holds the candidate and .nocx-swap.app holds
+    the PREVIOUS nightly. That peer is the rollback copy, and it has to still be
+    there — reconcileLocked (§7.5) rolls an installed build that cannot certify
+    its pair back by exchanging it in again after three launches.
+
+    .nocx-backup.app is the FINALISATION's to create, from the peer, once the
+    RESTARTED build has reported healthy and certifyPair has accepted it. A
+    backup before the restart would mean the app that applied the update had
+    finalised its own update and disarmed rollback — the hole certifyPair
+    exists to close (nocx-vh2hr.1.22; the proof used to require that backup).
+
+    Returns the two managed paths so the caller can assert what finalisation
+    does to them afterwards.
+    """
+    swap = layout["install"].parent / ".nocx-swap.app"
+    backup = layout["install"].parent / ".nocx-backup.app"
+    require(sha256(bundle_binary(layout["install"])) == candidate_sha,
+            "bundle swap: the installed bundle is not the candidate's bytes")
+    require(swap.exists() and sha256(bundle_binary(swap)) == previous_sha,
+            "bundle swap: the rollback peer does not hold the previous nightly's "
+            "bytes, so a build that cannot start has nothing to be rolled back to")
+    require(not backup.exists(),
+            "bundle swap: a retained backup appeared before the restart — "
+            "finalisation ran before the installed pair was certified")
+    return swap, backup
+
+
 def run(args, evidence):
     require(sys.platform == "darwin", "this is the macOS proof")
     require(os.getuid() != 0, "run as the runner's own user, not as root")
@@ -449,14 +480,9 @@ def run(args, evidence):
             "the diagnostic applied " + str(payload.get("toVersion"))
             + ", not the signed candidate " + candidate["version"])
 
-    # THE SWAP, on disk.
-    require(sha256(bundle_binary(layout["install"])) == candidate_sha,
-            "bundle swap: the installed bundle is not the candidate's bytes")
-    swap = layout["install"].parent / ".nocx-swap.app"
-    backup = layout["install"].parent / ".nocx-backup.app"
-    require(not swap.exists(), "bundle swap: the rollback peer is still there after a complete exchange")
-    require(sha256(bundle_binary(backup)) == previous_sha,
-            "bundle swap: the retained backup is not the previous nightly")
+    # THE SWAP, on disk: what a COMPLETE EXCHANGE leaves before the restart.
+    swap, backup = exchange_step(layout, candidate_sha, previous_sha)
+    evidence["rollbackPeerBeforeRelaunch"] = sha256(bundle_binary(swap))
     pending = read_pending(layout["journal"], layout["install"],
                            {**after, "version": candidate["version"]})
     require(pending["fromVersion"] == previous["version"],
@@ -480,8 +506,13 @@ def run(args, evidence):
                  args.ui_timeout, describe=lambda: tail(log_path.read_text(errors="replace"), 20))
         require(sha256(bundle_binary(layout["install"])) == candidate_sha,
                 "pair check: the installed bundle changed after finalisation")
+        # Finalisation renames the peer to the backup and only then deletes
+        # the journal, so both halves are checked: the previous nightly is
+        # retained as .nocx-backup.app, and the peer it came from is gone.
         require(backup.exists() and sha256(bundle_binary(backup)) == previous_sha,
                 "pair check: finalisation did not retain the previous nightly")
+        require(not swap.exists(),
+                "pair check: finalisation left the rollback peer in place beside the backup")
         evidence["relaunchedVersion"] = parse_version(
             command([bundle_binary(layout["install"]), "--version"]).stdout)
         evidence["pairCertified"] = True

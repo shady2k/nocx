@@ -382,3 +382,27 @@ its private GOPATH; all five real-hook subprocess scenarios passed in 5.366 s.
 The stopped aggregate command is not a full-gate pass. Its completed product
 checks remain evidence; remaining root/frontend, OS and container legs are
 verified separately.
+
+The next assembled tree passed native frontend checks (140 s), the native
+disposable-root OS target (381 s on Linux, not Darwin) and both portable backend
+container variants (1320 s). The Linux OS pass exposed a fixture-only Ubuntu
+OpenSSH 9.6 difference: `SSH_ORIGINAL_COMMAND` carries trailing whitespace after
+`internal-sftp`. The controlled Bash endpoint now matches the command boundary.
+The affected SFTP/SSH-child/Zsh cases passed in both Ubuntu keyring variants;
+the regression uploads private binary data and verifies the exact destination
+bytes, also passing on the native host. These fixes landed in `44d6e32b6`.
+
+Main `5d30b95fb` was then integrated without conflicts at `e9bcdf6c3222`, taking
+protocol 19 and the localization changes. Normal merge hooks passed. A fresh
+release-mode native build passed in 21 s; the real WebKitGTK window then ran six
+scrolling producers. All six advanced while five tabs were hidden, activation
+caught up, and every tab showed its final retained row and ready editor.
+Closing the six completed tabs left one fresh tab, one shell and no producers;
+the isolated application was stopped. The configured history-cap loss notice
+remained visible. `postProtocol19Smoke` in the measurement JSON records this
+behavioral proof separately: it is not a new CPU/RAM comparison.
+
+Per the coordinator's 2026-11-07 notice on PR #743, this work does not hold the
+busy-terminal milestone or the next release open. Its retained tasks transfer
+when that milestone closes. The old finding-budget admission must be reconciled
+with that transfer, not used to require this PR's merge before release.

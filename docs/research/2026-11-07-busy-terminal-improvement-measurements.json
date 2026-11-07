@@ -12070,5 +12070,140 @@
       "producers": 0
     },
     "note": "Behavioral smoke after merging main c1dca8a75, not a new paired CPU/RAM measurement. Native release build at463677a9fc71, fresh isolated profile,1024x768, six scrolling producers; final output and editor readiness checked in every tab."
+  },
+  "postProtocol19Smoke": {
+    "revision": "e9bcdf6c3222",
+    "main": "5d30b95fb99c6",
+    "protocol": 19,
+    "viewport": {
+      "width": 1024,
+      "height": 768
+    },
+    "visibleBefore": {
+      "tabs": 6,
+      "activeLast": true
+    },
+    "activeCounters": [
+      {
+        "pid": 101669,
+        "tick": 330,
+        "bytes": 269280,
+        "mode": "scroll"
+      },
+      {
+        "pid": 101772,
+        "tick": 300,
+        "bytes": 244800,
+        "mode": "scroll"
+      },
+      {
+        "pid": 101887,
+        "tick": 270,
+        "bytes": 220320,
+        "mode": "scroll"
+      },
+      {
+        "pid": 102020,
+        "tick": 210,
+        "bytes": 171360,
+        "mode": "scroll"
+      },
+      {
+        "pid": 102142,
+        "tick": 150,
+        "bytes": 122400,
+        "mode": "scroll"
+      },
+      {
+        "pid": 102252,
+        "tick": 90,
+        "bytes": 73440,
+        "mode": "scroll"
+      }
+    ],
+    "progressed": [
+      {
+        "pid": 101669,
+        "tick": 360,
+        "bytes": 293760,
+        "mode": "scroll"
+      },
+      {
+        "pid": 101772,
+        "tick": 330,
+        "bytes": 269280,
+        "mode": "scroll"
+      },
+      {
+        "pid": 101887,
+        "tick": 300,
+        "bytes": 244800,
+        "mode": "scroll"
+      },
+      {
+        "pid": 102020,
+        "tick": 240,
+        "bytes": 195840,
+        "mode": "scroll"
+      },
+      {
+        "pid": 102142,
+        "tick": 180,
+        "bytes": 146880,
+        "mode": "scroll"
+      },
+      {
+        "pid": 102252,
+        "tick": 120,
+        "bytes": 97920,
+        "mode": "scroll"
+      }
+    ],
+    "firstTabCaughtUp": true,
+    "completions": [
+      {
+        "id": "p1",
+        "tick": 1508,
+        "finalRowVisible": true,
+        "editorReady": true
+      },
+      {
+        "id": "p2",
+        "tick": 1486,
+        "finalRowVisible": true,
+        "editorReady": true
+      },
+      {
+        "id": "p3",
+        "tick": 1433,
+        "finalRowVisible": true,
+        "editorReady": true
+      },
+      {
+        "id": "p4",
+        "tick": 1372,
+        "finalRowVisible": true,
+        "editorReady": true
+      },
+      {
+        "id": "p5",
+        "tick": 1311,
+        "finalRowVisible": true,
+        "editorReady": true
+      },
+      {
+        "id": "p6",
+        "tick": 1252,
+        "finalRowVisible": true,
+        "editorReady": true
+      }
+    ],
+    "metricClaim": false,
+    "afterClose": {
+      "tabs": 1,
+      "shells": 1,
+      "producers": 0
+    },
+    "note": "Behavioral native WebKitGTK smoke after integrating main protocol19, not a paired CPU/RAM measurement. Six simultaneously scrolling producers progressed while five tabs were hidden; activation caught up; final retained row and editor readiness were observed in each tab. The configured history-cap loss notice remained explicit."
   }
 }

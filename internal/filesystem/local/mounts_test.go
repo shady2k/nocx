@@ -265,7 +265,18 @@ func TestASymlinkToARealMountPointTakesThatMountsDevice(t *testing.T) {
 	if point == "" {
 		t.Skip("this machine has no second mount to resolve into")
 	}
-	dir := t.TempDir()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// This scenario needs its link before the first non-root mount. A separate
+	// /tmp (including tmpfs) must stop resolution before the link is read.
+	for _, m := range table {
+		if m.Point != "/" && m.Point != "" &&
+			(dir == m.Point || strings.HasPrefix(dir, strings.TrimSuffix(m.Point, "/")+"/")) {
+			t.Skipf("temporary directory is behind mount %s; symlink traversal requires a root-volume fixture", m.Point)
+		}
+	}
 	link := filepath.Join(dir, "far")
 	if err := os.Symlink(point, link); err != nil {
 		t.Fatalf("symlink %s -> %s: %v", link, point, err)

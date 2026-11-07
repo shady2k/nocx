@@ -349,3 +349,12 @@ Closing those six completed tabs left one fresh tab, one shell and no producers.
 The JSON retains this separately as `postIntegrationSmoke`, with no new
 performance claim. The native screenshot also showed the expected explicit
 history-cap loss notice, not silent completeness.
+
+The next host backend run passed the app and transport packages but exposed a
+mount-fixture precondition: this machine mounts `/tmp` separately, and domain
+resolution must stop there before reading a symlink beneath it. The real-symlink
+test now declares that root-volume requirement; it is explicitly skipped on this
+host, while the remaining local-filesystem race checks pass. The unchanged
+target-device and distinct-neighbour assertions passed without skipping in the
+Ubuntu CI container (`/dev`: `tmpfs`, fixture directory: `overlay`). No production
+mount resolution was changed.

@@ -84,10 +84,23 @@ jobs:
       # Only an accepted head moves the baseline: a red run keeps checking the
       # same delta, so the violation cannot be buried by the next publish.
       - name: Record the checked head
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
           if [ -n "$CHECKED" ] && [ "$CHECKED" = "$HEAD_SHA" ]; then
             echo "the published head $HEAD_SHA was already checked"
             exit 0
           fi
-          git push origin "$HEAD_SHA:refs/tracker-gate/checked"
+          # The store was fetched shallow, so git here cannot see that the head
+          # descends from the mark across a gap of commits and calls the push a
+          # non-fast-forward. The remote holds the whole history, so it answers,
+          # and the force only replaces a fast-forward this has just proved.
+          if [ -n "$CHECKED" ]; then
+            relation=$(gh api "repos/$GITHUB_REPOSITORY/compare/$CHECKED...$HEAD_SHA" --jq .status)
+            if [ "$relation" != ahead ]; then
+              echo "::error::the published head $HEAD_SHA is $relation of the checked head $CHECKED: the store's history was rewritten"
+              exit 1
+            fi
+          fi
+          git push --force origin "$HEAD_SHA:refs/tracker-gate/checked"

@@ -4,8 +4,8 @@
  *
  * WHAT A USER CAN DO THAT THEY COULD NOT BEFORE, and what this spec watches:
  * reload a window holding ten integrated local panes while the coordinator's
- * `sessions.live` answer is lost, or while its claims are refused "Control
- * plane busy", and come back to THE SAME ten shells — same session ids, same
+ * `sessions.live` answer is lost, or while its claims come back "did not
+ * start", and come back to THE SAME ten shells — same session ids, same
  * PIDs, same helper inventory — with no replacement shell opened and no
  * window-budget refusal. The pane is usable afterwards, or (when the answer
  * never comes) it shows the existing attach retry and still opens nothing.
@@ -28,11 +28,14 @@
  * page's WebSocket is wrapped (the pattern agent-redraw-mode.spec.ts and
  * several others already use) and ONE request is answered with a JSON-RPC
  * error the server could have sent. Everything after it is real: the backend,
- * the helper, the PTY, the layout chain, the renderer. The refusal codes are
- * the backend's own — -32603 for the lost read, -32004 with the
- * `control-saturated` payload for the busy claim (internal/transport/
- * ws_saturation.go) — so the renderer is given a fault it already knows how
- * to classify, and this spec does not invent a new one.
+ * the helper, the PTY, the layout chain, the renderer. The answers are the
+ * backend's own — -32603 for a lost read, -32005 with the catalogue's
+ * `not-started` reason for a call whose turn ran out before it started
+ * (contracts/operation.expired.schema.json) — so the renderer is given a
+ * fault it already knows how to classify, and this spec does not invent a
+ * new one. There is no capacity refusal to inject: ADR-8eej3e66 stage 8
+ * removed it, and a spec that still injected the busy answer would be staging
+ * something the server cannot give.
  *
  * # The positive control
  *
@@ -82,7 +85,7 @@ interface InventorySession {
 }
 
 /** What the wrapped socket is asked to do to the next document. */
-type FaultMode = 'off' | 'inventory-once' | 'inventory-always' | 'attach-busy'
+type FaultMode = 'off' | 'inventory-once' | 'inventory-always' | 'attach-not-started'
 
 /**
  * The page's socket, wrapped once per document. Inert until a mode is set, so
@@ -119,25 +122,15 @@ async function installFaultShim(page: Page): Promise<void> {
           error = { code: -32603, message: 'injected: the live inventory could not be read' }
         } else if (message.method === 'sessions.live' && mode === 'inventory-always') {
           error = {
-            code: -32004,
-            message: 'Control plane busy',
-            data: {
-              reason: 'control-saturated',
-              scope: 'session',
-              retryable: true,
-              retryAfterMs: 50,
-            },
+            code: -32005,
+            message: 'The call did not start',
+            data: { reason: 'not-started' },
           }
-        } else if (message.method === 'attach' && mode === 'attach-busy') {
+        } else if (message.method === 'attach' && mode === 'attach-not-started') {
           error = {
-            code: -32004,
-            message: 'Control plane busy',
-            data: {
-              reason: 'control-saturated',
-              scope: 'session',
-              retryable: true,
-              retryAfterMs: 50,
-            },
+            code: -32005,
+            message: 'The call did not start',
+            data: { reason: 'not-started' },
           }
         }
         if (error === null) {
@@ -253,9 +246,9 @@ async function openPanes(page: Page, count: number): Promise<void> {
 /** The active pane back at a prompt, whatever the real plane answered.
  *
  *  The fix does not make the coordinator faster: ten panes reclaiming at once
- *  can still be refused "Control plane busy" by the bounded executor, and the
- *  measured no-fault reproduction of this defect began exactly there. What the
- *  fix changes is the consequence — such a pane keeps its session and shows
+ *  can still answer "did not start" while they wait for their sessions, and
+ *  the measured no-fault reproduction of this defect began exactly there. What
+ *  the fix changes is the consequence — such a pane keeps its session and shows
  *  the existing retry instead of opening a second shell. So the spec accepts
  *  both honest outcomes and, when the card is up, presses it the way a person
  *  would. That click is the product's own action, not a retry of a failed
@@ -364,7 +357,7 @@ test.describe('a restore whose live inventory cannot be read (nocx-3an1s.1.5)', 
     expect(localShells(await inventory(endpoint))).toEqual(beforeShells)
   })
 
-  test('a busy claim keeps the pane on its own session and the retry takes it back', async ({
+  test('a claim that did not start keeps the pane on its own session and the retry takes it back', async ({
     page,
   }) => {
     test.setTimeout(180_000)
@@ -382,13 +375,13 @@ test.describe('a restore whose live inventory cannot be read (nocx-3an1s.1.5)', 
     expect(beforeLive).toHaveLength(PANES)
     expect(beforeShells).toHaveLength(PANES)
 
-    // ── THE RELOAD UNDER TEST: every claim is refused "Control plane busy" ─
-    await armFault(page, 'attach-busy')
+    // ── THE RELOAD UNDER TEST: every claim answers "did not start" ─────────
+    await armFault(page, 'attach-not-started')
     await page.reload()
     await expect(page.locator(TABS)).toHaveCount(PANES, { timeout: 30_000 })
     await expect(page.locator(ATTACH_CARD)).toHaveCount(PANES, { timeout: 30_000 })
 
-    // A refusal with no verdict is uncertainty, not absence: nothing opened.
+    // An answer with no verdict is uncertainty, not absence: nothing opened.
     expect(await opensRequested(page)).toBe(0)
     expect(await countWindowBudgetRefusals(page)).toBe(0)
     expect(await liveSessions(endpoint)).toHaveLength(PANES)

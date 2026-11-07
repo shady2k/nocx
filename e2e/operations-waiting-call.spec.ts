@@ -59,9 +59,7 @@ async function openConnections(page: Page): Promise<void> {
 
 test.use({ viewport: { width: 1280, height: 800 } })
 
-test('a waiting call takes a row, cancels, and leaves one of the three answers', async ({
-  page,
-}) => {
+test('a waiting call takes a row, and Cancel takes it away with the answer', async ({ page }) => {
   const host = await silentSSHHost()
   const keyDir = mkdtempSync(join(tmpdir(), 'nocx-operations-key-'))
   const keyPath = join(keyDir, 'id_rsa')
@@ -106,13 +104,22 @@ test('a waiting call takes a row, cancels, and leaves one of the three answers',
     const cancel = page.getByRole('button', { name: 'Cancel Checking the connection' })
     await expect(cancel).toBeVisible()
     await cancel.click()
-    // The wait is over; the question is not. One of §8's three answers, and
-    // nothing left to cancel.
-    await expect(row).toContainText(/It did not start|It finished|Checking what happened/, {
-      timeout: 30_000,
-    })
-    await expect(page.getByRole('button', { name: 'Cancel Checking the connection' })).toHaveCount(
-      0,
+
+    // A ROW IS THE WAIT AND GOES WHEN THE WAIT DOES (ADR-8eej3e66 §8), on
+    // every settlement: the row is gone, nothing is left in Operations, and
+    // there is nothing left to cancel.
+    await expect(row).toHaveCount(0, { timeout: 30_000 })
+    await expect(page.getByTestId('operations-panel')).toContainText('Nothing is running')
+    await expect(page.locator('.ui-operation-row')).toHaveCount(0)
+
+    // WHERE THE ANSWER GOES. `connections.test` is a mutation (the catalogue
+    // declares its outcome unknown at the deadline), so §8 owes the person
+    // one of three sentences — and the call's own rejection carries it to
+    // the surface that asked: the Connections panel's test toast. A row that
+    // stayed behind to read it out was the entry a Cancel could not remove.
+    await expect(page.locator('.ui-toast__message')).toHaveText(
+      /It did not start|It finished|Checking what happened/,
+      { timeout: 30_000 },
     )
   } finally {
     for (const socket of host.held) socket.destroy()

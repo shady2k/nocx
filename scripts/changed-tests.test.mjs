@@ -15,6 +15,9 @@ import {
   packageInSet,
   parseNameStatus,
   repeatInvocations,
+  repeatTimeoutMs,
+  REPEAT_TIMEOUT_CEILING_MS,
+  REPEAT_TIMEOUT_PER_RUN_MS,
 } from './changed-tests.mjs'
 
 test('name-status records: added, modified, deleted and renamed', () => {
@@ -121,7 +124,17 @@ test('the repeat is one go test per package, selecting exactly the changed names
     [
       {
         command: 'go',
-        args: ['test', '-race', '-count', '20', '-run', '^(TestA|TestB)$', './internal/foo'],
+        args: [
+          'test',
+          '-race',
+          '-count',
+          '20',
+          '-timeout',
+          '1200s',
+          '-run',
+          '^(TestA|TestB)$',
+          './internal/foo',
+        ],
       },
     ],
   )
@@ -178,4 +191,39 @@ test('a real repository lists changed specs and test bodies, never deletions', (
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('the repeat sets its own time bound: the count arithmetic, under a ceiling', () => {
+  // go test's ten-minute default is per PACKAGE BINARY, and this tool puts
+  // `count` repetitions inside one. The bound is the tool's arithmetic, so the
+  // tool states it: sixty seconds a repetition (the slowest single pass the
+  // changed tests have measured, 42.5 s, with room for a slower runner), and
+  // twenty minutes of ceiling because this is one step of a job that also
+  // builds, lints and runs the whole suite.
+  assert.equal(REPEAT_TIMEOUT_PER_RUN_MS, 60_000)
+  assert.equal(REPEAT_TIMEOUT_CEILING_MS, 1_200_000)
+  assert.equal(repeatTimeoutMs(1), 60_000)
+  assert.equal(repeatTimeoutMs(20), 1_200_000)
+  // Past the ceiling the bound stops growing: a count of a thousand may not
+  // buy a test suite five hours inside one ci-backend step.
+  assert.equal(repeatTimeoutMs(1000), REPEAT_TIMEOUT_CEILING_MS)
+
+  const plan = [{ package: './internal/foo', tests: ['TestA'] }]
+  const [small] = repeatInvocations(plan, {
+    packages: './internal/foo/...',
+    module: 'm',
+    count: 2,
+    race: true,
+  })
+  assert.deepEqual(small.args, [
+    'test',
+    '-race',
+    '-count',
+    '2',
+    '-timeout',
+    '120s',
+    '-run',
+    '^(TestA)$',
+    './internal/foo',
+  ])
 })

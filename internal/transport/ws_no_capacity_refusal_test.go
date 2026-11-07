@@ -16,13 +16,17 @@ package transport
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
 
+	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/operation/catalog"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/transport/control"
 	"github.com/shady2k/nocx/internal/waittest"
 )
 
@@ -165,4 +169,98 @@ func TestVaultUnseal_AnswersWhileOtherCallsHoldEveryPermit(t *testing.T) {
 	if code := errorCodeOf(t, raw); code == RemovedCapacityCode {
 		t.Fatalf("vault.unseal was refused while every permit was held: %s", raw)
 	}
+}
+
+// ── A queue's wait ends at the declared turn ──────────────────────────────
+
+// A submission that ORDERS work holds a task behind its predecessor. The
+// record's turn is the bound on that wait (ADR-8eej3e66 §3): a call whose turn
+// runs out before it starts answers "did not start" and never runs. Without
+// the check, the second call below would be held until the first returned,
+// with no answer at all — memory bounded by what a client sends, the WAIT not
+// bounded by anything.
+//
+// The handle is app.diagnostics' declaration: a one-second turn, and a method
+// name outside the ingress-critical set, so the turn check applies. A
+// thirty-second declaration would prove the same thing and cost thirty seconds
+// in every repetition of this package's changed tests.
+func TestAQueuedCallThatOutlivesItsTurnAnswersNotStarted(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	srv := NewWSServer(logger, newRegWithStub(logger))
+	ctx := context.Background()
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Stop(ctx) })
+
+	var mu sync.Mutex
+	ran := 0
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	queue := control.NewOrderedSubmission("test-queue")
+	srv.methods["test.queued"] = reg(
+		queue,
+		catalog.OpAppDiagnostics, // a one-second turn, and not ingress-critical by name
+		noParams(),
+		func(_ *wsConn, _ *connState, r Responder) handlerFunc {
+			return func(_ context.Context, req jsonrpcRequest) {
+				mu.Lock()
+				ran++
+				first := ran == 1
+				mu.Unlock()
+				if first {
+					started <- struct{}{}
+					<-release
+				}
+				_ = r.TryResult(req.ID, json.RawMessage(`{"ok":true}`))
+			}
+		},
+	)
+	turn := catalog.OpAppDiagnostics.Declaration().Turn.Duration()
+
+	conn := connectWS(t, srv)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	// The holder: it occupies the queue's single worker.
+	sendControl(t, conn, "test.queued", map[string]any{}, 1)
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first call never reached its handler")
+	}
+
+	// The queued one: it waits its turn, then answers "did not start" — and
+	// the handler is never entered for it.
+	raw := jsonrpcCallWithIDWithin(t, conn, "test.queued", map[string]any{}, 2, turn+wantWithin)
+	if code := errorCodeOf(t, raw); code != OperationExpiredCode {
+		t.Fatalf("a call that outlived its turn answered %d: %s", code, raw)
+	}
+	var env struct {
+		Error struct {
+			Data struct {
+				Reason string `json:"reason"`
+			} `json:"data"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if env.Error.Data.Reason != string(catalog.ExpiredNotStarted) {
+		t.Fatalf("reason = %q, want %q", env.Error.Data.Reason, catalog.ExpiredNotStarted)
+	}
+	mu.Lock()
+	entered := ran
+	mu.Unlock()
+	if entered != 1 {
+		t.Fatalf("the queued call entered its handler (%d entries); a task past its turn must not run", entered)
+	}
+	close(release)
+	readResponseFor(t, conn, 1, 10*time.Second)
 }

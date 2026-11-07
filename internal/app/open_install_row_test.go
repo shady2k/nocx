@@ -326,11 +326,32 @@ func TestCancellingTheInstallEndsTheOpenAndNothingLaterTrustsIt(t *testing.T) {
 	if row.Title != "Copying the nocx helper" {
 		t.Fatalf("the open after a cancelled install says %q, want a fresh install", row.Title)
 	}
+	// THE OPEN ITSELF IS STILL IN FLIGHT when its install row goes, and a test
+	// that ends here ends the open in the middle of it: the stand's teardown
+	// then stops a transport whose open is still building a helper lane, and
+	// the lane it dialled outlives the test — TestMain's stand check reported
+	// exactly that (one lane watcher per leaky run, ten of twenty repeats).
+	// The open is read to its own answer before the test returns, so what it
+	// opened is what the cleanup finds.
+	sawOpen := false
 	for {
-		frame := readFrame(t, stand.conn, "the second install to settle")
+		frame := readFrame(t, stand.conn, "the second install to settle, then the open to answer")
 		if frame.Method == "operation.rowDone" {
+			continue
+		}
+		if frame.ID != nil && string(*frame.ID) == "2" {
+			if frame.Error != nil {
+				t.Fatalf("the open after a cancelled install answered %+v", frame.Error)
+			}
+			if frame.Result == nil || frame.Result.SessionID == "" {
+				t.Fatalf("the open after a cancelled install answered no session: %+v", frame)
+			}
+			sawOpen = true
 			break
 		}
+	}
+	if !sawOpen {
+		t.Fatal("the second open never answered")
 	}
 	if !stand.inst.hasCompleteInstall(stand.home) {
 		t.Fatal("the install after a cancelled one did not complete")

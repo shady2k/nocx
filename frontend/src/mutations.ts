@@ -27,7 +27,10 @@ import type { OperationOutcome } from './generated/operation.outcome'
 import { callOperationDeclaration } from './generated/operations'
 import { waitingSentence } from './operations/waiting-sentences'
 
-/** The wire's closed set of answers. */
+/** The wire's closed set of answers. Not exported: the one consumer that
+ *  named the type was the row that read an answer out, and a row is the wait
+ *  (ADR-8eej3e66 §8) — the answer belongs to the call's own rejection, whose
+ *  surface reads {@link MutationAssessment} instead. */
 type MutationAnswer = OperationOutcome['outcome']
 
 /** What one answer means to the person, in their terms. */
@@ -125,4 +128,31 @@ export async function resolveMutationOutcome(
   } catch {
     return assessmentOf({ outcome: 'unknown', operation: '' })
   }
+}
+
+/** A mutation the person withdrew. The name stays 'AbortError' — the call WAS
+ *  withdrawn, and a surface that stays quiet for a person's own cancel keeps
+ *  doing so — while the message is §8's sentence for it: one of "It did not
+ *  start", "It finished" or "Checking what happened…". A row is the wait and
+ *  goes when the call settles, so this is where a withdrawn mutation's answer
+ *  reaches the surface that asked. */
+export class MutationWithdrawnError extends Error {
+  constructor(readonly assessment: MutationAssessment) {
+    super(assessment.sentence)
+    this.name = 'AbortError'
+  }
+}
+
+/** The answer for a mutation withdrawn before it was ever sent: nothing ran,
+ *  so the record is never asked. */
+export function withdrawnBeforeStart(method: string): MutationAssessment {
+  return assessmentOf({ outcome: 'not-started', operation: method })
+}
+
+/** The answer when the record could not be asked at all (its connection went
+ *  before the answer came back): the sentence names what to look at, and the
+ *  record is retained server-side, so the surface can ask again on the next
+ *  connection. */
+export function withdrawnUnanswered(method: string): MutationAssessment {
+  return assessmentOf({ outcome: 'unknown', operation: method })
 }

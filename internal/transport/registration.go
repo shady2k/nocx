@@ -45,6 +45,15 @@ import (
 // transition, so a report queued behind other work would delay the
 // awaiting-takeover transition. transport.ping is a liveness probe; its
 // handler only reads the clock and enqueues a response.
+// ingressCritical reports whether a method is answered inline on the read
+// loop. It is the one question the dispatch path asks of the set (whether a
+// turn deadline can even apply: an inline answer never queues), and it keeps
+// the map itself private to this file.
+func ingressCritical(method string) bool {
+	_, ok := ingressCriticalMethods[method]
+	return ok
+}
+
 var ingressCriticalMethods = map[string]struct{}{
 	"ack":                          {},
 	"vault.unlockResolved":         {},

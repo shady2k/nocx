@@ -2013,14 +2013,10 @@ func WithDomainConflictWaitTimeout(d time.Duration) WSServerOption {
 	return func(s *WSServer) { s.domainWaitTimeout = d }
 }
 
-// WithCreditWindow sets the ordinary credit window transport.credit
-// advertises. Zero (the default) is DefaultCreditWindow, which is what
-// production uses; a test names a smaller value to fill a window with a
-// known number of calls. The value is per connection: every connection of
-// this server is told the same window.
-func WithCreditWindow(n int) WSServerOption {
-	return func(s *WSServer) { s.creditWindow = n }
-}
+// THERE IS NO LANE OPTION ANY MORE (ADR-8eej3e66 §7, stage 8), and the
+// credit window's option is not here either: it is test-only, so it lives in
+// credit_window_option_test.go where the dead-code ratchet can see it is
+// reached by tests and by nothing a build ships.
 
 func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption) *WSServer {
 	s := &WSServer{
@@ -3853,23 +3849,107 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		}()
 		m.handle(pctx, req)
 	}}
-	if cancelEntry != nil {
-		// A QUEUED MUTATION THAT NEVER STARTS ANSWERS "DID NOT START", and the
-		// scope is settled here because a withdrawn task never reaches the
-		// handler that would have settled it.
-		task.Start = func() bool {
-			if cancelEntry.begin() {
-				return true
-			}
+	// A QUEUED TASK THAT NEVER STARTS ANSWERS "DID NOT START" — and it is
+	// answered AT ITS TURN, not when the queue gets round to it.
+	//
+	// The record's turn is "a finite deadline on waiting for resources and
+	// capacity" (ADR-8eej3e66 §3). Two of the waits are time-bounded by the
+	// admission itself (a waiting semaphore, a resource FIFO). A submission
+	// that ORDERS work — the lifecycle FIFO, one session's operations, one
+	// binding's — has no deadline of its own: it holds a task behind its
+	// predecessor, and a predecessor that never returns would hold it for
+	// ever. The memory is bounded by what a producer sends; the WAIT was not
+	// bounded by anything, and the caller was never answered.
+	//
+	// So the turn is armed here, once, and settled by whichever of the two
+	// arrives first: the task starting, or the turn running out. Running and
+	// answering are mutually exclusive (one mutex), so a task that starts in
+	// the turn's own instant is a completion and never a second answer.
+	//
+	// NOT FOR THE INGRESS-CRITICAL SET. Those methods are answered inline on
+	// the read loop: they never queue, so their one-millisecond turns are a
+	// formality, and expiring them here under load would refuse an unlock
+	// resolution for arithmetic. The check exists to end a QUEUE wait, and
+	// only work that queues has one.
+	var turn struct {
+		mu       sync.Mutex
+		running  bool
+		answered bool
+	}
+	claimRun := func() bool {
+		turn.mu.Lock()
+		defer turn.mu.Unlock()
+		if turn.answered {
+			return false
+		}
+		turn.running = true
+		return true
+	}
+	claimExpiry := func() bool {
+		turn.mu.Lock()
+		defer turn.mu.Unlock()
+		if turn.running || turn.answered {
+			return false
+		}
+		turn.answered = true
+		return true
+	}
+	expireTurn := func() {
+		if !claimExpiry() {
+			return
+		}
+		mutation.NotStarted()
+		scope.Settle(catalog.OutcomeNotStarted)
+		if req.ID != nil {
+			answerOperationExpiry(wconn, req, catalog.ExpiredNotStarted, "")
+		}
+	}
+	var turnTimer *time.Timer
+	if !ingressCritical(req.Method) {
+		if wait := time.Until(scope.TurnDeadline()); wait > 0 {
+			turnTimer = time.AfterFunc(wait, expireTurn)
+		} else {
+			// The turn was already spent before the frame was even
+			// dispatched: nothing may start.
+			expireTurn()
+		}
+	}
+	start := func() bool {
+		if cancelEntry != nil && !cancelEntry.begin() {
 			mutation.NotStarted()
 			scope.Settle(catalog.OutcomeNotStarted)
 			return false
 		}
+		if turnTimer != nil {
+			turnTimer.Stop()
+		}
+		if !claimRun() {
+			// The turn answered first: this task must not run.
+			return false
+		}
+		if !ingressCritical(req.Method) && !time.Now().Before(scope.TurnDeadline()) {
+			mutation.NotStarted()
+			scope.Settle(catalog.OutcomeNotStarted)
+			if req.ID != nil {
+				answerOperationExpiry(wconn, req, catalog.ExpiredNotStarted, "")
+			}
+			return false
+		}
+		return true
+	}
+	task.Start = start
+	if cancelEntry != nil {
 		requestCtx = withRequestCancel(requestCtx, cancelEntry)
 	}
 	rej := m.submission.TrySubmit(requestCtx, task)
 	if rej == nil {
 		return true
+	}
+	if turnTimer != nil {
+		turnTimer.Stop()
+		turn.mu.Lock()
+		turn.answered = true // the refusal below is the answer; nothing may add one
+		turn.mu.Unlock()
 	}
 	if rej.Kind == control.RejectionWaitExceeded {
 		scope.Settle(catalog.OutcomeNotStarted)

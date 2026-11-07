@@ -16,10 +16,14 @@ import type { TransportCreditResult } from './generated/transport.credit'
 import type { MutationReplayed } from './generated/mutation.replayed'
 import {
   MutationNotReplayedError,
+  MutationWithdrawnError,
   isMutationMethod,
   newMutationIdentity,
   replayedAssessment,
   resolveMutationOutcome,
+  withdrawnBeforeStart,
+  withdrawnUnanswered,
+  type MutationAssessment,
 } from './mutations'
 import { log } from './log'
 export type NotificationHandler = (params: unknown) => void
@@ -405,12 +409,12 @@ export class Dispatcher {
 
   constructor(private readonly provider: EndpointProvider) {
     this.subscribe(OUTBOUND_STALLED, () => {
-      // The OUTBOUND twin of control.saturated, and it needs the opposite
-      // remedy. A refused request has an answer — the caller is told no, and
-      // the toast above makes that visible. A stalled outbound queue has
-      // already DROPPED frames: the backend keeps one reserved slot to say so
-      // and then goes on, so what this connection owes the renderer no longer
-      // exists anywhere. There is nothing to retry and nothing to be told.
+      // The OUTBOUND twin of a dropped frame, and it needs its own remedy. A
+      // call that did not start has an answer — the caller is rejected and its
+      // surface says so. A stalled outbound queue has already DROPPED frames:
+      // the backend keeps one reserved slot to say so and then goes on, so what
+      // this connection owes the renderer no longer exists anywhere. There is
+      // nothing to retry and nothing to be told.
       //
       // So take the existing close path, exactly as the heartbeat's dead
       // socket does: it rejects what is pending, publishes waiting, schedules
@@ -727,10 +731,14 @@ export class Dispatcher {
     if (signal === undefined) return
     const abort = (): void => this.detach(slot, member)
     if (signal.aborted) {
-      member.settled = true
+      member.removeAbortListener?.()
       slot.members.delete(member)
+      if (slot.members.size === 0 && slot.state !== 'done') {
+        this.withdraw(slot, [member])
+        return
+      }
+      member.settled = true
       member.reject(abortError())
-      if (slot.members.size === 0 && slot.state !== 'done') this.withdraw(slot)
       return
     }
     member.signal = signal
@@ -743,11 +751,19 @@ export class Dispatcher {
    *  joiner leaving must not cancel the request the others still want. */
   private detach(slot: CallSlot, member: CallMember): void {
     if (member.settled) return
-    member.settled = true
     member.removeAbortListener?.()
     slot.members.delete(member)
+    if (slot.state !== 'done' && slot.members.size === 0) {
+      // THE LAST CALLER GOES WITH THE SLOT, not ahead of it: a mutation's
+      // rejection carries §8's answer, and that is decided in withdraw — so
+      // this caller is NOT marked settled here, or the answer would be
+      // dropped for a promise already closed. A joiner leaving while others
+      // still want the call takes the plain withdrawal.
+      this.withdraw(slot, [member])
+      return
+    }
+    member.settled = true
     member.reject(abortError())
-    if (slot.state !== 'done' && slot.members.size === 0) this.withdraw(slot)
   }
 
   /** Tell the Operations source about a person's operation call. It is told
@@ -901,13 +917,81 @@ export class Dispatcher {
 
   /** Withdraw every caller of one slot. A queued call is simply dropped; a
    *  sent one is cancelled BY THE ID THE BACKEND IS WORKING ON. */
-  private withdraw(slot: CallSlot): void {
+  private withdraw(slot: CallSlot, last: CallMember[] = []): void {
     const wireID = slot.wireID
     const onTheWire = wireID !== null && !this.isExempt(slot.method)
-    // A SENT CALL ENDS WITH NO ANSWER, and for a mutation that is the moment
-    // the question starts (ADR-8eej3e66 §4 and §8): the record has to be
-    // asked, because nothing here knows whether the work began.
+    if (slot.mutation !== undefined) {
+      this.withdrawMutation(slot, onTheWire, wireID, last)
+      return
+    }
+    for (const member of last) {
+      if (member.settled) continue
+      member.settled = true
+      member.reject(abortError())
+    }
     this.settleSlot(slot, abortError(), undefined, onTheWire ? 'no-answer' : 'answered')
+    this.cancelOnWire(wireID, onTheWire)
+  }
+
+  /** A mutation's withdrawal ends the wait and answers the caller (§8).
+   *
+   *  THE ROW GOES AND THE SENTENCE GOES TO THE CALL. A row is the wait, so it
+   *  is released here like any other settlement; what a person is owed for a
+   *  mutation is one of the three answers, and from here it travels on the
+   *  call's own rejection — where the surface that asked reads it. A call
+   *  that never reached the wire never started, so nothing is asked of the
+   *  record; a sent one is asked, because nothing here knows whether the work
+   *  began. The rejection keeps the AbortError name (the call WAS withdrawn)
+   *  and carries the sentence as its message. */
+  private withdrawMutation(
+    slot: CallSlot,
+    onTheWire: boolean,
+    wireID: number | null,
+    last: CallMember[],
+  ): void {
+    const held = slot.members
+    for (const member of last) if (!member.settled) held.add(member)
+    slot.members = new Set()
+    this.settleSlot(slot, undefined, undefined, onTheWire ? 'no-answer' : 'answered')
+    this.cancelOnWire(wireID, onTheWire)
+    if (!onTheWire) {
+      this.answerWithdrawn(held, withdrawnBeforeStart(slot.method))
+      return
+    }
+    void resolveMutationOutcome(this, slot.mutation ?? '').then(
+      (assessment) => {
+        this.answerWithdrawn(held, assessment)
+      },
+      // THE ASK IS THE DISPATCHER'S OWN REQUEST, so its failure is the
+      // dispatcher's to own. It fails when the connection goes before the
+      // record answers — expected on a close, and the one place an unhandled
+      // rejection could come from with nobody to catch it: the caller dropped
+      // nothing, the ask did. The caller is still settled, with the sentence
+      // that says nobody can say; the ask is not retried inline, because the
+      // record lives on the backend and the surface asks again on the next
+      // connection. Logged with its cause — handled, not swallowed.
+      (cause: unknown) => {
+        log.warn('nocx: the mutation answer could not be asked', {
+          method: slot.method,
+          cause: cause instanceof Error ? cause.message : String(cause),
+        })
+        this.answerWithdrawn(held, withdrawnUnanswered(slot.method))
+      },
+    )
+  }
+
+  private answerWithdrawn(members: Set<CallMember>, assessment: MutationAssessment): void {
+    for (const member of members) {
+      if (member.settled) continue
+      member.settled = true
+      member.removeAbortListener?.()
+      member.reject(new MutationWithdrawnError(assessment))
+    }
+    members.clear()
+  }
+
+  /** Withdraw one request on the wire, by the id the backend is working on. */
+  private cancelOnWire(wireID: number | null, onTheWire: boolean): void {
     if (!onTheWire || wireID === null) return
     const ws = this.ws
     if (!ws || ws.readyState !== WebSocket.OPEN) return

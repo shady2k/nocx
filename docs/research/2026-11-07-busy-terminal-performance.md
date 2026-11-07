@@ -358,3 +358,17 @@ host, while the remaining local-filesystem race checks pass. The unchanged
 target-device and distinct-neighbour assertions passed without skipping in the
 Ubuntu CI container (`/dev`: `tmpfs`, fixture directory: `overlay`). No production
 mount resolution was changed.
+
+The additional `nocx_local_ssh` pass exposed four further native-shell fixture
+assumptions. A no-op Fish startup alone creates cache/config/data files, so the
+artifact checks now compare exact paths against native-shell initialization
+before bootstrap, while scanning every retained file for the capability. Bash
+fallback and enhanced typed-SSH proofs use the existing real Bash endpoint.
+The four affected race checks passed (6.586 s), as did the neighboring SSH and
+bootstrap family (13.130 s); parent review found no weakened security assertion.
+
+The independent frontend CI container job passed on `c561c7700` in 496 s:
+7716 frontend tests, 80 lint-fixture tests, build, formatting, lint, type checks,
+root tooling checks and collection of 159 e2e spec files. Collection is not an
+e2e execution result. Subsequent repairs touch Go test fixtures, not product or
+frontend code.

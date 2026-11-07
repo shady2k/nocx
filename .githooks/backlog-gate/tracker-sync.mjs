@@ -62,13 +62,23 @@
  *   3  a claim or a transition was lost: said out loud, nothing left behind
  *   4  the remote is unreachable and another machine's state was needed; the
  *      store here is this machine's only, and the command says so
- *   5  the remote refused this ref: a hosting policy, never counted with 4
+ *   5  the remote refused this ref: a hosting policy or a clone without write
+ *      rights, never counted with 4. A clone that cannot publish is a legitimate
+ *      clone: it keeps its hooks and its reads, connect says so in one sentence
+ *      and exits 0, and every later command keeps the local work and makes no
+ *      promise that a later attempt publishes it
  *
  * BOUNDED LATENCY, and what it costs: publish waits for the debounce of quiet or
  * the maximum batch age, whichever comes first, so a stream of writes is still
  * published within the maximum age. Every network git operation is killed after
- * its timeout (10 s for a push, 20 s for a fetch) and reported as unreachable or
- * refused rather than hanging. A recipe command is killed after the recipe
+ * its timeout (10 s for a push, 20 s for a sync fetch, and the store's whole
+ * history in connect at the recipe timeout's floor of 120 s, because a large
+ * store's first fetch outlasts a moment's bound) and reported as unreachable or
+ * refused rather than hanging. A failed push is read by its OUTCOME, not by more
+ * words: text that is only about the network is unreachable; text that may be an
+ * authorization answer is asked about once with a bounded read; a remote that
+ * answers its reads and refuses the write is a refusal, never an unreachable
+ * remote and never a promise to publish later. A recipe command is killed after the recipe
  * timeout (--recipe-timeout, recorded by connect, 120 s by default). Network
  * operations run outside the store mutation lock. A conditional operation
  * snapshots under the local lock (a copy of the live database where the recipe
@@ -124,6 +134,48 @@ function readVersion() {
 let THROW_ERRORS = false;
 const die = (code, msg) => { if (THROW_ERRORS) throw Object.assign(new Error(msg), {exitCode:code}); process.stderr.write(`tracker-sync: ${msg}\n`); process.exit(code); };
 const say = (msg) => process.stdout.write(`${msg}\n`);
+/** A stop that arrives while this process is reading the store. The supervisor
+ * signals the whole group (systemd's default KillMode=control-group), so the git
+ * children of a merge are killed with it; that is a stop, not a failure and not a
+ * fact about the store. Nothing here has committed anything by then, so the round
+ * is abandoned and the next start continues (#skills-by6c). */
+let STOPPING = false;
+function stopNow(what) {
+  die(0, `stopped while ${what}; nothing was committed by that round and the next start continues`);
+}
+/** One read of a path in a commit that is over: a stopped process exits as a
+ * stop, and anything else is named as a failed read, never taken for a file the
+ * commit does not hold. */
+function readFailed(what, r) {
+  if (STOPPING) stopNow(`reading ${what}`);
+  die(1, `could not read ${what}: ${text(r).split('\n')[0] || `git exited ${r.code}`}; this is a failed read, not a file the commit does not hold, so nothing is decided from it`);
+}
+/** Git's own answer for an object it does not have, and the only answer that is a
+ * commit this store does not hold: a `cat-file` that was killed says nothing
+ * about whether the object is here (#skills-by6c). */
+const MISSING_OBJECT = /not a valid object name|invalid object name|does not exist|bad object|Needed a single revision/i;
+async function commitHere(oid, where) {
+  const said = where || `store commit ${String(oid).slice(0, 12)}`;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const r = await git(['cat-file', '-e', `${oid}^{commit}`], { cwd: CURRENT.store });
+    if (r.code === 0) return true;
+    if (STOPPING) stopNow(`reading ${said}`);
+    if (attempt === 0) continue;
+    if (MISSING_OBJECT.test(text(r))) return false;
+    readFailed(said, r);
+  }
+}
+/** The names a commit holds under a path, in one read. A listing that failed is a
+ * failed read, never a commit that holds nothing underneath (#skills-by6c). */
+async function treeNames(rev, path, where) {
+  const said = where || `the files of ${String(rev).slice(0, 12)} under ${path}`;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const r = await git(['ls-tree', '-r', '--name-only', rev, '--', path], { cwd: CURRENT.store });
+    if (r.code === 0) return r.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+    if (STOPPING) stopNow(`reading ${said}`);
+    if (attempt === 1) readFailed(said, r);
+  }
+}
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const nowIso = () => new Date().toISOString();
 
@@ -574,6 +626,40 @@ async function flushDatabase() {
 
 const headOid = async () => (await gitOk(['rev-parse', 'HEAD'], { cwd: CURRENT.store }));
 
+const hasOrigin = async (cwd) => (await git(['remote', 'get-url', 'origin'], { cwd })).code === 0;
+
+/** Take the store's ref from the remote into this clone, or say why it was not
+ * taken - and never take an empty store in its place (#62).
+ *
+ * A ref absent here is not the same as a ref the remote never had. The first
+ * store's fetch is a whole history, so it gets the recipe timeout's floor of
+ * 120 s rather than the 20 s a sync's fetch is bounded by. Its result is READ,
+ * and the question "does the remote hold this ref?" is asked of the remote when
+ * it failed: holds it means stop, naming the ref and the failed fetch; answers
+ * without it means this is genuinely a first store; no answer means stop too,
+ * because an empty commit under the ref would present an empty tracker as the
+ * real one. `--offline` with the ref absent here would be exactly that guess,
+ * so it refuses before anything is written. A repository that names no remote
+ * still gets its first store: there is nothing to ask and nothing to wait for.
+ */
+async function storeRefFromRemote() {
+  const { repoRoot, flags } = CURRENT;
+  const ref = CURRENT.ref;
+  if (!(await hasOrigin(repoRoot))) return { have: false, noRemote: true };
+  if (flags.offline)
+    return { stop: true, code: 1, said: `--offline was given, ${ref} is not held in this clone and the remote is not read, so connect cannot tell a first store from a store it could not fetch. Nothing was written. Run connect without --offline when the remote answers, or fetch the ref first: git fetch origin +${ref}:${ref}` };
+  const f = await git(['fetch', 'origin', `+${ref}:${ref}`], { cwd: repoRoot, timeoutMs: Math.max(120000, recipeTimeoutMs()) });
+  if (f.code === 0) return { have: (await git(['rev-parse', '--verify', '--quiet', ref], { cwd: repoRoot })).code === 0 };
+  const said = text(f).split('\n').filter(Boolean)[0] || `exit ${f.code}`;
+  const ls = await git(['ls-remote', 'origin', ref], { cwd: repoRoot, timeoutMs: 20000 });
+  if (ls.missing || ls.timedOut || ls.code !== 0)
+    return { stop: true, code: 4, said: `the remote did not answer a read of ${ref} (${said}), so connect cannot tell a first store from a store it could not fetch. Nothing was written` };
+  const holds = ls.stdout.split('\n').map((l) => l.trim().split(/\s+/)).some(([, name]) => name === ref);
+  if (holds)
+    return { stop: true, code: 4, said: `the remote holds ${ref} and this clone could not fetch it (${said}). Nothing was written: an empty store under that ref would present an empty tracker as the real one. Retry the fetch when the remote is back, then connect` };
+  return { have: false };
+}
+
 async function ensureStore({ create = false } = {}) {
   const { flags, repoRoot } = CURRENT;
   const store = storePathOf(flags, repoRoot);
@@ -588,8 +674,10 @@ async function ensureStore({ create = false } = {}) {
     fresh = true;
     let have = (await git(['rev-parse', '--verify', '--quiet', CURRENT.ref], { cwd: repoRoot })).code === 0;
     if (!have) {
-      await git(['fetch', 'origin', `+${CURRENT.ref}:${CURRENT.ref}`], { cwd: repoRoot, timeoutMs: 20000 });
-      have = (await git(['rev-parse', '--verify', '--quiet', CURRENT.ref], { cwd: repoRoot })).code === 0;
+      const taken = await storeRefFromRemote();
+      if (taken.stop) die(taken.code, taken.said);
+      have = taken.have;
+      if (!taken.noRemote && !have) say(`tracker-sync: the remote answers and holds no ${CURRENT.ref}`);
     }
     if (!have) {
       const emptyTree = (await gitOk(['hash-object', '-t', 'tree', '/dev/null'], { cwd: repoRoot })).trim();
@@ -649,13 +737,35 @@ async function comparableStateFiles() {
   return comparableFiles;
 }
 
+/** The text of a path in a commit, or null where that commit does not hold the
+ * path. A `git show` that fails and a commit that does not hold a file are two
+ * different answers that both leave no output: stateFrom took the first for the
+ * second, so a read killed when a supervisor stopped the watcher - or one that
+ * failed for lack of memory - gave a state missing a file, and the digest check
+ * then reported that the store ref's history had been rewritten (#skills-by6c).
+ * An answer is asked of the commit's own tree: only a tree without the path is an
+ * absent file. Anything else is one bounded retry and then a failed read. */
+async function showAt(rev, path, where) {
+  const r = await git(['show', `${rev}:${path}`], { cwd: CURRENT.store });
+  if (r.code === 0) return r.stdout;
+  // A stop that reached this read is a stop, not a fact about the commit: the
+  // supervisor signals the whole group, so the git child died with this process.
+  if (STOPPING) stopNow(`reading ${where || `${path} of ${String(rev).slice(0, 12)}`}`);
+  const tree = await git(['ls-tree', '-r', '--name-only', rev, '--', path], { cwd: CURRENT.store });
+  if (tree.code !== 0) readFailed(where || `${path} of ${String(rev).slice(0, 12)}`, r);
+  if (!tree.stdout.split('\n').map((l) => l.trim()).includes(path)) return null;
+  const again = await git(['show', `${rev}:${path}`], { cwd: CURRENT.store });
+  if (again.code === 0) return again.stdout;
+  readFailed(where || `${path} of ${String(rev).slice(0, 12)}`, again);
+}
+
 /** Write one state file into the store from a revision's tree, or from nowhere. */
-async function stateFrom(rev) {
+/** `where` names the read in a failure: a recording's state read says which
+ * recording it was, never only a store commit a person cannot place. */
+async function stateFrom(rev, where = null) {
   const out = [];
-  for (const p of stateFiles()) {
-    const r = await git(['show', `${rev}:${p}`], { cwd: CURRENT.store });
-    out.push([p, r.code === 0 ? r.stdout : null]);
-  }
+  for (const p of stateFiles())
+    out.push([p, await showAt(rev, p, where ? `${where} (${p})` : `the state file ${p} of ${String(rev).slice(0, 12)}`)]);
   return out;
 }
 const sideText = (parts) => parts.filter(([, c]) => c !== null).map(([p, c]) => `=== ${p}\n${c}`).join('\n');
@@ -733,7 +843,6 @@ async function fetchRemote() {
   }
   return { ok: false, unreachable: true, said: 'the fetch did not answer' };
 }
-const isUnreachable = (r) => r.timedOut || /could not resolve host|unable to access|Connection (refused|reset|timed out)|Network is unreachable|Could not read from remote|Operation timed out|no route to host|terminal prompts disabled|Permission denied \(publickey\)/i.test(text(r));
 const isRefused = (r) => /rejected|non-fast-forward|fetch first|stale info/i.test(text(r));
 // A refusal the remote's own policy makes (a protected ref, a denied user) is
 // its own class and is never retried; a push a pre-receive hook merely declined
@@ -742,6 +851,89 @@ const isRefused = (r) => /rejected|non-fast-forward|fetch first|stale info/i.tes
 // process, and the fetch-merge-push round retries it. A policy refusal is one a
 // person must change something for.
 const isPolicy = (r) => /denied|protected ref|not allowed|refusing to allow|forbidden/i.test(text(r));
+
+/** What a failed network call means, by OUTCOME rather than by more words.
+ *
+ * Three answers only, and each is decided by what the remote DID:
+ *
+ *   refused     the remote answered and will not take the write. Named, never
+ *               retried, and never reported as a remote that answers later.
+ *   unreachable nobody answered; nothing about rights is known.
+ *   failed      neither: an answer this mechanism does not recognise, which is
+ *               a failure for a person and is never retried as a moved ref.
+ *
+ * A host's text mixes a refusal with a transport error in exactly the lines that
+ * matter (a read-only deploy key, a clone with no rights, `terminal prompts
+ * disabled`), so the words alone cannot be the test. A text that only names the
+ * network is unreachable with no probe: asking a remote that did not answer
+ * costs its own timeout. A text that MAY be an authorization answer is decided by
+ * one bounded read of the remote, and a remote that answers its reads while
+ * refusing the write is refusing. An explicit policy word needs no probe.
+ *
+ * HTTP statuses are matched only in git's own `error: 403` form: a bare number
+ * can sit inside an object id, and an object id is not a refusal.
+ */
+const NETWORK_ANSWER = /could not resolve host|failed to connect|connection refused|connection reset|connection (?:timed out|closed)|network is unreachable|no route to host|operation timed out|remote end hung up|early EOF|unexpected disconnect|error: (?:5\d\d|429)\b/i;
+const AUTHORIZATION_ANSWER = /terminal prompts disabled|authentication failed|permission to \S+ denied|permission denied|no anonymous write access|unable to access|could not read from remote repository|marked as read only|invalid username or password|error: (?:401|403)\b|requested url returned error/i;
+const POLICY_ANSWER = /protected ref|not allowed|refusing to allow|forbidden|pre-receive hook declined|not permitted/i;
+
+/** Whether the remote answers at all, asked once: the read that separates a
+ * refusal from an outage, and the only thing it decides. */
+async function remoteAnswersReads(cwd = CURRENT.store) {
+  const r = await git(['ls-remote', 'origin'], { cwd, timeoutMs: 20000 });
+  return !(r.missing || r.timedOut || r.code !== 0);
+}
+
+async function pushFailureKind(r) {
+  const t = text(r);
+  // The network first: a text that names only the network is an outage whatever
+  // else it says, and probing a remote that did not answer costs its timeout.
+  if (r.timedOut || NETWORK_ANSWER.test(t)) return 'unreachable';
+  if (AUTHORIZATION_ANSWER.test(t)) {
+    // The remote's own last answer about THIS clone's writes is kept in the
+    // machine's config, and it is used before the remote is asked again: a record
+    // started by every commit must not spend a network round trip learning what
+    // this clone already knows, or the hook is slower than it was (#62). A
+    // refusal is about rights and does not lapse between two commits, and a push
+    // that lands clears the mark.
+    if (readConfig(CURRENT.flags, CURRENT.repoRoot).publishRefused) return 'refused';
+    return (await remoteAnswersReads(CURRENT.store)) ? 'refused' : 'unreachable';
+  }
+  // A policy the text names outright needs no probe. `denied` is kept here, as it
+  // always was: the answers that MIX a denial with a transport error are matched
+  // above, so what is left is a remote naming a rule of its own.
+  if (POLICY_ANSWER.test(t) || isPolicy(r)) return 'refused';
+  return 'failed';
+}
+
+// ---- a remote that refuses this clone's writes ------------------------------
+/** The one sentence a clone without write rights is owed, and the state that
+ * keeps it from being said again per tick or per commit. A refusal is a fact
+ * about rights, not a moment: it is remembered in the machine's own config so
+ * that status can show it, it is said the first time and not after, and the
+ * sentence names what does happen: the write stays here, and a push that lands
+ * carries it - rights granted later, or a credential renewed, heal by themselves,
+ * and a push that lands clears the mark. A read-only clone is legitimate: its
+ * local work, its hooks and its reads are kept. */
+let PUSH_REFUSED = null;
+function refusalLine(said) {
+  const line = String(said || '').split('\n').map((s) => s.trim()).filter(Boolean)[0] || 'no answer';
+  return `the remote refuses this clone's writes (${line}); this clone cannot publish now, so the write stays here, and the next push that lands - a sync, or any later run - carries it`;
+}
+function noteRefusal(r) {
+  const line = refusalLine(text(r));
+  PUSH_REFUSED = line;
+  const known = readConfig(CURRENT.flags, CURRENT.repoRoot).publishRefused;
+  const first = !(known && known.said === line);
+  writeConfig(CURRENT.flags, CURRENT.repoRoot, { lastPublishOk: false, publishRefused: { said: line, at: nowIso() } });
+  return { said: line, first };
+}
+/** A push that lands clears the mark: this clone can publish again. */
+function clearRefusal() {
+  PUSH_REFUSED = null;
+  if (readConfig(CURRENT.flags, CURRENT.repoRoot).publishRefused)
+    writeConfig(CURRENT.flags, CURRENT.repoRoot, { publishRefused: null, lastPublishOk: true });
+}
 
 /** Which machine this store belongs to, and keeping that true.
  *
@@ -886,31 +1078,97 @@ async function mergeAndCommit(tip, { flushed: done } = {}) {
   }
   // recordings travel beside the tracker items and are immutable: two different
   // states for one revision are a refusal, never a newer-wins choice.
-  const listIn = async (rev) => (await git(['ls-tree', '-r', '--name-only', rev, '--', '.tracker-sync/recordings'], { cwd: CURRENT.store })).stdout.split('\n').filter(Boolean);
-  const [a, b] = [await listIn(head), await listIn(tip)];
-  for (const p of new Set([...a, ...b])) {
-    const ca = a.includes(p) ? (await git(['show', `${head}:${p}`], { cwd: CURRENT.store })).stdout : null;
-    const cb = b.includes(p) ? (await git(['show', `${tip}:${p}`], { cwd: CURRENT.store })).stdout : null;
-    // A recording holds a reference, so the two sides are compared as the STATES
-    // they stand for: two references to commits with the same state are one
-    // recording, and only states that differ are a refusal for a person.
-    const sa = ca === null ? null : (await recordingState(ca, `the recording of ${basename(p)} in ${head.slice(0, 12)}`)).text;
-    const sb = cb === null ? null : (await recordingState(cb, `the recording of ${basename(p)} in ${tip.slice(0, 12)}`)).text;
-    if (sa !== null && sb !== null && sa !== sb)
+  //
+  // A merge costs what it changes (#skills-rntd): the two sides are listed once,
+  // with the blob id of every recording, so a recording that is the same file on
+  // both sides is one lookup and reads no state, and one held on one side only is
+  // copied without a state read. Two different files that both hold a reference
+  // are compared by the blobs of the commits they name - a tree, never a file -
+  // and only a real difference reads the two states, to refuse with the sentence
+  // it refused with before. Reading a state per recording on both sides is what
+  // made one commit on a store of 216 recordings cost about 170 s of CPU and
+  // 1.49 GB, and it grew by one recording per commit.
+  const recordingsIn = async (rev) => {
+    const said = `the recordings of ${String(rev).slice(0, 12)}`;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const r = await git(['ls-tree', '-r', rev, '--', '.tracker-sync/recordings'], { cwd: CURRENT.store });
+      if (r.code !== 0) {
+        if (STOPPING) stopNow(`reading ${said}`);
+        if (attempt === 1) readFailed(said, r);
+        continue;
+      }
+      const out = new Map();
+      for (const line of r.stdout.split('\n')) {
+        const m = /^\d+ blob ([0-9a-f]+)\t(.*)$/.exec(line);
+        if (m) out.set(m[2], m[1]);
+      }
+      return out;
+    }
+    return new Map();
+  };
+  const [a, b] = [await recordingsIn(head), await recordingsIn(tip)];
+  // A referenced commit's state blobs, read once per merge however many
+  // recordings name it.
+  const stateBlobsOf = new Map();
+  const blobsAt = async (oid) => {
+    const key = String(oid);
+    if (!stateBlobsOf.has(key)) stateBlobsOf.set(key, await stateBlobsAt(key));
+    return stateBlobsOf.get(key);
+  };
+  for (const p of new Set([...a.keys(), ...b.keys()])) {
+    const [oa, ob] = [a.get(p), b.get(p)];
+    const whereA = `the recording of ${basename(p)} in ${String(head).slice(0, 12)}`;
+    const whereB = `the recording of ${basename(p)} in ${String(tip).slice(0, 12)}`;
+    if (oa && ob && oa === ob) continue; // the same file on both sides: one state, and nothing to read
+    if (!oa) {
+      // Held on the remote's side only: the file travels as it is, and no state
+      // is read for it.
+      const cb = await showAt(tip, p, whereB);
+      if (cb !== null) { mkdirSync(dirname(join(CURRENT.store, p)), { recursive: true }); writeFileSync(join(CURRENT.store, p), cb); }
+      continue;
+    }
+    if (!ob) continue; // ours only: ours stays, as it always did
+    // Two different files. A recording holds a reference, so the two sides are
+    // compared as the STATES they stand for: two references whose commits hold
+    // the same state are one recording, and the trees answer that without either
+    // state being read.
+    const [ca, cb] = [await showAt(head, p, whereA), await showAt(tip, p, whereB)];
+    if (ca === null || cb === null) continue;
+    const [ra, rb] = [parseRecording(ca), parseRecording(cb)];
+    // Equal trees prove one state only where both trees were read. A tree read
+    // that answered nothing proves nothing: stateBlobsAt answers an empty map both
+    // for a commit this store does not hold and for a commit that holds no state
+    // file, and two empty maps are not one state. An empty pair therefore takes
+    // the state-reading path below, where recordingState names the commit this
+    // store does not hold (#skills-ppvr).
+    const [blobsA, blobsB] = ra && rb ? [await blobsAt(ra.store), await blobsAt(rb.store)] : [null, null];
+    if (blobsA && blobsA.size && sameBlobs(blobsA, blobsB)) continue;
+    const sa = (await recordingState(ca, whereA)).text;
+    const sb = (await recordingState(cb, whereB)).text;
+    if (sa !== sb)
       die(1, `two different recordings for ${basename(p)}: ${head.slice(0, 12)} and ${tip.slice(0, 12)} recorded different states for one revision, so neither is moved; a person must decide`);
-    if (ca === null) { mkdirSync(dirname(join(CURRENT.store, p)), { recursive: true }); writeFileSync(join(CURRENT.store, p), cb); }
   }
   await recipeIsland(head, tip);
   keepIdentity();
   if (mustImport) await importState(held);
+  // A merge that changes nothing is not a commit - unless the head does not hold
+  // the remote's tip yet, because this commit is also what makes the push a
+  // fast-forward of that tip: skipping it there left a head that could never be
+  // pushed, and a write that never left the machine. With the tip already in the
+  // head, a tick of a watcher in a clone that cannot publish would otherwise add
+  // one merge commit of the same two states per tick, for ever (#62).
+  const containsTip = (await git(['merge-base', '--is-ancestor', tip, head], { cwd: CURRENT.store })).code === 0;
+  if (containsTip && !(await hasUncommittedState())) return head;
   return commitState(`tracker store: merge ${head.slice(0, 12)} and ${tip.slice(0, 12)} per item`, [head, tip]);
 }
 /** The mechanism's own files under .tracker-sync travel beside the state. */
 async function recipeIsland(head, tip) {
-  const names = (await git(['ls-tree', '-r', '--name-only', tip, '--', '.tracker-sync'], { cwd: CURRENT.store }))
-    .stdout.split('\n').filter((n) => n && !n.startsWith('.tracker-sync/recordings/'));
+  const names = (await treeNames(tip, '.tracker-sync', `the mechanism's own files of ${String(tip).slice(0, 12)}`))
+    .filter((n) => n && !n.startsWith('.tracker-sync/recordings/'));
   for (const n of names) {
-    const theirs = (await git(['show', `${tip}:${n}`], { cwd: CURRENT.store })).stdout;
+    // A read that failed is named, never taken for an empty file the two sides
+    // disagree about (#skills-by6c).
+    const theirs = (await showAt(tip, n, `${n} of ${String(tip).slice(0, 12)}`)) ?? '';
     requireRegularFile(join(CURRENT.store, n), 'a file the mechanism carries beside the state');
     const mine = existsSync(join(CURRENT.store, n)) ? readFileSync(join(CURRENT.store, n), 'utf8') : null;
     if (mine === null) { mkdirSync(dirname(join(CURRENT.store, n)), { recursive: true }); writeFileSync(join(CURRENT.store, n), theirs); continue; }
@@ -994,25 +1252,51 @@ async function syncOnce({ needsRemote, push, quiet, skipOnTimeout = false } = {}
     throw e;
   }
   if (!quiet) say(fast ? `tracker-sync: took the remote's state ${remote.tip.slice(0, 12)}` : `tracker-sync: merged the remote's ${remote.tip.slice(0, 12)} into ${oid.slice(0, 12)} per item`);
-  const pushed = push === false ? null : await pushOid(oid, { quiet, skipOnTimeout });
+  // A sync is a READ that may also publish: a remote that refuses this clone's
+  // writes must not turn the read into an exit, or a clone without write rights
+  // could not read the other machines' state at all.
+  // pushOid says a refusal itself when this call is not quiet; a quiet caller
+  // (the watcher, export) says it in its own place, once.
+  const pushed = push === false ? null : await pushOid(oid, { quiet, skipOnTimeout, allowRefusal: true });
   return { oid, pushed };
 }
-/** Push an immutable oid; a refused push fetches, merges and pushes again. */
 /** Push an immutable oid; a refused push fetches, merges and pushes again.
  * The push itself is a network call and runs outside the lock; the merge is local
- * work and takes it. */
-async function pushOid(oid, { quiet, attempts = 3, skipOnTimeout = false } = {}) {
+ * work and takes it.
+ *
+ * `allowRefusal` is for the callers that must finish their own job whatever the
+ * remote says about writing - connect, a watcher tick, a record started by a
+ * commit hook: a remote that answers and refuses is then an OUTCOME they carry,
+ * never an exit that leaves the rest of their work undone. Without it a refusal
+ * is exit 5, the class it has always been. */
+async function pushOid(oid, { quiet, attempts = 3, skipOnTimeout = false, allowRefusal = false } = {}) {
+  // A refusal already met in this run is not asked again: a watcher tick that
+  // retried it would be retrying a fact about rights, not a moment's failure.
+  if (allowRefusal && PUSH_REFUSED) return { ok: false, refused: true, stopped: true, said: PUSH_REFUSED, first: false };
   // The last refusal, kept for the line that gives up: "three pushes were refused"
   // is a verdict, and what the remote answered is the cause (#49's addendum).
   let lastSaid = '';
   for (let i = 0; i < attempts; i++) {
     const r = await git(['push', 'origin', `${oid}:${CURRENT.ref}`], { cwd: CURRENT.store, timeoutMs: 10000 });
-    if (r.code === 0) return { ok: true, oid };
-    if (isUnreachable(r)) { if (!quiet) say(`tracker-sync: the remote is unreachable; the write is kept here and published when it answers (${text(r).split('\n')[0]})`); return { ok: false, unreachable: true }; }
-    // A hosting policy that refuses this ref is its own class (exit 5): named,
-    // never retried as if the remote had merely moved.
-    if (isPolicy(r)) die(5, `the remote refused ${CURRENT.ref}: ${text(r)}`);
+    if (r.code === 0) { clearRefusal(); return { ok: true, oid }; }
+    const kind = await pushFailureKind(r);
     lastSaid = text(r).split('\n')[0] || `exit ${r.code}`;
+    if (kind === 'unreachable') {
+      if (!quiet) say(`tracker-sync: the remote is unreachable; the write is kept here (${lastSaid})`);
+      return { ok: false, unreachable: true, said: text(r) };
+    }
+    // A remote that answers and refuses this write is a refusal, not a remote
+    // that may answer later: named, never retried as if it had merely moved, and
+    // never a promise to publish the write when something changes. A clone
+    // without write rights is a legitimate clone and is told so once.
+    if (kind === 'refused') {
+      const refusal = noteRefusal(r);
+      if (allowRefusal) {
+        if (!quiet && refusal.first) say(`tracker-sync: ${refusal.said}`);
+        return { ok: false, refused: true, said: refusal.said, first: refusal.first };
+      }
+      die(5, `${refusal.said} (${CURRENT.ref})`);
+    }
     if (isRefused(r)) {
       const remote = await fetchRemote();
       if (!remote.ok) { if (!quiet) say('tracker-sync: the push was refused and the remote is unreachable; the write is kept here'); return { ok: false, unreachable: true }; }
@@ -1167,7 +1451,7 @@ async function locked(fn, waitMs = LOCK_WAIT_MS, { skipOnTimeout = false } = {})
 /** One publish. `publish` with `--watch` starts the watcher with this first round
  * and then keeps looping, so that round skips a lock it cannot take instead of
  * ending the command before the watcher it was asked to start. */
-async function publishOnce({ quiet, skipOnTimeout = false } = {}) {
+async function publishOnce({ quiet, skipOnTimeout = false, allowRefusal = false } = {}) {
   let oid;
   try {
     oid = await locked(async () => {
@@ -1192,16 +1476,21 @@ async function publishOnce({ quiet, skipOnTimeout = false } = {}) {
     throw e;
   }
   if (oid === null) return { ok: true, nothing: true };
-  const res = await pushOid(oid, { quiet, skipOnTimeout });
+  const res = await pushOid(oid, { quiet, skipOnTimeout, allowRefusal });
   writeConfig(CURRENT.flags, CURRENT.repoRoot, { lastPublish: nowIso(), lastPublishOk: !!res.ok });
   if (res.ok && !quiet) say(`tracker-sync: published ${oid.slice(0, 12)} to ${CURRENT.ref}`);
   return res;
 }
+/** One push of one candidate: what the remote made of it, for a caller that
+ * decides. A remote that refuses this clone's writes is `refusedByHost` - the
+ * recording a candidate carries was made here and stays possible, while a claim
+ * counts only on the remote - and is never read as an unreachable remote. */
 async function pushOnce(oid) {
   const r = await git(['push', 'origin', `${oid}:${CURRENT.ref}`], { cwd: CURRENT.store, timeoutMs: 10000 });
-  if (r.code === 0) return { ok: true };
-  if (isUnreachable(r)) return { unreachable: true, said: text(r) };
-  if (isPolicy(r)) die(5, `the remote refused ${CURRENT.ref}: ${text(r)}`);
+  if (r.code === 0) { clearRefusal(); return { ok: true }; }
+  const kind = await pushFailureKind(r);
+  if (kind === 'unreachable') return { unreachable: true, said: text(r) };
+  if (kind === 'refused') { const refusal = noteRefusal(r); return { refusedByHost: true, said: refusal.said, first: refusal.first }; }
   if (isRefused(r)) return { refused: true, said: text(r) };
   die(1, `the push failed: ${text(r)}`);
 }
@@ -1451,9 +1740,9 @@ const recordingText = (oid, state) => `${JSON.stringify({ format: RECORDING_FORM
 /** The state files as a commit holds them, in the shape a snapshot writes: the
  * one shape both kinds of recording produce, so `export --at` is one read. */
 async function stateTextAt(oid, where = 'the recording') {
-  if ((await git(['cat-file', '-e', `${oid}^{commit}`], { cwd: CURRENT.store })).code !== 0)
+  if (!(await commitHere(oid, `the store commit ${String(oid).slice(0, 12)} that ${where} names`)))
     die(1, `${where} names store commit ${String(oid).slice(0, 12)}, which this store does not hold. The store ref's history is append-only and is never rewritten, so a referenced commit is either here or the ref was rewritten outside this mechanism: the state of that revision is not guessed from a later one`);
-  return sideText(await stateFrom(oid));
+  return sideText(await stateFrom(oid, where));
 }
 
 /** What a recording file stands for, as state text: a reference is read through
@@ -1485,9 +1774,24 @@ async function recordingState(text, where) {
  * cheap. A declared file the store's git ignores is not asked for: no commit of
  * any revision holds it, and listing it would answer nothing. */
 async function stateBlobsAt(oid) {
-  const r = await git(['ls-tree', '-r', oid, '--', ...(await comparableStateFiles())], { cwd: CURRENT.store });
+  const files = await comparableStateFiles();
+  const read = () => git(['ls-tree', '-r', oid, '--', ...files], { cwd: CURRENT.store });
+  let r = await read();
+  if (r.code !== 0) {
+    // A tree this store could not read is not a commit holding no state files: the
+    // merge reads it to decide whether the remote moved anything, and an empty map
+    // there would say "nothing moved" and skip the merge whole. A commit this store
+    // does not hold is answered the way it always was - by the reads that name it -
+    // so only a commit that IS here is a failed read, retried once (#skills-by6c).
+    if (STOPPING) stopNow(`reading the state tree of ${String(oid).slice(0, 12)}`);
+    if (!(await commitHere(oid, `the state tree of ${String(oid).slice(0, 12)}`))) return new Map();
+    r = await read();
+    if (r.code !== 0) {
+      if (!(await commitHere(oid, `the state tree of ${String(oid).slice(0, 12)}`))) return new Map();
+      readFailed(`the state tree of ${String(oid).slice(0, 12)}`, r);
+    }
+  }
   const out = new Map();
-  if (r.code !== 0) return out;
   for (const line of r.stdout.split('\n')) {
     const m = /^\d+ blob ([0-9a-f]+)\t(.*)$/.exec(line);
     if (m) out.set(m[2], m[1]);
@@ -2122,7 +2426,7 @@ async function isolatedCandidate(kind, item, prepare) {
     // Network outside the mutation lock. A refused/unreachable candidate is
     // discarded, not rolled back over another local operation's completed work.
     const pushed = await pushOnce(step.oid);
-    diagnostic.phase = pushed.ok ? 'accepted' : pushed.unreachable ? 'unknown' : 'refused';
+    diagnostic.phase = pushed.ok ? 'accepted' : pushed.unreachable ? 'unknown' : pushed.refusedByHost ? 'refused-by-host' : 'refused';
     if (pushed.unreachable) {
       diagnostic.retainedRef = `refs/tracker-sync/candidates/${basename(candidate)}`;
       await gitOk(['update-ref', diagnostic.retainedRef, step.oid], { cwd: live });
@@ -2209,6 +2513,12 @@ async function conditional(kind, decl, map, item) {
       writeConfig(CURRENT.flags, CURRENT.repoRoot, { lastPublish: nowIso(), lastPublishOk: true });
       say(`${kind} landed on the remote: ${item}`);
       return;
+    }
+    // A claim or a transition counts only on the remote, so a remote that refuses
+    // this clone's writes did not make it: named, exit 5, and the candidate goes.
+    if (step.pushed.refusedByHost) {
+      settleDiagnostic(step.diagnostic);
+      die(5, `${step.pushed.said}: the ${kind} did not count, because a ${kind} counts only once the remote holds it`);
     }
     if (step.pushed.unreachable) {
       // Unknown: the diagnostic and the retained ref stay until a run proves
@@ -2364,8 +2674,12 @@ async function recordRun({ revision, checkout, fromTree, resolvedRevision }) {
       // "already recorded": a recording this machine kept while the remote's publish
       // of the same revision was refused is exactly where two different states for
       // one revision meet, and that is a refusal for a person, never a success.
+      // A recording the remote does not hold is an empty read, and a read that
+      // failed is neither: a killed show is retried once, then named as a failed
+      // read, so a stop cannot look like "the remote never recorded this revision"
+      // and cannot overwrite the remote's recording with ours (#skills-by6c).
       const there = remote.ok && !remote.noRef
-        ? (await git(['show', `${remote.tip}:.tracker-sync/recordings/${rev}.jsonl`], { cwd: CURRENT.store })).stdout
+        ? (await showAt(remote.tip, `.tracker-sync/recordings/${rev}.jsonl`, `the remote's recording of ${String(rev).slice(0, 12)}`)) ?? ''
         : '';
       // A recording is a reference, and two references to commits holding the SAME
       // state are not two different recordings: what a revision's state was is the
@@ -2441,6 +2755,23 @@ async function recordRun({ revision, checkout, fromTree, resolvedRevision }) {
     // A recipe command that failed is an error: its diagnostic stays for a person.
     if (step.failed) die(step.failed.code === 127 || step.failed.missing ? 2 : 1, `the recipe's ${step.decl} command failed (${step.failed.code}): ${text(step.failed) || 'no output'}`);
     await reconcileCandidate(step);
+    // A recording is this machine's own work, and a remote that refuses this
+    // clone's writes does not take it away: the candidate is merged into the
+    // store here, where every reader of a recording looks, and the one sentence
+    // says that this clone cannot publish it. Keep it, never retry it as a
+    // momentary refusal (#62).
+    if (step.pushed.refusedByHost) {
+      await integrateCandidate(step);
+      settleDiagnostic(step.diagnostic);
+      clearRecordTimeout(CURRENT.flags, CURRENT.repoRoot, requested);
+      writeConfig(CURRENT.flags, CURRENT.repoRoot, { lastRecord: nowIso() });
+      const at = String(captured.rev).slice(0, 12);
+      // Once: a clone that already heard it does not hear it again per commit. A
+      // record a person ran is their own action, and it says where the recording is.
+      if (step.pushed.first) say(`tracker-sync: the recording of ${at} is kept in this store; ${step.pushed.said}`);
+      else if (!CURRENT.flags.hook) say(`tracker-sync: the recording of ${at} is kept in this store, and this clone cannot publish it`);
+      return;
+    }
     if (step.pushed.ok) {
       await integrateCandidate(step);
       settleDiagnostic(step.diagnostic);
@@ -2968,7 +3299,8 @@ async function connectRun(flags) {
     const add = plan.missing.map((h) => `  ${h.name}:\n    ${h.mark.trim()}\n    ${h.line.trim()}`).join('\n');
     die(1, `the hooks folder ${plan.dir} of ${c} is inside the repository (core.hooksPath names a folder in the tree), so these steps would commit this machine's own paths - its state directory ${machineDir(CURRENT.flags, repoRoot)} and the recipe ${CURRENT.recipe.path} - into every checkout of every machine. Nothing was written. Put them in the project's own hooks there yourself, marker line and command together, or point core.hooksPath at a folder outside the working tree and rerun connect:\n${add}`);
   }
-  if (!flags.offline) {
+  const remoteNamed = await hasOrigin(repoRoot);
+  if (!flags.offline && remoteNamed) {
     // Reachability is whether the remote answers at all. `--exit-code` makes git
     // exit 2 for "no matching ref", which says nothing about the remote: a bare
     // remote whose HEAD names a branch that does not exist (git init --bare
@@ -2978,8 +3310,15 @@ async function connectRun(flags) {
     // makes the store, and a remote with no store ref yet is the normal first
     // connect on a fresh remote.
     const any = await git(['ls-remote', 'origin'], { cwd: repoRoot, timeoutMs: 20000 });
-    if (any.missing || any.timedOut || any.code !== 0)
-      die(4, `the remote is unreachable (${text(any).split('\n')[0] || 'no answer'}); the store cannot be brought up to date. Pass --offline to connect anyway, and it will publish when the remote answers`);
+    if (any.missing || any.timedOut || any.code !== 0) {
+      // Nothing has been written yet, and nothing is: connect cannot tell a remote
+      // that holds no store ref from one it cannot read, and guessing is how an
+      // empty tracker appeared in a clone that could not reach the real one (#62).
+      // --offline is offered only where it is honest: the clone already holds the
+      // store's ref, so connecting it asks the remote for nothing it needs.
+      const held = (await git(['rev-parse', '--verify', '--quiet', CURRENT.ref], { cwd: repoRoot })).code === 0;
+      die(4, `the remote is unreachable (${text(any).split('\n')[0] || 'no answer'}), so connect cannot tell whether it holds ${CURRENT.ref} yet: nothing was written. Retry when the remote answers${held ? `, or pass --offline now: this clone already holds ${CURRENT.ref}, and --offline connects it without reading the remote` : ''}`);
+    }
   }
   // Everything connect writes happens under the store's one lock: nothing of its
   // transaction can interleave with a watcher's publish or another session's claim.
@@ -3035,12 +3374,14 @@ async function connectRun(flags) {
     // The recipe timeout is this machine's bound, read by every later command;
     // the watcher's own bounds are on its launch line.
     if (flags['recipe-timeout'] !== undefined) writeConfig(flags, repoRoot, { recipeTimeout: recipeTimeoutMs() / 1000 });
+    // The ordinal is taken HERE, locally, and published last: nothing between this
+    // commit and the push asks the remote for it, because nothing between them is
+    // a push or a merge, and a push that fails must never leave the checkout
+    // without its pointer, its hooks and its config (#62).
+    let ordinalOid = null;
     if (CURRENT.recipe.ordinal) {
-      const name = machineName;
-      await recipeOk('ordinal', { machine: quote(name) });
-      const oid = await commitState(`tracker store: this machine takes its ordinal`, [await headOid()]);
-      const res = await pushOid(oid, { quiet: true });
-      say(`tracker-sync: this machine is named in the store's machine ordinals${res.ok ? '' : ' (kept here, published when the remote answers)'}`);
+      await recipeOk('ordinal', { machine: quote(machineName) });
+      ordinalOid = await commitState(`tracker store: this machine takes its ordinal`, [await headOid()]);
     }
     const envLine = (await recipe('pointer.env', {}, { cwd: CURRENT.store })).stdout.trim();
     // NOT `--env-file`: node itself consumes that option (`--env-file=<path>`), so
@@ -3073,10 +3414,6 @@ async function connectRun(flags) {
     // recheck runs connect, so this is where an existing project is repaired
     // without an action of its owner, and the line says what came back.
     const migrated = await migrateStore({ announce: true, force: true });
-    if (migrated.oid) {
-      const res = await pushOid(migrated.oid, { quiet: true });
-      say(`tracker-sync: recordings this store held as whole copies now reference the state they record${res.ok ? '' : ' (kept here, published when the remote answers)'}`);
-    }
     if (envFile && envLine) {
       requireRegularFile(envFile, 'the launcher file');
       const lines = existsSync(envFile) ? readFileSync(envFile, 'utf8') : '';
@@ -3091,6 +3428,34 @@ async function connectRun(flags) {
       points: says, mechanismVersion: VERSION, mechanism: join(HERE, 'tracker-sync.mjs'),
     });
     say(`tracker-sync: connected ${unique.length} checkout(s) to ${CURRENT.store} on ${CURRENT.ref} (mechanism ${VERSION})`);
+    // Only now the writes that leave this machine, and only after every local step
+    // above: whether a checkout has its pointer, its hooks and its config never
+    // depends on a push (#62).
+    const leaving = [];
+    if (ordinalOid) leaving.push([`this machine is named in the store's machine ordinals`, ordinalOid]);
+    if (migrated.oid) leaving.push([`recordings this store held as whole copies now reference the state they record`, migrated.oid]);
+    if (leaving.length) {
+      if (!remoteNamed) {
+        say('tracker-sync: this repository names no remote, so what connect wrote stays in this store until one is added');
+      } else if (flags.offline) {
+        say(`tracker-sync: --offline: ${leaving.length === 1 ? 'the store\'s new commit stays' : 'the store\'s new commits stay'} here, and the next publish carries ${leaving.length === 1 ? 'it' : 'them'} to the remote`);
+      } else {
+        let refused = null;
+        let unreachable = null;
+        for (const [sentence, oid] of leaving) {
+          const res = await pushOid(oid, { quiet: true, allowRefusal: true });
+          if (res.ok) say(`tracker-sync: ${sentence}`);
+          else if (res.refused) refused = refused || res.said;
+          else unreachable = unreachable || res.said || res.skipped || 'no answer';
+        }
+        // A remote that answers and refuses this clone's writes leaves a complete
+        // connection: a clone without write rights is a legitimate clone, and it
+        // is told once, in one sentence (#62).
+        if (refused) say(`tracker-sync: ${refused}`);
+        // Any other failure is still a failure, said after those local steps.
+        else if (unreachable) die(4, `the remote stopped answering while connect published what it wrote (${String(unreachable).split('\n')[0]}): this checkout is connected, its hooks and its config are in place, and the store's new commits stay here`);
+      }
+    }
   });
   } finally { release(); }
 }
@@ -3140,6 +3505,11 @@ async function statusRun(flags) {
     const alive = pid ? (() => { try { process.kill(pid, 0); return true; } catch { return false; } })() : false;
     out.supervisor = { configured: !!cfg.supervisor || !!pid, alive, pid, lastTick: pid ? new Date(statSync(pidPath(flags, repoRoot)).mtimeMs).toISOString() : null };
     out.lastPublish = cfg.lastPublish || null; out.lastPublishOk = cfg.lastPublishOk ?? null;
+    // A clone whose writes the remote refuses is a legitimate clone, and status is
+    // where a person asks. The mark connect and every later push leave is read
+    // here and never re-probed: asking the host again would say the same thing.
+    out.publishRefused = cfg.publishRefused || null;
+    out.cannotPublish = !!cfg.publishRefused;
     out.lastFetch = remote.ok ? nowIso() : cfg.lastFetch || null;
     out.lastSync = cfg.lastFetch || null;
     // How a project learns that its installed copy is older than the set's: the
@@ -3161,6 +3531,9 @@ async function statusRun(flags) {
   say(`store       ${out.store}`);
   say(`head        ${out.head ? out.head.slice(0, 12) : 'none'}${out.remote ? `  remote ${out.remote.slice(0, 12)}` : '  remote none'}${out.unreachable ? '  UNREACHABLE' : ''}`);
   say(`queued      ${out.queued.unpublished ?? 0} local, ${out.queued.behind ?? 0} to take`);
+  say(`publish     ${out.publishRefused ? out.publishRefused.said
+    : out.lastPublishOk === false ? 'the last publish did not land (the remote was unreachable)'
+      : out.lastPublish ? `ok, ${out.lastPublish}` : 'nothing published yet'}`);
   say(`recordings  ${out.recordings}${out.snapshots ? `  (${out.snapshots} still whole states${out.migration && out.migration.known ? '' : ': the next record, sync or publish converts them, or says which cannot be'})` : ''}`);
   // What the last pass kept and why, grouped by cause, with one example each: an
   // owner must not have to add a debug print to learn what a kept recording means
@@ -3230,7 +3603,10 @@ async function watchRun(flags) {
   mkdirSync(machineDir(flags, CURRENT.repoRoot), { recursive: true });
   writeFileSync(pidPath(flags, CURRENT.repoRoot), String(process.pid));
   let stop = false;
-  const onStop = () => { stop = true; };
+  // The stop is also visible to the reads a tick is in: a git child signalled with
+  // this process leaves a read that failed, and that is a stop - said as one, with
+  // nothing committed - never a fact about the store (#skills-by6c).
+  const onStop = () => { stop = true; STOPPING = true; };
   process.on('SIGINT', onStop); process.on('SIGTERM', onStop);
   say(`tracker-sync: watching ${CURRENT.store} (publish after ${debounce}s of quiet or ${maxAge}s at most, sync every ${interval}s)`);
   let firstChange = null; let lastChange = null; let lastDigest = '';
@@ -3343,9 +3719,13 @@ async function watchRun(flags) {
           if (e.lockTimeout) { onLockTimeout(e); await sleep(1000); continue; }
           throw e;
         }
-        const res = await pushOid(oid, { quiet: true, skipOnTimeout: true });
+        const res = await pushOid(oid, { quiet: true, skipOnTimeout: true, allowRefusal: true });
         if (res.skipped) onLockTimeout(Object.assign(new Error(res.skipped), { lockTimeout: true }));
         writeConfig(flags, CURRENT.repoRoot, { lastPublish: nowIso(), lastPublishOk: !!res.ok });
+        // A remote that refuses this clone's writes is said once, kept in the
+        // config for status, and never asked again by this watcher: a retry
+        // cannot change rights, and the loop stays up for the reads and records.
+        if (res.refused && res.first) say(`tracker-sync: ${res.said} (the watcher keeps its reads and its records)`);
         if (res.ok) {
           say(`tracker-sync: published ${oid.slice(0, 12)} (${((Date.now() - firstChange) / 1000).toFixed(1)}s after the first unpublished change)`);
           firstChange = null; lastChange = null; lastDigest = '';
@@ -3360,6 +3740,7 @@ async function watchRun(flags) {
         const r = await syncOnce({ quiet: true, skipOnTimeout: true });
         const skipped = (r && r.skipped) || (r && r.pushed && r.pushed.skipped);
         if (skipped) onLockTimeout(Object.assign(new Error(skipped), { lockTimeout: true }));
+        if (r && r.pushed && r.pushed.refused && r.pushed.first) say(`tracker-sync: ${r.pushed.said} (the watcher keeps its reads and its records)`);
       } catch (e) { say(`tracker-sync: the sync failed: ${e.message}`); }
       await sleep(interval * 1000);
     }
@@ -3433,7 +3814,9 @@ async function main() {
       // publishOnce takes the store lock itself, for its local work only. Under
       // --watch this first round is the watcher's first tick, so a lock it cannot
       // take is skipped and said once, exactly as the loop says it.
-      const r = await publishOnce({ quiet: false, skipOnTimeout: !!flags.watch });
+      // --watch: this round is the watcher's first tick, and a tick carries a
+      // refusal instead of ending the watcher it was asked to start.
+      const r = await publishOnce({ quiet: false, skipOnTimeout: !!flags.watch, allowRefusal: !!flags.watch });
       if (flags.watch) {
         if (r.skipped) say(`tracker-sync: another command holds the store lock (${r.skipped.split(';')[0]}); this round is skipped and tried again, the watcher stays up`);
         await watchRun(flags);
@@ -3441,7 +3824,8 @@ async function main() {
       }
       if (r.nothing) say('tracker-sync: nothing to publish');
       else if (r.ok) say(`tracker-sync: published ${String(r.oid).slice(0, 12)}`);
-      else say('tracker-sync: the write is kept here and is published when the remote answers');
+      else if (r.refused) say(`tracker-sync: ${r.said}`);
+      else say('tracker-sync: the remote is unreachable; the write is kept here');
       break;
     }
     case 'sync': {

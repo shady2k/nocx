@@ -820,9 +820,12 @@ func withAssemblyBashEndpoint(t *testing.T) liveSshdOption {
 		t.Fatal("OpenSSH sftp-server is required for the controlled Bash endpoint; install the OpenSSH SFTP server alongside sshd")
 	}
 	command := filepath.Join(t.TempDir(), "bash-endpoint")
+	// OpenSSH 9.6 appends whitespace to the subsystem's original command.
+	// Match the command boundary, as sshd does for internal-sftp, rather than
+	// falling through to Bash and trying to execute a nonexistent binary.
 	script := "export SHELL=\"$BASH\"\n" +
 		"case \"$SSH_ORIGINAL_COMMAND\" in\n" +
-		"  internal-sftp) exec " + shellQuoteForSh(sftpServer) + " ;;\n" +
+		"  internal-sftp|internal-sftp[[:space:]]*) exec " + shellQuoteForSh(sftpServer) + " ;;\n" +
 		"  '') exec \"$BASH\" -l ;;\n" +
 		"  *) exec \"$BASH\" -c \"$SSH_ORIGINAL_COMMAND\" ;;\n" +
 		"esac\n"
@@ -831,6 +834,28 @@ func withAssemblyBashEndpoint(t *testing.T) liveSshdOption {
 	}
 	return func(c *liveSshdConfig) {
 		c.extraConfig = "ForceCommand " + shellQuoteForSh(bash) + " " + shellQuoteForSh(command)
+	}
+}
+
+// The forced endpoint must preserve the real subsystem, not merely reach a
+// Bash prompt. Exercise a real SFTP client before any carrier bootstrap can
+// turn a subsystem failure into a missing child hello.
+func TestLiveSshd_AssemblyBashEndpointServesSFTP(t *testing.T) {
+	fx := startLiveSshd(t, true, withAssemblyBashEndpoint(t), func(c *liveSshdConfig) {
+		c.clientKeyFile = true
+	})
+	wrapper := filepath.Join(installSSHWrapper(t, fx), "ssh")
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sftp", "-S", wrapper, "-o", "BatchMode=yes", "-i", fx.clientKey,
+		"-P", fmt.Sprint(fx.fixturePort()), "-b", "-", fx.user+"@127.0.0.1") // #nosec G204 — the wrapper and endpoint belong to this fixture.
+	cmd.Stdin = strings.NewReader("pwd\n")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("SFTP subsystem exchange: %v\noutput: %s\nsshd: %s", err, output, fx.logBuf.String())
+	}
+	if !bytes.Contains(output, []byte("Remote working directory: /")) {
+		t.Fatalf("SFTP did not report its remote working directory: %s", output)
 	}
 }
 

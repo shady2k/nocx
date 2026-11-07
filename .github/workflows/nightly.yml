@@ -66,7 +66,7 @@ jobs:
           node --input-type=module <<'JS'
           import { execFileSync } from 'node:child_process';
           import { appendFileSync } from 'node:fs';
-          import { prepare, authorize, releaseKeys, verifyFile } from './scripts/publish-nightly.mjs';
+          import { prepare, authorize, releaseKeys, verifyFile, nightlyCommit } from './scripts/publish-nightly.mjs';
           authorize({ ref: process.env.GITHUB_REF, dryRun: process.env.DRY_RUN === 'true', linuxOnly: process.env.LINUX_ONLY === 'true' });
           const git = args => execFileSync('git', args, { encoding: 'utf8' }).trim();
           const sha = git(['rev-parse', 'HEAD']);
@@ -93,20 +93,18 @@ jobs:
           // What a person reads in the release is the pull requests of the
           // first-parent history since the previous nightly, so each commit is
           // resolved here, where git and that commit are both in hand, and the
-          // result is carried to publication. A failed lookup throws: the plan
-          // step must fail rather than publish notes with a change missing.
+          // result is carried to publication. nightlyCommit keeps the parsed
+          // bullets and drops the body: the output and the publish step's
+          // environment are bounded, and the notes never read the body again.
+          // A failed lookup throws: the plan step must fail rather than publish
+          // notes with a change missing.
           const commits = previous
             ? git(['log', '--first-parent', '--format=%H%x09%s', `${previous}..${sha}`])
                 .split('\n').filter(Boolean)
                 .map(line => {
                   const [commit, ...subject] = line.split('\t');
                   const pulls = JSON.parse(gh(['api', `repos/{owner}/{repo}/commits/${commit}/pulls`]));
-                  const pull = pulls[0];
-                  return {
-                    sha: commit,
-                    subject: subject.join('\t'),
-                    pull: pull ? { number: pull.number, title: pull.title, body: pull.body ?? '' } : null,
-                  };
+                  return nightlyCommit({ sha: commit, subject: subject.join('\t'), pull: pulls[0] });
                 })
             : [];
           if (process.env.DRY_RUN === 'true') plan.moved = true;

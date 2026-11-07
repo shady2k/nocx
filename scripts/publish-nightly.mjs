@@ -137,14 +137,35 @@ export function parseWhatChangesForYou(body) {
 }
 
 /**
+ * One first-parent commit as the nightly carries it from the plan to
+ * publication: the sha, the subject kept for a commit with no pull request,
+ * and, when GitHub resolved one, its number, title and already-parsed bullets.
+ * The body is deliberately absent. A job output and an environment variable
+ * are bounded — 1 MB for the output and 128 KiB for one environment string on
+ * Linux — and the notes never read the body again after the bullets are out.
+ */
+export function nightlyCommit({ sha, subject, pull }) {
+  if (!pull) return { sha, subject, pull: null }
+  return {
+    sha,
+    subject,
+    pull: {
+      number: pull.number,
+      title: pull.title,
+      bullets: parseWhatChangesForYou(pull.body),
+    },
+  }
+}
+
+/**
  * Release notes for one dated build. `commits` is the first-parent history
- * since the previous nightly, newest first, each entry `{sha, subject, pull}`
- * as the workflow collected it. A pull request that carries the user-facing
- * section supplies its bullets verbatim, each linked to that pull request; a
- * pull request without one, and a commit with no pull request, is listed under
- * a collapsed "Technical changes" group instead. This function owns all the
- * wording and links and knows nothing about git or GitHub, so the same data
- * renders the same notes in a test.
+ * since the previous nightly, newest first, each entry shaped by
+ * `nightlyCommit`. A pull request that carries user-facing bullets supplies
+ * them verbatim, each linked to that pull request; a pull request without one,
+ * and a commit with no pull request, is listed under a collapsed "Technical
+ * changes" group instead. This function owns all the wording and links and
+ * knows nothing about git or GitHub, so the same data renders the same notes
+ * in a test.
  */
 export function releaseNotes({ version, build, sha, previous, commits = [] }) {
   const header = `\`nocx ${version}\` nightly, build ${build}, from main at ${sha}.`
@@ -163,7 +184,7 @@ export function releaseNotes({ version, build, sha, previous, commits = [] }) {
     // not as many as the commits that carry it.
     if (seenPulls.has(pull.number)) continue
     seenPulls.add(pull.number)
-    const bullets = parseWhatChangesForYou(pull.body)
+    const bullets = pull.bullets ?? []
     if (bullets.length)
       for (const bullet of bullets) changes.push(`- ${bullet} ${pullLink(pull.number)}`)
     else technical.push(`- ${pull.title} ${pullLink(pull.number)}`)

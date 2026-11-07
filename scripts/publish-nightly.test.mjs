@@ -25,6 +25,7 @@ import {
   isDatedNightly,
   nightlyTag,
   nightlyTitle,
+  nightlyCommit,
   parseWhatChangesForYou,
   releaseNotes,
 } from './publish-nightly.mjs'
@@ -102,13 +103,16 @@ function fixture(t) {
         pull: {
           number: 41,
           title: 'Keep the update manifest URL immutable',
-          body: '## What changes for you\r\n\r\n- The update check no longer loses the manifest URL.\r\n- The update notice names the build you are running.\r\n',
+          bullets: [
+            'The update check no longer loses the manifest URL.',
+            'The update notice names the build you are running.',
+          ],
         },
       },
       {
         sha: 'c'.repeat(40),
         subject: 'Merge pull request #42 from shady2k/tech (nocx-y)',
-        pull: { number: 42, title: 'Refactor the nightly publisher', body: 'No section here.' },
+        pull: { number: 42, title: 'Refactor the nightly publisher', bullets: [] },
       },
     ],
     runId: '42',
@@ -425,6 +429,59 @@ test('notes list what changed for a user, each bullet linked to its pull request
   assert.equal(alias[alias.indexOf('--notes') + 1], notes)
 })
 
+test('a carried commit keeps the parsed bullets and drops the body', () => {
+  const entry = nightlyCommit({
+    sha: 'a'.repeat(40),
+    subject: 'Merge pull request #7 from shady2k/pty-fix',
+    pull: {
+      number: 7,
+      title: 'Keep the terminal open',
+      body: '## What changes for you\r\n\r\n- One user change.\r\n- Another user change.\r\n\r\n## Reviewer notes\r\n- not carried\r\n',
+    },
+  })
+  assert.deepEqual(entry, {
+    sha: 'a'.repeat(40),
+    subject: 'Merge pull request #7 from shady2k/pty-fix',
+    pull: {
+      number: 7,
+      title: 'Keep the terminal open',
+      bullets: ['One user change.', 'Another user change.'],
+    },
+  })
+  assert.equal(JSON.stringify(entry).includes('Reviewer notes'), false)
+  assert.equal(nightlyCommit({ sha: 'b'.repeat(40), subject: 'chore: x', pull: null }).pull, null)
+  // An empty section is no section, and its body does not travel either.
+  assert.deepEqual(
+    nightlyCommit({
+      sha: 'c'.repeat(40),
+      subject: 'Merge pull request #8 from x',
+      pull: {
+        number: 8,
+        title: 'Empty section',
+        body: '## What changes for you\n\n## Notes\n- internal\n',
+      },
+    }).pull.bullets,
+    [],
+  )
+})
+
+test('a range of 200 long-bodied pull requests carries less than 128 KiB', () => {
+  const body = '## What changes for you\r\n\r\n- One user change.\r\n\r\n' + 'x'.repeat(100 * 1024)
+  const entries = Array.from({ length: 200 }, (_, i) =>
+    nightlyCommit({
+      sha: String(i).padStart(40, '0'),
+      subject: `Merge pull request #${i + 1} from branch`,
+      pull: { number: i + 1, title: `Pull request ${i + 1}`, body },
+    }),
+  )
+  const carried = JSON.stringify(entries)
+  assert.ok(
+    Buffer.byteLength(carried) < 128 * 1024,
+    `carried payload is ${Buffer.byteLength(carried)} bytes`,
+  )
+  assert.equal(carried.includes('x'.repeat(1024)), false)
+})
+
 test('release notes name the build, the comparison point and what changed in plain words', () => {
   const notes = releaseNotes({
     version: '0.8.1',
@@ -438,7 +495,7 @@ test('release notes name the build, the comparison point and what changed in pla
         pull: {
           number: 7,
           title: 'Keep the terminal open',
-          body: '## What changes for you\n\n- The terminal stays open when a program exits.\n',
+          bullets: ['The terminal stays open when a program exits.'],
         },
       },
       { sha: 'd'.repeat(40), subject: 'fix(pty): keep the slave open', pull: null },
@@ -492,7 +549,7 @@ test('the what-changes heading is exact, tolerates CRLF and stops at the next he
   assert.deepEqual(parseWhatChangesForYou('## What changes for you\n\n## Details\n- One\n'), [])
 })
 
-test('a pull request without the section, a direct commit and an empty section are technical changes', () => {
+test('a pull request without bullets and a direct commit are technical changes', () => {
   const notes = releaseNotes({
     version: '0.8.1',
     build: '202611021101',
@@ -502,16 +559,12 @@ test('a pull request without the section, a direct commit and an empty section a
       {
         sha: 'b'.repeat(40),
         subject: 'Merge pull request #8 from shady2k/tidy',
-        pull: {
-          number: 8,
-          title: 'Tidy the workflow',
-          body: '## What changes for you\r\n\r\n## Notes\r\n- Internal only.\r\n',
-        },
+        pull: { number: 8, title: 'Tidy the workflow', bullets: [] },
       },
       {
         sha: 'c'.repeat(40),
         subject: 'Merge pull request #9 from shady2k/deps',
-        pull: { number: 9, title: 'Drop an unused dependency', body: '' },
+        pull: { number: 9, title: 'Drop an unused dependency', bullets: [] },
       },
       { sha: 'd'.repeat(40), subject: 'chore: refresh the lockfile', pull: null },
     ],
@@ -528,7 +581,7 @@ test('a pull request reached by several commits is listed once', () => {
   const pull = {
     number: 10,
     title: 'One change',
-    body: '## What changes for you\n\n- One user change.\n',
+    bullets: ['One user change.'],
   }
   const notes = releaseNotes({
     version: '0.8.1',
@@ -707,21 +760,29 @@ test('the tag is made where the build instant is stamped, and the proofs read it
 test('the plan resolves every commit to its pull request and fails when a lookup fails', () => {
   const nightly = readFileSync(new URL('../.github/workflows/nightly.yml', import.meta.url), 'utf8')
   // The plan step asks GitHub for the pull request of every first-parent
-  // commit, and carries its title and body to publication.
+  // commit, and carries only the parsed bullets: a job output and an
+  // environment variable are bounded, and the body is never read again.
   assert.match(
     nightly,
     /gh\(\['api', `repos\/\{owner\}\/\{repo\}\/commits\/\$\{commit\}\/pulls`\]\)/,
   )
   assert.match(
     nightly,
-    /pull: pull \? \{ number: pull\.number, title: pull\.title, body: pull\.body \?\? '' \} : null/,
+    /import \{[^}]*nightlyCommit[^}]*\} from '\.\/scripts\/publish-nightly\.mjs'/,
+  )
+  assert.match(
+    nightly,
+    /nightlyCommit\(\{ sha: commit, subject: subject\.join\('\\t'\), pull: pulls\[0\] \}\)/,
   )
   // execFileSync throws on a failed lookup and nothing catches it, so the
   // plan step fails instead of publishing notes with a change missing.
   const start = nightly.indexOf('- id: plan')
   const end = nightly.indexOf('\n          JS\n', start)
   assert.ok(start >= 0 && end > start, 'the plan step script must be present')
-  assert.doesNotMatch(nightly.slice(start, end), /catch/)
+  const plan = nightly.slice(start, end)
+  assert.doesNotMatch(plan, /catch/)
+  // The raw body is passed to nightlyCommit and never shaped into the entry.
+  assert.doesNotMatch(plan, /body: pull\.body/)
   // The job's token must be allowed to read pull requests, or every lookup
   // fails.
   const prepare = nightly.slice(nightly.indexOf('  prepare:'), nightly.indexOf('  build:'))

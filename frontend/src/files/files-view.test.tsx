@@ -17,6 +17,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createSignal } from 'solid-js'
 import { cleanup, fireEvent, render } from '@solidjs/testing-library'
 import { FILES_VIEW_ID, FILES_VIEW_ORDER, createFilesView } from './files-view'
+import { setActiveLocale } from '../i18n/locale-model'
 import { mountSidebar, type SidebarHandle, type SidebarViewDescriptor } from '../sidebar'
 import { PlugIcon } from '../ui/icons'
 import { makeClient, mountPaneManager } from '../test-support/panes-fixtures'
@@ -211,7 +212,7 @@ async function mountApp(
   // Files the FIRST activity-bar icon (SidebarSolid renders array order).
   const ports: SidebarViewDescriptor = {
     id: 'ports',
-    title: 'Ports',
+    title: () => 'Ports',
     icon: PlugIcon,
     view: () => null,
     order: 0,
@@ -262,6 +263,7 @@ function rowNamed(panel: HTMLElement, name: string): HTMLElement {
 }
 
 afterEach(() => {
+  setActiveLocale('en')
   clearToasts()
   for (const h of liveHandles) h.destroy()
   liveHandles.length = 0
@@ -275,6 +277,18 @@ describe('files sidebar view', () => {
     // zone — an owner requirement, asserted here, not a consequence of a
     // number somebody picked.
     expect(FILES_VIEW_ORDER).toBeLessThan(0)
+  })
+
+  it('the no-files empty state reads through the catalogue under ru (stage 3e)', async () => {
+    setActiveLocale('ru')
+    const services = fakeServices()
+    const { panel, setActiveOrigin } = await mountApp(services)
+    setActiveOrigin(null)
+    await vi.waitFor(() => expect(panel.textContent).toContain('Нет файлов для показа'))
+    expect(panel.textContent).not.toContain('No files to show')
+    // The header action's aria-label is attribute text, not rendered text.
+    const refresh = panel.querySelector<HTMLButtonElement>('[data-testid="files-refresh"]')
+    expect(refresh?.getAttribute('aria-label')).toBe('Обновить файлы')
   })
 
   it('from a cold start the Files icon is first, enabled, and opens the panel', async () => {

@@ -17,6 +17,7 @@ import {
   type UpdateStateReading,
 } from './update-details'
 import type { ClipboardAccess } from './clipboard'
+import { t } from './i18n/locale-model'
 
 /** What an offer says about the build behind it (nocx-vh2hr.1.5).
  *
@@ -220,14 +221,16 @@ export function createUpdateController(deps: UpdateControllerDeps = {}): UpdateC
     if (!failure || !clipboard) return
     try {
       await clipboard.writeText(await failureDetailsText(failure))
-      present({ message: 'Update details copied' })
+      present({ message: t('update.details.copied', 'Update details copied') })
     } catch (error) {
       // A clipboard is a platform capability that can refuse — a non-secure
       // context, a platform that declined the write — and a button that
       // silently does nothing is worse than one that is not there.
       present({
         level: 'danger',
-        message: `Could not copy the update details: ${error instanceof Error ? error.message : String(error)}`,
+        message: t('update.details.copyFailed', 'Could not copy the update details: {error}', {
+          error: error instanceof Error ? error.message : String(error),
+        }),
       })
     }
   }
@@ -249,7 +252,14 @@ export function createUpdateController(deps: UpdateControllerDeps = {}): UpdateC
       level: 'danger',
       message,
       ...(deps.clipboard && deps.about
-        ? { actions: [{ label: 'Copy details', onClick: () => void copyFailureDetails() }] }
+        ? {
+            actions: [
+              {
+                label: t('update.details.copy', 'Copy details'),
+                onClick: () => void copyFailureDetails(),
+              },
+            ],
+          }
         : {}),
     })
   }
@@ -297,31 +307,49 @@ export function createUpdateController(deps: UpdateControllerDeps = {}): UpdateC
                 // The nightly link is a commit range, not notes: label it for
                 // what it shows. The backend composes it, and leaves it empty
                 // when there is no range to show.
-                link: { label: nightly ? 'What changed' : 'Release notes', href: current.notesUrl },
+                link: {
+                  label: nightly
+                    ? t('update.link.whatChanged', 'What changed')
+                    : t('update.link.releaseNotes', 'Release notes'),
+                  href: current.notesUrl,
+                },
               }),
           actions: [
             { label: installLabel, variant: 'primary', onClick: () => void apply() },
-            { label: 'Later', onClick: () => {} },
+            { label: t('update.later', 'Later'), onClick: () => {} },
           ],
         })
         return
       }
       case 'finishing':
-        present({ message: `Finishing the update to nocx ${current.version}…` })
+        present({
+          message:
+            t('update.finishingHead', 'Finishing the update to nocx') + ` ${current.version}…`,
+        })
         return
       case 'downloading':
         present({
           message:
             current.progress === undefined
-              ? `Downloading nocx ${current.version}…`
-              : `${downloadProgressLabel(current.progress)} — nocx ${current.version}`,
+              ? t('update.downloading', 'Downloading nocx {version}…', {
+                  version: current.version,
+                })
+              : t('update.downloadingProgress', '{progress} — nocx {version}', {
+                  progress: downloadProgressLabel(current.progress),
+                  version: current.version,
+                }),
         })
         return
       case 'pending':
         present({
           level: 'success',
-          message: `nocx ${current.version} installed — restart to apply`,
-          actions: [{ label: 'Restart now', variant: 'primary', onClick: restart }],
+          message:
+            t('update.installedRestart.head', 'nocx') +
+            ` ${current.version} ` +
+            t('update.installedRestart.tail', 'installed — restart to apply'),
+          actions: [
+            { label: t('update.restartNow', 'Restart now'), variant: 'primary', onClick: restart },
+          ],
         })
         return
       case 'held':
@@ -331,8 +359,16 @@ export function createUpdateController(deps: UpdateControllerDeps = {}): UpdateC
           // finishing stops the coordinator this window has outlived and
           // QUITS — it does not relaunch, so calling it a restart told the
           // person to expect a window that would not appear.
-          message: `nocx ${current.version} installed — close nocx and open it again to finish (this closes open sessions)`,
-          actions: [{ label: 'Close nocx', variant: 'primary', onClick: finish }],
+          message:
+            t('update.installedClose.head', 'nocx') +
+            ` ${current.version} ` +
+            t(
+              'update.installedClose.tail',
+              'installed — close nocx and open it again to finish (this closes open sessions)',
+            ),
+          actions: [
+            { label: t('update.closeNocx', 'Close nocx'), variant: 'primary', onClick: finish },
+          ],
         })
         return
     }

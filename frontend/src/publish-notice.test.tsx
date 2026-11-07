@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SessionPublishFailed } from './generated/session.publishFailed'
 import {
   PUBLISH_FAILURE_REASONS,
-  PUBLISH_NOTICE_TITLE,
+  publishNoticeTitle,
   mountPublishNotice,
   publishFailureSentence,
   subscribePublishFailed,
@@ -51,7 +51,7 @@ describe('the publish-failure notice (nocx-1kejz.4)', () => {
     const holder = host.querySelector('.nocx-publish-notice')
     expect(holder).not.toBeNull()
     expect(holder!.querySelectorAll('.ui-status-card')).toHaveLength(1)
-    expect(holder!.querySelector('.ui-status-card__title')?.textContent).toBe(PUBLISH_NOTICE_TITLE)
+    expect(holder!.querySelector('.ui-status-card__title')?.textContent).toBe(publishNoticeTitle())
     const description = holder!.querySelector('.ui-status-card__desc')?.textContent ?? ''
     expect(description).toContain('file-transfer channel')
     // …and what the pane is doing instead, which is the half a person cannot

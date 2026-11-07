@@ -54,6 +54,7 @@ import {
   type SidebarWidthController,
 } from './sidebar-width'
 import { createAppVisibility, type AppVisibility } from './app-visible'
+import { t, tPlural } from './i18n/locale-model'
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -105,9 +106,9 @@ export type SidebarCountKind = 'running' | 'unread'
  *  pass a string — that is exactly the second vocabulary the invariant
  *  forbids. The view names a KIND from this closed set and the bar keeps the
  *  wording. */
-const COUNT_WORD: Record<SidebarCountKind, string> = {
-  running: 'running',
-  unread: 'unread',
+const COUNT_WORD: Record<SidebarCountKind, { key: string; english: string }> = {
+  running: { key: 'sidebar.count.running', english: '{count} running' },
+  unread: { key: 'sidebar.count.unread', english: '{count} unread' },
 }
 
 export interface SidebarViewStatus {
@@ -132,7 +133,14 @@ export interface SidebarViewStatus {
 /** A view whose content is rendered inside the sidebar panel. */
 export interface SidebarViewDescriptor {
   readonly id: string
-  readonly title: string // panel header, e.g. "EXPLORER"
+  /** The panel header and the rail's accessible name, READ at render rather
+   *  than captured — an accessor for the same reason `status` is one. A
+   *  string built from `t()` when the descriptor is constructed is the
+   *  language the app started in, and the sidebar outlives a locale switch
+   *  (it is remounted per connection, not per language). The accessor reads
+   *  the locale signal inside the bar's own scope, so the header, the count
+   *  suffix and the aria label all switch together. */
+  readonly title: () => string
   readonly icon: Component // activity-bar icon — a component, never markup
   readonly view: Component<SidebarViewProps> // panel body, receives view props
   readonly actions?: Component // per-view header actions (…, refresh, collapse-all)
@@ -155,7 +163,8 @@ export interface SidebarViewDescriptor {
 
 /** A reactive indicator in the bottom zone, owned by the composition root. */
 export interface SidebarIndicator {
-  readonly title: string
+  /** Resolved at render — see SidebarViewDescriptor.title. */
+  readonly title: () => string
   readonly icon: Component
   readonly available: () => boolean
   readonly level: () => StatusDotTone
@@ -165,7 +174,8 @@ export interface SidebarIndicator {
 /** An action button in the bottom zone (global actions, never opens panel). */
 export interface SidebarAction {
   readonly id: string
-  readonly title: string
+  /** Resolved at render — see SidebarViewDescriptor.title. */
+  readonly title: () => string
   readonly icon: Component
   readonly onActivate: () => void
 }
@@ -240,7 +250,7 @@ function PanelRoot(props: PanelRootProps) {
           reports belongs to the pane on the far side of it. */}
       <Show when={props.resize}>
         <ResizeHandle
-          ariaLabel="Resize sidebar"
+          ariaLabel={t('sidebar.resize', 'Resize sidebar')}
           pane="after"
           value={width()}
           min={SIDEBAR_WIDTH_MIN}
@@ -294,7 +304,7 @@ function ActiveView(props: {
   // below exists for in the first place.
   return (
     <SidebarView
-      title={props.desc.title}
+      title={props.desc.title()}
       actions={props.desc.actions ? <Dynamic component={props.desc.actions} /> : undefined}
       filter={props.desc.filter ? <Dynamic component={props.desc.filter} /> : undefined}
     >
@@ -501,9 +511,18 @@ function SidebarSolid(props: SidebarSolidProps) {
 
   // ── Render ─────────────────────────────────────────────────────────────
   return (
-    <div role="toolbar" aria-label="Activity bar" class="activity-bar" onKeyDown={handleKeyDown}>
+    <div
+      role="toolbar"
+      aria-label={t('sidebar.activityBar', 'Activity bar')}
+      class="activity-bar"
+      onKeyDown={handleKeyDown}
+    >
       {/* Top zone: views */}
-      <div class="activity-bar-zone activity-bar-top" role="group" aria-label="Views">
+      <div
+        class="activity-bar-zone activity-bar-top"
+        role="group"
+        aria-label={t('sidebar.views', 'Views')}
+      >
         <For each={props.views}>
           {(view) => {
             const status = () => view.status?.() ?? null
@@ -513,7 +532,13 @@ function SidebarSolid(props: SidebarSolidProps) {
                button with the keyboard cannot see the badge. */
             const kind = () => status()?.kind ?? 'running'
             const label = () =>
-              count() === 0 ? view.title : `${view.title} — ${count()} ${COUNT_WORD[kind()]}`
+              count() === 0
+                ? view.title()
+                : `${view.title()} — ${tPlural(
+                    COUNT_WORD[kind()].key,
+                    count(),
+                    COUNT_WORD[kind()].english,
+                  )}`
             return (
               <IconButton
                 size="lg"
@@ -552,7 +577,7 @@ function SidebarSolid(props: SidebarSolidProps) {
                         see. */}
                     <ProgressBar
                       value={progress() as number}
-                      ariaLabel={`${view.title} progress`}
+                      ariaLabel={view.title() + ' ' + t('ops.progress.aria', 'progress')}
                     />
                   </span>
                 </Show>
@@ -566,14 +591,18 @@ function SidebarSolid(props: SidebarSolidProps) {
       <div class="activity-bar-spacer" />
 
       {/* Bottom zone: actions. */}
-      <div class="activity-bar-zone activity-bar-bottom" role="group" aria-label="Actions">
+      <div
+        class="activity-bar-zone activity-bar-bottom"
+        role="group"
+        aria-label={t('sidebar.actions', 'Actions')}
+      >
         <For each={props.actions}>
           {(action) => (
             <IconButton
               size="lg"
               data-action={action.id}
-              title={action.title}
-              ariaLabel={action.title}
+              title={action.title()}
+              ariaLabel={action.title()}
               tabIndex={action.id === tabbableId() ? 0 : -1}
               onClick={() => handleActionClick(action)}
             >
@@ -586,8 +615,8 @@ function SidebarSolid(props: SidebarSolidProps) {
             size="lg"
             data-update-indicator
             tabIndex={tabbableId() === null ? 0 : -1}
-            title={props.indicator?.title ?? 'Update available'}
-            ariaLabel={props.indicator?.title ?? 'Update available'}
+            title={props.indicator?.title() ?? t('app.update.available', 'Update available')}
+            ariaLabel={props.indicator?.title() ?? t('app.update.available', 'Update available')}
             onClick={() => props.indicator?.onActivate()}
           >
             <StatusDot tone={props.indicator?.level() ?? 'neutral'} accessibleName="Update status">

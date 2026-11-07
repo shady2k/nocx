@@ -37,6 +37,10 @@ export interface ModeIndicatorMenuItem {
 export interface ModeIndicatorOptions {
   /** What the person reads — the active target's word ('Run', 'Ask'). */
   word: string
+  /** The button's accessible name, resolved by the caller: "Enter goes to
+   *  Run. Click to choose." A kit module may not own a sentence it cannot
+   *  localise (ui/README.md's i18n rule, nocx-dej6.3.8). */
+  ariaLabel: string
   /** The badge tone: the active state's register (neutral for the shell,
    *  info for the assistant — the same register the running block wears). */
   tone: BadgeTone
@@ -73,7 +77,7 @@ export function createModeIndicator(opts: ModeIndicatorOptions): HTMLButtonEleme
   if (opts.variant) btn.dataset.variant = opts.variant
   btn.setAttribute('aria-haspopup', 'menu')
   btn.setAttribute('aria-expanded', 'false')
-  btn.setAttribute('aria-label', `Enter goes to ${opts.word}. Click to choose.`)
+  btn.setAttribute('aria-label', opts.ariaLabel)
 
   const label = document.createElement('span')
   label.className = 'ui-mode-indicator__label'

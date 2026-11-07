@@ -45,10 +45,6 @@ package coordinator
 // therefore speaks to a coordinator that can answer, and one pairing the
 // other way is refused at the handshake instead of at the method.
 //
-// The number in a stage branch means only that ITS surface moved; this is the
-// number the integrated surface carries, and its golden is the one written by
-// the recipe over all four stages at once.
-//
 // 18 (nocx-3an1s.2.7, over main's 17): the capacity refusal left the wire.
 // The -32004 answer and the control.saturated notification are gone
 // (ADR-8eej3e66 §8, stage 8), the lane with them, and a call whose declared
@@ -59,7 +55,15 @@ package coordinator
 // written over the MERGED tree: this branch's first golden was computed
 // before origin/main's own surface changes arrived, and the digest moved with
 // them.
-const ProtocolVersion = 18
+//
+// 19 (this branch, over main's 18): the settings declarations crossed the wire
+// with their translation keys — `settings.describe` gained `sectionKey` and
+// `zeroLabelKey` — which is a surface change and therefore a bump.
+//
+// The number in a stage branch means only that ITS surface moved; this is the
+// number the integrated surface carries, and its golden is the one written by
+// the recipe over all four stages at once.
+const ProtocolVersion = 19
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

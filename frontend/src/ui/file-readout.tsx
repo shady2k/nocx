@@ -104,6 +104,9 @@ export interface FileReadoutProps {
    * ones with no bytes: a reason is only useful beside the thing it is about.
    */
   facts: readonly Fact[]
+  /** The kit's own copy, threaded in from the surface so this file never
+   *  imports i18n. The i18n layer's `fileReadoutLabels()` builds it. */
+  labels: FileReadoutLabels
   /**
    * What the block of bytes is, for a screen reader. The visible answer is in
    * `facts`; this is the accessible name for the region that holds the file.
@@ -126,6 +129,15 @@ export interface FileReadoutProps {
   fill?: boolean
 }
 
+/** The kit's copy, threaded in from the surface (kit never imports i18n). */
+export interface FileReadoutLabels {
+  whatAria: string
+  notText: string
+  tooLarge: string
+  readFailed: string
+  scanNotice: string
+}
+
 interface Refusal {
   tone: StatusCardTone
   title: string
@@ -139,21 +151,21 @@ interface Refusal {
  * outcome is a closed union, so a fifth state fails this return-type check
  * rather than rendering as a viewer that quietly shows nothing.
  */
-function refusalFor(outcome: FileReadoutOutcome): Refusal | null {
+function refusalFor(outcome: FileReadoutOutcome, labels: FileReadoutLabels): Refusal | null {
   switch (outcome.kind) {
     case 'text':
       return null
     case 'not-text':
       return {
         tone: 'warning',
-        title: 'This file is not text',
+        title: labels.notText,
         description:
           'Its bytes are not something that can be shown as lines, so there is nothing here to read. The file is on disk exactly as it was — this is a fact about the file, not a refusal of the request.',
       }
     case 'too-large':
       return {
         tone: 'warning',
-        title: 'This file is larger than the read budget',
+        title: labels.tooLarge,
         // The budget is NAMED, in the units a person reads sizes in, because
         // it travelled on the wire for exactly that purpose. A second copy of
         // the number here would one day quote a limit nothing enforces.
@@ -162,7 +174,7 @@ function refusalFor(outcome: FileReadoutOutcome): Refusal | null {
     case 'unreadable':
       return {
         tone: 'danger',
-        title: 'This file could not be read',
+        title: labels.readFailed,
         description: outcome.message,
       }
   }
@@ -206,7 +218,8 @@ function markedText(text: string, marks: readonly FileReadoutMark[]): JSX.Elemen
 
 /** One file, as a person reads it: read-only, and never blank. */
 export function FileReadout(props: FileReadoutProps) {
-  const refusal = (): Refusal | null => refusalFor(props.outcome)
+  const labels = (): FileReadoutLabels => props.labels
+  const refusal = (): Refusal | null => refusalFor(props.outcome, labels())
   /** The bytes, or null when there are none. Null rather than `''`, because
    *  an empty file still gets a block: an empty reader and a refused one must
    *  not look the same. */
@@ -235,7 +248,7 @@ export function FileReadout(props: FileReadoutProps) {
       data-state={props.outcome.kind}
       data-fill={props.fill ? 'true' : undefined}
     >
-      <FactList facts={props.facts} ariaLabel="What this file is" />
+      <FactList facts={props.facts} ariaLabel={labels().whatAria} />
       <Show when={refusal()}>
         {(said) => (
           <StatusCard tone={said().tone} title={said().title} description={said().description} />
@@ -245,7 +258,7 @@ export function FileReadout(props: FileReadoutProps) {
         {(words) => (
           <StatusCard
             tone="warning"
-            title="Highlighted lines below matched a static scan"
+            title={labels().scanNotice}
             description={`${words()}. The match is highlighted where it sits, in the bytes themselves \u2014 it is evidence to read there, not a refusal, and nothing changed because a pattern matched. Lines nothing matched are not lines anything has vouched for.`}
           />
         )}

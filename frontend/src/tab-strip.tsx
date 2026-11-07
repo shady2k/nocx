@@ -29,6 +29,7 @@ import type { JSX, Setter } from 'solid-js'
 import { createStore } from 'solid-js/store'
 import { render } from 'solid-js/web'
 import type { PaneActivity, PaneActivitySource, PaneChild } from './pane-observation'
+import { t } from './i18n/locale-model'
 
 /**
  * The vertical strip's width bounds, in CSS pixels.
@@ -638,7 +639,7 @@ abstract class TabStripBase implements TabStrip {
           },
           {
             id: 'pin',
-            label: pinned ? 'Unpin' : 'Pin',
+            label: pinned ? t('tabs.unpin', 'Unpin') : t('tabs.pin', 'Pin'),
             icon: PinIcon,
             onSelect: () => this.onPin?.(paneId, !pinned),
           },
@@ -1333,7 +1334,7 @@ export class HorizontalTabStrip extends TabStripBase {
   protected setupContainer(container: HTMLElement): void {
     container.classList.add('tabbar')
     container.setAttribute('role', 'tablist')
-    container.setAttribute('aria-label', 'Terminal tabs')
+    container.setAttribute('aria-label', t('tabs.aria', 'Terminal tabs'))
   }
 }
 
@@ -1347,6 +1348,6 @@ export class VerticalTabStrip extends TabStripBase {
   protected setupContainer(container: HTMLElement): void {
     container.classList.add('tabstrip-vertical')
     container.setAttribute('role', 'tablist')
-    container.setAttribute('aria-label', 'Terminal tabs')
+    container.setAttribute('aria-label', t('tabs.aria', 'Terminal tabs'))
   }
 }

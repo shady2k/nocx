@@ -71,6 +71,7 @@ import type { Pane as PaneRow, Workspace as WorkspaceRow } from './generated/lay
 import { leftRunningMessage, liveDescendants, type LineageNode } from './lineage'
 import { closingWorkspaceMessage, type WorkspaceMember } from './live-work'
 import { log } from './log'
+import { t, tPlural } from './i18n/locale-model'
 import type { TabStrip } from './tab-strip'
 import type {
   PaneHost,
@@ -225,7 +226,12 @@ export class Pane implements PaneHost {
    * old that has no title yet.
    */
   get displayTitle(): string {
-    return tabLabel(this._tabName, [this._title]) || this.descriptor.defaultTitle
+    return (
+      tabLabel(this._tabName, [this._title]) ||
+      (this.descriptor.defaultTitleKey
+        ? t(this.descriptor.defaultTitleKey, this.descriptor.defaultTitle)
+        : this.descriptor.defaultTitle)
+    )
   }
 
   /** Whether the composed title came from an OSC program title. */
@@ -426,7 +432,10 @@ export class Pane implements PaneHost {
     if (this._disposed) return
 
     this._pushedTitle = title.trim()
-    const next = this._pushedTitle || this.descriptor.defaultTitle
+    const fallback = this.descriptor.defaultTitleKey
+      ? t(this.descriptor.defaultTitleKey, this.descriptor.defaultTitle)
+      : this.descriptor.defaultTitle
+    const next = this._pushedTitle || fallback
     if (next !== this._title) {
       this._title = next
       this.onDisplayChange?.()
@@ -1001,8 +1010,15 @@ export class PaneManager {
       showToast({
         level: 'warning',
         message: name
-          ? `"${name}" is now open in another window — this one is no longer connected to it`
-          : 'A pane is now open in another window — this one is no longer connected to it',
+          ? t(
+              'app.displaced.named',
+              '"{name}" is now open in another window — this one is no longer connected to it',
+              { name },
+            )
+          : t(
+              'app.displaced.unnamed',
+              'A pane is now open in another window — this one is no longer connected to it',
+            ),
       })
     })
 
@@ -1541,7 +1557,11 @@ export class PaneManager {
         })
         showToast({
           level: 'warning',
-          message: `The session this tab was running has ended (${message}) — a new shell was started`,
+          message: t(
+            'app.restore.sessionEnded',
+            'The session this tab was running has ended ({error}) — a new shell was started',
+            { error: message },
+          ),
         })
         return null
       }
@@ -1570,7 +1590,10 @@ export class PaneManager {
       log.warn('nocx: the layout store is unavailable', { error: message })
       showToast({
         level: 'warning',
-        message: 'Tabs are not being remembered — the layout store is unavailable',
+        message: t(
+          'tabs.notRemembered',
+          'Tabs are not being remembered — the layout store is unavailable',
+        ),
       })
     }
   }
@@ -2365,7 +2388,10 @@ export class PaneManager {
     if (!this.layoutAvailable) {
       showToast({
         level: 'warning',
-        message: 'Workspaces are unavailable — the layout store could not be read',
+        message: t(
+          'ws.unavailable',
+          'Workspaces are unavailable — the layout store could not be read',
+        ),
       })
       return
     }
@@ -3153,8 +3179,18 @@ export class PaneManager {
         level: 'warning',
         message:
           hosts.length === 1
-            ? `Could not reconnect to ${hosts[0]} — its tab is still here`
-            : `${hosts.length} connections could not be reopened — their tabs are still here`,
+            ? t(
+                'app.reconnect.failed.one',
+                'Could not reconnect to {host} — its tab is still here',
+                {
+                  host: hosts[0],
+                },
+              )
+            : tPlural(
+                'app.reconnect.failed.many',
+                hosts.length,
+                '{count} connections could not be reopened — their tabs are still here',
+              ),
       })
     }, 0)
   }

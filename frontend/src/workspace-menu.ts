@@ -25,6 +25,7 @@
 
 import type { Component } from 'solid-js'
 import { ArrowDownIcon, ArrowUpIcon, CloseIcon, PencilIcon } from './ui/icons'
+import { t } from './i18n/locale-model'
 
 /** One row of a workspace menu, in the kit ContextMenu's shape — including
  *  its mark, which is why this module is a `.tsx`: the rows are built here so
@@ -103,7 +104,7 @@ export function workspaceActionRows(
   const rows: WorkspaceMenuRow[] = [
     {
       id: 'workspace-rename',
-      label: 'Rename workspace…',
+      label: t('ws.rename', 'Rename workspace…'),
       icon: PencilIcon,
       onSelect: () => actions.onRename(subject),
     },
@@ -112,7 +113,7 @@ export function workspaceActionRows(
   if (up) {
     rows.push({
       id: 'workspace-up',
-      label: 'Move up',
+      label: t('ws.moveUp', 'Move up'),
       icon: ArrowUpIcon,
       onSelect: () => actions.onReorder(up),
     })
@@ -121,14 +122,14 @@ export function workspaceActionRows(
   if (down) {
     rows.push({
       id: 'workspace-down',
-      label: 'Move down',
+      label: t('ws.moveDown', 'Move down'),
       icon: ArrowDownIcon,
       onSelect: () => actions.onReorder(down),
     })
   }
   rows.push({
     id: 'workspace-close',
-    label: 'Close workspace',
+    label: t('ws.close', 'Close workspace'),
     icon: CloseIcon,
     onSelect: () => actions.onClose(subject),
   })

@@ -48,10 +48,14 @@ it('keeps direct document visibility reads in the app visibility module', () => 
   expect(readers.filter((file) => file !== APP_VISIBILITY_MODULE)).toEqual([])
 })
 
-it('keeps the grant chip label in one production module', () => {
-  const owners = productionModules(SRC_ROOT).filter((file) =>
-    readFileSync(file, 'utf8').includes(GRANT_LABEL),
-  )
+it('keeps the grant chip label in one production module and its catalogue', () => {
+  // The wording has one owner — grant.ts — and the catalogue holds its
+  // translation beside the English fallback (nocx-dej6). Excluding i18n is
+  // what keeps this a check on the SURFACE rather than on the catalogue's
+  // contents: a second module that spells the sentence would still fail.
+  const owners = productionModules(SRC_ROOT)
+    .filter((file) => !file.includes('/i18n/'))
+    .filter((file) => readFileSync(file, 'utf8').includes(GRANT_LABEL))
   expect(owners).toEqual([resolve(SRC_ROOT, 'grant.ts')])
 })
 

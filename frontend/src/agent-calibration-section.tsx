@@ -65,6 +65,7 @@ import {
 import { type TypingClient, type TypingResult } from './typing-client'
 import { PageSection, Section, Select, Badge, Button, EmptyState } from './ui'
 import { Spinner } from './ui/spinner'
+import { t } from './i18n/locale-model'
 
 /**
  * How often the open page asks again.
@@ -273,7 +274,7 @@ export function AgentCalibrationSection(props: AgentCalibrationSectionProps) {
   })
 
   const options = createMemo(() => [
-    { value: '', label: 'Choose a pane…' },
+    { value: '', label: t('agents.choosePane.ph', 'Choose a pane…') },
     ...panes().map((p) => ({
       value: p.sessionId,
       label: props.nameOf?.(p.sessionId) ?? `${p.agent} · ${p.sessionId.slice(0, 8)}`,
@@ -296,22 +297,31 @@ export function AgentCalibrationSection(props: AgentCalibrationSectionProps) {
 
   return (
     <PageSection
-      title="Calibrate an agent"
-      description="nocx asks you to drive your agent into one named state at a time and labels the screen with the state it asked for. The labelled set is what a detection rule is then checked against — a rule verified against a recording nobody produced on purpose proves nothing."
+      title={t('agents.calibrate.title', 'Calibrate an agent')}
+      description={t(
+        'agents.cal.desc',
+        'nocx asks you to drive your agent into one named state at a time and labels the screen with the state it asked for. The labelled set is what a detection rule is then checked against — a rule verified against a recording nobody produced on purpose proves nothing.',
+      )}
     >
       <Show when={error()}>
         <Badge tone="danger">{error()!}</Badge>
       </Show>
       <Show when={!loaded() && error() === null}>
-        <Spinner size="sm" label="Looking for panes nocx is watching" />
+        <Spinner
+          size="sm"
+          label={t('agents.lookingForPanes.label', 'Looking for panes nocx is watching')}
+        />
       </Show>
       <Show when={loaded()}>
         <Show
           when={panes().length > 0}
           fallback={
             <EmptyState
-              title="No pane is enrolled"
-              description="nocx watches a pane only after an agent asks it to. Start an agent in a terminal tab and it appears here."
+              title={t('agents.noPane.title', 'No pane is enrolled')}
+              description={t(
+                'agents.cal.noPane.desc',
+                'nocx watches a pane only after an agent asks it to. Start an agent in a terminal tab and it appears here.',
+              )}
             />
           }
         >
@@ -334,7 +344,10 @@ export function AgentCalibrationSection(props: AgentCalibrationSectionProps) {
         <Show when={state()} keyed>
           {(s) => (
             <>
-              <Section id="calibration-stored" title="What this agent is calibrated for">
+              <Section
+                id="calibration-stored"
+                title={t('agents.calibratedFor.title', 'What this agent is calibrated for')}
+              >
                 <div class="st-calibration__stored">
                   <Badge tone={s.stored?.complete ? 'success' : 'neutral'}>
                     {s.stored?.complete ? 'calibrated' : 'not calibrated'}
@@ -343,7 +356,10 @@ export function AgentCalibrationSection(props: AgentCalibrationSectionProps) {
                 </div>
               </Section>
 
-              <Section id="calibration-verdict" title="What this rule may do">
+              <Section
+                id="calibration-verdict"
+                title={t('agents.ruleMayDo.title', 'What this rule may do')}
+              >
                 <div
                   class="st-calibration__stored"
                   data-may-type={s.verification.mayType ? 'true' : 'false'}
@@ -356,12 +372,10 @@ export function AgentCalibrationSection(props: AgentCalibrationSectionProps) {
                   </span>
                 </div>
                 <p class="st-calibration__detail">
-                  nocx types unless something here says its rule is wrong: a state you calibrated
-                  that it read differently, or no way to read this agent's screen at all.
-                  Calibrating narrows that check to the states you actually produced; skipping it
-                  does not turn typing off. So an agent whose update changes what its screen looks
-                  like loses typing here, the next time this is checked, rather than somewhere a
-                  keystroke lands in a dialog.
+                  {t(
+                    'agents.cal.typesUnless',
+                    "nocx types unless something here says its rule is wrong: a state you calibrated that it read differently, or no way to read this agent's screen at all. Calibrating narrows that check to the states you actually produced; skipping it does not turn typing off. So an agent whose update changes what its screen looks like loses typing here, the next time this is checked, rather than somewhere a keystroke lands in a dialog.",
+                  )}
                 </p>
                 <For each={s.verification.disagreements}>
                   {(d) => (
@@ -379,14 +393,14 @@ export function AgentCalibrationSection(props: AgentCalibrationSectionProps) {
                       onClick={() => void tryTyping(s.sessionId)}
                       data-typing-action="try"
                     >
-                      Type a test line into this pane
+                      {t('agents.cal.typeTestLine', 'Type a test line into this pane')}
                     </Button>
                   </div>
                   <p class="st-calibration__detail">
-                    nocx types only into a pane its rule reads as waiting for input, and it looks
-                    again in the instant before each write — so if your agent starts working, or
-                    asks you to approve something, between now and then, nothing is typed and this
-                    says which of those it was.
+                    {t(
+                      'agents.cal.typesOnlyInto',
+                      'nocx types only into a pane its rule reads as waiting for input, and it looks again in the instant before each write — so if your agent starts working, or asks you to approve something, between now and then, nothing is typed and this says which of those it was.',
+                    )}
                   </p>
                   <Show when={typed()} keyed>
                     {(result) => (
@@ -409,12 +423,15 @@ export function AgentCalibrationSection(props: AgentCalibrationSectionProps) {
                 when={s.walk}
                 keyed
                 fallback={
-                  <Section id="calibration-start" title="Walk the calibration">
+                  <Section
+                    id="calibration-start"
+                    title={t('agents.walk.title', 'Walk the calibration')}
+                  >
                     <p class="st-calibration__detail">
-                      You will be asked for each state in turn. Get your agent into the state, then
-                      capture — nocx reads the pane as it is at that moment, so nothing is labelled
-                      that you did not produce for it. Starting again leaves the set you already
-                      have alone until a new walk finishes.
+                      {t(
+                        'agents.cal.walk.desc',
+                        'You will be asked for each state in turn. Get your agent into the state, then capture — nocx reads the pane as it is at that moment, so nothing is labelled that you did not produce for it. Starting again leaves the set you already have alone until a new walk finishes.',
+                      )}
                     </p>
                     <Button
                       variant="primary"
@@ -422,13 +439,16 @@ export function AgentCalibrationSection(props: AgentCalibrationSectionProps) {
                       onClick={() => void act('begin')}
                       data-calibration-action="begin"
                     >
-                      Start calibration
+                      {t('agents.cal.start', 'Start calibration')}
                     </Button>
                   </Section>
                 }
               >
                 {(walk) => (
-                  <Section id="calibration-step" title="What to do now">
+                  <Section
+                    id="calibration-step"
+                    title={t('agents.nowWhat.title', 'What to do now')}
+                  >
                     <div
                       class="st-calibration__ask"
                       data-step={walk.pending}
@@ -451,7 +471,7 @@ export function AgentCalibrationSection(props: AgentCalibrationSectionProps) {
                         onClick={() => void act('capture', walk.pending)}
                         data-calibration-action="capture"
                       >
-                        Capture the pane now
+                        {t('agents.cal.capture', 'Capture the pane now')}
                       </Button>
                       <Show when={pending() && !pending()!.required}>
                         <Button
@@ -460,7 +480,7 @@ export function AgentCalibrationSection(props: AgentCalibrationSectionProps) {
                           onClick={() => void act('skip', walk.pending)}
                           data-calibration-action="skip"
                         >
-                          Skip this state
+                          {t('agents.cal.skip', 'Skip this state')}
                         </Button>
                       </Show>
                       <Show when={walk.pending > 0}>
@@ -470,7 +490,7 @@ export function AgentCalibrationSection(props: AgentCalibrationSectionProps) {
                           onClick={() => void act('redo', walk.pending)}
                           data-calibration-action="redo"
                         >
-                          Do the previous step again
+                          {t('agents.cal.again', 'Do the previous step again')}
                         </Button>
                       </Show>
                       <Button
@@ -479,14 +499,17 @@ export function AgentCalibrationSection(props: AgentCalibrationSectionProps) {
                         onClick={() => void act('abandon')}
                         data-calibration-action="abandon"
                       >
-                        Stop
+                        {t('agents.cal.stop', 'Stop')}
                       </Button>
                     </div>
                   </Section>
                 )}
               </Show>
 
-              <Section id="calibration-steps" title="The states, in the order you are asked">
+              <Section
+                id="calibration-steps"
+                title={t('agents.statesOrder.title', 'The states, in the order you are asked')}
+              >
                 <For each={s.steps}>
                   {(step, i) => (
                     <div

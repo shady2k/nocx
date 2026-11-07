@@ -111,7 +111,7 @@ function mount(fake: FakeDispatcher): void {
     bar,
     panel,
     [createOperationsView(model)],
-    [{ id: 'settings', title: 'Settings', icon: SettingsIcon, onActivate: () => {} }],
+    [{ id: 'settings', title: () => 'Settings', icon: SettingsIcon, onActivate: () => {} }],
   )
 }
 

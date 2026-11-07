@@ -150,7 +150,10 @@ export function TreeRow(props: TreeRowProps) {
             type="button"
             class="ui-tree-row__disclosure"
             aria-expanded={expanded() ? 'true' : 'false'}
-            aria-label={expanded() ? `Collapse ${props.name}` : `Expand ${props.name}`}
+            /* The name is the subject, never a verb: `aria-expanded` below
+               already says open or closed, and the verb would be the kit
+               owning copy it cannot localise (nocx-dej6.3.8). */
+            aria-label={props.name}
             disabled={props.busy === true || props.disabled === true}
             onClick={(e: MouseEvent) => {
               // The disclosure owns this click. A surface that also toggles

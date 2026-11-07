@@ -463,15 +463,20 @@ describe('sectionBlocks (nocx-3mniv)', () => {
     expect(b.matrix.cell('sessionEnded', 'centre')).toBe(sessionCentre)
   })
 
-  it('uses declaration labels for rows, with the first declaration winning', () => {
+  it('uses the first declaration for an axis, and mints its key from the id', () => {
+    // The first cell that names an axis decides the axis; the second one's
+    // label must not replace it. What the axis CARRIES is now the id's key
+    // plus the label halves as the English fallback (nocx-dej6.3.8).
     const conflictingCentre = centreCell('bell', 'Wrong label')
     const blocks = sectionBlocks([bellBanner, conflictingCentre])
     const b = blocks[0]
     if (b.kind !== 'matrix') throw new Error('expected a matrix block')
-    expect(b.matrix.rows).toEqual([{ id: 'bell', label: 'Terminal bell' }])
+    expect(b.matrix.rows).toEqual([
+      { id: 'bell', labelKey: 'notify.kind.bell.label', english: 'Terminal bell' },
+    ])
     expect(b.matrix.columns).toEqual([
-      { id: 'banner', label: 'OS banner' },
-      { id: 'centre', label: 'Notification centre' },
+      { id: 'banner', labelKey: 'notify.column.banner.label', english: 'OS banner' },
+      { id: 'centre', labelKey: 'notify.column.centre.label', english: 'Notification centre' },
     ])
   })
 
@@ -492,28 +497,44 @@ describe('sectionBlocks (nocx-3mniv)', () => {
     const b = blocks[0]
     if (b.kind !== 'matrix') throw new Error('expected a matrix block')
     expect(b.matrix.rows.map((r) => r.id)).toEqual(['programNotify', 'diskFull'])
-    expect(b.matrix.rows.map((r) => r.label)).toEqual([
+    expect(b.matrix.rows.map((r) => r.english)).toEqual([
       'Program notification request',
       'The disk filled up',
+    ])
+    // The header's words are the catalogue's, minted from the id: a kind this
+    // build has never heard of still gets a key, so adding a kind to Go needs
+    // no edit here.
+    expect(b.matrix.rows.map((r) => r.labelKey)).toEqual([
+      'notify.kind.programNotify.label',
+      'notify.kind.diskFull.label',
     ])
     expect(b.matrix.cell('diskFull', 'toast')).toBe(invented)
     // And a pair the backend does not offer is absent, not invented.
     expect(b.matrix.cell('diskFull', 'banner')).toBeUndefined()
   })
 
-  it('the axis labels are the halves of the cell label, and fall back to the id', () => {
+  it('the axis headers are keys minted from the ids, with the label halves as their English', () => {
     const b = sectionBlocks([bellBanner, bellToast])[0]
     if (b.kind !== 'matrix') throw new Error('expected a matrix block')
-    expect(b.matrix.rows.map((r) => r.label)).toEqual(['Terminal bell'])
-    expect(b.matrix.columns.map((c) => c.label)).toEqual(['OS banner', 'In-app toast'])
+    expect(b.matrix.rows.map((r) => r.labelKey)).toEqual(['notify.kind.bell.label'])
+    expect(b.matrix.columns.map((c) => c.labelKey)).toEqual([
+      'notify.column.banner.label',
+      'notify.column.toast.label',
+    ])
+    // The English the wire carried stays as the fallback, so a catalogue that
+    // has not caught up yet still shows words rather than ids.
+    expect(b.matrix.rows.map((r) => r.english)).toEqual(['Terminal bell'])
+    expect(b.matrix.columns.map((c) => c.english)).toEqual(['OS banner', 'In-app toast'])
 
     // A label that does not carry the separator cannot remove a control from
-    // the grid: the id stands in for the half that is missing.
+    // the grid: the id stands in for the half that is missing, and the key is
+    // minted either way.
     const odd = { ...cell('bell', 'banner', 'Terminal bell') }
     const c = sectionBlocks([odd])[0]
     if (c.kind !== 'matrix') throw new Error('expected a matrix block')
-    expect(c.matrix.rows[0].label).toBe('Terminal bell')
-    expect(c.matrix.columns[0].label).toBe('banner')
+    expect(c.matrix.rows[0].english).toBe('Terminal bell')
+    expect(c.matrix.columns[0].english).toBe('banner')
+    expect(c.matrix.columns[0].labelKey).toBe('notify.column.banner.label')
   })
 
   // "Visible rather than silently absent from the grid": a key under either

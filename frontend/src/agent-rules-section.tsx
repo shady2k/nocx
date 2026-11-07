@@ -40,6 +40,7 @@ import { Section } from './ui/section'
 import { Spinner } from './ui/spinner'
 import { StatusCard } from './ui/status-card'
 import { TextField } from './ui/text-field'
+import { t } from './i18n/locale-model'
 
 export interface AgentRulesSectionProps {
   client: AgentRulesClient
@@ -196,14 +197,17 @@ export function AgentRulesSection(props: AgentRulesSectionProps) {
 
   return (
     <PageSection
-      title="Agent rules"
-      description="nocx reads an agent's screen with a rule. These are the rules it ships and the ones you have written: edit a document for an agent nocx reads wrongly, switch detection off for one it should leave alone, or remove your document to go back to the shipped rule."
+      title={t('agents.rules.title', 'Agent rules')}
+      description={t(
+        'agents.rules.desc',
+        "nocx reads an agent's screen with a rule. These are the rules it ships and the ones you have written: edit a document for an agent nocx reads wrongly, switch detection off for one it should leave alone, or remove your document to go back to the shipped rule.",
+      )}
     >
       <Show when={error()}>
         <Badge tone="danger">{error()!}</Badge>
       </Show>
       <Show when={!loaded() && error() === null}>
-        <Spinner size="sm" label="Reading the rules" />
+        <Spinner size="sm" label={t('agents.rules.reading.label', 'Reading the rules')} />
       </Show>
       {/* A read that failed says so and offers to try again, and it does NOT
           fall through to the empty state below: "this build ships no rules" is
@@ -217,7 +221,7 @@ export function AgentRulesSection(props: AgentRulesSectionProps) {
             onClick={() => void read()}
             data-rule-action="reread"
           >
-            Read again
+            {t('agents.rules.readAgain', 'Read again')}
           </Button>
         </div>
       </Show>
@@ -226,8 +230,11 @@ export function AgentRulesSection(props: AgentRulesSectionProps) {
           when={rules().length > 0}
           fallback={
             <EmptyState
-              title="No agent has a rule in this build"
-              description="A rule is written per agent, and this build ships none — so there is nothing here to edit."
+              title={t('agents.rules.none.title', 'No agent has a rule in this build')}
+              description={t(
+                'agents.rules.none.desc',
+                'A rule is written per agent, and this build ships none — so there is nothing here to edit.',
+              )}
             />
           }
         >
@@ -242,16 +249,22 @@ export function AgentRulesSection(props: AgentRulesSectionProps) {
                 <Show when={row.state === 'unreadable'}>
                   <StatusCard
                     tone="danger"
-                    title={`The document for ${row.agent} could not be read`}
-                    description={`${row.problem ?? ''} Fix the file, or remove it below to go back to the shipped rule.`}
+                    title={`${t('agents.rules.docFailed.head', 'The document for')} ${row.agent} ${t('agents.rules.docFailed.mid', 'could not be read')}`}
+                    description={`${row.problem ?? ''} ${t(
+                      'agents.rules.docFailed.desc',
+                      'Fix the file, or remove it below to go back to the shipped rule.',
+                    )}`}
                   />
                 </Show>
 
                 <Show when={row.state !== 'unreadable'}>
                   <TextField
                     id={`rule-document-${row.agent}`}
-                    label={`Rule for ${row.agent}`}
-                    description="One JSON document, in the same grammar the shipped rules are written in. The backend compiles it before it is stored, so a document it could not read is refused here rather than quietly leaving the pane unread."
+                    label={`${t('agents.rules.ruleFor.label', 'Rule for')} ${row.agent}`}
+                    description={t(
+                      'agents.rules.json.desc',
+                      'One JSON document, in the same grammar the shipped rules are written in. The backend compiles it before it is stored, so a document it could not read is refused here rather than quietly leaving the pane unread.',
+                    )}
                     multiline
                     wrap
                     rows={16}
@@ -265,7 +278,7 @@ export function AgentRulesSection(props: AgentRulesSectionProps) {
                   <Checkbox
                     variant="switch"
                     checked={row.state === 'shipped' || row.state === 'user'}
-                    label={`Read ${row.agent}'s screen`}
+                    label={`${t('agents.rules.readScreen.label', 'Read')} ${row.agent}${t('agents.rules.readScreen.mid', "'s screen")}`}
                     disabled={busy() || row.state === 'unreadable'}
                     onChange={(checked) => toggle(row, checked)}
                   />
@@ -275,7 +288,7 @@ export function AgentRulesSection(props: AgentRulesSectionProps) {
                     onClick={() => void save(row)}
                     data-rule-action="save"
                   >
-                    Save this rule
+                    {t('agents.rules.save', 'Save this rule')}
                   </Button>
                   <Button
                     variant="default"
@@ -283,16 +296,22 @@ export function AgentRulesSection(props: AgentRulesSectionProps) {
                     onClick={() => void remove(row)}
                     data-rule-action="remove"
                   >
-                    Remove mine, use the shipped rule
+                    {t('agents.rules.useShipped', 'Remove mine, use the shipped rule')}
                   </Button>
                 </div>
               </Section>
             )}
           </For>
           <p class="st-rules__files">
-            These are files as well as a page: one document per agent in <code>{directory()}</code>,
-            so a rule can be written or repaired in an editor and nocx picks it up on the next pane
-            it reads.
+            {t(
+              'agents.rules.filesNote.head',
+              'These are files as well as a page: one document per agent in',
+            )}{' '}
+            <code>{directory()}</code>
+            {t(
+              'agents.rules.filesNote.tail',
+              ', so a rule can be written or repaired in an editor and nocx picks it up on the next pane it reads.',
+            )}
           </p>
         </Show>
       </Show>

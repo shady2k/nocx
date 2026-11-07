@@ -221,4 +221,60 @@ test.describe('a proposed tool reaches the approval prompt (nocx-aospw)', () => 
     await expect(prompt).toBeVisible({ timeout: 20_000 })
     await expect(prompt).toContainText('session.read')
   })
+
+  // The same question, asked in Russian (nocx-dej6.3.8's review, defect 1).
+  //
+  // The prompt's title map and its width list were module-level literals:
+  // `t()` ran when the module was imported, which is BEFORE main.tsx
+  // bootstraps the locale, so a window reading Russian still showed the
+  // question in English — and the widths with it. Nothing but a real switch
+  // followed by a real question shows it, because the defect is invisible in
+  // English and invisible to a unit test that mounts after the switch.
+  test('the question and its widths follow the language a person switched to', async ({ page }) => {
+    await openApp(page)
+
+    // ── Switch the language through the surface that owns it.
+    await page.keyboard.press('Meta+,')
+    await settingsReady(page)
+    await page.locator('.ui-grouped-nav__item[data-item="Interface"]').click()
+    const languageRow = page.locator('[data-key="ui.language"]')
+    await expect(languageRow).toBeVisible()
+    await languageRow.locator('select').selectOption({ label: 'Русский' })
+    await expect(page.getByPlaceholder('Поиск настроек…')).toBeVisible()
+
+    // ── Back to the terminal, and ask again. The endpoint and the model are
+    // this file's own, set up by the test above (serial mode).
+    await page.locator(TITLE).first().click()
+    await expect(page.locator(INPUT)).toBeVisible({ timeout: 10_000 })
+    fake.setScript({
+      chunks: [],
+      toolCalls: [{ name: 'session.read', arguments: {} }],
+    })
+    await askFromPrompt(page, 'Прочитай экран и скажи, что там.')
+
+    // THE POINT: the title and the widths are Russian. The button's
+    // accessible name carries the width, and `Allow` stays English because
+    // the verb is the surface's own residue — what these assertions pin is
+    // that the string the catalogue owns is resolved where it is READ.
+    const prompt = page.getByRole('dialog', { name: 'Это действие требует вашего согласия' })
+    await expect(prompt).toBeVisible({ timeout: 20_000 })
+    await expect(prompt).toContainText('один раз')
+    await expect(prompt).toContainText('в этом сеансе')
+
+    // ── Leave the window English: the next spec in this worker inherits the
+    // backend's settings, and the language is one of them.
+    //
+    // NOT through `settingsReady()`, which waits for the rail's ENGLISH
+    // accessible name: the rail is one of the surfaces this branch translated,
+    // so in Russian it says «Разделы настроек», and the helper would time out
+    // on a window working exactly as intended. Generated sections keep the Go
+    // section name verbatim in `data-item`, which is language-free.
+    await page.keyboard.press('Escape')
+    await page.keyboard.press('Meta+,')
+    const interfaceItem = page.locator('.ui-grouped-nav__item[data-item="Interface"]')
+    await expect(interfaceItem).toBeVisible({ timeout: 15_000 })
+    await interfaceItem.click()
+    await page.locator('[data-key="ui.language"] select').selectOption({ label: 'English' })
+    await expect(page.getByPlaceholder('Search settings…')).toBeVisible()
+  })
 })

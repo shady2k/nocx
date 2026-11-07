@@ -26,8 +26,8 @@ import {
 } from './operations-view'
 
 const OTHER_VIEWS: readonly SidebarViewDescriptor[] = [
-  { id: 'files', title: 'Files', icon: ArrowUpIcon, view: () => <div>files</div>, order: 0 },
-  { id: 'ports', title: 'Ports', icon: ArrowUpIcon, view: () => <div>ports</div>, order: 1 },
+  { id: 'files', title: () => 'Files', icon: ArrowUpIcon, view: () => <div>files</div>, order: 0 },
+  { id: 'ports', title: () => 'Ports', icon: ArrowUpIcon, view: () => <div>ports</div>, order: 1 },
 ]
 
 let handle: SidebarHandle | null = null
@@ -50,7 +50,7 @@ function mount(
     bar,
     panel,
     [...OTHER_VIEWS, createOperationsView(model, deps)],
-    [{ id: 'settings', title: 'Settings', icon: SettingsIcon, onActivate: () => {} }],
+    [{ id: 'settings', title: () => 'Settings', icon: SettingsIcon, onActivate: () => {} }],
   )
   return { store, services }
 }

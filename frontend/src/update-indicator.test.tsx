@@ -10,12 +10,12 @@ const TestIcon: Component = () => <svg data-test-icon="1" />
 const TestView: Component = () => <div>Updates test view</div>
 const settings: SidebarAction = {
   id: 'settings',
-  title: 'Settings',
+  title: () => 'Settings',
   icon: TestIcon,
   onActivate: vi.fn(),
 }
 const views: SidebarViewDescriptor[] = [
-  { id: 'test', title: 'Test', icon: TestIcon, view: TestView, order: 0 },
+  { id: 'test', title: () => 'Test', icon: TestIcon, view: TestView, order: 0 },
 ]
 
 afterEach(() => {
@@ -41,7 +41,7 @@ describe('activity bar update indicator', () => {
       undefined,
       undefined,
       {
-        title: 'Update available',
+        title: () => 'Update available',
         icon: TestIcon,
         level: () => 'neutral',
         available,
@@ -74,7 +74,7 @@ describe('activity bar update indicator', () => {
     controller.showAvailable('2.0.0', 'https://example.com/releases/2.0.0')
     render(() => <ToastHost />)
     mountSidebar(bar, panel, views, [settings], null, undefined, undefined, undefined, undefined, {
-      title: 'Update available',
+      title: () => 'Update available',
       icon: TestIcon,
       level: () => 'neutral',
       available,

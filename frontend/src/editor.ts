@@ -45,6 +45,7 @@ import {
   type PromptContextFacts,
 } from './ui/prompt-context'
 import { SETTLE_EASING, SETTLE_MS, motionAllowed } from './motion'
+import { t } from './i18n/locale-model'
 
 /**
  * The indent a pasted command arrives with, when it arrives at the very
@@ -702,7 +703,9 @@ export class CommandEditor {
       this.modelEndpointChip.title = state.endpoint
       this.modelEndpointChip.setAttribute(
         'aria-label',
-        `Answers with ${state.endpoint}. Open Endpoints.`,
+        t('editor.chip.endpoint', 'Answers with {endpoint}. Open Endpoints.', {
+          endpoint: state.endpoint,
+        }),
       )
       // The id is long and must not wrap: a wrapped chip is the layout
       // shift the row's single height exists to prevent. The CSS truncates
@@ -714,7 +717,9 @@ export class CommandEditor {
       this.modelChip.title = state.model
       this.modelChip.setAttribute(
         'aria-label',
-        `Answers with the model ${state.model}. Open Roles.`,
+        t('editor.chip.model', 'Answers with the model {model}. Open Roles.', {
+          model: state.model,
+        }),
       )
       return
     }
@@ -734,7 +739,9 @@ export class CommandEditor {
     // promise an action the chip does not have.
     this.modelChip.setAttribute(
       'aria-label',
-      state.page === null ? state.text : `${state.text}. Opens settings.`,
+      state.page === null
+        ? state.text
+        : t('editor.chip.opensSettings', '{text}. Opens settings.', { text: state.text }),
     )
   }
 

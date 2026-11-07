@@ -37,6 +37,7 @@ import {
   type VaultState,
 } from './secret-text-field'
 import type { SecretPickerSource } from '../ui/secret-picker'
+import { t } from '../i18n/locale-model'
 import type { ApiParam } from './api-model'
 // The label rule for a table's tab is stated once, by the surface that first
 // stated it, rather than restated here (nocx-x3cax.6).
@@ -136,7 +137,10 @@ export function FolderView(props: FolderViewProps) {
   const readDescription = (): string => {
     const reason = props.error || 'The folder variables file could not be read.'
     if (reason.includes('folder variables file is malformed')) {
-      return `${reason} Correct .variables.json in this folder in an editor before this page can edit it.`
+      return `${reason} ${t(
+        'api.folder.variablesMalformed',
+        'Correct .variables.json in this folder in an editor before this page can edit it.',
+      )}`
     }
     return reason
   }
@@ -148,12 +152,19 @@ export function FolderView(props: FolderViewProps) {
       fallback={
         <EmptyState
           icon={<FolderIcon />}
-          title={props.folder === '' ? 'This collection is empty' : 'This folder is empty'}
-          description="Make a request here, or import a curl command into it."
+          title={
+            props.folder === ''
+              ? t('api.folder.empty.collection', 'This collection is empty')
+              : t('api.folder.empty.folder', 'This folder is empty')
+          }
+          description={t(
+            'api.folder.empty.desc',
+            'Make a request here, or import a curl command into it.',
+          )}
           action={
             <Button variant="primary" onClick={() => props.onNewRequest()}>
               <PlusIcon />
-              New request
+              {t('api.folder.newRequest', 'New request')}
             </Button>
           }
         />
@@ -178,20 +189,25 @@ export function FolderView(props: FolderViewProps) {
   const variables = () => (
     <>
       <p class="api-folder__note">
-        A variable here answers for every request in this folder and below it, and a request's own
-        variable wins over it.
+        {t(
+          'api.folder.vars.note',
+          "A variable here answers for every request in this folder and below it, and a request's own variable wins over it.",
+        )}
       </p>
       <Show
         when={!props.loading}
         fallback={
-          <StatusCard title="Loading folder variables" description="Reading this folder's file." />
+          <StatusCard
+            title={t('api.folder.vars.loading.title', 'Loading folder variables')}
+            description={t('api.folder.vars.loading.desc', "Reading this folder's file.")}
+          />
         }
       >
         <Show
           when={props.variables !== null}
           fallback={
             <StatusCard
-              title="Folder variables unavailable"
+              title={t('api.folder.vars.unavailable', 'Folder variables unavailable')}
               description={readDescription()}
               tone="danger"
             />
@@ -199,7 +215,7 @@ export function FolderView(props: FolderViewProps) {
         >
           <EditableRowList
             variant="table"
-            ariaLabel="Folder variables"
+            ariaLabel={t('api.folder.vars.aria', 'Folder variables')}
             columns={[{ label: 'Send', labelHidden: true }, { label: 'Name' }, { label: 'Value' }]}
             rows={rows()}
             addLabel="Add variable"
@@ -209,7 +225,7 @@ export function FolderView(props: FolderViewProps) {
               <>
                 <td>
                   <Checkbox
-                    ariaLabel={`Use variable ${i + 1}`}
+                    ariaLabel={`${t('api.folder.useVar.aria', 'Use variable')} ${i + 1}`}
                     checked={row().enabled}
                     onChange={(enabled) => patchRow(i, { enabled })}
                   />
@@ -217,7 +233,7 @@ export function FolderView(props: FolderViewProps) {
                 <td>
                   <TextField
                     id={`api-folder-var-name-${i}`}
-                    ariaLabel={`Variable ${i + 1} name`}
+                    ariaLabel={`${t('api.folder.var.nameAriaHead', 'Variable')} ${i + 1}${t('api.folder.var.nameAriaTail', ' name')}`}
                     placeholder="baseUrl"
                     value={row().name}
                     onInput={(value) => patchRow(i, { name: value })}
@@ -226,7 +242,7 @@ export function FolderView(props: FolderViewProps) {
                 <td>
                   <SecretTextField
                     id={`api-folder-var-value-${i}`}
-                    ariaLabel={`Variable ${i + 1} value`}
+                    ariaLabel={`${t('api.folder.var.valueAriaHead', 'Value')} ${i + 1}${t('api.folder.var.valueAriaTail', ' value')}`}
                     placeholder="https://api.example.com"
                     value={row().value}
                     onInput={(value) => patchRow(i, { value })}
@@ -278,11 +294,11 @@ export function FolderView(props: FolderViewProps) {
           states. */}
       <Tabs
         orientation="horizontal"
-        ariaLabel="This folder"
+        ariaLabel={t('api.folder.thisFolder.aria', 'This folder')}
         active={tab()}
         onChange={setTab}
         items={[
-          { id: 'contents', label: 'Contents', content: contents },
+          { id: 'contents', label: t('api.folder.contents', 'Contents'), content: contents },
           // The same words the request's own strip uses for the same fact, so
           // one convention is read across the panel.
           { id: 'variables', label: counted('Variables', rows()), content: variables },

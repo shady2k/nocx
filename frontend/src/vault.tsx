@@ -33,6 +33,7 @@ import type { StatusCardTone, BadgeTone } from './ui'
 import { CopyIcon, LockIcon, LockOpenIcon } from './ui/icons'
 import { showToast } from './ui/toast'
 import { RpcError, VaultOperationCancelledError } from './dispatcher'
+import { t } from './i18n/locale-model'
 import type { SecretPickerSource } from './ui/secret-picker'
 import type {
   VaultClient,
@@ -44,38 +45,60 @@ import type {
 
 export { VaultOperationCancelledError } from './dispatcher'
 
-const REASON_MESSAGES: Record<string, string> = {
-  'no-service': 'No system keyring available. Use a passphrase to unlock.',
-  locked: 'Your login keychain is locked. Unlock it and try again.',
-  denied: 'Access to the system keyring was denied.',
-  timeout: 'The operation timed out. Please try again.',
-  'unsupported-platform': 'System keyring is not supported on this platform.',
+// The values are thunks, not strings: t() reads the locale signal, and the
+// locale can flip after this module has been imported (the Go reconcile can
+// switch it post-launch), so the sentence must be resolved at read time. A
+// plain table would pin the import-time language forever.
+const REASON_MESSAGES: Record<string, () => string> = {
+  'no-service': () =>
+    t('vault.reason.noService', 'No system keyring available. Use a passphrase to unlock.'),
+  locked: () => t('vault.reason.locked', 'Your login keychain is locked. Unlock it and try again.'),
+  denied: () => t('vault.reason.denied', 'Access to the system keyring was denied.'),
+  timeout: () => t('vault.reason.timeout', 'The operation timed out. Please try again.'),
+  'unsupported-platform': () =>
+    t('vault.reason.unsupportedPlatform', 'System keyring is not supported on this platform.'),
   // Not "no keyring here" — nobody looked. This build declared the OS keystore
   // out of play, because the only way to ask is a keychain write and on a host
   // with no keychain that write is a modal nobody can dismiss (design D10).
-  excluded:
-    'This build does not use the system keychain. Secrets are kept in the encrypted file store.',
-  'unknown-provider': 'This secret reference names a provider not available in this build.',
+  excluded: () =>
+    t(
+      'vault.reason.excluded',
+      'This build does not use the system keychain. Secrets are kept in the encrypted file store.',
+    ),
+  'unknown-provider': () =>
+    t(
+      'vault.reason.unknownProvider',
+      'This secret reference names a provider not available in this build.',
+    ),
   // Without this entry the reason fell through to the backend's own words and
   // the user was shown "unseal failed" — an internal phrase, in lower case,
   // naming an operation no interface mentions. Every reason the transport can
   // send needs a line here; that is what makes this table the single owner of
   // user-facing wording rather than a partial one.
-  'unseal-failed': 'That did not unlock the vault. Check what you entered and try again.',
-  'vault-changed': 'The vault changed while this was open. Try again.',
-  'vault-sealed': 'The vault is locked.',
-  'vault-uninitialized': 'Protection has not been set up yet.',
+  'unseal-failed': () =>
+    t(
+      'vault.reason.unsealFailed',
+      'That did not unlock the vault. Check what you entered and try again.',
+    ),
+  'vault-changed': () =>
+    t('vault.reason.vaultChanged', 'The vault changed while this was open. Try again.'),
+  'vault-sealed': () => t('vault.reason.vaultSealed', 'The vault is locked.'),
+  'vault-uninitialized': () =>
+    t('vault.reason.vaultUninitialized', 'Protection has not been set up yet.'),
 }
 
-function vaultErrorMessage(err: unknown): string {
+/** The sentence a failed vault RPC becomes. Exported for the i18n test, which
+ *  proves the reason table resolves under the active locale, not the import
+ *  locale. */
+export function vaultErrorMessage(err: unknown): string {
   if (err instanceof RpcError && err.data && typeof err.data === 'object') {
     const d = err.data as { reason?: string }
     if (d.reason && REASON_MESSAGES[d.reason]) {
-      return REASON_MESSAGES[d.reason]
+      return REASON_MESSAGES[d.reason]()
     }
   }
   if (err instanceof Error) return err.message
-  return 'Operation failed'
+  return t('vault.reason.operationFailed', 'Operation failed')
 }
 
 // ── Store display helpers ───────────────────────────────────────────────
@@ -83,13 +106,14 @@ function vaultErrorMessage(err: unknown): string {
 // sentences from provider status using REASON_MESSAGES as the single owner
 // of user-facing wording.
 
-const STORE_NAMES: Record<string, string> = {
-  system: 'System keychain',
-  file: 'Encrypted nocx storage',
+// Thunks, for the same reason REASON_MESSAGES are — see the note above.
+const STORE_NAMES: Record<string, () => string> = {
+  system: () => t('vault.store.system', 'System keychain'),
+  file: () => t('vault.store.file', 'Encrypted nocx storage'),
 }
 
 function storeLabelName(id: string): string {
-  return STORE_NAMES[id] ?? id
+  return STORE_NAMES[id]?.() ?? id
 }
 
 /** The fallback sentence shown when a store is not answering and its reason
@@ -97,15 +121,18 @@ function storeLabelName(id: string): string {
 const UNKNOWN_REASON_SENTENCE = 'Not answering: check the store and try again.'
 
 function storeStateSentence(p: ProviderStatus): string {
-  if (p.ready) return `${storeLabelName(p.id)} is available and answering.`
+  if (p.ready)
+    return t('vault.provider.ready', '{store} is available and answering.', {
+      store: storeLabelName(p.id),
+    })
   // "excluded" is the one not-ready reason that is not a failure: nothing was
   // asked, so "Not answering" would describe a question nobody put. It gets
   // its own sentence rather than the failure prefix (design D10).
-  if (p.reason === 'excluded') return REASON_MESSAGES.excluded
+  if (p.reason === 'excluded') return REASON_MESSAGES.excluded()
   const msg = p.reason
-    ? (REASON_MESSAGES[p.reason] ?? UNKNOWN_REASON_SENTENCE)
+    ? (REASON_MESSAGES[p.reason]?.() ?? UNKNOWN_REASON_SENTENCE)
     : UNKNOWN_REASON_SENTENCE
-  return `Not answering: ${msg}`
+  return t('vault.provider.notAnswering', 'Not answering: {reason}', { reason: msg })
 }
 
 /** A store's health, as the list row shows it: a tone for the dot and a name
@@ -120,14 +147,21 @@ function storeRowStatus(p: ProviderStatus): StoreRowStatus {
     // A store this build deliberately never asked is not broken, and an error
     // dot next to a decision somebody made reads as a fault to fix.
     if (p.reason === 'excluded') {
-      return { tone: 'warning', accessibleName: 'Not used by this build' }
+      return {
+        tone: 'warning',
+        accessibleName: t('vault.provider.notInBuild', 'Not used by this build'),
+      }
     }
-    const label = p.reason ? (REASON_MESSAGES[p.reason] ?? 'Not available') : 'Not available'
+    const label = p.reason
+      ? (REASON_MESSAGES[p.reason]?.() ?? t('vault.provider.unavailable', 'Not available'))
+      : t('vault.provider.unavailable', 'Not available')
     return { tone: 'error', accessibleName: label }
   }
   return {
     tone: p.writable ? 'ok' : 'warning',
-    accessibleName: p.writable ? 'Available' : 'Read-only',
+    accessibleName: p.writable
+      ? t('vault.provider.available', 'Available')
+      : t('vault.provider.readonly', 'Read-only'),
   }
 }
 
@@ -344,7 +378,10 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
         } else {
           showToast({
             level: 'danger',
-            message: 'Could not check vault status. Password was not saved.',
+            message: t(
+              'vault.status.checkFailed',
+              'Could not check vault status. Password was not saved.',
+            ),
           })
         }
       })
@@ -704,11 +741,14 @@ export const SetupDialog: Component<SetupDialogProps> = (props) => {
       await navigator.clipboard.writeText(recoveryCode())
       setCopied(true)
       setTimeout(() => setCopied(false), 3000)
-      showToast({ level: 'success', message: 'Recovery code copied to the clipboard.' })
+      showToast({
+        level: 'success',
+        message: t('vault.recovery.copied', 'Recovery code copied to the clipboard.'),
+      })
     } catch {
       showToast({
         level: 'danger',
-        message: 'Could not copy the recovery code. Write it down before closing this.',
+        message: `${t('vault.recovery.copyFailedHead', 'Could not copy the recovery code.')} ${t('vault.recovery.copyFailedTail', 'Write it down before closing this.')}`,
         duration: 0,
       })
     }
@@ -729,7 +769,7 @@ export const SetupDialog: Component<SetupDialogProps> = (props) => {
     <Stack>
       <TextField
         id="vault-setup-passphrase"
-        label="Master passphrase"
+        label={t('vault.setup.passphrase.label', 'Master passphrase')}
         type="password"
         value={passphrase()}
         onInput={(v) => {
@@ -741,7 +781,7 @@ export const SetupDialog: Component<SetupDialogProps> = (props) => {
       />
       <TextField
         id="vault-setup-confirm"
-        label="Confirm passphrase"
+        label={t('vault.setup.confirm.label', 'Confirm passphrase')}
         type="password"
         value={confirm()}
         onInput={(v) => {
@@ -756,13 +796,20 @@ export const SetupDialog: Component<SetupDialogProps> = (props) => {
   // Step 2: recovery code (shown exactly once)
   const recoveryView = (
     <Stack>
-      <p>Your vault is ready. Save this recovery code somewhere safe — it is shown only once.</p>
+      <p>
+        {`${t(
+          'vault.setup.readyHead',
+          'Your vault is ready. Save this recovery code somewhere safe',
+        )} — it is shown only once.`}
+      </p>
       <div class="ui-vault-code-block-wrap">
         <CodeBlock>{recoveryCode()}</CodeBlock>
       </div>
       <div class="ui-vault-action-row">
         <IconButton
-          ariaLabel={copied() ? 'Copied' : 'Copy recovery code'}
+          ariaLabel={
+            copied() ? t('vault.copied', 'Copied') : t('vault.recovery.copy', 'Copy recovery code')
+          }
           onClick={() => {
             void handleCopy()
           }}
@@ -771,7 +818,7 @@ export const SetupDialog: Component<SetupDialogProps> = (props) => {
           <CopyIcon />
         </IconButton>
         <Button variant="ghost" onClick={handleDownload}>
-          Download
+          {t('vault.setup.download', 'Download')}
         </Button>
       </div>
     </Stack>
@@ -797,9 +844,9 @@ export const SetupDialog: Component<SetupDialogProps> = (props) => {
             reset()
             props.onClose()
           }}
-          ariaLabel="Set Up Vault"
+          ariaLabel={t('vault.setup.aria', 'Set Up Vault')}
           placement="top-sheet"
-          title="Set Up Vault"
+          title={t('vault.setup.title', 'Set Up Vault')}
           onSubmit={() => {
             void handleSetup()
           }}
@@ -812,10 +859,12 @@ export const SetupDialog: Component<SetupDialogProps> = (props) => {
                   void handleSetup()
                 }}
               >
-                {saving() ? 'Setting up…' : 'Set Up'}
+                {saving()
+                  ? t('vault.setup.submitting', 'Setting up…')
+                  : t('vault.setup.submit', 'Set Up')}
               </Button>
               <Button variant="default" disabled={saving()} onClick={props.onClose}>
-                Cancel
+                {t('vault.setup.cancel', 'Cancel')}
               </Button>
             </>
           }
@@ -830,7 +879,7 @@ export const SetupDialog: Component<SetupDialogProps> = (props) => {
           reset()
           props.onClose()
         }}
-        title="Recovery Code"
+        title={t('vault.recovery.title', 'Recovery Code')}
         footer={
           <Button
             variant="primary"
@@ -840,7 +889,7 @@ export const SetupDialog: Component<SetupDialogProps> = (props) => {
               props.onClose()
             }}
           >
-            Done
+            {t('vault.setup.done', 'Done')}
           </Button>
         }
       >
@@ -910,11 +959,14 @@ export const ResetVaultDialog: Component<ResetVaultDialogProps> = (props) => {
       if (result.residue.length > 0) {
         showToast({
           level: 'warning',
-          message: `Vault reset. ${residueSentence(result.residue)}`,
+          message: `${t('vault.reset.doneHead', 'Vault reset.')} ${residueSentence(result.residue)}`,
           duration: 0,
         })
       } else {
-        showToast({ level: 'success', message: 'Vault reset. Set up protection to start again.' })
+        showToast({
+          level: 'success',
+          message: `${t('vault.reset.doneHead', 'Vault reset.')} ${t('vault.reset.failedTail', 'Set up protection to start again.')}`,
+        })
       }
       props.onReset?.()
       props.onClose()
@@ -931,7 +983,7 @@ export const ResetVaultDialog: Component<ResetVaultDialogProps> = (props) => {
         reset()
         props.onClose()
       }}
-      title="Reset the vault"
+      title={t('vault.reset.title', 'Reset the vault')}
       footer={
         <>
           <Button
@@ -941,18 +993,22 @@ export const ResetVaultDialog: Component<ResetVaultDialogProps> = (props) => {
               void handleReset()
             }}
           >
-            {resetting() ? 'Resetting…' : 'Reset the vault'}
+            {resetting()
+              ? t('vault.setup.resetBusy', 'Resetting…')
+              : t('vault.reset.title', 'Reset the vault')}
           </Button>
           <Button variant="default" disabled={resetting()} onClick={props.onClose}>
-            Cancel
+            {t('vault.setup.cancel', 'Cancel')}
           </Button>
         </>
       }
     >
       <Stack>
         <p class="ui-vault-desc-text">
-          This deletes every password and key passphrase nocx has saved, and cannot be undone. There
-          is no way to recover them afterwards.
+          {t(
+            'vault.setup.deleteWarnHead',
+            'This deletes every password and key passphrase nocx has saved, and cannot be undone. There is no way to recover them afterwards.',
+          )}
         </p>
 
         <Show when={preview()}>
@@ -960,13 +1016,16 @@ export const ResetVaultDialog: Component<ResetVaultDialogProps> = (props) => {
             <>
               <Show when={p().secretCount > 0}>
                 <p class="ui-vault-reset-impact">
-                  {countPhrase(p().secretCount, 'saved secret', 'saved secrets')} will be deleted.{' '}
-                  {countPhrase(p().profileCount, 'connection', 'connections')} will ask for a
-                  password again.
+                  {countPhrase(p().secretCount, 'saved secret', 'saved secrets')}{' '}
+                  {t('vault.reset.chainTail2', 'will be deleted.')}{' '}
+                  {countPhrase(p().profileCount, 'connection', 'connections')}{' '}
+                  {t('vault.reset.chainTail', 'will ask for a password again.')}
                 </p>
               </Show>
               <Show when={p().secretCount === 0}>
-                <p class="ui-vault-reset-impact">There are no saved secrets to delete.</p>
+                <p class="ui-vault-reset-impact">
+                  {t('vault.reset.nothing', 'There are no saved secrets to delete.')}
+                </p>
               </Show>
               {/* Stated before the choice, not after it. Whether the keychain
                   answers decides whether anything stored there can be removed
@@ -974,8 +1033,10 @@ export const ResetVaultDialog: Component<ResetVaultDialogProps> = (props) => {
                   than a decision. */}
               <Show when={!p().systemKeychainReachable}>
                 <p class="ui-vault-reset-warning">
-                  The system keychain is not answering, so secrets stored there cannot be removed.
-                  They will remain readable until it is available and you reset again.
+                  {t(
+                    'vault.keychain.unanswered',
+                    'The system keychain is not answering, so secrets stored there cannot be removed. They will remain readable until it is available and you reset again.',
+                  )}
                 </p>
               </Show>
             </>
@@ -985,7 +1046,7 @@ export const ResetVaultDialog: Component<ResetVaultDialogProps> = (props) => {
         <Checkbox
           checked={confirmed()}
           onChange={setConfirmed}
-          label="I understand this cannot be undone"
+          label={t('vault.reset.confirm', 'I understand this cannot be undone')}
         />
 
         <Show when={error()}>
@@ -1003,7 +1064,7 @@ function countPhrase(n: number, one: string, many: string): string {
 
 function residueSentence(residue: ResidueEntry[]): string {
   const names = residue.map((r) => storeLabelName(r.store)).join(', ')
-  return `${names} could not be cleared, and still holds secrets.`
+  return `${names} ${t('vault.reset.residueTail', 'could not be cleared, and still holds secrets.')}`
 }
 
 // ── Unlock dialog ────────────────────────────────────────────────────────
@@ -1058,9 +1119,10 @@ export const UnlockDialog: Component<UnlockDialogProps> = (props) => {
    *  which of the two it was. */
   const refusalMessage = (m: UnlockMeans, e: unknown): string => {
     const generic = vaultErrorMessage(e)
-    if (generic !== REASON_MESSAGES['unseal-failed']) return generic
-    if (m === 'passphrase') return 'That passphrase does not unlock this vault.'
-    return 'That recovery code does not unlock this vault.'
+    if (generic !== REASON_MESSAGES['unseal-failed']()) return generic
+    if (m === 'passphrase')
+      return t('vault.unlock.passphraseWrong', 'That passphrase does not unlock this vault.')
+    return t('vault.unlock.recoveryWrong', 'That recovery code does not unlock this vault.')
   }
 
   const handleUnseal = async (overrideMeans?: UnlockMeans) => {
@@ -1070,6 +1132,8 @@ export const UnlockDialog: Component<UnlockDialogProps> = (props) => {
     // anything. The OUTCOME of the call is a different kind of message and
     // goes where every other outcome on these surfaces goes — a toast.
     if (!secret()) {
+      // Lowercase on purpose — this completes the sentence "Enter your …",
+      // it is not the field label above.
       const lbl = m === 'passphrase' ? 'vault passphrase' : 'vault recovery code'
       setError(`Enter your ${lbl}`)
       return
@@ -1079,7 +1143,7 @@ export const UnlockDialog: Component<UnlockDialogProps> = (props) => {
     try {
       await props.vaultClient.unseal({ means: m, secret: secret() })
       reset()
-      showToast({ level: 'success', message: 'Vault unlocked.' })
+      showToast({ level: 'success', message: t('vault.unlock.done', 'Vault unlocked.') })
       props.onUnsealed?.()
       props.onClose()
     } catch (e: unknown) {
@@ -1097,20 +1161,23 @@ export const UnlockDialog: Component<UnlockDialogProps> = (props) => {
         variant={currentMeans() === 'passphrase' ? 'primary' : 'default'}
         onClick={() => setMeans('passphrase')}
       >
-        Passphrase
+        {t('vault.unlock.passphrase', 'Passphrase')}
       </Button>
       <Button
         variant={currentMeans() === 'recovery' ? 'primary' : 'default'}
         onClick={() => setMeans('recovery')}
       >
-        Recovery code
+        {t('vault.unlock.recovery', 'Recovery code')}
       </Button>
     </div>
   )
 
   const meansForm = () => {
     const m = currentMeans()
-    const label = m === 'passphrase' ? 'Vault passphrase' : 'Vault recovery code'
+    const label =
+      m === 'passphrase'
+        ? t('vault.unlock.passphraseLabel', 'Vault passphrase')
+        : t('vault.unlock.recoveryLabel', 'Vault recovery code')
     const placeholder = m === 'passphrase' ? 'Your vault passphrase' : 'Your vault recovery code'
     const inputId = m === 'passphrase' ? 'vault-unlock-passphrase' : 'vault-unlock-recovery'
     return (
@@ -1142,9 +1209,17 @@ export const UnlockDialog: Component<UnlockDialogProps> = (props) => {
       // The title says WHICH password and WHY (nocx-s8jn): a bare "Unlock the
       // vault" cannot be told apart from the key and connection prompts, and
       // the reason names the operation that made the app ask now.
-      ariaLabel={props.reason ? `Unlock the vault to ${props.reason}` : 'Unlock the vault'}
+      ariaLabel={
+        props.reason
+          ? `${t('vault.unlock.titleReasonHead', 'Unlock the vault to')} ${props.reason}`
+          : t('vault.unlock.title', 'Unlock the vault')
+      }
       placement="top-sheet"
-      title={props.reason ? `Unlock the vault to ${props.reason}` : 'Unlock the vault'}
+      title={
+        props.reason
+          ? `${t('vault.unlock.titleReasonHead', 'Unlock the vault to')} ${props.reason}`
+          : t('vault.unlock.title', 'Unlock the vault')
+      }
       // Enter unlocks, supplied by the Prompt's onSubmit — the same contract
       // Dialog offered. The one control a user reaches for reflexively in a
       // passphrase prompt must not do nothing.
@@ -1161,10 +1236,12 @@ export const UnlockDialog: Component<UnlockDialogProps> = (props) => {
               void handleUnseal()
             }}
           >
-            {unlocking() ? 'Unlocking…' : 'Unlock'}
+            {unlocking()
+              ? t('vault.unlock.busy', 'Unlocking…')
+              : t('vault.unlock.submit', 'Unlock')}
           </Button>
           <Button variant="default" disabled={unlocking()} onClick={props.onClose}>
-            Cancel
+            {t('vault.setup.cancel', 'Cancel')}
           </Button>
         </>
       }
@@ -1233,7 +1310,7 @@ export const ChangePassphraseDialog: Component<ChangePassphraseDialogProps> = (p
       )
       reset()
       props.onClose()
-      showToast({ level: 'success', message: 'Passphrase changed.' })
+      showToast({ level: 'success', message: t('vault.passphrase.changed', 'Passphrase changed.') })
     } catch (e: unknown) {
       setChanging(false)
       setError(vaultErrorMessage(e))
@@ -1247,9 +1324,9 @@ export const ChangePassphraseDialog: Component<ChangePassphraseDialogProps> = (p
         reset()
         props.onClose()
       }}
-      ariaLabel="Change vault passphrase"
+      ariaLabel={t('vault.passphrase.changeTitle', 'Change vault passphrase')}
       placement="top-sheet"
-      title="Change vault passphrase"
+      title={t('vault.passphrase.changeTitle', 'Change vault passphrase')}
       onSubmit={() => {
         void handleChange()
       }}
@@ -1262,7 +1339,7 @@ export const ChangePassphraseDialog: Component<ChangePassphraseDialogProps> = (p
               void handleChange()
             }}
           >
-            {changing() ? 'Changing…' : 'Change passphrase'}
+            {changing() ? 'Changing…' : t('vault.protection.passphrase.label', 'Change passphrase')}
           </Button>
           <Button
             variant="default"
@@ -1272,7 +1349,7 @@ export const ChangePassphraseDialog: Component<ChangePassphraseDialogProps> = (p
               props.onClose()
             }}
           >
-            Cancel
+            {t('vault.setup.cancel', 'Cancel')}
           </Button>
         </>
       }
@@ -1286,7 +1363,7 @@ export const ChangePassphraseDialog: Component<ChangePassphraseDialogProps> = (p
               setError('')
             }}
           >
-            I know my passphrase
+            {t('vault.passphrase.mean', 'I know my passphrase')}
           </Button>
           <Button
             variant={mode() === 'recovery' ? 'primary' : 'default'}
@@ -1295,14 +1372,14 @@ export const ChangePassphraseDialog: Component<ChangePassphraseDialogProps> = (p
               setError('')
             }}
           >
-            I have a recovery code
+            {t('vault.passphrase.haveRecovery', 'I have a recovery code')}
           </Button>
         </div>
 
         <Show when={mode() === 'passphrase'}>
           <TextField
             id="vault-change-old-passphrase"
-            label="Current vault passphrase"
+            label={t('vault.passphrase.current', 'Current vault passphrase')}
             type="password"
             value={oldPassphrase()}
             onInput={(v) => {
@@ -1315,7 +1392,7 @@ export const ChangePassphraseDialog: Component<ChangePassphraseDialogProps> = (p
         <Show when={mode() === 'recovery'}>
           <TextField
             id="vault-change-recovery"
-            label="Vault recovery code"
+            label={t('vault.passphrase.recoveryLabel', 'Vault recovery code')}
             type="password"
             value={recoveryCode()}
             onInput={(v) => {
@@ -1328,7 +1405,7 @@ export const ChangePassphraseDialog: Component<ChangePassphraseDialogProps> = (p
 
         <TextField
           id="vault-change-new-passphrase"
-          label="New vault passphrase"
+          label={t('vault.passphrase.new', 'New vault passphrase')}
           type="password"
           value={newPassphrase()}
           onInput={(v) => {
@@ -1338,7 +1415,7 @@ export const ChangePassphraseDialog: Component<ChangePassphraseDialogProps> = (p
         />
         <TextField
           id="vault-change-confirm-passphrase"
-          label="Confirm new vault passphrase"
+          label={t('vault.passphrase.confirmNew', 'Confirm new vault passphrase')}
           type="password"
           value={confirmPassphrase()}
           onInput={(v) => {
@@ -1349,9 +1426,14 @@ export const ChangePassphraseDialog: Component<ChangePassphraseDialogProps> = (p
         />
 
         <p class="ui-vault-desc-text">
-          Changing the passphrase requires your current passphrase or a recovery code. An OS-held
-          key alone is not sufficient — a factor that only unlocks must not be able to replace the
-          factor that recovers.
+          {t(
+            'vault.change.requiresHead',
+            'Changing the passphrase requires your current passphrase or',
+          )}{' '}
+          {t(
+            'vault.change.requiresTail',
+            'a recovery code. An OS-held key alone is not sufficient — a factor that only unlocks must not be able to replace the factor that recovers.',
+          )}
         </p>
       </Stack>
     </Prompt>
@@ -1405,12 +1487,15 @@ export const RecoveryCodeDialog: Component<RecoveryCodeDialogProps> = (props) =>
     void navigator.clipboard.writeText(code).then(
       () => {
         setCopied(true)
-        showToast({ level: 'success', message: 'Recovery code copied to the clipboard.' })
+        showToast({
+          level: 'success',
+          message: t('vault.recovery.copied', 'Recovery code copied to the clipboard.'),
+        })
       },
       () => {
         showToast({
           level: 'danger',
-          message: 'Could not copy the recovery code. Write it down before closing this.',
+          message: `${t('vault.recovery.copyFailedHead', 'Could not copy the recovery code.')} ${t('vault.recovery.copyFailedTail', 'Write it down before closing this.')}`,
           duration: 0,
         })
       },
@@ -1429,9 +1514,9 @@ export const RecoveryCodeDialog: Component<RecoveryCodeDialogProps> = (props) =>
         reset()
         props.onClose()
       }}
-      ariaLabel="Reissue recovery code"
+      ariaLabel={t('vault.recovery.reissueAria', 'Reissue recovery code')}
       placement="top-sheet"
-      title="Reissue recovery code"
+      title={t('vault.recovery.reissue', 'Reissue recovery code')}
       // Enter submits the passphrase, the same as everywhere else a passphrase
       // is asked for. Only while it is still being asked: once the code is on
       // screen the affirmative action is Done, and Enter must not dismiss a
@@ -1448,7 +1533,7 @@ export const RecoveryCodeDialog: Component<RecoveryCodeDialogProps> = (props) =>
         <Stack>
           <TextField
             id="vault-reissue-passphrase"
-            label="Current vault passphrase"
+            label={t('vault.passphrase.current', 'Current vault passphrase')}
             type="password"
             value={passphrase()}
             onInput={(v) => {
@@ -1475,24 +1560,34 @@ export const RecoveryCodeDialog: Component<RecoveryCodeDialogProps> = (props) =>
               props.onClose()
             }}
           >
-            Cancel
+            {t('vault.setup.cancel', 'Cancel')}
           </Button>
         </Stack>
       </Show>
       <Show when={recoveryCode() !== null}>
         <Stack>
           <p class="ui-vault-desc-text">
-            Your new recovery code is shown below. Copy it now — it will not be displayed again.
-            Keep it in a safe place.
+            {t(
+              'vault.recovery.newShownHead',
+              'Your new recovery code is shown below. Copy it now — it will',
+            )}{' '}
+            {t('vault.recovery.newShownTail', 'not be displayed again. Keep it in a safe place.')}
           </p>
           <div class="ui-vault-recovery-row">
             <CodeBlock>{recoveryCode() ?? ''}</CodeBlock>
-            <IconButton ariaLabel={copied() ? 'Copied' : 'Copy recovery code'} onClick={handleCopy}>
+            <IconButton
+              ariaLabel={
+                copied()
+                  ? t('vault.copied', 'Copied')
+                  : t('vault.recovery.copy', 'Copy recovery code')
+              }
+              onClick={handleCopy}
+            >
               <CopyIcon />
             </IconButton>
           </div>
           <Button variant="primary" onClick={handleDone}>
-            Done
+            {t('vault.setup.done', 'Done')}
           </Button>
         </Stack>
       </Show>
@@ -1529,7 +1624,7 @@ export function VaultSection(props: VaultSectionProps) {
     setSealing(true)
     try {
       await props.vaultController.seal()
-      showToast({ level: 'success', message: 'Vault locked.' })
+      showToast({ level: 'success', message: t('vault.locked', 'Vault locked.') })
     } catch (e: unknown) {
       showToast({ level: 'danger', message: vaultErrorMessage(e) })
     } finally {
@@ -1542,7 +1637,10 @@ export function VaultSection(props: VaultSectionProps) {
   const handleDefaultProvider = async (provider: string) => {
     try {
       await props.vaultController.setDefaultProvider({ provider })
-      showToast({ level: 'success', message: 'Default provider updated.' })
+      showToast({
+        level: 'success',
+        message: t('vault.provider.updated', 'Default provider updated.'),
+      })
     } catch (e: unknown) {
       showToast({ level: 'danger', message: vaultErrorMessage(e) })
     }
@@ -1566,26 +1664,35 @@ export function VaultSection(props: VaultSectionProps) {
     // here answered a question nobody had asked and left the actual one —
     // what do I do about it — unanswered.
     if (s.state === 'uninitialized')
-      return 'Set up protection first; there is nothing to change yet.'
-    if (s.state === 'sealed') return 'Unlock the vault to change how it is protected.'
+      return t('vault.change.notSetUp', 'Set up protection first; there is nothing to change yet.')
+    if (s.state === 'sealed')
+      return t('vault.change.lockedHead', 'Unlock the vault to change how it is protected.')
     // Unsealed, but the vault has no passphrase envelope: it is held by an
     // OS key alone, and both of these actions are about a passphrase.
-    return 'This vault is held by an OS key alone, so there is no passphrase to change or recover.'
+    return t(
+      'vault.change.osKeyOnly',
+      'This vault is held by an OS key alone, so there is no passphrase to change or recover.',
+    )
   }
 
-  const AUTO_LOCK_OPTIONS = [
-    { value: 0, label: 'Never' },
-    { value: 5, label: '5 min' },
-    { value: 15, label: '15 min' },
-    { value: 30, label: '30 min' },
-    { value: 60, label: '60 min' },
+  // Per read, not per mount: the labels are translations and this section
+  // outlives a language switch. `autoLockOptions()` is called from JSX.
+  const autoLockOptions = () => [
+    { value: 0, label: t('vault.autolock.never', 'Never') },
+    { value: 5, label: t('vault.autolock.min.5', '5 min') },
+    { value: 15, label: t('vault.autolock.min.15', '15 min') },
+    { value: 30, label: t('vault.autolock.min.30', '30 min') },
+    { value: 60, label: t('vault.autolock.min.60', '60 min') },
   ]
 
   const handleSetAutoLock = async (minutes: number) => {
     try {
       await props.vaultClient.setAutoSeal(minutes)
       await props.vaultController.refresh()
-      showToast({ level: 'success', message: 'Auto-lock timeout updated.' })
+      showToast({
+        level: 'success',
+        message: t('vault.autolock.updated', 'Auto-lock timeout updated.'),
+      })
     } catch (e: unknown) {
       showToast({ level: 'danger', message: vaultErrorMessage(e) })
     }
@@ -1611,7 +1718,10 @@ export function VaultSection(props: VaultSectionProps) {
 
     const p = status()?.providers.find((x) => x.id === id)
     if (!p) {
-      showToast({ level: 'warning', message: `${storeLabelName(id)} is no longer registered.` })
+      showToast({
+        level: 'warning',
+        message: `${storeLabelName(id)} ${t('vault.provider.gone', 'is no longer registered.')}`,
+      })
       return
     }
     showToast({
@@ -1636,9 +1746,9 @@ export function VaultSection(props: VaultSectionProps) {
   const cardTitle = (): string => {
     const s = status()
     if (!s) return ''
-    if (s.state === 'unsealed') return 'Vault is unlocked'
-    if (s.state === 'sealed') return 'Vault is locked'
-    return 'Protection is not set up yet'
+    if (s.state === 'unsealed') return t('vault.protection.unlocked.title', 'Vault is unlocked')
+    if (s.state === 'sealed') return t('secrets.locked.title', 'Vault is locked')
+    return t('vault.protection.notSetUp.title', 'Protection is not set up yet')
   }
 
   const cardDescription = (): string => {
@@ -1647,12 +1757,21 @@ export function VaultSection(props: VaultSectionProps) {
     if (s.state === 'unsealed') {
       return s.autoSealMinutes > 0
         ? `Saved passwords and key passphrases are available to your connections, and lock again after ${s.autoSealMinutes} minutes idle.`
-        : 'Saved passwords and key passphrases are available to your connections.'
+        : t(
+            'vault.protection.availableNote',
+            'Saved passwords and key passphrases are available to your connections.',
+          )
     }
     if (s.state === 'sealed') {
-      return 'Saved passwords and key passphrases stay encrypted until you unlock. Connections that need one will ask.'
+      return t(
+        'vault.protection.sealed.desc',
+        'Saved passwords and key passphrases stay encrypted until you unlock. Connections that need one will ask.',
+      )
     }
-    return 'nocx keeps the passwords and key passphrases you save for your connections. Set up protection to start storing them encrypted.'
+    return t(
+      'vault.protection.uninitialized.desc',
+      'nocx keeps the passwords and key passphrases you save for your connections. Set up protection to start storing them encrypted.',
+    )
   }
 
   const diagStateTone = (): BadgeTone => {
@@ -1666,8 +1785,13 @@ export function VaultSection(props: VaultSectionProps) {
   const cardActionLabel = (): string => {
     const s = status()
     if (!s) return ''
-    if (s.state === 'unsealed') return sealing() ? 'Locking…' : 'Lock now'
-    return s.state === 'sealed' ? 'Unlock' : 'Set up protection'
+    if (s.state === 'unsealed')
+      return sealing()
+        ? t('vault.protection.locking', 'Locking…')
+        : t('vault.protection.lockNow', 'Lock now')
+    return s.state === 'sealed'
+      ? t('vault.unlock.submit', 'Unlock')
+      : t('vault.protection.setUp', 'Set up protection')
   }
 
   // ── The store list ──────────────────────────────────────────────────
@@ -1709,7 +1833,7 @@ export function VaultSection(props: VaultSectionProps) {
 
       {/* Where it is stored */}
       <Show when={stores().length > 0}>
-        <PageSection title="Where it is stored" divided>
+        <PageSection title={t('vault.storage.title', 'Where it is stored')} divided>
           <For each={stores()}>
             {(p) => {
               const rowStatus = storeRowStatus(p)
@@ -1728,7 +1852,7 @@ export function VaultSection(props: VaultSectionProps) {
                       <span class="ui-vault-store__name">{storeLabelName(p.id)}</span>
                     </StatusDot>
                     <Show when={isDefault()}>
-                      <Badge tone="info">New secrets go here</Badge>
+                      <Badge tone="info">{t('vault.empty.newHere', 'New secrets go here')}</Badge>
                     </Show>
                     <div class="ui-vault-store__actions">
                       <Show when={!isDefault()}>
@@ -1739,7 +1863,7 @@ export function VaultSection(props: VaultSectionProps) {
                             void handleDefaultProvider(p.id)
                           }}
                         >
-                          Store new secrets here
+                          {t('vault.empty.storeHere', 'Store new secrets here')}
                         </Button>
                       </Show>
                       <Button
@@ -1748,14 +1872,20 @@ export function VaultSection(props: VaultSectionProps) {
                           void handleTest(p.id)
                         }}
                       >
-                        Test
+                        {t('vault.provider.test', 'Test')}
                       </Button>
                     </div>
                   </div>
                   <p class="ui-vault-store__state">
                     {storeStateSentence(p)}
                     <Show when={lastCheck()}>
-                      {(ts) => <> · Last checked: {new Date(ts()).toLocaleTimeString()}</>}
+                      {(ts) => (
+                        <>
+                          {' '}
+                          {t('vault.provider.lastCheckedHead', '· Last checked:')}{' '}
+                          {new Date(ts()).toLocaleTimeString()}
+                        </>
+                      )}
                     </Show>
                   </p>
                 </div>
@@ -1769,16 +1899,20 @@ export function VaultSection(props: VaultSectionProps) {
           for the section — not repeated under each of them, which is what put
           "Vault is locked." on this page three times. */}
       <PageSection
-        title="Protection"
+        title={t('vault.protection.title', 'Protection')}
         description={!actionCanRun() ? actionDisabledReason() : undefined}
         divided
       >
         <Show when={status()?.state === 'unsealed'}>
-          <Field for="vault-auto-lock" label="Lock automatically after" orientation="horizontal">
+          <Field
+            for="vault-auto-lock"
+            label={t('vault.autolock.label', 'Lock automatically after')}
+            orientation="horizontal"
+          >
             <Select
               value={String(status()!.autoSealMinutes)}
               onChange={(v) => void handleSetAutoLock(Number(v))}
-              options={AUTO_LOCK_OPTIONS.map((o) => ({
+              options={autoLockOptions().map((o) => ({
                 value: String(o.value),
                 label: o.label,
               }))}
@@ -1787,30 +1921,36 @@ export function VaultSection(props: VaultSectionProps) {
         </Show>
         <Field
           for="vault-change-passphrase"
-          label="Change passphrase"
+          label={t('vault.protection.passphrase.label', 'Change passphrase')}
           orientation="horizontal"
-          description="The passphrase that unlocks the vault on a machine with no OS-held key."
+          description={t(
+            'vault.protection.passphrase.desc',
+            'The passphrase that unlocks the vault on a machine with no OS-held key.',
+          )}
         >
           <Button
             variant="default"
             disabled={!actionCanRun()}
             onClick={() => setDialog('passphrase')}
           >
-            Change passphrase
+            {t('vault.protection.passphrase.label', 'Change passphrase')}
           </Button>
         </Field>
         <Field
           for="vault-reissue-recovery"
-          label="Recovery code"
+          label={t('vault.protection.recovery.label', 'Recovery code')}
           orientation="horizontal"
-          description="The one-time code that recovers the vault when the passphrase is lost."
+          description={t(
+            'vault.protection.recovery.desc',
+            'The one-time code that recovers the vault when the passphrase is lost.',
+          )}
         >
           <Button
             variant="default"
             disabled={!actionCanRun()}
             onClick={() => setDialog('recovery')}
           >
-            Reissue recovery code
+            {t('vault.recovery.reissue', 'Reissue recovery code')}
           </Button>
         </Field>
         {/* Last, and the only enabled control here while the vault is locked.
@@ -1819,12 +1959,15 @@ export function VaultSection(props: VaultSectionProps) {
             disabled precisely because they cannot get in. */}
         <Field
           for="vault-reset"
-          label="Reset the vault"
+          label={t('vault.protection.reset.label', 'Reset the vault')}
           orientation="horizontal"
-          description="Delete every saved password and key passphrase and start again. Cannot be undone."
+          description={t(
+            'vault.protection.reset.desc',
+            'Delete every saved password and key passphrase and start again. Cannot be undone.',
+          )}
         >
           <Button variant="danger" onClick={() => setDialog('reset')}>
-            Reset the vault
+            {t('vault.protection.reset.label', 'Reset the vault')}
           </Button>
         </Field>
       </PageSection>
@@ -1832,7 +1975,7 @@ export function VaultSection(props: VaultSectionProps) {
       {/* Diagnostics disclosure */}
       <Show when={status()}>
         <details class="ui-vault-diagnostics">
-          <summary>Diagnostics</summary>
+          <summary>{t('vault.diagnostics', 'Diagnostics')}</summary>
           {/* Values are Badges, not fine print. These lines are read while
               something is wrong, by someone comparing "Ready" against "Not
               ready" down a column — the difference has to be visible before
@@ -1840,8 +1983,18 @@ export function VaultSection(props: VaultSectionProps) {
               directly against that. The tone carries it: `success` says
               nothing to do here, which is the whole reason Badge grew one. */}
           <Stack>
-            <Field for="vault-state-raw" label="State" orientation="horizontal">
-              <Badge tone={diagStateTone()}>{status()!.state}</Badge>
+            <Field
+              for="vault-state-raw"
+              label={t('vault.state.label', 'State')}
+              orientation="horizontal"
+            >
+              <Badge tone={diagStateTone()}>
+                {status()!.state === 'uninitialized'
+                  ? t('vault.diag.state.uninitialized', 'uninitialized — protection is not set up')
+                  : status()!.state === 'sealed'
+                    ? t('vault.diag.state.sealed', 'sealed — locked')
+                    : t('vault.diag.state.unsealed', 'unsealed — unlocked')}
+              </Badge>
             </Field>
             <Show when={status()!.providers.length > 0}>
               <For each={status()!.providers}>

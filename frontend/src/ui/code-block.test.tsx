@@ -13,6 +13,16 @@ import { cleanup, fireEvent, render } from '@solidjs/testing-library'
 import { clearToasts, toasts } from './toast'
 import { CodeBlock, mountCodeBlockCopyButton } from './code-block'
 
+/** The copy control's words and write, supplied the way a caller supplies
+ *  them: the kit may not localise itself, so the seam carries both. */
+const copyOf = (write: (text: string) => Promise<void>) => ({
+  write,
+  label: 'Copy code',
+  copiedLabel: 'Copied',
+  copiedToast: 'Code copied',
+  failedToast: 'Could not copy code',
+})
+
 afterEach(() => {
   cleanup()
   clearToasts()
@@ -98,7 +108,7 @@ describe('CodeBlock', () => {
     document.body.appendChild(host)
     render(
       () => (
-        <CodeBlock copy={() => Promise.resolve()} ariaLabel="Payload">
+        <CodeBlock copy={copyOf(() => Promise.resolve())} ariaLabel="Payload">
           {'alpha\nbeta'}
         </CodeBlock>
       ),
@@ -114,7 +124,7 @@ describe('CodeBlock', () => {
     document.body.appendChild(host)
     render(
       () => (
-        <CodeBlock copy={() => Promise.resolve()} label="bash" ariaLabel="Payload">
+        <CodeBlock copy={copyOf(() => Promise.resolve())} label="bash" ariaLabel="Payload">
           {'printf hello'}
         </CodeBlock>
       ),
@@ -130,7 +140,7 @@ describe('CodeBlock', () => {
     document.body.appendChild(host)
     render(
       () => (
-        <CodeBlock copy={() => Promise.resolve()} ariaLabel="Payload">
+        <CodeBlock copy={copyOf(() => Promise.resolve())} ariaLabel="Payload">
           {'printf hello'}
         </CodeBlock>
       ),
@@ -145,7 +155,7 @@ describe('CodeBlock', () => {
     const dispose = mountCodeBlockCopyButton(host, {
       label: 'bash',
       getText: () => 'printf hello',
-      copy: () => Promise.resolve(),
+      copy: copyOf(() => Promise.resolve()),
     })
 
     assertHeader(wrapper, 'bash')
@@ -174,7 +184,7 @@ describe('CodeBlock', () => {
     document.body.appendChild(host)
     render(
       () => (
-        <CodeBlock copy={() => Promise.resolve()} ariaLabel="Raw request">
+        <CodeBlock copy={copyOf(() => Promise.resolve())} ariaLabel="Raw request">
           <span class="inline-stand-in">chip</span>
         </CodeBlock>
       ),
@@ -193,7 +203,7 @@ describe('CodeBlock', () => {
     document.body.appendChild(host)
     render(
       () => (
-        <CodeBlock copy={copy} ariaLabel="Payload">
+        <CodeBlock copy={copyOf(copy)} ariaLabel="Payload">
           {'alpha\nbeta'}
         </CodeBlock>
       ),
@@ -215,7 +225,7 @@ describe('CodeBlock', () => {
     document.body.appendChild(host)
     render(
       () => (
-        <CodeBlock copy={copy} ariaLabel="Payload">
+        <CodeBlock copy={copyOf(copy)} ariaLabel="Payload">
           alpha
         </CodeBlock>
       ),
@@ -280,7 +290,7 @@ describe('CodeBlock answer variant', () => {
     document.body.appendChild(host)
     render(
       () => (
-        <CodeBlock copy={copy} copyText={'formatted\nrequest'} ariaLabel="Dump request">
+        <CodeBlock copy={copyOf(copy)} copyText={'formatted\nrequest'} ariaLabel="Dump request">
           <span>formatted</span>
           {'\n'}
           <span>request</span>

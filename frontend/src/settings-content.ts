@@ -6,7 +6,7 @@
 // child component inside SettingsComponent.
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { createComponent } from 'solid-js'
+import { createComponent, createEffect } from 'solid-js'
 import { render } from 'solid-js/web'
 import { type ProfileClient, type SSHProfile } from './profiles'
 import type { VaultController } from './vault'
@@ -14,6 +14,7 @@ import { type SettingsObserver } from './settings-observer'
 import { SolidPaneContent, type PaneHost } from './solid-pane-content'
 import type { SurfaceType, SingletonKey } from './pane-content'
 import { SettingsComponent, type SettingsComponentHandle } from './settings'
+import { t } from './i18n/locale-model'
 import type { AgentClient } from './agent'
 import type { SnippetsStore } from './snippets/snippets-store'
 import type { SkillsStore } from './skills-store'
@@ -144,8 +145,14 @@ export class SettingsContent extends SolidPaneContent {
     if (this._disposed || this._hostElement) return
     if (signal.aborted) return
 
-    host.setTitle('Settings')
+    host.setTitle(t('app.page.settings', 'Settings'))
     await super.mount(target, host, signal)
+    // The tab strip carries plain records: without this effect a language
+    // switch would leave the tab's own title in the old language until the
+    // content republished it. Reading the locale inside the effect tracks
+    // it, and setTitle reaches the strip through onDisplayChange — the same
+    // shape api-content.ts uses for its pane title.
+    createEffect(() => host.setTitle(t('app.page.settings', 'Settings')))
     this.handle = this.handleRef.current!
     await this.handle.ready()
     if (this.pendingNewConnection) {

@@ -340,22 +340,24 @@ describe('RecordRow — the disclosure (nocx-ctl6q task 3)', () => {
     expect(onActivate).not.toHaveBeenCalled()
   })
 
-  it('names the disclosure by what it discloses', () => {
+  it('names the disclosure by what it discloses, and leaves the state to aria-expanded', () => {
     // One accessible name per control, and it says which row it opens — the
-    // same "Expand <name>" / "Collapse <name>" TreeRow uses.
+    // same rule TreeRow follows. The name is the RECORD's, never a verb: the
+    // verb was the kit owning copy it cannot localise (nocx-dej6.3.8), and
+    // `aria-expanded` already announces open or closed.
     const collapsed = render(() => (
       <RecordRow title="deploy ×12" expandable onToggle={vi.fn()} actions={actions} />
     ))
-    expect(
-      collapsed.container.querySelector('.ui-record-row__disclosure')?.getAttribute('aria-label'),
-    ).toBe('Expand deploy ×12')
+    const closed = collapsed.container.querySelector('.ui-record-row__disclosure')
+    expect(closed?.getAttribute('aria-label')).toBe('deploy ×12')
+    expect(closed?.getAttribute('aria-expanded')).toBe('false')
     cleanup()
     const { container } = render(() => (
       <RecordRow title="deploy ×12" expandable expanded onToggle={vi.fn()} actions={actions} />
     ))
-    expect(container.querySelector('.ui-record-row__disclosure')?.getAttribute('aria-label')).toBe(
-      'Collapse deploy ×12',
-    )
+    const open = container.querySelector('.ui-record-row__disclosure')
+    expect(open?.getAttribute('aria-label')).toBe('deploy ×12')
+    expect(open?.getAttribute('aria-expanded')).toBe('true')
   })
 })
 

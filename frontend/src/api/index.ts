@@ -86,11 +86,14 @@ export function openApiWorkbench(): ApiContent {
  *  single arrow is what every other rail in this product uses to mean "go
  *  there": the entry read as navigation (nocx-zccer). Its words are
  *  API_PANE_TITLE, the same constant the pane hands the strip, so the rail
- *  and the tab cannot drift apart. */
+ *  and the tab cannot drift apart. The rail reads it through an accessor, as
+ *  every descriptor title is read (sidebar.tsx, SidebarViewDescriptor.title).
+ *  (The constant is English; the pane's own title is the tab strip's, which is
+ *  a per-pane label and not this descriptor's to translate.) */
 export function apiSidebarAction(): SidebarAction {
   return {
     id: SURFACE_ID_API,
-    title: API_PANE_TITLE,
+    title: () => API_PANE_TITLE,
     icon: ArrowRightLeftIcon,
     onActivate: () => {
       openApiWorkbench()

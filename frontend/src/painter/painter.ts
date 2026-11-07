@@ -29,6 +29,7 @@ import { createMapping, type PixelMapping } from './mapping'
 import { fitCandidatesOf, paintRow } from './paint-row'
 import { styleEquals } from './style'
 import { devicePxToCssPx, displayDpr } from './committed-metric'
+import { t } from '../i18n/locale-model'
 
 /** The measuring authority, in the shape run-geometry's metric needs. A
  *  CellFit satisfies it structurally; tests inject tables. `geometry()`'
@@ -181,7 +182,7 @@ export function createCellPainter(opts: CellPainterOptions): CellPainter {
   let lastPalette: TerminalSnapshot | null = null
   surface.classList.add(GRID_CLASS)
   surface.setAttribute('role', 'grid')
-  surface.setAttribute('aria-label', 'Terminal output')
+  surface.setAttribute('aria-label', t('terminal.output.aria', 'Terminal output'))
 
   let activeRow: number | null = null
   let keyboardFocus = false

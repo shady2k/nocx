@@ -37,6 +37,7 @@ import { Dialog } from '../ui/dialog'
 import { IconButton } from '../ui/icon-button'
 import { FolderOpenIcon } from '../ui/icons'
 import { TextField } from '../ui/text-field'
+import { t } from '../i18n/locale-model'
 
 export interface CollectionDialogProps {
   open: boolean
@@ -100,7 +101,7 @@ export function CollectionDialog(props: CollectionDialogProps) {
       footer={
         <>
           <Button variant="default" onClick={props.onCancel}>
-            Cancel
+            {t('api.dialog.cancel', 'Cancel')}
           </Button>
           <Button variant="primary" disabled={trimmed() === '' || props.busy} onClick={submit}>
             {props.submitLabel}
@@ -128,8 +129,8 @@ export function CollectionDialog(props: CollectionDialogProps) {
           props.onBrowse ? (
             <IconButton
               size="sm"
-              ariaLabel="Browse…"
-              title="Choose a folder with the system picker"
+              ariaLabel={t('api.dialog.browse.aria', 'Browse…')}
+              title={t('api.dialog.browse.title', 'Choose a folder with the system picker')}
               onClick={() => props.onBrowse?.()}
             >
               <FolderOpenIcon />

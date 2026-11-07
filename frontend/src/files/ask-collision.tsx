@@ -14,6 +14,7 @@
 // dialog's own and it is the single outcome it exists to protect.
 
 import { render } from 'solid-js/web'
+import { collisionLabels } from '../i18n/kit-labels'
 import {
   CollisionDialog,
   type CollisionRequest,
@@ -38,6 +39,9 @@ export function askCollision(request: CollisionRequest): Promise<CollisionResult
       resolve(result)
     }
 
-    dispose = render(() => <CollisionDialog request={request} onResolve={finish} />, host)
+    dispose = render(
+      () => <CollisionDialog request={request} labels={collisionLabels()} onResolve={finish} />,
+      host,
+    )
   })
 }

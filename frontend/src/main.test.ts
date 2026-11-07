@@ -25,7 +25,7 @@ const observedView: Component = () => {
 
 const view: SidebarViewDescriptor = {
   id: 'observed',
-  title: 'Observed',
+  title: () => 'Observed',
   icon: SettingsIcon,
   view: observedView,
   order: 0,

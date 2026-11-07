@@ -804,6 +804,30 @@ it('states each row kind in readable text beside the storage badge', async () =>
   expect(badges[0][0]).not.toBe(badges[1][0])
 })
 
+// A secret's NAME is not a template (nocx-dej6.3.8's review). The dialog's
+// title was built with String.prototype.replace('{name}', name), which reads
+// `$&`, `$'` and `$1` in the replacement as instructions — so a secret called
+// `price $& tax` made the confirmation name a target that does not exist, and
+// the sentence a person agreed to was not the one on screen. The catalogue
+// interpolator substitutes values literally.
+it('names the secret exactly, whatever characters its name carries', async () => {
+  const { client, inventory } = mockClient()
+  client.status = vi.fn().mockResolvedValue(UNSEALED_STATUS)
+  inventory.mockResolvedValue({ entries: [{ ...MOCK_ENTRY_2, name: 'price $& tax' }] })
+
+  const { container } = await mount(client)
+  await vi.waitFor(() => {
+    expect(container.querySelector('.sr-row-label')).toBeTruthy()
+  })
+  const del = container.querySelector('button[aria-label^="Delete "]') as HTMLButtonElement
+  del.click()
+  await vi.waitFor(() => {
+    expect(container.querySelector('.nocx-dialog')).toBeTruthy()
+  })
+  const title = container.querySelector('.nocx-dialog [role="heading"], .nocx-dialog h2')
+  expect(title?.textContent).toBe('Delete "price $& tax"?')
+})
+
 // A secret nothing uses may go with a plain confirmation: no usage fetch, one
 // dialog, delete reached with the row handle, row gone after.
 it('deletes a secret nothing uses with a plain confirmation', async () => {

@@ -40,6 +40,7 @@ import type { SessionRecovery } from './ipc'
 import type { SessionOutputGap } from './generated/session.outputGap'
 import { CloseIcon } from './ui/icons'
 import { recoveryAccount, uncoveredGapRanges, type RecoveryAccount } from './recovery-account'
+import { t } from './i18n/locale-model'
 
 // The account itself lives in recovery-account.ts: it is the ONE derivation of
 // "how much is missing", rendered here and compared against this card by the
@@ -73,17 +74,25 @@ function clauses(account: RecoveryAccount): string[] {
 /** The card's headline: the whole hole, as a number a person can weigh
  *  against the run they were watching. */
 function title(account: RecoveryAccount): string {
-  if (account.statusUnavailable) return 'Could not check this session’s recovery status'
-  return `${formatBytes(account.missing)} of this session's output is missing`
+  if (account.statusUnavailable)
+    return t('recovery.title.unavailable', 'Could not check this session’s recovery status')
+  return t('recovery.title.missing', "{bytes} of this session's output is missing", {
+    bytes: formatBytes(account.missing),
+  })
 }
 
 /** …and what took it. The sentence ends where the honesty does — nothing
  *  here offers to get the bytes back, because nothing can. */
 function description(account: RecoveryAccount): string {
   if (account.statusUnavailable) {
-    return 'Recovery metadata could not be read. Some earlier session output may be missing.'
+    return t(
+      'recovery.desc.unavailable',
+      'Recovery metadata could not be read. Some earlier session output may be missing.',
+    )
   }
-  return `This tab was taken back after those bytes were gone: ${clauses(account).join(', and ')}.`
+  return t('recovery.desc.gone', 'This tab was taken back after those bytes were gone: {causes}.', {
+    causes: clauses(account).join(', and '),
+  })
 }
 
 export interface RecoveryNoticeProps {

@@ -1,4 +1,11 @@
-import { appReadyForInput, promptReady, test, expect, settingsReady } from './harness'
+import {
+  appReadyForInput,
+  promptReady,
+  test,
+  expect,
+  settingsReady,
+  switchLanguage,
+} from './harness'
 
 // Stage 3 close gate (nocx-dej6.3, owner's ru-l10n plan step 10): switching
 // ui.language to Русский re-renders the settings surface without a restart —
@@ -9,10 +16,13 @@ import { appReadyForInput, promptReady, test, expect, settingsReady } from './ha
 // regression that renders English reads as an English-string assertion
 // failing, never as a silent pass.
 //
-// Reset at the end: ui.language is a persisted setting, and the suite owns a
-// disposable $HOME, but the next spec in the same worker inherits the page
-// state — the language is switched back, and the switch is asserted, so a
-// broken revert fails here and not three specs later.
+// The language is a PERSISTED setting on a SHARED stand, so this spec is the
+// one that can poison the rest of its shard: it switches through
+// `switchLanguage`, and the harness puts the window back to English after every
+// test whether this one passes, fails or times out (e2e/harness.ts,
+// `restoreEnglishLanguage`). That is why the restore is not spelled here — a
+// restore inside the body is exactly what a failing assertion skips, which is
+// how one red test turned into twenty-four in the #745 run.
 
 test('switching the language to Russian re-renders settings in Russian', async ({ page }) => {
   await page.goto('/')
@@ -30,15 +40,14 @@ test('switching the language to Russian re-renders settings in Russian', async (
   const languageRow = page.locator('[data-key="ui.language"]')
   await expect(languageRow).toBeVisible()
 
-  // The select inside it — open and pick Русский.
-  const select = languageRow.locator('select')
-  await select.selectOption({ label: 'Русский' })
+  // The switch, through the harness helper: it waits for the interface to be
+  // SPEAKING Russian rather than for the select to have taken the click.
+  await switchLanguage(page, 'ru')
 
   // The surface re-renders in Russian WITHOUT a reload: the search placeholder
   // is the settings chrome the stage translated, and Interface's own group
   // heading ("application" → Приложение) resolves through the catalogue.
   const search = page.getByPlaceholder('Поиск настроек…')
-  await expect(search).toBeVisible()
   await expect(page.locator('.ui-grouped-nav__heading').first()).toContainText(
     /Приложение|Ассистент|История|Интерфейс|Терминал/,
   )
@@ -59,17 +68,21 @@ test('switching the language to Russian re-renders settings in Russian', async (
   //    sidebar outlives a language switch (it is remounted per connection,
   //    not per language).
   await expect(page.locator('button[data-view="files"]')).toHaveAttribute('aria-label', 'Файлы')
+  // The bell's name carries its UNREAD COUNT when it has one — the rail puts
+  // the number in the accessible name so a keyboard user hears it. The stand is
+  // shared and other tests leave notifications behind, so the count is not the
+  // spec's to predict: what is asserted is the Russian title, and, when a count
+  // is there, that the count's own words are Russian too. (Asserting the bare
+  // title is what failed #745 in both browsers: «Уведомления — 37
+  // непрочитанных» against «Уведомления».)
   await expect(page.locator('button[data-view="notifications"]')).toHaveAttribute(
     'aria-label',
-    'Уведомления',
+    /^Уведомления( — \d+ непрочитанное| — \d+ непрочитанных)?$/,
   )
 
   // 2. The notification matrix's headers. They used to be the two halves of
   //    the English cell label, cut on " → "; they are catalogue keys now, so
   //    a column reads Russian and a row does too.
-  // The same locator the spec opened with — a Playwright locator is lazy, so
-  // it re-queries in the language on screen now rather than the one it was
-  // built against.
   await search.fill('notifications')
   const matrix = page.locator('.ui-toggle-matrix').first()
   await expect(matrix).toBeVisible({ timeout: 10_000 })
@@ -79,8 +92,8 @@ test('switching the language to Russian re-renders settings in Russian', async (
   )
   await search.fill('')
 
-  // Switch back and assert the revert — the next spec must not inherit ru.
-  await select.selectOption({ label: 'English' })
-  await expect(page.getByPlaceholder('Search settings…')).toBeVisible()
+  // The restore is the harness's; asserting it here too keeps this spec honest
+  // about what a person sees when they switch back.
+  await switchLanguage(page, 'en')
   await expect(page.locator('button[data-view="files"]')).toHaveAttribute('aria-label', 'Files')
 })

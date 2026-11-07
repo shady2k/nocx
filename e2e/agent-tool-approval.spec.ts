@@ -62,6 +62,7 @@ import {
   createAiEndpoint,
   setDefaultModel,
   settingsReady,
+  switchLanguage,
 } from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
@@ -233,14 +234,11 @@ test.describe('a proposed tool reaches the approval prompt (nocx-aospw)', () => 
   test('the question and its widths follow the language a person switched to', async ({ page }) => {
     await openApp(page)
 
-    // ── Switch the language through the surface that owns it.
-    await page.keyboard.press('Meta+,')
-    await settingsReady(page)
-    await page.locator('.ui-grouped-nav__item[data-item="Interface"]').click()
-    const languageRow = page.locator('[data-key="ui.language"]')
-    await expect(languageRow).toBeVisible()
-    await languageRow.locator('select').selectOption({ label: 'Русский' })
-    await expect(page.getByPlaceholder('Поиск настроек…')).toBeVisible()
+    // ── Switch the language through the surface that owns it. The helper is
+    // the harness's, so the way back is the harness's too: `restoreEnglishLanguage`
+    // runs after every test, on the failure path as well, which is what keeps
+    // this persisted setting from reaching the next spec in the shard.
+    await switchLanguage(page, 'ru')
 
     // ── Back to the terminal, and ask again. The endpoint and the model are
     // this file's own, set up by the test above (serial mode).
@@ -261,20 +259,11 @@ test.describe('a proposed tool reaches the approval prompt (nocx-aospw)', () => 
     await expect(prompt).toContainText('один раз')
     await expect(prompt).toContainText('в этом сеансе')
 
-    // ── Leave the window English: the next spec in this worker inherits the
-    // backend's settings, and the language is one of them.
-    //
-    // NOT through `settingsReady()`, which waits for the rail's ENGLISH
-    // accessible name: the rail is one of the surfaces this branch translated,
-    // so in Russian it says «Разделы настроек», and the helper would time out
-    // on a window working exactly as intended. Generated sections keep the Go
-    // section name verbatim in `data-item`, which is language-free.
-    await page.keyboard.press('Escape')
-    await page.keyboard.press('Meta+,')
-    const interfaceItem = page.locator('.ui-grouped-nav__item[data-item="Interface"]')
-    await expect(interfaceItem).toBeVisible({ timeout: 15_000 })
-    await interfaceItem.click()
-    await page.locator('[data-key="ui.language"] select').selectOption({ label: 'English' })
-    await expect(page.getByPlaceholder('Search settings…')).toBeVisible()
+    // Leaving the window English is the harness's job, not this test's: the
+    // afterEach in e2e/harness.ts restores the language after every test,
+    // which is the only version of this that also runs when the assertions
+    // above fail. Nothing here reads an English name while Russian is on
+    // screen — `switchLanguage` drives the rail by `data-item`, the Go section
+    // name, and the option by its endonym.
   })
 })

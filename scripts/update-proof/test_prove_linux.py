@@ -146,6 +146,114 @@ class VanishingAccessibleTests(unittest.TestCase):
         self.assertEqual(reading.options, ())
 
 
+class ReplacementNoticeTests(unittest.TestCase):
+    """The warning's button lives inside an ALERT, and its name dies with the press.
+
+    Nightly 42362329510 (nocx-vh2hr.1.22) failed with "the replacement warning
+    has no button to press" while the accessibility snapshot in the same
+    evidence block listed that button: GTK gives a GtkMessageDialog's own
+    accessible the role ALERT, so the walk that looked for "dialog" passed the
+    message, left the application and found nothing to search. Measured against
+    the GTK 3.24.33 the AppImage bundles, the sentence's chain is
+    label → filler → filler → filler → alert. The stock OK also answers '' for
+    its name once the press has destroyed the dialog, so the name has to be
+    read before the action — otherwise a press that worked still reads as none.
+    """
+
+    class Node:
+        def __init__(self, role, name="", children=()):
+            self.role, self.name = role, name
+            self.children = list(children)
+            self.parent = None
+            for child in self.children:
+                child.parent = self
+
+        @property
+        def childCount(self):
+            return len(self.children)
+
+        def getChildAtIndex(self, index):
+            return self.children[index] if index < len(self.children) else None
+
+        def getRoleName(self):
+            return self.role
+
+    class Button(Node):
+        def __init__(self, name="OK", pressable=True, clears_name=False):
+            super().__init__("push button", name)
+            self.pressed = False
+            self.pressable = pressable
+            self.clears_name = clears_name
+
+        def queryAction(self):
+            button = self
+
+            class Actions:
+                nActions = 1
+
+                def doAction(self, index):
+                    if not button.pressable:
+                        return False
+                    button.pressed = True
+                    if button.clears_name:
+                        button.name = ""
+                    return True
+
+            return Actions()
+
+    def desktop(self, root):
+        desktop = proof.Desktop.__new__(proof.Desktop)
+        desktop.nodes = lambda: list(proof.descendants(root))
+        return desktop
+
+    def warning(self, **button):
+        """The tree the shipped GTK reports, with the sentence four hops down."""
+        sentence = self.Node("label", proof.Desktop.NOTICE)
+        ok = self.Button(**button)
+        alert = self.Node("alert", "Warning", children=[
+            self.Node("filler", children=[
+                self.Node("filler", children=[self.Node("filler", children=[sentence])])]),
+            self.Node("filler", children=[self.Node("filler", children=[ok])]),
+        ])
+        return sentence, ok, alert
+
+    def test_the_alerts_own_button_is_pressed_and_the_windows_controls_are_not(self):
+        _, ok, alert = self.warning()
+        settings = self.Button("Settings")
+        application = self.Node("application", children=[
+            alert, self.Node("filler", children=[settings])])
+        self.assertEqual(self.desktop(application).dismiss_notice(), "OK")
+        self.assertTrue(ok.pressed)
+        self.assertFalse(settings.pressed)
+
+    def test_the_pressed_name_is_read_before_the_action_destroys_the_dialog(self):
+        _, ok, alert = self.warning(clears_name=True)
+        desktop = self.desktop(self.Node("application", children=[alert]))
+        self.assertEqual(desktop.dismiss_notice(), "OK")
+        self.assertEqual(ok.name, "", "the press is what emptied it")
+
+    def test_a_warning_outside_a_message_dialog_is_named_and_not_searched_past(self):
+        sentence = self.Node("label", proof.Desktop.NOTICE)
+        settings = self.Button("Settings")
+        application = self.Node("application", children=[
+            self.Node("filler", children=[self.Node("filler", children=[sentence])]),
+            self.Node("filler", children=[settings])])
+        with self.assertRaises(proof.ProofError) as caught:
+            self.desktop(application).dismiss_notice()
+        self.assertIn("not inside a message dialog", str(caught.exception))
+        self.assertIn("label → filler → filler → application", str(caught.exception))
+        self.assertFalse(settings.pressed)
+
+    def test_a_message_surface_without_a_pressable_control_is_refused(self):
+        sentence = self.Node("label", proof.Desktop.NOTICE)
+        alert = self.Node("alert", "Warning", children=[
+            self.Node("filler", children=[self.Node("filler", children=[sentence])]),
+            self.Node("filler", children=[self.Button("OK", pressable=False)])])
+        with self.assertRaises(proof.ProofError) as caught:
+            self.desktop(self.Node("application", children=[alert])).dismiss_notice()
+        self.assertIn("no pressable control", str(caught.exception))
+
+
 class CoordinatorTests(unittest.TestCase):
     def test_version_increase_requires_candidate_coordinator(self):
         initial = [{"executable": "/old/nocx-server", "sha256": "old-server"}]

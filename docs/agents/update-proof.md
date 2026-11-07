@@ -130,6 +130,14 @@ A failed upload without `NOCX_RUN_EXIT` means no test ran, not a failed assertio
    the previous authentic published release must not offer a downgrade. This is
    an assertion against the product's ordering policy, not a harness-only
    `released` comparison.
+6. When the new window replaced an incompatible coordinator, the warning D4
+   requires was on screen **while the update was still pending**, the update
+   finalised with nobody answering it, and its own OK button dismissed it. The
+   warning is a Wails `GtkMessageDialog`, and GTK exposes that widget's own
+   accessible as role `alert`; its stock OK is a `push button` two fillers
+   inside it, named `OK` only until the press destroys the dialog. The driver
+   anchors the button on that alert, never on the window behind it
+   (nocx-vh2hr.1.22).
 
 The loopback HTTPS relay in `scripts/update-proof/transport.py` is **test tooling
 only**, never shipped code. It can replace only the proved channel's manifest

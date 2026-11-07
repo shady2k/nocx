@@ -148,6 +148,100 @@ func TestStoreGuard_QuarantineIsANamedFailureUntilRestart(t *testing.T) {
 	}
 }
 
+// THE WAIT IS THE WINDOW THE QUARANTINE EXISTS FOR. Restore holds the store set
+// exclusively, its rollback fails, and it quarantines before it releases the
+// permit. A writer already queued behind it passed the availability check at
+// the TOP of its admission, so the permit it is finally granted needs that
+// check again — otherwise the save is admitted to, and acknowledged into, the
+// two-generation state the quarantine hides, and the rollback (or the next
+// start's recovery) overwrites what it was told had been written.
+//
+// The order is forced, not timed. Two saves are started while the restore
+// holds the set; the guard's queue bound is one, so exactly one of them is
+// REGISTERED as a waiter and the other is refused by the bound at once. That
+// is a fact about the queue, not a race: neither can be granted while the
+// restore holds. The restore's last two acts then happen in the order
+// restoreOperation.Run performs them — quarantine while the exclusive permit
+// is held, then release — and whichever save waited must come back refused
+// without running a callback.
+func TestStoreGuard_QuarantineDuringTheWaitRefusesTheQueuedWriter(t *testing.T) {
+	guard := newStoreGuard(1)
+	lane := control.NewSemaphore("test-lane", 4)
+
+	restore, rej := guard.Exclusive(catalog.OpBackupRestore.Declaration()).TryAcquire(context.Background())
+	if rej != nil {
+		t.Fatalf("the restoring operation was refused: %+v", rej)
+	}
+	defer restore.Release()
+
+	save := capability.NewNoteOperation(guard.Shared(capability.StoreConfig), lane, nil)
+	type saveResult struct {
+		err error
+		ran bool
+	}
+	saved := make(chan saveResult, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			ran := false
+			err := save.Run(context.Background(), func(context.Context, capability.NoteService) error {
+				ran = true
+				return nil
+			})
+			saved <- saveResult{err: err, ran: ran}
+		}()
+	}
+
+	// Exactly one of the two is answered before the restore lets go: the other
+	// is registered as a waiter and cannot be granted while the set is held.
+	early := <-saved
+
+	// The restore's last two acts, in their real order: the rollback failed,
+	// so the stores it was rewriting are quarantined while the exclusive
+	// permit is still held, and only then is the permit released.
+	guard.Quarantine([]string{capability.StoreConfig, capability.StoreContent}, "the rollback failed")
+	restore.Release()
+
+	var results []saveResult
+	waittest.WaitFor(t, "the queued save to be answered", func() bool {
+		select {
+		case r := <-saved:
+			results = append(results, r)
+			return true
+		default:
+			return false
+		}
+	})
+
+	var quarantined, refused int
+	for _, r := range append([]saveResult{early}, results...) {
+		if r.ran {
+			t.Fatal("a save ran over the quarantined store")
+		}
+		var unavailable *capability.UnavailableError
+		switch {
+		case errors.As(r.err, &unavailable):
+			quarantined++
+			if !strings.Contains(r.err.Error(), "Restart nocx") {
+				t.Fatalf("the refusal does not say what ends it: %v", r.err)
+			}
+		case capability.IsRefused(r.err):
+			refused++
+		default:
+			t.Fatalf("a save ended with %v, want the quarantine or the queue's refusal", r.err)
+		}
+	}
+	if quarantined != 1 || refused != 1 {
+		t.Fatalf("queued=%d refused=%d, want exactly one save behind the restore and one refused by its bound", quarantined, refused)
+	}
+
+	// A refused save must leave nothing held. The permit it was granted and
+	// then refused has to go back, or the shared half of the barrier it took
+	// keeps a later restore from ever draining the set.
+	if holders := control.HoldersOf(guard.Shared(capability.StoreConfig)); len(holders) != 0 {
+		t.Fatalf("the refused save kept %d permit(s) held: %+v", len(holders), holders)
+	}
+}
+
 // Sealed vault work must not wait behind a restore. The vault's plan names the
 // reset barrier only, so a restore queued for the store-set barrier has no
 // admission the vault path needs — and that is true with capacity exhausted,

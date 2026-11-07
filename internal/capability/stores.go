@@ -331,6 +331,24 @@ func (g *StoreGuard) StoresOf(decl catalog.Declaration) []string {
 // watch wraps an admission in the quarantine check. The check is first, so a
 // quarantined store is refused even while the barrier and key are free: the
 // refusal is about what the store CONTAINS, not about capacity.
+//
+// The check is on BOTH sides of the wait, and the second one is the one the
+// quarantine exists for. A restore holds the store set exclusively, its
+// rollback fails, and it quarantines before it releases the permit — the
+// permit is what keeps readers out while the set holds two generations
+// (restoreOperation.Run). A caller that was already queued behind that
+// barrier passed the check while the quarantine did not exist yet, so the
+// permit it is finally granted has to be checked again: otherwise the save is
+// admitted to, and acknowledged into, the generation the quarantine hides, and
+// the rollback or the next start's recovery overwrites what it was told had
+// been written.
+//
+// A check made while the permit is held cannot be overtaken, which is why the
+// second one is decisive. Quarantine is set only by an operation holding an
+// EXCLUSIVE plan, and every admission this guard builds for a shared holder
+// takes every barrier that protects the store first — so the exclusive plan
+// cannot even start while the permit is held, and no quarantine can appear
+// between the second check and the callback.
 func (g *StoreGuard) watch(stores []string, inner control.Admission, name string) control.Admission {
 	return &guardedAdmission{guard: g, stores: stores, inner: inner, name: name}
 }
@@ -385,14 +403,37 @@ func (a *guardedAdmission) Name() string { return a.name }
 func (a *guardedAdmission) Holders() []control.Holder { return control.HoldersOf(a.inner) }
 
 func (a *guardedAdmission) TryAcquire(ctx context.Context) (control.Permit, *control.Rejection) {
-	if store, reason, ok := a.guard.quarantineReason(a.stores); ok {
-		return nil, &control.Rejection{
-			Kind:   control.RejectionUnavailable,
-			Reason: unavailableSentence(store, reason),
-			Scope:  "store:" + store,
-		}
+	if refusal := a.quarantineRefusal(); refusal != nil {
+		return nil, refusal
 	}
-	return a.inner.TryAcquire(ctx)
+	permit, rej := a.inner.TryAcquire(ctx)
+	if rej != nil {
+		return nil, rej
+	}
+	// The wait above is where a restore can quarantine the set it was already
+	// holding, so the answer is about the store's contents NOW, not when the
+	// caller arrived. Release before refusing: the reason is the contents, and
+	// keeping the shared half of the barrier would keep a later restore from
+	// ever draining a set it must be able to rewrite.
+	if refusal := a.quarantineRefusal(); refusal != nil {
+		permit.Release()
+		return nil, refusal
+	}
+	return permit, nil
+}
+
+// quarantineRefusal is the unavailable answer, or nil while the stores are
+// serving. One copy so the two checks cannot drift into two sentences.
+func (a *guardedAdmission) quarantineRefusal() *control.Rejection {
+	store, reason, ok := a.guard.quarantineReason(a.stores)
+	if !ok {
+		return nil
+	}
+	return &control.Rejection{
+		Kind:   control.RejectionUnavailable,
+		Reason: unavailableSentence(store, reason),
+		Scope:  "store:" + store,
+	}
 }
 
 // unavailableSentence is what a person reads when a store is quarantined. It

@@ -158,6 +158,11 @@ type terminal struct {
 	// C callback cannot carry a Go pointer, so it carries a number instead.
 	id   uintptr
 	geom emulator.Geometry
+	// Row extraction reuses only its geometry-sized starting buffers under mu.
+	// Retry buffers stay local, so an exceptional cluster cannot enlarge retained
+	// scratch. No returned cell or string aliases either buffer.
+	rowCells     []C.nocxRowCellFacts
+	rowGraphemes []byte
 	// replies holds what the program asked to be written back to the PTY. See
 	// the struct doc: only the goroutine holding mu writes it, and the bytes in
 	// it are already copied out of the library's borrowed memory.
@@ -499,6 +504,12 @@ func (t *terminal) Resize(g emulator.Geometry) ([]byte, error) {
 		return nil, fmt.Errorf("ghostty: %w: %dx%d cells, %dx%d px", emulator.ErrOutOfRange,
 			g.Cols, g.Rows, g.CellWidthPx, g.CellHeightPx)
 	}
+	// Resize callbacks may extract rows at either geometry. Drop their scratch
+	// on every exit so a wide former screen is not retained by a narrow one.
+	defer func() {
+		t.rowCells = nil
+		t.rowGraphemes = nil
+	}()
 	// The depth either side of the resize is the debt: a taller screen fills
 	// itself out of history — the depth shrinks by the rows it took — and
 	// those rows must not be reported as departures when they leave the
@@ -1597,11 +1608,21 @@ func (t *terminal) historyRow(y int) (emulator.Row, error) {
 // ACTIVE/SCREEN preserve complete clusters regardless of history's limits.
 func (t *terminal) rowAt(tag C.GhosttyPointTag, y int) (emulator.Row, error) {
 	cols := t.geom.Cols
-	cells := make([]C.nocxRowCellFacts, cols)
+	if len(t.rowCells) != cols {
+		t.rowCells = make([]C.nocxRowCellFacts, cols)
+	}
+	cells := t.rowCells
 	var wrap, cont C.bool
 	var used C.size_t
 	// Geometry is uint16-bounded, so these row budgets fit even a 32-bit int.
-	graphemes := make([]byte, cols*maxGraphemeCodepoints*4)
+	// Retain only the starting budget, smaller than the pinned emulator's
+	// maximum cluster size. Larger complete clusters still use local retries
+	// below; this retention bound never becomes a limit on extracted text.
+	initialBytes := cols * maxGraphemeCodepoints * 4
+	if len(t.rowGraphemes) != initialBytes {
+		t.rowGraphemes = make([]byte, initialBytes)
+	}
+	graphemes := t.rowGraphemes
 	op := "row"
 	if tag == pointHistory {
 		op = "history_row"
@@ -2073,4 +2094,6 @@ func (t *terminal) release() {
 	t.t = nil
 	t.replies = nil
 	t.effects = nil
+	t.rowCells = nil
+	t.rowGraphemes = nil
 }

@@ -212,6 +212,59 @@ func TestActiveBulkRowRetriesPreserveNeighborsAndHistory(t *testing.T) {
 	}
 }
 
+func TestActiveBulkRowScratchReuseKeepsReturnedRowsOwned(t *testing.T) {
+	term := departedTerm(t, 40, 3)
+	var retained, expected []emulator.Row
+	for _, cols := range []int{40, 5, 80, 3} {
+		if _, err := term.Resize(emulator.Geometry{Cols: cols, Rows: 3, CellWidthPx: 10, CellHeightPx: 20}); err != nil {
+			t.Fatal(err)
+		}
+		departedFeed(t, term, "\x1b[0m\x1b[2J\x1b[H\x1b[38;2;40;50;60mA\u0301\x1b[0mB")
+		want := emulator.Row{Cells: make([]emulator.Cell, cols)}
+		for x := range want.Cells {
+			cell, err := term.Cell(x, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want.Cells[x] = cell
+		}
+		row, err := term.Row(0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		retained = append(retained, row)
+		expected = append(expected, want)
+		// A blank row must clear old facts, and a different text row must
+		// overwrite the reusable UTF-8 buffer without changing prior results.
+		departedFeed(t, term, "\x1b[2;1HXY")
+		activeRowsMatchCells(t, term, cols, 3)
+		track, err := term.TrackRow(0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tracked, err := track.Row()
+		track.Release()
+		if err != nil || !reflect.DeepEqual(tracked, want) {
+			t.Fatalf("tracked read after scratch reuse: %+v, %v", tracked, err)
+		}
+		retained = append(retained, tracked)
+		expected = append(expected, want)
+		readerCopy, err := term.Row(0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		readerCopy.Cells[0].Grapheme = "reader mutation"
+		readerCopy.Cells[0].Style = emulator.Style{}
+		activeRowsMatchCells(t, term, cols, 3)
+	}
+	term.Close()
+	for i, row := range retained {
+		if !reflect.DeepEqual(row, expected[i]) {
+			t.Fatalf("read, reader mutation, resize or close changed retained row %d", i)
+		}
+	}
+}
+
 func TestActiveBulkRowErrors(t *testing.T) {
 	term := departedTerm(t, 1, 2)
 	for _, y := range []int{-1, 2, int(^uint(0) >> 1)} {

@@ -121,3 +121,22 @@ None set by the owner. No date is invented here.
 
 Feature titles only, none planned: the owner's working day without herdr; bulk terminal
 data on its own carrier; on-demand MCP tools; the Russian interface.
+
+## How it closed (owner, 2026-11-07)
+
+Closed on nightly `v0.8.1-nightly.202611072039` with both update proofs green, without a
+stable promotion: «Я жду очередной nightly и закрывай веху. Закрытие вехи не значит перевод в
+stable». Promotion to stable waits until the owner has tried that nightly.
+
+- **O1 is met in the code and not yet tried by the owner.** The refusal for busyness no longer
+  exists (#740), and a busy tab no longer holds up the others (#534, #727).
+- **O2's check holds; its success signal does not.** Earlier pull requests of the milestone
+  needed reruns; the last ones did not.
+- **O3 is carried over.** A nightly updates to the next nightly in both proofs; stable to
+  stable needs the first promotion, and the owner's Mac pass needs the owner (`nocx-vh2hr`).
+- **Left for v0-9:** #743 and its tasks (`nocx-nqmjq`), by the owner's decision «Работу Андрея не
+  ждем»; Shutdown's goroutines (`nocx-3an1s.2.8`); the screen-baseline wait (`nocx-atpw5.1.26`).
+  The rest of the findings left open carry the `v0-9` label, deferred.
+
+It took 12 findings against its budget of 12, after the five of #743 left with it. `v0-9` has no
+charter and no finding budget yet: `to-milestone` proposes them.

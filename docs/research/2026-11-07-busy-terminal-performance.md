@@ -406,3 +406,9 @@ Per the coordinator's 2026-11-07 notice on PR #743, this work does not hold the
 busy-terminal milestone or the next release open. Its retained tasks transfer
 when that milestone closes. The old finding-budget admission must be reconciled
 with that transfer, not used to require this PR's merge before release.
+
+Main `9a541483c` subsequently closed busy-terminal and carried this PR's tasks
+under `nocx-nqmjq` into `v0-9`. This branch drops its obsolete budget-17 hunk
+and adopts main's `currentMilestone: v0-9` and unset finding budget; no budget
+for a new charter is inferred. That merge changes policy and release documents,
+not product code, so it does not invalidate the protocol-19 behavioral evidence.

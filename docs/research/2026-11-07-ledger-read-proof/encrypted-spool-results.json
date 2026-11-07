@@ -1,0 +1,15 @@
+{
+  "canaryAbsent": true,
+  "captureMilliseconds": 33,
+  "cleanup": true,
+  "copiedBytes": 9437184,
+  "correctKeyReopen": true,
+  "kind": "real-adiantum-incremental-blob-probe",
+  "maxCopySliceBytes": 16384,
+  "parts": 576,
+  "productionReadAPIImplemented": false,
+  "snapshotRevision": 7,
+  "sourceRevisionAfterDelete": 8,
+  "spoolFileBytes": 9744384,
+  "wrongKeyRejected": true
+}

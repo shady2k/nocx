@@ -1,0 +1,16 @@
+{
+  "defaultCapBytes": 262144,
+  "maximumSettingCapBytes": 4194304,
+  "chunkTargetBytes": 16384,
+  "pageBytes": 65536,
+  "pageRows": 256,
+  "fragmentBytes": 45056,
+  "copySliceBytes": 16384,
+  "idleSeconds": 30,
+  "leaseMaximumSeconds": 3600,
+  "plainWidths": [18, 79, 120, 400],
+  "defaultRows": 1600,
+  "maximumRows": 30000,
+  "oversizedTextBytes": 9437184,
+  "sparseChunkSequences": [-17, -3, 0, 8, 27, 1000000]
+}

@@ -28,6 +28,9 @@ interface FakeDispatcher {
   cancel: ReturnType<typeof vi.fn>
   /** A person's `open`, as the call source sees it. */
   pending: (id: number, method: string) => void
+  /** The call the backend is working on under `requestID`: the translation
+   *  the real dispatcher owns, and the reason the two ids are not one. */
+  wire: (requestID: number, callID: number) => void
   settled: (id: number) => void
   notify: (method: string, params: unknown) => void
   disconnect: () => void
@@ -37,8 +40,15 @@ function fakeDispatcher(): FakeDispatcher {
   const cancel = vi.fn()
   const handlers = new Map<string, Set<Notify>>()
   const disconnects = new Set<() => void>()
+  // Wire id → the call it was sent under, as `Dispatcher.pending` holds it:
+  // a response forgets the wire id, the call's own id lives on.
+  const wireIDs = new Map<number, number>()
   const dispatcher = {
     cancel,
+    callIDForRequest(requestID: number | string): number | null {
+      if (typeof requestID !== 'number') return null
+      return wireIDs.get(requestID) ?? null
+    },
     subscribe(method: string, handler: Notify) {
       let set = handlers.get(method)
       if (!set) {
@@ -59,7 +69,11 @@ function fakeDispatcher(): FakeDispatcher {
     pending: (id, method) => {
       dispatcher.onCallPending!({ id, method, startedAt: Date.now(), cancel: () => {} })
     },
-    settled: (id) => dispatcher.onCallSettled!(id, 'answered'),
+    wire: (requestID, callID) => wireIDs.set(requestID, callID),
+    settled: (id) => {
+      for (const [requestID, callID] of wireIDs) if (callID === id) wireIDs.delete(requestID)
+      dispatcher.onCallSettled!(id, 'answered')
+    },
     notify: (method, params) => {
       for (const handler of handlers.get(method) ?? []) handler(params)
     },
@@ -126,6 +140,8 @@ describe("a first open's helper install", () => {
     const fake = fakeDispatcher()
     mount(fake)
     openList()
+    fake.pending(1, 'open')
+    fake.wire(1, 1)
     fake.notify('operation.row', copying)
     expect(rows()).toHaveLength(1)
     const text = rows()[0].textContent ?? ''
@@ -144,6 +160,7 @@ describe("a first open's helper install", () => {
       mount(fake)
       // The person's open is on the wire, and the install starts inside it.
       fake.pending(1, 'open')
+      fake.wire(1, 1)
       fake.notify('operation.row', copying)
       // Past the call threshold: the call source would show "Opening your
       // terminal" for the same request, and one operation is one row.
@@ -170,6 +187,7 @@ describe("a first open's helper install", () => {
     const fake = fakeDispatcher()
     mount(fake)
     fake.pending(1, 'open')
+    fake.wire(1, 1)
     fake.notify('operation.row', copying)
     openList()
     expect(rows()).toHaveLength(1)
@@ -178,11 +196,12 @@ describe("a first open's helper install", () => {
     expect(emptyState()).toContain('Nothing is running')
   })
 
-  it("cancels the open through the dispatcher by the call's own id", () => {
+  it("cancels the open through the dispatcher by the call's own id, which is not the id the backend named", () => {
     const fake = fakeDispatcher()
     mount(fake)
-    fake.pending(9, 'open')
-    fake.notify('operation.row', { ...copying, requestId: 9 })
+    fake.pending(3, 'open') // the call's own id: what a row and Cancel name
+    fake.wire(11, 3) // the id the backend is working on
+    fake.notify('operation.row', { ...copying, requestId: 11 })
     openList()
     const button = document.querySelector<HTMLElement>(
       '[aria-label="Cancel Copying the nocx helper"]',
@@ -190,13 +209,69 @@ describe("a first open's helper install", () => {
     expect(button).not.toBeNull()
     fireEvent.click(button!)
     // The row borrows the call's identity, so its Cancel is the ordinary
-    // withdrawal of the open — there is no second verb.
-    expect(fake.cancel).toHaveBeenCalledWith(9)
+    // withdrawal of the open — there is no second verb. The id the backend
+    // named is not that identity: after a queued call, a reordered send or a
+    // sealed retry it names a different call, or none.
+    expect(fake.cancel).toHaveBeenCalledTimes(1)
+    expect(fake.cancel).toHaveBeenCalledWith(3)
+  })
+
+  it("is ONE row for the call, under the call's id", () => {
+    vi.useFakeTimers()
+    try {
+      const fake = fakeDispatcher()
+      mount(fake)
+      // The person's open waits long enough for its own row, and the install
+      // inside it starts under the id the backend is working on.
+      fake.pending(3, 'open')
+      fake.wire(11, 3)
+      vi.advanceTimersByTime(3000)
+      openList()
+      expect(rows()).toHaveLength(1)
+      expect(rows()[0].textContent).toContain('Opening your terminal')
+      fake.notify('operation.row', { ...copying, requestId: 11 })
+      // One operation is one row: the install's account of the work replaces
+      // the call's, and the two ids never make it two.
+      expect(rows()).toHaveLength(1)
+      expect(rows()[0].textContent).toContain('Copying the nocx helper')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('goes by the id the backend named even after the call it describes has settled', () => {
+    const fake = fakeDispatcher()
+    mount(fake)
+    fake.pending(3, 'open')
+    fake.wire(11, 3)
+    fake.notify('operation.row', { ...copying, requestId: 11 })
+    openList()
+    expect(rows()).toHaveLength(1)
+    // The answer arrives, so the dispatcher no longer knows the wire id; the
+    // row still knows which row it is, and its own end still removes it.
+    fake.settled(3)
+    fake.notify('operation.rowDone', { requestId: 11 })
+    expect(rows()).toHaveLength(0)
+    expect(emptyState()).toContain('Nothing is running')
+  })
+
+  it('draws nothing for a row whose call this renderer does not hold', () => {
+    const fake = fakeDispatcher()
+    mount(fake)
+    // No call of ours was sent under this id: there is no call identity to
+    // key the row by and no withdrawal the row could offer, so there is no
+    // row. A key that guessed would be another action's key.
+    fake.notify('operation.row', copying)
+    openList()
+    expect(rows()).toHaveLength(0)
+    expect(emptyState()).toContain('Nothing is running')
   })
 
   it('goes when the socket does, because the work died with it', () => {
     const fake = fakeDispatcher()
     mount(fake)
+    fake.pending(1, 'open')
+    fake.wire(1, 1)
     fake.notify('operation.row', copying)
     openList()
     expect(rows()).toHaveLength(1)

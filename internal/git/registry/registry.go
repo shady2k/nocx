@@ -20,6 +20,13 @@ type Binding struct {
 	id        string
 	sessionID session.ID
 	repo      git.Repo
+	// checkout is the working tree this binding is on and domain is the
+	// failure domain its git processes draw on (a mount's device, or the
+	// remote session that reaches it). They are identity, not routing: two
+	// bindings on one checkout share both, and that is what ADR-8eej3e66 §5
+	// orders on ("a checkout, not a binding").
+	checkout string
+	domain   string
 
 	mu       sync.Mutex
 	cond     *sync.Cond
@@ -35,6 +42,14 @@ func (b *Binding) ID() string { return b.id }
 // bounded by its session, never by a WebSocket, and a live session keeps its
 // bindings across a reconnect.
 func (b *Binding) SessionID() session.ID { return b.sessionID }
+
+// Checkout is the working tree's canonical identity — the ordering key every
+// mutation on it chains on.
+func (b *Binding) Checkout() string { return b.checkout }
+
+// Domain is the failure domain the checkout's git processes share with other
+// work on it: a mount, or the remote session reaching the host.
+func (b *Binding) Domain() string { return b.domain }
 
 // Handle is the only thing that can reach a repository. It is what Acquire
 // returns, it holds the use-guard for its lifetime, and it is invalid after
@@ -91,9 +106,12 @@ func New() *Registry { return &Registry{bindings: make(map[string]*Binding)} }
 // layer calls this only after OpenOutcome.State is OpenOK; ownership of the
 // returned Repo transfers to the registry here, and on failure the caller
 // still owns it and must close it (spec §5.1, rules 1–3).
-func (r *Registry) Register(repo git.Repo, sessionID session.ID) (string, error) {
+func (r *Registry) Register(repo git.Repo, sessionID session.ID, checkout, domain string) (string, error) {
 	if repo == nil || isNilRepo(repo) {
 		return "", errors.New("git: Register with nil repo")
+	}
+	if checkout == "" || domain == "" {
+		return "", errors.New("git: Register without a checkout identity")
 	}
 	id, err := newBindingID()
 	if err != nil {
@@ -103,12 +121,37 @@ func (r *Registry) Register(repo git.Repo, sessionID session.ID) (string, error)
 		id:        id,
 		sessionID: sessionID,
 		repo:      repo,
+		checkout:  checkout,
+		domain:    domain,
 	}
 	b.cond = sync.NewCond(&b.mu)
 	r.mu.Lock()
 	r.bindings[id] = b
 	r.mu.Unlock()
 	return id, nil
+}
+
+// BindingIdentity is what an operation must know before it can order or bound
+// work: the checkout it changes and the failure domain it draws on. It is a
+// read, not an acquisition — the use-guard is still taken, and ownership still
+// checked, by Acquire. A caller that gets no identity runs its work and lets
+// Acquire answer the unknown binding, in one place.
+type BindingIdentity struct {
+	SessionID session.ID
+	Checkout  string
+	Domain    string
+}
+
+// Identity returns bid's checkout and domain without taking the use-guard.
+// The second result is false for an unknown binding.
+func (r *Registry) Identity(id string) (BindingIdentity, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	b, ok := r.bindings[id]
+	if !ok {
+		return BindingIdentity{}, false
+	}
+	return BindingIdentity{SessionID: b.sessionID, Checkout: b.checkout, Domain: b.domain}, true
 }
 
 // isNilRepo reports whether p is an interface holding a typed nil — a

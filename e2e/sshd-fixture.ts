@@ -82,19 +82,42 @@ export interface StartSshdOptions {
 }
 
 /**
+ * The fixture's SFTP link, shaped on purpose.
+ *
+ * A helper install is 15.3 MB and over loopback it is over before a spec can
+ * look at it. The stand's SFTP server reads uploads at `bytesPerSecond` while
+ * `until` does not exist, and goes to full speed the moment the spec creates
+ * that file — so "the install takes as long as this assertion needs" is a
+ * fixture state and not a sleep, and the same spec can then watch the same
+ * install finish (nocx-3an1s.2.10).
+ */
+export interface SlowSftp {
+  /** Path that must not exist for the pacing to apply. */
+  until: string
+  /** Upload (client to server) rate in bytes per second. */
+  bytesPerSecond: number
+}
+
+/** The argv that shapes the fixture's SFTP link, or none. */
+function sftpArgs(slow: SlowSftp | undefined): string[] {
+  if (slow === undefined) return []
+  return ['-sftp-slow-until', slow.until, '-sftp-upload-bps', String(slow.bytesPerSecond)]
+}
+
+/**
  * Build (once per process) and spawn the fixture; resolve when it is READY.
  *
  * The build output is keyed by pid so concurrent runs never write each other's
  * binary mid-exec, and reused within a run because the compile costs seconds.
  */
-export function startSshd(opts: StartSshdOptions): Promise<SshdFixture> {
+export function startSshd(opts: StartSshdOptions & { slowSftp?: SlowSftp }): Promise<SshdFixture> {
   const bin = path.resolve(process.env.TMPDIR ?? '/tmp', `nocx-e2e-sshd-${process.pid}`)
   if (!existsSync(bin)) {
     execFileSync('go', ['build', '-o', bin, './cmd/e2e-sshd'], {
       cwd: path.resolve(__dirname, '..'),
     })
   }
-  const proc = spawn(bin, opts.args ?? [], {
+  const proc = spawn(bin, [...(opts.args ?? []), ...sftpArgs(opts.slowSftp)], {
     stdio: ['ignore', 'pipe', 'inherit'],
     cwd: opts.cwd,
     env: {

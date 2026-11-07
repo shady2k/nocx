@@ -178,6 +178,15 @@ func jsonrpcCall(t *testing.T, conn *websocket.Conn, method string, params any) 
 
 func jsonrpcCallWithID(t *testing.T, conn *websocket.Conn, method string, params any, id int) json.RawMessage {
 	t.Helper()
+	return jsonrpcCallWithIDWithin(t, conn, method, params, id, wantWithin)
+}
+
+// jsonrpcCallWithIDWithin is the same call with an explicit read bound: the
+// one caller whose answer is a declared turn longer than wantWithin — a
+// person's call on a saturated failure domain waits its thirty seconds
+// (catalogue personTurnMillis) before the domain answers "did not start".
+func jsonrpcCallWithIDWithin(t *testing.T, conn *websocket.Conn, method string, params any, id int, within time.Duration) json.RawMessage {
+	t.Helper()
 	req, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
 		"id":      id,
@@ -197,11 +206,52 @@ func jsonrpcCallWithID(t *testing.T, conn *websocket.Conn, method string, params
 	// causes, the files.uploadDone a transfer causes, the git.changed a
 	// teardown causes — and drop it. The frame is now RETAINED for
 	// whoever wants it (ws_inbox_test.go).
-	resp, err := awaitFrame(conn, time.Now().Add(wantWithin), isResponseTo(id))
+	//
+	// AND THE SOCKET IS KEPT ALIVE WHILE IT WAITS. The server closes a
+	// connection that has sent it nothing for its inbound idle window, which
+	// is thirty seconds; a person's call may legitimately wait its declared
+	// turn that long before a saturated domain answers. The renderer pings in
+	// the same window, so this does too — a test client that went silent for
+	// its turn was measuring the idle window, not the turn.
+	// The ping runs beside the read, not between reads: gorilla makes one
+	// read error permanent, so a wait that times out and pings again has no
+	// socket left to ping.
+	stop := keepAlive(conn)
+	defer stop()
+	resp, err := awaitFrame(conn, time.Now().Add(within), isResponseTo(id))
 	if err != nil {
 		t.Fatalf("read response to %s (id %d): %v", method, id, err)
 	}
 	return resp
+}
+
+// keepAlive sends a transport.ping every ten seconds until the returned stop
+// runs. The server closes a connection that has sent it nothing for its
+// inbound idle window, and a person's call may legitimately wait its declared
+// turn — thirty seconds — before a saturated failure domain answers it. The
+// renderer pings in the same window; a test client that went silent for its
+// turn would be measuring the idle window rather than the turn.
+func keepAlive(conn *websocket.Conn) func() {
+	done := make(chan struct{})
+	var once sync.Once
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		id := -1
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				id--
+				ping := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"transport.ping","params":{}}`, id)
+				if err := conn.WriteMessage(websocket.TextMessage, []byte(ping)); err != nil {
+					return
+				}
+			}
+		}
+	}()
+	return func() { once.Do(func() { close(done) }) }
 }
 
 // TestOpenParamsIgnoresEnhanced pins the removal (nocx-tr2n, superseding

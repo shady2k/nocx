@@ -12,6 +12,20 @@ import type {
 import type { ControlSaturated } from './generated/control.saturated'
 import type { TransportPingResult } from './generated/transport.ping'
 import type { ControlSaturatedNotification } from './generated/control.saturated.notification'
+import { callOperationDeclaration } from './generated/operations'
+import type { TransportCreditResult } from './generated/transport.credit'
+import type { MutationReplayed } from './generated/mutation.replayed'
+import {
+  MutationNotReplayedError,
+  MutationWithdrawnError,
+  isMutationMethod,
+  newMutationIdentity,
+  replayedAssessment,
+  resolveMutationOutcome,
+  withdrawnBeforeStart,
+  withdrawnUnanswered,
+  type MutationAssessment,
+} from './mutations'
 import { log } from './log'
 export type NotificationHandler = (params: unknown) => void
 export type LifecycleHandler = () => void
@@ -195,33 +209,185 @@ type TimerHandle = ReturnType<typeof setTimeout>
  *  only — the intent never crosses the control plane. */
 export type RpcIntent = 'operation' | 'report'
 
-interface PendingCall {
+/** One caller waiting on a slot. Several members share a slot when they made
+ *  the same mergeable call; each keeps its own promise, signal and origin. */
+interface CallMember {
   resolve: (v: unknown) => void
   reject: (e: Error) => void
-  // The request itself, so a sealed response can be re-sent verbatim (with a
-  // fresh id) after the vault layer raises the unlock prompt.
-  method: string
-  params: unknown
   intent: RpcIntent
-  /** Who asked. Carried on the call so a refusal can be recorded against the
-   *  invocation that caused it, and so the paths that must stay quiet can
-   *  recognise their own work (ADR-8eej3e66 §2). */
+  /** Who asked. The strongest origin on the slot decides how it queues and
+   *  whether it is shown (ADR-8eej3e66 §2). */
   origin: CallOrigin
-  sealedRetried: boolean
-  sent: boolean
   settled: boolean
-  /** The id the BACKEND is working on. A vault-sealed retry re-sends the
-   *  request under a fresh id, and a withdrawal must name that one. */
-  currentID: number
   signal?: AbortSignal
   onAbort?: () => void
   removeAbortListener?: () => void
 }
 
+/** One invocation on its way to the backend. It may hold a credit and be on
+ *  the wire, or wait in this renderer's queue for one (ADR-8eej3e66 §7). Its
+ *  identity is stable across a sealed retry, which changes only `wireID`. */
+interface CallSlot {
+  /** Stable identity: the Operations row's id and what cancel() names. */
+  observeID: number
+  method: string
+  params: unknown
+  intent: RpcIntent
+  origin: CallOrigin
+  /** The merge key, or null for a declaration whose merge is `none`. */
+  key: string | null
+  members: Set<CallMember>
+  /** Whether the Operations source was told about this slot. */
+  announced: boolean
+  startedAt: number
+  state: 'queued' | 'sent' | 'done'
+  /** The id the BACKEND is working on; null while queued or awaiting an
+   *  unlock. A sealed retry sends under a fresh id. */
+  wireID: number | null
+  sealedRetried: boolean
+  /** The `turn` deadline while this slot waits here for credit. */
+  deadline: ReturnType<typeof setTimeout> | null
+  /** The identity this mutating call carries (ADR-8eej3e66 §4). Minted once
+   *  per slot — not per attempt — so a sanctioned retry names the same work.
+   *  Absent on a read: the catalogue decides, not the caller. */
+  mutation?: string
+}
+
+/** A call that waited for credit past its declared turn and was never sent.
+ *  Its outcome is the record's `not-started`: nothing took effect. Surfaces
+ *  recognise it by `name`, the same stable token the existing AbortError and
+ *  VaultOperationCancelledError use. */
+class CallNotStartedError extends Error {
+  constructor(readonly method: string) {
+    super('The operation timed out before it started')
+    this.name = 'CallNotStartedError'
+  }
+}
+
+/** The credit advertisement the backend answers transport.credit with
+ *  (contracts/transport.credit.schema.json). */
+type CreditAdvertisement = TransportCreditResult
+
+/**
+ * The key two invocations must share to join one another. A declaration whose
+ * merge is `none` never joins: two mutations are two effects even when their
+ * params are identical. For `same-key` and `latest-value` the key is the
+ * method plus its canonical params — that is what makes two actions the SAME
+ * action rather than two calls that resemble each other.
+ */
+function mergeKey(
+  method: string,
+  params: unknown,
+  intent: RpcIntent,
+  origin: CallOrigin,
+): string | null {
+  const declaration = callOperationDeclaration(method)
+  // ONLY A READ MERGES. `latest-value` is a state replacement (resize): a
+  // later value replaces a QUEUED one, which is a different operation with
+  // its own completion to report, and a sent resize must never be collapsed
+  // with the one after it — the receipt chain depends on both being applied
+  // in order. `none` is every mutation, and two effects are two effects.
+  if (declaration === undefined || declaration.merge !== 'same-key') return null
+  // INTENT IS PART OF THE KEY. A report is a passive read whose sealed answer
+  // is a fact to show, while an operation wants vault material and may raise
+  // the unlock; joining them would hand one caller the other's semantics.
+  //
+  // AND SO IS ORIGIN (ADR-8eej3e66 §2). Origin is who the answer is owed to:
+  // a background poll's refusal is recorded quietly and a person's is shown.
+  // A person joining a background call that is already on the wire would take
+  // that call's quiet verdict for the person's action, which is the silence
+  // §2 exists to end — so two origins are two invocations, and only the
+  // same origin, intent and params share one.
+  return method + '\n' + intent + '\n' + origin + '\n' + canonicalJSON(params)
+}
+
+/** The bound a queued call waits under before it is answered "not started".
+ *
+ *  A PERSON'S CALL GETS ITS DECLARATION'S TURN — thirty seconds — because the
+ *  wait must be long enough to be seen: the row appears past two seconds with
+ *  Cancel, and a refusal after one second would be the busyness answer in a
+ *  new place (ADR-8eej3e66 §8, and the catalogue's personTurnMillis).
+ *
+ *  A BACKGROUND CALL KEEPS THE OLD ONE SECOND. Nobody is watching it, it is
+ *  never shown as a row, and a queue made of polls must still end: a poll
+ *  that never got credit is not worth thirty seconds of a window.
+ */
+const BACKGROUND_QUEUE_TURN_MS = 1000
+
+function queueTurnMs(slot: CallSlot, declaredTurnMs: number): number {
+  if (slot.origin === 'person') return declaredTurnMs
+  return Math.min(declaredTurnMs, BACKGROUND_QUEUE_TURN_MS)
+}
+
+/** JSON with object keys sorted, so two equal params produce one key. */
+function canonicalJSON(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null'
+  if (Array.isArray(value)) return '[' + value.map(canonicalJSON).join(',') + ']'
+  const record = value as Record<string, unknown>
+  return (
+    '{' +
+    Object.keys(record)
+      .sort()
+      .map((key) => JSON.stringify(key) + ':' + canonicalJSON(record[key]))
+      .join(',') +
+    '}'
+  )
+}
+
+/** One call a person made, as the Operations source sees it. `cancel` is the
+ *  same withdrawal the caller's own AbortSignal performs. */
+export interface PendingCallView {
+  readonly id: number
+  readonly method: string
+  readonly startedAt: number
+  /** The mutation identity the call carries, or absent for a read. A surface
+   *  that shows what became of a call asks with this. */
+  readonly mutation?: string
+  cancel: () => void
+}
+
+/** How a call left the renderer's hands (ADR-8eej3e66 §8). */
+export type CallSettlement =
+  /** The backend answered: a result or an error. */
+  | 'answered'
+  /** The renderer's own half ended with no answer — withdrawn, or the socket
+   *  went. For a mutation this is the moment the question starts. */
+  | 'no-answer'
+
 function abortError(): Error {
   const err = new Error('The operation was aborted')
   err.name = 'AbortError'
   return err
+}
+
+/** The data of the -32005 refusal, when this error is one. Code, not message
+ *  text: the code is the wire's discriminator, the reason is the second half. */
+function replayedPayload(code: number | undefined, data: unknown): MutationReplayed | null {
+  if (code !== -32005 || data === null || typeof data !== 'object') return null
+  const payload = data as { reason?: unknown; outcome?: unknown; operation?: unknown }
+  if (payload.reason !== 'mutation-replayed') return null
+  if (typeof payload.outcome !== 'string' || typeof payload.operation !== 'string') return null
+  return {
+    reason: 'mutation-replayed',
+    outcome: payload.outcome as MutationReplayed['outcome'],
+    operation: payload.operation,
+  }
+}
+
+/** One request frame, from one owner: the mutation identity rides the
+ *  ENVELOPE beside the id and the method, because it is a fact about the
+ *  invocation and not a param any handler should see (ADR-8eej3e66 §4), and
+ *  the origin travels with it for the same reason (§2). */
+function frameFor(id: number, slot: CallSlot): string {
+  const frame: Record<string, unknown> = {
+    jsonrpc: '2.0',
+    id,
+    method: slot.method,
+    params: slot.params,
+    origin: slot.origin,
+  }
+  if (slot.mutation !== undefined) frame.mutation = slot.mutation
+  return JSON.stringify(frame)
 }
 
 export type ConnectionState =
@@ -232,9 +398,37 @@ export type ConnectionState =
 
 export class Dispatcher {
   private ws: WebSocket | null = null
+  /** Call ids, starting at 1: a caller's first request is id 1, which is the
+   *  number the wire and the tests already speak. */
   private nextID = 1
-  private pending = new Map<number, PendingCall>()
+  /** Infrastructure ids, kept below zero so the handshake and the heartbeat
+   *  never consume a call's id. JSON-RPC ids are opaque to the backend. */
+  private infraID = -1
+  /** The id an Operations row and cancel() name. It is deliberately separate
+   *  from the wire id: a sealed retry changes the wire id and must not change
+   *  what the person's Cancel names. Both counters start at 1; the maps they
+   *  key are separate. */
+  private nextObserveID = 1
+  /** Wire id → the slot the backend is working on. */
+  private pending = new Map<number, CallSlot>()
+  /** Every live slot, queued or sent, by the id its row and cancel() use. */
+  private slots = new Map<number, CallSlot>()
+  /** Slots waiting for credit, in arrival order. */
+  private queue: CallSlot[] = []
+  /** Merge key → the live slot a further identical call joins. */
+  private groups = new Map<string, CallSlot>()
   private subscribers = new Map<string, Set<NotificationHandler>>()
+
+  // Credit window state (ADR-8eej3e66 §7). `null` means the backend has not
+  // advertised yet: ordinary calls wait rather than risk sending more than
+  // they were allowed. Infinity means the peer does not advertise at all, so
+  // holding calls would invent a bound nobody enforces.
+  private creditWindow: number | null = null
+  private creditExempt = new Set<string>()
+  private creditReserved = new Set<string>()
+  private creditInFlight = 0
+  private creditReservedInFlight = new Map<string, number>()
+  private creditRequestID: number | null = null
 
   // Lifecycle subscribers.
   private connectHandlers = new Set<LifecycleHandler>()
@@ -432,6 +626,12 @@ export class Dispatcher {
         if (settled) return
         settled = true
         this.setConnectionState({ kind: 'online' })
+        // THE WINDOW IS THIS CONNECTION'S (ADR-8eej3e66 §7). Forget the old
+        // one, ask for this one, and let onConnect fire immediately: a
+        // surface's calls queue until the answer arrives rather than risk
+        // sending more than the connection allows.
+        this.resetCredit()
+        this.requestCredit(ws)
         this._armHeartbeatIdle(ws)
         this.fireConnect()
         resolve()
@@ -512,6 +712,12 @@ export class Dispatcher {
    */
   onVaultSealed?: (method: string) => Promise<void>
 
+  /** Called when a person's operation call is on the wire. Background work
+   *  never reaches it: it merges and is not shown. */
+  onCallPending?: (call: PendingCallView) => void
+  /** Called once when that call has settled, however it settled. */
+  onCallSettled?: (id: number, settlement: CallSettlement) => void
+
   call<T = unknown>(
     method: string,
     params: unknown,
@@ -520,58 +726,371 @@ export class Dispatcher {
   ): Promise<T> {
     const intent = options.intent ?? 'operation'
     const origin = options.origin ?? 'person'
-    return new Promise((resolve, reject) => {
-      const id = this.nextID++
-      const pending: PendingCall = {
+    return new Promise<T>((resolve, reject) => {
+      const ws = this.ws
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        reject(new Error('not connected'))
+        return
+      }
+      const member: CallMember = {
         resolve: resolve as (v: unknown) => void,
         reject,
+        intent,
+        origin,
+        settled: false,
+      }
+      // A MERGEABLE CALL JOINS THE ONE PENDING (ADR-8eej3e66 §7). Background
+      // work merges on its key so a poll storm cannot fill the window with
+      // one question, and a person's further identical action joins too
+      // rather than making the backend answer the same thing twice.
+      const key = mergeKey(method, params, intent, origin)
+      const joined = key === null ? undefined : this.groups.get(key)
+      if (joined !== undefined && joined.state !== 'done') {
+        this.attach(joined, member, signal)
+        return
+      }
+      const slot: CallSlot = {
+        observeID: this.nextObserveID++,
         method,
         params,
         intent,
         origin,
+        key,
+        members: new Set(),
+        announced: false,
+        startedAt: Date.now(),
+        state: 'queued',
+        wireID: null,
         sealedRetried: false,
-        sent: false,
-        settled: false,
-        currentID: id,
+        deadline: null,
+        // A MUTATION MINTS ITS IDENTITY HERE, once per call — not per attempt,
+        // so a sanctioned retry names the same work (ADR-8eej3e66 §4).
+        mutation:
+          intent === 'operation' && isMutationMethod(method) ? newMutationIdentity() : undefined,
       }
-      const abort = (): void => {
-        if (pending.settled) return
-        pending.settled = true
-        const activeID = pending.currentID
-        if (this.pending.get(activeID) === pending) this.pending.delete(activeID)
-        pending.removeAbortListener?.()
-        reject(abortError())
-        const ws = this.ws
-        if (pending.sent && ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(
-            JSON.stringify({ jsonrpc: '2.0', method: 'rpc.cancel', params: { id: activeID } }),
-          )
-          this._noteOutboundActivity(ws)
-        }
-      }
-      this.pending.set(id, pending)
-      if (signal?.aborted) {
-        abort()
-        return
-      }
-      if (signal) {
-        pending.signal = signal
-        pending.onAbort = abort
-        signal.addEventListener('abort', abort, { once: true })
-        pending.removeAbortListener = () => signal.removeEventListener('abort', abort)
-      }
-      const ws = this.ws
-      if (!ws || ws.readyState !== WebSocket.OPEN) {
-        this.pending.delete(id)
-        pending.settled = true
-        pending.removeAbortListener?.()
-        reject(new Error('not connected'))
-        return
-      }
-      pending.sent = true
-      ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }))
-      this._noteOutboundActivity(ws)
+      if (key !== null) this.groups.set(key, slot)
+      this.slots.set(slot.observeID, slot)
+      this.attach(slot, member, signal)
+      if (slot.state === 'done') return
+      this.announce(slot)
+      this.enqueue(slot)
     })
+  }
+
+  // --- The credit queue (ADR-8eej3e66 §7) --------------------------------
+
+  /** Add one caller to a slot, and wire its withdrawal. A slot's origin is
+   *  the strongest of its members': a person joining background work makes
+   *  the whole call a person's for queueing and for the row. */
+  private attach(slot: CallSlot, member: CallMember, signal?: AbortSignal): void {
+    slot.members.add(member)
+    if (member.origin === 'person' && slot.origin !== 'person') {
+      slot.origin = 'person'
+      slot.startedAt = Date.now()
+      this.announce(slot)
+    }
+    if (signal === undefined) return
+    const abort = (): void => this.detach(slot, member)
+    if (signal.aborted) {
+      member.removeAbortListener?.()
+      slot.members.delete(member)
+      if (slot.members.size === 0 && slot.state !== 'done') {
+        this.withdraw(slot, [member])
+        return
+      }
+      member.settled = true
+      member.reject(abortError())
+      return
+    }
+    member.signal = signal
+    member.onAbort = abort
+    signal.addEventListener('abort', abort, { once: true })
+    member.removeAbortListener = () => signal.removeEventListener('abort', abort)
+  }
+
+  /** One caller withdraws. If it was the last one, the whole slot goes; a
+   *  joiner leaving must not cancel the request the others still want. */
+  private detach(slot: CallSlot, member: CallMember): void {
+    if (member.settled) return
+    member.removeAbortListener?.()
+    slot.members.delete(member)
+    if (slot.state !== 'done' && slot.members.size === 0) {
+      // THE LAST CALLER GOES WITH THE SLOT, not ahead of it: a mutation's
+      // rejection carries §8's answer, and that is decided in withdraw — so
+      // this caller is NOT marked settled here, or the answer would be
+      // dropped for a promise already closed. A joiner leaving while others
+      // still want the call takes the plain withdrawal.
+      this.withdraw(slot, [member])
+      return
+    }
+    member.settled = true
+    member.reject(abortError())
+  }
+
+  /** Tell the Operations source about a person's operation call. It is told
+   *  the moment the person acts, not when credit arrives: the wait the row
+   *  reports is exactly the wait for credit. */
+  private announce(slot: CallSlot): void {
+    if (slot.announced || slot.state === 'done') return
+    if (slot.intent !== 'operation' || slot.origin !== 'person') return
+    slot.announced = true
+    this.onCallPending?.({
+      id: slot.observeID,
+      method: slot.method,
+      startedAt: slot.startedAt,
+      mutation: slot.mutation,
+      cancel: () => this.cancel(slot.observeID),
+    })
+  }
+
+  /** Put a slot where it belongs: on the wire if it may go now, otherwise in
+   *  the queue under its `turn` deadline. Unknown methods bypass the queue:
+   *  the backend does not count a method it does not know. */
+  private enqueue(slot: CallSlot): void {
+    if (slot.state === 'done') return
+    const declaration = callOperationDeclaration(slot.method)
+    if (declaration === undefined || this.isExempt(slot.method)) {
+      this.send(slot)
+      return
+    }
+    if (this.creditWindow !== null && this.hasCredit(slot)) {
+      this.send(slot)
+      return
+    }
+    slot.state = 'queued'
+    this.queue.push(slot)
+    if (slot.deadline === null) {
+      slot.deadline = setTimeout(() => this.expire(slot), queueTurnMs(slot, declaration.turnMs))
+    }
+  }
+
+  private expire(slot: CallSlot): void {
+    slot.deadline = null
+    if (slot.state !== 'queued') return
+    this.removeFromQueue(slot)
+    this.settleSlot(slot, new CallNotStartedError(slot.method))
+  }
+
+  private isExempt(method: string): boolean {
+    return this.creditExempt.has(method)
+  }
+
+  private isReserved(method: string): boolean {
+    return this.creditReserved.has(method)
+  }
+
+  private hasCredit(slot: CallSlot): boolean {
+    if (this.isReserved(slot.method)) {
+      return (this.creditReservedInFlight.get(slot.method) ?? 0) < 1
+    }
+    const window = this.creditWindow
+    return window !== null && this.creditInFlight < window
+  }
+
+  /** Send one slot now. The credit is taken here and released by whichever
+   *  comes first: the response, the withdrawal, or the task ending. */
+  private send(slot: CallSlot): void {
+    const ws = this.ws
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      this.settleSlot(slot, new Error('not connected'))
+      return
+    }
+    this.removeFromQueue(slot)
+    this.clearDeadline(slot)
+    const id = this.nextID++
+    slot.wireID = id
+    slot.state = 'sent'
+    if (!this.isExempt(slot.method)) {
+      if (this.isReserved(slot.method)) {
+        this.creditReservedInFlight.set(
+          slot.method,
+          (this.creditReservedInFlight.get(slot.method) ?? 0) + 1,
+        )
+      } else {
+        this.creditInFlight++
+      }
+    }
+    this.pending.set(id, slot)
+    ws.send(frameFor(id, slot))
+    this._noteOutboundActivity(ws)
+  }
+
+  private releaseCredit(slot: CallSlot): void {
+    if (this.isExempt(slot.method)) return
+    if (this.isReserved(slot.method)) {
+      const held = this.creditReservedInFlight.get(slot.method) ?? 0
+      if (held <= 1) this.creditReservedInFlight.delete(slot.method)
+      else this.creditReservedInFlight.set(slot.method, held - 1)
+      return
+    }
+    this.creditInFlight = Math.max(0, this.creditInFlight - 1)
+  }
+
+  /** Fill the window from the queue, person first. Background work never
+   *  takes the credit a person's call is waiting for (ADR-8eej3e66 §6). */
+  private pump(): void {
+    if (this.creditWindow === null) return
+    for (;;) {
+      if (this.queue.length === 0) return
+      let next = this.queue.findIndex((slot) => slot.origin === 'person' && this.hasCredit(slot))
+      if (next < 0) next = this.queue.findIndex((slot) => this.hasCredit(slot))
+      if (next < 0) return
+      const slot = this.queue.splice(next, 1)[0]
+      this.send(slot)
+    }
+  }
+
+  /** Settle one slot and every caller waiting on it. There is no second
+   *  settlement: the state check is what makes a response arriving after a
+   *  withdrawal inert. */
+  private settleSlot(
+    slot: CallSlot,
+    error?: Error,
+    value?: unknown,
+    settlement: CallSettlement = 'answered',
+  ): void {
+    if (slot.state === 'done') return
+    slot.state = 'done'
+    this.clearDeadline(slot)
+    this.removeFromQueue(slot)
+    if (slot.key !== null && this.groups.get(slot.key) === slot) this.groups.delete(slot.key)
+    this.slots.delete(slot.observeID)
+    if (slot.wireID !== null) {
+      // A sent slot that settles without an answer (withdrawal, expire,
+      // disconnect) still owns its credit; free it here. The normal response
+      // path has already released and cleared it, so this is the other half
+      // of the same invariant rather than a second release.
+      this.releaseCredit(slot)
+      this.pending.delete(slot.wireID)
+      slot.wireID = null
+    }
+    for (const member of slot.members) {
+      if (member.settled) continue
+      member.settled = true
+      member.removeAbortListener?.()
+      if (error !== undefined) member.reject(error)
+      else member.resolve(value)
+    }
+    slot.members.clear()
+    this.notifyCallSettled(slot, settlement)
+    this.pump()
+  }
+
+  /** Withdraw every caller of one slot. A queued call is simply dropped; a
+   *  sent one is cancelled BY THE ID THE BACKEND IS WORKING ON. */
+  private withdraw(slot: CallSlot, last: CallMember[] = []): void {
+    const wireID = slot.wireID
+    const onTheWire = wireID !== null && !this.isExempt(slot.method)
+    if (slot.mutation !== undefined) {
+      this.withdrawMutation(slot, onTheWire, wireID, last)
+      return
+    }
+    for (const member of last) {
+      if (member.settled) continue
+      member.settled = true
+      member.reject(abortError())
+    }
+    this.settleSlot(slot, abortError(), undefined, onTheWire ? 'no-answer' : 'answered')
+    this.cancelOnWire(wireID, onTheWire)
+  }
+
+  /** A mutation's withdrawal ends the wait and answers the caller (§8).
+   *
+   *  THE ROW GOES AND THE SENTENCE GOES TO THE CALL. A row is the wait, so it
+   *  is released here like any other settlement; what a person is owed for a
+   *  mutation is one of the three answers, and from here it travels on the
+   *  call's own rejection — where the surface that asked reads it. A call
+   *  that never reached the wire never started, so nothing is asked of the
+   *  record; a sent one is asked, because nothing here knows whether the work
+   *  began. The rejection keeps the AbortError name (the call WAS withdrawn)
+   *  and carries the sentence as its message. */
+  private withdrawMutation(
+    slot: CallSlot,
+    onTheWire: boolean,
+    wireID: number | null,
+    last: CallMember[],
+  ): void {
+    const held = slot.members
+    for (const member of last) if (!member.settled) held.add(member)
+    slot.members = new Set()
+    this.settleSlot(slot, undefined, undefined, onTheWire ? 'no-answer' : 'answered')
+    this.cancelOnWire(wireID, onTheWire)
+    if (!onTheWire) {
+      this.answerWithdrawn(held, withdrawnBeforeStart(slot.method))
+      return
+    }
+    void resolveMutationOutcome(this, slot.mutation ?? '').then(
+      (assessment) => {
+        this.answerWithdrawn(held, assessment)
+      },
+      // THE ASK IS THE DISPATCHER'S OWN REQUEST, so its failure is the
+      // dispatcher's to own. It fails when the connection goes before the
+      // record answers — expected on a close, and the one place an unhandled
+      // rejection could come from with nobody to catch it: the caller dropped
+      // nothing, the ask did. The caller is still settled, with the sentence
+      // that says nobody can say; the ask is not retried inline, because the
+      // record lives on the backend and the surface asks again on the next
+      // connection. Logged with its cause — handled, not swallowed.
+      (cause: unknown) => {
+        log.warn('nocx: the mutation answer could not be asked', {
+          method: slot.method,
+          cause: cause instanceof Error ? cause.message : String(cause),
+        })
+        this.answerWithdrawn(held, withdrawnUnanswered(slot.method))
+      },
+    )
+  }
+
+  private answerWithdrawn(members: Set<CallMember>, assessment: MutationAssessment): void {
+    for (const member of members) {
+      if (member.settled) continue
+      member.settled = true
+      member.removeAbortListener?.()
+      member.reject(new MutationWithdrawnError(assessment))
+    }
+    members.clear()
+  }
+
+  /** Withdraw one request on the wire, by the id the backend is working on. */
+  private cancelOnWire(wireID: number | null, onTheWire: boolean): void {
+    if (!onTheWire || wireID === null) return
+    const ws = this.ws
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    ws.send(JSON.stringify({ jsonrpc: '2.0', method: 'rpc.cancel', params: { id: wireID } }))
+    this._noteOutboundActivity(ws)
+  }
+
+  private removeFromQueue(slot: CallSlot): void {
+    const index = this.queue.indexOf(slot)
+    if (index >= 0) this.queue.splice(index, 1)
+  }
+
+  private clearDeadline(slot: CallSlot): void {
+    if (slot.deadline !== null) {
+      clearTimeout(slot.deadline)
+      slot.deadline = null
+    }
+  }
+
+  /** Forget the previous connection's window. The next one advertises its
+   *  own; until then nothing ordinary is sent. */
+  private resetCredit(): void {
+    this.creditWindow = null
+    this.creditExempt = new Set()
+    this.creditReserved = new Set()
+    this.creditInFlight = 0
+    this.creditReservedInFlight.clear()
+    this.creditRequestID = null
+  }
+
+  /** Ask the connection for its window. It is the first frame sent, so the
+   *  answer is on its way before any surface's onConnect handler can make a
+   *  call; those calls wait in the queue until it lands. */
+  private requestCredit(ws: WebSocket): void {
+    const id = this.infraID--
+    this.creditRequestID = id
+    ws.send(JSON.stringify({ jsonrpc: '2.0', id, method: 'transport.credit', params: {} }))
+    this._noteOutboundActivity(ws)
   }
 
   /** Send a JSON-RPC notification (no id, no response expected). */
@@ -681,81 +1200,44 @@ export class Dispatcher {
       return
     }
 
+    // Response to the credit advertisement (transport.credit).
+    if (msg.id !== undefined && this.creditRequestID === msg.id) {
+      const answer =
+        msg.error === undefined ? (msg.result as Partial<CreditAdvertisement>) : undefined
+      if (
+        answer !== undefined &&
+        typeof answer.window === 'number' &&
+        answer.window > 0 &&
+        Array.isArray(answer.exempt) &&
+        Array.isArray(answer.reserved)
+      ) {
+        this.creditWindow = answer.window
+        this.creditExempt = new Set(answer.exempt)
+        this.creditReserved = new Set(answer.reserved)
+      } else {
+        // No advertisement: this peer does not enforce a window, so holding
+        // calls would impose a bound nobody asked for. One line, then send.
+        this.creditWindow = Number.POSITIVE_INFINITY
+        log.warn('nocx: the backend did not advertise a credit window')
+      }
+      this.creditRequestID = null
+      this.pump()
+      return
+    }
+
     // Response to a pending request.
     if (msg.id !== undefined) {
-      const p = this.pending.get(msg.id)
-      if (!p) return
+      const slot = this.pending.get(msg.id)
+      if (!slot) return
       this.pending.delete(msg.id)
-      p.removeAbortListener?.()
+      this.releaseCredit(slot)
+      slot.wireID = null
       if (msg.error) {
-        if (
-          p.intent === 'operation' &&
-          this.onVaultSealed &&
-          !p.sealedRetried &&
-          msg.error.data &&
-          typeof msg.error.data === 'object' &&
-          'reason' in msg.error.data &&
-          msg.error.data.reason === 'vault-sealed'
-        ) {
-          // Keep the caller's promise pending: raise the unlock prompt (the
-          // vault owns it), then re-send the request verbatim with a fresh
-          // id. Exactly one retry — a second sealed error rejects as-is.
-          p.sealedRetried = true
-          void this.onVaultSealed(p.method).then(
-            () => {
-              if (p.signal?.aborted) {
-                // Withdrawn while the unlock prompt was up. The first request
-                // has already been answered and the replacement was never
-                // sent, so nothing is in flight to cancel.
-                p.settled = true
-                p.reject(abortError())
-                return
-              }
-              const id = this.nextID++
-              p.currentID = id
-              this.pending.set(id, p)
-              const ws = this.ws
-              if (!ws || ws.readyState !== WebSocket.OPEN) {
-                this.pending.delete(id)
-                p.settled = true
-                p.reject(new Error('not connected'))
-                return
-              }
-              ws.send(JSON.stringify({ jsonrpc: '2.0', id, method: p.method, params: p.params }))
-              this._noteOutboundActivity(ws)
-              // The listener was dropped with the first response; the caller's
-              // signal still owns this call, so re-arm it against the new id.
-              const signal = p.signal
-              const onAbort = p.onAbort
-              if (signal && onAbort) {
-                signal.addEventListener('abort', onAbort, { once: true })
-                p.removeAbortListener = () => signal.removeEventListener('abort', onAbort)
-              }
-            },
-            (e: unknown) => {
-              p.settled = true
-              p.reject(e instanceof Error ? e : new Error(String(e)))
-            },
-          )
-          return
-        }
-        if (
-          msg.error.data &&
-          typeof msg.error.data === 'object' &&
-          'reason' in msg.error.data &&
-          msg.error.data.reason === 'vault-operation-cancelled'
-        ) {
-          p.reject(new VaultOperationCancelledError())
-          return
-        }
-        if (isSaturationData(msg.error.data)) {
-          p.reject(refusedError(p.method, p.origin, msg.error.data, msg.error.code))
-          return
-        }
-        p.reject(new RpcError(msg.error.message ?? 'rpc error', msg.error.code, msg.error.data))
-      } else {
-        p.resolve(msg.result)
+        if (this.retrySealed(slot, msg.error)) return
+        this.settleSlot(slot, this.errorFor(slot, msg.error))
+        return
       }
+      this.settleSlot(slot, undefined, msg.result)
       return
     }
 
@@ -818,7 +1300,7 @@ export class Dispatcher {
     this._heartbeatIdleTimer = setTimeout(() => {
       if (this._heartbeatSocket !== ws || this.ws !== ws || ws.readyState !== WebSocket.OPEN) return
       this._heartbeatIdleTimer = null
-      const id = this.nextID++
+      const id = this.infraID--
       this._heartbeatRequestID = id
       ws.send(JSON.stringify({ jsonrpc: '2.0', id, method: 'transport.ping', params: {} }))
       this._heartbeatResponseTimer = setTimeout(() => {
@@ -888,11 +1370,128 @@ export class Dispatcher {
     if (this._connectionState.kind === 'waiting') this.retryNow()
   }
 
-  private rejectAllPending(reason: string): void {
-    for (const p of this.pending.values()) {
-      p.reject(new Error(reason))
+  /** Withdraw one call by the id its caller was given. Unknown ids are a
+   *  normal race: the answer may have arrived first. */
+  cancel(id: number): void {
+    const slot = this.slots.get(id)
+    if (slot !== undefined) this.withdraw(slot)
+  }
+
+  /** One sealed refusal becomes one unlock and one re-send (ADR-0032). The
+   *  replacement goes back through the queue, so an unlock answered while
+   *  the window is full waits for credit like any other call rather than
+   *  jumping it — except vault.unseal, which has its reserved credit. */
+  private retrySealed(
+    slot: CallSlot,
+    error: { code?: number; message?: string; data?: unknown },
+  ): boolean {
+    if (slot.intent !== 'operation' || this.onVaultSealed === undefined || slot.sealedRetried) {
+      return false
     }
+    if (
+      !error.data ||
+      typeof error.data !== 'object' ||
+      !('reason' in error.data) ||
+      error.data.reason !== 'vault-sealed'
+    ) {
+      return false
+    }
+    slot.sealedRetried = true
+    // A MUTATION ASKS FIRST (ADR-8eej3e66 §4). Re-sending is replaying, and a
+    // replay is only safe when the backend says the first attempt did not
+    // start. A sealed refusal normally is that answer — the vault refused
+    // before anything was touched — but the renderer does not get to assume
+    // it: the record does, and a record that says anything else ends the call
+    // with one of §8's three answers.
+    if (slot.mutation !== undefined) {
+      void this.replayMutationAfterUnlock(slot)
+      return true
+    }
+    slot.state = 'queued'
+    void this.onVaultSealed(slot.method).then(
+      () => {
+        if (slot.state === 'done') return
+        this.enqueue(slot)
+      },
+      (e: unknown) => this.settleSlot(slot, e instanceof Error ? e : new Error(String(e))),
+    )
+    return true
+  }
+
+  /**
+   * The one re-send a mutation may have: ADR-0032's unlock retry, gated on the
+   * backend's record. It asks what became of the first attempt and re-sends
+   * only when the answer is `not-started` — under the SAME identity, so a
+   * second copy cannot slip past the record either — and the re-send goes back
+   * through the queue, so it waits for credit like any other call.
+   */
+  private async replayMutationAfterUnlock(slot: CallSlot): Promise<void> {
+    const assessment = await resolveMutationOutcome(this, slot.mutation ?? '')
+    if (slot.state === 'done') return
+    if (assessment.answer !== 'not-started') {
+      // Nothing is re-sent. The person is told which of the three answers it
+      // is, and a timeout that reached this point never implies a rollback.
+      this.settleSlot(slot, new MutationNotReplayedError(assessment))
+      return
+    }
+    let unlocked = false
+    try {
+      await this.onVaultSealed?.(slot.method)
+      unlocked = true
+    } catch (e) {
+      this.settleSlot(slot, e instanceof Error ? e : new Error(String(e)))
+      return
+    }
+    // The awaits above let the slot settle under us (a withdrawal while the
+    // prompt was up), and TypeScript cannot see that: it narrowed the union
+    // to the two live states after the guard at the top.
+    if (!unlocked || (slot.state as CallSlot['state']) === 'done') return
+    slot.state = 'queued'
+    this.enqueue(slot)
+  }
+
+  private errorFor(
+    slot: CallSlot,
+    error: { code?: number; message?: string; data?: unknown },
+  ): Error {
+    // A REPLAY THE RECORD REFUSED. The answer is in the payload, so the
+    // person is told which of the three it is rather than "already ran".
+    const replayed = replayedPayload(error.code, error.data)
+    if (replayed !== null) {
+      return new MutationNotReplayedError(replayedAssessment(replayed))
+    }
+    if (
+      error.data &&
+      typeof error.data === 'object' &&
+      'reason' in error.data &&
+      error.data.reason === 'vault-operation-cancelled'
+    ) {
+      return new VaultOperationCancelledError()
+    }
+    if (isSaturationData(error.data)) {
+      return refusedError(slot.method, slot.origin, error.data, error.code)
+    }
+    return new RpcError(error.message ?? 'rpc error', error.code, error.data)
+  }
+
+  private notifyCallSettled(slot: CallSlot, settlement: CallSettlement = 'answered'): void {
+    if (slot.announced) this.onCallSettled?.(slot.observeID, settlement)
+  }
+
+  /** A lost connection settles everything: sent calls have no answer coming,
+   *  queued calls never started, and the next connection advertises a new
+   *  window. */
+  private rejectAllPending(reason: string): void {
+    // Forget the window FIRST: settling a slot pumps the queue, and pumping
+    // on a dead connection must not try to send anything.
+    this.resetCredit()
+    this.queue = []
+    for (const slot of [...this.slots.values()]) {
+      this.settleSlot(slot, new Error(reason), undefined, 'no-answer')
+    }
+    this.slots.clear()
     this.pending.clear()
+    this.groups.clear()
   }
 
   private fireConnect(): void {

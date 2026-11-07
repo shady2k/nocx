@@ -46,6 +46,7 @@ import (
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/git/registry"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/operation/schedule"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
@@ -63,7 +64,7 @@ import (
 // message for params that are absent or not a JSON object, and "" on
 // success. The decode shape of the exemplar (validateProbeParamsRaw),
 // shared by every validator in this sweep so none of them can forget the
-// object gate.
+// mount's bulkhead.
 func decodeParams(raw json.RawMessage, out any) string {
 	if len(raw) == 0 {
 		return "params are required"
@@ -532,7 +533,7 @@ func (s *WSServer) forgetBinding(bid string) {
 }
 
 // gitOpenHandlers answers git.open. It holds the GitOpenOperation (session +
-// git gates — the session resolve and the open+register run inside the
+// git's per-checkout order and mount bulkhead — the session resolve and the open+register run inside the
 // callback), the Responder, the transport's binding bookkeeping seam and a
 // logger. It needs the connection's connState per call: git.open is
 // authorised by connState (D15), and the inline first status acquires with
@@ -603,7 +604,7 @@ func (h gitOpenHandlers) handleOpen(ctx context.Context, state *connState, req j
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: unknown sessionId"})
 		return
 	}
-	openErr := h.op.Open(ctx, func(ctx context.Context, svc capability.GitOpenService) error {
+	openErr := h.op.Open(ctx, sess, params.Cwd, func(ctx context.Context, svc capability.GitOpenService) error {
 		if sess.Kind() != session.KindLocal {
 			// D3 as amended 2026-08-13, superseded by ADR-0068: the
 			// remote case is the helper's, and git.open never asks — the
@@ -699,14 +700,14 @@ func (h gitOpenHandlers) handleOpen(ctx context.Context, state *connState, req j
 		return nil
 	})
 	if openErr != nil {
-		answerOperationRefusal(h.r, req, openErr)
+		answerGitOperationError(h.r, req, openErr)
 	}
 }
 
 // gitBindingHandlers answers the git.* binding methods — status, diff,
 // stage, unstage, stageAll, unstageAll, commit, headMessage, log, remote,
 // close. Each call acquires the binding per call through the
-// GitBindingOperation (git gate) with the connection's connState as the
+// GitBindingOperation (per-checkout order and mount bulkhead) with the connection's connState as the
 // caller: bindings close at any moment, so validity is checked per call, not
 // at construction, and Registry.Acquire re-checks that the binding's session
 // is in the REQUESTING connection's connState (D15) in exactly one place. It
@@ -733,7 +734,7 @@ func (h gitBindingHandlers) handleStatus(ctx context.Context, state *connState, 
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
-	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
+	err := h.op.Run(ctx, params.BindingID, func(ctx context.Context, svc capability.GitBindingService) error {
 		hnd, release, err := svc.Acquire(params.BindingID, state)
 		if err != nil {
 			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
@@ -757,9 +758,7 @@ func (h gitBindingHandlers) handleStatus(ctx context.Context, state *connState, 
 		}))
 		return nil
 	})
-	if err != nil {
-		answerOperationRefusal(h.r, req, err)
-	}
+	answerGitOperationError(h.r, req, err)
 }
 
 // handleDiff diffs one file on one side. side is a closed enum — the
@@ -781,7 +780,7 @@ func (h gitBindingHandlers) handleDiff(ctx context.Context, state *connState, re
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: side must be staged, unstaged or untracked"})
 		return
 	}
-	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
+	err := h.op.Run(ctx, params.BindingID, func(ctx context.Context, svc capability.GitBindingService) error {
 		hnd, release, err := svc.Acquire(params.BindingID, state)
 		if err != nil {
 			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
@@ -800,9 +799,7 @@ func (h gitBindingHandlers) handleDiff(ctx context.Context, state *connState, re
 		}))
 		return nil
 	})
-	if err != nil {
-		answerOperationRefusal(h.r, req, err)
-	}
+	answerGitOperationError(h.r, req, err)
 }
 
 // handleStage stages exactly the given paths (D8: paths ride stdin as a
@@ -819,7 +816,7 @@ func (h gitBindingHandlers) handleStage(ctx context.Context, state *connState, r
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
-	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
+	err := h.op.Run(ctx, params.BindingID, func(ctx context.Context, svc capability.GitBindingService) error {
 		hnd, release, err := svc.Acquire(params.BindingID, state)
 		if err != nil {
 			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
@@ -839,9 +836,7 @@ func (h gitBindingHandlers) handleStage(ctx context.Context, state *connState, r
 		_ = h.r.TryResult(req.ID, mustMarshal(gitStatusResult{Status: wireGitStatus(status)}))
 		return nil
 	})
-	if err != nil {
-		answerOperationRefusal(h.r, req, err)
-	}
+	answerGitOperationError(h.r, req, err)
 }
 
 // handleUnstage unstages exactly the given paths. It is the one
@@ -863,7 +858,7 @@ func (h gitBindingHandlers) handleUnstage(ctx context.Context, state *connState,
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
-	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
+	err := h.op.Run(ctx, params.BindingID, func(ctx context.Context, svc capability.GitBindingService) error {
 		hnd, release, err := svc.Acquire(params.BindingID, state)
 		if err != nil {
 			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
@@ -894,9 +889,7 @@ func (h gitBindingHandlers) handleUnstage(ctx context.Context, state *connState,
 		}))
 		return nil
 	})
-	if err != nil {
-		answerOperationRefusal(h.r, req, err)
-	}
+	answerGitOperationError(h.r, req, err)
 }
 
 // handleStageAll stages everything (git add -A, D19) and returns the
@@ -914,7 +907,7 @@ func (h gitBindingHandlers) handleStageAll(ctx context.Context, state *connState
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
-	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
+	err := h.op.Run(ctx, params.BindingID, func(ctx context.Context, svc capability.GitBindingService) error {
 		hnd, release, err := svc.Acquire(params.BindingID, state)
 		if err != nil {
 			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
@@ -929,9 +922,7 @@ func (h gitBindingHandlers) handleStageAll(ctx context.Context, state *connState
 		_ = h.r.TryResult(req.ID, mustMarshal(gitStatusResult{Status: wireGitStatus(status)}))
 		return nil
 	})
-	if err != nil {
-		answerOperationRefusal(h.r, req, err)
-	}
+	answerGitOperationError(h.r, req, err)
 }
 
 // handleUnstageAll unstages everything — bare git reset, no HEAD, no
@@ -948,7 +939,7 @@ func (h gitBindingHandlers) handleUnstageAll(ctx context.Context, state *connSta
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
-	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
+	err := h.op.Run(ctx, params.BindingID, func(ctx context.Context, svc capability.GitBindingService) error {
 		hnd, release, err := svc.Acquire(params.BindingID, state)
 		if err != nil {
 			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
@@ -963,9 +954,7 @@ func (h gitBindingHandlers) handleUnstageAll(ctx context.Context, state *connSta
 		_ = h.r.TryResult(req.ID, mustMarshal(gitStatusResult{Status: wireGitStatus(status)}))
 		return nil
 	})
-	if err != nil {
-		answerOperationRefusal(h.r, req, err)
-	}
+	answerGitOperationError(h.r, req, err)
 }
 
 // handleCommit commits with the message on stdin (-F -, D8) and returns
@@ -982,7 +971,7 @@ func (h gitBindingHandlers) handleCommit(ctx context.Context, state *connState, 
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
-	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
+	err := h.op.Run(ctx, params.BindingID, func(ctx context.Context, svc capability.GitBindingService) error {
 		hnd, release, err := svc.Acquire(params.BindingID, state)
 		if err != nil {
 			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
@@ -1008,9 +997,7 @@ func (h gitBindingHandlers) handleCommit(ctx context.Context, state *connState, 
 		_ = h.r.TryResult(req.ID, mustMarshal(res))
 		return nil
 	})
-	if err != nil {
-		answerOperationRefusal(h.r, req, err)
-	}
+	answerGitOperationError(h.r, req, err)
 }
 
 // handleHeadMessage is the Amend prefill (spec §5.2): the full HEAD
@@ -1027,7 +1014,7 @@ func (h gitBindingHandlers) handleHeadMessage(ctx context.Context, state *connSt
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
-	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
+	err := h.op.Run(ctx, params.BindingID, func(ctx context.Context, svc capability.GitBindingService) error {
 		hnd, release, err := svc.Acquire(params.BindingID, state)
 		if err != nil {
 			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
@@ -1045,9 +1032,7 @@ func (h gitBindingHandlers) handleHeadMessage(ctx context.Context, state *connSt
 		}))
 		return nil
 	})
-	if err != nil {
-		answerOperationRefusal(h.r, req, err)
-	}
+	answerGitOperationError(h.r, req, err)
 }
 
 // handleLog answers "what has happened on this branch": the first
@@ -1067,7 +1052,7 @@ func (h gitBindingHandlers) handleLog(ctx context.Context, state *connState, req
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
-	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
+	err := h.op.Run(ctx, params.BindingID, func(ctx context.Context, svc capability.GitBindingService) error {
 		hnd, release, err := svc.Acquire(params.BindingID, state)
 		if err != nil {
 			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
@@ -1082,9 +1067,7 @@ func (h gitBindingHandlers) handleLog(ctx context.Context, state *connState, req
 		_ = h.r.TryResult(req.ID, mustMarshal(gitLogResult{Log: wireGitLog(lg)}))
 		return nil
 	})
-	if err != nil {
-		answerOperationRefusal(h.r, req, err)
-	}
+	answerGitOperationError(h.r, req, err)
 }
 
 // handleRemote answers "what URL does the branch I am on track"
@@ -1106,7 +1089,7 @@ func (h gitBindingHandlers) handleRemote(ctx context.Context, state *connState, 
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
-	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
+	err := h.op.Run(ctx, params.BindingID, func(ctx context.Context, svc capability.GitBindingService) error {
 		hnd, release, err := svc.Acquire(params.BindingID, state)
 		if err != nil {
 			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
@@ -1126,9 +1109,7 @@ func (h gitBindingHandlers) handleRemote(ctx context.Context, state *connState, 
 		_ = h.r.TryResult(req.ID, mustMarshal(gitRemoteResult{State: "ok", URL: url}))
 		return nil
 	})
-	if err != nil {
-		answerOperationRefusal(h.r, req, err)
-	}
+	answerGitOperationError(h.r, req, err)
 }
 
 // handleClose closes the binding: its repository released, the use-guard
@@ -1145,7 +1126,7 @@ func (h gitBindingHandlers) handleClose(ctx context.Context, state *connState, r
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
-	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
+	err := h.op.Run(ctx, params.BindingID, func(ctx context.Context, svc capability.GitBindingService) error {
 		_, release, err := svc.Acquire(params.BindingID, state)
 		if err != nil {
 			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
@@ -1161,9 +1142,7 @@ func (h gitBindingHandlers) handleClose(ctx context.Context, state *connState, r
 		_ = h.r.TryResult(req.ID, mustMarshal(gitCloseResult{Closed: true}))
 		return nil
 	})
-	if err != nil {
-		answerOperationRefusal(h.r, req, err)
-	}
+	answerGitOperationError(h.r, req, err)
 }
 
 // gitSessionClosed tears down every git binding of a session and tells that
@@ -1289,11 +1268,11 @@ func gitErrorCode(err error) int {
 // and the inline first status, the binding methods as the caller for the
 // per-call Acquire. The operations are built here from the wired stores
 // (composition root for this domain), once per builder and shared across
-// the methods: GitOpenOperation (session + git gates) and
-// GitBindingOperation (git gate). When the git registry is absent every
+// the methods: GitOpenOperation (session + mount bulkhead) and
+// GitBindingOperation (per-checkout order + mount bulkhead). When the git registry is absent every
 // handler answers the old not-available error; a registry wired without a
 // repo factory leaves only git.open unavailable.
-func (s *WSServer) gitSpecs(lane control.Admission, sessionGate, gitGate control.Admission) []methodSpec {
+func (s *WSServer) gitSpecs(lane control.Admission, sessionGate control.Admission, gitOrder *schedule.Keyed, gitBulkhead *schedule.Bulkhead) []methodSpec {
 	gitWired := s.git != nil
 	var openOp capability.GitOpenOperation
 	if gitWired && s.gitFactory != nil {
@@ -1313,11 +1292,11 @@ func (s *WSServer) gitSpecs(lane control.Admission, sessionGate, gitGate control
 			}
 			return s.gitFactory
 		})
-		openOp = capability.NewGitOpenOperation(sessionGate, gitGate, lane, s.registry, factoryFor, s.git)
+		openOp = capability.NewGitOpenOperation(sessionGate, gitBulkhead, lane, s.registry, factoryFor, s.git)
 	}
 	var bindingOp capability.GitBindingOperation
 	if gitWired {
-		bindingOp = capability.NewGitBindingOperation(gitGate, lane, s.git)
+		bindingOp = capability.NewGitBindingOperation(gitOrder, gitBulkhead, lane, s.git)
 	}
 	openSub := s.operationQueue("git-open")
 	bindingSub := s.operationQueue("git")

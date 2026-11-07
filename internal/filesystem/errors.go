@@ -214,3 +214,22 @@ type ErrDownloadUnsupported struct {
 func (e *ErrDownloadUnsupported) Error() string {
 	return fmt.Sprintf("filesystem: binding %q has no read-stream seam; files cannot be downloaded from this tab", e.BindingID)
 }
+
+// ErrCloseAbandoned — a binding was closed while a use-guard was still held,
+// and the guard did not drain within closeDrainTimeout. The provider was
+// closed anyway, which is what unblocks a call still inside an SFTP lease; a
+// call that cannot be unblocked (a readdir on a hung mount) is the case this
+// bound exists for.
+//
+// It is an error rather than a log line because teardown that silently leaves
+// work behind is how a hung disk goes unnoticed until the process is out of
+// descriptors: the RPC path surfaces it, and session teardown logs it.
+type ErrCloseAbandoned struct {
+	BindingID string
+	Guards    int
+}
+
+func (e *ErrCloseAbandoned) Error() string {
+	return fmt.Sprintf("filesystem: binding %q closed with %d use-guard(s) still held after %s",
+		e.BindingID, e.Guards, closeDrainTimeout)
+}

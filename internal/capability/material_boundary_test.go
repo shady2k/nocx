@@ -29,7 +29,7 @@ import (
 // THIS TEST BINDS THIS PACKAGE AND NOTHING ELSE, which is what nocx-9fzkk
 // cost: a transport handler holding its own Resolver resolved from inside
 // op.Run and no test here could see it. The rule for a CALLER is enforced at
-// run time instead — an operation composed from an UnlockAnsweringGate marks
+// run time instead — an operation composed from an UnlockAnswering admission marks
 // its callback's context and the resolve fails on it (unlock_fence_test.go,
 // and credential/unlock_fence.go). The two are complements: this one keeps the
 // resolver out of the package, that one keeps the wait out of the callback.

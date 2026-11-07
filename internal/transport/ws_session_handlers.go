@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/operation/catalog"
+	"github.com/shady2k/nocx/internal/operation/rows"
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
@@ -366,6 +367,19 @@ func (h openHandlers) answerOpenFailure(ctx context.Context, r Responder, req js
 		_ = respond(r, newJSONRPCError(req.ID, -32602, "Invalid params: "+err.Error()))
 		return
 	}
+	// A PERSON'S WITHDRAWAL IS NOT AN UNREACHABLE HOST. When the open is
+	// cancelled by rpc.cancel the work stops with context.Canceled, and the
+	// ssh taxonomy below has no class for it: it answered -32603
+	// "unreachable: deploy: write helper: context canceled", a sentence that
+	// sends the person to check a machine that was never the problem — and
+	// logged it at ERROR, as a failure. Withdrawing a call is an ordinary
+	// ending, so it is answered as one, with the JSON-RPC cancellation code
+	// the renderer already knows how to ignore when the caller is gone.
+	if errors.Is(err, context.Canceled) {
+		log.From(ctx).Debug("open withdrawn before it finished", "error", err)
+		_ = respond(r, newJSONRPCError(req.ID, -32800, "Request cancelled: it was withdrawn before the session opened"))
+		return
+	}
 	// THE REQUEST AND THE TRACE RIDE IT (nocx-3an1s.1.8). This line used the
 	// server's logger, so the one line saying an open FAILED carried no
 	// request_id — and a person grepping their log by the id the other lines
@@ -412,6 +426,22 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		resp := newJSONRPCError(req.ID, -32602, "Invalid params: cols and rows required")
 		_ = respond(r, resp)
 		return
+	}
+
+	// THE ROW THE INSTALL MAY TAKE (ADR-8eej3e66 §8). A first far open
+	// installs the helper inside this call, and that install is work a person
+	// is watching; the catalogue declares it `row: always`, so it appears for
+	// its whole duration rather than after a threshold. The work reports
+	// through the reporter this binds to the request's context — and does so
+	// only when there is something to report, which is why an open that
+	// installs nothing costs this connection no frame at all.
+	if req.ID != nil {
+		reporter := newOperationRowReporter(r, req.ID)
+		ctx = rows.WithReporter(ctx, reporter)
+		// The wire's own half of "the row goes on settle": the work ends it
+		// when it finishes, and this covers every path where the handler
+		// returns without the work having reached its own end.
+		defer reporter.End()
 	}
 
 	spec := OpenSpec{
@@ -615,7 +645,15 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	})
 
 	sidBytes, _ := session.IDToBytes(sess.ID())
-	go h.sess.ringToConn(ctx, wconn, sidBytes, rx, 0)
+	// The pump is session/connection-owned, not request-owned: the request
+	// context is cancelled when this handler returns, and a pump that stopped
+	// there would deliver nothing (the output ring would fill and the session
+	// would look dead). The pump exits on displacement or a failed enqueue.
+	pumpCtx := context.WithoutCancel(ctx)
+	if conn, ok := connectionContext(ctx); ok {
+		pumpCtx = conn
+	}
+	go h.sess.ringToConn(pumpCtx, wconn, sidBytes, rx, 0)
 
 	// The screen, for the window the lifecycle replay above covers
 	// (nocx-zg3k3.2.15): whatever the shell drew between the spawn and the
@@ -1069,7 +1107,11 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 		h.machine.replayPaneObservation(sid)
 		sidBytes, _ := session.IDToBytes(sid)
 		if gapQueued {
-			go h.machine.ringToConn(ctx, wconn, sidBytes, rx, from)
+			pumpCtx := context.WithoutCancel(ctx)
+			if conn, ok := connectionContext(ctx); ok {
+				pumpCtx = conn
+			}
+			go h.machine.ringToConn(pumpCtx, wconn, sidBytes, rx, from)
 		}
 		attached = true
 		return nil
@@ -1159,17 +1201,20 @@ func answerOperationRefusal(r Responder, req jsonrpcRequest, err error) {
 	_ = r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 }
 
-// orderedBySession binds ordering to the protocol's authoritative sessionId,
-// never a tab/window/connection identity or a caller-selected queue name.
-// connMethods validates before admission so malformed requests cannot
-// allocate key state.
+// keyedBySession binds one session's resource key to a method whose params
+// carry the protocol's authoritative sessionId, never a tab/window/connection
+// identity or a caller-selected queue name. connMethods validates before
+// admission so malformed requests cannot allocate key state.
+//
 // Ownership is still checked when the queued handler runs: a preceding detach
 // or a concurrent ownership transfer may have changed it since admission.
-func orderedBySession(spec methodSpec) methodSpec {
-	spec.key = func(raw json.RawMessage) string {
-		var target closeParams
+func keyedBySession(spec methodSpec) methodSpec {
+	spec.key = func(raw json.RawMessage) []string {
+		var target struct {
+			SessionID string `json:"sessionId"`
+		}
 		_ = json.Unmarshal(raw, &target) // already validated by connMethods
-		return target.SessionID
+		return []string{sessionKey(target.SessionID)}
 	}
 	return spec
 }
@@ -1219,12 +1264,20 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 	sessionSub := s.operationQueue("session")
 	// Completion ordering belongs to a session, not the whole server. All
 	// sockets share this scheduler: a blocked intent holds only its own
-	// session's FIFO. The 32 slots count running AND queued work, bounding
+	// session's FIFO. The slots count running AND queued work, bounding
 	// active key workers as well as pending work. Inflight tracking makes
 	// Stop cancel and drain admitted tasks before session teardown.
+	//
+	// THE CAPACITY IS THE RESOURCE ORDER'S, not the old namespace's. It used
+	// to be 32, which was a bound on a whole-domain namespace: one tab with
+	// 32 queued resizes refused the 33rd request of every other session on
+	// the server. Below this submission each key has its own queue and the
+	// resource FIFO is what orders one session against itself, so the only
+	// thing left for this number to bound is the goroutines: one worker per
+	// active key, which the FIFO's own admission limit already caps.
 	ordered := &inflightSubmission{
 		inflight: &s.inflight,
-		inner:    control.NewKeyedOrderedSubmission("session-ops", 32),
+		inner:    control.NewKeyedOrderedSubmission("session-ops", control.DefaultOrderLimit),
 	}
 	// The instance identity is read ONCE, here, where the registry is: a
 	// handler judging a claim needs the value, never the registry.
@@ -1234,32 +1287,32 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 			h := openHandlers{opener: s.opener, sess: s, log: s.log, intents: s.paneIntentSource}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, w, r, state, req) }
 		}),
-		orderedBySession(reg(ordered, catalog.OpDetach, params(validateCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		keyedBySession(reg(ordered, catalog.OpDetach, params(validateCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, conn: w, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDetach(ctx, state, req) }
 		})),
-		orderedBySession(reg(ordered, catalog.OpSessionIntent, params(validateSessionIntentRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		keyedBySession(reg(ordered, catalog.OpSessionIntent, params(validateSessionIntentRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := sessionIntentHandler{source: s.paneIntentSource, r: r, state: state}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
 		})),
-		orderedBySession(reg(ordered, catalog.OpResize, params(validateResizeRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		keyedBySession(reg(ordered, catalog.OpResize, params(validateResizeRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleResize(ctx, state, req) }
 		})),
-		orderedBySession(reg(ordered, catalog.OpClose, params(validateCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		keyedBySession(reg(ordered, catalog.OpClose, params(validateCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleClose(ctx, state, req) }
 		})),
-		reg(sessionSub, catalog.OpAttach, params(validateAttachRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		keyedBySession(reg(sessionSub, catalog.OpAttach, params(validateAttachRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, machine: s, intents: s.paneIntentSource}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAttach(ctx, w, r, state, req) }
-		}),
+		})),
 		// Recovery metadata shares the session operation queue with attach and
 		// the live-session list; it is read as part of reclaiming one claim.
-		whenAvailable(regResponder(sessionSub, catalog.OpSessionRecoveryStatus, params(validateSessionRecoveryStatusRaw), func(r Responder) handlerFunc {
+		whenAvailable(keyedBySession(regResponder(sessionSub, catalog.OpSessionRecoveryStatus, params(validateSessionRecoveryStatusRaw), func(r Responder) handlerFunc {
 			h := sessionRecoveryStatusHandlers{ops: sessionOps, store: s.sessionRecorder, instance: instance, r: r}
 			return h.handle
-		}), func() bool { return s.sessionRecorder != nil }, "session recovery status is unavailable"),
+		})), func() bool { return s.sessionRecorder != nil }, "session recovery status is unavailable"),
 		// sessions.live is the session plane's read, and it rides the same
 		// per-operation queue as attach: the two are one act for a fresh
 		// client — ask what is alive, take one — and a list answered under a

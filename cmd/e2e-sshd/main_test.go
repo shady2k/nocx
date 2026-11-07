@@ -811,3 +811,36 @@ func TestChannel_AnUnknownTypeIsStillRejectedByName(t *testing.T) {
 		t.Errorf("reason = %v, want %v", openErr.Reason, gossh.UnknownChannelType)
 	}
 }
+
+// The fixture's slow link is a STATE, not a rate the suite hopes for: uploads
+// are paced while the gate file is absent and are ordinary the moment it
+// exists. That is what lets a spec watch a helper install for as long as its
+// assertions need and then let the same install finish (nocx-3an1s.2.10).
+func TestSFTPUploadRateIsTheSlowLinkOnlyWhileItsGateIsAbsent(t *testing.T) {
+	previousUntil, previousBps := sftpSlowUntil, sftpUploadBps
+	t.Cleanup(func() { sftpSlowUntil, sftpUploadBps = previousUntil, previousBps })
+
+	gate := filepath.Join(t.TempDir(), "full-speed")
+
+	sftpSlowUntil, sftpUploadBps = "", 500_000
+	if got := sftpUploadRate(); got != 0 {
+		t.Fatalf("with no gate named the link is paced at %d, want ordinary", got)
+	}
+
+	sftpSlowUntil, sftpUploadBps = gate, 0
+	if got := sftpUploadRate(); got != 0 {
+		t.Fatalf("with no rate configured the link is paced at %d, want ordinary", got)
+	}
+
+	sftpSlowUntil, sftpUploadBps = gate, 500_000
+	if got := sftpUploadRate(); got != 500_000 {
+		t.Fatalf("while the gate is absent the link is paced at %d, want 500000", got)
+	}
+
+	if err := os.WriteFile(gate, nil, 0o600); err != nil {
+		t.Fatalf("create the gate: %v", err)
+	}
+	if got := sftpUploadRate(); got != 0 {
+		t.Fatalf("once the gate exists the link is paced at %d, want ordinary", got)
+	}
+}

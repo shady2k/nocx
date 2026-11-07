@@ -294,17 +294,45 @@ export function packageInSet(pkg, patterns, module) {
   return false
 }
 
+/**
+ * The repeat's OWN time bound, per repetition and in total.
+ *
+ * `go test`'s default is ten minutes PER PACKAGE BINARY, and this tool runs one
+ * binary with `count` repetitions INSIDE it — so the bound has to grow with the
+ * count or a legitimate repeat dies on the default. Measured on the integrated
+ * tree, 2026-11-06: ci-backend's portable repeat of `internal/transport` cost
+ * 42.5 s for ONE pass under `-race`, 850 s for twenty, and the job failed at
+ * 600.123 s with `panic: test timed out after 10m0s` and no test hung.
+ *
+ * Sixty seconds per repetition is the slowest single pass this repo's changed
+ * tests have been measured at (42.5 s) with room for a slower runner; twenty
+ * minutes is the ceiling, because this is one step of a job that also builds,
+ * lints and runs the whole suite. A test that needs more than its share is a
+ * test to make cheaper — as the 30 s turn wait in `internal/transport` was —
+ * not a bound to raise.
+ */
+export const REPEAT_TIMEOUT_PER_RUN_MS = 60_000
+export const REPEAT_TIMEOUT_CEILING_MS = 20 * 60_000
+
+/** The `-timeout` this repeat sets: the count's own arithmetic, under a ceiling. */
+export function repeatTimeoutMs(count) {
+  if (!Number.isSafeInteger(count) || count < 1) throw new Error('count must be a positive integer')
+  return Math.min(count * REPEAT_TIMEOUT_PER_RUN_MS, REPEAT_TIMEOUT_CEILING_MS)
+}
+
 /** One `go test` invocation per package, selecting exactly the named tests. */
 export function repeatInvocations(
   plan,
   { packages, module, tags = '', count = 20, race = false, go = 'go' },
 ) {
   if (!Number.isSafeInteger(count) || count < 1) throw new Error('count must be a positive integer')
+  const timeout = `${Math.round(repeatTimeoutMs(count) / 1000)}s`
   return filterPlan(plan, packages, module).map((entry) => {
     const args = ['test']
     if (race) args.push('-race')
     if (tags) args.push('-tags', tags)
     args.push('-count', String(count))
+    args.push('-timeout', timeout)
     args.push('-run', `^(${entry.tests.join('|')})$`)
     args.push(entry.package)
     return { command: go, args }

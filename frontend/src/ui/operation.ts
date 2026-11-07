@@ -24,18 +24,25 @@
 /**
  * What kind of work this is.
  *
- * Two members, and the second cost exactly what the first one's comment
- * predicted: download (nocx-9le.8.3) joined by adding a member here and a
+ * Four members. Download (nocx-9le.8.3) joined by adding a member here and a
  * glyph in `operation-row.tsx`'s table, and nothing in the indicator, the
- * model or the row switches on kind, so nothing else changed. What is
+ * model or the row switches on kind, so nothing else changed. `call` is the
+ * same addition for a person's waiting control-plane call (ADR-8eej3e66 §8):
+ * a row, a sentence and Cancel, with no progress to draw. What is
  * deliberately NOT here is a framework for operations that do not exist —
  * no priorities, no retry policy, and no scheduler. The one queue there is
  * belongs to `files/upload-store.ts` and is not a policy: design §4 sends
  * one file at a time per binding, so a batch has a waiting half whether or
  * not anything models it, and the bead this cost was about it not being
  * modelled.
+ *
+ * `install` is the fourth, and the first one the BACKEND starts inside a
+ * call a person made (ADR-8eej3e66 §8): a first open's helper upload. It
+ * has a size, so it draws a bar; it has stages, so its title changes while
+ * the row stays one row; and it has a Cancel, which is the open's own.
+ * `operations/install-operations.ts` is its source.
  */
-export type OperationKind = 'upload' | 'download'
+export type OperationKind = 'upload' | 'download' | 'call' | 'install'
 
 /**
  * Where an operation is. Five of the eight values are terminal, and three
@@ -64,7 +71,19 @@ export type OperationKind = 'upload' | 'download'
  * somebody.
  */
 export type OperationPhase =
-  'queued' | 'running' | 'unsettled' | 'written' | 'sent' | 'skipped' | 'cancelled' | 'failed'
+  | 'queued'
+  | 'running'
+  | 'unsettled'
+  | 'written'
+  | 'sent'
+  | 'skipped'
+  | 'cancelled'
+  | 'failed'
+  // A mutation whose record is gone: the backend cannot say whether it ran,
+  // and neither may this list. It is TERMINAL because no answer is coming —
+  // that is exactly what "unknown" means here — and it names what to look at
+  // in the row's detail rather than pretending either side (ADR-8eej3e66 §8).
+  | 'outcome-unknown'
 
 /** The values that mean nothing more can happen. Exported because a surface
  *  that labels an outcome needs the CLOSED set of outcomes; a second

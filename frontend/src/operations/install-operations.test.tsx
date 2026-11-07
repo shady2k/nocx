@@ -1,0 +1,234 @@
+// @vitest-environment jsdom
+//
+// A first open's helper install is ONE row for its whole duration, with what
+// it is doing, cancellable, and it goes on settle (nocx-3an1s.2.10,
+// ADR-8eej3e66 §8).
+//
+// Driven through the real sidebar, the real activity bar, the real operations
+// view and the real row — the seam a person reaches — over a fake dispatcher
+// that carries the two notifications the backend sends. The backend's half
+// (the real install, the real socket, the cancellation) is
+// internal/app/open_install_row_test.go, and the whole thing is
+// e2e/helper-install-row.spec.ts.
+import { cleanup, fireEvent } from '@solidjs/testing-library'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+
+import type { Dispatcher } from '../dispatcher'
+import { mountSidebar, type SidebarHandle } from '../sidebar'
+import { SettingsIcon } from '../ui/icons'
+import { callOperations } from './call-operations'
+import { installOperations } from './install-operations'
+import { createOperationsModel } from './operations'
+import { createOperationsView, OPERATIONS_VIEW_ID } from './operations-view'
+
+type Notify = (params: unknown) => void
+
+interface FakeDispatcher {
+  dispatcher: Dispatcher
+  cancel: ReturnType<typeof vi.fn>
+  /** A person's `open`, as the call source sees it. */
+  pending: (id: number, method: string) => void
+  settled: (id: number) => void
+  notify: (method: string, params: unknown) => void
+  disconnect: () => void
+}
+
+function fakeDispatcher(): FakeDispatcher {
+  const cancel = vi.fn()
+  const handlers = new Map<string, Set<Notify>>()
+  const disconnects = new Set<() => void>()
+  const dispatcher = {
+    cancel,
+    subscribe(method: string, handler: Notify) {
+      let set = handlers.get(method)
+      if (!set) {
+        set = new Set()
+        handlers.set(method, set)
+      }
+      set.add(handler)
+      return () => set.delete(handler)
+    },
+    onDisconnect(handler: () => void) {
+      disconnects.add(handler)
+      return () => disconnects.delete(handler)
+    },
+  } as unknown as Dispatcher
+  return {
+    dispatcher,
+    cancel,
+    pending: (id, method) => {
+      dispatcher.onCallPending!({ id, method, startedAt: Date.now(), cancel: () => {} })
+    },
+    settled: (id) => dispatcher.onCallSettled!(id, 'answered'),
+    notify: (method, params) => {
+      for (const handler of handlers.get(method) ?? []) handler(params)
+    },
+    disconnect: () => {
+      for (const handler of disconnects) handler()
+    },
+  }
+}
+
+/** The two sources main.tsx builds, in its own order. */
+function mount(fake: FakeDispatcher): void {
+  const callOps = callOperations(fake.dispatcher)
+  const installOps = installOperations(fake.dispatcher)
+  const model = createOperationsModel([callOps.source, installOps.source])
+  const bar = document.createElement('div')
+  const panel = document.createElement('div')
+  document.body.append(bar, panel)
+  handle = mountSidebar(
+    bar,
+    panel,
+    [createOperationsView(model)],
+    [{ id: 'settings', title: 'Settings', icon: SettingsIcon, onActivate: () => {} }],
+  )
+}
+
+let handle: SidebarHandle | null = null
+
+afterEach(() => {
+  handle?.destroy()
+  handle = null
+  document.body.replaceChildren()
+  cleanup()
+})
+
+function icon(): HTMLElement {
+  const found = document.querySelector<HTMLElement>(`button[data-view="${OPERATIONS_VIEW_ID}"]`)
+  if (found === null) throw new Error('operations view button missing')
+  return found
+}
+
+function openList(): void {
+  icon().click()
+}
+
+function rows(): HTMLElement[] {
+  return [...document.querySelectorAll<HTMLElement>('.ui-operation-row')]
+}
+
+function emptyState(): string {
+  return document.querySelector('[data-testid="operations-panel"]')?.textContent ?? ''
+}
+
+const copying = {
+  requestId: 1,
+  kind: 'install',
+  title: 'Copying the nocx helper',
+  machine: 'e2e@web-01',
+  done: 4_194_304,
+  total: 16_043_212,
+}
+
+describe("a first open's helper install", () => {
+  it('takes a row at once, with what it is doing and how far it has got', () => {
+    const fake = fakeDispatcher()
+    mount(fake)
+    openList()
+    fake.notify('operation.row', copying)
+    expect(rows()).toHaveLength(1)
+    const text = rows()[0].textContent ?? ''
+    expect(text).toContain('Copying the nocx helper')
+    expect(text).toContain('e2e@web-01')
+    expect(text).toContain('4.2 MB of 16.0 MB')
+    // A row that appears at once is the whole point: no threshold, because
+    // this is work a person is watching (the catalogue says row: always).
+    expect(document.querySelector('.ui-operation-row__percent')?.textContent).toBe('26%')
+  })
+
+  it("stays ONE row while its title changes, and the open's own row never doubles it", () => {
+    vi.useFakeTimers()
+    try {
+      const fake = fakeDispatcher()
+      mount(fake)
+      // The person's open is on the wire, and the install starts inside it.
+      fake.pending(1, 'open')
+      fake.notify('operation.row', copying)
+      // Past the call threshold: the call source would show "Opening your
+      // terminal" for the same request, and one operation is one row.
+      vi.advanceTimersByTime(3000)
+      openList()
+      expect(rows()).toHaveLength(1)
+      fake.notify('operation.row', {
+        ...copying,
+        title: 'Checking the nocx helper',
+        done: 0,
+        total: 0,
+      })
+      expect(rows()).toHaveLength(1)
+      expect(rows()[0].textContent).toContain('Checking the nocx helper')
+      // No bar and no percentage for a stage that counts nothing.
+      expect(document.querySelector('.ui-operation-row__percent')).toBeNull()
+      expect(rows()[0].textContent).not.toContain('of 0 B')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('goes on settle and leaves no finished entry', () => {
+    const fake = fakeDispatcher()
+    mount(fake)
+    fake.pending(1, 'open')
+    fake.notify('operation.row', copying)
+    openList()
+    expect(rows()).toHaveLength(1)
+    fake.notify('operation.rowDone', { requestId: 1 })
+    expect(rows()).toHaveLength(0)
+    expect(emptyState()).toContain('Nothing is running')
+  })
+
+  it("cancels the open through the dispatcher by the call's own id", () => {
+    const fake = fakeDispatcher()
+    mount(fake)
+    fake.pending(9, 'open')
+    fake.notify('operation.row', { ...copying, requestId: 9 })
+    openList()
+    const button = document.querySelector<HTMLElement>(
+      '[aria-label="Cancel Copying the nocx helper"]',
+    )
+    expect(button).not.toBeNull()
+    fireEvent.click(button!)
+    // The row borrows the call's identity, so its Cancel is the ordinary
+    // withdrawal of the open — there is no second verb.
+    expect(fake.cancel).toHaveBeenCalledWith(9)
+  })
+
+  it('goes when the socket does, because the work died with it', () => {
+    const fake = fakeDispatcher()
+    mount(fake)
+    fake.notify('operation.row', copying)
+    openList()
+    expect(rows()).toHaveLength(1)
+    fake.disconnect()
+    expect(rows()).toHaveLength(0)
+    expect(emptyState()).toContain('Nothing is running')
+  })
+
+  it('shows nothing for an open that installs nothing', () => {
+    vi.useFakeTimers()
+    try {
+      const fake = fakeDispatcher()
+      mount(fake)
+      // The open answers inside the call threshold and no install was
+      // reported: the row count stays at zero.
+      fake.pending(3, 'open')
+      fake.settled(3)
+      vi.advanceTimersByTime(10_000)
+      openList()
+      expect(rows()).toHaveLength(0)
+      expect(emptyState()).toContain('Nothing is running')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('ignores a frame it cannot read rather than drawing a broken row', () => {
+    const fake = fakeDispatcher()
+    mount(fake)
+    fake.notify('operation.row', { requestId: 1, kind: 'install' })
+    fake.notify('operation.row', null)
+    openList()
+    expect(rows()).toHaveLength(0)
+  })
+})

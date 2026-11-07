@@ -317,6 +317,7 @@ run_one() {
     -v "$GO_MOD" \
     -e PW_PROJECTS="$1" \
     -e PW_WORKERS="${PW_WORKERS:-}" \
+    -e PW_MIN_FREE_GB="${PW_MIN_FREE_GB:-}" \
     -e NOCX_LOG_LEVEL="${NOCX_LOG_LEVEL:-}" \
     -e NOCX_PROVE_FAILURE_CONTEXT="${NOCX_PROVE_FAILURE_CONTEXT:-}" \
     -e NOCX_E2E_SHARD_FILES="${NOCX_E2E_SHARD_FILES:-}" \

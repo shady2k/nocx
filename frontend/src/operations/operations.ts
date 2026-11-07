@@ -114,7 +114,24 @@ export function createOperationsModel(sources: readonly OperationSource[]): Oper
   // derivation over a list a person is looking at, and a memo here would
   // add a node to dispose for no measurable saving. The reads inside stay
   // tracked either way, which is the part that matters.
-  const all = (): Operation[] => sources.flatMap((source) => source())
+  //
+  // ONE ROW PER ID, AND THE LATER SOURCE SPEAKS FOR IT. Two sources can see
+  // one operation from different angles — the call a person made, and the
+  // helper install the backend is running inside it (ADR-8eej3e66 §8) — and
+  // the list a person reads is about the OPERATION, not about the sources.
+  // So the sources are listed from the general to the specific and the more
+  // specific answer replaces the general one for the same id: while an
+  // install runs, the row says what the install is doing; when it finishes,
+  // the call's own row is what is left if the call is still waiting. Two
+  // rows for one call would be two answers to one question, and Cancel on
+  // both would be the same withdrawal offered twice.
+  const all = (): Operation[] => {
+    const byID = new Map<string, Operation>()
+    for (const source of sources) {
+      for (const op of source()) byID.set(op.id, op)
+    }
+    return [...byID.values()]
+  }
 
   const live = (): Operation[] => all().filter((o) => !isTerminalPhase(o.phase))
 

@@ -52,7 +52,38 @@ const (
 	binaryMode = 0o700
 	// markerMode is the marker's mode; it is a data file, not executable.
 	markerMode = 0o600
+	// writeChunk is how much of the payload one Write carries. It is small
+	// enough for the INSTALL to be watchable and stoppable: a progress
+	// reporter sees a byte count that moves while somebody waits on a slow
+	// link, and a cancelled install is noticed within one chunk instead of
+	// after the whole binary. A 15.3 MB helper is 60 writes of it.
+	writeChunk = 256 << 10
 )
+
+// Stage names what the install is doing at this moment, in the vocabulary a
+// surface shows a person. There is no stage for "removing an unfinished
+// directory" or "decompressing": both are local work measured in
+// milliseconds, and a row that flickered through three sentences to say so
+// would be noise rather than news.
+type Stage string
+
+const (
+	// StageCopying is the payload moving to the host. Progress carries bytes.
+	StageCopying Stage = "copying"
+	// StageChecking is the verification read that proves what arrived hashes
+	// to the install directory's name. It moves no counted bytes: the read
+	// is one ReadFile, so a row says what it is doing and shows no bar
+	// rather than a bar at 100% that stops moving.
+	StageChecking Stage = "checking"
+)
+
+// Progress is the install's own account of what it is doing, for a surface
+// that shows the work while it happens (ADR-8eej3e66 §8: a first helper
+// install is work a person is watching). It is called on the installing
+// goroutine, never concurrently, and total is zero where the stage counts
+// nothing. A nil Progress is the ordinary case for every caller that is not
+// a person's open.
+type Progress func(stage Stage, written, total int64)
 
 // RemoteFS is the filesystem seam the installer writes through: the same
 // shape as the shell-integration publisher's seam, so one SFTP adapter
@@ -202,7 +233,7 @@ func InstalledBinary(dir string) string {
 // running from them, so an install followed by a start that fails is still
 // exactly as reusable as one followed by a start that succeeds. Liveness has
 // one authority and it is the endpoint socket.
-func Ensure(ctx context.Context, fs RemoteFS, src ArtifactSource, home string, p Platform) (binaryPath, contentHash string, err error) {
+func Ensure(ctx context.Context, fs RemoteFS, src ArtifactSource, home string, p Platform, progress Progress) (binaryPath, contentHash string, err error) {
 	scope := catalog.BeginInternal(ctx, catalog.OpInternalHelperInstall)
 	defer scope.Complete()
 	data, contentHash, err := src.Artifact(p)
@@ -220,6 +251,9 @@ func Ensure(ctx context.Context, fs RemoteFS, src ArtifactSource, home string, p
 		return "", "", err
 	}
 	if complete {
+		// NOTHING TO REPORT, and that is a fact a surface relies on: a
+		// repeat open installs nothing, so progress is never called and no
+		// row is ever made for it.
 		return binary, contentHash, nil
 	}
 	if err = ctx.Err(); err != nil {
@@ -234,7 +268,7 @@ func Ensure(ctx context.Context, fs RemoteFS, src ArtifactSource, home string, p
 	if err = ctx.Err(); err != nil {
 		return "", "", err
 	}
-	if err = install(fs, dir, binary, contentHash, data); err != nil {
+	if err = install(ctx, fs, dir, binary, contentHash, data, progress); err != nil {
 		return "", "", err
 	}
 	return binary, contentHash, nil
@@ -273,13 +307,27 @@ func hashesTo(fs RemoteFS, binary, contentHash string) (bool, error) {
 // writes the .install-complete marker — the directory is complete only when
 // the marker exists (D7). An interrupted or corrupt install leaves a
 // markerless directory, which a later Ensure removes and reinstalls.
-func install(fs RemoteFS, dir, binary, contentHash string, compressed []byte) error {
+//
+// THE WRITE IS CHUNKED, and it is the payload's two readers that decide it.
+// A person watching a slow link needs a byte count that moves (progress), and
+// a person who cancels needs the install to stop rather than to plough
+// through the rest of the binary — the context is checked between chunks,
+// and the write, sync and close all happen AFTER the last chunk was accepted,
+// so a cancelled install removes its temporary and leaves a markerless tree.
+// Neither reader can exist if the whole payload goes out in one Write, which
+// is what this used to do.
+func install(ctx context.Context, fs RemoteFS, dir, binary, contentHash string, compressed []byte, progress Progress) error {
 	if err := mkdirAll(fs, dir, dirMode); err != nil {
 		return fmt.Errorf("deploy: install directory: %w", err)
 	}
 	payload, err := decompressedPayload(compressed)
 	if err != nil {
 		return fmt.Errorf("deploy: decompress helper: %w", err)
+	}
+	report := func(stage Stage, written, total int64) {
+		if progress != nil {
+			progress(stage, written, total)
+		}
 	}
 
 	// The temporary name is per-attempt: two concurrent installs of the
@@ -290,9 +338,43 @@ func install(fs RemoteFS, dir, binary, contentHash string, compressed []byte) er
 	if err != nil {
 		return fmt.Errorf("deploy: create temp: %w", err)
 	}
-	written, werr := f.Write(payload)
-	if werr == nil && written != len(payload) {
-		werr = io.ErrShortWrite
+	total := int64(len(payload))
+	report(StageCopying, 0, total)
+	written := 0
+	werr := ctx.Err()
+	for werr == nil && written < len(payload) {
+		// A CANCEL BETWEEN CHUNKS IS THE POINT OF CHUNKING. This loop used
+		// to read ctx.Err() only before the first chunk and after the last,
+		// so a person's Cancel during a slow upload was answered by the
+		// whole payload going out anyway — 38 s on the e2e fixture's
+		// 500 KB/s link — and then "deploy: write helper: context canceled".
+		// The comment above has promised this check since the chunking
+		// landed; it was never there.
+		if cerr := ctx.Err(); cerr != nil {
+			werr = cerr
+			break
+		}
+		size := min(writeChunk, len(payload)-written)
+		n, writeErr := f.Write(payload[written : written+size])
+		if writeErr != nil {
+			werr = writeErr
+			break
+		}
+		if n != size {
+			werr = io.ErrShortWrite
+			break
+		}
+		written += n
+		report(StageCopying, int64(written), total)
+	}
+	// AND ONCE MORE BEFORE ANYTHING IS COMMITTED. A cancellation that
+	// arrives while the LAST chunk is on the wire otherwise slips past the
+	// loop, and the install would commit an upload the person had already
+	// stopped. Nothing is durable yet at this point — the rename and the
+	// marker come after — so stopping here costs the person nothing and
+	// leaves the markerless tree every later attempt knows how to replace.
+	if werr == nil {
+		werr = ctx.Err()
 	}
 	if werr == nil {
 		werr = f.Sync()
@@ -321,6 +403,13 @@ func install(fs RemoteFS, dir, binary, contentHash string, compressed []byte) er
 	// (D6). Leaving the tree markerless is what makes the next attempt
 	// reinstall it: the marker is the claim, and a corrupt write may not
 	// carry one.
+	//
+	// NO BAR HERE, and the stage says so: the read is one ReadFile of the
+	// whole binary, so there is no byte count between its ends to report
+	// (total zero). A row that showed 100% for the several seconds this
+	// takes on a slow link would read as stalled at the moment it is
+	// working hardest.
+	report(StageChecking, 0, 0)
 	ok, err := hashesTo(fs, binary, contentHash)
 	if err != nil {
 		return fmt.Errorf("deploy: verify helper: %w", err)

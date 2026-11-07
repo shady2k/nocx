@@ -208,3 +208,34 @@ func TestKeyedOrderedSubmissionReclaimsIdleKeysBeforeShutdown(t *testing.T) {
 		}
 	})
 }
+
+// The keyed form gives the same gate: a cancelled task queued behind a
+// running one is skipped and the queue advances to the next.
+func TestKeyedOrderedSubmissionNeverStartsAWithdrawnTask(t *testing.T) {
+	sub := newTestKeyedOrdered(t, "keyed-start-gate", 4)
+	t.Cleanup(sub.Shutdown)
+	block := make(chan struct{})
+	started := make(chan struct{})
+	if rej := sub.TrySubmit(context.Background(), Task{Key: "A", Run: func(context.Context) {
+		close(started)
+		<-block
+	}}); rej != nil {
+		t.Fatalf("first submit: %+v", rej)
+	}
+	<-started
+	ran := make(chan struct{}, 1)
+	if rej := sub.TrySubmit(context.Background(), Task{
+		Key:   "A",
+		Start: func() bool { return false },
+		Run:   func(context.Context) { ran <- struct{}{} },
+	}); rej != nil {
+		t.Fatalf("second submit: %+v", rej)
+	}
+	close(block)
+	sub.Shutdown()
+	select {
+	case <-ran:
+		t.Fatal("a withdrawn queued task ran")
+	case <-time.After(100 * time.Millisecond):
+	}
+}

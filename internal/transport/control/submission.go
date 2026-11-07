@@ -8,7 +8,9 @@ import "context"
 type ImmediateSubmission struct{}
 
 func (ImmediateSubmission) TrySubmit(ctx context.Context, task Task) *Rejection {
-	task.Run(ctx)
+	if startAllowed(task) {
+		task.Run(ctx)
+	}
 	return nil
 }
 
@@ -46,5 +48,7 @@ func (s *boundedSubmission) TrySubmit(ctx context.Context, task Task) *Rejection
 // crashes the process, but never leaks the Permit.
 func runAndRelease(permit Permit, ctx context.Context, task Task) {
 	defer permit.Release()
-	task.Run(ctx)
+	if startAllowed(task) {
+		task.Run(ctx)
+	}
 }

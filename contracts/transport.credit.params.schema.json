@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/transport.credit.params.schema.json",
+  "title": "TransportCreditParams",
+  "description": "Params for transport.credit. The advertisement describes the connection the request arrived on; it takes nothing from the caller.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {}
+}

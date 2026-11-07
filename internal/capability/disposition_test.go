@@ -7,8 +7,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/operation/schedule"
+
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/operation/catalog"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
@@ -18,6 +21,7 @@ func TestOperationDispositionsMatchMap(t *testing.T) {
 		return Gate(name, 1, 8, time.Second)
 	}
 	db := content.NewStub(log.NewSlogAdapter(nil))
+	stores := NewStoreGuard(catalog.Declarations(), 8, time.Second)
 	targetOp, err := NewSessionOperations(gate(GateSession), gate("lane"), dispositionRegistry{}, nil).ForSessionTarget("s1")
 	if err != nil {
 		t.Fatalf("ForSessionTarget: %v", err)
@@ -40,10 +44,10 @@ func TestOperationDispositionsMatchMap(t *testing.T) {
 		{"TabbyImportOperation", NewTabbyImportOperation(gate(GateConfig), gate(GateVault), gate("lane"), nil, nil, nil, nil, nil), DispositionDirect},
 		{"ConfigOperation", NewConfigOperation(gate(GateConfig), gate(GateVault), gate("lane"), nil, nil, nil, nil, nil, nil, nil, nil), DispositionDirect},
 		{"ContentOperation", NewContentOperation(gate(GateContent), gate("lane"), db), DispositionDirect},
-		{"FilesystemOpenOperation", NewFilesystemOpenOperation(gate(GateSession), gate(GateFilesystem), gate("lane"), nil, nil, nil), DispositionAdapted},
-		{"FilesystemBindingOperation", NewFilesystemBindingOperation(gate(GateFilesystem), gate("lane"), nil), DispositionAdapted},
-		{"GitOpenOperation", NewGitOpenOperation(gate(GateSession), gate(GateGit), gate("lane"), nil, nil, nil), DispositionAdapted},
-		{"GitBindingOperation", NewGitBindingOperation(gate(GateGit), gate("lane"), nil), DispositionAdapted},
+		{"FilesystemOpenOperation", NewFilesystemOpenOperation(gate(GateSession), gate("lane"), nil, nil, nil), DispositionAdapted},
+		{"FilesystemBindingOperation", NewFilesystemBindingOperation(gate("lane"), nil), DispositionAdapted},
+		{"GitOpenOperation", NewGitOpenOperation(gate(GateSession), testGitBulkhead(), gate("lane"), nil, nil, nil), DispositionAdapted},
+		{"GitBindingOperation", NewGitBindingOperation(schedule.NewKeyed("git", 8), testGitBulkhead(), gate("lane"), nil), DispositionAdapted},
 		{"LayoutOperation", NewLayoutOperation(gate(GateContent), gate("lane"), db), DispositionDirect},
 		{"LedgerOperation", NewLedgerOperation(gate(GateContent), gate("lane"), db), DispositionExcluded},
 		{"NoteOperation", NewNoteOperation(gate(GateConfig), gate("lane"), nil), DispositionDirect},
@@ -55,7 +59,8 @@ func TestOperationDispositionsMatchMap(t *testing.T) {
 		{"SnippetOperation", NewSnippetOperation(gate(GateConfig), gate("lane"), nil), DispositionDirect},
 		{"UIStateOperation", NewUIStateOperation(gate(GateConfig), gate("lane"), nil), DispositionExcluded},
 		{"VaultOperation", NewVaultOperation(gate(GateVault), gate("lane"), nil), DispositionDirect},
-		{"VaultResetOperation", NewVaultResetOperation(gate(GateConfig), gate(GateVault), gate("lane"), nil), DispositionDirect},
+		{"VaultResetOperation", NewVaultResetOperation(stores, catalog.OpVaultReset.Declaration(), gate("lane"), nil), DispositionDirect},
+		{"RestoreOperation", NewRestoreOperation(stores, catalog.OpBackupRestore.Declaration(), gate("lane"), nil), DispositionDirect},
 	}
 
 	for _, tc := range cases {

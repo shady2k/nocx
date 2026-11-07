@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Dispatcher } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
 import { SettingsObserver } from './settings-observer'
+import { creditHandshakeAnswer } from './test-support/credit'
 
 class MockSocket {
   static readonly CONNECTING = 0
@@ -31,6 +32,11 @@ class MockSocket {
     this._listeners.get(type)?.delete(fn)
   }
   send(data: string): void {
+    const credit = creditHandshakeAnswer(data)
+    if (credit !== null) {
+      this.deliver(credit)
+      return
+    }
     this.sent.push(data)
   }
   close(): void {

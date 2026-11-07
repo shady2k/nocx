@@ -25,12 +25,21 @@ import (
 // worktreeRepo is a repository with one commit on master and one directory
 // beside it for the linked worktrees, so no worktree path is ever inside
 // another.
+//
+// The home is canonicalTempDir, for the reason that helper is for: git answers
+// a worktree path in its RESOLVED spelling — `worktree list`, and the path a
+// refusal names — while t.TempDir() hands back the unresolved one, which on
+// macOS is /private/var against /var for every temporary directory. A test
+// that asks for a path and then compares it with git's answer has to ask in the
+// spelling git answers in, or the difference under test is the fixture's. The
+// two tests that deliberately hand the seam a caller's alias spelling — the
+// partial-add rollback and the same-path gate — take a home of their own.
 func worktreeRepo(t *testing.T) (repoDir, wtHome string) {
 	t.Helper()
 	dir := newGitRepo(t)
 	gitWrite(t, dir, "tracked.txt", "v1")
 	gitCommit(t, dir, "one")
-	return dir, t.TempDir()
+	return dir, canonicalTempDir(t)
 }
 
 // TestAddWorktreePreservesABranchCreatedAfterTheAbsenceRead fixes the race
@@ -220,7 +229,10 @@ func TestAddWorktreeCleansARegisteredPartialCheckoutOnCancellation(t *testing.T)
 			}
 			t.Setenv("TMPDIR", tempAlias)
 
-			dir, home := worktreeRepo(t)
+			// The home is the caller's spelling on purpose: git answers the
+			// resolved one, and the seam has to join the two.
+			dir, _ := worktreeRepo(t)
+			home := t.TempDir()
 			if !strings.HasPrefix(home, tempAlias+string(os.PathSeparator)) {
 				t.Fatalf("worktree home %q does not retain TMPDIR alias %q", home, tempAlias)
 			}
@@ -321,7 +333,10 @@ func TestAddWorktreeWaiterCannotRemoveTheSuccessfulCheckout(t *testing.T) {
 	}
 	t.Setenv("TMPDIR", tempAlias)
 
-	dir, home := worktreeRepo(t)
+	// The home is the caller's spelling on purpose: the gate below has to see
+	// one physical path through two of them.
+	dir, _ := worktreeRepo(t)
+	home := t.TempDir()
 	linkedCwd := filepath.Join(home, "linked-caller")
 	if output, err := commandIn(dir, "worktree", "add", "--detach", "--", linkedCwd, "master").CombinedOutput(); err != nil {
 		t.Fatalf("create linked caller worktree: %v: %s", err, output)

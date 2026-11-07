@@ -3,9 +3,12 @@ package capability
 import (
 	"context"
 	"errors"
+	"path"
 
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/git/registry"
+	"github.com/shady2k/nocx/internal/operation/catalog"
+	"github.com/shady2k/nocx/internal/operation/schedule"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
@@ -45,65 +48,87 @@ type GitOpenService interface {
 
 // GitOpenOperation is the typed operation for git.open, and it is two-phase
 // for the reason OpenOperation is (nocx-l21ib.1, nocx-zg3k3.14.17): Resolve
-// runs under the session gate alone, Open under the git gate and the
-// execution lane. On an ssh session the open is a helper round trip — a
-// lease, a uname, the open, the first status — and the session gate is
-// capacity one for every session request of every pane. Held across that, a
-// reloaded window's few ssh panes filled its wait queue and every resize,
-// sessions.live and shell request on the server was refused "Control plane
-// busy" for as long as the opens took. Resolving is a registry read; it is
-// the only part the session gate has any business excluding.
+// runs under the session gate alone, Open under the checkout's failure-domain
+// bulkhead and the execution lane. On an ssh session the open is a helper
+// round trip — a lease, a uname, the open, the first status — and the session
+// gate is capacity one for every session request of every pane. Held across
+// that, a reloaded window's few ssh panes filled its wait queue and every
+// resize, sessions.live and shell request on the server was refused "Control
+// plane busy" for as long as the opens took. Resolving is a registry read; it
+// is the only part the session gate has any business excluding.
 //
-// What the gate used to buy, and what replaces it: under it an open could
-// not interleave with a session close, so it never registered a binding for
-// a session already torn down. Now one can, and the handler closes it: the
-// registry forgets a session before its bindings are swept, so an opener
-// that finds its session gone after recording the binding is the one that
-// must close it, and one that finds it present can leave it to the sweep.
+// The git gate is gone in stage 5. The open draws on its checkout's mount
+// instead, so a hung mount holds the open's permit and a healthy one opens.
 type GitOpenOperation interface {
 	AssistantOperation
 	// Resolve runs fn under the session gate and nothing else.
 	Resolve(context.Context, func(context.Context, GitOpenService) error) error
-	// Open runs fn under [git] and the execution lane, no session gate held.
-	Open(context.Context, func(context.Context, GitOpenService) error) error
+	// Open runs fn under the checkout's bulkhead and the execution lane, no
+	// session gate held. The declaration's turn and max are enforced; the
+	// failure domain is read from the session and the cwd the open names.
+	Open(ctx context.Context, sess session.Session, cwd string, fn func(context.Context, GitOpenService) error) error
 }
 
-// NewGitOpenOperation builds the git.open operation. Its phases acquire the
-// session gate, then — after releasing it — the git gate and the execution
-// lane, so the canonical order holds and no phase waits on a domain gate
-// while holding the lane.
+// NewGitOpenOperation builds the git.open operation.
 func NewGitOpenOperation(
-	sessionGate, gitGate, lane control.Admission,
-	registry session.Registry,
-	factory GitOpenFactory,
-	reg *registry.Registry,
+	sessionGate control.Admission, bulkhead *schedule.Bulkhead, lane control.Admission,
+	registry session.Registry, factory GitOpenFactory, reg *registry.Registry,
 ) GitOpenOperation {
 	g := &guard{}
-	svc := newGitOpenService(g, registry, factory, reg)
 	disposition := Adapted("git.open", "opening a repository resolves a session and selects its helper or local binding")
 	return &gitOpenOperation{
-		resolve: newOperation[GitOpenService](disposition, control.NewComposite(sessionGate), g, svc),
-		open:    newOperation[GitOpenService](disposition, control.NewComposite(gitGate, lane), g, svc),
+		resolve:  newOperation[GitOpenService](disposition, control.NewComposite(sessionGate), g, newGitOpenService(g, registry, factory, reg)),
+		bulkhead: bulkhead, lane: lane, guard: g,
+		svc: newGitOpenService(g, registry, factory, reg), disposition: disposition,
 	}
 }
 
-// gitOpenOperation is the two admissions over ONE guard and ONE service, as
-// openOperation is: a handle captured in one phase is refused outside every
-// in-flight phase.
+// gitOpenOperation is the two phases over ONE guard and ONE service: a handle
+// captured in one phase is refused outside every in-flight phase.
 type gitOpenOperation struct {
-	resolve, open *operation[GitOpenService]
+	resolve     *operation[GitOpenService]
+	bulkhead    *schedule.Bulkhead
+	lane        control.Admission
+	guard       *guard
+	svc         GitOpenService
+	disposition Disposition
 }
 
-func (o *gitOpenOperation) Disposition() Disposition {
-	return o.open.Disposition()
-}
+func (o *gitOpenOperation) Disposition() Disposition { return o.disposition }
 
 func (o *gitOpenOperation) Resolve(ctx context.Context, fn func(context.Context, GitOpenService) error) error {
 	return o.resolve.Run(ctx, fn)
 }
 
-func (o *gitOpenOperation) Open(ctx context.Context, fn func(context.Context, GitOpenService) error) error {
-	return o.open.Run(ctx, fn)
+func (o *gitOpenOperation) Open(ctx context.Context, sess session.Session, cwd string, fn func(context.Context, GitOpenService) error) error {
+	allow, _ := allowanceFromContext(ctx)
+	domain := openFailureDomain(sess, cwd)
+	return gitRun(ctx, allow, func(waitCtx context.Context) (func(), func(), error) {
+		lease, err := o.bulkhead.Acquire(waitCtx, domain, schedule.Class(gitClass(allow.Origin)))
+		if err != nil {
+			return nil, nil, gitBulkheadError(ctx, allow, err)
+		}
+		permit, rejection := o.lane.TryAcquire(waitCtx)
+		if rejection != nil {
+			lease.Release()
+			return nil, nil, gitRefused(ctx, rejection)
+		}
+		return func() { permit.Release(); lease.Release() }, lease.Abandon, nil
+	}, func(workCtx context.Context) error {
+		o.guard.begin()
+		defer o.guard.end()
+		return fn(workCtx, o.svc)
+	})
+}
+
+// openFailureDomain is the mount the open will run on, before a checkout
+// exists: the cwd's device for a local session, the helper session for a
+// remote one.
+func openFailureDomain(sess session.Session, cwd string) string {
+	if sess.Kind() != session.KindLocal {
+		return "remote:" + string(sess.ID())
+	}
+	return git.FailureDomain(cwd)
 }
 
 // newGitOpenService builds the concrete git.open service bound to guard g.
@@ -155,7 +180,18 @@ func (s *gitOpenService) OpenBinding(ctx context.Context, sess session.Session, 
 		// The other direction of the same lie: ok with no repository.
 		return "", git.OpenOutcome{}, &openOutcomeNilRepoError{}
 	}
-	bid, err := s.reg.Register(repo, sess.ID())
+	checkout, domain := gitBindingIdentity(sess, outcome.Toplevel)
+	if checkout == "" {
+		// A source open that answered ok without a worktree root cannot be
+		// ordered per checkout. The registry refuses the identity, and the
+		// repo is closed below like any failed register.
+		re := &openRegisterError{err: errNoCheckoutIdentity}
+		if cerr := repo.Close(); cerr != nil {
+			re.closeErr = cerr
+		}
+		return "", git.OpenOutcome{}, re
+	}
+	bid, err := s.reg.Register(repo, sess.ID(), checkout, domain)
 	if err != nil {
 		// Always a typed error, close outcome or not: the transport's
 		// git.open answers every register failure with the "git.open:"
@@ -194,17 +230,86 @@ type GitBindingService interface {
 }
 
 // GitBindingOperation is the typed operation for the git-binding domain.
-// Its gate is [git].
+//
+// ADR-8eej3e66 stage 5: its whole-domain gate is gone. A mutation chains on
+// its CHECKOUT (not its binding — the branch source and the panel hold two
+// bindings on one checkout), every call draws on its checkout's failure
+// domain through a bulkhead, and the declaration's turn and max are enforced.
+// Reads take no key: they have no order to keep and run concurrently.
 type GitBindingOperation interface {
 	AssistantOperation
-	Run(context.Context, func(context.Context, GitBindingService) error) error
+	// Run orders and bounds one git.* call on bindingID. Declarations come
+	// from the catalogue scope the dispatcher put in ctx; a call without one
+	// (a direct capability test) runs unbounded.
+	Run(ctx context.Context, bindingID string, fn func(context.Context, GitBindingService) error) error
 }
 
-// NewGitBindingOperation builds the git-binding operation, acquiring the
-// git gate before the execution lane.
-func NewGitBindingOperation(gitGate, lane control.Admission, reg *registry.Registry) GitBindingOperation {
+// NewGitBindingOperation builds the git-binding operation. order serialises
+// mutations per checkout; bulkhead bounds execution per checkout mount; lane
+// is the execution lane this migration still holds.
+func NewGitBindingOperation(order *schedule.Keyed, bulkhead *schedule.Bulkhead, lane control.Admission, reg *registry.Registry) GitBindingOperation {
 	g := &guard{}
-	return newOperation[GitBindingService](Adapted("git.refresh", "git calls require an assistant-owned repository lease"), control.NewComposite(gitGate, lane), g, newGitBindingService(g, reg))
+	return &gitBindingOperation{
+		order: order, bulkhead: bulkhead, lane: lane, reg: reg, g: g,
+		svc:         newGitBindingService(g, reg),
+		disposition: Adapted("git.refresh", "git calls require an assistant-owned repository lease"),
+	}
+}
+
+type gitBindingOperation struct {
+	order       *schedule.Keyed
+	bulkhead    *schedule.Bulkhead
+	lane        control.Admission
+	reg         *registry.Registry
+	g           *guard
+	svc         GitBindingService
+	disposition Disposition
+}
+
+func (o *gitBindingOperation) Disposition() Disposition { return o.disposition }
+
+func (o *gitBindingOperation) Run(ctx context.Context, bindingID string, fn func(context.Context, GitBindingService) error) error {
+	allow, hasAllowance := allowanceFromContext(ctx)
+	identity, known := o.reg.Identity(bindingID)
+	ordered := hasAllowance && allow.Merge == catalog.MergeNone
+	return gitRun(ctx, allow, func(waitCtx context.Context) (func(), func(), error) {
+		if !known {
+			// The binding is gone. Nothing to order or bound: Acquire answers
+			// the unknown-binding error inside the work, in the one place
+			// that checks ownership.
+			return func() {}, func() {}, nil
+		}
+		var releases []func()
+		releaseAll := func() {
+			for i := len(releases) - 1; i >= 0; i-- {
+				releases[i]()
+			}
+		}
+		if ordered {
+			release, err := o.order.Acquire(waitCtx, identity.Checkout)
+			if err != nil {
+				return nil, nil, err
+			}
+			releases = append(releases, release)
+		}
+		lease, err := o.bulkhead.Acquire(waitCtx, identity.Domain, schedule.Class(gitClass(allow.Origin)))
+		if err != nil {
+			releaseAll()
+			return nil, nil, gitBulkheadError(ctx, allow, err)
+		}
+		releases = append(releases, lease.Release)
+		permit, rejection := o.lane.TryAcquire(waitCtx)
+		if rejection != nil {
+			releaseAll()
+			return nil, nil, gitRefused(ctx, rejection)
+		}
+		releases = append(releases, permit.Release)
+		return releaseAll, lease.Abandon, nil
+	}, func(workCtx context.Context) error {
+		o.g.begin()
+		defer o.g.end()
+		return fn(workCtx, o.svc)
+	})
 }
 
 // newGitBindingService builds the concrete git-binding service bound to
@@ -246,6 +351,21 @@ func (s *gitBindingService) CloseSession(sessionID session.ID) {
 // disagree.
 var errNoFactoryForSession = errors.New("git.open: no repo factory for this session")
 
+// gitBindingIdentity is the checkout and failure-domain identity a binding
+// carries. A local checkout is canonicalised and keyed by its mount; a remote
+// one is keyed by the helper session that reaches it, because that connection
+// is what fails together for work on that host.
+func gitBindingIdentity(sess session.Session, toplevel string) (checkout, domain string) {
+	if toplevel == "" {
+		return "", ""
+	}
+	if sess.Kind() == session.KindLocal {
+		return git.CheckoutIdentity(toplevel)
+	}
+	id := string(sess.ID())
+	return "remote:" + id + ":" + path.Clean(toplevel), "remote:" + id
+}
+
 // openOutcomeCloseError reports a refusing git.open outcome whose live repo
 // could not be closed. The repo must not leak, and a failed close is a fact
 // the operator should see, not a silently dropped error.
@@ -255,6 +375,11 @@ func (e *openOutcomeCloseError) Error() string {
 	return "git.open: close repo after refusing outcome: " + e.err.Error()
 }
 func (e *openOutcomeCloseError) Unwrap() error { return e.err }
+
+// errNoCheckoutIdentity reports an open that answered ok without a worktree
+// root. Nothing can be ordered without it, so the open is refused rather than
+// registered under a guess.
+var errNoCheckoutIdentity = errors.New("git.open: ok outcome without a checkout identity")
 
 // openOutcomeNilRepoError reports a factory that answered ok without a
 // repository.

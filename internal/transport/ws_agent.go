@@ -908,6 +908,19 @@ func validateAgentAskRaw(raw json.RawMessage) string {
 	return msg
 }
 
+// detachedRunContext is the context a resumed or streamed run gets: it
+// outlives the frame that started it, so the handler's return must not cancel
+// it, while rpc.cancel and disconnect still do through the request entry.
+func (h agentHandlers) detachedRunContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	parent := context.WithoutCancel(ctx)
+	if conn, ok := connectionContext(ctx); ok {
+		parent = conn
+	}
+	base, cancel := context.WithCancel(parent)
+	retainRequestWork(ctx, cancel)
+	return base, cancel
+}
+
 func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	if h.op == nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "method not found: content store not wired"})
@@ -1034,7 +1047,13 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	// approval that suspends it, the resume that finishes it and every
 	// effect any of them run all log under one trace, across the several
 	// wire frames it takes (internal/log).
-	runCtx, _ := log.StartTrace(ctx, runTrace(askRes.RunID))
+	// The run outlives this handler: the response is already sent when the
+	// stream starts. Its context must therefore not be the request context,
+	// which is cancelled when the worker returns; it is detached from that
+	// cancellation and retained on the request entry instead, so rpc.cancel
+	// and disconnect still end it.
+	runBase, cancelRun := h.detachedRunContext(ctx)
+	runCtx, _ := log.StartTrace(runBase, runTrace(askRes.RunID))
 	leaseDegradation := assistant.NewRunLeaseDegradation()
 	runControl := &agentRunControl{cancelDone: make(chan struct{})}
 	rc := askRunContext{
@@ -1076,8 +1095,10 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		Model:     facts.Model,
 	}))
 	if rej := h.askSub.TrySubmit(runCtx, control.Task{Run: func(taskCtx context.Context) {
+		defer cancelRun()
 		h.runAskStream(taskCtx, rc, h.r)
 	}}); rej != nil {
+		cancelRun()
 		// The stream was refused: nothing is in flight. Drop the stored
 		// context so a later agent.approve cannot target a run that never
 		// started — the run terminalizes below and has no question open.
@@ -2054,9 +2075,12 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 		if msg := h.notifyStandingAnswer(ap, p, outcome, rc); msg != "" {
 			warning = msg
 		}
-		if rej := h.askSub.TrySubmit(ctx, control.Task{Run: func(taskCtx context.Context) {
+		runCtx, cancelRun := h.detachedRunContext(ctx)
+		if rej := h.askSub.TrySubmit(runCtx, control.Task{Run: func(taskCtx context.Context) {
+			defer cancelRun()
 			h.resumeRunDeclined(taskCtx, rc, h.r)
 		}}); rej != nil {
+			cancelRun()
 			h.terminalize(ctx, rc, content.RunFailed, content.TermFailed,
 				"too many answers in flight — try again in a moment", h.r)
 			_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunFailed), Warning: warning}))
@@ -2120,9 +2144,12 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 	// the middleware sees the approval and runs the call as the proposal's
 	// SUBSEQUENT attempt. The approval store is passed again, so the yes
 	// crosses the suspension.
-	if rej := h.askSub.TrySubmit(ctx, control.Task{Run: func(taskCtx context.Context) {
+	runCtx, cancelRun := h.detachedRunContext(ctx)
+	if rej := h.askSub.TrySubmit(runCtx, control.Task{Run: func(taskCtx context.Context) {
+		defer cancelRun()
 		h.resumeRun(taskCtx, rc, h.r)
 	}}); rej != nil {
+		cancelRun()
 		h.terminalize(ctx, rc, content.RunFailed, content.TermFailed,
 			"too many answers in flight — try again in a moment", h.r)
 		_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunFailed), Warning: warning}))

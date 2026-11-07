@@ -65,7 +65,7 @@ var internalDeclarations = []Declaration{
 	decl("internal.git.process", KindInternal, OwnerCheckout,
 		[]Phase{ph("run", []Resource{{Kind: ResourceCheckout, Name: "", Mode: ModeKey}}, []Domain{DomainGit, DomainFilesystem, DomainSSH, DomainHelper})},
 		d(1000, BasisRead, "the operation waits on its owner’s resources; the smallest non-zero turn is declared until the resource scheduler lands"),
-		d(600000, BasisRead, "read: a git process can run hooks; present behaviour has no bound (stage 5 adds the hook deadline)"),
+		d(600000, BasisMeasured, "measured: a commit's hook deadline is 600 s (git.commit's declared max, from this repository's 107 s pre-commit hook); a child stays within its parent's remainder and is killed by the context at that deadline"),
 		none(), none(), none(),
 		MergeNone, nil,
 		"Waiting for git in this checkout", RowNever, ExpiredOutcomeUnknown),

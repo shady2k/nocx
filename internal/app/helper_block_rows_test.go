@@ -4,12 +4,14 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/emulator"
 	"github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/sessionruntime"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // fakeSink records what the bridge hands the transport, and answers each
@@ -329,4 +331,85 @@ func TestOutputStartAnchorReachesTransportSink(t *testing.T) {
 	if len(sink.outputStartAnchors) != 1 || sink.outputStartAnchors[0] != anchor {
 		t.Fatalf("output start anchors = %+v, want %+v (separate from FromRow 900)", sink.outputStartAnchors, anchor)
 	}
+}
+
+// markConfirmer records every mark the bridge asks the helper for.
+type markConfirmer struct {
+	mu    sync.Mutex
+	marks []uint64
+}
+
+func (m *markConfirmer) ConfirmWritten(_ context.Context, upToRow uint64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.marks = append(m.marks, upToRow)
+	return nil
+}
+
+func (m *markConfirmer) reached(want uint64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, mark := range m.marks {
+		if mark == want {
+			return true
+		}
+	}
+	return false
+}
+
+// A RECORDING OUTLIVES THE REQUEST THAT OPENED THE PANE (the integration of
+// nocx-3an1s.2.2 with the rows plane). Every call is withdrawable now, so the
+// request that opens a pane carries a cancellable context and the transport
+// cancels it the moment the handler returns — milliseconds after this bind, and
+// long before the person's first command finishes. The confirmer runs for the
+// pane's whole life: a mark the helper never receives is a row it keeps in its
+// resend window, and that window is finite. When it filled, the helper dropped
+// the tail of a 5000-row command and said so with its incomplete marker — the
+// block ended at row 3626 and 1374 rows of a person's output were never stored
+// (e2e/transcript-scroll-budget.spec.ts, both browsers).
+//
+// The shape asserted here is the e2e's, below it: a long command's output, its
+// store slow as another content write holding the connection would make it,
+// delivered after the request has ended — and every row handed on and confirmed
+// through the last one.
+func TestLongOutputIsRecordedAfterTheRequestThatOpenedThePaneHasEnded(t *testing.T) {
+	const (
+		batch   = 32
+		batches = 125 // 4000 rows: a command past the helper's 20 MB resend window
+	)
+	// The store is busy: every answer costs a little, as another content write
+	// holding the connection would make it.
+	sink := &fakeSink{answer: func(from uint64, n int) (uint64, bool) {
+		time.Sleep(time.Millisecond)
+		return from + uint64(n), true //nolint:gosec // a test's row count, never negative
+	}}
+	src := &fakeSource{}
+	conf := &markConfirmer{}
+	ctx, cancelRequest := context.WithCancel(context.Background())
+	stop := bindBlockRowsTo(ctx, sink, "s1", src, conf)
+	defer stop()
+	// The handler returns. This is what the transport does to the request the
+	// pane was opened by, and it happens before the person types anything.
+	cancelRequest()
+
+	for i := 0; i < batches; i++ {
+		src.deliverRows(client.OutputRows{FromRow: uint64(i * batch), Rows: rowsN(batch)}) //nolint:gosec // a test's index
+	}
+
+	// Every row reached the transport...
+	sink.mu.Lock()
+	stored := 0
+	for _, delivery := range sink.rows {
+		stored += len(delivery.Rows)
+	}
+	sink.mu.Unlock()
+	if stored != batch*batches {
+		t.Fatalf("the transport received %d rows, want %d: the tail of a person's output was dropped", stored, batch*batches)
+	}
+	// ...and the helper was told, through the last row. Without this mark it
+	// keeps every row in its resend window, and a window that fills drops them.
+	last := uint64(batch * batches) //nolint:gosec // a test's row count
+	waittest.WaitFor(t, "the helper to be told every row was written", func() bool {
+		return conf.reached(last)
+	})
 }

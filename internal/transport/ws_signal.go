@@ -547,10 +547,10 @@ func (h signalHandlers) answer(ctx context.Context, req jsonrpcRequest, sid sess
 // with the same bound, from the composition of the control plane.
 func (s *WSServer) signalSpecs() []methodSpec {
 	return []methodSpec{
-		reg(s.signalSub, catalog.OpSessionSignal, params(validateSignalRaw), func(_ *wsConn, state *connState, r Responder) handlerFunc {
+		keyedBySession(reg(s.signalSub, catalog.OpSessionSignal, params(validateSignalRaw), func(_ *wsConn, state *connState, r Responder) handlerFunc {
 			h := signalHandlers{ops: s.signalOps, machine: s, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSignal(ctx, state, req) }
-		}),
+		})),
 	}
 }
 
@@ -1008,6 +1008,14 @@ func (s *WSServer) deliverHeldStop(ctx context.Context, held heldStop, attempt l
 	sid, lg := held.sid, log.From(held.ctx)
 	lg.Info("foreground signal: delivering the held Stop, the shell has started the command",
 		"session_id", string(sid), "attempt", string(attempt))
+	// The delivery is the same act on the same session as a person's Stop, so
+	// it takes the same ordering key. It has no frame behind it, so no
+	// catalogue scope travels with its context; the fallback turn is the
+	// declaration's own wait bound.
+	ctx = control.WithOrder(ctx, control.OrderRequest{
+		Keys: []string{sessionKey(string(sid))},
+		Turn: control.FallbackOrderTurn,
+	})
 	op, err := s.signalOps.ForSession(sid)
 	if err != nil {
 		// ForSession refuses only when the registry has no such session, so

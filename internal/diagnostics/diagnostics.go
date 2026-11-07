@@ -77,6 +77,7 @@ const (
 	liveOpenCap       = 32
 	recentOpenCap     = 32
 	refusalCap        = 16
+	creditOverrunCap  = 8
 	labelCap          = 64
 	openStagesCap     = 64
 	goroutineStackCap = 512 * 1024
@@ -126,6 +127,20 @@ type Refusal struct {
 	Scope   string
 	Held    time.Duration // age of the oldest holder at refusal
 	Holders []Holder
+}
+
+// CreditOverrun is one frame a peer sent beyond the credit window it was
+// advertised (ADR-8eej3e66 §7). The connection was disconnected for it, so
+// this record is the only place a person can read what happened from the
+// other side. Nothing here is request data: method and class are server
+// vocabulary, the counts are numbers.
+type CreditOverrun struct {
+	At       time.Time
+	Conn     uint64
+	Method   string
+	Class    string
+	InFlight int
+	Window   int
 }
 
 // Holder is one request holding an admission at the moment it was asked.
@@ -179,8 +194,9 @@ type Recorder struct {
 	order  []uint64 // live ids, oldest first
 	recent []*Trace
 
-	refusals []Refusal
-	losses   []LifecycleLoss
+	refusals       []Refusal
+	losses         []LifecycleLoss
+	creditOverruns []CreditOverrun
 
 	now func() time.Time
 }
@@ -638,6 +654,22 @@ func (r *Recorder) RecordRefusal(now time.Time, method, scope string, holders []
 	r.mu.Unlock()
 }
 
+// RecordCreditOverrun appends one peer's over-window frame to the bounded
+// ring. The connection is being disconnected as this is written; the ring is
+// what lets the NEXT connection's Copy diagnostics name it.
+func (r *Recorder) RecordCreditOverrun(now time.Time, o CreditOverrun) {
+	if r == nil {
+		return
+	}
+	o.At = now
+	r.mu.Lock()
+	r.creditOverruns = append(r.creditOverruns, o)
+	if len(r.creditOverruns) > creditOverrunCap {
+		r.creditOverruns = r.creditOverruns[len(r.creditOverruns)-creditOverrunCap:]
+	}
+	r.mu.Unlock()
+}
+
 // NoteLifecycleLoss appends one channel's ending to the bounded ring. The
 // app's loss sink calls it; lane, cause and closer are all bounded codes.
 func (r *Recorder) NoteLifecycleLoss(lane, cause, closedBy string) {
@@ -654,11 +686,12 @@ func (r *Recorder) NoteLifecycleLoss(lane, cause, closedBy string) {
 
 // Snapshot is the record at one moment.
 type Snapshot struct {
-	Generated time.Time
-	Live      []OpenView
-	Recent    []OpenView
-	Refusals  []Refusal
-	Losses    []LifecycleLoss
+	Generated      time.Time
+	Live           []OpenView
+	Recent         []OpenView
+	Refusals       []Refusal
+	Losses         []LifecycleLoss
+	CreditOverruns []CreditOverrun
 }
 
 // OpenView is one open as the text reads it.
@@ -698,6 +731,7 @@ func (r *Recorder) Snapshot() Snapshot {
 	}
 	s.Refusals = append([]Refusal(nil), r.refusals...)
 	s.Losses = append([]LifecycleLoss(nil), r.losses...)
+	s.CreditOverruns = append([]CreditOverrun(nil), r.creditOverruns...)
 	return s
 }
 

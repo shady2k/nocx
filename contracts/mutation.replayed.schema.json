@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/mutation.replayed.schema.json",
+  "title": "MutationReplayed",
+  "description": "The data payload of the -32005 refusal: a mutating call arrived with an identity the backend already used, and the record it retained does not say the first attempt failed to start, so running it again could apply one effect twice (ADR-8eej3e66 \u00a74). It is the error a client that tries again without asking receives.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["reason", "outcome", "operation"],
+  "properties": {
+    "reason": {
+      "description": "The fixed discriminator the renderer matches on.",
+      "type": "string",
+      "enum": ["mutation-replayed"]
+    },
+    "outcome": {
+      "description": "What the retained record says about the first attempt: the same closed set operation.outcome answers with.",
+      "type": "string",
+      "enum": ["not-started", "done", "outcome-unknown", "unknown"]
+    },
+    "operation": {
+      "description": "The catalogue operation the record belongs to.",
+      "type": "string"
+    }
+  }
+}

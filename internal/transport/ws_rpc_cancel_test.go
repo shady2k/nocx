@@ -197,38 +197,38 @@ func TestRPCCancel_UnknownIDIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestRPCCancel_LeavesAMutatingMethodAlone — only the read-only completion
-// calls are withdrawable. A resize the renderer has already asked for must
-// not be cancellable by a stray withdrawal carrying its id.
-func TestRPCCancel_LeavesAMutatingMethodAlone(t *testing.T) {
-	conn, _, sessionID := cancelRig(t)
-
-	writeFrame(t, conn, map[string]any{
-		"jsonrpc": "2.0", "id": 6, "method": "resize",
-		"params": map[string]any{"sessionId": sessionID, "cols": 100, "rows": 30},
-	})
-	writeFrame(t, conn, map[string]any{
-		"jsonrpc": "2.0", "method": "rpc.cancel", "params": map[string]any{"id": 6},
-	})
-
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	for {
-		_, raw, err := conn.ReadMessage()
-		if err != nil {
-			t.Fatalf("resize never answered: %v", err)
-		}
-		var resp struct {
-			ID    *int             `json:"id"`
-			Error *jsonrpcErrorObj `json:"error"`
-		}
-		if err := json.Unmarshal(raw, &resp); err != nil || resp.ID == nil {
-			continue
-		}
-		if *resp.ID == 6 {
-			if resp.Error != nil {
-				t.Fatalf("resize was disturbed by a withdrawal it is not subject to: %+v", resp.Error)
-			}
-			return
+// TestRPCCancel_EveryRequestIsWithdrawable — the stage widens cancellation to
+// every call a person makes; the method name is no longer a filter.
+func TestRPCCancel_EveryRequestIsWithdrawable(t *testing.T) {
+	server := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)))
+	for method := range server.methods {
+		if !requestMethodCancellable(method) {
+			t.Errorf("%s is not cancellable", method)
 		}
 	}
+}
+
+// The gate decides start-against-cancel in one step, and both orders are
+// defined: a withdrawal that gets there first refuses the start; a start that
+// gets there first runs, and sees its context end.
+func TestRequestStartAndWithdrawDecideOneStep(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	first := &requestCancel{cancel: cancel}
+	first.withdraw()
+	if first.begin() {
+		t.Fatal("a withdrawn request was allowed to start")
+	}
+
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	second := &requestCancel{cancel: cancel2}
+	if !second.begin() {
+		t.Fatal("a live request was refused")
+	}
+	second.withdraw()
+	select {
+	case <-ctx2.Done():
+	case <-time.After(time.Second):
+		t.Fatal("withdrawing a started request did not end its context")
+	}
+	_ = ctx
 }

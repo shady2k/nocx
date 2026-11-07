@@ -105,6 +105,8 @@ import { uploadSurfaceFor } from './files/upload-surface'
 import { uploadOperations } from './files/upload-operations'
 import { downloadSurfaceFor } from './files/download-surface'
 import { downloadOperations } from './files/download-operations'
+import { callOperations } from './operations/call-operations'
+import { installOperations } from './operations/install-operations'
 import { createOperationsModel } from './operations/operations'
 import { createOperationsView } from './operations/operations-view'
 import { createGitView } from './git/git-view'
@@ -930,9 +932,20 @@ function main(): void {
   // what made download a one-line ADDITION here: it has no panel of its own,
   // it joins as a second source, and nothing in the model, the indicator or
   // the row changed to receive it.
+  const callOps = callOperations(dispatcher)
+  // The work a backend does INSIDE a person's call is the fourth source
+  // (ADR-8eej3e66 §8): a first open's helper upload. It is listed LAST
+  // because those rows borrow the call's identity — the model shows one row
+  // per id and the later source is the more specific account, so a person
+  // sees the install rather than "Opening your terminal" while it runs.
+  const installOps = installOperations(dispatcher)
   const operations = createOperationsModel([
     uploadOperations(uploadSurface.store),
     downloadOperations(downloadSurface.store),
+    // A person's call past two seconds is the third source. It leaves no
+    // finished entry; the dispatcher announces settle and the row goes.
+    callOps.source,
+    installOps.source,
   ])
   const operationsView = createOperationsView(operations)
 

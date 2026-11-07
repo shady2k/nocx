@@ -47,6 +47,14 @@
 // structurally impossible, and the order keeps it impossible if a blocking
 // admission is ever introduced.
 //
+// It governs the gates that remain. Migration stages 5–7 of ADR-8eej3e66
+// removed git's gate (a per-checkout key and a per-mount bulkhead in
+// internal/operation/schedule replace it) and the session, content and API
+// gates (per-resource FIFOs, internal/transport/control.ResourceOrder). The
+// store guard that replaced the config and vault gates keeps the same
+// sequence inside its own plan: every declared barrier, then config, vault,
+// content in that key order.
+//
 // # Conservative grain
 //
 // The initial operations take the whole domain where the conflict set is
@@ -67,26 +75,48 @@
 //
 // # Read policy (stated per domain, per the brief)
 //
-//   - config: reads PARTICIPATE in the config gate. The profile/group
-//     store gives a coherent single-file snapshot, but a config read that
-//     spans profiles + settings (export.configExport, vault inventory
-//     inputs) could otherwise observe two stores at different generations;
-//     the gate keeps multi-store readers coherent.
-//   - vault: reads participate in the vault gate. The vault is one
-//     mutex-guarded store, but lifecycle ops (seal, reset) and secret ops
-//     share the store; a seal between two secret operations is a conflict
-//     the gate excludes conservatively.
-//   - content, session, git, filesystem: reads participate in their
-//     domain's gate. Each is one store; the conservative posture is one
-//     gate per domain until per-id grain exists.
-//   - api: reads participate in the api gate, and api.request.send holds it
-//     only long enough to snapshot the request — never across the dial
-//     (api.go).
+//   - config: reads PARTICIPATE in the store guard's shared plan for the
+//     config store (stores.go: every barrier that protects it, then its own
+//     key). The profile/group store gives a coherent single-file snapshot,
+//     but a config read that spans profiles + settings (export.configExport,
+//     vault inventory inputs) could otherwise observe two stores at
+//     different generations; the plan keeps multi-store readers coherent and
+//     lets a restore exclude them.
+//   - vault: reads participate in the guard's shared plan for the vault. The
+//     vault is one mutex-guarded store, but lifecycle ops (seal, reset) and
+//     secret ops share the store; a seal between two secret operations is a
+//     conflict the plan excludes conservatively.
+//   - session and content: PER RESOURCE, not per domain (ADR-8eej3e66
+//     section 5, migration stage 6). Their operations are constructed with a
+//     control.ResourceOrder instead of a domain gate: it takes the keys the
+//     invocation's declaration names — one session, the content store, the
+//     layout collection — and a waiter on a different resource is not behind
+//     anybody. The key set and the wait bound arrive in the context from the
+//     dispatcher, which is the only layer that has both the declaration and
+//     the validated params, and capability reads neither. Reads order like
+//     writes: a read of one resource is a phase with the resource in it.
+//     Content composes that FIFO with the store guard's shared barrier
+//     (StoreGuard.SharedBarrier), barrier first, so a restore's exclusive
+//     claim excludes its writers without the FIFO's grain returning to one
+//     key for the whole store.
+//   - git: PER CHECKOUT AND PER MOUNT (ADR-8eej3e66 section 5, migration
+//     stage 5). A git operation orders on its checkout's key in
+//     internal/operation/schedule, and its execution is bounded by the
+//     mount's bulkhead; a staged read of one session inside git.open still
+//     takes the session gate, which stage 6 left for the domains that stage
+//     a registry lookup under it.
+//   - filesystem: reads participate in the filesystem gate, and so does a
+//     staged read of one session inside files.open. It is one store; the
+//     conservative posture is one gate per domain until its stage migrates.
+//   - api: reads order per open collection (a ResourceOrder keyed on the
+//     collection handle), and api.request.send holds that key only long
+//     enough to snapshot the request — never across the dial (api.go).
 //
 // # Refinements deliberately deferred
 //
-//   - per-session / per-binding gate grain (session:<id>, git-binding:<id>,
-//     filesystem-binding:<id>) — the current gates are whole-domain;
+//   - per-binding gate grain for filesystem (filesystem-binding:<id>) — that
+//     gate is whole-domain until its stage migrates; git took the
+//     per-checkout key in stage 5;
 //   - splitting config reads out of the [config, vault] pair once the row
 //     translation is measured.
 //
@@ -107,11 +137,16 @@ import (
 // Domain gate names. They label the gates for metrics only
 // (control.Admission.Name); no implementation may branch on them (AD-8).
 const (
-	GateConfig     = "config"
-	GateVault      = "vault"
-	GateContent    = "content"
-	GateSession    = "session"
-	GateGit        = "git"
+	GateConfig  = "config"
+	GateVault   = "vault"
+	GateContent = "content"
+	GateSession = "session"
+	GateGit     = "git"
+	// GateFilesystem names the domain, and no gate is constructed for it
+	// since stage 4 of ADR-8eej3e66: filesystem work is ordered per binding
+	// and bounded per failure domain (internal/operation/domains). The name
+	// stays because CanonicalOrder is a fixed order and a future barrier
+	// would need the slot; a gate built here again would be the regression.
 	GateFilesystem = "filesystem"
 	// GateAPI is the API-testing collection's own domain (api.go). It is
 	// NOT the config gate: snippets, notes and UI state hold that one
@@ -148,18 +183,26 @@ func Gate(domain string, capacity, maxQueue int, waitTimeout time.Duration) cont
 	return control.NewWaitingSemaphore(domain, capacity, maxQueue, waitTimeout)
 }
 
-// UnlockAnsweringGate is Gate for a domain whose gate THE ANSWER TO A VAULT
-// UNLOCK must itself acquire, and the declaration is the whole of it: an
-// operation composed from such a gate marks its callback's context, and an
-// operation-stance credential read that sees the mark fails rather than
+// UnlockAnswering marks an admission whose acquisition THE ANSWER TO A VAULT
+// UNLOCK must itself make, and the declaration is the whole of it: an
+// operation composed from such an admission marks its callback's context, and
+// an operation-stance credential read that sees the mark fails rather than
 // waiting for a dialog nobody can satisfy (credential/unlock_fence.go).
 //
-// Today that is exactly one gate — the vault's, because vault.unseal runs
+// Today that is exactly one admission — the vault's, because vault.unseal runs
 // under it (transport.vaultSpecs) — and the composition root says so rather
-// than this package inferring it from the domain name, which is metrics-only
+// than this package inferring it from a domain name, which is metrics-only
 // (AD-8). Two handlers have already raised an unanswerable unlock by holding
-// this gate across a resolve (nocx-o3606, nocx-9fzkk); the mark is what stops
-// the third.
+// this admission across a resolve (nocx-o3606, nocx-9fzkk); the mark is what
+// stops the third.
+//
+// It takes an Admission rather than a domain name and a capacity because the
+// vault's admission is not a plain domain gate any more: stage 7 of
+// ADR-8eej3e66 replaced it with the store key and the barrier plan
+// (stores.go), and the fence has to travel with that object unchanged. The
+// question the marker answers — "does the answer to this unlock need the
+// admission I am holding" — is a property of the admission, not of how it was
+// constructed.
 //
 // It is deliberately NOT applied to the execution lane, which vault.unseal
 // also acquires. The lane has capacity for several holders and the ssh dial
@@ -167,8 +210,8 @@ func Gate(domain string, capacity, maxQueue int, waitTimeout time.Duration) cont
 // Dial phase, which holds no domain gate at all). Whether enough lane permits
 // can be held across one wait to starve the unseal is a bound, not an
 // exclusion, and it is nocx-0dvf2.
-func UnlockAnsweringGate(domain string, capacity, maxQueue int, waitTimeout time.Duration) control.Admission {
-	return unlockAnsweringGate{Admission: Gate(domain, capacity, maxQueue, waitTimeout)}
+func UnlockAnswering(a control.Admission) control.Admission {
+	return unlockAnsweringGate{Admission: a}
 }
 
 // unlockAnsweringGate is the marker wrapper. It is a type rather than a flag
@@ -210,8 +253,31 @@ var ErrOperationUnavailable = errors.New("capability: operation service unavaila
 // from the scope the record kept.
 func refused(ctx context.Context, rej *control.Rejection) error {
 	control.ReportRefusal(ctx, *rej)
+	if rej.Kind == control.RejectionUnavailable {
+		return &UnavailableError{Scope: rej.Scope, Reason: rej.Reason}
+	}
 	return &RefusedError{Rejection: *rej}
 }
+
+// UnavailableError is returned by Run when the store an operation needs is
+// quarantined: it will not serve until restart, so the answer is not the busy
+// dialogue and not a retry (ADR-8eej3e66 §5). It is deliberately NOT a
+// *RefusedError: the transport maps that type to control.saturated, and a
+// store that is unavailable is not busy.
+type UnavailableError struct {
+	// Scope names the store as "store:<name>".
+	Scope string
+	// Reason is the sentence a person reads. It names the store, says what
+	// happened and says that a restart ends it.
+	Reason string
+	// Err is the cause, when there is one: a restore that quarantined the set
+	// keeps its recovery failure reachable here.
+	Err error
+}
+
+func (e *UnavailableError) Error() string { return e.Reason }
+
+func (e *UnavailableError) Unwrap() error { return e.Err }
 
 // RefusedError is returned by Run when the operation's conflict gates
 // refused the work. It carries the control.Rejection the transport already
@@ -286,6 +352,12 @@ type operation[S any] struct {
 	// by newOperation, because the answer cannot change for the life of the
 	// operation and Run must not walk a composite per call.
 	answeringGate string
+	// ordered reports that the admission holds per-resource keys. The
+	// callback then runs inside that ordered scope, and a further ordered
+	// acquisition from it is the nesting ADR-8eej3e66 section 5 forbids: it
+	// would be two keys held in whatever order two handlers happened to
+	// acquire them, which is a deadlock waiting for a slow dependency.
+	ordered bool
 }
 
 // Disposition returns the operation's explicit assistant projection contract.
@@ -301,6 +373,13 @@ func (op *operation[S]) Run(ctx context.Context, fn func(context.Context, S) err
 	permit, rej := op.admission.TryAcquire(ctx)
 	if rej != nil {
 		return refused(ctx, rej)
+	}
+	// The callback's context says it holds the resources, so a nested
+	// ordered acquisition inside it panics instead of deadlocking
+	// (control.ResourceOrder.TryAcquire). Set after the permit exists: the
+	// acquisition itself must not see the mark.
+	if op.ordered {
+		ctx = control.WithOrderHeld(ctx)
 	}
 	// Release the permit only after the guard has gone cold: a service
 	// that escaped the callback must not observe a live guard in the

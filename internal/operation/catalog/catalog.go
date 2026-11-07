@@ -536,9 +536,11 @@ type Scope struct {
 	owner       Owner
 	started     time.Time
 	maxDeadline time.Time
+	parent      *Scope
 	ctx         context.Context
 	strict      bool
 	settled     atomic.Bool
+	settleDone  chan struct{}
 	outcome     atomic.Value // Outcome
 	expiry      *time.Timer
 	cancelReg   func() bool
@@ -570,6 +572,7 @@ func begin(ctx context.Context, op Method, inv Invocation, strict bool) *Scope {
 	s := &Scope{
 		op: op, decl: d, origin: inv.Origin, owner: inv.Owner,
 		started: time.Now(), ctx: ctx, strict: strict,
+		settleDone: make(chan struct{}),
 	}
 	// MAX IS THE ONLY DEADLINE STAGE 2 CAN OBSERVE. Turn is the wait for
 	// resources and capacity; nothing queues on a catalogue resource yet, so a
@@ -589,6 +592,9 @@ func begin(ctx context.Context, op Method, inv Invocation, strict bool) *Scope {
 		}
 	}
 	s.maxDeadline = s.started.Add(maxLifetime)
+	if parent, ok := ScopeFrom(ctx); ok {
+		s.parent = parent
+	}
 	s.mu.Lock()
 	if !s.settled.Load() {
 		s.expiry = time.AfterFunc(maxLifetime, s.expire)
@@ -600,6 +606,53 @@ func begin(ctx context.Context, op Method, inv Invocation, strict bool) *Scope {
 	}
 	s.mu.Unlock()
 	return s
+}
+
+// Deadline is the absolute end of the scope's max bound: work must stop by
+// then. It is the instant the timer in begin() fires, exposed so the caller
+// that enforces the bound derives its context from the same value the record
+// uses rather than recomputing it and drifting. It is zero when the scope has
+// settled: a settled operation has no budget left to enforce.
+func (s *Scope) Deadline() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.settled.Load() {
+		return time.Time{}
+	}
+	return s.maxDeadline
+}
+
+// StartWork re-arms the maximum lifetime from now and returns the effective
+// budget. ADR-8eej3e66 §3: max begins when WORK begins and is never renewed.
+// The scope's timer starts at Begin so stage 2 can record an invocation that
+// never reaches work; a stage that enforces the deadline calls StartWork at
+// the moment the work starts, so a wait for a key or a capacity permit does
+// not eat the work's own budget.
+//
+// It never extends a child beyond its parent's remainder: a child operation's
+// deadline is the minimum of its own and its parent's.
+func (s *Scope) StartWork() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.settled.Load() {
+		return 0
+	}
+	now := time.Now()
+	deadline := now.Add(s.decl.Max.Duration())
+	if s.parent != nil {
+		if parentDeadline := s.parent.Deadline(); !parentDeadline.IsZero() && parentDeadline.Before(deadline) {
+			deadline = parentDeadline
+		}
+	}
+	lifetime := deadline.Sub(now)
+	if lifetime <= 0 {
+		return 0
+	}
+	s.maxDeadline = deadline
+	if s.expiry != nil {
+		s.expiry.Reset(lifetime)
+	}
+	return lifetime
 }
 
 // ScopeFrom returns the scope an invocation put in the context, if any.
@@ -624,6 +677,12 @@ func (s *Scope) Origin() Origin           { return s.origin }
 func (s *Scope) Owner() Owner             { return s.owner }
 func (s *Scope) Declaration() Declaration { return s.decl }
 func (s *Scope) Started() time.Time       { return s.started }
+
+// TurnDeadline is the absolute end of the scope's turn budget: the bound on
+// waiting for resources and capacity. It is not armed in stage 2, which had
+// nothing to wait for; the stage that first makes an operation wait enforces
+// it, and this is the value it enforces.
+func (s *Scope) TurnDeadline() time.Time { return s.started.Add(s.decl.Turn.Duration()) }
 
 // Outcome returns the settled outcome and whether the scope has settled.
 func (s *Scope) Outcome() (Outcome, bool) {
@@ -658,6 +717,11 @@ func (s *Scope) Settle(outcome Outcome) bool {
 			prev, _ := s.Outcome()
 			panic(fmt.Sprintf("operation/catalog: %s settled twice: %q then %q", s.decl.ID, prev, outcome))
 		}
+		// The winner may be the max timer's goroutine, still writing its one
+		// expiry record. A caller that settles second must not return until
+		// that write is finished: after the operation returned, nothing it
+		// owns may still be writing (CI fdfc8d519's follow-up).
+		<-s.settleDone
 		return false
 	}
 	s.outcome.Store(outcome)
@@ -667,6 +731,7 @@ func (s *Scope) Settle(outcome Outcome) bool {
 			"operation", string(s.decl.ID), "owner", string(s.owner), "origin", string(s.origin),
 			"max_ms", s.decl.Max.Millis, "elapsed_ms", time.Since(s.started).Milliseconds())
 	}
+	close(s.settleDone)
 	return true
 }
 

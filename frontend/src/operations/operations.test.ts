@@ -62,6 +62,33 @@ describe('the order the list is read in', () => {
     expect(list.map((o) => o.id)).toEqual(['a', 'b'])
   })
 
+  it('shows one row per id, and the later source speaks for it', () => {
+    // Two sources can see one operation: the call a person made, and the
+    // helper install the backend is running inside it (ADR-8eej3e66 §8).
+    // The list is about the OPERATION, so the more specific account replaces
+    // the general one, in place, and the count follows the row rather than
+    // the sources.
+    const model = createOperationsModel([
+      () => [op({ id: 'call:1', kind: 'call', title: 'Opening your terminal' })],
+      () => [op({ id: 'call:1', kind: 'install', title: 'Copying the nocx helper', total: 10 })],
+    ])
+    expect(model.operations().map((o) => o.id)).toEqual(['call:1'])
+    expect(model.operations()[0].title).toBe('Copying the nocx helper')
+    expect(model.activeCount()).toBe(1)
+    expect(model.progress()).toEqual({ fraction: 0 })
+  })
+
+  it('lets a row come back to the general source when the specific one ends', () => {
+    let installing = true
+    const call = () => [op({ id: 'call:2', kind: 'call', title: 'Opening your terminal' })]
+    const install = () =>
+      installing ? [op({ id: 'call:2', kind: 'install', title: 'Copying the nocx helper' })] : []
+    const model = createOperationsModel([call, install])
+    expect(model.operations()[0].title).toBe('Copying the nocx helper')
+    installing = false
+    expect(model.operations()[0].title).toBe('Opening your terminal')
+  })
+
   it('reads every source it was given', () => {
     // The shape download joins through: a second function, not a second
     // list type and not a change to this module.

@@ -8,6 +8,7 @@ import { EndpointClient } from './endpoints'
 import { EndpointsSection } from './endpoints-section'
 import { VaultClient } from './vault-client'
 import { createVaultState, UnlockDialog } from './vault'
+import { creditHandshakeAnswer } from './test-support/credit'
 
 const UNSEALED = {
   state: 'unsealed',
@@ -49,6 +50,11 @@ class Socket {
     Socket.current = this
   }
   send(data: string) {
+    const credit = creditHandshakeAnswer(data)
+    if (credit !== null) {
+      this.deliver(credit)
+      return
+    }
     this.requests.push(JSON.parse(data) as { id: number; method: string; params: unknown })
   }
   close() {

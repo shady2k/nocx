@@ -68,12 +68,12 @@ func init() {
 func TestAnInterruptedInstallIsNeverMistakenForComplete(t *testing.T) {
 	fs := newFakeFS()
 	fs.failAfterBytes(1024)
-	_, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"})
+	_, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"}, nil)
 	if err == nil {
 		t.Fatal("want the interrupted upload to fail")
 	}
 	fs.failAfterBytes(0) // heal
-	path, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"})
+	path, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"}, nil)
 	if err != nil {
 		t.Fatalf("second attempt must succeed: %v", err)
 	}
@@ -87,11 +87,11 @@ func TestAnInterruptedInstallIsNeverMistakenForComplete(t *testing.T) {
 // timing.
 func TestEnsureUploadsNothingWhenComplete(t *testing.T) {
 	fs := newFakeFS()
-	if _, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"}); err != nil {
+	if _, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"}, nil); err != nil {
 		t.Fatalf("first install: %v", err)
 	}
 	before := fs.binaryCreateCount()
-	if _, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"}); err != nil {
+	if _, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"}, nil); err != nil {
 		t.Fatalf("second ensure: %v", err)
 	}
 	if got := fs.binaryCreateCount() - before; got != 0 {
@@ -103,14 +103,14 @@ func TestEnsureUploadsNothingWhenComplete(t *testing.T) {
 // WITHOUT the marker is removed and reinstalled, never used.
 func TestEnsureIncompleteDirectoryIsRemovedAndReinstalled(t *testing.T) {
 	fs := newFakeFS()
-	installed, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"})
+	installed, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"}, nil)
 	if err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	// Delete the marker: the directory is now partial, whatever it holds.
 	fs.remove(filepath.Join(filepath.Dir(installed), ".install-complete"))
 	before := fs.binaryCreateCount()
-	if _, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"}); err != nil {
+	if _, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"}, nil); err != nil {
 		t.Fatalf("ensure over an incomplete directory must reinstall: %v", err)
 	}
 	if got := fs.binaryCreateCount() - before; got != 1 {
@@ -127,12 +127,12 @@ func TestEnsureIncompleteDirectoryIsRemovedAndReinstalled(t *testing.T) {
 // read invisible is exactly the machine this defect hides on.
 func TestACompleteInstallIsNeverReadAgain(t *testing.T) {
 	fs := newFakeFS()
-	if _, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"}); err != nil {
+	if _, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"}, nil); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	before := fs.readFileCount()
 	beforeBytes := fs.readFileBytes()
-	if _, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"}); err != nil {
+	if _, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"}, nil); err != nil {
 		t.Fatalf("ensure over a complete install: %v", err)
 	}
 	if got := fs.readFileCount() - before; got != 0 {
@@ -151,7 +151,7 @@ func TestACompleteInstallIsNeverReadAgain(t *testing.T) {
 func TestACorruptWriteLeavesNoMarkerAndTheNextAttemptReinstalls(t *testing.T) {
 	fs := newFakeFS()
 	fs.corruptWrites = true
-	_, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"})
+	_, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"}, nil)
 	if !errors.Is(err, deploy.ErrHashMismatch) {
 		t.Fatalf("a corrupt write answered %v, want ErrHashMismatch", err)
 	}
@@ -163,7 +163,7 @@ func TestACorruptWriteLeavesNoMarkerAndTheNextAttemptReinstalls(t *testing.T) {
 	}
 
 	fs.corruptWrites = false // heal
-	path, hash, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"})
+	path, hash, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"}, nil)
 	if err != nil {
 		t.Fatalf("the attempt after a corrupt write: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestEnsureHashMismatchDoesNotLoop(t *testing.T) {
 	fs := newFakeFS()
 	fs.corruptWrites = true
 	for i := 0; i < 2; i++ {
-		_, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"})
+		_, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"}, nil)
 		if !errors.Is(err, deploy.ErrHashMismatch) {
 			t.Fatalf("call %d answered %v, want ErrHashMismatch", i+1, err)
 		}
@@ -201,11 +201,11 @@ func TestEnsureHashMismatchDoesNotLoop(t *testing.T) {
 // directories, each holding the binary for its own platform.
 func TestEnsureTwoPlatformsNeverCollide(t *testing.T) {
 	fs := newFakeFS()
-	amd64, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"})
+	amd64, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"}, nil)
 	if err != nil {
 		t.Fatalf("amd64 install: %v", err)
 	}
-	arm64, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "arm64"})
+	arm64, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "arm64"}, nil)
 	if err != nil {
 		t.Fatalf("arm64 install: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestEnsureTwoPlatformsNeverCollide(t *testing.T) {
 // never.
 func TestPruneKeepsTheNamedDirectory(t *testing.T) {
 	fs := newFakeFS()
-	installed, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"})
+	installed, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"}, nil)
 	if err != nil {
 		t.Fatalf("install: %v", err)
 	}
@@ -262,10 +262,10 @@ func TestPruneKeepsTheNamedDirectory(t *testing.T) {
 // states that contract and removes the tree.)
 func TestUninstallRemovesTheWholeHelperTree(t *testing.T) {
 	fs := newFakeFS()
-	if _, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"}); err != nil {
+	if _, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"}, nil); err != nil {
 		t.Fatalf("amd64 install: %v", err)
 	}
-	if _, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "arm64"}); err != nil {
+	if _, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "arm64"}, nil); err != nil {
 		t.Fatalf("arm64 install: %v", err)
 	}
 	// An interrupted install: a versioned directory with no
@@ -314,7 +314,7 @@ func TestEnsureHonoursContextCancellation(t *testing.T) {
 	fs := newFakeFS()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, _, err := deploy.Ensure(ctx, fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"}); !errors.Is(err, context.Canceled) {
+	if _, _, err := deploy.Ensure(ctx, fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"}, nil); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled ensure error = %v, want context.Canceled", err)
 	}
 }
@@ -344,6 +344,10 @@ type fakeFS struct {
 	// operation returns this error and clears the entry, so one Ensure can
 	// be broken at exactly one boundary and the retry after it is honest.
 	fail map[string]error
+	// afterWrite, when set, runs after every accepted binary write with the
+	// total written so far. It is how a test puts a cancellation in the
+	// middle of an upload instead of before it.
+	afterWrite func(written int)
 }
 
 func newFakeFS() *fakeFS {
@@ -374,6 +378,12 @@ func (f *fakeFS) failAfterBytes(n int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.failAt = n
+}
+
+func (f *fakeFS) bytesWritten() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.written
 }
 
 func (f *fakeFS) binaryCreateCount() int {
@@ -618,6 +628,9 @@ func (ff *fakeFile) Write(p []byte) (int, error) {
 	}
 	ff.buf = append(ff.buf, p...)
 	ff.fs.written += len(p)
+	if ff.fs.afterWrite != nil {
+		ff.fs.afterWrite(ff.fs.written)
+	}
 	return len(p), nil
 }
 
@@ -702,7 +715,7 @@ func TestEveryInstallBoundaryLeavesATreeTheNextAttemptCanFinish(t *testing.T) {
 			}
 			fs.failNext(tc.op, boom)
 
-			_, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"})
+			_, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"}, nil)
 			if err == nil {
 				t.Fatalf("a failing %s reported a successful install", tc.name)
 			}
@@ -713,7 +726,7 @@ func TestEveryInstallBoundaryLeavesATreeTheNextAttemptCanFinish(t *testing.T) {
 			// Healed. The next attempt finishes, whatever the last one left:
 			// a markerless tree is removed and reinstalled, a complete one is
 			// reused, and neither needs a human to clear anything.
-			path, hash, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"})
+			path, hash, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"}, nil)
 			if err != nil {
 				t.Fatalf("the attempt after a failing %s could not install: %v", tc.name, err)
 			}
@@ -741,4 +754,32 @@ func leaveIncompleteTree(t *testing.T, fs *fakeFS) {
 	dir := "/home/u/.nocx/helper/" + proto.Version + "-linux-amd64-" + syntheticHash
 	fs.mkdirAll(dir)
 	fs.touch(filepath.Join(dir, "nocx-helper"))
+}
+
+// TestACancelDuringTheUploadStopsAtTheNextChunk is the half
+// TestEnsureHonoursContextCancellation cannot see: it cancels BEFORE Ensure,
+// so the one check at the top answers. A person pressing Cancel during a slow
+// upload cancels in the middle of it, and the loop used to check the context
+// only before and after the whole payload — so the install ploughed through
+// the rest of the binary (38 s on the e2e fixture's 500 KB/s link, then
+// answered "deploy: write helper: context canceled") instead of stopping at
+// the next chunk.
+func TestACancelDuringTheUploadStopsAtTheNextChunk(t *testing.T) {
+	src := newBigSource(t, 6<<20) // many chunks
+	fs := newFakeFS()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var once sync.Once
+	fs.afterWrite = func(int) { once.Do(cancel) } // the person's Cancel, mid-upload
+
+	_, _, err := deploy.Ensure(ctx, fs, src, "/home/u", deploy.Platform{GOOS: "linux", GOARCH: "amd64"}, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("a cancelled upload answered %v, want context.Canceled", err)
+	}
+	if wrote := fs.bytesWritten(); wrote > src.size/2 {
+		t.Fatalf("the upload wrote %d of %d bytes after the cancellation; it was not stopped between chunks", wrote, src.size)
+	}
+	if fs.hasMarker("/home/u/" + proto.Version + "-linux-amd64-" + src.hash) {
+		t.Fatal("a cancelled upload left a complete-looking tree")
+	}
 }

@@ -195,3 +195,37 @@ func TestOrderedSubmission_ShutdownRejectsNewWorkAndWaitsForAdmitted(t *testing.
 	close(release)
 	<-waited
 }
+
+// A queued task whose start gate says no never runs. This is the one-step
+// start-against-cancel decision: cancellation does not have to beat the
+// worker to the queue, it has to beat the gate.
+func TestOrderedSubmissionNeverStartsAWithdrawnTask(t *testing.T) {
+	sub, ok := NewOrderedSubmission("ordered-start-gate", 4).(*orderedSubmission)
+	if !ok {
+		t.Fatal("unexpected ordered submission implementation")
+	}
+	t.Cleanup(sub.Shutdown)
+	block := make(chan struct{})
+	started := make(chan struct{})
+	if rej := sub.TrySubmit(context.Background(), Task{Run: func(context.Context) {
+		close(started)
+		<-block
+	}}); rej != nil {
+		t.Fatalf("first submit: %+v", rej)
+	}
+	<-started
+	ran := make(chan struct{}, 1)
+	if rej := sub.TrySubmit(context.Background(), Task{
+		Start: func() bool { return false },
+		Run:   func(context.Context) { ran <- struct{}{} },
+	}); rej != nil {
+		t.Fatalf("second submit: %+v", rej)
+	}
+	close(block)
+	sub.Shutdown()
+	select {
+	case <-ran:
+		t.Fatal("a withdrawn queued task ran")
+	case <-time.After(100 * time.Millisecond):
+	}
+}

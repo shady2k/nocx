@@ -1688,6 +1688,18 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       })
     } catch (err) {
       const message = (err as Error).message
+      // A WITHDRAWN TEST IS NOT A FAILED ONE (ADR-8eej3e66 §8). Pressing
+      // Cancel withdraws the call, and the call's own rejection carries which
+      // of the three answers it is — "It did not start — nothing was
+      // changed.", "It finished." or "Checking what happened…" (a mutation's
+      // row goes when it settles, so the sentence reaches the person here).
+      // Reading "Test failed: The operation was aborted" for a cancel sent
+      // people to fix a connection nothing had tested.
+      if ((err as Error).name === 'AbortError') {
+        log.info('Connection test withdrawn', { profileId: profile.id, message })
+        showToast({ level: 'warning', message })
+        return
+      }
       log.error('Connection test failed', { profileId: profile.id, message })
       showToast({
         level: 'danger',

@@ -95,7 +95,7 @@ type Installed struct {
 // preferredLocal): the helper that runs here links an ssh client, and the
 // artifact that is written to somebody else's host must not.
 func Install(ctx context.Context, src deploy.ArtifactSource, home string) (Installed, error) {
-	binary, contentHash, err := deploy.Ensure(ctx, FS{}, preferredLocal{src: src, platform: Platform()}, home, Platform())
+	binary, contentHash, err := deploy.Ensure(ctx, FS{}, preferredLocal{src: src, platform: Platform()}, home, Platform(), nil)
 	if err != nil {
 		return Installed{}, err
 	}

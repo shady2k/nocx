@@ -1645,7 +1645,7 @@ func TestFilesPoll_FailureLadderUsesRealListingErrors(t *testing.T) {
 
 	p.failNext(errors.New("synthetic listing failure"))
 	selection := &filesPollSelection{path: dir, entry: entry, generation: generation}
-	if result := e.ws.filesPollPath(w, h, selection); result != filesPollPathFailed {
+	if result := e.ws.filesPollPath(context.Background(), w, h, selection); result != filesPollPathFailed {
 		t.Fatalf("failing dispatch result = %v, want failed", result)
 	}
 	w.mu.Lock()
@@ -1659,7 +1659,7 @@ func TestFilesPoll_FailureLadderUsesRealListingErrors(t *testing.T) {
 	}
 	w.mu.Unlock()
 
-	if result := e.ws.filesPollPath(w, h, selection); result != filesPollPathOK {
+	if result := e.ws.filesPollPath(context.Background(), w, h, selection); result != filesPollPathOK {
 		t.Fatalf("recovering dispatch result = %v, want ok", result)
 	}
 	w.mu.Lock()
@@ -1832,7 +1832,7 @@ func TestFilesPoll_DispatchesOnePathPerDispatch(t *testing.T) {
 		for _, dir := range dirs {
 			before[dir] = count(dir)
 		}
-		if result := e.ws.filesPollTick(w); result == filesPollPathStopped {
+		if result := e.ws.filesPollTick(context.Background(), w); result == filesPollPathStopped {
 			t.Fatal("poll stopped during visibility catch-up")
 		}
 		totalDelta := 0
@@ -1880,7 +1880,7 @@ func TestFilesPoll_PerPathLaddersAreIndependent(t *testing.T) {
 	w.pollBase = base
 	w.mu.Unlock()
 	provider().failNext(errors.New("synthetic first-path failure"))
-	result := e.ws.filesPollPath(w, w.handle, &filesPollSelection{
+	result := e.ws.filesPollPath(context.Background(), w, w.handle, &filesPollSelection{
 		path: firstPath, entry: first, generation: first.generation,
 	})
 	if result != filesPollPathFailed {
@@ -1895,7 +1895,7 @@ func TestFilesPoll_PerPathLaddersAreIndependent(t *testing.T) {
 	}
 	second.failureStep = 2
 	w.mu.Unlock()
-	result = e.ws.filesPollPath(w, w.handle, &filesPollSelection{
+	result = e.ws.filesPollPath(context.Background(), w, w.handle, &filesPollSelection{
 		path: firstPath, entry: first, generation: first.generation,
 	})
 	if result != filesPollPathOK {
@@ -2027,7 +2027,7 @@ func TestFilesPoll_StaleCompletionDoesNotOverwriteReaddedPath(t *testing.T) {
 	p := provider()
 	p.blockNext()
 	result := make(chan filesPollPathResult, 1)
-	go func() { result <- e.ws.filesPollPath(w, h, selection) }()
+	go func() { result <- e.ws.filesPollPath(context.Background(), w, h, selection) }()
 	select {
 	case <-p.listStarted:
 	case <-time.After(wantWithin):

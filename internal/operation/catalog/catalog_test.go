@@ -423,3 +423,91 @@ func TestALateCancellationWritesNothingAfterSettlement(t *testing.T) {
 		t.Fatalf("a cancelled invocation wrote after it settled: %s", got)
 	}
 }
+
+// blockingExpiryHandler parks inside Warn until released, so a test can see
+// whether a caller that settles second waits for the timer's record.
+type blockingExpiryHandler struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+	buf     *bytes.Buffer
+}
+
+func (h *blockingExpiryHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *blockingExpiryHandler) Handle(_ context.Context, r slog.Record) error {
+	h.once.Do(func() { close(h.started) })
+	<-h.release
+	h.buf.WriteString(r.Message)
+	return nil
+}
+func (h *blockingExpiryHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *blockingExpiryHandler) WithGroup(string) slog.Handler      { return h }
+
+// The max timer may win the settlement and still be writing its expiry line
+// when the caller's Complete arrives. Complete must join that write before
+// returning; otherwise the caller reads its own log while the timer writes
+// (CI fdfc8d519's follow-up).
+func TestACompletedScopeWaitsForTheExpiryWriterItLostTo(t *testing.T) {
+	var buf bytes.Buffer
+	h := &blockingExpiryHandler{started: make(chan struct{}), release: make(chan struct{}), buf: &buf}
+	ctx := log.WithLogger(context.Background(), log.NewSlogAdapter(slog.New(h)))
+
+	s := Begin(ctx, OpTransportPing, Invocation{})
+	select {
+	case <-h.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the max timer never expired")
+	}
+	completed := make(chan bool, 1)
+	go func() { completed <- s.Complete() }()
+	select {
+	case <-completed:
+		t.Fatal("Complete returned while the expiry writer was still writing")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(h.release)
+	select {
+	case won := <-completed:
+		if won {
+			t.Fatal("Complete must lose to the expiry that already settled")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Complete never returned after the writer finished")
+	}
+	if got := buf.String(); got != "operation deadline expired" {
+		t.Fatalf("the expiry record was not completed before Complete returned: %q", got)
+	}
+}
+
+// A PERSON'S WAIT IS NOT ONE SECOND (ADR-8eej3e66 §8, and the integration's
+// review of stage 12). Every method entry is a call a person can make, and the
+// renderer's credit queue holds it under the declaration's turn before it
+// answers CallNotStartedError. At one second that was the busyness refusal in
+// a new place: with the window full, a person's call was refused before the
+// two-second row that is supposed to appear could. The turn now gives every
+// person-facing call at least thirty seconds — long enough that no legitimate
+// wait for one resource outlasts it — and it remains a bound, so a stuck queue
+// still ends. Background work keeps its own short bound in the renderer.
+// rescueTurnMethods never wait for credit or a resource: the transport runs
+// them inline on the read loop (internal/transport/registration.go's
+// ingressCriticalMethods) and the renderer exempts them from its window, so
+// their turn is a hang detector rather than a person's wait. They keep the
+// bound they were declared with.
+var rescueTurnMethods = map[ID]bool{
+	"ack": true, "vault.unlockResolved": true, "connections.passwordResolved": true,
+	"agent.runResolved": true, "host.resolved": true, "agent.laneInteractivity": true,
+	"transport.credit": true, "transport.ping": true, "rpc.cancel": true,
+	"app.diagnostics": true,
+}
+
+func TestEveryPersonFacingTurnWaitsLongEnoughToBeSeen(t *testing.T) {
+	for _, d := range Declarations() {
+		if d.Kind != KindMethod || rescueTurnMethods[d.ID] {
+			continue
+		}
+		if d.Turn.Millis < 30000 {
+			t.Errorf("%s: turn is %d ms; a person's call must be allowed to wait at least 30000 ms",
+				d.ID, d.Turn.Millis)
+		}
+	}
+}

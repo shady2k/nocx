@@ -42,6 +42,8 @@ import (
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/operation/catalog"
+	"github.com/shady2k/nocx/internal/operation/domains"
+	"github.com/shady2k/nocx/internal/operation/schedule"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
@@ -595,6 +597,11 @@ type WSServer struct {
 	// Structured backup capability and native file saver. The operation is
 	// constructed after all options so it shares the current config gate.
 	backupService *backup.Service
+	// storeGuard owns the store-set barrier, the per-store keys and the
+	// quarantine (ADR-8eej3e66 §5, stage 7). It is built once, unless the
+	// composition root supplies one, so the config, vault and content
+	// admissions every operation already takes are projections of one plan.
+	storeGuard *capability.StoreGuard
 	// paneScreens is the store a watched pane's frame is read from
 	// (ADR-0066): the coordinator holds no emulator, so this is a question
 	// asked of the helper that owns the pane. Nil is the normal state: a
@@ -907,6 +914,11 @@ type WSServer struct {
 	// control work to finish after cancelling it. Work that ignores
 	// cancellation is abandoned at this bound.
 	controlDrainTimeout time.Duration
+	// recorderDrainTimeout is how long Stop waits for session output
+	// recorders to append their buffered tail. It is the same documented
+	// maximum as the control drain, for the same reason: a store that has
+	// stopped answering must not hold shutdown open for ever.
+	recorderDrainTimeout time.Duration
 	// methods is the validated control-method registration set: method →
 	// submission + per-connection handler builder. Built once at
 	// construction (registration.go); the per-connection materialisation
@@ -916,6 +928,21 @@ type WSServer struct {
 	// notification (no id) triggers — one per class+scope per interval,
 	// never one per refused frame.
 	satNotify *saturatedNotifyLimiter
+	// credit is the per-connection flow-control declaration every connection
+	// is told by transport.credit (credit.go): the ordinary window, the
+	// rescue methods that take no credit, and the reserved methods with one
+	// credit outside the window. Built with the control plane, after every
+	// option has been applied.
+	credit creditConfig
+	// creditWindow overrides the ordinary window; zero derives it from the
+	// lane with DefaultCreditWindow. Tests name it to fill a window with a
+	// known number of calls; production leaves it zero.
+	creditWindow int
+
+	// mutations retains what became of each mutation identity for a bounded
+	// time, in memory (ADR-8eej3e66 §4). Server-wide on purpose: a renderer
+	// that lost its socket must still get its answer on the next one.
+	mutations *catalog.MutationStore
 
 	// profileUsage tracks last-used timestamps for the sessions.status RPC.
 	// When nil, the handler reports live-state from the registry but
@@ -963,7 +990,11 @@ type WSServer struct {
 	// (fm-w8). When nil, those methods return -32601. The provider
 	// factories and the revealer ride separate options; the transport
 	// never constructs a provider itself (AD-8).
-	filesys                    *filesystem.Registry
+	filesys *filesystem.Registry
+	// filesDomains bounds filesystem work per failure domain (ADR-8eej3e66
+	// §6): one mount or one resolved host, so a hung disk holds its own
+	// permits and every other disk's listings go on.
+	filesDomains               *domains.Registry
 	filesProviderFor           FilesystemProviderFactory
 	revealer                   FilesRevealer
 	filesPollInterval          time.Duration // transport-side digest-poll cadence (files.watch)
@@ -1196,6 +1227,11 @@ type WSServer struct {
 	// the shell channel's reader.
 	signalSub control.Submission
 	signalOps *capability.SessionOperations
+	// orders are the per-resource FIFOs that replaced the session, content
+	// and API domain gates (buildControlPlane). Kept on the server so a test
+	// drives the same queues a request does, and so app.diagnostics names the
+	// leaves it lists.
+	orders resourceOrders
 	// integrations is the per-session integration axis published as
 	// session.integrationChanged (nocx-dvql, ws_integration.go). Separate
 	// from lifecycleLanes because it answers a different question: that map
@@ -2056,6 +2092,7 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		sessionPolicy:              newSessionPolicyStore(),
 		laneInteractivity:          newLaneState(),
 		satNotify:                  newSaturatedNotifyLimiter(time.Second),
+		mutations:                  catalog.NewMutationStore(),
 		pendingRuns:                make(map[int64]askRunContext),
 		filesBindings:              make(map[string]*filesBinding),
 		filesBySession:             make(map[session.ID]map[string]struct{}),
@@ -2071,6 +2108,7 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		domainMaxQueue:             DefaultDomainMaxQueue,
 		domainQueueDepth:           DefaultDomainQueueDepth,
 		controlDrainTimeout:        defaultControlDrainTimeout,
+		recorderDrainTimeout:       defaultControlDrainTimeout,
 		gitBindings:                make(map[string]*gitBinding),
 		gitBySession:               make(map[session.ID]map[string]struct{}),
 		paneObserverSweep:          DefaultPaneObserverSweep,
@@ -2103,6 +2141,16 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 func (s *WSServer) buildControlPlane() {
 	lane := control.NewSemaphore("control", s.laneCapacity)
 	s.lane = control.NewBoundedSubmission(lane)
+	// THE CREDIT DECLARATION (credit.go). The exempt set is the transport's
+	// existing ingress-critical set, not a second list: both ask the same
+	// question — "must this method never wait behind the work it rescues?" —
+	// and one owner for that answer is what keeps the wire and the read loop
+	// from drifting apart.
+	window := s.creditWindow
+	if window == 0 {
+		window = DefaultCreditWindow
+	}
+	s.credit = newCreditConfig(window, ingressCriticalMethods, reservedCreditMethods)
 	// Probe and agent probe keep their own capacity-one resource admissions
 	// composed with the lane (canonical order: resource before execution
 	// permit): a second probe is refused even while the lane has free
@@ -2147,12 +2195,48 @@ func (s *WSServer) buildControlPlane() {
 	// lane inside Run, on the task goroutine, so waiting conflict work never
 	// occupies a worker permit and the read loop never blocks on a conflict.
 	// The per-operation queue submissions bound in-flight tasks per operation.
+	if s.storeGuard == nil {
+		s.storeGuard = capability.NewStoreGuard(catalog.Declarations(), s.domainMaxQueue, s.domainWaitTimeout)
+	}
 	gates := s.domainGates()
+	// The git domain's stage-5 scheduler: one order gate for every checkout
+	// and one bulkhead for every mount, shared by all git.* methods.
+	gitOrder := schedule.NewKeyed("git-checkout", gitOrderCapacity)
+	gitBulkhead := schedule.NewBulkhead("git", schedule.Limits{
+		Capacity:           gitBulkheadCapacity,
+		PersonReserved:     gitPersonReserved,
+		Queue:              gitBulkheadQueue,
+		AbandonedPerDomain: gitAbandonedPerDomain,
+		AbandonedGlobal:    gitAbandonedGlobal,
+	})
+	// The per-resource FIFOs stage 6 put where the session, content and API
+	// domain gates were (ADR-8eej3e66 section 5).
+	orders := s.resourceOrders()
+	s.orders = orders
+	// CONTENT'S ORDER AND ITS EXCLUSION HAVE TWO OWNERS, and each keeps the
+	// one it owns. Migration stage 6 gave content per-resource order (the
+	// FIFO); stage 7 gave every writer and coherent reader of the store set
+	// the shared barrier that backup.restore excludes them with. Taking the
+	// guard's whole shared plan for content would put every content write
+	// back behind one capacity-one store key — the domain grain stage 6
+	// removed — and taking the FIFO alone would let a restore rewrite the
+	// content store while a collection write was running. So: barrier first,
+	// then the FIFO, acquired as one composite.
+	contentOrder := control.NewComposite(
+		s.storeGuard.SharedBarrier(capability.StoreContent), orders.content)
+	// Every admission leaf this server built, for app.diagnostics. The lane
+	// first: it is the one a saturated server holds for days.
+	// THE FILESYSTEM'S FAILURE DOMAINS (stage 4): one bulkhead per mount or
+	// attested host, with part of each reserved for a person and a breaker
+	// for a domain that keeps abandoning workers. The whole-domain gate it
+	// replaces is gone, so filesystem is not in domainGates any more.
+	s.filesDomains = domains.New(domains.FilesystemDefaults())
 	// Every admission leaf this server built, for app.diagnostics. The lane
 	// first: it is the one a saturated server holds for days.
 	s.diagAdmits = []control.Admission{
-		lane, gates.config, gates.vault, gates.content, gates.session,
-		gates.git, gates.filesystem, gates.api, s.agentProbeAdmit, s.dialogAdmit,
+		lane, gates.config, gates.vault, gates.session,
+		orders.session, orders.content, orders.api,
+		s.agentProbeAdmit, s.dialogAdmit,
 	}
 	immediate := control.ImmediateSubmission{}
 	// The signal lane, built here rather than inside signalSpecs because it
@@ -2160,7 +2244,7 @@ func (s *WSServer) buildControlPlane() {
 	// and the delivery of a Stop that was held for an attempt's start
 	// (nocx-zas0d, ws_signal.go). Both are the same act on the same session,
 	// so they share the bound and the serialisation.
-	s.signalOps = capability.NewSessionOperations(gates.session, lane, s.registry, s.profileUsage)
+	s.signalOps = capability.NewSessionOperations(orders.session, lane, s.registry, s.profileUsage)
 	s.signalSub = s.operationQueue("signal")
 	// The request broker is constructed here, once the server's connection
 	// set exists: its delivery seams are this server's own snapshot and
@@ -2175,8 +2259,10 @@ func (s *WSServer) buildControlPlane() {
 	specs := make([]methodSpec, 0, 96)
 	inventorySub := s.operationQueue("session-inventory")
 	specs = append(specs, rpcCancelSpec(immediate))
+	specs = append(specs, s.operationOutcomeSpec(s.lane))
+	specs = append(specs, s.creditSpec())
 	specs = append(specs, s.heartbeatSpecs(immediate)...)
-	specs = append(specs, s.sessionSpecs(lane, gates.session, gates.config)...)
+	specs = append(specs, s.sessionSpecs(lane, orders.session, gates.config)...)
 	specs = append(specs, whenAvailable(
 		s.hostSessionInventorySpecs(inventorySub)[0],
 		func() bool { return s.hostSessionInventory != nil },
@@ -2187,24 +2273,24 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.runResolutionSpec(immediate))
 	specs = append(specs, s.clientHostSpecs(immediate, s.lane)...)
 	specs = append(specs, s.configSpecs(lane, gates.config, gates.vault, configOp, endpointWired, noteOp, snippetOp)...)
-	specs = append(specs, s.backupSpecs(lane, gates.config)...)
-	specs = append(specs, s.vaultSpecs(lane, gates.config, gates.vault)...)
+	specs = append(specs, s.backupSpecs(lane, gates.config, s.storeGuard)...)
+	specs = append(specs, s.vaultSpecs(lane, gates.config, gates.vault, s.storeGuard)...)
 	specs = append(specs, s.notifySpecs()...)
 	specs = append(specs, s.notifyFeedSpecs()...)
-	specs = append(specs, s.secretSpecs(lane, gates.config, gates.vault, gates.content)...)
-	specs = append(specs, s.gitSpecs(lane, gates.session, gates.git)...)
-	specs = append(specs, s.filesSpecs(lane, gates.session, gates.filesystem)...)
-	specs = append(specs, s.apiSpecs(lane, gates.api, gates.vault)...)
+	specs = append(specs, s.secretSpecs(lane, gates.config, gates.vault, contentOrder)...)
+	specs = append(specs, s.gitSpecs(lane, gates.session, gitOrder, gitBulkhead)...)
+	specs = append(specs, s.filesSpecs(lane, gates.session)...)
+	specs = append(specs, s.apiSpecs(lane, orders.api, gates.vault)...)
 	contentSub := s.operationQueue("content")
-	specs = append(specs, s.contentSpecs(lane, gates.content, contentSub)...)
+	specs = append(specs, s.contentSpecs(lane, contentOrder, contentSub)...)
 	// history.status rides the plain lane, not the content queue: it is a
 	// mutex read of in-memory state and must stay answerable while the
 	// content domain is exactly what is broken.
 	specs = append(specs, s.historyStatusSpecs(s.lane)...)
 	specs = append(specs, s.checkoutsStatusSpecs(s.lane)...)
-	specs = append(specs, s.agentSpecs(contentSub, lane, gates.content, configOp, endpointWired, noteOp, snippetOp, s.skillLibrary, s.agentTools, s.credentialResolver(), s.assistantClient, s.askSub)...)
-	specs = append(specs, s.ledgerSpecs(contentSub, lane, gates.content)...)
-	specs = append(specs, s.layoutSpecs(contentSub, lane, gates.content)...)
+	specs = append(specs, s.agentSpecs(contentSub, lane, contentOrder, configOp, endpointWired, noteOp, snippetOp, s.skillLibrary, s.agentTools, s.credentialResolver(), s.assistantClient, s.askSub)...)
+	specs = append(specs, s.ledgerSpecs(contentSub, lane, contentOrder)...)
+	specs = append(specs, s.layoutSpecs(contentSub, lane, contentOrder)...)
 	specs = append(specs, s.shellSpecs(lane, gates.session)...)
 	specs = append(specs, s.aboutSpecs()...)
 	specs = append(specs, s.diagnosticsSpec())
@@ -2216,8 +2302,8 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.agentRuleStoreSpecs()...)
 	specs = append(specs, s.agentCalibrationSpecs()...)
 	specs = append(specs, s.agentTypeSpecs()...)
-	specs = append(specs, s.seamSpecs(lane, gates.session)...)
-	specs = append(specs, s.historyPageSpecs(lane, gates.session)...)
+	specs = append(specs, s.seamSpecs(lane, orders.session)...)
+	specs = append(specs, s.historyPageSpecs(lane, orders.session)...)
 	methods, err := buildMethodSpecs(specs)
 	if err != nil {
 		panic("nocx: control-plane registration: " + err.Error())
@@ -2244,25 +2330,58 @@ func (s *WSServer) operationQueue(name string) control.Submission {
 // gate is constructed; operations take them as separate parameters and
 // compose in the canonical order.
 type domainGates struct {
-	config, vault, content, session, git, filesystem, api control.Admission
+	config, vault, session control.Admission
+}
+
+// resourceOrders builds the per-resource FIFOs that replace the session,
+// content and API domain gates (ADR-8eej3e66 section 5, migration stage 6).
+// Each names the canonical keys its domain owns: the session-plane methods
+// order on one session, the content-store methods on the store and on the
+// layout collection, and the api.* methods on one open collection. A key
+// belonging to another domain is never taken by a FIFO that does not own it;
+// the one textual overlap — the api prefix also matches the layout
+// collection's name — is unreachable, because an api key is a 32-hex handle
+// or an absolute folder path and never that name.
+//
+// The session gate is NOT replaced here for shell, git and filesystem: those
+// stage a read of one session under it and are the stages that migrate them.
+// Session's own methods stop taking it, because what it ordered — "a close
+// must not interleave an open of the same id" — is one registry lookup, which
+// is atomic on its own, and what needs order is two mutations of one session,
+// which the per-session FIFO orders.
+type resourceOrders struct {
+	session, content, api *control.ResourceOrder
+}
+
+func (s *WSServer) resourceOrders() resourceOrders {
+	return resourceOrders{
+		session: control.NewResourceOrder("session-order", control.DefaultOrderLimit, "session:"),
+		content: control.NewResourceOrder("content-order", control.DefaultOrderLimit,
+			"store:content", "collection:workspace-layout"),
+		api: control.NewResourceOrder("api-order", control.DefaultOrderLimit, "collection:"),
+	}
 }
 
 func (s *WSServer) domainGates() domainGates {
 	return domainGates{
-		config: capability.Gate(capability.GateConfig, 1, s.domainMaxQueue, s.domainWaitTimeout),
-		// The vault gate is DECLARED as the one vault.unseal itself acquires
-		// (vaultSpecs builds VaultOperation from it). Every operation that
-		// composes this gate therefore fences the operation-stance credential
-		// reads inside its callback, because such a read waits for a person to
-		// answer an unlock whose answer needs this gate back — twice now a
-		// handler has shown somebody that dialog and refused their Unlock with
-		// "Control plane busy" (nocx-o3606, nocx-9fzkk).
-		vault:      capability.UnlockAnsweringGate(capability.GateVault, 1, s.domainMaxQueue, s.domainWaitTimeout),
-		content:    capability.Gate(capability.GateContent, 1, s.domainMaxQueue, s.domainWaitTimeout),
-		session:    capability.Gate(capability.GateSession, 1, s.domainMaxQueue, s.domainWaitTimeout),
-		git:        capability.Gate(capability.GateGit, 1, s.domainMaxQueue, s.domainWaitTimeout),
-		filesystem: capability.Gate(capability.GateFilesystem, 1, s.domainMaxQueue, s.domainWaitTimeout),
-		api:        capability.Gate(capability.GateAPI, 1, s.domainMaxQueue, s.domainWaitTimeout),
+		// Config and vault are the store set of ADR-8eej3e66 §5: their
+		// domain admission is now the store guard's shared plan — every
+		// barrier that protects the store, then the store's own key. The
+		// canonical acquisition order is unchanged (config, vault, then the
+		// rest), and the guard keeps barriers ahead of keys. Content's
+		// admission is not built here: stage 6 ordered it per resource, and
+		// contentOrder composes that order with this plan's shared barrier.
+		config: s.storeGuard.Shared(capability.StoreConfig),
+		// The vault admission is DECLARED as the one vault.unseal itself
+		// acquires (vaultSpecs builds VaultOperation from it). Every operation
+		// that composes this gate therefore fences the operation-stance
+		// credential reads inside its callback, because such a read waits for a
+		// person to answer an unlock whose answer needs this gate back — twice
+		// now a handler has shown somebody that dialog and refused their
+		// Unlock with "Control plane busy" (nocx-o3606, nocx-9fzkk). The
+		// marker travels on the store guard's plan unchanged.
+		vault:   capability.UnlockAnswering(s.storeGuard.Shared(capability.StoreVault)),
+		session: capability.Gate(capability.GateSession, 1, s.domainMaxQueue, s.domainWaitTimeout),
 	}
 }
 
@@ -2472,12 +2591,25 @@ func (s *WSServer) Stop(ctx context.Context) error {
 	}
 	s.ringsMu.Unlock()
 
+	// Files bindings are torn down CONCURRENTLY, after the sessions they
+	// belong to are gone. Each binding waits at most closeDrainTimeout for an
+	// in-flight call (filesystem.Binding.close), so doing them one after
+	// another would multiply that bound by the number of tabs — and a hung
+	// mount hangs every local binding at once, which is exactly the shutdown
+	// this bound exists for (ADR-8eej3e66 §15). Nothing in this phase reads
+	// the session object: it takes the id, the transport's bookkeeping, the
+	// transfer ledger and the filesystem registry.
+	var filesCleanup sync.WaitGroup
 	for _, sess := range s.registry.List() {
 		s.closeLane(sess.ID())
 		_ = s.registry.Close(sess.ID())
 		// Files (fm-w8): Stop closes every session, which closes its
 		// bindings (spec §5.1); the watcher goroutines stop with them.
-		s.filesSessionClosed(sess.ID())
+		filesCleanup.Add(1)
+		go func(sid session.ID) {
+			defer filesCleanup.Done()
+			s.filesSessionClosed(sid)
+		}(sess.ID())
 		// Git (spec §5.5): Stop closes every session, which closes its git
 		// bindings too. No subscriber is attached at shutdown — nobody to
 		// notify, and gitSessionClosed's nil capture is exactly that case.
@@ -2493,13 +2625,39 @@ func (s *WSServer) Stop(ctx context.Context) error {
 	if s.captures != nil {
 		s.captures.DestroyAll()
 	}
+	filesCleanup.Wait()
+
 	// Recorder admission was fenced by stopped under ringsMu. Closed rings
 	// leave their buffered tail available, which each admitted recorder
 	// appends before it exits; this group includes recorders whose rx was
-	// removed before shutdown.
-	s.sessionRecorders.Wait()
+	// removed before shutdown. The join is BOUNDED: a recorder is a commit
+	// interval, so Stop waits for it, but a store that stopped answering must
+	// not hold shutdown for ever (ADR-8eej3e66 §15).
+	if !waitGroupWithin(&s.sessionRecorders, s.recorderDrainTimeout) {
+		s.log.Warn("abandoning session recorders at shutdown", "maxWait", s.recorderDrainTimeout)
+	}
 
 	return shutdownErr
+}
+
+// waitGroupWithin waits for wg up to the bound and reports whether it
+// finished. A sync.WaitGroup has no timed wait, so the join runs on its own
+// goroutine; that goroutine ends when the wait does, so a timeout leaves one
+// goroutine behind, which is the abandonment the caller has already recorded.
+func waitGroupWithin(wg *sync.WaitGroup, bound time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(bound)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
 }
 
 // stopping reports whether Stop has begun tearing this server down.
@@ -2754,6 +2912,14 @@ type wsConn struct {
 	log            log.Logger
 	id             uint64
 	requestCancels *requestCancels
+	// mutations maps a request id to the mutation record its one response
+	// answers (ws_operation_outcome.go). The record itself lives on the
+	// server; this is only the connection's half of "which response is this".
+	mutations inFlightMutations
+	// credit holds this connection's flow-control accounting (credit.go).
+	// Nil in a hand-built wsConn that never dispatches; every method is
+	// nil-safe.
+	credit *creditWindow
 	// methods is this connection's materialised control-handler set
 	// (registration.go): method → submission + handler closure. The handlers
 	// are constructed with THIS connection's Responder, so the set is
@@ -2776,14 +2942,39 @@ func newWSConn(s *WSServer, conn *websocket.Conn, id uint64) *wsConn {
 		log:            s.log,
 		id:             id,
 		requestCancels: newRequestCancels(),
+		// One accounting per connection: the window is the connection's, and
+		// a reconnection is a new peer with a new set of credits.
+		credit: s.credit.forConnection(),
 	}
 }
 
+// TryResult and TryError are the ONE response seam, so they are also where a
+// request's credit ends: the moment the answer is enqueued the client may
+// send the call that replaces it. The task goroutine also releases the
+// permit when it returns, for a request withdrawn or failed without an
+// answer; Release is idempotent, so the two owners cannot free one credit
+// twice.
 func (w *wsConn) TryResult(id json.RawMessage, result json.RawMessage) error {
+	// THE ONE PLACE A MUTATION'S ANSWER IS LEARNED (ADR-8eej3e66 §4): every
+	// handler answers through this Responder, and a result is the record
+	// saying the work finished. The write is recorded even when the socket is
+	// gone — the person may still ask what happened.
+	w.mutations.take(id).Answered(catalog.AnsweredResult)
+	// The answer ends this request's credit: the client may send one more.
+	w.credit.releaseByID(id)
 	return w.out.TryEnqueueResponse(mustMarshal(newJSONRPCResult(id, result)))
 }
 
 func (w *wsConn) TryError(id json.RawMessage, rpcErr RPCError) error {
+	// A sealed-vault refusal is emitted before the operation touched
+	// anything, which is what makes ADR-0032's unlock replay safe; every other
+	// error still means the work finished, and nothing may replay it.
+	kind := catalog.AnsweredError
+	if sealedVaultReason(rpcErr) != "" {
+		kind = catalog.AnsweredSealed
+	}
+	w.mutations.take(id).Answered(kind)
+	w.credit.releaseByID(id)
 	obj := &jsonrpcErrorObj{Code: rpcErr.Code, Message: rpcErr.Message}
 	if rpcErr.Data != nil {
 		obj.Data = rpcErr.Data
@@ -2910,6 +3101,16 @@ type jsonrpcRequest struct {
 	ID      json.RawMessage `json:"id,omitempty"`
 	Method  string          `json:"method,omitempty"`
 	Params  json.RawMessage `json:"params,omitempty"`
+	// Origin is who asked (ADR-8eej3e66 §2): one read method serves a
+	// person's refresh and a background poll, so it travels with the call.
+	// Absent, the backend treats it as person — the side on which an error
+	// cannot silence somebody.
+	Origin catalog.Origin `json:"origin,omitempty"`
+	// Mutation is the identity a mutating call carries so its outcome can be
+	// asked for after the caller stopped waiting (ADR-8eej3e66 §4). It is
+	// envelope metadata, beside the id and the method: a fact about the
+	// invocation, never a param, and no handler ever receives it.
+	Mutation string `json:"mutation,omitempty"`
 }
 
 type jsonrpcResponse struct {
@@ -3496,14 +3697,22 @@ func (s *WSServer) readLoop(ctx context.Context, wconn *wsConn, state *connState
 		}
 		switch msgType {
 		case websocket.TextMessage:
-			s.handleControlFrame(ctx, wconn, state, data)
+			if !s.handleControlFrame(ctx, wconn, state, data) {
+				// A protocol violation: the peer has been told (the log and
+				// the record) and the connection ends here. The deferred
+				// out.Close in handleSession closes the socket.
+				return
+			}
 		case websocket.BinaryMessage:
 			s.handleDataFrame(state, data)
 		}
 	}
 }
 
-func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state *connState, data []byte) {
+// handleControlFrame dispatches one control frame. It returns false when the
+// connection must end: the one case is a peer sending an ordinary request
+// beyond the credit window it was advertised (ADR-8eej3e66 §7).
+func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state *connState, data []byte) bool {
 	// Envelope-only decode through a capped stdlib tokenizer: the read loop
 	// learns jsonrpc, id and method and stops there. The tokenizer reads at
 	// most envelopeScanCap bytes (io.LimitReader), so a frame's size cannot
@@ -3525,13 +3734,13 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 			resp := newJSONRPCError(json.RawMessage("null"), -32700, "Parse error")
 			_ = respond(wconn, resp)
 		}
-		return
+		return true
 	}
 
 	if req.JSONRPC != "2.0" || req.Method == "" {
 		resp := newJSONRPCError(req.ID, -32600, "Invalid Request")
 		_ = respond(wconn, resp)
-		return
+		return true
 	}
 
 	// Per-method params budget: an oversized frame is refused by length
@@ -3543,7 +3752,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		resp := newJSONRPCError(req.ID, -32602, fmt.Sprintf(
 			"params exceed the size budget for method %s (%d bytes)", req.Method, budget))
 		_ = respond(wconn, resp)
-		return
+		return true
 	}
 
 	// The frame is within budget: decode it fully. This validates
@@ -3553,7 +3762,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.log.Warn("jsonrpc parse error", "len", len(data), "category", "syntax_error")
 		resp := newJSONRPCError(json.RawMessage("null"), -32700, "Parse error")
 		_ = respond(wconn, resp)
-		return
+		return true
 	}
 	// An explicit null id behaves exactly like an absent one: the response
 	// carries no id field (parity with the envelope pass and the old
@@ -3571,7 +3780,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.log.Warn("jsonrpc invalid request", "len", len(data), "category", "method_mismatch")
 		resp := newJSONRPCError(req.ID, -32600, "Invalid Request")
 		_ = respond(wconn, resp)
-		return
+		return true
 	}
 
 	// Dispatch through the registration set: the method's submission decides
@@ -3583,15 +3792,15 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	if !ok {
 		resp := newJSONRPCError(req.ID, -32601, "Method not found")
 		_ = respond(wconn, resp)
-		return
+		return true
 	}
-	key := ""
+	runtimeKeys := []string(nil)
 	if m.key != nil {
 		var refusal *RPCError
-		key, refusal = m.key(req.Params)
+		runtimeKeys, refusal = m.key(req.Params)
 		if refusal != nil {
 			_ = wconn.TryError(req.ID, *refusal)
-			return
+			return true
 		}
 	}
 	// THE CHAIN STARTS HERE (nocx-d6gn4.8.1): the frame names itself in the
@@ -3636,6 +3845,22 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	// even though every frame on it opened a span. This is what a failing
 	// e2e test's printed block actually finds by trace_id.
 	log.From(ctx).Debug("jsonrpc dispatch", "method", req.Method)
+	// THE CREDIT WINDOW (ADR-8eej3e66 §7). A request beyond what the
+	// connection was advertised is a protocol violation, not a capacity
+	// answer: the client was TOLD what it may have outstanding, so a peer
+	// that sends more is logged, recorded and disconnected. Notifications
+	// have no answer and therefore take no credit; rescue methods and the
+	// reserved unlock never count against the window (credit.go).
+	var credit *creditPermit
+	if req.ID != nil {
+		var over *creditOverrun
+		credit, over = wconn.credit.admit(req.Method, req.ID)
+		if over != nil {
+			s.noteCreditOverrun(ctx, wconn, req.Method, over)
+			return false
+		}
+	}
+	ctx = withConnectionContext(ctx, ctx)
 	requestCtx := ctx
 	cancelRequest := func() {}
 	var cancelEntry *requestCancel
@@ -3644,31 +3869,103 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		var err error
 		cancelEntry, err = wconn.requestCancels.register(req.ID, cancelRequest)
 		if err != nil {
-			cancelRequest()
-			_ = respond(wconn, newJSONRPCError(req.ID, -32600, "Invalid Request"))
-			return
+			// A duplicate id cannot be tracked twice. The request still runs
+			// (ids are the renderer's to keep unique; refusing here would
+			// change what a client that reuses one can do), but this
+			// invocation is not the one a withdrawal for that id names.
+			cancelEntry = nil
 		}
 	}
 	// THE INVOCATION GETS A SCOPE (ADR-8eej3e66 §4). It carries the
 	// declaration's deadlines and the request's cancellation, and it owns the
-	// one settlement record. Stage 2 records settlement and logs expiry; it
-	// does not answer for it, so nothing a caller can do changes here yet.
-	scope := catalog.Begin(requestCtx, m.op, catalog.Invocation{})
+	// one settlement record. Stage 2 recorded and logged it; here the
+	// settlement also decides the retained answer for a mutation, which is
+	// what a caller can ask for after it stopped waiting.
+	//
+	// A MUTATION'S IDENTITY IS REGISTERED BEFORE IT CAN RUN (ADR-8eej3e66
+	// §4). A second invocation of an identity whose work already ran — or is
+	// still running — is refused here, before admission, so no replay can
+	// reach a handler however the renderer behaves.
+	mutation, mutationRefusal := s.beginMutation(req, m.op)
+	if mutationRefusal != nil {
+		_ = wconn.TryError(req.ID, *mutationRefusal)
+		return true
+	}
+	scope := catalog.Begin(requestCtx, m.op, catalog.Invocation{Origin: invocationOrigin(req)})
 	requestCtx = catalog.WithScope(requestCtx, scope)
-	rej := m.submission.TrySubmit(requestCtx, control.Task{Key: key, Run: func(pctx context.Context) {
+	if mutation != nil {
+		wconn.mutations.add(req.ID, mutation)
+	}
+	// THE RESOURCES THIS INVOCATION ORDERS ON (ADR-8eej3e66 section 5).
+	// The declaration names the keys it can — store:content, a named
+	// collection — and the validator above named the ones only the params
+	// know: which session, which collection. An operation's own admission
+	// takes the keys belonging to its domain and waits for them under the
+	// declared turn; a method whose keys belong to no migrated domain is
+	// unaffected, because no admission there reads them.
+	orderKeys := orderKeysFor(scope.Declaration(), runtimeKeys)
+	requestCtx = control.WithOrder(requestCtx, control.OrderRequest{
+		Keys: orderKeys,
+		Turn: scope.Declaration().Turn.Duration(),
+	})
+	// The per-key FIFO still receives the first runtime key: submissions
+	// that order by key (session-ops) keep their own arrival order, and a
+	// method with no runtime key is unkeyed there.
+	key := ""
+	if len(runtimeKeys) > 0 {
+		key = runtimeKeys[0]
+	}
+	task := control.Task{Key: key, Run: func(pctx context.Context) {
 		defer cancelRequest()
-		defer scope.Complete()
+		defer func() {
+			// THE INVOCATION'S OWN END, and what it means for the mutation
+			// record. The chosen outcome is the CAUSE, not whichever settle
+			// won the race: a withdrawn request records "cancelled" even when
+			// the handler happened to return first.
+			outcome := catalog.OutcomeCompleted
+			if requestCtx.Err() != nil {
+				outcome = catalog.OutcomeCancelled
+			}
+			scope.Settle(outcome)
+			settled, _ := scope.Outcome()
+			// A handler that returned without answering leaves the record to
+			// be settled here, and its request entry must not outlive it.
+			wconn.mutations.take(req.ID)
+			mutation.Settled(settled)
+		}()
+		// The task is the second owner of this credit: a request withdrawn
+		// or failed without an answer would otherwise hold its window slot
+		// until the connection ended. Release is idempotent, so the response
+		// path may already have freed it.
+		defer credit.Release()
 		defer func() {
 			if cancelEntry != nil {
 				wconn.requestCancels.drop(req.ID, cancelEntry)
 			}
 		}()
 		m.handle(pctx, req)
-	}})
+	}}
+	if cancelEntry != nil {
+		// A QUEUED MUTATION THAT NEVER STARTS ANSWERS "DID NOT START", and the
+		// scope is settled here because a withdrawn task never reaches the
+		// handler that would have settled it.
+		task.Start = func() bool {
+			if cancelEntry.begin() {
+				return true
+			}
+			mutation.NotStarted()
+			scope.Settle(catalog.OutcomeNotStarted)
+			return false
+		}
+		requestCtx = withRequestCancel(requestCtx, cancelEntry)
+	}
+	rej := m.submission.TrySubmit(requestCtx, task)
 	if rej == nil {
-		return
+		return true
 	}
 	scope.Refuse()
+	mutation.Settled(catalog.OutcomeRefused)
+	wconn.mutations.take(req.ID)
 	cancelRequest()
 	if cancelEntry != nil {
 		wconn.requestCancels.drop(req.ID, cancelEntry)
@@ -3681,9 +3978,23 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	control.ReportRefusal(requestCtx, *rej)
 	if req.ID != nil {
 		_ = wconn.TryError(req.ID, saturationRPCError(req.Method, rej))
-		return
+		return true
 	}
 	s.emitSaturatedNotification(wconn, req.Method, rej)
+	return true
+}
+
+// invocationOrigin reads the caller's declared origin. Only the catalogue's
+// three values are accepted; anything else — including a missing field — is
+// person, because the wrong answer for a background poll is a quieter one
+// and the wrong answer for a person is an error nobody sees.
+func invocationOrigin(req jsonrpcRequest) catalog.Origin {
+	switch req.Origin {
+	case catalog.OriginBackground, catalog.OriginSystem:
+		return req.Origin
+	default:
+		return catalog.OriginPerson
+	}
 }
 
 // beginInternal starts an internal operation's scope. It is the one place a

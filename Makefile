@@ -562,8 +562,24 @@ ci-full: ci-os-split ci-local-ssh-split ci ci-mac ci-backend ci-linux ci-fronten
 # SCM_RIGHTS descriptor passing, and the probes that decide a refusal class —
 # and a package with a platform split that stays in the portable set has its
 # `!unix` half compiled by nothing at all.
+#
+# internal/git joined on 2026-11-06, noticed by ci-os-split on the merged
+# ADR-8eej3e66 tree in exactly the same way (nocx-3an1s.2.4). A checkout's
+# failure domain is its mount's device id (git.CheckoutIdentity), so the
+# package grew identity_unix.go / identity_other.go; the split moves the
+# package, and with it its tests, from the portable job to the OS one. That is
+# the whole edit: one list owns both partitions, so no test command names it
+# a second time.
+#
+# internal/filesystem/local joined beside it for the same reason, from the
+# same integration (nocx-3an1s.2.3): a local binding asks the kernel's mount
+# table which device a path belongs to, and that question has one answer per
+# platform (mounts_darwin.go / mounts_linux.go). A provider that can say
+# neither still gets a domain of its own, but the reading is the OS's.
 OS_PKG_DIRS := cmd/e2e-sshd internal/apicoll internal/app internal/contentkey \
-               internal/coordinator internal/desktopidentity internal/helper/endpoint internal/helper/fishchannel \
+               internal/coordinator internal/desktopidentity \
+               internal/filesystem/local internal/git \
+               internal/helper/endpoint internal/helper/fishchannel \
                internal/helper/session internal/lifecyclechannel \
                internal/loginshell internal/nativeports internal/procwatch \
                internal/pty internal/reveal internal/ssh/mux \

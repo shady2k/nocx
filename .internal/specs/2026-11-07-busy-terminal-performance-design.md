@@ -1,6 +1,6 @@
 # Prepare fidelity-preserving fixes for active-output tabs
 
-- **Status:** supporting preparation, proposed for review; no optimization implemented.
+- **Status:** P1–P4 implementation and P5 contract design approved; implementation not yet accepted.
 - **Owner request:** 2026-11-07, “проведи подготовку к исправлению и сделай pr в репе”
   (prepare the fixes and open a pull request).
 - **Preparation leaf:** `nocx-3an1s.1.11`, serving busy-terminal O1 under
@@ -9,10 +9,11 @@
   are unchanged from measured revision `f49860272193af2bce04745c691b0ad621252092`.
 - **Evidence:** [diagnostic report](../../docs/research/2026-11-07-busy-terminal-performance.md)
   and [portable measurements](../../docs/research/2026-11-07-busy-terminal-measurements.json).
-- **Admission:** the five follow-ons below are tracked **deferred**. The current
-  finding budget remains 12/12; preparation does not authorize implementation,
-  raise that budget, supersede an ADR or approve a merge. The owner reviews the
-  plan and selects/adopts implementation work separately.
+- **Admission:** on 2026-11-07 the owner selected “Четыре исправления и контракт
+  истории” after seeing P1–P5 and the increase from 12 to 17 admitted findings.
+  This approves the four bounded fixes and P5's design proof, not pagination
+  implementation, an ADR supersession or a merge. The original preparation
+  measurements and their limits remain unchanged.
 
 ## Problem
 

@@ -364,7 +364,7 @@ func (s *WSServer) emittingAvailable() bool {
 func (s *WSServer) agentEmittingSpecs() []methodSpec {
 	return []methodSpec{
 		whenAvailable(
-			regResponder(s.lane, catalog.OpAgentEmitting, params(validateAgentEmittingRaw), func(r Responder) handlerFunc {
+			regResponder(s.work, catalog.OpAgentEmitting, params(validateAgentEmittingRaw), func(r Responder) handlerFunc {
 				return func(ctx context.Context, req jsonrpcRequest) { s.handleAgentEmitting(ctx, req, r) }
 			}),
 			s.emittingAvailable,

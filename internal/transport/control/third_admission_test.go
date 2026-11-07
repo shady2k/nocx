@@ -5,13 +5,10 @@ package control
 // through the constructors, with zero edits to the package's production
 // source.
 //
-// It lives in an internal test file because NonblockingAdmission's marker
-// method is unexported by design (ADR-0026 item 3 of Enforcement): only this
-// package may declare a submission-path admission, so a waiting admission
-// cannot be wired into a Submission's TrySubmit from anywhere else — the
-// miswiring is a compile error, not a convention. The package's internal
-// tests are the one legitimate outside-implementer of the marker, which is
-// why the proof runs here.
+// It lives in an internal test file because the Admission interface is
+// satisfied outside this package all the time (the capability layer builds
+// store plans from it), and this is where the proof that the package needs no
+// edit to accept a new kind belongs.
 
 import (
 	"context"
@@ -45,31 +42,14 @@ func (o *oneShotAdmission) TryAcquire(context.Context) (Permit, *Rejection) {
 	return oneShotPermit{}, nil
 }
 
-// nonblocking seals the interface: TryAcquire never blocks, so the admission
-// is a legitimate part of a submission-path composite, exactly like the
-// package's semaphore. No type outside this package can declare it.
-func (o *oneShotAdmission) nonblocking() {}
-
 type oneShotPermit struct{}
 
 func (oneShotPermit) Release() {}
 
 func TestThirdAdmissionDefinedInTestFileIsUsedUnchanged(t *testing.T) {
-	sub := NewBoundedSubmission(&oneShotAdmission{name: "oneshot"})
-
-	ran := make(chan struct{})
-	if rej := sub.TrySubmit(context.Background(), Task{Run: func(context.Context) { close(ran) }}); rej != nil {
-		t.Fatalf("first submit through the third admission was rejected: %+v", rej)
-	}
-	<-ran
-
-	if rej := sub.TrySubmit(context.Background(), Task{Run: func(context.Context) { t.Error("must not run") }}); rej == nil {
-		t.Fatal("second submit must be refused by the exhausted third admission")
-	}
-
-	// It also composes with the package's own semaphore: when the foreign
-	// admission refuses, the semaphore permit acquired before it is released.
-	sem := NewSemaphore("exec", 1)
+	// The foreign admission composes with the package's own, and when it
+	// refuses the permit acquired before it is released.
+	sem := NewWaitingSemaphore("exec", 1, time.Second)
 	comp := NewComposite(&oneShotAdmission{name: "oneshot2"}, sem)
 	if p, rej := comp.TryAcquire(context.Background()); rej != nil {
 		t.Fatalf("first composite acquire refused: %+v", rej)

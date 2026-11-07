@@ -76,7 +76,7 @@ func (h aboutHandlers) handleAbout(_ context.Context, req jsonrpcRequest) {
 // inferred from a neighbour.
 func (s *WSServer) aboutSpecs() []methodSpec {
 	return []methodSpec{
-		regResponder(s.lane, catalog.OpAppAbout, noParams(), func(r Responder) handlerFunc {
+		regResponder(s.work, catalog.OpAppAbout, noParams(), func(r Responder) handlerFunc {
 			h := aboutHandlers{build: s.build, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAbout(ctx, req) }
 		}),

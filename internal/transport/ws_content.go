@@ -63,10 +63,10 @@ func validateHistoryQueryRaw(raw json.RawMessage) string {
 	return ""
 }
 
-func (s *WSServer) contentSpecs(lane control.Admission, contentGate control.Admission, contentSub control.Submission) []methodSpec {
+func (s *WSServer) contentSpecs(contentGate control.Admission, contentSub control.Submission) []methodSpec {
 	var contentOp capability.ContentOperation
 	if s.contentDB != nil {
-		contentOp = capability.NewContentOperation(contentGate, lane, s.contentDB)
+		contentOp = capability.NewContentOperation(contentGate, s.contentDB)
 	}
 	specs := []methodSpec{
 		regResponder(contentSub, catalog.OpHistoryQuery, params(validateHistoryQueryRaw), func(r Responder) handlerFunc {

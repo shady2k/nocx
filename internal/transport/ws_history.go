@@ -153,11 +153,11 @@ func (h historyQueryHandlers) handleHistoryQuery(ctx context.Context, req jsonrp
 		return nil
 	})
 	if err != nil {
-		// A gate refusal is the saturation error; anything else keeps the
+		// An admission's answer is the declaration's; anything else keeps the
 		// store-failure answer unchanged from the pre-capability handler.
 		var rej *capability.RefusedError
 		if errors.As(err, &rej) {
-			_ = h.r.TryError(req.ID, saturationRPCError(req.Method, &rej.Rejection))
+			answerOperationRefusal(h.r, req, err)
 			return
 		}
 		_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "history.query: ", err))

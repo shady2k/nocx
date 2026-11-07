@@ -77,37 +77,34 @@ func (s *WSServer) SetDialogService(ds DialogService) {
 
 // dialogHandlers answers the dialog methods. It holds the dialog service
 // holder, the native-picker capability and its Responder; nothing else. The
-// off-loop machinery (the gate composed with the execution lane, inflight
-// registration) lives in the registration, not in the handler.
+// off-loop machinery (the work submission and the inflight registration) lives
+// in the registration, not in the handler.
 type dialogHandlers struct {
 	dialog *dialogServiceHolder
-	// admit is the native picker: a capacity-one WAITING gate composed with
-	// the execution lane (ws.go, buildControlPlane). It is acquired HERE,
-	// on the task goroutine, rather than by the submission at submit time,
-	// because a waiting admission may never be wired into a Submission —
-	// the read loop is a Submission's caller and must never block
-	// (ADR-0026 item 3 of Enforcement, enforced as a compile error).
+	// admit is the native picker: a capacity-one WAITING gate (ws.go,
+	// buildControlPlane). It is acquired HERE, on the task goroutine, rather
+	// than by the submission at submit time, because a waiting admission may
+	// never be wired into a Submission — the read loop is a Submission's
+	// caller and must never block (ADR-0026 item 3 of Enforcement, enforced
+	// as a compile error).
 	//
 	// Waiting is the point. The handler enqueues its response inside the
-	// task and its permit is returned only after the task goroutine
-	// returns, so a sequential client's very next dialog request can arrive
-	// while the capability is still held by the request it has already been
-	// answered. An instant-refusal gate told that client "Control plane
-	// busy" for doing nothing wrong; a waiting gate queues it, and only
-	// exhausting a bound is a refusal — which is still what a picker a
-	// human left open produces.
+	// task and its permit is returned only after the task goroutine returns,
+	// so a sequential client's very next dialog request can arrive while the
+	// capability is still held by the request it has already been answered.
+	// A second picker waits for the first — a picker a human left open is
+	// what keeps it held — and when its turn ends it answers "did not start".
 	admit control.Admission
 	r     Responder
 }
 
 // holdPicker takes the native-picker capability for one picker call, or
-// answers the caller with the saturation error the transport already has a
+// answers the caller with the admission's own answer, which the transport has a
 // wire shape for. The permit is the caller's to release.
 func (h dialogHandlers) holdPicker(ctx context.Context, req jsonrpcRequest) (control.Permit, bool) {
 	permit, rej := h.admit.TryAcquire(ctx)
 	if rej != nil {
-		control.ReportRefusal(ctx, *rej)
-		_ = h.r.TryError(req.ID, saturationRPCError(req.Method, rej))
+		answerSubmissionRejection(ctx, h.r, req, rej)
 		return nil, false
 	}
 	return permit, true

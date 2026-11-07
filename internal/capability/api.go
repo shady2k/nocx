@@ -407,7 +407,7 @@ type APICollectionOperation interface {
 }
 
 // NewAPICollectionOperation builds the collection operation over the folder
-// service, acquiring the api gate and then the execution lane.
+// service, acquiring the api gate and nothing after it.
 //
 // It takes the WHOLE folder surface — requests, environments and creation —
 // because all three are reached from this one domain and all three must go
@@ -417,11 +417,11 @@ type APICollectionOperation interface {
 // substitution. It is a parameter rather than a field set afterwards because
 // the snapshot needs it on the first call; a build wired without one leaves
 // references unresolved and refuses the send.
-func NewAPICollectionOperation(apiGate, lane control.Admission, svc apicoll.Collections) APICollectionOperation {
+func NewAPICollectionOperation(apiGate control.Admission, svc apicoll.Collections) APICollectionOperation {
 	g := &guard{}
 	return newOperation[APICollectionService](
 		Direct("APICollectionOperation"),
-		control.NewComposite(apiGate, lane),
+		control.NewComposite(apiGate),
 		g,
 		newAPICollectionService(g, svc),
 	)
@@ -1023,7 +1023,7 @@ type APIImportOperation interface {
 }
 
 // NewAPIImportOperation builds the import operation, acquiring the api gate
-// before the vault gate (the canonical order) and then the execution lane.
+// and the vault gate (the canonical order).
 // fsys is every filesystem touch the writer makes.
 //
 // fetch acquires a document by URL and may be nil, which is a build without
@@ -1033,7 +1033,7 @@ type APIImportOperation interface {
 // too — a build with no vault stores the export's values as it found them,
 // and the offer is simply never taken.
 func NewAPIImportOperation(
-	apiGate, vaultGate, lane control.Admission,
+	apiGate, vaultGate control.Admission,
 	fsys apiimport.FS,
 	fetch apifetch.Fetcher,
 	secrets APIImportVault,
@@ -1041,7 +1041,7 @@ func NewAPIImportOperation(
 	g := &guard{}
 	return newOperation[APIImportService](
 		Direct("APIImportOperation"),
-		control.NewComposite(apiGate, vaultGate, lane),
+		control.NewComposite(apiGate, vaultGate),
 		g,
 		&apiImportService{guard: g, fsys: fsys, fetch: fetch, secrets: secrets},
 	)

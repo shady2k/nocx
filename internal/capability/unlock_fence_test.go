@@ -30,9 +30,10 @@ func TestOperationHoldingTheAnsweringGateFencesAMaterialRead(t *testing.T) {
 	resolver := credential.NewResolver(store, nil, store)
 
 	op := capability.NewConfigOperation(
-		capability.Gate(capability.GateConfig, 1, 8, time.Second),
-		capability.UnlockAnswering(capability.Gate(capability.GateVault, 1, 8, time.Second)),
-		testLane(), &fakeProfileRepo{}, &fakeGroupRepo{}, nil, nil, newProfileService(t), nil, nil, nil)
+		capability.UnlockAnswering(storePlan(
+			capability.Gate(capability.GateConfig, 1, time.Second),
+			capability.Gate(capability.GateVault, 1, time.Second))),
+		&fakeProfileRepo{}, &fakeGroupRepo{}, nil, nil, newProfileService(t), nil, nil, nil)
 
 	var got error
 	if err := op.Run(context.Background(), func(ctx context.Context, _ capability.ConfigService) error {
@@ -57,9 +58,10 @@ func TestTheSameReadAfterTheOperationSucceeds(t *testing.T) {
 	resolver := credential.NewResolver(store, nil, store)
 
 	op := capability.NewConfigOperation(
-		capability.Gate(capability.GateConfig, 1, 8, time.Second),
-		capability.UnlockAnswering(capability.Gate(capability.GateVault, 1, 8, time.Second)),
-		testLane(), &fakeProfileRepo{}, &fakeGroupRepo{}, nil, nil, newProfileService(t), nil, nil, nil)
+		capability.UnlockAnswering(storePlan(
+			capability.Gate(capability.GateConfig, 1, time.Second),
+			capability.Gate(capability.GateVault, 1, time.Second))),
+		&fakeProfileRepo{}, &fakeGroupRepo{}, nil, nil, newProfileService(t), nil, nil, nil)
 
 	ctx := context.Background()
 	if err := op.Run(ctx, func(context.Context, capability.ConfigService) error { return nil }); err != nil {
@@ -82,7 +84,7 @@ func TestAnOperationWithoutTheAnsweringGateStillResolves(t *testing.T) {
 	store := &fenceStore{sealed: true}
 	resolver := credential.NewResolver(store, nil, store)
 
-	op := capability.NewContentOperation(control.NewSemaphore(capability.GateContent, 1), testLane(), nil)
+	op := capability.NewContentOperation(control.NewWaitingSemaphore(capability.GateContent, 1, time.Second), nil)
 
 	var got error
 	if err := op.Run(context.Background(), func(ctx context.Context, _ capability.ContentService) error {

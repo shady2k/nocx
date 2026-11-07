@@ -9,9 +9,8 @@ import type {
   EndpointProvider,
   EndpointResult,
 } from './endpoint'
-import type { ControlSaturated } from './generated/control.saturated'
 import type { TransportPingResult } from './generated/transport.ping'
-import type { ControlSaturatedNotification } from './generated/control.saturated.notification'
+import type { OperationExpired } from './generated/operation.expired'
 import { callOperationDeclaration } from './generated/operations'
 import type { TransportCreditResult } from './generated/transport.credit'
 import type { MutationReplayed } from './generated/mutation.replayed'
@@ -87,90 +86,46 @@ export interface CallOptions {
   origin?: CallOrigin
 }
 
-/** The wire's fixed reason for a refused control request
- *  (contracts/control.saturated.schema.json). */
-const SATURATION_REASON = 'control-saturated'
-
 /**
- * WHAT THE REFUSAL WAS FOR, in the person's words (nocx-3an1s.1.1).
+ * True when `err` is the answer a call that never started carries: -32005
+ * with the fixed reason `not-started` (contracts/operation.expired.schema.json,
+ * the same shape the git domain answers with).
  *
- * A refusal carries `scope`: the backend admission that refused the work, set
- * from server vocabulary at the composition root and never from request text.
- * The owner met "The terminal is busy" while no command of theirs was running,
- * which is exactly what a background write in another surface looks like, so
- * naming the domain is the least a refusal can do.
+ * A call whose declared turn ran out while it waited for a resource, or whose
+ * work reached its declared max before any effect, did not start. Nothing
+ * changed, so the remedy is the same action once more — and the surface that
+ * asked owns that retry, because a sentence shared by every surface cannot
+ * know what the person was doing (ADR-8eej3e66 §8).
  *
- * An unknown scope names no domain rather than inventing a cause; a new
- * admission is a new row here, deliberately.
+ * This is the ONE place the renderer reads that discriminator. There is no
+ * capacity answer to recognise: stage 8 removed the -32004 refusal and its
+ * notification with the lane that produced them.
  */
-const REFUSAL_DOMAINS: Record<string, string> = {
-  config: 'settings',
-  session: 'terminal session',
-  vault: 'vault',
-  content: 'command record',
-  git: 'git',
-  filesystem: 'file',
-  api: 'API',
-  // The execution lane every admission-backed control method shares
-  // (internal/transport/ws.go's control.NewSemaphore("control", …)). It is
-  // the scope a stuck pane open takes eight of, and until it was named the
-  // owner met exactly that with nothing they could name (nocx-398ca).
-  control: 'terminal',
+export function isNotStartedAnswer(err: unknown): boolean {
+  if (!(err instanceof RpcError) || err.code !== OPERATION_EXPIRED_CODE) return false
+  // A shape check first, so the code alone is never the answer: the
+  // mutation-replay refusal shares -32005 and carries a different payload.
+  return isOperationExpiredPayload(err.data) && err.data.reason === NOT_STARTED_REASON
 }
 
-/**
- * The sentence a refused call rejects with (ADR-8eej3e66 §8, stage 1).
- *
- * It says what happened and what was at its limit, and nothing else: no
- * "busy", no "try again in a moment". The remedy belongs to the surface that
- * asked — its own refused state and its own retry — because a sentence shared
- * by every surface cannot know what the person was doing or whether asking
- * again is even theirs to do.
- *
- * This is the ONE owner of the refusal's words. A surface that renders
- * `err.message` therefore cannot inherit the wire's own "Control plane busy",
- * and two spellings of one fact cannot drift apart.
- */
-export function refusalSentence(scope?: string): string {
-  const domain = scope === undefined ? undefined : REFUSAL_DOMAINS[scope]
-  return domain === undefined
-    ? 'The request was refused — nocx was already running as many operations as it allows.'
-    : `The request was refused — nocx was already running as many ${domain} operations as it allows.`
+/** True when `data` is the expiry payload
+ *  (contracts/operation.expired.schema.json), whose only field is the
+ *  catalogue's reason. */
+function isOperationExpiredPayload(data: unknown): data is Pick<OperationExpired, 'reason'> {
+  return typeof data === 'object' && data !== null && 'reason' in data
 }
+
+/** The JSON-RPC code a call that reached a declared deadline answers with. */
+const OPERATION_EXPIRED_CODE = -32005
+
+/** The catalogue's reason for "nothing took effect". */
+const NOT_STARTED_REASON = 'not-started'
 
 /** The control-plane notification a full refreshable outbound queue sends
  *  through its one reserved slot, after dropping the frame that overflowed it
  *  (outbound.StallNoticeMethod). It carries no params: the fact that frames
  *  were dropped is the whole message. */
 const OUTBOUND_STALLED = 'outbound.stalled'
-
-/**
- * True when `data` is the error payload of a refused control request
- * (contracts/control.saturated.schema.json). Only the fixed `reason`
- * discriminates, so a payload field may grow without the class being lost.
- */
-function isSaturationData(data: unknown): data is Pick<ControlSaturated, 'reason'> {
-  return (
-    typeof data === 'object' &&
-    data !== null &&
-    'reason' in data &&
-    data.reason === SATURATION_REASON
-  )
-}
-
-/**
- * True when `err` is a control request the backend refused because the
- * control plane was saturated — transient by contract (`retryable`), so a
- * surface may offer the person the same action again.
- *
- * The dispatcher no longer shows anything for a refusal (ADR-8eej3e66 stage
- * 1): this is how a surface recognises the one class of failure whose remedy
- * is its own retry, through the wire's discriminator rather than a second
- * reading of the message.
- */
-export function isSaturationRefusal(err: unknown): boolean {
-  return err instanceof RpcError && isSaturationData(err.data)
-}
 
 // Reconnect backoff: start at 250 ms, double each attempt, cap at 5 s.
 // Jitter of up to 50 % of the current backoff is added so a reload storm
@@ -434,6 +389,9 @@ export class Dispatcher {
   private connectHandlers = new Set<LifecycleHandler>()
   private disconnectHandlers = new Set<LifecycleHandler>()
   private connectionStateHandlers = new Set<(state: ConnectionState) => void>()
+  // Call observers: the sources that draw a person's call.
+  private callPendingHandlers = new Set<(call: PendingCallView) => void>()
+  private callSettledHandlers = new Set<(id: number, settlement: CallSettlement) => void>()
 
   // Reconnect state.
   private _connectionState: ConnectionState = { kind: 'waiting', backoffMs: MIN_BACKOFF_MS }
@@ -453,29 +411,13 @@ export class Dispatcher {
   private _heartbeatRequestID: number | null = null
 
   constructor(private readonly provider: EndpointProvider) {
-    this.subscribe('control.saturated', (params: unknown) => {
-      // A refused NOTIFICATION: no id, so no response to carry the -32004
-      // error, and the server says it here instead. Nobody's promise is
-      // rejected for it and nobody pressed anything for it, so the whole
-      // debt of this frame is the record (ADR-8eej3e66 stage 1 removed the
-      // toast; the schema and this subscription go in its last stage).
-      //
-      // Consumes the generated params type — the contract file must stay
-      // reachable from main(): `methodClass` and `scope` are the server's
-      // coarse class and admission name, never request text.
-      const note = params as ControlSaturatedNotification
-      log.warn('nocx: control action refused', {
-        methodClass: typeof note.methodClass === 'string' ? note.methodClass : '',
-        scope: typeof note.scope === 'string' ? note.scope : '',
-      })
-    })
     this.subscribe(OUTBOUND_STALLED, () => {
-      // The OUTBOUND twin of control.saturated, and it needs the opposite
-      // remedy. A refused request has an answer — the caller is told no, and
-      // the toast above makes that visible. A stalled outbound queue has
-      // already DROPPED frames: the backend keeps one reserved slot to say so
-      // and then goes on, so what this connection owes the renderer no longer
-      // exists anywhere. There is nothing to retry and nothing to be told.
+      // The OUTBOUND twin of a dropped frame, and it needs its own remedy. A
+      // call that did not start has an answer — the caller is rejected and its
+      // surface says so. A stalled outbound queue has already DROPPED frames:
+      // the backend keeps one reserved slot to say so and then goes on, so what
+      // this connection owes the renderer no longer exists anywhere. There is
+      // nothing to retry and nothing to be told.
       //
       // So take the existing close path, exactly as the heartbeat's dead
       // socket does: it rejects what is pending, publishes waiting, schedules
@@ -695,6 +637,8 @@ export class Dispatcher {
     this.connectHandlers.clear()
     this.disconnectHandlers.clear()
     this.connectionStateHandlers.clear()
+    this.callPendingHandlers.clear()
+    this.callSettledHandlers.clear()
   }
 
   // --- RPC -----------------------------------------------------------------
@@ -712,11 +656,29 @@ export class Dispatcher {
    */
   onVaultSealed?: (method: string) => Promise<void>
 
-  /** Called when a person's operation call is on the wire. Background work
-   *  never reaches it: it merges and is not shown. */
-  onCallPending?: (call: PendingCallView) => void
-  /** Called once when that call has settled, however it settled. */
-  onCallSettled?: (id: number, settlement: CallSettlement) => void
+  /** Observe a person's operation call the moment it is on the wire.
+   *  Background work never reaches it: it merges and is not shown.
+   *
+   *  More than one surface reads this, and each ends its own row by it: the
+   *  call's wait and the work the backend does inside the call are two
+   *  accounts of one call, not two calls. Returns an unsubscribe function,
+   *  like every other subscription here. */
+  onCallPending(handler: (call: PendingCallView) => void): () => void {
+    this.callPendingHandlers.add(handler)
+    return () => {
+      this.callPendingHandlers.delete(handler)
+    }
+  }
+
+  /** Observe the settlement of a call that was announced, however it
+   *  settled: answered, withdrawn, or left without an answer by the socket.
+   *  This is the end of anything that call was showing. */
+  onCallSettled(handler: (id: number, settlement: CallSettlement) => void): () => void {
+    this.callSettledHandlers.add(handler)
+    return () => {
+      this.callSettledHandlers.delete(handler)
+    }
+  }
 
   call<T = unknown>(
     method: string,
@@ -834,13 +796,14 @@ export class Dispatcher {
     if (slot.announced || slot.state === 'done') return
     if (slot.intent !== 'operation' || slot.origin !== 'person') return
     slot.announced = true
-    this.onCallPending?.({
+    const call: PendingCallView = {
       id: slot.observeID,
       method: slot.method,
       startedAt: slot.startedAt,
       mutation: slot.mutation,
       cancel: () => this.cancel(slot.observeID),
-    })
+    }
+    for (const handler of this.callPendingHandlers) handler(call)
   }
 
   /** Put a slot where it belongs: on the wire if it may go now, otherwise in
@@ -977,7 +940,15 @@ export class Dispatcher {
   }
 
   /** Withdraw every caller of one slot. A queued call is simply dropped; a
-   *  sent one is cancelled BY THE ID THE BACKEND IS WORKING ON. */
+   *  sent one is cancelled BY THE ID THE BACKEND IS WORKING ON.
+   *
+   *  THE CANCEL GOES FIRST, BEFORE ANY CREDIT COMES BACK (ADR-8eej3e66 §7).
+   *  The backend releases a withdrawn request's credit when it handles the
+   *  cancel on its read loop, and it disconnects a peer that sends one past
+   *  its window. Settling the slot here frees the credit and pumps the queue
+   *  in the same breath, so a cancel sent after it would put the replacement
+   *  on the wire while the server still counts the withdrawn call — and every
+   *  call waiting behind it would lose its answer to a drop. */
   private withdraw(slot: CallSlot, last: CallMember[] = []): void {
     const wireID = slot.wireID
     const onTheWire = wireID !== null && !this.isExempt(slot.method)
@@ -985,13 +956,13 @@ export class Dispatcher {
       this.withdrawMutation(slot, onTheWire, wireID, last)
       return
     }
+    this.cancelOnWire(wireID, onTheWire)
     for (const member of last) {
       if (member.settled) continue
       member.settled = true
       member.reject(abortError())
     }
     this.settleSlot(slot, abortError(), undefined, onTheWire ? 'no-answer' : 'answered')
-    this.cancelOnWire(wireID, onTheWire)
   }
 
   /** A mutation's withdrawal ends the wait and answers the caller (§8).
@@ -1013,8 +984,11 @@ export class Dispatcher {
     const held = slot.members
     for (const member of last) if (!member.settled) held.add(member)
     slot.members = new Set()
-    this.settleSlot(slot, undefined, undefined, onTheWire ? 'no-answer' : 'answered')
+    // The cancel precedes the settlement here for the reason `withdraw`
+    // gives: the credit the server gives back is spent by the pump, and the
+    // server must have been told first.
     this.cancelOnWire(wireID, onTheWire)
+    this.settleSlot(slot, undefined, undefined, onTheWire ? 'no-answer' : 'answered')
     if (!onTheWire) {
       this.answerWithdrawn(held, withdrawnBeforeStart(slot.method))
       return
@@ -1377,6 +1351,22 @@ export class Dispatcher {
     if (slot !== undefined) this.withdraw(slot)
   }
 
+  /** THE CALL A REQUEST ID NAMES (ADR-8eej3e66 §8). The backend knows a call
+   *  only by the id it was sent with: that is the id in `rpc.cancel` and the
+   *  one in `operation.row`. It is per ATTEMPT — a sealed retry sends under a
+   *  fresh one — while the id a row and `cancel()` name must survive that, so
+   *  the renderer keeps two counters and they are not the same number: one
+   *  queued call that a person's call overtakes, or one that expires before
+   *  it is sent, and every later wire id names a different call. This is the
+   *  one place that holds both, so this is where the translation lives; a
+   *  wire id that names no call of this renderer's answers null rather than a
+   *  guess, because a guessed id is another call's. */
+  callIDForRequest(requestID: number | string): number | null {
+    if (typeof requestID !== 'number') return null
+    const slot = this.pending.get(requestID)
+    return slot === undefined ? null : slot.observeID
+  }
+
   /** One sealed refusal becomes one unlock and one re-send (ADR-0032). The
    *  replacement goes back through the queue, so an unlock answered while
    *  the window is full waits for credit like any other call rather than
@@ -1468,14 +1458,12 @@ export class Dispatcher {
     ) {
       return new VaultOperationCancelledError()
     }
-    if (isSaturationData(error.data)) {
-      return refusedError(slot.method, slot.origin, error.data, error.code)
-    }
     return new RpcError(error.message ?? 'rpc error', error.code, error.data)
   }
 
   private notifyCallSettled(slot: CallSlot, settlement: CallSettlement = 'answered'): void {
-    if (slot.announced) this.onCallSettled?.(slot.observeID, settlement)
+    if (!slot.announced) return
+    for (const handler of this.callSettledHandlers) handler(slot.observeID, settlement)
   }
 
   /** A lost connection settles everything: sent calls have no answer coming,
@@ -1505,32 +1493,4 @@ export class Dispatcher {
       h()
     }
   }
-}
-
-/**
- * The error one refused call rejects with, and the record of who caused it.
- *
- * Two things happen here and nowhere else (ADR-8eej3e66 stage 1):
- *
- * - The message becomes a sentence a person can read. The wire's own
- *   "Control plane busy" is a diagnostic, not an answer, and a surface that
- *   prints `err.message` — which most of them do — must not put it on screen.
- *   `data` is untouched, so `isSaturationRefusal` still recognises the class.
- * - The invocation is recorded with its origin, in the log. A background
- *   refusal is silent to the person by design, so the record is the only
- *   place it exists in the renderer; the backend's own `control action
- *   refused` line and Copy diagnostics hold the same fact with its holders.
- */
-function refusedError(
-  method: string,
-  origin: CallOrigin,
-  data: Pick<ControlSaturated, 'reason'>,
-  code: number | undefined,
-): RpcError {
-  const scope =
-    typeof (data as { scope?: unknown }).scope === 'string'
-      ? ((data as { scope?: unknown }).scope as string)
-      : ''
-  log.warn('nocx: control request refused', { method, scope, origin })
-  return new RpcError(refusalSentence(scope === '' ? undefined : scope), code, data)
 }

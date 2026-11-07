@@ -1,5 +1,12 @@
 # Capabilities — migration map
 
+> **Historical, and superseded where it disagrees.** This was the plan for the
+> domain-capability migration. ADR-8eej3e66 replaced the model it describes —
+> whole-domain gates, the one-second wait, the queue-depth bound and the
+> execution lane all went during its stages 1–8 — and the code is the record
+> of what is there now (`internal/capability`'s package doc). Read this for how
+> the migration was reasoned about, not for what the code does.
+
 Worker F deliverable for the domain-capabilities wave. The typed, scoped
 domain operations live in `internal/capability` (new package). This map is
 the plan the migration bead executes: for every JSON-RPC control method,

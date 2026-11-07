@@ -42,10 +42,10 @@ type UIStateOperation interface {
 }
 
 // NewUIStateOperation builds a UIStateOperation that acquires configGate then
-// the execution lane, and hands the callback a guard-bound UI-state service.
-func NewUIStateOperation(configGate, lane control.Admission, store *uistate.Store) UIStateOperation {
+// and hands the callback a guard-bound UI-state service.
+func NewUIStateOperation(configGate control.Admission, store *uistate.Store) UIStateOperation {
 	g := &guard{}
-	return newOperation[UIStateService](Excluded("it persists renderer presentation state rather than performing a domain action"), control.NewComposite(configGate, lane), g, &uiStateService{guard: g, store: store})
+	return newOperation[UIStateService](Excluded("it persists renderer presentation state rather than performing a domain action"), control.NewComposite(configGate), g, &uiStateService{guard: g, store: store})
 }
 
 type uiStateService struct {

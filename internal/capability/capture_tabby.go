@@ -48,14 +48,14 @@ type CaptureSaveOperation interface {
 // vaultGate before contentGate (the canonical order), then the execution
 // lane.
 func NewCaptureSaveOperation(
-	vaultGate, contentGate, lane control.Admission,
+	vaultGate, contentGate control.Admission,
 	vaultLifecycle SecretVault,
 	contentDB content.ContentDB,
 ) CaptureSaveOperation {
 	g := &guard{}
 	return newOperation[CaptureSaveService](
 		Direct("CaptureSaveOperation"),
-		control.NewComposite(vaultGate, contentGate, lane),
+		control.NewComposite(vaultGate, contentGate),
 		g,
 		newCaptureSaveService(g, vaultLifecycle, contentDB),
 	)
@@ -121,18 +121,18 @@ type TabbyImportService interface {
 }
 
 // TabbyImportOperation is the typed operation for profiles.importTabby,
-// profiles.tabbyPreview and profiles.tabbyExecute. Its gates are
-// [config, vault].
+// profiles.tabbyPreview and profiles.tabbyExecute. Its admission is the one
+// plan for both stores it writes (config and vault), never the two per-store
+// plans composed — stores.go says why that deadlocks.
 type TabbyImportOperation interface {
 	AssistantOperation
 	Run(context.Context, func(context.Context, TabbyImportService) error) error
 }
 
-// NewTabbyImportOperation builds a TabbyImportOperation that acquires
-// configGate before vaultGate (the canonical order), then the execution
-// lane.
+// NewTabbyImportOperation builds a TabbyImportOperation over the plan its
+// stores are written through, acquired once.
 func NewTabbyImportOperation(
-	configGate, vaultGate, lane control.Admission,
+	stores control.Admission,
 	profiles profile.ProfileRepository,
 	groups profile.GroupRepository,
 	svc *profile.ProfileService,
@@ -142,7 +142,7 @@ func NewTabbyImportOperation(
 	g := &guard{}
 	return newOperation[TabbyImportService](
 		Direct("TabbyImportOperation"),
-		control.NewComposite(configGate, vaultGate, lane),
+		stores,
 		g,
 		newTabbyImportService(g, profiles, groups, svc, vaultLifecycle, store),
 	)

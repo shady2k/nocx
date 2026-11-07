@@ -11,11 +11,11 @@ import (
 )
 
 // The waiting admission is the gate behind the domain-conflict fix: a
-// conflicting operation WAITS (bounded) for the gate instead of refusing
-// instantly, so a sequential client whose previous response left the permit
-// held for a moment is never told the control plane is busy. These tests
-// pin the two bounds — the wait timeout and the queue depth — and the
-// acquire-after-release handoff.
+// conflicting operation WAITS (bounded by its declared turn) for the gate
+// instead of refusing instantly, so a sequential client whose previous
+// response left the permit held for a moment is never told the control plane
+// is busy. These tests pin the wait bound, the absence of a count bound, the
+// acquire-after-release handoff and the turn the context carries.
 
 // releaseGate holds a waiting admission's single permit until released,
 // standing in for an in-flight conflicting operation.
@@ -68,7 +68,7 @@ func waitersOf(t *testing.T, a Admission, want int, what string) {
 // it waits, and runs once the gate frees. Against the old non-blocking
 // semaphore this test fails immediately (the second acquire refuses).
 func TestWaitingAdmission_AwaitsConflictInsteadOfRefusing(t *testing.T) {
-	a := NewWaitingSemaphore("config", 1, 8, time.Second)
+	a := NewWaitingSemaphore("config", 1, time.Second)
 	busy := holdBusy(t, a)
 	defer busy.free()
 
@@ -100,10 +100,10 @@ func TestWaitingAdmission_AwaitsConflictInsteadOfRefusing(t *testing.T) {
 }
 
 // TestWaitingAdmission_WaitBoundIsExhausted pins the wait bound: a request
-// that cannot get the gate within the timeout is refused, and the refusal
-// is a Rejection (the wire maps it to -32004).
+// that cannot get the gate within its turn ends as a wait-exceeded rejection,
+// which the wire answers as the declaration's "did not start".
 func TestWaitingAdmission_WaitBoundIsExhausted(t *testing.T) {
-	a := NewWaitingSemaphore("config", 1, 8, 100*time.Millisecond)
+	a := NewWaitingSemaphore("config", 1, 100*time.Millisecond)
 	busy := holdBusy(t, a)
 	defer busy.free()
 
@@ -115,44 +115,46 @@ func TestWaitingAdmission_WaitBoundIsExhausted(t *testing.T) {
 	if elapsed := time.Since(start); elapsed < 80*time.Millisecond {
 		t.Fatalf("refusal came after %v, before the wait bound elapsed", elapsed)
 	}
+	if rej.Kind != RejectionWaitExceeded {
+		t.Fatalf("rejection kind = %q, want %q", rej.Kind, RejectionWaitExceeded)
+	}
 }
 
-// TestWaitingAdmission_QueueDepthBoundIsInstant pins the queue-depth bound:
-// once maxQueue callers are waiting, the next conflicting caller is refused
-// instantly, never queued.
-func TestWaitingAdmission_QueueDepthBoundIsInstant(t *testing.T) {
-	a := NewWaitingSemaphore("config", 1, 2, time.Second)
+// TestWaitingAdmission_ManyWaitersAreAllServed pins the stage-8 rule: there
+// is no waiter-count bound, so a burst of waiters far beyond any fixed depth
+// is queued and served in turn rather than refused (ADR-8eej3e66 §7). What
+// ends a wait is the turn, not a count.
+func TestWaitingAdmission_ManyWaitersAreAllServed(t *testing.T) {
+	a := NewWaitingSemaphore("config", 1, 5*time.Second)
 	busy := holdBusy(t, a)
 	defer busy.free()
 
-	// Fill the waiter bound (2 waiters), each waiting on the held gate.
-	// The waiter accounting is the registration barrier: poll it directly
-	// (in-package test) so the third acquire below races nothing.
-	for range 2 {
+	const waiters = 12
+	served := make(chan struct{}, waiters)
+	for range waiters {
 		go func() {
-			_, _ = a.TryAcquire(context.Background())
+			p, rej := a.TryAcquire(context.Background())
+			if rej == nil {
+				p.Release()
+			}
+			served <- struct{}{}
 		}()
 	}
-	waitersOf(t, a, 2, "fill the queue")
-
-	// The third conflicting caller must be refused instantly.
-	start := time.Now()
-	if _, rej := a.TryAcquire(context.Background()); rej == nil {
-		t.Fatal("acquire beyond the queue depth must be refused")
-	}
-	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
-		t.Fatalf("queue-depth refusal took %v; it must be instant", elapsed)
-	}
-
-	// Releasing the gate lets the queued waiters through one by one.
+	waitersOf(t, a, waiters, "every waiter registered")
 	busy.free()
-	waitersOf(t, a, 0, "drain the queue")
+	for range waiters {
+		select {
+		case <-served:
+		case <-time.After(5 * time.Second):
+			t.Fatal("a waiter was never served")
+		}
+	}
 }
 
 // TestWaitingAdmission_CancelledWaitIsRefused pins context cancellation:
 // a waiter whose context dies leaves the queue without stranding a token.
 func TestWaitingAdmission_CancelledWaitIsRefused(t *testing.T) {
-	a := NewWaitingSemaphore("config", 1, 8, time.Second)
+	a := NewWaitingSemaphore("config", 1, time.Second)
 	busy := holdBusy(t, a)
 	defer busy.free()
 
@@ -186,7 +188,7 @@ func TestWaitingAdmission_CancelledWaitIsRefused(t *testing.T) {
 // times out must not hold a phantom claim on the token, so the next release
 // hands the token to a genuinely waiting caller.
 func TestWaitingAdmission_TimedOutWaiterLeavesNoStrandedToken(t *testing.T) {
-	a := NewWaitingSemaphore("config", 1, 8, 50*time.Millisecond)
+	a := NewWaitingSemaphore("config", 1, 50*time.Millisecond)
 	busy := holdBusy(t, a)
 
 	// One waiter times out while the gate is still held.
@@ -207,7 +209,7 @@ func TestWaitingAdmission_TimedOutWaiterLeavesNoStrandedToken(t *testing.T) {
 // configuration: a zero wait timeout is the old non-blocking behavior — a
 // busy gate refuses instantly, a free gate admits.
 func TestWaitingAdmission_ZeroTimeoutRefusesWhenBusy(t *testing.T) {
-	a := NewWaitingSemaphore("config", 1, 8, 0)
+	a := NewWaitingSemaphore("config", 1, 0)
 	p, rej := a.TryAcquire(context.Background())
 	if rej != nil {
 		t.Fatalf("free gate refused: %+v", rej)
@@ -224,7 +226,7 @@ func TestWaitingAdmission_ZeroTimeoutRefusesWhenBusy(t *testing.T) {
 // TestWaitingAdmission_DoubleReleaseDoesNotOverAdmit keeps the permit
 // contract: a double release must not hand back a token a held permit owns.
 func TestWaitingAdmission_DoubleReleaseDoesNotOverAdmit(t *testing.T) {
-	a := NewWaitingSemaphore("config", 1, 8, time.Second)
+	a := NewWaitingSemaphore("config", 1, time.Second)
 	p, rej := a.TryAcquire(context.Background())
 	if rej != nil {
 		t.Fatalf("acquire refused: %+v", rej)

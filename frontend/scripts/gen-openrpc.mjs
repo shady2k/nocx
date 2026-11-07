@@ -56,9 +56,9 @@ function methodEntry(name, resultFiles, operation, mutating) {
         'x-nocx-errorSchema': ref('rpc.error.schema.json'),
       },
       {
-        code: -32004,
-        message: 'Control plane busy',
-        'x-nocx-errorSchema': ref('rpc.error.schema.json'),
+        code: -32005,
+        message: 'This call did not start, or its work reached its declared deadline',
+        'x-nocx-errorSchema': ref('operation.expired.schema.json'),
       },
     ],
     'x-nocx-agent-disposition': 'operation-owned',

@@ -210,7 +210,7 @@ func (h notifyRaiseHandlers) handleNotifyRaise(ctx context.Context, req jsonrpcR
 // kind could have named a different one.
 func (s *WSServer) notifySpecs() []methodSpec {
 	return []methodSpec{
-		reg(s.lane, catalog.OpNotifyRaise, params(validateNotifyRaiseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(s.work, catalog.OpNotifyRaise, params(validateNotifyRaiseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			return notifyRaiseHandlers{
 				raiser:   s.notifyRaiser,
 				registry: s.registry,

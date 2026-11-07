@@ -715,7 +715,7 @@ func (h ledgerHandlers) invalid(req jsonrpcRequest, msg string) {
 // answerError maps the write path's failures. An id already used by a
 // different submission is reachable from the renderer (a client that reused a
 // UUID) and is invalid params, never a server fault; a gate refusal keeps its
-// control.saturated shape; anything else is an internal error.
+// declaration's own answer; anything else is an internal error.
 func (h ledgerHandlers) answerError(req jsonrpcRequest, err error) {
 	switch {
 	case errors.Is(err, content.ErrIDConflict),
@@ -843,10 +843,10 @@ func validateLedgerCloseRaw(raw json.RawMessage) string {
 // ledgerSpecs declares the ledger lifecycle methods on the CONTENT operation
 // queue: the ledger is content's schema v1 (ADR-0019), so it shares the
 // content domain's gate and queue with history.* and agent.*.
-func (s *WSServer) ledgerSpecs(contentSub control.Submission, lane control.Admission, contentGate control.Admission) []methodSpec {
+func (s *WSServer) ledgerSpecs(contentSub control.Submission, contentGate control.Admission) []methodSpec {
 	var op capability.LedgerOperation
 	if s.contentDB != nil {
-		op = capability.NewLedgerOperation(contentGate, lane, s.contentDB)
+		op = capability.NewLedgerOperation(contentGate, s.contentDB)
 	}
 	// One shared state for all three methods and every connection: the phase
 	// decision is serialized across the process, not per connection.

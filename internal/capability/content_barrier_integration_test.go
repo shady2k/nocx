@@ -22,10 +22,9 @@ import (
 // Shared(StoreContent) instead, with its capacity-one store key, would not
 // allow.
 func TestSharedBarrierExcludesWithRestoreAndLeavesOrderToTheCaller(t *testing.T) {
-	stores := newStoreGuard(8)
-	order := control.NewResourceOrder("content-order", control.DefaultOrderLimit,
+	stores := newStoreGuard()
+	order := control.NewResourceOrder("content-order",
 		"store:content", "collection:workspace-layout")
-	lane := control.NewSemaphore("test-lane", 4)
 	admission := func() control.Admission {
 		return control.NewComposite(stores.SharedBarrier(capability.StoreContent), order)
 	}
@@ -40,7 +39,7 @@ func TestSharedBarrierExcludesWithRestoreAndLeavesOrderToTheCaller(t *testing.T)
 	if rej != nil {
 		t.Fatalf("the restore was refused: %+v", rej)
 	}
-	content := capability.NewContentOperation(admission(), lane, db)
+	content := capability.NewContentOperation(admission(), db)
 	ran := make(chan struct{})
 	go func() {
 		_ = content.Run(resources(2*time.Second, "store:content"), func(context.Context, capability.ContentService) error {
@@ -65,7 +64,7 @@ func TestSharedBarrierExcludesWithRestoreAndLeavesOrderToTheCaller(t *testing.T)
 
 	// Two different keys of one content domain still run together: the store
 	// key Shared(StoreContent) would have taken is not in this plan.
-	layout := capability.NewLayoutOperation(admission(), lane, db)
+	layout := capability.NewLayoutOperation(admission(), db)
 	held, rej := order.TryAcquire(resources(time.Second, "store:content"))
 	if rej != nil {
 		t.Fatalf("hold the content store key: %+v", rej)

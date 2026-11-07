@@ -1,11 +1,11 @@
 package transport
 
-// The epic's acceptance tests, over the real socket (nocx-sfv6.5): the
-// wired executor must let the data plane run while control work blocks, must
-// refuse (never queue) saturated ordinary work with the -32004 wire error,
-// must keep the ingress-critical resolvers immediate under saturation, must
-// correlate out-of-order responses, and must give conflicting mutations the
-// same gate protection from one socket as from two.
+// The epic's acceptance tests, over the real socket (nocx-sfv6.5): the wired
+// executor must let the data plane run while control work blocks, must keep
+// the ingress-critical resolvers immediate, must never answer a person's call
+// with a capacity error (ADR-8eej3e66 stage 8), must correlate out-of-order
+// responses, and must give conflicting mutations the same gate protection
+// from one socket as from two.
 
 import (
 	"context"
@@ -28,6 +28,7 @@ import (
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/transport/control"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // openLocalSession opens a local session over the wire and returns its id.
@@ -82,21 +83,19 @@ func waitForEcho(t *testing.T, conn *websocket.Conn, sid string, needle string) 
 }
 
 // blockingProbeServer builds a server whose connections.test blocks in the
-// prober until released, with the given lane capacity.
-func blockingProbeServer(t *testing.T, laneCapacity int) (*WSServer, *probeCallRecorder) {
+// prober until released.
+func blockingProbeServer(t *testing.T) (*WSServer, *probeCallRecorder) {
 	t.Helper()
-	return blockingProbeServerWithLogger(t, laneCapacity, log.NewSlogAdapter(nil))
+	return blockingProbeServerWithLogger(t, log.NewSlogAdapter(nil))
 }
 
 func blockingProbeServerWithLogger(
 	t *testing.T,
-	laneCapacity int,
 	logger log.Logger,
 ) (*WSServer, *probeCallRecorder) {
 	t.Helper()
 	rec := &probeCallRecorder{started: make(chan struct{}), cancelled: make(chan struct{})}
 	srv := NewWSServer(logger, newRegWithStub(logger),
-		WithControlLaneCapacity(laneCapacity),
 		WithProber(rec),
 		WithProfileResolver(probeResolver()),
 	)
@@ -181,11 +180,11 @@ func TestKeystrokeReachesLiveSessionWhileDialogOutstanding(t *testing.T) {
 	waitForEcho(t, conn, sid, "keystroke-during-dialog")
 }
 
-// ── While the ordinary lane is saturated, vault.unlockResolved still
-// ── completes its pending unlock and the blocked originating RPC resumes.
+// ── While ordinary work is blocked, vault.unlockResolved still completes its
+// ── pending unlock and the blocked originating RPC resumes.
 
-func TestUnlockResolvedCompletesWhileLaneSaturated(t *testing.T) {
-	srv, rec := blockingProbeServer(t, 1)
+func TestUnlockResolvedCompletesWhileOtherWorkIsBlocked(t *testing.T) {
+	srv, rec := blockingProbeServer(t)
 	ctx := context.Background()
 
 	conn := connectWS(t, srv)
@@ -193,16 +192,11 @@ func TestUnlockResolvedCompletesWhileLaneSaturated(t *testing.T) {
 
 	startBlockedProbe(t, conn, rec)
 
-	// An ordinary request is now refused — the lane is genuinely saturated.
-	refused := jsonrpcCall(t, conn, "fs.complete", map[string]any{"text": "/etc", "cwd": "/", "limit": 5})
-	var env struct {
-		Error *jsonrpcErrorObj `json:"error"`
-	}
-	if err := json.Unmarshal(refused, &env); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if env.Error == nil || env.Error.Code != SaturationErrorCode {
-		t.Fatalf("expected the saturation refusal, got %s", refused)
+	// An ordinary request is ADMITTED and answered while the probe holds its
+	// goroutine: nothing refuses for capacity any more (ADR-8eej3e66 stage 8).
+	ordinary := jsonrpcCall(t, conn, "fs.complete", map[string]any{"text": "/etc", "cwd": "/", "limit": 5})
+	if code := errorCodeOf(t, ordinary); code != 0 {
+		t.Fatalf("an ordinary call was answered with error %d while a probe was in flight: %s", code, ordinary)
 	}
 
 	// The ask: RequestUnlock is blocked waiting for its resolution.
@@ -211,7 +205,7 @@ func TestUnlockResolvedCompletesWhileLaneSaturated(t *testing.T) {
 	rid := waitForPendingAsk(t, srv)
 
 	// The resolution arrives over the same socket the read loop consumes —
-	// the resolver is ingress-critical and must complete under saturation.
+	// the resolver is ingress-critical and must complete under any load.
 	resp := jsonrpcCall(t, conn, "vault.unlockResolved", map[string]any{
 		"requestId": rid,
 		"outcome":   "unsealed",
@@ -223,7 +217,7 @@ func TestUnlockResolvedCompletesWhileLaneSaturated(t *testing.T) {
 		t.Fatalf("unmarshal resolution: %v", err)
 	}
 	if okEnv.Error != nil {
-		t.Fatalf("vault.unlockResolved refused while the lane was saturated: %+v", okEnv.Error)
+		t.Fatalf("vault.unlockResolved refused while other work was blocked: %+v", okEnv.Error)
 	}
 	select {
 	case err := <-released:
@@ -231,129 +225,49 @@ func TestUnlockResolvedCompletesWhileLaneSaturated(t *testing.T) {
 			t.Fatalf("RequestUnlock: %v", err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("vault.unlockResolved did not release the waiter under lane saturation")
+		t.Fatal("vault.unlockResolved did not release the waiter")
 	}
 }
 
-func TestSaturationRefusalEmitsSafeDebugDiagnostic(t *testing.T) {
+// ── A call that does not start is recorded, and neither the record nor the
+// ── answer carries request text ───────────────────────────────────────────
+
+func TestAWaitThatEndsIsRecordedWithoutRequestText(t *testing.T) {
 	var buf syncBuffer
 	handler := slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
 	logger := log.NewSlogAdapter(slog.New(handler))
-	srv, rec := blockingProbeServerWithLogger(t, 1, logger)
-	conn := connectWS(t, srv)
-	defer conn.Close() //nolint:errcheck
-
-	startBlockedProbe(t, conn, rec)
-
-	assertDiagnostic := func(secret, method, methodClass, scope, disposition string) {
-		t.Helper()
-		logged := buf.String()
-		for _, forbidden := range []string{secret, "capacity exhausted"} {
-			if strings.Contains(logged, forbidden) {
-				t.Fatalf("saturation diagnostic leaked %q:\n%s", forbidden, logged)
-			}
-		}
-		for _, line := range strings.Split(strings.TrimSpace(logged), "\n") {
-			if line == "" {
-				continue
-			}
-			var record map[string]any
-			if err := json.Unmarshal([]byte(line), &record); err != nil {
-				t.Fatalf("bad log line %q: %v", line, err)
-			}
-			if record["msg"] != "control action refused" {
-				continue
-			}
-			if record["method"] != method ||
-				record["methodClass"] != methodClass ||
-				record["scope"] != scope ||
-				record["disposition"] != disposition ||
-				record["retryAfterMs"] != float64(0) {
-				t.Fatalf("incomplete saturation diagnostic: %v", record)
-			}
-			return
-		}
-		t.Fatalf("missing control action refusal diagnostic:\n%s", logged)
+	srv := NewWSServer(logger, newRegWithStub(logger))
+	ctx := context.Background()
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
 	}
+	t.Cleanup(func() { _ = srv.Stop(ctx) })
 
 	requestSecret := "request-secret-must-not-be-logged"
-	resp := jsonrpcCall(t, conn, "fs.complete", map[string]any{
-		"text":  requestSecret,
-		"cwd":   "/",
-		"limit": 5,
-	})
-	if !strings.Contains(string(resp), `"code":-32004`) {
-		t.Fatalf("expected saturation response, got %s", resp)
-	}
-	assertDiagnostic(requestSecret, "fs.complete", "fs", "control", "request")
-
-	buf.Reset()
-	notificationSecret := "notification-secret-must-not-be-logged"
-	frame := fmt.Sprintf(
-		`{"jsonrpc":"2.0","method":"fs.complete","params":{"text":%q,"cwd":"/","limit":5}}`,
-		notificationSecret,
-	)
-	if err := conn.WriteMessage(websocket.TextMessage, []byte(frame)); err != nil {
-		t.Fatalf("write notification: %v", err)
-	}
-	_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
-	if _, _, err := conn.ReadMessage(); err != nil {
-		t.Fatalf("read saturation notification: %v", err)
-	}
-	assertDiagnostic(notificationSecret, "fs.complete", "fs", "control", "notification")
-
-	buf.Reset()
-	innerRequestValue := "inner-refusal-sensitive-value"
-	srv.methods["test.innerRefusal"] = reg(
-		control.NewBoundedSubmission(control.NewSemaphore("test-dispatch", 1)),
-		// A handle from the catalogue is the only kind reg accepts; the map
-		// key is this test's own synthetic method name.
+	// A handler whose admission answer is the one this stage produces: the
+	// wait ended, nothing started. The reason is free text and deliberately
+	// NOT on the wire or in the log.
+	srv.methods["test.waitEnded"] = reg(
+		control.AsyncSubmission{},
 		catalog.OpFsComplete,
-		// The merge: every method now declares a params validator (a method
-		// without one stopped building, nocx-q27y) and writes through the
-		// Responder, which is what the sealed normalizer wraps (nocx-k41yv).
-		// This one accepts what the call sends — the payload IS the fixture
-		// here (the diagnostic must not echo it back), so validating it away
-		// would delete the thing under test.
 		params(func(json.RawMessage) string { return "" }),
-		func(w *wsConn, _ *connState, r Responder) handlerFunc {
-			_ = w
+		func(_ *wsConn, _ *connState, r Responder) handlerFunc {
 			return func(ctx context.Context, req jsonrpcRequest) {
 				rejection := control.Rejection{
-					Reason: "inner capacity exhausted: " + innerRequestValue,
+					Kind:   control.RejectionWaitExceeded,
+					Reason: "conflict queue full: " + requestSecret,
 					Scope:  "config",
 				}
-				// THE REFUSAL IS REPORTED WHERE IT IS BORN (nocx-3an1s.1.8).
-				// A real gate refusal is reported by capability.refused at the
-				// admission; this fixture builds one by hand, so it says the
-				// same thing at the same point — the diagnostic line is the
-				// transport's, and the transport hears it through this sink.
 				control.ReportRefusal(ctx, rejection)
 				answerOperationRefusal(r, req, &capability.RefusedError{Rejection: rejection})
 			}
 		},
 	)
-	innerConn := connectWS(t, srv)
-	defer innerConn.Close() //nolint:errcheck
-	innerResp := jsonrpcCall(t, innerConn, "test.innerRefusal", map[string]string{"sensitive": innerRequestValue})
-	if !strings.Contains(string(innerResp), `"code":-32004`) {
-		t.Fatalf("expected inner saturation response, got %s", innerResp)
-	}
-	assertDiagnostic(innerRequestValue, "test.innerRefusal", "test", "config", "request")
-}
 
-// ── Ordinary saturation returns the structured retryable error immediately
-// ── (over the wire, validated against the contract schema — the
-// ── over-the-wire half that needed a real saturation off a real socket).
-
-func TestSaturationError_OverTheWireConformsToContract(t *testing.T) {
-	srv, rec := blockingProbeServer(t, 1)
 	conn := connectWS(t, srv)
 	defer conn.Close() //nolint:errcheck
 
-	startBlockedProbe(t, conn, rec)
-
-	resp := jsonrpcCall(t, conn, "fs.complete", map[string]any{"text": "/etc", "cwd": "/", "limit": 5})
+	resp := jsonrpcCall(t, conn, "test.waitEnded", map[string]string{"text": requestSecret})
 	var env struct {
 		Error *struct {
 			Code    int             `json:"code"`
@@ -365,65 +279,80 @@ func TestSaturationError_OverTheWireConformsToContract(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if env.Error == nil {
-		t.Fatalf("expected a refusal, got %s", resp)
+		t.Fatalf("expected the expiry answer, got %s", resp)
 	}
-	if env.Error.Code != SaturationErrorCode {
-		t.Fatalf("error code = %d, want %d", env.Error.Code, SaturationErrorCode)
+	if env.Error.Code != OperationExpiredCode {
+		t.Fatalf("error code = %d, want %d", env.Error.Code, OperationExpiredCode)
 	}
-	if env.Error.Message != SaturationMessage {
-		t.Fatalf("error message = %q, want %q", env.Error.Message, SaturationMessage)
+	// The data payload is the contract: exact key set, the declaration's own
+	// reason, and nothing from the request.
+	validateJSON(t, loadSchema(t, "operation.expired.schema.json"), env.Error.Data, "expiry data")
+	if strings.Contains(string(env.Error.Data), requestSecret) {
+		t.Fatalf("the answer echoed request text: %s", env.Error.Data)
 	}
-	// The data payload is the contract: exact key set, required fields,
-	// fixed reason vocabulary, retryable, retryAfterMs >= 0.
-	validateJSON(t, loadSchema(t, "control.saturated.schema.json"), env.Error.Data, "saturation error data")
-}
 
-// ── A refused notification (no id) is answered with the rate-limited
-// ── control.saturated notification, never an error, at most one per
-// ── (class, scope) per interval.
-
-func TestRefusedNotificationRateLimitedOverTheWire(t *testing.T) {
-	srv, rec := blockingProbeServer(t, 1)
-	// Shorten the server-side emission interval so the test does not sleep
-	// a full second.
-	srv.satNotify.interval = 50 * time.Millisecond
-
-	conn := connectWS(t, srv)
-	defer conn.Close() //nolint:errcheck
-
-	startBlockedProbe(t, conn, rec)
-
-	// Three refused NOTIFICATIONS (no id) of the same class+scope: the first
-	// emits control.saturated, the next two within the interval stay silent.
-	for range 3 {
-		if err := conn.WriteMessage(websocket.TextMessage, []byte(
-			`{"jsonrpc":"2.0","method":"fs.complete","params":{"text":"/etc","cwd":"/","limit":5}}`,
-		)); err != nil {
-			t.Fatalf("write notification: %v", err)
+	logged := buf.String()
+	for _, forbidden := range []string{requestSecret, "conflict queue full"} {
+		if strings.Contains(logged, forbidden) {
+			t.Fatalf("the diagnostic leaked %q:\n%s", forbidden, logged)
 		}
 	}
+	found := false
+	for _, line := range strings.Split(strings.TrimSpace(logged), "\n") {
+		if line == "" {
+			continue
+		}
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("bad log line %q: %v", line, err)
+		}
+		if record["msg"] != "control action did not start" {
+			continue
+		}
+		if record["method"] != "test.waitEnded" ||
+			record["kind"] != string(control.RejectionWaitExceeded) ||
+			record["scope"] != "config" ||
+			record["disposition"] != "request" {
+			t.Fatalf("incomplete wait diagnostic: %v", record)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatalf("missing the wait diagnostic:\n%s", logged)
+	}
+}
 
-	// Collect text frames until quiet; count control.saturated notifications.
-	saturated := 0
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-		_, data, err := conn.ReadMessage()
+// ── The expiry answer is one shape for every domain ───────────────────────
+
+func TestTheExpiryAnswer_IsOneShapeForEveryDomain(t *testing.T) {
+	for _, decl := range catalog.Declarations() {
+		if decl.Kind != catalog.KindMethod {
+			continue
+		}
+		rec := &captureResponder{}
+		answerOperationExpiry(rec, jsonrpcRequest{ID: json.RawMessage("1")}, decl.Expired, "")
+		if rec.err == nil {
+			t.Fatalf("%s: no answer was written", decl.ID)
+		}
+		if rec.err.Code != OperationExpiredCode {
+			t.Fatalf("%s: code = %d, want %d", decl.ID, rec.err.Code, OperationExpiredCode)
+		}
+		raw, err := json.Marshal(rec.data)
 		if err != nil {
-			break // quiet (timeout) — the burst has settled
+			t.Fatalf("%s: marshal data: %v", decl.ID, err)
 		}
-		if strings.Contains(string(data), `"method":"control.saturated"`) {
-			saturated++
+		validateJSON(t, loadSchema(t, "operation.expired.schema.json"), raw, string(decl.ID)+" expiry data")
+		var payload struct {
+			Reason string `json:"reason"`
 		}
-	}
-	if saturated != 1 {
-		t.Fatalf("control.saturated notifications = %d, want exactly 1 (rate-limited)", saturated)
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			t.Fatalf("%s: decode: %v", decl.ID, err)
+		}
+		if payload.Reason != string(decl.Expired) {
+			t.Fatalf("%s: reason = %q, want %q", decl.ID, payload.Reason, decl.Expired)
+		}
 	}
 }
-
-// ── Responses may complete out of request order and still correlate
-// ── correctly: the slow request's id and the fast request's id each ride
-// ── their own response.
 
 func TestResponsesCorrelateOutOfOrder(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
@@ -740,10 +669,9 @@ func TestSequentialBackToBackConflictingRequestsNeverSaturated(t *testing.T) {
 	}
 }
 
-// ── The bounded wait is bounded: a conflict that outlives the wait bound
-// ── is refused with the saturation error, and only then.
+// ── A conflicting call WAITS and then runs; nothing is refused for capacity ──
 
-func TestBoundedConflictWaitExhaustsToRefusal(t *testing.T) {
+func TestAConflictingCallWaitsAndThenRuns(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
 	reg := newRegWithStub(logger)
 	// Held by the RESOLVE, for the reason the test above states.
@@ -773,10 +701,6 @@ func TestBoundedConflictWaitExhaustsToRefusal(t *testing.T) {
 				return "host.example.com", &ssh.ConnectConfig{User: "test", Port: 22}, nil
 			},
 		}),
-		// A SHORT wait bound: the conflicting request exhausts it and is
-		// refused with the saturation error — the refusal is the bound
-		// exhausting, not the instant refusal of the old code.
-		WithDomainConflictWaitTimeout(150*time.Millisecond),
 	)
 	ctx := context.Background()
 	if err := srv.Start(ctx); err != nil {
@@ -787,7 +711,7 @@ func TestBoundedConflictWaitExhaustsToRefusal(t *testing.T) {
 	conn := connectWS(t, srv)
 	defer conn.Close() //nolint:errcheck
 
-	// The blocked resolve holds the [config, session] gates.
+	// The blocked resolve holds [config, session].
 	sendControl(t, conn, "open", map[string]any{
 		"kind": "ssh", "profileId": "ssh:p:1",
 		"cols": 80, "rows": 24,
@@ -798,42 +722,42 @@ func TestBoundedConflictWaitExhaustsToRefusal(t *testing.T) {
 		t.Fatal("resolve never started")
 	}
 
-	// The conflicting mutation waits the bound out, then is refused.
-	start := time.Now()
-	refused := jsonrpcCallWithID(t, conn, "profiles.create", map[string]any{
-		"id": "ssh:p:2", "name": "b", "type": "ssh",
-		"options": map[string]any{"host": "b.example.com"},
-	}, 2)
-	var env struct {
-		Error *jsonrpcErrorObj `json:"error"`
-	}
-	if err := json.Unmarshal(refused, &env); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if env.Error == nil || env.Error.Code != SaturationErrorCode {
-		t.Fatalf("conflicting request must be refused after the wait bound, got %s", refused)
-	}
-	if elapsed := time.Since(start); elapsed < 100*time.Millisecond {
-		t.Fatalf("refusal came after %v; the wait bound was not honored", elapsed)
+	// The conflicting mutation waits for the holder. It is NOT answered with
+	// a capacity error while it waits (ADR-8eej3e66 §7): its answer arrives
+	// only when the gate frees.
+	settled := make(chan json.RawMessage, 1)
+	go func() {
+		settled <- jsonrpcCallWithID(t, conn, "profiles.create", map[string]any{
+			"id": "ssh:p:2", "name": "b", "type": "ssh",
+			"options": map[string]any{"host": "b.example.com"},
+		}, 2)
+	}()
+	waittest.WaitFor(t, "the conflicting write to be waiting", func() bool { return hasProfile(t, ps, "ssh:p:2") == false })
+	select {
+	case raw := <-settled:
+		t.Fatalf("the conflicting write was answered while the holder was still running: %s", raw)
+	case <-time.After(150 * time.Millisecond):
 	}
 
-	select {
-	case <-releaseResolve:
-	default:
-		close(releaseResolve)
+	// The holder returns: the same action completes, and it did not start
+	// before that.
+	close(releaseResolve)
+	raw := <-settled
+	if code := errorCodeOf(t, raw); code != 0 {
+		t.Fatalf("the conflicting write was answered with error %d after the gate freed: %s", code, raw)
+	}
+	if !hasProfile(t, ps, "ssh:p:2") {
+		t.Fatal("the conflicting write was answered but its mutation was not applied")
 	}
 }
 
-// A REFUSAL ENDS WITH THE OPERATION THAT SET IT (nocx-3an1s.1.1).
+// A WAIT ENDS WITH THE OPERATION THAT SET IT (nocx-3an1s.1.1).
 //
 // The bead's criterion in one run, over the wire: one operation holds the
-// config domain past the wait bound, so a conflicting request is refused with
-// the saturation error — the LEGITIMATE refusal — and the moment that holder
-// returns, the same action is offered again and ACCEPTED. Nothing restarts,
-// nothing is reset by hand, and no state outlives the operation that set it.
-// This is the regression the owner's intermittent toast needs: the refusal is
-// a wait bound, not a stuck gate.
-func TestRefusalEndsWhenTheHoldingOperationReleases(t *testing.T) {
+// config domain, a conflicting request waits, and the moment that holder
+// returns the waiting request completes. No state outlives the operation that
+// held the resource, and nothing is answered "busy" in between.
+func TestAWaitEndsWhenTheHoldingOperationReleases(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
 	reg := newRegWithStub(logger)
 	resolveStarted := make(chan struct{})
@@ -857,8 +781,6 @@ func TestRefusalEndsWhenTheHoldingOperationReleases(t *testing.T) {
 				return "host.example.com", &ssh.ConnectConfig{User: "test", Port: 22}, nil
 			},
 		}),
-		// Short, so the refusal is the bound exhausting rather than a wait.
-		WithDomainConflictWaitTimeout(150*time.Millisecond),
 	)
 	ctx := context.Background()
 	if err := srv.Start(ctx); err != nil {
@@ -880,32 +802,26 @@ func TestRefusalEndsWhenTheHoldingOperationReleases(t *testing.T) {
 		t.Fatal("resolve never started")
 	}
 
-	create := func(id int) string {
-		return string(jsonrpcCallWithID(t, conn, "profiles.create", map[string]any{
+	create := func(id int) json.RawMessage {
+		return jsonrpcCallWithID(t, conn, "profiles.create", map[string]any{
 			"id": "ssh:p:2", "name": "b", "type": "ssh",
 			"options": map[string]any{"host": "b.example.com"},
-		}, id))
+		}, id)
 	}
-	// While the holder is in its domain, the conflicting write waits the bound
-	// out and is refused.
-	refused := create(2)
-	if !strings.Contains(refused, `"code":-32004`) {
-		t.Fatalf("the conflicting write must be refused while the resolve holds the domain, got %s", refused)
+	// While the holder is in its domain, the conflicting write waits — and is
+	// not answered at all until the gate frees.
+	settled := make(chan json.RawMessage, 1)
+	go func() { settled <- create(2) }()
+	select {
+	case raw := <-settled:
+		t.Fatalf("the conflicting write settled while the resolve held the domain: %s", raw)
+	case <-time.After(150 * time.Millisecond):
 	}
-
-	// The holder returns. The same write is offered again and must be
-	// answered — created, or refused for its own reason, but never as busy.
 	release()
-	deadline := time.Now().Add(5 * time.Second)
-	last := ""
-	for time.Now().Before(deadline) {
-		last = create(3)
-		if !strings.Contains(last, `"code":-32004`) {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
+	raw := <-settled
+	if code := errorCodeOf(t, raw); code != 0 {
+		t.Fatalf("the write was answered with error %d after the holder returned: %s", code, raw)
 	}
-	t.Fatalf("the action stayed refused after the holding operation returned: %s", last)
 }
 
 // ── A DIAL HOLDS NO DOMAIN GATE (nocx-l21ib.1) ────────────────────────────
@@ -1011,9 +927,10 @@ func TestDialInFlightRefusesNothing(t *testing.T) {
 	readResponseFor(t, conn, 1, 10*time.Second)
 }
 
-// assertNotRefused fails when the response is the saturation refusal. Any
-// OTHER error passes: these calls are made against stubs that fail for their
-// own reasons, and the claim is about admission, not about the answer.
+// assertNotRefused fails when the response is the removed capacity refusal,
+// -32004. Any OTHER error passes: these calls are made against stubs that fail
+// for their own reasons, and the claim is about admission, not about the
+// answer.
 func assertNotRefused(t *testing.T, resp []byte, what string) {
 	t.Helper()
 	var env struct {
@@ -1022,62 +939,8 @@ func assertNotRefused(t *testing.T, resp []byte, what string) {
 	if err := json.Unmarshal(resp, &env); err != nil {
 		t.Fatalf("unmarshal %s: %v", what, err)
 	}
-	if env.Error != nil && env.Error.Code == SaturationErrorCode {
-		t.Fatalf("%s was refused with the saturation error: %s", what, resp)
-	}
-}
-
-// ── Ordinary execution saturation (the lane) still refuses instantly,
-// ── including for domain-gated methods: the refusal is answered by the
-// ── handler with the same -32004, never a wait.
-
-func TestLaneSaturationRefusesDomainMethodInstantly(t *testing.T) {
-	logger := log.NewSlogAdapter(nil)
-	rec := &probeCallRecorder{started: make(chan struct{}), cancelled: make(chan struct{})}
-	ps := profile.NewJSONStore(t.TempDir() + "/p.json")
-	srv := NewWSServer(logger, newRegWithStub(logger),
-		WithControlLaneCapacity(1),
-		WithProber(rec),
-		WithProfileResolver(probeResolver()),
-		WithProfileRepository(ps),
-		WithGroupRepository(ps),
-	)
-	ctx := context.Background()
-	if err := srv.Start(ctx); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	t.Cleanup(func() { _ = srv.Stop(ctx) })
-
-	conn := connectWS(t, srv)
-	defer conn.Close() //nolint:errcheck
-
-	// A blocked probe holds the only lane permit.
-	sendControl(t, conn, "connections.test", map[string]any{"profileId": "ssh:test:1"}, 1)
-	select {
-	case <-rec.started:
-	case <-time.After(5 * time.Second):
-		t.Fatal("probe never started")
-	}
-
-	// A domain-gated request finds the lane full and is refused instantly
-	// with the saturation error — the lane never waits, even under the new
-	// waiting gates (the conflict gates are free; the lane is the bound).
-	start := time.Now()
-	refused := jsonrpcCallWithID(t, conn, "profiles.create", map[string]any{
-		"id": "ssh:p:1", "name": "a", "type": "ssh",
-		"options": map[string]any{"host": "a.example.com"},
-	}, 2)
-	var env struct {
-		Error *jsonrpcErrorObj `json:"error"`
-	}
-	if err := json.Unmarshal(refused, &env); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if env.Error == nil || env.Error.Code != SaturationErrorCode {
-		t.Fatalf("lane-saturated domain request must be refused, got %s", refused)
-	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("lane refusal took %v; saturation must refuse immediately", elapsed)
+	if env.Error != nil && env.Error.Code == -32004 {
+		t.Fatalf("%s was answered with the removed capacity refusal: %s", what, resp)
 	}
 }
 

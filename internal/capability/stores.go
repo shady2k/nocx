@@ -101,10 +101,10 @@ type StoreGuard struct {
 }
 
 // NewStoreGuard derives the plan from the catalogue and builds one barrier per
-// declared barrier name and one key per store. maxQueue and waitTimeout are the
-// bounds every acquisition carries; the composition root names them, the same
-// way it names the domain gates' bounds.
-func NewStoreGuard(decls []catalog.Declaration, maxQueue int, waitTimeout time.Duration) *StoreGuard {
+// declared barrier name and one key per store. waitTimeout is the wait bound a
+// caller without a declared turn inherits; a control call carries its own turn
+// (ADR-8eej3e66 §3), so the composition root's value is a fallback.
+func NewStoreGuard(decls []catalog.Declaration, waitTimeout time.Duration) *StoreGuard {
 	g := &StoreGuard{
 		barriers:   make(map[string]*control.Barrier),
 		keys:       make(map[string]control.Admission),
@@ -151,11 +151,11 @@ func NewStoreGuard(decls []catalog.Declaration, maxQueue int, waitTimeout time.D
 	}
 	sort.Strings(g.barrierOrder)
 	for _, name := range g.barrierOrder {
-		g.barriers[name] = control.NewBarrier(name, maxQueue, waitTimeout)
+		g.barriers[name] = control.NewBarrier(name, waitTimeout)
 	}
 	for _, store := range storeOrder {
 		g.stores = append(g.stores, store)
-		g.keys[store] = control.NewWaitingSemaphore("store:"+store, 1, maxQueue, waitTimeout)
+		g.keys[store] = control.NewWaitingSemaphore("store:"+store, 1, waitTimeout)
 		// Rebuild the member list in barrier order from the names collected
 		// above: the acquisition order may not depend on which declaration
 		// happened to be walked first.
@@ -220,22 +220,48 @@ func (g *StoreGuard) BarriersOf(store string) []string {
 }
 
 // Shared returns the admission a reader or a single-store writer takes: every
-// barrier that protects the store, shared, then the store's key. It panics on
-// an unknown store — that is a wiring mistake, not a runtime condition.
-func (g *StoreGuard) Shared(store string) control.Admission {
-	members, ok := g.members[store]
-	if !ok {
-		panic("capability: no store named " + store)
+// barrier that protects the stores, shared, then each store's key, in the one
+// acquisition order. It panics on an unknown store — that is a wiring mistake,
+// not a runtime condition.
+//
+// A CALLER THAT WRITES TWO STORES ASKS FOR THEM TOGETHER, in one call with
+// both names. Composing two of these plans instead takes every barrier they
+// share TWICE: the second acquisition is a real one, and a barrier with an
+// exclusive holder queued refuses it (writer preference) while that holder
+// waits for the first. That is the self-deadlock a config call — which writes
+// the config document and resolves vault row handles — hit against a queued
+// vault.reset, and it is why the set is built here, once, and never nested
+// (ADR-8eej3e66 §5: a phase acquires its complete set together).
+func (g *StoreGuard) Shared(stores ...string) control.Admission {
+	if len(stores) == 0 {
+		panic("capability: a store plan names no store")
 	}
-	parts := make([]control.Admission, 0, len(members)+1)
+	members := make(map[string]bool, len(g.barrierOrder))
+	keys := make([]string, 0, len(stores))
+	for _, store := range stores {
+		protecting, ok := g.members[store]
+		if !ok {
+			panic("capability: no store named " + store)
+		}
+		for _, name := range protecting {
+			members[name] = true
+		}
+		keys = append(keys, store)
+	}
+	parts := make([]control.Admission, 0, len(members)+len(keys))
 	for _, name := range g.barrierOrder {
-		if contains(members, name) {
+		if members[name] {
 			parts = append(parts, g.barriers[name].Shared())
 		}
 	}
-	parts = append(parts, g.keys[store])
-	name := "store:" + store + "+shared"
-	return g.watch([]string{store}, control.NewComposite(parts...), name)
+	// The keys are taken in the guard's own order, never in the caller's: that
+	// order is the whole deadlock argument for two callers of one pair.
+	for _, store := range g.stores {
+		if contains(keys, store) {
+			parts = append(parts, g.keys[store])
+		}
+	}
+	return g.watch(stores, control.NewComposite(parts...), "store:"+strings.Join(stores, "+")+"+shared")
 }
 
 // SharedBarrier returns the barrier half of the shared plan: every barrier
@@ -331,6 +357,24 @@ func (g *StoreGuard) StoresOf(decl catalog.Declaration) []string {
 // watch wraps an admission in the quarantine check. The check is first, so a
 // quarantined store is refused even while the barrier and key are free: the
 // refusal is about what the store CONTAINS, not about capacity.
+//
+// The check is on BOTH sides of the wait, and the second one is the one the
+// quarantine exists for. A restore holds the store set exclusively, its
+// rollback fails, and it quarantines before it releases the permit — the
+// permit is what keeps readers out while the set holds two generations
+// (restoreOperation.Run). A caller that was already queued behind that
+// barrier passed the check while the quarantine did not exist yet, so the
+// permit it is finally granted has to be checked again: otherwise the save is
+// admitted to, and acknowledged into, the generation the quarantine hides, and
+// the rollback or the next start's recovery overwrites what it was told had
+// been written.
+//
+// A check made while the permit is held cannot be overtaken, which is why the
+// second one is decisive. Quarantine is set only by an operation holding an
+// EXCLUSIVE plan, and every admission this guard builds for a shared holder
+// takes every barrier that protects the store first — so the exclusive plan
+// cannot even start while the permit is held, and no quarantine can appear
+// between the second check and the callback.
 func (g *StoreGuard) watch(stores []string, inner control.Admission, name string) control.Admission {
 	return &guardedAdmission{guard: g, stores: stores, inner: inner, name: name}
 }
@@ -385,14 +429,37 @@ func (a *guardedAdmission) Name() string { return a.name }
 func (a *guardedAdmission) Holders() []control.Holder { return control.HoldersOf(a.inner) }
 
 func (a *guardedAdmission) TryAcquire(ctx context.Context) (control.Permit, *control.Rejection) {
-	if store, reason, ok := a.guard.quarantineReason(a.stores); ok {
-		return nil, &control.Rejection{
-			Kind:   control.RejectionUnavailable,
-			Reason: unavailableSentence(store, reason),
-			Scope:  "store:" + store,
-		}
+	if refusal := a.quarantineRefusal(); refusal != nil {
+		return nil, refusal
 	}
-	return a.inner.TryAcquire(ctx)
+	permit, rej := a.inner.TryAcquire(ctx)
+	if rej != nil {
+		return nil, rej
+	}
+	// The wait above is where a restore can quarantine the set it was already
+	// holding, so the answer is about the store's contents NOW, not when the
+	// caller arrived. Release before refusing: the reason is the contents, and
+	// keeping the shared half of the barrier would keep a later restore from
+	// ever draining a set it must be able to rewrite.
+	if refusal := a.quarantineRefusal(); refusal != nil {
+		permit.Release()
+		return nil, refusal
+	}
+	return permit, nil
+}
+
+// quarantineRefusal is the unavailable answer, or nil while the stores are
+// serving. One copy so the two checks cannot drift into two sentences.
+func (a *guardedAdmission) quarantineRefusal() *control.Rejection {
+	store, reason, ok := a.guard.quarantineReason(a.stores)
+	if !ok {
+		return nil
+	}
+	return &control.Rejection{
+		Kind:   control.RejectionUnavailable,
+		Reason: unavailableSentence(store, reason),
+		Scope:  "store:" + store,
+	}
 }
 
 // unavailableSentence is what a person reads when a store is quarantined. It

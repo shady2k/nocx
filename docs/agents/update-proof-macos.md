@@ -27,15 +27,22 @@ afterwards, its renderer reports healthy, and finalisation certifies the pair
 2. **Verify.** The installed app's `--apply-release-update --channel nightly`
    fetches and verifies the candidate manifest with the bundle's own compiled
    keyring. An unsigned or wrong-key manifest fails here.
-3. **Swap.** After the diagnostic returns, `Contents/MacOS/nocx` in the installed
-   bundle hashes to the candidate zip's binary, `.nocx-backup.app` holds the
-   previous nightly's bytes, `.nocx-swap.app` is gone, and the journal names the
-   candidate.
+3. **Swap.** After the diagnostic returns, a complete exchange has happened
+   and nothing has finalised it: `Contents/MacOS/nocx` in the installed bundle
+   hashes to the candidate zip's binary, `.nocx-swap.app` holds the **previous**
+   nightly's bytes — it is the rollback peer `reconcileLocked` exchanges back in
+   when the installed build cannot certify its pair (§7.5) — no
+   `.nocx-backup.app` exists yet, and the journal names the candidate. A backup
+   at this point would mean the app that applied the update had finalised its
+   own update, which is exactly what `certifyPair` exists to refuse
+   (nocx-vh2hr.1.22).
 4. **Relaunch and healthy.** The driver starts the installed bundle. The app's
    renderer reports healthy, the transaction's pair check certifies the window
-   against the coordinator that answered it, and the journal is removed while the
-   backup is retained. The driver waits for the journal's disappearance — the
-   observable finalisation produces, never a duration.
+   against the coordinator that answered it, and finalisation renames the peer
+   to `.nocx-backup.app` and only then removes the journal. The driver waits for
+   the journal's disappearance — the observable finalisation produces, never a
+   duration — and then asserts the backup holds the previous nightly's bytes and
+   the peer is gone.
 
 ## When it fails
 

@@ -29,8 +29,7 @@ func (p apiPaths) CacheDir() string  { return filepath.Join(p.root, "cache") }
 func newAPIOperation(t *testing.T) capability.APICollectionOperation {
 	t.Helper()
 	return capability.NewAPICollectionOperation(
-		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
-		capability.Gate("lane", 8, 64, 5*time.Second),
+		capability.Gate(capability.GateAPI, 1, 5*time.Second),
 		apicoll.NewCollections(apiPaths{root: t.TempDir()}),
 	)
 }
@@ -49,8 +48,7 @@ func (testSecretRefs) ResolveText(_ context.Context, text string) (string, []cap
 func newAPIOperationWithSecrets(t *testing.T) capability.APICollectionOperation {
 	t.Helper()
 	return capability.NewAPICollectionOperation(
-		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
-		capability.Gate("lane", 8, 64, 5*time.Second),
+		capability.Gate(capability.GateAPI, 1, 5*time.Second),
 		apicoll.NewCollections(apiPaths{root: t.TempDir()}),
 	)
 }
@@ -63,8 +61,7 @@ func newAPIOperationWithSecrets(t *testing.T) capability.APICollectionOperation 
 func TestAPICollectionService_DefaultRootIsWhereACreatedCollectionLands(t *testing.T) {
 	root := t.TempDir()
 	op := capability.NewAPICollectionOperation(
-		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
-		capability.Gate("lane", 8, 64, 5*time.Second),
+		capability.Gate(capability.GateAPI, 1, 5*time.Second),
 		apicoll.NewCollections(apiPaths{root: root}),
 	)
 
@@ -98,8 +95,7 @@ func TestAPICollectionService_DefaultRootIsWhereACreatedCollectionLands(t *testi
 
 	// And the pair: no app directory, no default location, "" said plainly.
 	none := capability.NewAPICollectionOperation(
-		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
-		capability.Gate("lane", 8, 64, 5*time.Second),
+		capability.Gate(capability.GateAPI, 1, 5*time.Second),
 		apicoll.NewCollections(nil),
 	)
 	if err := none.Run(context.Background(), func(_ context.Context, svc capability.APICollectionService) error {
@@ -422,9 +418,8 @@ func TestAPICollectionService_ListOpenReportsADeadFolderBesideALiveOne(t *testin
 // the api gate and execution lane.
 func TestAPIImportService_RefusesADocumentThatIsNotAFile(t *testing.T) {
 	op := capability.NewAPIImportOperation(
-		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
-		capability.Gate(capability.GateVault, 1, 64, 5*time.Second),
-		capability.Gate("lane", 8, 64, 5*time.Second),
+		capability.Gate(capability.GateAPI, 1, 5*time.Second),
+		capability.Gate(capability.GateVault, 1, 5*time.Second),
 		apiimport.NewOSFS(),
 		// No fetcher: this test is about the two entrances that reach no
 		// network, and a build without one is a coherent build (it refuses
@@ -486,9 +481,8 @@ func TestAPIImportService_RefusesADocumentThatIsNotAFile(t *testing.T) {
 // makes: a document apiimport cannot parse.
 func TestAPIImportService_ImportsADocumentItWasHandedTheBytesOf(t *testing.T) {
 	op := capability.NewAPIImportOperation(
-		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
-		capability.Gate(capability.GateVault, 1, 64, 5*time.Second),
-		capability.Gate("lane", 8, 64, 5*time.Second),
+		capability.Gate(capability.GateAPI, 1, 5*time.Second),
+		capability.Gate(capability.GateVault, 1, 5*time.Second),
 		apiimport.NewOSFS(),
 		// No fetcher: this test is about the two entrances that reach no
 		// network, and a build without one is a coherent build (it refuses

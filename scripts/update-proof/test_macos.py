@@ -259,5 +259,62 @@ class ApplicatorTests(unittest.TestCase):
         self.assertIn("extraction (ditto)", str(caught.exception))
 
 
+class ExchangeTests(unittest.TestCase):
+    """What a complete exchange leaves, and what it must not (nocx-vh2hr.1.22).
+
+    Nightly 42362329510 failed this step with "the rollback peer is still there
+    after a complete exchange", one line after the updater logged "exchange
+    complete". The peer WAS the exchange: RENAME_SWAP swaps the two names, so
+    .nocx-swap.app holds the previous nightly and is the rollback copy §7.5
+    needs. The retained backup is the next step's, created only after the
+    restarted build certifies its pair.
+    """
+
+    def tree(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        applications = root / "Applications"
+        layout = {"install": applications / "nocx.app"}
+
+        def bundle(app, contents):
+            binary = proof.bundle_binary(app)
+            binary.parent.mkdir(parents=True)
+            binary.write_text(contents)
+            return proof.sha256(binary)
+
+        candidate_sha = bundle(layout["install"], "the candidate's bytes")
+        previous_sha = bundle(applications / ".nocx-swap.app", "the previous nightly")
+        return applications, layout, candidate_sha, previous_sha
+
+    def test_a_complete_exchange_leaves_the_previous_nightly_as_the_rollback_peer(self):
+        applications, layout, candidate_sha, previous_sha = self.tree()
+        swap, backup = proof.exchange_step(layout, candidate_sha, previous_sha)
+        self.assertEqual(swap, applications / ".nocx-swap.app")
+        self.assertEqual(backup, applications / ".nocx-backup.app")
+        self.assertFalse(backup.exists(), "finalisation has not run yet")
+
+    def test_a_missing_peer_is_a_missing_rollback_copy_not_leftover_debris(self):
+        applications, layout, candidate_sha, previous_sha = self.tree()
+        shutil.rmtree(applications / ".nocx-swap.app")
+        with self.assertRaises(proof.ProofError) as caught:
+            proof.exchange_step(layout, candidate_sha, previous_sha)
+        self.assertIn("rollback peer", str(caught.exception))
+
+    def test_a_peer_that_is_not_the_previous_nightly_is_refused(self):
+        applications, layout, candidate_sha, previous_sha = self.tree()
+        proof.bundle_binary(applications / ".nocx-swap.app").write_text("something else")
+        with self.assertRaisesRegex(proof.ProofError, "previous nightly"):
+            proof.exchange_step(layout, candidate_sha, previous_sha)
+
+    def test_a_backup_before_the_restart_is_refused(self):
+        applications, layout, candidate_sha, previous_sha = self.tree()
+        backup = proof.bundle_binary(applications / ".nocx-backup.app")
+        backup.parent.mkdir(parents=True)
+        backup.write_text("the previous nightly")
+        with self.assertRaises(proof.ProofError) as caught:
+            proof.exchange_step(layout, candidate_sha, previous_sha)
+        self.assertIn("before the restart", str(caught.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

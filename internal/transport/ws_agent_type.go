@@ -152,7 +152,7 @@ func (s *WSServer) handleAgentType(ctx context.Context, state *connState, req js
 func (s *WSServer) agentTypeSpecs() []methodSpec {
 	return []methodSpec{
 		whenAvailable(
-			reg(s.lane, catalog.OpAgentType, params(validateAgentTypeRaw),
+			reg(s.work, catalog.OpAgentType, params(validateAgentTypeRaw),
 				func(_ *wsConn, state *connState, r Responder) handlerFunc {
 					return func(ctx context.Context, req jsonrpcRequest) {
 						s.handleAgentType(ctx, state, req, r)

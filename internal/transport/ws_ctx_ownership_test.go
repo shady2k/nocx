@@ -361,9 +361,9 @@ func waitDialogFree(t *testing.T, conn *websocket.Conn, wantPath string) {
 
 // A non-cooperative adapter (the real Wails runtime cannot cancel the picker):
 // the disconnect must send no response to the dead socket, keep the capability
-// busy until the adapter actually returns, and never open a second dialog over
-// the first for a reconnecting client.
-func TestDialogOpenFile_NonCooperativeAdapterBusyUntilReturn(t *testing.T) {
+// held until the adapter actually returns, and never open a second dialog over
+// the first for a reconnecting client — the second call waits for the picker.
+func TestDialogOpenFile_NonCooperativeAdapterHoldsUntilReturn(t *testing.T) {
 	h := newInventoryHarness(t)
 	dlg := &blockingDialog{started: make(chan struct{}), release: make(chan struct{})}
 	h.ws.SetDialogService(dlg)
@@ -380,22 +380,25 @@ func TestDialogOpenFile_NonCooperativeAdapterBusyUntilReturn(t *testing.T) {
 	// Disconnect while the dialog is open.
 	_ = connA.Close()
 
-	// A reconnecting client must be refused while the adapter is still
-	// running: a second dialog over the first is the defect.
+	// A reconnecting client's call waits for the picker the dead client left
+	// open: a second dialog over the first is the defect, and a capacity
+	// answer is not the remedy.
 	connB := connectWS(t, h.ws)
 	defer func() { _ = connB.Close() }()
-	resp := jsonrpcCall(t, connB, "dialog.openFile", map[string]any{})
-	var errEnv struct {
-		Error *jsonrpcErrorObj `json:"error"`
-	}
-	if err := json.Unmarshal(resp, &errEnv); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if errEnv.Error == nil {
-		t.Fatalf("second dialog.openFile while the first adapter is running must be refused, got %s", resp)
-	}
-	if errEnv.Error.Code != SaturationErrorCode {
-		t.Fatalf("refusal code = %d, want %d (control plane busy)", errEnv.Error.Code, SaturationErrorCode)
+	answered := make(chan []byte, 1)
+	go func() {
+		_, resp, err := connB.ReadMessage()
+		if err != nil {
+			return
+		}
+		answered <- resp
+	}()
+	sendControl(t, connB, "dialog.openFile", map[string]any{}, 2)
+
+	select {
+	case resp := <-answered:
+		t.Fatalf("a second dialog.openFile was answered while the adapter was still running: %s", resp)
+	case <-time.After(200 * time.Millisecond):
 	}
 	dlg.mu.Lock()
 	calls := dlg.calls
@@ -406,12 +409,32 @@ func TestDialogOpenFile_NonCooperativeAdapterBusyUntilReturn(t *testing.T) {
 
 	// Only when the adapter ACTUALLY returns is the capability free again.
 	close(dlg.release)
-	waitDialogFree(t, connB, "/home/dev/.ssh/id_ed25519")
+	var resp []byte
+	select {
+	case resp = <-answered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the waiting dialog.openFile was never answered")
+	}
+	var env struct {
+		Error  *jsonrpcErrorObj `json:"error"`
+		Result *struct {
+			Path string `json:"path"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if env.Error != nil {
+		t.Fatalf("the waiting dialog.openFile answered an error: %+v", env.Error)
+	}
+	if env.Result == nil || env.Result.Path != "/home/dev/.ssh/id_ed25519" {
+		t.Fatalf("answer = %s, want the adapter's path", resp)
+	}
 	dlg.mu.Lock()
 	calls = dlg.calls
 	dlg.mu.Unlock()
 	if calls != 2 {
-		t.Fatalf("adapter calls = %d after the retry, want 2", calls)
+		t.Fatalf("adapter calls = %d after the waiting call ran, want 2", calls)
 	}
 }
 

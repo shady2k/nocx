@@ -31,10 +31,10 @@ type NoteOperation interface {
 }
 
 // NewNoteOperation builds a NoteOperation that acquires configGate then the
-// execution lane, and hands the callback a guard-bound notes service.
-func NewNoteOperation(configGate, lane control.Admission, svc *note.Service) NoteOperation {
+// and hands the callback a guard-bound notes service.
+func NewNoteOperation(configGate control.Admission, svc *note.Service) NoteOperation {
 	g := &guard{}
-	return newOperation[NoteService](Direct("NoteOperation"), control.NewComposite(configGate, lane), g, &noteService{guard: g, svc: svc})
+	return newOperation[NoteService](Direct("NoteOperation"), control.NewComposite(configGate), g, &noteService{guard: g, svc: svc})
 }
 
 type noteService struct {

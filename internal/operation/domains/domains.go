@@ -148,10 +148,14 @@ type Request struct {
 	// Turn bounds the wait for a permit. It is the invocation's turn
 	// deadline: when it expires before a permit is free, nothing started.
 	Turn context.Context
-	// Work bounds the work itself, and starts when a permit is taken. When it
-	// expires the call settles, the worker keeps the permit until it returns,
-	// and it is counted abandoned.
-	Work context.Context
+	// Work starts the work's own bound, once the permit is taken. It is a
+	// function and not a context for one reason: max is measured from the
+	// moment WORK starts, never from the invocation (ADR-8eej3e66 §3), and a
+	// context built before the wait has already spent part of its budget on
+	// it. Do calls it after acquire returns and before the worker runs, and
+	// cancels what it returns when Do returns — so a call that settled at its
+	// deadline stops work that honours its context.
+	Work func() (context.Context, context.CancelFunc)
 	// Run is the work. It is called at most once, on its own goroutine.
 	Run func(context.Context) error
 }
@@ -287,6 +291,13 @@ func (r *Registry) Do(req Request) error {
 		return err
 	}
 	d := r.enterWork(req.Key, origin)
+	// AFTER THE GRANT, never before: this is where the work's own bound starts.
+	work, cancelWork := req.Work()
+	if work == nil || cancelWork == nil {
+		r.finish(d, origin, false)
+		return fmt.Errorf("operation/domains: request %s has no work context", req.Key)
+	}
+	defer cancelWork()
 
 	// WHO RELEASES THE PERMIT is decided once, by whoever wins this state:
 	// the caller (state 2, the worker returned first) or the worker (state 1,
@@ -296,7 +307,7 @@ func (r *Registry) Do(req Request) error {
 	var state atomic.Uint32
 	result := make(chan error, 1)
 	go func() {
-		err := req.Run(req.Work)
+		err := req.Run(work)
 		if !state.CompareAndSwap(0, workerDone) {
 			// The call already settled: this worker is the one that keeps
 			// the permit until it really returns, so it is the one that
@@ -310,10 +321,10 @@ func (r *Registry) Do(req Request) error {
 	case err := <-result:
 		r.finish(d, origin, false)
 		return err
-	case <-req.Work.Done():
+	case <-work.Done():
 		if state.CompareAndSwap(0, callSettled) {
 			r.abandon(d)
-			return req.Work.Err()
+			return work.Err()
 		}
 		// The worker won the race and is about to deliver its result. This
 		// call settles with that result rather than calling a finished piece

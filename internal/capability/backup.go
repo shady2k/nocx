@@ -18,7 +18,7 @@ type BackupService interface {
 }
 
 // BackupOperation serializes backup reads and restore writes with the config
-// domain and the bounded control lane.
+// domain and the store plan that replaced its gate.
 type BackupOperation interface {
 	AssistantOperation
 	Run(context.Context, func(context.Context, BackupService) error) error
@@ -53,11 +53,11 @@ func (s *backupService) Restore(contents string, strategy backup.RestoreStrategy
 // NewBackupOperation constructs the guarded access path for the backup reads
 // (create and preview). restore takes its own operation below: it rewrites the
 // store set and must exclude every reader, not share the config gate with them.
-// The config gate is acquired before the execution lane, matching the canonical
+// The config gate is acquired alone, matching the canonical
 // order used by every config operation.
-func NewBackupOperation(configGate, lane control.Admission, service *backup.Service) BackupOperation {
+func NewBackupOperation(configGate control.Admission, service *backup.Service) BackupOperation {
 	g := &guard{}
-	return newOperation[BackupService](Direct("BackupOperation"), control.NewComposite(configGate, lane), g, &backupService{guard: g, service: service})
+	return newOperation[BackupService](Direct("BackupOperation"), control.NewComposite(configGate), g, &backupService{guard: g, service: service})
 }
 
 // NewRestoreOperation constructs the operation that rewrites the store set.
@@ -69,11 +69,11 @@ func NewBackupOperation(configGate, lane control.Admission, service *backup.Serv
 // its recovery budget leaves the stores holding two generations, and the only
 // safe answer is to make them unreadable until restart: the operation quarantines
 // the declaration's stores and returns an unavailable failure, which the transport
-// answers with a named sentence rather than control.saturated.
-func NewRestoreOperation(stores *StoreGuard, decl catalog.Declaration, lane control.Admission, service *backup.Service) BackupOperation {
+// answers with a named sentence rather than a capacity refusal.
+func NewRestoreOperation(stores *StoreGuard, decl catalog.Declaration, service *backup.Service) BackupOperation {
 	g := &guard{}
 	inner := newOperation[BackupService](Direct("RestoreOperation"),
-		control.NewComposite(stores.Exclusive(decl), lane), g, &backupService{guard: g, service: service})
+		control.NewComposite(stores.Exclusive(decl)), g, &backupService{guard: g, service: service})
 	return &restoreOperation{inner: inner, guard: stores, stores: stores.StoresOf(decl)}
 }
 

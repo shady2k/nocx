@@ -243,10 +243,10 @@ func (h historyPageHandlers) handleHistoryPage(ctx context.Context, req jsonrpcR
 // serialises — it happens on scroll, later, against a session that has long
 // been established. Unwired pager leaves the method unregistered
 // (whenAvailable), the way an unwired store leaves session.output.
-func (s *WSServer) historyPageSpecs(lane control.Admission, sessionGate control.Admission) []methodSpec {
-	historyOp := capability.NewSessionOperations(sessionGate, lane, s.registry, s.profileUsage)
+func (s *WSServer) historyPageSpecs(sessionGate control.Admission) []methodSpec {
+	historyOp := capability.NewSessionOperations(sessionGate, s.registry, s.profileUsage)
 	return []methodSpec{
-		whenAvailable(keyedBySession(regResponder(s.operationQueue("history-page"), catalog.OpSessionHistoryPage, params(validateHistoryPageRaw), func(r Responder) handlerFunc {
+		whenAvailable(keyedBySession(regResponder(s.work, catalog.OpSessionHistoryPage, params(validateHistoryPageRaw), func(r Responder) handlerFunc {
 			h := historyPageHandlers{ops: historyOp, pager: s.historyPager, publisher: s, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleHistoryPage(ctx, req) }
 		})), func() bool { return s.historyPager != nil }, "method not found: history pager not wired"),

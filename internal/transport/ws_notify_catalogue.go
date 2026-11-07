@@ -45,7 +45,7 @@ func notifyCatalogueResultFor(c *notify.Catalogue) notifyCatalogueResult {
 }
 
 func (s *WSServer) notifyCatalogueSpec() methodSpec {
-	return regResponder(s.lane, catalog.OpNotifyCatalogue, noParams(), func(r Responder) handlerFunc {
+	return regResponder(s.work, catalog.OpNotifyCatalogue, noParams(), func(r Responder) handlerFunc {
 		return func(_ context.Context, req jsonrpcRequest) {
 			_ = r.TryResult(req.ID, mustMarshal(notifyCatalogueResultFor(notify.DefaultCatalogue())))
 		}

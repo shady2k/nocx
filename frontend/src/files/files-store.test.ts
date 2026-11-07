@@ -15,7 +15,7 @@ import type { FilesListEntry, FilesListResult } from '../generated/files.list'
 import type { FilesChanged } from '../generated/files.changed'
 import type { FilesRefreshStateChanged } from '../generated/files.refreshStateChanged'
 import type { FilesPanelServices } from './files-client'
-import { refusalSentence, RpcError } from '../dispatcher'
+import { NOT_STARTED } from './test-fixtures'
 import { createFilesTreeStore, FILES_PAGE_SIZE, type FilesTreeStore } from './files-store'
 import type { ActiveOrigin } from '../pane-content'
 
@@ -1979,13 +1979,8 @@ describe('a Files panel nobody is looking at does no work', () => {
     expect(store.phase()).toBe('ready')
   })
 
-  it('names a refused open where it happened, and the header refresh asks again', async () => {
-    const refusal = new RpcError(refusalSentence('filesystem'), -32004, {
-      reason: 'control-saturated',
-      scope: 'filesystem',
-      retryable: true,
-      retryAfterMs: 0,
-    })
+  it('names a call that did not start where it happened, and the header refresh asks again', async () => {
+    const refusal = NOT_STARTED
     const open = vi.fn().mockRejectedValueOnce(refusal).mockResolvedValue(OPEN_RESULT)
     const list = vi
       .fn()
@@ -1997,8 +1992,9 @@ describe('a Files panel nobody is looking at does no work', () => {
     // Its own state, with the Retry the header carries for a failed open.
     expect(store.phase()).toBe('failed')
     const sentence = store.openError() ?? ''
-    expect(sentence).toContain('refused')
-    expect(sentence).toContain('file operations')
+    // The wire's own words for a call that never started — nothing changed,
+    // and the Retry is the same action once more (ADR-8eej3e66 §8).
+    expect(sentence).toContain('did not start')
     expect(sentence.toLowerCase()).not.toContain('busy')
     expect(sentence.toLowerCase()).not.toContain('try again in a moment')
 
@@ -2009,25 +2005,15 @@ describe('a Files panel nobody is looking at does no work', () => {
     expect(store.openError()).toBeNull()
   })
 
-  it('re-asks a background refusal when the panel is shown again', async () => {
+  it('re-asks a background call that did not start when the panel is shown again', async () => {
     // The watch refused while the panel was on screen; hiding and showing it
     // is the natural trigger that recovers it, without the person having to
     // find the header's Refresh for a failure they caused nothing of.
-    const watch = vi
-      .fn()
-      .mockRejectedValueOnce(
-        new RpcError(refusalSentence('filesystem'), -32004, {
-          reason: 'control-saturated',
-          scope: 'filesystem',
-          retryable: true,
-          retryAfterMs: 0,
-        }),
-      )
-      .mockResolvedValue({ mode: 'watching' })
+    const watch = vi.fn().mockRejectedValueOnce(NOT_STARTED).mockResolvedValue({ mode: 'watching' })
     const store = shownStore(makeServices({ watch }))
     store.rescope(LOCAL_A)
     await settle()
-    expect(store.watchFailed()).toContain('refused')
+    expect(store.watchFailed()).toContain('did not start')
 
     store.setVisible(false)
     store.setVisible(true)
@@ -2038,13 +2024,8 @@ describe('a Files panel nobody is looking at does no work', () => {
     expect(store.watchMode()).toBe('watching')
   })
 
-  it('a refused listing is that directory’s own error and retry, not a panel-wide failure', async () => {
-    const refusal = new RpcError(refusalSentence('filesystem'), -32004, {
-      reason: 'control-saturated',
-      scope: 'filesystem',
-      retryable: true,
-      retryAfterMs: 0,
-    })
+  it('a listing that did not start is that directory’s own error and retry, not a panel-wide failure', async () => {
+    const refusal = NOT_STARTED
     const list = vi
       .fn()
       .mockImplementation((bindingId: string, path: string) =>
@@ -2060,7 +2041,7 @@ describe('a Files panel nobody is looking at does no work', () => {
     store.toggle(docs)
     await settle()
     expect(docs.state).toBe('error')
-    expect(docs.error).toContain('refused')
+    expect(docs.error).toContain('did not start')
     expect(store.phase()).toBe('ready')
 
     list.mockResolvedValue(

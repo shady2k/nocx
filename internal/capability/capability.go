@@ -22,17 +22,13 @@
 //     Run, so a captured handle cannot be carried out of the operation it
 //     was issued for.
 //   - The gates are WAITING (control.NewWaitingSemaphore): a gate held by
-//     another operation makes the new operation WAIT (bounded by a wait
-//     timeout and a queue-depth bound on the gate) rather than refuse. A
+//     another operation makes the new operation WAIT, bounded by the turn its
+//     catalogue entry declares (ADR-8eej3e66 §3), rather than refuse. A
 //     domain conflict is a serialisation point, not an overload — the
 //     sequential client whose previous response left the permit held for a
-//     moment must never be told the control plane is busy. Only exhausting
-//     the bound is a refusal, and the transport maps that refusal to the
-//     control.saturated wire error (internal/transport/ws_saturation.go);
-//     a handler surfaces that. The wait happens inside Run, on the task
-//     goroutine, and the composite acquires the conflict gates BEFORE the
-//     execution lane (canonical order), so waiting conflict work never
-//     occupies a worker permit.
+//     moment must never be told the control plane is busy. A wait that runs
+//     out answers the declaration's own "did not start"; nothing refuses for
+//     capacity. The wait happens inside Run, on the task goroutine.
 //
 // # Canonical acquisition order
 //
@@ -179,8 +175,8 @@ var CanonicalOrder = []string{GateConfig, GateVault, GateContent, GateSession, G
 // request waits (beyond it, refusal). Only exhausting a bound is a refusal.
 // The composition root supplies both; the defaults exist for direct use
 // (tests) and are deliberately generous.
-func Gate(domain string, capacity, maxQueue int, waitTimeout time.Duration) control.Admission {
-	return control.NewWaitingSemaphore(domain, capacity, maxQueue, waitTimeout)
+func Gate(domain string, capacity int, waitTimeout time.Duration) control.Admission {
+	return control.NewWaitingSemaphore(domain, capacity, waitTimeout)
 }
 
 // UnlockAnswering marks an admission whose acquisition THE ANSWER TO A VAULT
@@ -204,12 +200,11 @@ func Gate(domain string, capacity, maxQueue int, waitTimeout time.Duration) cont
 // admission I am holding" — is a property of the admission, not of how it was
 // constructed.
 //
-// It is deliberately NOT applied to the execution lane, which vault.unseal
-// also acquires. The lane has capacity for several holders and the ssh dial
-// legitimately resolves a key passphrase while holding one (openOperation's
-// Dial phase, which holds no domain gate at all). Whether enough lane permits
-// can be held across one wait to starve the unseal is a bound, not an
-// exclusion, and it is nocx-0dvf2.
+// The ssh dial legitimately resolves a key passphrase while holding no domain
+// gate at all (openOperation's Dial phase), so it is untouched by the mark.
+// The execution lane that used to bound it went in stage 8, which is what
+// closed nocx-0dvf2: with no lane there is no capacity for a full window to
+// hold against the unseal.
 func UnlockAnswering(a control.Admission) control.Admission {
 	return unlockAnsweringGate{Admission: a}
 }
@@ -262,8 +257,8 @@ func refused(ctx context.Context, rej *control.Rejection) error {
 // UnavailableError is returned by Run when the store an operation needs is
 // quarantined: it will not serve until restart, so the answer is not the busy
 // dialogue and not a retry (ADR-8eej3e66 §5). It is deliberately NOT a
-// *RefusedError: the transport maps that type to control.saturated, and a
-// store that is unavailable is not busy.
+// *RefusedError: the transport answers it as a wait that ended or a
+// cancellation, and a store that is unavailable is not a wait.
 type UnavailableError struct {
 	// Scope names the store as "store:<name>".
 	Scope string
@@ -279,9 +274,9 @@ func (e *UnavailableError) Error() string { return e.Reason }
 
 func (e *UnavailableError) Unwrap() error { return e.Err }
 
-// RefusedError is returned by Run when the operation's conflict gates
-// refused the work. It carries the control.Rejection the transport already
-// maps to the control.saturated wire error.
+// RefusedError is returned by Run when an admission did not grant the work:
+// a wait that ran out, the caller's cancellation, or a quarantined store.
+// It carries the control.Rejection the transport answers.
 type RefusedError struct {
 	Rejection control.Rejection
 }

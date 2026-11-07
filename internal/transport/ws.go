@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -860,45 +861,26 @@ type WSServer struct {
 	// the connection, so a disconnect cancels the stream and the run
 	// terminalizes.
 	askSub control.Submission
-	// lane is the ordinary control lane: the shared bounded worker pool every
-	// admission-backed control method runs on (registration.go). Capacity
-	// laneCapacity; a full lane refuses new work with the control-saturated
-	// error instead of queueing it. Probe and dialog compose their own
-	// capacity-one resource admissions with the lane (see below).
-	lane control.Submission
-	// laneCapacity is the ordinary lane's permit count, configurable for
-	// tests that must saturate it deterministically.
-	laneCapacity int
-	// domainWaitTimeout bounds how long a request waits on a domain conflict
-	// gate before the wait itself is refused (the wait bound of the
-	// waiting-gate design). Long enough that a sequential client's
-	// back-to-back requests — whose previous response left the gate held
-	// for a moment — always clear it; short enough that a gate held by a
-	// long operation (a dial, an import) cannot delay the answer forever.
+	// work is where ordinary control work is handed over: every task on its
+	// own goroutine, never refused (ADR-8eej3e66 §7). What bounds accepted
+	// work is the per-connection credit window (credit.go) and each call's
+	// declared turn and max. The ordinary execution lane and the per-operation
+	// queues that refused at submit time are gone with the capacity answer.
+	work control.Submission
+	// domainWaitTimeout is the wait bound a call inherits when its context
+	// carries no declared turn — an internal call or a test. A renderer's
+	// call waits the turn its catalogue entry declares (ADR-8eej3e66 §3).
 	domainWaitTimeout time.Duration
-	// domainMaxQueue bounds how many requests may wait on one domain gate
-	// before further conflicting requests are refused instantly (the
-	// queue-depth bound at the gate). Cross-method waiters on a shared
-	// gate accumulate here.
-	domainMaxQueue int
-	// domainQueueDepth bounds in-flight tasks per operation (waiting on the
-	// gates or running): a flood of conflicting requests is refused at
-	// submit time rather than spawning unbounded tasks.
-	domainQueueDepth int
-	// probeSub admits and runs connections.test probes off the read loop:
-	// a 30-second SSH probe must never freeze the socket that feeds every
-	// other tab. Capacity one (a second probe is refused with the
-	// control-saturated error) composed with the lane, so a probe also
-	// occupies an ordinary worker permit; the permit frees when the task
-	// returns, cancelled or not — that is what releases the admission slot
-	// for the next connection.
+	// probeSub runs connections.test probes off the read loop: a 30-second
+	// SSH probe must never freeze the socket that feeds every other tab. It
+	// never refuses — two probes are two goroutines (ADR-8eej3e66 §7).
 	probeSub control.Submission
 	// screenOfferSub owns retries for prompt-boundary frames. Its tasks are
 	// registered with inflight so server shutdown cancels and joins them.
 	screenOfferSub control.Submission
-	// dialogSub runs the dialog methods off the read loop under a bounded
-	// queue. It does NOT carry the native-picker capability: that is
-	// dialogAdmit, acquired on the task goroutine.
+	// dialogSub runs the dialog methods off the read loop. It does NOT carry
+	// the native-picker capability: that is dialogAdmit, acquired on the task
+	// goroutine.
 	dialogSub control.Submission
 	// dialogAdmit is the native picker itself — a capacity-one WAITING gate
 	// composed with the lane, acquired inside the task (dialogHandlers), not
@@ -924,10 +906,6 @@ type WSServer struct {
 	// construction (registration.go); the per-connection materialisation
 	// happens in handleSession.
 	methods map[string]methodSpec
-	// satNotify rate-limits the control.saturated notification a refused
-	// notification (no id) triggers — one per class+scope per interval,
-	// never one per refused frame.
-	satNotify *saturatedNotifyLimiter
 	// credit is the per-connection flow-control declaration every connection
 	// is told by transport.credit (credit.go): the ordinary window, the
 	// rescue methods that take no credit, and the reserved methods with one
@@ -994,8 +972,19 @@ type WSServer struct {
 	// filesDomains bounds filesystem work per failure domain (ADR-8eej3e66
 	// §6): one mount or one resolved host, so a hung disk holds its own
 	// permits and every other disk's listings go on.
-	filesDomains               *domains.Registry
-	filesProviderFor           FilesystemProviderFactory
+	filesDomains     *domains.Registry
+	filesProviderFor FilesystemProviderFactory
+	// fsCompleteReadDir is the directory read fs.complete performs. It is a
+	// field rather than a direct os.ReadDir so a test can hold one open, the
+	// way the filesystem tests hold a provider's listing open; nil is
+	// os.ReadDir. The read runs under filesDomains (nocx-3an1s.2.17).
+	fsCompleteReadDir func(string) ([]os.DirEntry, error)
+	// fsCompleteDomainNamer names the failure domain a completed path draws
+	// on. fs.complete has no binding, so it cannot get this from a
+	// filesystem.Handle; the composition root supplies the local provider's
+	// mount-table answer (filesystem.DomainNamer). Nil shares one
+	// conservative domain, which is still bounded.
+	fsCompleteDomainNamer      filesystem.DomainNamer
 	revealer                   FilesRevealer
 	filesPollInterval          time.Duration // transport-side digest-poll cadence (files.watch)
 	filesRefreshStateThreshold time.Duration // visible no-observation threshold
@@ -1219,7 +1208,7 @@ type WSServer struct {
 	// happened. One record per attempt a person pressed Stop on, dropped with
 	// the session however it ends (closeSession and monitorExit).
 	stopStates map[lifecycle.AttemptID]*stopState
-	// signalSub and signalOps are the execution lane session.signal runs on
+	// signalSub and signalOps are the submission and the order session.signal runs on
 	// (buildControlPlane), shared with the one other thing that is a signal:
 	// a held Stop being delivered when its attempt starts. One lane, so the
 	// bound that keeps a person's Stop off the socket read loop also bounds
@@ -1827,6 +1816,17 @@ func WithFilesystemProviderFactory(f FilesystemProviderFactory) WSServerOption {
 	return func(s *WSServer) { s.filesProviderFor = f }
 }
 
+// WithLocalFilesystemDomainNamer attaches the seam that names the failure
+// domain of a path fs.complete reads. That method completes against the
+// backend's own filesystem and has no binding to ask, so the composition
+// root supplies the local provider's mount-table answer (filesystem.
+// DomainNamer) — the same answer a local binding's handle gives, from the
+// same owner. Without it, every completion shares one conservative domain,
+// which is bounded but cannot keep a hung mount away from a healthy one.
+func WithLocalFilesystemDomainNamer(n filesystem.DomainNamer) WSServerOption {
+	return func(s *WSServer) { s.fsCompleteDomainNamer = n }
+}
+
 // WithGitRegistry attaches the binding registry backing the git.* control
 // plane (spec §5.1). When absent, those methods return -32601. The
 // composition root constructs the registry (internal/app/app.go); without
@@ -2010,16 +2010,6 @@ func WithFilesRevealer(r FilesRevealer) WSServerOption {
 	return func(s *WSServer) { s.revealer = r }
 }
 
-// DefaultControlLaneCapacity is the ordinary lane's permit count: the number
-// of control tasks that may run concurrently before new work is refused with
-// the saturation error. Larger than one so non-conflicting long operations
-// genuinely overlap (a tabby import beside a git status); small enough that
-// a burst of control requests cannot spawn unbounded goroutines. The
-// composition root names it explicitly (app.go), the same way the D14 bounds
-// are named there; the option is also how tests saturate the lane with a
-// known number of blocked tasks.
-const DefaultControlLaneCapacity = 8
-
 // DefaultDomainConflictWaitTimeout is how long a conflicting control request
 // waits on its domain gate before being refused. The window it exists to
 // bridge is the task tail: a handler enqueues its response and the permit is
@@ -2037,23 +2027,6 @@ const DefaultDomainConflictWaitTimeout = time.Second
 // bound.
 const probeGateWaitMargin = 5 * time.Second
 
-// DefaultDomainMaxQueue is the default number of requests that may wait on
-// one domain gate; a conflicting request beyond it is refused instantly.
-const DefaultDomainMaxQueue = 8
-
-// DefaultDomainQueueDepth is the default number of in-flight tasks one
-// operation may have (waiting on the gates or running); a request beyond it
-// is refused at submit time.
-const DefaultDomainQueueDepth = 8
-
-// askStreamCapacity bounds concurrent model streams (agent.ask, nocx-
-// x8s2.2). Several asks must overlap — the acceptance criterion drives two
-// at once and they stream concurrently — but a runaway renderer cannot
-// spawn unbounded model calls. A stream beyond the capacity refuses at
-// submit time and the run terminalizes failed ("too many answers in
-// flight") rather than queueing behind an unbounded backlog.
-const askStreamCapacity = 4
-
 // WithDomainConflictWaitTimeout sets how long a request waits on a domain
 // conflict gate before the wait is refused. Tests use a short value to
 // exhaust the bound deterministically and a long one to hold a conflict
@@ -2063,12 +2036,10 @@ func WithDomainConflictWaitTimeout(d time.Duration) WSServerOption {
 	return func(s *WSServer) { s.domainWaitTimeout = d }
 }
 
-// WithControlLaneCapacity sets the ordinary lane's permit count. The
-// composition root names the production value explicitly; tests use it to
-// saturate the lane with a known number of blocked tasks.
-func WithControlLaneCapacity(n int) WSServerOption {
-	return func(s *WSServer) { s.laneCapacity = n }
-}
+// THERE IS NO LANE OPTION ANY MORE (ADR-8eej3e66 §7, stage 8), and the
+// credit window's option is not here either: it is test-only, so it lives in
+// credit_window_option_test.go where the dead-code ratchet can see it is
+// reached by tests and by nothing a build ships.
 
 func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption) *WSServer {
 	s := &WSServer{
@@ -2091,7 +2062,6 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		agentApprovals:             assistant.NewApprovalStore(),
 		sessionPolicy:              newSessionPolicyStore(),
 		laneInteractivity:          newLaneState(),
-		satNotify:                  newSaturatedNotifyLimiter(time.Second),
 		mutations:                  catalog.NewMutationStore(),
 		pendingRuns:                make(map[int64]askRunContext),
 		filesBindings:              make(map[string]*filesBinding),
@@ -2100,15 +2070,13 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		historySources:             make(map[string]historyAttemptScope),
 		filesPollInterval:          defaultFilesPollInterval,
 		filesRefreshStateThreshold: defaultFilesRefreshStateThreshold,
-		laneCapacity:               DefaultControlLaneCapacity,
 		heartbeatReadWindow:        DefaultHeartbeatReadWindow,
 		domainWaitTimeout:          DefaultDomainConflictWaitTimeout,
 		toolSurfaces:               make(map[session.ID]toolSurfaceStatus),
 		publishFailures:            make(map[session.ID]shellintegration.PublishFailureReason),
-		domainMaxQueue:             DefaultDomainMaxQueue,
-		domainQueueDepth:           DefaultDomainQueueDepth,
 		controlDrainTimeout:        defaultControlDrainTimeout,
 		recorderDrainTimeout:       defaultControlDrainTimeout,
+		fsCompleteReadDir:          os.ReadDir,
 		gitBindings:                make(map[string]*gitBinding),
 		gitBySession:               make(map[session.ID]map[string]struct{}),
 		paneObserverSweep:          DefaultPaneObserverSweep,
@@ -2139,8 +2107,13 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 // set. A registration that cannot be validated fails the server build
 // rather than freezing a socket at runtime.
 func (s *WSServer) buildControlPlane() {
-	lane := control.NewSemaphore("control", s.laneCapacity)
-	s.lane = control.NewBoundedSubmission(lane)
+	// NOTHING REFUSES ADMISSION (ADR-8eej3e66 §7, stage 8). Ordinary work is
+	// handed over and runs on its own goroutine; the credit window bounds what
+	// a client may have outstanding, and each call's declared turn and max
+	// bound the call. The ordinary execution lane, the per-operation queues
+	// and the probe/ask capacity semaphores are gone with the capacity answer.
+	work := control.AsyncSubmission{}
+	s.work = work
 	// THE CREDIT DECLARATION (credit.go). The exempt set is the transport's
 	// existing ingress-critical set, not a second list: both ask the same
 	// question — "must this method never wait behind the work it rescues?" —
@@ -2151,61 +2124,33 @@ func (s *WSServer) buildControlPlane() {
 		window = DefaultCreditWindow
 	}
 	s.credit = newCreditConfig(window, ingressCriticalMethods, reservedCreditMethods)
-	// Probe and agent probe keep their own capacity-one resource admissions
-	// composed with the lane (canonical order: resource before execution
-	// permit): a second probe is refused even while the lane has free
-	// permits, and every task still occupies one lane permit.
-	s.probeSub = &inflightSubmission{inflight: &s.inflight, inner: control.NewBoundedSubmission(control.NewCompositeNonblocking(
-		control.NewSemaphore("probe", 1), lane))}
-	s.agentProbeSub = &inflightSubmission{inflight: &s.inflight, inner: s.operationQueue("agent-probe")}
-	// Screen offers can wait on outbound capacity and the helper frame carrier.
-	// Bound concurrent sessions and include each retry in Stop's inflight join.
-	s.screenOfferSub = &inflightSubmission{inflight: &s.inflight, inner: s.operationQueue("screen-offer")}
-	// The wait bound is sized against the probe's OWN limit, not the domain
-	// default: a probe may run for assistant.ProbeTimeout, so a second probe
-	// has to be able to wait that long to queue behind it. A shorter bound
-	// would refuse the second press for no reason but arithmetic, which is
-	// the defect this gate was changed to remove.
-	s.agentProbeAdmit = control.NewComposite(
-		control.NewWaitingSemaphore("agent-probe", 1, s.domainMaxQueue, assistant.ProbeTimeout+probeGateWaitMargin), lane)
-	s.askSub = &inflightSubmission{inflight: &s.inflight, inner: control.NewBoundedSubmission(control.NewCompositeNonblocking(
-		control.NewSemaphore("agent-ask", askStreamCapacity), lane))}
-	// The native picker is the one of these that is NOT an execution bound.
-	// A probe competes for a scarce worker; a picker is a serialisation
-	// point — one at a time, and the second may proceed once the first
-	// closes. Held in the instant-refusal class it refused its own tail: a
-	// handler enqueues its response inside the task and the permit is
-	// returned only after the task goroutine returns, so a sequential
-	// client's very next dialog request landed in that window and was told
-	// "Control plane busy" for doing nothing wrong. That is precisely the
-	// window ADR-0026 item 4 says the waiting gate exists to bridge, and it
-	// is what made the R2 sweep report the picker opening zero times:
-	// dialog.openFile sorts immediately before dialog.openFileForUpload.
-	//
-	// So the capability moves to the waiting class and, because a waiting
-	// admission may never be wired into a Submission (ADR-0026 item 3 of
-	// Enforcement — a compile error, not a convention), it is acquired on
-	// the task goroutine by the handler. The submission that remains is a
-	// bounded queue, exactly as a domain operation's is.
-	s.dialogSub = &inflightSubmission{inflight: &s.inflight, inner: s.operationQueue("dialog")}
-	s.dialogAdmit = control.NewComposite(
-		control.NewWaitingSemaphore("dialog", 1, s.domainMaxQueue, s.domainWaitTimeout), lane)
-	// Domain-gated methods do not register on the lane submission: their
-	// operation acquires the conflict gates (waiting, bounded) and THEN the
-	// lane inside Run, on the task goroutine, so waiting conflict work never
-	// occupies a worker permit and the read loop never blocks on a conflict.
-	// The per-operation queue submissions bound in-flight tasks per operation.
+	// Probes, the agent probe, the ask stream, the picker and screen offers
+	// are handed over like everything else. Their tasks are registered with
+	// the inflight set, so Stop cancels and joins them; none of them refuses.
+	s.probeSub = &inflightSubmission{inflight: &s.inflight, inner: work}
+	s.agentProbeSub = &inflightSubmission{inflight: &s.inflight, inner: work}
+	s.screenOfferSub = &inflightSubmission{inflight: &s.inflight, inner: work}
+	// A probe is a SERIALISATION POINT, not a scarce worker (nocx-bxafj): one
+	// at a time, and the second proceeds when the first is done. The gate
+	// WAITS under the invocation's turn, which is sized by the probe's own
+	// declaration; nothing is refused for arithmetic.
+	s.agentProbeAdmit = control.NewWaitingSemaphore("agent-probe", 1, assistant.ProbeTimeout+probeGateWaitMargin)
+	s.askSub = &inflightSubmission{inflight: &s.inflight, inner: work}
+	// The native picker is the same shape: one at a time, the second waits for
+	// the first to close (ADR-8eej3e66 §5). It is acquired on the task
+	// goroutine by the handler.
+	s.dialogSub = &inflightSubmission{inflight: &s.inflight, inner: work}
+	s.dialogAdmit = control.NewWaitingSemaphore("dialog", 1, s.domainWaitTimeout)
 	if s.storeGuard == nil {
-		s.storeGuard = capability.NewStoreGuard(catalog.Declarations(), s.domainMaxQueue, s.domainWaitTimeout)
+		s.storeGuard = capability.NewStoreGuard(catalog.Declarations(), s.domainWaitTimeout)
 	}
 	gates := s.domainGates()
 	// The git domain's stage-5 scheduler: one order gate for every checkout
 	// and one bulkhead for every mount, shared by all git.* methods.
-	gitOrder := schedule.NewKeyed("git-checkout", gitOrderCapacity)
+	gitOrder := schedule.NewKeyed("git-checkout")
 	gitBulkhead := schedule.NewBulkhead("git", schedule.Limits{
 		Capacity:           gitBulkheadCapacity,
 		PersonReserved:     gitPersonReserved,
-		Queue:              gitBulkheadQueue,
 		AbandonedPerDomain: gitAbandonedPerDomain,
 		AbandonedGlobal:    gitAbandonedGlobal,
 	})
@@ -2224,17 +2169,16 @@ func (s *WSServer) buildControlPlane() {
 	// then the FIFO, acquired as one composite.
 	contentOrder := control.NewComposite(
 		s.storeGuard.SharedBarrier(capability.StoreContent), orders.content)
-	// Every admission leaf this server built, for app.diagnostics. The lane
-	// first: it is the one a saturated server holds for days.
 	// THE FILESYSTEM'S FAILURE DOMAINS (stage 4): one bulkhead per mount or
 	// attested host, with part of each reserved for a person and a breaker
 	// for a domain that keeps abandoning workers. The whole-domain gate it
 	// replaces is gone, so filesystem is not in domainGates any more.
 	s.filesDomains = domains.New(domains.FilesystemDefaults())
-	// Every admission leaf this server built, for app.diagnostics. The lane
-	// first: it is the one a saturated server holds for days.
+	// Every admission leaf this server built, for app.diagnostics. There is no
+	// lane: the leaves are the stores and per-resource orders, the two
+	// serialisation points, and the session gate.
 	s.diagAdmits = []control.Admission{
-		lane, gates.config, gates.vault, gates.session,
+		gates.config, gates.vault, gates.session,
 		orders.session, orders.content, orders.api,
 		s.agentProbeAdmit, s.dialogAdmit,
 	}
@@ -2244,54 +2188,52 @@ func (s *WSServer) buildControlPlane() {
 	// and the delivery of a Stop that was held for an attempt's start
 	// (nocx-zas0d, ws_signal.go). Both are the same act on the same session,
 	// so they share the bound and the serialisation.
-	s.signalOps = capability.NewSessionOperations(orders.session, lane, s.registry, s.profileUsage)
-	s.signalSub = s.operationQueue("signal")
+	s.signalOps = capability.NewSessionOperations(orders.session, s.registry, s.profileUsage)
+	s.signalSub = work
 	// The request broker is constructed here, once the server's connection
 	// set exists: its delivery seams are this server's own snapshot and
 	// per-connection enqueue, and its resolution methods register on the
-	// ingress-critical set below (the resolution must never wait behind the
-	// lane — a pending requestor blocks on it).
+	// ingress-critical set below (the resolution must never wait behind
+	// request work — a pending requestor blocks on it).
 	s.broker = NewBroker(s.rendererConns, s.rendererDeliver)
-	configOp, endpointWired := s.buildConfigOp(lane, gates.config, gates.vault)
-	noteOp := capability.NewNoteOperation(gates.config, lane, s.notes)
-	snippetOp := capability.NewSnippetOperation(gates.config, lane, s.snippets)
+	configOp, endpointWired := s.buildConfigOp(gates.configVault)
+	noteOp := capability.NewNoteOperation(gates.config, s.notes)
+	snippetOp := capability.NewSnippetOperation(gates.config, s.snippets)
 	_ = endpointWired
 	specs := make([]methodSpec, 0, 96)
-	inventorySub := s.operationQueue("session-inventory")
 	specs = append(specs, rpcCancelSpec(immediate))
-	specs = append(specs, s.operationOutcomeSpec(s.lane))
+	specs = append(specs, s.operationOutcomeSpec(s.work))
 	specs = append(specs, s.creditSpec())
 	specs = append(specs, s.heartbeatSpecs(immediate)...)
-	specs = append(specs, s.sessionSpecs(lane, orders.session, gates.config)...)
+	specs = append(specs, s.sessionSpecs(orders.session, gates.config)...)
 	specs = append(specs, whenAvailable(
-		s.hostSessionInventorySpecs(inventorySub)[0],
+		s.hostSessionInventorySpecs(work)[0],
 		func() bool { return s.hostSessionInventory != nil },
 		"method not found: helper session inventory not wired"))
 	specs = append(specs, s.signalSpecs()...)
 	specs = append(specs, s.askResolverSpecs(immediate)...)
 	specs = append(specs, s.laneInteractivitySpec(immediate))
 	specs = append(specs, s.runResolutionSpec(immediate))
-	specs = append(specs, s.clientHostSpecs(immediate, s.lane)...)
-	specs = append(specs, s.configSpecs(lane, gates.config, gates.vault, configOp, endpointWired, noteOp, snippetOp)...)
-	specs = append(specs, s.backupSpecs(lane, gates.config, s.storeGuard)...)
-	specs = append(specs, s.vaultSpecs(lane, gates.config, gates.vault, s.storeGuard)...)
+	specs = append(specs, s.clientHostSpecs(immediate, s.work)...)
+	specs = append(specs, s.configSpecs(gates.config, gates.configVault, configOp, endpointWired, noteOp, snippetOp)...)
+	specs = append(specs, s.backupSpecs(gates.config, s.storeGuard)...)
+	specs = append(specs, s.vaultSpecs(gates.configVault, gates.vault, s.storeGuard)...)
 	specs = append(specs, s.notifySpecs()...)
 	specs = append(specs, s.notifyFeedSpecs()...)
-	specs = append(specs, s.secretSpecs(lane, gates.config, gates.vault, contentOrder)...)
-	specs = append(specs, s.gitSpecs(lane, gates.session, gitOrder, gitBulkhead)...)
-	specs = append(specs, s.filesSpecs(lane, gates.session)...)
-	specs = append(specs, s.apiSpecs(lane, orders.api, gates.vault)...)
-	contentSub := s.operationQueue("content")
-	specs = append(specs, s.contentSpecs(lane, contentOrder, contentSub)...)
-	// history.status rides the plain lane, not the content queue: it is a
-	// mutex read of in-memory state and must stay answerable while the
+	specs = append(specs, s.secretSpecs(gates.configVault, gates.vault, contentOrder)...)
+	specs = append(specs, s.gitSpecs(gates.session, gitOrder, gitBulkhead)...)
+	specs = append(specs, s.filesSpecs(gates.session)...)
+	specs = append(specs, s.apiSpecs(orders.api, gates.vault)...)
+	specs = append(specs, s.contentSpecs(contentOrder, work)...)
+	// history.status rides the plain submission, not the content order: it is
+	// a mutex read of in-memory state and must stay answerable while the
 	// content domain is exactly what is broken.
-	specs = append(specs, s.historyStatusSpecs(s.lane)...)
-	specs = append(specs, s.checkoutsStatusSpecs(s.lane)...)
-	specs = append(specs, s.agentSpecs(contentSub, lane, contentOrder, configOp, endpointWired, noteOp, snippetOp, s.skillLibrary, s.agentTools, s.credentialResolver(), s.assistantClient, s.askSub)...)
-	specs = append(specs, s.ledgerSpecs(contentSub, lane, contentOrder)...)
-	specs = append(specs, s.layoutSpecs(contentSub, lane, contentOrder)...)
-	specs = append(specs, s.shellSpecs(lane, gates.session)...)
+	specs = append(specs, s.historyStatusSpecs(work)...)
+	specs = append(specs, s.checkoutsStatusSpecs(work)...)
+	specs = append(specs, s.agentSpecs(work, contentOrder, configOp, endpointWired, noteOp, snippetOp, s.skillLibrary, s.agentTools, s.credentialResolver(), s.assistantClient, s.askSub)...)
+	specs = append(specs, s.ledgerSpecs(work, contentOrder)...)
+	specs = append(specs, s.layoutSpecs(work, contentOrder)...)
+	specs = append(specs, s.shellSpecs(gates.session)...)
 	specs = append(specs, s.aboutSpecs()...)
 	specs = append(specs, s.diagnosticsSpec())
 	specs = append(specs, s.lifecycleSpecs()...)
@@ -2302,24 +2244,13 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.agentRuleStoreSpecs()...)
 	specs = append(specs, s.agentCalibrationSpecs()...)
 	specs = append(specs, s.agentTypeSpecs()...)
-	specs = append(specs, s.seamSpecs(lane, orders.session)...)
-	specs = append(specs, s.historyPageSpecs(lane, orders.session)...)
+	specs = append(specs, s.seamSpecs(orders.session)...)
+	specs = append(specs, s.historyPageSpecs(orders.session)...)
 	methods, err := buildMethodSpecs(specs)
 	if err != nil {
 		panic("nocx: control-plane registration: " + err.Error())
 	}
 	s.methods = methods
-}
-
-// operationQueue builds the bounded queue-submission for one operation's
-// methods: at most domainQueueDepth tasks of the operation may be in flight
-// (waiting on the conflict gates or running) before new work is refused at
-// submit time. The refusal is the queue-depth half of the waiting-gate
-// bound; the gate itself carries the other half (its own waiters cap), and
-// the lane — acquired by the operation AFTER the gates, inside Run — is the
-// execution bound.
-func (s *WSServer) operationQueue(name string) control.Submission {
-	return control.NewBoundedSubmission(control.NewSemaphore(name+"-queue", s.domainQueueDepth))
 }
 
 // domainGates builds one gate per domain, capacity 1 — the conservative
@@ -2331,6 +2262,13 @@ func (s *WSServer) operationQueue(name string) control.Submission {
 // compose in the canonical order.
 type domainGates struct {
 	config, vault, session control.Admission
+	// configVault is the plan for ONE operation that writes both stores —
+	// the config document and the vault row references into it. It is asked
+	// for once, because the two per-store plans share the vault-reset
+	// barrier and composing them takes it twice: a reset queued between the
+	// two acquisitions blocks the second by writer preference while it waits
+	// for the first (ADR-8eej3e66 §5; stores.go tells the whole story).
+	configVault control.Admission
 }
 
 // resourceOrders builds the per-resource FIFOs that replace the session,
@@ -2355,14 +2293,21 @@ type resourceOrders struct {
 
 func (s *WSServer) resourceOrders() resourceOrders {
 	return resourceOrders{
-		session: control.NewResourceOrder("session-order", control.DefaultOrderLimit, "session:"),
-		content: control.NewResourceOrder("content-order", control.DefaultOrderLimit,
+		session: control.NewResourceOrder("session-order", "session:"),
+		content: control.NewResourceOrder("content-order",
 			"store:content", "collection:workspace-layout"),
-		api: control.NewResourceOrder("api-order", control.DefaultOrderLimit, "collection:"),
+		api: control.NewResourceOrder("api-order", "collection:"),
 	}
 }
 
 func (s *WSServer) domainGates() domainGates {
+	// ONE statement of which admission the answer to a vault unlock needs: a
+	// plan that includes the vault's store. Every consumer of the vault's
+	// plan is marked here rather than marking each one, because the mark is a
+	// property of what the plan holds, not of who holds it.
+	answering := func(stores ...string) control.Admission {
+		return capability.UnlockAnswering(s.storeGuard.Shared(stores...))
+	}
 	return domainGates{
 		// Config and vault are the store set of ADR-8eej3e66 §5: their
 		// domain admission is now the store guard's shared plan — every
@@ -2380,8 +2325,9 @@ func (s *WSServer) domainGates() domainGates {
 		// now a handler has shown somebody that dialog and refused their
 		// Unlock with "Control plane busy" (nocx-o3606, nocx-9fzkk). The
 		// marker travels on the store guard's plan unchanged.
-		vault:   capability.UnlockAnswering(s.storeGuard.Shared(capability.StoreVault)),
-		session: capability.Gate(capability.GateSession, 1, s.domainMaxQueue, s.domainWaitTimeout),
+		vault:       answering(capability.StoreVault),
+		configVault: answering(capability.StoreConfig, capability.StoreVault),
+		session:     capability.Gate(capability.GateSession, 1, s.domainWaitTimeout),
 	}
 }
 
@@ -2852,7 +2798,7 @@ func (s *WSServer) takeCloseRequested(id session.ID) bool {
 // TryResult and TryError (the other half of a promise) use reserved critical
 // capacity the refreshable data plane cannot consume; critical overflow closes
 // the connection rather than dropping a response. TryNotify is refreshable
-// state: on a saturated queue it is dropped and the stall policy applies
+// state: on a full queue it is dropped and the stall policy applies
 // (mark stalled, reserve one
 // control-overload notice, close as a last resort), which is safe because
 // the renderer re-syncs from the next notification.
@@ -2871,15 +2817,12 @@ type Responder interface {
 	TryNotify(method string, params json.RawMessage) error
 }
 
-// RPCError is the payload of a JSON-RPC error response. Data is omitted
-// from the wire when nil (parity with jsonrpcErrorObj's omitempty). Method is
-// internal-only metadata used by the sole response seam to diagnose an
-// in-handler saturation refusal; it is never serialized.
+// RPCError is the payload of a JSON-RPC error response. Data is omitted from
+// the wire when nil (parity with jsonrpcErrorObj's omitempty).
 type RPCError struct {
 	Code    int
 	Message string
 	Data    any
-	method  string
 }
 
 // wsConn wraps a connection's outbound side (outbound.Conn — the socket,
@@ -3341,7 +3284,7 @@ const wsReadLimit = 32 << 20 // 32 MiB
 // one server. The per-connection queue (outbound.DefaultQueueDepth frames,
 // up to ~2 MiB at the largest data frame) is the primary bound; this is the
 // process-wide additional bound the design calls for. 32 MiB tolerates
-// roughly a dozen saturated connections before the shared budget itself
+// roughly a dozen busy connections before the shared budget itself
 // trips the stall policy.
 const outboundBudgetBytes = 32 << 20 // 32 MiB
 
@@ -3888,6 +3831,14 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	// reach a handler however the renderer behaves.
 	mutation, mutationRefusal := s.beginMutation(req, m.op)
 	if mutationRefusal != nil {
+		// This invocation ends before a task exists, so nothing else will
+		// drop the cancellation registration made above. The replay refusal
+		// used to leave it in the connection's map for the connection's life
+		// (nocx-3an1s.2.17, the same early end as a skipped queued task).
+		if cancelEntry != nil {
+			wconn.requestCancels.drop(req.ID, cancelEntry)
+		}
+		cancelRequest()
 		_ = wconn.TryError(req.ID, *mutationRefusal)
 		return true
 	}
@@ -3915,9 +3866,24 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	if len(runtimeKeys) > 0 {
 		key = runtimeKeys[0]
 	}
-	task := control.Task{Key: key, Run: func(pctx context.Context) {
-		defer cancelRequest()
-		defer func() {
+	// ONE FINISHER FOR BOTH ENDS OF A TASK (nocx-3an1s.2.17). A task that
+	// ran calls it from Run's defer; a task the start gate refused calls it
+	// itself, because Run never runs and everything Run's defers would have
+	// released — the request's cancellation entry, its credit, its mutation
+	// mapping, its inflight registration (that one lives in the submission
+	// wrapper) — would otherwise stay behind. A withdrawn queued call used to
+	// leave its entry in requestCancels for the life of the connection.
+	var finishOnce sync.Once
+	finishInvocation := func() {
+		finishOnce.Do(func() {
+			if cancelEntry != nil {
+				wconn.requestCancels.drop(req.ID, cancelEntry)
+			}
+			// The task is the second owner of this credit: a request withdrawn
+			// or failed without an answer would otherwise hold its window slot
+			// until the connection ended. Release is idempotent, so the
+			// response path may already have freed it.
+			credit.Release()
 			// THE INVOCATION'S OWN END, and what it means for the mutation
 			// record. The chosen outcome is the CAUSE, not whichever settle
 			// won the race: a withdrawn request records "cancelled" even when
@@ -3932,55 +3898,141 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 			// be settled here, and its request entry must not outlive it.
 			wconn.mutations.take(req.ID)
 			mutation.Settled(settled)
-		}()
-		// The task is the second owner of this credit: a request withdrawn
-		// or failed without an answer would otherwise hold its window slot
-		// until the connection ended. Release is idempotent, so the response
-		// path may already have freed it.
-		defer credit.Release()
-		defer func() {
-			if cancelEntry != nil {
-				wconn.requestCancels.drop(req.ID, cancelEntry)
-			}
-		}()
+			cancelRequest()
+		})
+	}
+	task := control.Task{Key: key, Run: func(pctx context.Context) {
+		defer finishInvocation()
 		m.handle(pctx, req)
 	}}
-	if cancelEntry != nil {
-		// A QUEUED MUTATION THAT NEVER STARTS ANSWERS "DID NOT START", and the
-		// scope is settled here because a withdrawn task never reaches the
-		// handler that would have settled it.
-		task.Start = func() bool {
-			if cancelEntry.begin() {
-				return true
-			}
-			mutation.NotStarted()
-			scope.Settle(catalog.OutcomeNotStarted)
+	// A QUEUED TASK THAT NEVER STARTS ANSWERS "DID NOT START" — and it is
+	// answered AT ITS TURN, not when the queue gets round to it.
+	//
+	// The record's turn is "a finite deadline on waiting for resources and
+	// capacity" (ADR-8eej3e66 §3). Two of the waits are time-bounded by the
+	// admission itself (a waiting semaphore, a resource FIFO). A submission
+	// that ORDERS work — the lifecycle FIFO, one session's operations, one
+	// binding's — has no deadline of its own: it holds a task behind its
+	// predecessor, and a predecessor that never returns would hold it for
+	// ever. The memory is bounded by what a producer sends; the WAIT was not
+	// bounded by anything, and the caller was never answered.
+	//
+	// So the turn is armed here, once, and settled by whichever of the two
+	// arrives first: the task starting, or the turn running out. Running and
+	// answering are mutually exclusive (one mutex), so a task that starts in
+	// the turn's own instant is a completion and never a second answer.
+	//
+	// NOT FOR THE INGRESS-CRITICAL SET. Those methods are answered inline on
+	// the read loop: they never queue, so their one-millisecond turns are a
+	// formality, and expiring them here under load would refuse an unlock
+	// resolution for arithmetic. The check exists to end a QUEUE wait, and
+	// only work that queues has one.
+	var turn struct {
+		mu       sync.Mutex
+		running  bool
+		answered bool
+	}
+	claimRun := func() bool {
+		turn.mu.Lock()
+		defer turn.mu.Unlock()
+		if turn.answered {
 			return false
 		}
+		turn.running = true
+		return true
+	}
+	claimExpiry := func() bool {
+		turn.mu.Lock()
+		defer turn.mu.Unlock()
+		if turn.running || turn.answered {
+			return false
+		}
+		turn.answered = true
+		return true
+	}
+	expireTurn := func() {
+		if !claimExpiry() {
+			return
+		}
+		mutation.NotStarted()
+		scope.Settle(catalog.OutcomeNotStarted)
+		if req.ID != nil {
+			answerOperationExpiry(wconn, req, catalog.ExpiredNotStarted, "")
+		}
+	}
+	var turnTimer *time.Timer
+	if !ingressCritical(req.Method) {
+		if wait := time.Until(scope.TurnDeadline()); wait > 0 {
+			turnTimer = time.AfterFunc(wait, expireTurn)
+		} else {
+			// The turn was already spent before the frame was even
+			// dispatched: nothing may start.
+			expireTurn()
+		}
+	}
+	start := func() bool {
+		if cancelEntry != nil && !cancelEntry.begin() {
+			mutation.NotStarted()
+			scope.Settle(catalog.OutcomeNotStarted)
+			finishInvocation()
+			return false
+		}
+		if turnTimer != nil {
+			turnTimer.Stop()
+		}
+		if !claimRun() {
+			// The turn answered first: this task must not run.
+			finishInvocation()
+			return false
+		}
+		if !ingressCritical(req.Method) && !time.Now().Before(scope.TurnDeadline()) {
+			mutation.NotStarted()
+			scope.Settle(catalog.OutcomeNotStarted)
+			if req.ID != nil {
+				answerOperationExpiry(wconn, req, catalog.ExpiredNotStarted, "")
+			}
+			finishInvocation()
+			return false
+		}
+		return true
+	}
+	task.Start = start
+	if cancelEntry != nil {
 		requestCtx = withRequestCancel(requestCtx, cancelEntry)
 	}
 	rej := m.submission.TrySubmit(requestCtx, task)
 	if rej == nil {
 		return true
 	}
-	scope.Refuse()
-	mutation.Settled(catalog.OutcomeRefused)
+	if turnTimer != nil {
+		turnTimer.Stop()
+		turn.mu.Lock()
+		turn.answered = true // the refusal below is the answer; nothing may add one
+		turn.mu.Unlock()
+	}
+	if rej.Kind == control.RejectionWaitExceeded {
+		scope.Settle(catalog.OutcomeNotStarted)
+		mutation.Settled(catalog.OutcomeNotStarted)
+	} else {
+		scope.Refuse()
+		mutation.Settled(catalog.OutcomeRefused)
+	}
 	wconn.mutations.take(req.ID)
 	cancelRequest()
 	if cancelEntry != nil {
 		wconn.requestCancels.drop(req.ID, cancelEntry)
 	}
-	// Refused. A request (has an id) answers with the saturation error; a
-	// notification (no id) has no response to carry it, so the server emits
-	// the rate-limited control.saturated notification instead. Both paths
-	// leave the SAME line and record: a refusal the owner saw on screen and
-	// could not find in 300 MB of log is the defect this closes.
-	control.ReportRefusal(requestCtx, *rej)
+	// NOT ADMITTED. A submission refuses only for a reason that is not
+	// capacity: it is shutting down (ADR-8eej3e66 §7 removed the rest). A
+	// request is answered with the declaration's own answer; a notification
+	// has no response to carry it, so the server records it and moves on —
+	// the same line and record either way, which is what closes "a refusal
+	// the owner saw on screen and could not find in 300 MB of log".
 	if req.ID != nil {
-		_ = wconn.TryError(req.ID, saturationRPCError(req.Method, rej))
+		answerSubmissionRejection(requestCtx, wconn, req, rej)
 		return true
 	}
-	s.emitSaturatedNotification(wconn, req.Method, rej)
+	control.ReportRefusal(requestCtx, *rej)
 	return true
 }
 
@@ -4015,18 +4067,6 @@ func (s *WSServer) connMethodsFor(wconn *wsConn) map[string]controlMethod {
 		wconn.methods = connMethods(s.methods, wconn, nil)
 	}
 	return wconn.methods
-}
-
-// emitSaturatedNotification sends the control.saturated notification for a
-// refused notification, rate-limited per (methodClass, scope): a burst of
-// refused notifications must not flood the wire.
-func (s *WSServer) emitSaturatedNotification(wconn Responder, method string, rej *control.Rejection) {
-	class := methodClassFor(method)
-	if !s.satNotify.allow(class, rej.Scope) {
-		return
-	}
-	params := saturatedNotificationParamsFor(class, rej.Scope)
-	_ = wconn.TryNotify("control.saturated", mustMarshal(params))
 }
 
 // --- control-plane handlers -----------------------------------------------

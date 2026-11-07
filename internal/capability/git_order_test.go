@@ -93,15 +93,15 @@ func (r *testRepo) DeleteWorktreeBranch(context.Context, string, string) error {
 func (r *testRepo) Close() error { return nil }
 
 func newGitGates() (*schedule.Keyed, *schedule.Bulkhead) {
-	order := schedule.NewKeyed("git", 16)
+	order := schedule.NewKeyed("git")
 	bulkhead := schedule.NewBulkhead("git", schedule.Limits{
-		Capacity: 8, PersonReserved: 2, Queue: 32, AbandonedPerDomain: 8, AbandonedGlobal: 32,
+		Capacity: 8, PersonReserved: 2, AbandonedPerDomain: 8, AbandonedGlobal: 32,
 	})
 	return order, bulkhead
 }
 
 func newGitBindingOp(reg *registry.Registry, order *schedule.Keyed, bulkhead *schedule.Bulkhead) capability.GitBindingOperation {
-	return capability.NewGitBindingOperation(order, bulkhead, testLane(), reg)
+	return capability.NewGitBindingOperation(order, bulkhead, reg)
 }
 
 type ownsAll struct{}

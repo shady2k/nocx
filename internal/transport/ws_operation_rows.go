@@ -15,11 +15,17 @@ package transport
 // # Why the row is addressed by the REQUEST
 //
 // The row belongs to the invocation, and the invocation's identity on the wire
-// is the JSON-RPC id — the same id the renderer holds for the call it made, so
-// a Cancel on the row is `rpc.cancel` with that id and needs no second
-// addressing scheme (ADR-8eej3e66 §8: every call a person makes is
-// cancellable). The renderer keys the row on the same id its call row uses,
-// which is what makes one operation ONE row rather than two.
+// is the JSON-RPC id it was sent with, so a Cancel on the row is `rpc.cancel`
+// with that id and needs no second addressing scheme (ADR-8eej3e66 §8: every
+// call a person makes is cancellable).
+//
+// That id is per ATTEMPT, while the renderer's own identity for a call
+// outlives a sealed retry and a wait for credit, so the two are separate
+// counters and not always the same number. The renderer resolves this id to
+// its own where it holds both (Dispatcher.callIDForRequest) and keys the row
+// by the call's identity, which is what makes one operation ONE row rather
+// than two — and what makes its Cancel reach THIS call rather than whichever
+// call happens to hold that number as its own.
 //
 // # It is an indicator, never a ledger
 //

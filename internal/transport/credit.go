@@ -52,7 +52,7 @@ var reservedCreditMethods = []string{"vault.unseal"}
 // measures nothing about a bulkhead"). It is deliberately NOT the lane's
 // capacity: the lane is an execution bound shared by every connection, while
 // this window is what ONE connection may have outstanding, and a test that
-// shrinks the lane to saturate it must still be able to send its second
+// sets a small window must still be able to send its second
 // request. A test or a later stage names a different value with
 // WithCreditWindow.
 const DefaultCreditWindow = 8

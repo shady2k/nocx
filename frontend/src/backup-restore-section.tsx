@@ -14,7 +14,7 @@ import { readBackupText, MAX_BACKUP_BYTES, downloadText } from './backup-file'
 import { Button, FileInput, Radio, MarkerList, PageSection } from './ui'
 import { showToast } from './ui/toast'
 import { showConfirm } from './ui/dialog'
-import { isSaturationRefusal } from './dispatcher'
+import { isNotStartedAnswer } from './dispatcher'
 
 interface Props {
   profileClient: ProfileClient
@@ -180,14 +180,14 @@ export function BackupRestoreSection(props: Props) {
           setState({ preview: result })
         } catch (err) {
           if (gen !== previewGen) return
-          // A refused request is not the backup's fault and not final: the
-          // file is still chosen, nothing ran, and nothing is wrong with it.
-          // Choosing the same file again fires no change event, so without a
-          // way to ask again the section is a dead end (nocx-9ox05). The
-          // sentence is the dispatcher's (`refusalSentence`), shown HERE
-          // next to the remedy instead of in a toast over the whole app
-          // (ADR-8eej3e66 stage 1).
-          if (isSaturationRefusal(err)) {
+          // A call that did not start is not the backup's fault and not
+          // final: the file is still chosen, nothing ran, and nothing is
+          // wrong with it. Choosing the same file again fires no change
+          // event, so without a way to ask again the section is a dead end
+          // (nocx-9ox05). The sentence is the wire's, shown HERE next to the
+          // remedy instead of in a toast over the whole app (ADR-8eej3e66
+          // §8).
+          if (isNotStartedAnswer(err)) {
             setState({ preview: null, previewRefused: messageOf(err) })
             return
           }

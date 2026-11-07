@@ -16,7 +16,14 @@ import (
 // production caller passes the request's context so a withdrawn keystroke
 // stops the walk, and no test here exercises that lifetime.
 func completeLocalPath(text, cwd string, limit int) []fsCompleteEntry {
-	entries, _ := completeLocalPathContext(context.Background(), text, cwd, limit)
+	target, ok := resolveFsCompleteTarget(text, cwd)
+	if !ok {
+		return []fsCompleteEntry{}
+	}
+	entries, err := completeInDir(context.Background(), target, limit, os.ReadDir, os.Stat)
+	if err != nil {
+		return []fsCompleteEntry{}
+	}
 	return entries
 }
 

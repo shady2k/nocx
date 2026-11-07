@@ -6,8 +6,25 @@ import "path/filepath"
 // repository exists: the mount the path is on. git.open uses it because a
 // checkout's own identity is only known after the open, and the open already
 // draws on the disk.
+//
+// This reads the disk — one stat, to learn the device — so it must be called
+// where a stuck syscall is bounded. PathFailureDomain is the same question
+// asked without reading anything.
 func FailureDomain(localPath string) string {
 	return mountDomain(filepath.Clean(localPath))
+}
+
+// PathFailureDomain names the domain a path has while its mount is unknown:
+// the path itself, in the one spelling mountDomain falls back to when its
+// stat fails.
+//
+// It exists for the order of operations, not for an answer: a caller that
+// wants the mount must stat, a stat on a hung mount never returns, and the
+// permit that bounds that worker has to be taken BEFORE the question is
+// asked. So this names a domain that can be held while FailureDomain runs,
+// and the two agree wherever FailureDomain cannot answer.
+func PathFailureDomain(localPath string) string {
+	return "checkout:" + filepath.Clean(localPath)
 }
 
 // CheckoutIdentity is a local checkout's ordering and failure-domain

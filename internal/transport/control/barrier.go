@@ -27,21 +27,19 @@ import (
 // and the restore queued among them never sees the set empty. With it, the
 // first exclusive waiter closes the door behind it.
 //
-// # The bounds
+// # The bound
 //
-// waitTimeout bounds the whole acquisition (not one wake), and maxQueue bounds
-// how many callers may be registered as waiters at once; a caller beyond it is
-// refused instantly. Both are the same bounds the domain gates state, and both
-// must be finite: a barrier whose reader can wait for ever turns a hung
-// dependency into a frozen application, which is the defect this record is
-// written against.
+// waitTimeout bounds the whole acquisition (not one wake) for a caller whose
+// context carries no declared turn; a call that carries one waits exactly the
+// turn its catalogue entry declares (ADR-8eej3e66 §3). There is no waiter
+// count: a caller beyond any such count is not refused, because no capacity
+// answer exists any more, and every waiter leaves when its turn ends.
 //
 // A refusal carries the holders it found, exactly like the semaphores: a
 // person is owed "what is holding this", and the answer travels in the
 // rejection (holder.go).
 type Barrier struct {
 	name        string
-	maxQueue    int
 	waitTimeout time.Duration
 	book        *holderBook
 
@@ -53,20 +51,16 @@ type Barrier struct {
 	wake       chan struct{} // closed and replaced on every release
 }
 
-// NewBarrier returns a shared/exclusive barrier. A negative maxQueue or
-// waitTimeout is a programming error, like every other admission here. The
-// returned barrier is the container; Shared and Exclusive return the
-// admissions an operation composes.
-func NewBarrier(name string, maxQueue int, waitTimeout time.Duration) *Barrier {
-	if maxQueue < 0 {
-		panic("control: negative maxQueue for barrier " + name)
-	}
+// NewBarrier returns a shared/exclusive barrier. A negative waitTimeout is a
+// programming error, like every other admission here. The returned barrier is
+// the container; Shared and Exclusive return the admissions an operation
+// composes.
+func NewBarrier(name string, waitTimeout time.Duration) *Barrier {
 	if waitTimeout < 0 {
 		panic("control: negative waitTimeout for barrier " + name)
 	}
 	return &Barrier{
 		name:        name,
-		maxQueue:    maxQueue,
 		waitTimeout: waitTimeout,
 		book:        newHolderBook(),
 		wake:        make(chan struct{}),
@@ -110,8 +104,17 @@ func (b *Barrier) grantableLocked(exclusive bool) bool {
 	return b.exclWait == 0
 }
 
+// waitBound is the turn the invocation declared, or the fallback this barrier
+// was built with when the context carries none.
+func (b *Barrier) waitBound(ctx context.Context) time.Duration {
+	if req, ok := OrderFrom(ctx); ok && req.Turn > 0 {
+		return req.Turn
+	}
+	return b.waitTimeout
+}
+
 func (b *Barrier) acquire(ctx context.Context, exclusive bool) (Permit, *Rejection) {
-	deadline := time.NewTimer(b.waitTimeout)
+	deadline := time.NewTimer(b.waitBound(ctx))
 	defer deadline.Stop()
 
 	b.mu.Lock()
@@ -128,15 +131,6 @@ func (b *Barrier) acquire(ctx context.Context, exclusive bool) (Permit, *Rejecti
 			return &barrierPermit{b: b, exclusive: exclusive, id: id}, nil
 		}
 		if !registered {
-			if b.sharedWait+b.exclWait >= b.maxQueue {
-				b.mu.Unlock()
-				return nil, &Rejection{
-					Kind:    RejectionCapacity,
-					Reason:  "conflict queue full",
-					Scope:   b.name,
-					Holders: b.book.snapshot(),
-				}
-			}
 			registered = true
 		}
 		if exclusive {

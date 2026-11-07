@@ -1558,7 +1558,7 @@ func (h filesBindingHandlers) handleReveal(ctx context.Context, state *connState
 // FilesystemBindingOperation are built here from the wired stores
 // (composition root for this domain); when no filesystem registry is wired,
 // every handler answers -32601 "files not available".
-func (s *WSServer) filesSpecs(lane control.Admission, sessionGate control.Admission) []methodSpec {
+func (s *WSServer) filesSpecs(sessionGate control.Admission) []methodSpec {
 	var openOp capability.FilesystemOpenOperation
 	var bindingOp capability.FilesystemBindingOperation
 	var factory capability.ProviderFactory
@@ -1568,17 +1568,17 @@ func (s *WSServer) filesSpecs(lane control.Admission, sessionGate control.Admiss
 		// stays filesystem ← capability). nil converts to nil, preserving
 		// the old "no provider factory wired" answer.
 		factory = capability.ProviderFactory(s.filesProviderFor)
-		openOp = capability.NewFilesystemOpenOperation(sessionGate, lane, s.registry, factory, s.filesys)
-		bindingOp = capability.NewFilesystemBindingOperation(lane, s.filesys)
+		openOp = capability.NewFilesystemOpenOperation(sessionGate, s.registry, factory, s.filesys)
+		bindingOp = capability.NewFilesystemBindingOperation(s.filesys)
 	}
-	openSub := s.operationQueue("files-open")
-	bindingSub := s.operationQueue("files")
+	openSub := s.work
+	bindingSub := s.work
 	// One FIFO per binding for the operations that CHANGE it, shared by every
 	// connection on this server. The 32 slots count running and queued work
 	// together, which also bounds the number of active key workers.
 	bindingOrder := &inflightSubmission{
 		inflight: &s.inflight,
-		inner:    control.NewKeyedOrderedSubmission("files-binding-ops", 32),
+		inner:    control.NewKeyedOrderedSubmission("files-binding-ops"),
 	}
 	specs := []methodSpec{
 		reg(openSub, catalog.OpFilesOpen, params(validateFilesOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
@@ -2259,9 +2259,21 @@ func filesTurnContext(ctx context.Context) (context.Context, context.CancelFunc)
 	return context.WithCancel(ctx)
 }
 
+// filesWorkContext derives the work bound from the moment the work starts, and
+// that moment is the grant: StartWork re-arms the scope's max from now and
+// answers the lifetime actually available — its own max, clamped to a parent
+// operation's remainder. Asking the scope rather than recomputing it keeps the
+// context the provider sees, the timer that settles the call and the bound the
+// expiry reports on ONE number (ADR-8eej3e66 §3).
 func filesWorkContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	if scope, ok := catalog.ScopeFrom(ctx); ok {
-		return context.WithDeadline(ctx, scope.Deadline())
+		if lifetime := scope.StartWork(); lifetime > 0 {
+			return context.WithDeadline(ctx, time.Now().Add(lifetime))
+		}
+		// The scope has settled or spent its budget: there is no work budget
+		// left to start with. An already-expired context makes that a
+		// deadline the caller answers with, not an unbounded call.
+		return context.WithDeadline(ctx, time.Now())
 	}
 	return context.WithCancel(ctx)
 }
@@ -2287,14 +2299,18 @@ func (s *WSServer) filesDomainDo(
 	}
 	turn, cancelTurn := filesTurnContext(ctx)
 	defer cancelTurn()
-	work, cancelWork := filesWorkContext(ctx)
-	defer cancelWork()
 	return s.filesDomains.Do(domains.Request{
 		Key:    key,
 		Origin: filesOrigin(ctx),
 		Turn:   turn,
-		Work:   work,
-		Run:    fn,
+		// The work's own bound is derived when the permit is taken, not here:
+		// the wait for capacity is the turn's to bound, and charging it to max
+		// left a read granted after 29 s of waiting about a second of its
+		// thirty (ADR-8eej3e66 §3, nocx-3an1s.2.14).
+		Work: func() (context.Context, context.CancelFunc) {
+			return filesWorkContext(ctx)
+		},
+		Run: fn,
 	})
 }
 

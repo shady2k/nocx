@@ -33,10 +33,10 @@ type ContentOperation interface {
 }
 
 // NewContentOperation builds a ContentOperation that acquires the content
-// gate before the execution lane.
-func NewContentOperation(contentGate, lane control.Admission, db content.ContentDB) ContentOperation {
+// gate.
+func NewContentOperation(contentGate control.Admission, db content.ContentDB) ContentOperation {
 	g := &guard{}
-	return newOperation[ContentService](Direct("ContentOperation"), control.NewComposite(contentGate, lane), g, newContentService(g, db))
+	return newOperation[ContentService](Direct("ContentOperation"), control.NewComposite(contentGate), g, newContentService(g, db))
 }
 
 // newContentService builds the concrete content service bound to guard g.

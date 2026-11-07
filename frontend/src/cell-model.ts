@@ -60,6 +60,8 @@ import type {
   Style as WireStyle,
 } from './generated/session.frame'
 
+type WireRow = SessionFrame['rows'][number]
+
 /** The column footprints a committed frame carries (emulator.Width minus
  *  the 0 a committed frame does not carry — refused at intake). The
  *  enumeration is the wire's: 1 narrow, 2 wide, 3 spacerTail, 4
@@ -273,26 +275,133 @@ export function rowColumnsOf(wireRow: SessionFrame['rows'][number]): number {
   return 'malformed' in positions ? 0 : explicitColumnsOf(positions)
 }
 
+/** Private comparison storage owns only the current frame's facts. Flat
+ * numeric arrays avoid allocating a tuple and style array for every run in
+ * full redraws. Ordinary numbers preserve wire values without coercion. */
+interface RowComparison {
+  readonly text: string
+  readonly wrap: boolean | undefined
+  readonly continuation: boolean | undefined
+  readonly marks: readonly number[] | undefined
+  readonly runs: readonly number[] | undefined
+}
+
+/** Compare the compact wire facts without decoding or serializing them.
+ * Marks occupy three numbers; runs occupy seven: length, tuple tag, then
+ * all five style fields. The tag distinguishes bare 0 from a style tuple. */
+function sameRow(a: WireRow, b: RowComparison): boolean {
+  if (a.text !== b.text || a.wrap !== b.wrap || a.continuation !== b.continuation) return false
+  if (a.marks === undefined) {
+    if (b.marks !== undefined) return false
+  } else {
+    if (b.marks === undefined || a.marks.length * 3 !== b.marks.length) return false
+    for (let i = 0; i < a.marks.length; i++) {
+      const mark = a.marks[i]
+      const offset = i * 3
+      if (
+        mark[0] !== b.marks[offset] ||
+        mark[1] !== b.marks[offset + 1] ||
+        mark[2] !== b.marks[offset + 2]
+      ) {
+        return false
+      }
+    }
+  }
+  if (a.runs === undefined) {
+    if (b.runs !== undefined) return false
+  } else {
+    if (b.runs === undefined || a.runs.length * 7 !== b.runs.length) return false
+    for (let i = 0; i < a.runs.length; i++) {
+      const [style, length] = a.runs[i]
+      const offset = i * 7
+      if (length !== b.runs[offset] || (style === 0 ? 0 : 1) !== b.runs[offset + 1]) return false
+      if (style !== 0) {
+        for (let field = 0; field < 5; field++) {
+          if (style[field] !== b.runs[offset + 2 + field]) return false
+        }
+      }
+    }
+  }
+  return true
+}
+
+function ownRow(wireRow: WireRow): RowComparison {
+  let marks: number[] | undefined
+  if (wireRow.marks !== undefined) {
+    marks = new Array<number>(wireRow.marks.length * 3)
+    for (let i = 0; i < wireRow.marks.length; i++) {
+      const mark = wireRow.marks[i]
+      const offset = i * 3
+      marks[offset] = mark[0]
+      marks[offset + 1] = mark[1]
+      marks[offset + 2] = mark[2]
+    }
+  }
+  let runs: number[] | undefined
+  if (wireRow.runs !== undefined) {
+    runs = new Array<number>(wireRow.runs.length * 7)
+    for (let i = 0; i < wireRow.runs.length; i++) {
+      const [style, length] = wireRow.runs[i]
+      const offset = i * 7
+      runs[offset] = length
+      runs[offset + 1] = style === 0 ? 0 : 1
+      for (let field = 0; field < 5; field++) {
+        runs[offset + 2 + field] = style === 0 ? 0 : style[field]
+      }
+    }
+  }
+  return {
+    text: wireRow.text,
+    wrap: wireRow.wrap,
+    continuation: wireRow.continuation,
+    marks,
+    runs,
+  }
+}
+
+function sameRowSpace(frame: SessionFrame, previous: ScreenSnapshot): boolean {
+  const a = frame.geometry
+  const b = previous.geometry
+  return (
+    a.cols === b.cols &&
+    a.rows === b.rows &&
+    a.cellWidthPx === b.cellWidthPx &&
+    a.cellHeightPx === b.cellHeightPx &&
+    a.revision === b.revision &&
+    frame.state?.bufferKind === previous.state.bufferKind &&
+    frame.state?.bufferInstance === previous.state.bufferInstance &&
+    frame.state?.baseRow === previous.state.baseRow
+  )
+}
+
 /** Validate intake before building cells, retaining each row's positions.
  *  Reject malformed shapes (a rows array that is not geometry.rows long, a
  *  row whose explicit content spans more columns than geometry.cols, a
  *  mark that claims more codepoints than the text has left or names a
  *  position twice, a width outside {1, 2, 4}, present runs whose lengths
- *  do not partition the row's own explicit width). A refusal installs nothing;
- *  successful positions live only for this apply. */
+ *  do not partition the row's own explicit width). A refusal installs nothing.
+ *  Existing rows certify equality with an already validated row in the same
+ *  grid position and buffer/geometry; changed positions live only for this apply. */
 function validateFrame(
   frame: SessionFrame,
-  currentRevision: number | null,
-): RowPositions[] | FrameRefusal {
+  previous: ScreenSnapshot | null,
+  previousRows: readonly RowComparison[],
+): (RowPositions | ModelRow)[] | FrameRefusal {
+  const currentRevision = previous?.revision ?? null
   if (currentRevision !== null && frame.revision <= currentRevision) {
     return { reason: 'stale-revision', revision: frame.revision, current: currentRevision }
   }
   if (frame.rows.length !== frame.geometry.rows) {
     return { reason: 'malformed-geometry', detail: 'row-count' }
   }
-  const rows: RowPositions[] = []
+  const reusable = previous !== null && sameRowSpace(frame, previous)
+  const rows: (RowPositions | ModelRow)[] = []
   for (let r = 0; r < frame.rows.length; r++) {
     const wireRow = frame.rows[r]
+    if (previous !== null && reusable && sameRow(wireRow, previousRows[r])) {
+      rows.push(previous.rows[r])
+      continue
+    }
     const positions = positionsOf(wireRow)
     if ('malformed' in positions) {
       return { reason: 'malformed-row', row: r, detail: 'marks' }
@@ -402,6 +511,7 @@ function buildRow(
 
 export function createCellModel(): CellModel {
   let installed: ScreenSnapshot | null = null
+  let comparisonRows: readonly RowComparison[] = []
 
   return {
     current(): ScreenSnapshot | null {
@@ -409,20 +519,30 @@ export function createCellModel(): CellModel {
     },
 
     apply(frame: SessionFrame): ApplyResult {
-      const positions = validateFrame(frame, installed?.revision ?? null)
+      const positions = validateFrame(frame, installed, comparisonRows)
       if (!Array.isArray(positions)) {
         return { ok: false, refusal: positions }
       }
-      // Decode builds every fact fresh from the frame's strings and
-      // numbers — there is nothing left to alias, so freezing the result
-      // (rather than the frame) is what protects an installed revision
-      // from a caller mutating the frame object afterward.
+      // All rows and frame state have passed validation before either the
+      // snapshot or its comparison facts can advance. Shared rows are already
+      // frozen; rebuilt rows and comparison facts never alias wire arrays.
       const geometry = Object.freeze({ ...frame.geometry })
       const cursor = Object.freeze({ ...frame.cursor })
-      const state: FrameState = Object.freeze({ ...frame.state })
+      const state: FrameState = Object.freeze({
+        ...frame.state,
+        cwd: frame.state.cwd === null ? null : Object.freeze({ ...frame.state.cwd }),
+      })
       const rows: ModelRow[] = []
+      const nextComparisonRows: RowComparison[] = []
       for (let r = 0; r < frame.rows.length; r++) {
-        rows.push(buildRow(r, frame.rows[r], geometry.cols, positions[r]))
+        const rowPositions = positions[r]
+        if ('cells' in rowPositions) {
+          rows.push(rowPositions)
+          nextComparisonRows.push(comparisonRows[r])
+        } else {
+          rows.push(buildRow(r, frame.rows[r], geometry.cols, rowPositions))
+          nextComparisonRows.push(ownRow(frame.rows[r]))
+        }
       }
       Object.freeze(rows)
       const snapshot: ScreenSnapshot = Object.freeze({
@@ -439,6 +559,7 @@ export function createCellModel(): CellModel {
         },
       })
       installed = snapshot
+      comparisonRows = nextComparisonRows
       return { ok: true, snapshot }
     },
   }

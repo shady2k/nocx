@@ -16,6 +16,7 @@
 // element as data-root, which is what the checks read.
 
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from 'solid-js'
+import { t } from '../i18n/locale-model'
 import type { Component } from 'solid-js'
 import type { SidebarViewDescriptor } from '../sidebar'
 import type { ActiveOrigin } from '../pane-content'
@@ -282,7 +283,10 @@ function FilesPanel(props: FilesPanelProps) {
     const text = kind === 'relative' ? props.store.relativePath(node) : node.path
     try {
       await props.clipboard.writeText(text)
-      showToast({ level: 'success', message: `Copied ${kind} path` })
+      showToast({
+        level: 'success',
+        message: `${t('files.path.copiedHead', 'Copied')} ${kind === 'relative' ? t('files.path.copied.tailKindRelative', 'relative') : t('files.path.copied.tailKindAbsolute', 'absolute')} ${t('files.path.copied.tail', 'path')}`,
+      })
     } catch (e) {
       showToast({ level: 'danger', message: e instanceof Error ? e.message : String(e) })
     }
@@ -384,13 +388,13 @@ function FilesPanel(props: FilesPanelProps) {
     const items: ContextMenuItem[] = [
       {
         id: 'copy-relative',
-        label: 'Copy Relative Path',
+        label: t('files.copy.relative', 'Copy Relative Path'),
         icon: CopyIcon,
         onSelect: () => void copyPath(m.node, 'relative'),
       },
       {
         id: 'copy-absolute',
-        label: 'Copy Absolute Path',
+        label: t('files.copy.absolute', 'Copy Absolute Path'),
         icon: CopyIcon,
         onSelect: () => void copyPath(m.node, 'absolute'),
       },
@@ -433,7 +437,7 @@ function FilesPanel(props: FilesPanelProps) {
     ) {
       items.push({
         id: 'upload-into',
-        label: 'Upload…',
+        label: t('files.upload.ellipsis', 'Upload…'),
         // The mark the panel's other Upload already wears: one action, one
         // glyph, whichever surface raises it.
         icon: ArrowUpIcon,
@@ -464,7 +468,7 @@ function FilesPanel(props: FilesPanelProps) {
     ) {
       items.push({
         id: 'download',
-        label: 'Download',
+        label: t('files.download', 'Download'),
         icon: ArrowDownIcon,
         onSelect: () => void downloadFile(m.node),
       })
@@ -472,7 +476,7 @@ function FilesPanel(props: FilesPanelProps) {
     if (o !== null && o.kind === 'local' && (b?.revealAvailable ?? false)) {
       items.push({
         id: 'reveal',
-        label: 'Show in Finder',
+        label: t('files.showInFinder', 'Show in Finder'),
         icon: ExternalLinkIcon,
         onSelect: () => void revealInFinder(m.node),
       })
@@ -569,8 +573,8 @@ function FilesPanel(props: FilesPanelProps) {
           data-depth={row.depth}
           data-testid="files-filter-searching"
         >
-          <Spinner size="sm" label="Searching opened directory" />
-          <span>Searching opened directory…</span>
+          <Spinner size="sm" label={t('files.searching.label', 'Searching opened directory')} />
+          <span>{t('files.searching.text', 'Searching opened directory…')}</span>
         </div>
       )
     }
@@ -581,14 +585,14 @@ function FilesPanel(props: FilesPanelProps) {
           data-depth={row.depth}
           data-testid="files-filter-refusal"
         >
-          <span>Could not search this opened folder: {row.message}</span>
+          <span>{`${t('files.search.failedHead', 'Could not search this opened folder:')} ${row.message}`}</span>
         </div>
       )
     }
     if (row.kind === 'loading') {
       return (
         <div class="files-row" data-depth={row.depth} data-testid="files-loading-row">
-          <Spinner size="sm" label="Loading directory" />
+          <Spinner size="sm" label={t('files.loading.label', 'Loading directory')} />
         </div>
       )
     }
@@ -609,7 +613,7 @@ function FilesPanel(props: FilesPanelProps) {
             data-testid="files-show-more"
             onClick={() => props.store.showMore(row.dir)}
           >
-            Show next {remaining}
+            {`${t('files.showNext.head', 'Show next')} ${remaining}`}
           </Button>
         </div>
       )
@@ -618,17 +622,19 @@ function FilesPanel(props: FilesPanelProps) {
     // first, and neither is a toast nor an empty directory.
     const dir = row.dir
     if (dir.state === 'tooLarge') {
-      const observed = dir.observedCount !== null ? ` (${dir.observedCount} entries)` : ''
+      const observed =
+        dir.observedCount !== null
+          ? ` (${dir.observedCount} ${t('files.tooLarge.entries', 'entries')})`
+          : ''
       return (
         <div
           class="files-row files-row-state"
           data-depth={row.depth}
           data-testid="files-state-too-large"
         >
-          <Badge tone="warning">Directory too large</Badge>
+          <Badge tone="warning">{t('files.tooLarge.badge', 'Directory too large')}</Badge>
           <span>
-            More than {dir.tooLargeLimit} entries{observed} — nocx does not display directories this
-            large.
+            {`${t('files.tooLarge.head', 'More than')} ${dir.tooLargeLimit} ${t('files.tooLarge.entries', 'entries')}${observed} ${t('files.tooLarge.tail', '— nocx does not display directories this large.')}`}
           </span>
         </div>
       )
@@ -640,9 +646,9 @@ function FilesPanel(props: FilesPanelProps) {
           data-depth={row.depth}
           data-testid="files-state-timed-out"
         >
-          <span>This directory took too long to load.</span>
+          <span>{t('files.tooLong', 'This directory took too long to load.')}</span>
           <Button size="sm" data-testid="files-retry" onClick={() => props.store.retry(dir)}>
-            Retry
+            {t('files.retry', 'Retry')}
           </Button>
         </div>
       )
@@ -677,20 +683,23 @@ function FilesPanel(props: FilesPanelProps) {
       <Show when={props.store.phase() === 'no-origin'}>
         <EmptyState
           icon={<FilesIcon />}
-          title="No files to show"
-          description="Focus a terminal tab to see the files of the machine you are on."
+          title={t('files.empty.title', 'No files to show')}
+          description={t(
+            'files.empty.desc',
+            'Focus a terminal tab to see the files of the machine you are on.',
+          )}
         />
       </Show>
       <Show when={props.store.phase() === 'opening'}>
         <div class="files-loading" data-testid="files-loading">
-          <Spinner label="Opening files" />
+          <Spinner label={t('files.opening.label', 'Opening files')} />
         </div>
       </Show>
       <Show when={props.store.phase() === 'failed'}>
         <div class="files-error" data-testid="files-error">
           <p>{props.store.openError()}</p>
           <Button size="sm" data-testid="files-retry-open" onClick={() => props.store.refresh()}>
-            Retry
+            {t('files.retry', 'Retry')}
           </Button>
         </div>
       </Show>
@@ -713,7 +722,7 @@ function FilesPanel(props: FilesPanelProps) {
                   : '')}
             </span>
             <Button size="sm" data-testid="files-watch-retry" onClick={() => props.store.refresh()}>
-              Retry
+              {t('files.retry', 'Retry')}
             </Button>
           </div>
         </Show>
@@ -723,20 +732,23 @@ function FilesPanel(props: FilesPanelProps) {
             files on it. */}
         <Show when={filterMatchedNothing()}>
           <EmptyState
-            title="No files match"
-            description="Opened folders are searched completely. Unopened folders are not searched."
+            title={t('files.nomatch.title', 'No files match')}
+            description={t(
+              'files.nomatch.desc',
+              'Opened folders are searched completely. Unopened folders are not searched.',
+            )}
             action={
               <Button
                 size="sm"
                 data-testid="files-filter-clear"
                 onClick={() => props.store.setFilter('')}
               >
-                Clear filter
+                {t('files.clearFilter', 'Clear filter')}
               </Button>
             }
           />
         </Show>
-        <div class="files-tree" role="tree" aria-label="Files" ref={treeEl}>
+        <div class="files-tree" role="tree" aria-label={t('files.aria', 'Files')} ref={treeEl}>
           <For each={visibleRows()}>{(row) => renderRow(row)}</For>
         </div>
       </Show>
@@ -841,7 +853,10 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
     if (destination === null) {
       showToast({
         level: 'warning',
-        message: 'nocx does not know which folder this panel is showing yet.',
+        message: t(
+          'files.unknownFolder',
+          'nocx does not know which folder this panel is showing yet.',
+        ),
       })
       return
     }
@@ -875,7 +890,7 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
       if (upload !== null && o !== null && uploadMovesTheFile({ native: native(), kind: o.kind })) {
         items.push({
           id: 'upload',
-          label: 'Upload File…',
+          label: t('files.upload.fileEllipsis', 'Upload File…'),
           icon: ArrowUpIcon,
           onSelect: () => void uploadHere(),
         })
@@ -903,8 +918,8 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
         <IconButton
           data-testid="files-refresh"
           size="sm"
-          ariaLabel="Refresh files"
-          title="Refresh files"
+          ariaLabel={t('files.refresh.title', 'Refresh files')}
+          title={t('files.refresh.title', 'Refresh files')}
           disabled={store.origin() === null}
           onClick={() => store.refresh()}
         >
@@ -934,8 +949,8 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
           <IconButton
             data-testid="files-overflow"
             size="sm"
-            ariaLabel="More file actions"
-            title="More file actions"
+            ariaLabel={t('files.more.title', 'More file actions')}
+            title={t('files.more.title', 'More file actions')}
             onClick={(e: MouseEvent) => {
               const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
               setOverflowAt({ x: r.left, y: r.bottom })
@@ -969,8 +984,8 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
       <SearchField
         value={store.filter()}
         onInput={(v) => store.setFilter(v)}
-        placeholder="Filter by name…"
-        ariaLabel="Filter files by name"
+        placeholder={t('files.filter.ph', 'Filter by name…')}
+        ariaLabel={t('files.filter.aria', 'Filter files by name')}
         onKeyDown={(e) => {
           if (e.key === 'Escape' && store.filter() !== '') {
             e.stopPropagation()
@@ -983,7 +998,7 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
 
   return {
     id: FILES_VIEW_ID,
-    title: 'Files',
+    title: () => t('files.panel.title', 'Files'),
     icon: FilesIcon,
     actions: FilesHeaderActions,
     filter: FilesFilter,

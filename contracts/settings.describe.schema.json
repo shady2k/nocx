@@ -57,6 +57,10 @@
           "description": "Translation key the description resolves through: settings.<key>.description, minted in Go. Optional for the same reason as labelKey.",
           "type": "string"
         },
+        "sectionKey": {
+          "description": "Translation key the section title resolves through: settings.section.<lowercased-with-dashes section>, minted in Go. Optional for the same reason as labelKey.",
+          "type": "string"
+        },
         "control": {
           "enum": ["toggle", "text", "number", "select", "secret"]
         },
@@ -99,6 +103,10 @@
           "type": "string"
         },
         "zeroLabel": {
+          "type": "string"
+        },
+        "zeroLabelKey": {
+          "description": "Translation key the zeroLabel resolves through: settings.<key>.zeroLabel, minted in Go. Present only beside a zeroLabel, for the same reason as labelKey.",
           "type": "string"
         },
         "multiline": {

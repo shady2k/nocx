@@ -36,6 +36,7 @@ describe('createModeIndicator', () => {
   it('is the kit badge with a stable identity and the typed tone variance', () => {
     const el = createModeIndicator({
       word: 'Run',
+      ariaLabel: 'Enter goes to Run. Click to choose.',
       tone: 'neutral',
       targetId: 'shell',
       items: RUN_ASK_ITEMS,
@@ -54,6 +55,7 @@ describe('createModeIndicator', () => {
   it('carries the registry’s target id as the data-target hook, never a derivation', () => {
     const el = createModeIndicator({
       word: 'Ask',
+      ariaLabel: 'Enter goes to Ask. Click to choose.',
       tone: 'info',
       targetId: 'agent',
       items: RUN_ASK_ITEMS,
@@ -65,6 +67,7 @@ describe('createModeIndicator', () => {
   it('names what the control does in the aria-label, and marks itself a menu button', () => {
     const el = createModeIndicator({
       word: 'Run',
+      ariaLabel: 'Enter goes to Run. Click to choose.',
       tone: 'neutral',
       targetId: 'shell',
       items: RUN_ASK_ITEMS,
@@ -78,6 +81,7 @@ describe('createModeIndicator', () => {
   it('renders a trailing chevron, then a divider after the whole switch (round 18: "Run ⌄ │")', () => {
     const el = createModeIndicator({
       word: 'Run',
+      ariaLabel: 'Enter goes to Run. Click to choose.',
       tone: 'neutral',
       targetId: 'shell',
       items: RUN_ASK_ITEMS,
@@ -105,6 +109,7 @@ describe('createModeIndicator', () => {
   it('a mousedown never moves the caret or steals the editor’s focus', () => {
     const el = createModeIndicator({
       word: 'Ask',
+      ariaLabel: 'Enter goes to Ask. Click to choose.',
       tone: 'info',
       targetId: 'agent',
       items: RUN_ASK_ITEMS,
@@ -118,6 +123,7 @@ describe('createModeIndicator', () => {
   it('click opens a kit ContextMenu listing every item, the active one checked', () => {
     const el = createModeIndicator({
       word: 'Run',
+      ariaLabel: 'Enter goes to Run. Click to choose.',
       tone: 'neutral',
       targetId: 'shell',
       items: RUN_ASK_ITEMS,
@@ -146,6 +152,7 @@ describe('createModeIndicator', () => {
     const onSelect = vi.fn()
     const el = createModeIndicator({
       word: 'Run',
+      ariaLabel: 'Enter goes to Run. Click to choose.',
       tone: 'neutral',
       targetId: 'shell',
       items: RUN_ASK_ITEMS,
@@ -169,6 +176,7 @@ describe('createModeIndicator', () => {
   it('a second click closes an already-open menu', () => {
     const el = createModeIndicator({
       word: 'Run',
+      ariaLabel: 'Enter goes to Run. Click to choose.',
       tone: 'neutral',
       targetId: 'shell',
       items: RUN_ASK_ITEMS,
@@ -185,6 +193,7 @@ describe('createModeIndicator', () => {
   it('renders any word and tone it is given — the presentation is the host’s vocabulary', () => {
     const el = createModeIndicator({
       word: 'Recall',
+      ariaLabel: 'Enter goes to Recall. Click to choose.',
       tone: 'warning',
       targetId: 'recall',
       items: [{ targetId: 'recall', word: 'Recall' }],
@@ -200,6 +209,7 @@ describe('createModeIndicator', () => {
   it('carries no data-variant by default — the base compact look this component always had', () => {
     const el = createModeIndicator({
       word: 'Run',
+      ariaLabel: 'Enter goes to Run. Click to choose.',
       tone: 'neutral',
       targetId: 'shell',
       items: RUN_ASK_ITEMS,
@@ -211,6 +221,7 @@ describe('createModeIndicator', () => {
   it('the field variant sets data-variant="field", and changes nothing else about the control', () => {
     const el = createModeIndicator({
       word: 'Run',
+      ariaLabel: 'Enter goes to Run. Click to choose.',
       tone: 'neutral',
       targetId: 'shell',
       items: RUN_ASK_ITEMS,

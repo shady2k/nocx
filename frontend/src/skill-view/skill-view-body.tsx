@@ -80,6 +80,8 @@ import {
 } from '../ui'
 import { ResizeHandle } from '../ui/resize-handle'
 import { skillFileOutcome } from '../skills-presentation'
+import { t } from '../i18n/locale-model'
+import { fileReadoutLabels } from '../i18n/kit-labels'
 import type { SkillsFile } from '../generated/skills.file'
 import type { SkillsScan } from '../generated/skills.scan'
 import type { Skill, SkillsStore } from '../skills-store'
@@ -503,7 +505,11 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
   const truncationNotice = (): string => {
     const state = filesState()
     if (state.kind !== 'ready' || !state.truncated) return ''
-    return `The list stops at the first ${state.maxFiles} files, and this skill carries more files than that. They are still on disk, still in a backup, and still readable — this list just does not name them, and the scan runs only over the files shown.`
+    return t(
+      'skills.files.truncated',
+      'The list stops at the first {count} files, and this skill carries more files than that. They are still on disk, still in a backup, and still readable — this list just does not name them, and the scan runs only over the files shown.',
+      { count: state.maxFiles },
+    )
   }
 
   // THE PANE HAS NOTHING TO SAY THAT THE TAB HAS NOT SAID (nocx-xj1l6).
@@ -563,14 +569,22 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
       : `Reading ${path} of “${props.name}”.`
   }
 
-  const readoutLabel = (): string => `${selectedPath() ?? ''} of “${props.name}”, verbatim`
+  const readoutLabel = (): string =>
+    t('skills.readout.label', '{path} of “{name}”, verbatim', {
+      path: selectedPath() ?? '',
+      name: props.name,
+    })
 
   /** The DOCUMENT's accessible name, and it deliberately does not say
    *  "verbatim" the way the byte view's does (nocx-okee0): a rendered
    *  markdown document is the file READ, not the file quoted — its markers
    *  are not on screen — and a name claiming otherwise would be the one
    *  thing a screen-reader user could not check for themselves. */
-  const documentLabel = (): string => `${selectedPath() ?? ''} of “${props.name}”`
+  const documentLabel = (): string =>
+    t('skills.document.label', '{path} of “{name}”', {
+      path: selectedPath() ?? '',
+      name: props.name,
+    })
 
   /** The row buttons in DOM order — RecordRow's title IS the row's tab stop
    *  (record-row.tsx: "the name is the control"), so this is the one place
@@ -665,7 +679,7 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
                 round asked for; Tab still reaches it, so nothing is
                 unreachable, only slower to reach by arrow key. */}
             <Show when={props.provenance !== 'builtin'}>
-              <Section id="skill-view-check" title="Check">
+              <Section id="skill-view-check" title={t('skillview.check.title', 'Check')}>
                 <Stack divided dense>
                   <RecordRow
                     title={checkRowTitle(checkState())}
@@ -713,11 +727,14 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
                 </Button>
               </Section>
             </Show>
-            <Section title="Files">
+            <Section title={t('skillview.files.title', 'Files')}>
               <Show when={filesRefusal()}>
                 <StatusCard
                   tone="danger"
-                  title="What this skill carries could not be listed"
+                  title={t(
+                    'skillview.files.listFailed',
+                    'What this skill carries could not be listed',
+                  )}
                   description={filesRefusal()}
                 />
               </Show>
@@ -729,14 +746,14 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
                     "clean" because the scan itself could not run. */}
                 <StatusCard
                   tone="warning"
-                  title="The static scan could not run"
+                  title={t('skillview.files.scanFailed', 'The static scan could not run')}
                   description={scanRefusal()}
                 />
               </Show>
               <Show when={truncationNotice()}>
                 <StatusCard
                   tone="warning"
-                  title="This list is not the whole skill"
+                  title={t('skillview.files.notWhole', 'This list is not the whole skill')}
                   description={truncationNotice()}
                 />
               </Show>
@@ -779,7 +796,7 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
             caller. */}
         <div class="skill-view__seam">
           <ResizeHandle
-            ariaLabel="Resize the file list"
+            ariaLabel={t('skillview.files.resizeAria', 'Resize the file list')}
             value={listWidth()}
             min={MIN_LIST_WIDTH}
             max={listMax()}
@@ -805,7 +822,7 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
                 fallback={
                   <StatusCard
                     tone="neutral"
-                    title="Reading this file"
+                    title={t('skillview.files.readingFile', 'Reading this file')}
                     description={readingSentence()}
                   />
                 }
@@ -814,7 +831,13 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
                   <Show
                     when={documentText(said())}
                     fallback={
-                      <FileReadout facts={[]} fill ariaLabel={readoutLabel()} outcome={said()} />
+                      <FileReadout
+                        facts={[]}
+                        fill
+                        ariaLabel={readoutLabel()}
+                        outcome={said()}
+                        labels={fileReadoutLabels()}
+                      />
                     }
                   >
                     {(doc) => (

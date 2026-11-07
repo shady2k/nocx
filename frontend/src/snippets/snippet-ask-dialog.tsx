@@ -25,6 +25,7 @@ import { Select } from '../ui/select'
 import { Stack } from '../ui/stack'
 import { StatusCard } from '../ui/status-card'
 import { TextField } from '../ui/text-field'
+import { t } from '../i18n/locale-model'
 import { FLAG_ON, needsForm, visibleFields } from './resolve'
 import { parse, type Field } from './parse'
 import type { SnippetDestination } from './fire'
@@ -153,10 +154,10 @@ export function mountSnippetAskDialog(
             footer={
               <>
                 <Button variant="default" onClick={close}>
-                  Cancel
+                  {t('snippets.cancel', 'Cancel')}
                 </Button>
                 <Button variant="primary" onClick={() => void submit()}>
-                  Insert
+                  {t('snippets.insert', 'Insert')}
                 </Button>
               </>
             }
@@ -194,7 +195,11 @@ export function mountSnippetAskDialog(
                 )}
               </For>
               <Show when={error() !== ''}>
-                <StatusCard tone="danger" title="Nothing was inserted" description={error()} />
+                <StatusCard
+                  tone="danger"
+                  title={t('snippets.insertFailed.title', 'Nothing was inserted')}
+                  description={error()}
+                />
               </Show>
             </Stack>
           </Dialog>

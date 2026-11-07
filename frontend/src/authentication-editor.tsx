@@ -24,7 +24,7 @@
  */
 import { Show, createMemo, type Component, type JSX } from 'solid-js'
 import { t } from './i18n/locale-model'
-import { AUTH_SEGMENTS } from './auth-methods'
+import { authSegments } from './auth-methods'
 import type { AuthMode } from './profiles'
 import { boundSecret, secretReference } from './secret-reference'
 import { SecretTextField, secretMarks, type VaultState } from './api/secret-text-field'
@@ -93,9 +93,9 @@ export const AuthMethodEditor: Component<AuthMethodEditorProps> = (props) => {
             label: t('connections.auth.inherit', 'Inherit'),
             title: t('connections.auth.inheritTitle', 'Not set — inherit from parent'),
           },
-          ...AUTH_SEGMENTS,
+          ...authSegments(),
         ]
-      : AUTH_SEGMENTS,
+      : authSegments(),
   )
 
   return (

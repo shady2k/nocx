@@ -28,13 +28,13 @@ function TestView(id: string): Component {
 }
 
 const TWO_VIEWS: SidebarViewDescriptor[] = [
-  { id: 'alpha', title: 'Alpha', icon: TestIcon, view: TestView('alpha'), order: 0 },
-  { id: 'beta', title: 'Beta', icon: TestIcon, view: TestView('beta'), order: 1 },
+  { id: 'alpha', title: () => 'Alpha', icon: TestIcon, view: TestView('alpha'), order: 0 },
+  { id: 'beta', title: () => 'Beta', icon: TestIcon, view: TestView('beta'), order: 1 },
 ]
 
 const SETTINGS_ACTION: SidebarAction = {
   id: 'settings',
-  title: 'Settings',
+  title: () => 'Settings',
   icon: TestIcon,
   onActivate: () => {},
 }
@@ -220,7 +220,9 @@ describe('sidebar', () => {
   it('triggers onActivate when an action button is clicked, without touching the panel', () => {
     const onActivate = vi.fn()
     const { bar, panel } = mount()
-    const actions: SidebarAction[] = [{ id: 'gear', title: 'Gear', icon: TestIcon, onActivate }]
+    const actions: SidebarAction[] = [
+      { id: 'gear', title: () => 'Gear', icon: TestIcon, onActivate },
+    ]
 
     // Start with panel open on a view
     mountSidebar(bar, panel, TWO_VIEWS, actions)
@@ -239,7 +241,7 @@ describe('sidebar', () => {
       bar,
       panel,
       [],
-      [{ id: 'settings', title: 'Settings', icon: TestIcon, onActivate: () => {} }],
+      [{ id: 'settings', title: () => 'Settings', icon: TestIcon, onActivate: () => {} }],
     )
 
     // No panel views — the panel must start collapsed, not empty.
@@ -574,7 +576,7 @@ describe('sidebar — revealView and view props (nocx-wzc4.7)', () => {
     const handle = mountSidebar(
       bar,
       panel,
-      [{ id: 'probe', title: 'Probe', icon: TestIcon, view: ProbeView, order: 0 }],
+      [{ id: 'probe', title: () => 'Probe', icon: TestIcon, view: ProbeView, order: 0 }],
       [],
       undefined,
       () => 'ssh:p1:1',

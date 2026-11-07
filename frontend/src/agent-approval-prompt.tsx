@@ -181,6 +181,9 @@ import {
 } from './ui'
 import { EFFECT_LABEL } from './effect-labels'
 import { scanPatternWords } from './scan-pattern-words'
+import { t } from './i18n/locale-model'
+import { codeBlockCopyWords } from './i18n/kit-labels'
+import { fileReadoutLabels } from './i18n/kit-labels'
 import type { AgentApprovalRequested } from './generated/agent.approvalRequested'
 import type { AgentApprove } from './generated/agent.approve'
 
@@ -386,7 +389,7 @@ const classifierNotice = (
   if (!classifier.consulted) {
     return {
       tone: 'warning',
-      title: 'The classifier gate did not run.',
+      title: t('approval.classifier.didNotRun', 'The classifier gate did not run.'),
       description: say(askedOf),
     }
   }
@@ -394,13 +397,19 @@ const classifierNotice = (
     case 'clear':
       return {
         tone: 'neutral',
-        title: 'A second model read this proposal and raised no suspicion.',
+        title: t(
+          'approval.classifier.noSuspicion',
+          'A second model read this proposal and raised no suspicion.',
+        ),
         description: say(verdictFrom),
       }
     case 'suspect':
       return {
         tone: 'warning',
-        title: 'A second model read this proposal and judged it suspect.',
+        title: t(
+          'approval.classifier.suspect',
+          'A second model read this proposal and judged it suspect.',
+        ),
         description: say(verdictFrom),
       }
     default:
@@ -408,7 +417,10 @@ const classifierNotice = (
       // inventing either verdict for it would be worse than saying so.
       return {
         tone: 'warning',
-        title: 'A second model was consulted and returned no verdict.',
+        title: t(
+          'approval.classifier.noVerdict',
+          'A second model was consulted and returned no verdict.',
+        ),
         description: say(askedOf),
       }
   }
@@ -472,10 +484,18 @@ export interface AgentApprovalPromptProps {
   copy?: (text: string) => Promise<void>
 }
 
-const TITLE: Record<AgentApprovalRequested['reason'], string> = {
-  policy: 'This action needs your approval',
-  egress: 'A tool result contained secret-shaped material',
-}
+/** The question's own title, resolved where it is read.
+ *
+ *  A Record built here at module evaluation would be a snapshot of the
+ *  language the app started in: the catalogue is switched after this module
+ *  is imported (main.tsx bootstraps the locale once the window is up), so a
+ *  `t()` in a module-level literal freezes English onto a Russian start.
+ *  Everything below that renders a string resolves it during render, which
+ *  is what makes a switch re-render it. */
+const titleFor = (reason: AgentApprovalRequested['reason']): string =>
+  reason === 'egress'
+    ? t('approval.title.egress', 'A tool result contained secret-shaped material')
+    : t('approval.title.policy', 'This action needs your approval')
 
 /**
  * The three widths, narrowest first, in the order both groups read.
@@ -484,13 +504,16 @@ const TITLE: Record<AgentApprovalRequested['reason'], string> = {
  * decides this proposal and commits to nothing. It is also what the prompt
  * focuses on open, since Prompt puts the caret on the first enabled button.
  */
-const SCOPES: ReadonlyArray<{ scope: ApprovalScope; label: string }> = [
-  { scope: 'once', label: 'once' },
+/** Built per call, never once: the labels are translations, and a literal
+ *  evaluated at module load keeps the startup language for the life of the
+ *  process (see [titleFor]). */
+const scopes = (): ReadonlyArray<{ scope: ApprovalScope; label: string }> => [
+  { scope: 'once', label: t('approval.scope.once', 'once') },
   // "in this session", never "in this pane": the permission binds to the
   // terminal session, so restarting the shell is a new session and the
   // question comes back. Naming the pane would promise a lifetime it has not.
-  { scope: 'session', label: 'in this session' },
-  { scope: 'always', label: 'always' },
+  { scope: 'session', label: t('approval.scope.session', 'in this session') },
+  { scope: 'always', label: t('approval.scope.always', 'always') },
 ]
 
 /**
@@ -540,12 +563,12 @@ const approvalAnswerVerb = (approved: boolean) => (approved ? 'Allow' : 'Deny')
  * One label builder for every answer, because two would be two spellings of
  * one concept. `expand` is not a fourth WIDTH — the three widths answer "how
  * long", and this one answers "over what" — so its words are built from the
- * resource that fell outside rather than looked up in SCOPES.
+ * resource that fell outside rather than looked up in [scopes].
  */
 const approvalAnswerLabel = (verb: string, scope: ApprovalScope, wideningResource = '') =>
   scope === 'expand'
     ? `${verb} and widen to ${wideningResource}`
-    : `${verb} ${SCOPES.find((candidate) => candidate.scope === scope)?.label ?? scope}`
+    : `${verb} ${scopes().find((candidate) => candidate.scope === scope)?.label ?? scope}`
 
 /**
  * The WHOLE of one answer in one sentence: the direction and how far it
@@ -972,7 +995,7 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
    * reconstructing one from arguments.
    */
   const offeredScopes = () =>
-    SCOPES.filter(({ scope }) => scope === 'once' || ask().standing.available)
+    scopes().filter(({ scope }) => scope === 'once' || ask().standing.available)
 
   /**
    * The fact that a resource fell outside a bound, or null when nothing did
@@ -1015,7 +1038,13 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
     approvalAnswerSentence(verb, scope, ask().standing, effectLabel(), wideningResource())
 
   const group = (approved: boolean, verb: string, variant: 'primary' | 'danger') => (
-    <ActionGroup ariaLabel={approved ? 'Allow this action' : 'Refuse this action'}>
+    <ActionGroup
+      ariaLabel={
+        approved
+          ? t('approval.group.allow', 'Allow this action')
+          : t('approval.group.refuse', 'Refuse this action')
+      }
+    >
       <For each={offeredScopes()}>
         {({ scope }) => (
           <Button
@@ -1038,9 +1067,9 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
       // Escape and a click on the scrim are the NARROWEST refusal. Dismissing
       // a question is not answering it for every call to come.
       onClose={() => props.onDecide(false, 'once')}
-      ariaLabel={TITLE[ask().reason]}
+      ariaLabel={titleFor(ask().reason)}
       placement="top-sheet"
-      title={TITLE[ask().reason]}
+      title={titleFor(ask().reason)}
       density="compact"
       actionsLayout={ask().reason === 'egress' ? 'row' : 'stacked'}
       actions={
@@ -1083,14 +1112,19 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
               eye already is; last and named is where a deliberate answer
               belongs. It is never focused on open either way, because Prompt
               puts the caret on the first enabled button and that is still
-              `Allow once` (the reason SCOPES leads with it).
+              `Allow once` (the reason [scopes] leads with it).
 
               There is no Deny twin: a widening is an approval, and the wire
               refuses `expand` on a decline. Denying is what the Deny row
               already does.
             */}
             <Show when={wideningOffered()}>
-              <ActionGroup ariaLabel="Allow this action and widen what it may reach">
+              <ActionGroup
+                ariaLabel={t(
+                  'approval.allowWiden.aria',
+                  'Allow this action and widen what it may reach',
+                )}
+              >
                 <Button
                   variant="default"
                   secondary={`— ${approvalScopeCoverage('expand', ask().standing, effectLabel())}`}
@@ -1117,7 +1151,10 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
               <p>
                 The assistant is asking to call <strong>{ask().tool}</strong> with these arguments:
               </p>
-              <CodeBlock copy={props.copy} ariaLabel={`Arguments of ${ask().tool}`}>
+              <CodeBlock
+                copy={{ ...codeBlockCopyWords(), write: props.copy! }}
+                ariaLabel={`Arguments of ${ask().tool}`}
+              >
                 {ask().arguments}
               </CodeBlock>
             </>
@@ -1166,7 +1203,10 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
             {(command) => (
               <>
                 <p>{runLead()}:</p>
-                <CodeBlock copy={props.copy} ariaLabel="The command this question is about">
+                <CodeBlock
+                  copy={{ ...codeBlockCopyWords(), write: props.copy! }}
+                  ariaLabel={t('approval.commandAbout.aria', 'The command this question is about')}
+                >
                   {command()}
                 </CodeBlock>
                 {/*
@@ -1187,8 +1227,11 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
                         means, not what is sent — the line above is what runs, exactly as written:
                       </p>
                       <CodeBlock
-                        copy={props.copy}
-                        ariaLabel="The same command with its variables read as the shell reads them now"
+                        copy={{ ...codeBlockCopyWords(), write: props.copy! }}
+                        ariaLabel={t(
+                          'approval.commandNow.aria',
+                          'The same command with its variables read as the shell reads them now',
+                        )}
                       >
                         {expanded()}
                       </CodeBlock>
@@ -1216,7 +1259,7 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
         <For each={partitionedArguments().blocks}>
           {(block) => (
             <CodeBlock
-              copy={props.copy}
+              copy={{ ...codeBlockCopyWords(), write: props.copy! }}
               label={block.name}
               ariaLabel={`The ${block.name} argument of ${ask().tool}`}
             >
@@ -1257,6 +1300,7 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
                         facts={[{ name: 'path', value: file.path }]}
                         ariaLabel={`${file.path}, which installing “${skill.name}” would write`}
                         outcome={installFileOutcome(file)}
+                        labels={fileReadoutLabels()}
                       />
                     )}
                   </For>
@@ -1298,6 +1342,7 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
                 ]}
                 ariaLabel={`What ${reading.path} holds right now`}
                 outcome={scriptOutcome(reading)}
+                labels={fileReadoutLabels()}
               />
             )}
           </For>
@@ -1361,7 +1406,9 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
               {(f) => (
                 <p>
                   <Badge tone={f.source === 'known' ? 'warning' : 'info'}>
-                    {f.source === 'known' ? 'Known vault material' : 'Heuristic match'}
+                    {f.source === 'known'
+                      ? t('approval.finding.known', 'Known vault material')
+                      : t('approval.finding.heuristic', 'Heuristic match')}
                   </Badge>{' '}
                   {f.source === 'known' ? f.secretName : f.kind}
                   {' — bytes '}

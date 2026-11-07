@@ -29,6 +29,7 @@ import { render } from 'solid-js/web'
 import { IconButton } from './ui/icon-button'
 import { StatusCard } from './ui/status-card'
 import { CloseIcon } from './ui/icons'
+import { t, tPlural } from './i18n/locale-model'
 
 /** The wire's closed vocabulary for why nobody could be asked
  *  (contracts/ledger.query.schema.json). Declared here because this is the one
@@ -110,8 +111,11 @@ export function unreconciledAccount(rows: readonly UnreconciledRow[]): Unreconci
  *  "Neither running nor finished" is the design's own phrase and it is the
  *  honest one — every shorter version picks a side. */
 function unreconciledTitle(account: UnreconciledAccount): string {
-  const what = account.blocks === 1 ? 'One command' : `${account.blocks} commands`
-  return `${what} in this tab: neither running nor finished`
+  return tPlural(
+    'panes.unreconciled.title',
+    account.blocks,
+    '{count} commands in this tab: neither running nor finished',
+  )
 }
 
 /** …and why. A cause this build has no sentence for is carried through in the
@@ -119,7 +123,9 @@ function unreconciledTitle(account: UnreconciledAccount): string {
  *  stand behind — the rule recovery-notice.tsx states for a gap reason. */
 function unreconciledDescription(account: UnreconciledAccount): string {
   const reasons = account.causes.map((c) => SENTENCES[c] ?? `nobody could be asked ("${c}").`)
-  return `Their session may still be running: ${reasons.join(' ')}`
+  return t('panes.unreconciled.desc', 'Their session may still be running: {reasons}', {
+    reasons: reasons.join(' '),
+  })
 }
 
 export interface UnreconciledNoticeProps {

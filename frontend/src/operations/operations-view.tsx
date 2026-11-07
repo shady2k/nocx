@@ -43,6 +43,7 @@ import { EmptyState } from '../ui/empty-state'
 import { ArrowDownUpIcon } from '../ui/icons'
 import { OperationRow } from '../ui/operation-row'
 import { isTerminalPhase, isWaitingPhase } from '../ui/operation'
+import { t } from '../i18n/locale-model'
 import type { Operation, OperationsModel } from './operations'
 import { createThrottledOperations, type RenderThrottleDeps } from './render-throttle'
 
@@ -61,8 +62,10 @@ export const OPERATIONS_VIEW_ID = 'operations'
 const OPERATIONS_VIEW_ORDER = 3
 
 /** The panel header, and the accessible name of the list inside it. One
- *  string, because they are one thing to a reader. */
-const TITLE = 'Operations'
+ *  phrase, because they are one thing to a reader — resolved through one key
+ *  for the same reason, and resolved at render so a language switch reaches
+ *  the header (sidebar.tsx, SidebarViewDescriptor.title). */
+const title = (): string => t('ops.title', 'Operations')
 
 /**
  * How often "2 min ago" is recomputed.
@@ -95,7 +98,7 @@ export function createOperationsView(
 ): SidebarViewDescriptor {
   return {
     id: OPERATIONS_VIEW_ID,
-    title: TITLE,
+    title,
     icon: ArrowDownUpIcon,
     order: OPERATIONS_VIEW_ORDER,
     // Read by the ACTIVITY BAR, not by the panel: this is the half that has
@@ -210,7 +213,7 @@ function OperationsPanel(model: OperationsModel, deps: OperationsViewDeps) {
         fallback={
           <EmptyState
             icon={<ArrowDownUpIcon />}
-            title="Nothing is running"
+            title={t('ops.empty.title', 'Nothing is running')}
             description="Uploads and other background work appear here while they run, and stay for a while after they finish."
           />
         }
@@ -222,28 +225,43 @@ function OperationsPanel(model: OperationsModel, deps: OperationsViewDeps) {
             group draws nothing at all rather than an empty heading. */}
         <Show when={runningOps().length > 0}>
           <h3 class="ops-group__heading">
-            In progress
+            {t('ops.inProgress', 'In progress')}
             <span class="ops-group__count">{runningOps().length}</span>
           </h3>
-          <div class="ops-list" role="list" aria-label="In progress" data-testid="ops-list">
+          <div
+            class="ops-list"
+            role="list"
+            aria-label={t('ops.inProgress', 'In progress')}
+            data-testid="ops-list"
+          >
             {renderRows(runningOps)}
           </div>
         </Show>
         <Show when={queuedOps().length > 0}>
           <h3 class="ops-group__heading">
-            Queued
+            {t('ops.queued', 'Queued')}
             <span class="ops-group__count">{queuedOps().length}</span>
           </h3>
-          <div class="ops-list" role="list" aria-label="Queued" data-testid="ops-list-queued">
+          <div
+            class="ops-list"
+            role="list"
+            aria-label={t('ops.queued', 'Queued')}
+            data-testid="ops-list-queued"
+          >
             {renderRows(queuedOps)}
           </div>
         </Show>
         <Show when={finishedOps().length > 0}>
           <h3 class="ops-group__heading">
-            Finished
+            {t('ops.finished', 'Finished')}
             <span class="ops-group__count">{finishedOps().length}</span>
           </h3>
-          <div class="ops-list" role="list" aria-label="Finished" data-testid="ops-list-finished">
+          <div
+            class="ops-list"
+            role="list"
+            aria-label={t('ops.finished', 'Finished')}
+            data-testid="ops-list-finished"
+          >
             {renderRows(finishedOps)}
           </div>
         </Show>

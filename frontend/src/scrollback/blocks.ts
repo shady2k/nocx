@@ -26,6 +26,7 @@ import { createAnswerBody, type AnswerBody } from './answer-body'
 import { toolCallTitle } from './tool-call-title'
 import { paintShellInto } from './shell-paint'
 import { mountDumpPanel } from '../ui/dump-panel'
+import { codeBlockCopyWords, dumpLabels, secretChipTitles } from '../i18n/kit-labels'
 import { decorateLinks } from '../terminal-links/decorate'
 import { cwdLabel } from '../cwd-label'
 import { createBadge } from '../ui/badge-element'
@@ -59,6 +60,7 @@ import {
   updatePromptContext,
   type PromptContextFacts,
 } from '../ui/prompt-context'
+import { t } from '../i18n/locale-model'
 // ── Clipboard helper ────────────────────────────────────────────────────────
 
 async function copyToClipboardImpl(text: string): Promise<void> {
@@ -897,7 +899,11 @@ export function settleBlockOutcome(
     // The target shows a check beside a successful command duration.
     // Other block kinds retain their own outcome vocabulary.
     if (spec.outcome === 'success') {
-      if (kind === 'command') chips.push(createCommandSuccess())
+      if (kind === 'command') {
+        const mark = createCommandSuccess()
+        mark.setAttribute('aria-label', t('scrollback.succeeded', 'Succeeded'))
+        chips.push(mark)
+      }
       continue
     }
     chips.push(
@@ -1053,7 +1059,7 @@ function createHeader(
       cmdSpan.replaceChildren(commandFragment(command))
     } else {
       if (command) paintShellInto(cmdSpan, command, store)
-      else cmdSpan.textContent = '(empty)'
+      else cmdSpan.textContent = t('scrollback.emptyCommand', '(empty)')
     }
     // The terminal-command presentation (spec 2026-09-15 §1.6, task A's
     // ui/shell-command.ts): the shared tokenizer's `.tok-*` spans painted
@@ -1367,7 +1373,11 @@ function buildOverflowMenu(
             const result = await dump(entryId)
             const host = document.createElement('div')
             document.body.appendChild(host)
-            mountDumpPanel(host, { dump: result, copy: copyToClipboard })
+            mountDumpPanel(host, {
+              dump: result,
+              copy: { ...codeBlockCopyWords(), write: copyToClipboard },
+              labels: dumpLabels(),
+            })
           } catch {
             showToast({ level: 'danger', message: 'Could not load the model dump' })
           }
@@ -1377,7 +1387,9 @@ function buildOverflowMenu(
     if (running?.toggleGrant && (running.grantsAvailable?.() ?? true)) {
       list.push({
         id: 'grant',
-        label: running.isGranted?.(blockEl) ? 'Unmark' : 'Ask about this block',
+        label: running.isGranted?.(blockEl)
+          ? t('scrollback.unmark', 'Unmark')
+          : t('scrollback.askAboutBlock', 'Ask about this block'),
         icon: PinIcon,
         onSelect: () => running.toggleGrant?.(blockEl),
       })
@@ -1447,7 +1459,9 @@ function buildOverflowMenu(
     }
     list.push({
       id: 'wrap',
-      label: wrapOn() ? 'Do not wrap' : 'Wrap lines',
+      label: wrapOn()
+        ? t('scrollback.doNotWrap', 'Do not wrap')
+        : t('scrollback.wrapLines', 'Wrap lines'),
       icon: ArrowDownUpIcon,
       onSelect: () => blockEl.setAttribute('data-wrap', wrapOn() ? 'off' : 'on'),
     })
@@ -1591,7 +1605,12 @@ function setBlockAccessibility(wrapper: HTMLElement, kind: BlockKind): void {
   const label = wrapper.querySelector<HTMLElement>('.cmd-header-text')?.textContent?.trim()
   wrapper.setAttribute('role', 'group')
   wrapper.tabIndex = 0
-  wrapper.setAttribute('aria-label', label ? `${kind} block: ${label}` : `${kind} block`)
+  wrapper.setAttribute(
+    'aria-label',
+    label
+      ? t('scrollback.block.aria.named', '{kind} block: {label}', { kind, label })
+      : t('scrollback.block.aria', '{kind} block', { kind }),
+  )
 }
 
 /**
@@ -1974,7 +1993,7 @@ export function renderRecordedCommand(
     const to = Math.max(from, Math.min(r.end, maskedCommand.length))
     if (from > pos) frag.appendChild(document.createTextNode(maskedCommand.slice(pos, from)))
     if (to > from) {
-      const chip = createSecretChipUnresolved(KIND_LABELS[r.kind])
+      const chip = createSecretChipUnresolved(KIND_LABELS[r.kind], secretChipTitles())
       chip.dataset.redactionIndex = String(i)
       chip.dataset.redactionStart = String(r.start)
       chip.dataset.redactionEnd = String(r.end)
@@ -2429,7 +2448,7 @@ export class BlockManager {
     const boundary = document.createElement('div')
     boundary.className = 'scrollback-restore-boundary'
     boundary.dataset.restoreBoundary = 'true'
-    boundary.textContent = 'Previous session'
+    boundary.textContent = t('scrollback.previousSession', 'Previous session')
     this._own(boundary, anchor)
   }
 
@@ -2491,7 +2510,7 @@ export class BlockManager {
     const boundary = document.createElement('div')
     boundary.className = 'scrollback-restore-boundary'
     boundary.dataset.reconnectBoundary = 'true'
-    boundary.textContent = 'New shell — the one above is gone'
+    boundary.textContent = t('scrollback.newShell', 'New shell — the one above is gone')
     this._own(boundary, null)
   }
 
@@ -2860,7 +2879,7 @@ export class BlockManager {
     if (right === null || right.querySelector('.cmd-header-unrecorded') !== null) return
     const chip = document.createElement('span')
     chip.className = 'nocx-chip nocx-chip-muted cmd-header-unrecorded'
-    chip.textContent = 'not recorded'
+    chip.textContent = t('scrollback.notRecorded', 'not recorded')
     placeHeaderChip(right, chip)
   }
 
@@ -3653,7 +3672,7 @@ export class BlockManager {
         if (status === 'success' && model) {
           const note = document.createElement('div')
           note.className = 'cmd-answer-provenance'
-          note.textContent = `answered by ${model}`
+          note.textContent = t('scrollback.answeredBy', 'answered by {model}', { model })
           children.appendChild(note)
         }
         if (error) {

@@ -4,6 +4,7 @@
 // backend. That is the point of the component — the question can be answered
 // correctly long before anything exists to ask it.
 import { describe, expect, it, vi, afterEach } from 'vitest'
+import { collisionLabels } from '../i18n/kit-labels'
 import { render, screen, fireEvent, cleanup } from '@solidjs/testing-library'
 import { CollisionDialog, type CollisionRequest, type CollisionResult } from './collision-dialog'
 import { clearStack, closeTopmost } from './overlay/stack'
@@ -21,7 +22,9 @@ function subject(overrides?: Partial<CollisionRequest>) {
     remaining: 4,
     ...overrides,
   }
-  render(() => <CollisionDialog request={request} onResolve={onResolve} />)
+  render(() => (
+    <CollisionDialog request={request} labels={collisionLabels()} onResolve={onResolve} />
+  ))
   return { onResolve }
 }
 

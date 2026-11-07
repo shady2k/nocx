@@ -33,13 +33,25 @@ import { AlertTriangleIcon, LockIcon, iconElement } from './icons'
 
 export type SecretChipVariant = 'resolved' | 'unresolved' | 'damaged'
 
-export function createSecretChip(name: string): HTMLElement {
-  return buildChip('resolved', name)
+/** The chip's hover text, resolved by the caller: the kit may not own a
+ *  sentence it cannot localise (ui/README.md, nocx-dej6.3.8). The i18n
+ *  layer's `secretChipTitles()` builds this. */
+export interface SecretChipTitles {
+  resolved(name: string): string
+  unresolved(): string
+  damaged(name: string, damage: string): string
+}
+
+export function createSecretChip(name: string, titles: SecretChipTitles): HTMLElement {
+  return buildChip('resolved', name, '', titles)
 }
 
 /** The unresolved variant: the kind label in the chip's warning tone. */
-export function createSecretChipUnresolved(kindLabel: string): HTMLElement {
-  return buildChip('unresolved', kindLabel)
+export function createSecretChipUnresolved(
+  kindLabel: string,
+  titles: SecretChipTitles,
+): HTMLElement {
+  return buildChip('unresolved', kindLabel, '', titles)
 }
 
 /**
@@ -50,8 +62,12 @@ export function createSecretChipUnresolved(kindLabel: string): HTMLElement {
  * bytes" carries lengths only. Nothing in this function can render a value:
  * it takes a name and a shape, and there is no third parameter.
  */
-export function createSecretChipDamaged(name: string, damage: string): HTMLElement {
-  return buildChip('damaged', name, damage)
+export function createSecretChipDamaged(
+  name: string,
+  damage: string,
+  titles: SecretChipTitles,
+): HTMLElement {
+  return buildChip('damaged', name, damage, titles)
 }
 
 /** The mark per variant, as a kit icon. A lock for a reference to a secret; a
@@ -74,23 +90,33 @@ const TONE: Record<SecretChipVariant, BadgeTone> = {
   damaged: 'danger',
 }
 
-function titleFor(variant: SecretChipVariant, label: string, damage: string): string {
+function titleFor(
+  variant: SecretChipVariant,
+  label: string,
+  damage: string,
+  titles: SecretChipTitles,
+): string {
   switch (variant) {
     case 'resolved':
-      return `secret from the vault: ${label}`
+      return titles.resolved(label)
     case 'unresolved':
-      return 'a masked secret — pick a live value to run this command'
+      return titles.unresolved()
     case 'damaged':
-      return `${label}: these bytes are no longer the secret — ${damage}`
+      return titles.damaged(label, damage)
   }
 }
 
-function buildChip(variant: SecretChipVariant, label: string, damage = ''): HTMLElement {
+function buildChip(
+  variant: SecretChipVariant,
+  label: string,
+  damage: string,
+  titles: SecretChipTitles,
+): HTMLElement {
   const chip = document.createElement('span')
   chip.className = 'ui-badge ui-secret-chip'
   chip.dataset.variant = variant
   chip.dataset.tone = TONE[variant]
-  chip.title = titleFor(variant, label, damage)
+  chip.title = titleFor(variant, label, damage, titles)
 
   const lock = document.createElement('span')
   lock.className = 'ui-secret-chip__lock'

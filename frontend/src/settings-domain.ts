@@ -46,6 +46,21 @@ export function numberRangeCaption(decl: Declaration, value?: number): string | 
   return undefined
 }
 
+/** The sentinel-0 caption resolved for the active locale. The plain caption
+ * above stays framework-neutral (this domain module imports no Solid, and
+ * t() reads a signal); the surface calls this one where the caption renders,
+ * and the range suffixes need no translation — they are numbers and units. */
+export function numberRangeCaptionResolved(
+  decl: Declaration,
+  value?: number,
+  resolve: (key: string, english: string) => string = (_key, english) => english,
+): string | undefined {
+  if (value === 0 && decl.zeroLabel !== undefined && decl.zeroLabelKey !== undefined) {
+    return resolve(decl.zeroLabelKey, decl.zeroLabel)
+  }
+  return numberRangeCaption(decl, value)
+}
+
 /** The out-of-range error for a numeric value, derived from the declaration's
  *  Min/Max. Returns undefined when the value is inside the bounds. */
 export function numberRangeError(decl: Declaration, value: number): string | undefined {
@@ -392,6 +407,24 @@ export function applyAcceptedSnapshot(snapshot: AcceptedSnapshot): SettingsMirro
 const ROUTE_SETTING_PREFIX = 'notifications.route.'
 const CENTRE_SETTING_PREFIX = 'notifications.centre.'
 
+/**
+ * The key a matrix ROW header resolves through: the kind's own label, whose
+ * spelling `KindLabelKey` pins in `internal/notify/catalogue.go` from the same
+ * id the setting key carries (`notify.kind.<kindId>.label`). The id is what
+ * arrives on the wire; the words are the catalogue's.
+ */
+const rowLabelKey = (rowId: string): string => `notify.kind.${rowId}.label`
+
+/**
+ * The key a matrix COLUMN header resolves through. Columns are delivery
+ * channels — `internal/notify/catalogue.go`'s `ChannelBanner`/`ChannelToast`
+ * — plus the centre-visibility pseudo-column `parseNotificationMatrixSettingKey`
+ * names `centre`, so the family is named for the column rather than for the
+ * channel: one key per column id, no special case for the one that is not a
+ * delivery channel.
+ */
+const columnLabelKey = (columnId: string): string => `notify.column.${columnId}.label`
+
 /** The separator declaration labels put between the two halves of a cell label. */
 const MATRIX_LABEL_SEPARATOR = ' → '
 
@@ -430,10 +463,16 @@ export function parseNotificationMatrixSettingKey(key: string): NotificationMatr
   return { rowId, columnId }
 }
 
-/** One axis entry of a matrix: the id from the key, the label from the declaration. */
+/** One axis entry of a matrix: the id from the key, and what its header says —
+ *  the translation key the surface resolves at render, plus the English the
+ *  wire carried as the fallback for a key with no entry. */
 interface MatrixAxis {
   id: string
-  label: string
+  /** Resolved by the surface, at render, through the active catalogue. */
+  labelKey: string
+  /** The English fallback: the half a cell's label carried, or the id when
+   *  the label does not carry one. */
+  english: string
 }
 
 /** A matrix of toggles, derived entirely from the declarations it was built from. */
@@ -484,13 +523,25 @@ export function sectionBlocks(decls: readonly Declaration[]): SectionBlock[] {
       continue
     }
 
+    // The axis HEADERS come from keys minted off the id — never from a split
+    // of the English label (nocx-dej6.3.8's review: a Russian column read
+    // English because the split read Go's prose). The split survives only as
+    // the English fallback for a key the catalogue does not carry.
     const [rowLabel, columnLabel] = splitCellLabel(decl.label)
     if (!byRow.has(at.rowId)) {
       byRow.set(at.rowId, new Map())
-      rows.push({ id: at.rowId, label: rowLabel ?? at.rowId })
+      rows.push({
+        id: at.rowId,
+        labelKey: rowLabelKey(at.rowId),
+        english: rowLabel ?? at.rowId,
+      })
     }
     if (!columns.some((c) => c.id === at.columnId)) {
-      columns.push({ id: at.columnId, label: columnLabel ?? at.columnId })
+      columns.push({
+        id: at.columnId,
+        labelKey: columnLabelKey(at.columnId),
+        english: columnLabel ?? at.columnId,
+      })
     }
 
     const row = byRow.get(at.rowId)!
@@ -514,7 +565,8 @@ export function sectionBlocks(decls: readonly Declaration[]): SectionBlock[] {
 
 /**
  * The two halves of a cell's label, or `undefined` for a half the label does not
- * carry.
+ * carry — the English FALLBACK for an axis header whose catalogue entry is
+ * missing, never the header's own source (see `rowLabelKey`/`columnLabelKey`).
  *
  * The label is display text, so it may never decide whether a control appears: a
  * declaration whose label has lost the separator still gets its cell, with the id

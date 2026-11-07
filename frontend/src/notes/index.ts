@@ -14,6 +14,7 @@ import type { NotesStore } from './notes-store'
 import type { PaneManager } from '../panes'
 import { log } from '../log'
 import { showToast } from '../ui/toast'
+import { t } from '../i18n/locale-model'
 
 /** Stable surface type (B.7), used in restore descriptors and deep links. */
 const SURFACE_NOTE: SurfaceType = 'nocx.note' as SurfaceType
@@ -66,6 +67,9 @@ export async function createAndOpenNote(): Promise<void> {
     log.error('nocx: could not create a note', { message })
     // The chord did nothing and says why: a keystroke that silently does
     // nothing is indistinguishable from a keystroke nobody bound.
-    showToast({ level: 'danger', message: `Could not create a note: ${message}` })
+    showToast({
+      level: 'danger',
+      message: `${t('notes.create.failedHead', 'Could not create a note:')} ${message}`,
+    })
   }
 }

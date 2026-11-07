@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { codeBlockCopyWords, dumpLabels } from '../i18n/kit-labels'
 import { cleanup, fireEvent, render } from '@solidjs/testing-library'
 import { DumpPanel } from './dump-panel'
 
@@ -21,7 +22,14 @@ function subject(dump: {
   request: Array<{ text: string; truncated: boolean }>
   response: Array<{ text: string; truncated: boolean }>
 }) {
-  return render(() => <DumpPanel dump={dump} copy={vi.fn(async () => {})} onClose={vi.fn()} />)
+  return render(() => (
+    <DumpPanel
+      dump={dump}
+      copy={{ ...codeBlockCopyWords(), write: vi.fn(async () => {}) }}
+      onClose={vi.fn()}
+      labels={dumpLabels()}
+    />
+  ))
 }
 
 describe('DumpPanel', () => {

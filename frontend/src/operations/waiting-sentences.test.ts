@@ -2,6 +2,7 @@ import { describe, expect, it, afterEach } from 'vitest'
 import { callOperationDeclaration } from '../generated/operations'
 import { setActiveLocale } from '../i18n/locale-model'
 import { en } from '../i18n/catalogues/en'
+import { ru } from '../i18n/catalogues/ru'
 import { waitingSentence } from './waiting-sentences'
 
 afterEach(() => {
@@ -36,12 +37,20 @@ describe("the catalogue's waiting sentences", () => {
   })
 
   it('marks the sentence for translation rather than printing a key', () => {
-    // Under a locale with no entry the fallback is the English catalogue's own
-    // value — never the key and never blank.
+    // Two halves, because the family is translated now (nocx-4ggge): under a
+    // locale that HAS an entry the catalogue's own words are what is read, and
+    // under one that has none the fallback is the English catalogue's value —
+    // never the key and never blank. This test used to assert only the second
+    // half, against `ru`, which was true only while `ru` had no entry.
     setActiveLocale('ru')
     const declaration = callOperationDeclaration('files.list')!
-    const rendered = waitingSentence('files.list', declaration.waiting)
-    expect(rendered).toBe(declaration.waiting)
-    expect(rendered).not.toContain('operations.waiting.')
+    expect(ru['operations.waiting.files.list'], 'files.list has no ru entry').toBeDefined()
+    const translated = waitingSentence('files.list', declaration.waiting)
+    expect(translated).toBe(ru['operations.waiting.files.list'])
+    expect(translated).not.toBe(declaration.waiting)
+
+    const unknown = waitingSentence('no.such.method', 'Doing something')
+    expect(unknown).toBe('Doing something')
+    expect(unknown).not.toContain('operations.waiting.')
   })
 })

@@ -7,6 +7,7 @@ import { Select, type SelectOption } from './ui/select'
 import { Stack } from './ui/stack'
 import { TextField } from './ui/text-field'
 import type { InventoryEntry, VaultSecretKind } from './vault-client'
+import { t } from './i18n/locale-model'
 import { firstFreeName } from './secret-name-proposal'
 
 /** What a door already knows when it opens the ask. */
@@ -104,19 +105,19 @@ function SecretCreateForm(
     <Dialog
       open={true}
       onClose={props.onClose}
-      title="Create secret"
+      title={t('secrets.add.dialogTitle', 'Create secret')}
       onSubmit={() => submitAction()?.invoke()}
       footer={
         <>
           <Button variant="default" onClick={props.onClose}>
-            Cancel
+            {t('secrets.cancel', 'Cancel')}
           </Button>
           <Button
             variant="primary"
             disabled={submitAction()?.disabled() ?? true}
             onClick={() => submitAction()?.invoke()}
           >
-            Save to vault
+            {t('secrets.add.saveButton', 'Save to vault')}
           </Button>
         </>
       }
@@ -124,16 +125,16 @@ function SecretCreateForm(
       <Stack gap="default">
         <TextField
           id="secret-create-name"
-          label="Name"
+          label={t('secrets.field.name', 'Name')}
           error={nameError() || undefined}
           value={name()}
           onInput={(next) => {
             setName(next)
             setNameError('')
           }}
-          placeholder="e.g. prod password"
+          placeholder={t('secrets.add.hintPhrase', 'e.g. prod password')}
         />
-        <Field for="secret-create-kind" label="Kind">
+        <Field for="secret-create-kind" label={t('secrets.field.kind', 'Kind')}>
           <Select
             id="secret-create-kind"
             options={SECRET_KIND_OPTIONS}
@@ -141,16 +142,16 @@ function SecretCreateForm(
             onChange={(next) => setKind(next as VaultSecretKind)}
           />
         </Field>
-        <Field for="secret-create-value" label="Value">
+        <Field for="secret-create-value" label={t('secrets.field.value', 'Value')}>
           <SecretValueField
             id="secret-create-value"
-            ariaLabel="Value"
-            placeholder="Paste the secret value"
+            ariaLabel={t('secrets.field.value', 'Value')}
+            placeholder={t('secrets.add.pastePlaceholder', 'Paste the secret value')}
             actionPlacement="external"
             onSubmitAction={(action) => {
               setSubmitAction(action)
             }}
-            title="Save secret to vault"
+            title={t('secrets.add.saveTitleAria', 'Save secret to vault')}
             initialValue={props.ask.value}
             onSubmit={submit}
           />

@@ -3,6 +3,7 @@ import { FloatingPanel, type FloatingPanelRow } from './ui/floating-panel'
 import { createIconButton } from './ui/icon-button-element'
 import { createButton } from './ui/button-element'
 import { CloseIcon, iconElement } from './ui/icons'
+import { t } from './i18n/locale-model'
 
 export type { GrantBlock }
 
@@ -141,16 +142,33 @@ export class GrantController {
     // here is the fact that something came with the question, not the
     // sentence about it. The accessible name and the title keep the sentence.
     const automatic = this.automaticBlock === null ? '' : ' + screen'
-    const spoken = this.automaticBlock === null ? '' : ' · frozen screen attached automatically'
-    this.chip.textContent = `marked for the question · ${count}${automatic}`
+    const spoken =
+      this.automaticBlock === null
+        ? ''
+        : t('composer.grant.frozenSpoken', ' · frozen screen attached automatically')
+    this.chip.textContent = t(
+      'composer.grant.chip',
+      'marked for the question · {count}{automatic}',
+      {
+        count,
+        automatic,
+      },
+    )
     // The chip ellipsises within its bounded width (Button's `data-truncate`,
     // composer.css), so the title carries the whole line rather than a label
     // about it — nothing may live only in the ellipsis.
     this.chip.title =
       count === 0 && this.automaticBlock === null
-        ? 'Mark blocks to include them in a question'
-        : `Open the marked blocks — marked for the question · ${count}${spoken}`
-    this.chip.setAttribute('aria-label', `marked for the question · ${count}${spoken}`)
+        ? t('composer.grant.mark', 'Mark blocks to include them in a question')
+        : t(
+            'composer.grant.open',
+            'Open the marked blocks — marked for the question · {count}{spoken}',
+            { count, spoken },
+          )
+    this.chip.setAttribute(
+      'aria-label',
+      t('composer.grant.aria', 'marked for the question · {count}{spoken}', { count, spoken }),
+    )
   }
 
   private renderPanel(): void {

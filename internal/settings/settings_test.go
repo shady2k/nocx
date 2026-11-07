@@ -1155,6 +1155,16 @@ func TestDeclarations_CarryTranslationKeys(t *testing.T) {
 		if want := "settings." + d.Key + ".description"; d.DescriptionKey != want {
 			t.Errorf("declaration %q descriptionKey = %q, want %q", d.Key, d.DescriptionKey, want)
 		}
+		if want := settings.SectionKeyFor(d.Section); d.SectionKey != want {
+			t.Errorf("declaration %q sectionKey = %q, want %q", d.Key, d.SectionKey, want)
+		}
+		if d.ZeroLabel != "" && d.ZeroLabelKey != "settings."+d.Key+".zeroLabel" {
+			t.Errorf("declaration %q carries a ZeroLabel with zeroLabelKey = %q, want %q",
+				d.Key, d.ZeroLabelKey, "settings."+d.Key+".zeroLabel")
+		}
+		if d.ZeroLabel == "" && d.ZeroLabelKey != "" {
+			t.Errorf("declaration %q carries zeroLabelKey %q with no ZeroLabel", d.Key, d.ZeroLabelKey)
+		}
 		for _, o := range d.Options {
 			if want := "settings." + d.Key + ".option." + o.Value; o.LabelKey != want {
 				t.Errorf("declaration %q option %q labelKey = %q, want %q", d.Key, o.Value, o.LabelKey, want)
@@ -1212,6 +1222,23 @@ func TestKeyMintingIsDeterministic(t *testing.T) {
 	}
 	if got := settings.GroupKeyFor("Backup & Restore"); got != "settings.group.backup-restore" {
 		t.Errorf("GroupKeyFor(Backup & Restore) = %q", got)
+	}
+	if got := settings.ZeroLabelKeyFor("history.retentionDays"); got != "settings.history.retentionDays.zeroLabel" {
+		t.Errorf("ZeroLabelKeyFor = %q", got)
+	}
+	if got := settings.SectionKeyFor("Assistant permissions"); got != "settings.section.assistant-permissions" {
+		t.Errorf("SectionKeyFor = %q", got)
+	}
+	// Determinism: the same input mints the same key, twice. Written through
+	// two reads so the assertion is about the function, not about a constant
+	// compared with itself (staticcheck's SA4000).
+	zFirst, zSecond := settings.ZeroLabelKeyFor("ui.theme"), settings.ZeroLabelKeyFor("ui.theme")
+	if zFirst != zSecond {
+		t.Errorf("ZeroLabelKeyFor is not deterministic: %q then %q", zFirst, zSecond)
+	}
+	sFirst, sSecond := settings.SectionKeyFor("History"), settings.SectionKeyFor("History")
+	if sFirst != sSecond {
+		t.Errorf("SectionKeyFor is not deterministic: %q then %q", sFirst, sSecond)
 	}
 }
 

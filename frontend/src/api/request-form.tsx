@@ -73,6 +73,7 @@ import {
 import type { InventoryEntry } from '../vault-client'
 import type { SecretCreateAsk } from '../secret-create-ask'
 import { proposeSecret } from '../secret-name-proposal'
+import { t, tPlural } from '../i18n/locale-model'
 import type { ApiHeader, ApiParam, ApiRequest } from './api-model'
 import type { ApiScopeVariable } from './api-store'
 
@@ -280,9 +281,12 @@ export function RequestLine(props: RequestLineProps) {
   }
 
   const sendTitle = (): string => {
-    if (props.sending) return 'Stops the run that is in flight'
-    if (!props.sendable) return 'Choose a request from a collection first'
-    return props.dirty ? 'Saves this request, then sends it' : 'Send this request'
+    if (props.sending) return t('api.send.stops', 'Stops the run that is in flight')
+    if (!props.sendable)
+      return t('api.send.chooseFirst', 'Choose a request from a collection first')
+    return props.dirty
+      ? t('api.send.savesThenSends', 'Saves this request, then sends it')
+      : t('api.send.sends', 'Send this request')
   }
 
   return (
@@ -293,7 +297,7 @@ export function RequestLine(props: RequestLineProps) {
     <div class="api-request__line">
       <div class="api-request__method" data-api-field="method">
         <Select
-          ariaLabel="Method"
+          ariaLabel={t('api.form.method.aria', 'Method')}
           value={request()?.method ?? ''}
           onChange={(v) => patch({ method: v })}
           options={methodOptions()}
@@ -303,7 +307,7 @@ export function RequestLine(props: RequestLineProps) {
       <div class="api-request__url">
         <SecretTextField
           id="api-url"
-          ariaLabel="URL"
+          ariaLabel={t('api.form.url.aria', 'URL')}
           value={typedUrl()}
           disabled={request() === null}
           onInput={editUrl}
@@ -496,14 +500,17 @@ export function RequestEditor(props: RequestEditorProps) {
     if (result.kind === 'unreadable') {
       showToast({
         level: 'warning',
-        message: 'This body is not valid JSON, so it was left exactly as it is.',
+        message: t(
+          'api.form.jsonInvalid',
+          'This body is not valid JSON, so it was left exactly as it is.',
+        ),
       })
       return
     }
     if (result.kind === 'too-large') {
       showToast({
         level: 'warning',
-        message: `This body is over ${result.limit / 1024}K characters — too large to lay out here, so it was left exactly as it is.`,
+        message: `${t('api.form.bodyTooLarge.head', 'This body is over ')}${result.limit / 1024}${t('api.form.bodyTooLarge.kilo', 'K')}${t('api.form.bodyTooLarge.tail', ' characters — too large to lay out here, so it was left exactly as it is.')}`,
       })
       return
     }
@@ -524,7 +531,7 @@ export function RequestEditor(props: RequestEditorProps) {
         {(req) => (
           <Tabs
             orientation="horizontal"
-            ariaLabel="This request"
+            ariaLabel={t('api.form.thisRequest.aria', 'This request')}
             active={tab()}
             onChange={setTab}
             items={[
@@ -534,7 +541,7 @@ export function RequestEditor(props: RequestEditorProps) {
                 content: () => (
                   <EditableRowList
                     variant="table"
-                    ariaLabel="Query parameters"
+                    ariaLabel={t('api.form.query.aria', 'Query parameters')}
                     columns={[
                       { label: 'Send', labelHidden: true },
                       { label: 'Name' },
@@ -552,7 +559,11 @@ export function RequestEditor(props: RequestEditorProps) {
                             the user keeps. */}
                         <td>
                           <Checkbox
-                            ariaLabel={`Send parameter ${i + 1}`}
+                            ariaLabel={tPlural(
+                              'api.form.sendParam.aria',
+                              i + 1,
+                              'Send parameter {count}',
+                            )}
                             checked={row().enabled}
                             onChange={(v) =>
                               patch({ query: patchRow(req().query, i, { enabled: v }) })
@@ -562,7 +573,11 @@ export function RequestEditor(props: RequestEditorProps) {
                         <td>
                           <TextField
                             id={`api-query-name-${i}`}
-                            ariaLabel={`Parameter ${i + 1} name`}
+                            ariaLabel={tPlural(
+                              'api.form.paramName.aria',
+                              i + 1,
+                              'Parameter {count} name',
+                            )}
                             value={row().name}
                             onInput={(v) => patch({ query: patchRow(req().query, i, { name: v }) })}
                           />
@@ -570,7 +585,11 @@ export function RequestEditor(props: RequestEditorProps) {
                         <td>
                           <SecretTextField
                             id={`api-query-value-${i}`}
-                            ariaLabel={`Parameter ${i + 1} value`}
+                            ariaLabel={tPlural(
+                              'api.form.paramValue.aria',
+                              i + 1,
+                              'Parameter {count} value',
+                            )}
                             value={row().value}
                             onInput={(v) =>
                               patch({ query: patchRow(req().query, i, { value: v }) })
@@ -596,7 +615,7 @@ export function RequestEditor(props: RequestEditorProps) {
                   <>
                     <EditableRowList
                       variant="table"
-                      ariaLabel="Request variables"
+                      ariaLabel={t('api.form.vars.aria', 'Request variables')}
                       columns={[
                         { label: 'Send', labelHidden: true },
                         { label: 'Name' },
@@ -610,7 +629,11 @@ export function RequestEditor(props: RequestEditorProps) {
                         <>
                           <td>
                             <Checkbox
-                              ariaLabel={`Use variable ${i + 1}`}
+                              ariaLabel={tPlural(
+                                'api.form.useVar.aria',
+                                i + 1,
+                                'Use variable {count}',
+                              )}
                               checked={row().enabled}
                               onChange={(v) =>
                                 patch({ variables: patchRow(req().variables, i, { enabled: v }) })
@@ -620,7 +643,11 @@ export function RequestEditor(props: RequestEditorProps) {
                           <td>
                             <TextField
                               id={`api-variable-name-${i}`}
-                              ariaLabel={`Variable ${i + 1} name`}
+                              ariaLabel={tPlural(
+                                'api.form.varName.aria',
+                                i + 1,
+                                'Variable {count} name',
+                              )}
                               value={row().name}
                               onInput={(v) =>
                                 patch({ variables: patchRow(req().variables, i, { name: v }) })
@@ -630,7 +657,11 @@ export function RequestEditor(props: RequestEditorProps) {
                           <td>
                             <SecretTextField
                               id={`api-variable-value-${i}`}
-                              ariaLabel={`Variable ${i + 1} value`}
+                              ariaLabel={tPlural(
+                                'api.form.varValue.aria',
+                                i + 1,
+                                'Variable {count} value',
+                              )}
                               value={row().value}
                               onInput={(v) =>
                                 patch({ variables: patchRow(req().variables, i, { value: v }) })
@@ -655,15 +686,17 @@ export function RequestEditor(props: RequestEditorProps) {
                       <For each={scopeRows().filter((variable) => variable.refused !== '')}>
                         {(variable) => (
                           <p class="api-request__idle" role="alert" data-api-scope-refusal>
-                            Variable {variable.name} is refused: {variable.refused} Send is refused
-                            while it stands.
+                            {t('api.form.varRefused.head', 'Variable')} {variable.name}{' '}
+                            {t('api.form.varRefused.middle', ' is refused: ')}
+                            {variable.refused}{' '}
+                            {t('api.form.varRefused.tail', 'Send is refused while it stands.')}
                           </p>
                         )}
                       </For>
                       <EditableRowList
                         variant="table"
                         readOnly
-                        ariaLabel="Inherited request variables"
+                        ariaLabel={t('api.form.inheritedVars.aria', 'Inherited request variables')}
                         columns={[
                           { label: 'Scope' },
                           { label: 'Name' },
@@ -721,7 +754,7 @@ export function RequestEditor(props: RequestEditorProps) {
                     <div class="api-request__controls">
                       <div class="api-request__mode" data-api-field="body-kind">
                         <Select
-                          ariaLabel="Body kind"
+                          ariaLabel={t('api.form.bodyKind.aria', 'Body kind')}
                           value={req().body.kind}
                           onChange={(v) =>
                             patch({
@@ -732,16 +765,18 @@ export function RequestEditor(props: RequestEditorProps) {
                         />
                       </div>
                       <Show when={hasFormatter(req().body.kind)}>
-                        <Button onClick={formatBody}>Format</Button>
+                        <Button onClick={formatBody}>{t('api.form.format', 'Format')}</Button>
                       </Show>
                     </div>
                     <Show when={req().body.kind === 'none'}>
-                      <p class="api-request__idle">No body is sent with this request.</p>
+                      <p class="api-request__idle">
+                        {t('api.form.noBody', 'No body is sent with this request.')}
+                      </p>
                     </Show>
                     <Show when={req().body.kind === 'file'}>
                       <TextField
                         id="api-body-file"
-                        label="File in the collection"
+                        label={t('api.form.fileInCollection', 'File in the collection')}
                         description="A path WITHIN the collection, read on send under the handle's path rules."
                         value={req().body.fileRef}
                         onInput={(v) => patch({ body: { ...req().body, fileRef: v } })}
@@ -766,7 +801,7 @@ export function RequestEditor(props: RequestEditorProps) {
                 content: () => (
                   <EditableRowList
                     variant="table"
-                    ariaLabel="Request headers"
+                    ariaLabel={t('api.form.headers.aria', 'Request headers')}
                     columns={[
                       { label: 'Send', labelHidden: true },
                       { label: 'Name' },
@@ -780,7 +815,11 @@ export function RequestEditor(props: RequestEditorProps) {
                       <>
                         <td>
                           <Checkbox
-                            ariaLabel={`Send header ${i + 1}`}
+                            ariaLabel={tPlural(
+                              'api.form.sendHeader.aria',
+                              i + 1,
+                              'Send header {count}',
+                            )}
                             checked={row().enabled}
                             onChange={(v) =>
                               patch({ headers: patchRow(req().headers, i, { enabled: v }) })
@@ -790,7 +829,11 @@ export function RequestEditor(props: RequestEditorProps) {
                         <td>
                           <TextField
                             id={`api-header-name-${i}`}
-                            ariaLabel={`Header ${i + 1} name`}
+                            ariaLabel={tPlural(
+                              'api.form.headerName.aria',
+                              i + 1,
+                              'Header {count} name',
+                            )}
                             value={row().name}
                             onInput={(v) =>
                               patch({ headers: patchRow(req().headers, i, { name: v }) })
@@ -800,7 +843,11 @@ export function RequestEditor(props: RequestEditorProps) {
                         <td>
                           <SecretTextField
                             id={`api-header-value-${i}`}
-                            ariaLabel={`Header ${i + 1} value`}
+                            ariaLabel={tPlural(
+                              'api.form.headerValue.aria',
+                              i + 1,
+                              'Header {count} value',
+                            )}
                             value={row().value}
                             onInput={(v) =>
                               patch({ headers: patchRow(req().headers, i, { value: v }) })
@@ -832,7 +879,7 @@ export function RequestEditor(props: RequestEditorProps) {
                     <div class="api-request__controls">
                       <div class="api-request__mode" data-api-field="auth-kind">
                         <Select
-                          ariaLabel="Auth scheme"
+                          ariaLabel={t('api.form.auth.aria', 'Auth scheme')}
                           value={req().auth.kind}
                           onChange={(v) =>
                             patch({
@@ -846,13 +893,15 @@ export function RequestEditor(props: RequestEditorProps) {
                     <Show
                       when={req().auth.kind !== 'none'}
                       fallback={
-                        <p class="api-request__idle">No credential is sent with this request.</p>
+                        <p class="api-request__idle">
+                          {t('api.form.noCredential', 'No credential is sent with this request.')}
+                        </p>
                       }
                     >
                       <Show when={req().auth.kind === 'basic'}>
                         <TextField
                           id="api-auth-user"
-                          label="User"
+                          label={t('api.form.user', 'User')}
                           value={req().auth.user}
                           onInput={(v) => patch({ auth: { ...req().auth, user: v } })}
                         />
@@ -864,7 +913,11 @@ export function RequestEditor(props: RequestEditorProps) {
                           one value (nocx-3o0ed.4). */}
                       <SecretTextField
                         id="api-auth-var"
-                        label={req().auth.kind === 'basic' ? 'Password' : 'Token'}
+                        label={
+                          req().auth.kind === 'basic'
+                            ? t('api.auth.password', 'Password')
+                            : t('api.auth.token', 'Token')
+                        }
                         value={authValue()}
                         onInput={setAuthValue}
                         source={authSecretSource()}

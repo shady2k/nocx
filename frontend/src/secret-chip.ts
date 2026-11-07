@@ -18,6 +18,7 @@ import { StateField } from '@codemirror/state'
 import { Decoration, EditorView, WidgetType, type DecorationSet } from '@codemirror/view'
 import { findReferences } from './secret-reference'
 import { createSecretChip } from './ui/secret-chip'
+import { secretChipTitles } from './i18n/kit-labels'
 
 class SecretChipWidget extends WidgetType {
   constructor(readonly name: string) {
@@ -27,7 +28,7 @@ class SecretChipWidget extends WidgetType {
     return other.name === this.name
   }
   toDOM(): HTMLElement {
-    return createSecretChip(this.name)
+    return createSecretChip(this.name, secretChipTitles())
   }
   ignoreEvent(): boolean {
     // A chip is one unit: no mouse gesture may enter the replaced span.

@@ -17,6 +17,7 @@ import { Show, createResource } from 'solid-js'
 
 import { PageSection, StatusCard } from './ui'
 import type { AppAbout } from './generated/app.about'
+import { t } from './i18n/locale-model'
 
 export interface UpdatesSectionProps {
   /** Reads the build description, for its platform half. A thunk rather
@@ -33,11 +34,14 @@ export function UpdatesSection(props: UpdatesSectionProps) {
 
   return (
     <Show when={platform()?.startsWith('linux')}>
-      <PageSection title="Installing updates on Linux">
+      <PageSection title={t('updates.section.linuxInstall.title', 'Installing updates on Linux')}>
         <StatusCard
           tone="warning"
-          title="Linux updates"
-          description="AppImage installs can update themselves in nocx. deb and rpm installs update through their package manager; that is a different install from the AppImage."
+          title={t('updates.section.linux.title', 'Linux updates')}
+          description={t(
+            'updates.section.linux.desc',
+            'AppImage installs can update themselves in nocx. deb and rpm installs update through their package manager; that is a different install from the AppImage.',
+          )}
         />
       </PageSection>
     </Show>

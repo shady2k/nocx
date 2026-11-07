@@ -16,6 +16,7 @@ import { StateField, StateEffect } from '@codemirror/state'
 import { Decoration, EditorView, WidgetType, type DecorationSet } from '@codemirror/view'
 import { KIND_LABELS, type SecretKind } from './secret-kind'
 import { createSecretChipUnresolved } from './ui/secret-chip'
+import { secretChipTitles } from './i18n/kit-labels'
 
 /** One unresolved masked segment in the current document. */
 export interface UnresolvedSpan {
@@ -35,7 +36,7 @@ class UnresolvedChipWidget extends WidgetType {
     return other.kind === this.kind
   }
   toDOM(): HTMLElement {
-    return createSecretChipUnresolved(KIND_LABELS[this.kind])
+    return createSecretChipUnresolved(KIND_LABELS[this.kind], secretChipTitles())
   }
   ignoreEvent(): boolean {
     // A chip is one unit: no mouse gesture may enter the replaced span.

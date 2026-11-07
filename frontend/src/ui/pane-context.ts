@@ -71,6 +71,9 @@ export interface PaneContextActions {
    *  and whatever else a program-owned pane still lets a person reach.
    *  Absent for `local`/`remote`, which have no such menu. */
   onSessionActions?: () => void
+  /** What that control says. Required whenever `onSessionActions` is given:
+   *  the kit may not own a word it cannot localise (nocx-dej6.3.8). */
+  sessionActionsLabel?: string
 }
 
 function textPart(cls: string, text: string): HTMLSpanElement {
@@ -118,13 +121,15 @@ function buildProgram(facts: PaneContextFacts, actions: PaneContextActions): HTM
     trailing.append(kbIcon)
     trailing.append(textPart('ui-pane-context__keyboard', `Keyboard → ${facts.keyboardTarget}`))
   }
-  if (actions.onSessionActions) {
+  // Both halves or neither: a control with no name is not one the kit will
+  // draw (the sentence belongs to the surface, nocx-dej6.3.8).
+  if (actions.onSessionActions && actions.sessionActionsLabel) {
     const btn = document.createElement('button')
     btn.type = 'button'
     btn.className = 'ui-button'
     btn.dataset.variant = 'ghost'
     btn.dataset.size = 'sm'
-    btn.textContent = 'Session actions'
+    btn.textContent = actions.sessionActionsLabel
     btn.addEventListener('click', () => actions.onSessionActions?.())
     trailing.append(btn)
   }

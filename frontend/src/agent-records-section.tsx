@@ -2,6 +2,7 @@ import { For, Show, createSignal, onMount, untrack } from 'solid-js'
 import type { Agent } from './generated/agentRecords.list'
 import type { AgentRecordDraft, AgentRecordsClient } from './agent-records-client'
 import { Button, Checkbox, PageSection, Section, Stack, TextField } from './ui'
+import { t } from './i18n/locale-model'
 
 export interface AgentRecordsSectionProps {
   client: AgentRecordsClient
@@ -102,48 +103,61 @@ function AgentRecordCard(props: {
     <Section title={props.agent.displayName || props.agent.id}>
       <Stack gap="loose">
         <p>
-          Agent ID: {props.agent.id}
+          {t('agents.records.idColon', 'Agent ID:')} {props.agent.id}
           {props.agent.builtin ? ' · Built in' : ''}
         </p>
-        <TextField label="Display name" value={displayName()} onInput={setDisplayName} />
-        <TextField label="Command" value={command()} onInput={setCommand} required />
         <TextField
-          label="Arguments (one per line)"
+          label={t('agents.records.displayName', 'Display name')}
+          value={displayName()}
+          onInput={setDisplayName}
+        />
+        <TextField
+          label={t('agents.records.command', 'Command')}
+          value={command()}
+          onInput={setCommand}
+          required
+        />
+        <TextField
+          label={t('agents.records.args', 'Arguments (one per line)')}
           value={args()}
           onInput={setArgs}
           multiline
           rows={4}
         />
         <TextField
-          label="Environment (KEY=VALUE, one per line)"
+          label={t('agents.records.env', 'Environment (KEY=VALUE, one per line)')}
           value={env()}
           onInput={setEnv}
           multiline
           rows={4}
         />
         <Checkbox
-          label="Offer this agent in new shells"
+          label={t('agents.records.offer', 'Offer this agent in new shells')}
           variant="switch"
           checked={props.agent.state !== 'unreadable' && !disabled()}
           disabled={busy() || props.agent.state === 'unreadable'}
           onChange={changeOffering}
         />
         <Show when={props.agent.state === 'unreadable'}>
-          <p role="alert">This record could not be read: {props.agent.problem}</p>
+          <p role="alert">
+            {t('agents.records.unreadable', 'This record could not be read:')} {props.agent.problem}
+          </p>
         </Show>
         <Show when={props.saved}>
-          <p role="status">Saved. The next launch will use these settings.</p>
+          <p role="status">
+            {t('agents.records.saved', 'Saved. The next launch will use these settings.')}
+          </p>
         </Show>
         <Show when={error()}>
           <p role="alert">{error()}</p>
         </Show>
         <div>
           <Button variant="primary" disabled={busy()} onClick={() => void save()}>
-            Save agent
+            {t('agents.records.save', 'Save agent')}
           </Button>
           <Show when={!props.agent.builtin}>
             <Button variant="danger" disabled={busy()} onClick={() => void remove()}>
-              Remove agent
+              {t('agents.records.remove', 'Remove agent')}
             </Button>
           </Show>
         </div>
@@ -245,12 +259,15 @@ export function AgentRecordsSection(props: AgentRecordsSectionProps) {
 
   return (
     <PageSection
-      title="Agents"
-      description="Edit the commands nocx offers in new shells. Changes apply to the next agent launch; built-in agents can be edited but not removed."
+      title={t('agents.records.title', 'Agents')}
+      description={t(
+        'agents.records.desc',
+        'Edit the commands nocx offers in new shells. Changes apply to the next agent launch; built-in agents can be edited but not removed.',
+      )}
     >
       <Stack gap="loose">
         <Show when={loading()}>
-          <p role="status">Loading agent records…</p>
+          <p role="status">{t('agents.records.loading', 'Loading agent records…')}</p>
         </Show>
         <Show when={loadError()}>
           <p role="alert">{loadError()}</p>
@@ -267,33 +284,49 @@ export function AgentRecordsSection(props: AgentRecordsSectionProps) {
             />
           )}
         </For>
-        <Section title="Add an agent">
+        <Section title={t('agents.records.add.title', 'Add an agent')}>
           <Stack gap="loose">
-            <TextField label="Agent ID" value={newID()} onInput={setNewID} required />
-            <TextField label="Display name" value={newName()} onInput={setNewName} />
-            <TextField label="Command" value={newCommand()} onInput={setNewCommand} required />
             <TextField
-              label="Arguments (one per line)"
+              label={t('agents.records.id', 'Agent ID')}
+              value={newID()}
+              onInput={setNewID}
+              required
+            />
+            <TextField
+              label={t('agents.records.displayName', 'Display name')}
+              value={newName()}
+              onInput={setNewName}
+            />
+            <TextField
+              label={t('agents.records.command', 'Command')}
+              value={newCommand()}
+              onInput={setNewCommand}
+              required
+            />
+            <TextField
+              label={t('agents.records.args', 'Arguments (one per line)')}
               value={newArgs()}
               onInput={setNewArgs}
               multiline
               rows={4}
             />
             <TextField
-              label="Environment (KEY=VALUE, one per line)"
+              label={t('agents.records.env', 'Environment (KEY=VALUE, one per line)')}
               value={newEnv()}
               onInput={setNewEnv}
               multiline
               rows={4}
             />
             <Show when={createSaved()}>
-              <p role="status">Agent added. It is available in new shells.</p>
+              <p role="status">
+                {t('agents.records.added', 'Agent added. It is available in new shells.')}
+              </p>
             </Show>
             <Show when={createError()}>
               <p role="alert">{createError()}</p>
             </Show>
             <Button variant="primary" disabled={creating()} onClick={() => void saveNew()}>
-              Add agent
+              {t('agents.records.add', 'Add agent')}
             </Button>
           </Stack>
         </Section>

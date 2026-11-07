@@ -33,6 +33,7 @@ import {
 } from './key-material-input'
 import type { KeyInputMode } from './key-material-input'
 import { showToast } from './ui/toast'
+import { t } from './i18n/locale-model'
 import type { VaultClient, InventoryEntry } from './vault-client'
 import type { VaultController } from './vault'
 import type { DialogClient } from './dialog-client'
@@ -94,9 +95,13 @@ const STORE_LABELS: Record<string, string> = {
 // supplied three ways (path / file / paste) through KeyMaterialInput — the
 // same vocabulary the connection editor uses.
 const ADD_KINDS = [
-  { value: 'password', label: 'Password' },
-  { value: 'key-passphrase', label: 'Key passphrase' },
-  { value: 'private-key', label: 'Private key' },
+  { value: 'password', tKey: 'secrets.add.kindPassword', tFallback: 'Password' },
+  {
+    value: 'key-passphrase',
+    tKey: 'secrets.add.kindKeyPassphrase',
+    tFallback: 'Key passphrase',
+  },
+  { value: 'private-key', tKey: 'secrets.add.kindPrivateKey', tFallback: 'Private key' },
 ] as const
 
 type AddKind = (typeof ADD_KINDS)[number]['value']
@@ -249,7 +254,10 @@ export function SecretsSection(props: SecretsSectionProps) {
     } catch (err) {
       const message = (err as Error).message
       log.error('Failed to load secrets', { message })
-      showToast({ level: 'danger', message: 'Could not load secrets: ' + message })
+      showToast({
+        level: 'danger',
+        message: `${t('secrets.load.failedHead', 'Could not load secrets:')} ${message}`,
+      })
       setLoadState({ kind: 'error', message })
     }
   }
@@ -319,7 +327,10 @@ export function SecretsSection(props: SecretsSectionProps) {
         const pc = props.profileClient
         if (!pc) {
           setAddOpen(false)
-          showToast({ level: 'danger', message: 'This window cannot add a private key.' })
+          showToast({
+            level: 'danger',
+            message: t('secrets.add.noPrivateKeyHere', 'This window cannot add a private key.'),
+          })
           void load()
           return
         }
@@ -334,7 +345,7 @@ export function SecretsSection(props: SecretsSectionProps) {
             setAddOpen(false)
             showToast({
               level: 'info',
-              message: 'Key added without a passphrase — a connection using it will ask for one.',
+              message: `${t('secrets.add.keyNoPassphraseHead', 'Key added without a passphrase —')} ${t('secrets.add.keyNoPassphraseTail', 'a connection using it will ask for one.')}`,
             })
             void load()
             return
@@ -344,12 +355,18 @@ export function SecretsSection(props: SecretsSectionProps) {
         await props.vaultClient.createSecret(params)
       }
       setAddOpen(false)
-      showToast({ level: 'success', message: `Added "${addName().trim()}"` })
+      showToast({
+        level: 'success',
+        message: `${t('secrets.add.doneHead', 'Added')} "${addName().trim()}"`,
+      })
       void load()
     } catch (err) {
       const message = (err as Error).message
       log.error('Failed to add secret', { message })
-      showToast({ level: 'danger', message: `Could not add secret: ${message}` })
+      showToast({
+        level: 'danger',
+        message: `${t('secrets.add.failedHead', 'Could not add secret:')} ${message}`,
+      })
     } finally {
       setAddBusy(false)
     }
@@ -388,12 +405,18 @@ export function SecretsSection(props: SecretsSectionProps) {
       }
       await props.vaultClient.replaceSecret(params)
       setReplaceTarget(null)
-      showToast({ level: 'success', message: `Replaced the value of "${entry.name}"` })
+      showToast({
+        level: 'success',
+        message: `${t('secrets.replace.doneHead', 'Replaced the value of')} "${entry.name}"`,
+      })
       void load()
     } catch (err) {
       const message = (err as Error).message
       log.error('Failed to replace secret', { message })
-      showToast({ level: 'danger', message: `Could not replace the value: ${message}` })
+      showToast({
+        level: 'danger',
+        message: `${t('secrets.replace.failedHead', 'Could not replace the value:')} ${message}`,
+      })
     } finally {
       setReplaceBusy(false)
     }
@@ -418,12 +441,18 @@ export function SecretsSection(props: SecretsSectionProps) {
     try {
       await props.vaultClient.renameSecret({ id: entry.id, name: renameName().trim() })
       setRenameTarget(null)
-      showToast({ level: 'success', message: `Renamed to "${renameName().trim()}"` })
+      showToast({
+        level: 'success',
+        message: `${t('secrets.rename.doneHead', 'Renamed to')} "${renameName().trim()}"`,
+      })
       void load()
     } catch (err) {
       const message = (err as Error).message
       log.error('Failed to rename secret', { message })
-      showToast({ level: 'danger', message: `Could not rename secret: ${message}` })
+      showToast({
+        level: 'danger',
+        message: `${t('secrets.rename.failedHead', 'Could not rename secret:')} ${message}`,
+      })
     } finally {
       setRenameBusy(false)
     }
@@ -473,13 +502,19 @@ export function SecretsSection(props: SecretsSectionProps) {
     try {
       await props.vaultClient.deleteSecret({ id: entry.id })
       setDeleteTarget(null)
-      showToast({ level: 'success', message: `Deleted "${entry.name}"` })
+      showToast({
+        level: 'success',
+        message: `${t('secrets.delete.doneHead', 'Deleted')} "${entry.name}"`,
+      })
       // The row is gone from the list without a manual refresh.
       void load()
     } catch (err) {
       const message = (err as Error).message
       log.error('Failed to delete secret', { message })
-      showToast({ level: 'danger', message: `Could not delete secret: ${message}` })
+      showToast({
+        level: 'danger',
+        message: `${t('secrets.delete.failedHead', 'Could not delete secret:')} ${message}`,
+      })
     } finally {
       setDeleteBusy(false)
     }
@@ -494,15 +529,22 @@ export function SecretsSection(props: SecretsSectionProps) {
           were ever named, because before the vault could be reset there was
           no easy way to reach the others with this page open. A Switch makes
           the set of states something you have to look at. */}
-      <Switch fallback={<EmptyState icon={<KeyIcon />} title="Loading secrets…" />}>
+      <Switch
+        fallback={
+          <EmptyState icon={<KeyIcon />} title={t('secrets.loading', 'Loading secrets…')} />
+        }
+      >
         <Match when={status()?.state === 'uninitialized'}>
           <EmptyState
             icon={<LockIcon />}
-            title="Protection is not set up yet"
-            description="nocx has nowhere to keep passwords until protection is set up. Nothing is stored, and nothing is lost."
+            title={t('secrets.unset.title', 'Protection is not set up yet')}
+            description={t(
+              'secrets.unset.desc',
+              'nocx has nowhere to keep passwords until protection is set up. Nothing is stored, and nothing is lost.',
+            )}
             action={
               <Button variant="primary" onClick={() => props.vaultController.openSetup()}>
-                Set up protection
+                {t('secrets.unset.action', 'Set up protection')}
               </Button>
             }
           />
@@ -511,14 +553,14 @@ export function SecretsSection(props: SecretsSectionProps) {
         <Match when={status()?.state === 'sealed'}>
           <EmptyState
             icon={<LockIcon />}
-            title="Vault is locked"
-            description="Unlock the vault to see what secrets it holds."
+            title={t('secrets.locked.title', 'Vault is locked')}
+            description={t('secrets.locked.desc', 'Unlock the vault to see what secrets it holds.')}
             action={
               <Button
                 variant="primary"
                 onClick={() => props.vaultController.openUnlock('view your secrets')}
               >
-                Unlock vault
+                {t('secrets.locked.action', 'Unlock vault')}
               </Button>
             }
           />
@@ -527,11 +569,11 @@ export function SecretsSection(props: SecretsSectionProps) {
         <Match when={loadState().kind === 'error'}>
           <EmptyState
             icon={<KeyIcon />}
-            title="Could not load secrets"
+            title={t('secrets.load.error', 'Could not load secrets')}
             description={(loadState() as Extract<LoadState, { kind: 'error' }>).message}
             action={
               <Button variant="default" onClick={() => void load()}>
-                Try again
+                {t('secrets.load.retry', 'Try again')}
               </Button>
             }
           />
@@ -550,7 +592,7 @@ export function SecretsSection(props: SecretsSectionProps) {
             searchLabel="Filter secrets"
             actions={
               <Button variant="primary" onClick={() => openAdd()}>
-                + Add a secret
+                {t('secrets.empty.add', '+ Add a secret')}
               </Button>
             }
             hasItems={visibleEntries().length > 0}
@@ -560,8 +602,11 @@ export function SecretsSection(props: SecretsSectionProps) {
                 fallback={
                   <EmptyState
                     icon={<KeyIcon />}
-                    title="Vault is empty"
-                    description="There are no secrets in the vault yet. Add one here, or save a password on a connection and it appears. Whatever is stored is encrypted and never shown back to you."
+                    title={t('secrets.empty.title', 'Vault is empty')}
+                    description={t(
+                      'secrets.empty.desc',
+                      'There are no secrets in the vault yet. Add one here, or save a password on a connection and it appears. Whatever is stored is encrypted and never shown back to you.',
+                    )}
                   />
                 }
               >
@@ -570,8 +615,11 @@ export function SecretsSection(props: SecretsSectionProps) {
                     clearing the box. */}
                 <EmptyState
                   icon={<KeyIcon />}
-                  title="No secret matches that"
-                  description="Nothing in the vault matches the filter."
+                  title={t('secrets.filter.nomatch.title', 'No secret matches that')}
+                  description={t(
+                    'secrets.filter.nomatch.desc',
+                    'Nothing in the vault matches the filter.',
+                  )}
                 />
               </Show>
             }
@@ -587,7 +635,7 @@ export function SecretsSection(props: SecretsSectionProps) {
                       <div class="sr-row-body">
                         <span class="sr-row-label">{entry.name}</span>
                         <span class="sr-row-usage">
-                          {entry.usedBy} connection{entry.usedBy === 1 ? '' : 's'}
+                          {`${entry.usedBy} ${t('secrets.row.connectionWord', 'connection')}${entry.usedBy === 1 ? '' : 's'}`}
                         </span>
                       </div>
                     </div>
@@ -606,28 +654,30 @@ export function SecretsSection(props: SecretsSectionProps) {
                           row's right edge. */}
                       <Badge tone="neutral">{STORE_LABELS[entry.provider] ?? entry.provider}</Badge>
                       <Show when={!entry.reachable}>
-                        <Badge tone="danger">Store unreachable</Badge>
+                        <Badge tone="danger">
+                          {t('secrets.row.unreachable', 'Store unreachable')}
+                        </Badge>
                       </Show>
                       <IconButton
                         size="md"
-                        ariaLabel={`Replace value of ${entry.name}`}
-                        title="Replace value"
+                        ariaLabel={`${t('secrets.replace.ariaHead', 'Replace value of')} ${entry.name}`}
+                        title={t('secrets.replace.title', 'Replace value')}
                         onClick={() => openReplace(entry)}
                       >
                         <ResetIcon />
                       </IconButton>
                       <IconButton
                         size="md"
-                        ariaLabel={`Rename ${entry.name}`}
-                        title="Rename secret"
+                        ariaLabel={`${t('secrets.rename.aria', 'Rename')} ${entry.name}`}
+                        title={t('secrets.rename.title', 'Rename secret')}
                         onClick={() => openRename(entry)}
                       >
                         <PencilIcon />
                       </IconButton>
                       <IconButton
                         size="md"
-                        ariaLabel={`Delete ${entry.name}`}
-                        title="Delete secret"
+                        ariaLabel={`${t('secrets.delete.aria', 'Delete')} ${entry.name}`}
+                        title={t('secrets.delete.title', 'Delete secret')}
                         onClick={() => openDelete(entry)}
                       >
                         <TrashIcon />
@@ -649,15 +699,15 @@ export function SecretsSection(props: SecretsSectionProps) {
         <Dialog
           open={addOpen()}
           onClose={closeAdd}
-          title="Add secret"
+          title={t('secrets.add.title', 'Add secret')}
           onSubmit={() => void submitAdd()}
           footer={
             <>
               <Button variant="primary" onClick={() => void submitAdd()} disabled={addBusy()}>
-                Add secret
+                {t('secrets.add.title', 'Add secret')}
               </Button>
               <Button variant="default" onClick={closeAdd} disabled={addBusy()}>
-                Cancel
+                {t('secrets.cancel', 'Cancel')}
               </Button>
             </>
           }
@@ -665,8 +715,8 @@ export function SecretsSection(props: SecretsSectionProps) {
           <Stack gap="default">
             <TextField
               id="sr-add-name"
-              label="Name"
-              placeholder="e.g. prod password"
+              label={t('secrets.field.name', 'Name')}
+              placeholder={t('secrets.add.hintPhrase', 'e.g. prod password')}
               value={addName()}
               onInput={setAddName}
               onBlur={() => addValidation.touch('name')}
@@ -674,15 +724,18 @@ export function SecretsSection(props: SecretsSectionProps) {
               required
             />
             <SegmentedControl
-              options={ADD_KINDS as unknown as { value: string; label: string }[]}
+              options={ADD_KINDS.map((k) => ({
+                value: k.value,
+                label: t(k.tKey, k.tFallback),
+              }))}
               value={addKind()}
               onChange={(v) => setAddKind(v as AddKind)}
-              ariaLabel="Kind"
+              ariaLabel={t('secrets.field.kind', 'Kind')}
             />
             <Show when={addKind() !== 'private-key'}>
               <TextField
                 id="sr-add-value"
-                label="Value"
+                label={t('secrets.field.value', 'Value')}
                 type="password"
                 value={addValue()}
                 onInput={setAddValue}
@@ -744,7 +797,7 @@ export function SecretsSection(props: SecretsSectionProps) {
           <Dialog
             open={true}
             onClose={closeReplace}
-            title={`Replace value of "${target().name}"`}
+            title={`${t('secrets.replace.ariaHead', 'Replace value of')} "${target().name}"`}
             onSubmit={() => void submitReplace()}
             footer={
               <>
@@ -753,23 +806,25 @@ export function SecretsSection(props: SecretsSectionProps) {
                   onClick={() => void submitReplace()}
                   disabled={replaceBusy()}
                 >
-                  Replace value
+                  {t('secrets.replace.title', 'Replace value')}
                 </Button>
                 <Button variant="default" onClick={closeReplace} disabled={replaceBusy()}>
-                  Cancel
+                  {t('secrets.cancel', 'Cancel')}
                 </Button>
               </>
             }
           >
             <Stack gap="default">
               <p class="sr-replace-hint">
-                Write a new value. The stored value is never shown and stays in place until you
-                save. Every connection using this secret keeps working.
+                {t(
+                  'secrets.replace.hint',
+                  'Write a new value. The stored value is never shown and stays in place until you save. Every connection using this secret keeps working.',
+                )}
               </p>
               <Show when={target().kind !== 'private-key'}>
                 <TextField
                   id="sr-replace-value"
-                  label="New value"
+                  label={t('secrets.field.newValue', 'New value')}
                   type="password"
                   value={replaceValue()}
                   onInput={(v) => {
@@ -808,7 +863,7 @@ export function SecretsSection(props: SecretsSectionProps) {
           <Dialog
             open={true}
             onClose={closeRename}
-            title={`Rename "${target().name}"`}
+            title={t('secrets.rename.compositeTitle', 'Rename "{name}"', { name: target().name })}
             onSubmit={() => void submitRename()}
             footer={
               <>
@@ -817,10 +872,10 @@ export function SecretsSection(props: SecretsSectionProps) {
                   onClick={() => void submitRename()}
                   disabled={renameBusy()}
                 >
-                  Rename
+                  {t('secrets.rename.aria', 'Rename')}
                 </Button>
                 <Button variant="default" onClick={closeRename} disabled={renameBusy()}>
-                  Cancel
+                  {t('secrets.cancel', 'Cancel')}
                 </Button>
               </>
             }
@@ -828,7 +883,7 @@ export function SecretsSection(props: SecretsSectionProps) {
             <Stack gap="default">
               <TextField
                 id="sr-rename-name"
-                label="Name"
+                label={t('secrets.field.name', 'Name')}
                 value={renameName()}
                 onInput={setRenameName}
                 onBlur={() => renameValidation.touch('name')}
@@ -851,7 +906,7 @@ export function SecretsSection(props: SecretsSectionProps) {
           <Dialog
             open={true}
             onClose={closeDelete}
-            title={`Delete "${target().name}"?`}
+            title={t('secrets.delete.compositeTitle', 'Delete "{name}"?', { name: target().name })}
             footer={
               <>
                 <Button
@@ -859,10 +914,10 @@ export function SecretsSection(props: SecretsSectionProps) {
                   disabled={deleteBusy() || deleteNames() === null || deleteNamesError() !== null}
                   onClick={() => void submitDelete()}
                 >
-                  {deleteBusy() ? 'Deleting…' : 'Delete secret'}
+                  {deleteBusy() ? 'Deleting…' : t('secrets.delete.title', 'Delete secret')}
                 </Button>
                 <Button variant="default" onClick={closeDelete} disabled={deleteBusy()} autofocus>
-                  Cancel
+                  {t('secrets.cancel', 'Cancel')}
                 </Button>
               </>
             }
@@ -870,23 +925,28 @@ export function SecretsSection(props: SecretsSectionProps) {
             <Stack gap="default">
               <Show when={target().usedBy > 0}>
                 <Show when={deleteNames() === null && deleteNamesError() === null}>
-                  <p class="sr-delete-hint">Checking which connections use this secret…</p>
+                  <p class="sr-delete-hint">
+                    {t('secrets.delete.checking', 'Checking which connections use this secret…')}
+                  </p>
                 </Show>
                 <Show when={deleteNamesError() !== null}>
                   <p class="sr-delete-hint" role="alert">
-                    Could not check which connections use this secret: {deleteNamesError()}
+                    {`${t('secrets.delete.checkFailedHead', 'Could not check which connections use this secret:')} ${deleteNamesError()}`}
                   </p>
                   <Button
                     variant="default"
                     disabled={deleteBusy()}
                     onClick={() => void loadDeleteNames(target())}
                   >
-                    Try again
+                    {t('secrets.load.retry', 'Try again')}
                   </Button>
                 </Show>
                 <Show when={deleteNames() !== null && deleteNamesError() === null}>
                   <p class="sr-delete-hint">
-                    These connections use this secret and will stop using it:
+                    {t(
+                      'secrets.delete.usersHead',
+                      'These connections use this secret and will stop using it:',
+                    )}
                   </p>
                   <Show when={deleteNames()!.length > 0}>
                     <ul class="sr-delete-connections">
@@ -895,19 +955,25 @@ export function SecretsSection(props: SecretsSectionProps) {
                   </Show>
                   <Show when={deleteNames()!.length === 0}>
                     <p class="sr-delete-hint">
-                      {target().usedBy} connection{target().usedBy === 1 ? '' : 's'} use it, but the
-                      connection name could not be resolved.
+                      {`${target().usedBy} ${t('secrets.row.connectionWord', 'connection')} ${t(
+                        'secrets.delete.usersUnresolvedTail',
+                        'use it, but the connection name could not be resolved.',
+                      )}`}
                     </p>
                   </Show>
                 </Show>
               </Show>
               <Show when={target().usedBy === 0}>
                 <p class="sr-delete-hint">
-                  No connection uses this secret. The stored value is destroyed and cannot be
-                  recovered.
+                  {t(
+                    'secrets.delete.noUsers',
+                    'No connection uses this secret. The stored value is destroyed and cannot be recovered.',
+                  )}
                 </p>
               </Show>
-              <p class="sr-delete-hint">This cannot be undone.</p>
+              <p class="sr-delete-hint">
+                {t('secrets.delete.irreversible', 'This cannot be undone.')}
+              </p>
             </Stack>
           </Dialog>
         )}

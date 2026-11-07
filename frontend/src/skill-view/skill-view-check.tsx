@@ -48,6 +48,7 @@ import { Show, type JSX } from 'solid-js'
 import { Caption, StatusCard } from '../ui'
 import { Spinner } from '../ui/spinner'
 import { shortDate } from '../skills-presentation'
+import { t } from '../i18n/locale-model'
 import type { SkillsCheck } from '../generated/skills.check'
 
 /** The wire's own shapes, never re-declared by hand (review round 2's
@@ -211,14 +212,14 @@ export function SkillViewCheckPanel(props: SkillViewCheckPanelProps): JSX.Elemen
       <Show when={props.state.kind === 'loading'}>
         <StatusCard
           tone="neutral"
-          title="Reading the stored check"
+          title={t('skillview.check.readingStored', 'Reading the stored check')}
           description={`Reading what content.db knows about “${props.name}”.`}
         />
       </Show>
       <Show when={unavailableMessage()}>
         <StatusCard
           tone="danger"
-          title="The stored check could not be read"
+          title={t('skillview.check.readFailed', 'The stored check could not be read')}
           description={unavailableMessage()}
         />
       </Show>
@@ -231,7 +232,10 @@ export function SkillViewCheckPanel(props: SkillViewCheckPanelProps): JSX.Elemen
             <Show when={!held().current}>
               <StatusCard
                 tone="warning"
-                title="This check is about an earlier version of these files"
+                title={t(
+                  'skillview.check.staleFiles',
+                  'This check is about an earlier version of these files',
+                )}
                 description="Something moved since this reading was made — an edit, a reinstall. It is shown below exactly as it was recorded; re-check to read the bytes as they are now."
               />
             </Show>
@@ -244,7 +248,7 @@ export function SkillViewCheckPanel(props: SkillViewCheckPanelProps): JSX.Elemen
             <Show when={fallbackNote(held().reading)}>
               <StatusCard
                 tone="warning"
-                title="This was read by the answering model"
+                title={t('skillview.check.byModel', 'This was read by the answering model')}
                 description={fallbackNote(held().reading)}
               />
             </Show>
@@ -257,7 +261,7 @@ export function SkillViewCheckPanel(props: SkillViewCheckPanelProps): JSX.Elemen
             <Show when={held().reading.storedNote}>
               <StatusCard
                 tone="warning"
-                title="This reading was not saved"
+                title={t('skillview.check.notSaved', 'This reading was not saved')}
                 description={held().reading.storedNote}
               />
             </Show>
@@ -282,13 +286,17 @@ export function SkillViewCheckPanel(props: SkillViewCheckPanelProps): JSX.Elemen
              model reading a whole bundle — tens of seconds (nocx-l9dy8). It is
              PLACED here, never repainted: Spinner carries its own motion, its
              reduced-motion gate and its role="status" name. */
-          icon={<Spinner size="sm" label="Reading this skill" />}
-          title="Reading this skill"
+          icon={<Spinner size="sm" label={t('skillview.check.reading', 'Reading this skill')} />}
+          title={t('skillview.check.reading', 'Reading this skill')}
           description={`A model is reading the files of “${props.name}” and writing a description of them.`}
         />
       </Show>
       <Show when={props.auditError}>
-        <StatusCard tone="danger" title="This skill was not read" description={props.auditError} />
+        <StatusCard
+          tone="danger"
+          title={t('skillview.check.notRead', 'This skill was not read')}
+          description={props.auditError}
+        />
       </Show>
     </div>
   )

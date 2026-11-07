@@ -138,19 +138,19 @@ type HostKeyEvidence = NonNullable<ConnectionTestResult['hostKey']>
 function probeOutcomeLabel(outcome: ProbeOutcome): string {
   switch (outcome) {
     case 'accepted':
-      return 'Accepted'
+      return t('connections.probe.accepted', 'Accepted')
     case 'rejected':
-      return 'Rejected'
+      return t('connections.probe.rejected', 'Rejected')
     case 'unreachable':
-      return 'Unreachable'
+      return t('connections.probe.unreachable', 'Unreachable')
     case 'host-key-unknown':
       // First contact is routine; the words must not borrow the alarm that
       // belongs to a changed key (nocx-6v1p).
-      return 'Unknown host key'
+      return t('connections.probe.hostKeyUnknown', 'Unknown host key')
     case 'host-key-changed':
-      return 'Host key changed'
+      return t('connections.probe.hostKeyChanged', 'Host key changed')
     case 'needs-interactive':
-      return 'Needs interactive auth'
+      return t('connections.probe.needsInteractive', 'Needs interactive auth')
   }
 }
 
@@ -744,7 +744,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       {
         value: 'sshConfig',
         label: cfg?.path
-          ? `SSH config (${cfg.path})`
+          ? t('connections.import.sshConfigPath', 'SSH config ({path})', { path: cfg.path })
           : t('connections.import.sshConfig', 'SSH config'),
       },
       { value: 'tabby', label: t('connections.import.tabbyConfig', 'Tabby config (.yml/.yaml)') },
@@ -1181,12 +1181,12 @@ export function ConnectionsView(props: ConnectionsViewProps) {
    * were never one subject anyway — a secret binding and a keepalive
    * interval are not read at the same moment.
    */
-  const CONNECTION_DEFAULTS: { key: string; label: string }[] = [
+  const connectionDefaults = (): { key: string; label: string }[] => [
     { key: 'port', label: t('connections.group.fieldPort', 'Port') },
     { key: 'jumpHost', label: t('connections.group.fieldJumpServer', 'Jump server') },
   ]
 
-  const ADVANCED_DEFAULTS: { key: string; label: string }[] = [
+  const advancedDefaults = (): { key: string; label: string }[] => [
     {
       key: 'keepaliveInterval',
       label: t('connections.group.fieldKeepaliveInterval', 'Keepalive interval (ms)'),
@@ -1515,7 +1515,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
               </Field>
             }
           />
-          <For each={CONNECTION_DEFAULTS}>{(field) => renderDefault(field)}</For>
+          <For each={connectionDefaults()}>{(field) => renderDefault(field)}</For>
         </Stack>
       )
     }
@@ -1558,7 +1558,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             {
               id: 'advanced',
               label: t('connections.group.tabAdvanced', 'Advanced'),
-              content: () => renderDefaults(ADVANCED_DEFAULTS),
+              content: () => renderDefaults(advancedDefaults()),
             },
           ]}
           active={groupSection()}

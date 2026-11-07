@@ -1,6 +1,7 @@
 import './display.css'
 
 import type { CapturedFrame, FrameRow } from './types'
+import { t } from '../i18n/locale-model'
 
 /**
  * Build the static view for one accepted backend screen frame. This consumes
@@ -11,7 +12,7 @@ export function createCapturedFrameView(frame: CapturedFrame): HTMLElement {
   const root = document.createElement('div')
   root.className = 'nocx-freeze-frame'
   root.dataset.source = frame.provenance.source
-  root.setAttribute('aria-label', 'Frozen terminal frame')
+  root.setAttribute('aria-label', t('frame.frozen.aria', 'Frozen terminal frame'))
 
   for (const row of frame.rows) {
     root.appendChild(createRow(row))
@@ -57,7 +58,10 @@ export function createFreezeMarker(): HTMLElement {
   marker.className = 'ui-badge'
   marker.dataset.tone = 'warning'
   marker.setAttribute('role', 'status')
-  marker.textContent = 'Screen frozen while you ask'
-  marker.title = 'The terminal keeps running; this is a pinned view of its screen.'
+  marker.textContent = t('frame.frozen.text', 'Screen frozen while you ask')
+  marker.title = t(
+    'frame.frozen.title',
+    'The terminal keeps running; this is a pinned view of its screen.',
+  )
   return marker
 }

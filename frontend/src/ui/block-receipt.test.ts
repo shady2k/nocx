@@ -59,12 +59,16 @@ function makeReceipt(
     onHover: vi.fn(),
     onExitReview: vi.fn(),
   }
-  const receipt = new BlockReceipt(captures, {
-    onSaveAll: callbacks.onSaveAll ?? calls.onSaveAll,
-    onDismiss: callbacks.onDismiss ?? calls.onDismiss,
-    onHover: callbacks.onHover ?? calls.onHover,
-    onExitReview: callbacks.onExitReview ?? calls.onExitReview,
-  })
+  const receipt = new BlockReceipt(
+    captures,
+    {
+      onSaveAll: callbacks.onSaveAll ?? calls.onSaveAll,
+      onDismiss: callbacks.onDismiss ?? calls.onDismiss,
+      onHover: callbacks.onHover ?? calls.onHover,
+      onExitReview: callbacks.onExitReview ?? calls.onExitReview,
+    },
+    RECEIPT_LABELS,
+  )
   const container = document.createElement('div')
   container.className = 'cmd-block'
   document.body.appendChild(container)
@@ -75,6 +79,15 @@ function makeReceipt(
 beforeEach(() => {
   vi.useRealTimers()
 })
+
+/** The receipt's words, supplied by a caller the way a surface supplies them. */
+const RECEIPT_LABELS = {
+  aria: 'save detected secret',
+  nameFor: (kindLabel: string) => `vault name for ${kindLabel}`,
+  dismiss: 'Dismiss',
+  dismissAria: (kindLabel: string) => `do not save this ${kindLabel}`,
+  save: (count: number) => (count === 1 ? 'Save' : `Save ${count}`),
+}
 
 describe('BlockReceipt: the kit contract', () => {
   it('renders one row per capture with the kind badge, masked value and pre-filled name', () => {
@@ -206,10 +219,15 @@ describe('forConnection variant (nocx-pu4.7)', () => {
   it('renders a single-row receipt with SSH host kind', () => {
     const onSave = vi.fn()
     const onDismiss = vi.fn()
-    const receipt = BlockReceipt.forConnection('pi@host-2', 'host-2', {
-      onSave,
-      onDismiss,
-    })
+    const receipt = BlockReceipt.forConnection(
+      'pi@host-2',
+      'host-2',
+      {
+        onSave,
+        onDismiss,
+      },
+      RECEIPT_LABELS,
+    )
 
     const root = receipt.root
     expect(root.className).toContain('ui-block-receipt')
@@ -248,10 +266,15 @@ describe('forConnection variant (nocx-pu4.7)', () => {
     document.body.appendChild(container)
     input.focus()
 
-    const receipt = BlockReceipt.forConnection('host', 'host', {
-      onSave: () => {},
-      onDismiss: () => {},
-    })
+    const receipt = BlockReceipt.forConnection(
+      'host',
+      'host',
+      {
+        onSave: () => {},
+        onDismiss: () => {},
+      },
+      RECEIPT_LABELS,
+    )
     receipt.mount(container)
 
     // Focus stays where it was — not stolen by the receipt.

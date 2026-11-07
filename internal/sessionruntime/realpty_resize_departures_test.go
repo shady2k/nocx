@@ -3,6 +3,7 @@ package sessionruntime
 import (
 	"fmt"
 	"testing"
+	"time"
 )
 
 // The resize debt's one invariant (nocx-2v80t.3.9): a resize reflows the
@@ -29,6 +30,61 @@ printf '` + obsLines(40, 40) + `'
 printf 'RESIZE-DONE\n'
 `
 
+// resizeBlankRowProgram is the same command with one blank line in its first
+// batch: a blank row is a real departure, and a count that skipped it while
+// the runtime counted it is exactly the off-by-one this pair of tests exists
+// for (nocx-atpw5.1.47).
+var resizeBlankRowProgram = rawPreamble + `
+printf '\r\n'
+printf '` + obsLines(0, 40) + `'
+readhex 1 >/dev/null
+printf '` + obsLines(40, 40) + `'
+printf 'RESIZE-DONE\n'
+`
+
+// TestABlankRowThatLeavesIsStillADeparture keeps the counting rule honest:
+// the runtime counts every row it streams, a blank one included, so a reading
+// that skips blank texts reports one row fewer than the runtime did and turns
+// that into a swallowed departure.
+func TestABlankRowThatLeavesIsStillADeparture(t *testing.T) {
+	rs := &recordingRowStream{}
+	p := startProgramRows(t, resizeBlankRowProgram, harnessGeometry(80, 12), rs)
+	p.wait("L000039")
+	for _, rows := range []int{20, 10, 22, 18, 24} {
+		if _, err := p.s.CommitGeometry(harnessGeometry(80, rows)); err != nil {
+			t.Fatalf("resize the pane to %d rows: %v", rows, err)
+		}
+	}
+	p.typed("go")
+	p.wait("RESIZE-DONE")
+	select {
+	case <-p.done:
+	case <-time.After(hangLimit):
+		t.Fatal("the program's output never ended, so the stream has no last row to read")
+	}
+
+	streamed, blank := 0, 0
+	for _, e := range rs.snapshot() {
+		if e.kind != "rows" {
+			continue
+		}
+		for _, r := range e.rows {
+			streamed++
+			if streamRowText(r) == "" {
+				blank++
+			}
+		}
+	}
+	if blank == 0 {
+		t.Fatalf("no blank row reached the stream (%d rows), so this test asserts nothing", streamed)
+	}
+	// #nosec G115 -- a row count, small and positive
+	if got, want := p.s.DepartedRowCount(), uint64(streamed); got != want {
+		t.Fatalf("the runtime reports %d departed rows and streamed %d, %d of them blank",
+			got, streamed, blank)
+	}
+}
+
 func TestAResizeNeverSwallowsRealDepartures(t *testing.T) {
 	rs := &recordingRowStream{}
 	p := startProgramRows(t, resizeDeparturesProgram, harnessGeometry(80, 12), rs)
@@ -44,14 +100,39 @@ func TestAResizeNeverSwallowsRealDepartures(t *testing.T) {
 
 	p.typed("go")
 	p.wait("RESIZE-DONE")
+	// THE PROGRAM'S OUTPUT HAS ENDED, so the runtime's totals are final. The
+	// screen is published under the session lock, but the row stream is read
+	// under its own and the counter is read after it: a batch still on its way
+	// between the two reads — the runtime increments the count and then hands
+	// the rows over in the same locked call — would be counted here and
+	// missing there, and the failure would name a swallowed row. So the read
+	// waits for the end of the stream itself, which this program reaches by
+	// exiting, and not for a moment after the last screen it produced
+	// (nocx-atpw5.1.47).
+	select {
+	case <-p.done:
+	case <-time.After(hangLimit):
+		t.Fatal("the program's output never ended, so the stream has no last row to read")
+	}
 
-	// What the runtime handed the stream, in order.
+	// What the runtime handed the stream, in order: every row, a blank one
+	// included. A blank line that left the screen is a departure like any
+	// other, and skipping it made this test undercount its own stream by one
+	// per blank row — the arithmetic below then blamed a debt for a row the
+	// runtime had streamed (nocx-atpw5.1.47).
 	counted := map[string]int{}
-	for _, text := range streamedTexts(rs) {
-		if text == "" {
+	streamed, holes := 0, uint64(0)
+	for _, e := range rs.snapshot() {
+		if e.kind != "rows" {
 			continue
 		}
-		counted[text]++
+		holes += e.lost
+		for _, r := range e.rows {
+			streamed++
+			if text := streamRowText(r); text != "" {
+				counted[text]++
+			}
+		}
 	}
 	for text, times := range counted {
 		if times > 1 {
@@ -84,15 +165,22 @@ func TestAResizeNeverSwallowsRealDepartures(t *testing.T) {
 		}
 	}
 
+	// A struck feed spends one index with no row on it (rowstream.go): the
+	// emulator could not read rows that left, and no count may manufacture
+	// them. In this scenario that is a lost scrollback row, so it is named as
+	// one instead of being left to look like a debt that swallowed a
+	// departure — which is a shape the count and the stream cannot differ by
+	// at all, since both are written in one locked call.
+	if holes > 0 {
+		t.Fatalf("the emulator struck %d feed(s), so rows that left the screen could not be read: departed=%d, streamed=%d",
+			holes, p.s.DepartedRowCount(), streamed)
+	}
+
 	// The count the runtime reports is the rows it actually streamed: the debt
 	// may cancel reflowed rows, never a command's own.
-	streamed := 0
-	for _, times := range counted {
-		streamed += times
-	}
 	// #nosec G115 -- a row count, small and positive
 	want := uint64(streamed)
 	if got := p.s.DepartedRowCount(); got != want {
-		t.Fatalf("the runtime reports %d departed rows and streamed %d: the difference is rows the debt swallowed", got, streamed)
+		t.Fatalf("the runtime reports %d departed rows and streamed %d, with no struck feed to account for the difference", got, streamed)
 	}
 }

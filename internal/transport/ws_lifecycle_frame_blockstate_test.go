@@ -170,7 +170,7 @@ func TestAWriteThatFailsOnceLeavesTheBlockAsIfItHadNotAndItSealsNormally(t *test
 		t.Fatalf("CreateSession: %v", err)
 	}
 	e.ws.blockRowsStore = &expiringOpen{blockOutputStore: db.Ledger(), holds: holds}
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	r := repeatFrames{lane: lane, h: h}
 	ingest := func(env lifecycle.Envelope) func(ctx context.Context) error {
@@ -194,14 +194,14 @@ func TestAWriteThatFailsOnceLeavesTheBlockAsIfItHadNotAndItSealsNormally(t *test
 
 	// The block then lives like any other: its rows land, and the helper's
 	// end seals it with all of them.
-	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0,
-		[]emulator.Row{aStreamRow("row-0"), aStreamRow("row-1"), aStreamRow("row-2")}, ""); !confirm || written != 3 {
-		t.Fatalf("rows ack = (%d, %v), want rows 0..2 stored", written, confirm)
-	}
+	e.ws.BlockRowsArrived(session.ID(sid), 0, 0,
+		[]emulator.Row{aStreamRow("row-0"), aStreamRow("row-1"), aStreamRow("row-2")}, "")
+	awaitConfirmedBlockRows(t, marks, 3)
 	if ierr, ferr := applyFrame(db, sid, 340, ingest(r.complete(4, 0))); ierr != nil || ferr != nil {
 		t.Fatalf("the complete frame: ingest %v, frame %v", ierr, ferr)
 	}
 	e.ws.BlockIntervalEnded(session.ID(sid), lifecycleFence(0x50), 3, nil, false)
+	awaitBlockClosed(t, e)
 	if art := blockArtifact(t, db, entry); art.State != content.ArtifactSealed {
 		t.Fatalf("the block's artifact is %q after the helper's end, want sealed", art.State)
 	}
@@ -238,7 +238,7 @@ func frameThatFailsEveryAttempt(t *testing.T, endFirst bool) {
 	}); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	r := repeatFrames{lane: lane, h: h}
 	ingest := func(pub interface {
@@ -254,10 +254,10 @@ func frameThatFailsEveryAttempt(t *testing.T, endFirst bool) {
 		t.Fatalf("the start frame: ingest %v, frame %v", ierr, ferr)
 	}
 	const entry = "s-dom-repeat-0"
-	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0,
-		[]emulator.Row{aStreamRow("row-0"), aStreamRow("row-1"), aStreamRow("row-2")}, ""); !confirm || written != 3 {
-		t.Fatalf("rows ack = (%d, %v), want rows 0..2 stored", written, confirm)
-	}
+	e.ws.BlockRowsArrived(session.ID(sid), 0, 0,
+		[]emulator.Row{aStreamRow("row-0"), aStreamRow("row-1"), aStreamRow("row-2")}, "")
+	awaitConfirmedBlockRows(t, marks, 3)
+	awaitBlockRowsIdle(t, e.ws, session.ID(sid))
 	if endFirst {
 		e.ws.BlockIntervalEnded(session.ID(sid), lifecycleFence(0x50), 3, nil, false)
 	}
@@ -349,15 +349,15 @@ func TestAFrameThatIsNeverStoredTellsTheRendererNothing(t *testing.T) {
 	e, pub, lane, h, sid, _ := newLifecycleLedgerEnvWithStore(t, db)
 	// The binding records no cursor, so every frame's last write fails.
 	createSessionRow(t, db, sid)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 	r := repeatFrames{lane: lane, h: h}
 	mustLifecycleIngest(t, pub, "T", r.prompt(2))
 	mustLifecycleIngest(t, pub, "T", r.start(3, 0, "make build"))
 	const entry = "s-dom-repeat-0"
-	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0,
-		[]emulator.Row{aStreamRow("row-0"), aStreamRow("row-1"), aStreamRow("row-2")}, ""); !confirm || written != 3 {
-		t.Fatalf("rows ack = (%d, %v), want rows 0..2 stored", written, confirm)
-	}
+	e.ws.BlockRowsArrived(session.ID(sid), 0, 0,
+		[]emulator.Row{aStreamRow("row-0"), aStreamRow("row-1"), aStreamRow("row-2")}, "")
+	awaitConfirmedBlockRows(t, marks, 3)
+	awaitBlockRowsIdle(t, e.ws, session.ID(sid))
 	e.ws.BlockIntervalEnded(session.ID(sid), lifecycleFence(0x50), 3, nil, false)
 	_ = renderedUntilSentinel(t, e, sid, 1)
 

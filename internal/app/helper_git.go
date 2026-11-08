@@ -1308,7 +1308,14 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 	}
 	// THE STREAMED BLOCK OUTPUT, registered before the adopt like the screen
 	// drain, so no row is dropped at a door nobody opened yet.
-	stopBlockRows := bindHeldBlockRows(ctx, r.blockRows, sid, attached, held)
+	stopBlockRows, err := bindHeldBlockRows(ctx, r.blockRows, sid, attached, held)
+	if err != nil {
+		_ = attached.Close()
+		endLifecycleLeg("open-rollback:block-rows")
+		_ = c.CloseSession(ctx, entry.HostSessionID)
+		_ = c.Close()
+		return transport.HostedSessionOpen{}, true, err
+	}
 	// Observe before Adopt can consume its first post-bootstrap PTY bytes.
 	if lifecycleAdapter != nil {
 		attached.OnFirstOutput(lifecycleAdapter.ObserveShellOutput)

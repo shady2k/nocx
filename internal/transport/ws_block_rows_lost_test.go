@@ -46,10 +46,7 @@ func blockArtifact(t *testing.T, db content.ContentDB, entryID string) *content.
 
 func assertSealedAs(t *testing.T, db content.ContentDB, entryID string, want *content.Truncation) {
 	t.Helper()
-	art := blockArtifact(t, db, entryID)
-	if art.State != content.ArtifactSealed {
-		t.Fatalf("block %s is %q, want sealed", entryID, art.State)
-	}
+	art := waitForSealed(t, db, entryID)
 	switch {
 	case want == nil && art.Truncated != nil:
 		t.Fatalf("block %s is stored truncated %q, want whole", entryID, *art.Truncated)
@@ -93,11 +90,11 @@ var gap = func() *content.Truncation { g := content.TruncGap; return &g }()
 func completedWithRows(t *testing.T, fence lifecycle.FenceNonce) (*lifecycleTestEnv, session.ID, string, content.ContentDB) {
 	t.Helper()
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 	attempt := startsACommand(t, e, pub, lane, h, 2, "make")
-	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("building")}, ""); !confirm {
-		t.Fatal("the streamed row was not confirmed")
-	}
+	e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("building")}, "")
+	awaitConfirmedBlockRows(t, marks, 1)
+	awaitBlockRowsIdle(t, e.ws, session.ID(sid))
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence)))
 	return e, session.ID(sid), attempt, db
 }
@@ -150,11 +147,11 @@ func TestAnIntervalSettledWithoutItsFenceIsStoredAsAGap(t *testing.T) {
 func TestAnEntryWhoseDeliveryWasLostSealsTheCurrentBlockAsAGap(t *testing.T) {
 	e, pub, lane, h, sidStr, db := newLifecycleLedgerEnv(t, true)
 	sid := session.ID(sidStr)
-	e.ws.AttachBlockRows(sid)
+	marks := attachConfirmedBlockRows(t, e.ws, sid)
 	attempt := startsACommand(t, e, pub, lane, h, 2, "ssh host")
-	if _, confirm := e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("Welcome")}, ""); !confirm {
-		t.Fatal("the streamed row was not confirmed")
-	}
+	e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("Welcome")}, "")
+	awaitConfirmedBlockRows(t, marks, 1)
+	awaitBlockRowsIdle(t, e.ws, sid)
 
 	e.ws.BlockBoundaryLost(context.Background(), sid, [32]byte{})
 
@@ -193,7 +190,9 @@ func TestALossAndADetachSettleOneBlockOnce(t *testing.T) {
 		// ADR-0076: the coordinator's detach changes no block. The loss
 		// report arrives after the coordinator returns (it travels the
 		// re-adopted connection), and settles the still-open block.
-		e.ws.AttachBlockRows(sid)
+		if err := e.ws.AttachBlockRows(t.Context(), sid, nil); err != nil {
+			t.Fatalf("attach block rows: %v", err)
+		}
 		e.ws.BlockBoundaryLost(context.Background(), sid, fence)
 
 		// The boundary was lost: its end never arrived, so the seal says

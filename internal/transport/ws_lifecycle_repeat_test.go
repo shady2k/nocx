@@ -61,7 +61,9 @@ func newFreshCoordinator(t *testing.T, db content.ContentDB, sid string, lane li
 		}); err != nil {
 		t.Fatalf("re-adopting the session: %v", err)
 	}
-	ws.AttachBlockRows(session.ID(sid))
+	if err := ws.AttachBlockRows(t.Context(), session.ID(sid), nil); err != nil {
+		t.Fatalf("attach block rows: %v", err)
+	}
 	return &freshCoordinator{ws: ws, pub: pub}
 }
 
@@ -179,7 +181,9 @@ func TestARepeatedLifecycleFrameIsANoOpOnAFreshCoordinator(t *testing.T) {
 				}); err != nil {
 					t.Fatalf("CreateSession: %v", err)
 				}
-				e.ws.AttachBlockRows(session.ID(sid))
+				if err := e.ws.AttachBlockRows(t.Context(), session.ID(sid), nil); err != nil {
+					t.Fatalf("attach block rows: %v", err)
+				}
 				r := repeatFrames{lane: lane, h: h}
 				frames := tc.applied(r)
 				for _, env := range frames {

@@ -136,7 +136,9 @@ func lateOpenSetup(t *testing.T) (
 	store = &raceOpenStore{ledger: db.Ledger(), bound: make(chan struct{}), entered: make(chan struct{}, 1)}
 	e.ws.blockRowsStore = store
 	sid = session.ID(sidStr)
-	e.ws.AttachBlockRows(sid)
+	if err := e.ws.AttachBlockRows(t.Context(), sid, nil); err != nil {
+		t.Fatalf("attach block rows: %v", err)
+	}
 	attempt = startsACommand(t, e, pub, lane, h, 2, "make")
 	return e, pub, lane, h, sid, attempt, store, db
 }
@@ -319,7 +321,9 @@ func TestThreeAttemptsQueuedBehindOneOpenAllOpenOnceEachInOrder(t *testing.T) {
 	release := make(chan struct{})
 	store := &queueingOpenStore{hold: release, entered: make(chan struct{}, 1)}
 	e.ws.blockRowsStore = store
-	e.ws.AttachBlockRows(sid)
+	if err := e.ws.AttachBlockRows(t.Context(), sid, nil); err != nil {
+		t.Fatalf("attach block rows: %v", err)
+	}
 
 	done := make(chan struct{})
 	go func() {
@@ -361,7 +365,9 @@ func TestOneAttemptQueuedBehindOneOpenStillOpens(t *testing.T) {
 	release := make(chan struct{})
 	store := &queueingOpenStore{hold: release, entered: make(chan struct{}, 1)}
 	e.ws.blockRowsStore = store
-	e.ws.AttachBlockRows(sid)
+	if err := e.ws.AttachBlockRows(t.Context(), sid, nil); err != nil {
+		t.Fatalf("attach block rows: %v", err)
+	}
 
 	done := make(chan struct{})
 	go func() {
@@ -404,7 +410,9 @@ func TestAQueuedAttemptClosedWhileAnotherOpensInstallsNothing(t *testing.T) {
 	release := make(chan struct{})
 	store := &queueingOpenStore{hold: release, entered: make(chan struct{}, 1)}
 	e.ws.blockRowsStore = store
-	e.ws.AttachBlockRows(sid)
+	if err := e.ws.AttachBlockRows(t.Context(), sid, nil); err != nil {
+		t.Fatalf("attach block rows: %v", err)
+	}
 
 	done := make(chan struct{})
 	go func() {

@@ -67,7 +67,9 @@ func commandBeforeItsRow(t *testing.T) (*lifecycleTestEnv, session.ID, string, *
 	}
 	e.ws.blockRowsStore = store
 	sid := session.ID(sidStr)
-	e.ws.AttachBlockRows(sid)
+	if err := e.ws.AttachBlockRows(t.Context(), sid, nil); err != nil {
+		t.Fatalf("attach block rows: %v", err)
+	}
 	attempt := startsACommand(t, e, pub, lane, h, 2, "make")
 	ingest := func(seq uint64, evt lifecycle.Event) {
 		mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, seq, evt))

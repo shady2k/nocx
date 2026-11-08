@@ -26,9 +26,9 @@ func (o *orderedSink) note(e string) {
 	o.mu.Unlock()
 }
 
-func (o *orderedSink) AttachBlockRows(sid session.ID) {
+func (o *orderedSink) AttachBlockRows(ctx context.Context, sid session.ID, confirm func(uint64)) error {
 	o.note("attach")
-	o.fakeSink.AttachBlockRows(sid)
+	return o.fakeSink.AttachBlockRows(ctx, sid, confirm)
 }
 
 func (o *orderedSink) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows []emulator.Row, cause string) (uint64, bool) {
@@ -71,7 +71,10 @@ func TestRowsArrivingBetweenTheAttachAndTheBindReachTheStreamInOrder(t *testing.
 	src.deliverEnd(client.IntervalEnd{Nonce: nonce, EndRow: 277, Closing: rowsN(23)})
 
 	conf := &gatedConfirmer{asked: make(chan uint64, 8), release: make(chan struct{})}
-	stop := held.bindAfter(context.Background(), sink, "s1", conf, nil)
+	stop, err := held.bindAfter(context.Background(), sink, "s1", conf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer stop()
 	src.deliverClear()
 
@@ -113,7 +116,10 @@ func TestAReadoptedPanesRowsWaitForItsReplayedWindow(t *testing.T) {
 
 	replayed := make(chan struct{})
 	conf := &gatedConfirmer{asked: make(chan uint64, 8), release: make(chan struct{})}
-	stop := held.bindAfter(context.Background(), sink, "s1", conf, replayed)
+	stop, err := held.bindAfter(context.Background(), sink, "s1", conf, replayed)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer stop()
 	src.deliverRows(client.OutputRows{FromRow: 32, Rows: rowsN(32)}) // after the bind, before the replay
 

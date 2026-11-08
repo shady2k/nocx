@@ -20,6 +20,7 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/emulator"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // failFirstAppendStore refuses the FIRST AppendBlockRows once — a store that
@@ -67,9 +68,11 @@ func TestBlockRowsArrived_AutoFlushCountsTheBatchAgainstTheBound(t *testing.T) {
 	store := newFailFirstAppendStore(db.Ledger())
 	e.ws.blockRowsStore = store
 	confirmed := make(chan uint64, 8)
-	e.ws.AttachBlockRowsWithConfirmation(session.ID(sid), func(upTo uint64) {
+	if err := e.ws.AttachBlockRows(t.Context(), session.ID(sid), func(upTo uint64) {
 		confirmed <- upTo
-	})
+	}); err != nil {
+		t.Fatalf("attach block rows: %v", err)
+	}
 
 	rowBytes := heldRowsBytes([]emulator.Row{aStreamRow("x")})
 	e.ws.blockStream.mu.Lock()
@@ -155,6 +158,11 @@ func TestBlockRowsArrived_AutoFlushCountsTheBatchAgainstTheBound(t *testing.T) {
 	if c := <-confirmed; c != 2 {
 		t.Fatalf("second confirmed watermark = %d, want 2", c)
 	}
+	waittest.WaitFor(t, "the confirmed flush to release its ownership", func() bool {
+		e.ws.blockStream.mu.Lock()
+		defer e.ws.blockStream.mu.Unlock()
+		return !e.ws.blockStream.flushing[session.ID(sid)]
+	})
 	e.ws.blockStream.mu.Lock()
 	held = e.ws.blockStream.heldBytesLocked(session.ID(sid))
 	stillFlushing = e.ws.blockStream.flushing[session.ID(sid)]

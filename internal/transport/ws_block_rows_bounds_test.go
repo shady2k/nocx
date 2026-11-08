@@ -518,7 +518,9 @@ func TestTheThreeOutputBoundsHoldTogetherAtRealGeometry(t *testing.T) {
 			// The block stream is attached for the session, exactly as the
 			// app's binding does; without a source the stream is inert and
 			// no block would ever open.
-			e.ws.AttachBlockRows(session.ID(sid))
+			if err := e.ws.AttachBlockRows(t.Context(), session.ID(sid), rec.offerConfirmation); err != nil {
+				t.Fatalf("attach block rows: %v", err)
+			}
 
 			// runCommand runs one command through one block: the real
 			// submit over the ws conn, a command that prints its own

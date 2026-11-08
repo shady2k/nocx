@@ -7,10 +7,9 @@ package transport
 // snapshots the stale cursor and writes its own closing append at rows the
 // in-flight delivery owns — on the loaded run the two store transactions
 // interleaved, both succeeded, and the sealed body lost them both (256 of
-// 300 rows). The deferred-append path has always made its batch visible
-// (flushing, set by takeForFlushLocked) so closeBlockRows parks the end
-// behind it; the direct path must hold the same invariant: NO close-side
-// store op may overlap a delivery that is still in the store.
+// 300 rows). The pending-append owner makes every batch visible (flushing,
+// set by takeForFlushLocked) so closeBlockRows parks the end behind it:
+// NO close-side store op may overlap a delivery that is still in the store.
 //
 // The store double commits the watched delivery first, THEN holds the call —
 // exactly the production window — and records any overlapping close-side
@@ -23,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/emulator"
@@ -111,27 +111,32 @@ func TestACloseWaitsForADeliveryThatIsStillInTheStore(t *testing.T) {
 	}
 	e.ws.blockRowsStore = store
 	sid := session.ID(sidStr)
-	e.ws.AttachBlockRows(sid)
+	marks := attachConfirmedBlockRows(t, e.ws, sid)
 	attempt := startsACommand(t, e, pub, lane, h, 2, "make")
 
 	// The command's streamed rows, in live deliveries — all but the last
 	// one land unremarkably.
-	if up, confirm := e.ws.BlockRowsArrived(sid, 0, 0, rowsOf(t, 0, 128), ""); !confirm || up != 128 {
-		t.Fatalf("the first delivery: up=%d confirm=%v, want 128 true", up, confirm)
+	if up, confirm := e.ws.BlockRowsArrived(sid, 0, 0, rowsOf(t, 0, 128), ""); confirm || up != 0 {
+		t.Fatalf("the first admission: up=%d confirm=%v, want deferred confirmation", up, confirm)
 	}
-	if up, confirm := e.ws.BlockRowsArrived(sid, 128, 0, rowsOf(t, 128, 128), ""); !confirm || up != 256 {
-		t.Fatalf("the second delivery: up=%d confirm=%v, want 256 true", up, confirm)
+	awaitConfirmedBlockRows(t, marks, 128)
+	if up, confirm := e.ws.BlockRowsArrived(sid, 128, 0, rowsOf(t, 128, 128), ""); confirm || up != 0 {
+		t.Fatalf("the second admission: up=%d confirm=%v, want deferred confirmation", up, confirm)
 	}
+	awaitConfirmedBlockRows(t, marks, 256)
+	awaitBlockRowsIdle(t, e.ws, sid)
 
 	// THE LAST LIVE DELIVERY COMMITS, THEN THE CALL HANGS IN THE STORE —
 	// the loaded window: the store cursor is 277, block.rows still says 256.
 	store.beginWatch(256)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		e.ws.BlockRowsArrived(sid, 256, 0, rowsOf(t, 256, 21), "")
-	}()
-	<-store.entered
+	if up, confirm := e.ws.BlockRowsArrived(sid, 256, 0, rowsOf(t, 256, 21), ""); confirm || up != 0 {
+		t.Fatalf("the held admission: up=%d confirm=%v, want deferred confirmation", up, confirm)
+	}
+	select {
+	case <-store.entered:
+	case <-time.After(wantWithin):
+		t.Fatal("the last delivery never reached the store")
+	}
 
 	// THE COMPLETION'S FENCE IS PUBLISHED FIRST, as the replayed window's
 	// completion arrives before the block's end is processed: with the
@@ -158,7 +163,6 @@ func TestACloseWaitsForADeliveryThatIsStillInTheStore(t *testing.T) {
 	// The delivery lands, and with it the whole handoff: the parked end (if
 	// any) closes at the true cursor and the artifact seals with every row.
 	close(store.release)
-	<-done
 	waittest.WaitForDetail(t, "the block to seal with every row of the command", func() string {
 		row, rowErr := db.Ledger().Entry(context.Background(), attempt)
 		if rowErr != nil || row == nil {

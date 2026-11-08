@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -23,6 +24,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
+	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 )
 
@@ -34,6 +36,60 @@ func aStreamRow(text string) emulator.Row {
 		})
 	}
 	return row
+}
+
+// attachConfirmedBlockRows observes the same durable confirmation used by the
+// app bridge. Admission alone no longer implies a completed store mutation.
+func attachConfirmedBlockRows(t *testing.T, ws *WSServer, sid session.ID) <-chan uint64 {
+	t.Helper()
+	marks := make(chan uint64, 1024)
+	if err := ws.AttachBlockRows(t.Context(), sid, func(up uint64) { marks <- up }); err != nil {
+		t.Fatal(err)
+	}
+	return marks
+}
+
+func awaitConfirmedBlockRows(t *testing.T, marks <-chan uint64, want uint64) {
+	t.Helper()
+	timer := time.NewTimer(wantWithin)
+	defer timer.Stop()
+	for {
+		select {
+		case up := <-marks:
+			if up >= want {
+				if up != want {
+					t.Fatalf("durable confirmation = %d, want %d", up, want)
+				}
+				return
+			}
+		case <-timer.C:
+			t.Fatalf("rows through %d were never durably confirmed", want)
+		}
+	}
+}
+
+// deliverAndAwaitRows is only for assertions whose premise is durable
+// delivery. Unlike admission, it waits for the actual helper-facing mark.
+func deliverAndAwaitRows(t *testing.T, marks <-chan uint64, ws *WSServer, sid session.ID, from, lost uint64, rows []emulator.Row, cause string) (uint64, bool) {
+	t.Helper()
+	if up, confirmed := ws.BlockRowsArrived(sid, from, lost, rows, cause); confirmed {
+		return up, true
+	}
+	timer := time.NewTimer(wantWithin)
+	defer timer.Stop()
+	for {
+		select {
+		case up := <-marks:
+			if up < from+uint64(len(rows)) {
+				continue // an earlier queued delivery's durable confirmation
+			}
+			awaitBlockRowsIdle(t, ws, sid)
+			return up, true
+		case <-timer.C:
+			t.Fatal("admitted rows were not durably confirmed")
+			return 0, false
+		}
+	}
 }
 
 type closeFailureBlockStore struct {
@@ -111,6 +167,251 @@ func (s *blockingAppendStore) CloseBlockRows(ctx context.Context, in content.Clo
 
 func (s *blockingAppendStore) RecordClearBoundary(ctx context.Context, in content.RecordClearBoundary) (content.ClearBoundaryRecorded, error) {
 	return s.ledger.RecordClearBoundary(ctx, in)
+}
+
+// A row observer runs on the helper connection's one reader. Its next frame
+// can belong to another pane: waiting for this pane's durable append must not
+// keep that screen behind the content writer. The store gate, not a sleep,
+// establishes the interleaving; the screen is observed on the real WebSocket.
+func TestBlockRowsArrived_SlowStoreDoesNotHoldTheNextScreen(t *testing.T) {
+	db := newLedgerStore(t)
+	e, pub, lane, h, sid, _ := newLifecycleLedgerEnvWithStore(t, db)
+	createSessionRow(t, db, sid)
+	other := session.ID(e.openSession(t, 301))
+	store := newBlockingAppendStore(db.Ledger())
+	e.ws.blockRowsStore = store
+	confirmed := make(chan uint64, 8)
+	if err := e.ws.AttachBlockRows(t.Context(), session.ID(sid), func(up uint64) { confirmed <- up }); err != nil {
+		t.Fatal(err)
+	}
+	attempt := startsACommand(t, e, pub, lane, h, 2, "stream rows")
+	var once sync.Once
+	release := func() { once.Do(func() { close(store.release) }) }
+	t.Cleanup(release)
+
+	doc := []byte(`{"revision":77,"state":{"screen":"other pane remains visible"}}`)
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("first")}, "")
+		e.ws.PublishScreenFrame(other, 77, doc)
+	}()
+	t.Cleanup(func() {
+		release()
+		select {
+		case <-readerDone:
+		case <-time.After(wantWithin):
+			t.Error("row observer did not finish after releasing the store")
+		}
+	})
+	select {
+	case <-store.entered:
+	case <-time.After(wantWithin):
+		t.Fatal("the admitted delivery never reached the store")
+	}
+	_, err := awaitFrame(e.conn, time.Now().Add(wantWithin), func(msg []byte) bool {
+		frame, decodeErr := DecodeFrame(msg)
+		return decodeErr == nil && frame.MsgType == MsgTypeMetadata && string(frame.Payload) == string(doc)
+	})
+	if err != nil {
+		t.Fatalf("another pane's screen waited behind the blocked row store: %v", err)
+	}
+	select {
+	case up := <-confirmed:
+		t.Fatalf("confirmed row %d before the store accepted it", up)
+	default:
+	}
+
+	// The existing bounded owner must retain the next delivery, and its
+	// authenticated end must wait for BOTH rows, not seal at the old cursor.
+	e.ws.BlockRowsArrived(session.ID(sid), 1, 0, []emulator.Row{aStreamRow("second")}, "")
+	bs := e.ws.blockStream
+	bs.mu.Lock()
+	held := bs.heldBytesLocked(session.ID(sid))
+	wantHeld := heldRowsBytes([]emulator.Row{aStreamRow("first"), aStreamRow("second")})
+	bs.mu.Unlock()
+	if held != wantHeld {
+		t.Fatalf("in-flight plus pending bytes = %d, want %d", held, wantHeld)
+	}
+	fence := lifecycleFence(0x76)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence)))
+	e.ws.BlockIntervalEnded(session.ID(sid), fence, 2, nil, false)
+	release()
+	for _, want := range []uint64{1, 2} {
+		select {
+		case up := <-confirmed:
+			if up != want {
+				t.Fatalf("confirmation = %d, want ordered durable row %d", up, want)
+			}
+		case <-time.After(wantWithin):
+			t.Fatalf("row %d was not confirmed after storage resumed", want)
+		}
+	}
+	if _, err := awaitFrame(e.conn, time.Now().Add(wantWithin), isNotification("block.closed")); err != nil {
+		t.Fatalf("the authenticated end did not close after the tail: %v", err)
+	}
+	assertBlockSealed(t, db, attempt)
+	rows := streamRows(t, db, attempt)
+	if len(rows) != 2 || rows[0].From != 0 || rows[0].Text != "first" || rows[1].From != 1 || rows[1].Text != "second" {
+		t.Fatalf("sealed rows = %+v, want the complete ordered tail", rows)
+	}
+}
+
+func TestStopAccountsForAdmittedRowsAndRejectsLateRows(t *testing.T) {
+	db := newLedgerStore(t)
+	var logs syncBuffer
+	logger := log.NewSlogAdapter(slog.New(slog.NewJSONHandler(&logs, nil)))
+	e, pub, lane, h, sid, _ := newLifecycleLedgerEnvWithStore(t, db, func(ws *WSServer) {
+		ws.log = logger
+	})
+	createSessionRow(t, db, sid)
+	store := newBlockingAppendStore(db.Ledger())
+	e.ws.blockRowsStore = store
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
+	attempt := startsACommand(t, e, pub, lane, h, 2, "shutdown tail")
+	var once sync.Once
+	release := func() { once.Do(func() { close(store.release) }) }
+	t.Cleanup(func() {
+		release()
+		awaitBlockRowsIdle(t, e.ws, session.ID(sid))
+	})
+	e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("first")}, "")
+	select {
+	case <-store.entered:
+	case <-time.After(wantWithin):
+		t.Fatal("the admitted row never reached the store")
+	}
+	e.ws.BlockRowsArrived(session.ID(sid), 1, 0, []emulator.Row{aStreamRow("second")}, "")
+	fence := lifecycleFence(0x77)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence)))
+	e.ws.BlockIntervalEnded(session.ID(sid), fence, 2, nil, false)
+
+	// A deliberately uncooperative store must consume the EXISTING bounded
+	// recorder drain and be reported as abandoned, not escape accounting.
+	// No test sleep or enlarged shutdown timeout establishes this ordering.
+	if err := e.ws.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "abandoning") {
+		t.Error("Stop returned without accounting for the blocked durable row drain")
+	}
+	select {
+	case up := <-marks:
+		t.Fatalf("Stop confirmed row %d before storage resumed", up)
+	default:
+	}
+	if up, confirmed := e.ws.BlockRowsArrived(session.ID(sid), 2, 0, []emulator.Row{aStreamRow("too late")}, ""); confirmed || up != 0 {
+		t.Fatalf("post-stop admission = (%d, %v), want no confirmation", up, confirmed)
+	}
+	bs := e.ws.blockStream
+	bs.mu.Lock()
+	held := bs.heldBytesLocked(session.ID(sid))
+	bs.mu.Unlock()
+	if want := heldRowsBytes([]emulator.Row{aStreamRow("first"), aStreamRow("second")}); held != want {
+		t.Errorf("post-stop retained bytes = %d, want only the admitted tail's %d", held, want)
+	}
+
+	// Stopping admission must not stop the already-owned tail or its parked
+	// close. The shared recorder count retires only after both have settled.
+	release()
+	if !waitGroupWithin(&e.ws.sessionRecorders, wantWithin) {
+		t.Fatal("the durable row drain did not retire after storage resumed")
+	}
+	awaitConfirmedBlockRows(t, marks, 2)
+	assertBlockSealed(t, db, attempt)
+	rows := streamRows(t, db, attempt)
+	if len(rows) != 2 || rows[0].Text != "first" || rows[1].Text != "second" {
+		t.Fatalf("shutdown tail = %+v, want the two admitted rows only", rows)
+	}
+}
+
+func TestBlockRowsArrived_CancelledReplacementWaitsForPriorDurableCursor(t *testing.T) {
+	db := newLedgerStore(t)
+	e, pub, lane, h, sid, _ := newLifecycleLedgerEnvWithStore(t, db)
+	createSessionRow(t, db, sid)
+	oldMarks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
+	attempt := startsACommand(t, e, pub, lane, h, 2, "retain rows")
+	store := newBlockingAppendStore(db.Ledger())
+	e.ws.blockRowsStore = store
+	var once sync.Once
+	release := func() { once.Do(func() { close(store.release) }) }
+	t.Cleanup(release)
+	e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("old attachment")}, "")
+	select {
+	case <-store.entered:
+	case <-time.After(wantWithin):
+		t.Fatal("old attachment did not enter its durable write")
+	}
+	bs := e.ws.blockStream
+	bs.mu.Lock()
+	waiterAllocated := bs.flushDone[session.ID(sid)].done != nil
+	bs.mu.Unlock()
+	if waiterAllocated {
+		t.Fatal("ordinary row admission allocated a replacement waiter")
+	}
+	t.Cleanup(func() {
+		release()
+		awaitBlockRowsIdle(t, e.ws, session.ID(sid))
+	})
+	e.ws.DetachBlockRows(session.ID(sid))
+
+	cancelledMarks := make(chan uint64, 1)
+	ctx, cancel := context.WithCancel(t.Context())
+	attaching := make(chan struct{})
+	attached := make(chan error, 1)
+	go func() {
+		close(attaching)
+		attached <- e.ws.AttachBlockRows(ctx, session.ID(sid), func(up uint64) { cancelledMarks <- up })
+	}()
+	<-attaching
+	cancel()
+	select {
+	case err := <-attached:
+		if err != context.Canceled {
+			t.Fatalf("replacement while prior write is held = %v, want cancellation", err)
+		}
+	case <-time.After(wantWithin):
+		t.Fatal("replacement ignored cancellation while waiting for the prior write")
+	}
+	bs.mu.Lock()
+	_, sourced := bs.sources[session.ID(sid)]
+	gen := bs.attachGen[session.ID(sid)]
+	oldDone := bs.flushDone[session.ID(sid)].done
+	bs.mu.Unlock()
+	if sourced || gen != 0 {
+		t.Fatal("cancelled replacement left a live rows binding")
+	}
+	if oldDone == nil {
+		t.Fatal("replacement never registered its drain wait")
+	}
+	release()
+	select {
+	case <-oldDone:
+	case <-time.After(wantWithin):
+		t.Fatal("detached flush did not retire after its store call returned")
+	}
+	for _, marks := range []<-chan uint64{oldMarks, cancelledMarks} {
+		select {
+		case up := <-marks:
+			t.Fatalf("detached or cancelled attachment confirmed late row %d", up)
+		default:
+		}
+	}
+	newMarks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
+	bs.mu.Lock()
+	cursor := bs.current[session.ID(sid)].rows
+	_, activeFlush := bs.flushDone[session.ID(sid)]
+	bs.mu.Unlock()
+	if cursor != 1 || activeFlush {
+		t.Fatalf("replacement cursor=%d activeFlush=%v, want durable cursor 1 and retired owner", cursor, activeFlush)
+	}
+	if up, ok := deliverAndAwaitRows(t, newMarks, e.ws, session.ID(sid), 1, 0, []emulator.Row{aStreamRow("replacement")}, ""); !ok || up != 2 {
+		t.Fatalf("replacement durable confirmation = (%d,%v), want (2,true)", up, ok)
+	}
+	rows := streamRows(t, db, attempt)
+	if len(rows) != 2 || rows[0].Text != "old attachment" || rows[1].Text != "replacement" {
+		t.Fatalf("reattached rows = %+v, want both durable deliveries once", rows)
+	}
 }
 
 func blockRowsBody(t *testing.T, db content.ContentDB, entryID string) string {
@@ -194,26 +495,7 @@ func streamRows(t *testing.T, db content.ContentDB, entryID string) []struct {
 
 func assertBlockSealed(t *testing.T, db content.ContentDB, entryID string) {
 	t.Helper()
-	row, err := db.Ledger().Entry(context.Background(), entryID)
-	if err != nil {
-		t.Fatalf("Entry(%s): %v", entryID, err)
-	}
-	for _, ex := range row.Executions {
-		for _, artifact := range ex.Artifacts {
-			if artifact.MediaType != content.MediaBlockRows {
-				continue
-			}
-			stored, err := db.Ledger().Artifact(context.Background(), artifact.ID)
-			if err != nil {
-				t.Fatalf("Artifact(%s): %v", artifact.ID, err)
-			}
-			if stored.State != content.ArtifactSealed {
-				t.Fatalf("block %s state = %q, want sealed", entryID, stored.State)
-			}
-			return
-		}
-	}
-	t.Fatalf("entry %s has no block rows artifact", entryID)
+	waitForSealed(t, db, entryID)
 }
 
 // The opposite event order is also load-bearing: ledger submit/start and the
@@ -221,11 +503,11 @@ func assertBlockSealed(t *testing.T, db content.ContentDB, entryID string) {
 // appends immediately to the already-selected block.
 func TestBlockRowsArrived_AppendsToTheAuthenticatedCommand(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	attempt := startsACommand(t, e, pub, lane, h, 2, "printf 'one\\ntwo\\n'")
 
-	written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{
+	written, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 0, 0, []emulator.Row{
 		aStreamRow("one"), aStreamRow("two"),
 	}, "")
 	if !confirm || written != 2 {
@@ -248,13 +530,13 @@ func TestBlockRowsArrived_AppendsToTheAuthenticatedCommand(t *testing.T) {
 
 func TestOutputStartMarkDoesNotChangeFreshAuthenticatedStart(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 	e.ws.BlockOutputStartPlaneAttached(session.ID(sid))
 	// A position mark can arrive before the authenticated start on the rows
 	// plane. It must not change a fresh block's ordinary row-zero boundary.
 	e.ws.BlockOutputStartRow(session.ID(sid), 2)
 	attempt := startsACommand(t, e, pub, lane, h, 2, "printf output")
-	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{
+	if up, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 0, 0, []emulator.Row{
 		aStreamRow("prompt"), aStreamRow("prior"), aStreamRow("output"),
 	}, ""); !confirm || up != 3 {
 		t.Fatalf("marked rows ack = (%d, %v), want 3", up, confirm)
@@ -263,7 +545,7 @@ func TestOutputStartMarkDoesNotChangeFreshAuthenticatedStart(t *testing.T) {
 	if len(rows) != 3 || rows[0].Text != "prompt" || rows[0].From != 0 || rows[2].Text != "output" {
 		t.Fatalf("fresh block rows = %+v, want the full row-zero stream", rows)
 	}
-	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 3, 0, []emulator.Row{aStreamRow("tail")}, ""); !confirm || up != 4 {
+	if up, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 3, 0, []emulator.Row{aStreamRow("tail")}, ""); !confirm || up != 4 {
 		t.Fatalf("post-mark ack = (%d, %v), want 4 confirmed", up, confirm)
 	}
 	rows = streamRows(t, db, attempt)
@@ -274,7 +556,7 @@ func TestOutputStartMarkDoesNotChangeFreshAuthenticatedStart(t *testing.T) {
 
 func TestOutputStartReplayMarkJoinsCurrentBlockAheadOfQueuedAttempt(t *testing.T) {
 	e, pub, lane, h, sid, _ := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 	e.ws.BlockOutputStartPlaneAttached(session.ID(sid))
 	startsACommand(t, e, pub, lane, h, 2, "printf first")
 
@@ -310,7 +592,7 @@ func TestOutputStartReplayMarkJoinsCurrentBlockAheadOfQueuedAttempt(t *testing.T
 
 func TestRecoveredOutputMarkDoesNotSkipPastEmptyDurableCursor(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 	attempt := startsACommand(t, e, pub, lane, h, 2, "printf recovery")
 
 	bs := e.ws.blockStream
@@ -319,7 +601,7 @@ func TestRecoveredOutputMarkDoesNotSkipPastEmptyDurableCursor(t *testing.T) {
 	bs.mu.Unlock()
 	e.ws.BlockOutputStartRow(session.ID(sid), 2)
 
-	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{
+	if up, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 0, 0, []emulator.Row{
 		aStreamRow("first owed row"), aStreamRow("second owed row"), aStreamRow("third owed row"),
 	}, ""); !confirm || up != 3 {
 		t.Fatalf("recovered rows ack = (%d, %v), want the whole undurable prefix", up, confirm)
@@ -332,10 +614,10 @@ func TestRecoveredOutputMarkDoesNotSkipPastEmptyDurableCursor(t *testing.T) {
 
 func TestAuthenticatedStartKeepsTheRowZeroPathWhenNoOutputMarkExists(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 	e.ws.BlockOutputStartPlaneAttached(session.ID(sid))
 	attempt := startsACommand(t, e, pub, lane, h, 2, "printf without shell integration")
-	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("ordinary output")}, ""); !confirm || up != 1 {
+	if up, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 0, 0, []emulator.Row{aStreamRow("ordinary output")}, ""); !confirm || up != 1 {
 		t.Fatalf("ordinary no-mark row = (%d, %v), want row 1 confirmed", up, confirm)
 	}
 	rows := streamRows(t, db, attempt)
@@ -346,14 +628,14 @@ func TestAuthenticatedStartKeepsTheRowZeroPathWhenNoOutputMarkExists(t *testing.
 
 func TestOutputStartMarkDoesNotAuthorizeABlockAndCanPrecedeStart(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 	e.ws.BlockOutputStartPlaneAttached(session.ID(sid))
 	e.ws.BlockOutputStartRow(session.ID(sid), 2)
 	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 2, 0, []emulator.Row{aStreamRow("early")}, ""); confirm || up != 0 {
 		t.Fatalf("rows before authenticated Start = (%d, %v), want rejected", up, confirm)
 	}
 	attempt := startsACommand(t, e, pub, lane, h, 2, "printf output")
-	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{
+	if up, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 0, 0, []emulator.Row{
 		aStreamRow("prompt"), aStreamRow("prior"), aStreamRow("output"),
 	}, ""); !confirm || up != 3 {
 		t.Fatalf("resend ack = (%d, %v), want 3", up, confirm)
@@ -369,7 +651,7 @@ func TestOutputStartMarkDoesNotAuthorizeABlockAndCanPrecedeStart(t *testing.T) {
 // that emitted them until its end marker opens the next block.
 func TestBlockRowsArrived_WaitsForPriorIntervalBeforeNextOpen(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	first := startsACommand(t, e, pub, lane, h, 2, "printf first")
 	firstFence := lifecycleFence(0x61)
@@ -377,7 +659,7 @@ func TestBlockRowsArrived_WaitsForPriorIntervalBeforeNextOpen(t *testing.T) {
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 4, lifecyclePromptEvt()))
 	second := startsACommand(t, e, pub, lane, h, 5, "printf second")
 
-	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("first-departed")}, ""); !confirm {
+	if _, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 0, 0, []emulator.Row{aStreamRow("first-departed")}, ""); !confirm {
 		t.Fatal("the first interval's delayed row was not confirmed")
 	}
 	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 1, []emulator.Row{aStreamRow("first-final")}, false)
@@ -385,10 +667,10 @@ func TestBlockRowsArrived_WaitsForPriorIntervalBeforeNextOpen(t *testing.T) {
 	// A replay from below the closed interval's own boundary is confirmed at
 	// that boundary — so the helper's mark may advance — and enters no block.
 	// Its closing screen never streams again: the runtime holds it back.
-	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("first-tail-replayed")}, ""); !confirm || written != 1 {
+	if written, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 0, 0, []emulator.Row{aStreamRow("first-tail-replayed")}, ""); !confirm || written != 1 {
 		t.Fatalf("replayed row ack = (%d, %v), want the closed boundary 1", written, confirm)
 	}
-	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 1, 0, []emulator.Row{aStreamRow("second-departed")}, ""); !confirm {
+	if _, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 1, 0, []emulator.Row{aStreamRow("second-departed")}, ""); !confirm {
 		t.Fatal("the second interval's row was not confirmed")
 	}
 
@@ -415,7 +697,7 @@ func TestBlockRowsArrived_WaitsForPriorIntervalBeforeNextOpen(t *testing.T) {
 // is what separates a row leaving again from the successor's own row.
 func TestBlockRowsArrived_RowsBehindTheBoundaryEnterNoBlock(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	first := startsACommand(t, e, pub, lane, h, 2, "printf first")
 	firstFence := lifecycleFence(0x91)
@@ -431,7 +713,7 @@ func TestBlockRowsArrived_RowsBehindTheBoundaryEnterNoBlock(t *testing.T) {
 	// The first command's departed rows, then its end marker at row 2 carrying
 	// the two rows the boundary sat on — a screenful that has not left the
 	// screen yet.
-	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{
+	if written, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 0, 0, []emulator.Row{
 		aStreamRow("first-1"), aStreamRow("first-2"),
 	}, ""); !confirm || written != 2 {
 		t.Fatalf("first rows ack = (%d, %v), want rows 0..1 written", written, confirm)
@@ -444,12 +726,12 @@ func TestBlockRowsArrived_RowsBehindTheBoundaryEnterNoBlock(t *testing.T) {
 	// stored nowhere. Its closing screen never arrives again at all: the
 	// runtime holds it back (rowstream.go), so there is no delivery of it to
 	// refuse — the ownership of those rows is the runtime's.
-	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{
+	if written, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 0, 0, []emulator.Row{
 		aStreamRow("first-1-again"), aStreamRow("first-2-again"),
 	}, ""); !confirm || written != 2 {
 		t.Fatalf("replay ack = (%d, %v), want the closed boundary 2", written, confirm)
 	}
-	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 4, 0, []emulator.Row{aStreamRow("second-1")}, ""); !confirm || written != 5 {
+	if written, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 4, 0, []emulator.Row{aStreamRow("second-1")}, ""); !confirm || written != 5 {
 		t.Fatalf("second rows ack = (%d, %v), want the successor's first row written at 4", written, confirm)
 	}
 	e.ws.BlockIntervalEnded(session.ID(sid), secondFence, 5, []emulator.Row{aStreamRow("second-2")}, false)
@@ -493,14 +775,14 @@ func TestBlockRowsArrived_RowsBehindTheBoundaryEnterNoBlock(t *testing.T) {
 // append lands behind a cursor that already moved.
 func TestBlockRowsArrived_RowsAfterAParkedEndMarkerWaitForTheNextInterval(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	first := startsACommand(t, e, pub, lane, h, 2, "printf first")
 	firstFence := lifecycleFence(0xa1)
 
 	// The first interval's own rows, then its end marker at row 2 — parked,
 	// because its completion has not been published yet.
-	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{
+	if written, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 0, 0, []emulator.Row{
 		aStreamRow("first-1"), aStreamRow("first-2"),
 	}, ""); !confirm || written != 2 {
 		t.Fatalf("first rows ack = (%d, %v), want rows 0..1 written", written, confirm)
@@ -542,7 +824,7 @@ func TestBlockRowsArrived_RowsAfterAParkedEndMarkerWaitForTheNextInterval(t *tes
 	second := startsACommand(t, e, pub, lane, h, 6, "printf second")
 	secondFence := lifecycleFence(0xa2)
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 7, lifecycleCompleteEvt(lifecycle.AttemptID(second), 0, secondFence)))
-	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 4, 0, []emulator.Row{aStreamRow("second-3")}, ""); !confirm || written != 5 {
+	if written, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 4, 0, []emulator.Row{aStreamRow("second-3")}, ""); !confirm || written != 5 {
 		t.Fatalf("second rows ack = (%d, %v), want row 4 written", written, confirm)
 	}
 	e.ws.BlockIntervalEnded(session.ID(sid), secondFence, 5, []emulator.Row{aStreamRow("second-screen")}, false)
@@ -568,7 +850,7 @@ func TestBlockRowsArrived_RowsAfterAParkedEndMarkerWaitForTheNextInterval(t *tes
 // prior interval loses the current destination before its own end arrives.
 func TestBlockRowsQueuedEndWaitsForPriorInterval(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	first := startsACommand(t, e, pub, lane, h, 2, "printf first")
 	firstFence := lifecycleFence(0x71)
@@ -613,7 +895,7 @@ func TestBlockRowsQueuedEndWaitsForPriorInterval(t *testing.T) {
 // start reached the kernel in every run measured for this bead.
 func TestBlockRowsUnknownAttemptOnNestedDomainClose_DoesNotStickTheQueue(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	if err := pub.BindTransport("T2", noopPort{}); err != nil {
 		t.Fatalf("BindTransport T2: %v", err)
@@ -708,7 +990,7 @@ func submitsInChild(t *testing.T, e *lifecycleTestEnv, pub *lifecyclepub.Publish
 // completion settles the attempt, not a new block.
 func TestBlockRowsSshJourney_EveryBlockKeepsItsOwnRows(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	// The local `ssh`, handing the lane to a child that says hello.
 	sshAttempt := startsACommand(t, e, pub, lane, h, 2, "ssh host")
@@ -783,7 +1065,7 @@ func TestBlockRowsSshJourney_EveryBlockKeepsItsOwnRows(t *testing.T) {
 
 func TestBlockRowsPendingRowsSplitAtPriorEnd(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	first := startsACommand(t, e, pub, lane, h, 2, "printf first")
 	firstFence := lifecycleFence(0x81)
@@ -825,7 +1107,7 @@ func TestBlockRowsCloseFailureRetainsCurrentForRetry(t *testing.T) {
 	e, pub, lane, h, sid, _ := newLifecycleLedgerEnvWithStore(t, db)
 	failing := &closeFailureBlockStore{ledger: db.Ledger(), fail: true}
 	e.ws.blockRowsStore = failing
-	e.ws.AttachBlockRows(session.ID(sid))
+	attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	first := startsACommand(t, e, pub, lane, h, 2, "printf first")
 	firstFence := lifecycleFence(0x91)
@@ -871,7 +1153,7 @@ func TestBlockRowsClosingAppendFailureRetainsCurrentForRetry(t *testing.T) {
 	e, pub, lane, h, sid, _ := newLifecycleLedgerEnvWithStore(t, db)
 	failing := &closeFailureBlockStore{ledger: db.Ledger(), appendFail: true}
 	e.ws.blockRowsStore = failing
-	e.ws.AttachBlockRows(session.ID(sid))
+	attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	first := startsACommand(t, e, pub, lane, h, 2, "printf first")
 	firstFence := lifecycleFence(0x93)
@@ -903,10 +1185,7 @@ func TestBlockRowsClosingAppendFailureRetainsCurrentForRetry(t *testing.T) {
 // current is nil would lose it permanently.
 func TestBlockRowsArrived_BeforeLedgerBindIsHeldUntilRetry(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	var confirmed []uint64
-	e.ws.AttachBlockRowsWithConfirmation(session.ID(sid), func(upTo uint64) {
-		confirmed = append(confirmed, upTo)
-	})
+	confirmed := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	const command = "printf before-bind"
 	got := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt",
@@ -935,9 +1214,7 @@ func TestBlockRowsArrived_BeforeLedgerBindIsHeldUntilRetry(t *testing.T) {
 	}
 	// The held row sits at index 0, so the mark the helper may advance to is
 	// the exclusive end of what the store holds: 1.
-	if len(confirmed) != 1 || confirmed[0] != 1 {
-		t.Fatalf("deferred confirmation = %v, want [1]", confirmed)
-	}
+	awaitConfirmedBlockRows(t, confirmed, 1)
 }
 
 // An authenticated end can resolve while the bind retry is flushing rows.
@@ -945,10 +1222,10 @@ func TestBlockRowsArrived_BeforeLedgerBindIsHeldUntilRetry(t *testing.T) {
 // deferred rows reach the store.
 func TestBlockRowsCloseWaitsForDeferredRows(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 	attempt := startsACommand(t, e, pub, lane, h, 2, "printf deferred")
 
-	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("seed")}, ""); !confirm {
+	if _, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 0, 0, []emulator.Row{aStreamRow("seed")}, ""); !confirm {
 		t.Fatal("seed row was not confirmed")
 	}
 	existing := streamRows(t, db, attempt)
@@ -974,9 +1251,10 @@ func TestBlockRowsCloseWaitsForDeferredRows(t *testing.T) {
 	// that extracts it (nocx-2v80t.3.51); this test drives flushPendingRows
 	// directly, so it stands in for that caller here.
 	e.ws.blockStream.beginFlushLocked(session.ID(sid), pending)
+	gen := e.ws.blockStream.attachGen[session.ID(sid)]
 	e.ws.blockStream.mu.Unlock()
 
-	e.ws.blockStream.flushPendingRows(context.Background(), e.ws, session.ID(sid), block, pending, nil)
+	e.ws.blockStream.flushPendingRows(context.Background(), e.ws, session.ID(sid), block, pending, nil, gen)
 	kept := streamRows(t, db, attempt)
 	if len(kept) != 3 || kept[0].Text != "seed" || kept[1].Text != "deferred" || kept[2].Text != "closing" {
 		t.Fatalf("flush-before-close rows = %+v, want seed, deferred, closing", kept)
@@ -1006,9 +1284,9 @@ func TestBlockRowsCloseWaitsForDeferredRows(t *testing.T) {
 // drain the gate.
 func TestBlockRowsCloseKeepsTheAttemptThatEndedDuringAFlush(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 	first := startsACommand(t, e, pub, lane, h, 2, "printf first")
-	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("first")}, ""); !confirm {
+	if _, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 0, 0, []emulator.Row{aStreamRow("first")}, ""); !confirm {
 		t.Fatal("first row was not confirmed")
 	}
 	firstFence := lifecycleFence(0x41)
@@ -1039,8 +1317,9 @@ func TestBlockRowsCloseKeepsTheAttemptThatEndedDuringAFlush(t *testing.T) {
 	// A real caller counts the batch as flushingBytes at the same lock hold
 	// that extracts it (nocx-2v80t.3.51).
 	e.ws.blockStream.beginFlushLocked(session.ID(sid), pending)
+	gen := e.ws.blockStream.attachGen[session.ID(sid)]
 	e.ws.blockStream.mu.Unlock()
-	e.ws.blockStream.flushPendingRows(context.Background(), e.ws, session.ID(sid), firstBlock, pending, nil)
+	e.ws.blockStream.flushPendingRows(context.Background(), e.ws, session.ID(sid), firstBlock, pending, nil, gen)
 
 	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 2, []emulator.Row{aStreamRow("first-final")}, false)
 	assertBlockSealed(t, db, first)
@@ -1051,7 +1330,7 @@ func TestBlockRowsCloseKeepsTheAttemptThatEndedDuringAFlush(t *testing.T) {
 	nextSeq := uint64(8)
 	for i := 3; i <= 30; i++ {
 		attempt := startsACommand(t, e, pub, lane, h, nextSeq, fmt.Sprintf("printf command-%02d", i))
-		if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow(fmt.Sprintf("command-%02d", i))}, ""); !confirm {
+		if _, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 0, 0, []emulator.Row{aStreamRow(fmt.Sprintf("command-%02d", i))}, ""); !confirm {
 			t.Fatalf("command %d row was not confirmed", i)
 		}
 		fence := lifecycleFence(byte(i))
@@ -1081,7 +1360,7 @@ func TestFlushingBatchCountsAgainstTheBufferBound(t *testing.T) {
 	e, pub, lane, h, sid, _ := newLifecycleLedgerEnvWithStore(t, db)
 	store := newBlockingAppendStore(db.Ledger())
 	e.ws.blockRowsStore = store
-	e.ws.AttachBlockRows(session.ID(sid))
+	attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 	// SetBlockRowsBufferBytes clamps to MinBlockRowsBufferBytes (4 MiB), far
 	// above what a handful of test rows can exercise, so the bound is set
 	// directly on the attached session the way these tests already reach
@@ -1113,8 +1392,9 @@ func TestFlushingBatchCountsAgainstTheBufferBound(t *testing.T) {
 	// A real caller counts the batch as flushingBytes at the same lock hold
 	// that extracts it (nocx-2v80t.3.51).
 	e.ws.blockStream.beginFlushLocked(session.ID(sid), inFlight)
+	gen := e.ws.blockStream.attachGen[session.ID(sid)]
 	e.ws.blockStream.mu.Unlock()
-	go e.ws.blockStream.flushPendingRows(context.Background(), e.ws, session.ID(sid), block, inFlight, nil)
+	go e.ws.blockStream.flushPendingRows(context.Background(), e.ws, session.ID(sid), block, inFlight, nil, gen)
 	select {
 	case <-store.entered:
 	case <-time.After(5 * time.Second):
@@ -1187,7 +1467,7 @@ func TestFlushingBatchReleasesTheBudgetOnceItLands(t *testing.T) {
 	e, pub, lane, h, sid, _ := newLifecycleLedgerEnvWithStore(t, db)
 	store := newBlockingAppendStore(db.Ledger())
 	e.ws.blockRowsStore = store
-	e.ws.AttachBlockRows(session.ID(sid))
+	attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	attempt := startsACommand(t, e, pub, lane, h, 2, "printf rows")
 	e.ws.blockStream.mu.Lock()
@@ -1204,8 +1484,9 @@ func TestFlushingBatchReleasesTheBudgetOnceItLands(t *testing.T) {
 	// A real caller counts the batch as flushingBytes at the same lock hold
 	// that extracts it (nocx-2v80t.3.51).
 	e.ws.blockStream.beginFlushLocked(session.ID(sid), pending)
+	gen := e.ws.blockStream.attachGen[session.ID(sid)]
 	e.ws.blockStream.mu.Unlock()
-	go e.ws.blockStream.flushPendingRows(context.Background(), e.ws, session.ID(sid), block, pending, nil)
+	go e.ws.blockStream.flushPendingRows(context.Background(), e.ws, session.ID(sid), block, pending, nil, gen)
 	select {
 	case <-store.entered:
 	case <-time.After(5 * time.Second):
@@ -1257,7 +1538,7 @@ func TestBlockRowsArrived_RefusedCommandStoresNothingAndConfirmsNothing(t *testi
 	policy.SetOutputEnabled(false)
 	db := newLedgerStoreWithPolicy(t, policy)
 	e, pub, lane, h, sid, _ := newLifecycleLedgerEnvWithStore(t, db)
-	e.ws.AttachBlockRows(session.ID(sid))
+	attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	attempt := startsACommand(t, e, pub, lane, h, 2, "make secret")
 
@@ -1275,10 +1556,10 @@ func TestBlockRowsArrived_RefusedCommandStoresNothingAndConfirmsNothing(t *testi
 // hears both that it grew and that it closed.
 func TestBlockIntervalEnded_SealsWhenTheCompletionArrivedFirst(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	attempt := startsACommand(t, e, pub, lane, h, 2, "make watch")
-	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("working")}, ""); !confirm {
+	if _, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 0, 0, []emulator.Row{aStreamRow("working")}, ""); !confirm {
 		t.Fatal("the streamed row was not confirmed")
 	}
 
@@ -1326,10 +1607,10 @@ func TestBlockIntervalEnded_SealsWhenTheCompletionArrivedFirst(t *testing.T) {
 // never arrive.
 func TestBlockIntervalEnded_NoFenceResolvesToTheCurrentBlock(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	attempt := startsACommand(t, e, pub, lane, h, 2, "ssh host")
-	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("Welcome")}, ""); !confirm {
+	if _, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 0, 0, []emulator.Row{aStreamRow("Welcome")}, ""); !confirm {
 		t.Fatal("the streamed row was not confirmed")
 	}
 
@@ -1355,7 +1636,7 @@ func TestBlockIntervalEnded_NoFenceResolvesToTheCurrentBlock(t *testing.T) {
 // cannot reach, because there is no fence to ever resolve at all.
 func TestBlockIntervalEnded_NoFenceWithNoCurrentBlockIsDropped(t *testing.T) {
 	e, _, _, _, sid, _ := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	var noFence [32]byte
 	e.ws.BlockIntervalEnded(session.ID(sid), noFence, 0, nil, false)
@@ -1379,10 +1660,10 @@ func TestBlockIntervalEnded_NoFenceWithNoCurrentBlockIsDropped(t *testing.T) {
 // third check), rather than a payload built by the test.
 func TestBlockGrewAndClosed_OverTheWireConformsToContract(t *testing.T) {
 	e, pub, lane, h, sid, _ := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	attempt := startsACommand(t, e, pub, lane, h, 2, "make watch")
-	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("working")}, ""); !confirm {
+	if _, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 0, 0, []emulator.Row{aStreamRow("working")}, ""); !confirm {
 		t.Fatal("the streamed row was not confirmed")
 	}
 
@@ -1447,11 +1728,11 @@ func createSessionRow(t *testing.T, db content.ContentDB, sid string) {
 func TestBlockClearBoundary_KeepsTheRunningCommandAndNotifies(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
 	createSessionRow(t, db, sid)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	// An earlier command, sealed — this is what the boundary must hide.
 	before := startsACommand(t, e, pub, lane, h, 2, "make watch")
-	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("working")}, ""); !confirm {
+	if _, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 0, 0, []emulator.Row{aStreamRow("working")}, ""); !confirm {
 		t.Fatal("the streamed row was not confirmed")
 	}
 	fence := lifecycleFence(0x51)
@@ -1465,7 +1746,7 @@ func TestBlockClearBoundary_KeepsTheRunningCommandAndNotifies(t *testing.T) {
 
 	// `clear` itself: still running when the erase is sighted inside it.
 	attempt := startsACommand(t, e, pub, lane, h, 5, "clear")
-	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 1, 0, []emulator.Row{aStreamRow("")}, ""); !confirm {
+	if _, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 1, 0, []emulator.Row{aStreamRow("")}, ""); !confirm {
 		t.Fatal("the streamed row was not confirmed")
 	}
 
@@ -1533,7 +1814,7 @@ func TestBlockClearBoundary_KeepsTheRunningCommandAndNotifies(t *testing.T) {
 func TestBlockClearBoundary_NoOpenBlockKeepsNothing(t *testing.T) {
 	e, _, _, _, sid, db := newLifecycleLedgerEnv(t, true)
 	createSessionRow(t, db, sid)
-	e.ws.AttachBlockRows(session.ID(sid))
+	attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	e.ws.BlockClearBoundary(session.ID(sid))
 
@@ -1571,11 +1852,11 @@ func TestBlockClearBoundary_NoOpenBlockKeepsNothing(t *testing.T) {
 func TestBlockClearBoundary_AnEndedBlockIsNotTheErasuresInterval(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
 	createSessionRow(t, db, sid)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	// The block on screen before the erase, with its rows.
 	before := startsACommand(t, e, pub, lane, h, 2, "make watch")
-	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("working")}, ""); !confirm {
+	if _, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 0, 0, []emulator.Row{aStreamRow("working")}, ""); !confirm {
 		t.Fatal("the streamed row was not confirmed")
 	}
 	// Its end marker reaches the rows tier now; the completion that names
@@ -1615,10 +1896,10 @@ func TestBlockClearBoundary_AnEndedBlockIsNotTheErasuresInterval(t *testing.T) {
 func TestBlockClearBoundary_AnEndedBlockIsHiddenEvenBeforeItSeals(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
 	createSessionRow(t, db, sid)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	before := startsACommand(t, e, pub, lane, h, 2, "make watch")
-	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("working")}, ""); !confirm {
+	if _, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 0, 0, []emulator.Row{aStreamRow("working")}, ""); !confirm {
 		t.Fatal("the streamed row was not confirmed")
 	}
 	fence := lifecycleFence(0x62)
@@ -1668,16 +1949,16 @@ func TestBlockClearBoundary_AnEndedBlockIsHiddenEvenBeforeItSeals(t *testing.T) 
 func TestBlockClearBoundary_SuccessorOutputMarkEndsTheCurrentInterval(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
 	createSessionRow(t, db, sid)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	before := startsACommand(t, e, pub, lane, h, 2, "make watch")
-	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("working")}, ""); !confirm {
+	if _, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 0, 0, []emulator.Row{aStreamRow("working")}, ""); !confirm {
 		t.Fatal("the streamed row was not confirmed")
 	}
 	// Its own output-start mark, then the next command's: one mark per
 	// interval, in the order the shell wrote them.
 	e.ws.BlockOutputStartRow(session.ID(sid), 1)
-	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 1, 0, []emulator.Row{aStreamRow("")}, ""); !confirm {
+	if _, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 1, 0, []emulator.Row{aStreamRow("")}, ""); !confirm {
 		t.Fatal("the streamed row was not confirmed")
 	}
 	e.ws.BlockOutputStartRow(session.ID(sid), 2)
@@ -1733,7 +2014,7 @@ func TestBlockClearBoundary_KeepsTheIntervalQueuedBehindAnEndedBlock(t *testing.
 	createSessionRow(t, db, sid)
 	store := newBlockingAppendStore(db.Ledger())
 	e.ws.blockRowsStore = store
-	e.ws.AttachBlockRows(session.ID(sid))
+	attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	before := startsACommand(t, e, pub, lane, h, 2, "make watch")
 	e.ws.blockStream.mu.Lock()
@@ -1753,11 +2034,12 @@ func TestBlockClearBoundary_KeepsTheIntervalQueuedBehindAnEndedBlock(t *testing.
 	pending := e.ws.blockStream.pending[session.ID(sid)]
 	delete(e.ws.blockStream.pending, session.ID(sid))
 	e.ws.blockStream.beginFlushLocked(session.ID(sid), pending)
+	gen := e.ws.blockStream.attachGen[session.ID(sid)]
 	e.ws.blockStream.mu.Unlock()
 	if len(pending) == 0 {
 		t.Fatal("the streamed row never reached the pending batch")
 	}
-	go e.ws.blockStream.flushPendingRows(context.Background(), e.ws, session.ID(sid), block, pending, nil)
+	go e.ws.blockStream.flushPendingRows(context.Background(), e.ws, session.ID(sid), block, pending, nil, gen)
 	select {
 	case <-store.entered:
 	case <-time.After(wantWithin):
@@ -1836,10 +2118,10 @@ func TestBlockClearBoundary_KeepsTheIntervalQueuedBehindAnEndedBlock(t *testing.
 func TestBlockClearBoundary_DoesNotKeepAnIntervalWhoseCompletionArrived(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
 	createSessionRow(t, db, sid)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	before := startsACommand(t, e, pub, lane, h, 2, "make watch")
-	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("working")}, ""); !confirm {
+	if _, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 0, 0, []emulator.Row{aStreamRow("working")}, ""); !confirm {
 		t.Fatal("the streamed row was not confirmed")
 	}
 
@@ -1875,7 +2157,7 @@ func TestBlockClearBoundary_DoesNotKeepAnIntervalWhoseCompletionArrived(t *testi
 func TestBlockCleared_OverTheWireConformsToContract(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
 	createSessionRow(t, db, sid)
-	e.ws.AttachBlockRows(session.ID(sid))
+	attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 	startsACommand(t, e, pub, lane, h, 2, "clear")
 
 	e.ws.BlockClearBoundary(session.ID(sid))
@@ -1897,10 +2179,10 @@ func TestBlockCleared_OverTheWireConformsToContract(t *testing.T) {
 // completion, and the completion resolves it: one meeting, either order.
 func TestBlockIntervalEnded_WaitsForTheCompletionThatNamesIt(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	attempt := startsACommand(t, e, pub, lane, h, 2, "make watch")
-	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("working")}, ""); !confirm {
+	if _, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 0, 0, []emulator.Row{aStreamRow("working")}, ""); !confirm {
 		t.Fatal("the streamed row was not confirmed")
 	}
 
@@ -1928,10 +2210,10 @@ func TestBlockIntervalEnded_WaitsForTheCompletionThatNamesIt(t *testing.T) {
 // never will come; the rows already stored are the block's truth.
 func TestDetachBlockRows_SealsAnUnendedBlock(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	attempt := startsACommand(t, e, pub, lane, h, 2, "make watch")
-	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("partial")}, ""); !confirm {
+	if _, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 0, 0, []emulator.Row{aStreamRow("partial")}, ""); !confirm {
 		t.Fatal("the streamed row was not confirmed")
 	}
 
@@ -1966,7 +2248,7 @@ func TestBlockRowsStream_IsInertWithoutASource(t *testing.T) {
 // stored (nocx-zg3k3.5.3), and no artifact holds them.
 func TestBlockRowsArrived_NoAttemptRowsAreDroppedUnconfirmed(t *testing.T) {
 	e, _, _, _, sid, _ := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 7, 0, []emulator.Row{aStreamRow("prompt")}, "")
 	if confirm || written != 0 {
@@ -2000,10 +2282,10 @@ func lifecycleSessionOf(t *testing.T, e *lifecycleTestEnv) session.ID {
 // payload the test assembled.
 func TestBlockRowsReadBack_OverTheWireConformsToContract(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	attempt := startsACommand(t, e, pub, lane, h, 2, "printf 'a\\nb\\n'")
-	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{
+	if _, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 0, 0, []emulator.Row{
 		aStreamRow("a"), aStreamRow("b"),
 	}, ""); !confirm {
 		t.Fatal("the streamed rows were not confirmed")
@@ -2140,17 +2422,17 @@ func TestBlockRowsArrived_ALossOnlyDeliveryReachesTheSummary(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-			e.ws.AttachBlockRows(session.ID(sid))
+			marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 			attempt := startsACommand(t, e, pub, lane, h, 2, "cat big")
 
-			if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{
+			if _, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 0, 0, []emulator.Row{
 				aStreamRow("one"), aStreamRow("two"),
 			}, ""); !confirm {
 				t.Fatal("the ordinary rows were not confirmed")
 			}
 			endRow := uint64(2)
 			if tc.hole {
-				written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 3, 1, nil, "")
+				written, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 3, 1, nil, "")
 				if !confirm || written != 3 {
 					t.Fatalf("the loss-only delivery was answered (%d, %v), want confirmed through 3", written, confirm)
 				}
@@ -2178,7 +2460,7 @@ func TestBlockRowsArrived_ALossOnlyDeliveryReachesTheSummary(t *testing.T) {
 // at the end row belongs to the interval that END closes, never to the next.
 func TestBlockRowsPendingLossOnlyTailStaysWithItsInterval(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	first := startsACommand(t, e, pub, lane, h, 2, "printf first")
 	firstFence := lifecycleFence(0x71)
@@ -2219,14 +2501,14 @@ func TestBlockClearBoundary_AClearThatDidNotPersistIsNotAnnounced(t *testing.T) 
 	e, pub, lane, h, sid, _ := newLifecycleLedgerEnvWithStore(t, db)
 	createSessionRow(t, db, sid)
 	e.ws.blockRowsStore = &clearFailureBlockStore{closeFailureBlockStore{ledger: db.Ledger()}}
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 	attempt := startsACommand(t, e, pub, lane, h, 2, "clear")
 
 	e.ws.BlockClearBoundary(session.ID(sid))
 
 	// An observable event AFTER the clear on the same ordered socket: once
 	// block.grew has arrived, anything the clear sent is already in the inbox.
-	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("after")}, ""); !confirm {
+	if _, confirm := deliverAndAwaitRows(t, marks, e.ws, session.ID(sid), 0, 0, []emulator.Row{aStreamRow("after")}, ""); !confirm {
 		t.Fatal("the streamed row was not confirmed")
 	}
 	if _, err := awaitFrame(e.conn, time.Now().Add(wantWithin), isNotification("block.grew")); err != nil {
@@ -2274,7 +2556,7 @@ func awaitBlockClosed(t *testing.T, e *lifecycleTestEnv) blockClosedParams {
 func TestBlockIntervalEnded_EveryResolvedEndSaysBlockClosed(t *testing.T) {
 	t.Run("kept: the store holds the block's rows", func(t *testing.T) {
 		e, pub, lane, h, sid, _ := newLifecycleLedgerEnv(t, true)
-		e.ws.AttachBlockRows(session.ID(sid))
+		attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 		attempt := startsACommand(t, e, pub, lane, h, 2, "make watch")
 		fence := lifecycleFence(0x51)
 		mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence)))
@@ -2291,7 +2573,7 @@ func TestBlockIntervalEnded_EveryResolvedEndSaysBlockClosed(t *testing.T) {
 		policy.SetOutputEnabled(false)
 		db := newLedgerStoreWithPolicy(t, policy)
 		e, pub, lane, h, sid, _ := newLifecycleLedgerEnvWithStore(t, db)
-		e.ws.AttachBlockRows(session.ID(sid))
+		attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 		attempt := startsACommand(t, e, pub, lane, h, 2, "make secret")
 		fence := lifecycleFence(0x52)
 		mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence)))
@@ -2305,7 +2587,7 @@ func TestBlockIntervalEnded_EveryResolvedEndSaysBlockClosed(t *testing.T) {
 
 	t.Run("no block at all: a shell-originated attempt with no store", func(t *testing.T) {
 		e, pub, lane, h, sid, _ := newLifecycleLedgerEnv(t, false)
-		e.ws.AttachBlockRows(session.ID(sid))
+		attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 		shellID := lifecycle.AttemptID("att-shell-closed")
 		fence := lifecycleFence(0x53)
 		mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 2, lifecycleStartEvt(&shellID, "ls")))
@@ -2327,7 +2609,7 @@ func TestBlockIntervalEnded_EveryResolvedEndSaysBlockClosed(t *testing.T) {
 // block.closed and nothing after this can send it (nocx-2v80t.3.27).
 func TestHelperSessionEnded_SaysEveryUnendedBlockClosed(t *testing.T) {
 	e, pub, lane, h, sid, _ := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	attempt := startsACommand(t, e, pub, lane, h, 2, "make watch")
 	fence := lifecycleFence(0x54)
@@ -2387,7 +2669,7 @@ func TestBlockClosed_DTOConformsToContract(t *testing.T) {
 func TestBlockClosed_EndsWithoutACompletionAreSaid(t *testing.T) {
 	t.Run("an attempt gone unknown whose block never opened", func(t *testing.T) {
 		e, _, _, _, sid, _ := newLifecycleLedgerEnv(t, true)
-		e.ws.AttachBlockRows(session.ID(sid))
+		attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 		e.ws.blockStream.abandonAttempt(context.Background(), e.ws, session.ID(sid), "att-never-opened")
 
 		got := awaitBlockClosed(t, e)
@@ -2398,7 +2680,7 @@ func TestBlockClosed_EndsWithoutACompletionAreSaid(t *testing.T) {
 
 	t.Run("an environment entry with no store: the block is tracked, unkept", func(t *testing.T) {
 		e, pub, lane, h, sid, _ := newLifecycleLedgerEnv(t, false)
-		e.ws.AttachBlockRows(session.ID(sid))
+		attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 		sshID := lifecycle.AttemptID("att-ssh-nostore")
 		mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 2, lifecycleStartEvt(&sshID, "ssh host")))
 
@@ -2415,7 +2697,7 @@ func TestBlockClosed_EndsWithoutACompletionAreSaid(t *testing.T) {
 func TestBlockOutputStart_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "block.outputStart.schema.json")
 	e, pub, lane, h, sid, _ := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 	entry := startsACommand(t, e, pub, lane, h, 2, "printf output")
 	e.ws.BlockOutputStartRowWithAnchor(session.ID(sid), 900, proto.OutputStartScreenAnchor{
 		Row: 4, ScreenRevision: 12, BufferKind: "alternate", BufferInstance: "2", Cols: 80, Rows: 24,

@@ -107,7 +107,9 @@ func TestAFrameFailedAtTheCursorIsAppliedOnceOnItsNextAttempt(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	e.ws.AttachBlockRows(session.ID(sid))
+	if err := e.ws.AttachBlockRows(t.Context(), session.ID(sid), nil); err != nil {
+		t.Fatalf("attach block rows: %v", err)
+	}
 
 	const promptEnd, startEnd = 100, 220
 	r := repeatFrames{lane: lane, h: h}

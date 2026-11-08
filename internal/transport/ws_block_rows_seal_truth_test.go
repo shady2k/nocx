@@ -21,11 +21,13 @@ func detachWithSeal(t *testing.T, sealFails bool) (blockClosedParams, string, co
 	db := newLedgerStore(t)
 	e, pub, lane, h, sid, _ := newLifecycleLedgerEnvWithStore(t, db)
 	e.ws.blockRowsStore = &closeFailureBlockStore{ledger: db.Ledger(), fail: sealFails}
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 	attempt := startsACommand(t, e, pub, lane, h, 2, "make watch")
-	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("partial")}, ""); !confirm {
-		t.Fatal("the streamed row was not confirmed")
+	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("partial")}, ""); confirm || up != 0 {
+		t.Fatalf("row admission = (%d, %v), want deferred confirmation", up, confirm)
 	}
+	awaitConfirmedBlockRows(t, marks, 1)
+	awaitBlockRowsIdle(t, e.ws, session.ID(sid))
 
 	e.ws.HelperSessionEnded(session.ID(sid))
 	return awaitBlockClosed(t, e), attempt, db
@@ -56,7 +58,9 @@ func abandonAtTheBound(t *testing.T, sealFails bool) (blockClosedParams, string)
 	db := newLedgerStore(t)
 	e, pub, lane, h, sid, _ := newLifecycleLedgerEnvWithStore(t, db)
 	e.ws.blockRowsStore = &closeFailureBlockStore{ledger: db.Ledger(), appendFail: true, fail: sealFails}
-	e.ws.AttachBlockRows(session.ID(sid))
+	if err := e.ws.AttachBlockRows(t.Context(), session.ID(sid), nil); err != nil {
+		t.Fatalf("attach block rows: %v", err)
+	}
 	attempt := startsACommand(t, e, pub, lane, h, 2, "printf stuck")
 	fence := lifecycleFence(0x9a)
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence)))
@@ -64,6 +68,7 @@ func abandonAtTheBound(t *testing.T, sealFails bool) (blockClosedParams, string)
 	e.ws.BlockIntervalEnded(session.ID(sid), fence, 0, []emulator.Row{aStreamRow("final screen")}, false)
 	for i := range maxCloseAttempts {
 		e.ws.BlockRowsArrived(session.ID(sid), uint64(i), 0, []emulator.Row{aStreamRow(fmt.Sprintf("later-%d", i))}, "") //nolint:gosec // a row index
+		awaitBlockRowsIdle(t, e.ws, session.ID(sid))
 	}
 	return awaitBlockClosed(t, e), attempt
 }

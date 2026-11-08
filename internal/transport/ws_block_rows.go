@@ -97,6 +97,9 @@ const maxCloseAttempts = 3
 // rows source is attached, and all of it dies with the session.
 type blockStream struct {
 	mu sync.Mutex
+	// stopped fences new row admission before Stop joins durable recorders.
+	// Existing flushes still own and finish their admitted tail and close.
+	stopped bool
 	// sources are the sessions whose helper callbacks are wired.
 	sources map[session.ID]struct{}
 	// open are the session's open blocks by attempt id — kept ones carry a
@@ -148,6 +151,10 @@ type blockStream struct {
 	waiting  map[session.ID]string
 	pending  map[session.ID][]pendingRows
 	flushing map[session.ID]bool
+	// flushDone covers the lifetime of an asynchronously admitted flush,
+	// including its store call after detach. A replacement attachment waits
+	// for that write before reading the durable cursor it will adopt.
+	flushDone map[session.ID]rowFlushWait
 	// opening names the attempt whose OpenBlockOutput call is in flight for
 	// the session, empty when none is (nocx-2v80t.3.48): a second caller
 	// checks it by attempt id, not just by presence, so a close or an abandon
@@ -420,8 +427,12 @@ func (s *WSServer) holdEndLocked(sid session.ID, e *pendingEnd) {
 // they would take its buffer past its bound, in which case the buffer has
 // overflowed and the stream is not recorded from fromRow on (unrecorded).
 func (s *WSServer) holdLocked(sid session.ID, fromRow uint64, rows []emulator.Row) bool {
+	return s.holdBytesLocked(sid, fromRow, heldRowsBytes(rows))
+}
+
+func (s *WSServer) holdBytesLocked(sid session.ID, fromRow uint64, bytes int64) bool {
 	bs := s.blockStream
-	if bs.heldBytesLocked(sid)+heldRowsBytes(rows) <= bs.budgets[sid] {
+	if bs.heldBytesLocked(sid)+bytes <= bs.budgets[sid] {
 		return true
 	}
 	bs.markUnrecordedLocked(sid, fromRow)
@@ -565,6 +576,11 @@ type openBlock struct {
 	closingIn bool
 }
 
+type rowFlushWait struct {
+	active int
+	done   chan struct{} // allocated only by a replacement attachment that waits
+}
+
 type pendingRows struct {
 	from  uint64
 	lost  uint64
@@ -667,8 +683,12 @@ func splitPendingRowsAt(deliveries []pendingRows, endRow uint64) (before, after 
 	return before, after
 }
 
-func (bs *blockStream) takePendingRows(sid session.ID, attempt string) []pendingRows {
+func (bs *blockStream) takePendingRows(sid session.ID, attempt string, gen uint64) []pendingRows {
 	bs.mu.Lock()
+	if bs.attachGen[sid] != gen {
+		bs.mu.Unlock()
+		return nil
+	}
 	// Rows of the interval that follows wait behind the close parked for
 	// this attempt's end: everything below that end goes out with this
 	// batch, the rest stays queued for the block that follows.
@@ -680,6 +700,12 @@ func (bs *blockStream) takePendingRows(sid session.ID, attempt string) []pending
 		}
 	}
 	next := bs.takeForFlushLocked(sid, endRow)
+	// Releasing the flush and finding no more rows are one decision. An
+	// arriving delivery must either join this batch or acquire the next
+	// flush, never be stranded between an empty take and a later unlock.
+	if len(next) == 0 {
+		bs.flushing[sid] = false
+	}
 	bs.mu.Unlock()
 	return next
 }
@@ -704,6 +730,9 @@ type blockClosedParams struct {
 
 // AttachBlockRows registers a session's helper rows callbacks as this
 // stream's source. Without a source the stream is inert — see the header.
+// New durable prefixes are reported through confirm, not the admission call.
+// A replacement waits for prior admitted writes before adopting their durable
+// cursor; ctx cancels that wait without installing a replacement source.
 //
 // Before the source is exposed, the stream re-binds the session to the
 // open block the store still holds (adoptOpenBlock): a session re-adopted
@@ -715,43 +744,35 @@ type blockClosedParams struct {
 // the snapshot at its post-command prompt, and until then the very fact
 // the block stream would wait on is quarantined, so the tail rows would
 // land on no block and be dropped (ADR-0076 decision 3).
-func (s *WSServer) AttachBlockRows(sid session.ID) {
-	found := s.adoptableOpenBlock(sid)
-	s.blockStream.attach(sid, nil, s.blockRowsBuffer())
-	s.blockStream.adoptOpenBlock(sid, found)
-	s.restoreStoredFence(sid, found)
-	// The helper's end fact may have arrived before this lane registered
-	// (the shell exited while the coordinator was away): the adopted
-	// domain's recorded terminal state settles the session now (Round 10).
-	// Idempotent — HelperSessionEnded seals only open blocks. Behind an
-	// armed end hold (nocx-zg3k3.5.11 Round 4) the settle waits for the
-	// replayed window instead: consulting now would read a kernel that has
-	// ingested nothing yet, and the exit's own post-hold settle would race
-	// the teardown's unregistering.
-	if s.settleWhenEndHoldLifts(sid) {
-		return
+func (s *WSServer) AttachBlockRows(ctx context.Context, sid session.ID, confirm func(uint64)) error {
+	s.blockStream.mu.Lock()
+	flush := s.blockStream.flushDone[sid]
+	if flush.active > 0 && flush.done == nil {
+		flush.done = make(chan struct{})
+		s.blockStream.flushDone[sid] = flush
 	}
-	if s.adoptedDomainTerminal(sid) {
-		s.HelperSessionEnded(sid)
+	done := flush.done
+	s.blockStream.mu.Unlock()
+	if done != nil {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
-}
-
-// AttachBlockRowsWithConfirmation additionally gives deferred rows a way to
-// advance the helper's watermark after the bind retry has persisted them.
-// It re-binds from the store exactly as AttachBlockRows does.
-func (s *WSServer) AttachBlockRowsWithConfirmation(sid session.ID, confirm func(uint64)) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	found := s.adoptableOpenBlock(sid)
 	s.blockStream.attach(sid, confirm, s.blockRowsBuffer())
 	s.blockStream.adoptOpenBlock(sid, found)
 	s.restoreStoredFence(sid, found)
-	// The same boundary consult as AttachBlockRows (Round 10), and the same
-	// end-hold deferral (nocx-zg3k3.5.11 Round 4).
-	if s.settleWhenEndHoldLifts(sid) {
-		return
-	}
-	if s.adoptedDomainTerminal(sid) {
+	// A helper end can precede lane registration on re-adoption. The
+	// lifecycle replay's end hold owns when that terminal fact may settle.
+	if !s.settleWhenEndHoldLifts(sid) && s.adoptedDomainTerminal(sid) {
 		s.HelperSessionEnded(sid)
 	}
+	return nil
 }
 
 // adoptableOpenBlock is the store half of the re-adopt re-bind: the open
@@ -1314,24 +1335,6 @@ func sealAtDetach(ctx context.Context, store blockOutputStore, sid session.ID, b
 	return true
 }
 
-// BlockRowsArrived delivers one OutputRows delivery from the session's
-// helper callback: the rows that left the screen, in order, at the absolute
-// index they departed from, with the count the emulator pruned just before
-// them and the cause that names which bucket the count belongs to when it
-// is not the emulator's own (LostCauseCoordinatorUnavailable, the resend's
-// counted absence, nocx-zg3k3.5.3). It answers whether the coordinator
-// wants them confirmed written — the helper's "written up to here" mark. Rows that belong to no block (a
-// prompt scrolling between commands) and rows of a refused command are
-// confirmed and dropped; rows of a kept block are appended first; a store
-// failure is the one answer that withholds the confirmation, so the helper's
-// mark never claims bytes the store does not hold.
-//
-// A delivery with no rows and a loss is a LOSS-ONLY delivery
-// (nocx-2v80t.3.26): the helper's statement of a hole with nothing after it —
-// at the very end of an interval, or where the bridge dropped rows ahead of
-// an end marker. It takes the same path as any other delivery, so the loss
-// reaches the block's summary and the block's cursor moves to the end of the
-// gap, where the closing screen then lands.
 // BlockOutputStartPlaneAttached enables the position gate for this source.
 // Authentication still comes only from the lifecycle start path.
 func (s *WSServer) BlockOutputStartPlaneAttached(sid session.ID) {
@@ -1556,16 +1559,31 @@ func outputRowsAfterStart(p pendingRows, start uint64) ([]emulator.Row, uint64, 
 	return p.rows[skip:], start, 0
 }
 
+// BlockRowsArrived admits one ordered OutputRows delivery: rows departing at
+// fromRow, the loss preceding them, and the loss cause. New work uses the
+// existing bounded pending/flush owner, so the helper reader never waits for
+// ordinary row persistence. Pending and in-flight rows share the same bound.
+//
+// The return value confirms only an already-settled prefix. Newly admitted
+// rows are confirmed through the attachment callback after storage; neither
+// admission nor a failed write advances the helper's durable mark.
+//
+// A delivery with no rows and a loss still follows the same path: its hole
+// reaches the block summary and cursor before the closing screen is appended.
 func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows []emulator.Row, lostCause string) (writtenUpTo uint64, confirm bool) {
 	if len(rows) == 0 && lost == 0 {
 		return 0, false
 	}
-	// Owner: this stream, inside one delivery of the helper's rows plane.
-	// Closing event: the delivery's return — its appends, and any close it
-	// drains, are the last writes it causes.
+	// The helper's shared reader admits rows, never waits for the content
+	// writer. The existing bounded flush owns them until storage answers;
+	// its confirmation, not this admission, advances the helper's mark.
 	ctx := log.WithLogger(context.Background(), s.log)
 	bs := s.blockStream
 	bs.mu.Lock()
+	if bs.stopped {
+		bs.mu.Unlock()
+		return 0, false
+	}
 	_, sourced := bs.sources[sid]
 	if _, unrecorded := bs.unrecorded[sid]; sourced && unrecorded {
 		// Not recorded until the next command (BlockOutputIncomplete): what
@@ -1637,9 +1655,8 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 	if sourced {
 		// Dedup by absolute row index (nocx-zg3k3.5.3): a resent delivery
 		// may start behind what this block already committed. block.rows is
-		// the artifact's cursor, moved by each append that landed -- the
-		// direct one below and the deferred flush's own. The overlap is
-		// trimmed here and the new tail appended, so the store never sees a
+		// the artifact's cursor, moved by each append the flush committed.
+		// The overlap is trimmed here and the new tail appended, so the store never sees a
 		// discontinuity and the confirmation names only rows the artifact
 		// holds. Rows still queued for the store are NOT part of the bound:
 		// they are not durable, and an overlap with them is refused by the
@@ -1702,51 +1719,24 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 		}
 		if fullyStored {
 			if len(head) == 0 {
+				held, up := len(block.held), block.rows
 				bs.mu.Unlock()
-				if len(block.held) > 0 {
-					// the chain is still short of the floor: the held rows
-					// are not in the artifact, and this delivery named them
-					// — nothing here may be confirmed (Round 9).
+				if held > 0 {
+					// A below-floor chain is not yet durable.
 					return 0, false
 				}
-				return block.rows, true
+				return up, true
 			}
-			bs.mu.Unlock()
-			if !s.prependBlockHead(sid, block.entry, block.artifactID, headFrom, head) {
-				return 0, false
-			}
-			bs.mu.Lock()
-			block.floor = headFrom
-			block.held = nil
-			bs.mu.Unlock()
-			return block.rows, true
-		}
-		if len(head) > 0 {
-			// THIS BATCH COMPLETED THE HEAD AND CARRIES ROWS PAST THE
-			// CURSOR (nocx-zg3k3.5.11: sealed at 39 rows of 300 on CI). The
-			// resend's batches align with neither the floor nor the cursor,
-			// so one batch can hold the chain's last rows, rows the artifact
-			// already has, and rows it lacks. head is set only once the
-			// chain reaches the floor, so it joins now, in one prepend, and
-			// the tail goes on below like any delivery: returning here
-			// stored neither, confirmed neither, and the resend never offers
-			// a delivered batch again — every later batch then met the store
-			// at the old cursor and was refused.
-			bs.mu.Unlock()
-			if !s.prependBlockHead(sid, block.entry, block.artifactID, headFrom, head) {
-				return 0, false
-			}
-			bs.mu.Lock()
-			block.floor = headFrom
-			block.held = nil
-			head = nil
+			// The only new rows are the completed retained head. Its write
+			// belongs to the same asynchronous flush as a new tail.
+			rows, lost = nil, 0
 		}
 		// The interval's end marker may have arrived without the completion
 		// that names its fence. Its EndRow is the boundary either way, and
 		// anything at or above it streamed after the boundary: it is held for
 		// the interval that follows rather than appended to the one that is
 		// closing over it.
-		if block != nil {
+		if block != nil && (len(rows) > 0 || lost > 0) {
 			if bound, parked := bs.parkedBoundary(sid); parked {
 				if held := bs.beyondThrough[sid]; fromRow < held {
 					skip := held - fromRow
@@ -1781,191 +1771,61 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 		}
 	}
 	waiting := bs.waiting[sid]
-	flushing := bs.flushing[sid]
-	pending := len(bs.pending[sid]) > 0
-	closing := bs.closing[sid]
-	retryClose := sourced && len(bs.pendingCloses[sid]) > 0 && !flushing && !closing
-	if retryClose {
-		bs.closing[sid] = true
-		bs.mu.Unlock()
-		bs.drainPendingCloses(ctx, s, sid)
-		bs.mu.Lock()
-		// A delivery is held only behind a close that may SEAL. A WAITING
-		// end (nocx-zg3k3.5.11 Round 9: parked by publishFence's resolution
-		// or the still-owed guard, no attempt spent) must not hold it — the
-		// delivery is what advances the cursor the wait is on, and holding
-		// it here would strand the tail behind a wait that only the
-		// delivery can end. Recursing instead overflowed the stack: every
-		// level re-parked the same end before its delivery could land.
-		held := false
-		for _, e := range bs.pendingCloses[sid] {
-			if !e.waiting {
-				held = true
-				break
-			}
-		}
-		if held {
-			if !s.holdLocked(sid, fromRow, rows) {
-				bs.mu.Unlock()
-				return 0, false
-			}
-			bs.pending[sid] = append(bs.pending[sid], pendingRows{
-				from: fromRow, lost: lost, cause: lostCause, rows: append([]emulator.Row(nil), rows...),
-			})
-			bs.mu.Unlock()
-			return 0, false
-		}
-		// ALL remaining ends are WAITING: fall through under the
-		// still-held lock — the direct arm below advances the cursor they
-		// wait on, and its own completion tail re-drives them.
-	}
-	if sourced && pending && !flushing && !closing && block != nil && bs.queued[sid] == "" {
-		bs.pending[sid] = append(bs.pending[sid], pendingRows{
-			from: fromRow, lost: lost, cause: lostCause, rows: append([]emulator.Row(nil), rows...),
-		})
-		toFlush := bs.takeForFlushLocked(sid, takeAllPendingRows)
-		bs.flushing[sid] = true
-		confirm := bs.confirmers[sid]
-		bs.mu.Unlock()
-		bs.flushPendingRows(ctx, s, sid, block, toFlush, confirm)
-		return 0, false
-	}
-	if sourced && (flushing || closing || (waiting != "" && block == nil)) {
-		if !s.holdLocked(sid, fromRow, rows) {
-			bs.mu.Unlock()
-			return 0, false
-		}
-		if bs.pending == nil {
-			bs.pending = make(map[session.ID][]pendingRows)
-		}
-		bs.pending[sid] = append(bs.pending[sid], pendingRows{
-			from: fromRow, lost: lost, cause: lostCause, rows: append([]emulator.Row(nil), rows...),
-		})
+	flushing, closing := bs.flushing[sid], bs.closing[sid]
+	if !sourced || (!flushing && !closing && waiting == "" && (block == nil || !block.kept || s.blockStore() == nil)) {
 		bs.mu.Unlock()
 		return 0, false
 	}
-	// THE DIRECT ADMISSION ARMS THE IN-FLIGHT MARK IN THE SAME LOCK HOLD
-	// THAT ADMITTED IT (nocx-zg3k3.5.11 Round 5): the store call below runs
-	// outside bs.mu, and until it returns, block.rows — the cursor a close
-	// snapshots — names the PREVIOUS delivery. A close that resolved in
-	// that window (the fence resolving a parked end, or the replayed
-	// window's domain closed — both on the lifecycle goroutine, concurrent
-	// with this read loop) wrote its closing screen at the stale cursor; on
-	// the loaded run the two transactions interleaved, both succeeded, and
-	// the sealed body lost them both (2/40, sealed at 256 of 300). A close
-	// reads flushing under this same mu, so arming here leaves no window
-	// between the admission and the mark; the deferred path has always held
-	// the same invariant through takeForFlushLocked. The mark comes down in
-	// finishDirectDelivery, on every path the store call can take.
-	var store blockOutputStore
-	armed := sourced && block != nil && block.kept
-	if armed {
-		store = s.blockStore()
-		armed = store != nil
-	}
-	if armed {
-		if bs.flushingBytes == nil {
-			bs.flushingBytes = make(map[session.ID]int64)
-		}
-		bs.flushing[sid] = true
-		bs.flushingBytes[sid] += heldRowsBytes(rows)
-	}
-	bs.mu.Unlock()
-	if !sourced {
+	if !s.holdBytesLocked(sid, fromRow, heldRowsBytes(head)+heldRowsBytes(rows)) {
+		bs.mu.Unlock()
 		return 0, false
 	}
 	if len(head) > 0 {
-		if !s.prependBlockHead(sid, block.entry, block.artifactID, headFrom, head) {
-			return 0, false
-		}
-		bs.mu.Lock()
-		block.floor = headFrom
+		bs.pending[sid] = append(bs.pending[sid], pendingRows{from: headFrom, rows: head})
 		block.held = nil
-		bs.mu.Unlock()
 	}
-	writtenUpTo = fromRow + uint64(len(rows)) //nolint:gosec // a row count, not a byte count
-	if block == nil || !block.kept {
-		// Rows of no block, or of a keep the policy refused: dropped, and
-		// NOT confirmed -- the mark means stored (nocx-zg3k3.5.3), and the
-		// resend must be able to offer them again for a fresh decision.
-		// Never armed above: nothing is in flight.
-		return 0, false
-	}
-	if !armed {
-		// No store is wired: nothing to append, nothing in flight.
-		return 0, false
-	}
-	err := store.AppendBlockRows(ctx, content.AppendBlockRows{
-		EntryID: block.entry, ArtifactID: block.artifactID,
-		FromRow: fromRow, LostRows: lost, LostCause: lostCause, Rows: rows,
-	})
-	if err != nil {
-		// A store failure is not a refusal: the rows are still wanted, and
-		// refusing to confirm is what lets them be offered again.
-		log.From(ctx).Warn("block rows append failed", "session", sid, "entry", block.entry,
-			"artifact", block.artifactID, "from", fromRow, "error", err)
-		s.finishDirectDelivery(ctx, sid, block, rows)
-		return 0, false
-	}
-	// Probe (nocx-zg3k3.5.3 round 7): the direct append's answer — which
-	// artifact took the delivery, and what the acknowledgement will claim.
-	log.From(ctx).Debug("block rows direct append: stored",
-		"session", sid, "entry", block.entry, "artifact", block.artifactID,
-		"from", fromRow, "rows", len(rows), "upTo", writtenUpTo)
-	// The append committed, so the artifact's cursor is now the exclusive end
-	// of this delivery. The close reads it to place its closing screen.
-	bs.mu.Lock()
-	if block.rows == 0 && block.floor == 0 {
-		// The first accepted append may start above row zero. Record the
-		// store's actual floor so a resend of the missing head is prepended,
-		// not mistaken for an already-stored overlap.
-		block.floor = fromRow
-	}
-	block.rows = writtenUpTo
-	bs.mu.Unlock()
-	if len(rows) > 0 {
-		// A loss-only delivery stored no row, so nothing grew.
-		s.notifyBlockSubscriber(ctx, sid, "block.grew", blockGrewParams{
-			EntryID: block.entry, From: fromRow, Count: uint64(len(rows)), //nolint:gosec // a row count, not a byte count
+	if len(rows) > 0 || lost > 0 {
+		bs.pending[sid] = append(bs.pending[sid], pendingRows{
+			from: fromRow, lost: lost, cause: lostCause, rows: append([]emulator.Row(nil), rows...),
 		})
 	}
-	s.finishDirectDelivery(ctx, sid, block, rows)
-	bs.mu.Lock()
-	floor, storedUpTo, expectedFirstRow := block.floor, block.rows, block.expectedFirstRow
-	bs.mu.Unlock()
-	if floor > expectedFirstRow {
-		// A watermark is a contiguous prefix, not the end of an artifact
-		// whose first stored row is later. Keep the helper's head until it
-		// reaches the floor and prependBlockHead joins it to the artifact.
+	if flushing || closing || block == nil {
+		bs.mu.Unlock()
 		return 0, false
 	}
-	return storedUpTo, true
-}
-
-// finishDirectDelivery is the direct path's completion tail, run on every
-// path the store call can take: the in-flight mark the admission armed comes
-// down under bs.mu, and whatever parked behind the delivery either flushes
-// (the next batch, under the same flushing ownership the deferred path
-// holds) or hands the stream to its parked closes. This is what makes the
-// close wait: closeBlockRows parks on flushing, and this is where flushing
-// comes down.
-func (s *WSServer) finishDirectDelivery(ctx context.Context, sid session.ID, block *openBlock, delivered []emulator.Row) {
-	bs := s.blockStream
-	bs.mu.Lock()
-	bs.flushingBytes[sid] -= heldRowsBytes(delivered)
-	confirm := bs.confirmers[sid]
-	bs.mu.Unlock()
-	// takePendingRows takes bs.mu itself, so it runs outside the hold above
-	// — the deferred path's own order (flushPendingRows' tail).
-	next := bs.takePendingRows(sid, block.attempt)
-	if len(next) > 0 {
-		bs.flushPendingRows(ctx, s, sid, block, next, confirm)
-		return
+	// This flush also re-drives parked closes after their owed rows land;
+	// neither append nor a close retry may run on the shared helper reader.
+	toFlush := bs.takeForFlushLocked(sid, takeAllPendingRows)
+	bs.flushing[sid] = true
+	confirmWritten := bs.confirmers[sid]
+	gen := bs.attachGen[sid]
+	if bs.flushDone == nil {
+		bs.flushDone = make(map[session.ID]rowFlushWait)
 	}
-	bs.mu.Lock()
-	bs.flushing[sid] = false
+	flush := bs.flushDone[sid]
+	flush.active++
+	bs.flushDone[sid] = flush
+	s.sessionRecorders.Add(1) // shares Stop's row-admission fence under bs.mu
 	bs.mu.Unlock()
-	bs.drainPendingCloses(ctx, s, sid)
+	go func() {
+		defer s.sessionRecorders.Done()
+		defer func() {
+			bs.mu.Lock()
+			flush := bs.flushDone[sid]
+			flush.active--
+			if flush.active == 0 {
+				delete(bs.flushDone, sid)
+				if flush.done != nil {
+					close(flush.done)
+				}
+			} else {
+				bs.flushDone[sid] = flush
+			}
+			bs.mu.Unlock()
+		}()
+		bs.flushPendingRows(ctx, s, sid, block, toFlush, confirmWritten, gen)
+	}()
+	return 0, false
 }
 
 // noFenceNonce is the sentinel [Session.SealEnvironmentEntry] sends: a
@@ -2622,8 +2482,9 @@ func (s *WSServer) closeBlockRows(ctx context.Context, sid session.ID, attempt s
 			log.From(ctx).Debug("block rows close queued behind pending append", "session", sid, "attempt", attempt, "endRow", endRow, "pending", len(bs.pendingCloses[sid]))
 			bs.flushing[sid] = true
 			confirm := bs.confirmers[sid]
+			gen := bs.attachGen[sid]
 			bs.mu.Unlock()
-			bs.flushPendingRows(ctx, s, sid, current, toFlush, confirm)
+			bs.flushPendingRows(ctx, s, sid, current, toFlush, confirm, gen)
 			return
 		}
 		bs.closing[sid] = true
@@ -3302,6 +3163,7 @@ func (bs *blockStream) openAttemptFor(ctx context.Context, s *WSServer, sid sess
 			bs.flushing[sid] = true
 		}
 		confirm := bs.confirmers[sid]
+		flushGen := bs.attachGen[sid]
 		// A duplicate request for THIS attempt, already installed, is not
 		// the end of the session's queue: whatever was asked for behind it
 		// still owes an open, and nothing else advances the queue for this
@@ -3310,7 +3172,7 @@ func (bs *blockStream) openAttemptFor(ctx context.Context, s *WSServer, sid sess
 		next, kind, gen := bs.dequeueNextOpenLocked(sid, "")
 		bs.mu.Unlock()
 		if len(pending) > 0 {
-			bs.flushPendingRows(ctx, s, sid, existing, pending, confirm)
+			bs.flushPendingRows(ctx, s, sid, existing, pending, confirm, flushGen)
 		}
 		bs.continueQueuedOpen(ctx, s, sid, next, kind, gen)
 		return
@@ -3446,7 +3308,7 @@ func (bs *blockStream) performOpen(ctx context.Context, s *WSServer, sid session
 		next, kind, nextGen := bs.dequeueNextOpenLocked(sid, attempt)
 		bs.mu.Unlock()
 		for _, d := range pending {
-			confirmPendingRows(ctx, confirm, d)
+			confirmStoredRows(ctx, confirm, d.from+uint64(len(d.rows)))
 		}
 		// Owner: this stream, discarding a late open on behalf of the attempt
 		// or the session that already ended it.
@@ -3515,7 +3377,7 @@ func (bs *blockStream) performOpen(ctx context.Context, s *WSServer, sid session
 	next, kind, nextGen := bs.dequeueNextOpenLocked(sid, "")
 	bs.mu.Unlock()
 	if len(pending) > 0 {
-		bs.flushPendingRows(ctx, s, sid, b, pending, confirm)
+		bs.flushPendingRows(ctx, s, sid, b, pending, confirm, gen)
 	}
 	// A later open asked for while this one was in flight is made now rather
 	// than lost, in the order asked (nocx-2v80t.3.48). One queued for this
@@ -3569,20 +3431,20 @@ func (bs *blockStream) openFinished(ctx context.Context, s *WSServer, sid sessio
 	bs.continueQueuedOpen(ctx, s, sid, next, kind, gen)
 }
 
-func (bs *blockStream) flushPendingRows(ctx context.Context, s *WSServer, sid session.ID, block *openBlock, pending []pendingRows, confirm func(uint64)) {
+func (bs *blockStream) flushPendingRows(ctx context.Context, s *WSServer, sid session.ID, block *openBlock, pending []pendingRows, confirm func(uint64), gen uint64) {
 	opScope := s.beginInternal(ctx, catalog.OpInternalContentBlockRowFlush)
 	defer opScope.Complete()
 	if !block.kept {
 		// A refused keep stores nothing, so it confirms nothing (the mark
 		// means stored, nocx-zg3k3.5.3): the queued rows were dropped with
 		// the block, and the resend offers them again.
-		bs.finishPendingRows(sid)
+		bs.finishPendingRows(sid, gen)
 		bs.drainPendingCloses(ctx, s, sid)
 		return
 	}
 	store := s.blockStore()
 	if store == nil {
-		bs.requeuePendingRows(sid, pending)
+		bs.requeuePendingRows(sid, pending, gen)
 		return
 	}
 	// This batch left bs.pending in the caller before this call — that is
@@ -3599,28 +3461,62 @@ func (bs *blockStream) flushPendingRows(ctx context.Context, s *WSServer, sid se
 	// Owner: this stream, on behalf of the helper's attached session.
 	// Closing event: each successful append or the session detach.
 	for i, delivery := range pending {
-		if err := store.AppendBlockRows(ctx, content.AppendBlockRows{
-			EntryID: block.entry, ArtifactID: block.artifactID,
-			FromRow: delivery.from, LostRows: delivery.lost, LostCause: delivery.cause, Rows: delivery.rows,
-		}); frameFailed(err) {
-			return
-		} else if err != nil {
-			s.log.Warn("deferred block rows append failed", "session", sid, "entry", block.entry, "error", err)
-			bs.requeuePendingRows(sid, pending[i:])
-			return
-		}
-		// The artifact's cursor follows every committed delivery, in the
-		// deferred path exactly as in the direct one: the close places its
-		// closing screen at that cursor. flushingBytes drops by the same
-		// delivery, the instant it stops being "in flight to the store" and
-		// becomes rows the store already holds.
+		heldBytes := heldRowsBytes(delivery.rows)
 		bs.mu.Lock()
-		if block.rows == 0 && block.floor == 0 {
-			block.floor = delivery.from
+		if bs.attachGen[sid] != gen {
+			bs.mu.Unlock()
+			return
 		}
-		block.rows = delivery.from + uint64(len(delivery.rows)) //nolint:gosec // a row count, not a byte count
-		floor, expectedFirstRow := block.floor, block.expectedFirstRow
-		bs.flushingBytes[sid] -= heldRowsBytes(delivery.rows)
+		// A resend can overlap a batch that was still in flight when it
+		// arrived. Reconcile against the cursor NOW, not its admission-time
+		// value; an already stored row is neither written nor counted twice.
+		prepend := delivery.from < block.floor
+		if prepend {
+			if n := block.floor - delivery.from; n < uint64(len(delivery.rows)) {
+				delivery.rows = delivery.rows[:n]
+			}
+		} else if delivery.from < block.rows {
+			skip := block.rows - delivery.from
+			if skip > uint64(len(delivery.rows)) {
+				skip = uint64(len(delivery.rows))
+			}
+			delivery.from += skip
+			delivery.rows = delivery.rows[skip:]
+			delivery.lost = 0
+		}
+		bs.mu.Unlock()
+		if len(delivery.rows) > 0 || delivery.lost > 0 {
+			if err := store.AppendBlockRows(ctx, content.AppendBlockRows{
+				EntryID: block.entry, ArtifactID: block.artifactID,
+				FromRow: delivery.from, LostRows: delivery.lost, LostCause: delivery.cause, Rows: delivery.rows,
+			}); frameFailed(err) {
+				return
+			} else if err != nil {
+				s.log.Warn("deferred block rows append failed", "session", sid, "entry", block.entry, "error", err)
+				bs.requeuePendingRows(sid, pending[i:], gen)
+				// The arrival is also the existing opportunity to retry an
+				// end whose close failed. A failed append must not strand
+				// that end forever; its own bounded close policy still owns
+				// the verdict, on this flush goroutine rather than the reader.
+				bs.drainPendingCloses(ctx, s, sid)
+				return
+			}
+		}
+		bs.mu.Lock()
+		if bs.attachGen[sid] != gen {
+			bs.mu.Unlock()
+			return
+		}
+		if prepend {
+			block.floor = delivery.from
+		} else {
+			if block.rows == 0 && block.floor == 0 {
+				block.floor = delivery.from
+			}
+			block.rows = max(block.rows, delivery.from+uint64(len(delivery.rows)))
+		}
+		floor, expectedFirstRow, storedUpTo := block.floor, block.expectedFirstRow, block.rows
+		bs.flushingBytes[sid] -= heldBytes
 		bs.mu.Unlock()
 		if len(delivery.rows) > 0 {
 			s.notifyBlockSubscriber(ctx, sid, "block.grew", blockGrewParams{
@@ -3628,21 +3524,18 @@ func (bs *blockStream) flushPendingRows(ctx context.Context, s *WSServer, sid se
 			})
 		}
 		if floor <= expectedFirstRow {
-			confirmPendingRows(ctx, confirm, delivery)
+			confirmStoredRows(ctx, confirm, storedUpTo)
 		}
 	}
-	next := bs.takePendingRows(sid, block.attempt)
+	next := bs.takePendingRows(sid, block.attempt, gen)
 	if len(next) == 0 {
 		// takePendingRows already set flushingBytes to 0 for this (empty)
 		// next batch: every delivery in the one just finished landed, and
 		// nothing is left in flight.
-		bs.mu.Lock()
-		bs.flushing[sid] = false
-		bs.mu.Unlock()
 		bs.drainPendingCloses(ctx, s, sid)
 		return
 	}
-	bs.flushPendingRows(ctx, s, sid, block, next, confirm)
+	bs.flushPendingRows(ctx, s, sid, block, next, confirm, gen)
 }
 
 func (bs *blockStream) drainPendingCloses(ctx context.Context, s *WSServer, sid session.ID) {
@@ -3689,24 +3582,28 @@ func (bs *blockStream) drainPendingCloses(ctx context.Context, s *WSServer, sid 
 	}
 }
 
-// confirmPendingRows tells the helper a delivery is settled — it may forget
+// confirmStoredRows tells the helper a durable prefix is settled — it may forget
 // those rows. Inside a lifecycle frame the telling waits for the frame's
 // commit and is dropped if it does not commit (ADR-0077 decision 9): rows the
 // frame appended are not stored until then, and a helper told otherwise
 // never offers them again.
-func confirmPendingRows(ctx context.Context, confirm func(uint64), delivery pendingRows) {
+func confirmStoredRows(ctx context.Context, confirm func(uint64), upTo uint64) {
 	if confirm == nil {
 		return
 	}
 	lifecyclecommit.After(ctx, nil, func(committed bool) {
 		if committed {
-			confirm(delivery.from + uint64(len(delivery.rows))) //nolint:gosec // a row count, not a byte count
+			confirm(upTo)
 		}
 	})
 }
 
-func (bs *blockStream) finishPendingRows(sid session.ID) {
+func (bs *blockStream) finishPendingRows(sid session.ID, gen uint64) {
 	bs.mu.Lock()
+	if bs.attachGen[sid] != gen {
+		bs.mu.Unlock()
+		return
+	}
 	delete(bs.pending, sid)
 	bs.flushing[sid] = false
 	delete(bs.flushingBytes, sid)
@@ -3718,8 +3615,12 @@ func (bs *blockStream) finishPendingRows(sid session.ID) {
 // flushingBytes for it in the same call: the batch stops being "in flight to
 // the store" here, so counting it in both places at once would count it
 // twice (nocx-2v80t.3.49).
-func (bs *blockStream) requeuePendingRows(sid session.ID, pending []pendingRows) {
+func (bs *blockStream) requeuePendingRows(sid session.ID, pending []pendingRows, gen uint64) {
 	bs.mu.Lock()
+	if bs.attachGen[sid] != gen {
+		bs.mu.Unlock()
+		return
+	}
 	bs.pending[sid] = append(pending, bs.pending[sid]...)
 	bs.flushing[sid] = false
 	delete(bs.flushingBytes, sid)
@@ -3841,32 +3742,4 @@ func (s *WSServer) blockStore() blockOutputStore {
 		return nil
 	}
 	return s.contentDB.Ledger()
-}
-
-// prependBlockHead stores one below-floor delivery — the block's own head,
-// departed before its open and offered again by the resend (nocx-zg3k3.5.3
-// Round 8) — through the store's contiguous-below-floor path. It answers
-// whether the artifact now holds the head: a failure is the one answer that
-// withholds the confirmation, so the mark never claims rows the store does
-// not hold.
-func (s *WSServer) prependBlockHead(sid session.ID, entry, artifact string, from uint64, rows []emulator.Row) bool {
-	store := s.blockStore()
-	if store == nil {
-		return false
-	}
-	// Owner: this stream, inside the helper's row delivery — the
-	// below-floor head's own store write. Closing event: the write — one
-	// prepend, nothing held past it (the mark stays behind until the
-	// prepend answers, so nothing outlives the context).
-	ctx := log.WithLogger(context.Background(), s.log)
-	if err := store.AppendBlockRows(ctx, content.AppendBlockRows{
-		EntryID: entry, ArtifactID: artifact, FromRow: from, Rows: rows,
-	}); err != nil {
-		log.From(ctx).Warn("block rows head prepend failed",
-			"session", sid, "entry", entry, "artifact", artifact, "from", from, "error", err)
-		return false
-	}
-	log.From(ctx).Debug("block rows head prepend: stored",
-		"session", sid, "entry", entry, "artifact", artifact, "from", from, "rows", len(rows))
-	return true
 }

@@ -32,7 +32,7 @@ import (
 // with exactly the rows it received.
 func TestBlockIntervalEnded_SealsWhenTheEndRowIsBehindTheArtifact(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	attempt := startsACommand(t, e, pub, lane, h, 2, "printf many")
 	fence := lifecycleFence(0x97)
@@ -44,9 +44,11 @@ func TestBlockIntervalEnded_SealsWhenTheEndRowIsBehindTheArtifact(t *testing.T) 
 	for i := range 20 {
 		rows = append(rows, aStreamRow(fmt.Sprintf("row-%02d", i)))
 	}
-	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, rows, ""); !confirm || written != 20 {
-		t.Fatalf("rows ack = (%d, %v), want the exclusive end 20 confirmed", written, confirm)
+	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, rows, ""); confirm || written != 0 {
+		t.Fatalf("rows admission = (%d, %v), want (0, false)", written, confirm)
 	}
+	awaitConfirmedBlockRows(t, marks, 20)
+	awaitBlockRowsIdle(t, e.ws, session.ID(sid))
 	e.ws.BlockIntervalEnded(session.ID(sid), fence, 10, []emulator.Row{aStreamRow("closing")}, false)
 
 	// The block seals: this is the state the client's `cmd-block-running` waits
@@ -107,7 +109,7 @@ func TestBlockIntervalEnded_SealsWhenTheEndRowIsBehindTheArtifact(t *testing.T) 
 // `18446744073709552000 rows missing`.
 func TestBlockIntervalEnded_SealsWithoutClaimingRowsItNeverReceived(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	attempt := startsACommand(t, e, pub, lane, h, 2, "printf short")
 	fence := lifecycleFence(0x99)
@@ -118,9 +120,11 @@ func TestBlockIntervalEnded_SealsWithoutClaimingRowsItNeverReceived(t *testing.T
 	for i := range 10 {
 		rows = append(rows, aStreamRow(fmt.Sprintf("delivered-%02d", i)))
 	}
-	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, rows, ""); !confirm || written != 10 {
-		t.Fatalf("rows ack = (%d, %v), want the exclusive end 10 confirmed", written, confirm)
+	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, rows, ""); confirm || written != 0 {
+		t.Fatalf("rows admission = (%d, %v), want (0, false)", written, confirm)
 	}
+	awaitConfirmedBlockRows(t, marks, 10)
+	awaitBlockRowsIdle(t, e.ws, session.ID(sid))
 	e.ws.BlockIntervalEnded(session.ID(sid), fence, 40, []emulator.Row{aStreamRow("closing")}, false)
 
 	assertBlockSealed(t, db, attempt)
@@ -164,14 +168,14 @@ func TestBlockRowsCloseAbandonsAtTheAttemptBound(t *testing.T) {
 	e, pub, lane, h, sid, _ := newLifecycleLedgerEnvWithStore(t, db)
 	failing := &closeFailureBlockStore{ledger: db.Ledger(), fail: true}
 	e.ws.blockRowsStore = failing
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	attempt := startsACommand(t, e, pub, lane, h, 2, "printf stuck")
 	fence := lifecycleFence(0x98)
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence)))
-	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("running")}, ""); !confirm {
-		t.Fatal("the streamed row was not confirmed")
-	}
+	e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("running")}, "")
+	awaitConfirmedBlockRows(t, marks, 1)
+	awaitBlockRowsIdle(t, e.ws, session.ID(sid))
 
 	// The first attempt is the close itself; every later delivery retries the
 	// end while it is still parked. maxCloseAttempts bounds that.
@@ -179,6 +183,13 @@ func TestBlockRowsCloseAbandonsAtTheAttemptBound(t *testing.T) {
 	for i := range maxCloseAttempts {
 		from := uint64(i + 1) //nolint:gosec // a row index, never negative
 		e.ws.BlockRowsArrived(session.ID(sid), from, 0, []emulator.Row{aStreamRow(fmt.Sprintf("later-%d", i))}, "")
+		awaitBlockRowsIdle(t, e.ws, session.ID(sid))
+	}
+	// The client is told the command's block ended, so the surface cannot sit
+	// in a running state with no event left that could end it.
+	deadline := time.Now().Add(wantWithin)
+	if _, err := awaitFrame(e.conn, deadline, isNotification("block.closed")); err != nil {
+		t.Fatalf("no block.closed reached the subscriber after the bound: %v", err)
 	}
 
 	e.ws.blockStream.mu.Lock()
@@ -190,12 +201,5 @@ func TestBlockRowsCloseAbandonsAtTheAttemptBound(t *testing.T) {
 	if parked != 0 || current != nil || open != nil || tries != 0 {
 		t.Fatalf("after the attempt bound: parked=%d current=%+v open=%+v tries=%d; want the close settled and nothing left to retry",
 			parked, current, open, tries)
-	}
-
-	// The client is told the command's block ended, so the surface cannot sit
-	// in a running state with no event left that could end it.
-	deadline := time.Now().Add(wantWithin)
-	if _, err := awaitFrame(e.conn, deadline, isNotification("block.closed")); err != nil {
-		t.Fatalf("no block.closed reached the subscriber after the bound: %v", err)
 	}
 }

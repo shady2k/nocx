@@ -383,7 +383,13 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 	// THE STREAMED BLOCK OUTPUT (nocx-2v80t.3.7): registered BEFORE the
 	// adopt, like the screen drain, so no row the runtime streams from its
 	// first output is dropped at a door nobody opened yet.
-	stopBlockRows := bindHeldBlockRows(ctx, h.blockRows, session.ID(entry.HostSessionID.Session), attached, held)
+	stopBlockRows, err := bindHeldBlockRows(ctx, h.blockRows, session.ID(entry.HostSessionID.Session), attached, held)
+	if err != nil {
+		_ = attached.Close()
+		abortLifecycleNow("open-rollback:block-rows")
+		_ = h.client.CloseSession(ctx, entry.HostSessionID)
+		return hostedSpawnResult{}, err
+	}
 
 	endAdopt := diagnostics.Stage(ctx, diagnostics.StageAdoption)
 	sess, err := h.registry.Adopt(ctx, cfg, session.ID(entry.HostSessionID.Session), attached)

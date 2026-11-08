@@ -20,7 +20,9 @@ import (
 // as for an unnamed one (nocx-zg3k3.5.11, found writing the repeat test).
 func TestANamedStartAttachingToAnAppAttemptStartsItsExecution(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	if err := e.ws.AttachBlockRows(t.Context(), session.ID(sid), nil); err != nil {
+		t.Fatalf("attach block rows: %v", err)
+	}
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 2, lifecyclePromptEvt()))
 	got := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt",
 		lifecycleSubmitParams(string(h.Domain), "make build"), 41))

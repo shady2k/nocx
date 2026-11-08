@@ -27,11 +27,13 @@ import (
 func TestTheHelpersSessionEndWaitsBehindTheReplayItFollows(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
 	createSessionRow(t, db, sid)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 	attempt := startsACommand(t, e, pub, lane, h, 2, "make release")
-	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("built")}, ""); !confirm {
-		t.Fatal("the streamed row was not confirmed")
+	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("built")}, ""); confirm || up != 0 {
+		t.Fatalf("row admission = (%d, %v), want deferred confirmation", up, confirm)
 	}
+	awaitConfirmedBlockRows(t, marks, 1)
+	awaitBlockRowsIdle(t, e.ws, session.ID(sid))
 
 	// The re-adopt arms the hold: the window still owes its replay.
 	drained := make(chan struct{})

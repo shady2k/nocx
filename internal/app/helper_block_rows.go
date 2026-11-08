@@ -32,7 +32,7 @@ import (
 // blockRowsSink is the transport's half, as this file needs it.
 // *transport.WSServer satisfies it; a nil sink wires nothing.
 type blockRowsSink interface {
-	AttachBlockRows(sid session.ID)
+	AttachBlockRows(ctx context.Context, sid session.ID, confirm func(uint64)) error
 	DetachBlockRows(sid session.ID)
 	// HelperSessionEnded settles the session's streaming because THE
 	// HELPER reported the session's end (ADR-0076) — sealed, unlike the
@@ -54,9 +54,6 @@ type blockRowsSink interface {
 	// overflowed (nocx-2v80t.3.36), on the same ordered sequence.
 	BlockOutputIncomplete(sid session.ID, fromRow uint64)
 }
-type blockRowsConfirmationSink interface {
-	AttachBlockRowsWithConfirmation(sid session.ID, confirm func(uint64))
-}
 
 // confirmer is the helper-facing half of one attachment's rows stream.
 type confirmer interface {
@@ -70,16 +67,16 @@ type confirmer interface {
 // attachment's rows plane was held from before its attach
 // (holdRowsBeforeAttach), so the frames that arrived in between reach the
 // stream once it is bound; a nil hold binds the attachment directly.
-func bindHeldBlockRows(ctx context.Context, sink blockRowsSink, sid session.ID, attached *client.AttachedSession, held *heldRows) func() {
+func bindHeldBlockRows(ctx context.Context, sink blockRowsSink, sid session.ID, attached *client.AttachedSession, held *heldRows) (func(), error) {
 	return bindHeldBlockRowsAfter(ctx, sink, sid, attached, held, nil)
 }
 
 // bindHeldBlockRowsAfter is bindHeldBlockRows for a re-adopted pane: the held
 // rows reach the stream once replayed closes — the leg applied the window the
 // helper handed it (heldRows.bindAfter). A nil replayed releases at the bind.
-func bindHeldBlockRowsAfter(ctx context.Context, sink blockRowsSink, sid session.ID, attached *client.AttachedSession, held *heldRows, replayed <-chan struct{}) func() {
+func bindHeldBlockRowsAfter(ctx context.Context, sink blockRowsSink, sid session.ID, attached *client.AttachedSession, held *heldRows, replayed <-chan struct{}) (func(), error) {
 	if sink == nil || attached == nil {
-		return func() {}
+		return func() {}, nil
 	}
 	if held == nil {
 		return bindBlockRowsTo(ctx, sink, sid, attached, attached)
@@ -102,7 +99,7 @@ type rowsSource interface {
 	OnOutputStartRow(func(client.OutputStartRow))
 }
 
-func bindBlockRowsTo(ctx context.Context, sink blockRowsSink, sid session.ID, src rowsSource, conf confirmer) func() {
+func bindBlockRowsTo(ctx context.Context, sink blockRowsSink, sid session.ID, src rowsSource, conf confirmer) (func(), error) {
 	// THE RECORDING OUTLIVES THE REQUEST THAT OPENED THE PANE. Every control
 	// call is withdrawable (nocx-3an1s.2.2), so the request that opens a pane
 	// carries a cancellable context and the transport cancels it when the
@@ -115,14 +112,13 @@ func bindBlockRowsTo(ctx context.Context, sink blockRowsSink, sid session.ID, sr
 	// incomplete). WithoutCancel keeps the request's values — the log fields
 	// this file logs with — and leaves the cancellation to its one owner: the
 	// returned stop, which the session's end calls.
-	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	marks := newMarkSlot()
 	sink.BlockOutputStartPlaneAttached(sid)
-	if withConfirmation, ok := sink.(blockRowsConfirmationSink); ok {
-		withConfirmation.AttachBlockRowsWithConfirmation(sid, marks.offer)
-	} else {
-		sink.AttachBlockRows(sid)
+	if err := sink.AttachBlockRows(ctx, sid, marks.offer); err != nil {
+		sink.DetachBlockRows(sid)
+		return nil, err
 	}
+	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	go func() {
 		for {
 			mark, ok := marks.next(ctx)
@@ -176,7 +172,7 @@ func bindBlockRowsTo(ctx context.Context, sink blockRowsSink, sid session.ID, sr
 			sink.DetachBlockRows(sid)
 			cancel()
 		})
-	}
+	}, nil
 }
 
 // heldRows is an attachment's rows plane from the instant the attachment
@@ -353,17 +349,20 @@ func (h *heldRows) release() {
 // read-back is not sent twice. Everything arriving meanwhile is held behind
 // them, so the stream sees one order. A nil ready releases at once: a fresh
 // open, with no window to replay.
-func (h *heldRows) bindAfter(ctx context.Context, sink blockRowsSink, sid session.ID, conf confirmer, ready <-chan struct{}) func() {
-	stop := bindBlockRowsTo(ctx, sink, sid, h, conf)
+func (h *heldRows) bindAfter(ctx context.Context, sink blockRowsSink, sid session.ID, conf confirmer, ready <-chan struct{}) (func(), error) {
+	stop, err := bindBlockRowsTo(ctx, sink, sid, h, conf)
+	if err != nil {
+		return nil, err
+	}
 	if ready == nil {
 		h.release()
-		return stop
+		return stop, nil
 	}
 	go func() {
 		<-ready
 		h.release()
 	}()
-	return stop
+	return stop, nil
 }
 
 // boundaryLossTo is the completion downlink's report of a lost boundary,

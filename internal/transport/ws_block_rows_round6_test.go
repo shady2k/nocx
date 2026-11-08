@@ -41,7 +41,9 @@ func TestALateOpenAcrossDetachAndReattachInstallsIntoNeitherAttachment(t *testin
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, lifecycleFence(0x99))))
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 4, lifecyclePromptEvt()))
 	e.ws.HelperSessionEnded(sid)
-	e.ws.AttachBlockRows(sid)
+	if err := e.ws.AttachBlockRows(t.Context(), sid, nil); err != nil {
+		t.Fatalf("attach block rows: %v", err)
+	}
 
 	// The open's store call now succeeds — and installs into neither
 	// attachment: the completed attempt's block was discarded.
@@ -93,7 +95,9 @@ func TestADuplicateQueuedAttemptDoesNotStrandTheQueue(t *testing.T) {
 	release := make(chan struct{})
 	store := &queueingOpenStore{hold: release, entered: make(chan struct{}, 1)}
 	e.ws.blockRowsStore = store
-	e.ws.AttachBlockRows(sid)
+	if err := e.ws.AttachBlockRows(t.Context(), sid, nil); err != nil {
+		t.Fatalf("attach block rows: %v", err)
+	}
 
 	done := make(chan struct{})
 	go func() {
@@ -137,7 +141,9 @@ func TestManyDuplicateRequestsCoalesceInTheQueue(t *testing.T) {
 	release := make(chan struct{})
 	store := &queueingOpenStore{hold: release, entered: make(chan struct{}, 1)}
 	e.ws.blockRowsStore = store
-	e.ws.AttachBlockRows(sid)
+	if err := e.ws.AttachBlockRows(t.Context(), sid, nil); err != nil {
+		t.Fatalf("attach block rows: %v", err)
+	}
 
 	done := make(chan struct{})
 	go func() {

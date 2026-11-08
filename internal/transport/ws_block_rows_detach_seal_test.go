@@ -92,11 +92,13 @@ func TestADetachAndAnInFlightCloseSealOnce(t *testing.T) {
 			}
 			store.detach = func() { e.ws.HelperSessionEnded(sid) }
 			e.ws.blockRowsStore = store
-			e.ws.AttachBlockRows(sid)
+			marks := attachConfirmedBlockRows(t, e.ws, sid)
 			attempt := startsACommand(t, e, pub, lane, h, 2, "make")
-			if _, confirm := e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("building")}, ""); !confirm {
-				t.Fatal("the streamed row was not confirmed")
+			if up, confirm := e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("building")}, ""); confirm || up != 0 {
+				t.Fatalf("row admission = (%d, %v), want deferred confirmation", up, confirm)
 			}
+			awaitConfirmedBlockRows(t, marks, 1)
+			awaitBlockRowsIdle(t, e.ws, sid)
 			fence := lifecycleFence(0x3a)
 			mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence)))
 			store.sealFails = tc.sealFails

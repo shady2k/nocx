@@ -9,10 +9,11 @@ package client
 // this boundary sees a wire shape.
 //
 // Delivery is in stream order, from the connection's own read loop, exactly
-// as OnOutputHole's is: the coordinator's block for a running command is
-// appended by the same goroutine that reads the wire, so a row can never be
-// attributed to the wrong interval by a delivery race. An observer must
-// therefore not block — it appends and returns, as the hole observer does.
+// as OnOutputHole's is. Rows, interval ends and clear boundaries are admitted
+// in that order; durable row writes belong to the coordinator's bounded,
+// ordered block-stream flush, not this reader. An observer must not wait for
+// row persistence: that would also withhold every pane's following screen
+// and control response. Only a completed durable write confirms its rows.
 
 import (
 	"context"

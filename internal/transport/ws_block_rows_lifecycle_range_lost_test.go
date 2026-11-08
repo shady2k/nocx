@@ -19,12 +19,14 @@ import (
 func TestLifecycleRangeLost_SettlesTheOpenBlockTheLostRangeCouldHaveEnded(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
 	createSessionRow(t, db, sid)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	attempt := startsACommand(t, e, pub, lane, h, 2, "make long")
-	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("before-the-gap")}, ""); !confirm {
-		t.Fatal("the streamed row was not confirmed")
+	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("before-the-gap")}, ""); confirm || up != 0 {
+		t.Fatalf("row admission = (%d, %v), want deferred confirmation", up, confirm)
 	}
+	awaitConfirmedBlockRows(t, marks, 1)
+	awaitBlockRowsIdle(t, e.ws, session.ID(sid))
 	// The coordinator goes away: the block stays open (ADR-0076).
 	e.ws.DetachBlockRows(session.ID(sid))
 

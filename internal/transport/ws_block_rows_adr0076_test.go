@@ -24,12 +24,14 @@ func TestDetachBlockRows_ACoordinatorDetachChangesNoBlock(t *testing.T) {
 	if err := db.Ledger().CreateSession(context.Background(), content.Session{ID: sid, WorkspaceID: "ws-lifecycle"}); err != nil {
 		t.Fatalf("create persisted session for rebind: %v", err)
 	}
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	attempt := startsACommand(t, e, pub, lane, h, 2, "make restart")
-	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("kept-0"), aStreamRow("kept-1")}, ""); !confirm || written != 2 {
-		t.Fatalf("first ack = (%d, %v), want rows 0 and 1 stored", written, confirm)
+	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("kept-0"), aStreamRow("kept-1")}, ""); confirm || written != 0 {
+		t.Fatalf("first admission = (%d, %v), want deferred confirmation", written, confirm)
 	}
+	awaitConfirmedBlockRows(t, marks, 2)
+	awaitBlockRowsIdle(t, e.ws, session.ID(sid))
 
 	e.ws.DetachBlockRows(session.ID(sid))
 
@@ -53,11 +55,13 @@ func TestDetachBlockRows_ACoordinatorDetachChangesNoBlock(t *testing.T) {
 	// re-binds the open block from the store — session id → open entry →
 	// its cursor — and the re-adopt's attempt fact, when it arrives,
 	// finds the block already installed.
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks = attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 	e.ws.blockStream.openAttemptFor(context.Background(), e.ws, session.ID(sid), attempt)
-	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 2, 0, []emulator.Row{aStreamRow("kept-2"), aStreamRow("kept-3")}, ""); !confirm || written != 4 {
-		t.Fatalf("continued ack = (%d, %v), want rows 2 and 3 appended to the open block", written, confirm)
+	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 2, 0, []emulator.Row{aStreamRow("kept-2"), aStreamRow("kept-3")}, ""); confirm || written != 0 {
+		t.Fatalf("continued admission = (%d, %v), want deferred confirmation", written, confirm)
 	}
+	awaitConfirmedBlockRows(t, marks, 4)
+	awaitBlockRowsIdle(t, e.ws, session.ID(sid))
 
 	// The helper reports the interval's end: only now does the block seal,
 	// with every row it was given across the restart.
@@ -81,12 +85,14 @@ func TestDetachBlockRows_ACoordinatorDetachChangesNoBlock(t *testing.T) {
 // said closed, and inert to later rows.
 func TestHelperSessionEnded_SealsTheOpenBlock(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	attempt := startsACommand(t, e, pub, lane, h, 2, "make exit")
-	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("partial")}, ""); !confirm {
-		t.Fatal("the streamed row was not confirmed")
+	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("partial")}, ""); confirm || written != 0 {
+		t.Fatalf("row admission = (%d, %v), want deferred confirmation", written, confirm)
 	}
+	awaitConfirmedBlockRows(t, marks, 1)
+	awaitBlockRowsIdle(t, e.ws, session.ID(sid))
 
 	e.ws.HelperSessionEnded(session.ID(sid))
 
@@ -113,23 +119,27 @@ func TestAttachBlockRows_AReAdoptingStreamContinuesTheOpenBlockFromTheStore(t *t
 	// The sessions row production's own open path writes; the read the
 	// re-bind makes joins the entry's session through it.
 	createSessionRow(t, db, sid)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	attempt := startsACommand(t, e, pub, lane, h, 2, "make restart")
-	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("kept-0"), aStreamRow("kept-1")}, ""); !confirm || written != 2 {
-		t.Fatalf("first ack = (%d, %v), want rows 0 and 1 stored", written, confirm)
+	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("kept-0"), aStreamRow("kept-1")}, ""); confirm || written != 0 {
+		t.Fatalf("first admission = (%d, %v), want deferred confirmation", written, confirm)
 	}
+	awaitConfirmedBlockRows(t, marks, 2)
+	awaitBlockRowsIdle(t, e.ws, session.ID(sid))
 
 	e.ws.DetachBlockRows(session.ID(sid))
 
 	// The coordinator comes back. No attempt fact is ingested here — the
 	// lane is Desynchronized and its lifecycle events quarantined — yet
 	// the attach alone must continue the open block from the store.
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks = attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
-	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 2, 0, []emulator.Row{aStreamRow("kept-2"), aStreamRow("kept-3")}, ""); !confirm || written != 4 {
-		t.Fatalf("continued ack = (%d, %v), want the tail appended to the rebound block", written, confirm)
+	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 2, 0, []emulator.Row{aStreamRow("kept-2"), aStreamRow("kept-3")}, ""); confirm || written != 0 {
+		t.Fatalf("continued admission = (%d, %v), want deferred confirmation", written, confirm)
 	}
+	awaitConfirmedBlockRows(t, marks, 4)
+	awaitBlockRowsIdle(t, e.ws, session.ID(sid))
 	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 1, 0, []emulator.Row{aStreamRow("kept-1"), aStreamRow("kept-2")}, ""); !confirm || written != 4 {
 		t.Fatalf("overlap ack = (%d, %v), want the resent prefix deduped at the cursor", written, confirm)
 	}
@@ -162,16 +172,18 @@ func TestTheRebindReconcilesAnEarlierInstalledBlockToTheDurableCursor(t *testing
 	e, pub, lane, h, sidStr, db := newLifecycleLedgerEnv(t, true)
 	sid := session.ID(sidStr)
 	createSessionRow(t, db, sidStr)
-	e.ws.AttachBlockRows(sid)
+	marks := attachConfirmedBlockRows(t, e.ws, sid)
 
 	attempt := startsACommand(t, e, pub, lane, h, 2, "make race")
-	if _, confirm := e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("r0"), aStreamRow("r1")}, ""); !confirm {
-		t.Fatal("the streamed rows were not confirmed")
+	if written, confirm := e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("r0"), aStreamRow("r1")}, ""); confirm || written != 0 {
+		t.Fatalf("row admission = (%d, %v), want deferred confirmation", written, confirm)
 	}
+	awaitConfirmedBlockRows(t, marks, 2)
+	awaitBlockRowsIdle(t, e.ws, sid)
 	art := blockArtifact(t, db, attempt)
 	e.ws.DetachBlockRows(sid)
 
-	e.ws.AttachBlockRows(sid)
+	marks = attachConfirmedBlockRows(t, e.ws, sid)
 	// A lifecycle open won the race: the same entry, the same (idempotent)
 	// artifact, installed at rows 0 — what performOpen gives a block this
 	// process opened.
@@ -195,9 +207,10 @@ func TestTheRebindReconcilesAnEarlierInstalledBlockToTheDurableCursor(t *testing
 	}
 	e.ws.blockStream.mu.Unlock()
 
-	if written, confirm := e.ws.BlockRowsArrived(sid, 2, 0, []emulator.Row{aStreamRow("r2")}, ""); !confirm || written != 3 {
-		t.Fatalf("tail ack = (%d, %v), want the tail appended past the durable cursor", written, confirm)
+	if written, confirm := e.ws.BlockRowsArrived(sid, 2, 0, []emulator.Row{aStreamRow("r2")}, ""); confirm || written != 0 {
+		t.Fatalf("tail admission = (%d, %v), want deferred confirmation", written, confirm)
 	}
+	awaitConfirmedBlockRows(t, marks, 3)
 }
 
 // A NEW command started after the re-adopt owns the stream: the recovered
@@ -208,16 +221,20 @@ func TestTheRebindDoesNotStealCurrentFromALaterBlock(t *testing.T) {
 	e, pub, lane, h, sidStr, db := newLifecycleLedgerEnv(t, true)
 	sid := session.ID(sidStr)
 	createSessionRow(t, db, sidStr)
-	e.ws.AttachBlockRows(sid)
+	marks := attachConfirmedBlockRows(t, e.ws, sid)
 
 	attempt := startsACommand(t, e, pub, lane, h, 2, "make first")
-	if _, confirm := e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("f0")}, ""); !confirm {
-		t.Fatal("the streamed row was not confirmed")
+	if written, confirm := e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("f0")}, ""); confirm || written != 0 {
+		t.Fatalf("row admission = (%d, %v), want deferred confirmation", written, confirm)
 	}
+	awaitConfirmedBlockRows(t, marks, 1)
+	awaitBlockRowsIdle(t, e.ws, sid)
 	art := blockArtifact(t, db, attempt)
 	e.ws.DetachBlockRows(sid)
 
-	e.ws.AttachBlockRows(sid)
+	if err := e.ws.AttachBlockRows(t.Context(), sid, nil); err != nil {
+		t.Fatalf("attach block rows: %v", err)
+	}
 	e.ws.blockStream.mu.Lock()
 	later := &openBlock{attempt: "later", entry: "later", artifactID: "later-art", kept: true}
 	e.ws.blockStream.open[sid] = map[string]*openBlock{"later": later}

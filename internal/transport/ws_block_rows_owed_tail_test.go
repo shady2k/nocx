@@ -71,13 +71,15 @@ func TestACloseWithRowsStillOwedWaitsForThemInsteadOfSealing(t *testing.T) {
 	db := newLedgerStore(t)
 	e, pub, lane, h, sidStr, _ := newLifecycleLedgerEnvWithStore(t, db)
 	sid := session.ID(sidStr)
-	e.ws.AttachBlockRows(sid)
+	marks := attachConfirmedBlockRows(t, e.ws, sid)
 	attempt := startsACommand(t, e, pub, lane, h, 2, "make")
 
 	// The interval streams [0..177) and the coordinator stores it all.
-	if up, confirm := e.ws.BlockRowsArrived(sid, 0, 0, rowsOfOwed(t, 0, 177), ""); !confirm || up != 177 {
-		t.Fatalf("the head delivery: up=%d confirm=%v, want 177 true", up, confirm)
+	if up, confirm := e.ws.BlockRowsArrived(sid, 0, 0, rowsOfOwed(t, 0, 177), ""); confirm || up != 0 {
+		t.Fatalf("the head admission: up=%d confirm=%v, want deferred confirmation", up, confirm)
 	}
+	awaitConfirmedBlockRows(t, marks, 177)
+	awaitBlockRowsIdle(t, e.ws, sid)
 
 	// THE END MARKER ARRIVES BEFORE ITS FENCE: it parks in bs.ends (the
 	// either-order of ADR-0024 decision 7), unresolved.
@@ -102,12 +104,14 @@ func TestACloseWithRowsStillOwedWaitsForThemInsteadOfSealing(t *testing.T) {
 
 	// THE OWED ROWS ARRIVE, in the walk's batches; each re-drives the close
 	// at the truer cursor.
-	if up, confirm := e.ws.BlockRowsArrived(sid, 177, 0, rowsOfOwed(t, 177, 53), ""); !confirm {
-		t.Fatalf("the first owed batch did not store: up=%d confirm=%v", up, confirm)
+	if up, confirm := e.ws.BlockRowsArrived(sid, 177, 0, rowsOfOwed(t, 177, 53), ""); confirm || up != 0 {
+		t.Fatalf("the first owed admission: up=%d confirm=%v, want deferred confirmation", up, confirm)
 	}
-	if up, confirm := e.ws.BlockRowsArrived(sid, 230, 0, rowsOfOwed(t, 230, 48), ""); !confirm {
-		t.Fatalf("the second owed batch did not store: up=%d confirm=%v", up, confirm)
+	awaitConfirmedBlockRows(t, marks, 230)
+	if up, confirm := e.ws.BlockRowsArrived(sid, 230, 0, rowsOfOwed(t, 230, 48), ""); confirm || up != 0 {
+		t.Fatalf("the second owed admission: up=%d confirm=%v, want deferred confirmation", up, confirm)
 	}
+	awaitConfirmedBlockRows(t, marks, 278)
 
 	// The retried close seals with every row.
 	waittest.WaitForDetail(t, "the block to seal with every row of the command", func() string {

@@ -48,7 +48,9 @@ func TestZeroRetentionBurstKeepsEveryStoredMarker(t *testing.T) {
 	})
 	attached.OnOutputRows(rec.onRows)
 	attached.OnIntervalEnd(rec.onEnd)
-	e.ws.AttachBlockRowsWithConfirmation(session.ID(sid), rec.offerConfirmation)
+	if err := e.ws.AttachBlockRows(t.Context(), session.ID(sid), rec.offerConfirmation); err != nil {
+		t.Fatalf("attach block rows: %v", err)
+	}
 	nonce, nonceHex := fenceNonce(1)
 	command := "stty -echo; seq -f 'transcript-zero-retention-%03g' 1 5000; printf '\\033]1337;NOCX_FENCE;" + nonceHex + "\\007'"
 	attempt := startsACommand(t, e, pub, lane, h, 2, command)

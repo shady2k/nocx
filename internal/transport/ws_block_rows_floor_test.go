@@ -20,7 +20,7 @@ import (
 	"github.com/shady2k/nocx/internal/session"
 )
 
-func TestFreshArtifactAtItsAuthenticatedNonzeroOutputStartConfirmsImmediately(t *testing.T) {
+func TestFreshArtifactAtItsAuthenticatedNonzeroOutputStartConfirmsAfterStorage(t *testing.T) {
 	e, _, _, _, sid, attempt, store, db := lateOpenSetup(t)
 	e.ws.BlockOutputStartPlaneAttached(sid)
 
@@ -35,11 +35,13 @@ func TestFreshArtifactAtItsAuthenticatedNonzeroOutputStartConfirmsImmediately(t 
 	case <-time.After(wantWithin):
 		t.Fatal("the marked open did not finish")
 	}
+	marks := attachConfirmedBlockRows(t, e.ws, sid)
 
 	rows := []emulator.Row{aStreamRow("R7"), aStreamRow("R8"), aStreamRow("R9"), aStreamRow("R10")}
-	if up, confirm := e.ws.BlockRowsArrived(sid, 6, 0, rows, ""); !confirm || up != 10 {
-		t.Fatalf("first append at the authenticated start answered up=%d confirm=%v, want durable cursor 10", up, confirm)
+	if up, confirm := e.ws.BlockRowsArrived(sid, 6, 0, rows, ""); confirm || up != 0 {
+		t.Fatalf("first append at the authenticated start answered up=%d confirm=%v, want deferred confirmation", up, confirm)
 	}
+	awaitConfirmedBlockRows(t, marks, 10)
 
 	stored := streamRows(t, db, attempt)
 	if len(stored) != 4 || stored[0].From != 6 {
@@ -49,7 +51,7 @@ func TestFreshArtifactAtItsAuthenticatedNonzeroOutputStartConfirmsImmediately(t 
 
 func TestFreshFirstAppendAboveZeroDoesNotConfirmTheMissingHead(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 	attempt := startsACommand(t, e, pub, lane, h, 2, "printf first append")
 
 	// The store accepts this first batch at row 6 and records [6,10), but it
@@ -59,13 +61,21 @@ func TestFreshFirstAppendAboveZeroDoesNotConfirmTheMissingHead(t *testing.T) {
 	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 6, 0, suffix, ""); confirm || up != 0 {
 		t.Fatalf("first append at row 6 answered up=%d confirm=%v, want no confirmation before the head is stored", up, confirm)
 	}
+	awaitDurableBlockRowCount(t, db, attempt, 4)
+	awaitBlockRowsIdle(t, e.ws, session.ID(sid))
+	select {
+	case up := <-marks:
+		t.Fatalf("suffix confirmed at %d before the missing head was stored", up)
+	default:
+	}
 
 	// The resend's head reaches below the artifact's actual first row. It
 	// prepends [0,6), then may confirm the now-contiguous [0,10) span.
 	head := []emulator.Row{aStreamRow("R1"), aStreamRow("R2"), aStreamRow("R3"), aStreamRow("R4"), aStreamRow("R5"), aStreamRow("R6"), aStreamRow("R7"), aStreamRow("R8")}
-	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, head, ""); !confirm || up != 10 {
-		t.Fatalf("completed head answered up=%d confirm=%v, want the full durable cursor 10", up, confirm)
+	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, head, ""); confirm || up != 0 {
+		t.Fatalf("completed head answered up=%d confirm=%v, want deferred confirmation", up, confirm)
 	}
+	awaitConfirmedBlockRows(t, marks, 10)
 
 	stored := streamRows(t, db, attempt)
 	if len(stored) != 10 {
@@ -143,7 +153,7 @@ func TestAResentHeadBelowTheBlockFloorPrependsBeforeItConfirms(t *testing.T) {
 	}
 
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)), WithContentDB(db))
-	ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, ws, session.ID(sid))
 
 	// The resend's head: [0..9) — [0..6) below the floor, [6..9) held.
 	var resent []emulator.Row
@@ -151,12 +161,10 @@ func TestAResentHeadBelowTheBlockFloorPrependsBeforeItConfirms(t *testing.T) {
 		resent = append(resent, aStreamRow("R"+strings.Repeat("x", 0)+string(rune('0'+i))))
 	}
 	written, confirm := ws.BlockRowsArrived(session.ID(sid), 0, 0, resent, "")
-	if !confirm {
-		t.Fatalf("the head delivery was not confirmed: the mark would never cover it")
+	if confirm || written != 0 {
+		t.Fatalf("head admission = (%d, %v), want deferred confirmation", written, confirm)
 	}
-	if written != 10 {
-		t.Fatalf("the ack reports %d, want the artifact's cursor 10 — the whole span it now holds", written)
-	}
+	awaitConfirmedBlockRows(t, marks, 10)
 
 	// The artifact holds [0..10): the prepended head first.
 	art, err := led.Artifact(ctx, artifact)
@@ -263,7 +271,7 @@ func TestAResentHeadHeldUntilItReachesTheFloor(t *testing.T) {
 	}
 
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)), WithContentDB(db))
-	ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, ws, session.ID(sid))
 
 	// Batch 1: [0..3) — inside the gap, short of the floor. Held, never
 	// confirmed: the ack must not leap over rows the artifact lacks.
@@ -274,9 +282,10 @@ func TestAResentHeadHeldUntilItReachesTheFloor(t *testing.T) {
 	// Batch 2: [3..6) — the chain now reaches the floor: it all joins in
 	// one prepend, and the ack covers the artifact's whole held span.
 	if written, confirm := ws.BlockRowsArrived(session.ID(sid), 3, 0,
-		[]emulator.Row{aStreamRow("R4"), aStreamRow("R5"), aStreamRow("R6")}, ""); !confirm || written != 10 {
-		t.Fatalf("batch 2 = (%d, %v), want the chain joined and the artifact's cursor 10", written, confirm)
+		[]emulator.Row{aStreamRow("R4"), aStreamRow("R5"), aStreamRow("R6")}, ""); confirm || written != 0 {
+		t.Fatalf("batch 2 = (%d, %v), want deferred confirmation", written, confirm)
 	}
+	awaitConfirmedBlockRows(t, marks, 10)
 
 	// The artifact holds [0..10), head first.
 	art, artErr := led.Artifact(ctx, artifact)
@@ -373,7 +382,7 @@ func TestAResendBatchThatCompletesTheHeadAlsoAppendsItsTail(t *testing.T) {
 	}
 
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)), WithContentDB(db))
-	ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, ws, session.ID(sid))
 
 	// The resend, in batches that align with neither the floor nor the
 	// cursor: [0,4) short of the floor; [4,13) completes the head, repeats
@@ -381,12 +390,14 @@ func TestAResendBatchThatCompletesTheHeadAlsoAppendsItsTail(t *testing.T) {
 	if _, confirm := ws.BlockRowsArrived(session.ID(sid), 0, 0, span(0, 4), ""); confirm {
 		t.Fatal("the batch short of the floor was confirmed")
 	}
-	if written, confirm := ws.BlockRowsArrived(session.ID(sid), 4, 0, span(4, 13), ""); !confirm || written != 13 {
-		t.Fatalf("the batch that completes the head and carries the tail = (%d, %v), want (13, true)", written, confirm)
+	if written, confirm := ws.BlockRowsArrived(session.ID(sid), 4, 0, span(4, 13), ""); confirm || written != 0 {
+		t.Fatalf("the batch that completes the head and carries the tail = (%d, %v), want deferred confirmation", written, confirm)
 	}
-	if written, confirm := ws.BlockRowsArrived(session.ID(sid), 13, 0, span(13, 16), ""); !confirm || written != 16 {
-		t.Fatalf("the next batch = (%d, %v), want it to continue the block to 16", written, confirm)
+	awaitConfirmedBlockRows(t, marks, 13)
+	if written, confirm := ws.BlockRowsArrived(session.ID(sid), 13, 0, span(13, 16), ""); confirm || written != 0 {
+		t.Fatalf("the next batch = (%d, %v), want deferred confirmation", written, confirm)
 	}
+	awaitConfirmedBlockRows(t, marks, 16)
 	art, artErr := led.Artifact(ctx, artifact)
 	if artErr != nil {
 		t.Fatalf("Artifact: %v", artErr)
@@ -402,6 +413,62 @@ func TestAResendBatchThatCompletesTheHeadAlsoAppendsItsTail(t *testing.T) {
 	for i, line := range got {
 		if !strings.Contains(line, `"R`+strconv.Itoa(i)+`"`) && !strings.Contains(line, "R"+strconv.Itoa(i)) {
 			t.Fatalf("row %d is %s, want R%d", i, line, i)
+		}
+	}
+}
+
+// A gapped prefix is durable without being confirmable to the helper.
+func awaitDurableBlockRowCount(t *testing.T, db content.ContentDB, attempt string, want int) {
+	t.Helper()
+	timer := time.NewTimer(wantWithin)
+	defer timer.Stop()
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for {
+		got := len(streamRows(t, db, attempt))
+		if got == want {
+			return
+		}
+		if got > want {
+			t.Fatalf("durable rows = %d, want %d", got, want)
+		}
+		select {
+		case <-timer.C:
+			t.Fatalf("durable rows = %d, want %d", got, want)
+		case <-tick.C:
+		}
+	}
+}
+
+// Confirmation proves storage, but the flush owner may still be unwinding.
+// Wait for that owner only when the next step needs a completed delivery.
+func awaitBlockRowsIdle(t *testing.T, ws *WSServer, sid session.ID) {
+	t.Helper()
+	timer := time.NewTimer(wantWithin)
+	defer timer.Stop()
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for {
+		ws.blockStream.mu.Lock()
+		flush := ws.blockStream.flushDone[sid]
+		idle := !ws.blockStream.flushing[sid] && !ws.blockStream.closing[sid] && flush.active == 0
+		done := flush.done
+		ws.blockStream.mu.Unlock()
+		if idle && done == nil {
+			return
+		}
+		if done != nil {
+			select {
+			case <-done:
+				continue
+			case <-timer.C:
+				t.Fatal("the block rows drain did not retire")
+			}
+		}
+		select {
+		case <-timer.C:
+			t.Fatal("the block rows owner did not finish its delivery")
+		case <-tick.C:
 		}
 	}
 }

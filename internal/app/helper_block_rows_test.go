@@ -32,10 +32,23 @@ type fakeSink struct {
 	answer             func(fromRow uint64, n int) (uint64, bool)
 }
 
-func (f *fakeSink) AttachBlockRows(sid session.ID) {
+func (f *fakeSink) AttachBlockRows(ctx context.Context, sid session.ID, _ func(uint64)) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.attached = append(f.attached, sid)
+	return nil
+}
+
+func mustBindBlockRows(t *testing.T, ctx context.Context, sink blockRowsSink, sid session.ID, src rowsSource, conf confirmer) func() {
+	t.Helper()
+	stop, err := bindBlockRowsTo(ctx, sink, sid, src, conf)
+	if err != nil {
+		t.Fatalf("bind block rows: %v", err)
+	}
+	return stop
 }
 
 func (f *fakeSink) DetachBlockRows(sid session.ID) {
@@ -198,7 +211,7 @@ func TestTheRowsReadLoopNeverWaitsOnAConfirmation(t *testing.T) {
 	sink := &fakeSink{answer: func(from uint64, n int) (uint64, bool) { return from + uint64(n), true }} //nolint:gosec // a test's row count, never negative
 	src := &fakeSource{}
 	conf := &gatedConfirmer{asked: make(chan uint64, 8), release: make(chan struct{})}
-	stop := bindBlockRowsTo(context.Background(), sink, "s1", src, conf)
+	stop := mustBindBlockRows(t, context.Background(), sink, "s1", src, conf)
 	defer stop()
 
 	src.deliverRows(client.OutputRows{FromRow: 0, Rows: rowsN(10)})
@@ -233,7 +246,7 @@ func TestAnUnconfirmedDeliverySendsNoMarkAndTheMarkNeverGoesBack(t *testing.T) {
 	src := &fakeSource{}
 	conf := &gatedConfirmer{asked: make(chan uint64, 8), release: make(chan struct{})}
 	close(conf.release)
-	stop := bindBlockRowsTo(context.Background(), sink, "s1", src, conf)
+	stop := mustBindBlockRows(t, context.Background(), sink, "s1", src, conf)
 	defer stop()
 
 	mark = 7
@@ -259,7 +272,7 @@ func TestEndsReachTheTransportAndStopDetaches(t *testing.T) {
 	sink := &fakeSink{answer: func(uint64, int) (uint64, bool) { return 0, false }}
 	src := &fakeSource{}
 	conf := &gatedConfirmer{asked: make(chan uint64, 8), release: make(chan struct{})}
-	stop := bindBlockRowsTo(context.Background(), sink, "s1", src, conf)
+	stop := mustBindBlockRows(t, context.Background(), sink, "s1", src, conf)
 
 	var nonce sessionruntime.FenceNonce
 	nonce[0] = 0xab
@@ -291,8 +304,27 @@ func TestEndsReachTheTransportAndStopDetaches(t *testing.T) {
 
 // A nil sink or attachment wires nothing and stop is safe.
 func TestANilSinkWiresNothing(t *testing.T) {
-	stop := bindHeldBlockRows(context.Background(), nil, "s1", nil, nil)
+	stop, err := bindHeldBlockRows(context.Background(), nil, "s1", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	stop()
+}
+
+func TestCancelledRowAttachmentInstallsNoCallbacks(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	sink, src := &fakeSink{}, &fakeSource{}
+	stop, err := bindBlockRowsTo(ctx, sink, "cancelled", src, nil)
+	if err != context.Canceled || stop != nil {
+		t.Fatalf("cancelled bind = (%v, stop present %v), want cancellation without a binding", err, stop != nil)
+	}
+	if len(sink.attached) != 0 || len(sink.detached) != 1 {
+		t.Fatalf("attachment state after cancellation: attached=%v detached=%v", sink.attached, sink.detached)
+	}
+	if src.rows != nil || src.end != nil || src.clear != nil || src.outputStartRow != nil {
+		t.Fatal("a cancelled attachment installed row callbacks")
+	}
 }
 
 // The helper's overflow marker (nocx-2v80t.3.36) reaches the transport as
@@ -303,7 +335,7 @@ func TestAnIncompleteMarkerIsNotARowDelivery(t *testing.T) {
 	src := &fakeSource{}
 	conf := &gatedConfirmer{asked: make(chan uint64, 8), release: make(chan struct{})}
 	close(conf.release)
-	stop := bindBlockRowsTo(context.Background(), sink, "s1", src, conf)
+	stop := mustBindBlockRows(t, context.Background(), sink, "s1", src, conf)
 	defer stop()
 
 	src.deliverRows(client.OutputRows{FromRow: 0, Rows: rowsN(2)})
@@ -321,7 +353,7 @@ func TestAnIncompleteMarkerIsNotARowDelivery(t *testing.T) {
 func TestOutputStartAnchorReachesTransportSink(t *testing.T) {
 	sink := &fakeSink{}
 	src := &fakeSource{}
-	stop := bindBlockRowsTo(context.Background(), sink, "session-1", src, nil)
+	stop := mustBindBlockRows(t, context.Background(), sink, "session-1", src, nil)
 	defer stop()
 	anchor := proto.OutputStartScreenAnchor{Row: 5, ScreenRevision: 9, BufferKind: "alternate", BufferInstance: "2", Cols: 120, Rows: 40}
 	src.mu.Lock()
@@ -386,7 +418,7 @@ func TestLongOutputIsRecordedAfterTheRequestThatOpenedThePaneHasEnded(t *testing
 	src := &fakeSource{}
 	conf := &markConfirmer{}
 	ctx, cancelRequest := context.WithCancel(context.Background())
-	stop := bindBlockRowsTo(ctx, sink, "s1", src, conf)
+	stop := mustBindBlockRows(t, ctx, sink, "s1", src, conf)
 	defer stop()
 	// The handler returns. This is what the transport does to the request the
 	// pane was opened by, and it happens before the person types anything.

@@ -27,7 +27,9 @@ func TestBlockRowsArrived_ARefusedKeepIsNotConfirmed(t *testing.T) {
 	policy.SetOutputEnabled(false)
 	db := newLedgerStoreWithPolicy(t, policy)
 	e, pub, lane, h, sid, _ := newLifecycleLedgerEnvWithStore(t, db)
-	e.ws.AttachBlockRows(session.ID(sid))
+	if err := e.ws.AttachBlockRows(t.Context(), session.ID(sid), nil); err != nil {
+		t.Fatalf("attach block rows: %v", err)
+	}
 
 	attempt := startsACommand(t, e, pub, lane, h, 2, "make secret")
 
@@ -44,7 +46,9 @@ func TestBlockRowsArrived_ARefusedKeepIsNotConfirmed(t *testing.T) {
 // it is not confirmed either: the helper offers those rows again.
 func TestBlockRowsArrived_UnrecordedStreamIsNotConfirmed(t *testing.T) {
 	e, pub, lane, h, sid, _ := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	if err := e.ws.AttachBlockRows(t.Context(), session.ID(sid), nil); err != nil {
+		t.Fatalf("attach block rows: %v", err)
+	}
 
 	startsACommand(t, e, pub, lane, h, 2, "make flood")
 	e.ws.BlockOutputIncomplete(session.ID(sid), 5)
@@ -59,7 +63,9 @@ func TestBlockRowsArrived_UnrecordedStreamIsNotConfirmed(t *testing.T) {
 // rides on — not confirmed: nothing about them is stored.
 func TestBlockRowsArrived_NoAttemptRowsAreNotConfirmed(t *testing.T) {
 	e, _, _, _, sid, _ := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	if err := e.ws.AttachBlockRows(t.Context(), session.ID(sid), nil); err != nil {
+		t.Fatalf("attach block rows: %v", err)
+	}
 
 	written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("prompt noise")}, "")
 	if confirm || written != 0 {
@@ -72,19 +78,22 @@ func TestBlockRowsArrived_NoAttemptRowsAreNotConfirmed(t *testing.T) {
 // and the store never sees a discontinuity.
 func TestBlockRowsArrived_AResentDeliveryIsTrimmedToTheCursor(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	attempt := startsACommand(t, e, pub, lane, h, 2, "make watch")
-	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("one"), aStreamRow("two")}, ""); !confirm || written != 2 {
-		t.Fatalf("first ack = (%d, %v), want rows 0 and 1 stored", written, confirm)
+	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("one"), aStreamRow("two")}, ""); confirm || written != 0 {
+		t.Fatalf("first admission = (%d, %v), want deferred confirmation", written, confirm)
 	}
+	awaitConfirmedBlockRows(t, marks, 2)
+	awaitBlockRowsIdle(t, e.ws, session.ID(sid))
 
 	// The same rows offered again, one row further: index 1 is already in
 	// the artifact, index 2 is new.
 	written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 1, 0, []emulator.Row{aStreamRow("two"), aStreamRow("three")}, "")
-	if !confirm || written != 3 {
-		t.Fatalf("resent ack = (%d, %v), want the new row stored and confirmed through 3", written, confirm)
+	if confirm || written != 0 {
+		t.Fatalf("resent admission = (%d, %v), want deferred confirmation", written, confirm)
 	}
+	awaitConfirmedBlockRows(t, marks, 3)
 	kept := streamRows(t, db, attempt)
 	if len(kept) != 3 {
 		t.Fatalf("stored rows = %+v, want exactly three — the overlap stored once", kept)
@@ -101,11 +110,13 @@ func TestBlockRowsArrived_AResentDeliveryIsTrimmedToTheCursor(t *testing.T) {
 // confirmed the way it always was.
 func TestBlockRowsArrived_RowsBelowASealedIntervalStayConfirmed(t *testing.T) {
 	e, pub, lane, h, sid, _ := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	first := startsACommand(t, e, pub, lane, h, 2, "make first")
 	fence := lifecycleFence(0x31)
 	e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("early")}, "")
+	awaitConfirmedBlockRows(t, marks, 1)
+	awaitBlockRowsIdle(t, e.ws, session.ID(sid))
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(first), 0, fence)))
 	e.ws.BlockIntervalEnded(session.ID(sid), fence, 1, []emulator.Row{aStreamRow("first screen")}, false)
 
@@ -125,16 +136,19 @@ func TestBlockRowsArrived_RowsBelowASealedIntervalStayConfirmed(t *testing.T) {
 // add to.
 func TestBlockRowsArrived_AnUnavailableGapReachesThePayload(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
 
 	attempt := startsACommand(t, e, pub, lane, h, 2, "make output")
-	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("one")}, ""); !confirm || written != 1 {
-		t.Fatalf("first ack = (%d, %v), want row 0 stored", written, confirm)
+	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("one")}, ""); confirm || written != 0 {
+		t.Fatalf("first admission = (%d, %v), want deferred confirmation", written, confirm)
 	}
+	awaitConfirmedBlockRows(t, marks, 1)
 	// The resend's gap: rows [1, 3) pruned while the coordinator was away.
-	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 3, 2, []emulator.Row{aStreamRow("two")}, proto.LostCauseCoordinatorUnavailable); !confirm || written != 4 {
-		t.Fatalf("gap ack = (%d, %v), want the gap named and row 3 stored", written, confirm)
+	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 3, 2, []emulator.Row{aStreamRow("two")}, proto.LostCauseCoordinatorUnavailable); confirm || written != 0 {
+		t.Fatalf("gap admission = (%d, %v), want deferred confirmation", written, confirm)
 	}
+	awaitConfirmedBlockRows(t, marks, 4)
+	awaitBlockRowsIdle(t, e.ws, session.ID(sid))
 
 	fence := lifecycleFence(0x33)
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence)))

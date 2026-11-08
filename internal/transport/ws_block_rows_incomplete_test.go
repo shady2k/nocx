@@ -32,14 +32,14 @@ func TestAnIncompleteMarkerEndsTheBlockInFlightIncomplete(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			e, pub, lane, h, sidStr, db := newLifecycleLedgerEnv(t, true)
 			sid := session.ID(sidStr)
-			e.ws.AttachBlockRows(sid)
+			marks := attachConfirmedBlockRows(t, e.ws, sid)
 			e.ws.BlockOutputStartPlaneAttached(sid)
 
 			// A: running when the helper's buffer overflows.
 			a := startsACommand(t, e, pub, lane, h, 2, "make a")
-			if _, confirm := e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("a0"), aStreamRow("a1")}, ""); !confirm {
-				t.Fatal("A's rows were not confirmed")
-			}
+			e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("a0"), aStreamRow("a1")}, "")
+			awaitConfirmedBlockRows(t, marks, 2)
+			awaitBlockRowsIdle(t, e.ws, sid)
 			if tc.overflow {
 				e.ws.BlockOutputIncomplete(sid, 2)
 				// What the helper still sends until it can record again is
@@ -51,6 +51,8 @@ func TestAnIncompleteMarkerEndsTheBlockInFlightIncomplete(t *testing.T) {
 				}
 			} else {
 				e.ws.BlockRowsArrived(sid, 2, 0, []emulator.Row{aStreamRow("a2")}, "")
+				awaitConfirmedBlockRows(t, marks, 3)
+				awaitBlockRowsIdle(t, e.ws, sid)
 			}
 			fenceA := lifecycleFence(0x41)
 			mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(a), 0, fenceA)))
@@ -96,9 +98,9 @@ func TestAnIncompleteMarkerEndsTheBlockInFlightIncomplete(t *testing.T) {
 			// D's output begins after the session's pre-command rows; this is
 			// the authenticated block's absolute first row, not a missing head.
 			e.ws.BlockOutputStartRow(sid, 5)
-			if _, confirm := e.ws.BlockRowsArrived(sid, 5, 0, []emulator.Row{aStreamRow("d0")}, ""); !confirm {
-				t.Fatal("D's row was not confirmed")
-			}
+			e.ws.BlockRowsArrived(sid, 5, 0, []emulator.Row{aStreamRow("d0")}, "")
+			awaitConfirmedBlockRows(t, marks, 6)
+			awaitBlockRowsIdle(t, e.ws, sid)
 			fenceD := lifecycleFence(0x44)
 			mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 12, lifecycleCompleteEvt(lifecycle.AttemptID(d), 0, fenceD)))
 			e.ws.BlockIntervalEnded(sid, fenceD, 6, []emulator.Row{aStreamRow("$ ")}, false)
@@ -138,7 +140,7 @@ func TestTheCoordinatorsBufferEndsTheBlockInFlightIncomplete(t *testing.T) {
 			wide := aStreamRow(strings.Repeat("r", 2000))
 			bound := MinBlockRowsBufferBytes
 			e.ws.SetBlockRowsBufferBytes(bound)
-			e.ws.AttachBlockRows(sid)
+			marks := attachConfirmedBlockRows(t, e.ws, sid)
 			a := startsACommand(t, e, pub, lane, h, 2, "make a")
 
 			// The store is slow: a deferred append is in flight, so what
@@ -167,9 +169,9 @@ func TestTheCoordinatorsBufferEndsTheBlockInFlightIncomplete(t *testing.T) {
 
 			// The next command, after the store and the stream recovered.
 			d := startsACommand(t, e, pub, lane, h, 5, "make d")
-			if _, confirm := e.ws.BlockRowsArrived(sid, end, 0, []emulator.Row{aStreamRow("d0")}, ""); !confirm {
-				t.Fatal("the next command's row was not confirmed")
-			}
+			e.ws.BlockRowsArrived(sid, end, 0, []emulator.Row{aStreamRow("d0")}, "")
+			awaitConfirmedBlockRows(t, marks, end+1)
+			awaitBlockRowsIdle(t, e.ws, sid)
 			fenceD := lifecycleFence(0x52)
 			mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 6, lifecycleCompleteEvt(lifecycle.AttemptID(d), 0, fenceD)))
 			e.ws.BlockIntervalEnded(sid, fenceD, end+1, []emulator.Row{aStreamRow("$ ")}, false)
@@ -186,9 +188,13 @@ func TestTheCoordinatorsBufferIsTheOneTheSessionWasOpenedWith(t *testing.T) {
 	second := session.ID("0123456789abcdef0123456789abcdef")
 
 	e.ws.SetBlockRowsBufferBytes(5 << 20)
-	e.ws.AttachBlockRows(first)
+	if err := e.ws.AttachBlockRows(t.Context(), first, nil); err != nil {
+		t.Fatalf("attach first block rows: %v", err)
+	}
 	e.ws.SetBlockRowsBufferBytes(7 << 20)
-	e.ws.AttachBlockRows(second)
+	if err := e.ws.AttachBlockRows(t.Context(), second, nil); err != nil {
+		t.Fatalf("attach second block rows: %v", err)
+	}
 
 	e.ws.blockStream.mu.Lock()
 	defer e.ws.blockStream.mu.Unlock()
@@ -203,7 +209,9 @@ func TestTheCoordinatorsBufferIsTheOneTheSessionWasOpenedWith(t *testing.T) {
 // Paired: with nothing configured, a session gets the default.
 func TestTheCoordinatorsBufferDefaultsWhenNothingIsConfigured(t *testing.T) {
 	e, _, _, _, sidStr, _ := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sidStr))
+	if err := e.ws.AttachBlockRows(t.Context(), session.ID(sidStr), nil); err != nil {
+		t.Fatalf("attach block rows: %v", err)
+	}
 	e.ws.blockStream.mu.Lock()
 	defer e.ws.blockStream.mu.Unlock()
 	if got := e.ws.blockStream.budgets[session.ID(sidStr)]; got != DefaultBlockRowsBufferBytes {
@@ -229,7 +237,9 @@ func assertHeldWithin(t *testing.T, e *lifecycleTestEnv, sid session.ID, bound i
 func TestTheCoordinatorsBufferHasAFloor(t *testing.T) {
 	e, _, _, _, sidStr, _ := newLifecycleLedgerEnv(t, true)
 	e.ws.SetBlockRowsBufferBytes(1)
-	e.ws.AttachBlockRows(session.ID(sidStr))
+	if err := e.ws.AttachBlockRows(t.Context(), session.ID(sidStr), nil); err != nil {
+		t.Fatalf("attach block rows: %v", err)
+	}
 	e.ws.blockStream.mu.Lock()
 	defer e.ws.blockStream.mu.Unlock()
 	if got := e.ws.blockStream.budgets[session.ID(sidStr)]; got != MinBlockRowsBufferBytes {
@@ -246,12 +256,12 @@ func TestTheCoordinatorsBufferHasAFloor(t *testing.T) {
 func TestAnIncompleteMarkerAfterItsCompletionStillSettlesTheBlock(t *testing.T) {
 	e, pub, lane, h, sidStr, db := newLifecycleLedgerEnv(t, true)
 	sid := session.ID(sidStr)
-	e.ws.AttachBlockRows(sid)
+	marks := attachConfirmedBlockRows(t, e.ws, sid)
 
 	a := startsACommand(t, e, pub, lane, h, 2, "make a")
-	if _, confirm := e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("a0")}, ""); !confirm {
-		t.Fatal("A's row was not confirmed")
-	}
+	e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("a0")}, "")
+	awaitConfirmedBlockRows(t, marks, 1)
+	awaitBlockRowsIdle(t, e.ws, sid)
 	fenceA := lifecycleFence(0x61)
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(a), 0, fenceA)))
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 4, lifecyclePromptEvt()))
@@ -273,9 +283,8 @@ func TestAnIncompleteMarkerAfterItsCompletionStillSettlesTheBlock(t *testing.T) 
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 7, lifecyclePromptEvt()))
 
 	c := startsACommand(t, e, pub, lane, h, 8, "make c")
-	if _, confirm := e.ws.BlockRowsArrived(sid, 2, 0, []emulator.Row{aStreamRow("c0")}, ""); !confirm {
-		t.Fatal("C's row was not confirmed")
-	}
+	e.ws.BlockRowsArrived(sid, 2, 0, []emulator.Row{aStreamRow("c0")}, "")
+	awaitConfirmedBlockRows(t, marks, 3)
 	if rows := streamRows(t, db, a); len(rows) != 1 {
 		t.Fatalf("A holds %+v after recovery, want only its own row — the next command's rows went to it", rows)
 	}
@@ -306,7 +315,9 @@ func TestEveryEndQueueCountsAgainstTheCoordinatorsBuffer(t *testing.T) {
 		e, pub, lane, h, sidStr, db := newLifecycleLedgerEnv(t, true)
 		sid := session.ID(sidStr)
 		e.ws.SetBlockRowsBufferBytes(bound)
-		e.ws.AttachBlockRows(sid)
+		if err := e.ws.AttachBlockRows(t.Context(), sid, nil); err != nil {
+			t.Fatalf("attach block rows: %v", err)
+		}
 		a := startsACommand(t, e, pub, lane, h, 2, "make a")
 		fenceA, fenceX := lifecycleFence(0x71), lifecycleFence(0x72)
 		// Two ends whose completions have not arrived: both parked.
@@ -321,7 +332,9 @@ func TestEveryEndQueueCountsAgainstTheCoordinatorsBuffer(t *testing.T) {
 			e, pub, lane, h, sidStr, db := newLifecycleLedgerEnv(t, true)
 			sid := session.ID(sidStr)
 			e.ws.SetBlockRowsBufferBytes(bound)
-			e.ws.AttachBlockRows(sid)
+			if err := e.ws.AttachBlockRows(t.Context(), sid, nil); err != nil {
+				t.Fatalf("attach block rows: %v", err)
+			}
 			a := startsACommand(t, e, pub, lane, h, 2, "make a")
 			fenceA := lifecycleFence(0x73)
 			mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(a), 0, fenceA)))
@@ -336,11 +349,12 @@ func TestEveryEndQueueCountsAgainstTheCoordinatorsBuffer(t *testing.T) {
 			delete(e.ws.blockStream.pending, sid)
 			e.ws.blockStream.flushing[sid] = false
 			block := e.ws.blockStream.current[sid]
+			gen := e.ws.blockStream.attachGen[sid]
 			// A real caller counts the batch as flushingBytes at the same
 			// lock hold that extracts it (nocx-2v80t.3.51).
 			e.ws.blockStream.beginFlushLocked(sid, pending)
 			e.ws.blockStream.mu.Unlock()
-			e.ws.blockStream.flushPendingRows(context.Background(), e.ws, sid, block, pending, nil)
+			e.ws.blockStream.flushPendingRows(context.Background(), e.ws, sid, block, pending, nil, gen)
 			if len(closing) == len(small) {
 				assertSealedAs(t, db, a, nil)
 			} else {

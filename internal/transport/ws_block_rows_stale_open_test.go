@@ -39,7 +39,9 @@ func TestAStaleOpensReturnLeavesTheLaterAttachmentAlone(t *testing.T) {
 	releaseA := make(chan struct{})
 	store := &queueingOpenStore{hold: releaseA, entered: make(chan struct{}, 1)}
 	e.ws.blockRowsStore = store
-	e.ws.AttachBlockRows(sid)
+	if err := e.ws.AttachBlockRows(t.Context(), sid, nil); err != nil {
+		t.Fatalf("attach block rows: %v", err)
+	}
 
 	doneA := make(chan struct{})
 	go func() {
@@ -56,7 +58,9 @@ func TestAStaleOpensReturnLeavesTheLaterAttachmentAlone(t *testing.T) {
 	// then let the new attachment open B (held in the store in turn) and ask
 	// for C behind it.
 	e.ws.DetachBlockRows(sid)
-	e.ws.AttachBlockRows(sid)
+	if err := e.ws.AttachBlockRows(t.Context(), sid, nil); err != nil {
+		t.Fatalf("attach block rows: %v", err)
+	}
 
 	releaseB := make(chan struct{})
 	store.mu.Lock()
@@ -209,7 +213,9 @@ func TestAttachDetachCyclesRetainNoGenerationState(t *testing.T) {
 	bs := e.ws.blockStream
 
 	for range 50 {
-		e.ws.AttachBlockRows(sid)
+		if err := e.ws.AttachBlockRows(t.Context(), sid, nil); err != nil {
+			t.Fatalf("attach block rows: %v", err)
+		}
 		bs.mu.Lock()
 		stamped := bs.attachGen[sid]
 		bs.mu.Unlock()
@@ -232,7 +238,9 @@ func TestAttachDetachCyclesRetainNoGenerationState(t *testing.T) {
 	release := make(chan struct{})
 	store := &queueingOpenStore{hold: release, entered: make(chan struct{}, 1)}
 	e.ws.blockRowsStore = store
-	e.ws.AttachBlockRows(sid)
+	if err := e.ws.AttachBlockRows(t.Context(), sid, nil); err != nil {
+		t.Fatalf("attach block rows: %v", err)
+	}
 	doneA := make(chan struct{})
 	go func() {
 		defer close(doneA)
@@ -251,7 +259,9 @@ func TestAttachDetachCyclesRetainNoGenerationState(t *testing.T) {
 		if has {
 			t.Fatal("attachGen entry survived detach")
 		}
-		e.ws.AttachBlockRows(sid)
+		if err := e.ws.AttachBlockRows(t.Context(), sid, nil); err != nil {
+			t.Fatalf("attach block rows: %v", err)
+		}
 	}
 	close(release)
 	<-doneA

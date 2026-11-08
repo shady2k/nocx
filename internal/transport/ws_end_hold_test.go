@@ -112,7 +112,9 @@ func TestTheArmedEndHoldKeepsTheExitBehindTheReplayedWindow(t *testing.T) {
 	// attach is the first boundary consult: behind the hold, its settle must
 	// wait for the window, not run now.
 	ws.HoldSessionEndFor(sid, drained)
-	ws.AttachBlockRows(sid)
+	if attachErr := ws.AttachBlockRows(t.Context(), sid, nil); attachErr != nil {
+		t.Fatalf("attach block rows: %v", attachErr)
+	}
 
 	// The re-adopt, over the same double the exit pipeline's own test uses:
 	// the REAL monitorExit is started by ReadoptHostedSession, and the lane

@@ -20,11 +20,13 @@ func twoCommands(t *testing.T, fence lifecycle.FenceNonce) (*lifecycleTestEnv, s
 	t.Helper()
 	e, pub, lane, h, sidStr, _ := newLifecycleLedgerEnv(t, true)
 	sid := session.ID(sidStr)
-	e.ws.AttachBlockRows(sid)
+	marks := attachConfirmedBlockRows(t, e.ws, sid)
 	first := startsACommand(t, e, pub, lane, h, 2, "make one")
-	if _, confirm := e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("one")}, ""); !confirm {
-		t.Fatal("the streamed row was not confirmed")
+	if up, confirm := e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("one")}, ""); confirm || up != 0 {
+		t.Fatalf("row admission = (%d, %v), want deferred confirmation", up, confirm)
 	}
+	awaitConfirmedBlockRows(t, marks, 1)
+	awaitBlockRowsIdle(t, e.ws, sid)
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(first), 0, fence)))
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 4, lifecyclePromptEvt()))
 	second := startsACommand(t, e, pub, lane, h, 5, "make two")

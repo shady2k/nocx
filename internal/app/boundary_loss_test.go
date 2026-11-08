@@ -67,7 +67,7 @@ func TestALostBoundaryReachesTheBlockStreamOfItsSession(t *testing.T) {
 func TestAnEndMarkersNoFenceReachesTheBlockStream(t *testing.T) {
 	sink := &fakeSink{answer: func(uint64, int) (uint64, bool) { return 0, false }}
 	src := &fakeSource{}
-	stop := bindBlockRowsTo(context.Background(), sink, "s1", src, &gatedConfirmer{asked: make(chan uint64, 1), release: make(chan struct{})})
+	stop := mustBindBlockRows(t, context.Background(), sink, "s1", src, &gatedConfirmer{asked: make(chan uint64, 1), release: make(chan struct{})})
 	defer stop()
 
 	src.deliverEnd(client.IntervalEnd{Nonce: sessionruntime.FenceNonce{1}, EndRow: 3, NoFence: true})

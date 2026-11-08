@@ -915,7 +915,12 @@ func (rp *readoptPass) readopt(
 		// registered before the adopt, like the screen drain above — and
 		// after the lost-range settle, so the re-bind finds the store as the
 		// settle left it; what the helper sent meanwhile was held.
-		stopBlockRows := bindHeldBlockRowsAfter(ctx, rp.blockRows, sid, attached, held, replayed)
+		stopBlockRows, err := bindHeldBlockRowsAfter(ctx, rp.blockRows, sid, attached, held, replayed)
+		if err != nil {
+			_ = attached.Close()
+			adoption.abort()
+			return transport.HostedSessionOpen{}, fmt.Errorf("bind re-attached block rows: %w", err)
+		}
 		sess, err := rp.registry.registry.Adopt(ctx, cfg, sid, attached)
 		if err != nil {
 			stopBlockRows()

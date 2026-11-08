@@ -896,9 +896,9 @@ type WSServer struct {
 	// control work to finish after cancelling it. Work that ignores
 	// cancellation is abandoned at this bound.
 	controlDrainTimeout time.Duration
-	// recorderDrainTimeout is how long Stop waits for session output
-	// recorders to append their buffered tail. It is the same documented
-	// maximum as the control drain, for the same reason: a store that has
+	// recorderDrainTimeout is how long Stop waits for durable session output
+	// recorders and admitted block-row drains to finish their buffered tail.
+	// It is the same documented maximum as the control drain: a store that has
 	// stopped answering must not hold shutdown open for ever.
 	recorderDrainTimeout time.Duration
 	// methods is the validated control-method registration set: method →
@@ -1050,8 +1050,9 @@ type WSServer struct {
 	ringsMu sync.Mutex
 	rx      map[session.ID]*sessionRx
 	stopped bool
-	// sessionRecorders.Add shares the stopped fence under ringsMu; the group
-	// outlives rx removal so Stop drains recorders for ended sessions too.
+	// sessionRecorders counts raw-output recorders and active block-row drains.
+	// Add shares each owner's stopped fence (ringsMu or blockStream.mu); Stop
+	// sets BOTH fences before Wait. The group outlives session/rx removal.
 	sessionRecorders sync.WaitGroup
 	// closeRequested holds the session ids whose end somebody asked for:
 	// written before the registry close by every caller that ends a session
@@ -2480,6 +2481,9 @@ func (s *WSServer) Stop(ctx context.Context) error {
 	s.ringsMu.Lock()
 	s.stopped = true
 	s.ringsMu.Unlock()
+	s.blockStream.mu.Lock()
+	s.blockStream.stopped = true
+	s.blockStream.mu.Unlock()
 	// Stop ordered submissions before tearing down server-owned resources.
 	// Existing tasks can finish, but no new task is admitted during shutdown.
 	for _, spec := range s.methods {
@@ -2503,9 +2507,9 @@ func (s *WSServer) Stop(ctx context.Context) error {
 	// Cancellation makes cooperative tasks return promptly; waitDrained
 	// bounds the wait at controlDrainTimeout (the documented maximum, see
 	// ws_control.go) and ABANDONS whatever ignores cancellation — the
-	// forced-abandonment policy for work outside a commit interval. Session
-	// output recorders are commit intervals: Stop joins them below without
-	// this timeout so accepted final output is durable before return.
+	// forced-abandonment policy for work outside a commit interval. Durable
+	// output recorders and row drains are commit intervals: Stop joins them
+	// below under their existing recorder drain bound.
 	// End the pane-observation coalescer with the server, not with whatever
 	// context happened to start it — and WAIT for it, so a returned Stop
 	// means no sweep is still running.
@@ -2573,14 +2577,14 @@ func (s *WSServer) Stop(ctx context.Context) error {
 	}
 	filesCleanup.Wait()
 
-	// Recorder admission was fenced by stopped under ringsMu. Closed rings
-	// leave their buffered tail available, which each admitted recorder
-	// appends before it exits; this group includes recorders whose rx was
-	// removed before shutdown. The join is BOUNDED: a recorder is a commit
-	// interval, so Stop waits for it, but a store that stopped answering must
-	// not hold shutdown for ever (ADR-8eej3e66 §15).
+	// Both recorder admission fences were set before this join. Closed rings
+	// leave their buffered tail available; admitted row drains likewise finish
+	// their pending rows and parked close even after new admission stops.
+	// This group includes owners whose session/rx was removed before shutdown.
+	// The shared join is BOUNDED: these are commit intervals, but a store that
+	// stopped answering must not hold shutdown forever (ADR-8eej3e66 §15).
 	if !waitGroupWithin(&s.sessionRecorders, s.recorderDrainTimeout) {
-		s.log.Warn("abandoning session recorders at shutdown", "maxWait", s.recorderDrainTimeout)
+		s.log.Warn("abandoning durable output recorders at shutdown", "maxWait", s.recorderDrainTimeout)
 	}
 
 	return shutdownErr

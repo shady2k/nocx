@@ -12251,7 +12251,67 @@
       "The preceding native run still reproduced the existing close-race task after main's last-tab fix; this is the repair's behavioral proof, not a new CPU/RAM comparison.",
       "The first survivor screenshot preceded command-card completion. The later burst waits for a successful visible output card and a paint boundary. An early forced process stop left that first command visibly unreconciled on restart.",
       "One background files.close refused a binding already revoked by terminal teardown. The raw error is retained separately; zero RPC errors is not claimed.",
-      "The full final-tree CI gate remains pending."
+      "This native smoke is not a final-tree CI receipt."
     ]
+  },
+  "ciRepairVerification": {
+    "failedRun": {
+      "url": "https://github.com/shady2k/nocx/actions/runs/42475792152",
+      "revision": "01c41dabe3fb9b9e9f466ef0c5a280e186fbc7eb",
+      "successfulJobs": 12,
+      "totalJobs": 13,
+      "failedJob": "ci-mac",
+      "crossTabFailuresInTwentyRepetitions": 8
+    },
+    "assembledRepairRevision": "2b5191b34",
+    "productionChangedByTheseThreeRepairs": false,
+    "assembledFocusedRaceCheckSeconds": 35,
+    "deadlineProof": {
+      "realSocketAndCodec": true,
+      "virtualizedBlockingNativePoll": false,
+      "oldElapsedOracleRejected": true,
+      "deadlineRenewalMutationRejected": true,
+      "successAndCancellationCovered": true,
+      "queuedBytesAndSocketFlagsPreserved": true
+    },
+    "screenDrainProof": {
+      "fastReaderRevisions": 40,
+      "controlledDiagnosticDeliveredFrames": [38, 37],
+      "controlledDiagnosticCoalescedFrames": [2, 3],
+      "permanentBlockedReaderCases": 1,
+      "boundedPressureOrderedSurvivorsAndResumption": true,
+      "historicalMissingFrameAttribution": "inference; original CI had no coalescing counters"
+    },
+    "crossTabWireProof": {
+      "platform": "Linux",
+      "raceRepetitions": 20,
+      "passedTests": 60,
+      "scrollingPhaseAssertions": 40,
+      "commandScreenRatioRange": [3.03, 3.94],
+      "keystrokeScreenRatioRange": [1.07, 1.43],
+      "unchangedRatioBound": 10,
+      "screenOnlyWaitFailedBeforeRepair": true,
+      "historicalMacOSFailureAttribution": "not established for all eight failures"
+    },
+    "closeRaceMutations": {
+      "independentGuardDeletions": 2,
+      "killed": 2,
+      "temporaryCheckoutRemoved": true
+    },
+    "evidenceDirectory": "/home/andrey/.cache/nocx-perf/20261107-fixes",
+    "evidenceFiles": [
+      "ci-42475792152-mac.log",
+      "fishdeadline-package.log",
+      "fishdeadline-old-oracle.log",
+      "fishdeadline-renewal.log",
+      "screen-drain-final-race.log",
+      "screen-drain-refined-race.log",
+      "crosstabwire-recovery-segments.log",
+      "crosstabwire-screen-wait-before.log",
+      "crosstabwire-final-race20.log",
+      "close-race-mutation-proof.json"
+    ],
+    "fullCIChecksURL": "https://github.com/shady2k/nocx/pull/743/checks",
+    "metricClaim": false
   }
 }

@@ -330,6 +330,16 @@ included as a required-check correction, retaining that task's separate
 `v0-8-2` parent. It changes neither P1–P5's contracts nor the former root's
 acceptance boundary.
 
+The subsequent macOS-required check repairs (`nocx-nqmjq.4–.6`) change fixtures,
+not production behavior or the accepted latency bound. Fragmented reads are
+judged against the operation's deadline rather than a scheduler-dependent
+elapsed ceiling; a reading subscriber actually drains bounded batches; and
+the wire-latency comparison proves that B scrolls in both phases and waits for
+screen delivery. They make existing checks meaningful, not a new performance
+claim or admission into `v0-8-2`. The published-tracker gate still flags the
+new repair leaves under the retained `v0-9` root; no charter or exemption is
+silently changed to resolve that separate boundary.
+
 ## DONE WHEN
 
 The PR preserves the original portable measurements and constraints, implements

@@ -492,3 +492,55 @@ the survivor's new command as a completed, visibly painted card, rather than
 mistaking below-viewport live-grid accessibility rows for painted output.
 `postRepairSmoke` records the exact source hashes and behavioral evidence.
 These checks are not a new paired CPU/RAM cohort or a complete final-tree CI pass.
+
+### macOS-required check fixtures
+
+The ready-for-review run
+[42475792152](https://github.com/shady2k/nocx/actions/runs/42475792152), on
+`01c41dabe`, finished with twelve successful jobs and a failed macOS job.
+That job exposed three distinct failures, including eight failures in twenty
+cross-tab wire-latency repetitions. The repairs below change tests only.
+
+For `nocx-nqmjq.4`, the Fish socket had returned the expected timeout after two
+bytes, but the test inferred deadline renewal from elapsed wall time exceeding
+220 ms. Controlled scheduling now exercises the real socket reader and frame
+codec against one absolute deadline, with success, expiration, delayed
+resumption and cancellation. It neither virtualizes a blocked native poll nor
+adds a production clock abstraction. The old elapsed-time oracle and a
+progress-renews-deadline mutation both fail; the race-checked package passes.
+This proves the oracle's flaw, not the uninstrumented CI scheduler's exact delay.
+
+For `nocx-nqmjq.5`, publishing forty revisions before waiting did not establish
+the claimed reader-that-keeps-up premise. Controlled blocked-sink schedules
+reproduce 38/40 and 37/40 deliveries with two and three explicitly coalesced
+frames. The permanent fast-reader check receives each bounded batch before
+publishing another and checks every revision's actual screen text. One
+blocked-reader regression checks bounded pressure, ordered survivors and fresh
+delivery after resumption. The original CI run had no coalescing counters, so
+attributing its exact missing frames to this schedule remains an inference.
+
+For `nocx-nqmjq.6`, a local race-checked probe measured command-to-screen medians
+of 1.616 ms initially idle, 12.340 ms busy, and 5.357 ms idle again. B initially
+filled unused rows; later it scrolled and persisted departed rows. The check
+now prepares B until a delivered screen proves scrolling, and every measured
+command must scroll in both phases. Only a screen delivery completes a trial;
+raw bytes and letters inside old command text cannot satisfy it. The screen
+wait regression failed before repair. Twenty race repetitions passed all
+sixty checks and forty scrolling-phase assertions: command ratios 3.03–3.94×,
+keystroke ratios 1.07–1.43×, against the unchanged 10× bound.
+
+The assembled repair revision `2b5191b34` passes the focused checks across all
+three packages with the race detector (35 s). Independent same-model
+coordinator review checked the deadline owner, the bounded-consumer contract
+and the screen/scroll observation boundaries. Two hand-planted close-race
+guard deletions also fail their respective regressions; the temporary checkout
+was restored and removed. These are verification corrections, not another
+CPU/RAM gain, proof of every historical macOS failure's cause, or a macOS pass.
+The subsequent full-run result belongs to the exact head shown in
+[PR #743's checks](https://github.com/shady2k/nocx/pull/743/checks).
+
+The separate published-tracker gate also reports this PR's new required-check
+leaves as off-milestone: their retained root is `v0-9`, while the shared current
+milestone is `v0-8-2`. Malformed multi-revision submission headers were corrected;
+no milestone, charter, budget or exemption was changed to silence admission.
+That queue decision remains separate from the technical repair evidence.

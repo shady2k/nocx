@@ -9601,7 +9601,11 @@ export class TerminalContent extends BasePaneContent {
    *  carries no timestamps at all is treated as long: a composer the product
    *  has no evidence to keep must not be kept. */
   private _settleDeparture(attempt: ExecutionAttempt): void {
-    const blockMs = attemptBlockMs(attempt)
+    // The attempt's own length, and the block manager's measurement when the
+    // fact carries no timestamps — the same fallback the header takes, so the
+    // two still read one number.
+    const blockMs =
+      attemptBlockMs(attempt) ?? this.scrollback?.blockManager.elapsedCommandMs() ?? null
     this._endDeparture()
     if (blockMs !== null && blockMs < SUBMIT_GRACE_MS) {
       this._armDeparture('awaiting-prompt', DEPARTURE_FALLBACK_MS)

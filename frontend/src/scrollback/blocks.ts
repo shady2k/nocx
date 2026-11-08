@@ -3307,7 +3307,10 @@ export class BlockManager {
 
     // LOGICAL freeze — the authenticated event alone flips the block's
     // status, exit code and duration and frees the running slot.
-    const terminal = this._logicalFreeze(rec, code, status, attemptBlockMs(attempt))
+    // The length the block reports is the attempt's own when its fact carries
+    // both timestamps; a fact that cannot say (a replayed or foreign attempt)
+    // keeps what this manager measured, which is what it always printed.
+    const terminal = this._logicalFreeze(rec, code, status, attemptBlockMs(attempt) ?? undefined)
     this._attemptId = null
 
     return this._closeOnBackend(rec, endLine, terminal) ? rec : null

@@ -1,6 +1,9 @@
 # Live session output-gap notification
 
-- **Status:** implemented, with the bounded pane-local presentation correction below.
+- **Status:** implemented. The pane-local presentation this spec described — a
+  warning card per pane — was removed on the owner's decision of 2026-11-08
+  (`nocx-ipuy3`); see "Presentation removed" below. The transport contract is
+  unchanged.
 - **Bead:** `nocx-k6p18.29`.
 - **Binding architecture:** AD-6, AD-7, AD-9 and AD-10; ADR-0066, ADR-0073, ADR-0078 and ADR-0081.
 - **Owner decision already given (2026-10-09):** use a separate control-plane `session.outputGap` notification. The gap is a transport fact, not a session effect. Do not add an `outputGap` kind to `session.effect`, and do not rely on offsets added only to binary data frames.
@@ -33,6 +36,21 @@ and reset the ledger and account. A failed or pending reconnect retains the
 notice/account and its original expiry deadline, not the closed session binding.
 Historical recovery cards and protocol-error danger toasts retain their
 existing lifetimes.
+
+### Presentation removed (2026-11-08, `nocx-ipuy3`)
+
+The owner removed the missing-output card altogether. A card above the pane
+stated a session-level byte total that named no place a person could look at;
+a full-screen program's redraws kept growing it, so it returned right after it
+was closed; and the bytes it counted were mostly already unreadable redraws.
+What replaced it is one quiet line in a command's own stored history, at the
+place its output was cut (`frontend/src/scrollback/block-rows.ts`): the
+artifact's rows carry absolute row numbers, so the hole between two kept rows
+is the cut, and the line there says the session's size limit dropped those
+rows. A full-screen program's redraws leave no rows behind, so there is no
+line at all for them. The `session.outputGap` notification, its cursor
+semantics and its protocol errors below are unchanged — only the card that
+painted them is gone.
 
 ### Client interpretation at delivery
 

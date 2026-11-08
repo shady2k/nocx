@@ -662,10 +662,28 @@ type helperRegistry struct {
 	// lifecycle frame arriving after it is left for the next coordinator
 	// (lifecycleCursor.applyFrame). Nil never stops.
 	lifecycleStopping *atomic.Bool
-	mu                sync.Mutex
-	hosts             map[session.ID]*hostHelper
-	pendingReadopts   map[session.ID]*hostHelper
-	closing           map[string]struct{}
+	// transports is the composition root's record of what each lifecycle
+	// transport is (internal/app's transportRegistry), and this route is ONE OF
+	// ITS WRITERS (nocx-8gg8y). A far pane's channel is an adapter this
+	// registry builds, so it is the only party that knows the transport exists
+	// — and while nothing registered it, every question keyed on it answered
+	// "unknown": the agent launch resolver read a launch on an ssh pane as an
+	// unregistered local pane, refused it with a sentence naming none of its
+	// causes, and the pane could not start the agent a person had typed. Nil
+	// leaves the same silence as before, which is a test's shape and not the
+	// composition root's.
+	transports *transportRegistry
+	// registerLane binds a far pane's lane to the session that will speak for
+	// it. The transport registers the same pair for the FACTS; this seam exists
+	// because the coordinator's own lane→session map (childSessions) is what
+	// the agent enroller reads, and a far pane's enrolment would otherwise be
+	// refused as a lane nobody owns. It is the same closure the local opener
+	// and the remote lifecycle provider are handed.
+	registerLane    func(lane lifecycle.LaneID, sid string)
+	mu              sync.Mutex
+	hosts           map[session.ID]*hostHelper
+	pendingReadopts map[session.ID]*hostHelper
+	closing         map[string]struct{}
 	// farTools are the far-side tool sockets this registry opened, keyed by the
 	// session each belongs to (nocx-e2bws). They are held HERE rather than by
 	// the hostHelper because the event that ends them is a session's end and not
@@ -1142,6 +1160,17 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 			Lane: string(launch.Lane), Domain: string(launch.Domain),
 			Epoch: launch.Epoch, Capability: launch.Capability, Recovery: launch.Recovery, RecoveryEpisodeID: launch.RecoveryEpisodeID,
 		}
+		// A FAR PANE'S CHANNEL IS NOT THIS MACHINE'S, AND THE COMPOSITION ROOT
+		// IS TOLD SO THE MOMENT IT EXISTS (nocx-8gg8y). The adapter's own
+		// TransportID says "register me in the kind registry" in its comment;
+		// nothing did on this route, so every question keyed on the transport —
+		// the agent launch resolver's first among them — answered "unknown" and
+		// took its refusal branch. local:false is what this transport is: the
+		// domains ride the helper's stream to another machine, so no record of
+		// ours and no tool surface of ours applies to a launch on it.
+		if r.transports != nil {
+			r.transports.register(lifecycleAdapter.TransportID(), transportKind{local: false})
+		}
 		if r.environmentEntries != nil {
 			r.environmentEntries.register(sessionCtx, launch.Lane, downlink)
 		}
@@ -1296,6 +1325,14 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 		return transport.HostedSessionOpen{}, true, err
 	}
 	bindBlockEndToSession(sess, attached, r.blockRows, sid, stopBlockRows)
+	// AND THE LANE NOW HAS A SESSION, which is the other fact the agent
+	// enroller reads (nocx-8gg8y). The transport records the same pair for the
+	// published facts; this map is the coordinator's own, and a far pane's lane
+	// missing from it made an enrolment on somebody else's machine answer "nocx
+	// does not know which pane this shell is".
+	if lifecycleAdapter != nil && r.registerLane != nil {
+		r.registerLane(lifecycleAdapter.Lane(), string(sid))
+	}
 	// THE FINGERPRINT THIS SELECTION ALREADY RESOLVED (ADR-0068), recorded
 	// onto the session Adopt just created (session.Reg.RecordHostKeyFingerprint's
 	// own comment): the adopted session is a data-plane attachment to a

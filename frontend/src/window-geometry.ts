@@ -64,22 +64,45 @@ const wailsGeometryEvents: GeometryEvents = {
  * and relays every sample the shell emits afterwards. Returns the
  * unsubscribe function.
  *
- * A failure on any leg leaves the window as it opened: an unreachable
- * backend or a missing binding costs the user their saved geometry for
- * this launch, never the launch itself — the same degrade the layout
- * half lives by (ADR-0048 §5).
+ * THE READ WAITS FOR THE CONNECTION, and that is not an optimisation
+ * (nocx-ouru5.1.6). The composition root mounts this relay above
+ * `dispatcher.start()`, while the socket does not exist yet, and
+ * Dispatcher.call rejects everything at that moment with "not connected".
+ * A read spent there is lost: the binding that starts the shell's sampler
+ * is never called, so nothing is restored AND nothing is ever sampled or
+ * written — the window half of the document stays all zeros for the life
+ * of the install. The layout half has always read at connect, beside
+ * `uistate.get` (ADR-0098 says "once at bootstrap, beside uistate.get");
+ * this is that same moment for the window half.
+ *
+ * A dispatcher that is already online when the relay is mounted reads
+ * immediately. A failure on any leg leaves the window as it opened: an
+ * unreachable backend or a missing binding costs the user their saved
+ * geometry for this launch, never the launch itself — the same degrade
+ * the layout half lives by (ADR-0048 §5).
  */
 export function mountWindowGeometry(
   dispatcher: Dispatcher,
   bindings: GeometryBindings = wailsGeometryBindings,
   events: GeometryEvents = wailsGeometryEvents,
 ): () => void {
-  void restoreSavedGeometry(dispatcher, bindings)
-  return events.on(WINDOW_SAMPLED_EVENT, (data) => {
+  let restored = false
+  const restoreOnce = (): void => {
+    if (restored) return
+    restored = true
+    void restoreSavedGeometry(dispatcher, bindings)
+  }
+  const offConnect = dispatcher.onConnect(restoreOnce)
+  if (dispatcher.connected) restoreOnce()
+  const offSamples = events.on(WINDOW_SAMPLED_EVENT, (data) => {
     const sample = sampledWindow(data)
     if (!sample) return
     dispatcher.notify('uistate.window.observe', sample)
   })
+  return () => {
+    offConnect()
+    offSamples()
+  }
 }
 
 /** Read the saved geometry and hand it to the shell. Skipped whole when

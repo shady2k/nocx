@@ -315,3 +315,24 @@ func TestANestedChildOnThisMachineWrapsTheRecordsAgents(t *testing.T) {
 		t.Fatalf("the child's launch carries an environment line from the person's record")
 	}
 }
+
+// A REMOTE PARENT THAT NAMES NO PORT A CHILD COULD DIAL IS REFUSED BY NAME
+// (nocx-8gg8y). Helper-hosted ssh panes register their transports now — they
+// were invisible to every question keyed on a transport, which is what made a
+// typed agent on an ssh pane fail — and such a pane's domains ride the helper's
+// own stream rather than a loopback port this coordinator knows. Rendering
+// NOCX_LIFECYCLE_PORT=0 into a sudo child would hand it a port nothing listens
+// on and a hello nobody answers, so the grant is refused as this builder's
+// documented shape: the parent runs its command conventionally.
+func TestANestedChildInsideAPortlessRemoteParentIsRefusedByName(t *testing.T) {
+	h := newNestedGrantHarness(t, transportKind{local: false}, nil, nil, nil)
+	_, err := h.builder(lifecyclepub.GrantRequest{
+		Lane: h.lane, Parent: h.parent, RequestID: "r-portless-remote", Env: lifecycle.EnvSudo,
+	})
+	if err == nil {
+		t.Fatal("a child was composed for a remote parent with no forwarded port")
+	}
+	if !strings.Contains(err.Error(), "no forwarded port") {
+		t.Fatalf("the refusal does not name the step: %v", err)
+	}
+}

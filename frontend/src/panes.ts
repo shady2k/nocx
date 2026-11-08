@@ -41,6 +41,7 @@ import type { ClipboardBanner } from './banner'
 import type { ProfileClient, SSHProfile } from './profiles'
 import { adoptAliasProfile, parseQuickConnect } from './profiles'
 import { resolveSshProfileOverlay } from './quick-connect-assembly'
+import { connectionLabel } from './connection-label'
 import { cardQuote } from './overview/overview-model'
 import { NotifyClient } from './notify-client'
 import { showToast } from './ui/toast'
@@ -1876,15 +1877,25 @@ export class PaneManager {
   }
 
   /** Open a connection the user just asked for: mint the identity, ask the
-   *  backend for the tab, and put the chrome up in the same turn. */
-  newSSHPane(profileId: string, host: string, user?: string, port?: number, title?: string): Pane {
-    log.info('nocx: newSSHPane called', { profileId, host, user, port, title })
+   *  backend for the tab, and put the chrome up in the same turn.
+   *
+   *  `name` is the saved connection's own display name, when the row that
+   *  opened this pane has one (nocx-ouru5.1.2): the tab and the composer say
+   *  "Production · dev@host" instead of the bare address. Absent for a
+   *  hand-typed host and for a connection nobody named — both keep the host
+   *  alone, which is what they had. */
+  newSSHPane(profileId: string, host: string, user?: string, port?: number, name?: string): Pane {
+    log.info('nocx: newSSHPane called', { profileId, host, user, port, name })
     // The endpoint is the canonical user@host:port the pane applies at,
     // which is what §5 stores on an ssh pane — and what a restore reconnects
     // through, since the chain has no column for the profile a pane was
     // opened from (see reopenSSH).
     const identity = this.mintPane('ssh', endpointOf(host, user, port))
-    return this.buildSSHPane(identity, { profileId, host, user, port }, title || host)
+    return this.buildSSHPane(
+      identity,
+      { profileId, host, user, port, name },
+      connectionLabel(name, host),
+    )
   }
 
   /**
@@ -1951,7 +1962,7 @@ export class PaneManager {
    *  than "a local pane" may (see buildLocalPane). */
   private buildSSHPane(
     identity: PaneIdentity,
-    sshOpts: { profileId: string; host: string; user?: string; port?: number },
+    sshOpts: { profileId: string; host: string; user?: string; port?: number; name?: string },
     title: string,
     activateNow = true,
     /** As buildLocalPane's: the claim that takes back a connection the
@@ -3303,13 +3314,19 @@ export class PaneManager {
       ? resolveSshProfileOverlay(this.savedProfiles, { host: dest.host, user: dest.user })
       : null
     const profileId = overlay?.identity === endpoint ? overlay.profileId : ''
+    // The row names no profile, so the saved connection is found by its
+    // endpoint above — and its NAME comes from that same match, because a
+    // reopened tab is the same tab it was before the restart (nocx-ouru5.1.2).
+    const profileName =
+      profileId === '' ? undefined : this.savedProfiles.find((p) => p.id === profileId)?.name
     log.info('nocx: reopening a stored connection', { pane: row.id, endpoint, profileId })
     const pane = this.buildSSHPane(
       { paneId: row.id, registered: Promise.resolve(true) },
-      { profileId, host: dest.host, user: dest.user, port: dest.port },
-      // The tab is named after the endpoint until the session names it,
-      // exactly as a connection opened by hand is named after its host.
-      dest.host || endpoint,
+      { profileId, host: dest.host, user: dest.user, port: dest.port, name: profileName },
+      // The tab is named after the endpoint when the host cannot be read,
+      // and after the connection's name beside its host otherwise — exactly
+      // as a connection opened by hand is named.
+      connectionLabel(profileName, dest.host) || endpoint,
       false,
       // A CONNECTION THE COORDINATOR STILL HOLDS IS TAKEN BACK, not made a
       // second time. Without this the reconnect below would open another

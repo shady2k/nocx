@@ -1,6 +1,6 @@
 import { decodeFrame, encodeFrame, isSessionID, MSG_TYPE_METADATA } from './frame'
 import type { DecodedFrame } from './frame'
-import { Dispatcher, RpcError, type CallOptions } from './dispatcher'
+import { Dispatcher, RpcError, type CallOptions, type PendingCallView } from './dispatcher'
 import type { AttachResult } from './generated/attach'
 import type { Exit } from './generated/exit'
 import type { Open } from './generated/open'
@@ -164,6 +164,14 @@ export function isProvenSessionAbsence(err: unknown): boolean {
  *  follows from the kind — a key name with modifiers, committed text, a paste
  *  body, a mouse event in cells, or "in"/"out". */
 export type SessionIntentKind = 'key' | 'text' | 'paste' | 'mouse' | 'focus'
+
+/**
+ * Told a session's own `open` call the moment the dispatcher announces it, so
+ * the pane that asked can name WHAT it is waiting on and offer to withdraw it
+ * (nocx-q9od5). The view carries the call's id and its cancel — the same two
+ * things the Operations row gets, from the same announce.
+ */
+export type OpenWatch = (call: PendingCallView) => void
 
 export interface OpenAnchor {
   /**
@@ -1416,17 +1424,26 @@ export class WSClient {
   // never established a lifecycle channel and could never show a block. The
   // renderer still wires the editor BEFORE this call, so no invisible
   // prompt gap can occur (nocx-4ff.10).
-  openSession(size: SessionSize, anchor: OpenAnchor = {}): Promise<SessionHandle> {
+  openSession(
+    size: SessionSize,
+    anchor: OpenAnchor = {},
+    watch?: OpenWatch,
+  ): Promise<SessionHandle> {
     return this.dispatcher
-      .call<OpenResult>('open', {
-        ...size,
-        ...paneParam(anchor),
-        // ONLY the local opener carries a starting directory, and the two ssh
-        // openers below deliberately do not: a far login shell starts where
-        // that host says, so a cwd here would be a value nothing acts on —
-        // the wire refuses it outright rather than letting it travel.
-        ...cwdParam(anchor),
-      })
+      .call<OpenResult>(
+        'open',
+        {
+          ...size,
+          ...paneParam(anchor),
+          // ONLY the local opener carries a starting directory, and the two ssh
+          // openers below deliberately do not: a far login shell starts where
+          // that host says, so a cwd here would be a value nothing acts on —
+          // the wire refuses it outright rather than letting it travel.
+          ...cwdParam(anchor),
+        },
+        undefined,
+        { announced: watch },
+      )
       .then((result) => this._registerHandle(result, size))
   }
 
@@ -1437,14 +1454,20 @@ export class WSClient {
     size: SessionSize,
     profileId: string,
     anchor: OpenAnchor = {},
+    watch?: OpenWatch,
   ): Promise<SessionHandle> {
     return this.dispatcher
-      .call<OpenResult>('open', {
-        ...size,
-        kind: 'ssh',
-        profileId,
-        ...paneParam(anchor),
-      })
+      .call<OpenResult>(
+        'open',
+        {
+          ...size,
+          kind: 'ssh',
+          profileId,
+          ...paneParam(anchor),
+        },
+        undefined,
+        { announced: watch },
+      )
       .then((result) => this._registerHandle(result, size))
   }
 
@@ -1461,16 +1484,22 @@ export class WSClient {
     user?: string,
     anchor: OpenAnchor = {},
     desiredMode?: string,
+    watch?: OpenWatch,
   ): Promise<SessionHandle> {
     return this.dispatcher
-      .call<OpenResult>('open', {
-        ...size,
-        kind: 'ssh',
-        host,
-        user,
-        ...(desiredMode ? { desiredMode } : {}),
-        ...paneParam(anchor),
-      })
+      .call<OpenResult>(
+        'open',
+        {
+          ...size,
+          kind: 'ssh',
+          host,
+          user,
+          ...(desiredMode ? { desiredMode } : {}),
+          ...paneParam(anchor),
+        },
+        undefined,
+        { announced: watch },
+      )
       .then((result) => this._registerHandle(result, size))
   }
 
@@ -2113,6 +2142,40 @@ export class WSClient {
     if (state) {
       state.livenessCallback = cb
     }
+  }
+
+  /** Observe the work the backend reports INSIDE a person's call
+   *  (operation.row), with the call's own identity resolved — the id the
+   *  dispatcher announced, which is what a surface waiting on that call knows
+   *  it by (nocx-q9od5). A frame whose request id names no live call of this
+   *  renderer's is dropped: there is no call here for it to be about.
+   *  Returns an unsubscribe. */
+  onOperationRow(
+    cb: (row: {
+      callID: number
+      title: string
+      done: number
+      total: number
+      machine: string
+    }) => void,
+  ): () => void {
+    return this.dispatcher.subscribe('operation.row', (params: unknown) => {
+      if (!params || typeof params !== 'object') return
+      const raw = params as Record<string, unknown>
+      const requestId = raw.requestId
+      if (typeof requestId !== 'number' && typeof requestId !== 'string') return
+      if (typeof raw.title !== 'string' || raw.title === '') return
+      if (typeof raw.done !== 'number' || typeof raw.total !== 'number') return
+      const callID = this.dispatcher.callIDForRequest(requestId)
+      if (callID === null) return
+      cb({
+        callID,
+        title: raw.title,
+        done: raw.done,
+        total: raw.total,
+        machine: typeof raw.machine === 'string' ? raw.machine : '',
+      })
+    })
   }
 
   /** Report how many sessions resumed and how many are authoritatively absent.

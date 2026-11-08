@@ -89,6 +89,7 @@ import type { SessionHandle, SessionRecovery, SessionSize, WSClient } from './ip
 import type { SessionIntentResult } from './generated/session.intent'
 import type { SessionSignal } from './generated/session.signal'
 import {
+  openBlockMenuAt,
   blockOutputText,
   createCommandBlock,
   type BlockRecord,
@@ -1598,25 +1599,143 @@ describe('the terminal keyboard sends physical key intents', () => {
 })
 
 describe('clipboard paste into the live terminal uses session intents', () => {
-  it.each([
-    ['right-click', 'contextmenu', undefined],
-    ['middle-click', 'mousedown', 1],
-  ])('%s queues one paste intent instead of using xterm', async (_name, eventType, button) => {
+  it('middle-click queues one paste intent instead of using xterm', async () => {
     const clipboard = makeClipboard({ readText: vi.fn().mockResolvedValue('clipboard text') })
     const { content, teardown } = await mountTerminal(clipboard)
     try {
       const session = sessionOf(content)
       const target = (content as unknown as { _paneTarget: HTMLElement })._paneTarget
       target.dispatchEvent(
-        eventType === 'contextmenu'
-          ? new MouseEvent(eventType, { bubbles: true, cancelable: true })
-          : new MouseEvent(eventType, { bubbles: true, cancelable: true, button }),
+        new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 1 }),
       )
       await vi.waitFor(() => expect(clipboard.readText).toHaveBeenCalledOnce())
       await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('paste', 'clipboard text'))
       expect(session.send).not.toHaveBeenCalled()
     } finally {
       teardown()
+    }
+  })
+})
+
+// nocx-a9x6u, owner 2026-11-08: «уберем вставку по клику правой кнопкой мыши».
+// The pane pasted its clipboard on every right-click — into the editor or into
+// the running program — and a person right-clicking a block got their clipboard
+// in the command they were about to run.
+describe('a right-click in the terminal is not a paste', () => {
+  it('pastes nothing at the pane, and queues no intent', async () => {
+    const clipboard = makeClipboard({ readText: vi.fn().mockResolvedValue('clipboard text') })
+    const { content, teardown } = await mountTerminal(clipboard)
+    try {
+      const session = sessionOf(content)
+      const target = (content as unknown as { _paneTarget: HTMLElement })._paneTarget
+      const event = new MouseEvent('contextmenu', {
+        bubbles: true,
+        cancelable: true,
+        clientX: 40,
+        clientY: 20,
+      })
+      target.dispatchEvent(event)
+      expect(event.defaultPrevented, 'the WebView menu is not ours either').toBe(true)
+      // Nothing was read, so nothing could have been pasted: a read is the
+      // first thing the old handler did.
+      expect(clipboard.readText).not.toHaveBeenCalled()
+      expect(session.intent).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('the menu a right-click opens keeps the keyboard once the gesture ends', async () => {
+    // Found by the e2e, not by this file: a right-click opens the menu
+    // BETWEEN the press and its release, so the pane's focus bounce — armed
+    // by the press — fired at the release and took the keyboard out of the
+    // row the menu had just focused. The menu was visible and dead: Escape
+    // and the arrows reached the composer instead (nocx-a9x6u). A menu row is
+    // an owner the gesture chose, like the ⋮ it duplicates.
+    const mounted = await mountTerminal(makeClipboard(), { attachToDocument: true })
+    try {
+      const ed = mounted.ed
+      mounted.content.setVisible(true)
+      ed.show()
+      // The bounce only runs while the editor is up; without this premise the
+      // assertion below would hold on a product where the bounce never ran.
+      expect(ed.isVisible).toBe(true)
+      const scrollback = scrollbackFor(mounted.content)
+      const block = createCommandBlock(
+        'command',
+        1,
+        'echo menu-focus',
+        '~',
+        '',
+        '<span class="term-line">menu-focus-output</span>',
+        10,
+        0,
+        'success',
+        () => scrollback.scrollbackInner,
+        () => {},
+        new CommandSnapshotStore(),
+        'shell',
+      )
+      scrollback.scrollbackInner.appendChild(block)
+
+      expect(openBlockMenuAt(block, 120, 40)).toBe(true)
+      const row = document.querySelector<HTMLElement>(
+        '[data-testid="block-actions-menu"] [role="menuitem"]',
+      )
+      expect(row).not.toBeNull()
+      expect(document.activeElement).toBe(row)
+
+      // The bounce runs on a focusin inside the pane, whoever the keyboard is
+      // on; with a menu open that keyboard is the menu's.
+      scrollback.scrollbackInner.dispatchEvent(new FocusEvent('focusin', { bubbles: true }))
+      expect(document.activeElement).toBe(row)
+    } finally {
+      mounted.teardown()
+    }
+  })
+
+  it('on a block it opens that block’s own menu at the pointer, and still pastes nothing', async () => {
+    const clipboard = makeClipboard({ readText: vi.fn().mockResolvedValue('clipboard text') })
+    const mounted = await mountTerminal(clipboard)
+    try {
+      const session = sessionOf(mounted.content)
+      mounted.content.setVisible(true)
+      const scrollback = scrollbackFor(mounted.content)
+      const block = createCommandBlock(
+        'command',
+        1,
+        'echo right-click',
+        '~',
+        '',
+        '<span class="term-line">right-click-output</span>',
+        10,
+        0,
+        'success',
+        () => scrollback.scrollbackInner,
+        () => {},
+        new CommandSnapshotStore(),
+        'shell',
+      )
+      scrollback.scrollbackInner.appendChild(block)
+      block.querySelector('.term-line')!.dispatchEvent(
+        new MouseEvent('contextmenu', {
+          bubbles: true,
+          cancelable: true,
+          clientX: 120,
+          clientY: 40,
+        }),
+      )
+
+      const menu = document.querySelector<HTMLElement>('[data-testid="block-actions-menu"]')
+      expect(menu, 'the block’s ⋮ menu, opened by the pointer').not.toBeNull()
+      const rows = [...menu!.querySelectorAll<HTMLElement>('.ui-context-menu__item')].map(
+        (row) => row.dataset.itemId,
+      )
+      expect(rows).toEqual(['copy-command', 'copy-output', 'copy-all', 'wrap'])
+      expect(clipboard.readText).not.toHaveBeenCalled()
+      expect(session.intent).not.toHaveBeenCalled()
+    } finally {
+      mounted.teardown()
     }
   })
 })
@@ -21245,6 +21364,139 @@ describe('a cancelled open', () => {
     try {
       expect(closed).not.toHaveBeenCalled()
       expect(document.body.textContent ?? '').toContain('Terminal failed to start')
+    } finally {
+      teardown()
+    }
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A slow open says so in the pane (nocx-q9od5)
+// ═══════════════════════════════════════════════════════════════════════════
+// The owner's blank pane: a first open of a host where the helper is not
+// installed is mostly a 15.3 MB upload, and for the whole of it the pane drew
+// nothing. The Operations row existed and the person was not looking at it.
+//
+// What is asserted here is the WIRING, which the card's own unit test cannot
+// see: the pane mounts a card once the open has outlived its grace, the card
+// is named by the work the backend reports INSIDE that call (matched by the
+// call id the dispatcher announced, so a frame about another call is not
+// shown), its Cancel withdraws that call, and the card goes when the call
+// settles.
+describe('a slow open states what it is doing in the pane (nocx-q9od5)', () => {
+  function mountOpeningSsh(pending: Promise<SessionFake>, cancel: () => void) {
+    const clientFake = makeClient({
+      openSSHSessionByHost: vi.fn(
+        (
+          _size: unknown,
+          _host: string,
+          _user: string | undefined,
+          _anchor: unknown,
+          _mode: string | undefined,
+          watch?: (call: {
+            id: number
+            method: string
+            startedAt: number
+            cancel: () => void
+          }) => void,
+        ) => {
+          watch?.({ id: 7, method: 'open', startedAt: Date.now(), cancel })
+          return pending
+        },
+      ),
+    })
+    const content = new TerminalContent(
+      clientFake as unknown as WSClient,
+      anchoredPane(),
+      makeClipboard(),
+      new ClipboardGate(),
+      makeBanner(),
+      null,
+      () => {},
+      { profileId: '', host: '192.0.2.57', user: 'root' },
+    )
+    const tab = new Pane(
+      content,
+      {
+        surfaceType: SURFACE_TERMINAL,
+        singletonKey: null,
+        restoreDescriptor: { type: 'local' },
+        supportsAttention: true,
+        defaultTitle: 'Terminal',
+      },
+      99,
+      'tab-99',
+    )
+    const parent = document.createElement('div')
+    parent.append(tab.pane)
+    document.body.append(parent)
+    // NOT awaited: the open is the thing under test, and it has not answered.
+    const started = tab.start()
+    return {
+      clientFake,
+      content,
+      tab,
+      started,
+      teardown: () => {
+        tab.close()
+        parent.remove()
+      },
+    }
+  }
+
+  it('mounts no card until the open outlives the grace, then names the call’s own work', async () => {
+    // Promise.withResolvers needs ES2024 and this project targets ES2021.
+    let resolve!: (s: SessionFake) => void
+    const promise = new Promise<SessionFake>((done) => {
+      resolve = done
+    })
+    const cancel = vi.fn()
+    const { clientFake, tab, started, teardown } = mountOpeningSsh(promise, cancel)
+    try {
+      // The mount reaches the open through its own awaits; the grace starts
+      // when the CALL is sent, which is the state this test drives.
+      await vi.waitFor(() => expect(clientFake.openSSHSessionByHost).toHaveBeenCalled())
+      // THE FREE FLASH IS NOT DRAWN: an open that answers inside the grace
+      // shows no card at all, so a local tab never flickers one.
+      expect(tab.pane.querySelector('.ui-status-card')).toBeNull()
+      await vi.waitFor(() => expect(tab.pane.querySelector('.ui-status-card')).not.toBeNull())
+      const card = tab.pane.querySelector('.ui-status-card')
+      expect(card).not.toBeNull()
+      expect(card?.textContent).toContain('Opening your terminal')
+      expect(card?.textContent).toContain('192.0.2.57')
+
+      // The backend's account of the work inside THIS call replaces the
+      // title and adds the numbers — the same words the Operations row uses.
+      clientFake._fireOperationRow({
+        callID: 7,
+        title: 'Copying the nocx helper',
+        done: 3_200_000,
+        total: 15_300_000,
+        machine: 'root@192.0.2.57',
+      })
+      expect(card?.textContent).toContain('Copying the nocx helper')
+      expect(card?.textContent).toContain('3.2 MB of 15.3 MB')
+
+      // A ROW ABOUT ANOTHER CALL IS NOT THIS PANE'S (somebody else's install).
+      clientFake._fireOperationRow({
+        callID: 99,
+        title: 'Copying the nocx helper',
+        done: 1,
+        total: 15_300_000,
+        machine: 'other@elsewhere',
+      })
+      expect(card?.textContent).toContain('3.2 MB of 15.3 MB')
+
+      // Cancel is the call's own withdrawal, not a second one.
+      const button = card?.querySelector('button')
+      if (!button) throw new Error('the card drew no Cancel')
+      button.click()
+      expect(cancel).toHaveBeenCalledTimes(1)
+
+      // And the call settling retires the card.
+      resolve(makeSession())
+      await started
+      expect(tab.pane.querySelector('.ui-status-card')).toBeNull()
     } finally {
       teardown()
     }

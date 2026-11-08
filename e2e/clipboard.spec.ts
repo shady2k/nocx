@@ -1,6 +1,6 @@
 import { test, expect, promptReady, clickIntoEditor } from './harness'
 
-// Terminal clipboard e2e: copy-on-select, right-click paste.
+// Terminal clipboard e2e: copy-on-select, and the right-click that is no longer a paste.
 //
 // CLIPBOARD REALITY FOR PLAYWRIGHT:
 // In `wails dev`, window.runtime is injected, so the app uses the Wails
@@ -250,7 +250,14 @@ test.describe('paste', () => {
     'clipboard-read + clipboard-write require Chromium',
   )
 
-  test('right-click pastes clipboard text at the cursor', async ({ page }) => {
+  test('right-click no longer pastes — the chord keeps that job', async ({ page }) => {
+    // nocx-a9x6u, the owner's 2026-11-08 pass: right-click-in-the-terminal
+    // pasted the clipboard at the cursor, so a person aiming at a block's
+    // actions inserted their clipboard into a command. The gesture is gone,
+    // paste stays on Cmd/Ctrl+V — whose own path (the editor takes the focus
+    // and the browser's native paste) is terminal-content.test.ts's "Cmd/Ctrl+V
+    // redirects to the editor". A block's right-click now opens its ⋮ menu;
+    // e2e/block-right-click.spec.ts carries that half.
     await disableWailsRuntime(page)
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)
@@ -259,31 +266,19 @@ test.describe('paste', () => {
 
     await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
 
-    // The expected output is not present verbatim in the pasted command, so
-    // finding it in a completed block proves that Enter executed the paste.
     const suffix = Date.now().toString(36)
-    const pasteMarker = `PT-${suffix}`
-    const pastedCommand = `printf 'PT-%s\\n' '${suffix}'`
+    const clipboardText = `printf 'PT-%s\\n' '${suffix}'`
     await page.evaluate(async (command) => {
       await navigator.clipboard.writeText(command)
-    }, pastedCommand)
+    }, clipboardText)
 
-    // Right-click the editor. The contextmenu handler on the pane pastes to the
-    // editor when it is visible, and a contextmenu on the editor bubbles to it;
-    // clicking the xterm area may have its own handler.
     await clickIntoEditor(page, { button: 'right' })
 
-    // Wait for the paste to land in the editor. The input surface is CM6's
-    // contenteditable contentDOM (ADR-0010), so the text is read back from the
-    // DOM, not from a .value property.
-    await expect(page.locator(INPUT)).toHaveText(pastedCommand, {
-      timeout: 3000,
-    })
-
-    // Execute the pasted command and wait for its completed output block.
-    await page.keyboard.press('Enter')
-    await expect(page.locator('.cmd-block', { hasText: pasteMarker }).first()).toBeVisible({
-      timeout: 5000,
-    })
+    // The input surface is CM6's contenteditable contentDOM (ADR-0010), so the
+    // text is read back from the DOM, not from a .value property.
+    await expect(page.locator(INPUT)).not.toContainText(clipboardText)
+    // And nothing ran: a paste into the editor that then lost its way into the
+    // PTY would show as a completed sprintf block.
+    await expect(page.locator('.cmd-block', { hasText: `PT-${suffix}` })).toHaveCount(0)
   })
 })

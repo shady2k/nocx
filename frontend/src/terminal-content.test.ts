@@ -8121,7 +8121,8 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       const block = withScrollback.scrollback.blockManager.runningBlock
       expect(block).not.toBeNull()
 
-      // Output taller than the pane: the box and grid share the same 268px
+      // Output taller than the pane: the box and grid share the same 256px
+      // (268px of pane is 16.75 rows; the box ends on a row boundary)
       // budget (300 minus one 32px header). Output cannot change that budget.
       const before = reports().length
       session.fireScreenFrame(
@@ -8131,7 +8132,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
           { rows: 20 },
         ),
       )
-      expect(withScrollback.scrollback.terminalLiveContainer.style.height).toBe('268px')
+      expect(withScrollback.scrollback.terminalLiveContainer.style.height).toBe('256px')
       expect(reports()).toHaveLength(before)
       expect(reports()[reports().length - 1]).toMatchObject({ rows: 16, ypixel: 256 })
     } finally {
@@ -8301,7 +8302,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
         { rows: 20 },
       )
       session.fireScreenFrame(topFrame)
-      expect(withScrollback.scrollback.terminalLiveContainer.style.height).toBe('268px')
+      expect(withScrollback.scrollback.terminalLiveContainer.style.height).toBe('256px')
       expect(scrollTo).toHaveBeenCalled()
       scrollTo.mockClear()
 
@@ -8314,7 +8315,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
           { rows: 20 },
         ),
       )
-      expect(withScrollback.scrollback.terminalLiveContainer.style.height).toBe('268px')
+      expect(withScrollback.scrollback.terminalLiveContainer.style.height).toBe('256px')
       expect(scrollTo).not.toHaveBeenCalled()
     } finally {
       globalThis.requestAnimationFrame = raf
@@ -20855,9 +20856,13 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
       openCommand()
       const cap = sb.runningLiveCap
       expect(cap).not.toBeNull()
-      expect(promptHeight).toBeCloseTo(cap!, 6)
-      // And the rows the prompt fitted occupy no more than the box that will
-      // show them.
+      // THE CAP IS NOW A ROW BOUNDARY (owner, 2026-11-08): the pane's
+      // fractional height floored to whole rows, because a ceiling between two
+      // rows leaves the clip slicing one. The invariant this case was written
+      // for survives — the prompt's rows fit the box that will show them — and
+      // gains the one it was missing: the box cannot end inside a row.
+      expect(cap!).toBeLessThanOrEqual(promptHeight)
+      expect(promptHeight - cap!).toBeLessThan(16)
       expect(prompt.rows * 16).toBeLessThanOrEqual(cap!)
     } finally {
       restore()

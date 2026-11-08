@@ -194,7 +194,9 @@ async function installTrace(
       record('first-presented', {
         cols: Number(grid.getAttribute('aria-colcount')),
         cell: parseFloat(getComputedStyle(inner).getPropertyValue('--term-cell-width')),
-        width: area.clientWidth,
+        width:
+          area.clientWidth -
+          2 * (parseFloat(getComputedStyle(area).getPropertyValue('--pane-inline-padding')) || 0),
         fullscreen: live.classList.contains('live-fullscreen'),
       })
     }
@@ -324,20 +326,20 @@ setInterval(() => {
             .poll(async () => {
               const cols = Number(read(sample).trim().split(/\s+/)[1])
               return page.evaluate((ptyCols) => {
+                // THE SAME ARITHMETIC THE PRODUCT FITS WITH: the scroller's
+                // own content box (which moves the instant the pane does) less
+                // the terminal area's inline gutter, read from the stylesheet
+                // in every mode (ADR-v26axn1t). Measured off the live region
+                // it would lag a frame behind a pane resize, and this poll
+                // exists to prove the app HAS caught up.
                 const area = document.querySelector<HTMLElement>('.pane.active .scrollback-area')!
                 const inner = document.querySelector<HTMLElement>('.pane.active .scrollback-inner')!
                 const cell = parseFloat(
                   getComputedStyle(inner).getPropertyValue('--term-cell-width'),
                 )
-                // ADR-3kqrem7v: the active rows are edge to edge in both
-                // buffers, so the fit is the scroller's own width. Read the
-                // live row's inset instead of assuming one.
-                const live = document.querySelector<HTMLElement>(
-                  '.pane.active .terminal-live-container',
-                )!
-                const cs = getComputedStyle(live)
-                const inset = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight)
-                return ptyCols === Math.floor((area.clientWidth - inset) / cell)
+                const gutter =
+                  parseFloat(getComputedStyle(area).getPropertyValue('--pane-inline-padding')) || 0
+                return ptyCols === Math.floor((area.clientWidth - 2 * gutter) / cell)
               }, cols)
             })
             .toBe(true)
@@ -385,9 +387,11 @@ setInterval(() => {
               const area = document.querySelector<HTMLElement>('.pane.active .scrollback-area')!
               const inner = document.querySelector<HTMLElement>('.pane.active .scrollback-inner')!
               const cell = parseFloat(getComputedStyle(inner).getPropertyValue('--term-cell-width'))
+              const gutter =
+                parseFloat(getComputedStyle(area).getPropertyValue('--pane-inline-padding')) || 0
               return (
                 cols === Number(grid.getAttribute('aria-colcount')) &&
-                cols === Math.floor(area.clientWidth / cell)
+                cols === Math.floor((area.clientWidth - 2 * gutter) / cell)
               )
             }, ptyCols)
           })

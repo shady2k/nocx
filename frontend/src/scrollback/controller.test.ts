@@ -45,7 +45,9 @@ function makeController() {
   const controller = new ScrollbackController({
     pane,
     liveContentHeight: () => null,
-    cellMetrics: () => null,
+    // A cell metric, because the live cap is a row boundary: without one the
+    // ceiling cannot be floored and stays the pane's raw height.
+    cellMetrics: () => ({ cellWidth: 8, cellHeight: 16 }),
     snapshotStore: new CommandSnapshotStore(),
   })
   // jsdom does no layout: give the scrollback area a real height so the
@@ -314,7 +316,7 @@ describe('ScrollbackController unstructured mode', () => {
 
     expect(controller.mode).toBe('unstructured')
     expect(controller.terminalLiveContainer.className).toContain('live-unstructured')
-    expect(controller.terminalLiveContainer.style.height).toBe('360px')
+    expect(controller.terminalLiveContainer.style.height).toBe('352px')
   })
 
   it('lets the first OSC-133 marker transition back to the normal layout', () => {
@@ -356,7 +358,7 @@ describe('the live region follows the pane it fills (nocx-liveheight)', () => {
   it('re-measures an unstructured session when the scroller grows', () => {
     const { controller } = makeController()
     controller.setUnstructured()
-    expect(controller.terminalLiveContainer.style.height).toBe('360px')
+    expect(controller.terminalLiveContainer.style.height).toBe('352px')
 
     // The card is dismissed and the pane gives the pixels back.
     Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
@@ -365,13 +367,15 @@ describe('the live region follows the pane it fills (nocx-liveheight)', () => {
     })
     controller.setLiveHeight(null)
 
-    expect(controller.terminalLiveContainer.style.height).toBe('540px')
+    // Floored to whole rows, like every filled pane box (see runningLiveCap):
+    // 540px is 33.75 rows of a 16px cell.
+    expect(controller.terminalLiveContainer.style.height).toBe('528px')
   })
 
   it('re-measures an alt-screen program when the scroller shrinks', () => {
     const { controller } = makeController()
     controller.enterFullscreen()
-    expect(controller.terminalLiveContainer.style.height).toBe('360px')
+    expect(controller.terminalLiveContainer.style.height).toBe('352px')
 
     Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
       value: 200,
@@ -379,7 +383,7 @@ describe('the live region follows the pane it fills (nocx-liveheight)', () => {
     })
     controller.setLiveHeight(null)
 
-    expect(controller.terminalLiveContainer.style.height).toBe('200px')
+    expect(controller.terminalLiveContainer.style.height).toBe('192px')
   })
 
   it('the region answers the shared live-region identity, in every mode (ADR-0091)', () => {
@@ -647,8 +651,8 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     controller.setLiveHeight(24 * 16)
     expect(controller.terminalLiveInner.style.transform).toBe('')
     // Both the content clip and flow box clamp to the live-region cap.
-    expect(controller.terminalLiveViewport.style.height).toBe('328px')
-    expect(controller.terminalLiveContainer.style.height).toBe('328px')
+    expect(controller.terminalLiveViewport.style.height).toBe('320px')
+    expect(controller.terminalLiveContainer.style.height).toBe('320px')
 
     // A later matching accepted frame may place the anchor back in view.
     record.outputAnchorOffset = 1
@@ -694,12 +698,15 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     expect(controller.terminalLiveViewport.style.height).toBe('32px')
     expect(controller.terminalLiveContainer.style.height).toBe('32px')
 
-    // Full capacity is the pane less the one header. The live box and clip
-    // have the same size; neither reserves frozen-output padding or air.
+    // Full capacity is the pane less the one header, FLOORED TO WHOLE ROWS:
+    // 360 - 32 = 328px is 20.5 rows of a 16px cell, and a ceiling between two
+    // rows leaves the clip slicing the twenty-first (owner, 2026-11-08: "the
+    // live grid is cut short mid-row"). 320 is twenty rows. The live box and
+    // clip have the same size; neither reserves frozen-output padding or air.
     controller.setLiveHeight(100 * 16)
-    expect(controller.runningLiveCap).toBe(328)
-    expect(controller.terminalLiveContainer.style.height).toBe('328px')
-    expect(controller.terminalLiveViewport.style.height).toBe('328px')
+    expect(controller.runningLiveCap).toBe(320)
+    expect(controller.terminalLiveContainer.style.height).toBe('320px')
+    expect(controller.terminalLiveViewport.style.height).toBe('320px')
     controller.blockManager.clearAll()
     pane.remove()
   })
@@ -710,22 +717,25 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     try {
       expect(controller.runningHeaderHeightPx).toBe(32)
       controller.beginBlock('a very long command '.repeat(30), '~', 0)
-      expect(controller.runningLiveCap).toBe(328)
+      // 328px of pane is 20.5 rows; the cap is a row boundary (see the full
+      // capacity case above).
+      expect(controller.runningLiveCap).toBe(320)
       const header =
         controller.blockManager.runningBlock!.el.querySelector<HTMLElement>('.cmd-header')!
       header.getBoundingClientRect = () => ({ height: 120 }) as DOMRect
-      expect(controller.runningLiveCap).toBe(328)
+      expect(controller.runningLiveCap).toBe(320)
       controller.scrollbackArea.style.setProperty('--control-height-md', '40px')
       expect(controller.runningHeaderHeightPx).toBe(40)
       expect(controller.runningLiveCap).toBe(320)
       controller.scrollbackArea.style.setProperty('--control-height-md', 'invalid')
       expect(controller.runningHeaderHeightPx).toBe(32)
-      expect(controller.runningLiveCap).toBe(328)
+      expect(controller.runningLiveCap).toBe(320)
       Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
         value: 460,
         configurable: true,
       })
-      expect(controller.runningLiveCap).toBe(428)
+      // 460 - 32 = 428px, floored to the same roomless boundary: 26 rows.
+      expect(controller.runningLiveCap).toBe(416)
     } finally {
       controller.blockManager.clearAll()
       controller.scrollbackArea.remove()
@@ -788,14 +798,14 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     controller.setLiveHeight(100 * 16)
     const block = controller.blockManager.runningBlock!
     const header = block.el.querySelector('.cmd-header')!
-    expect(controller.terminalLiveContainer.style.height).toBe('328px')
+    expect(controller.terminalLiveContainer.style.height).toBe('320px')
     controller.enterFullscreen()
-    expect(controller.terminalLiveContainer.style.height).toBe('328px')
+    expect(controller.terminalLiveContainer.style.height).toBe('320px')
     expect(controller.scrollbackArea.contains(header)).toBe(true)
     controller.exitFullscreen()
     controller.setRunning()
     controller.setLiveHeight(100 * 16)
-    expect(controller.terminalLiveContainer.style.height).toBe('328px')
+    expect(controller.terminalLiveContainer.style.height).toBe('320px')
     expect(controller.blockManager.runningBlock).toBe(block)
     expect(block.el.contains(header)).toBe(true)
     controller.blockManager.clearAll()

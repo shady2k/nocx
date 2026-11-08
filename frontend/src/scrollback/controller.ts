@@ -405,7 +405,17 @@ export class ScrollbackController {
   get runningLiveCap(): number | null {
     if (this._mode !== 'running') return null
     const max = this._areaHeightPx() - this.runningHeaderHeightPx
-    return max > 0 ? max : null
+    if (max <= 0) return null
+    // A CAP THAT ENDS MID-ROW IS A ROW CUT IN HALF (owner, 2026-11-08: "the
+    // live grid is cut short mid-row"). The rows are laid at whole multiples
+    // of the cell height, so a ceiling between two of them leaves the clip
+    // slicing the last row — measured in the e2e container at the hand-off,
+    // 514px of pane for 30.24 rows, four pixels of a row left showing. Floored
+    // here, the ceiling is a row boundary and both the grid the fit sends and
+    // the box that clips it end on the same one.
+    const cell = this._cellMetrics()?.cellHeight ?? 0
+    if (cell > 0 && max > cell) return Math.floor(max / cell) * cell
+    return max
   }
 
   /** The scroller's laid-out height in the FRACTIONAL CSS pixels the browser
@@ -710,7 +720,13 @@ export class ScrollbackController {
    *  A window resize is the same defect with no card in it. */
   private _fillPane(): void {
     const max = this._areaHeightPx() - (this._fullscreenHeader ? this.runningHeaderHeightPx : 0)
-    if (max > 0) this.terminalLiveContainer.style.height = `${max}px`
+    if (max <= 0) return
+    // Floored to whole rows for the same reason the running cap is: the pane
+    // fills the box, and a box that ends inside a row shows a sliced one (see
+    // `runningLiveCap`).
+    const cell = this._cellMetrics()?.cellHeight ?? 0
+    const height = cell > 0 && max > cell ? Math.floor(max / cell) * cell : max
+    this.terminalLiveContainer.style.height = `${height}px`
   }
 
   /** Exit alt-screen: restore normal layout. */

@@ -665,17 +665,12 @@
   min-height: auto;
 }
 
-/* ADR-3kqrem7v: the ALTERNATE-screen grid fills the pane width, and the
-   primary one is fitted inside the terminal area's gutter (see the gutter rule
-   below, and ADR-v26axn1t for why the prompt and the running block share the
-   transcript's column). The cost is stated rather than hidden: entering an
-   alternate-screen program widens the grid by the gutter, so the program is
-   told a new size once at the switch. That is one resize at a mode change,
-   never an oscillation, and it keeps this record's alternate-screen treatment
-   exactly as it was accepted. */
-.scrollback-inner > .terminal-live-container.live-fullscreen {
-  padding-inline: 0;
-}
+/* The ALTERNATE-screen grid wears the same inline gutter as the primary one, in
+   the same box, so a buffer switch cannot change the program's column count —
+   ADR-3kqrem7v's invariant, kept by making the gutter presentation-independent
+   rather than by zeroing it (ADR-v26axn1t). A flush alternate grid here was the
+   interim that made a switch send one resize; the spec that asserts "no resize
+   on switch" (e2e/alt-screen-switch.spec.ts) is what settled it. */
 
 /* ADR-3kqrem7v: alternate mode hides transcript content, while keeping the
    SAME running command header above the live grid.

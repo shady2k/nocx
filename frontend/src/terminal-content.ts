@@ -6392,15 +6392,24 @@ export class TerminalContent extends BasePaneContent {
     // grid is fitted inside the terminal area's inline gutter in EVERY mode —
     // prompt, running, alternate screen — so the program's width depends on
     // the pane and never on presentation (ADR-3kqrem7v), and the running
-    // block wears the same shape as the frozen one it becomes. The area's own
-    // content box is the number: `.terminal-live-viewport` is `width: 100%` of
-    // it and carries no padding, so its clientWidth is the width the rows are
-    // painted into, wherever the live region is seated.
-    const live = this.scrollback?.terminalLiveViewport
-    const inner = live && live.clientWidth > 0 ? live.clientWidth : 0
-    const outer =
-      inner > 0 ? inner : area && area.clientWidth > 0 ? area.clientWidth : viewport.width
-    const width = Math.max(0, outer)
+    // block wears the same shape as the frozen one it becomes.
+    //
+    // THE GUTTER IS READ FROM THE STYLESHEET, not measured off the live
+    // region. Measured, it lags: the running live region lives inside the
+    // block, whose width is written from the scroller's on the next sizing
+    // pass, so a pane that had just changed size was fitted against the OLD
+    // box for a frame — and the size report that follows the real box then
+    // looked like a resize caused by whatever landed in between (the
+    // alternate-screen switch, e2e/alt-screen-switch.spec.ts's "before the
+    // resize"). The scroller's clientWidth is the pane's own content box and
+    // moves with the pane; the gutter is one declared number,
+    // `--pane-inline-padding`, paid by the stack's own rule.
+    const outer = area && area.clientWidth > 0 ? area.clientWidth : viewport.width
+    const gutter =
+      area === undefined
+        ? 0
+        : parseFloat(getComputedStyle(area).getPropertyValue('--pane-inline-padding')) || 0
+    const width = Math.max(0, outer - 2 * gutter)
     return { ...viewport, width, height }
   }
 

@@ -364,6 +364,13 @@ interface ShapeFrame {
   frozenRowRight: number
   /** A frame where the block's own room changed without its rows changing. */
   roomWithoutRows: number
+  /** The pitch two consecutive live rows are painted at, and the box's height
+   *  as a multiple of it — the two numbers that make a cut row possible. */
+  pitch: number
+  boxRows: number
+  cutText: string
+  viewportBottom: number
+  viewportRows: number
 }
 
 /**
@@ -378,7 +385,6 @@ async function shapeFrames(page: Page): Promise<ShapeFrame[]> {
     const pane = document.querySelector<HTMLElement>('.pane.active')!
     const scroller = pane.querySelector<HTMLElement>('.scrollback-area')!
     const frames: ShapeFrame[] = []
-    let seenFrozen = false
     let previous: { rows: number; height: number } | null = null
     return new Promise<ShapeFrame[]>((resolve) => {
       const tick = (): void => {
@@ -395,13 +401,38 @@ async function shapeFrames(page: Page): Promise<ShapeFrame[]> {
         const liveRows = [
           ...(pane.querySelectorAll<HTMLElement>('.terminal-live-grid .term-grid-row') ?? []),
         ]
+        const viewport = pane.querySelector<HTMLElement>('.terminal-live-viewport')
+        const vr = viewport ? viewport.getBoundingClientRect() : null
         // Rows painted INSIDE the live box: its own rows, clipped by it.
+        // The CLIP is the viewport — `overflow: hidden` on the box the grid is
+        // drawn into. The container around it pays the body's padding, so a
+        // row's 4px inside the container is padding, not a sliced row.
         let cutRows = 0
         for (const row of liveRows) {
           const b = row.getBoundingClientRect()
-          if (lr === null || b.height <= 0) continue
-          if (b.top >= lr.bottom - 0.5) continue
-          if (b.bottom > lr.bottom + 0.5 && b.top < lr.bottom - 0.5) cutRows += 1
+          const clip = vr ?? lr
+          if (clip === null || b.height <= 0) continue
+          if (b.top >= clip.bottom - 0.5) continue
+          if (b.bottom > clip.bottom + 0.5 && b.top < clip.bottom - 0.5) cutRows += 1
+        }
+        let pitch = NaN
+        for (let i = 1; i < liveRows.length; i += 1) {
+          const a = liveRows[i - 1].getBoundingClientRect()
+          const b = liveRows[i].getBoundingClientRect()
+          if (b.top > a.top + 0.5) {
+            pitch = Math.round((b.top - a.top) * 100) / 100
+            break
+          }
+        }
+        let cutText = ''
+        if (lr !== null) {
+          for (const row of liveRows) {
+            const b = row.getBoundingClientRect()
+            if (b.top < lr.bottom - 0.5 && b.bottom > lr.bottom + 0.5) {
+              cutText = `${lr.bottom - b.top} of ${b.height}: ${(row.textContent ?? '').slice(0, 12)}`
+              break
+            }
+          }
         }
         const firstRow = outRows[0] ?? liveRows[0] ?? null
         const firstRect = box(firstRow)
@@ -420,6 +451,16 @@ async function shapeFrames(page: Page): Promise<ShapeFrame[]> {
           if (grew) roomWithoutRows = 1
         }
         if (br !== null) previous = { rows: rowsNow, height: heightNow }
+        // THE WINDOW CLOSES ON THE EVENT ITSELF — the frozen body's own first
+        // painted row, in the frame that records it. Not the composer coming
+        // back: a frame can pass between the composer's return and the card's
+        // first row, and a sampler that closes there hands the test an empty
+        // frozen column under load. And never a deadline: the row is the
+        // observable, so the sampler waits for the row.
+        const frozenRowPainted =
+          frozen !== null &&
+          fRowRect !== null &&
+          (frozen.textContent ?? '').includes('BURST-DONE-END')
         frames.push({
           t: r2(performance.now()),
           scrollTop: r2(scroller.scrollTop),
@@ -439,11 +480,13 @@ async function shapeFrames(page: Page): Promise<ShapeFrame[]> {
           frozenRowX: fRowRect ? r2(fRowRect.left - sr.left) : NaN,
           frozenRowRight: fRowRect ? r2(fRowRect.right - sr.left) : NaN,
           roomWithoutRows,
+          pitch,
+          boxRows: lr !== null && pitch > 0 ? r2(lr.height / pitch) : NaN,
+          cutText,
+          viewportBottom: vr ? r2(vr.bottom - sr.top) : NaN,
+          viewportRows: vr !== null && pitch > 0 ? r2(vr.height / pitch) : NaN,
         })
-        if (composer !== null && (composer.getBoundingClientRect().height ?? 0) > 0) {
-          seenFrozen = true
-        }
-        if (seenFrozen && frames.length > 4) {
+        if (frozenRowPainted) {
           resolve(frames)
           return
         }

@@ -20,6 +20,7 @@ import (
 	"github.com/shady2k/nocx/internal/operation/catalog"
 	"github.com/shady2k/nocx/internal/operation/domains"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/waittest"
 )
 
@@ -110,6 +111,49 @@ func filesListState(t *testing.T, raw json.RawMessage) (string, map[string]any) 
 	}
 	state, _ := envelope.Result["state"].(string)
 	return state, envelope.Result
+}
+
+// A shared SFTP lease can reach its watchdog before this invocation's own
+// deadline. The cause must cross the wire as the Files timeout state, with
+// no partial rows, while another binding still lists successfully.
+func TestFilesListLeaseWatchdogAnswersTimedOut(t *testing.T) {
+	blockedRoot := t.TempDir()
+	healthyRoot := t.TempDir()
+	factory := func(_ session.Session, root string) (filesystem.Provider, error) {
+		provider := &mountProvider{
+			Provider: local.New(local.WithRoot(root)),
+			domain:   root,
+		}
+		if root == blockedRoot {
+			provider.list = func(context.Context, string, filesystem.Page) (filesystem.Listing, error) {
+				return filesystem.Listing{}, ssh.ErrFSDead
+			}
+		}
+		return provider, nil
+	}
+	env := newFilesTestEnv(t, WithFilesystemProviderFactory(factory))
+	sid := env.openSession(t, 1)
+	blocked := env.openBinding(t, sid, blockedRoot, 2)
+	healthy := env.openBinding(t, sid, healthyRoot, 3)
+
+	state, result := filesListState(t, jsonrpcCallWithID(t, env.conn, "files.list", map[string]any{
+		"bindingId": blocked, "path": blockedRoot, "offset": 0, "limit": 1,
+	}, 4))
+	if state != "timedOut" {
+		t.Fatalf("watchdog expiry answered %q, want timedOut", state)
+	}
+	if result["timeout"] != float64(catalog.OpFilesList.Declaration().Max.Millis) {
+		t.Fatalf("timeout = %v, want the declared file-list bound", result["timeout"])
+	}
+	if _, partial := result["entries"]; partial {
+		t.Fatal("expired listing returned partial rows")
+	}
+	state, _ = filesListState(t, jsonrpcCallWithID(t, env.conn, "files.list", map[string]any{
+		"bindingId": healthy, "path": healthyRoot, "offset": 0, "limit": 1,
+	}, 5))
+	if state != "ok" {
+		t.Fatalf("healthy binding answered %q beside the expired lease", state)
+	}
 }
 
 // TestFilesOneBlockedMountDoesNotHoldUnrelatedWork is the check the constraint

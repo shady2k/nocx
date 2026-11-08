@@ -76,17 +76,7 @@ func TestLiveSshd_CarrierBootstrapReachesAcceptedDomain(t *testing.T) {
 		t.Error("the per-epoch capability appeared in the session's own output")
 	}
 
-	if _, err := ch.Write([]byte("exit\n")); err != nil {
-		t.Fatalf("write exit: %v", err)
-	}
-	waittest.WaitForTimeout(t, "session end after exit", 20*time.Second, func() bool {
-		select {
-		case <-ch.Done():
-			return true
-		default:
-			return false
-		}
-	})
+	endTheSession(t, ch)
 	// Nothing installed beyond the bundle, and no file on the far host
 	// holds the capability — including the temp root, which the bootstrap
 	// wrote to and unlinked before writing a byte.
@@ -122,9 +112,7 @@ func TestLiveSshd_WithNothingPublishedTheSessionStillReachesAPrompt(t *testing.T
 		// domain reaching Established with no shell behind it.
 		t.Logf("minted %d domains (the channel is established at connect; the shell never joined it)", minted)
 	}
-	if _, err := ch.Write([]byte("exit\n")); err != nil {
-		t.Fatalf("write exit: %v", err)
-	}
+	endTheSession(t, ch)
 }
 
 // TestLiveSshd_InputIsRefusedUntilTheTerminalOutcome watches the quarantine on
@@ -166,9 +154,7 @@ func TestLiveSshd_InputIsRefusedUntilTheTerminalOutcome(t *testing.T) {
 	if strings.Contains(out.String(), "QUARANTINE_BREACH") {
 		t.Error("a keystroke refused during the bootstrap was delivered later")
 	}
-	if _, err := ch.Write([]byte("exit\n")); err != nil {
-		t.Fatalf("write exit: %v", err)
-	}
+	endTheSession(t, ch)
 }
 
 // The other two live-sshd rows, reproduced with an installer wired. They
@@ -199,9 +185,7 @@ func TestLiveSshd_ForwardingRefusedStillReachesAConventionalPrompt(t *testing.T)
 	if minted != 0 {
 		t.Errorf("refused forwarding still minted %d domain(s)", minted)
 	}
-	if _, err := ch.Write([]byte("exit\n")); err != nil {
-		t.Fatalf("write exit: %v", err)
-	}
+	endTheSession(t, ch)
 }
 
 // TestLiveSshd_ConnectionLossRevokesTheBootstrappedDomain mirrors
@@ -250,5 +234,33 @@ func TestLiveSshd_ConnectionLossRevokesTheBootstrappedDomain(t *testing.T) {
 		defer kernel.mu.Unlock()
 		a, ok := kernel.Attempt(att.ID)
 		return ok && a.State == lifecycle.AttemptUnknown && a.ExitCode == nil
+	})
+}
+
+// endTheSession ends the far shell and waits for the session to be over.
+//
+// The wait is what keeps the fixture's disposable home out of a race with the
+// shell's own exit (nocx-evj4b.1.4). A session that falls back to a native
+// login shell — what generation-unavailable leaves, and this file's subject —
+// never reads the fixture's ~/.bashrc, so it never sees the HISTFILE=/dev/null
+// planted there, and on its way out it writes $HOME/.bash_history. A stand
+// that returns while that exit is still in flight has the write land beside
+// t.TempDir's RemoveAll: RemoveAll has already read the directory's names, the
+// file appears before its rmdir, and the removal fails ENOTEMPTY. Before the
+// stand's cleanup closes the channel, ch.Done() closes only when the remote
+// session has ended — which is after the shell has exited and flushed its
+// history.
+func endTheSession(t *testing.T, ch ssh.Channel) {
+	t.Helper()
+	if _, err := ch.Write([]byte("exit\n")); err != nil {
+		t.Fatalf("write exit: %v", err)
+	}
+	waittest.WaitForTimeout(t, "session end after exit", 20*time.Second, func() bool {
+		select {
+		case <-ch.Done():
+			return true
+		default:
+			return false
+		}
 	})
 }

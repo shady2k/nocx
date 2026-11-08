@@ -296,8 +296,8 @@ logging and failing-test context remain in use; no new telemetry is proposed.
 Production incremental-history implementation; merge; claim that the earlier native
 RAM ramp is fixed; release/deployment; macOS proof not yet run; ledger eviction
 optimization beyond its existing one-pass fix; logging/ack policy changes;
-retention-policy changes; the separate rapid-close race (`nocx-3an1s.1.10`);
-`nocx-7epsi`'s transition-observation defect; a second VT parser or state owner.
+retention-policy changes; `nocx-7epsi`'s transition-observation defect; a second
+VT parser or state owner.
 
 The RAM follow-on stays on `nocx-3an1s.1.9`. Its next investigation must preserve
 the earlier session sequence/runtime state and distinguish live native ownership
@@ -314,8 +314,21 @@ document-readiness gate is not installed; no passing receipt is invented.
 P5's result is the [incremental ledger design](2026-11-07-incremental-ledger-read-design.md)
 and its executable reference proof. That proof is not a production read API:
 implementation still needs its own admission, canonical wire contracts and
-end-to-end checks. The budget increase to 17 is explicitly approved; neither
-these optimizations nor a clean gate changes the root's DONE WHEN.
+end-to-end checks. The original budget increase to 17 was approved for the former
+milestone; neither these optimizations nor a clean gate changes its DONE WHEN.
+
+After busy-terminal closed, main transferred this PR's retained tasks under
+`nocx-nqmjq` into `v0-9`. This branch removes the obsolete budget-17 hunk and
+adopts main `130d68b32`'s configuration (`currentMilestone: v0-8-2`, finding
+budget 5); the retained performance tasks remain in `v0-9`.
+
+The existing rapid-close task `nocx-3an1s.1.10` was initially outside the
+performance packages. Fresh native verification reproduced it after main's
+last-tab activation repair: concurrent replies could adopt a row whose close
+was still pending. Its close-interval and confirmed-removal repair is now
+included as a required-check correction, retaining that task's separate
+`v0-8-2` parent. It changes neither P1–P5's contracts nor the former root's
+acceptance boundary.
 
 ## DONE WHEN
 

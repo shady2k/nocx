@@ -10683,11 +10683,11 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       // The per-line CM6 gutter this replaced (task C, round 2) kept the
       // token off every line but the first with one blank cell per row —
       // bookkeeping the mockup pass's ComposerFrame field grid
-      // (composer-frame.css) does not need: ONE indicator sits in the
-      // field's leading grid column and the WHOLE editor sits in the
-      // column after it, so every line the editor draws — wrapped or
-      // typed — starts at that column's left edge by construction, not by
-      // a marker repeated per row.
+      // (composer-frame.css) does not need: the WHOLE editor sits in the
+      // field's FIRST grid column — the ledger's column, where a block's
+      // header and output start (ADR-2yzsq8mk) — so every line the editor
+      // draws, wrapped or typed, starts at that column's left edge by
+      // construction, not by a marker repeated per row.
       ed.insertText('one\ntwo')
       const field = ed.root.querySelector<HTMLElement>('.ui-composer-frame__field')
       expect(field).not.toBeNull()
@@ -10697,10 +10697,10 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       expect(editorHost).not.toBeNull()
       // DOM order IS the grid's column order (composer-frame.css places no
       // explicit `grid-column` — the field relies on source order), so the
-      // indicator immediately preceding the editor host is what puts the
-      // whole multiline document in the SECOND column, never split across
-      // per-line cells the indicator could occupy one of.
-      expect(indicators[0].nextElementSibling).toBe(editorHost)
+      // editor host being the field's FIRST child is what puts the whole
+      // multiline document in the leading column; the target switch follows
+      // it with the submit slot after.
+      expect(field!.firstElementChild).toBe(editorHost)
       expect(viewOf(ed).contentDOM.textContent).toBe('onetwo')
     } finally {
       teardown()

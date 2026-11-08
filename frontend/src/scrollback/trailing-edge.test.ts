@@ -181,19 +181,13 @@ describe('rows are full width, and the gutter lives in them (nocx-9bpeq.8)', () 
     expect(shipped('.cmd-block.cmd-block-running > .cmd-output', 'padding-inline')).toBeNull()
   })
 
-  it('a markerless session keeps the pane’s width; the gutter is the ledger’s', () => {
-    // ADR-2yzsq8mk: a plain ssh shell before its first marker has no blocks and
-    // no transcript column, so the terminal is the pane — and the surface that
-    // hands its past back is flush with the live rows above it, still one grid.
-    expect(
-      shipped(
-        '.scrollback-inner.inner-unstructured > .terminal-live-container.live-unstructured',
-        'padding-inline',
-      ),
-    ).toBe('0')
-    expect(shipped('.scrollback-inner.inner-unstructured > .live-history', 'padding-inline')).toBe(
-      '0',
-    )
+  it('no text touches the pane’s top or bottom edge, and no program is pushed off it', () => {
+    // ADR-2yzsq8mk, the owner's edge pass: the margin is on the BOX the
+    // scroller sits in, so a scrolling transcript cannot carry it away with the
+    // content — in every mode, and cancelled for the program that owns the
+    // pane, which starts at the pane's own top edge.
+    expect(shipped('.scrollback-layout', 'padding-block')).toBe('var(--pane-inline-padding)')
+    expect(shipped('.scrollback-layout.inner-pane-program', 'padding-block')).toBe('0')
   })
 
   it('the full-screen program owns the width and keeps a row of bottom margin', () => {
@@ -227,8 +221,12 @@ describe('rows are full width, and the gutter lives in them (nocx-9bpeq.8)', () 
     // deliberately narrower than the ledger's 24px row inset (the mockup's
     // own "10-12 px external gutter" for the card, not the row's).
     expect(shipped('.nocx-editor', 'padding')).toBeNull()
-    expect(shipped('.ui-composer-frame', 'margin')).toBe(
-      '0 var(--terminal-card-margin) var(--terminal-card-margin)',
+    // …and the card's TEXT starts on the ledger's column (ADR-2yzsq8mk): what
+    // is left of --pane-inline-padding after the card's own border and
+    // padding is the margin, so the first glyph lands on the gutter.
+    expect(shipped('.ui-composer-frame', 'margin')?.replace(/\s+/g, ' ')).toBe(
+      '0 calc(var(--pane-inline-padding) - var(--terminal-card-padding) - 1px) ' +
+        'var(--terminal-card-margin)',
     )
   })
 })

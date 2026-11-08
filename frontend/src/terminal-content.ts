@@ -6383,7 +6383,7 @@ export class TerminalContent extends BasePaneContent {
     // full-screen program a row: read from one owner, the markerless session's
     // program (no running block to take the branch below) gets the box's
     // height too, instead of the whole scroller the box does not show.
-    if (sb.mode === 'fullscreen') {
+    if (sb.mode === 'fullscreen' || sb.mode === 'unstructured') {
       const box = sb.paneFillHeight
       // No layout at all yet — the delivered box is the better guess, the same
       // fallback every other mode takes here.
@@ -6489,14 +6489,12 @@ export class TerminalContent extends BasePaneContent {
     // pane's own content box and moves with the pane; the gutter is the one
     // declared number every row of the ledger pays.
     const outer = area && area.clientWidth > 0 ? area.clientWidth : viewport.width
-    // A FULL-SCREEN PROGRAM AND A MARKERLESS SESSION OWN THE PANE'S WIDTH. The
-    // alternate screen pays no gutter by ADR-2yzsq8mk, and a session with no
-    // shell integration has no blocks to align with — there is no transcript
-    // column, only the terminal — so it keeps the whole pane as it always has.
-    // The gutter is the block ledger's, and only the ledger's.
-    const wholePane = sb?.mode === 'fullscreen' || sb?.mode === 'unstructured'
+    // ONLY A FULL-SCREEN PROGRAM OWNS THE PANE'S WHOLE WIDTH (ADR-2yzsq8mk).
+    // Every normal row — a running command, a plain ssh shell with no blocks
+    // yet — wears the ledger's gutter on both sides, so no painted column
+    // touches the pane's left or right edge.
     const gutter =
-      wholePane || area === undefined
+      sb?.mode === 'fullscreen' || area === undefined
         ? 0
         : parseFloat(getComputedStyle(area).getPropertyValue('--pane-inline-padding')) || 0
     const width = Math.max(0, outer - 2 * gutter)

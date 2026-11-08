@@ -336,7 +336,7 @@ export class ScrollbackController {
     this._applyEchoShift()
     this._updateSeparator()
     this._seatLive()
-    this._onModeChanged?.(this._mode)
+    this._announceMode()
   }
 
   /** Show live output below the running block. */
@@ -359,7 +359,7 @@ export class ScrollbackController {
     this._applyEchoShift()
     this._updateSeparator()
     this._seatLive()
-    this._onModeChanged?.(this._mode)
+    this._announceMode()
     // Size both layers from the rows that exist now. A short command therefore
     // opens beside the prompt instead of reserving a pane-high empty window.
     // Both layers change in the same layout pass: a transition here can still
@@ -390,7 +390,7 @@ export class ScrollbackController {
     this.scrollbackInner.classList.add('inner-unstructured')
     this._seatLive()
     this._fillPane()
-    this._onModeChanged?.(this._mode)
+    this._announceMode()
   }
 
   /** ADR-3kqrem7v: one fixed header cost in either buffer. The token is
@@ -695,6 +695,15 @@ export class ScrollbackController {
     this.scrollbackInner.classList.toggle('inner-fullscreen-mode', on)
   }
 
+  /** The layout's vertical margin is the ledger's — a markerless session keeps
+   *  it too (ADR-2yzsq8mk) — and only the alternate screen starts at the pane's
+   *  own top edge, one row of margin at its bottom instead. Every mode change
+   *  announces itself through here, so the class cannot lag the mode. */
+  private _announceMode(): void {
+    this.scrollbackLayout.classList.toggle('inner-pane-program', this._mode === 'fullscreen')
+    this._onModeChanged?.(this._mode)
+  }
+
   /**
    * Draw the running block flush for the rest of its command (ADR-2yzsq8mk).
    *
@@ -732,7 +741,7 @@ export class ScrollbackController {
     // second, in one task, so no frame sees both.
     this._seatLive()
     this._fillPane()
-    this._onModeChanged?.(this._mode)
+    this._announceMode()
   }
 
   /** The live box IS the scroller, in the two modes where the terminal owns
@@ -754,9 +763,12 @@ export class ScrollbackController {
    *  by its overflow — `top` drawing 34 of the 40 rows it had been given.
    *  A window resize is the same defect with no card in it. */
   private _fillPane(): void {
-    const box = this.paneFillHeight
-    if (box <= 0) return
-    this.terminalLiveContainer.style.height = `${box}px`
+    const grid = this.paneFillHeight
+    if (grid <= 0) return
+    // The box IS the grid: a markerless session's four-side margin is the
+    // stack's padding, not this box's (ADR-2yzsq8mk), and `paneFillHeight`
+    // already took it out of the rows this box may show.
+    this.terminalLiveContainer.style.height = `${grid}px`
   }
 
   /**
@@ -799,7 +811,7 @@ export class ScrollbackController {
     this.scrollbackInner.classList.remove('inner-fullscreen-mode')
     this._updateSeparator()
     this._seatLive()
-    this._onModeChanged?.(this._mode)
+    this._announceMode()
   }
 
   // ── Command cycle ─────────────────────────────────────────────────────

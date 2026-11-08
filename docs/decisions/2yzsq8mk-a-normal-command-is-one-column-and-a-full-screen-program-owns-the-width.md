@@ -50,10 +50,21 @@ two cases separated, which is what the two earlier records conflated.
    is drawn flush for the rest of that command, because its rows were written
    at the pane's width. The prompt is where the transcript's column returns,
    and the one resize owed for that happens at that boundary.
-5. **A markerless session keeps the pane's width.** A plain ssh shell before
-   its first OSC 133 marker has no blocks and no transcript column: the
-   terminal is the pane, as it always was, and the gutter is block mode's
-   alone. Its history surface is flush with the live rows it sits above.
+5. **No text touches the pane's edge.** In a normal command — the prompt, a
+   running command, the frozen card — and in a markerless session (a plain ssh
+   shell with no OSC 133 yet) every painted row keeps the ledger's margin on
+   all four sides: `--pane-inline-padding` on the left and on the right, so the
+   last column stops short of the pane's right edge, and the same token as the
+   live box's vertical margin, so the first row never touches the top edge and
+   the last never the bottom. The fit and the box read the same two numbers, so
+   nothing is clipped to pay for them. A markerless session has no blocks to
+   align with, but it is still text in a pane: the margin is not the ledger
+   column's, it is the pane's.
+6. **A block's header, its output and the composer's text are one column.**
+   The composer's first glyph starts on `--pane-inline-padding` too — the x the
+   directory, the time and the command start on — so the line a person types is
+   the block it will become, before it runs. The target switch that says where
+   Enter goes follows the editor in that row instead of preceding it.
 
 ## Consequences
 
@@ -74,3 +85,9 @@ two cases separated, which is what the two earlier records conflated.
   once per command that borrows the screen rather than once per keystroke.
 - The bottom margin costs a full-screen program one row of height. It is the
   owner's Warp parity, and the fit subtracts it so no row is clipped for it.
+- The four-side margin costs a normal command three rows of pane at the default
+  size (one top, one bottom, and the remainder of the gutter's 48px inline) and
+  a markerless session the same, and it is the one thing every mode but the
+  alternate screen now shares. The composer reaches its column by giving up its
+  own inline padding, not by moving its card: the card's margin is what is left
+  of `--pane-inline-padding` after its border and padding.

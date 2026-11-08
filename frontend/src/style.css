@@ -351,6 +351,16 @@
   flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
+  /* NO TEXT TOUCHES THE PANE'S TOP OR BOTTOM EDGE (ADR-2yzsq8mk, the owner's
+     edge pass). The margin is on the BOX the scroller sits in, not on the rows:
+     a transcript scrolls, so a padding inside the scroller would scroll away
+     with the content and the row at the top edge would be a row at the top
+     edge again on the next line. Here the scroller itself is the pane less one
+     margin top and bottom, in every mode, which is also what the fit reads
+     (`_areaHeightPx`) — no row is clipped to pay for it. The alternate screen
+     is the one exception: a program that owns the pane starts at its top edge
+     (`.inner-pane-program`, set with the mode). */
+  padding-block: var(--pane-inline-padding);
   /* The terminal screen's one ground (spec §7), not the canvas: history rows
      and the live region paint `transparent` and composite to what sits behind
      them. That is `.pane`'s --color-canvas — the one theme where it differs from
@@ -675,17 +685,6 @@
   margin-bottom: var(--term-cell-height, 1.2em);
 }
 
-/* A MARKERLESS SESSION HAS NO LEDGER TO ALIGN WITH (ADR-2yzsq8mk). A plain ssh
-   shell before its first OSC 133 marker has no blocks and no transcript
-   column: the terminal IS the pane, and it keeps the whole width it always
-   had. `usableViewport` subtracts no gutter there, and the surface holding the
-   shell's past is flush with the live rows it sits above — one grid, still
-   (nocx-zg3k3.10.4). */
-.scrollback-inner.inner-unstructured > .terminal-live-container.live-unstructured,
-.scrollback-inner.inner-unstructured > .live-history {
-  padding-inline: 0;
-}
-
 /* ADR-3kqrem7v: alternate mode hides transcript content, while keeping the
    SAME running command header above the live grid.
 
@@ -710,6 +709,14 @@
    The live container is excluded rather than the whole stack being hidden from
    an ancestor: `display: none` on `.scrollback-inner` would take fixed
    descendants with it (P0-2). */
+/* A PROGRAM THAT OWNS THE PANE STARTS AT ITS TOP EDGE: the layout's vertical
+   margin is the ledger's, and the alternate screen is not in the ledger
+   (ADR-2yzsq8mk — it keeps its own one row of bottom margin, in
+   `.live-fullscreen`). */
+.scrollback-layout.inner-pane-program {
+  padding-block: 0;
+}
+
 .scrollback-inner.inner-fullscreen-mode
   > :not(
     .terminal-live-container,

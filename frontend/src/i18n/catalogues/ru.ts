@@ -251,6 +251,15 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'terminal.connection.savedAs': 'как подключение.',
   'terminal.connection.saveFailed': 'Не удалось сохранить подключение:',
 
+  // ── The block's elapsed time (frontend/src/scrollback/elapsed.ts) ──────
+  // The units only: the figures keep the formatter's own spelling, so a
+  // Russian header reads "43 мин 8 с" beside an English one's "43m 8s".
+  'scrollback.duration.ms': '{value} мс',
+  'scrollback.duration.seconds': '{value} с',
+  'scrollback.duration.minutes': '{minutes} мин {seconds} с',
+  'scrollback.duration.hours': '{hours} ч {minutes} мин',
+  'scrollback.duration.days': '{days} д {hours} ч',
+
   // ── Connections surface, portion 1 (frontend/src/connections.tsx) ──────
   'connections.load.failedHead': 'Не удалось загрузить подключения:',
   'connections.load.failedTail': '. Список может быть устаревшим',

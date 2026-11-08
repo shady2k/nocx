@@ -49,6 +49,32 @@ describe('createPromptContext — the DOM contract', () => {
     expect(el.textContent).toBe('dev@staging:~/repos/nocx')
   })
 
+  it('a connection name reads first, then a divider, then the host (nocx-ouru5.1.2)', () => {
+    const el = createPromptContext(
+      { name: 'Production', host: 'dev@staging', hostStrong: true, path: '~' },
+      { presentation: 'composer' },
+    )
+    const name = el.querySelector<HTMLElement>(':scope > [data-part="name"]')
+    const divider = el.querySelector<HTMLElement>(':scope > .ui-prompt-context__divider')
+    const host = el.querySelector<HTMLElement>(':scope > [data-part="host"]')
+    expect(name?.textContent).toBe('Production')
+    expect(divider?.textContent).toBe('·')
+    expect(divider?.getAttribute('aria-hidden')).toBe('true')
+    // TEXT ORDER, not just presence: the name is what the person called the
+    // connection, and the host is where Enter goes.
+    expect(el.textContent).toBe('Production·dev@staging:~')
+    const order = [...el.children].map((c) => c.getAttribute('data-part') ?? c.className)
+    expect(order.indexOf('name')).toBeLessThan(order.indexOf('host'))
+    expect(name!.compareDocumentPosition(host!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('no name draws no name and no divider — the host stands alone', () => {
+    const el = createPromptContext({ host: 'dev@staging', path: '~' })
+    expect(el.querySelector('[data-part="name"]')).toBeNull()
+    expect(el.querySelector('.ui-prompt-context__divider')).toBeNull()
+    expect(el.textContent).toBe('dev@staging:~')
+  })
+
   it('hostStrong marks the host for normal text colour — the composer’s safety question', () => {
     const el = createPromptContext({ host: 'dev@staging', hostStrong: true, path: '~' })
     const host = el.querySelector<HTMLElement>(':scope > [data-part="host"]')

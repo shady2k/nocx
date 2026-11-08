@@ -976,6 +976,38 @@ describe('BlockManager', () => {
     }
   })
 
+  it('counts a long run in hours and days, and keeps that wording when it settles', () => {
+    // nocx-ouru5.1.7: the owner saw "167m 36s" on a finished block. One
+    // formatter answers for both states now, so the figure a person watches
+    // and the figure it becomes when the command ends cannot be two
+    // different wordings of one duration.
+    vi.useFakeTimers()
+    try {
+      const rec = manager.startBlock('make it take a while', '~', 10)
+      const durationSelector =
+        ':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]'
+      const shown = () => rec.el.querySelector<HTMLElement>(durationSelector)?.textContent ?? null
+
+      const started = fixedNow
+      const tick = (elapsed: number): void => {
+        fixedNow = started + elapsed
+        vi.advanceTimersByTime(100)
+      }
+
+      tick(43 * 60_000 + 8_000)
+      expect(shown()).toBe('43m 8s')
+      tick(2 * 3_600_000 + 47 * 60_000)
+      expect(shown()).toBe('2h 47m')
+      tick(24 * 3_600_000 + 3 * 3_600_000)
+      expect(shown()).toBe('1d 3h')
+
+      closeRunningBlock(manager)
+      expect(shown()).toBe('1d 3h')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   // `document.hidden` has one owner, app-visible.ts (grant.test.ts's "keeps
   // direct document visibility reads in the app visibility module"), so the
   // ticker's pause/resume reads it through an injected `AppVisibility`

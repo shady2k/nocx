@@ -2148,6 +2148,15 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
     one: '{count} row of earlier output was not kept here.',
     other: '{count} rows of earlier output were not kept here.',
   },
+  // A block header's elapsed time (nocx-ouru5.1.7). One formatter, four
+  // shapes: tenths of a second, then minutes, then hours, then days. The
+  // numbers stay as figures; only the units are the catalogue's, which is
+  // what makes "43m 8s" read "43 мин 8 с" without a second formatter.
+  'scrollback.duration.ms': '{value}ms',
+  'scrollback.duration.seconds': '{value}s',
+  'scrollback.duration.minutes': '{minutes}m {seconds}s',
+  'scrollback.duration.hours': '{hours}h {minutes}m',
+  'scrollback.duration.days': '{days}d {hours}h',
   'scrollback.doNotWrap': 'Do not wrap',
   'scrollback.emptyCommand': '(empty)',
   'scrollback.evicted': 'Output is no longer kept',

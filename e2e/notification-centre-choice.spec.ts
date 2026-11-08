@@ -48,6 +48,22 @@ const rowsOfKind = (page: Page, kind: string) =>
 const blockOf = (page: Page, title: string) => page.locator('.cmd-block').filter({ hasText: title })
 
 /**
+ * THIS RUN's finished-command row in the centre, found by the name its own
+ * command carries.
+ *
+ * NOT a count of every "Command finished" row: the feed is bounded at 200
+ * occurrences (internal/app's notifyFeedMaxOccurrences) and one stand serves
+ * every spec of a run, so a run that adds rows also evicts the oldest — the
+ * total then answers "how full is the feed", not "did this command reach it".
+ * Measured on the repeat harness: after a few passes the whole-feed count went
+ * DOWN while the row was created, and the assertion failed on arithmetic that
+ * was never about the product. `blockFinishedTitle` titles the row with the
+ * command, so the run's own name finds the run's own row.
+ */
+const finishedRow = (page: Page, title: string) =>
+  rowsOfKind(page, COMMAND_FINISHED).filter({ hasText: title })
+
+/**
  * Wait until the ledger has CLOSED this command, before asking the centre
  * about it.
  *
@@ -166,22 +182,29 @@ test('a person can choose visible notification kinds without losing rows or read
   test.setTimeout(150_000)
 
   const project = testInfo.project.name
+  // THE THREE NAMES CARRY A PER-RUN TAG, and both halves of that matter.
+  //
+  // This spec selects sessions by NAME (`selectOption({ label })`) and finds
+  // this run's finished-command rows by the name their command carries, so a
+  // name two runs of the same spec share picks the other run's session — which
+  // the repeat harness does on purpose (it runs the changed specs ten times
+  // against ONE stand, and the feed is durable). The tag is four base-36
+  // characters, not a timestamp: `assertReadableIdentifiers` rejects an 8+
+  // hex run, and four characters cannot reach one.
+  const runTag = Math.random().toString(36).slice(2, 6)
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nocx-e2e-notification-choice-'))
   const gateA = path.join(root, 'bell-a')
   const gateB = path.join(root, 'bell-b')
   const gateC = path.join(root, 'bell-c')
-  const titleA = `W6 choice primary ${project}`
-  const titleB = `W6 choice secondary ${project}`
-  const titleC = `W6 choice hidden ${project}`
+  const titleA = `W6 choice primary ${project} ${runTag}`
+  const titleB = `W6 choice secondary ${project} ${runTag}`
+  const titleC = `W6 choice hidden ${project} ${runTag}`
 
   try {
     await page.goto('/')
     await expect(page.locator(TAB)).toHaveCount(1)
     await promptReady(page)
     await quietBell(page)
-
-    const bellRowsBefore = await rowsOfKind(page, TERMINAL_BELL).count()
-    const finishedRowsBefore = await rowsOfKind(page, COMMAND_FINISHED).count()
 
     // Three named sessions let the Session axis prove real tab names rather
     // than disappearing because a single value cannot narrow anything. Each
@@ -205,7 +228,7 @@ test('a person can choose visible notification kinds without losing rows or read
     await commandFinished(page, titleA)
     await showSidebarView(page, 'notifications')
     const badge = page.locator(BELL).locator(BADGE)
-    // One wait on all three facts, and it carries the numbers.
+    // One wait on every fact, and it carries them.
     //
     // A raised tab produces TWO events on two different paths: the BEL is a
     // byte the renderer sees, while the command's completion is the
@@ -216,23 +239,23 @@ test('a person can choose visible notification kinds without losing rows or read
     // recurring flake shape, and it went red on a loaded runner exactly as
     // recorded: fourteen polls at "1" while webkit passed.
     //
-    // Polling the conjunction fixes the shape; returning the counts rather
-    // than a boolean is what makes a red run useful, because the timeout then
-    // names which half never arrived instead of only that the badge read "1".
+    // Polling the conjunction fixes the shape; returning the facts rather than
+    // a boolean is what makes a red run useful, because the timeout then names
+    // which half never arrived instead of only that the badge read "1".
+    //
+    // The facts are THIS RUN's: `a` is A's own finished row (see `finishedRow`)
+    // and `bell` is "some bell row is on screen at all", which is what the
+    // centre-on half of the matrix promises. Neither is a count of the feed.
     await expect
       .poll(
         async () => ({
           badge: await badge.textContent(),
-          bells: await rowsOfKind(page, TERMINAL_BELL).count(),
-          finished: await rowsOfKind(page, COMMAND_FINISHED).count(),
+          a: await finishedRow(page, titleA).count(),
+          bell: (await rowsOfKind(page, TERMINAL_BELL).count()) > 0,
         }),
         { timeout: 30_000 },
       )
-      .toEqual({
-        badge: '2',
-        bells: bellRowsBefore + 1,
-        finished: finishedRowsBefore + 1,
-      })
+      .toEqual({ badge: '2', a: 1, bell: true })
 
     // Read A before B is admitted. This gives the restore assertion two
     // states to preserve: A is read, while B and C remain unread.
@@ -250,21 +273,18 @@ test('a person can choose visible notification kinds without losing rows or read
     // passes through "1" on its way to "2" because the BEL and the ledger's
     // completion travel different paths, so a wait that closes on the badge
     // alone can close on the state the next assertion rejects — and when it
-    // times out it names which half never arrived.
+    // times out it names which half never arrived. `a` is still 1 here, which
+    // is the retention half: admitting B's row did not evict A's.
     await expect
       .poll(
         async () => ({
           badge: await badge.textContent(),
-          bells: await rowsOfKind(page, TERMINAL_BELL).count(),
-          finished: await rowsOfKind(page, COMMAND_FINISHED).count(),
+          a: await finishedRow(page, titleA).count(),
+          b: await finishedRow(page, titleB).count(),
         }),
         { timeout: 30_000 },
       )
-      .toEqual({
-        badge: '2',
-        bells: bellRowsBefore + 2,
-        finished: finishedRowsBefore + 2,
-      })
+      .toEqual({ badge: '2', a: 1, b: 1 })
 
     const countBeforeOff = Number(await badge.textContent())
     expect(countBeforeOff).toBe(2)
@@ -297,7 +317,8 @@ test('a person can choose visible notification kinds without losing rows or read
     // Both retained bell rows are hidden, while B's finished-command row is
     // still visible and unread. The count therefore drops from 2 to 1.
     await expect(rowsOfKind(page, TERMINAL_BELL)).toHaveCount(0)
-    await expect(rowsOfKind(page, COMMAND_FINISHED)).toHaveCount(finishedRowsBefore + 2)
+    await expect(finishedRow(page, titleA)).toHaveCount(1)
+    await expect(finishedRow(page, titleB)).toHaveCount(1)
     await expect(badge).toHaveText('1')
     const countAfterOff = Number(await badge.textContent())
     expect(countAfterOff).toBeLessThan(countBeforeOff)
@@ -325,15 +346,13 @@ test('a person can choose visible notification kinds without losing rows or read
         async () => ({
           badge: await badge.textContent(),
           bells: await rowsOfKind(page, TERMINAL_BELL).count(),
-          finished: await rowsOfKind(page, COMMAND_FINISHED).count(),
+          a: await finishedRow(page, titleA).count(),
+          b: await finishedRow(page, titleB).count(),
+          c: await finishedRow(page, titleC).count(),
         }),
         { timeout: 30_000 },
       )
-      .toEqual({
-        badge: '2',
-        bells: 0,
-        finished: finishedRowsBefore + 3,
-      })
+      .toEqual({ badge: '2', bells: 0, a: 1, b: 1, c: 1 })
 
     // Turn the same matrix choice back on. The feed still holds A, B and C;
     // visibility changed only which rows and unread facts were projected.
@@ -350,8 +369,14 @@ test('a person can choose visible notification kinds without losing rows or read
     await expect(centreSwitchAgain).toBeChecked()
 
     await showSidebarView(page, 'notifications')
-    await expect(rowsOfKind(page, TERMINAL_BELL)).toHaveCount(bellRowsBefore + 3)
-    await expect(rowsOfKind(page, COMMAND_FINISHED)).toHaveCount(finishedRowsBefore + 3)
+    // The three BEL rows are back on screen the moment the choice is turned on
+    // again (the per-session block below pins one per session — the rows
+    // themselves, not a total the feed's budget would answer for), and the
+    // three finished-command rows never left.
+    await expect.poll(() => rowsOfKind(page, TERMINAL_BELL).count()).toBeGreaterThan(0)
+    await expect(finishedRow(page, titleA)).toHaveCount(1)
+    await expect(finishedRow(page, titleB)).toHaveCount(1)
+    await expect(finishedRow(page, titleC)).toHaveCount(1)
     await expect(badge).toHaveText('4')
 
     const sessionFilter = filterFor(page, 'Session')

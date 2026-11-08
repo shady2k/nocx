@@ -252,15 +252,19 @@ test.describe('the submit grace (nocx-j9v81, ADR-tqjt5rkk)', () => {
     ).toBe(true)
 
     expect(blockMs, `wanted the block's own length; saw ${dump}`).not.toBeNull()
-    if ((blockMs as number) < GRACE_MS) {
-      // The case the owner's decision is about: a command that returns inside
-      // the grace never takes the composer off the screen — the rule, not this
-      // machine's clock, is what says so.
+    // The printed figure is the millisecond value ROUNDED for display, so the
+    // millisecond that brackets the grace is not asserted either way: the raw
+    // length can sit on either side of the line and the printed one cannot
+    // say which. Everything outside that one band is the rule.
+    if ((blockMs as number) <= GRACE_MS - 1) {
+      // The case the owner's decision is about: a command whose block ran
+      // inside the grace never takes the composer off the screen — the rule,
+      // not this machine's clock, is what says so.
       expect(
         absent(recorded),
         `the block printed ${blockMs} ms — inside the ${GRACE_MS} ms grace — so every frame must show the composer; saw ${dump}`,
       ).toEqual([])
-    } else {
+    } else if ((blockMs as number) >= GRACE_MS + 1) {
       // This machine's own block for `true` outlived the grace, so the product
       // is right to take the box down: the same rule, read the other way.
       expect(
@@ -299,9 +303,10 @@ test.describe('the submit grace (nocx-j9v81, ADR-tqjt5rkk)', () => {
 
     const recorded = await states(page, testInfo)
     const dump = timeline(recorded)
-    expect(blockMs, `wanted a block longer than the grace; saw ${dump}`).toBeGreaterThanOrEqual(
-      GRACE_MS,
-    )
+    expect(
+      blockMs,
+      `wanted a block clearly longer than the grace; saw ${dump}`,
+    ).toBeGreaterThanOrEqual(GRACE_MS + 1)
     const given = recorded.findIndex((state) => state.inert)
     const hidden = recorded.findIndex((state) => state.display === 'none')
     expect(given, `wanted the submit to give the keys up; saw ${dump}`).toBeGreaterThanOrEqual(0)

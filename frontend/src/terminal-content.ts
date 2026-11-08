@@ -14,6 +14,7 @@ import {
 import { LifecycleProjections } from './lifecycle/projections'
 import type { UnattributedCommand } from './lifecycle/projections'
 import { CommandEditor } from './editor'
+import { attemptBlockMs } from './scrollback/blocks'
 import { machineName, remoteMachineName } from './machine-name'
 import { shellExtensions } from './shell-highlight'
 import { RecallOverlay, queryLedgerHistory, withSessionText, type RecallQuery } from './recall'
@@ -9408,24 +9409,22 @@ export class TerminalContent extends BasePaneContent {
   /** The submitted command is OVER: the block's own length decides
    *  (ADR-tqjt5rkk).
    *
-   *  This is the decision the whole record exists for, and it is taken HERE —
-   *  at the completion, the first moment the product can know how long the
-   *  command ran — on the length the BLOCK measures for itself, the same
-   *  figure its header prints (`elapsedCommandMs`: the block opens on the
-   *  command's authenticated start and freezes on its completion). One
-   *  formula, so what the block says and what the composer did cannot
-   *  disagree; a deadline counted anywhere else would be a second opinion
-   *  about one command.
+   *  This is the decision the record exists for, and it is taken HERE, at the
+   *  completion — the first moment the product knows how long the command ran.
+   *  Until it arrives nothing was decided: there is no 40 ms timer that fires
+   *  on its own, because a renderer clock cannot tell a command that ended
+   *  40 ms ago from one that is still running. The length is the block's own,
+   *  `attemptBlockMs` — the interval the attempt's two backend timestamps
+   *  carry, which is also the figure the block's header prints, so what the
+   *  block says and what the composer did cannot disagree.
    *
    *  A quick command leaves the box where it is, and the prompt mark — a few
    *  milliseconds behind the completion — is what hands the keyboard back. A
-   *  command that outlived the grace takes the box down now: it is already
-   *  over, so this is the first moment the product could know it, and the
-   *  prompt follows within a frame. A completion with no block to measure it
-   *  by is treated as long: a composer the product has no evidence to keep
-   *  must not be kept. */
-  private _settleDeparture(): void {
-    const blockMs = this.scrollback?.blockManager.elapsedCommandMs() ?? null
+   *  command that outlived the grace takes the box down now. A completion that
+   *  carries no timestamps at all is treated as long: a composer the product
+   *  has no evidence to keep must not be kept. */
+  private _settleDeparture(attempt: ExecutionAttempt): void {
+    const blockMs = attemptBlockMs(attempt)
     this._endDeparture()
     if (blockMs !== null && blockMs < SUBMIT_GRACE_MS) {
       this._armDeparture('awaiting-prompt', DEPARTURE_FALLBACK_MS)
@@ -9556,29 +9555,37 @@ export class TerminalContent extends BasePaneContent {
       // `htop` on the alternate buffer got the whole pane.
       // NOT glided, and it is normally a no-op: a submitted composer leaves
       // the layout at its own departure — inside the submit's settle before
-      // ADR-tqjt5rkk, inside the grace's deadline now — and this call only
+      // ADR-tqjt5rkk, inside the completion's now — and this call only
       // reconciles. Wrapping it cost more than it bought — the running fact
       // arrives in a later task, often while a settle is still animating, and
       // `_glide` cancels in-flight settles before it measures. A no-op
       // mutation would therefore kill a live animation mid-flight and snap the
       // stack, which is the jitter it was meant to remove.
-      // THE DEPARTURE OWNS THE BOX WHILE IT WAITS (ADR-tqjt5rkk). A fact that
-      // says "not at a prompt" is what the command publishes after the submit,
-      // and it is not a reason to take down a box that already gave up the
-      // keys. Two facts do speak: the command's START, which names the attempt
-      // this departure is about, and its COMPLETION, whose own block time is
-      // the measurement the grace is compared against.
+      // THE DEPARTURE OWNS THE BOX WHILE IT WAITS (ADR-tqjt5rkk) — EXCEPT FOR
+      // THE ALTERNATE SCREEN. A fact that says "not at a prompt" is what the
+      // command publishes after the submit, and it is not a reason to take
+      // down a box that already gave up the keys. Two facts do speak: the
+      // command's START, which names the attempt this departure is about, and
+      // its COMPLETION, whose own length the grace is compared against. The
+      // alternate buffer is the third, and it outranks the wait: a full-screen
+      // program owns the whole viewport by the shell's own markers, and an
+      // inert composer left under `vim` would sit on rows the program is
+      // drawing until the fallback took it — so entering it ends the wait and
+      // the box leaves NOW, in this same reconciliation.
       if (this._departure !== null) {
-        const state = this.lifecycle.state
-        if (state.kind === 'running') {
-          if (state.attempt.state === 'open') {
-            this._departure.attemptId ??= state.attempt.id
-          } else if (state.attempt.id === this._departure.attemptId) {
-            this._settleDeparture()
+        if (this.lifecycle.buffer !== 'alternate') {
+          const state = this.lifecycle.state
+          if (state.kind === 'running') {
+            if (state.attempt.state === 'open') {
+              this._departure.attemptId ??= state.attempt.id
+            } else if (state.attempt.id === this._departure.attemptId) {
+              this._settleDeparture(state.attempt)
+            }
           }
+          this._updateCapability()
+          return
         }
-        this._updateCapability()
-        return
+        this._endDeparture()
       }
       this._setEditorPlacement('inline')
       const keyboardWasInEditor = editor.root.contains(document.activeElement)

@@ -53,11 +53,18 @@ releases the keyboard and becomes `inert`, all in the submit's own task; the lin
 goes out at once. The box then stays DRAWN, and what decides its departure is the
 command's own length.
 
-That length is the block's own: the interval from the command's authenticated
-start, which opens the block, to its completion, which freezes it — the same
-figure the block's header prints, read through the one method that computes it.
-One formula, so the length a person reads on the block and the decision the
-composer took cannot disagree. When the completion arrives:
+That length is the block's own, and the block's own is the attempt's: the
+interval its two BACKEND timestamps carry, `startedAt` to `completedAt` — the
+figure the block's header prints, because the freeze takes it from the same
+attempt. One number, so the length a person reads on the block and the decision
+the composer took cannot disagree.
+
+**Nothing is decided before the completion arrives, and that is the point.**
+Between the grace and the completion the renderer holds no measurement of the
+command: a deadline counted on its own clock cannot tell a command that ended
+20 ms ago from one that is still running, because the fact that says so is
+exactly what has not arrived. So the box stays DRAWN and inert through that
+window, and the completion is what settles it:
 
 - a command whose block ran under the grace keeps the composer where it never
   left it. The prompt mark, a few milliseconds behind the completion, hands the
@@ -66,13 +73,17 @@ composer took cannot disagree. When the completion arrives:
   the departure the hand-off used to perform at the submit: the ink fade, the
   departure ghost, and the settle glide that plays the freed height back.
 
-Two bounds cover the facts that do not come (the pane's `DEPARTURE_FALLBACK_MS`,
-250 ms measured from the submit): a command that has not reported a completion
-in that time has not been a quick one by any reading, so the box leaves and the
-running command gets the space; and a completion whose prompt mark never
-arrives would otherwise leave an `inert` composer on the screen holding nobody's
-keys, so that wait ends at the same bound. No state exists in which an inert
-composer waits on a fact that is not coming.
+**What a long command pays for that.** Its box stays on screen until its
+completion, so the pane's `DEPARTURE_FALLBACK_MS` (250 ms from the submit) is
+what a command that reports nothing gives up at — a command still unreported at
+that bound is long by any reading, and the box leaves then so the running
+command gets its space. The same bound covers the completion whose prompt mark
+never arrives. That wait is the price of never blinking a quick command; it is
+paid only by commands that run for at least a quarter of a second.
+
+The alternate screen outranks the wait: a full-screen program owns the viewport
+by the shell's own markers, so entering it settles the departure at once instead
+of leaving an inert composer under `vim` until the bound.
 
 Keys typed while the box waits reach the program and never the composer. That is
 a consequence of the ownership step above rather than a second rule: the box is

@@ -3434,13 +3434,16 @@ describe('a submitted command leaves the composer only when it outlives the grac
         origin: 'app',
         submitId: submitToken(client),
         command: 'true',
-        startedAt: '2026-11-08T12:00:00.000Z',
+        startedAt: STARTED_AT,
       },
     } as const
   }
 
-  /** The completion of `started`'s attempt. */
-  function completed(id = 'att-1') {
+  /** The completion of `started`'s attempt, carrying a block that ran for
+   *  `blockMs` — the two BACKEND timestamps, which is the length the block
+   *  prints and the length the decision reads. */
+  function completed(blockMs: number, id = 'att-1') {
+    const completedAt = new Date(Date.parse(STARTED_AT) + blockMs).toISOString()
     return {
       lane: 'lane-1',
       lifecycle: 'running',
@@ -3451,22 +3454,22 @@ describe('a submitted command leaves the composer only when it outlives the grac
         state: 'completed',
         exitCode: 0,
         fence: 'a'.repeat(64),
-        startedAt: '2026-11-08T12:00:00.000Z',
-        completedAt: '2026-11-08T12:00:00.020Z',
+        startedAt: STARTED_AT,
+        completedAt,
       },
     } as const
   }
 
+  const STARTED_AT = '2026-11-08T12:00:00.000Z'
   const PROMPT = { lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 } as const
 
   /** A pane at an authenticated prompt with its composer owning the keys, the
-   *  fake timers the departure's bounds need, and a CLOCK THE TEST MOVES.
+   *  fake timers the fallback needs, and a CLOCK THE TEST MOVES.
    *
-   *  The block measures the command itself — `performance.now()` at its
-   *  authenticated start, the same at its completion — and that interval is
-   *  what the decision reads and what the header prints. Spending it by hand
-   *  is what makes the boundary testable at 39, 40 and 41 ms without a
-   *  machine anywhere in the answer. */
+   *  The clock is the RENDERER's and it is deliberately not the length: a
+   *  completion reaches the renderer a long time after the command ended, and
+   *  `spend` is how a test says so without touching the length the completion
+   *  carries. */
   async function atPrompt() {
     const client = makeClient()
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
@@ -3484,7 +3487,7 @@ describe('a submitted command leaves the composer only when it outlives the grac
       ...mounted,
       client,
       handler,
-      /** Let the command's block run for `ms`. */
+      /** Let `ms` of RENDERER time pass — the wire, the frames, the fallback. */
       spend: (ms: number) => {
         at += ms
       },
@@ -3497,9 +3500,10 @@ describe('a submitted command leaves the composer only when it outlives the grac
     }
   }
 
-  // THE DECISION, AT ITS BOUNDARY. The owner's 40 ms is the threshold and it
-  // is not the machine's to move; what a slow machine changes is how long a
-  // command's block measures, never where the line is drawn.
+  // THE DECISION, AT ITS BOUNDARY, on the length the block reports for itself.
+  // The owner's 40 ms is the threshold and it is not the machine's to move:
+  // what a slow machine changes is how LATE the renderer learns the length,
+  // never the length it decides on.
   it("the owner's grace is 40 ms", () => {
     expect(SUBMIT_GRACE_MS).toBe(40)
   })
@@ -3511,7 +3515,7 @@ describe('a submitted command leaves the composer only when it outlives the grac
   ])(
     'a block of $blockMs ms decides the composer by its own length (kept: $stays)',
     async ({ blockMs, stays }) => {
-      const { ed, view, client, handler, spend, restore } = await atPrompt()
+      const { ed, view, client, handler, restore } = await atPrompt()
       try {
         expect(ed.isVisible).toBe(true)
         submitCommand(view, 'true')
@@ -3523,13 +3527,11 @@ describe('a submitted command leaves the composer only when it outlives the grac
         expect(ed.isVisible).toBe(false)
 
         handler(started(client))
-        // Nothing has decided anything yet, however much time the bounds
-        // spend: a renderer clock on its own is not a measurement of command.
+        // Nothing is decided while the command runs — no timer of its own.
         vi.advanceTimersByTime(DEPARTURE_FALLBACK_MS - 1)
         expect(ed.root.style.display).toBe('')
 
-        spend(blockMs)
-        handler(completed())
+        handler(completed(blockMs))
         expect(ed.root.style.display).toBe(stays ? '' : 'none')
 
         // And the prompt mark hands the keyboard back either way — a kept box
@@ -3545,6 +3547,51 @@ describe('a submitted command leaves the composer only when it outlives the grac
     },
   )
 
+  it('a completion that reaches the renderer late still decides on the block\u2019s own length', async () => {
+    // THE READ'S SEQUENCE (P2 of the review of #763): a 20 ms command whose
+    // completion reaches the renderer 60 ms after its start. A deadline on the
+    // renderer's clock would have taken the composer down at 40 ms and brought
+    // it back at the prompt — the blink this record exists to remove.
+    const { ed, view, client, handler, spend, restore } = await atPrompt()
+    try {
+      submitCommand(view, 'true')
+      handler(started(client))
+      spend(60)
+      expect(ed.root.style.display).toBe('')
+      handler(completed(20))
+      expect(ed.root.style.display).toBe('')
+
+      handler(PROMPT)
+      expect(ed.isVisible).toBe(true)
+      expect(ed.root.style.display).toBe('')
+      expect(ed.root.contains(document.activeElement)).toBe(true)
+    } finally {
+      restore()
+    }
+  })
+
+  it('entering the alternate screen settles the departure at once', async () => {
+    // `vim`, submitted and entering the alternate screen inside the grace: the
+    // full-screen program owns the viewport, so an inert composer must not sit
+    // under it until the fallback takes it.
+    const { content, ed, view, client, handler, restore } = await atPrompt()
+    try {
+      submitCommand(view, 'vim')
+      handler(started(client))
+      expect(ed.root.style.display).toBe('')
+
+      fireBufferState(sessionOf(content), 'alternate', 20)
+      expect(ed.root.style.display).toBe('none')
+      expect(ed.isVisible).toBe(false)
+
+      // No fallback is left running to take it down a second time.
+      vi.advanceTimersByTime(DEPARTURE_FALLBACK_MS * 4)
+      expect(ed.root.style.display).toBe('none')
+    } finally {
+      restore()
+    }
+  })
+
   it('a command that never reports its completion is taken down when the bound passes', async () => {
     const { ed, view, client, handler, restore } = await atPrompt()
     try {
@@ -3555,7 +3602,7 @@ describe('a submitted command leaves the composer only when it outlives the grac
       // A command that has not reported a completion in this long has not
       // been a quick one by any reading: the box gives the running command
       // its space, and no inert composer waits forever on a fact that is not
-      // coming.
+      // coming. This is what a long command costs.
       vi.advanceTimersByTime(1)
       expect(ed.root.style.display).toBe('none')
     } finally {
@@ -3568,7 +3615,7 @@ describe('a submitted command leaves the composer only when it outlives the grac
     try {
       submitCommand(view, 'true')
       handler(started(client))
-      handler(completed())
+      handler(completed(SUBMIT_GRACE_MS - 1))
       vi.advanceTimersByTime(DEPARTURE_FALLBACK_MS - 1)
       expect(ed.root.style.display).toBe('')
       vi.advanceTimersByTime(1)
@@ -3582,10 +3629,9 @@ describe('a submitted command leaves the composer only when it outlives the grac
     // The grid owns the keys while the box waits, so a command typed there can
     // start and complete inside the same window. Its completion is not this
     // submit's, and a departure must not be settled by it.
-    const { ed, view, client, handler, spend, restore } = await atPrompt()
+    const { ed, view, client, handler, restore } = await atPrompt()
     try {
       submitCommand(view, 'true')
-      spend(SUBMIT_GRACE_MS * 10)
       handler({
         lane: 'lane-1',
         lifecycle: 'running',
@@ -3605,8 +3651,7 @@ describe('a submitted command leaves the composer only when it outlives the grac
       expect(ed.root.style.display).toBe('')
       // …and its own block's quick completion, when it comes, settles it.
       handler(started(client))
-      spend(1)
-      handler(completed())
+      handler(completed(SUBMIT_GRACE_MS - 1))
       expect(ed.root.style.display).toBe('')
     } finally {
       restore()

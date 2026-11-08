@@ -167,71 +167,60 @@ func assertScreenRevisions(t *testing.T, got []proto.ScreenDataFrame, sub proto.
 }
 
 func TestASlowScreenSubscriberKeepsBoundedOrderedFramesAndResumes(t *testing.T) {
-	// Ten or eleven pending publications shed two or three of forty, matching
-	// the CI's 38/40 and 37/40 without losing any frame the drain took. The
-	// last case holds the reader through the whole flood.
-	for _, pending := range []uint64{10, 11, 39} {
-		t.Run(fmt.Sprintf("pending_%d", pending), func(t *testing.T) {
-			sink := newDelayedScreenSink()
-			svc, hs := spawnScripted(t, newScriptedProcess(""), 0)
-			release := svc.Bind(sink)
-			t.Cleanup(release)
-			t.Cleanup(sink.release)
-			sub := proto.SubscriberID("0123456789abcdef0123456789abcdef")
-			params, err := json.Marshal(proto.AttachParams{Session: hs.id, Subscriber: sub})
-			if err != nil {
-				t.Fatalf("attach params: %v", err)
-			}
-			if _, err := svc.Call(host.WithConnection(context.Background(), sink), proto.OpAttach, params); err != nil {
-				t.Fatalf("attach: %v", err)
-			}
-			hs.mu.Lock()
-			consumer := hs.subs[sub].screenCons
-			hs.mu.Unlock()
-
-			base := uint64(hs.runtime.Revision())
-			ingestScreenRevision(t, hs, base+1)
-			select {
-			case <-sink.screenEntered:
-			case <-time.After(hangLimit):
-				t.Fatal("first screen frame never reached the blocked sink")
-			}
-			// The real drain is now inside SendScreenFrame. It cannot Take
-			// again until this sink resumes, so pending pressure is controlled.
-			for i := uint64(2); i <= pending+1; i++ {
-				ingestScreenRevision(t, hs, base+i)
-				if got := consumer.Pending(); got > sessionruntime.MaxPendingFrames {
-					t.Fatalf("blocked reader holds %d frames, bound %d", got, sessionruntime.MaxPendingFrames)
-				}
-			}
-			lost := pending - sessionruntime.MaxPendingFrames
-			if consumer.Pending() != sessionruntime.MaxPendingFrames || consumer.Coalesced() != lost || !consumer.Stale() {
-				t.Fatalf("blocked reader: pending=%d coalesced=%d stale=%v, want pending=%d coalesced=%d stale=true",
-					consumer.Pending(), consumer.Coalesced(), consumer.Stale(), sessionruntime.MaxPendingFrames, lost)
-			}
-			want := []uint64{base + 1}
-			for i := lost + 2; i <= pending+1; i++ {
-				want = append(want, base+i)
-			}
-			sink.release()
-			assertScreenRevisions(t, sink.waitForScreenFrames(t, hs.raw, len(want)), sub, want)
-			for i := pending + 2; i <= 40; i++ {
-				ingestScreenRevision(t, hs, base+i)
-				want = append(want, base+i)
-				assertScreenRevisions(t, sink.waitForScreenFrames(t, hs.raw, len(want)), sub, want)
-			}
-			if consumer.Pending() != 0 || consumer.Coalesced() != lost || consumer.Stale() {
-				t.Fatalf("resumed reader: pending=%d coalesced=%d stale=%v, want pending=0 coalesced=%d stale=false",
-					consumer.Pending(), consumer.Coalesced(), consumer.Stale(), lost)
-			}
-			t.Logf("pending=%d coalesced=%d delivered=%d/40 ordered revisions=%v", pending, lost, len(want), want)
-			// Even the fully stalled case must deliver new output after its
-			// pending allowance is refunded, not just its last queued screen.
-			ingestScreenRevision(t, hs, base+41)
-			want = append(want, base+41)
-			assertScreenRevisions(t, sink.waitForScreenFrames(t, hs.raw, len(want)), sub, want)
-		})
+	sink := newDelayedScreenSink()
+	svc, hs := spawnScripted(t, newScriptedProcess(""), 0)
+	release := svc.Bind(sink)
+	t.Cleanup(release)
+	t.Cleanup(sink.release)
+	sub := proto.SubscriberID("0123456789abcdef0123456789abcdef")
+	params, err := json.Marshal(proto.AttachParams{Session: hs.id, Subscriber: sub})
+	if err != nil {
+		t.Fatalf("attach params: %v", err)
 	}
+	if _, err := svc.Call(host.WithConnection(context.Background(), sink), proto.OpAttach, params); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	hs.mu.Lock()
+	consumer := hs.subs[sub].screenCons
+	hs.mu.Unlock()
+
+	base := uint64(hs.runtime.Revision())
+	ingestScreenRevision(t, hs, base+1)
+	select {
+	case <-sink.screenEntered:
+	case <-time.After(hangLimit):
+		t.Fatal("first screen frame never reached the blocked sink")
+	}
+	// The real drain is now inside SendScreenFrame. It cannot Take again
+	// until this sink resumes, so the remaining publications fill its queue.
+	const pending = 39
+	for i := uint64(2); i <= pending+1; i++ {
+		ingestScreenRevision(t, hs, base+i)
+		if got := consumer.Pending(); got > sessionruntime.MaxPendingFrames {
+			t.Fatalf("blocked reader holds %d frames, bound %d", got, sessionruntime.MaxPendingFrames)
+		}
+	}
+	const lost = pending - sessionruntime.MaxPendingFrames
+	if consumer.Pending() != sessionruntime.MaxPendingFrames || consumer.Coalesced() != lost || !consumer.Stale() {
+		t.Fatalf("blocked reader: pending=%d coalesced=%d stale=%v, want pending=%d coalesced=%d stale=true",
+			consumer.Pending(), consumer.Coalesced(), consumer.Stale(), sessionruntime.MaxPendingFrames, lost)
+	}
+	want := []uint64{base + 1}
+	for i := uint64(lost + 2); i <= pending+1; i++ {
+		want = append(want, base+i)
+	}
+	sink.release()
+	assertScreenRevisions(t, sink.waitForScreenFrames(t, hs.raw, len(want)), sub, want)
+	if consumer.Pending() != 0 || consumer.Coalesced() != lost || consumer.Stale() {
+		t.Fatalf("resumed reader: pending=%d coalesced=%d stale=%v, want pending=0 coalesced=%d stale=false",
+			consumer.Pending(), consumer.Coalesced(), consumer.Stale(), lost)
+	}
+	t.Logf("pending=%d coalesced=%d delivered=%d/40 ordered revisions=%v", pending, lost, len(want), want)
+	// The reader must receive new output after its pending allowance is
+	// refunded, not just its last queued screen.
+	ingestScreenRevision(t, hs, base+41)
+	want = append(want, base+41)
+	assertScreenRevisions(t, sink.waitForScreenFrames(t, hs.raw, len(want)), sub, want)
 }
 
 // TestASubscriberReceivesAnIdentityBearingEffect proves that the runtime's

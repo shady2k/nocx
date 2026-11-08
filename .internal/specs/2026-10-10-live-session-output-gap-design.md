@@ -1,5 +1,7 @@
 # Live session output-gap notification
 
+> **Presentation superseded (2026-11-08):** the missing-output card this design drew is removed; a cut is stated in the command's history instead, by [ADR-4jz81kfa](../../docs/decisions/4jz81kfa-a-cut-in-a-commands-output-is-stated-in-its-history-not-in-a-card.md). The transport contract here is unchanged.
+
 - **Status:** implemented. The pane-local presentation this spec described — a
   warning card per pane — was removed on the owner's decision of 2026-11-08
   (`nocx-ipuy3`); see "Presentation removed" below. The transport contract is

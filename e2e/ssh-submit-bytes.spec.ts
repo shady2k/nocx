@@ -26,10 +26,12 @@
  * # Nothing is waited out
  *
  * The waits are on product state: the composer holding the keyboard, the
- * running block disappearing, the fixture's own announcement. `apt-get update`
- * runs five times in a row because the report's alternation is the shape of the
- * defect — one corrupted submit in five would still be a failure.
+ * submit's own block reaching its settled form (`data-outcome`, written by the
+ * one owner that settles a block), the fixture's own announcement. `apt-get
+ * update` runs five times in a row because the report's alternation is the
+ * shape of the defect — one corrupted submit in five would still be a failure.
  */
+import type { Locator } from '@playwright/test'
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -40,11 +42,15 @@ import { rpc, startSshd, type SshdFixture } from './sshd-fixture'
 
 const PANE = '.pane.active'
 const EDITOR = `${PANE} .nocx-editor-input`
-const RUNNING = `${PANE} .cmd-block-running`
-/** A settled command block, in DOM order. */
+/** A command block, in DOM order — the RUNNING one included: it is a block of
+ *  the command kind from the moment the shell's start mark reaches the pane,
+ *  and it carries no outcome until it settles. */
 const BLOCKS = `${PANE} .scrollback-inner > .cmd-block[data-block-kind="command"]`
 /** The settled status word: the header's own meta that is not the duration. */
 const STATUS = ':scope > .cmd-header .cmd-header-right > .ui-meta:not([data-column])'
+/** How long a submit's own block may take to settle. A hang detector and not a
+ *  claim about speed: two long loops and five runs are real work on a real pty. */
+const SETTLE_MS = 120_000
 
 /** The three lines the owner reported, exactly as they were typed. */
 const OWNER_LINES = [
@@ -59,21 +65,41 @@ const REPEATS = 5
 interface RunResult {
   /** What the far side received for this submit. */
   readonly received: string
-  /** The block's own exit code: -1 when the header settles with no status
+  /** The block's own exit code: 0 when the header settles with no status
    *  word, which is how a zero exit is shown. */
   readonly exitCode: number
 }
 
-/** The status the last settled block reports, and this line's exit code. */
-async function lastExitCode(page: Page): Promise<number> {
-  const blocks = page.locator(BLOCKS)
-  await expect(blocks.last()).toBeVisible()
-  const outcome = await blocks.last().getAttribute('data-outcome')
-  expect(
-    outcome,
+/**
+ * The block this submit produced, waited for on the product's own settlement.
+ *
+ * `data-outcome` is written by the ONE owner that settles a block
+ * (`settleBlockOutcome`, scrollback/blocks.ts) and by nothing else, so the
+ * attribute is the product's statement that this block HAS an exit code. It is
+ * waited for, never read once: a settled block and a running one differ by
+ * exactly this, and the running one is a block of the command kind too.
+ *
+ * "No block is running" cannot stand in for it. The running element is created
+ * on the shell's own start mark (OSC 133 C), which arrives over the wire after
+ * the submit, so a wait begun on the Enter itself is TRUE on a page where the
+ * submit has produced nothing yet — and then any later-appearing block, the
+ * running one included, satisfies it. That is the window this spec used to read
+ * `null` through: ten runs in ten, and widest on an ssh pane, where the start
+ * mark crosses a helper and a socket.
+ */
+async function settledBlock(page: Page, index: number): Promise<Locator> {
+  const block = page.locator(BLOCKS).nth(index)
+  await expect(
+    block,
     'the submitted line produced no settled command block, so no exit code exists for it',
-  ).not.toBeNull()
-  const status = blocks.last().locator(STATUS)
+  ).toHaveAttribute('data-outcome', /^(success|failure)$/, { timeout: SETTLE_MS })
+  return block
+}
+
+/** The exit code a settled block states: `Exit <n>`, and a zero exit is shown
+ *  as a check with no word at all. */
+async function exitCodeOf(block: Locator): Promise<number> {
+  const status = block.locator(STATUS)
   if ((await status.count()) === 0) return 0
   const word = (await status.textContent()) ?? ''
   const m = /Exit\s+(\d+)/.exec(word)
@@ -93,16 +119,18 @@ async function submitOne(page: Page, line: string): Promise<number> {
   await editor.click()
   await editor.pressSequentially(line)
   await expect(editor).toHaveText(line)
-  const before = await page.locator(BLOCKS).count()
+  // One line makes one block and blocks are appended, so the count before
+  // Enter is this submit's own index — whether its block appears still running
+  // or arrives already settled.
+  const index = await page.locator(BLOCKS).count()
   await editor.press('Enter')
-  await expect(page.locator(RUNNING)).toHaveCount(0, { timeout: 120_000 })
   await expect
     .poll(() => page.locator(BLOCKS).count(), {
-      timeout: 120_000,
+      timeout: SETTLE_MS,
       message: 'the submitted line produced no command block of its own',
     })
-    .toBeGreaterThan(before)
-  return lastExitCode(page)
+    .toBeGreaterThan(index)
+  return exitCodeOf(await settledBlock(page, index))
 }
 
 /**

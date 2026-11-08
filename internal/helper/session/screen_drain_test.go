@@ -3,12 +3,14 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/sessionruntime"
 )
 
 // drainSink is the screen drain test's own recording sink: internal-package,
@@ -79,12 +81,9 @@ func (s *drainSink) wholeScreenFrames(session [16]byte) []proto.ScreenDataFrame 
 	return out
 }
 
-// The screen drain's acceptance, at the helper: a subscriber that reads
-// receives every revision the session's screen publishes. The drain parks on
-// the runtime's Ready and Takes what it is owed — and Take refunds the
-// allowance, which is why a flood far past MaxPendingFrames arrives whole
-// instead of shedding: a reader that keeps up is never capped by what it has
-// already taken away.
+// A reader keeps up by receiving each bounded batch before the next is
+// published. Publishing all forty first races the drain's scheduler and can
+// legitimately exhaust MaxPendingFrames; that is the slow-reader case below.
 func TestASubscriberThatReadsReceivesEveryRevisionTheScreenPublishes(t *testing.T) {
 	sink := newDrainSink()
 	proc := newScriptedProcess("")
@@ -101,39 +100,137 @@ func TestASubscriberThatReadsReceivesEveryRevisionTheScreenPublishes(t *testing.
 		t.Fatalf("attach: %v", err)
 	}
 
-	// Forty revisions through the runtime's own port — far past
-	// MaxPendingFrames, every one of them owed to a reader that keeps up.
 	const revisions = 40
-	for i := 0; i < revisions; i++ {
-		if err := hs.runtime.Ingest([]byte("revision line\r\n")); err != nil {
-			t.Fatalf("ingest %d: %v", i, err)
+	const batch = sessionruntime.MaxPendingFrames / 2
+	base := uint64(hs.runtime.Revision())
+	want := make([]uint64, 0, revisions)
+	for i := uint64(1); i <= revisions; i++ {
+		revision := base + i
+		ingestScreenRevision(t, hs, revision)
+		want = append(want, revision)
+		if i%batch == 0 || i == revisions {
+			assertScreenRevisions(t, sink.waitForScreenFrames(t, hs.raw, len(want)), sub, want)
 		}
 	}
+	t.Logf("reading subscriber received all %d revisions in order: %v", revisions, want)
+}
 
-	deadline := time.Now().Add(hangLimit)
+func ingestScreenRevision(t *testing.T, hs *hostSession, revision uint64) {
+	t.Helper()
+	if err := hs.runtime.Ingest([]byte(fmt.Sprintf("\x1b[Hrevision %03d", revision))); err != nil {
+		t.Fatalf("ingest revision %d: %v", revision, err)
+	}
+	if got := uint64(hs.runtime.Revision()); got != revision {
+		t.Fatalf("ingest published revision %d, want %d", got, revision)
+	}
+}
+
+func (s *drainSink) waitForScreenFrames(t *testing.T, session [16]byte, count int) []proto.ScreenDataFrame {
+	t.Helper()
+	timer := time.NewTimer(hangLimit)
+	defer timer.Stop()
 	for {
-		// The wake-up channel is taken BEFORE the count, as every other sink
-		// wait in this package does: a frame landing after the count closes
-		// this channel, where one taken after it would be the replacement
-		// nothing closes (nocx-2v80t.3.56).
-		next := sink.waiter()
-		got := sink.wholeScreenFrames(hs.raw)
-		if len(got) >= revisions {
-			for i := range got[:revisions] {
-				if i > 0 && got[i].Revision <= got[i-1].Revision {
-					t.Fatalf("screen frame %d carries revision %d after %d: the drain must deliver revisions in order", i, got[i].Revision, got[i-1].Revision)
-				}
-			}
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("only %d of %d whole screen frames arrived for the subscriber", len(got), revisions)
+		// Take the waiter BEFORE the count: a delivery after the count must
+		// close this channel, not its replacement (nocx-2v80t.3.56).
+		next := s.waiter()
+		got := s.wholeScreenFrames(session)
+		if len(got) >= count {
+			return got
 		}
 		select {
 		case <-next:
-		case <-time.After(hangLimit):
-			t.Fatalf("only %d of %d whole screen frames arrived for the subscriber", len(sink.wholeScreenFrames(hs.raw)), revisions)
+		case <-timer.C:
+			t.Fatalf("only %d of %d whole screen frames arrived: %+v", len(got), count, got)
 		}
+	}
+}
+
+func assertScreenRevisions(t *testing.T, got []proto.ScreenDataFrame, sub proto.SubscriberID, want []uint64) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("received %d frames, want exactly %d revisions %v", len(got), len(want), want)
+	}
+	subscriber := mustSubscriberBytes(t, sub)
+	for i, frame := range got {
+		if frame.Revision != want[i] || frame.Subscriber != subscriber {
+			t.Fatalf("frame %d: revision=%d subscriber=%x, want revision=%d subscriber=%x", i, frame.Revision, frame.Subscriber, want[i], subscriber)
+		}
+		var screen sessionruntime.Frame
+		if err := json.Unmarshal(frame.Payload, &screen); err != nil {
+			t.Fatalf("decode revision %d: %v", frame.Revision, err)
+		}
+		text := fmt.Sprintf("revision %03d", want[i])
+		if screen.Revision != want[i] || len(screen.Rows) == 0 || screen.Rows[0].Text != text {
+			t.Fatalf("frame %d does not carry the screen at revision %d: %s", i, want[i], frame.Payload)
+		}
+	}
+}
+
+func TestASlowScreenSubscriberKeepsBoundedOrderedFramesAndResumes(t *testing.T) {
+	// Ten or eleven pending publications shed two or three of forty, matching
+	// the CI's 38/40 and 37/40 without losing any frame the drain took. The
+	// last case holds the reader through the whole flood.
+	for _, pending := range []uint64{10, 11, 39} {
+		t.Run(fmt.Sprintf("pending_%d", pending), func(t *testing.T) {
+			sink := newDelayedScreenSink()
+			svc, hs := spawnScripted(t, newScriptedProcess(""), 0)
+			release := svc.Bind(sink)
+			t.Cleanup(release)
+			t.Cleanup(sink.release)
+			sub := proto.SubscriberID("0123456789abcdef0123456789abcdef")
+			params, err := json.Marshal(proto.AttachParams{Session: hs.id, Subscriber: sub})
+			if err != nil {
+				t.Fatalf("attach params: %v", err)
+			}
+			if _, err := svc.Call(host.WithConnection(context.Background(), sink), proto.OpAttach, params); err != nil {
+				t.Fatalf("attach: %v", err)
+			}
+			hs.mu.Lock()
+			consumer := hs.subs[sub].screenCons
+			hs.mu.Unlock()
+
+			base := uint64(hs.runtime.Revision())
+			ingestScreenRevision(t, hs, base+1)
+			select {
+			case <-sink.screenEntered:
+			case <-time.After(hangLimit):
+				t.Fatal("first screen frame never reached the blocked sink")
+			}
+			// The real drain is now inside SendScreenFrame. It cannot Take
+			// again until this sink resumes, so pending pressure is controlled.
+			for i := uint64(2); i <= pending+1; i++ {
+				ingestScreenRevision(t, hs, base+i)
+				if got := consumer.Pending(); got > sessionruntime.MaxPendingFrames {
+					t.Fatalf("blocked reader holds %d frames, bound %d", got, sessionruntime.MaxPendingFrames)
+				}
+			}
+			lost := pending - sessionruntime.MaxPendingFrames
+			if consumer.Pending() != sessionruntime.MaxPendingFrames || consumer.Coalesced() != lost || !consumer.Stale() {
+				t.Fatalf("blocked reader: pending=%d coalesced=%d stale=%v, want pending=%d coalesced=%d stale=true",
+					consumer.Pending(), consumer.Coalesced(), consumer.Stale(), sessionruntime.MaxPendingFrames, lost)
+			}
+			want := []uint64{base + 1}
+			for i := lost + 2; i <= pending+1; i++ {
+				want = append(want, base+i)
+			}
+			sink.release()
+			assertScreenRevisions(t, sink.waitForScreenFrames(t, hs.raw, len(want)), sub, want)
+			for i := pending + 2; i <= 40; i++ {
+				ingestScreenRevision(t, hs, base+i)
+				want = append(want, base+i)
+				assertScreenRevisions(t, sink.waitForScreenFrames(t, hs.raw, len(want)), sub, want)
+			}
+			if consumer.Pending() != 0 || consumer.Coalesced() != lost || consumer.Stale() {
+				t.Fatalf("resumed reader: pending=%d coalesced=%d stale=%v, want pending=0 coalesced=%d stale=false",
+					consumer.Pending(), consumer.Coalesced(), consumer.Stale(), lost)
+			}
+			t.Logf("pending=%d coalesced=%d delivered=%d/40 ordered revisions=%v", pending, lost, len(want), want)
+			// Even the fully stalled case must deliver new output after its
+			// pending allowance is refunded, not just its last queued screen.
+			ingestScreenRevision(t, hs, base+41)
+			want = append(want, base+41)
+			assertScreenRevisions(t, sink.waitForScreenFrames(t, hs.raw, len(want)), sub, want)
+		})
 	}
 }
 
@@ -221,7 +318,7 @@ func (s *delayedScreenSink) SendScreenFrame(frame proto.ScreenDataFrame) error {
 	default:
 	}
 	<-s.releaseScreen
-	return nil
+	return s.drainSink.SendScreenFrame(frame)
 }
 
 func (s *delayedScreenSink) release() { s.releaseOnce.Do(func() { close(s.releaseScreen) }) }

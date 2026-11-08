@@ -1851,6 +1851,14 @@ export class TerminalContent extends BasePaneContent {
    *  screen, fed by the session's screen frames — one per pane, created
    *  when the pane binds a session, fed by nothing else. */
   private _cellModel: CellModel | null = null
+  /** WHICH SCREEN this pane is painting (nocx-djx1u). The pane paints one
+   *  installed screen at a time, and a screen's life ends in a step of its
+   *  own: a bind installs the next one, a loss or an attachment that falls
+   *  away ends the current one with nothing to replace it yet. The running
+   *  block's held rows are qualified by the generation they were measured on
+   *  (`_rowsTheScreenPassed`), so a step that ends a screen releases them in
+   *  the same instant, rather than by a timer or a flag of its own. */
+  private _screenGeneration = 0
   /** The live region's painter (nocx-zg3k3.2.5): what a person SEES of the
    *  screen, drawing the model's revisions. Created at mount — the pane has
    *  a live region before it has a session — and fed by the one frame
@@ -1960,7 +1968,18 @@ export class TerminalContent extends BasePaneContent {
     const changed = this._attachment.kind !== attachment.kind
     this._attachment = attachment
     if (this._intentInput) this._intentInput.element.disabled = attachment.kind !== 'attached'
-    if (attachment.kind !== 'attached') this._cancelDeferredShellSubmissions()
+    if (attachment.kind !== 'attached') {
+      this._cancelDeferredShellSubmissions()
+      // A PANE THAT IS NOT ATTACHED HAS NO LIVE SCREEN (nocx-djx1u). Frames
+      // stop at the moment the attachment does, and the last one painted is a
+      // screen that will never pass another row — so the generation ends here,
+      // in the step that installs this state, and the running block's held
+      // rows come back with it. The count is refused by the generation check
+      // from now on, so a delivery that lands while the pane is off the session
+      // cannot hold its rows for a screen nobody is painting.
+      this._screenGeneration++
+      this.scrollback?.blockManager.releaseHeldRows()
+    }
     this._syncAttachOffer()
     if (changed) this._syncLifecycleOwnership()
     this._publishTabMark()
@@ -4966,11 +4985,16 @@ export class TerminalContent extends BasePaneContent {
     clearTimeout(this._fence?.deadline)
     this._fence = null
     this._switchPresents = false
-    // AND THE HELD ROWS COME BACK (ADR-2yzsq8mk's joint, nocx-djx1u). The
-    // running block's body holds the rows its painted screen has not passed
-    // yet; a bind means the screen that was going to pass them is gone, so the
-    // body takes every row the record holds rather than waiting for a frame
-    // that will never come (e2e/connection-overlay.spec.ts).
+    // AND THE HELD ROWS COME BACK, BECAUSE THE SCREEN THEY WERE HELD FOR IS
+    // OVER (ADR-2yzsq8mk's joint, nocx-djx1u). The running block's body holds
+    // the rows its painted screen has not passed yet, and the count is only
+    // meaningful on the generation that produced it: this bind ends that
+    // generation here, and the body takes every row the record holds rather
+    // than waiting for a frame from a screen that is gone. The generation
+    // itself is what keeps a later delivery from re-taking the hold
+    // (`_rowsTheScreenPassed`), so nothing here has to be remembered as a
+    // released flag (e2e/connection-overlay.spec.ts).
+    this._screenGeneration++
     this.scrollback?.blockManager.releaseHeldRows()
     // AND THE FRAME THE PREVIOUS BIND LEFT WAITING. It describes a screen this
     // pane no longer shows, and a paint of it would be measured against a row
@@ -5135,7 +5159,15 @@ export class TerminalContent extends BasePaneContent {
       this.client.dispatcher.subscribe('block.closed', onBlockClosed),
       this.client.dispatcher.subscribe('block.cleared', onBlockCleared),
       this.client.onBlockOutputStart((anchor) => {
-        this.scrollback?.blockManager.setOutputStartAnchor(anchor.entryId, anchor)
+        // The row this anchor names is an absolute row of the screen the pane
+        // has installed NOW — the generation travels with it, because the
+        // running block's hold is only ever taken against that screen
+        // (nocx-djx1u; see `_rowsTheScreenPassed`).
+        this.scrollback?.blockManager.setOutputStartAnchor(
+          anchor.entryId,
+          anchor,
+          this._screenGeneration,
+        )
         this.scrollback?.outputAnchorChanged()
       }),
     )
@@ -5673,6 +5705,10 @@ export class TerminalContent extends BasePaneContent {
       // The session is gone: an origin naming it would name a machine
       // that no longer exists (B.9). True for a clean exit AND a loss.
       this._sessionExited = true
+      // The screen this session was painting ends with the session, whatever
+      // the cause (nocx-djx1u): the generation moves on, so no later delivery
+      // can hold its rows for a frame that will never arrive.
+      this._screenGeneration++
       this._submittedAwaitingStart = false
       // Nothing this pane asks for can be applied by a session that has
       // ended, and the transport answers a resize cancelled by a close with
@@ -5994,33 +6030,66 @@ export class TerminalContent extends BasePaneContent {
   }
 
   /**
-   * How many of a running block's stored lines the painted screen has passed.
+   * How many of a running block's stored lines the painted screen has passed
+   * — or null when this pane has no live screen to hold them for.
    *
    * The record's index space starts at the block's first output row — the
    * backend's `block.grew` `From` counts from the same absolute row space
    * `outputStart` names, which the e2e container confirmed frame by frame —
-   * so the count is the painted screen's base row less that start. Null
-   * until the anchor has placed the block, and a block with no anchor yet
-   * paints everything it is given, as before.
+   * so the count is the painted screen's base row less that start.
+   *
+   * THE HOLD IS A FUNCTION OF A LIVE SCREEN, NEVER A REMEMBERED NUMBER
+   * (nocx-djx1u). It exists for one situation: the record is written as a row
+   * leaves the emulator's screen, and the frame showing that row gone can
+   * still be in flight, so a burst would otherwise paint its rows twice — in
+   * the body AND in the grid below it (e2e/output-jitter.spec.ts). Its premise
+   * is a screen that is still arriving and will pass those rows; where there
+   * is no such screen the premise is gone and holding is simply loss:
+   * e2e/connection-overlay.spec.ts measured a block keeping the nine rows its
+   * dead screen had passed out of the forty-one the record held, for the rest
+   * of the command. So this answers a count only while
+   *
+   *   - the pane is attached and its session has not ended, and
+   *   - the row space `outputStart` was measured in is the one being painted
+   *     (the block's own screen generation),
+   *
+   * and the position it does have is the block's own row space — a screen the
+   * block opened on has passed no row of it yet, which is a count of zero, not
+   * an absence. A bind installs a fresh screen (a new model, no frame yet) and
+   * a loss ends the old one, each in its own step; both steps also release the
+   * rows already held (`BlockManager.releaseHeldRows`), so the release and the
+   * new state land together. Once a generation has passed, the count cannot
+   * come back for that block: the rows were already painted, and a later
+   * number would only take them away again.
    */
-  private _rowsTheScreenPassed(rec: { outputStart?: number } | null): number | null {
+  private _rowsTheScreenPassed(rec: BlockRecord | null): number | null {
+    if (rec === null || rec.outputStart === undefined) return null
+    if (this._attachment.kind !== 'attached' || this._sessionExited) return null
+    if (rec.outputScreen !== this._screenGeneration) return null
     const snapshot = this._cellModel?.current()
     if (snapshot === null || snapshot === undefined) return null
-    if (rec === null || rec.outputStart === undefined) return null
-    return Math.max(0, snapshot.state.baseRow - rec.outputStart)
+    const passed = snapshot.state.baseRow - rec.outputStart
+    // A LIVE SCREEN THAT HAS NOT REACHED THE BLOCK'S ROWS HAS PASSED NONE OF
+    // THEM, and zero is the answer: the block opened on a row the screen has
+    // not scrolled past yet (the anchor is at or below the base), so every
+    // row the record holds is still on screen and all of it is held. That is
+    // the same bound the clamp below has always given; what makes it a hold
+    // now is the generation check above, not the sign of this number.
+    return Number.isSafeInteger(passed) ? Math.max(0, passed) : null
   }
 
   /** Paint the running block's held rows as the painted screen passes them —
    *  the other half of `applyStoredRows`'s `upTo` — and hold the tail. Runs
    *  in the same frame as the grid's own paint, so the block's body is never
-   *  a screen behind or ahead of the grid it is joined to. */
+   *  a screen behind or ahead of the grid it is joined to. An answer of null
+   *  is the release, and it is applied here as well: a repaint that has no
+   *  screen to wait for takes every row the record holds. */
   private _widenRunningRowsToScreen(): void {
     const sb = this.scrollback
     const rec = sb?.blockManager.runningBlock ?? null
     if (!sb || rec === null || rec.attemptId === undefined) return
     const upTo = this._rowsTheScreenPassed(rec)
-    if (upTo === null) return
-    if (!sb.blockManager.widenStoredRows(rec.attemptId, upTo)) return
+    if (!sb.blockManager.holdStoredRows(rec.attemptId, upTo)) return
     sb.scrollToBottomIfFollowing()
   }
 
@@ -10632,25 +10701,18 @@ export class TerminalContent extends BasePaneContent {
       // (BlockManager.applyStoredRows's `upTo`), which is what keeps the body
       // one continuous run of rows.
       if (sb.blockManager.runningBlock?.attemptId === entryId) {
-        // A HOLD NEEDS A SCREEN PAINTED FOR THIS DELIVERY (nocx-djx1u): the
-        // count below says which rows the live grid is showing, and it is only
-        // true of a frame this pane painted for these rows. A pane that is not
-        // painting — cut, rebound, waiting — has a screen it did not paint for
-        // them; holding rows back for it lost nine of forty-one for the rest
-        // of a command in e2e/connection-overlay.spec.ts. Nothing painted,
-        // nothing held.
-        // AN OPEN DEFECT LIVES HERE (nocx-7nb3w): a record delivered after a
-        // daemon cut is still held against the screen the pane had before it,
-        // so a running block can keep only the rows it showed at the cut — see
-        // e2e/connection-overlay.spec.ts, quarantined under that bead. The
-        // count is kept unconditional because it is what keeps a burst from
-        // painting its own rows twice (e2e/output-jitter.spec.ts's out-of-order
-        // assertion); every weakening of it measured in that session broke the
-        // burst instead.
+        // THE HOLD IS THIS DELIVERY'S ANSWER ABOUT THE LIVE SCREEN, asked
+        // after the frame in flight has been painted, and null when there is
+        // no live screen to answer for (`_rowsTheScreenPassed`) — in which
+        // case the body takes every row the record holds, in this same paint.
+        // e2e/connection-overlay.spec.ts: a record delivered across a daemon
+        // cut used to be held against the screen the pane had before it, and
+        // the block kept the eight rows that screen had passed out of
+        // forty-one for the rest of the command.
         this._flushPendingPaint()
         const upTo = this._rowsTheScreenPassed(sb.blockManager.runningBlock)
         sb.settleAround(() => {
-          sb.blockManager.applyStoredRows(entryId, rows, upTo ?? undefined)
+          sb.blockManager.applyStoredRows(entryId, rows, upTo)
           sb.scrollToBottomIfFollowing()
         })
       } else {

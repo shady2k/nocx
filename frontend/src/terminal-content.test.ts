@@ -5392,6 +5392,135 @@ describe('the projections consume the kernel through the composition root (ADR-0
       teardown()
     }
   })
+  it('a delivery across a lost attachment paints every stored row, and no later frame re-holds them (nocx-djx1u)', async () => {
+    // THE HOLD NEEDS A LIVE SCREEN. It exists so a burst does not paint its
+    // rows twice — in the body AND in the grid below it — while the painted
+    // screen lags the record. A screen that is over will never pass another
+    // row, so rows held for it are rows nobody shows:
+    // e2e/connection-overlay.spec.ts measured a block keeping the rows its
+    // dead screen had passed out of forty-one the record held. This is that
+    // path at the unit layer: the attachment falls away mid-command, the
+    // body takes the record whole in that step, and a frame of the ended
+    // screen cannot hold it back again.
+    const stored = Array.from({ length: 12 }, (_, index) =>
+      JSON.stringify({
+        from: index,
+        row: wireRowOf(Array.from(`row ${index}`, (ch) => [ch, 1, true] as CellSpec)),
+      }),
+    ).join('\n')
+    const whole = Array.from({ length: 12 }, (_, index) => `row ${index}`).join('\n')
+    // The body pads every row to the block's widest line; this reads the
+    // rows, not the padding.
+    const bodyText = (el: HTMLElement): string =>
+      blockOutputText(el)
+        .split('\n')
+        .map((line) => line.trimEnd())
+        .join('\n')
+    const client = makeClient()
+    client.call.mockImplementation((method: string, params?: unknown) => {
+      const id =
+        typeof params === 'object' && params !== null && 'id' in params ? params.id : undefined
+      if (method === 'ledger.get' && id === 'att-hold') {
+        return Promise.resolve({
+          entry: {},
+          edges: [],
+          artifacts: [{ id: 'art-hold', mediaType: 'application/x-nocx-rows' }],
+        })
+      }
+      if (method === 'ledger.artifact' && id === 'art-hold') {
+        return Promise.resolve({
+          id: 'art-hold',
+          mediaType: 'application/x-nocx-rows',
+          body: stored,
+          truncated: null,
+          byteLen: stored.length,
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('make')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-hold',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'make',
+        },
+      })
+      const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
+      // The backend places the command's first output row on the screen the
+      // pane has installed now, and the block's row space belongs to it.
+      client._fireBlockOutputStart({
+        entryId: 'att-hold',
+        row: 12,
+        screenRevision: 5,
+        bufferKind: 'normal',
+        bufferInstance: '1',
+        cols: SCREEN_COLS,
+        rows: SCREEN_ROWS,
+      })
+      const anchored = screenFrame(6, ['', '', ''])
+      anchored.state.baseRow = 10
+      client._sessions[0].fireScreenFrame(anchored)
+      await flushDisplayFrame()
+      const block = scrollback.blockManager.blockForAttempt('att-hold')
+      expect(block?.outputStart).toBe(12)
+
+      const grew = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'block.grew',
+      )?.[1] as ((params: unknown) => void) | undefined
+      expect(grew).toBeDefined()
+
+      // The live screen has passed six of the record's twelve rows: the body
+      // paints those and holds the rest, which is the burst's rule at work.
+      const scrolled = screenFrame(7, ['', ''])
+      scrolled.state.baseRow = 18
+      client._sessions[0].fireScreenFrame(scrolled)
+      await flushDisplayFrame()
+      grew?.({ entryId: 'att-hold', from: 0, count: 1 })
+      await vi.waitFor(() =>
+        expect(bodyText(block!.el)).toBe('row 0\nrow 1\nrow 2\nrow 3\nrow 4\nrow 5'),
+      )
+
+      // THE SCREEN ENDS: the pane is off the session, and the rows held for
+      // it are painted in that same step.
+      client._sessions[0].fireAttachment({ kind: 'attaching' })
+      expect(bodyText(block!.el)).toBe(whole)
+
+      // THE SAME SESSION COMES BACK, and that is the case the hold must not
+      // answer for: the reattach completes, frames of the screen arrive
+      // again, and every one of them still belongs to the row space this
+      // pane ended. A count measured on it would take the rows away again on
+      // the next delivery, which is e2e/connection-overlay.spec.ts's defect.
+      client._sessions[0].fireAttachment({ kind: 'attached' })
+      const late = screenFrame(8, ['', ''])
+      late.state.baseRow = 20
+      client._sessions[0].fireScreenFrame(late)
+      await flushDisplayFrame()
+      grew?.({ entryId: 'att-hold', from: 0, count: 1 })
+      await vi.waitFor(() => expect(bodyText(block!.el)).toBe(whole))
+    } finally {
+      teardown()
+    }
+  })
 
   it('a card is opened and closed only by what the backend sent (nocx-2v80t.3.2)', async () => {
     const client = makeClient()

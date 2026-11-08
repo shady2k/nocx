@@ -714,8 +714,9 @@ export interface BlockRecord {
   storedRows?: StoredBlockRows
   /** How many of `storedRows` the RUNNING block's body may paint: the rows
    *  whose screen row the painted grid has passed (see
-   *  `BlockManager.widenStoredRows`). Undefined on a block that is not
-   *  running, which paints all of them. */
+   *  `BlockManager.holdStoredRows`). Undefined on a block that is not
+   *  running, which paints all of them — and undefined again the moment the
+   *  screen it was taken from is over. */
   storedUpTo?: number
   /** Why the latest read of this block's stored rows failed, when it did
    *  (nocx-2v80t.3.27) — the store could not be asked, or the artifact did
@@ -745,6 +746,16 @@ export interface BlockRecord {
    *  is the record of that; a shell-originated block opens after its echo
    *  and defaults to `startLine`. */
   outputStart?: number
+  /** The pane's installed-screen generation that supplied `outputStart`
+   *  (terminal-content's `_screenGeneration`). The row above is an absolute
+   *  row of THAT screen's coordinate, so a hold measured against another one
+   *  holds nothing real: a bind installs a fresh screen and a loss ends this
+   *  one, and either makes the number stale (nocx-djx1u). */
+  outputScreen?: number
+  /** The generation the pane reported WITH the anchor; `outputStart` is only
+   *  ever stamped from it, so a frame arriving after the screen's life ended
+   *  cannot re-place the block in the new screen's row space. */
+  outputAnchorScreen?: number
   /** Backend-owned screen anchor; cursor position is never a substitute. */
   outputAnchor?: BlockOutputStart
   /** Offset from the accepted frame base row when its identity matches the anchor. */
@@ -2627,10 +2638,10 @@ export class BlockManager {
     this._attemptId = attemptId
     if (this._runningBlock) {
       this._runningBlock.attemptId = attemptId
-      const anchor = this._pendingOutputAnchors.get(attemptId)
-      if (anchor) {
+      const parked = this._pendingOutputAnchors.get(attemptId)
+      if (parked) {
         this._pendingOutputAnchors.delete(attemptId)
-        this.setOutputStartAnchor(attemptId, anchor)
+        this.setOutputStartAnchor(attemptId, parked.anchor, parked.screen)
       }
       this._runningBlock.el.dataset.entryId = attemptId
       const pending = this._pendingStoredRows.get(attemptId)
@@ -2642,24 +2653,36 @@ export class BlockManager {
     }
   }
 
-  /** Attach a backend screen anchor, parking it if lifecycle binding has not arrived yet. */
-  setOutputStartAnchor(entryId: string, anchor: BlockOutputStart): void {
+  /** Attach a backend screen anchor, parking it if lifecycle binding has not
+   *  arrived yet.
+   *
+   *  `screen` is the pane's installed-screen generation at the moment the
+   *  anchor arrived, and it is recorded with the anchor rather than with the
+   *  frame that later supplies the row: the anchor names an absolute row of
+   *  THAT screen, and a hold measured against a later one would be a claim
+   *  about a row space the block's rows were never written in (nocx-djx1u). */
+  setOutputStartAnchor(entryId: string, anchor: BlockOutputStart, screen: number): void {
     const rec = this.blockForAttempt(entryId)
     if (!rec) {
       if (this._pendingOutputAnchors.size >= MAX_PENDING_STORED_ROWS) {
         const first = this._pendingOutputAnchors.keys().next().value
         if (first !== undefined) this._pendingOutputAnchors.delete(first)
       }
-      this._pendingOutputAnchors.set(entryId, anchor)
+      this._pendingOutputAnchors.set(entryId, { anchor, screen })
       return
     }
     rec.outputAnchor = Object.freeze({ ...anchor })
+    rec.outputAnchorScreen = screen
     rec.outputStart = undefined
+    rec.outputScreen = undefined
     rec.outputAnchorOffset = undefined
     rec.outputAnchorText = undefined
   }
 
-  /** Consume only a frame accepted by the pane CellModel and matching every anchor identity field. */
+  /** Consume only a frame accepted by the pane CellModel and matching every
+   *  anchor identity field. The row it supplies belongs to the screen the
+   *  anchor came from (`outputAnchorScreen`), which is what the running
+   *  block's hold is taken against (nocx-djx1u). */
   acceptOutputStartFrame(snapshot: ScreenSnapshot): void {
     for (const rec of this._blocks) {
       if (rec === this._runningBlock) this._acceptStartFrame(rec, snapshot)
@@ -2692,6 +2715,7 @@ export class BlockManager {
         continue
       }
       rec.outputStart = anchor.row
+      rec.outputScreen = rec.outputAnchorScreen
       const index = anchor.row - snapshot.state.baseRow
       if (index <= 0) {
         // The anchor names the first output row. Its preceding echo row is
@@ -2821,10 +2845,17 @@ export class BlockManager {
    *  every batch. Painting the whole delivery put those rows in the body
    *  AND in the live grid below it: `Get:002, Get:003, Get:004, Get:001,
    *  Get:002…` on screen for a frame, the output running backwards at the
-   *  joint. The rows are held, not dropped: `widenStoredRows` paints them as
+   *  joint. The rows are held, not dropped: `holdStoredRows` paints them as
    *  the screen catches up, so the body is one continuous run of rows in
-   *  every frame. */
-  applyStoredRows(entryId: string, rows: StoredBlockRows, upTo?: number): void {
+   *  every frame.
+   *
+   *  `upTo` is the caller's live-screen answer (`terminal-content`'s
+   *  `_rowsTheScreenPassed`), and null is the caller saying there is no such
+   *  screen any more: the body then takes every row the record holds, and the
+   *  hold is forgotten rather than kept for a frame that will not come
+   *  (nocx-djx1u). A number only ever widens the bound — a smaller one
+   *  arriving later must not un-paint rows that are already on screen. */
+  applyStoredRows(entryId: string, rows: StoredBlockRows, upTo?: number | null): void {
     const cursor = rows.lines.length > 0 ? rows.lines[rows.lines.length - 1].from : -1
     const seen = this._storedRowsCursor.get(entryId) ?? -1
     if (cursor < seen) return
@@ -2849,11 +2880,12 @@ export class BlockManager {
     // paints everything it holds (`bindAttempt`), so a smaller count arriving
     // afterwards must not un-paint rows that are already on screen — the
     // paint's own diff removes what the slice omits. What keeps it from
-    // latching is the caller: the count is offered only for a screen painted
-    // for THIS delivery (terminal-content's `_flushPendingPaint` answers
-    // whether it painted), so a pane that has stopped painting holds nothing
-    // and the body takes every row the record has.
-    if (upTo !== undefined) rec.storedUpTo = Math.max(rec.storedUpTo ?? 0, upTo)
+    // latching is the caller: the count is offered only while the screen that
+    // supplied the block's row space is still the live one, so a pane whose
+    // screen is over holds nothing and the body takes every row the record
+    // has (nocx-djx1u).
+    if (upTo === null) rec.storedUpTo = undefined
+    else if (upTo !== undefined) rec.storedUpTo = Math.max(rec.storedUpTo ?? 0, upTo)
     const painted = this._paintedLines(rec)
     if (painted !== null) this.paintStoredRows(rec.el, painted)
   }
@@ -2871,14 +2903,15 @@ export class BlockManager {
 
   /** Release every held row: paint the running block's body whole.
    *
-   *  The hold is a bet about a screen THIS pane is still painting, and a bet
-   *  needs a way to lose. A cut and a rebind is that way: the re-bound session's
-   *  first screen can stand anywhere in the row space, and the frames this pane
-   *  was painting are gone, so the rows it was holding back for them are rows
-   *  nobody shows — measured in e2e/connection-overlay.spec.ts, a block held
-   *  nine of its forty-one rows for the rest of the command. Held rows are only
-   *  ever held against a screen that is still arriving; when it stops, the
-   *  transcript keeps the output. */
+   *  The hold is a bet about a screen THIS pane is still painting, and the bet
+   *  is lost in the step that ends that screen — a cut, a rebind, an
+   *  attachment that falls away. The pane calls this there (with the news that
+   *  the count it offers from now on belongs to no screen in hand:
+   *  terminal-content's `_rowsTheScreenPassed`), and the rows it was holding
+   *  back for a frame that will not come are painted in this same step. Held
+   *  rows are only ever held against a screen that is still arriving; when it
+   *  stops, the transcript keeps the output (e2e/connection-overlay.spec.ts
+   *  measured nine of forty-one rows kept for the rest of a command). */
   releaseHeldRows(): void {
     const rec = this._runningBlock
     if (rec === null || rec.storedUpTo === undefined) return
@@ -2887,17 +2920,26 @@ export class BlockManager {
     if (painted !== null) this.paintStoredRows(rec.el, painted)
   }
 
-  /** Widen the running block's body to the rows the painted screen has now
-   *  passed — the other half of `applyStoredRows`'s hold. Answers whether
-   *  anything was painted, so the caller holds the tail in the same task.
-   *  A no-op for a block that is not running: a frozen body has no live grid
-   *  to stay disjoint from. */
-  widenStoredRows(entryId: string, upTo: number): boolean {
+  /** Take the running block's body to where the painted screen has now
+   *  reached — the other half of `applyStoredRows`'s hold, and the same
+   *  answer: a count while the screen that supplied the block's row space is
+   *  the live one, null when it is over. Null is the RELEASE, applied here in
+   *  the paint that follows it, so the rows come back in the same frame the
+   *  screen's generation ends (nocx-djx1u). Answers whether anything was
+   *  painted, so the caller holds the tail in the same task. A no-op for a
+   *  block that is not running: a frozen body has no live grid to stay
+   *  disjoint from. */
+  holdStoredRows(entryId: string, upTo: number | null): boolean {
     const rec = this.blockForAttempt(entryId)
     if (rec === null || rec !== this._runningBlock) return false
     if (rec.storedRows === undefined) return false
-    if (upTo <= (rec.storedUpTo ?? 0)) return false
-    rec.storedUpTo = upTo
+    if (upTo === null) {
+      if (rec.storedUpTo === undefined) return false
+      rec.storedUpTo = undefined
+    } else {
+      if (upTo <= (rec.storedUpTo ?? 0)) return false
+      rec.storedUpTo = upTo
+    }
     const painted = this._paintedLines(rec)
     if (painted !== null) this.paintStoredRows(rec.el, painted)
     return true
@@ -2960,7 +3002,10 @@ export class BlockManager {
    */
   /** Where this session is — `user@host`, or empty for a local shell. */
   private _location = ''
-  private readonly _pendingOutputAnchors = new Map<string, BlockOutputStart>()
+  private readonly _pendingOutputAnchors = new Map<
+    string,
+    { anchor: BlockOutputStart; screen: number }
+  >()
 
   setLocation(location: string): void {
     this._location = location

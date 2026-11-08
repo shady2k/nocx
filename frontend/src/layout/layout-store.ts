@@ -455,6 +455,10 @@ export class LayoutStore {
   async closePane(paneId: string): Promise<Replacement> {
     const replacement: Replacement = { tabId: uuidv7(), paneId: uuidv7(), cwd: '' }
     await this.client.closePane(paneId, replacement)
+    // The removal is confirmed even if the full-chain read fails. Fold that
+    // one fact before another change can render the old row and reopen it;
+    // only the backend's read decides the container cascade and replacement.
+    this.fold({ ...this.state, panes: this.state.panes.filter((pane) => pane.id !== paneId) })
     await this.load()
     return replacement
   }

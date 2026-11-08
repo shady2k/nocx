@@ -427,5 +427,68 @@ delete-button count while the snippets page could still be loading; root
 visibility did not establish list readiness. Per-case ownership removes that
 cleanup dependency without weakening the unique-row or refused-secret
 assertions. All five real-app scenarios passed in Chromium (61 s including
-runner setup) and WebKit (60 s). The output-fidelity and file-timeout failures
-remain separate required-check repairs, not accepted losses or wider deadlines.
+runner setup) and WebKit (60 s). At that point, output fidelity and file timeout
+remained separate required-check repairs, not accepted losses or wider deadlines.
+
+### Required-check repairs and native close ordering
+
+Main `130d68b32` is integrated at `fb282e9da`. Its current milestone is
+`v0-8-2`, with finding budget 5; this PR's retained work stays under `nocx-nqmjq`
+in `v0-9`. No charter or finding budget was changed for these repairs.
+
+For `nocx-nqmjq.1`, a controlled real-runtime probe held the first wire delivery
+while ingesting 5000 marker lines at 136×40 with zero live retention. Default
+padding made the raw emitted rows demand 27,295,143 bytes against the existing
+20,971,520-byte pool; the encoded departed-row payload was only 207,368 bytes.
+The pool reported explicit overflow at departed row 3064 while the fence still
+completed. This reproduces retention pressure, not the exact historical
+3827-row schedule: that original run's backend log was not retained.
+
+The helper now retains the canonical encoder's compact row representation.
+Shortened cell arrays are privately owned; unchanged rows are reused. Styled
+blanks, explicit spaces, wide cells, combining clusters and wrap facts remain
+byte-equivalent on the wire. The held-delivery pool charge is 6,221,263 bytes.
+That charge and the pre-fix raw-emission demand are different accounting
+observations, not a measured before/after resident-memory reduction. Compaction
+adds a bounded scan and copies of shortened rows; no new CPU or transient-
+allocation improvement is claimed. Existing caps, explicit-loss behavior,
+confirmation/replay and stream-order completion are unchanged.
+
+Both live delivery and replacement-reader replay retain all 5000 exact markers;
+the real PTY-to-content-store check stores all 5000 without truncation. Review
+also corrected the replay test's barrier: it now waits for the replacement
+reader's received cursor, not a drain request that bypasses replay. Twenty
+single-processor race-checked repetitions passed.
+
+For `nocx-nqmjq.2`, real SSH/SFTP evidence distinguishes the shared lease's hard
+watchdog from the listing context's deadline. The watchdog-only `ErrFSDead`
+sentinel now retains its identity while wrapping `context.DeadlineExceeded`.
+The application and wire therefore report the existing timeout state without
+an adapter workaround, a longer deadline or reclassifying ordinary close,
+cancellation, permission and connection-loss errors. The Files e2e diagnostic
+follows the parent listing's actual binding rather than the latest incidental
+`files.open`. The original missing-state failure's exact schedule remains
+unknown; the corrected unchanged-product diagnostic passed.
+
+On product revision `298265832`, all seven focused real-app scenarios passed
+in Chromium (128 s) and WebKit (124 s): the Files load case, five isolated
+snippet cases, and exact 5000-row output before and after restart.
+
+The subsequent native smoke exposed the existing `nocx-3an1s.1.10` close race
+again, despite main's last-tab activation fix. Every clicked tab was removed,
+but another close's layout snapshot adopted rows whose own closes were still
+pending, creating new local panes and invalid content requests. The fix extends
+the existing window-exclusion set for the close interval and folds each
+backend-confirmed pane removal before the fallible full-chain refresh. It
+does not reconstruct the backend's container cascade. Two deterministic
+regressions failed before the repair; all 144 pane/layout tests then passed,
+including refusal recovery.
+
+A fresh release-mode WebKitGTK build ran six scrolling producers: each advanced
+while hidden, activation caught up, and every final retained row appeared.
+All six close replies succeeded, no new tab was adopted during the close
+interval, and one shell with no producers remained. A second close burst proved
+the survivor's new command as a completed, visibly painted card, rather than
+mistaking below-viewport live-grid accessibility rows for painted output.
+`postRepairSmoke` records the exact source hashes and behavioral evidence.
+These checks are not a new paired CPU/RAM cohort or a complete final-tree CI pass.

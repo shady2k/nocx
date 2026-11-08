@@ -12205,5 +12205,53 @@
       "producers": 0
     },
     "note": "Behavioral native WebKitGTK smoke after integrating main protocol19, not a paired CPU/RAM measurement. Six simultaneously scrolling producers progressed while five tabs were hidden; activation caught up; final retained row and editor readiness were observed in each tab. The configured history-cap loss notice remained explicit."
+  },
+  "postRepairSmoke": {
+    "baseRevision": "be4b2bd8d3f5",
+    "workingTreeRepair": "nocx-3an1s.1.10",
+    "sourceSHA256": {
+      "frontend/src/panes.ts": "f3a4a87a95ee223dbd76953769b8c0e051fe0b8e619eabc8e38b67434c68754e",
+      "frontend/src/layout/layout-store.ts": "20b16d04b7467ce9c2067abecdac939c66e5522649527a3321e85ece766dfcf0",
+      "frontend/src/panes.test.ts": "1e9ce028c688777eac17b848c5d157da07d7e9368cf1fee0534a888912c12a96"
+    },
+    "protocol": 19,
+    "surface": "native Wails release/production/gtk3, WebKitGTK",
+    "viewport": { "width": 1024, "height": 768 },
+    "simultaneousScrollingProducers": 6,
+    "beforeTicks": [150, 120, 90, 60, 30, 30],
+    "progressedTicks": [180, 150, 120, 90, 60, 60],
+    "firstTabCaughtUp": true,
+    "finalVisibleTicks": [1678, 1652, 1623, 1593, 1560, 1539],
+    "finalRow": 7,
+    "allEditorsReady": true,
+    "configuredHistoryCapNoticeVisible": true,
+    "successfulCloseReplies": 6,
+    "unexpectedTabsAdoptedDuringClose": 0,
+    "paneErrors": [],
+    "afterClose": { "tabs": 1, "shells": 1, "producers": 0 },
+    "paintedSurvivor": {
+      "additionalCompletedTabsClosed": 6,
+      "output": "NATIVE_CLOSE_PAINTED_SURVIVOR_OK",
+      "outcome": "success",
+      "outputRect": { "top": 597, "bottom": 622, "left": 24, "right": 694 }
+    },
+    "evidenceDirectory": "/home/andrey/.cache/nocx-perf/20261107-fixes",
+    "evidenceFiles": [
+      "native-close-diagnostic.json",
+      "native-retention-before-close-fix.json",
+      "native-retention-after-close-fix.json",
+      "native-close-repaired-output.png",
+      "native-close-painted-survivor.png",
+      "close-race-red.log",
+      "close-race-failure-boundary-red.log",
+      "close-race-green.log"
+    ],
+    "metricClaim": false,
+    "limits": [
+      "The preceding native run still reproduced the existing close-race task after main's last-tab fix; this is the repair's behavioral proof, not a new CPU/RAM comparison.",
+      "The first survivor screenshot preceded command-card completion. The later burst waits for a successful visible output card and a paint boundary. An early forced process stop left that first command visibly unreconciled on restart.",
+      "One background files.close refused a binding already revoked by terminal teardown. The raw error is retained separately; zero RPC errors is not claimed.",
+      "The full final-tree CI gate remains pending."
+    ]
   }
 }

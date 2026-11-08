@@ -3546,6 +3546,107 @@ describe('a restored pane and the session the backend still holds', () => {
 // layout.read. The tests below watch it happen in the renderer's own state —
 // the layout cache and the tab strip's DOM — never merely that a handler was
 // registered.
+describe('closing panes stay closed while layout replies catch up (nocx-3an1s.1.10)', () => {
+  beforeEach(() => {
+    resetSessionCounter()
+    vi.clearAllMocks()
+  })
+
+  it('does not adopt a pending close when another close publishes its snapshot', async () => {
+    const underlying = makeLayoutBackend()
+    let releaseFirst!: () => void
+    const held = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    let firstClose = true
+    const chain = makeLayoutStore({
+      ...underlying,
+      closePane: async (...args: Parameters<typeof underlying.closePane>) => {
+        if (firstClose) {
+          firstClose = false
+          await held
+        }
+        return underlying.closePane(...args)
+      },
+    })
+    const { client, manager, bar, layout } = await mountPaneManager(
+      makeClient(),
+      undefined,
+      undefined,
+      undefined,
+      chain,
+    )
+    manager.newPane()
+    manager.newPane()
+    await vi.waitFor(() => expect(client.openSession).toHaveBeenCalledTimes(3))
+    const [first, , survivor] = underlying.rows().panes
+    const survivorTab = bar.querySelectorAll('.nocx-tab')[2]
+    const buttons = bar.querySelectorAll<HTMLButtonElement>('[aria-label="Close tab"]')
+
+    buttons[0].click()
+    buttons[1].click()
+    try {
+      // The second close has answered; its snapshot still holds the first
+      // row, whose close has deliberately not reached the backend yet.
+      await vi.waitFor(() =>
+        expect(layout.panes().map((pane) => pane.id)).toEqual([first.id, survivor.id]),
+      )
+      expect([...bar.querySelectorAll('.nocx-tab')]).toEqual([survivorTab])
+      expect(client.openSession).toHaveBeenCalledTimes(3)
+    } finally {
+      releaseFirst()
+      await vi.waitFor(() => expect(layout.panes().map((pane) => pane.id)).toEqual([survivor.id]))
+    }
+    expect([...bar.querySelectorAll('.nocx-tab')]).toEqual([survivorTab])
+    expect(client.openSession).toHaveBeenCalledTimes(3)
+    expect(client._sessions[2].detach).not.toHaveBeenCalled()
+  })
+
+  it('keeps a confirmed removal when the following layout read fails', async () => {
+    const underlying = makeLayoutBackend()
+    let failRead = false
+    const chain = makeLayoutStore({
+      ...underlying,
+      read: () =>
+        failRead ? Promise.reject(new Error('layout refresh interrupted')) : underlying.read(),
+    })
+    const { client, manager, bar, layout } = await mountPaneManager(
+      makeClient(),
+      undefined,
+      undefined,
+      undefined,
+      chain,
+    )
+    const survivor = underlying.rows().panes[0].id
+    manager.newPane()
+    await vi.waitFor(() => expect(client.openSession).toHaveBeenCalledTimes(2))
+    failRead = true
+    manager.closeActivePane()
+    await vi.waitFor(() => expect(showToast).toHaveBeenCalled())
+    expect(layout.panes().map((pane) => pane.id)).toEqual([survivor])
+
+    // A subsequent confirmed create renders the cache without a successful
+    // read. It must not start a shell for the already removed pane.
+    manager.newPane()
+    await vi.waitFor(() => expect(client.openSession).toHaveBeenCalledTimes(3))
+    expect(bar.querySelectorAll('.nocx-tab')).toHaveLength(2)
+  })
+
+  it('shows a refused close and allows its retained row to appear on the next read', async () => {
+    const { client, manager, bar, layout, backend } = await mountPaneManager()
+    manager.newPane()
+    await vi.waitFor(() => expect(client.openSession).toHaveBeenCalledTimes(2))
+    const retained = backend.rows().panes.map((pane) => pane.id)
+    backend.fail('closePane', new Error('close refused'))
+    manager.closeActivePane()
+    await vi.waitFor(() => expect(showToast).toHaveBeenCalled())
+
+    await layout.load()
+    expect(layout.panes().map((pane) => pane.id)).toEqual(retained)
+    expect(bar.querySelectorAll('.nocx-tab')).toHaveLength(2)
+  })
+})
+
 // ── A stale layout answer cannot close a pane (nocx-1ebrs.56) ──────────────
 //
 // The read and the create are two requests on one socket, and nothing on it

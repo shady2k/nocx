@@ -733,8 +733,8 @@ export class PaneManager {
   private tabStrip: TabStrip
   private readonly displayRevisionListeners = new Set<() => void>()
   /** The chain, as the backend last answered. A cache, never an authority. */
-  /** The panes this window is NOT showing: what the chain held at boot when
-   *  the person asked for a clean start (nocx-yejir).
+  /** The panes this window is NOT showing: clean-start rows (nocx-yejir)
+   *  and panes whose close request has not settled yet.
    *
    *  A SET of ids rather than a flag, and the difference is the whole
    *  correctness of it. A flag would have to be off for the boot and on
@@ -744,7 +744,9 @@ export class PaneManager {
    *  says exactly what is meant: these were left over, and a row created
    *  afterwards is not one of them and appears like any other.
    *
-   *  Empty when restore is on, which is the normal case. */
+   *  A closing row stays excluded while other replies can still contain it.
+   *  closeThroughChain releases that exclusion when its request settles;
+   *  the store folds a confirmed removal before a fallible refresh. */
   private readonly notShown = new Set<string>()
   private readonly layout: LayoutStore
   /**
@@ -2618,6 +2620,7 @@ export class PaneManager {
     if (wasActive) this.activePane = null
 
     if (this.layoutAvailable && this.layout.tabOf(pane.wireId)) {
+      this.notShown.add(pane.wireId)
       void this.ask(() => this.closeThroughChain(pane.wireId), 'Could not close the tab')
     } else if (this.panes.length === 0) {
       // No chain to ask, so the old rule stands: the window is never empty.
@@ -2653,9 +2656,13 @@ export class PaneManager {
    * pane under that id.
    */
   private async closeThroughChain(wireId: string): Promise<void> {
-    const replacement = await this.layout.closePane(wireId)
-    const front = this.panes.find((candidate) => candidate.wireId === replacement.paneId)
-    if (front) await this.activate(front)
+    try {
+      const replacement = await this.layout.closePane(wireId)
+      const front = this.panes.find((candidate) => candidate.wireId === replacement.paneId)
+      if (front) await this.activate(front)
+    } finally {
+      this.notShown.delete(wireId)
+    }
   }
 
   /** Activate a pane: show its pane, mount content, focus. */

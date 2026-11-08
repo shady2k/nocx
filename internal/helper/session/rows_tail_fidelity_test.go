@@ -76,7 +76,23 @@ func TestZeroRetentionBurstSurvivesBlockedDeliveryAndReplay(t *testing.T) {
 				hs.mu.Unlock()
 				sink = newRowsSink()
 				rowsAttachReader(t, hs, "22222222222222222222222222222222", sink)
-				<-hs.requestRowsDrain()
+				// A drain request can bypass pending replay. Wait for the
+				// replacement receiver's departed cursor before adding the fence.
+				wantCursor := rt.DepartedRowCount()
+				for {
+					frames := sink.rowFrames()
+					if len(frames) > 0 {
+						last := decodeResentRows(t, frames[len(frames)-1:])[0]
+						cursor := last.from + uint64(len(last.texts)) //nolint:gosec // a row count
+						if cursor >= wantCursor {
+							if cursor != wantCursor {
+								t.Fatalf("replay cursor=%d, want %d before the fence", cursor, wantCursor)
+							}
+							break
+						}
+					}
+					<-sink.changed
+				}
 			}
 			nonce := endNonce(0x41)
 			rt.Completed(rt.Incarnation(), nonce, 0)

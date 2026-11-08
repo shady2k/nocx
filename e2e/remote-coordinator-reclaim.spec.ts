@@ -99,8 +99,6 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 
-import { recoveryAccount, uncoveredGapRanges } from '../frontend/src/recovery-account'
-import { formatBytes } from '../frontend/src/ui/format-bytes'
 import { BASE_URL } from './base-url'
 import {
   standalone as base,
@@ -178,79 +176,11 @@ function paneForSession(page: Page, sessionId: string) {
   return page.locator(`.pane[data-session-id="${sessionId}"]`)
 }
 
-interface VisibleLiveOutputGap {
-  title: string
-  description: string
-  count: number
-  rect: { x: number; y: number; width: number; height: number }
-}
-
-async function captureFirstVisibleLiveOutputGap(page: Page, sessionId: string): Promise<void> {
-  await page.addInitScript((targetSessionId) => {
-    const captured = window as Window & { __nocxLiveOutputGapReading?: VisibleLiveOutputGap }
-    let scheduled = false
-    const observer = new MutationObserver(schedule)
-    function schedule() {
-      if (scheduled || captured.__nocxLiveOutputGapReading) return
-      scheduled = true
-      requestAnimationFrame(() => {
-        scheduled = false
-        const notices = document.querySelectorAll<HTMLElement>(
-          `.pane[data-session-id="${targetSessionId}"] [data-notice-kind="live-output-gap"]`,
-        )
-        for (const notice of notices) {
-          const rect = notice.getBoundingClientRect()
-          if (
-            rect.width <= 0 ||
-            rect.height <= 0 ||
-            rect.bottom <= 0 ||
-            rect.right <= 0 ||
-            rect.top >= innerHeight ||
-            rect.left >= innerWidth
-          ) {
-            continue
-          }
-          let visible = true
-          for (let node: HTMLElement | null = notice; node; node = node.parentElement) {
-            const style = getComputedStyle(node)
-            if (
-              style.display === 'none' ||
-              style.visibility === 'hidden' ||
-              style.visibility === 'collapse' ||
-              Number(style.opacity) === 0
-            ) {
-              visible = false
-              break
-            }
-          }
-          if (!visible) continue
-          captured.__nocxLiveOutputGapReading = {
-            title: notice.querySelector('.ui-status-card__title')?.textContent ?? '',
-            description: notice.querySelector('.ui-status-card__desc')?.textContent ?? '',
-            count: notices.length,
-            rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
-          }
-          observer.disconnect()
-          return
-        }
-      })
-    }
-    observer.observe(document, {
-      subtree: true,
-      childList: true,
-      characterData: true,
-      attributes: true,
-    })
-    schedule()
-  }, sessionId)
-}
-
 async function freshClient(
   browser: Browser,
   endpoint: BackendEndpoint,
   label: string,
   onServerFrame?: (frame: string) => void,
-  beforeNavigate?: (page: Page) => Promise<void>,
 ): Promise<Page> {
   // baseURL explicitly: a context made by hand inherits nothing from the
   // config's `use`, so `goto('/')` would have no origin to resolve against.
@@ -269,7 +199,6 @@ async function freshClient(
   // On the failure report from its first byte, and the harness's to close.
   watchClient(page, label)
   await bindEndpoint(page, endpoint)
-  await beforeNavigate?.(page)
   await page.goto('/')
   return page
 }
@@ -736,43 +665,31 @@ test('a remote helper build survives a fresh coordinator, names what it lost, an
     // notification cannot race the assertions below.
     let liveOutputGap: { sessionId: string; start: number; end: number; reason: string } | null =
       null
-    // EVERY range the returned client is told about, in arrival order: the
-    // reclaim card subtracts them from the recording's account so the same
-    // lost bytes are never named twice, and the assertion below has to derive
-    // the card's number the same way (nocx-zg3k3.14.24).
-    const liveOutputGaps: { sessionId: string; start: number; end: number; reason: string }[] = []
-    returned = await freshClient(
-      browser,
-      endpoint,
-      'returned client',
-      (frame) => {
-        if (typeof frame !== 'string') return
-        let envelope: { method?: unknown; params?: Record<string, unknown> }
-        try {
-          envelope = JSON.parse(frame) as { method?: unknown; params?: Record<string, unknown> }
-        } catch {
-          return
+    returned = await freshClient(browser, endpoint, 'returned client', (frame) => {
+      if (typeof frame !== 'string') return
+      let envelope: { method?: unknown; params?: Record<string, unknown> }
+      try {
+        envelope = JSON.parse(frame) as { method?: unknown; params?: Record<string, unknown> }
+      } catch {
+        return
+      }
+      const params = envelope.params
+      if (
+        envelope.method === 'session.outputGap' &&
+        params &&
+        params.sessionId === liveBefore.sessionId &&
+        typeof params.start === 'number' &&
+        typeof params.end === 'number' &&
+        typeof params.reason === 'string'
+      ) {
+        liveOutputGap = {
+          sessionId: params.sessionId as string,
+          start: params.start,
+          end: params.end,
+          reason: params.reason,
         }
-        const params = envelope.params
-        if (
-          envelope.method === 'session.outputGap' &&
-          params &&
-          params.sessionId === liveBefore.sessionId &&
-          typeof params.start === 'number' &&
-          typeof params.end === 'number' &&
-          typeof params.reason === 'string'
-        ) {
-          liveOutputGap = {
-            sessionId: params.sessionId as string,
-            start: params.start,
-            end: params.end,
-            reason: params.reason,
-          }
-          liveOutputGaps.push(liveOutputGap)
-        }
-      },
-      (page) => captureFirstVisibleLiveOutputGap(page, liveBefore.sessionId),
-    )
+      }
+    })
     const returnedPane = paneForSession(returned, liveBefore.sessionId)
     await expect(returnedPane).toBeVisible({ timeout: 120_000 })
 
@@ -843,10 +760,11 @@ test('a remote helper build survives a fresh coordinator, names what it lost, an
       .first()
     await expect(returnedBlock).toBeVisible({ timeout: 60_000 })
 
-    // ── the actual live event and its distinct notice ──────────────────────
+    // ── the actual live event, and no announcement of it in the pane ───────
     // The new client must receive the control-plane event, not merely recover
-    // historical gap metadata. Its live title is deliberately distinct from
-    // the reclaim card below.
+    // historical gap metadata. Nothing is painted for it: the card that used
+    // to paint it is gone (nocx-ipuy3, the owner's decision of 2026-11-08),
+    // and a loss with no readable rows behind it says nothing in a scrollback.
     await expect
       .poll(() => liveOutputGap, {
         timeout: 60_000,
@@ -857,87 +775,31 @@ test('a remote helper build survives a fresh coordinator, names what it lost, an
     expect(liveOutputGap!.reason).toBe('hostWindow')
     expect(liveOutputGap!.end).toBeGreaterThan(liveOutputGap!.start)
 
-    // The live warning expires after eight seconds; restoration above may
-    // legitimately take longer. Assert what was actually visible on its first
-    // paint, not whether a transient card survived these unrelated waits.
-    const liveReading = await returned.evaluate(
-      () =>
-        (window as Window & { __nocxLiveOutputGapReading?: VisibleLiveOutputGap })
-          .__nocxLiveOutputGapReading ?? null,
-    )
-    expect(liveReading, 'no visible live-output warning was captured').not.toBeNull()
-    expect(liveReading!.count).toBe(1)
-    expect(liveReading!.rect.width).toBeGreaterThan(0)
-    expect(liveReading!.rect.height).toBeGreaterThan(0)
-    const covered: Array<{ start: number; end: number }> = []
-    const prefixTitles: string[] = []
-    let missing = 0
-    for (const gap of liveOutputGaps) {
-      const uncovered = uncoveredGapRanges(gap, covered)
-      covered.push(...uncovered)
-      missing += uncovered.reduce((total, range) => total + range.end - range.start, 0)
-      if (missing > 0) prefixTitles.push(`${missing} bytes of live output are missing`)
-    }
-    expect(prefixTitles).toContain(liveReading!.title)
-    expect(liveReading!.description).toBe("The execution host's output window moved past this tab.")
-
-    // ── what remains missing, and the SAME number the ledger states ───────
+    // ── what remains missing, off the coordinator's own method ────────────
     //
-    // THE CARD'S NUMBER IS NOT A PHOTOGRAPH OF THE RECLAIM (nocx-zg3k3.14.24).
-    // The reclaim read session.recoveryStatus before it attached — while the
-    // recorder was still appending the bytes the helper replayed — and the
-    // retention bound goes on evicting as it does. On PR #380's CI this
-    // assertion compared that stale number with a fresh reading (3.1 MB
-    // against 3.6 MB) and failed on a product that was only doing what it was
-    // written to do. The fix is not a tolerance: the recording now PUSHES its
-    // revised answer (session.recoveryChanged) and the card is rebuilt from
-    // it, so `session.recoveryStatus` and the card are one fact at one instant.
+    // THE FACT IS STILL ASSERTED WHERE IT LIVES; ONLY THE CARD IS GONE.
+    // session.recoveryStatus states the recording's holes, and this spec still
+    // checks them by name: a cap loss exists, a hostWindow range exists, and
+    // the range the returned client was told about is one of them. What
+    // changed (nocx-ipuy3) is that the pane no longer states a session-level
+    // total above the terminal: the number named no place, the record's cap
+    // kept growing it, and the card came back every time the window did.
     //
-    // THE EXPECTED VALUE IS DERIVED BY THE PRODUCT, NOT BY THIS FILE.
-    // `recoveryAccount` is what the card renders: every missing byte across
-    // all reasons, minus the ranges the live notice already names. Summing the
-    // recording's `cap` gaps here instead — which this spec used to do — is a
-    // second owner of that arithmetic, and it states a different fact from the
-    // card's the moment anything but the cap is missing.
-    const notice = returnedPane
-      .locator('.nocx-recovery-notice')
-      .filter({ hasText: /of this session's output is missing/i })
-    await expect(notice).toBeVisible({ timeout: 60_000 })
-
-    // A WAIT ON THE CARD'S OWN VALUE, not on a duration and not a retry: the
-    // poll settles the instant the two agree, and it agrees because the
-    // recording told the pane what its answer became. Both numbers are read
-    // inside the same pass, so what is asserted is that the card and the
-    // ledger agree NOW — which is the whole of the criterion.
-    await expect
-      .poll(
-        async () => {
-          const ledger = await recoveryStatus(endpoint, liveAfter!)
-          const account = recoveryAccount(ledger, liveOutputGaps)
-          const stated =
-            account === null
-              ? null
-              : `${formatBytes(account.missing)} of this session's output is missing`
-          const card = await notice.locator('.ui-status-card__title').textContent()
-          return card === stated ? null : `card ${String(card)} / ledger ${String(stated)}`
-        },
-        {
-          timeout: 60_000,
-          intervals: [250],
-          message: 'the card never reached the number the recording states',
-        },
-      )
-      .toBeNull()
-
+    // THE REPLACEMENT IS A LINE AT A CUT IN THE BLOCK'S OWN ROWS, and it may
+    // not blame this session's size limit for these bytes: the host's window
+    // took them before they were ever rows on this machine, while the cap's
+    // own hole is in the RECORDING — bytes the runtime still holds — and so is
+    // not a cut in anything a person can scroll to. The old card-versus-ledger
+    // comparison (nocx-zg3k3.14.24) is replaced by these two assertions: the
+    // ledger's numbers are what they always were, and no line claims them.
     const finalOutput = await recoveryStatus(endpoint, liveAfter!)
     const capLossBytes = finalOutput.gaps
       .filter((gap) => gap.reason === 'cap')
       .reduce((total, gap) => total + gap.end - gap.start, 0)
     expect(capLossBytes).toBeGreaterThan(0)
-    await expect(notice.locator('.ui-status-card__desc')).toContainText(
-      "this session's own size limit dropped",
-    )
-    await expect(notice.locator('.ui-status-card__desc')).not.toContainText('hostWindow')
+    await expect(returnedPane.locator('.nocx-recovery-notice')).toHaveCount(0)
+    await expect(returnedPane.locator('[data-notice-kind="live-output-gap"]')).toHaveCount(0)
+    await expect(returnedPane.locator('.cmd-output-gap', { hasText: 'size limit' })).toHaveCount(0)
 
     // The same fact off the coordinator's own method, where the reason is a
     // field rather than a sentence.

@@ -1179,11 +1179,16 @@ export function blockOutputText(blockEl: HTMLElement | null): string {
     blockEl.querySelector<HTMLElement>('.cmd-output') ??
     blockEl.querySelector<HTMLElement>('[data-output-incomplete]')
   if (!outputEl) return ''
-  const lines = outputEl.querySelectorAll(OUTPUT_ROW_SELECTOR)
+  // THE CUT'S SENTENCE IS OURS, NOT THE COMMAND'S (nocx-ipuy3). It marks a
+  // stretch the store no longer holds, so it is a row of the block as a
+  // person reads it and NOT a line the program printed: a copy is the
+  // program's output, and storedBlockRowsText — the same read off the model —
+  // has no such line either.
+  const lines = Array.from(outputEl.querySelectorAll(OUTPUT_ROW_SELECTOR)).filter(
+    (line) => !line.classList.contains('cmd-output-gap'),
+  )
   if (lines.length === 0) return outputEl.textContent ?? ''
-  return Array.from(lines)
-    .map((line) => line.textContent ?? '')
-    .join('\n')
+  return lines.map((line) => line.textContent ?? '').join('\n')
 }
 
 /** The block's command as text, for a human label naming the block (the

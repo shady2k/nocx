@@ -1644,6 +1644,24 @@ export class PaneManager {
     const registered = opened.created.then(
       () => {
         this.registered.add(opened.paneId)
+        // AND THEN ASK FOR THE STRIP, because a create seats the tab beside
+        // its anchor by RENUMBERING the strip, and its answer carries only
+        // the row it minted (nocx-ouru5.1.3). The neighbours' new positions
+        // are the backend's to state, so the order is READ rather than
+        // derived — the same rule the worker's own tab follows when it
+        // arrives over workers.tabCreated.
+        //
+        // Folding the one row and sorting by the positions the cache still
+        // holds compared the new tab's fresh position with a neighbour's
+        // stale one; the tie broke by array order, and with the first of five
+        // tabs active the new tab landed third instead of second.
+        //
+        // NOT AWAITED: the session opens on the create's own answer, and
+        // holding the shell behind a round trip only the chrome needs would
+        // put that round trip in the person's way. A failed read is not a
+        // failed tab — readLayout reports it, and the strip keeps the order it
+        // drew.
+        void this.readLayout()
         return true
       },
       (err: unknown) => {

@@ -18979,18 +18979,24 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
-// A reclaimed pane says what is missing (nocx-fz4qa)
 // ═══════════════════════════════════════════════════════════════════════════
-// The backend already tells a reclaiming client which byte ranges it could
-// not give back (session.recoveryStatus's `gaps`, plus the renderer-derived
-// `unrecorded` stretch nothing kept), and until this bead nothing read it: a
-// pane came back short and said nothing about it. AGENTS.md forbids exactly
-// that — a soft degrade must be visible in the product.
+// A reclaimed pane announces nothing about a hole it cannot point at
+// (nocx-ipuy3, the owner's decision of 2026-11-08)
+// ═══════════════════════════════════════════════════════════════════════════
+// The reclaim used to mount a card above the pane stating the bytes the
+// recording's size limit had dropped. The owner removed it: the number named
+// no place a person could look at, a full-screen program's redraws kept
+// growing it so the card came back right after it was closed, and the bytes a
+// person can READ are stated where they were cut — in the block's own
+// history (scrollback/block-rows.ts). What is left here is the other half:
+// the pane says nothing, whatever the session recovered or however many live
+// gaps arrive. A soft degrade is still visible in the product; the place it
+// is visible moved from a banner to the output itself.
 //
 // These go through the ADOPTION seam a restored tab actually takes
-// (TerminalContentHooks.adoptSession), not through the notice module, so
-// they can report the wiring being absent.
-describe('a reclaimed pane says what is missing (nocx-fz4qa)', () => {
+// (TerminalContentHooks.adoptSession), not through a notice module, so a
+// second announcement points at the wiring and not at a helper.
+describe('a reclaimed pane raises no missing-output card (nocx-ipuy3)', () => {
   /** The pane's own reclaim: a session handle carrying what the claim
    *  recovered, handed back by the thunk PaneManager supplies. */
   function reclaiming(recovered: SessionRecovery | null) {
@@ -19001,642 +19007,78 @@ describe('a reclaimed pane says what is missing (nocx-fz4qa)', () => {
     }
   }
 
-  const cardTitle = (tab: Pane) =>
-    tab.pane.querySelector('.nocx-recovery-notice .ui-status-card__title')?.textContent ?? null
-  const cardDesc = (tab: Pane) =>
-    tab.pane.querySelector('.nocx-recovery-notice .ui-status-card__desc')?.textContent ?? null
-  const liveCard = (tab: Pane) => tab.pane.querySelector('[data-notice-kind="live-output-gap"]')
-  const liveTitle = (tab: Pane) =>
-    liveCard(tab)?.querySelector('.ui-status-card__title')?.textContent ?? null
-  const liveDesc = (tab: Pane) =>
-    liveCard(tab)?.querySelector('.ui-status-card__desc')?.textContent ?? null
   const fireGap = (session: SessionFake, start: number, end: number, reason = 'hostWindow') =>
     session.fireOutputGap({ sessionId: session.sessionId, start, end, reason })
 
-  it('keeps a screenshot-shaped burst of 32 distinct losses in the same single live card', async () => {
-    const { session, hooks } = reclaiming(null)
-    const { tab, teardown } = await mountTerminal(makeClipboard(), {
-      hooks,
-      attachToDocument: true,
-    })
-    try {
-      fireGap(session, 0, 32768)
-      const host = liveCard(tab)
-      const dismiss = host?.querySelector('button[aria-label="Dismiss"]')
-      expect(host).not.toBeNull()
-      expect(dismiss).not.toBeNull()
-      for (let i = 1; i < 32; i++) {
-        fireGap(session, i * 32768, (i + 1) * 32768)
-        expect(tab.pane.querySelectorAll('[data-notice-kind="live-output-gap"]')).toHaveLength(1)
-        expect(liveCard(tab)).toBe(host)
-        expect(liveCard(tab)?.querySelector('button[aria-label="Dismiss"]')).toBe(dismiss)
-      }
-      expect(liveTitle(tab)).toBe('1048576 bytes of live output are missing')
-      expect(tab.pane.querySelectorAll('.nocx-recovery-notice')).toHaveLength(1)
-    } finally {
-      teardown()
-    }
-  })
+  /** Any card this pane raised over the terminal: the recovery card's own
+   *  host, the live gap's marker, and every kit status card a reclaim could
+   *  have mounted (the integration and publish cards have their own tests). */
+  const cards = (tab: Pane) => [
+    ...tab.pane.querySelectorAll(
+      '.nocx-recovery-notice, [data-notice-kind="live-output-gap"], .ui-status-card',
+    ),
+  ]
 
-  it('unions overlaps and duplicates without attributing unknown-only loss to the host', async () => {
-    const { session, hooks } = reclaiming(null)
-    const { tab, teardown } = await mountTerminal(makeClipboard(), {
-      hooks,
-      attachToDocument: true,
-    })
-    try {
-      fireGap(session, 10, 20, 'future-cause')
-      expect(liveTitle(tab)).toBe('10 bytes of live output are missing')
-      expect(liveDesc(tab)).not.toContain('execution host')
-      const host = liveCard(tab)
-
-      // A different reason on already accounted bytes adds neither bytes nor a cause.
-      fireGap(session, 10, 20)
-      expect(liveDesc(tab)).not.toContain('execution host')
-      fireGap(session, 15, 25)
-      fireGap(session, 10, 20, 'future-cause')
-      expect(liveTitle(tab)).toBe('15 bytes of live output are missing')
-      expect(liveDesc(tab)).toContain('execution host')
-      expect(liveDesc(tab)).toContain('unknown cause')
-      expect(liveCard(tab)).toBe(host)
-      expect(tab.pane.querySelectorAll('[data-notice-kind="live-output-gap"]')).toHaveLength(1)
-    } finally {
-      teardown()
-    }
-  })
-
-  it('expires at the original 8000ms deadline even when new bytes arrive at 4000ms', async () => {
-    const { session, hooks } = reclaiming(null)
-    const { tab, teardown } = await mountTerminal(makeClipboard(), {
-      hooks,
-      attachToDocument: true,
-    })
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-    try {
-      fireGap(session, 10, 20)
-      const host = liveCard(tab)
-      expect(host).not.toBeNull()
-      await vi.advanceTimersByTimeAsync(4000)
-      fireGap(session, 15, 25)
-      expect(liveTitle(tab)).toBe('15 bytes of live output are missing')
-      expect(liveCard(tab)).toBe(host)
-      await vi.advanceTimersByTimeAsync(3999)
-      fireGap(session, 10, 20)
-      expect(liveCard(tab)).toBe(host)
-      await vi.advanceTimersByTimeAsync(1)
-      expect(liveCard(tab)).toBeNull()
-
-      fireGap(session, 10, 20)
-      fireGap(session, 15, 25)
-      expect(liveCard(tab)).toBeNull()
-      fireGap(session, 30, 35)
-      expect(liveTitle(tab)).toBe('20 bytes of live output are missing')
-      expect(liveCard(tab)).not.toBe(host)
-      expect(tab.pane.querySelectorAll('[data-notice-kind="live-output-gap"]')).toHaveLength(1)
-      await vi.advanceTimersByTimeAsync(7999)
-      expect(liveCard(tab)).not.toBeNull()
-      await vi.advanceTimersByTimeAsync(1)
-      expect(liveCard(tab)).toBeNull()
-    } finally {
-      teardown()
-      vi.useRealTimers()
-    }
-  })
-
-  it('dismisses only the live presentation and rearms a cumulative card only for new loss', async () => {
-    const { session, hooks } = reclaiming(null)
-    const { tab, teardown } = await mountTerminal(makeClipboard(), {
-      hooks,
-      attachToDocument: true,
-    })
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-    try {
-      fireGap(session, 10, 20)
-      fireGap(session, 15, 25)
-      expect(liveTitle(tab)).toBe('15 bytes of live output are missing')
-      await vi.advanceTimersByTimeAsync(4000)
-      liveCard(tab)!.querySelector<HTMLButtonElement>('button[aria-label="Dismiss"]')!.click()
-      expect(liveCard(tab)).toBeNull()
-      fireGap(session, 10, 20)
-      fireGap(session, 15, 25)
-      expect(liveCard(tab)).toBeNull()
-
-      fireGap(session, 30, 35, 'future-cause')
-      expect(liveTitle(tab)).toBe('20 bytes of live output are missing')
-      expect(liveDesc(tab)).toContain('execution host')
-      expect(liveDesc(tab)).toContain('unknown cause')
-      const remounted = liveCard(tab)
-      // The dismissed card's original deadline must not remove its replacement.
-      await vi.advanceTimersByTimeAsync(4000)
-      expect(liveCard(tab)).toBe(remounted)
-      await vi.advanceTimersByTimeAsync(3999)
-      expect(liveCard(tab)).toBe(remounted)
-      await vi.advanceTimersByTimeAsync(1)
-      expect(liveCard(tab)).toBeNull()
-    } finally {
-      teardown()
-      vi.useRealTimers()
-    }
-  })
-
-  it('keeps expired live bytes out of later historical recovery revisions', async () => {
-    const { session, hooks } = reclaiming({
-      produced: 60,
+  it('says nothing for a recovered hole, whatever its reason or size', async () => {
+    const { hooks } = reclaiming({
+      produced: 4_262_996,
       gaps: [
-        { start: 10, end: 30, reason: 'hostWindow' },
-        { start: 50, end: 60, reason: 'cap' },
+        { start: 3_043, end: 98_304, reason: 'hostWindow' },
+        { start: 131_072, end: 4_046_848, reason: 'cap' },
       ],
     })
-    const { tab, teardown } = await mountTerminal(makeClipboard(), {
-      hooks,
-      attachToDocument: true,
-    })
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-    try {
-      fireGap(session, 10, 20)
-      fireGap(session, 15, 25)
-      await vi.advanceTimersByTimeAsync(8000)
-      expect(liveCard(tab)).toBeNull()
-      session.fireRecoveryChanged({
-        produced: 65,
-        gaps: [
-          { start: 10, end: 30, reason: 'hostWindow' },
-          { start: 50, end: 65, reason: 'cap' },
-        ],
-      })
-      expect(tab.pane.querySelectorAll('.nocx-recovery-notice')).toHaveLength(1)
-      expect(cardTitle(tab)).toBe("20 B of this session's output is missing")
-      expect(cardDesc(tab)).toContain('5 B went missing as "hostWindow"')
-      expect(cardDesc(tab)).toContain("this session's own size limit dropped the oldest 15 B")
-      fireGap(session, 10, 20)
-      expect(liveCard(tab)).toBeNull()
-    } finally {
-      teardown()
-      vi.useRealTimers()
-    }
-  })
-
-  it.each(['rejected', 'pending'] as const)(
-    'expires the live warning at its original deadline while reconnect is %s',
-    async (outcome) => {
-      const client = makeClient()
-      const { content, tab, teardown } = await mountTerminal(
-        makeClipboard(),
-        { attachToDocument: true },
-        client,
-      )
-      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-      let rejectOpening!: (reason: Error) => void
-      const opening = new Promise<SessionFake>((_resolve, reject) => {
-        rejectOpening = reject
-      })
-      let reconnect: Promise<boolean> | undefined
-      try {
-        const session = client._sessions[0]
-        fireGap(session, 10, 20)
-        const notice = liveCard(tab)
-        expect(notice).not.toBeNull()
-        await vi.advanceTimersByTimeAsync(4000)
-        const loseSession = session.onExit.mock.calls[0][0] as (exit: {
-          sessionId: string
-          cause: 'interrupted'
-        }) => void
-        loseSession({ sessionId: session.sessionId, cause: 'interrupted' })
-        client.openSession.mockReturnValueOnce(opening)
-        reconnect = content.reconnect()
-        if (outcome === 'rejected') {
-          rejectOpening(new Error('reconnect refused'))
-          expect(await reconnect).toBe(false)
-        }
-        await vi.advanceTimersByTimeAsync(3999)
-        expect(liveCard(tab)).toBe(notice)
-        await vi.advanceTimersByTimeAsync(1)
-        expect(liveCard(tab)).toBeNull()
-      } finally {
-        rejectOpening(new Error('end pending reconnect'))
-        await reconnect
-        teardown()
-        vi.useRealTimers()
-      }
-    },
-  )
-
-  it('resets the live count and causes on reconnect and ignores the old session and deadline', async () => {
-    const client = makeClient()
-    const { content, tab, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-    const timeout = vi.spyOn(globalThis, 'setTimeout')
-    const clearTimeout = vi.spyOn(globalThis, 'clearTimeout')
-    try {
-      const first = client._sessions[0]
-      fireGap(first, 10, 20)
-      const deadlineIndex = timeout.mock.calls.findIndex(([, delay]) => delay === 8000)
-      expect(deadlineIndex).toBeGreaterThanOrEqual(0)
-      const oldDeadline: unknown = timeout.mock.results[deadlineIndex].value
-      await vi.advanceTimersByTimeAsync(4000)
-      const loseSession = first.onExit.mock.calls[0][0] as (exit: {
-        sessionId: string
-        cause: 'interrupted'
-      }) => void
-      loseSession({ sessionId: first.sessionId, cause: 'interrupted' })
-      expect(await content.reconnect()).toBe(true)
-      expect(clearTimeout).toHaveBeenCalledWith(oldDeadline)
-      expect(liveCard(tab)).toBeNull()
-
-      const second = client._sessions[1]
-      fireGap(first, 30, 35)
-      expect(liveCard(tab)).toBeNull()
-      // Reuse old offsets: the ledger as well as the displayed total must reset.
-      fireGap(second, 10, 17, 'future-cause')
-      expect(liveTitle(tab)).toBe('7 bytes of live output are missing')
-      const replacement = liveCard(tab)
-      fireGap(first, 40, 45)
-      expect(liveTitle(tab)).toBe('7 bytes of live output are missing')
-      expect(liveDesc(tab)).not.toContain('execution host')
-      await vi.advanceTimersByTimeAsync(4000)
-      expect(liveCard(tab)).toBe(replacement)
-      await vi.advanceTimersByTimeAsync(3999)
-      expect(liveCard(tab)).toBe(replacement)
-      await vi.advanceTimersByTimeAsync(1)
-      expect(liveCard(tab)).toBeNull()
-    } finally {
-      teardown()
-      timeout.mockRestore()
-      clearTimeout.mockRestore()
-      vi.useRealTimers()
-    }
-  })
-
-  it('cancels the live deadline on pane close and refuses later session gaps', async () => {
-    const { session, hooks } = reclaiming(null)
-    const { tab, teardown } = await mountTerminal(makeClipboard(), {
-      hooks,
-      attachToDocument: true,
-    })
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-    const timeout = vi.spyOn(globalThis, 'setTimeout')
-    const clearTimeout = vi.spyOn(globalThis, 'clearTimeout')
-    try {
-      fireGap(session, 10, 20)
-      expect(liveCard(tab)).not.toBeNull()
-      const deadlineIndex = timeout.mock.calls.findIndex(([, delay]) => delay === 8000)
-      expect(deadlineIndex).toBeGreaterThanOrEqual(0)
-      const deadline: unknown = timeout.mock.results[deadlineIndex].value
-      tab.close()
-      expect(clearTimeout).toHaveBeenCalledWith(deadline)
-      expect(liveCard(tab)).toBeNull()
-      fireGap(session, 30, 35)
-      await vi.advanceTimersByTimeAsync(8000)
-      fireGap(session, 40, 45)
-      expect(liveCard(tab)).toBeNull()
-      expect(document.querySelector('[data-notice-kind="live-output-gap"]')).toBeNull()
-    } finally {
-      teardown()
-      timeout.mockRestore()
-      clearTimeout.mockRestore()
-      vi.useRealTimers()
-    }
-  })
-
-  it('aggregates, dismisses and expires live notices independently in two panes', async () => {
-    const first = reclaiming(null)
-    const second = reclaiming(null)
-    const left = await mountTerminal(makeClipboard(), {
-      hooks: first.hooks,
-      attachToDocument: true,
-    })
-    const right = await mountTerminal(makeClipboard(), {
-      hooks: second.hooks,
-      attachToDocument: true,
-    })
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-    try {
-      fireGap(first.session, 10, 20)
-      await vi.advanceTimersByTimeAsync(4000)
-      fireGap(second.session, 10, 30, 'future-cause')
-      fireGap(first.session, 15, 25)
-      expect(liveTitle(left.tab)).toBe('15 bytes of live output are missing')
-      expect(liveTitle(right.tab)).toBe('20 bytes of live output are missing')
-      expect(liveDesc(right.tab)).not.toContain('execution host')
-      const rightHost = liveCard(right.tab)
-      liveCard(left.tab)!.querySelector<HTMLButtonElement>('button[aria-label="Dismiss"]')!.click()
-      expect(liveCard(left.tab)).toBeNull()
-      expect(liveCard(right.tab)).toBe(rightHost)
-      fireGap(first.session, 10, 20)
-      expect(liveCard(left.tab)).toBeNull()
-      await vi.advanceTimersByTimeAsync(4000)
-      expect(liveCard(right.tab)).toBe(rightHost)
-      fireGap(first.session, 30, 35)
-      expect(liveTitle(left.tab)).toBe('20 bytes of live output are missing')
-      await vi.advanceTimersByTimeAsync(4000)
-      expect(liveCard(right.tab)).toBeNull()
-      expect(liveTitle(left.tab)).toBe('20 bytes of live output are missing')
-      await vi.advanceTimersByTimeAsync(4000)
-      expect(liveCard(left.tab)).toBeNull()
-    } finally {
-      left.teardown()
-      right.teardown()
-      vi.useRealTimers()
-    }
-  })
-
-  it('tells the user how much of the run is gone and that the size limit took it', async () => {
-    const { hooks } = reclaiming({
-      produced: 0,
-      gaps: [{ start: 0, end: 3_000_000, reason: 'cap' }],
-    })
-    const { tab, teardown } = await mountTerminal(makeClipboard(), { hooks })
-    try {
-      await vi.waitFor(() => expect(cardTitle(tab)).not.toBeNull())
-      expect(cardTitle(tab)).toContain('3.0 MB')
-      expect(cardDesc(tab)).toContain('size limit')
-    } finally {
-      teardown()
-    }
-  })
-
-  it('keeps distinct historical cap loss beside a live host-window notice without double-counting', async () => {
-    const hostWindow = { start: 2722, end: 98_304, reason: 'hostWindow' }
-    const cap = { start: 131_072, end: 4_046_848, reason: 'cap' }
-    const { session, hooks } = reclaiming({
-      produced: 0,
-      gaps: [hostWindow, cap],
-    })
-    const { tab, teardown } = await mountTerminal(makeClipboard(), { hooks })
-    try {
-      session.fireOutputGap({
-        sessionId: session.sessionId,
-        ...hostWindow,
-      })
-
-      const notices = [...tab.pane.querySelectorAll('.nocx-recovery-notice')]
-      expect(notices).toHaveLength(2)
-      const cards = notices.map((notice) => ({
-        title: notice.querySelector('.ui-status-card__title')?.textContent ?? '',
-        description: notice.querySelector('.ui-status-card__desc')?.textContent ?? '',
-      }))
-      expect(cards.map((card) => card.title)).toContain('95582 bytes of live output are missing')
-      expect(cards.map((card) => card.title)).toContain(
-        "3.9 MB of this session's output is missing",
-      )
-      const historical = cards.find((card) => card.title.includes("of this session's output"))!
-      expect(historical.description).toContain(
-        "this session's own size limit dropped the oldest 3.9 MB",
-      )
-      expect(historical.description).not.toContain('hostWindow')
-    } finally {
-      teardown()
-    }
-  })
-
-  // THE CARD IS NOT A PHOTOGRAPH (nocx-zg3k3.14.24). The reclaim reads
-  // session.recoveryStatus once, before it attaches; the recording goes on
-  // appending and its retention bound goes on dropping, so that answer is a
-  // fact about an instant that has passed. On PR #380's CI the card said
-  // 3.1 MB while a fresh session.recoveryStatus said 3.6 MB about the same
-  // session, and nothing recomputed it. A person who stays on the pane must
-  // see the number reach the ledger's without reopening the tab.
-  it('states the recording’s own revised total without reopening the pane (nocx-zg3k3.14.24)', async () => {
-    const { session, hooks } = reclaiming({
-      produced: 3_400_000,
-      gaps: [{ start: 131_072, end: 3_446_848, reason: 'cap' }],
-    })
-    const { tab, teardown } = await mountTerminal(makeClipboard(), { hooks })
-    try {
-      await vi.waitFor(() =>
-        expect(cardTitle(tab)).toBe("3.3 MB of this session's output is missing"),
-      )
-      expect(cardDesc(tab)).toContain("this session's own size limit dropped the oldest 3.3 MB")
-
-      // …and the recording drops more while the person is reading it.
-      session.fireRecoveryChanged({
-        produced: 4_262_996,
-        gaps: [{ start: 131_072, end: 4_046_848, reason: 'cap' }],
-      })
-
-      await vi.waitFor(() =>
-        expect(cardTitle(tab)).toBe("3.9 MB of this session's output is missing"),
-      )
-      expect(cardDesc(tab)).toContain("this session's own size limit dropped the oldest 3.9 MB")
-    } finally {
-      teardown()
-    }
-  })
-
-  it('does not rebuild the card for a revision that states the same total (nocx-zg3k3.14.24)', async () => {
-    const { session, hooks } = reclaiming({
-      produced: 3_400_000,
-      gaps: [{ start: 131_072, end: 3_446_848, reason: 'cap' }],
-    })
-    const { tab, teardown } = await mountTerminal(makeClipboard(), { hooks })
-    try {
-      await vi.waitFor(() =>
-        expect(cardTitle(tab)).toBe("3.3 MB of this session's output is missing"),
-      )
-      const mounted = tab.pane.querySelector('.nocx-recovery-notice')
-      expect(mounted).not.toBeNull()
-
-      // The recording's FRONTIER moved — it appended bytes — while the
-      // account it states did not. A saturated recording revises on every
-      // chunk it appends, and a card rebuilt for each of those would replace a
-      // DOM node and re-measure the pane for a number nobody can see change.
-      session.fireRecoveryChanged({
-        produced: 3_410_000,
-        gaps: [{ start: 131_072, end: 3_446_848, reason: 'cap' }],
-      })
-      await Promise.resolve()
-
-      expect(tab.pane.querySelector('.nocx-recovery-notice')).toBe(mounted)
-      expect(cardTitle(tab)).toBe("3.3 MB of this session's output is missing")
-    } finally {
-      teardown()
-    }
-  })
-
-  it('keeps a revised total from counting the live notice’s bytes twice (nocx-zg3k3.14.24)', async () => {
-    const { session, hooks } = reclaiming({
-      produced: 3_400_000,
-      gaps: [{ start: 3_043, end: 98_304, reason: 'hostWindow' }],
-    })
-    const { tab, teardown } = await mountTerminal(makeClipboard(), { hooks })
-    try {
-      session.fireOutputGap({
-        sessionId: session.sessionId,
-        start: 3_043,
-        end: 98_304,
-        reason: 'hostWindow',
-      })
-      session.fireRecoveryChanged({
-        produced: 4_262_996,
-        gaps: [
-          { start: 3_043, end: 98_304, reason: 'hostWindow' },
-          { start: 131_072, end: 4_046_848, reason: 'cap' },
-        ],
-      })
-
-      await vi.waitFor(() =>
-        expect(cardTitle(tab)).toBe("3.9 MB of this session's output is missing"),
-      )
-      expect(cardDesc(tab)).not.toContain('hostWindow')
-    } finally {
-      teardown()
-    }
-  })
-
-  it('unions overlapping live losses into one card and dismisses it independently of history', async () => {
-    const { session, hooks } = reclaiming({
-      produced: 0,
-      gaps: [
-        { start: 10, end: 30, reason: 'hostWindow' },
-        { start: 50, end: 60, reason: 'cap' },
-      ],
-    })
-    const { tab, teardown } = await mountTerminal(makeClipboard(), {
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), {
       hooks,
       attachToDocument: true,
     })
     try {
-      session.fireOutputGap({
-        sessionId: session.sessionId,
-        start: 10,
-        end: 20,
-        reason: 'hostWindow',
-      })
-      session.fireOutputGap({
-        sessionId: session.sessionId,
-        start: 15,
-        end: 25,
-        reason: 'hostWindow',
-      })
-      session.fireOutputGap({
-        sessionId: session.sessionId,
-        start: 10,
-        end: 20,
-        reason: 'hostWindow',
-      })
-
-      const notices = [...tab.pane.querySelectorAll('.nocx-recovery-notice')]
-      expect(notices).toHaveLength(2)
-      const titleOf = (notice: Element) =>
-        notice.querySelector('.ui-status-card__title')?.textContent ?? ''
-      expect(notices.map(titleOf)).toContain('15 bytes of live output are missing')
-      expect(notices.map(titleOf)).toContain("15 B of this session's output is missing")
-      const historical = notices.find((notice) =>
-        titleOf(notice).includes("of this session's output"),
-      )!
-      expect(historical.querySelector('.ui-status-card__desc')?.textContent).toContain(
-        '5 B went missing as "hostWindow"',
-      )
-      expect(historical.querySelector('.ui-status-card__desc')?.textContent).toContain(
-        "this session's own size limit dropped the oldest 10 B",
-      )
-
-      const live = tab.pane.querySelector('[data-notice-kind="live-output-gap"]')!
-      live.querySelector<HTMLButtonElement>('button[aria-label="Dismiss"]')!.click()
-      expect(tab.pane.querySelectorAll('.nocx-recovery-notice')).toHaveLength(1)
-      expect(tab.pane.querySelector('[data-notice-kind="live-output-gap"]')).toBeNull()
-      expect(tab.pane.querySelector('.nocx-recovery-notice')).toBe(historical)
-      expect(titleOf(historical)).toBe("15 B of this session's output is missing")
+      // The bind that starts the session is where the old card was decided,
+      // and the pane is mounted by the time the pane is ready.
+      await expect(content.ready).resolves.toBe(true)
+      expect(cards(tab)).toHaveLength(0)
     } finally {
       teardown()
     }
   })
 
-  it('does not resurrect a dismissed historical card when another live gap arrives', async () => {
-    const { session, hooks } = reclaiming({
-      produced: 0,
-      gaps: [{ start: 10, end: 20, reason: 'cap' }],
-    })
-    const { tab, teardown } = await mountTerminal(makeClipboard(), {
+  it('says nothing when the recovery answer could not be read', async () => {
+    const { hooks } = reclaiming({ produced: 0, gaps: [], statusUnavailable: true })
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), {
       hooks,
       attachToDocument: true,
     })
-    try {
-      const historical = () =>
-        [...tab.pane.querySelectorAll('.nocx-recovery-notice')].find((notice) =>
-          notice
-            .querySelector('.ui-status-card__title')
-            ?.textContent?.includes("of this session's output"),
-        )
-      await vi.waitFor(() => expect(historical()).toBeDefined())
-      historical()!.querySelector<HTMLButtonElement>('button[aria-label="Dismiss"]')!.click()
-      await vi.waitFor(() => expect(historical()).toBeUndefined())
-
-      session.fireOutputGap({
-        sessionId: session.sessionId,
-        start: 30,
-        end: 35,
-        reason: 'hostWindow',
-      })
-      await vi.waitFor(() =>
-        expect(
-          [...tab.pane.querySelectorAll('.nocx-recovery-notice')].some((notice) =>
-            notice
-              .querySelector('.ui-status-card__title')
-              ?.textContent?.includes('live output are missing'),
-          ),
-        ).toBe(true),
-      )
-      expect(historical()).toBeUndefined()
-    } finally {
-      teardown()
-    }
-  })
-
-  it('keeps historical host-window loss visible when no live gap notification arrives', async () => {
-    const { hooks } = reclaiming({
-      produced: 0,
-      gaps: [{ start: 100, end: 200, reason: 'hostWindow' }],
-    })
-    const { tab, teardown } = await mountTerminal(makeClipboard(), { hooks })
-    try {
-      await vi.waitFor(() => expect(cardTitle(tab)).not.toBeNull())
-      expect(cardTitle(tab)).toBe("100 B of this session's output is missing")
-      expect(cardDesc(tab)).toContain('went missing as "hostWindow"')
-    } finally {
-      teardown()
-    }
-  })
-
-  it('names the unrecorded stretch, which is a different fact from the bound', async () => {
-    const { hooks } = reclaiming({
-      produced: 0,
-      gaps: [{ start: 100, end: 5100, reason: 'unrecorded' }],
-    })
-    const { tab, teardown } = await mountTerminal(makeClipboard(), { hooks })
-    try {
-      await vi.waitFor(() => expect(cardTitle(tab)).not.toBeNull())
-      expect(cardDesc(tab)).toContain('never recorded')
-      expect(cardDesc(tab)).not.toContain('size limit')
-    } finally {
-      teardown()
-    }
-  })
-
-  // The negative, and the reason the positive means anything.
-  it('says nothing when the reclaim recovered the whole recording', async () => {
-    const { hooks } = reclaiming({ produced: 8192, gaps: [] })
-    const { content, tab, teardown } = await mountTerminal(makeClipboard(), { hooks })
     try {
       await expect(content.ready).resolves.toBe(true)
-      expect(tab.pane.querySelector('.nocx-recovery-notice')).toBeNull()
+      expect(cards(tab)).toHaveLength(0)
     } finally {
       teardown()
     }
   })
 
-  // A pane that opened a fresh session recovered nothing and has nothing to
-  // report — `recovered` is null, and a card here would be a claim about a
-  // session that never had a past.
+  it('says nothing for a live gap, nor for a burst of them, and stays silent on dismissal-free expiry', async () => {
+    const { session, hooks } = reclaiming(null)
+    const { tab, teardown } = await mountTerminal(makeClipboard(), {
+      hooks,
+      attachToDocument: true,
+    })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      for (let index = 0; index < 32; index++) fireGap(session, index * 32768, (index + 1) * 32768)
+      fireGap(session, 0, 1000, 'future-cause')
+      await vi.advanceTimersByTimeAsync(16_000)
+      expect(cards(tab)).toHaveLength(0)
+      expect(tab.pane.textContent ?? '').not.toContain('bytes of live output are missing')
+    } finally {
+      teardown()
+      vi.useRealTimers()
+    }
+  })
+
   it('says nothing on a pane that opened its own session', async () => {
     const { content, tab, teardown } = await mountTerminal()
     try {
       await expect(content.ready).resolves.toBe(true)
-      expect(tab.pane.querySelector('.nocx-recovery-notice')).toBeNull()
+      expect(cards(tab)).toHaveLength(0)
     } finally {
       teardown()
     }
@@ -19662,131 +19104,8 @@ describe('a reclaimed pane says what is missing (nocx-fz4qa)', () => {
       teardown()
     }
   })
-
-  it('is taken away when the user dismisses it', async () => {
-    const { hooks } = reclaiming({
-      produced: 0,
-      gaps: [{ start: 0, end: 1000, reason: 'cap' }],
-    })
-    // In the document: Solid delegates `click` at the document root, so a
-    // detached pane never sees the press a user makes.
-    const { tab, teardown } = await mountTerminal(makeClipboard(), {
-      hooks,
-      attachToDocument: true,
-    })
-    try {
-      await vi.waitFor(() => expect(cardTitle(tab)).not.toBeNull())
-      const cross = [...tab.pane.querySelectorAll('button')].find(
-        (b) => b.getAttribute('aria-label') === 'Dismiss',
-      )
-      expect(cross).toBeDefined()
-      cross!.click()
-      await vi.waitFor(() => expect(tab.pane.querySelector('.nocx-recovery-notice')).toBeNull())
-    } finally {
-      teardown()
-    }
-  })
-  // nocx-ipuy3. THE WINDOW COMES BACK, and the hole it already told the
-  // person about has not changed. The card is a statement about a finished
-  // fact, so saying it again on every reopen reads as the close losing output
-  // again — the same bytes announced twice, and the second time as news.
-  it('does not announce the same hole again when the window reopens (nocx-ipuy3)', async () => {
-    window.localStorage.removeItem('nocx.recovery.announced.v1')
-    const session = makeSession({
-      recovered: { produced: 400, gaps: [{ start: 100, end: 300, reason: 'cap' }] },
-    })
-    const hooks = { adoptSession: () => Promise.resolve(asSessionHandleForTest(session)) }
-    const pane = anchoredPane('pane-reopen')
-
-    const first = await mountTerminal(makeClipboard(), { hooks, attachToDocument: true, pane })
-    try {
-      await vi.waitFor(() => expect(cardTitle(first.tab)).not.toBeNull())
-      expect(cardTitle(first.tab)).toBe("200 B of this session's output is missing")
-    } finally {
-      first.teardown()
-    }
-
-    const second = await mountTerminal(makeClipboard(), { hooks, attachToDocument: true, pane })
-    try {
-      await expect(second.content.ready).resolves.toBe(true)
-      expect(second.tab.pane.querySelector('.nocx-recovery-notice')).toBeNull()
-    } finally {
-      second.teardown()
-    }
-  })
-
-  // …AND A HOLE THAT GREW IS STILL ANNOUNCED, with only the growth: the bytes
-  // the person has not been told about are the whole of the new statement.
-  it('announces only the growth when the hole has grown since the last reopen (nocx-ipuy3)', async () => {
-    window.localStorage.removeItem('nocx.recovery.announced.v1')
-    const session = makeSession({
-      recovered: { produced: 400, gaps: [{ start: 20, end: 120, reason: 'cap' }] },
-    })
-    const hooks = { adoptSession: () => Promise.resolve(asSessionHandleForTest(session)) }
-    const pane = anchoredPane('pane-reopen-growth')
-
-    const first = await mountTerminal(makeClipboard(), { hooks, attachToDocument: true, pane })
-    try {
-      await vi.waitFor(() => expect(cardTitle(first.tab)).not.toBeNull())
-      expect(cardTitle(first.tab)).toBe("100 B of this session's output is missing")
-    } finally {
-      first.teardown()
-    }
-
-    // The retention bound has taken a further 60 bytes since that card.
-    session.recovered = { produced: 400, gaps: [{ start: 20, end: 180, reason: 'cap' }] }
-    const second = await mountTerminal(makeClipboard(), { hooks, attachToDocument: true, pane })
-    try {
-      await vi.waitFor(() => expect(cardTitle(second.tab)).not.toBeNull())
-      expect(cardTitle(second.tab)).toBe("60 B of this session's output is missing")
-      expect(cardDesc(second.tab)).toContain(
-        "this session's own size limit dropped the oldest 60 B",
-      )
-    } finally {
-      second.teardown()
-    }
-  })
-
-  // The same rule inside one window: a dismissal settles the hole as told, so
-  // a later revision of the SAME hole is silent and a grown one names the
-  // growth rather than resurrecting the whole statement.
-  it('re-announces after a dismissal only for the bytes the hole grew by (nocx-ipuy3)', async () => {
-    window.localStorage.removeItem('nocx.recovery.announced.v1')
-    const { session, hooks } = reclaiming({
-      produced: 400,
-      gaps: [{ start: 20, end: 120, reason: 'cap' }],
-    })
-    const { tab, teardown } = await mountTerminal(makeClipboard(), {
-      hooks,
-      attachToDocument: true,
-    })
-    try {
-      await vi.waitFor(() => expect(cardTitle(tab)).not.toBeNull())
-      const cross = [...tab.pane.querySelectorAll('button')].find(
-        (b) => b.getAttribute('aria-label') === 'Dismiss',
-      )
-      cross!.click()
-      await vi.waitFor(() => expect(tab.pane.querySelector('.nocx-recovery-notice')).toBeNull())
-
-      session.fireRecoveryChanged({
-        produced: 400,
-        gaps: [{ start: 20, end: 120, reason: 'cap' }],
-      })
-      expect(tab.pane.querySelector('.nocx-recovery-notice')).toBeNull()
-
-      session.fireRecoveryChanged({
-        produced: 400,
-        gaps: [{ start: 20, end: 150, reason: 'cap' }],
-      })
-      await vi.waitFor(() => expect(cardTitle(tab)).not.toBeNull())
-      expect(cardTitle(tab)).toBe("30 B of this session's output is missing")
-    } finally {
-      teardown()
-    }
-  })
 })
 
-// ═══════════════════════════════════════════════════════════════════════════
 // A client that is not the one the channel follows draws at the SESSION's
 // grid, not at its own window (nocx-eidfb.3)
 // ═══════════════════════════════════════════════════════════════════════════

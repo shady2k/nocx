@@ -32,6 +32,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
 	"sync"
@@ -707,9 +708,23 @@ func (p *Publisher) answerAgentLaunchResolve(ctx context.Context, transport life
 			ans.ToolSurface = false
 			ans.Reason = "local agent launch resolution is not wired"
 		} else if resolved, err := p.agentLaunchResolver.Resolve(ctx, binding, AgentLaunchContext{Path: req.PanePath, Cwd: req.PaneCwd}); err != nil {
+			// THE CAUSE TRAVELS, AND IT IS WRITTEN DOWN (nocx-8gg8y). This branch
+			// served every way a resolution can fail with one sentence of its
+			// own — no owner wired for records, a frame whose context had
+			// already ended, a transport nothing registered — and dropped the
+			// resolver's error on the floor. The person could name no step, and
+			// the backend log held no line about the refusal at all, so neither
+			// the pane nor the field could say which of the three it was. The
+			// refusal now repeats the resolver's own words, and the log carries
+			// the same error beside the frame's authenticated addressing, under
+			// the trace this context is part of.
 			ans.Local = true
 			ans.ToolSurface = false
-			ans.Reason = "the local agent record could not be resolved"
+			ans.Reason = fmt.Sprintf("the local agent record could not be resolved: %v", err)
+			p.log.WithContext(ctx).Error("agent launch refused: the resolver failed",
+				"transport", string(transport), "lane", string(ask.Lane),
+				"domain", string(ask.Domain), "epoch", ask.Epoch,
+				"agent", binding.Agent, "error", err)
 		} else {
 			ans.Local = resolved.Local
 			ans.ToolSurface = resolved.ToolSurface

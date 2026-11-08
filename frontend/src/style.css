@@ -115,7 +115,6 @@
 @import './styles/surfaces/integration-notice.css';
 @import './styles/surfaces/integration-waiting.css';
 @import './styles/surfaces/publish-notice.css';
-@import './styles/surfaces/recovery-notice.css';
 @import './styles/surfaces/unreconciled-notice.css';
 @import './styles/surfaces/about.css';
 @import './styles/surfaces/settings.css';
@@ -1337,6 +1336,17 @@
      a block whose output was evicted must not read like a command that
      printed nothing. Dimmed and italic, because it is our sentence and not
      the program's — the one line in a block's body that nocx wrote. */
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
+.cmd-output-gap {
+  /* The place a command's output was cut (nocx-ipuy3). The per-command limit
+     keeps the head and the tail and drops the middle, and a stored block's
+     rows carry an absolute row number, so the hole between two kept rows is
+     where the sentence belongs: a person finds it by scrolling to the cut,
+     never as a banner above the pane. Dimmed and italic for the reason
+     .cmd-output-evicted is — it is our sentence, not the program's. */
   color: var(--color-text-muted);
   font-style: italic;
 }

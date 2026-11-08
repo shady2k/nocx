@@ -10366,13 +10366,24 @@ export class TerminalContent extends BasePaneContent {
       // them has already been laid out — a running block's own live
       // growth is followed inline (controller.ts's own height guard), but
       // this delivery is a SEPARATE mutation the controller does not see
-      // on its own. Without settling around it, a block that grows once
-      // its stream lands pushes the viewport away from the tail a person
-      // was following, silently (nocx-2v80t.3.19).
-      sb.settleAround(() => {
+      // on its own. Without holding the tail around it, a block that grows
+      // once its stream lands pushes the viewport away from the tail a
+      // person was following, silently (nocx-2v80t.3.19).
+      //
+      // A RUNNING block's rows take the non-animating door: they land above
+      // the live end, where the push down and the scroll that follows cancel
+      // for every row on screen, so there is no displacement to play back —
+      // and playing one back is the wobble the owner reported (see
+      // ScrollbackController.growAboveTail). A frozen block's late rows are a
+      // different mutation: they arrive right after the card swapped, often
+      // while that swap's settle is still unwinding, and `settleAround` is
+      // what folds them into it.
+      const apply = () => {
         sb.blockManager.applyStoredRows(entryId, rows)
         sb.scrollToBottomIfFollowing()
-      })
+      }
+      if (sb.blockManager.runningBlock?.attemptId === entryId) sb.growAboveTail(apply)
+      else sb.settleAround(apply)
     })
     const tracked = fetch.finally(() => {
       if (this._blockRowsInFlight.get(entryId) !== tracked) return

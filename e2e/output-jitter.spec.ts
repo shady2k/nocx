@@ -1,0 +1,314 @@
+/**
+ * A command's output does not move backwards while it prints (owner report,
+ * macOS nightly: `apt update` over ssh "jumps and twitches with every new
+ * line").
+ *
+ * The scenario is apt's shape: bursts of a few lines at a time, with a
+ * progress counter rewritten in place with `\r`, over a real SSH connection
+ * (`cmd/e2e-sshd`) as well as locally — the local test is the control, and it
+ * says whether ssh is part of the cause.
+ *
+ * WHAT IS MEASURED, once per animation frame, while the command runs: the
+ * block's height and top, the pane's `scrollTop`, every row visible inside the
+ * scroller with its text and its position, and the stack's transform. What a
+ * person reads as jitter is asserted:
+ *
+ * NO ROW MOVES DOWN. The pane follows the tail, so a row of output can only be
+ * pushed UP by the lines printed below it. A row seen in two consecutive
+ * frames that moved down — by more than half a line, since layout is
+ * fractional and `scrollTop` rounding leaves sub-pixel differences nobody can
+ * see — means the output went backwards.
+ *
+ * It was red before the fix, and the numbers that made it red are in the
+ * failure message: the frame after every `block.grew` carried the stack
+ * translated by the batch it had just committed (68, 96, 116 px measured, one
+ * viewport at the worst), so the whole block sat below its own tail and slid
+ * back over 140 ms while the next batch re-armed it.
+ *
+ * The window is the command's own: it ends at the last frame before the card
+ * freezes and the composer returns, because that settle is a designed movement
+ * at the end of a command, not a line arriving.
+ *
+ * Not asserted, and reported on the test instead: the largest sub-pixel
+ * movement seen, which belongs to the block opening under a fractional
+ * layout.
+ */
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import type { Page } from '@playwright/test'
+import { test, expect, promptReady, clickIntoEditor, resolveBackend } from './harness'
+import { startSshd, rpc } from './sshd-fixture'
+import { readStand } from './stand'
+
+/**
+ * The command: 240 numbered lines plus a progress counter rewritten in place
+ * with `\r`, pausing every fourth line — a few hundred lines at apt's pace,
+ * not as fast as the disk can write them.
+ */
+const COMMAND =
+  'printf "APT-START\\n"; ' +
+  'for i in $(seq -f "%03g" 1 240); do ' +
+  'printf "GET-%s http://example.test/pool/pkg_%s_arm64.deb\\n" "$i" "$i"; ' +
+  'printf "Progress %s%%\\r" "$i"; ' +
+  'if [ $((10#$i % 4)) -eq 0 ]; then sleep 0.05; fi; ' +
+  'done; ' +
+  'printf "\\nAPT-%s-DONE\\n" END'
+
+/** One line of the command's output. */
+const LINE = /GET-(\d{3})\b/
+
+/** The text the pane shows only when the command has finished. */
+const DONE = 'APT-END-DONE'
+
+interface VisibleRow {
+  /** Distance from the scroller's top edge, in CSS pixels. */
+  y: number
+  text: string
+}
+
+interface Frame {
+  /** `performance.now()` when the frame was read. */
+  t: number
+  scrollTop: number
+  /** The running block's box, relative to the scroller's top edge. */
+  blockTop: number
+  blockHeight: number
+  /** The stack's live transform — a FLIP settle, when one is playing. */
+  transform: string
+  rows: VisibleRow[]
+}
+
+/**
+ * Sample every animation frame until the command's last line is on screen.
+ *
+ * Read inside the frame the app has already painted (the sampler is its own
+ * rAF callback), and never by sleeping: the stop condition is the output the
+ * command produces.
+ */
+async function framesOf(page: Page, doneText: string): Promise<Frame[]> {
+  return page.evaluate(
+    async ({ doneText }) => {
+      const pane = document.querySelector<HTMLElement>('.pane.active')!
+      const scroller = pane.querySelector<HTMLElement>('.scrollback-area')!
+      const stack = pane.querySelector<HTMLElement>('.scrollback-inner')!
+      const round = (value: number): number => Math.round(value * 100) / 100
+      const frames: Frame[] = []
+      return new Promise<Frame[]>((resolve) => {
+        const tick = (): void => {
+          // ONLY WHILE THE COMMAND OWNS ITS BLOCK. The freeze swaps the running
+          // card for the frozen one and gives the composer its box back, and
+          // that settle is a designed movement of the whole transcript played
+          // back over 140 ms — it belongs to the end of a command, not to the
+          // lines arriving, which is what this spec is about. The window ends
+          // at the last frame before either of those: the command is over the
+          // moment the pane gives the composer its box back.
+          const block = pane.querySelector<HTMLElement>('.cmd-block.cmd-block-running')
+          const composer = pane.querySelector<HTMLElement>('.nocx-editor')
+          const composerBack = (composer?.getBoundingClientRect().height ?? 0) > 0
+          if (block === null || composerBack) {
+            if (frames.length > 0) {
+              resolve(frames)
+              return
+            }
+            requestAnimationFrame(tick)
+            return
+          }
+          const sr = scroller.getBoundingClientRect()
+          const rows: VisibleRow[] = []
+          for (const row of block.querySelectorAll<HTMLElement>(
+            '.cmd-output .term-grid-row, .terminal-live-grid .term-grid-row',
+          )) {
+            const box = row.getBoundingClientRect()
+            if (box.height <= 0) continue
+            if (box.bottom <= sr.top + 0.5 || box.top >= sr.bottom - 0.5) continue
+            rows.push({ y: round(box.top - sr.top), text: (row.textContent ?? '').trimEnd() })
+          }
+          const frameBox = block.getBoundingClientRect()
+          frames.push({
+            t: round(performance.now()),
+            scrollTop: round(scroller.scrollTop),
+            blockTop: round(frameBox.top - sr.top),
+            blockHeight: round(frameBox.height),
+            transform: getComputedStyle(stack).transform,
+            rows,
+          })
+          if ((pane.textContent ?? '').includes(doneText)) {
+            // The command's last line is on screen; the block is still running,
+            // so this frame is inside the window and the next one is not.
+            resolve(frames)
+            return
+          }
+          requestAnimationFrame(tick)
+        }
+        requestAnimationFrame(tick)
+      })
+    },
+    { doneText },
+  )
+}
+
+interface Jitter {
+  /** Rows that moved down between two frames, with the frame they moved in. */
+  readonly backwards: string[]
+  /** The largest downward movement seen, in pixels. */
+  readonly worstDownPx: number
+  /** The largest sub-pixel (< half a line) downward movement, reported only. */
+  readonly worstSubPixelPx: number
+  readonly frames: number
+}
+
+/** Judge one run's frames. `pitch` is the row height the pane paints with. */
+function judge(frames: readonly Frame[], pitch: number): Jitter {
+  const backwards: string[] = []
+  let worstDownPx = 0
+  let worstSubPixelPx = 0
+  for (let index = 1; index < frames.length; index += 1) {
+    const previous = frames[index - 1]
+    const frame = frames[index]
+    // Identity is the row's TEXT, and only a LINE OF OUTPUT has one this
+    // spec can name: the echo, the blank rows the grid pads with and the
+    // progress counter (rewritten in place) are not rows a person reads as
+    // output, and two rows with the same text say nothing about which one
+    // moved. A line that appears twice in one frame is the out-of-order
+    // assertion's, below.
+    const keyed = (frame: Frame): Map<string, number> => {
+      const counts = new Map<string, number>()
+      for (const row of frame.rows) counts.set(row.text, (counts.get(row.text) ?? 0) + 1)
+      const map = new Map<string, number>()
+      for (const row of frame.rows) {
+        if (counts.get(row.text) !== 1 || LINE.exec(row.text) === null) continue
+        map.set(row.text, row.y)
+      }
+      return map
+    }
+    const before = keyed(previous)
+    for (const [text, y] of keyed(frame)) {
+      const was = before.get(text)
+      if (was === undefined) continue
+      const dy = y - was
+      if (dy <= 0.05) continue
+      worstDownPx = Math.max(worstDownPx, dy)
+      if (dy < pitch / 2) {
+        worstSubPixelPx = Math.max(worstSubPixelPx, dy)
+        continue
+      }
+      backwards.push(
+        `${dy.toFixed(2)}px down in the frame at ${frame.t}ms: ` +
+          `${JSON.stringify(text.slice(0, 40))} ` +
+          `(scrollTop ${previous.scrollTop} → ${frame.scrollTop}, ` +
+          `block ${previous.blockTop}+${previous.blockHeight} → ${frame.blockTop}+${frame.blockHeight}, ` +
+          `transform ${frame.transform})`,
+      )
+    }
+  }
+  return {
+    backwards: backwards.slice(0, 8),
+    worstDownPx,
+    worstSubPixelPx,
+    frames: frames.length,
+  }
+}
+
+/** The row pitch the pane paints with — published on the scrollback stack by
+ *  scrollback/cell-metric.ts from the accepted frame's own cell height. */
+async function rowPitch(page: Page): Promise<number> {
+  return page.evaluate(() =>
+    parseFloat(
+      getComputedStyle(
+        document.querySelector<HTMLElement>('.pane.active .scrollback-inner')!,
+      ).getPropertyValue('--term-cell-height'),
+    ),
+  )
+}
+
+/**
+ * Type the command in the pane's editor, sample while it prints, and assert
+ * the two invariants.
+ */
+async function expectNoJitter(page: Page): Promise<void> {
+  await clickIntoEditor(page)
+  await page.keyboard.type(COMMAND)
+  const sampling = framesOf(page, DONE)
+  await page.keyboard.press('Enter')
+  const frames = await sampling
+  const jitter = judge(frames, 17)
+  const said = `output jitter: ${JSON.stringify(jitter)}`
+  test.info().annotations.push({
+    type: 'output jitter (frames sampled, worst sub-pixel move)',
+    description: `${jitter.frames} frames, worst reported sub-pixel move ${jitter.worstSubPixelPx.toFixed(2)}px`,
+  })
+  // The command's lines arrived as frames — a run of a dozen or two is what
+  // the pace above produces on both engines; anything far short of that means
+  // the measurement, not the product, is what failed.
+  expect(jitter.frames, said).toBeGreaterThan(30)
+  expect(jitter.backwards, said).toEqual([])
+}
+
+test('a local command printing at apt pace never moves its output backwards', async ({ page }) => {
+  test.setTimeout(120_000)
+  await page.goto('/')
+  await promptReady(page)
+  expect(await rowPitch(page)).toBeGreaterThan(0)
+  await expectNoJitter(page)
+})
+
+test('a command printing at apt pace over ssh never moves its output backwards', async ({
+  page,
+}) => {
+  test.setTimeout(180_000)
+  // The e2e suite's SSH stand: a real sshd (`cmd/e2e-sshd`) that authenticates,
+  // runs bash on a real PTY and serves the real filesystem. The remote HOME and
+  // cwd are its own, so the pane's shell sources nothing the local backend
+  // installed.
+  const remoteHome = mkdtempSync(path.join(tmpdir(), 'jitter-remote-'))
+  const remoteCwd = mkdtempSync(path.join(tmpdir(), 'jitter-cwd-'))
+  const fixture = await startSshd({ home: remoteHome, cwd: remoteCwd })
+  let createdId: string | null = null
+  try {
+    // Seed the isolated home's known_hosts so the backend's ssh client accepts
+    // the fixture's host key. REPLACED, not appended: every fixture spawn mints
+    // fresh keys.
+    const sshDir = path.join(readStand().home, '.ssh')
+    mkdirSync(sshDir, { recursive: true, mode: 0o700 })
+    writeFileSync(path.join(sshDir, 'known_hosts'), fixture.knownHosts + '\n')
+    await page.goto('/')
+    await promptReady(page)
+    const wsInfo = await resolveBackend(page)
+    const profileName = `jitter-fixture-${Date.now()}`
+    const created = await rpc<{ id: string }>(page, wsInfo, 'profiles.create', {
+      type: 'ssh',
+      name: profileName,
+      options: {
+        host: fixture.host,
+        port: fixture.port,
+        user: fixture.user,
+        keyPath: fixture.userKey,
+        desiredMode: 'script',
+      },
+    })
+    createdId = created.id
+    await page.keyboard.press('Control+Shift+P')
+    const search = page.locator('.quick-connect__search input')
+    await expect(search).toBeVisible()
+    await search.fill(profileName)
+    // Wait for the saved row before Enter: the palette renders its search box
+    // before its providers answer, and Enter on an empty list reaches the
+    // ad-hoc fallback with no credential (nocx-k1691).
+    await expect(page.locator('.quick-connect__item', { hasText: profileName })).toBeVisible({
+      timeout: 10_000,
+    })
+    await page.keyboard.press('Enter')
+    await expect(page.locator('.pane.active .nocx-editor-input')).toBeVisible({ timeout: 30_000 })
+    expect(await rowPitch(page)).toBeGreaterThan(0)
+    await expectNoJitter(page)
+  } finally {
+    try {
+      const info = await resolveBackend(page)
+      if (createdId !== null) await rpc(page, info, 'profiles.delete', { id: createdId })
+    } catch {
+      // A cleanup that throws would replace the real failure with its own.
+    }
+    fixture.proc.kill('SIGKILL')
+  }
+})

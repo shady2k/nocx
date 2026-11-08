@@ -917,6 +917,45 @@ export class ScrollbackController {
   }
 
   /**
+   * Grow a block's body ABOVE the live end and hold the tail — no settle.
+   *
+   * The durable record hands a running command its rows after the screen has
+   * already moved on, so `.cmd-output` grows between the block's header and
+   * the live region, and the scroller follows to stay at the bottom. Those
+   * two changes cancel each other for the rows a person is reading: they are
+   * pushed down by the rows added above them and pulled back up by the
+   * scroll, in one task, before anything is painted.
+   *
+   * `settleAround` cannot express that. Its measurement is the STACK's top,
+   * and the stack's top sits above the insertion — it feels only the scroll,
+   * so a growth that costs the person nothing is read as a displacement of
+   * exactly the rows committed and played back as a transform. Measured in
+   * the e2e container while a command printed four lines a batch: the frame
+   * after every `block.grew` carried `translateY(68px)` (96, 116, up to a
+   * viewport as the batches grew), the whole block sat that far below its
+   * own tail and slid back over `SETTLE_MS`, and the next batch re-armed it —
+   * 50 ms apart at apt's pace, so the pane never stopped moving. The rows
+   * went backwards, which is the jitter the owner reported.
+   */
+  growAboveTail(mutate: () => void): void {
+    // The in-flight settle is CANCELLED, not measured into: a glide is
+    // playing back a structural change (a card opening or freezing), and what
+    // lands now is a strip of this block's own rows — the two are not one
+    // movement, and folding them together is what re-armed the wobble.
+    // Cancelling leaves the stack at the position its last glide was heading
+    // for, which is where layout already put it.
+    const following = this._followIntent()
+    this._cancelGlides()
+    mutate()
+    this._watchPaintedTop()
+    if (!following) return
+    // The observer can report the old sentinel position after this mutation
+    // has grown the scroller. The decision is the pre-mutation one.
+    this._tail.follow()
+    this._scrollToBottom()
+  }
+
+  /**
    * Put the end of the output back at the bottom edge, if that is where the
    * person was.
    *

@@ -15,9 +15,8 @@
  * it is still unanswerable when this fact is emitted: a host carrying an older
  * generation integrates from it happily. So this says what nocx could not
  * deliver, the integration card says what the shell then did, and neither
- * borrows the other's claim. It is the same reasoning that keeps the reclaimed
- * pane's notice and the worker tool-surface notice separate
- * (recovery-notice.tsx, tool-surface-notice.tsx).
+ * borrows the other's claim. It is the same reasoning that keeps the worker
+ * tool-surface notice separate (tool-surface-notice.tsx).
  *
  * WHAT IT MUST NOT SAY. Never the backend's error text: a publish failure is an
  * SFTP status code and a path, which is meaningful in a log and meaningless in

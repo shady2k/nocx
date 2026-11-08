@@ -7,6 +7,7 @@ import type { FitCandidate } from './cell-fit'
 import type { RunMetric } from './run-geometry'
 import type { TerminalSnapshot } from './serializer'
 import { BlockNotice } from '../ui/block-notice'
+import { tPlural } from '../i18n/locale-model'
 
 export interface StoredBlockRows {
   readonly lines: readonly LedgerBlockRowsLine[]
@@ -219,7 +220,14 @@ const MISSING_ROW_CAUSES: readonly RowsMissingCause[] = [
     // The per-command output cap (history.outputCapKB) — the one cause a
     // person can act on, so it leads and names the setting. DroppedRows is
     // derived at close; a cap verdict before that arrives with no count.
-    present: (s) => s.droppedRows > 0 || s.truncated === 'cap',
+    //
+    // SAID HERE ONLY WHEN THE BLOCK HAS NO ROWS TO SAY IT AT (nocx-ipuy3).
+    // A block whose rows carry a cut states the cap AT THE CUT
+    // (storedRowCuts/cutSentence below): one line, in the history, where a
+    // person scrolls to it, instead of a summary under the whole block that
+    // is on screen whenever its end is. With no rows there is no cut to
+    // point at, and this is the only place left for the fact.
+    present: (s) => s.lines.length === 0 && (s.droppedRows > 0 || s.truncated === 'cap'),
     count: (s) => (s.droppedRows > 0 ? s.droppedRows : null),
     sentence: (n) =>
       n === null
@@ -373,6 +381,9 @@ type PaintMetric = Pick<
 interface StoredPaintState {
   readonly output: HTMLElement
   readonly rows: Map<number, PaintedStoredRow>
+  /** The quiet line at each cut, keyed by the kept row it follows. Held so a
+   *  repaint that only appends rows keeps the line where it is. */
+  readonly cuts: Map<number, HTMLElement>
   readonly columns: number
   readonly metric: PaintMetric | null
   readonly palette: TerminalSnapshot
@@ -431,6 +442,48 @@ function samePaintOptions(previous: StoredPaintState, opts: StoredBlockPaintOpti
     palette.defaultBg === opts.palette.defaultBg &&
     palette.palette.every((color, index) => color === opts.palette.palette[index])
   )
+}
+
+/** One stretch of a block's own history the store no longer holds: the rows
+ *  between two kept rows, read from their absolute row numbers. A stored row
+ *  names where it sits in the session's stream (`from`), so a jump between
+ *  neighbours is the ONLY place in the product that says where output was
+ *  cut — the card this replaced (recovery-notice.tsx, removed on the owner's
+ *  decision of 2026-11-08) stated a session-level total above the pane, a
+ *  number nobody could scroll to. */
+interface StoredRowCut {
+  /** The kept row the missing stretch follows; also the cut's identity, so a
+   *  repaint reuses the same line instead of replacing it. */
+  readonly after: number
+  /** How many rows departed between the two kept rows. */
+  readonly rows: number
+}
+
+function storedRowCuts(stored: StoredBlockRows): StoredRowCut[] {
+  const cuts: StoredRowCut[] = []
+  for (let index = 1; index < stored.lines.length; index++) {
+    const before = stored.lines[index - 1].from
+    const after = stored.lines[index].from
+    if (after > before + 1) cuts.push({ after: before, rows: after - before - 1 })
+  }
+  return cuts
+}
+
+/** What one cut says. The count is the rows absent AT THIS PLACE, so the
+ *  sentence stays true whatever else the store reports about the block; the
+ *  only cause it names is the size limit, and only when the store's own
+ *  verdict names the per-command cap as the one that took rows. A verdict
+ *  that has not arrived yet (the artifact is open while its command runs)
+ *  says that rows are not kept and nothing more. */
+function cutSentence(stored: StoredBlockRows, rows: number): string {
+  if (stored.truncated === 'cap') {
+    return tPlural(
+      'scrollback.cut.cap',
+      rows,
+      "Earlier output was not kept: this session's size limit dropped {count} rows here.",
+    )
+  }
+  return tPlural('scrollback.cut.rows', rows, '{count} rows of earlier output were not kept here.')
 }
 
 function paintOutput(
@@ -496,7 +549,25 @@ function paintOutput(
   } else {
     output.replaceChildren()
   }
+  // THE CUTS, PLACED WHERE THEY ARE. One line per stretch of rows that
+  // departed but that this artifact does not hold, between the kept rows
+  // either side of it — the place a person scrolls to when they ask what
+  // happened to the output. A cut replaced by a later read's whole body is
+  // dropped with the rows it described.
+  const cuts = new Map(storedRowCuts(stored).map((cut) => [cut.after, cut]))
+  const cutLines = new Map<number, HTMLElement>()
+  const cutLine = (after: number, rows: number): HTMLElement => {
+    const existing = previous?.cuts.get(after)
+    const element = existing ?? document.createElement('div')
+    // The grid's own type context, so the line occupies one terminal row in
+    // the block's body rather than a DOM box of its own.
+    element.className = 'term-line cmd-output-gap'
+    const text = cutSentence(stored, rows)
+    if (element.textContent !== text) element.textContent = text
+    return element
+  }
   let cursor = output.firstChild
+  let previousFrom: number | null = null
   for (const line of stored.lines) {
     const element = next.get(line.from)!.element
     const blockId = block.dataset.entryId ?? ''
@@ -507,10 +578,28 @@ function paintOutput(
     }
     const logicalLine = String(line.from)
     if (element.dataset.logicalLine !== logicalLine) element.dataset.logicalLine = logicalLine
+    const cut = previousFrom === null ? undefined : cuts.get(previousFrom)
+    if (cut !== undefined) {
+      const gap = cutLine(cut.after, cut.rows)
+      cutLines.set(cut.after, gap)
+      // `cursor` is always a child of the output or null, which the row
+      // element being placed is not yet on a first paint: the line goes
+      // before the same node the row is about to go before.
+      if (gap.parentElement !== output || gap.nextSibling !== cursor) {
+        output.insertBefore(gap, cursor)
+      }
+      cursor = gap.nextSibling
+    }
     // The common append/evict path never detaches an unchanged row, keeping
     // its selected text and decorated links in place.
     if (element !== cursor) output.insertBefore(element, cursor)
     cursor = element.nextSibling
+    previousFrom = line.from
+  }
+  if (previous) {
+    for (const [after, gap] of previous.cuts) {
+      if (!cutLines.has(after)) gap.remove()
+    }
   }
   output.className = 'cmd-output'
   if (output.parentElement !== block) block.appendChild(output)
@@ -518,6 +607,7 @@ function paintOutput(
   paintedRows.set(block, {
     output,
     rows: next,
+    cuts: cutLines,
     columns,
     metric:
       metric === null

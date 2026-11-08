@@ -81,20 +81,6 @@ import {
 } from './publish-notice'
 import type { SessionPublishFailed } from './generated/session.publishFailed'
 import type { SessionEffect } from './generated/session.effect'
-import type { SessionOutputGap } from './generated/session.outputGap'
-import {
-  mountRecoveryNotice,
-  mountLiveOutputGapNotice,
-  recoveryAccount,
-  uncoveredGapRanges,
-  type LiveOutputGapAccount,
-  type LiveOutputGapNoticeHandle,
-} from './recovery-notice'
-import {
-  RecoveryAnnouncementStore,
-  safeRecoveryStorage,
-  type AnnouncedRange,
-} from './recovery-announcements'
 import { mountUnreconciledNotice, type UnreconciledCause } from './unreconciled-notice'
 import { mountConnectionMark } from './connection-mark'
 import {
@@ -1803,41 +1789,6 @@ export class TerminalContent extends BasePaneContent {
    *  axis reads `starting` (nocx-ui8q6.1). Null means the terminal grid is
    *  showing — either the axis has answered, or this session never asked. */
   private _integrationWaitingDispose: (() => void) | null = null
-  /** The disposer for the reclaimed-pane card that names the output this
-   *  session produced and nothing kept (nocx-fz4qa). Separate from the card
-   *  above because the two report different KINDS of fact: that one is a
-   *  session state that comes and goes, this one is a settled fact about one
-   *  reclaim that will never stop being true. */
-  private _recoveryNoticeDispose: (() => void) | null = null
-  /** What an EARLIER window already announced for this session (nocx-ipuy3).
-   *  Captured once per bind from RecoveryAnnouncementStore, and never widened
-   *  by what this window says itself: the card a person is looking at must go
-   *  on stating the whole hole as the recording revises it (nocx-zg3k3.14.24),
-   *  while a window that comes back must say nothing about bytes an earlier
-   *  one named. Empty means nothing was announced before. */
-  private _recoveryToldBefore: readonly AnnouncedRange[] = []
-  /** The ranges the card currently up has named, as they were written to the
-   *  store. Dismissing moves them into _recoveryToldBefore, so a revision of
-   *  the same hole stays silent and a grown one names only the growth. */
-  private _recoveryTold: AnnouncedRange[] = []
-  /** The card a person has already been told about, per session, across
-   *  restarts (nocx-ipuy3): the same hole is not announced twice. */
-  private readonly _recoveryAnnouncements = new RecoveryAnnouncementStore(safeRecoveryStorage())
-  /** The account the mounted reclaim card states, as JSON — what a revision is
-   *  compared against before the card is rebuilt (nocx-zg3k3.14.24). Null when
-   *  no card is up. */
-  private _recoveryNoticeSignature: string | null = null
-  /** Presentation expires; the binding's loss account survives it. */
-  private _liveOutputGapNotice: LiveOutputGapNoticeHandle | null = null
-  private _liveOutputGapNoticeTimer: ReturnType<typeof setTimeout> | undefined
-  private _liveOutputGapAccount: LiveOutputGapAccount = {
-    missing: 0,
-    hostWindow: false,
-    unknownCause: false,
-  }
-  /** Every live range named during this session, used to partition those
-   *  bytes out of the historical recovery account. */
-  private _liveOutputGaps: SessionOutputGap[] = []
   /** The third state's card (nocx-k6p18.5), raised by a RESTORE rather
    *  than by a session: it is a fact about the blocks this pane read back,
    *  not about the pipe it is attached to now. */
@@ -5171,24 +5122,12 @@ export class TerminalContent extends BasePaneContent {
       return 'aborted'
     }
 
-    this._dropRecoveryNotice()
-    this._dropLiveOutputGapNotice()
     // The previous binding's delivery fact is not the new one's: a rebind is a
     // new session whose own publish either landed (nothing to say) or did not
     // (its own notification, on its own id). Left standing, the old card would
     // describe a copy that this open may well have made.
     this._dropPublishNotice()
     this._publishNoticeDismissed = false
-    // WHAT AN EARLIER WINDOW SAID ABOUT THIS SESSION (nocx-ipuy3). Read at
-    // bind, before this window has announced anything of its own: a reopen
-    // meets a hole the person was already told about, and only bytes beyond
-    // it are news. The session id is the key because it is what survives a
-    // window — the pane id is the same pane, and the session is the stream
-    // the ranges are offsets into.
-    this._recoveryToldBefore = this._recoveryAnnouncements.announced(session.sessionId)
-    this._recoveryTold = []
-    this._liveOutputGaps = []
-    this._liveOutputGapAccount = { missing: 0, hostWindow: false, unknownCause: false }
     this.snapshotStore.reset()
     this.session = session
     // The question that was open is answered; the card's retry no longer has
@@ -5200,24 +5139,19 @@ export class TerminalContent extends BasePaneContent {
     // bind. A rebind replaces both with the new session's — a new session
     // is a new history space, and the bind forgets the painted past.
     this._liveHistory?.bind(session)
-    // What the reclaim could NOT give back, said where a person will see it
-    // (nocx-fz4qa). The recovered bytes are already queued for the terminal
-    // by the time this handle exists; the hole is the half the terminal
-    // cannot show, because a missing stretch of a byte stream looks exactly
-    // like a session that printed less. Mounted here, with the session,
-    // because that is where the fact arrives and where the pane is known.
-    this._showRecoveryNotice(session, target)
-    session.onOutputGap((gap) => this._showLiveOutputGapNotice(session, gap, target))
-    // AND THE RECORDING KEEPS TALKING AFTER THE RECLAIM (nocx-zg3k3.14.24).
-    // The reclaim read its answer before it attached — while the recorder was
-    // still appending the bytes the helper replayed — so the number that card
-    // states is a fact about an instant that has passed, and it goes on passing
-    // as the retention bound evicts. The handle owns the revised answer; this
-    // rebuilds the card from it, so a person who stays on the pane reads the
-    // number the ledger states. `_showRecoveryNotice` is the same door the
-    // live-gap notice already uses, and it keeps the dismissal sticky: a card
-    // the person closed is not resurrected by a revision.
-    session.onRecoveryChanged(() => this._showRecoveryNotice(session, target))
+    // NOTHING IS ANNOUNCED FOR THE RECLAIM (nocx-ipuy3, the owner's decision
+    // of 2026-11-08). A reclaim used to raise a card above the pane stating
+    // bytes the recording's size limit had dropped — a session-level number
+    // that named no place a person could look at, and that a full-screen
+    // program's redraws kept growing until the card returned every time it
+    // was closed. The missing output a person can READ is now said where it
+    // was cut, in the block's own history (scrollback/block-rows.ts): the
+    // stored rows carry absolute row numbers, so the hole between two kept
+    // rows is the place, and the line at it is the whole statement. Nothing
+    // arrives here for a live gap either: the byte cursor and its
+    // acknowledgement are the ipc layer's, and a loss with no readable rows
+    // behind it — a full-screen program's redraws above all — has nothing
+    // to say in a scrollback.
     session.onProtocolError((message) => showToast({ level: 'danger', message }))
     session.onAttachment((attachment) => {
       if (this._disposed || this.session !== session) return
@@ -7063,100 +6997,6 @@ export class TerminalContent extends BasePaneContent {
     return this.hooks.outputRecording ?? RECORDING_UNKNOWN
   }
 
-  /** Keep live transport loss separate from the reclaim's historical loss.
-   *  The live range is subtracted from the historical account before both
-   *  cards are mounted, so overlapping bytes are named exactly once. */
-  private _showLiveOutputGapNotice(
-    session: SessionHandle,
-    gap: SessionOutputGap,
-    target: HTMLElement,
-  ): void {
-    if (this._disposed || this.session !== session) return
-    const uncovered = uncoveredGapRanges(gap, this._liveOutputGaps)
-    if (uncovered.length === 0) return
-    const newGaps = uncovered.map((range) => ({ ...gap, ...range }))
-    const unannouncedBytes = uncovered.reduce((total, range) => total + range.end - range.start, 0)
-    this._liveOutputGaps.push(...newGaps)
-    this._liveOutputGapAccount = {
-      missing: this._liveOutputGapAccount.missing + unannouncedBytes,
-      hostWindow: this._liveOutputGapAccount.hostWindow || gap.reason === 'hostWindow',
-      unknownCause: this._liveOutputGapAccount.unknownCause || gap.reason !== 'hostWindow',
-    }
-    this._showRecoveryNotice(session, target)
-    if (this._liveOutputGapNotice) {
-      this._liveOutputGapNotice.update(this._liveOutputGapAccount)
-    } else {
-      this._liveOutputGapNotice = mountLiveOutputGapNotice(target, this._liveOutputGapAccount, () =>
-        this._dropLiveOutputGapNotice(),
-      )
-      const notice = this._liveOutputGapNotice
-      // Fixed from first mount: a busy stream must still give the space back.
-      this._liveOutputGapNoticeTimer = setTimeout(() => {
-        if (this._liveOutputGapNotice === notice) this._dropLiveOutputGapNotice()
-      }, 8000)
-    }
-    this.scheduleLiveResize()
-  }
-
-  /** Raise the reclaimed-pane card for the historical ranges not already
-   *  named by a live gap card. A fresh session or whole recording mounts none.
-   *
-   *  THE MOUNT IS THE ACCOUNT IT STATES (nocx-zg3k3.14.24). The recording
-   *  revises its answer while a saturated session keeps printing — once per
-   *  chunk — so this is called far more often than the number a person reads
-   *  changes. Rebuilding the card for a revision that states the same thing
-   *  would replace a DOM node, and re-measure the live region, for nothing, so
-   *  an account identical to the one on screen is left alone. The comparison is
-   *  on the derivation the card renders, not on the raw wire numbers, because
-   *  those move on every byte and the card does not. */
-  private _showRecoveryNotice(session: SessionHandle, target: HTMLElement): void {
-    // Everything already named to this person about this session: the live
-    // ranges this binding announced, and whatever an earlier window recorded.
-    // The account is what is left — which is the whole hole in the ordinary
-    // first bind, and only its growth when the window comes back (nocx-ipuy3).
-    const told = [...this._liveOutputGaps, ...this._recoveryToldBefore]
-    const account = recoveryAccount(session.recovered, told)
-    const signature = account === null ? null : JSON.stringify(account)
-    if (signature === this._recoveryNoticeSignature) return
-    this._dropRecoveryNotice()
-    this._recoveryNoticeDispose = session.recovered
-      ? mountRecoveryNotice(target, {
-          recovery: session.recovered,
-          liveGaps: told,
-          onDismiss: () => this._dismissRecoveryNotice(),
-        })
-      : null
-    this._recoveryNoticeSignature = this._recoveryNoticeDispose ? signature : null
-    if (this._recoveryNoticeDispose) {
-      // THE CARD IS THE ANNOUNCEMENT (nocx-ipuy3): the ranges it states are
-      // written down as told, so the next window — a fresh renderer over the
-      // same storage, with no memory of this one — subtracts them.
-      this._recoveryTold = this._toldRanges(session, told)
-      this._recoveryAnnouncements.record(session.sessionId, this._recoveryTold)
-    }
-    // The card takes its height off the top of the pane, so the scroller is
-    // smaller than the grid fitted to it — the same re-measure the
-    // integration card goes through, and for the same reason: the pane's own
-    // box is unchanged, so no viewport observer fires for this.
-    if (this._recoveryNoticeDispose) this.scheduleLiveResize()
-  }
-
-  /** The byte ranges one mounted card names: what it was handed as already
-   *  told, plus every hole it states on top of that. The union is what "this
-   *  person has been told about these bytes" means, which is why it is
-   *  recorded and why a live range, already named by the live card, is in it
-   *  too. */
-  private _toldRanges(
-    session: SessionHandle,
-    told: readonly Pick<SessionOutputGap, 'start' | 'end'>[],
-  ): AnnouncedRange[] {
-    const ranges: AnnouncedRange[] = told.map((range) => ({ start: range.start, end: range.end }))
-    for (const gap of session.recovered?.gaps ?? []) {
-      ranges.push(...uncoveredGapRanges(gap, told))
-    }
-    return ranges
-  }
-
   /** Raise the third state's card for a restored page, when it has one
    *  (nocx-k6p18.5).
    *
@@ -7177,8 +7017,8 @@ export class TerminalContent extends BasePaneContent {
       onDismiss: () => this._dropUnreconciledNotice(),
     })
     // The card takes its height off the top of the pane, so the scroller is
-    // smaller than the grid fitted to it — the same re-measure the reclaim
-    // card goes through, and for the same reason.
+    // smaller than the grid fitted to it — the same re-measure the
+    // integration card goes through, and for the same reason.
     if (this._unreconciledNoticeDispose) this.scheduleLiveResize()
   }
 
@@ -7189,36 +7029,6 @@ export class TerminalContent extends BasePaneContent {
     this._unreconciledNoticeDispose()
     this._unreconciledNoticeDispose = null
     this.scheduleLiveResize()
-  }
-
-  /** The person closed the card: the hole it named is settled as told, so a
-   *  revision of the SAME hole stays silent. A hole that grew is still news
-   *  and is announced by its growth alone. */
-  private _dismissRecoveryNotice(): void {
-    this._recoveryToldBefore = this._recoveryTold
-    this._dropRecoveryNotice()
-  }
-
-  /** Take the reclaim card down and give the pane back to the terminal. The
-   *  account it stated goes with it, so the next raise is compared against
-   *  nothing rather than against a card that is no longer there. */
-  private _dropRecoveryNotice(): void {
-    this._recoveryNoticeSignature = null
-    if (!this._recoveryNoticeDispose) return
-    this._recoveryNoticeDispose()
-    this._recoveryNoticeDispose = null
-    this.scheduleLiveResize()
-  }
-
-  /** Remove presentation only; dismissed and expired bytes stay accounted for. */
-  private _dropLiveOutputGapNotice(): void {
-    clearTimeout(this._liveOutputGapNoticeTimer)
-    this._liveOutputGapNoticeTimer = undefined
-    const notice = this._liveOutputGapNotice
-    this._liveOutputGapNotice = null
-    if (!notice) return
-    notice.dispose()
-    if (!this._disposed) this.scheduleLiveResize()
   }
 
   /** Take the card down and give the pane back to the terminal. */
@@ -9764,11 +9574,6 @@ export class TerminalContent extends BasePaneContent {
     this._noticeDispose = null
     this._integrationWaitingDispose?.()
     this._integrationWaitingDispose = null
-    this._recoveryNoticeDispose?.()
-    this._recoveryNoticeDispose = null
-    this._dropLiveOutputGapNotice()
-    this._liveOutputGaps = []
-    this._liveOutputGapAccount = { missing: 0, hostWindow: false, unknownCause: false }
     this._unreconciledNoticeDispose?.()
     this._unreconciledNoticeDispose = null
     this._lifecycleChangeUnsub?.()

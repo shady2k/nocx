@@ -6,7 +6,9 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/emulator"
@@ -102,6 +104,141 @@ func TestHelperSessionEnded_SealsTheOpenBlock(t *testing.T) {
 	}
 	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 5, 0, []emulator.Row{aStreamRow("late")}, ""); confirm {
 		t.Fatal("a session the helper reported ended still answered rows")
+	}
+}
+
+// Helper exit follows ordinary rows, but its settlement already has a
+// per-pane owner goroutine (bindBlockEndToSession). That owner must retain
+// the in-flight append and admitted tail until storage finishes.
+func TestHelperSessionEnded_DrainsAdmittedRowsBeforeSealing(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	other := session.ID(e.openSession(t, 301))
+	screen := []byte(`{"revision":78,"state":{"screen":"other pane survives terminal drain"}}`)
+	store := newBlockingAppendStore(db.Ledger())
+	e.ws.blockRowsStore = store
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
+	attempt := startsACommand(t, e, pub, lane, h, 2, "make exit with tail")
+
+	type admission struct {
+		up      uint64
+		confirm bool
+	}
+	admitted := make(chan admission, 2)
+	continueReader := make(chan struct{})
+	readerDone := make(chan struct{})
+	endDone := make(chan struct{})
+	var releaseOnce, continueOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(store.release) }) }
+	resumeReader := func() { continueOnce.Do(func() { close(continueReader) }) }
+	t.Cleanup(func() {
+		// Release both gates even when a callback incorrectly blocks or an
+		// assertion fails; fixture shutdown must never inherit our store gate.
+		release()
+		resumeReader()
+		select {
+		case <-readerDone:
+		case <-time.After(wantWithin):
+			t.Error("helper callbacks did not finish after releasing storage")
+		}
+		select {
+		case <-endDone:
+		case <-time.After(wantWithin):
+			t.Error("terminal owner did not finish after releasing storage")
+		}
+	})
+	go func() {
+		defer close(readerDone)
+		up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("first")}, "")
+		admitted <- admission{up: up, confirm: confirm}
+		<-continueReader
+		up, confirm = e.ws.BlockRowsArrived(session.ID(sid), 1, 0, []emulator.Row{aStreamRow("second")}, "")
+		admitted <- admission{up: up, confirm: confirm}
+		go func() {
+			defer close(endDone)
+			e.ws.HelperSessionEnded(session.ID(sid))
+		}()
+		e.ws.PublishScreenFrame(other, 78, screen)
+	}()
+
+	select {
+	case <-store.entered:
+	case <-time.After(wantWithin):
+		t.Fatal("first admitted row never reached the store")
+	}
+	select {
+	case got := <-admitted:
+		if got.confirm || got.up != 0 {
+			t.Fatalf("first admission = (%d, %v), want deferred confirmation", got.up, got.confirm)
+		}
+	case <-time.After(wantWithin):
+		t.Fatal("first row callback waited for storage")
+	}
+
+	// The first append is inside the store, not merely scheduled. Admit the
+	// second row and report exit without any durability or idle wait.
+	resumeReader()
+	select {
+	case got := <-admitted:
+		if got.confirm || got.up != 0 {
+			t.Fatalf("second admission = (%d, %v), want deferred confirmation", got.up, got.confirm)
+		}
+	case <-time.After(wantWithin):
+		t.Fatal("second row callback waited for storage")
+	}
+	select {
+	case <-readerDone:
+	case <-time.After(wantWithin):
+		t.Fatal("row reader did not hand exit to its separate terminal owner")
+	}
+	if _, err := awaitFrame(e.conn, time.Now().Add(wantWithin), func(msg []byte) bool {
+		frame, decodeErr := DecodeFrame(msg)
+		return decodeErr == nil && frame.MsgType == MsgTypeMetadata && string(frame.Payload) == string(screen)
+	}); err != nil {
+		t.Fatalf("another pane's screen waited behind terminal settlement: %v", err)
+	}
+	// Observe that terminal handling has entered its ownership interval:
+	// the old implementation removes the source immediately, whereas a
+	// draining terminal owner registers a waiter on the held flush. Neither
+	// observation waits for the row drain to become idle.
+	deadline := time.NewTimer(wantWithin)
+	defer deadline.Stop()
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for {
+		bs := e.ws.blockStream
+		bs.mu.Lock()
+		_, sourced := bs.sources[session.ID(sid)]
+		waiting := bs.flushDone[session.ID(sid)].done != nil
+		bs.mu.Unlock()
+		if !sourced || waiting {
+			break
+		}
+		select {
+		case <-tick.C:
+		case <-deadline.C:
+			t.Fatal("terminal owner never observed the held row drain")
+		}
+	}
+	if art := blockArtifact(t, db, attempt); art.State != content.ArtifactOpen {
+		t.Errorf("artifact state = %q with accepted rows still blocked in storage, want open", art.State)
+	}
+	select {
+	case up := <-marks:
+		t.Errorf("confirmed row %d before storage accepted either row", up)
+	default:
+	}
+
+	release()
+	closed := awaitBlockClosed(t, e)
+	if closed.EntryID != attempt || !closed.Kept {
+		t.Fatalf("block.closed = %+v, want entry %q kept after its admitted tail drains", closed, attempt)
+	}
+	if art := blockArtifact(t, db, attempt); art.State != content.ArtifactSealed {
+		t.Fatalf("artifact state = %q after block.closed, want sealed", art.State)
+	}
+	rows := streamRows(t, db, attempt)
+	if len(rows) != 2 || rows[0].From != 0 || rows[0].Text != "first" || rows[1].From != 1 || rows[1].Text != "second" {
+		t.Fatalf("sealed rows = %+v, want both admitted rows in order", rows)
 	}
 }
 

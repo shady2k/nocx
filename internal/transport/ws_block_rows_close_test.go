@@ -203,3 +203,141 @@ func TestBlockRowsCloseAbandonsAtTheAttemptBound(t *testing.T) {
 			parked, current, open, tries)
 	}
 }
+
+// A failed authenticated close still owns the row boundary. The next
+// command's rows must retry that close before any append chooses its block.
+func TestBlockRowsCloseRetryPreservesSuccessorRowOwnership(t *testing.T) {
+	db := newLedgerStore(t)
+	e, pub, lane, h, sidStr, _ := newLifecycleLedgerEnvWithStore(t, db)
+	sid := session.ID(sidStr)
+	failing := &closeFailureBlockStore{ledger: db.Ledger(), fail: true}
+	e.ws.blockRowsStore = failing
+	marks := attachConfirmedBlockRows(t, e.ws, sid)
+
+	first := startsACommand(t, e, pub, lane, h, 2, "printf first")
+	if up, confirm := e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{
+		aStreamRow("first-0"), aStreamRow("first-1"),
+	}, ""); up != 0 || confirm {
+		t.Fatalf("first rows admission = (%d, %v), want (0, false)", up, confirm)
+	}
+	awaitConfirmedBlockRows(t, marks, 2)
+	// Only the initial delivery is drained: the test starts from A's
+	// durable rows and an actual failed close, not a close parked behind
+	// an append that has yet to finish.
+	awaitBlockRowsIdle(t, e.ws, sid)
+
+	fence := lifecycleFence(0x9a)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(first), 0, fence)))
+	e.ws.BlockIntervalEnded(sid, fence, 2, nil, false)
+	e.ws.blockStream.mu.Lock()
+	current := e.ws.blockStream.current[sid]
+	retainedFirst := current != nil && current.attempt == first
+	pending := len(e.ws.blockStream.pendingCloses[sid])
+	tries := e.ws.blockStream.closeTries[sid][fmt.Sprintf("%x", fence)]
+	closing := e.ws.blockStream.closing[sid]
+	e.ws.blockStream.mu.Unlock()
+	if !retainedFirst || pending != 1 || tries != 1 || closing {
+		t.Fatalf("first close did not fail and retain its boundary: current first=%v pending=%d tries=%d closing=%v",
+			retainedFirst, pending, tries, closing)
+	}
+	// The close call has returned after its one injected failure; no
+	// asynchronous close is using the store's failure switch.
+	failing.fail = false
+
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 4, lifecyclePromptEvt()))
+	second := startsACommand(t, e, pub, lane, h, 5, "printf second")
+	e.ws.blockStream.mu.Lock()
+	current = e.ws.blockStream.current[sid]
+	retainedFirst = current != nil && current.attempt == first
+	queued := e.ws.blockStream.queued[sid]
+	pending = len(e.ws.blockStream.pendingCloses[sid])
+	e.ws.blockStream.mu.Unlock()
+	if !retainedFirst || queued != second || pending != 1 {
+		t.Fatalf("successor start bypassed failed close: current first=%v queued=%q pending=%d",
+			retainedFirst, queued, pending)
+	}
+
+	// This delivery is the ONLY retry trigger: neither end marker is
+	// delivered again, and B has not completed. In the broken path the
+	// first flush writes this entire batch into A before retrying its close.
+	if up, confirm := e.ws.BlockRowsArrived(sid, 2, 0, []emulator.Row{
+		aStreamRow("second-0"), aStreamRow("second-1"),
+	}, ""); up != 0 || confirm {
+		t.Fatalf("successor rows admission = (%d, %v), want (0, false)", up, confirm)
+	}
+	// Observe the outcome only after the triggering delivery has run;
+	// no wait or extra event separates B's arrival from the retained end.
+	awaitBlockRowsIdle(t, e.ws, sid)
+	firstRows := streamRows(t, db, first)
+	if len(firstRows) != 2 || firstRows[0].From != 0 || firstRows[0].Text != "first-0" ||
+		firstRows[1].From != 1 || firstRows[1].Text != "first-1" {
+		t.Fatalf("predecessor rows after successor-triggered close retry = %+v; want only first-0 and first-1 at [0,2)", firstRows)
+	}
+	secondRows := streamRows(t, db, second)
+	if len(secondRows) != 2 || secondRows[0].From != 2 || secondRows[0].Text != "second-0" ||
+		secondRows[1].From != 3 || secondRows[1].Text != "second-1" {
+		t.Fatalf("successor rows after close retry = %+v; want second-0 and second-1 at [2,4)", secondRows)
+	}
+	assertBlockSealed(t, db, first)
+	e.ws.blockStream.mu.Lock()
+	current = e.ws.blockStream.current[sid]
+	promotedSecond := current != nil && current.attempt == second
+	pending = len(e.ws.blockStream.pendingCloses[sid])
+	queued = e.ws.blockStream.queued[sid]
+	e.ws.blockStream.mu.Unlock()
+	if !promotedSecond || pending != 0 || queued != "" {
+		t.Fatalf("close retry did not settle A and promote B: current second=%v pending=%d queued=%q",
+			promotedSecond, pending, queued)
+	}
+}
+
+func TestBlockRowsRetiredFlushCannotClaimNewFlushEnd(t *testing.T) {
+	e, pub, lane, h, sidStr, db := newLifecycleLedgerEnv(t, true)
+	sid := session.ID(sidStr)
+	marks := attachConfirmedBlockRows(t, e.ws, sid)
+	attempt := startsACommand(t, e, pub, lane, h, 2, "two batches")
+	e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("first")}, "")
+	awaitConfirmedBlockRows(t, marks, 1)
+	awaitBlockRowsIdle(t, e.ws, sid) // establish the first durable batch only
+
+	// Stop the old owner's schedule exactly after its empty take, before
+	// its drainPendingCloses call. A new owner can acquire flushing here.
+	bs := e.ws.blockStream
+	bs.mu.Lock()
+	bs.flushing[sid] = true
+	gen := bs.attachGen[sid]
+	bs.mu.Unlock()
+	if next := bs.takePendingRows(sid, attempt, gen); len(next) != 0 {
+		t.Fatalf("old owner's final take = %+v, want empty", next)
+	}
+	store := newBlockingAppendStore(db.Ledger())
+	e.ws.blockRowsStore = store
+	t.Cleanup(func() {
+		select {
+		case <-store.release:
+		default:
+			close(store.release)
+		}
+		awaitBlockRowsIdle(t, e.ws, sid)
+	})
+	e.ws.BlockRowsArrived(sid, 1, 0, []emulator.Row{aStreamRow("second")}, "")
+	select {
+	case <-store.entered:
+	case <-time.After(wantWithin):
+		t.Fatal("new flush did not enter storage")
+	}
+	fence := lifecycleFence(0x9b)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence)))
+	e.ws.BlockIntervalEnded(sid, fence, 2, nil, false)
+	// Resume the OLD owner while the NEW owner's append remains blocked.
+	bs.drainPendingCloses(context.Background(), e.ws, sid)
+	if art := blockArtifact(t, db, attempt); art.State != "open" {
+		t.Fatalf("old flush sealed artifact %q while new flush still owed its second row", art.State)
+	}
+	close(store.release)
+	assertBlockSealed(t, db, attempt)
+	rows := streamRows(t, db, attempt)
+	if len(rows) != 2 || rows[0].Text != "first" || rows[1].Text != "second" {
+		t.Fatalf("sealed rows = %+v, want both admitted batches", rows)
+	}
+}

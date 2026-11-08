@@ -90,6 +90,85 @@ func TestFreshFirstAppendAboveZeroDoesNotConfirmTheMissingHead(t *testing.T) {
 	}
 }
 
+func TestDuplicateSuffixDoesNotConfirmAnInflightRecoveredHead(t *testing.T) {
+	assertInflightRecoveredHead(t, false, false)
+}
+
+func TestDuplicateSuffixDoesNotConfirmAnInflightReadoptedHead(t *testing.T) {
+	assertInflightRecoveredHead(t, true, false)
+}
+
+func TestDuplicateSuffixDoesNotConfirmAFailedRecoveredHead(t *testing.T) {
+	assertInflightRecoveredHead(t, true, true)
+}
+
+func assertInflightRecoveredHead(t *testing.T, readopt, failFirst bool) {
+	t.Helper()
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	createSessionRow(t, db, sid)
+	marks := attachConfirmedBlockRows(t, e.ws, session.ID(sid))
+	attempt := startsACommand(t, e, pub, lane, h, 2, "recover prefix")
+	suffix := []emulator.Row{aStreamRow("R7"), aStreamRow("R8"), aStreamRow("R9"), aStreamRow("R10")}
+	e.ws.BlockRowsArrived(session.ID(sid), 6, 0, suffix, "")
+	awaitDurableBlockRowCount(t, db, attempt, 4)
+	awaitBlockRowsIdle(t, e.ws, session.ID(sid)) // establish the stored suffix only
+	if readopt {
+		e.ws.DetachBlockRows(session.ID(sid))
+		marks = attachConfirmedBlockRows(t, e.ws, session.ID(sid))
+	}
+
+	store := newBlockingAppendStore(db.Ledger())
+	e.ws.blockRowsStore = store
+	if failFirst {
+		e.ws.blockRowsStore = &failFirstAppendStore{blocking: store}
+	}
+	t.Cleanup(func() {
+		select {
+		case <-store.release:
+		default:
+			close(store.release)
+		}
+		awaitBlockRowsIdle(t, e.ws, session.ID(sid))
+	})
+	head := []emulator.Row{aStreamRow("R1"), aStreamRow("R2"), aStreamRow("R3"), aStreamRow("R4"), aStreamRow("R5"), aStreamRow("R6")}
+	e.ws.BlockRowsArrived(session.ID(sid), 0, 0, head, "")
+	if failFirst {
+		// Observe the actual failed drain's retirement, not successful
+		// persistence. Requeueing must leave the prefix obligation intact.
+		awaitBlockRowsIdle(t, e.ws, session.ID(sid))
+		if up, confirmed := e.ws.BlockRowsArrived(session.ID(sid), 6, 0, suffix, ""); confirmed || up != 0 {
+			t.Fatalf("suffix replay confirmed (%d, %v) after prepend failure", up, confirmed)
+		}
+		e.ws.BlockRowsArrived(session.ID(sid), 0, 0, head, "")
+	}
+	select {
+	case <-store.entered:
+	case <-time.After(wantWithin):
+		t.Fatal("recovered head never reached the store")
+	}
+	// A shorter replay may remain held while the first prepend is in
+	// flight; successful storage must settle that same head obligation.
+	e.ws.BlockRowsArrived(session.ID(sid), 0, 0, head[:2], "")
+	// No idle wait belongs here: the suffix replay follows admission while
+	// the missing prefix is still behind a controlled persistence gate.
+	if up, confirmed := e.ws.BlockRowsArrived(session.ID(sid), 6, 0, suffix, ""); confirmed || up != 0 {
+		t.Fatalf("suffix replay confirmed (%d, %v) while its recovered head was not durable", up, confirmed)
+	}
+	select {
+	case up := <-marks:
+		t.Fatalf("confirmed prefix %d before the recovered head became durable", up)
+	default:
+	}
+	close(store.release)
+	awaitConfirmedBlockRows(t, marks, 10)
+	if rows := streamRows(t, db, attempt); len(rows) != 10 || rows[0].From != 0 {
+		t.Fatalf("confirmed artifact = %+v, want the complete recovered prefix", rows)
+	}
+	if up, confirmed := e.ws.BlockRowsArrived(session.ID(sid), 6, 0, suffix, ""); !confirmed || up != 10 {
+		t.Fatalf("durable recovered prefix replay = (%d, %v), want (10, true)", up, confirmed)
+	}
+}
+
 func TestAResentHeadBelowTheBlockFloorPrependsBeforeItConfirms(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

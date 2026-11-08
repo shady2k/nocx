@@ -543,6 +543,13 @@ type openBlock struct {
 	// prepend; the trim and every confirmation cover [floor, rows) and
 	// never a span the artifact does not hold. Guarded by blockStream.mu.
 	floor uint64
+	// headOwed/headFloor track the lowest recovered head offered to this
+	// attachment, independently of whether it is held, queued, or in flight.
+	// Only a durable floor reaching that bound permits a prefix ACK again.
+	// This also applies after adoption, whose expected continuation may be
+	// above its stored floor. Guarded by blockStream.mu.
+	headOwed  bool
+	headFloor uint64
 	// held is the block's own below-floor head, offered again by the
 	// resend while the chain could not yet join the stored span: a
 	// prepend must END at the floor, and the resend's batches may land
@@ -683,6 +690,17 @@ func splitPendingRowsAt(deliveries []pendingRows, endRow uint64) (before, after 
 	return before, after
 }
 
+// pendingEndRowLocked applies the same authenticated boundary to the first
+// admitted batch and every subsequent batch, including close-failure retries.
+func (bs *blockStream) pendingEndRowLocked(sid session.ID, attempt string) uint64 {
+	for _, end := range bs.pendingCloses[sid] {
+		if end.attempt == attempt {
+			return end.endRow
+		}
+	}
+	return takeAllPendingRows
+}
+
 func (bs *blockStream) takePendingRows(sid session.ID, attempt string, gen uint64) []pendingRows {
 	bs.mu.Lock()
 	if bs.attachGen[sid] != gen {
@@ -692,14 +710,7 @@ func (bs *blockStream) takePendingRows(sid session.ID, attempt string, gen uint6
 	// Rows of the interval that follows wait behind the close parked for
 	// this attempt's end: everything below that end goes out with this
 	// batch, the rest stays queued for the block that follows.
-	endRow := takeAllPendingRows
-	for _, end := range bs.pendingCloses[sid] {
-		if end.attempt == attempt {
-			endRow = end.endRow
-			break
-		}
-	}
-	next := bs.takeForFlushLocked(sid, endRow)
+	next := bs.takeForFlushLocked(sid, bs.pendingEndRowLocked(sid, attempt))
 	// Releasing the flush and finding no more rows are one decision. An
 	// arriving delivery must either join this batch or acquire the next
 	// flush, never be stranded between an empty take and a later unlock.
@@ -728,6 +739,19 @@ type blockClosedParams struct {
 	ScreenAnchor *proto.OutputStartScreenAnchor `json:"screenAnchor"`
 }
 
+// flushCompletion is allocated only for a replacement or terminal owner
+// waiting on an active drain. Ordinary batches need no completion channel.
+func (bs *blockStream) flushCompletion(sid session.ID) <-chan struct{} {
+	bs.mu.Lock()
+	defer bs.mu.Unlock()
+	flush := bs.flushDone[sid]
+	if flush.active > 0 && flush.done == nil {
+		flush.done = make(chan struct{})
+		bs.flushDone[sid] = flush
+	}
+	return flush.done
+}
+
 // AttachBlockRows registers a session's helper rows callbacks as this
 // stream's source. Without a source the stream is inert — see the header.
 // New durable prefixes are reported through confirm, not the admission call.
@@ -745,15 +769,7 @@ type blockClosedParams struct {
 // the block stream would wait on is quarantined, so the tail rows would
 // land on no block and be dropped (ADR-0076 decision 3).
 func (s *WSServer) AttachBlockRows(ctx context.Context, sid session.ID, confirm func(uint64)) error {
-	s.blockStream.mu.Lock()
-	flush := s.blockStream.flushDone[sid]
-	if flush.active > 0 && flush.done == nil {
-		flush.done = make(chan struct{})
-		s.blockStream.flushDone[sid] = flush
-	}
-	done := flush.done
-	s.blockStream.mu.Unlock()
-	if done != nil {
+	if done := s.blockStream.flushCompletion(sid); done != nil {
 		select {
 		case <-done:
 		case <-ctx.Done():
@@ -1092,6 +1108,12 @@ func (s *WSServer) HelperSessionEnded(sid session.ID) {
 	// reported ended. Closing event: HelperSessionEnded's own seals —
 	// nothing is held past them (ADR-0076).
 	ctx := log.WithLogger(context.Background(), s.log)
+	// This caller is the existing per-pane terminal owner, not the shared
+	// reader. Its following detach must not invalidate an admitted append
+	// or discard the tail queued behind it before the drain retires.
+	if done := s.blockStream.flushCompletion(sid); done != nil {
+		<-done
+	}
 	// The session's open entry is resolved BEFORE the sealing detach: the
 	// detach seals the block's artifact, and the read below keys on the
 	// artifact being open.
@@ -1577,6 +1599,9 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 	// The helper's shared reader admits rows, never waits for the content
 	// writer. The existing bounded flush owns them until storage answers;
 	// its confirmation, not this admission, advances the helper's mark.
+	// Owner: the block stream's admitted row drain. Closing event: that drain
+	// finishes storage/close settlement or retires on failure or detach;
+	// Stop also joins it under the existing bounded recorder drain.
 	ctx := log.WithLogger(context.Background(), s.log)
 	bs := s.blockStream
 	bs.mu.Lock()
@@ -1675,6 +1700,12 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 					n = uint64(len(rows))
 				}
 				part := rows[:n]
+				if len(part) > 0 {
+					if !block.headOwed || fromRow < block.headFloor {
+						block.headFloor = fromRow
+					}
+					block.headOwed = true
+				}
 				switch {
 				case len(block.held) == 0:
 					block.heldFrom = fromRow
@@ -1719,10 +1750,12 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 		}
 		if fullyStored {
 			if len(head) == 0 {
-				held, up := len(block.held), block.rows
+				undurableHead := block.headOwed || len(block.held) > 0 || block.floor > block.expectedFirstRow
+				up := block.rows
 				bs.mu.Unlock()
-				if held > 0 {
-					// A below-floor chain is not yet durable.
+				if undurableHead {
+					// Moving a recovered head into the flush does not
+					// settle its durable-prefix obligation.
 					return 0, false
 				}
 				return up, true
@@ -1795,7 +1828,7 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 	}
 	// This flush also re-drives parked closes after their owed rows land;
 	// neither append nor a close retry may run on the shared helper reader.
-	toFlush := bs.takeForFlushLocked(sid, takeAllPendingRows)
+	toFlush := bs.takeForFlushLocked(sid, bs.pendingEndRowLocked(sid, block.attempt))
 	bs.flushing[sid] = true
 	confirmWritten := bs.confirmers[sid]
 	gen := bs.attachGen[sid]
@@ -3445,6 +3478,7 @@ func (bs *blockStream) flushPendingRows(ctx context.Context, s *WSServer, sid se
 	store := s.blockStore()
 	if store == nil {
 		bs.requeuePendingRows(sid, pending, gen)
+		bs.drainPendingCloses(ctx, s, sid)
 		return
 	}
 	// This batch left bs.pending in the caller before this call — that is
@@ -3515,7 +3549,17 @@ func (bs *blockStream) flushPendingRows(ctx context.Context, s *WSServer, sid se
 			}
 			block.rows = max(block.rows, delivery.from+uint64(len(delivery.rows)))
 		}
-		floor, expectedFirstRow, storedUpTo := block.floor, block.expectedFirstRow, block.rows
+		if block.headOwed && block.floor <= block.headFloor {
+			block.headOwed = false
+		}
+		if len(block.held) > 0 && block.floor <= block.heldFrom &&
+			block.heldFrom+uint64(len(block.held)) <= block.rows {
+			// A partial replay can arrive while a larger prepend is in
+			// flight. Its rows are now covered by the same durable span.
+			block.held = nil
+		}
+		canConfirm := !block.headOwed && len(block.held) == 0 && block.floor <= block.expectedFirstRow
+		storedUpTo := block.rows
 		bs.flushingBytes[sid] -= heldBytes
 		bs.mu.Unlock()
 		if len(delivery.rows) > 0 {
@@ -3523,7 +3567,7 @@ func (bs *blockStream) flushPendingRows(ctx context.Context, s *WSServer, sid se
 				EntryID: block.entry, From: delivery.from, Count: uint64(len(delivery.rows)), //nolint:gosec // a row count, not a byte count
 			})
 		}
-		if floor <= expectedFirstRow {
+		if canConfirm {
 			confirmStoredRows(ctx, confirm, storedUpTo)
 		}
 	}
@@ -3541,10 +3585,15 @@ func (bs *blockStream) flushPendingRows(ctx context.Context, s *WSServer, sid se
 func (bs *blockStream) drainPendingCloses(ctx context.Context, s *WSServer, sid session.ID) {
 	for {
 		bs.mu.Lock()
+		// The caller may be an old flush whose empty take was followed by
+		// a newer flush or close. Claim one boundary only while neither
+		// owner exists; never drain or release another owner's boundary.
+		if bs.flushing[sid] || bs.closing[sid] {
+			bs.mu.Unlock()
+			return
+		}
 		closes := bs.pendingCloses[sid]
-		delete(bs.pendingCloses, sid)
 		if len(closes) == 0 {
-			delete(bs.closing, sid)
 			bs.mu.Unlock()
 			// A flush that lands with nothing left to close is still a
 			// chance to retry a row a past discarded open never managed to
@@ -3552,32 +3601,31 @@ func (bs *blockStream) drainPendingCloses(ctx context.Context, s *WSServer, sid 
 			bs.retryOrphanSeals(ctx, s.blockStore(), sid, false)
 			return
 		}
-		bs.closing[sid] = true
-		bs.mu.Unlock()
-		for _, end := range closes {
-			bs.mu.Lock()
-			if end.waiting {
-				if _, open := bs.open[sid][end.attempt]; !open {
-					// A WAITING end whose block is gone was already sealed
-					// by its end frame's own close (or a detach): the wait
-					// is done, and a second close would re-notify a settled
-					// block.
-					bs.mu.Unlock()
-					continue
-				}
-			}
-			current := bs.current[sid]
-			queued := bs.queued[sid]
-			if queued == end.attempt && current != nil && current.attempt != end.attempt {
-				s.holdEndLocked(sid, &end)
-				bs.queuedEnds[sid] = append(bs.queuedEnds[sid], end)
+		end := closes[0]
+		closes[0] = pendingEnd{} // release the popped closing rows
+		if len(closes) == 1 {
+			delete(bs.pendingCloses, sid)
+		} else {
+			bs.pendingCloses[sid] = closes[1:]
+		}
+		if end.waiting {
+			if _, open := bs.open[sid][end.attempt]; !open {
+				// Its own end already sealed this block: no second close.
 				bs.mu.Unlock()
 				continue
 			}
+		}
+		current := bs.current[sid]
+		if bs.queued[sid] == end.attempt && current != nil && current.attempt != end.attempt {
+			s.holdEndLocked(sid, &end)
+			bs.queuedEnds[sid] = append(bs.queuedEnds[sid], end)
 			bs.mu.Unlock()
-			if !s.closeBlockRowsNow(ctx, sid, end.attempt, end.endRow, end.closing, end.nonce, end.incomplete, end.waiting, end.screenAnchor) {
-				return
-			}
+			continue
+		}
+		bs.closing[sid] = true
+		bs.mu.Unlock()
+		if !s.closeBlockRowsNow(ctx, sid, end.attempt, end.endRow, end.closing, end.nonce, end.incomplete, end.waiting, end.screenAnchor) {
+			return
 		}
 	}
 }

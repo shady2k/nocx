@@ -2,7 +2,7 @@
 import { describe, expect, it, vi, afterEach, beforeEach } from 'vitest'
 import { render, cleanup } from '@solidjs/testing-library'
 import { readFileSync } from 'node:fs'
-import { ToastHost, showToast, dismissToast, clearToasts, toasts } from './toast'
+import { ToastHost, showToast, updateToast, dismissToast, clearToasts, toasts } from './toast'
 
 beforeEach(() => {
   vi.useFakeTimers()
@@ -219,5 +219,60 @@ describe('showToast with actions and a link', () => {
     ;(container.querySelector('.ui-toast button.ui-button') as HTMLButtonElement).click()
     expect(container.querySelector('.ui-toast')).toBeNull()
     expect(toasts()).toHaveLength(0)
+  })
+})
+
+// A measure the toast reports while it lasts (nocx-vh2hr.1.25). The bar is the
+// kit's ProgressBar — the toast places it and never paints one of its own —
+// and the caller's figure is the words beside it, because the kit does not know
+// what the numbers count or which language they are read in.
+describe('a toast that reports a measure', () => {
+  const measure = (value: number, label: string) => ({
+    value,
+    label,
+    ariaLabel: 'Update download',
+  })
+
+  it('draws the kit bar with the caller’s figure beside it', () => {
+    const { container } = render(() => <ToastHost />)
+    showToast({ message: 'Downloading nocx 0.9.0…', progress: measure(0.42, '42% · 63 of 150 MB') })
+    const bar = container.querySelector('.ui-progress-bar')
+    expect(bar).not.toBeNull()
+    expect(bar?.getAttribute('role')).toBe('progressbar')
+    expect(bar?.getAttribute('aria-label')).toBe('Update download')
+    expect(bar?.getAttribute('aria-valuenow')).toBe('42')
+    // The measure is the point in a toast, so it is the kit's taller variant;
+    // the requirement is only that it IS the kit's bar.
+    expect(bar?.getAttribute('data-size')).toBe('md')
+    expect(container.querySelector('.ui-toast__figure')?.textContent).toBe('42% · 63 of 150 MB')
+  })
+
+  it('moves the same bar when the report is updated in place', () => {
+    const { container } = render(() => <ToastHost />)
+    const id = showToast({ message: 'Downloading…', progress: measure(0.1, '10%') })
+    const bar = container.querySelector('.ui-progress-bar')
+    expect(updateToast(id, { message: 'Downloading…', progress: measure(0.75, '75%') })).toBe(true)
+    // Identity, not equality: a replaced element would restart the bar's
+    // transition and re-announce the toast on every tick.
+    expect(container.querySelector('.ui-progress-bar')).toBe(bar)
+    expect(bar?.getAttribute('aria-valuenow')).toBe('75')
+    expect(container.querySelector('.ui-toast__figure')?.textContent).toBe('75%')
+    expect(container.querySelector('.ui-toast__message')?.firstChild?.textContent).toBe(
+      'Downloading…',
+    )
+  })
+
+  it('reports false for a toast that is gone rather than raising a new one', () => {
+    const { container } = render(() => <ToastHost />)
+    const id = showToast({ message: 'Downloading…' })
+    dismissToast(id)
+    expect(updateToast(id, { message: 'Downloading…', progress: measure(0.5, '50%') })).toBe(false)
+    expect(container.querySelectorAll('.ui-toast')).toHaveLength(0)
+  })
+
+  it('renders no bar for a toast that is only a sentence', () => {
+    const { container } = render(() => <ToastHost />)
+    showToast({ message: 'Can not reach the release server.' })
+    expect(container.querySelector('.ui-progress-bar')).toBeNull()
   })
 })

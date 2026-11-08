@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -71,7 +70,7 @@ func main() {
 	// the installed build. Read before every other mode so it can never open
 	// one.
 	if pid, installPath, waiter := relaunchRequest(os.Args[1:]); waiter {
-		if err := runRelaunchWaiter(pid, installPath, logger, syscall.Exec); err != nil {
+		if err := runRelaunchWaiter(runtime.GOOS, pid, installPath, logger, syscall.Exec); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -462,20 +461,21 @@ func (w *WailsApp) RestartWindow() error {
 }
 
 // startInstalledApplication starts the bundle or AppImage exchanged by the
-// updater. macOS waits for Launch Services to accept the `open` request, whose
-// `-n` is what makes the launch a NEW instance while this one is still alive.
+// updater, through the waiter that owns WHEN the start happens.
 //
-// LINUX STARTS A WAITER, NOT THE BUILD (nocx-vh2hr.1.13). This platform loads
-// a window's webview on activation, so a build started while this window still
-// owns the GTK application id can be handed that activation and never paint —
-// services and coordinator running, renderer absent, and therefore no
-// ReportHealthy ever, which is an update that never finalises (nocx-vh2hr.1.8).
-// The waiter waits for THIS PROCESS to be gone and then execs the build.
+// BOTH PLATFORMS START A WAITER, NOT THE BUILD (nocx-vh2hr.1.13,
+// nocx-vh2hr.1.24). macOS used to run `/usr/bin/open -n` from this very
+// process: `-n` starts a NEW instance while this one is still alive, and the
+// Dock kept a second tile for it after this window quit. Once this process is
+// gone the waiter opens the bundle WITHOUT `-n`, so Launch Services starts the
+// one instance and the Dock ties it to the bundle's tile (relaunch.go). On
+// Linux the waiter execs the AppImage, because this platform loads a window's
+// webview on activation — a build started while this window still owns the GTK
+// application id can be handed that activation and never paint, services and
+// coordinator running, renderer absent, and therefore no ReportHealthy ever,
+// which is an update that never finalises (nocx-vh2hr.1.8).
 func startInstalledApplication(installPath string) error {
-	if runtime.GOOS == "darwin" {
-		return exec.Command("/usr/bin/open", "-n", installPath).Run()
-	}
-	if runtime.GOOS != "linux" {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		return fmt.Errorf("restart after update is not supported on %s", runtime.GOOS)
 	}
 	self, err := os.Executable()

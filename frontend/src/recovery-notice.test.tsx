@@ -98,7 +98,7 @@ describe('a reclaimed pane says what is missing (nocx-fz4qa)', () => {
   it('states the retention bound as a sentence, with the bounds of what it took', () => {
     mount(recovery({ gaps: [{ start: 0, end: 2_000_000, reason: 'cap' }] }))
     expect(desc()).toBe(
-      "This tab was taken back after those bytes were gone: the recording's size limit dropped the oldest 2.0 MB.",
+      "This tab was taken back after those bytes were gone: this session's own size limit dropped the oldest 2.0 MB.",
     )
   })
 
@@ -112,7 +112,7 @@ describe('a reclaimed pane says what is missing (nocx-fz4qa)', () => {
       }),
     )
     expect(desc()).toBe(
-      "This tab was taken back after those bytes were gone: the recording's size limit dropped the oldest 1.0 kB, and 2.0 kB was never recorded.",
+      "This tab was taken back after those bytes were gone: this session's own size limit dropped the oldest 1.0 kB, and 2.0 kB was never recorded.",
     )
   })
 
@@ -246,7 +246,7 @@ describe('recoveryAccount (nocx-fz4qa)', () => {
     })
     mount(historical, vi.fn(), live)
     expect(title()).toBe("3.9 MB of this session's output is missing")
-    expect(desc()).toContain("the recording's size limit dropped the oldest 3.9 MB")
+    expect(desc()).toContain("this session's own size limit dropped the oldest 3.9 MB")
     expect(desc()).toContain('718 B went missing as "hostWindow"')
   })
 

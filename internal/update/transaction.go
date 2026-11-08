@@ -69,6 +69,20 @@ func (u *updater) Check(ctx context.Context) (*UpdateInfo, error) {
 	}, nil
 }
 
+// buildNumberOf is one build's number as the update's log states it: the
+// signed instant's UTC minute (YYYYMMDDHHMM), or "unknown" for a build that
+// carries none.
+//
+// THE VERSION ALONE CANNOT TELL TWO NIGHTLIES APART (ADR-79b6cy61): both sides
+// of an update during a nightly run carry the same marketing version, so a line
+// reading `from=0.8.1 to=0.8.1` says nothing about which builds changed. Every
+// update line that names a from/to pair names the build beside it
+// (nocx-vh2hr.1.25). The number comes from version.BuildNumberOf, the one
+// derivation the pipeline's stamp and the manifest agree on.
+func buildNumberOf(identity version.BuildIdentity) string {
+	return version.OrUnknown(version.BuildNumberOf(identity.BuiltAt))
+}
+
 // ---------------------------------------------------------------------------
 // Apply — §7.4
 // ---------------------------------------------------------------------------
@@ -121,6 +135,7 @@ func (u *updater) Apply(ctx context.Context, info *UpdateInfo) error {
 		FromVersion:    u.currentVersion,
 		ToVersion:      info.Version,
 		ToBuild:        info.buildIdentity(),
+		FromBuild:      u.currentBuild,
 		ArtifactSHA256: info.SHA256,
 	}
 	if err = writeJournal(jp, rec); err != nil {
@@ -128,7 +143,8 @@ func (u *updater) Apply(ctx context.Context, info *UpdateInfo) error {
 	}
 
 	u.log.Info("update apply: journal written, starting download",
-		"from", u.currentVersion, "to", info.Version)
+		"from", u.currentVersion, "fromBuild", buildNumberOf(u.currentBuild),
+		"to", info.Version, "toBuild", buildNumberOf(info.buildIdentity()))
 
 	// Step 5: create extraction directory.
 	extractDir := extractionDir(u.installPath, txID)
@@ -203,7 +219,8 @@ func (u *updater) Apply(ctx context.Context, info *UpdateInfo) error {
 	}
 
 	u.log.Info("update apply: exchange complete — restart to apply",
-		"from", u.currentVersion, "to", info.Version)
+		"from", u.currentVersion, "fromBuild", buildNumberOf(u.currentBuild),
+		"to", info.Version, "toBuild", buildNumberOf(info.buildIdentity()))
 
 	// No journal write follows the exchange — after step 11 the
 	// identities on disk say unambiguously that it happened.
@@ -307,7 +324,9 @@ func (u *updater) reconcileLocked(ctx context.Context) error {
 	case currentID.isZero() && !rec.OldBundleID.isZero():
 		return fmt.Errorf("reconcile: install bundle missing at %s — a transaction was in flight but the bundle is gone. Remove %s and consult the README rollback procedures.", rec.InstallPath, jp)
 	case currentID.equal(rec.OldBundleID):
-		u.log.Info("reconcile: exchange did not happen, cleaning up", "fromVersion", rec.FromVersion, "toVersion", rec.ToVersion)
+		u.log.Info("reconcile: exchange did not happen, cleaning up",
+			"fromVersion", rec.FromVersion, "fromBuild", buildNumberOf(rec.FromBuild),
+			"toVersion", rec.ToVersion, "toBuild", buildNumberOf(rec.ToBuild))
 		_ = os.RemoveAll(swapPath(rec.InstallPath))
 		_ = os.RemoveAll(extractionDir(rec.InstallPath, rec.TxID))
 		if err := deleteJournal(jp); err != nil {
@@ -463,26 +482,45 @@ func (u *updater) settleUnjournaledDebris(ctx context.Context) error {
 }
 
 // State implements [Updater.State]: what a window can tell a person about
-// the transaction in flight. Read-only by construction — it opens the
-// journal, derives, closes.
+// the transaction in flight. Read-only by construction — it reads this
+// process's download counters and the journal, derives, closes.
 //
-// The derivation is deliberately the same one reconcileLocked makes: a
-// journal exists AND the install path holds the bundle the transaction
-// staged. A journal whose exchange never happened is debris Reconcile is
-// about to clean, not pending work a person should be told about.
+// The PENDING derivation is deliberately the same one reconcileLocked makes: a
+// journal exists AND the install path holds the bundle the transaction staged.
+// A journal whose exchange never happened is debris Reconcile is about to
+// clean, not pending work a person should be told about.
+//
+// The DOWNLOAD part is not the journal's: it is this process's, and it is the
+// only state a person can be shown for the whole first interval of an update
+// (see the comment in the body, nocx-vh2hr.1.25).
 func (u *updater) State(ctx context.Context) UpdateState {
-	jp := journalPath(u.stateDir)
-	rec, err := readJournal(jp)
-	if err != nil || rec == nil {
-		return UpdateState{}
-	}
-	currentID, err := statBundleID(rec.InstallPath)
-	if err != nil || !currentID.equal(rec.NewBundleID) {
-		return UpdateState{}
-	}
+	// THE DOWNLOAD IS READ FIRST, AND INDEPENDENTLY OF THE JOURNAL
+	// (nocx-vh2hr.1.25). The journal is written before the body is asked for,
+	// but its newBundleID stays zero until the staged bundle is renamed into
+	// the swap peer — so every pending test below is false for the whole
+	// download. Reading the progress only after those tests passed therefore
+	// reported "nothing" for the one interval a person is waiting on: the
+	// notice polled, saw Downloading false, and drew no progress at all while
+	// 150 MB arrived (the owner's 73-second download with no word on screen).
 	u.progressMu.Lock()
 	downloading, downloaded, total := u.downloading, u.downloaded, u.downloadTotal
 	u.progressMu.Unlock()
+	progress := UpdateState{Downloading: downloading, Downloaded: downloaded, Total: total}
+
+	jp := journalPath(u.stateDir)
+	rec, err := readJournal(jp)
+	if err != nil || rec == nil {
+		// No transaction — nothing to report but the bytes, and there are
+		// bytes only while an Apply in this process is downloading.
+		return progress
+	}
+	currentID, err := statBundleID(rec.InstallPath)
+	if err != nil || !currentID.equal(rec.NewBundleID) {
+		// A journal whose exchange has not happened is not PENDING work a
+		// person is told about (reconcile owns it), but a download in flight
+		// is still the truth about this update.
+		return progress
+	}
 	return UpdateState{
 		Pending:                true,
 		Version:                rec.ToVersion,
@@ -515,7 +553,9 @@ func (u *updater) rollback(ctx context.Context, jp string, rec *journalRecord) e
 		return fmt.Errorf("rollback: exchange back failed: %w", err)
 	}
 
-	log.From(ctx).Warn("rollback: reverted to previous version", "from", rec.ToVersion, "to", rec.FromVersion,
+	log.From(ctx).Warn("rollback: reverted to previous version",
+		"from", rec.ToVersion, "fromBuild", buildNumberOf(rec.ToBuild),
+		"to", rec.FromVersion, "toBuild", buildNumberOf(rec.FromBuild),
 		"fromCommit", rec.ToBuild.Commit, "fromBuiltAt", rec.ToBuild.BuiltAt)
 
 	// Clean up journal and extraction debris.
@@ -577,7 +617,8 @@ func (u *updater) ReportHealthy(ctx context.Context) error {
 		// proof was left in and could not describe.
 		u.log.Info("report healthy: the exchanged bundle is not at the install path",
 			"install", rec.InstallPath, "onDisk", currentID, "newBundleID", rec.NewBundleID,
-			"fromVersion", rec.FromVersion, "toVersion", rec.ToVersion)
+			"fromVersion", rec.FromVersion, "fromBuild", buildNumberOf(rec.FromBuild),
+			"toVersion", rec.ToVersion, "toBuild", buildNumberOf(rec.ToBuild))
 		return nil // exchange not yet applied, nothing to report
 	}
 

@@ -33,10 +33,12 @@
  * which is what a screen-level notification area actually is.
  */
 import { Dynamic, Portal } from 'solid-js/web'
-import { For, Show, createSignal, onCleanup, type Component } from 'solid-js'
+import { For, Show, onCleanup, type Component } from 'solid-js'
+import { createStore } from 'solid-js/store'
 import { topOverlayElement } from './overlay/stack'
 import { Button } from './button'
 import { IconButton } from './icon-button'
+import { ProgressBar } from './progress-bar'
 import { CloseIcon, InfoIcon, CheckCircleIcon, AlertTriangleIcon, AlertCircleIcon } from './icons'
 
 export type ToastLevel = 'info' | 'success' | 'warning' | 'danger'
@@ -59,6 +61,22 @@ interface ToastLink {
   href: string
 }
 
+/** How far a long-running thing the toast reports has got (nocx-vh2hr.1.25).
+ *
+ *  The bar is the kit's own ProgressBar — a toast that drew its own bar would
+ *  be a second vocabulary for one measure, which is what the kit exists to
+ *  prevent — and the figure beside it is the CALLER's words, because the kit
+ *  does not know what the numbers count and does not translate. */
+export interface ToastProgress {
+  /** 0..1. ProgressBar clamps it and folds NaN to 0. */
+  value: number
+  /** The figure a person reads beside the bar: '42% · 63 of 150 MB'. */
+  label: string
+  /** What is progressing, for assistive technology: the bar announces a
+   *  number about nothing without it. */
+  ariaLabel: string
+}
+
 export interface ToastOptions {
   message: string
   level?: ToastLevel
@@ -74,6 +92,9 @@ export interface ToastOptions {
    *  raised sticky (`duration: 0`): one that dismisses itself takes its own
    *  buttons with it. */
   actions?: ToastAction[]
+  /** A determinate measure the toast reports while it lasts — the download
+   *  an update is fetching. Absent for every toast that is only a sentence. */
+  progress?: ToastProgress
 }
 
 export interface Toast {
@@ -83,6 +104,7 @@ export interface Toast {
   duration: number
   link?: ToastLink
   actions?: ToastAction[]
+  progress?: ToastProgress
 }
 
 /** Per-level auto-dismiss defaults, in ms. `0` is sticky — see the doc comment. */
@@ -93,10 +115,14 @@ const DEFAULT_DURATION: Record<ToastLevel, number> = {
   danger: 0,
 }
 
-const [toasts, setToasts] = createSignal<Toast[]>([])
+/** The queue, as a STORE rather than a signal of an array: a progress
+ *  report updates one field of one toast, and a replaced element would be a
+ *  new row to `For` — a fresh bar at the new fraction, a fresh animation and
+ *  a fresh announcement every tick (nocx-vh2hr.1.25). */
+const [toastStore, setToasts] = createStore<Toast[]>([])
 
 /** Read-only view of the queue, for the host and for tests. */
-export { toasts }
+export const toasts = () => toastStore
 
 let nextId = 1
 const timers = new Map<number, ReturnType<typeof setTimeout>>()
@@ -115,8 +141,9 @@ export function showToast(options: ToastOptions): number {
     duration,
     ...(options.link ? { link: options.link } : {}),
     ...(options.actions ? { actions: options.actions } : {}),
+    ...(options.progress ? { progress: options.progress } : {}),
   }
-  setToasts((current) => [...current, toast])
+  setToasts(toastStore.length, toast)
   if (duration > 0) {
     timers.set(
       toast.id,
@@ -133,6 +160,21 @@ export function dismissToast(id: number): void {
     timers.delete(id)
   }
   setToasts((current) => current.filter((t) => t.id !== id))
+}
+
+/** Say something new on a toast that is already up: the same element, the
+ *  same timer, the same actions, with its message and/or its measure
+ *  replaced. False when that toast is gone — a caller that owns a report
+ *  decides whether a dismissed notice comes back, and only it knows. */
+export function updateToast(
+  id: number,
+  patch: Pick<ToastOptions, 'message' | 'progress'>,
+): boolean {
+  const index = toastStore.findIndex((t) => t.id === id)
+  if (index < 0) return false
+  if (patch.message !== undefined) setToasts(index, 'message', patch.message)
+  if (patch.progress !== undefined) setToasts(index, 'progress', patch.progress)
+  return true
 }
 
 /** Drops every toast and its pending timer. For tests and for teardown. */
@@ -230,6 +272,18 @@ function renderHost(props: ToastHostProps) {
                       {link().label}
                     </a>
                   </>
+                )}
+              </Show>
+              <Show when={toast.progress}>
+                {(progress) => (
+                  <span class="ui-toast__progress">
+                    <ProgressBar
+                      value={progress().value}
+                      ariaLabel={progress().ariaLabel}
+                      size="md"
+                    />
+                    <span class="ui-toast__figure">{progress().label}</span>
+                  </span>
                 )}
               </Show>
             </span>

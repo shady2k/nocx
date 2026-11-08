@@ -52,6 +52,24 @@ const BURST = 10
  *  fail if the table and the product disagree about what "declared" means. */
 const FILES_LIST = callOperationDeclaration('files.list')!
 
+interface FilesCall {
+  id: number
+  method: string
+  sessionId?: string
+  bindingId?: string
+  path?: string
+  state?: string
+  error?: unknown
+}
+
+interface WireStats {
+  window: number | null
+  inFlight: number
+  peak: number
+  filesListSends: number
+  files: FilesCall[]
+}
+
 /** Rewrite a fixture's known_hosts line onto the port the client dials: the
  *  client reaches the fixture through the relay, so the fixture's own port
  *  would never match. */
@@ -100,12 +118,11 @@ async function openConnection(page: Page, profileName: string): Promise<void> {
  *  the only place in the suite that can observe it. */
 async function installWireInstrument(page: Page): Promise<void> {
   await page.addInitScript(() => {
-    type Frame = { method?: string; id?: number; jsonrpc?: string }
-    interface WireStats {
-      window: number | null
-      inFlight: number
-      peak: number
-      filesListSends: number
+    type Frame = {
+      method?: string
+      id?: number
+      jsonrpc?: string
+      params?: { sessionId?: string; bindingId?: string; path?: string }
     }
     // ONE ACCOUNT PER SOCKET. The page has more than one WebSocket over a run
     // — the dispatcher's connection, and the short-lived ones a spec's own
@@ -117,7 +134,13 @@ async function installWireInstrument(page: Page): Promise<void> {
     const statsFor = (socket: object): WireStats => {
       const held = (socket as { __nocxStats?: WireStats }).__nocxStats
       if (held !== undefined) return held
-      const fresh: WireStats = { window: null, inFlight: 0, peak: 0, filesListSends: 0 }
+      const fresh: WireStats = {
+        window: null,
+        inFlight: 0,
+        peak: 0,
+        filesListSends: 0,
+        files: [],
+      }
       ;(socket as { __nocxStats?: WireStats }).__nocxStats = fresh
       accounts.push(fresh)
       return fresh
@@ -135,6 +158,18 @@ async function installWireInstrument(page: Page): Promise<void> {
             if (frame.method !== undefined && frame.jsonrpc === '2.0' && frame.id !== undefined) {
               const stats = statsFor(this)
               if (frame.method === 'files.list') stats.filesListSends++
+              if (frame.method === 'files.open' || frame.method === 'files.list') {
+                // Only fixture addresses and outcome discriminators, never
+                // file contents, credentials or arbitrary response payloads.
+                stats.files.push({
+                  id: frame.id,
+                  method: frame.method,
+                  sessionId: frame.params?.sessionId,
+                  bindingId: frame.params?.bindingId,
+                  path: frame.params?.path,
+                })
+                if (stats.files.length > 128) stats.files.shift()
+              }
               if (frame.method === 'transport.credit') {
                 const ids = creditIDs.get(this) ?? new Set<number>()
                 ids.add(frame.id)
@@ -168,7 +203,7 @@ async function installWireInstrument(page: Page): Promise<void> {
             try {
               const frame = JSON.parse(message.data) as {
                 id?: number
-                result?: { window?: number }
+                result?: { window?: number; bindingId?: string; state?: string }
                 error?: unknown
               }
               if (frame.id !== undefined && creditIDs.get(this)?.delete(frame.id) === true) {
@@ -179,6 +214,14 @@ async function installWireInstrument(page: Page): Promise<void> {
                 (frame.result !== undefined || frame.error !== undefined)
               ) {
                 stats.inFlight = Math.max(0, stats.inFlight - 1)
+                const call = stats.files.find((entry) => entry.id === frame.id)
+                if (call !== undefined) {
+                  call.state = frame.result?.state
+                  call.error = frame.error
+                  if (frame.result?.bindingId !== undefined) {
+                    call.bindingId = frame.result.bindingId
+                  }
+                }
               }
             } catch {
               // Not a control frame.
@@ -195,20 +238,18 @@ async function installWireInstrument(page: Page): Promise<void> {
 
 /** Read the instrumented counts from the page: the account of the socket that
  *  asked for the credit advertisement, i.e. the dispatcher's own connection. */
-async function wireStats(
-  page: Page,
-): Promise<{ window: number | null; peak: number; filesListSends: number }> {
+async function wireStats(page: Page): Promise<WireStats> {
   return page.evaluate(() => {
-    const accounts = (
-      window as unknown as {
-        __nocxWire: { window: number | null; peak: number; filesListSends: number }[]
-      }
-    ).__nocxWire
+    // Installed by this spec before the page's dispatcher is created.
+    const instrumented = window as unknown as { __nocxWire: WireStats[] }
+    const accounts = instrumented.__nocxWire
     const renderer = accounts.find((a) => a.window !== null)
     return {
       window: renderer?.window ?? null,
+      inFlight: renderer?.inFlight ?? 0,
       peak: renderer?.peak ?? 0,
       filesListSends: renderer?.filesListSends ?? 0,
+      files: renderer?.files ?? [],
     }
   })
 }
@@ -308,6 +349,7 @@ test('a person never sees busy under load', async ({ page }, testInfo) => {
   let churnerProc: ChildProcess | null = null
   let healthyProfile = ''
   let blockedProfile = ''
+  let fault: 'pass' | 'blackhole' = 'pass'
   /** The ids the two profiles were created with. The stand's home is shared
    *  with every other spec in the run, so they are removed by ID in the
    *  finally — `profiles.list` answers an ARRAY (contracts/profiles.list has no
@@ -436,8 +478,29 @@ test('a person never sees busy under load', async ({ page }, testInfo) => {
     await expandRow(page, 'churn')
     const pending = page.locator('[data-testid="files-row"][data-path$="/churn/d20"]')
     await expect(pending).toBeVisible({ timeout: FILES_LIST.maxMs })
+    const pendingItem = pending.locator('.ui-tree-row')
+    await expect(pendingItem).toHaveAttribute('aria-expanded', 'false')
+    await expect(pendingItem).not.toHaveAttribute('data-busy', 'true')
+    const beforeBlock = await wireStats(page)
+    const blockedBinding = beforeBlock.files.findLast((call) => call.method === 'files.open')
+    expect(blockedBinding?.bindingId, 'the blocked tab opened its Files binding').toBeTruthy()
+    const pendingPath = await pending.getAttribute('data-path')
     blocked.blackhole()
+    fault = 'blackhole'
     await pending.click({ noWaitAfter: true })
+    await expect(pendingItem).toHaveAttribute('aria-expanded', 'true')
+    await expect
+      .poll(async () => {
+        const calls = (await wireStats(page)).files
+        return calls.some(
+          (call) =>
+            call.method === 'files.list' &&
+            call.bindingId === blockedBinding?.bindingId &&
+            call.path === pendingPath &&
+            call.id > (beforeBlock.files.at(-1)?.id ?? 0),
+        )
+      })
+      .toBe(true)
     await expect(page.locator('[data-testid="files-state-timed-out"]')).toBeVisible({
       timeout: FILES_LIST.maxMs + 10_000,
     })
@@ -464,6 +527,19 @@ test('a person never sees busy under load', async ({ page }, testInfo) => {
     await expect(page.getByText(/the terminal is busy/i)).toHaveCount(0)
     await expect(page.getByText(/control plane busy/i)).toHaveCount(0)
     await expect(page.getByText(/try again in a moment/i)).toHaveCount(0)
+  } catch (error) {
+    // The fixture's finally closes both SSH tabs. The shared reporter runs
+    // afterwards, when its snapshot and last frames no longer show the
+    // failed directory or its response. Preserve this boundary first.
+    await testInfo.attach('files-before-teardown', {
+      contentType: 'application/json',
+      body: JSON.stringify({
+        fault,
+        wire: await wireStats(page),
+        tree: await page.getByRole('tree', { name: 'Files', exact: true }).ariaSnapshot(),
+      }),
+    })
+    throw error
   } finally {
     churnerProc?.kill('SIGKILL')
     await blocked?.close()

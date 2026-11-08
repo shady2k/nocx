@@ -89,6 +89,7 @@ import type { SessionHandle, SessionRecovery, SessionSize, WSClient } from './ip
 import type { SessionIntentResult } from './generated/session.intent'
 import type { SessionSignal } from './generated/session.signal'
 import {
+  openBlockMenuAt,
   blockOutputText,
   createCommandBlock,
   type BlockRecord,
@@ -1598,25 +1599,143 @@ describe('the terminal keyboard sends physical key intents', () => {
 })
 
 describe('clipboard paste into the live terminal uses session intents', () => {
-  it.each([
-    ['right-click', 'contextmenu', undefined],
-    ['middle-click', 'mousedown', 1],
-  ])('%s queues one paste intent instead of using xterm', async (_name, eventType, button) => {
+  it('middle-click queues one paste intent instead of using xterm', async () => {
     const clipboard = makeClipboard({ readText: vi.fn().mockResolvedValue('clipboard text') })
     const { content, teardown } = await mountTerminal(clipboard)
     try {
       const session = sessionOf(content)
       const target = (content as unknown as { _paneTarget: HTMLElement })._paneTarget
       target.dispatchEvent(
-        eventType === 'contextmenu'
-          ? new MouseEvent(eventType, { bubbles: true, cancelable: true })
-          : new MouseEvent(eventType, { bubbles: true, cancelable: true, button }),
+        new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 1 }),
       )
       await vi.waitFor(() => expect(clipboard.readText).toHaveBeenCalledOnce())
       await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('paste', 'clipboard text'))
       expect(session.send).not.toHaveBeenCalled()
     } finally {
       teardown()
+    }
+  })
+})
+
+// nocx-a9x6u, owner 2026-11-08: «уберем вставку по клику правой кнопкой мыши».
+// The pane pasted its clipboard on every right-click — into the editor or into
+// the running program — and a person right-clicking a block got their clipboard
+// in the command they were about to run.
+describe('a right-click in the terminal is not a paste', () => {
+  it('pastes nothing at the pane, and queues no intent', async () => {
+    const clipboard = makeClipboard({ readText: vi.fn().mockResolvedValue('clipboard text') })
+    const { content, teardown } = await mountTerminal(clipboard)
+    try {
+      const session = sessionOf(content)
+      const target = (content as unknown as { _paneTarget: HTMLElement })._paneTarget
+      const event = new MouseEvent('contextmenu', {
+        bubbles: true,
+        cancelable: true,
+        clientX: 40,
+        clientY: 20,
+      })
+      target.dispatchEvent(event)
+      expect(event.defaultPrevented, 'the WebView menu is not ours either').toBe(true)
+      // Nothing was read, so nothing could have been pasted: a read is the
+      // first thing the old handler did.
+      expect(clipboard.readText).not.toHaveBeenCalled()
+      expect(session.intent).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('the menu a right-click opens keeps the keyboard once the gesture ends', async () => {
+    // Found by the e2e, not by this file: a right-click opens the menu
+    // BETWEEN the press and its release, so the pane's focus bounce — armed
+    // by the press — fired at the release and took the keyboard out of the
+    // row the menu had just focused. The menu was visible and dead: Escape
+    // and the arrows reached the composer instead (nocx-a9x6u). A menu row is
+    // an owner the gesture chose, like the ⋮ it duplicates.
+    const mounted = await mountTerminal(makeClipboard(), { attachToDocument: true })
+    try {
+      const ed = mounted.ed
+      mounted.content.setVisible(true)
+      ed.show()
+      // The bounce only runs while the editor is up; without this premise the
+      // assertion below would hold on a product where the bounce never ran.
+      expect(ed.isVisible).toBe(true)
+      const scrollback = scrollbackFor(mounted.content)
+      const block = createCommandBlock(
+        'command',
+        1,
+        'echo menu-focus',
+        '~',
+        '',
+        '<span class="term-line">menu-focus-output</span>',
+        10,
+        0,
+        'success',
+        () => scrollback.scrollbackInner,
+        () => {},
+        new CommandSnapshotStore(),
+        'shell',
+      )
+      scrollback.scrollbackInner.appendChild(block)
+
+      expect(openBlockMenuAt(block, 120, 40)).toBe(true)
+      const row = document.querySelector<HTMLElement>(
+        '[data-testid="block-actions-menu"] [role="menuitem"]',
+      )
+      expect(row).not.toBeNull()
+      expect(document.activeElement).toBe(row)
+
+      // The bounce runs on a focusin inside the pane, whoever the keyboard is
+      // on; with a menu open that keyboard is the menu's.
+      scrollback.scrollbackInner.dispatchEvent(new FocusEvent('focusin', { bubbles: true }))
+      expect(document.activeElement).toBe(row)
+    } finally {
+      mounted.teardown()
+    }
+  })
+
+  it('on a block it opens that block’s own menu at the pointer, and still pastes nothing', async () => {
+    const clipboard = makeClipboard({ readText: vi.fn().mockResolvedValue('clipboard text') })
+    const mounted = await mountTerminal(clipboard)
+    try {
+      const session = sessionOf(mounted.content)
+      mounted.content.setVisible(true)
+      const scrollback = scrollbackFor(mounted.content)
+      const block = createCommandBlock(
+        'command',
+        1,
+        'echo right-click',
+        '~',
+        '',
+        '<span class="term-line">right-click-output</span>',
+        10,
+        0,
+        'success',
+        () => scrollback.scrollbackInner,
+        () => {},
+        new CommandSnapshotStore(),
+        'shell',
+      )
+      scrollback.scrollbackInner.appendChild(block)
+      block.querySelector('.term-line')!.dispatchEvent(
+        new MouseEvent('contextmenu', {
+          bubbles: true,
+          cancelable: true,
+          clientX: 120,
+          clientY: 40,
+        }),
+      )
+
+      const menu = document.querySelector<HTMLElement>('[data-testid="block-actions-menu"]')
+      expect(menu, 'the block’s ⋮ menu, opened by the pointer').not.toBeNull()
+      const rows = [...menu!.querySelectorAll<HTMLElement>('.ui-context-menu__item')].map(
+        (row) => row.dataset.itemId,
+      )
+      expect(rows).toEqual(['copy-command', 'copy-output', 'copy-all', 'wrap'])
+      expect(clipboard.readText).not.toHaveBeenCalled()
+      expect(session.intent).not.toHaveBeenCalled()
+    } finally {
+      mounted.teardown()
     }
   })
 })

@@ -40,11 +40,20 @@ two cases separated, which is what the two earlier records conflated.
    program the live region pays no inline gutter, the grid is fitted to the
    pane's own content width, and the box keeps **one row of bottom margin** so
    the program's last row does not touch the window's edge. The margin is the
-   fit's as well as the box's: the program is told the rows that fit above it.
-3. **Entering or leaving the alternate screen changes the column count and
-   sends exactly one resize.** That is accepted, not a defect: a program that
-   takes the pane should be told the pane's width, and it is told once per
-   switch, never repeatedly.
+   fit's as well as the box's: the program is told the rows that fit above it,
+   and the box gives that row back, so the box and its margin are the pane.
+3. **Entering the alternate screen changes the column count and sends exactly
+   one resize.** That is accepted, not a defect: a program that takes the pane
+   should be told the pane's width, and it is told once per entry.
+4. **Leaving it does not resize the program.** The program keeps the grid it
+   was given until its command ends, and the running block that holds its rows
+   is drawn flush for the rest of that command, because its rows were written
+   at the pane's width. The prompt is where the transcript's column returns,
+   and the one resize owed for that happens at that boundary.
+5. **A markerless session keeps the pane's width.** A plain ssh shell before
+   its first OSC 133 marker has no blocks and no transcript column: the
+   terminal is the pane, as it always was, and the gutter is block mode's
+   alone. Its history surface is flush with the live rows it sits above.
 
 ## Consequences
 
@@ -52,6 +61,16 @@ two cases separated, which is what the two earlier records conflated.
   specs that used to forbid it now assert it.
 - A command's output no longer moves sideways when it finishes, and the earlier
   records' oscillation — a resize at every switch caused by a gutter that
-  depended on presentation — is replaced by one deliberate resize per switch.
+  depended on presentation — is replaced by one deliberate resize per entry.
+- **The exit is where the loop would be.** A program that borrows the alternate
+  screen to redraw is borrowing it because the pane resized, and a resize sent
+  at its exit would be the SIGWINCH that makes it borrow again — measured at
+  four entries, three exits and eight resizes for one pane resize. Decision 4
+  is what makes that impossible rather than merely rare. The price, stated: a
+  command that borrowed the alternate screen keeps its flush, one-row-shorter
+  presentation until it ends, and the transcript's column returns at the prompt
+  — so for that one command a 24px shift remains at the freeze. That is the
+  cost of joining a full-width program to a guttered ledger, and it is paid
+  once per command that borrows the screen rather than once per keystroke.
 - The bottom margin costs a full-screen program one row of height. It is the
   owner's Warp parity, and the fit subtracts it so no row is clipped for it.

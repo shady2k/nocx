@@ -4029,6 +4029,13 @@ export class TerminalContent extends BasePaneContent {
           // desynchronized episode comes back, used to stay flat until the
           // first command opened a block. setIdle declines while an
           // alt-screen program owns the pane.
+          //
+          // AND THE PROMPT TAKES THE GRID BACK (ADR-2yzsq8mk): a command that
+          // borrowed the alternate screen kept the pane's width until it
+          // ended, and this boundary is where the transcript's column returns
+          // — one resize, owed here, never inside the borrow.
+          this._ownedGrid = null
+          this.scrollback?.setPaneWidth(false)
           this.scrollback?.setIdle()
         } else if (
           this.lifecycle.state.kind === 'running' &&
@@ -6102,6 +6109,21 @@ export class TerminalContent extends BasePaneContent {
   private lastLocalGridSize: { cols: number; rows: number } | null = null
 
   /**
+   * THE GRID A PROGRAM OWNS, KEPT WHILE ITS COMMAND RUNS (ADR-2yzsq8mk).
+   *
+   * A program that borrows the alternate screen to redraw is borrowing it
+   * because the pane resized. If leaving the screen resized the pty back, that
+   * SIGWINCH would be the borrow's own trigger and the program would borrow
+   * again — the presentation loop ADR-3kqrem7v removed, measured at four
+   * alternate entries and eight resizes for one pane resize. So on leaving the
+   * alternate screen the pane keeps presenting the grid it applied to the
+   * program, and the running block that holds it is drawn flush (its rows were
+   * written at the pane's width). The prompt is where the transcript's column
+   * returns, and the one resize owed for that happens there.
+   */
+  private _ownedGrid: { cols: number; rows: number } | null = null
+
+  /**
    * The size report this window would send now: its locally fitted grid and
    * the cell metric in the wire's own unit — the whole text area in device
    * pixels, columns × the committed device-cell metric (TIOCSWINSZ's
@@ -6355,6 +6377,18 @@ export class TerminalContent extends BasePaneContent {
       area && this._areaHeightPx(area) > 0 ? this._areaHeightPx(area) : viewport.height
     const sb = this.scrollback
     if (!sb) return scroller
+    // THE PROGRAM THAT OWNS THE PANE IS TOLD ITS BOX (ADR-2yzsq8mk). The
+    // controller owns that height — `paneFillHeight`, which `_fillPane` writes
+    // to the box — so the alternate screen's one-row margin cannot cost a
+    // full-screen program a row: read from one owner, the markerless session's
+    // program (no running block to take the branch below) gets the box's
+    // height too, instead of the whole scroller the box does not show.
+    if (sb.mode === 'fullscreen') {
+      const box = sb.paneFillHeight
+      // No layout at all yet — the delivered box is the better guess, the same
+      // fallback every other mode takes here.
+      return box > 0 ? box : scroller
+    }
     const structured =
       sb.mode === 'idle' || sb.mode === 'running' || sb.blockManager.runningBlock !== null
     if (!structured) return scroller
@@ -6369,12 +6403,10 @@ export class TerminalContent extends BasePaneContent {
     if (cell > 0) {
       const max = sb.runningLiveCap
       const height = max ?? Math.max(0, this._terminalAreaPx(area!) - sb.runningHeaderHeightPx)
-      const rows = gridRows(height, cell)
-      // A FULL-SCREEN PROGRAM ENDS ONE ROW ABOVE THE WINDOW'S EDGE
-      // (ADR-2yzsq8mk, the owner's Warp pass): the box pays that margin, so the
-      // fit gives the program one row less than the pane holds and its last row
-      // is never the window's last pixel.
-      return (sb.mode === 'fullscreen' ? Math.max(1, rows - 1) : rows) * cell
+      // (The alternate screen left this branch above: it is told its box's
+      // height, which already gives back the margin row ADR-2yzsq8mk keeps
+      // below a program's last row.)
+      return gridRows(height, cell) * cell
     }
     const cap = sb.runningLiveCap
     if (cap !== null) return Math.max(0, cap)
@@ -6428,6 +6460,19 @@ export class TerminalContent extends BasePaneContent {
 
   private usableViewport(viewport: ContentViewport): ContentViewport {
     const area = this.scrollback?.scrollbackArea
+    const sb = this.scrollback
+    const metrics = this.liveCellMetrics()
+    const owned = this._ownedGrid
+    if (owned !== null && metrics !== null && sb?.mode !== 'fullscreen') {
+      // While the program owns the pane, its grid is the pane's answer — the
+      // one it was last given — so a switch back to the primary buffer cannot
+      // resize it.
+      return {
+        ...viewport,
+        width: owned.cols * metrics.cellWidth,
+        height: owned.rows * metrics.cellHeight,
+      }
+    }
     // Zero before first layout — the delivered box is the better guess then,
     // and the next viewport delivery corrects it. Each axis falls back on its
     // own: jsdom reports 0 for both, a real pane mid-layout can report one.
@@ -6444,8 +6489,14 @@ export class TerminalContent extends BasePaneContent {
     // pane's own content box and moves with the pane; the gutter is the one
     // declared number every row of the ledger pays.
     const outer = area && area.clientWidth > 0 ? area.clientWidth : viewport.width
+    // A FULL-SCREEN PROGRAM AND A MARKERLESS SESSION OWN THE PANE'S WIDTH. The
+    // alternate screen pays no gutter by ADR-2yzsq8mk, and a session with no
+    // shell integration has no blocks to align with — there is no transcript
+    // column, only the terminal — so it keeps the whole pane as it always has.
+    // The gutter is the block ledger's, and only the ledger's.
+    const wholePane = sb?.mode === 'fullscreen' || sb?.mode === 'unstructured'
     const gutter =
-      this.scrollback?.mode === 'fullscreen' || area === undefined
+      wholePane || area === undefined
         ? 0
         : parseFloat(getComputedStyle(area).getPropertyValue('--pane-inline-padding')) || 0
     const width = Math.max(0, outer - 2 * gutter)
@@ -7749,6 +7800,11 @@ export class TerminalContent extends BasePaneContent {
       if (thawing) {
         this._switchPresents = false
         this._closeAlternateScreenFence('thaw')
+        // AND THE GRID IT HAS IS THE GRID IT KEEPS (ADR-2yzsq8mk). A resize
+        // sent because the program stepped out of the alternate screen would
+        // arrive as the SIGWINCH that makes a borrowing program borrow again.
+        this._ownedGrid = this.lastLocalGridSize
+        this.scrollback?.setPaneWidth(true)
       }
       // A conventional terminal stays unstructured: the scrollback-block
       // model never takes over (ADR-0024 §4). Exit fullscreen before deciding

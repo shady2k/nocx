@@ -181,6 +181,21 @@ describe('rows are full width, and the gutter lives in them (nocx-9bpeq.8)', () 
     expect(shipped('.cmd-block.cmd-block-running > .cmd-output', 'padding-inline')).toBeNull()
   })
 
+  it('a markerless session keeps the pane’s width; the gutter is the ledger’s', () => {
+    // ADR-2yzsq8mk: a plain ssh shell before its first marker has no blocks and
+    // no transcript column, so the terminal is the pane — and the surface that
+    // hands its past back is flush with the live rows above it, still one grid.
+    expect(
+      shipped(
+        '.scrollback-inner.inner-unstructured > .terminal-live-container.live-unstructured',
+        'padding-inline',
+      ),
+    ).toBe('0')
+    expect(shipped('.scrollback-inner.inner-unstructured > .live-history', 'padding-inline')).toBe(
+      '0',
+    )
+  })
+
   it('the full-screen program owns the width and keeps a row of bottom margin', () => {
     // ADR-2yzsq8mk: the alternate screen pays no gutter — the program is
     // fitted to the pane's own width — and reserves one row below its last row

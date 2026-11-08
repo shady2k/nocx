@@ -21324,6 +21324,109 @@ describe('the copy chord does not claim plain Ctrl+C (nocx-1ebrs.19.1)', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 // The alternate-screen size fence (nocx-1ebrs.10)
 // ═══════════════════════════════════════════════════════════════════════════
+// The height a full-screen program is told (ADR-2yzsq8mk)
+// ═══════════════════════════════════════════════════════════════════════════
+// ONE OWNER. The controller writes the box that fills the pane and answers its
+// height (`paneFillHeight`); the fit asks for that same number. Two expressions
+// is how a markerless session's program — vim over a plain ssh shell, where
+// there is no running block and none of the structured branches apply — came to
+// be told the whole scroller while its box showed the margin's row less, and
+// lost its last row to the clip.
+describe('a full-screen program is told the box that shows it (ADR-2yzsq8mk)', () => {
+  const PANE = { width: 800, height: 400 }
+  const CELL = { cellWidthPx: 8, cellHeightPx: 16 }
+  /** 400px of pane, no running header to reserve, 25 rows of 16 — less the one
+   *  row the alternate screen keeps as its bottom margin. */
+  const FILLED = { rows: 24, ypixel: 384 }
+
+  async function markerlessPane() {
+    const client = makeClient()
+    const mounted = await mountTerminal(makeClipboard(), { attachToDocument: true }, client)
+    const { content } = mounted
+    const raf = globalThis.requestAnimationFrame
+    let queued: FrameRequestCallback[] = []
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      queued.push(cb)
+      return queued.length
+    }
+    const flushFrames = (): void => {
+      for (let pass = 0; pass < 50 && queued.length > 0; pass++) {
+        const frame = queued
+        queued = []
+        for (const cb of frame) cb(0)
+      }
+    }
+    const teardown = (): void => {
+      queued = []
+      globalThis.requestAnimationFrame = raf
+      mounted.teardown()
+    }
+    try {
+      const session = sessionOf(content)
+      const scrollback = scrollbackFor(content)
+      Object.defineProperty(scrollback.scrollbackArea, 'clientWidth', {
+        configurable: true,
+        value: PANE.width,
+      })
+      Object.defineProperty(scrollback.scrollbackArea, 'clientHeight', {
+        configurable: true,
+        value: PANE.height,
+      })
+      content.viewportChanged({ width: PANE.width, height: PANE.height })
+      // A plain ssh shell before its first marker: no blocks, no running
+      // header, the terminal is the pane.
+      scrollback.setUnstructured()
+      session.fireScreenFrame(screenFrame(1, ['$ top'], CELL))
+      flushFrames()
+      return { content, session, scrollback, flushFrames, teardown }
+    } catch (err) {
+      teardown()
+      throw err
+    }
+  }
+
+  it('keeps the pane’s full width, because a markerless session has no ledger column', async () => {
+    const { content, scrollback, teardown } = await markerlessPane()
+    try {
+      const reported = (
+        content as unknown as {
+          _reportedSize(): { cols: number; xpixel: number }
+        }
+      )._reportedSize()
+      // The whole pane: 800px of 8px cells. A gutter here would cost a plain
+      // ssh shell three columns of a width it has always had (ADR-2yzsq8mk).
+      expect(reported.cols).toBe(100)
+      expect(reported.xpixel).toBe(PANE.width)
+      expect(scrollback.mode).toBe('unstructured')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('gives the program the box less its margin row, from the one owner', async () => {
+    const { content, session, scrollback, flushFrames, teardown } = await markerlessPane()
+    try {
+      const alternate = screenFrame(2, ['ALT-READY'], CELL)
+      alternate.state.bufferKind = 'alternate'
+      session.fireScreenFrame(alternate)
+      expect(scrollback.mode).toBe('fullscreen')
+      flushFrames()
+      const box = parseFloat(scrollback.terminalLiveContainer.style.height)
+      const reported = (
+        content as unknown as { _reportedSize(): { rows: number; ypixel: number } }
+      )._reportedSize()
+      // The box, the fit and the pty are one number.
+      expect(box).toBe(FILLED.ypixel)
+      expect(reported.rows).toBe(FILLED.rows)
+      expect(reported.ypixel).toBe(box)
+      expect(scrollback.paneFillHeight).toBe(box)
+    } finally {
+      teardown()
+    }
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Measured on the tree before this fix: the first alternate-screen frames
 // carried the PREVIOUS mode's geometry (192 columns with the pane settled
 // wider; 70 columns in a 1394 px pane), the program read the person's keys

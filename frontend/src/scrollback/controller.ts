@@ -695,6 +695,22 @@ export class ScrollbackController {
     this.scrollbackInner.classList.toggle('inner-fullscreen-mode', on)
   }
 
+  /**
+   * Draw the running block flush for the rest of its command (ADR-2yzsq8mk).
+   *
+   * A program that borrowed the alternate screen wrote its primary rows at the
+   * pane's width, and the pane keeps telling it that width until its command
+   * ends — so the block that holds those rows wears no gutter, or the grid
+   * would be a softer target than the box and the last columns would be
+   * clipped. The prompt takes the attribute back with the grid.
+   */
+  setPaneWidth(on: boolean): void {
+    const block = this._blockManager.runningBlock?.el
+    if (!block) return
+    if (on) block.dataset.paneWidth = ''
+    else delete block.dataset.paneWidth
+  }
+
   /** Show the alternate grid beneath the same one-line running header
    * (ADR-3kqrem7v), preserving the actual header node and its controls. */
   enterFullscreen(): void {
@@ -738,21 +754,35 @@ export class ScrollbackController {
    *  by its overflow — `top` drawing 34 of the 40 rows it had been given.
    *  A window resize is the same defect with no card in it. */
   private _fillPane(): void {
+    const box = this.paneFillHeight
+    if (box <= 0) return
+    this.terminalLiveContainer.style.height = `${box}px`
+  }
+
+  /**
+   * THE HEIGHT OF THE BOX THAT FILLS THE PANE, AND OF THE GRID THAT FILLS IT.
+   *
+   * One owner, read by two callers: `_fillPane` writes it to the live box, and
+   * `terminal-content`'s `_gridHeight` returns it as the desired grid height
+   * while the program owns the pane. Two expressions — one box that ends on a
+   * row boundary, one grid the PTY is told — is how a markerless session's
+   * full-screen program (vim or top over a plain ssh shell, where there is no
+   * running block to give `_gridHeight` the structured branch) came to be told
+   * the whole scroller while its box showed one row less, and lost its last
+   * row to the clip.
+   *
+   * Floored to whole rows for the reason `runningLiveCap` is: a box that ends
+   * inside a row shows a sliced one. The alternate screen then gives one of
+   * those rows back — the margin ADR-2yzsq8mk keeps below a program's last row,
+   * which the stylesheet declares as `margin-bottom` — so the box and its
+   * margin together are the pane and no row is clipped for the margin.
+   */
+  get paneFillHeight(): number {
     const max = this._areaHeightPx() - (this._fullscreenHeader ? this.runningHeaderHeightPx : 0)
-    if (max <= 0) return
-    // Floored to whole rows for the same reason the running cap is: the pane
-    // fills the box, and a box that ends inside a row shows a sliced one (see
-    // `runningLiveCap`).
+    if (max <= 0) return 0
     const cell = this._cellMetrics()?.cellHeight ?? 0
     const height = cell > 0 && max > cell ? gridRows(max, cell) * cell : max
-    // AND THE FULL-SCREEN BOX GIVES BACK THE MARGIN ROW (ADR-2yzsq8mk). The
-    // stylesheet keeps `margin-bottom: var(--term-cell-height)` under the
-    // alternate screen, and `terminal-content`'s fit tells the program one row
-    // fewer for the same reason; a box still as tall as the whole pane would
-    // put that margin outside the scroller — no margin on screen, and a stack
-    // one row taller than the box it is drawn in.
-    const box = this._mode === 'fullscreen' && cell > 0 ? Math.max(0, height - cell) : height
-    this.terminalLiveContainer.style.height = `${box}px`
+    return this._mode === 'fullscreen' && cell > 0 ? Math.max(0, height - cell) : height
   }
 
   /** Exit alt-screen: restore normal layout. */

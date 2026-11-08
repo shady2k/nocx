@@ -675,6 +675,17 @@
   margin-bottom: var(--term-cell-height, 1.2em);
 }
 
+/* A MARKERLESS SESSION HAS NO LEDGER TO ALIGN WITH (ADR-2yzsq8mk). A plain ssh
+   shell before its first OSC 133 marker has no blocks and no transcript
+   column: the terminal IS the pane, and it keeps the whole width it always
+   had. `usableViewport` subtracts no gutter there, and the surface holding the
+   shell's past is flush with the live rows it sits above — one grid, still
+   (nocx-zg3k3.10.4). */
+.scrollback-inner.inner-unstructured > .terminal-live-container.live-unstructured,
+.scrollback-inner.inner-unstructured > .live-history {
+  padding-inline: 0;
+}
+
 /* ADR-3kqrem7v: alternate mode hides transcript content, while keeping the
    SAME running command header above the live grid.
 
@@ -1408,6 +1419,16 @@
 
 /* ADR-3kqrem7v: running geometry is a pane property, never a buffer-mode
    property. Frozen rows retain the ordinary transcript gutter and rhythm. */
+/* AND A COMMAND THAT BORROWED THE ALTERNATE SCREEN KEEPS THE WIDTH IT WAS
+   GIVEN (ADR-2yzsq8mk). The pane keeps telling such a program the pane's width
+   until its command ends — a resize for stepping back to the primary would be
+   the SIGWINCH that makes a borrowing program borrow again — so the running
+   block holding its rows is flush too, and the gutter returns with the prompt.
+   `.cmd-output` inside already pays no inline padding (the rule above). */
+.cmd-block.cmd-block-running[data-pane-width] {
+  padding-inline: 0;
+}
+
 /* ONE COLUMN FOR A NORMAL COMMAND, WHOLE WIDTH FOR A PROGRAM (ADR-2yzsq8mk).
    A normal command — running or finished, at the prompt or under an
    unstructured session — wears the transcript's gutter exactly as the frozen

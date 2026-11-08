@@ -1,27 +1,40 @@
 package main
 
-// THE LINUX UPDATE RESTART IS AN ORDERED HANDOVER (nocx-vh2hr.1.13).
+// THE UPDATE RESTART IS AN ORDERED HANDOVER, ON BOTH PLATFORMS
+// (nocx-vh2hr.1.13, nocx-vh2hr.1.24).
 //
-// macOS relaunches with `open -n`, which Launch Services answers with a NEW
-// instance even while the old one is still running. Linux has no such flag:
-// the update restart used to `exec.Command(installPath)` the installed build
-// and only then ask this window to quit, and on this platform the webview is
-// loaded on ACTIVATION — so a window started while the old GTK application
-// still holds the id can be handed that activation and never paint, while its
-// Go side (services, coordinator) runs perfectly well. That is the shape the
-// nightly's proof printed: a candidate process, a serving candidate
-// coordinator, and an update journal nobody ever finalised, because the only
-// caller of ReportHealthy is the renderer (nocx-vh2hr.1.8).
-//
-// So the window no longer starts the build. It starts a small detached waiter
+// The window never starts the build. It starts a small detached waiter
 // (setsid — not nohup: the child must leave this session, not merely ignore
 // SIGHUP), hands it this process's pid and the installed path, and quits. The
 // waiter waits for THIS PROCESS to be gone — pidfd where the kernel has one,
-// the pid itself otherwise, never a timer — and then execs the installed
-// build, so the new window starts with no other instance of its application
-// id alive. The exec keeps the waiter's stdout/stderr, which are this
-// window's, so the restarted build's log lands where the launcher's does
-// (PR #683).
+// the pid itself otherwise, never a timer — and only then starts the installed
+// build. The waiter's stdout/stderr are this window's, so the restarted
+// build's log lands where the launcher's does (PR #683).
+//
+// LINUX: the waiter EXECS the installed AppImage. It used to be the window
+// itself that ran `exec.Command(installPath)` before asking this window to
+// quit, and on this platform the webview is loaded on ACTIVATION — so a
+// window started while the old GTK application still holds the id can be
+// handed that activation and never paint, while its Go side (services,
+// coordinator) runs perfectly well. That is the shape the nightly's proof
+// printed: a candidate process, a serving candidate coordinator, and an update
+// journal nobody ever finalised, because the only caller of ReportHealthy is
+// the renderer (nocx-vh2hr.1.8).
+//
+// macOS: the window used to run `/usr/bin/open -n <bundle>` ITSELF, while this
+// window was still alive. `-n` is what makes Launch Services answer with a NEW
+// instance, and the Dock gave that instance a tile of its own beside the one
+// the running window already had; when the old window went away, two tiles
+// stayed (nocx-vh2hr.1.24, the owner's own Mac). The update is now handed over
+// like Linux's: once this process is gone the waiter opens the installed
+// bundle through Launch Services WITHOUT `-n`, so the one instance it starts is
+// tied to the bundle's own Dock tile — which is what the owner gets from a
+// pinned icon with nocx not running.
+//
+// The program the waiter execs is the installed build on Linux and
+// `/usr/bin/open` on macOS; that choice is [relaunchHandover], and it takes the
+// GOOS as a parameter so a test can state the platform it is not on
+// (internal/update/serverbin's rule).
 //
 // Failure is said out loud in the window's own log and the journal is left
 // alone: an update that could not be started is recovered by the ordinary
@@ -96,13 +109,38 @@ func waitForProcessExit(pid int) error {
 	return procwatch.WaitForExit(pid)
 }
 
+// relaunchHandover answers what the waiter hands this window's place to: the
+// program it execs and that program's command line.
+//
+// ONE LAUNCHER PER PLATFORM, and each is wrong for the other. On Linux the
+// installed AppImage IS the program — the update's target is the file that
+// runs. On macOS it is not: the bundle has to be started through Launch
+// Services, or the window it opens belongs to no application and the Dock
+// cannot tie it to the bundle's tile. `open` without `-n` is that launch, and
+// the waiter only reaches here once the old window is gone, so there is no
+// second instance for `-n` to force. The window itself never names a
+// launcher: it starts this waiter, which is what keeps "nothing starts before
+// the old window exits" true on both platforms.
+//
+// goos is passed rather than read for the same reason [quitSeam.keyBindings]
+// takes it: a rule that differs per platform is a rule a test has to be able
+// to state for the platform it is not on.
+func relaunchHandover(goos, installPath string) (string, []string) {
+	if goos == "darwin" {
+		return "/usr/bin/open", []string{"open", installPath}
+	}
+	return installPath, []string{installPath}
+}
+
 // runRelaunchWaiter is the waiter: wait for the window that started it, then
 // hand this process over to the installed build.
 //
 // execFn is syscall.Exec in production and a seam in the tests; the split is
 // what lets a test assert BOTH halves — that nothing is started while the old
-// window lives, and that something is started the moment it is gone.
-func runRelaunchWaiter(pid int, installPath string, logger *slog.Logger, execFn func(string, []string, []string) error) error {
+// window lives, and that something is started the moment it is gone — and, per
+// [relaunchHandover], that the something is `/usr/bin/open` on macOS and the
+// installed build on Linux.
+func runRelaunchWaiter(goos string, pid int, installPath string, logger *slog.Logger, execFn func(string, []string, []string) error) error {
 	at(logger).Info("relaunch: holding the handover until the window that started it exits",
 		"pid", pid, "install", installPath)
 	if err := waitForProcessExit(pid); err != nil {
@@ -112,7 +150,8 @@ func runRelaunchWaiter(pid int, installPath string, logger *slog.Logger, execFn 
 	}
 	at(logger).Info("relaunch: the previous window is gone; starting the installed build",
 		"install", installPath)
-	if err := execFn(installPath, []string{installPath}, os.Environ()); err != nil {
+	program, argv := relaunchHandover(goos, installPath)
+	if err := execFn(program, argv, os.Environ()); err != nil {
 		// The journal is deliberately left in place: the next launch's
 		// reconcile owns the recovery, and a deleted journal here would
 		// disarm it.

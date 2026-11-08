@@ -147,9 +147,8 @@ func (unsupported) Close() error { return nil }
 // process it names has exited, so there is no polling window and no pid reuse
 // to get wrong. pidfd_open lives only in x/sys/unix's Linux half, so every
 // other platform answers supported=false and takes the poll below
-// (wait_other.go) — which is also where macOS lands, and macOS's update
-// restart never starts a waiter at all (`open -n` starts a second instance
-// beside the first).
+// (wait_other.go) — which is also where macOS lands: its update restart runs
+// the same waiter (relaunch.go) and polls the window's pid.
 //
 // The poll is the same fact at a coarser grain: it asks whether the pid still
 // exists, never a sleep that assumes the answer.

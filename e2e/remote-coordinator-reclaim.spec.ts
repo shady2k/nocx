@@ -935,7 +935,7 @@ test('a remote helper build survives a fresh coordinator, names what it lost, an
       .reduce((total, gap) => total + gap.end - gap.start, 0)
     expect(capLossBytes).toBeGreaterThan(0)
     await expect(notice.locator('.ui-status-card__desc')).toContainText(
-      "the recording's size limit dropped",
+      "this session's own size limit dropped",
     )
     await expect(notice.locator('.ui-status-card__desc')).not.toContainText('hostWindow')
 

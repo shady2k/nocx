@@ -99,8 +99,25 @@ export function redactHome(text: string): string {
  *  and the copied details print them when a download is what failed. */
 export function downloadProgressLabel(progress: DownloadProgress): string {
   if (progress.total <= 0) return 'Downloading…'
-  const percent = Math.min(100, Math.floor((progress.downloaded * 100) / progress.total))
-  return `Downloading ${percent}% · ${megabytes(progress.downloaded)} of ${megabytes(progress.total)} MB`
+  const figures = downloadFigures(progress)
+  return `Downloading ${figures.percent}% · ${figures.done} of ${figures.total} MB`
+}
+
+/** The two numbers a download's figure is made of: the floored percent and
+ *  the decimal megabytes. ONE calculator for them (nocx-vh2hr.1.25): the
+ *  notice's figure is the catalogue's words around these numbers, the copied
+ *  details say the English sentence with the same ones, and a second division
+ *  would eventually round a different way. */
+export function downloadFigures(progress: DownloadProgress): {
+  percent: number
+  done: string
+  total: string
+} {
+  const percent =
+    progress.total > 0
+      ? Math.min(100, Math.floor((Math.max(0, progress.downloaded) * 100) / progress.total))
+      : 0
+  return { percent, done: megabytes(progress.downloaded), total: megabytes(progress.total) }
 }
 
 function megabytes(bytes: number): string {

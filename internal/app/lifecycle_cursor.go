@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/diagnostics"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
@@ -139,10 +140,24 @@ func (c *lifecycleCursor) applyFrame(consumed uint64, kind lifecycle.EventKind, 
 	offset, ok := c.streamOffsetLocked(consumed)
 	sid, store := c.sid, c.store
 	c.mu.Unlock()
+	// THE FIRST PROMPT IS THE OPEN'S LAST STEP (nocx-q9od5). An open's stages
+	// end when the session is adopted, and the person can type one prompt
+	// later — which is the interval the owner spent staring at a blank pane.
+	// Noted only for a frame this leg APPLIES, so a handover does not credit
+	// a prompt another coordinator delivered.
+	noted := false
+	notePrompt := func() {
+		if noted || kind != lifecycle.KindPromptReady {
+			return
+		}
+		noted = true
+		diagnostics.NoteFirstPrompt(c.ctx)
+	}
 	if !ok {
 		log.From(c.ctx).Warn("lifecycle cursor: a frame ends outside every relayed stretch; it is applied and the cursor stays where it was",
 			"session", sid, "consumed", consumed)
 		apply(c.ctx)
+		notePrompt()
 		return nil
 	}
 	if store != nil && sid != "" {
@@ -172,8 +187,10 @@ func (c *lifecycleCursor) applyFrame(consumed uint64, kind lifecycle.EventKind, 
 				"session", sid, "kind", kind, "attempts", attempts, "held_ms", held.Milliseconds(), "offset", offset, "error", err)
 			return err
 		}
+		notePrompt()
 	} else {
 		apply(c.ctx)
+		notePrompt()
 	}
 	c.mu.Lock()
 	if offset > c.applied {

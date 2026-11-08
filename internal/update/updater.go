@@ -342,7 +342,7 @@ func (f *GitHubManifestFetcher) get(ctx context.Context, url string) ([]byte, er
 // transfer from zero. The declared SHA-256 is still the only acceptance: a
 // resume that produced one wrong byte fails here.
 func (u *updater) downloadVerified(ctx context.Context, url, sha256Hex string, size int64, destPath string) error {
-	u.noteProgress(0, size)
+	u.recordProgress(0, size)
 	defer u.endDownload()
 	var lastErr error
 	for attempt := 0; attempt < downloadAttempts; attempt++ {
@@ -438,10 +438,14 @@ func (u *updater) downloadAttempt(ctx context.Context, url string, size int64, d
 		limit = size + 1<<20
 	}
 	body := &stallReader{body: io.LimitReader(resp.Body, limit), stall: u.stallWindow()}
-	var src io.Reader = body
-	if u.progress != nil {
-		src = &progressReader{r: body, done: offset, total: size, report: u.progress}
-	}
+	// THE COUNT IS ALWAYS KEPT (nocx-vh2hr.1.25). This reader used to be
+	// installed only when a Progress callback was configured, so the updater's
+	// own state — the numbers GetUpdateState hands the window — stayed at zero
+	// for the whole transfer on every build that passed no callback, which is
+	// every shipped one. The state is the surface's source of truth
+	// (nocx-vh2hr.1.15); a callback is an optional second reader of the same
+	// fact, never the reason the fact exists.
+	src := &progressReader{r: body, done: offset, total: size, report: u.recordProgress}
 	written, copyErr := io.Copy(f, src)
 	ok = true
 	if entity := resp.Header.Get("ETag"); entity != "" {
@@ -476,10 +480,12 @@ func (p *progressReader) Read(b []byte) (int, error) {
 	return n, err
 }
 
-// startDownload and endDownload are the download's own progress state: the
-// same numbers the callback carries, kept so a surface that asks LATER (the
-// notice is rebuilt on every render) can still say where the transfer is.
-func (u *updater) noteProgress(done, total int64) {
+// recordProgress is the download's own progress state: the same numbers the
+// optional callback carries, kept so a surface that asks LATER (the notice
+// polls every tick and is rebuilt on every render) can still say where the
+// transfer is. It is the ONLY writer of those fields, so the state a person
+// sees and any callback cannot disagree.
+func (u *updater) recordProgress(done, total int64) {
 	u.progressMu.Lock()
 	u.downloading, u.downloaded, u.downloadTotal = true, done, total
 	u.progressMu.Unlock()

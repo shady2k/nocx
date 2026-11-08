@@ -2611,12 +2611,14 @@ export class PaneManager {
     this.tabStrip.removePane(pane.id)
     this.panes.splice(index, 1)
     this.panesChanged()
+    // NO TAB IS IN FRONT once the front one has gone, until one is activated.
+    // Left pointing at the removed pane the field is a fact about nothing,
+    // and the replacement the backend mints cannot be told apart from a tab
+    // this window is merely drawing (nocx-v408b).
+    if (wasActive) this.activePane = null
 
     if (this.layoutAvailable && this.layout.tabOf(pane.wireId)) {
-      void this.ask(
-        () => this.layout.closePane(pane.wireId).then(() => undefined),
-        'Could not close the tab',
-      )
+      void this.ask(() => this.closeThroughChain(pane.wireId), 'Could not close the tab')
     } else if (this.panes.length === 0) {
       // No chain to ask, so the old rule stands: the window is never empty.
       this.newPane()
@@ -2629,6 +2631,31 @@ export class PaneManager {
         void this.activate(mruPane)
       }
     }
+  }
+
+  /**
+   * Close a pane through the chain, and put the window's tab in front when
+   * the close minted the replacement (nocx-v408b).
+   *
+   * THE REPLACEMENT IS ADOPTED, NOT ACTIVATED, and that is right for a
+   * restored window: adoption draws what the backend already holds, and which
+   * tab was in front is boot's to decide (renderFromLayout, "NOT ACTIVATED").
+   * A replacement minted by THIS close is a different fact — the window has
+   * just lost the tab it was showing, and the tab the store put in its place
+   * is the only one there is. Left unactivated it is drawn and never shown:
+   * `.pane` is `visibility: hidden` until it is the active one
+   * (styles/base.css), which is a tab with no prompt and nothing to type
+   * into.
+   *
+   * The id is the one this close SENT, so nothing is guessed: the store uses
+   * it in the same transaction only when the close would otherwise leave the
+   * application with no tab, and a close that leaves tabs behind finds no
+   * pane under that id.
+   */
+  private async closeThroughChain(wireId: string): Promise<void> {
+    const replacement = await this.layout.closePane(wireId)
+    const front = this.panes.find((candidate) => candidate.wireId === replacement.paneId)
+    if (front) await this.activate(front)
   }
 
   /** Activate a pane: show its pane, mount content, focus. */

@@ -60,7 +60,7 @@ export { recoveryAccount, uncoveredGapRanges }
 function clauses(account: RecoveryAccount): string[] {
   const parts: string[] = []
   if (account.dropped > 0) {
-    parts.push(`the recording's size limit dropped the oldest ${formatBytes(account.dropped)}`)
+    parts.push(`this session's own size limit dropped the oldest ${formatBytes(account.dropped)}`)
   }
   if (account.unrecorded > 0) {
     parts.push(`${formatBytes(account.unrecorded)} was never recorded`)
@@ -98,8 +98,10 @@ function description(account: RecoveryAccount): string {
 export interface RecoveryNoticeProps {
   /** What the reclaim recovered, and what it could not. */
   recovery: SessionRecovery
-  /** Live gaps already named by the neighboring live notice. Their byte
-   *  ranges are removed from the historical account to avoid double-counting. */
+  /** Bytes already named to this person about this session — the neighboring
+   *  live notice's ranges, and what an earlier window announced (nocx-ipuy3).
+   *  Their byte ranges are removed from the historical account, so the card
+   *  states each lost byte once and a reopened window states only the growth. */
   liveGaps?: readonly Pick<SessionOutputGap, 'start' | 'end'>[]
   /** Take this card away. It records nothing: the hole is permanent and the
    *  card is not, which is the whole of what dismissing it means. */

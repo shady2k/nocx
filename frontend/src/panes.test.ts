@@ -401,6 +401,31 @@ describe('PaneManager', () => {
     expect(rows.panes).toHaveLength(1)
   })
 
+  // nocx-v408b. THE REPLACEMENT IS THE TAB IN FRONT, and that is not a
+  // detail of how it is drawn: `.pane` is `visibility: hidden` until it is the
+  // active one (styles/base.css), so a replacement the renderer adopts without
+  // activating is a tab whose pane shows nothing at all — no prompt, no
+  // composer, nothing to type into.
+  it('makes the replacement tab the one in front, so its pane is visible (nocx-v408b)', async () => {
+    const { client, manager, bar, panes } = await mountPaneManager()
+
+    manager.closeActivePane()
+    await vi.waitFor(() => {
+      expect(bar.querySelectorAll('.nocx-tab').length).toBe(1)
+      expect(client.openSession).toHaveBeenCalledTimes(2)
+    })
+
+    // The strip says it is the tab in front…
+    expect(bar.querySelectorAll('.nocx-tab')[0].getAttribute('aria-selected')).toBe('true')
+    // …the window agrees, and that is what makes the pane the visible one…
+    const paneElements = panes.querySelectorAll<HTMLElement>('.pane')
+    expect(paneElements).toHaveLength(1)
+    expect(paneElements[0].classList.contains('active')).toBe(true)
+    expect(manager.activePaneElement()).toBe(paneElements[0])
+    // …and the replacement mounted the editor a command is typed into.
+    expect(paneElements[0].querySelector('.nocx-editor-input')).not.toBeNull()
+  })
+
   // ── a session's name to a person (nocx-vnzek) ─────────────────────────
 
   it('names a session with the same words the tab strip shows, and nothing for one it does not hold', async () => {

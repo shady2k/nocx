@@ -5,11 +5,11 @@ import {
   GetUpdateState,
   RestartWindow,
 } from '../bindings/github.com/shady2k/nocx/wailsapp'
-import { showToast, dismissToast, type ToastOptions } from './ui/toast'
+import { showToast, updateToast, dismissToast, type ToastOptions } from './ui/toast'
 import { log } from './log'
 import { updateFailureMessage } from './update-failure'
 import {
-  downloadProgressLabel,
+  downloadFigures,
   updateFailureDetails,
   updateStateLine,
   type DownloadProgress,
@@ -164,6 +164,35 @@ export function createUpdateController(deps: UpdateControllerDeps = {}): UpdateC
   const present = (options: ToastOptions): void => {
     if (toastId !== null) dismissToast(toastId)
     toastId = showToast({ ...options, duration: 0 })
+  }
+
+  /** Repaint the notice this controller already owns, keeping its element,
+   *  its timer and its actions. A download ticks every quarter second
+   *  (nocx-vh2hr.1.25): dismissing and re-raising on each one would restart
+   *  the enter animation, re-announce the whole sentence to a screen reader,
+   *  and re-create the bar instead of moving it. A toast that is gone is not
+   *  resurrected here — [present] is what raises one. */
+  const repaint = (options: Pick<ToastOptions, 'message' | 'progress'>): void => {
+    if (toastId !== null) updateToast(toastId, options)
+  }
+
+  /** The download's notice, from the bytes the backend reports. The bar is
+   *  drawn only when there IS a fraction — the kit's ProgressBar is
+   *  determinate and says so, so 0 of 0 renders no bar rather than one frozen
+   *  at zero (which reads as "stalled"). The figure beside it is the
+   *  catalogue's words around the two numbers update-details computes. */
+  const downloadingToast = (version: string, progress?: DownloadProgress): ToastOptions => {
+    const message = t('update.downloading', 'Downloading nocx {version}…', { version })
+    if (progress === undefined || progress.total <= 0) return { message }
+    const figures = downloadFigures(progress)
+    return {
+      message,
+      progress: {
+        value: progress.downloaded / progress.total,
+        label: t('update.downloading.figure', '{percent}% · {done} of {total} MB', figures),
+        ariaLabel: t('update.downloading.aria', 'Update download'),
+      },
+    }
   }
 
   /** The running build the details quote. A failed read is not a failed copy:
@@ -328,17 +357,7 @@ export function createUpdateController(deps: UpdateControllerDeps = {}): UpdateC
         })
         return
       case 'downloading':
-        present({
-          message:
-            current.progress === undefined
-              ? t('update.downloading', 'Downloading nocx {version}…', {
-                  version: current.version,
-                })
-              : t('update.downloadingProgress', '{progress} — nocx {version}', {
-                  progress: downloadProgressLabel(current.progress),
-                  version: current.version,
-                }),
-        })
+        present(downloadingToast(current.version, current.progress))
         return
       case 'pending':
         present({
@@ -396,8 +415,13 @@ export function createUpdateController(deps: UpdateControllerDeps = {}): UpdateC
   }
 
   /** followDownload polls the window's update state while an apply is in
-   *  flight and returns the stop. Percent steps only: a redraw per byte would
-   *  be a toast nobody can read and a renderer doing nothing else. */
+   *  flight and returns the stop. Percent steps only: a repaint per byte would
+   *  be a toast nobody can read and a renderer doing nothing else — and the
+   *  repaint is IN PLACE (repaint), so a step moves the bar rather than
+   *  replacing the notice. The first read happens at once: the state carries
+   *  the declared size from the moment the body is asked for, and the bar is
+   *  there with the message rather than a quarter second later
+   *  (nocx-vh2hr.1.25). */
   const followDownload = (version: string): (() => void) => {
     const getState = deps.getState ?? (() => GetUpdateState())
     let stopped = false
@@ -416,12 +440,13 @@ export function createUpdateController(deps: UpdateControllerDeps = {}): UpdateC
         const current = state()
         if (current.kind !== 'downloading') return
         setState({ kind: 'downloading', version, progress })
-        showOffer()
+        repaint(downloadingToast(version, progress))
       } catch {
         // A state read that fails is not the download failing: the apply's own
         // outcome decides, and the notice keeps saying what it last knew.
       }
     }
+    void tick()
     const timer = setInterval(() => void tick(), DOWNLOAD_PROGRESS_POLL_MS)
     return () => {
       stopped = true

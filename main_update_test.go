@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/coordinator"
 	"github.com/shady2k/nocx/internal/log/logtest"
@@ -196,5 +198,119 @@ func TestGetUpdateStateIsAReadAndSpendsNoLaunch(t *testing.T) {
 	got, err := os.ReadFile(target) //nolint:gosec // target is inside t.TempDir.
 	if err != nil || !bytes.Equal(got, payload) {
 		t.Fatalf("the third state read exchanged the installed bytes back to the previous build (error %v)", err)
+	}
+}
+
+// THE STATE READ SEES THE DOWNLOAD (nocx-vh2hr.1.25).
+//
+// The owner's 73-second download showed nothing: the notice polls
+// `GetUpdateState` every 250 ms (frontend/src/update-controller.ts,
+// followDownload), and this binding is what it reads. Two defects made that
+// read answer "nothing is downloading" for the whole transfer — the updater
+// kept byte counts only when a Progress callback was wired, and only wired its
+// counting reader in that case; and State threw the numbers away until the
+// journal's exchange had been staged. This test drives a REAL slow body through
+// the REAL updater the window builds and reads it exactly as the renderer
+// does.
+func TestGetUpdateStateReportsTheDownloadWhileTheBodyArrives(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux AppImage transaction")
+	}
+	storagetest.Isolate(t)
+	paths, err := storage.NewAppPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	targetDir := filepath.Join(root, "installed")
+	runningDir := filepath.Join(root, "mounted")
+	for _, dir := range []string{targetDir, runningDir} {
+		if mkdirErr := os.Mkdir(dir, 0o750); mkdirErr != nil {
+			t.Fatal(mkdirErr)
+		}
+	}
+	target := filepath.Join(targetDir, "nocx.AppImage")
+	running := filepath.Join(runningDir, "nocx")
+	old := []byte("old installed image")
+	for _, path := range []string{target, running} {
+		if writeErr := os.WriteFile(path, old, 0o600); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	t.Setenv("APPIMAGE", target)
+
+	payload := append([]byte{0x7f, 'E', 'L', 'F', 2, 1, 1, 0, 'A', 'I', 2}, bytes.Repeat([]byte("new image"), 64<<10)...)
+	sum := sha256.Sum256(payload)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Length", fmt.Sprint(len(payload)))
+		flusher, _ := w.(http.Flusher)
+		const chunk = 16 << 10
+		for offset := 0; offset < len(payload); offset += chunk {
+			end := offset + chunk
+			if end > len(payload) {
+				end = len(payload)
+			}
+			if _, writeErr := w.Write(payload[offset:end]); writeErr != nil {
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+	}))
+	defer server.Close()
+
+	_, logger := logtest.New(t)
+	updater, selected, err := newWindowUpdater(running, paths.DataDir(), update.UpdaterConfig{Platform: update.NewPlatform(), CurrentVersion: "0.8.1", Coordinator: coordinator.NewLaunchProbe(), Logger: logger})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected != target {
+		t.Fatalf("selected %q, want %q", selected, target)
+	}
+	w := &WailsApp{updater: updater}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- updater.Apply(context.Background(), &update.UpdateInfo{
+			Version: "0.8.1",
+			URL:     server.URL,
+			SHA256:  hex.EncodeToString(sum[:]),
+			Size:    int64(len(payload)),
+		})
+	}()
+
+	var seen update.UpdateState
+	deadline := time.After(30 * time.Second)
+	for !seen.Downloading || seen.Downloaded == 0 {
+		seen = w.GetUpdateState()
+		if seen.Downloading && seen.Downloaded > 0 {
+			break
+		}
+		select {
+		case applyErr := <-done:
+			t.Fatalf("the download finished before the binding ever reported progress (Apply: %v)", applyErr)
+		case <-deadline:
+			t.Fatal("GetUpdateState never reported the download that was still arriving")
+		case <-time.After(2 * time.Millisecond):
+		}
+	}
+	if seen.Total != int64(len(payload)) {
+		t.Fatalf("the binding reported %d bytes of %d", seen.Downloaded, seen.Total)
+	}
+	if seen.Pending {
+		t.Fatal("a download that has not exchanged anything was reported as a pending restart")
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if after := w.GetUpdateState(); after.Downloading {
+		t.Fatalf("the download ended and the binding still says it is downloading: %+v", after)
 	}
 }

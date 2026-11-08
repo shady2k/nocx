@@ -334,3 +334,170 @@ test('a command printing at apt pace over ssh never moves its output backwards',
     fixture.proc.kill('SIGKILL')
   }
 })
+
+/** One burst loop: ten rows every 300 ms — the owner's own reproducer. */
+const BURST =
+  'printf "BURST-START\\n"; ' +
+  'for i in $(seq 1 24); do seq $((i*10)) $((i*10+9)); sleep 0.3; done; ' +
+  'printf "BURST-%s-END\\n" DONE'
+
+interface ShapeFrame {
+  t: number
+  scrollTop: number
+  scrollH: number
+  clientH: number
+  blockLeft: number
+  blockRight: number
+  blockH: number
+  composerH: number
+  /** The running block's rows and the box that holds them. */
+  liveTop: number
+  liveBottom: number
+  rowX: number
+  rowRight: number
+  /** Row boundaries inside the live box, to say whether a row is cut. */
+  cutRows: number
+  outRows: number
+  /** The frozen block, once the command ends. */
+  frozenLeft: number
+  frozenRowX: number
+  frozenRowRight: number
+  /** A frame where the block's own room changed without its rows changing. */
+  roomWithoutRows: number
+}
+
+/**
+ * What the owner's frames have to say, one animation frame at a time: the
+ * block's box and each visible row's left and right edges, the live box's
+ * bounds against the rows painted inside it, and — after the freeze — the
+ * frozen block's own left and row edges.
+ */
+async function shapeFrames(page: Page): Promise<ShapeFrame[]> {
+  return page.evaluate(async () => {
+    const r2 = (v: number): number => Math.round(v * 100) / 100
+    const pane = document.querySelector<HTMLElement>('.pane.active')!
+    const scroller = pane.querySelector<HTMLElement>('.scrollback-area')!
+    const frames: ShapeFrame[] = []
+    let seenFrozen = false
+    let previous: { rows: number; height: number } | null = null
+    return new Promise<ShapeFrame[]>((resolve) => {
+      const tick = (): void => {
+        const block = pane.querySelector<HTMLElement>('.cmd-block.cmd-block-running')
+        const frozen = pane.querySelector<HTMLElement>('.cmd-block:not(.cmd-block-running)')
+        const live = pane.querySelector<HTMLElement>('.terminal-live-container')
+        const composer = pane.querySelector<HTMLElement>('.nocx-editor')
+        const sr = scroller.getBoundingClientRect()
+        const box = (el: Element | null): DOMRect | null => (el ? el.getBoundingClientRect() : null)
+        const br = box(block)
+        const lr = box(live)
+        const output = block?.querySelector<HTMLElement>(':scope > .cmd-output') ?? null
+        const outRows = output ? [...output.querySelectorAll<HTMLElement>('.term-grid-row')] : []
+        const liveRows = [
+          ...(pane.querySelectorAll<HTMLElement>('.terminal-live-grid .term-grid-row') ?? []),
+        ]
+        // Rows painted INSIDE the live box: its own rows, clipped by it.
+        let cutRows = 0
+        for (const row of liveRows) {
+          const b = row.getBoundingClientRect()
+          if (lr === null || b.height <= 0) continue
+          if (b.top >= lr.bottom - 0.5) continue
+          if (b.bottom > lr.bottom + 0.5 && b.top < lr.bottom - 0.5) cutRows += 1
+        }
+        const firstRow = outRows[0] ?? liveRows[0] ?? null
+        const firstRect = box(firstRow)
+        const fRow =
+          frozen?.querySelector<HTMLElement>(':scope > .cmd-output .term-grid-row') ?? null
+        const fRect = box(frozen)
+        const fRowRect = box(fRow)
+        const rowsNow = outRows.length
+        const heightNow = br ? br.height : NaN
+        // A block whose room changed while its painted rows did not is the
+        // "room first, rows later" frame the owner saw as the scrollbar
+        // jumping before the lines arrived.
+        let roomWithoutRows = 0
+        if (previous !== null && br !== null && rowsNow === previous.rows) {
+          const grew = Math.abs(heightNow - previous.height) > 0.5
+          if (grew) roomWithoutRows = 1
+        }
+        if (br !== null) previous = { rows: rowsNow, height: heightNow }
+        frames.push({
+          t: r2(performance.now()),
+          scrollTop: r2(scroller.scrollTop),
+          scrollH: r2(scroller.scrollHeight),
+          clientH: r2(scroller.clientHeight),
+          blockLeft: br ? r2(br.left - sr.left) : NaN,
+          blockRight: br ? r2(br.right - sr.left) : NaN,
+          blockH: br ? r2(br.height) : NaN,
+          composerH: composer ? r2(composer.getBoundingClientRect().height) : 0,
+          liveTop: lr ? r2(lr.top - sr.top) : NaN,
+          liveBottom: lr ? r2(lr.bottom - sr.top) : NaN,
+          rowX: firstRect ? r2(firstRect.left - sr.left) : NaN,
+          rowRight: firstRect ? r2(firstRect.right - sr.left) : NaN,
+          cutRows,
+          outRows: rowsNow,
+          frozenLeft: fRect ? r2(fRect.left - sr.left) : NaN,
+          frozenRowX: fRowRect ? r2(fRowRect.left - sr.left) : NaN,
+          frozenRowRight: fRowRect ? r2(fRowRect.right - sr.left) : NaN,
+          roomWithoutRows,
+        })
+        if (composer !== null && (composer.getBoundingClientRect().height ?? 0) > 0) {
+          seenFrozen = true
+        }
+        if (seenFrozen && frames.length > 4) {
+          resolve(frames)
+          return
+        }
+        requestAnimationFrame(tick)
+      }
+      requestAnimationFrame(tick)
+    })
+  })
+}
+
+test('a burst of rows arrives whole, in the block it will keep', async ({ page }) => {
+  test.setTimeout(180_000)
+  await page.goto('/')
+  await promptReady(page)
+  await clickIntoEditor(page)
+  await page.keyboard.type(BURST)
+  const sampling = shapeFrames(page)
+  await page.keyboard.press('Enter')
+  const frames = await sampling
+  const running = frames.filter((f) => f.outRows > 0 && f.composerH === 0)
+  const spoken = `shape: ${JSON.stringify(running.slice(-3))}`
+  expect(running.length, spoken).toBeGreaterThan(20)
+
+  // ONE SHAPE. Every row of the running block starts and ends where the frozen
+  // block's rows do: the live row and the finished row are one column.
+  const xs = new Set(running.map((f) => f.rowX))
+  const rights = new Set(running.map((f) => f.rowRight))
+  const frozenX = frames.filter((f) => f.frozenRowX === f.frozenRowX).map((f) => f.frozenRowX)
+  const frozenRight = frames
+    .filter((f) => f.frozenRowRight === f.frozenRowRight)
+    .map((f) => f.frozenRowRight)
+  expect(frozenX.length, spoken).toBeGreaterThan(0)
+  expect([...xs], spoken).toEqual([frozenX[frozenX.length - 1]])
+  expect([...rights], spoken).toEqual([frozenRight[frozenRight.length - 1]])
+  expect(new Set(running.map((f) => f.blockLeft)).size, spoken).toBe(1)
+
+  // NO ROOM WITHOUT ITS ROWS: the block never grew in a frame where its own
+  // painted rows stayed the same — the room and the rows are one paint.
+  expect(
+    running.filter((f) => f.roomWithoutRows === 1),
+    spoken,
+  ).toEqual([])
+
+  // NOTHING CUT: no frame shows a row sliced by the bottom of the live box.
+  expect(
+    frames.filter((f) => f.cutRows > 0),
+    spoken,
+  ).toEqual([])
+
+  // THE BOX NEVER OUTGROWS THE PANE it is drawn in: a live box taller than the
+  // scroller is the grid cut short mid-row, which the owner photographed at
+  // the hand-off.
+  expect(
+    frames.filter((f) => f.liveBottom - f.liveTop > f.clientH + 0.5),
+    spoken,
+  ).toEqual([])
+})

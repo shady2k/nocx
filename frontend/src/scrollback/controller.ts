@@ -19,7 +19,6 @@ import { publishCellMetric, publishRowPitch } from './cell-metric'
 import type { ExecutionAttempt } from '../lifecycle/state'
 import type { AgentDump } from '../generated/agent.dump'
 import { windowPet } from '../pets/window-pet'
-import { SETTLE_EASING, SETTLE_MS, motionAllowed } from '../motion'
 import { isAtTail, TailFollow } from './tail-follow'
 export type LiveRegionMode = 'idle' | 'running' | 'fullscreen' | 'unstructured'
 
@@ -118,12 +117,6 @@ export class ScrollbackController {
    *  `tail-follow.ts`, which owns the same concept for the summoned answer
    *  list — one predicate, one memory, two scrollers. */
   private readonly _tail = new TailFollow()
-  /** The glide in flight per element, so a change landing mid-settle
-   *  retargets rather than snapping — see `_glide`. */
-  private readonly _settleAnimations = new Map<Element, Animation>()
-  /** Where the stack was on the last painted frame, and the handle of the
-   *  loop that records it — see `_watchPaintedTop`. */
-  private _paintedTop: number | null = null
   private _paintWatch = 0
   private _painting = false
   private _followObserver: IntersectionObserver | null = null
@@ -162,7 +155,7 @@ export class ScrollbackController {
     // WHERE THE OUTPUT ENDS, as a fact about layout rather than about paint.
     // It is a sibling of the stack and never moves with it, which is the
     // whole point: the follow observer used to watch the live region, and the
-    // live region is inside the stack the settle displaces (see `_glide`).
+    // live region is inside the stack the settle measures.
     // One pixel tall with a matching negative margin, so it occupies a box
     // the observer can see and no space the layout can feel.
     this.followSentinel = document.createElement('div')
@@ -249,6 +242,16 @@ export class ScrollbackController {
     // box that caused it. Guarded like the observer below: jsdom has none.
     if (typeof ResizeObserver === 'function') {
       this._boxResizeObserver = new ResizeObserver(() => {
+        // A SCROLLER THAT CHANGED SIZE RESIZES THE LIVE BOX IN THE SAME TASK
+        // (owner, 2026-11-08: "the composer is back, the live grid is cut
+        // short mid-row, and a blank band lies between them"). The composer
+        // returning at the end of a command takes 130px back from the
+        // scroller; a live box still sized for the taller one overflows it,
+        // so its last rows are clipped mid-row for as long as the next
+        // resize pass takes, and the tail sits where the taller box put it.
+        // `runningLiveCap` is read from this box, so re-sizing here is the
+        // only place the two agree in the frame the box moved.
+        this.setLiveHeight(this._liveContentHeight())
         if (this._tail.following) this._scrollToBottom()
       })
       this._boxResizeObserver.observe(this.scrollbackArea)
@@ -357,7 +360,6 @@ export class ScrollbackController {
     this._updateSeparator()
     this._seatLive()
     this._onModeChanged?.(this._mode)
-    this._watchPaintedTop()
     // Size both layers from the rows that exist now. A short command therefore
     // opens beside the prompt instead of reserving a pane-high empty window.
     // Both layers change in the same layout pass: a transition here can still
@@ -767,7 +769,7 @@ export class ScrollbackController {
     startAnchor?: BlockScreenAnchor,
   ): void {
     const cmd = command || '(empty)'
-    this._glide(() => {
+    this.settleAtTail(() => {
       this._blockManager.startBlock(cmd, cwd, startLine, author, startAnchor)
       // The pet learned only about endings before this, so during the minute a
       // build takes — the minute somebody is actually watching the terminal —
@@ -849,110 +851,26 @@ export class ScrollbackController {
   }
 
   /**
-   * MOVE THE PANE, DO NOT JUMP IT.
+   * Run `mutate` and hold the tail — the one door for a structural change.
    *
-   * Every structural change to a command's block — it opens, it freezes —
-   * changes the stack's total content height, and while the person is
-   * FOLLOWING the live end the scroller's `scrollTop` moves to match
-   * (`_scrollToBottom`), so the whole stack's position in the viewport
-   * shifts at once. Two of those in thirty milliseconds is what the owner
-   * reported as the pane "not settling": the eye reads a sequence of instant
-   * displacements as a twitch, whatever their direction. `.scrollback-inner`
-   * is top-aligned now (decision 2026-09-15-terminal-screen-mockup-decision.
-   * md §1 item 1 — it carried `margin-top: auto` before, and the whole stack
-   * hung from the scroller's bottom edge), which removes exactly the case
-   * this glide otherwise has nothing to compensate: a transcript that still
-   * FITS the scroller never changes `scrollTop` at all, so `dy` below comes
-   * out at (or under) zero and no settle plays — the FLIP mechanism itself
-   * is unchanged and still owns the case that does move: a transcript long
-   * enough that opening or freezing a block moves the live end's scrollTop.
+   * NO ANIMATION (owner, 2026-11-08, replacing an earlier wish for a smooth
+   * scroll): "like Warp, no animation. The output is anchored to the bottom,
+   * and every frame shows the newest rows where they will stay; nothing
+   * reflows". This used to be a FLIP settle: the mutation landed whole, the
+   * stack was translated by the displacement it caused, and the translation
+   * was released over 140 ms. The measurement that killed it, in the e2e
+   * container, is e2e/output-jitter.spec.ts: the frame after every
+   * `block.grew` carried the stack translated by the very rows it had just
+   * committed (68, 96, 116 px, one viewport at the worst), re-armed every
+   * 50 ms at apt's pace, so the pane never settled — and at the freeze it
+   * moved the last rows DOWN by 34 px, which is a frame that goes back.
    *
-   * This is FLIP, and the F and the I are why it is not the animation that
-   * was tried and removed. The DOM change is applied WHOLE and at once; then
-   * the stack is given the inverse translation, so the frame looks exactly as
-   * it did; then the translation is released over `SETTLE_MS`. What animates
-   * is a TRANSFORM — it takes no part in layout, so nothing measuring these
-   * elements can read a value mid-flight, which is precisely what a
-   * `transition: height` on the live region did (it re-laid the box on every
-   * frame of output and never finished, so the scroll aimed at a target that
-   * had already moved).
-   *
-   * ONE element carries it, because the stack is one element: the blocks, the
-   * separator and the live region are all inside `.scrollback-inner`. That is
-   * also why "am I following the output" is answered by a sentinel OUTSIDE it
-   * — `IntersectionObserver` reports the TRANSFORMED box, so while the stack
-   * is displaced the live region it used to watch is out of the scroller and
-   * the pane concludes the person scrolled away. That turned following off
-   * silently: no more scroll-to-bottom as output arrives, and every later
-   * glide skipped, which is a jump. It reproduced only where a command
-   * finishes INSIDE the settle it started — the owner's machine at 27ms,
-   * never the container at 900 (nocx-i4h04.3).
-   *
-   * Skipped when the person is not following the output — movement they did
-   * not cause is not theirs to watch — and under `prefers-reduced-motion`,
-   * like every other motion in this app. An in-flight glide is measured INTO
-   * the next one rather than cancelled first, so a change landing mid-settle
-   * retargets instead of snapping (nocx-i4h04.2).
-   */
-  /**
-   * Run `mutate` and play its displacement back as the settle glide.
-   *
-   * The public door to `_glide`, for a mutation this controller does not own.
-   * The editor's box is the case that opened it: the composer leaves the
-   * layout at submit — it has to, because the keyboard goes to the program
-   * and nocx may not sniff the stream to find out whether the program wants
-   * it (ADR-0004) — and `.scrollback-area` grows by the composer's 77px in
-   * response (it is the flex sibling that absorbs the freed space). A short
-   * transcript that still fits notices nothing: `.scrollback-inner` is
-   * top-aligned (decision §1 item 1) and its own position never depended on
-   * where the composer's box ended. A transcript that OVERFLOWS does move —
-   * the taller scroller needs less `scrollTop` to reach the same live end —
-   * and that is the 77px this glide still exists to play back rather than
-   * let land as a jump. Reserving the composer's box instead was the older
-   * answer and cost an inline TUI four rows of pane (nocx-i4h04). The
-   * displacement is not the defect; an UNGLIDED displacement is.
+   * What a person gets instead is the terminal's own behaviour: the DOM change
+   * lands in one task, the recalc and the re-pin land in the same task, and
+   * the frame that paints shows the rows where they will stay.
    */
   settleAround(mutate: () => void): void {
-    this._glide(mutate)
-  }
-
-  /**
-   * Grow a block's body ABOVE the live end and hold the tail — no settle.
-   *
-   * The durable record hands a running command its rows after the screen has
-   * already moved on, so `.cmd-output` grows between the block's header and
-   * the live region, and the scroller follows to stay at the bottom. Those
-   * two changes cancel each other for the rows a person is reading: they are
-   * pushed down by the rows added above them and pulled back up by the
-   * scroll, in one task, before anything is painted.
-   *
-   * `settleAround` cannot express that. Its measurement is the STACK's top,
-   * and the stack's top sits above the insertion — it feels only the scroll,
-   * so a growth that costs the person nothing is read as a displacement of
-   * exactly the rows committed and played back as a transform. Measured in
-   * the e2e container while a command printed four lines a batch: the frame
-   * after every `block.grew` carried `translateY(68px)` (96, 116, up to a
-   * viewport as the batches grew), the whole block sat that far below its
-   * own tail and slid back over `SETTLE_MS`, and the next batch re-armed it —
-   * 50 ms apart at apt's pace, so the pane never stopped moving. The rows
-   * went backwards, which is the jitter the owner reported.
-   */
-  growAboveTail(mutate: () => void): void {
-    // The in-flight settle is CANCELLED, not measured into: a glide is
-    // playing back a structural change (a card opening or freezing), and what
-    // lands now is a strip of this block's own rows — the two are not one
-    // movement, and folding them together is what re-armed the wobble.
-    // Cancelling leaves the stack at the position its last glide was heading
-    // for, which is where layout already put it.
-    const following = this._followIntent()
-    this._cancelGlides()
-    mutate()
-    this._watchPaintedTop()
-    if (!following) return
-    // The observer can report the old sentinel position after this mutation
-    // has grown the scroller. The decision is the pre-mutation one.
-    this._tail.follow()
-    this._scrollToBottom()
+    this.settleAtTail(mutate)
   }
 
   /**
@@ -975,140 +893,27 @@ export class ScrollbackController {
     if (this._tail.following) this._scrollToBottom()
   }
 
-  private _glide(mutate: () => void, followIntent = this._followIntent()): void {
-    // Measured with any in-flight transform still applied: this is where the
-    // stack IS, not where layout says it belongs. A capture taken earlier in
-    // this same task wins — see `_captureGlideOrigin`.
-    // WHERE THE STACK WAS LAST PAINTED, which is not where it is now.
-    // Several changes land in one task — the live region takes the shell's
-    // last row, then the block freezes and takes it back — and the frames
-    // between them are never drawn. Measuring here would invert the glide for
-    // exactly those, and it did: the block approached its place from the
-    // wrong side by one row (nocx-i4h04.2, measured in the container).
-    const before = this._paintedTop ?? this.scrollbackInner.getBoundingClientRect().top
-    // The in-flight transform goes BEFORE the mutation, not after it. A
-    // `scrollIntoView` inside `mutate` reads the element's transformed box and
-    // would scroll by the offset the glide is currently hiding — two owners of
-    // the scroll position, which is the defect `overflow-anchor: none` is set
-    // against one line further out. Cancelling first leaves the mutation to
-    // see layout, and `before` above has already remembered where the stack
-    // looked to be.
-    this._cancelGlides()
+  /**
+   * The one implementation of "apply it, then hold the tail".
+   *
+   * Read top to bottom it is the whole rule: decide the follow intent from
+   * the PRE-mutation geometry, apply the DOM change whole, re-pin the bottom
+   * edge, and leave the frame as it is. Nothing is translated, nothing is
+   * scheduled, and no second pass can grow a box this one has already
+   * measured.
+   */
+  private settleAtTail(mutate: () => void, followIntent = this._followIntent()): void {
     mutate()
-    this._watchPaintedTop()
+    // The live box follows the mutation IN THIS TASK. The composer returning
+    // takes 130px back from the scroller and the cap is read from that box; a
+    // box still sized for the taller one is a grid cut mid-row for as long as
+    // the next resize pass takes, which is the frame the owner photographed.
+    this.setLiveHeight(this._liveContentHeight())
     if (!followIntent) return
     // The observer can report the old sentinel position after this mutation
-    // has grown the scroller. The decision belongs to the pre-mutation state.
+    // has grown the scroller. The decision is the pre-mutation one.
     this._tail.follow()
     this._scrollToBottom()
-    if (!this._motionAllowed()) return
-    const dy = before - this.scrollbackInner.getBoundingClientRect().top
-    // Below a pixel there is nothing to watch. Above a viewport it is not a
-    // settle at all — a clear, a restore, a jump the person asked for — and
-    // gliding it would be a second animation over their own gesture.
-    if (!Number.isFinite(dy) || Math.abs(dy) < 1) return
-    if (Math.abs(dy) > this.scrollbackArea.clientHeight) return
-    // THE SETTLE IS A STATE, NOT A STYLE (nocx-vydj). This class used to hide
-    // the scroller's bar so it would not flash on every command (nocx-i4h04.4).
-    // The scroller now always shows its bar — `overflow-y: scroll` in
-    // style.css, because the box the grid is fitted to must not depend on
-    // whether the transcript overflows — so there is no flash left to hide, and
-    // toggling the overflow here would move that box by the bar's width for the
-    // ~140ms of the glide, which a settling command would spend as a pending
-    // width refit. The class stays as the state: the e2e specs wait for it to
-    // clear, which is how they tell "the stack is gliding" from "it has
-    // landed".
-    //
-    // AND IS ONLY WRITTEN WHEN THE TRANSCRIPT FITS (nocx-2v80t.3.35). A class
-    // write on the scroller is not free — both engines treat it as a change to
-    // the whole scrolling subtree and re-lay out every block in it; measured in
-    // WebKit at 181 blocks, 218 ms per write, and a command settles about seven
-    // times. A transcript that already overflows says nothing this class does
-    // not, and a transcript that fits is short, which is exactly when the write
-    // is cheap. Layout is clean here — the rect read above settled it — so this
-    // read costs nothing.
-    const hidesBar = this.scrollbackArea.scrollHeight <= this.scrollbackArea.clientHeight
-    if (hidesBar) this.scrollbackArea.classList.add('is-settling')
-    for (const el of [this.scrollbackInner]) {
-      const anim = el.animate(
-        [{ transform: `translateY(${dy}px)` }, { transform: 'translateY(0px)' }],
-        { duration: SETTLE_MS, easing: SETTLE_EASING },
-      )
-      this._settleAnimations.set(el, anim)
-      anim.finished.then(
-        () => {
-          if (this._settleAnimations.get(el) === anim) this._settleAnimations.delete(el)
-          if (this._settleAnimations.size === 0) this._releaseSettlingBar()
-        },
-        () => {
-          /* cancelled by the next glide — the next one owns the element */
-        },
-      )
-    }
-  }
-
-  private _cancelGlides(): void {
-    for (const anim of this._settleAnimations.values()) anim.cancel()
-    this._settleAnimations.clear()
-    this._releaseSettlingBar()
-  }
-
-  /** End the settle's state — and write nothing when it was never entered:
-   *  every glide begins by cancelling the last one, and a class write on the
-   *  scroller is not free (see `_glide`). */
-  private _releaseSettlingBar(): void {
-    if (this.scrollbackArea.classList.contains('is-settling')) {
-      this.scrollbackArea.classList.remove('is-settling')
-    }
-  }
-
-  /**
-   * Record where the stack is, once per frame, while there is something to
-   * watch.
-   *
-   * An animation frame runs after that frame's tasks and before its paint, so
-   * what it reads is exactly what is about to be drawn — the position the
-   * person will have seen when the next change arrives. That is the only
-   * honest origin for a glide: within one task the live region can take a row
-   * and the freeze give it back, and neither of those states is ever on
-   * screen.
-   *
-   * It runs while a command is running or a glide is unwinding, and stops
-   * itself otherwise: an idle pane watching nothing would be one layout read
-   * per frame per pane, for the life of the window.
-   */
-  private _watchPaintedTop(): void {
-    if (this._paintWatch !== 0) return
-    const tick = (): void => {
-      // Re-entrancy, not recursion: a host that runs animation-frame callbacks
-      // synchronously — which the unit tests do, to make a frame deterministic
-      // — would otherwise re-enter here until the stack ends.
-      if (this._painting) return
-      this._painting = true
-      try {
-        this._paintedTop = this.scrollbackInner.getBoundingClientRect().top
-        // A command's life, not a layout class. The freeze no longer leaves
-        // `running` behind — nothing clears the terminal, so the whole
-        // surface stays up (nocx-2v80t.3.3) — and a watcher keyed on the
-        // mode would spin forever after the last command. The running BLOCK
-        // is the output; the settle animation is the playback.
-        if (this._blockManager.runningBlock !== null || this._settleAnimations.size > 0) {
-          this._paintWatch = requestAnimationFrame(tick)
-          return
-        }
-        this._paintWatch = 0
-        this._paintedTop = null
-      } finally {
-        this._painting = false
-      }
-    }
-    this._paintWatch = requestAnimationFrame(tick)
-  }
-
-  /** Whether this build may move anything. The shared decision (motion.ts) —
-   *  the composer's box transition reads the same one. */
-  private _motionAllowed(): boolean {
-    return motionAllowed(this.scrollbackInner)
   }
 
   /** The freeze landed: play back the card's displacement and tell the pet
@@ -1150,9 +955,9 @@ export class ScrollbackController {
     // glide plays back, not a second movement after it.
     // The mutate is otherwise empty on purpose: the card swap already
     // happened inside the manager, and the glide's painted-frame origin
-    // (see _glide) is what lets it play that swap back without
+    // (see settleAtTail) is what lets it land without
     // re-measuring mid-flight.
-    this._glide(() => {
+    this.settleAtTail(() => {
       this._applyEchoShift()
     }, followIntent)
   }
@@ -1221,9 +1026,6 @@ export class ScrollbackController {
   }
 
   dispose(): void {
-    if (this._paintWatch !== 0) cancelAnimationFrame(this._paintWatch)
-    this._paintWatch = 0
-    this._cancelGlides()
     this._followObserver?.disconnect()
     this._followObserver = null
     this._boxResizeObserver?.disconnect()

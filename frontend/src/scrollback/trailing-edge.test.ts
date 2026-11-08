@@ -165,19 +165,19 @@ describe('rows are full width, and the gutter lives in them (nocx-9bpeq.8)', () 
     expect(shipped('.scrollback-restore-boundary', 'padding-block')).toBe('var(--space-2)')
   })
 
-  it('the active body pays no padding at all, in either presentation', () => {
-    // ADR-3kqrem7v: while a command runs, the pane's row inset and the body
-    // padding are both zero — the running block, its committed rows and the
-    // live region are one edge-to-edge box, so switching the program's screen
-    // mode cannot move the grid. The frozen transcript keeps its gutter and
-    // its own body pads; those are asserted where they live
-    // (running-body-seam.test.ts, command-block.css).
+  it('the active body wears the same row inset as the frozen one', () => {
+    // THE LIVE ROW AND THE FROZEN ROW ARE ONE COLUMN (owner, 2026-11-08). This
+    // used to assert the opposite — ADR-3kqrem7v zeroed the running block's
+    // gutter so the running grid kept the pane's full width — and the owner
+    // then watched apt's lines move 24px right at the moment the card froze.
+    // The gutter is the stack's, in every mode; the grid is fitted inside it
+    // (terminal-content's `usableViewport`), so the program's width still
+    // depends on the pane and never on presentation.
+    expect(shipped('.cmd-block.cmd-block-running', 'padding-inline')).toBeNull()
+    expect(shipped('.terminal-live-container.live-running', 'padding-inline')).toBeNull()
+    // The body's vertical rhythm still arrives with the frozen card.
     expect(shipped('.terminal-live-container.live-running', 'padding')).toBe('0')
     expect(shipped('.cmd-block.cmd-block-running > .cmd-output', 'padding')).toBe('0')
-    // The row inset the frozen rows wear is not paid by the active block: a
-    // placeholder there would run the grid against the transcript's gutter.
-    expect(shipped('.cmd-block.cmd-block-running', 'padding-inline')).toBe('0')
-    expect(shipped('.cmd-block.cmd-block-running > .cmd-output', 'padding-inline')).toBe('0')
   })
 
   it('the summon stack is full width and its answers wear the row inset', () => {

@@ -920,10 +920,9 @@ describe('a nested running command borrows the full pane without changing its tr
   })
 })
 
-describe('the pane moves rather than jumping (nocx-i4h04.2)', () => {
-  /** A controller whose stack reports a position the test controls, and whose
-   *  two moving elements record what they were asked to animate. */
-  function movingController(tops: number[]): {
+describe('the pane holds the tail and never animates (owner, 2026-11-08)', () => {
+  /** A controller whose stack records whether anything asked it to animate. */
+  function movingController(): {
     controller: ScrollbackController
     frames: Array<{ el: string; keyframes: unknown }>
   } {
@@ -940,11 +939,6 @@ describe('the pane moves rather than jumping (nocx-i4h04.2)', () => {
       configurable: true,
     })
     controller.scrollbackArea.scrollTo = vi.fn()
-    // jsdom lays nothing out, so the stack's position is the test's to say:
-    // one answer per measurement, in the order `_glide` takes them.
-    const queue = [...tops]
-    controller.scrollbackInner.getBoundingClientRect = () =>
-      ({ top: queue.length > 1 ? (queue.shift() as number) : queue[0] }) as DOMRect
     const frames: Array<{ el: string; keyframes: unknown }> = []
     for (const [name, el] of [
       ['inner', controller.scrollbackInner],
@@ -958,56 +952,27 @@ describe('the pane moves rather than jumping (nocx-i4h04.2)', () => {
     return { controller, frames }
   }
 
-  beforeEach(() => {
-    window.matchMedia = (query: string) =>
-      ({
-        matches: false,
-        media: query,
-        addEventListener: () => {},
-        removeEventListener: () => {},
-      }) as unknown as MediaQueryList
-  })
-
-  it('gives the stack the inverse of what it just moved, and releases it', async () => {
-    // FLIP: the DOM change lands whole, then the stack is put back where it
-    // looked to be and let go. What animates is a transform — it takes no part
-    // in layout, which is why this is not the height animation that was tried
-    // and removed.
-    const { controller, frames } = movingController([500, 440])
+  it('opens a block without playing anything back', () => {
+    // The owner's decision replaces the FLIP settle this describe block used
+    // to prove: "like Warp, no animation. The output is anchored to the
+    // bottom, and every frame shows the newest rows where they will stay."
+    // Nothing is translated, so nothing asks either moving element to animate,
+    // and the settle's state class never appears on the scroller.
+    const { controller, frames } = movingController()
 
     controller.beginBlock('ls', '~', 0)
 
-    // ONE element, because the stack is one element — and the follow
-    // observer's sentinel is deliberately outside it (nocx-i4h04.3).
-    expect(frames.map((f) => f.el)).toEqual(['inner'])
-    // And no scrollbar for the settle's own overflow: the displaced stack
-    // hangs past the scroller's bottom edge for as long as this lasts, which
-    // flashed a bar on every command (nocx-i4h04.4).
-    expect(controller.scrollbackArea.classList.contains('is-settling')).toBe(true)
-    for (const f of frames) {
-      expect(f.keyframes).toEqual([
-        { transform: 'translateY(60px)' },
-        { transform: 'translateY(0px)' },
-      ])
-    }
-
-    // The settle ends and the scroller offers its bar again.
-    await Promise.resolve()
-    await Promise.resolve()
+    expect(frames).toEqual([])
     expect(controller.scrollbackArea.classList.contains('is-settling')).toBe(false)
     controller.blockManager.clearAll()
   })
 
-  it('leaves the scroller alone when the transcript already has a bar, however long it is (nocx-2v80t.3.35)', async () => {
-    // Toggling `overflow` on the scroller restyles and re-lays out every
-    // block under it — 218 ms per toggle in WebKit at 181 blocks, about seven
-    // settles per command — so a settle that toggled it made each new command
-    // cost more than the last. A transcript that already overflows shows its
-    // bar before, during and after the settle: there is no flash to hide, and
-    // the settle's work on the scroller must not depend on how many blocks
-    // sit above the live end. Counted as writes, not timed.
+  it('writes nothing to the scroller it holds, however long the transcript is', async () => {
+    // A class write on the scroller restyles and re-lays out every block under
+    // it — measured in WebKit at 218 ms for 181 blocks — so holding the tail
+    // must be scroll work only. Counted as writes, not timed.
     for (const blocks of [1, 50, 500]) {
-      const { controller, frames } = movingController([500, 440])
+      const { controller, frames } = movingController()
       Object.defineProperty(controller.scrollbackArea, 'scrollHeight', {
         value: 600 + blocks * 2000,
         configurable: true,
@@ -1020,10 +985,8 @@ describe('the pane moves rather than jumping (nocx-i4h04.2)', () => {
       await Promise.resolve()
       await Promise.resolve()
 
-      // The stack still settles — the glide is the point — and the scroller
-      // was never written to.
-      expect(frames.map((f) => f.el)).toEqual(['inner'])
       written.push(...writes.takeRecords())
+      expect(frames).toEqual([])
       expect(written).toEqual([])
       expect(controller.scrollbackArea.classList.contains('is-settling')).toBe(false)
       writes.disconnect()
@@ -1032,39 +995,35 @@ describe('the pane moves rather than jumping (nocx-i4h04.2)', () => {
   })
 
   it('answers "am I following the output" from outside the stack it moves', () => {
-    // The observer reports the TRANSFORMED box. While the settle displaces the
-    // stack, anything inside it is out of the scroller — and the live region,
-    // which used to be the target, is inside it. The pane then concluded the
-    // person had scrolled away and stopped following the output, which is a
-    // defect on its own and skipped every later glide (nocx-i4h04.3).
-    const { controller } = movingController([500, 500])
+    // The sentinel sits OUTSIDE the stack, so nothing the stack does can move
+    // the answer to "am I following the output". It used to matter because a
+    // settle displaced the stack's box (nocx-i4h04.3) and the pane then read
+    // its own displacement as the person scrolling away; the rule outlives
+    // the settle and costs nothing.
+    const { controller } = movingController()
 
     expect(controller.followSentinel.parentElement).toBe(controller.scrollbackArea)
     expect(controller.scrollbackInner.contains(controller.followSentinel)).toBe(false)
     expect(controller.scrollbackInner.contains(controller.terminalLiveContainer)).toBe(true)
   })
 
-  it('moves nothing when the person asked for less motion', () => {
-    window.matchMedia = (query: string) =>
-      ({
-        matches: true,
-        media: query,
-        addEventListener: () => {},
-        removeEventListener: () => {},
-      }) as unknown as MediaQueryList
-    const { controller, frames } = movingController([500, 440])
+  it('answers "am I following the output" from outside the stack it moves', () => {
+    // The sentinel sits OUTSIDE the stack, so nothing the stack does can move
+    // the answer to "am I following the output". It used to matter because a
+    // settle displaced the stack's box (nocx-i4h04.3) and the pane then read
+    // its own displacement as the person scrolling away; the rule outlives
+    // the settle and costs nothing.
+    const { controller } = movingController()
 
-    controller.beginBlock('ls', '~', 0)
-
-    expect(frames).toEqual([])
-    controller.blockManager.clearAll()
+    expect(controller.followSentinel.parentElement).toBe(controller.scrollbackArea)
+    expect(controller.scrollbackInner.contains(controller.followSentinel)).toBe(false)
+    expect(controller.scrollbackInner.contains(controller.terminalLiveContainer)).toBe(true)
   })
 
   it('moves nothing while the person is reading further up', () => {
-    // Movement they did not cause is not theirs to watch: a pane scrolled away
-    // from the bottom keeps its position, and the glide would be a second
-    // owner of it.
-    const { controller, frames } = movingController([500, 440])
+    // Movement they did not cause is not theirs: a pane scrolled away from the
+    // bottom keeps its position, and the tail is not re-pinned under them.
+    const { controller, frames } = movingController()
     stopFollowing(controller)
 
     controller.beginBlock('ls', '~', 0)

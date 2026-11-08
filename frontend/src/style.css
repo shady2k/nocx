@@ -665,8 +665,14 @@
   min-height: auto;
 }
 
-/* ADR-3kqrem7v: alternate and primary live grids both fill the pane width.
-   Transcript rows retain their own gutter; it never determines PTY columns. */
+/* ADR-3kqrem7v: the ALTERNATE-screen grid fills the pane width, and the
+   primary one is fitted inside the terminal area's gutter (see the gutter rule
+   below, and ADR-v26axn1t for why the prompt and the running block share the
+   transcript's column). The cost is stated rather than hidden: entering an
+   alternate-screen program widens the grid by the gutter, so the program is
+   told a new size once at the switch. That is one resize at a mode change,
+   never an oscillation, and it keeps this record's alternate-screen treatment
+   exactly as it was accepted. */
 .scrollback-inner > .terminal-live-container.live-fullscreen {
   padding-inline: 0;
 }
@@ -1404,13 +1410,18 @@
 
 /* ADR-3kqrem7v: running geometry is a pane property, never a buffer-mode
    property. Frozen rows retain the ordinary transcript gutter and rhythm. */
-.cmd-block.cmd-block-running,
-.scrollback-inner > .terminal-live-container.live-idle,
-.scrollback-inner > .terminal-live-container.live-unstructured,
-.cmd-block.cmd-block-running > .cmd-output,
-.cmd-block.cmd-block-running > .terminal-live-container.live-running {
-  padding-inline: 0;
-}
+/* THE LIVE ROW AND THE FROZEN ROW ARE ONE COLUMN (owner, 2026-11-08). This
+   rule zeroed the running block's gutter — the block, its body and its live
+   region — so the running grid kept the pane's full width. ADR-3kqrem7v bought
+   that at the price of a shape the owner then reported on the stand: apt's
+   lines were drawn flush left while it ran and jumped 24px right, into the
+   transcript's gutter, the moment the card froze. One gutter everywhere, the
+   live region included, is that column: `+.scrollback-inner > :not(...)` pays
+   it, and `usableViewport` fits the grid inside it in EVERY mode, so the
+   program's size still depends on the pane and never on presentation
+   (ADR-3kqrem7v's invariant, kept).
+   The running body keeps `padding-block: 0`: only the inline shape is one
+   column, and the body's vertical rhythm arrives with the frozen card. */
 .cmd-block.cmd-block-running > .cmd-output {
   padding-block: 0;
 }

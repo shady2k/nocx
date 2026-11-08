@@ -5820,10 +5820,17 @@ export class TerminalContent extends BasePaneContent {
       if (this._disposed || !this._cellModel || !this.scrollback) return
       // Height first, refit second, and the order is the whole point. Reaching
       // the ceiling collapses the editor, which grows the scroller — so the
-      // usable height is only correct AFTER this call. Refitting first meant
-      // the grid stayed at the old size until the next chunk of output arrived,
-      // and `top` refreshes every three seconds: the pane visibly re-laid
-      // itself several seconds after the program started.
+      // usable height is only correct AFTER the box is sized. Refitting first
+      // meant the grid stayed at the old size until the next chunk of output
+      // arrived, and `top` refreshes every three seconds: the pane visibly
+      // re-laid itself several seconds after the program started.
+      //
+      // Sized here too, from the model this pass reads, and again in the paint
+      // batch: both writes are committed by the SAME frame — one in this
+      // callback, one in the painter's — so the box and the rows it shows are
+      // never split across two paints. This is the structural half (a ceiling
+      // reached, a pane that changed shape under a running program); the paint
+      // batch is the half that follows output.
       this.scrollback.setLiveHeight(this.liveContentHeight())
       this.refitIfResized()
     })
@@ -5905,6 +5912,16 @@ export class TerminalContent extends BasePaneContent {
     // PREVIOUS layout's width, which is the defect. By the time this runs,
     // the fit is the one the pane will actually show (nocx-1ebrs.10).
     this._painter?.apply(this._presentedSnapshot(pending))
+    // THE BOX AND THE ROWS IT SHOWS ARE ONE PAINT (owner, 2026-11-08: "the
+    // room for the new rows is made a frame before the rows are drawn"). The
+    // live region's height is derived from the frame being painted — its last
+    // row of text — so it is set here, in the same frame as the painter's
+    // rows, never in a later animation frame of its own. A separate pass grew
+    // the box after the rows had already been painted into it and the scroll
+    // re-pinned to a height the frame before had not had; on a burst of ten
+    // rows that was a step of 170px with the newest rows clipped until it
+    // landed.
+    this.scrollback?.setLiveHeight(this.liveContentHeight())
     this._widenRunningRowsToScreen()
     // A REPAINT CHANGES WHAT THE MEASUREMENT READS (nocx-1ebrs.42). The
     // output-driven resize path runs its refit in a frame scheduled BEFORE
@@ -6371,9 +6388,18 @@ export class TerminalContent extends BasePaneContent {
     // own: jsdom reports 0 for both, a real pane mid-layout can report one.
     // The height is `_gridHeight`'s: the running cap, held at the prompt.
     const height = this._gridHeight(area, viewport)
-    // ADR-3kqrem7v: active rows occupy the pane width in either buffer.
-    // Frozen transcript insets never take columns from the live PTY grid.
-    const outer = area && area.clientWidth > 0 ? area.clientWidth : viewport.width
+    // THE LIVE ROW AND THE FROZEN ROW ARE ONE COLUMN (owner, 2026-11-08): the
+    // grid is fitted inside the terminal area's inline gutter in EVERY mode —
+    // prompt, running, alternate screen — so the program's width depends on
+    // the pane and never on presentation (ADR-3kqrem7v), and the running
+    // block wears the same shape as the frozen one it becomes. The area's own
+    // content box is the number: `.terminal-live-viewport` is `width: 100%` of
+    // it and carries no padding, so its clientWidth is the width the rows are
+    // painted into, wherever the live region is seated.
+    const live = this.scrollback?.terminalLiveViewport
+    const inner = live && live.clientWidth > 0 ? live.clientWidth : 0
+    const outer =
+      inner > 0 ? inner : area && area.clientWidth > 0 ? area.clientWidth : viewport.width
     const width = Math.max(0, outer)
     return { ...viewport, width, height }
   }
@@ -10420,34 +10446,34 @@ export class TerminalContent extends BasePaneContent {
       // once its stream lands pushes the viewport away from the tail a
       // person was following, silently (nocx-2v80t.3.19).
       //
-      // TWO DIFFERENT MUTATIONS, and they take two different doors.
+      // ONE DOOR, AND NOTHING ANIMATED (owner, 2026-11-08: "like Warp, no
+      // animation"). A running block's rows land above the live end, where
+      // the push down and the scroll that follows cancel for every row on
+      // screen; a frozen block's late rows land above the fold and cost the
+      // person nothing either. Both are applied and the tail re-pinned in one
+      // task, so the frame that paints shows the new rows where they will
+      // stay — ScrollbackController.settleAtTail is the whole rule.
       //
-      // A running block's rows land above the live end, where the push down
-      // and the scroll that follows cancel for every row on screen: there is
-      // no displacement to play back, and playing one back is the wobble the
-      // owner reported (ScrollbackController.growAboveTail). They are also
-      // bounded by the screen this pane has painted: the record is written
-      // when a row leaves the emulator's screen, and the frame showing it
-      // gone can still be in flight, so the delivery may name rows this pane
-      // is still painting in the grid below. The pending frame is painted
-      // first and the rows past it are held (BlockManager.applyStoredRows's
-      // `upTo`), which is what keeps the body one continuous run of rows.
-      //
-      // A frozen block's late rows are a different mutation: they arrive
-      // right after the card swapped, often while that swap's settle is still
-      // unwinding, and `settleAround` is what folds them into it.
-      const apply = () => {
-        sb.blockManager.applyStoredRows(entryId, rows)
-        sb.scrollToBottomIfFollowing()
-      }
+      // A running block's rows are also bounded by the screen this pane has
+      // painted: the record is written when a row leaves the emulator's
+      // screen, and the frame showing it gone can still be in flight, so the
+      // delivery may name rows this pane is still painting in the grid below.
+      // The pending frame is painted first and the rows past it are held
+      // (BlockManager.applyStoredRows's `upTo`), which is what keeps the body
+      // one continuous run of rows.
       if (sb.blockManager.runningBlock?.attemptId === entryId) {
         this._flushPendingPaint()
         const upTo = this._rowsTheScreenPassed(sb.blockManager.runningBlock)
-        sb.growAboveTail(() => {
+        sb.settleAround(() => {
           sb.blockManager.applyStoredRows(entryId, rows, upTo ?? undefined)
           sb.scrollToBottomIfFollowing()
         })
-      } else sb.settleAround(apply)
+      } else {
+        sb.settleAround(() => {
+          sb.blockManager.applyStoredRows(entryId, rows)
+          sb.scrollToBottomIfFollowing()
+        })
+      }
     })
     const tracked = fetch.finally(() => {
       if (this._blockRowsInFlight.get(entryId) !== tracked) return

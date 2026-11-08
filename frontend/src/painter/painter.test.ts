@@ -221,6 +221,40 @@ describe('the cursor overlay', () => {
   const cols = (n: number): CellSpec[][] =>
     Array.from({ length: 3 }, () => Array.from({ length: n }, () => ['', 1, false] as CellSpec))
 
+  // nocx-q9od5: the overlay exists from the painter's construction, and a
+  // painter with no frame yet used to draw it as a 2x2 box at the surface's
+  // own origin — the pane's top-left corner — because an absolutely
+  // positioned element with a 1px border and no size is still a box. That is
+  // the "blinking cursor cut by the pane's top edge" a slow ssh open showed
+  // for 20 seconds.
+  it('draws no cursor before a frame has placed it', () => {
+    const { painter, surface } = mount(() => null)
+    const cursor = surface.querySelector('.term-grid-cursor')
+    if (!(cursor instanceof HTMLElement)) throw new Error('no cursor overlay')
+    expect(cursor.hidden).toBe(true)
+    // A frame whose geometry the runtime has not measured yet places nothing
+    // either: the mapping answers null and the overlay stays hidden.
+    painter.apply(
+      snapshotOf(
+        frameOf(
+          1,
+          cols(4),
+          { x: 0, y: 0, visible: true },
+          {
+            cols: 4,
+            rows: 3,
+            cellWidthPx: 0,
+            cellHeightPx: 0,
+          },
+        ),
+      ),
+    )
+    expect(cursor.hidden).toBe(true)
+    // And the first measured frame draws it, in the cell the runtime named.
+    painter.apply(snapshotOf(frameOf(1, cols(4), { x: 0, y: 0, visible: true }, GEOMETRY)))
+    expect(cursor.hidden).toBe(false)
+  })
+
   it('sits on the cell the runtime names, sized to the cell, placed by THE mapping', () => {
     const { painter, surface } = mount(() => null)
     painter.apply(snapshotOf(frameOf(1, cols(4), { x: 1, y: 2, visible: true }, GEOMETRY)))

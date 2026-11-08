@@ -77,6 +77,9 @@ func writeOpen(b *strings.Builder, state string, o OpenView) {
 	} else {
 		fmt.Fprintf(b, " outcome=%s duration=%s", orNone(o.Outcome), shortDur(o.Elapsed))
 	}
+	if o.FirstPrompt > 0 {
+		fmt.Fprintf(b, " first_prompt=%s", shortDur(o.FirstPrompt))
+	}
 	if o.Publish != "" {
 		fmt.Fprintf(b, " publish=%s", o.Publish)
 	}

@@ -24,10 +24,10 @@ import type { Page } from './harness'
  */
 
 const TAB = '.nocx-tab'
-const TITLE = '.nocx-tab-title'
 const BELL = 'button[data-view="notifications"]'
 const BADGE = '.ui-badge'
 const INPUT = '.pane.active .nocx-editor-input'
+const MENU_ITEM = '.ui-context-menu__item'
 const LIST = '.notifications-panel__list'
 const ROW = `${LIST} > .ui-collection-row`
 const KIND_BADGE = '.ui-record-row__heading .ui-badge'
@@ -101,15 +101,49 @@ async function quietBell(page: Page): Promise<void> {
   await backToTheTerminal(page)
 }
 
-/** Start a command that names its tab, waits on a test-owned gate, rings BEL,
- * then exits non-zero so its finished-command row has a distinct level from
- * any earlier successful commands in the same session. */
+/**
+ * GIVE THE TAB IN FRONT A NAME OF ITS OWN, through the product's own rename
+ * form.
+ *
+ * This spec reads tab titles twice — `tabNamed` picks a row by it, and the
+ * centre's Session axis is labelled with the tab's name — and since
+ * nocx-ouru5.1.1 a title a PROGRAM sets ends with that program's run: the tab
+ * goes back to what its shell shows when the command does. So a command can no
+ * longer name a tab for longer than it runs, which is exactly what the parked
+ * commands below used to do. A rename is the durable name the product offers,
+ * and it is what the axis must prove.
+ */
+async function nameTab(page: Page, name: string): Promise<void> {
+  await page.locator(`${TAB}[aria-selected="true"]`).click({ button: 'right' })
+  await expect(page.locator(MENU_ITEM).first()).toBeVisible({ timeout: 10_000 })
+  await page.locator(MENU_ITEM, { hasText: 'Rename' }).first().click()
+  const panel = page.locator('dialog[open] .nocx-dialog__panel')
+  const field = panel.locator('.ui-text-field__input')
+  await expect(field).toBeVisible({ timeout: 10_000 })
+  await field.fill(name)
+  await panel.locator('button', { hasText: 'Save' }).click()
+  await expect(page.locator(TAB).filter({ hasText: name })).toBeVisible({ timeout: 10_000 })
+  // The dialog kept the keyboard; the command below is typed into the prompt.
+  await page.locator(INPUT).click()
+  await promptReady(page)
+}
+
+/** Name the tab in front, then start a command that waits on a test-owned
+ *  gate, rings BEL, and exits non-zero so its finished-command row has a
+ *  distinct level from any earlier successful commands in the same session. */
 async function parkBellAndFinish(page: Page, title: string, gate: string): Promise<void> {
+  await nameTab(page, title)
+  // The OSC 0 stays because `blockOf` finds a command by the text it printed,
+  // and the title is that text; what it can no longer do is name the tab.
   await page.keyboard.type(
     `printf '\\033]0;${title}\\007'; while [ ! -e ${gate} ]; do sleep 0.1; done; printf '\\a'; false`,
   )
   await page.keyboard.press('Enter')
-  await expect(page.locator(TITLE).filter({ hasText: title })).toBeVisible({ timeout: 15_000 })
+  // …and THE COMMAND IS RUNNING is the product's own state, not the title,
+  // which this tab carries for the whole test now.
+  await expect(page.locator('.pane.active .cmd-block.cmd-block-running')).toHaveCount(1, {
+    timeout: 15_000,
+  })
 }
 
 async function selectSession(page: Page, title: string): Promise<void> {
@@ -149,10 +183,10 @@ test('a person can choose visible notification kinds without losing rows or read
     const bellRowsBefore = await rowsOfKind(page, TERMINAL_BELL).count()
     const finishedRowsBefore = await rowsOfKind(page, COMMAND_FINISHED).count()
 
-    // Three named sessions let the Session axis prove real tab titles rather
+    // Three named sessions let the Session axis prove real tab names rather
     // than disappearing because a single value cannot narrow anything. Each
-    // command names its tab before it parks, so the later events occur while a
-    // different tab is selected.
+    // tab is NAMED before its command parks (nameTab), so the later events
+    // occur while a different tab is selected.
     await parkBellAndFinish(page, titleA, gateA)
     await page.locator('[aria-label="New tab"]').click()
     await expect(page.locator(TAB)).toHaveCount(2)

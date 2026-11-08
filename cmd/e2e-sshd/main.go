@@ -100,6 +100,67 @@ func main() {
 // not the explicit interpreter that executes the SSH command itself.
 var fixtureLoginShell string
 
+// inputLogDir is where -input-log records THE BYTES THE REMOTE PROGRAM RECEIVED
+// on its stdin, one file per shell channel, named shell-<n>.bytes and announced
+// as INPUTLOG=<path> when the channel starts.
+//
+// It is the far side's own account of what arrived, not a reading of the
+// fixture's chatter: a spec that asserts "the bytes the shell received equal the
+// bytes the person typed" needs the bytes the pty was actually given, and
+// nothing on this side of the channel can answer that. The file holds the stream
+// as it arrived (raw, no framing of the fixture's own), so a caller compares it
+// against what it typed byte for byte.
+//
+// Empty disables it, which is every caller that does not set the flag.
+var inputLogDir string
+
+// inputLogSeq names each shell channel's file. Taken under inputLogMu so two
+// channels never share a name, and never reused so a spec that opens a second
+// shell reads a second file.
+var (
+	inputLogMu  sync.Mutex
+	inputLogSeq int
+)
+
+// openInputLog makes this shell channel's record and returns it with the path
+// to announce. A nil file with an empty path is "not asked for"; an error here
+// is reported rather than swallowed, because a spec that then read an empty
+// file would be asserting on silence it had asked the fixture to produce.
+func openInputLog() (*os.File, string, error) {
+	if inputLogDir == "" {
+		return nil, "", nil
+	}
+	inputLogMu.Lock()
+	inputLogSeq++
+	seq := inputLogSeq
+	inputLogMu.Unlock()
+	path := filepath.Join(inputLogDir, "shell-"+strconv.Itoa(seq)+".bytes")
+	//nolint:gosec // a fixture file under a directory the spec created for it.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return nil, "", fmt.Errorf("input log %s: %w", path, err)
+	}
+	return f, path, nil
+}
+
+// recordingWriter writes to the pty master and appends what the write ACCEPTED
+// to the log. The order is the point: a byte is recorded once it has landed, so
+// the file never claims more than the program could have read.
+type recordingWriter struct {
+	master *os.File
+	log    *os.File
+}
+
+func (w recordingWriter) Write(p []byte) (int, error) {
+	n, err := w.master.Write(p)
+	if n > 0 && w.log != nil {
+		if _, logErr := w.log.Write(p[:n]); logErr != nil {
+			return n, logErr
+		}
+	}
+	return n, err
+}
+
 func run() error {
 	flag.StringVar(&fixtureLoginShell, "shell", "", "account shell advertised to the remote launcher")
 	banner := flag.String("banner", "", "sshd banner sent before authentication")
@@ -110,6 +171,7 @@ func run() error {
 	repo := flag.String("repo", "", "seed a git repository at this path for the git acceptance spec: an initial commit, an untracked file whose name has a space, a quote, a leading dash and a newline, and a pre-commit hook that writes a marker outside the repository and prints more than one packet of output; the fixture chdirs into it, so a shell this process serves directly starts inside the repository — a helper-hosted shell does not: the far nocx-helper spawns it and starts it in the login user's home, like any real sshd's login shell")
 	legacyIntegration := flag.Bool("legacy-integration", false, "plant an installer-era loader with retired accept semantics and production rc gates")
 	flag.StringVar(&sftpSlowUntil, "sftp-slow-until", "", "while this path does not exist, SFTP uploads are read at -sftp-upload-bps: a link slow enough for a spec to watch a helper install for as long as it needs, ended by creating the file")
+	flag.StringVar(&inputLogDir, "input-log", "", "record the bytes each shell channel receives into <dir>/shell-<n>.bytes, announced as INPUTLOG=<path>: the far program's own account of what arrived")
 	flag.IntVar(&sftpUploadBps, "sftp-upload-bps", 0, "bytes per second SFTP uploads are read at while -sftp-slow-until is absent; 0 disables pacing")
 	flag.Parse()
 	if fixtureLoginShell != "" {
@@ -773,7 +835,7 @@ func handleSession(ch gossh.Channel, reqs <-chan *gossh.Request) {
 				_ = req.Reply(true, nil)
 			case "shell":
 				_ = req.Reply(true, nil)
-				startCommand(ch, st, "exec bash -i")
+				startCommand(ch, st, "exec bash -i", "shell")
 			case "exec":
 				var e struct{ Command string }
 				if gossh.Unmarshal(req.Payload, &e) != nil {
@@ -782,7 +844,7 @@ func handleSession(ch gossh.Channel, reqs <-chan *gossh.Request) {
 				}
 				_ = req.Reply(true, nil)
 				if st.sawPtyReq() {
-					startCommand(ch, st, e.Command)
+					startCommand(ch, st, e.Command, "exec")
 				} else {
 					// A pty-less exec is the helper's own lane: internal/helper's
 					// client frames its protocol over stdin/stdout of a channel
@@ -976,7 +1038,7 @@ func sftpUploadRate() int {
 	return sftpUploadBps
 }
 
-func startCommand(ch gossh.Channel, st *sessionState, command string) {
+func startCommand(ch gossh.Channel, st *sessionState, command, kind string) {
 	if !st.claim() {
 		return
 	}
@@ -999,6 +1061,16 @@ func startCommand(ch gossh.Channel, st *sessionState, command string) {
 		_ = master.Close()
 		return
 	}
+	// The far program's input record, announced before the channel that fills it
+	// exists so a caller can open the file and wait on its LENGTH rather than on
+	// a guess about when the fixture got to it.
+	inputLog, inputLogPath, logErr := openInputLog()
+	if logErr != nil {
+		fmt.Fprintln(os.Stderr, "e2e-sshd:", logErr)
+	}
+	if inputLogPath != "" {
+		printLine("INPUTLOG=" + inputLogPath + " KIND=" + kind)
+	}
 	//nolint:gosec // dev-only fixture: the command string is this binary's own contract.
 	cmd := exec.Command(bash, "-c", command)
 	cmd.Env = sessionEnv(bash)
@@ -1010,6 +1082,9 @@ func startCommand(ch gossh.Channel, st *sessionState, command string) {
 		fmt.Fprintln(os.Stderr, "e2e-sshd: spawn:", err)
 		_ = slave.Close()
 		_ = master.Close()
+		if inputLog != nil {
+			_ = inputLog.Close()
+		}
 		return
 	}
 	// The child holds the slave through its stdio fds; the parent's copy is
@@ -1045,7 +1120,10 @@ func startCommand(ch gossh.Channel, st *sessionState, command string) {
 		_ = ch.Close()
 	}()
 	go func() {
-		_, _ = io.Copy(master, ch)
+		if inputLog != nil {
+			defer func() { _ = inputLog.Close() }()
+		}
+		_, _ = io.Copy(recordingWriter{master: master, log: inputLog}, ch)
 		// THE CLIENT HALF-CLOSING ITS STDIN IS NOT THE END OF THE COMMAND,
 		// and closing the master here said it was.
 		//

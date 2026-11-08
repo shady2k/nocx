@@ -15,7 +15,7 @@ import {
 } from './blocks'
 import type { CommandSnapshotStore } from '../command-snapshot'
 import type { StoredBlockRows } from './block-rows'
-import { publishCellMetric, publishRowPitch } from './cell-metric'
+import { gridRows, publishCellMetric, publishRowPitch } from './cell-metric'
 import type { ExecutionAttempt } from '../lifecycle/state'
 import type { AgentDump } from '../generated/agent.dump'
 import { windowPet } from '../pets/window-pet'
@@ -414,7 +414,7 @@ export class ScrollbackController {
     // here, the ceiling is a row boundary and both the grid the fit sends and
     // the box that clips it end on the same one.
     const cell = this._cellMetrics()?.cellHeight ?? 0
-    if (cell > 0 && max > cell) return Math.floor(max / cell) * cell
+    if (cell > 0 && max > cell) return gridRows(max, cell) * cell
     return max
   }
 
@@ -744,7 +744,7 @@ export class ScrollbackController {
     // fills the box, and a box that ends inside a row shows a sliced one (see
     // `runningLiveCap`).
     const cell = this._cellMetrics()?.cellHeight ?? 0
-    const height = cell > 0 && max > cell ? Math.floor(max / cell) * cell : max
+    const height = cell > 0 && max > cell ? gridRows(max, cell) * cell : max
     this.terminalLiveContainer.style.height = `${height}px`
   }
 

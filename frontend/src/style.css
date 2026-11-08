@@ -665,12 +665,13 @@
   min-height: auto;
 }
 
-/* The ALTERNATE-screen grid wears the same inline gutter as the primary one, in
-   the same box, so a buffer switch cannot change the program's column count —
-   ADR-3kqrem7v's invariant, kept by making the gutter presentation-independent
-   rather than by zeroing it (ADR-v26axn1t). A flush alternate grid here was the
-   interim that made a switch send one resize; the spec that asserts "no resize
-   on switch" (e2e/alt-screen-switch.spec.ts) is what settled it. */
+/* ADR-3kqrem7v: the alternate-screen grid fills the pane, like the primary
+   one — `e2e/grid-width.spec.ts` measures the program's columns against the
+   pane's own width. Both buffers at the pane's edge is also what makes a
+   switch change no column. */
+.scrollback-inner > .terminal-live-container.live-fullscreen {
+  padding-inline: 0;
+}
 
 /* ADR-3kqrem7v: alternate mode hides transcript content, while keeping the
    SAME running command header above the live grid.
@@ -1405,18 +1406,20 @@
 
 /* ADR-3kqrem7v: running geometry is a pane property, never a buffer-mode
    property. Frozen rows retain the ordinary transcript gutter and rhythm. */
-/* THE LIVE ROW AND THE FROZEN ROW ARE ONE COLUMN (owner, 2026-11-08). This
-   rule zeroed the running block's gutter — the block, its body and its live
-   region — so the running grid kept the pane's full width. ADR-3kqrem7v bought
-   that at the price of a shape the owner then reported on the stand: apt's
-   lines were drawn flush left while it ran and jumped 24px right, into the
-   transcript's gutter, the moment the card froze. One gutter everywhere, the
-   live region included, is that column: `+.scrollback-inner > :not(...)` pays
-   it, and `usableViewport` fits the grid inside it in EVERY mode, so the
-   program's size still depends on the pane and never on presentation
-   (ADR-3kqrem7v's invariant, kept).
-   The running body keeps `padding-block: 0`: only the inline shape is one
-   column, and the body's vertical rhythm arrives with the frozen card. */
+/* ADR-3kqrem7v, AND IT WINS HERE (see ADR-v26axn1t, which asked for one column
+   and cannot have it): the active rows are edge to edge — the running block,
+   its committed body and the live region pay no inline gutter — while the frozen
+   column keeps the transcript's. `e2e/row-gutter.spec.ts` and
+   `e2e/grid-width.spec.ts` assert exactly that ("the active grid fills the
+   pane"), and a program is fitted to the pane's own width in both buffers, so a
+   switch cannot change its column count. */
+.cmd-block.cmd-block-running,
+.scrollback-inner > .terminal-live-container.live-idle,
+.scrollback-inner > .terminal-live-container.live-unstructured,
+.cmd-block.cmd-block-running > .cmd-output,
+.cmd-block.cmd-block-running > .terminal-live-container.live-running {
+  padding-inline: 0;
+}
 .cmd-block.cmd-block-running > .cmd-output {
   padding-block: 0;
 }

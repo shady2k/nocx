@@ -237,6 +237,7 @@ import { installLiveSelectionGesture, type LiveSelectionGesture } from './painte
 import { createCellFit, type CellFit } from './scrollback/cell-fit'
 import { devicePxToCssPx, displayDpr } from './painter/committed-metric'
 import { measureNaturalAdvance, measureNaturalLineHeight } from './scrollback/cell-metric'
+import { gridRows } from './scrollback/cell-metric'
 import { t } from './i18n/locale-model'
 import { blockReceiptLabels } from './i18n/kit-labels'
 
@@ -6276,7 +6277,9 @@ export class TerminalContent extends BasePaneContent {
     const metrics = this.liveCellMetrics()
     if (!metrics || usable.width <= 0 || usable.height <= 0) return
     const cols = Math.max(1, Math.floor(usable.width / metrics.cellWidth))
-    const rows = Math.max(1, Math.floor(usable.height / metrics.cellHeight))
+    // The height arrives as `rows * cell` from `_gridHeight`, so this is the
+    // same count, not a second division (see `gridRows`).
+    const rows = Math.max(1, gridRows(usable.height, metrics.cellHeight))
     this.lastLocalGridSize = { cols, rows }
     // A pane that moves DURING an alternate-screen switch is the pane the
     // frames in the transition are fitted to (nocx-1ebrs.10) — and nothing
@@ -6355,12 +6358,19 @@ export class TerminalContent extends BasePaneContent {
     const structured =
       sb.mode === 'idle' || sb.mode === 'running' || sb.blockManager.runningBlock !== null
     if (!structured) return scroller
-    // ONE OWNER of the running box. While a command runs, the live region's
-    // cap IS the desired grid height — the box that will display the rows
-    // states how many of them fit, and the fit takes that number rather than
-    // computing a second one from the same pane. The two agree when the pane
-    // is measured in its own fractional pixels (nocx-3an1s.1.4); a second
-    // expression is what let them drift by a fraction and clip the last row.
+    // ONE OWNER of the running box, AND ONE INTEGER ROW COUNT (independent read,
+    // 2026-11-08: "compute the row count once, in integers, and derive the box
+    // from it"). Every structured mode answers with `rows * cell` from the same
+    // helper, so the normal screen, the prompt and the alternate screen cannot
+    // disagree by a row — and `floor(537.333 / 17.222)` cannot come out as
+    // 30.999999999999996 and cost the program a row that the alternate screen,
+    // reading the raw height, then adds back as a resize.
+    const cell = this.liveCellMetrics()?.cellHeight ?? 0
+    if (cell > 0) {
+      const max = sb.runningLiveCap
+      const height = max ?? Math.max(0, this._terminalAreaPx(area!) - sb.runningHeaderHeightPx)
+      return gridRows(height, cell) * cell
+    }
     const cap = sb.runningLiveCap
     if (cap !== null) return Math.max(0, cap)
     const total = area && this._areaHeightPx(area) > 0 ? this._terminalAreaPx(area) : scroller
@@ -6418,28 +6428,11 @@ export class TerminalContent extends BasePaneContent {
     // own: jsdom reports 0 for both, a real pane mid-layout can report one.
     // The height is `_gridHeight`'s: the running cap, held at the prompt.
     const height = this._gridHeight(area, viewport)
-    // THE LIVE ROW AND THE FROZEN ROW ARE ONE COLUMN (owner, 2026-11-08): the
-    // grid is fitted inside the terminal area's inline gutter in EVERY mode —
-    // prompt, running, alternate screen — so the program's width depends on
-    // the pane and never on presentation (ADR-3kqrem7v), and the running
-    // block wears the same shape as the frozen one it becomes.
-    //
-    // THE GUTTER IS READ FROM THE STYLESHEET, not measured off the live
-    // region. Measured, it lags: the running live region lives inside the
-    // block, whose width is written from the scroller's on the next sizing
-    // pass, so a pane that had just changed size was fitted against the OLD
-    // box for a frame — and the size report that follows the real box then
-    // looked like a resize caused by whatever landed in between (the
-    // alternate-screen switch, e2e/alt-screen-switch.spec.ts's "before the
-    // resize"). The scroller's clientWidth is the pane's own content box and
-    // moves with the pane; the gutter is one declared number,
-    // `--pane-inline-padding`, paid by the stack's own rule.
+    // ADR-3kqrem7v: the active rows are edge to edge in both buffers, so the
+    // fit is the scroller's own content box — the pane's width — and a switch
+    // between the normal and alternate screen cannot change a column.
     const outer = area && area.clientWidth > 0 ? area.clientWidth : viewport.width
-    const gutter =
-      area === undefined
-        ? 0
-        : parseFloat(getComputedStyle(area).getPropertyValue('--pane-inline-padding')) || 0
-    const width = Math.max(0, outer - 2 * gutter)
+    const width = Math.max(0, outer)
     return { ...viewport, width, height }
   }
 

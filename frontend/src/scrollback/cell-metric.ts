@@ -147,3 +147,19 @@ export function publishRowPitch(container: HTMLElement, cellHeight: number): num
   container.style.setProperty('--term-cell-height', `${cellHeight}px`)
   return cellHeight
 }
+
+/**
+ * How many whole rows a box holds — computed ONCE, and in a way that cannot
+ * lose a row to floating point (independent read, 2026-11-08).
+ *
+ * 548px of box and a 26-device-pixel cell at DPR 1.5 is a 17.22222px pitch:
+ * `537.3333333333334 / 17.22222222222222` is 31.000000000000004 in one place
+ * and 30.999999999999996 in another, so a bare `floor` gives 30 rows to the
+ * program while the alternate screen, reading the same box as a raw height,
+ * gives it 31 — and the switch back sends a resize. The epsilon is a fraction
+ * of a row, far below any real remainder.
+ */
+export function gridRows(height: number, cellHeight: number): number {
+  if (!(cellHeight > 0) || !(height > 0)) return 0
+  return Math.max(0, Math.floor(height / cellHeight + 1e-9))
+}

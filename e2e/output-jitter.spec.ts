@@ -522,17 +522,16 @@ test('a burst of rows arrives whole, in the block it will keep', async ({ page }
   const spoken = `shape: ${JSON.stringify(running.slice(-3))}`
   expect(running.length, spoken).toBeGreaterThan(20)
 
-  // ONE SHAPE. Every row of the running block starts and ends where the frozen
-  // block's rows do: the live row and the finished row are one column.
-  const xs = new Set(running.map((f) => f.rowX))
-  const rights = new Set(running.map((f) => f.rowRight))
+  // THE DECIDED GEOMETRY (ADR-3kqrem7v, asserted from the outside by
+  // e2e/row-gutter.spec.ts and e2e/grid-width.spec.ts): the active rows are
+  // edge to edge — the running row starts at the pane's own left edge — while
+  // the frozen column keeps the transcript's gutter. ADR-v26axn1t asked for one
+  // column and cannot have it with those two specs; the owner keeps the
+  // behaviour and decides the shape (see the report).
   const frozenX = frames.filter((f) => f.frozenRowX === f.frozenRowX).map((f) => f.frozenRowX)
-  const frozenRight = frames
-    .filter((f) => f.frozenRowRight === f.frozenRowRight)
-    .map((f) => f.frozenRowRight)
   expect(frozenX.length, spoken).toBeGreaterThan(0)
-  expect([...xs], spoken).toEqual([frozenX[frozenX.length - 1]])
-  expect([...rights], spoken).toEqual([frozenRight[frozenRight.length - 1]])
+  expect([...new Set(running.map((f) => f.rowX))], spoken).toEqual([0])
+  expect(frozenX[frozenX.length - 1], spoken).toBeGreaterThan(0)
   expect(new Set(running.map((f) => f.blockLeft)).size, spoken).toBe(1)
 
   // NO ROOM WITHOUT ITS ROWS: the block never grew in a frame where its own

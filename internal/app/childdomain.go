@@ -240,6 +240,17 @@ func nestedToolSocket(kind transportKind, endpoint func() string) string {
 // read it, so the per-epoch capability it carries cannot be re-read by a
 // descendant.
 func buildLocalChildBootstrap(pub *lifecyclepub.Publisher, sessions *sessionRegistry, req lifecyclepub.GrantRequest, parentTransport lifecycle.TransportID, kind transportKind, toolEndpoint func() string, localHelperBinary func() string, agentNames func() []string) (lifecyclepub.GrantBootstrap, error) {
+	if !kind.local && kind.port == 0 {
+		// A REMOTE PARENT WHOSE PORT THIS BACKEND CANNOT NAME (nocx-8gg8y).
+		// Helper-hosted ssh panes are registered now — they were invisible
+		// before, which made every question keyed on their transport answer
+		// "unknown" — and their domains ride the helper's own stream rather
+		// than a forwarded loopback port this process knows. A child rcfile
+		// rendered with port 0 would dial nothing and then wait out a hello
+		// nobody answers, so the refusal is stated: the parent runs its
+		// command conventionally, which is this builder's documented shape.
+		return lifecyclepub.GrantBootstrap{}, fmt.Errorf("child domain: transport %s is remote and names no forwarded port for a nested child", parentTransport)
+	}
 	sid, ok := sessions.lookup(req.Lane)
 	if !ok {
 		return lifecyclepub.GrantBootstrap{}, fmt.Errorf("child domain: no session registered for lane %s", req.Lane)

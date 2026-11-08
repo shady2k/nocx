@@ -2279,16 +2279,29 @@ func New(opts ...Option) (*App, error) {
 		}
 	}
 	remoteLifecycle.registerLane = registerLane
-	// A HELPER-HOSTED LOCAL PANE REGISTERS THE SAME TWO FACTS, by two seams
-	// rather than one closure, because the transport already owns half of it:
-	// the hosted open path binds the lane to its session through
-	// laneRegistrar, and what is left is the child-domain half — which
-	// transport a nested sudo/su rides, and which session a lane speaks for
-	// when the worker record and the pane enroller ask (nocx-u7uh.11). The
-	// shell inherits the daemon's descriptor exactly as it inherited this
-	// process's before, so the parent transport is still a local one.
-	localOpener.noteChildDomainParent = func(t lifecycle.TransportID, lane lifecycle.LaneID, sid string) {
-		childTransports.register(t, transportKind{local: true})
+	// THE FAR-HELPER ROUTE REGISTERS THE SAME TWO FACTS, through its own
+	// registry rather than a closure parameter (nocx-8gg8y). Its lifecycle
+	// adapters are built here, in this process, and nothing told the
+	// composition root they existed: a launch typed on an ssh pane reached the
+	// agent resolver as an unknown transport, and the resolver's refusal — which
+	// named none of its causes — was what a person read in the pane. The
+	// transports registry answers "is this pane this machine's", and the lane
+	// map answers "which session speaks for this shell"; a far pane had neither.
+	helperReg.transports = childTransports
+	helperReg.registerLane = registerLane
+	// A HELPER-HOSTED PANE REGISTERS THE SAME TWO FACTS, by two seams rather
+	// than one closure, because the transport already owns half of it: the
+	// hosted open path binds the lane to its session through laneRegistrar,
+	// and what is left is the child-domain half — which transport a nested
+	// sudo/su rides, and which session a lane speaks for when the worker
+	// record and the pane enroller ask (nocx-u7uh.11). THE KIND IS THE
+	// OPENER'S TO SAY, not this closure's assumption (nocx-8gg8y): this
+	// opener serves a shell forked here AND a shell on the far side of the
+	// connection it dialled, and only the second's domains are somebody
+	// else's. Registering both as local is what let an ssh pane's typed agent
+	// be answered by this machine's agent records.
+	localOpener.noteChildDomainParent = func(t lifecycle.TransportID, lane lifecycle.LaneID, sid string, local bool) {
+		childTransports.register(t, transportKind{local: local})
 		childSessions.register(lane, sid)
 	}
 	// The bootstrap's terminal outcome (carrier design §5.5, §6.1), routed

@@ -10,20 +10,27 @@
  *
  * WHAT IS MEASURED, once per animation frame, while the command runs: the
  * block's height and top, the pane's `scrollTop`, every row visible inside the
- * scroller with its text and its position, and the stack's transform. What a
- * person reads as jitter is asserted:
+ * scroller with its text and its position, and the stack's transform. Two
+ * things a person reads as jitter are asserted:
  *
- * NO ROW MOVES DOWN. The pane follows the tail, so a row of output can only be
- * pushed UP by the lines printed below it. A row seen in two consecutive
- * frames that moved down — by more than half a line, since layout is
- * fractional and `scrollTop` rounding leaves sub-pixel differences nobody can
- * see — means the output went backwards.
+ * 1. NO ROW MOVES DOWN. The pane follows the tail, so a row of output can
+ *    only be pushed UP by the lines printed below it. A row seen in two
+ *    consecutive frames that moved down (by more than half a line — layout is
+ *    fractional and `scrollTop` rounding leaves sub-pixel differences that
+ *    nobody can see) means the output went backwards.
+ * 2. ONE RUN OF ROWS, IN ORDER. The visible rows, top to bottom, are
+ *    consecutive lines of the command's output: no line is painted twice and
+ *    none out of order. The block's body is two sources — the rows the durable
+ *    record took, and the live grid — and a frame where they overlap shows one
+ *    line twice, which reads as the output jumping back.
  *
- * It was red before the fix, and the numbers that made it red are in the
- * failure message: the frame after every `block.grew` carried the stack
+ * Both were red before their fix, and the numbers that made them red are in
+ * the failure messages: the frame after every `block.grew` carried the stack
  * translated by the batch it had just committed (68, 96, 116 px measured, one
  * viewport at the worst), so the whole block sat below its own tail and slid
- * back over 140 ms while the next batch re-armed it.
+ * back over 140 ms while the next batch re-armed it; and once every second to
+ * third frame had the committed body painted over rows the live grid still
+ * showed (`GET-002, GET-003, GET-004, GET-001, GET-002…`).
  *
  * The window is the command's own: it ends at the last frame before the card
  * freezes and the composer returns, because that settle is a designed movement
@@ -55,7 +62,7 @@ const COMMAND =
   'done; ' +
   'printf "\\nAPT-%s-DONE\\n" END'
 
-/** One line of the command's output. */
+/** One line of the command's output, as this spec can identify it. */
 const LINE = /GET-(\d{3})\b/
 
 /** The text the pane shows only when the command has finished. */
@@ -151,6 +158,8 @@ async function framesOf(page: Page, doneText: string): Promise<Frame[]> {
 interface Jitter {
   /** Rows that moved down between two frames, with the frame they moved in. */
   readonly backwards: string[]
+  /** Frames whose visible rows repeat a line or carry them out of order. */
+  readonly outOfOrder: string[]
   /** The largest downward movement seen, in pixels. */
   readonly worstDownPx: number
   /** The largest sub-pixel (< half a line) downward movement, reported only. */
@@ -161,6 +170,7 @@ interface Jitter {
 /** Judge one run's frames. `pitch` is the row height the pane paints with. */
 function judge(frames: readonly Frame[], pitch: number): Jitter {
   const backwards: string[] = []
+  const outOfOrder: string[] = []
   let worstDownPx = 0
   let worstSubPixelPx = 0
   for (let index = 1; index < frames.length; index += 1) {
@@ -201,9 +211,20 @@ function judge(frames: readonly Frame[], pitch: number): Jitter {
           `transform ${frame.transform})`,
       )
     }
+    const ordered = frame.rows
+      .map((row) => LINE.exec(row.text)?.[1])
+      .filter((line): line is string => line !== undefined)
+    for (let at = 1; at < ordered.length; at += 1) {
+      if (Number(ordered[at]) > Number(ordered[at - 1])) continue
+      outOfOrder.push(
+        `the frame at ${frame.t}ms shows ${ordered.slice(Math.max(0, at - 3), at + 2).join(', ')}`,
+      )
+      break
+    }
   }
   return {
     backwards: backwards.slice(0, 8),
+    outOfOrder: outOfOrder.slice(0, 8),
     worstDownPx,
     worstSubPixelPx,
     frames: frames.length,
@@ -243,6 +264,7 @@ async function expectNoJitter(page: Page): Promise<void> {
   // the measurement, not the product, is what failed.
   expect(jitter.frames, said).toBeGreaterThan(30)
   expect(jitter.backwards, said).toEqual([])
+  expect(jitter.outOfOrder, said).toEqual([])
 }
 
 test('a local command printing at apt pace never moves its output backwards', async ({ page }) => {

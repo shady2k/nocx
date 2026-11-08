@@ -5876,25 +5876,75 @@ export class TerminalContent extends BasePaneContent {
     if (this._paintFrameHandle !== 0) return
     this._paintFrameHandle = requestAnimationFrame(() => {
       this._paintFrameHandle = 0
-      const pending = this._pendingPaint
-      this._pendingPaint = null
-      if (pending === null || this._disposed || !this._active) return
-      // THE RECTANGLE IS READ HERE, NOT WHEN THE FRAME ARRIVED. An alternate
-      // switch moves the pane's usable box (the prose gutter goes away), and
-      // that refit lands between accepting the frame and painting it — so a
-      // snapshot padded from the fit known at acceptance would carry the
-      // PREVIOUS layout's width, which is the defect. By the time this runs,
-      // the fit is the one the pane will actually show (nocx-1ebrs.10).
-      this._painter?.apply(this._presentedSnapshot(pending))
-      // A REPAINT CHANGES WHAT THE MEASUREMENT READS (nocx-1ebrs.42). The
-      // output-driven resize path runs its refit in a frame scheduled BEFORE
-      // this one, so a pane whose first accepted frame is also its first
-      // paint — the restored tab — was always measured against rows that did
-      // not exist yet. Re-measure once the rows are up: the fit's own guards
-      // make a rectangle that did not change a no-op, and the rAF dedupe
-      // makes the second schedule free.
-      this.scheduleLiveResize()
+      this._flushPendingPaint()
     })
+  }
+
+  /**
+   * Paint the frame this pane is holding, now.
+   *
+   * The batch's own body, reachable from outside the animation frame it
+   * normally runs in. A running block's body is TWO paints — this grid and
+   * the rows the durable record took (below it, in `.cmd-output`) — and the
+   * rows are fetched after their `block.grew`, so they land in a TASK while
+   * the grid waits for a frame. Whoever paints the rows therefore has to see
+   * the screen they belong to first, or the frame that is shown has the
+   * committed rows painted OVER rows the grid still shows: measured in the
+   * e2e container at apt's pace, every batch left `Get:002, Get:003,
+   * Get:004, Get:001, Get:002…` visible for a frame — the output running
+   * backwards at the joint, which is the twitch the owner reported.
+   */
+  private _flushPendingPaint(): void {
+    const pending = this._pendingPaint
+    this._pendingPaint = null
+    if (pending === null || this._disposed || !this._active) return
+    // THE RECTANGLE IS READ HERE, NOT WHEN THE FRAME ARRIVED. An alternate
+    // switch moves the pane's usable box (the prose gutter goes away), and
+    // that refit lands between accepting the frame and painting it — so a
+    // snapshot padded from the fit known at acceptance would carry the
+    // PREVIOUS layout's width, which is the defect. By the time this runs,
+    // the fit is the one the pane will actually show (nocx-1ebrs.10).
+    this._painter?.apply(this._presentedSnapshot(pending))
+    this._widenRunningRowsToScreen()
+    // A REPAINT CHANGES WHAT THE MEASUREMENT READS (nocx-1ebrs.42). The
+    // output-driven resize path runs its refit in a frame scheduled BEFORE
+    // this one, so a pane whose first accepted frame is also its first
+    // paint — the restored tab — was always measured against rows that did
+    // not exist yet. Re-measure once the rows are up: the fit's own guards
+    // make a rectangle that did not change a no-op, and the rAF dedupe
+    // makes the second schedule free.
+    this.scheduleLiveResize()
+  }
+
+  /**
+   * How many of a running block's stored lines the painted screen has passed.
+   *
+   * The record's index space starts at the block's first output row — the
+   * backend's `block.grew` `From` counts from the same absolute row space
+   * `outputStart` names, which the e2e container confirmed frame by frame —
+   * so the count is the painted screen's base row less that start. Null
+   * until the anchor has placed the block, and a block with no anchor yet
+   * paints everything it is given, as before.
+   */
+  private _rowsTheScreenPassed(rec: { outputStart?: number } | null): number | null {
+    const snapshot = this._cellModel?.current()
+    if (snapshot === null || snapshot === undefined) return null
+    if (rec === null || rec.outputStart === undefined) return null
+    return Math.max(0, snapshot.state.baseRow - rec.outputStart)
+  }
+
+  /** Paint the running block's held rows as the painted screen passes them —
+   *  the other half of `applyStoredRows`'s `upTo` — and hold the tail. Runs
+   *  in the same frame as the grid's own paint, so the block's body is never
+   *  a screen behind or ahead of the grid it is joined to. */
+  private _widenRunningRowsToScreen(): void {
+    const sb = this.scrollback
+    const rec = sb?.blockManager.runningBlock ?? null
+    if (!sb || rec === null || rec.attemptId === undefined) return
+    const upTo = this._rowsTheScreenPassed(rec)
+    if (upTo === null) return
+    if (!sb.blockManager.widenStoredRows(rec.attemptId, upTo)) return
+    sb.scrollToBottomIfFollowing()
   }
 
   /**
@@ -10370,20 +10420,34 @@ export class TerminalContent extends BasePaneContent {
       // once its stream lands pushes the viewport away from the tail a
       // person was following, silently (nocx-2v80t.3.19).
       //
-      // A RUNNING block's rows take the non-animating door: they land above
-      // the live end, where the push down and the scroll that follows cancel
-      // for every row on screen, so there is no displacement to play back —
-      // and playing one back is the wobble the owner reported (see
-      // ScrollbackController.growAboveTail). A frozen block's late rows are a
-      // different mutation: they arrive right after the card swapped, often
-      // while that swap's settle is still unwinding, and `settleAround` is
-      // what folds them into it.
+      // TWO DIFFERENT MUTATIONS, and they take two different doors.
+      //
+      // A running block's rows land above the live end, where the push down
+      // and the scroll that follows cancel for every row on screen: there is
+      // no displacement to play back, and playing one back is the wobble the
+      // owner reported (ScrollbackController.growAboveTail). They are also
+      // bounded by the screen this pane has painted: the record is written
+      // when a row leaves the emulator's screen, and the frame showing it
+      // gone can still be in flight, so the delivery may name rows this pane
+      // is still painting in the grid below. The pending frame is painted
+      // first and the rows past it are held (BlockManager.applyStoredRows's
+      // `upTo`), which is what keeps the body one continuous run of rows.
+      //
+      // A frozen block's late rows are a different mutation: they arrive
+      // right after the card swapped, often while that swap's settle is still
+      // unwinding, and `settleAround` is what folds them into it.
       const apply = () => {
         sb.blockManager.applyStoredRows(entryId, rows)
         sb.scrollToBottomIfFollowing()
       }
-      if (sb.blockManager.runningBlock?.attemptId === entryId) sb.growAboveTail(apply)
-      else sb.settleAround(apply)
+      if (sb.blockManager.runningBlock?.attemptId === entryId) {
+        this._flushPendingPaint()
+        const upTo = this._rowsTheScreenPassed(sb.blockManager.runningBlock)
+        sb.growAboveTail(() => {
+          sb.blockManager.applyStoredRows(entryId, rows, upTo ?? undefined)
+          sb.scrollToBottomIfFollowing()
+        })
+      } else sb.settleAround(apply)
     })
     const tracked = fetch.finally(() => {
       if (this._blockRowsInFlight.get(entryId) !== tracked) return

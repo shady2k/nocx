@@ -712,6 +712,11 @@ export interface BlockRecord {
   /** Rows read from the backend's block artifact. They are a paint source,
    *  never a second client-side store of command output. */
   storedRows?: StoredBlockRows
+  /** How many of `storedRows` the RUNNING block's body may paint: the rows
+   *  whose screen row the painted grid has passed (see
+   *  `BlockManager.widenStoredRows`). Undefined on a block that is not
+   *  running, which paints all of them. */
+  storedUpTo?: number
   /** Why the latest read of this block's stored rows failed, when it did
    *  (nocx-2v80t.3.27) — the store could not be asked, or the artifact did
    *  not parse. Set by `markRowsUnreadable`, cleared by the next read that
@@ -2806,8 +2811,20 @@ export class BlockManager {
 
   /** Apply the latest durable rows to the matching block — unless a
    *  response already applied (or pending) covers MORE of the stream, in
-   *  which case this one arrived late and is dropped. */
-  applyStoredRows(entryId: string, rows: StoredBlockRows): void {
+   *  which case this one arrived late and is dropped.
+   *
+   *  `upTo` bounds what the RUNNING block paints: the number of leading
+   *  lines whose screen row the painted grid has already passed. The record
+   *  is written when a row leaves the emulator's screen, and the frame that
+   *  shows it gone reaches this client later — measured in the e2e container
+   *  at apt's pace, a delivery led the painted screen by up to four rows on
+   *  every batch. Painting the whole delivery put those rows in the body
+   *  AND in the live grid below it: `Get:002, Get:003, Get:004, Get:001,
+   *  Get:002…` on screen for a frame, the output running backwards at the
+   *  joint. The rows are held, not dropped: `widenStoredRows` paints them as
+   *  the screen catches up, so the body is one continuous run of rows in
+   *  every frame. */
+  applyStoredRows(entryId: string, rows: StoredBlockRows, upTo?: number): void {
     const cursor = rows.lines.length > 0 ? rows.lines[rows.lines.length - 1].from : -1
     const seen = this._storedRowsCursor.get(entryId) ?? -1
     if (cursor < seen) return
@@ -2828,7 +2845,40 @@ export class BlockManager {
     }
     rec.storedRows = rows
     rec.rowsUnreadable = undefined
-    this.paintStoredRows(rec.el, rows)
+    // The bound only ever WIDENS. A delivery read before the block was bound
+    // paints everything it holds (`bindAttempt`), so a smaller count arriving
+    // afterwards must not un-paint rows that are already on screen — the
+    // paint's own diff removes what the slice omits.
+    if (upTo !== undefined) rec.storedUpTo = Math.max(rec.storedUpTo ?? 0, upTo)
+    const painted = this._paintedLines(rec)
+    if (painted !== null) this.paintStoredRows(rec.el, painted)
+  }
+
+  /** The part of a block's stored rows its body may paint: all of them,
+   *  except the running block's, which stops where the painted screen has
+   *  stopped (`applyStoredRows`'s `upTo`). */
+  private _paintedLines(rec: BlockRecord): StoredBlockRows | null {
+    const rows = rec.storedRows
+    if (rows === undefined) return null
+    const limit = rec === this._runningBlock ? rec.storedUpTo : undefined
+    if (limit === undefined || limit >= rows.lines.length) return rows
+    return { ...rows, lines: rows.lines.slice(0, Math.max(0, limit)) }
+  }
+
+  /** Widen the running block's body to the rows the painted screen has now
+   *  passed — the other half of `applyStoredRows`'s hold. Answers whether
+   *  anything was painted, so the caller holds the tail in the same task.
+   *  A no-op for a block that is not running: a frozen body has no live grid
+   *  to stay disjoint from. */
+  widenStoredRows(entryId: string, upTo: number): boolean {
+    const rec = this.blockForAttempt(entryId)
+    if (rec === null || rec !== this._runningBlock) return false
+    if (rec.storedRows === undefined) return false
+    if (upTo <= (rec.storedUpTo ?? 0)) return false
+    rec.storedUpTo = upTo
+    const painted = this._paintedLines(rec)
+    if (painted !== null) this.paintStoredRows(rec.el, painted)
+    return true
   }
 
   /** The latest read of an entry's stored rows FAILED (nocx-2v80t.3.27):

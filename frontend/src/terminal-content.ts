@@ -132,6 +132,7 @@ import { attachTerminalLinks, type TerminalLinksHandle } from './terminal-links'
 import type { ClipboardBanner } from './banner'
 import { ScrollbackController } from './scrollback/controller'
 import { LiveHistorySurface } from './scrollback/live-history'
+import { openBlockMenuAt } from './scrollback/blocks'
 import type {
   AnswerToolCall,
   BlockRecord,
@@ -1369,7 +1370,17 @@ export class TerminalContent extends BasePaneContent {
       (this.editor.rootContains(active) ||
         this.scrollback?.terminalLiveContainer.contains(active) ||
         this.receipt?.root.contains(active) ||
-        active.closest('[data-block-control]'))
+        active.closest('[data-block-control]') ||
+        // …AND THE MENU A RIGHT-CLICK OPENS, which is the one overlay created
+        // DURING the gesture rather than after it (nocx-a9x6u). A press on a
+        // block arms this bounce; the contextmenu that arrives between that
+        // press and its release opens the block's menu and focuses its first
+        // row; the release then took the keyboard straight back out of it, so
+        // the menu was visible and dead — Escape and the arrows reached the
+        // composer. The ⋮'s menu never met this because it opens on click,
+        // after the release. A row of the kit's menu is an owner the gesture
+        // chose, exactly as the ⋮ and Stop are.
+        active.closest('.ui-context-menu'))
     )
       return
     this.editor.focus()
@@ -2188,6 +2199,16 @@ export class TerminalContent extends BasePaneContent {
    */
   get ready(): Promise<boolean> {
     return this._readyPromise
+  }
+
+  /** Whether the accepted backend screen frame says the program is tracking
+   *  the pointer (a DECSET 1000/1002/1003 program). One reading of one frame
+   *  field, for every gesture that asks — the pointer intents the program is
+   *  sent, the live selection's own stance, and the pane's right-click
+   *  (nocx-a9x6u). "Never" while no frame has been accepted: a pane with no
+   *  program is a pane whose right-clicks nobody else owns. */
+  private get mouseReporting(): boolean {
+    return this._cellModel?.current()?.state.mouseTracking ?? false
   }
 
   /** Whether the pane walked into a child domain that names a remote host
@@ -3175,7 +3196,7 @@ export class TerminalContent extends BasePaneContent {
         // Mouse reporting is an emulator mode. Use only the latest accepted
         // backend frame; with no accepted mode the pointer remains available
         // to selection and native scrollback.
-        mouseTracking: () => this._cellModel?.current()?.state.mouseTracking ?? false,
+        mouseTracking: () => this.mouseReporting,
         // The wheel is counted in LINES, so it needs the row pitch: the
         // painter's accepted cell height, which is the same number the caret,
         // the selection and hit-testing are placed by (nocx-1ebrs.26). A
@@ -4471,7 +4492,8 @@ export class TerminalContent extends BasePaneContent {
       // gesture above. DOM block selection uses the document selectionchange
       // listener installed during mount; the painted grid has no DOM-text owner.
 
-      // Paste on right-click AND middle-click.
+      // Paste on middle-click. (Right-click used to paste too; it does not
+      // any more — nocx-a9x6u — and the chord is where paste lives.)
       const doPaste = async () => {
         try {
           const text = await this.clipboard.readText()
@@ -4490,9 +4512,33 @@ export class TerminalContent extends BasePaneContent {
         }
       }
 
+      // A RIGHT-CLICK IS NOT A PASTE (nocx-a9x6u, owner 2026-11-08). It was
+      // one here, on the whole pane: the clipboard landed in the editor or in
+      // the running program, which is a destructive answer to a gesture people
+      // make while aiming at something else. Paste stays on the chord (and on
+      // the middle button); nothing in the pane pastes on this one.
+      //
+      // ON A BLOCK it opens that block's OWN menu, the one behind its ⋮, at
+      // the pointer — the block decides which rows it offers (`items()` in
+      // scrollback/blocks.ts, which is why this asks the block rather than
+      // listing anything here), so a running block offers Stop and a finished
+      // one offers copy/wrap.
+      //
+      // A FULL-SCREEN PROGRAM THAT REPORTS THE MOUSE KEEPS ITS RIGHT-CLICKS.
+      // The press and release are already on their way to it as pointer
+      // intents (IntentInput, from the grid's own listeners); what the pane
+      // must not do is put a menu over the program's screen. The live region
+      // is a RUNNING BLOCK'S BODY (ADR-0091), so `closest('.cmd-block')` would
+      // claim it — `insideLiveRegion` is the one answer to "is this the
+      // terminal's surface".
       target.addEventListener('contextmenu', (e: MouseEvent) => {
+        // The native menu is never ours, in either case: a WebView's own
+        // Reload/Inspect entries over a terminal are chrome nobody asked for.
         e.preventDefault()
-        void doPaste()
+        if (this.mouseReporting && insideLiveRegion(e.target)) return
+        const block =
+          e.target instanceof Element ? e.target.closest<HTMLElement>('.cmd-block') : null
+        if (block !== null) openBlockMenuAt(block, e.clientX, e.clientY)
       })
 
       target.addEventListener('mousedown', (e: MouseEvent) => {
@@ -5360,7 +5406,7 @@ export class TerminalContent extends BasePaneContent {
         surface: painterSurface,
         gestureRoot,
         surfaceId: this.pane.paneId,
-        mouseReportingActive: () => this._cellModel?.current()?.state.mouseTracking ?? false,
+        mouseReportingActive: () => this.mouseReporting,
         focusInput: () => this._intentInput?.focus(),
         copy: (text) => {
           if (shouldCopy(text)) {

@@ -13,6 +13,7 @@ import {
   freezeBlock,
   deselectAllBlocks,
   getSelectedBlock,
+  openBlockMenuAt,
   blockOutputText,
   blockCommandText,
   blockKindRules,
@@ -1367,6 +1368,71 @@ describe('overflow menu (P1-6)', () => {
 
     // Clean up
     menu?.remove()
+    document.body.removeChild(container)
+  })
+
+  it('opens the SAME rows at the pointer — the pane’s right-click door (nocx-a9x6u)', () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const el = createCommandBlock(
+      'command',
+      1,
+      'echo hello',
+      '~',
+      '',
+      'output',
+      42,
+      0,
+      'success',
+      () => container,
+      noopSelect,
+      freshStore(),
+      'shell',
+    )
+    container.appendChild(el)
+
+    const rows = (menu: HTMLElement): (string | undefined)[] =>
+      [...menu.querySelectorAll<HTMLElement>('.ui-context-menu__item')].map((r) => r.dataset.itemId)
+
+    const fromButton = rows(openBlockMenu(el))
+    // The pointer's door reports that a menu exists, so the pane can let the
+    // event go when it does not.
+    expect(openBlockMenuAt(el, 120, 40)).toBe(true)
+    const menu = document.body.querySelector<HTMLElement>('[data-testid="block-actions-menu"]')!
+    // ONE LIST: the ⋮'s rows, not a second table written for the pointer.
+    expect(rows(menu)).toEqual(fromButton)
+    expect(fromButton).toContain('copy-command')
+    // AT THE POINTER: the kit places its own left/top from the point it is
+    // given (context-menu.tsx), and this asks for the top-left corner.
+    expect(menu.style.left).toBe('120px')
+    expect(menu.style.top).toBe('40px')
+
+    menu.remove()
+    document.body.removeChild(container)
+  })
+
+  it('offers no menu to open on a kind that draws no header', () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const el = createCommandBlock(
+      'text',
+      2,
+      '',
+      '~',
+      '',
+      'a run of prose',
+      0,
+      0,
+      'success',
+      () => container,
+      noopSelect,
+      freshStore(),
+      'shell',
+    )
+    container.appendChild(el)
+    expect(el.querySelector('[data-block-actions]')).toBeNull()
+    expect(openBlockMenuAt(el, 120, 40)).toBe(false)
+    expect(document.body.querySelector('[data-testid="block-actions-menu"]')).toBeNull()
     document.body.removeChild(container)
   })
 

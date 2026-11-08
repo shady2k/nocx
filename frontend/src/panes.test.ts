@@ -1394,24 +1394,11 @@ describe('PaneManager', () => {
     expect(cb.writeText).toHaveBeenCalledWith('osc52 payload')
   })
 
-  it('pastes on right-click (contextmenu event)', async () => {
-    const cb = makeClipboard({
-      readText: vi.fn().mockResolvedValue('right-click text'),
-    })
-    const { bar, client } = await mountPaneManager(undefined, cb)
-
-    await Promise.resolve()
-    const session = client._sessions[0]
-    if (!session) throw new Error('session not opened')
-
-    const pane = bar.parentElement!.querySelector('.pane.active')!
-    pane.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }))
-
-    await vi.waitFor(() => {
-      expect(cb.readText).toHaveBeenCalled()
-    })
-    await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('paste', 'right-click text'))
-  })
+  // A RIGHT-CLICK IS NOT A PASTE any more (nocx-a9x6u): the gesture was taken
+  // off the whole pane, and the pane's own handler is asserted where it lives —
+  // terminal-content.test.ts, "a right-click in the terminal is not a paste".
+  // The paste path that remains is the middle button, and the two tests below
+  // are about its multi-line confirmation.
 
   it('pastes on middle-click', async () => {
     const cb = makeClipboard({
@@ -1450,7 +1437,7 @@ describe('PaneManager', () => {
     // Default _bufferType is 'normal'.
     confirm.mockResolvedValueOnce(false)
     const pane = bar.parentElement!.querySelector('.pane.active')!
-    pane.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }))
+    pane.dispatchEvent(new MouseEvent('mousedown', { button: 1, bubbles: true }))
 
     await vi.waitFor(() => {
       expect(cb.readText).toHaveBeenCalled()
@@ -1460,7 +1447,7 @@ describe('PaneManager', () => {
 
     // Now confirm.
     confirm.mockResolvedValueOnce(true)
-    pane.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }))
+    pane.dispatchEvent(new MouseEvent('mousedown', { button: 1, bubbles: true }))
     await vi.waitFor(() => {
       expect(session.intent).toHaveBeenCalledWith('paste', 'line1\nline2')
     })
@@ -1483,7 +1470,7 @@ describe('PaneManager', () => {
     fireFrameMetadata(client._sessions[0], 1, { bufferKind: 'alternate' })
 
     const pane = bar.parentElement!.querySelector('.pane.active')!
-    pane.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }))
+    pane.dispatchEvent(new MouseEvent('mousedown', { button: 1, bubbles: true }))
 
     await vi.waitFor(() => {
       expect(cb.readText).toHaveBeenCalled()

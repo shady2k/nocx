@@ -1262,6 +1262,11 @@ export interface RunningBlockActions {
 
 const overflowMenuClosers = new WeakMap<HTMLElement, () => void>()
 
+/** Each block's menu, reachable at a point — the pane's right-click door
+ *  (nocx-a9x6u). Registered where the ⋮ and the rows are built, so the two
+ *  doors can never name two lists. */
+const blockMenuOpeners = new WeakMap<HTMLElement, (x: number, y: number) => void>()
+
 /**
  * Build the block's "⋮" (nocx-9bpeq.5): a kit IconButton whose click mounts
  * the kit ContextMenu as a render island — created on open, disposed on
@@ -1473,19 +1478,33 @@ function buildOverflowMenu(
     return list
   }
 
-  function openMenu(): void {
-    // Right-aligned to the button, below it: the kit turns `align: 'end'` into
-    // `x - width` and clamps through menu-geometry.ts (nocx-vnirv.2).
-    const rect = btn.getBoundingClientRect()
+  /** Show this block's menu at a point in viewport pixels.
+   *
+   *  TWO DOORS, ONE MENU (nocx-a9x6u). The ⋮ opens it hanging from its own
+   *  right edge (`align: 'end'`); a right-click on the block opens it AT THE
+   *  POINTER (`align: 'start'`, no anchor). Both reach `items()` above, the
+   *  one place the rows are decided — a second list built for the pointer
+   *  would agree with this one everywhere anyone looked and disagree about
+   *  Stop or the grant the first time a block was running.
+   *
+   *  Re-opened rather than toggled: a second right-click is a new question
+   *  about a new place, not a request to put the first answer away. */
+  function showMenu(point: {
+    x: number
+    y: number
+    align: 'start' | 'end'
+    anchor?: HTMLElement
+  }): void {
+    closeMenu()
     const host = document.createElement('div')
     dispose = render(
       () =>
         createComponent(ContextMenu, {
           open: true,
-          align: 'end',
-          anchor: btn,
-          x: rect.right,
-          y: rect.bottom + 2,
+          align: point.align,
+          anchor: point.anchor,
+          x: point.x,
+          y: point.y,
           items: items(),
           onClose: closeMenu,
           'data-testid': 'block-actions-menu',
@@ -1494,7 +1513,30 @@ function buildOverflowMenu(
     )
   }
 
+  function openMenu(): void {
+    // Right-aligned to the button, below it: the kit turns `align: 'end'` into
+    // `x - width` and clamps through menu-geometry.ts (nocx-vnirv.2).
+    const rect = btn.getBoundingClientRect()
+    showMenu({ x: rect.right, y: rect.bottom + 2, align: 'end', anchor: btn })
+  }
+
+  // The block's own menu, openable from outside this closure: the pane's
+  // right-click handler asks the BLOCK which rows it offers rather than
+  // deciding any itself (nocx-a9x6u).
+  blockMenuOpeners.set(blockEl, (x, y) => showMenu({ x, y, align: 'start' }))
+
   return btn
+}
+
+/** The block's menu at a point, for the gesture the block itself does not
+ *  receive — a right-click handled by the pane. Answers whether the block has
+ *  a menu at all: a kind with no header draws no ⋮ (BlockKind.noHeader), and
+ *  a right-click there does nothing of its own. */
+export function openBlockMenuAt(blockEl: HTMLElement, x: number, y: number): boolean {
+  const open = blockMenuOpeners.get(blockEl)
+  if (open === undefined) return false
+  open(x, y)
+  return true
 }
 
 // ── Selection helpers ──────────────────────────────────────────────────────

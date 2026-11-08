@@ -2158,6 +2158,7 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'snippets.edit.title': 'Edit snippet: {name}',
   'snippets.new.title': 'New snippet',
   'tabs.aria': 'Terminal tabs',
+  'tabs.duplicate': 'Duplicate',
   'tabs.pin': 'Pin',
   'tabs.unpin': 'Unpin',
   'terminal.output.aria': 'Terminal output',

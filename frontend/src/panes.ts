@@ -179,6 +179,9 @@ export class Pane implements PaneHost {
   private _subtitle = ''
   private _adoptable = false
   private _onAdopt: (() => void) | null = null
+  /** Whether the chain holds a row for this pane, which is what its menu's
+   *  Duplicate acts on (setDuplicable). */
+  private _duplicable = false
   private _warning = false
   private _warningLabel = ''
   private _disposed = false
@@ -380,6 +383,24 @@ export class Pane implements PaneHost {
 
   get onAdopt(): (() => void) | null {
     return this._onAdopt
+  }
+
+  /**
+   * Whether this row's menu offers Duplicate (nocx-ouru5.1.4): pushed in by
+   * PaneManager from whether the chain holds a row for this pane, for the same
+   * reason the decoration and the strip placement are — a Pane asks nobody
+   * anything, and "is there something to copy" is a question only the model
+   * that holds the chain can answer.
+   */
+  setDuplicable(duplicable: boolean): void {
+    if (this._disposed) return
+    if (duplicable === this._duplicable) return
+    this._duplicable = duplicable
+    this.onDisplayChange?.()
+  }
+
+  get duplicable(): boolean {
+    return this._duplicable
   }
 
   /** Mark the pane as saveable or not, with the save action. */
@@ -717,6 +738,28 @@ function insertionIndex(from: number, to: number, before: boolean): number {
  * that call site would be a second answer to which machine a tab is on.
  */
 export const LOCAL_BACKEND_ID = 'local'
+
+/**
+ * WHERE A TAB THE PERSON POINTED AT GOES (nocx-ouru5.1.4).
+ *
+ * A create's ordinary seat is "beside the tab in front, in the workspace the
+ * window shows" and needs no saying. A duplicate's seat is a row the person
+ * chose, which may be in another workspace, and it carries the directory the
+ * new shell starts in — read from the source pane's own verified report, so
+ * the new tab is in the same place rather than merely beside the old one.
+ */
+interface TabSeat {
+  /** The container the tab is minted into — the source's, never the
+   *  window's: in the vertical strip every workspace is on screen, and a
+   *  duplicate that landed in the front workspace would be a copy of a tab
+   *  that is somewhere else. */
+  readonly workspaceId: string
+  /** The tab this one is seated immediately after. */
+  readonly afterTabId: string
+  /** Where the new pane's shell starts. Empty means the registry's default,
+   *  which is all a create knows before its shell says otherwise. */
+  readonly cwd: string
+}
 
 export class PaneManager {
   private readonly panes: Pane[] = []
@@ -1618,7 +1661,15 @@ export class PaneManager {
    * never appears (nocx-rtg0.29). Returning the id alone is what made that
    * race impossible to close at the call site.
    */
-  private mintPane(kind: 'local' | 'ssh', endpoint: string | null): PaneIdentity {
+  private mintPane(
+    kind: 'local' | 'ssh',
+    endpoint: string | null,
+    /** Where this tab goes, when the answer is not "beside whichever tab is
+     *  in front, in the workspace the window shows" — which is the ordinary
+     *  case and the only one a create had before nocx-ouru5.1.4's Duplicate
+     *  asked for a tab beside a row the person POINTED AT. */
+    seat?: TabSeat,
+  ): PaneIdentity {
     // No store is a DEGRADE, not a refusal: the id is minted and simply
     // names no row, which `registered: false` states rather than leaving the
     // caller to infer it from a promise that never settles.
@@ -1629,9 +1680,15 @@ export class PaneManager {
     // person was working. The default is where it goes when that is where
     // they are.
     const opened = this.layout.openTab(
-      { kind, endpoint, cwd: '' },
-      this.currentWorkspaceId(),
-      this.activePane ? this.layout.tabOf(this.activePane.wireId)?.id : undefined,
+      // THE ROW'S cwd is where the shell is asked to start, and empty is the
+      // ordinary answer: a tab the person opened has no directory yet — the
+      // shell reports one a round trip later. A duplicate KNOWS the
+      // directory (it is the source pane's own verified report), so it says
+      // so here, which is also what lets the new shell start there.
+      { kind, endpoint, cwd: seat?.cwd ?? '' },
+      seat?.workspaceId ?? this.currentWorkspaceId(),
+      seat?.afterTabId ??
+        (this.activePane ? this.layout.tabOf(this.activePane.wireId)?.id : undefined),
     )
     // ONE handler with both arms, not a .then() and a .catch(): two handlers
     // on the same promise leave the first one's rejection unhandled, which
@@ -1673,7 +1730,7 @@ export class PaneManager {
         return false
       },
     )
-    return { paneId: opened.paneId, registered }
+    return { paneId: opened.paneId, registered, startCwd: seat?.cwd }
   }
 
   /** The panes' view of the recording fact, resolved at READ time rather
@@ -1791,6 +1848,64 @@ export class PaneManager {
     // opened from (see reopenSSH).
     const identity = this.mintPane('ssh', endpointOf(host, user, port))
     return this.buildSSHPane(identity, { profileId, host, user, port }, title || host)
+  }
+
+  /**
+   * DUPLICATE — a NEW tab beside the row the menu was opened on
+   * (nocx-ouru5.1.4): the same directory for a local tab, the same
+   * connection for an ssh one.
+   *
+   * A NEW SESSION, NEVER A MIRROR. Two tabs on one live session would share
+   * one screen, one prompt and one set of keystrokes, which is a split view
+   * and not a copy; the ticket says so, and the shape below is the same one
+   * every other "open this again" path uses — mint an identity, seat the tab,
+   * build the chrome, open a session.
+   *
+   * WHAT IS COPIED IS THE CHAIN'S ANSWER, never the chrome's: the source
+   * pane's ROW says which kind it is, the directory its shell last verified
+   * (osc 7, AD-5) and the endpoint it applies at. A pane with no row is not
+   * offered the action at all (Pane.setDuplicable), and a row that somehow
+   * arrives without a pane is a no-op rather than an error — the person asked
+   * to copy something that has just gone.
+   */
+  private duplicatePane(paneId: number): void {
+    if (!this.layoutAvailable) return
+    const pane = this.panes.find((candidate) => candidate.id === paneId)
+    if (!pane) return
+    const tab = this.layout.tabOf(pane.wireId)
+    if (!tab) return
+    // A tab holds one pane today (a share below 1 arrives with the split,
+    // nocx-8m2x6), so "the pane this row is" is the first of them and there
+    // is no second to ask about.
+    const source = this.layout.panesOf(tab.id)[0]
+    if (!source) return
+    const seat: TabSeat = { workspaceId: tab.workspaceId, afterTabId: tab.id, cwd: source.cwd }
+    if (source.kind === 'ssh') {
+      // HOW THIS PANE WAS OPENED, from the pane itself: its own constructor
+      // arguments are the one record of the saved connection, because the
+      // chain stores where a pane applies and not which profile it came from.
+      // Reading the ENDPOINT back instead would lose the port and the
+      // credentials — a duplicate that dialled the default ssh port of the
+      // same host is a different service, not a copy.
+      const content = pane.content
+      const ssh = content instanceof TerminalContent ? content.sshOptions() : null
+      if (ssh === null || ssh.host === '') {
+        log.warn('nocx: an ssh tab was asked to duplicate with nothing to connect to', {
+          pane: source.id,
+        })
+        return
+      }
+      // NO cwd: a far login shell starts where that host says, and the wire
+      // refuses one on an ssh open for exactly this reason.
+      const identity = this.mintPane('ssh', source.endpoint, {
+        ...seat,
+        cwd: '',
+      })
+      this.buildSSHPane(identity, ssh, ssh.host)
+      return
+    }
+    log.info('nocx: duplicating a tab', { pane: source.id, kind: source.kind, cwd: source.cwd })
+    this.buildLocalPane(this.mintPane('local', null, seat))
   }
 
   /** The chrome and content of an SSH pane with a given identity — one
@@ -2034,6 +2149,7 @@ export class PaneManager {
     old.onRename = null
     old.onRecolour = null
     old.onPin = null
+    old.onDuplicate = null
     old.onSwitchWorkspace = null
     old.onNewWorkspace = null
     old.onOpenOverview = null
@@ -2099,6 +2215,10 @@ export class PaneManager {
     strip.onRename = (id) => void this.renameTab(id)
     strip.onRecolour = (id, colour) => void this.recolourTab(id, colour)
     strip.onPin = (id, pinned) => void this.pinTab(id, pinned)
+    // THE MENU'S DUPLICATE (nocx-ouru5.1.4). The strip names the row; what a
+    // copy of that pane is — its directory, its connection, the workspace it
+    // goes in — is this model's, because it is the one holding the chain.
+    strip.onDuplicate = (id) => this.duplicatePane(id)
     strip.onSwitchWorkspace = (workspaceId) => this.switchWorkspace(workspaceId)
     strip.onNewWorkspace = () => void this.newWorkspace()
     // Set by the composition root, which owns the overview's lifetime — the
@@ -3295,8 +3415,16 @@ export class PaneManager {
     // A pane the chain does not hold yet carries no placement at all: no
     // group, no indent. It is on screen because the person opened it, and
     // nothing in the backend has an opinion about where it sits.
+    const fromChainSet = new Set(fromChain)
     for (const pane of this.panes) {
-      if (!fromChain.includes(pane)) pane.setStripPlacement({ groupKey: '', depth: 0 })
+      if (!fromChainSet.has(pane)) pane.setStripPlacement({ groupKey: '', depth: 0 })
+      // AND WHETHER THERE IS ANYTHING TO COPY (nocx-ouru5.1.4): a pane the
+      // chain holds has a directory, a connection and a row the backend can
+      // seat a copy beside; a surface the window draws without storing it has
+      // none of the three, so its menu offers no Duplicate. Read here rather
+      // than at the menu because the answer is the chain's, and this is the
+      // one place the chain is mapped onto the rows.
+      pane.setDuplicable(fromChainSet.has(pane))
     }
     // A VIEW PANE BELONGS TO THE UNGROUPED RUN, and to its own place within
     // it. Opening Settings used to put it wherever it was created — the end

@@ -608,6 +608,17 @@ export interface PaneIdentity {
    * the ordinary case look exceptional.
    */
   readonly registered: Promise<boolean>
+  /**
+   * Where this pane's shell is asked to START, or undefined for the ordinary
+   * "wherever an unconfigured local shell starts".
+   *
+   * Only a duplicate names one (nocx-ouru5.1.4): it copies a pane that is
+   * already standing in a directory, and a copy in another directory would not
+   * be one. It rides the OPEN rather than arriving as a command typed into the
+   * new shell, because a `cd` a person did not type is a line in their
+   * history and a block they never ran.
+   */
+  readonly startCwd?: string
 }
 
 /** A scrollback selection held across a transaction that would overwrite it. */
@@ -2263,6 +2274,24 @@ export class TerminalContent extends BasePaneContent {
    *  profile until it is adopted, so it has no valid ports scope. Null
    *  also while the pane walks on a remote host it reached by hand — the
    *  scope follows where the pane IS, never how it was opened. */
+  /**
+   * HOW THIS PANE WAS OPENED, for a caller that must open another one the same
+   * way — the tab menu's Duplicate (nocx-ouru5.1.4). Null for a local pane.
+   *
+   * THE CHROME IS THE ONLY THING THAT KNOWS IT: the chain stores where a pane
+   * APPLIES (`user@host:port`), never which saved connection it was opened
+   * from, and a saved connection carries the port and the credentials. A copy
+   * that resolved the endpoint instead would dial the same host on its default
+   * ssh port with no profile behind it, which is a different service and not a
+   * copy of this tab.
+   *
+   * Read-only and unparsed: the caller hands it straight back to buildSSHPane,
+   * which is the one place that decides what an ssh pane is opened with.
+   */
+  sshOptions(): { profileId: string; host: string; user?: string; port?: number } | null {
+    return this.sshOpts ?? null
+  }
+
   get portsTargetId(): string | null {
     if (this._paneWalkedToRemoteChild) return null
     if (this.sshOpts === undefined) return LOCAL_TARGET_ID
@@ -2861,7 +2890,15 @@ export class TerminalContent extends BasePaneContent {
   private async openRequestedSession(): Promise<SessionHandle> {
     const adopted = await this.adoptLiveSession()
     if (adopted !== null) return adopted
-    const anchor: OpenAnchor = (await this.pane.registered) ? { paneId: this.pane.paneId } : {}
+    // THE STARTING DIRECTORY, when this pane was born with one (a duplicate:
+    // nocx-ouru5.1.4). It travels with the pane's own id rather than as a
+    // command typed into the new shell, because a `cd` nobody typed would be
+    // a line in the person's history and a block they never ran.
+    const startCwd = this.pane.startCwd
+    const anchor: OpenAnchor = {
+      ...((await this.pane.registered) ? { paneId: this.pane.paneId } : {}),
+      ...(startCwd ? { cwd: startCwd } : {}),
+    }
     // AD-1: the shell must start in the measured grid, before it can print.
     // Adopted sessions keep their accepted geometry until this pane fits them.
     if (this._latestViewport) {

@@ -412,3 +412,20 @@ under `nocx-nqmjq` into `v0-9`. This branch drops its obsolete budget-17 hunk
 and adopts main's `currentMilestone: v0-9` and unset finding budget; no budget
 for a new charter is inferred. That merge changes policy and release documents,
 not product code, so it does not invalidate the protocol-19 behavioral evidence.
+
+On that same product tree, both portable backend container variants passed
+(1304 s), the Linux OS no-keyring leg passed, and its separately completed
+keyring leg passed in 791 s. The frontend CI container passed in 285 s.
+The full Chromium e2e run reported 410 passed, four skipped and three failed:
+short durable output with zero live retention, missing file-list timeout state,
+and duplicate snippets inherited across cases. WebKit did not finish before
+the aggregate command's outer bound; this is not a complete e2e pass.
+
+For `nocx-nqmjq.3`, each snippet case now owns a fresh disposable backend and
+document. The previous shared backend depended on UI cleanup that read the
+delete-button count while the snippets page could still be loading; root
+visibility did not establish list readiness. Per-case ownership removes that
+cleanup dependency without weakening the unique-row or refused-secret
+assertions. All five real-app scenarios passed in Chromium (61 s including
+runner setup) and WebKit (60 s). The output-fidelity and file-timeout failures
+remain separate required-check repairs, not accepted losses or wider deadlines.

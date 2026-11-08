@@ -104,24 +104,6 @@ async function createSnippet(page: Page, title: string, body: string): Promise<v
   })
 }
 
-/** Remove a snippet the same way, so a second run starts where this one
- *  did. Tolerant of it being gone already: an interrupted run must not
- *  leave the next one failing in its cleanup. */
-async function removeSnippet(page: Page, title: string): Promise<void> {
-  await page.keyboard.press('Meta+,')
-  await page.locator('.ui-grouped-nav__item[data-item="snippets"]').click()
-  await expect(page.locator('.sn-root')).toBeVisible({ timeout: 10_000 })
-  const del = page.locator(`[aria-label="Delete ${title}"]`)
-  if ((await del.count()) === 0) return
-  await del.first().click()
-  await page
-    .getByRole('dialog')
-    .filter({ hasText: `Delete "${title}"?` })
-    .getByRole('button', { name: 'OK', exact: true })
-    .click()
-  await expect(page.locator(`[aria-label="Delete ${title}"]`)).toHaveCount(0, { timeout: 10_000 })
-}
-
 /** Open a terminal tab and leave a program waiting on stdin: `read` holds
  *  the pane, so the command editor is hidden and the pty owns input — the
  *  state the palette exists for.
@@ -222,34 +204,18 @@ test.describe('a saved snippet reaches a running program', () => {
   test.use({ viewport: { width: 1280, height: 800 } })
 
   let backend: VaultBackend
-  let endpoint: { port: number; token: string }
-
-  test.beforeAll(async () => {
-    const root = mkdtempSync(join(tmpdir(), 'nocx-snippets-'))
-    backend = new VaultBackend(readStand().server, { root })
-    endpoint = await backend.start()
-  })
-
-  test.afterAll(() => {
-    backend?.stop()
-  })
 
   test.beforeEach(async ({ page }) => {
+    // Each case owns its document. UI cleanup can observe the list before its
+    // asynchronous load finishes and leave a same-named snippet for the next case.
+    const root = mkdtempSync(join(tmpdir(), 'nocx-snippets-'))
+    backend = new VaultBackend(readStand().server, { root })
+    const endpoint = await backend.start()
     await bindEndpoint(page, endpoint)
   })
 
-  test.afterEach(async ({ page }) => {
-    await page.goto('/')
-    // The chord removeSnippet presses goes to a page that has just loaded, so
-    // wait for the app to be up before pressing it. On webkit it was landing
-    // before the shortcut was wired: Settings never opened, the click on its
-    // rail waited on an element that was never going to appear, and the whole
-    // test failed in its own cleanup. Waiting on the observable state — the
-    // prompt owning input — is the fix; a bigger budget only moves it.
-    await promptReady(page)
-    await removeSnippet(page, 'e2e fill')
-    await removeSnippet(page, 'e2e two lines')
-    await removeSnippet(page, 'e2e choice')
+  test.afterEach(() => {
+    backend?.stop()
   })
 
   test('fires filled in, without a newline, into the program reading stdin', async ({ page }) => {
@@ -489,9 +455,9 @@ test.describe('a saved snippet reaches a running program', () => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)
     await appReadyForInput(page)
-    // This describe owns a fresh disposable backend, so it cannot inherit a
-    // vault from the shared stand. Its uninitialized vault makes the reference
-    // genuinely unresolved. The rule under test is the one §11.1 states:
+    // This case owns a fresh disposable backend, so it cannot inherit a vault
+    // from the shared stand or another case. Its uninitialized vault makes the
+    // reference genuinely unresolved. The rule under test is the one §11.1 states:
     // an unresolved name refuses the whole fire — the literal {{secret:…}}
     // must never reach a running program's stdin.
     await createSnippet(page, 'e2e fill', 'psql {{secret:e2e-absent}}')

@@ -943,7 +943,16 @@ export class ScrollbackController {
     // takes 130px back from the scroller and the cap is read from that box; a
     // box still sized for the taller one is a grid cut mid-row for as long as
     // the next resize pass takes, which is the frame the owner photographed.
-    this.setLiveHeight(this._liveContentHeight())
+    //
+    // SIZED FROM WHAT WAS PAINTED, never from a fresher model (owner,
+    // 2026-11-08). A stored-rows delivery lands between accepting a frame and
+    // painting it, and this call used to read the model at that instant: the
+    // box took the newer frame's text extent while the grid below it still
+    // showed the older one, so a block that had just grown by one committed
+    // row could lose a row of box and move every visible row down 17px.
+    // `_lastLiveHeightPx` is the height the last paint computed, which is the
+    // only one the rows on screen agree with.
+    this.setLiveHeight(this._lastLiveHeightPx ?? this._liveContentHeight())
     if (!followIntent) return
     // The observer can report the old sentinel position after this mutation
     // has grown the scroller. The decision is the pre-mutation one.

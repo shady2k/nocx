@@ -935,6 +935,61 @@ describe('a nested running command borrows the full pane without changing its tr
   })
 })
 
+describe('a delivery sizes the box from what was painted (owner, 2026-11-08)', () => {
+  /** A running controller whose measured content the test owns, and whose
+   *  scroller records where it was asked to go. */
+  function runningController(content: { px: number | null }) {
+    const renderer = makeRenderer()
+    const pane = document.createElement('div')
+    const controller = new ScrollbackController({
+      pane,
+      liveContentHeight: () => content.px,
+      cellMetrics: () => ({ cellWidth: 8, cellHeight: 16 }),
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    document.body.appendChild(controller.scrollbackArea)
+    Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
+      value: 360,
+      configurable: true,
+    })
+    Object.defineProperty(controller.scrollbackArea, 'scrollHeight', {
+      value: 360,
+      configurable: true,
+    })
+    controller.scrollbackArea.scrollTo = vi.fn()
+    controller.beginBlock('ls', '~', 0)
+    return { controller, renderer }
+  }
+
+  it('does not follow a fresher measurement than the rows on screen', () => {
+    // THE ORDER THE BROWSER PRODUCED, driven here by hand: a stored-rows
+    // delivery arrives after a frame was accepted and before it is painted, so
+    // the model answers with the NEWER frame's extent. The box must keep the
+    // height the last paint computed — the only one its rows agree with — and
+    // take the new measurement on the next paint, not on the delivery.
+    const content = { px: 3 * 16 }
+    const { controller } = runningController(content)
+    try {
+      // The paint that put three rows on screen.
+      controller.setLiveHeight(content.px)
+      expect(controller.terminalLiveContainer.style.height).toBe('48px')
+
+      // The delivery: the model has moved on (two rows of text, say), but no
+      // frame has painted them.
+      content.px = 2 * 16
+      controller.settleAround(() => {})
+      expect(controller.terminalLiveContainer.style.height).toBe('48px')
+
+      // The paint that does show them takes the measurement.
+      controller.setLiveHeight(content.px)
+      expect(controller.terminalLiveContainer.style.height).toBe('32px')
+    } finally {
+      controller.blockManager.clearAll()
+      controller.scrollbackArea.remove()
+    }
+  })
+})
+
 describe('the pane holds the tail and never animates (owner, 2026-11-08)', () => {
   /** A controller whose stack records whether anything asked it to animate. */
   function movingController(): {

@@ -5794,8 +5794,14 @@ export class TerminalContent extends BasePaneContent {
 
   /** Live block height starts at the backend's accepted output anchor. The
    *  prompt echo and earlier screen rows are outside the running output. */
-  private liveContentHeight(): number | null {
-    const snapshot = this._cellModel?.current()
+  private liveContentHeight(painted = this._cellModel?.current()): number | null {
+    // THE PAINTED SNAPSHOT, not whatever the model holds now. `_flushPendingPaint`
+    // passes the frame it is about to draw: sizing the box from a NEWER
+    // accepted revision measured rows the painter had not painted, so the box
+    // could shrink or grow one frame away from its own rows — measured on
+    // WebKit in an ssh session, a block that grew by one committed row while
+    // the box lost one, and every visible row moved down 17px.
+    const snapshot = painted
     const metrics = this.liveCellMetrics()
     if (!snapshot || !metrics) return null
     let lastTextRow = -1
@@ -5921,7 +5927,7 @@ export class TerminalContent extends BasePaneContent {
     // re-pinned to a height the frame before had not had; on a burst of ten
     // rows that was a step of 170px with the newest rows clipped until it
     // landed.
-    this.scrollback?.setLiveHeight(this.liveContentHeight())
+    this.scrollback?.setLiveHeight(this.liveContentHeight(this._presentedSnapshot(pending)))
     this._widenRunningRowsToScreen()
     // A REPAINT CHANGES WHAT THE MEASUREMENT READS (nocx-1ebrs.42). The
     // output-driven resize path runs its refit in a frame scheduled BEFORE

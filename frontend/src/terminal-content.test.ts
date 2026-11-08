@@ -21385,7 +21385,7 @@ describe('a full-screen program is told the box that shows it (ADR-2yzsq8mk)', (
     }
   }
 
-  it('keeps the pane’s full width, because a markerless session has no ledger column', async () => {
+  it('wears the ledger’s gutter too, because text against the edge is what the decision stops', async () => {
     const { content, scrollback, teardown } = await markerlessPane()
     try {
       const reported = (
@@ -21393,11 +21393,24 @@ describe('a full-screen program is told the box that shows it (ADR-2yzsq8mk)', (
           _reportedSize(): { cols: number; xpixel: number }
         }
       )._reportedSize()
-      // The whole pane: 800px of 8px cells. A gutter here would cost a plain
-      // ssh shell three columns of a width it has always had (ADR-2yzsq8mk).
+      // The fit takes the same gutter a running command's rows wear
+      // (ADR-2yzsq8mk §5): with no stylesheet in jsdom the token is zero, so
+      // what this asserts is the ARITHMETIC — the fit goes through the same
+      // one column as every other mode, and the stylesheet contract itself is
+      // asserted in scrollback/trailing-edge.test.ts.
       expect(reported.cols).toBe(100)
       expect(reported.xpixel).toBe(PANE.width)
       expect(scrollback.mode).toBe('unstructured')
+
+      // …and the gutter is one number, taken off BOTH sides.
+      scrollback.scrollbackArea.style.setProperty('--pane-inline-padding', '24px')
+      content.viewportChanged({ width: PANE.width, height: PANE.height })
+      const after = (
+        content as unknown as {
+          _reportedSize(): { cols: number; xpixel: number }
+        }
+      )._reportedSize()
+      expect(after.cols).toBe(Math.floor((PANE.width - 48) / CELL.cellWidthPx))
     } finally {
       teardown()
     }

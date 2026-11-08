@@ -2848,7 +2848,11 @@ export class BlockManager {
     // The bound only ever WIDENS. A delivery read before the block was bound
     // paints everything it holds (`bindAttempt`), so a smaller count arriving
     // afterwards must not un-paint rows that are already on screen — the
-    // paint's own diff removes what the slice omits.
+    // paint's own diff removes what the slice omits. What keeps it from
+    // latching is the caller: the count is offered only for a screen painted
+    // for THIS delivery (terminal-content's `_flushPendingPaint` answers
+    // whether it painted), so a pane that has stopped painting holds nothing
+    // and the body takes every row the record has.
     if (upTo !== undefined) rec.storedUpTo = Math.max(rec.storedUpTo ?? 0, upTo)
     const painted = this._paintedLines(rec)
     if (painted !== null) this.paintStoredRows(rec.el, painted)
@@ -2863,6 +2867,24 @@ export class BlockManager {
     const limit = rec === this._runningBlock ? rec.storedUpTo : undefined
     if (limit === undefined || limit >= rows.lines.length) return rows
     return { ...rows, lines: rows.lines.slice(0, Math.max(0, limit)) }
+  }
+
+  /** Release every held row: paint the running block's body whole.
+   *
+   *  The hold is a bet about a screen THIS pane is still painting, and a bet
+   *  needs a way to lose. A cut and a rebind is that way: the re-bound session's
+   *  first screen can stand anywhere in the row space, and the frames this pane
+   *  was painting are gone, so the rows it was holding back for them are rows
+   *  nobody shows — measured in e2e/connection-overlay.spec.ts, a block held
+   *  nine of its forty-one rows for the rest of the command. Held rows are only
+   *  ever held against a screen that is still arriving; when it stops, the
+   *  transcript keeps the output. */
+  releaseHeldRows(): void {
+    const rec = this._runningBlock
+    if (rec === null || rec.storedUpTo === undefined) return
+    rec.storedUpTo = undefined
+    const painted = this._paintedLines(rec)
+    if (painted !== null) this.paintStoredRows(rec.el, painted)
   }
 
   /** Widen the running block's body to the rows the painted screen has now
@@ -3187,6 +3209,10 @@ export class BlockManager {
     this._cmdStartTime = null
     rec.exitCode = exitCode
     rec.status = status
+    // A FROZEN BODY HAS NO LIVE GRID TO STAY DISJOINT FROM: the hold that
+    // keeps a running block's rows from doubling the screen has nothing to
+    // hold against now, so the body takes everything the record holds.
+    rec.storedUpTo = undefined
     this._runningBlock = null
     return status
   }

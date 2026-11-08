@@ -704,22 +704,6 @@ export class ScrollbackController {
     this._onModeChanged?.(this._mode)
   }
 
-  /**
-   * Draw the running block flush for the rest of its command (ADR-2yzsq8mk).
-   *
-   * A program that borrowed the alternate screen wrote its primary rows at the
-   * pane's width, and the pane keeps telling it that width until its command
-   * ends — so the block that holds those rows wears no gutter, or the grid
-   * would be a softer target than the box and the last columns would be
-   * clipped. The prompt takes the attribute back with the grid.
-   */
-  setPaneWidth(on: boolean): void {
-    const block = this._blockManager.runningBlock?.el
-    if (!block) return
-    if (on) block.dataset.paneWidth = ''
-    else delete block.dataset.paneWidth
-  }
-
   /** Show the alternate grid beneath the same one-line running header
    * (ADR-3kqrem7v), preserving the actual header node and its controls. */
   enterFullscreen(): void {

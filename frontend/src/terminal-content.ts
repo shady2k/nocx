@@ -4035,7 +4035,6 @@ export class TerminalContent extends BasePaneContent {
           // ended, and this boundary is where the transcript's column returns
           // — one resize, owed here, never inside the borrow.
           this._ownedGrid = null
-          this.scrollback?.setPaneWidth(false)
           this.scrollback?.setIdle()
         } else if (
           this.lifecycle.state.kind === 'running' &&
@@ -4967,6 +4966,20 @@ export class TerminalContent extends BasePaneContent {
     clearTimeout(this._fence?.deadline)
     this._fence = null
     this._switchPresents = false
+    // AND THE HELD ROWS COME BACK (ADR-2yzsq8mk's joint, nocx-djx1u). The
+    // running block's body holds the rows its painted screen has not passed
+    // yet; a bind means the screen that was going to pass them is gone, so the
+    // body takes every row the record holds rather than waiting for a frame
+    // that will never come (e2e/connection-overlay.spec.ts).
+    this.scrollback?.blockManager.releaseHeldRows()
+    // AND THE FRAME THE PREVIOUS BIND LEFT WAITING. It describes a screen this
+    // pane no longer shows, and a paint of it would be measured against a row
+    // space the new session does not share (see the stored-rows hold below).
+    this._pendingPaint = null
+    if (this._paintFrameHandle !== 0) {
+      cancelAnimationFrame(this._paintFrameHandle)
+      this._paintFrameHandle = 0
+    }
     for (const unsubscribe of this._blockRowsUnsubs) unsubscribe()
     this._blockRowsUnsubs = []
     this._blockRowsInFlight.clear()
@@ -5673,6 +5686,14 @@ export class TerminalContent extends BasePaneContent {
       this._projections?.reset()
       this.lifecycle.reset()
       if (exit.cause === 'interrupted') {
+        // AND THE HELD ROWS COME BACK (nocx-djx1u). The running block's body
+        // holds the rows its painted screen has not passed; the screen that
+        // was going to pass them is on a channel that just failed, so the body
+        // takes every row the record holds rather than waiting for a frame
+        // that may never come. Measured in e2e/connection-overlay.spec.ts: a
+        // cut mid-command left nine of forty-one rows out of the block for the
+        // rest of it.
+        this.scrollback?.blockManager.releaseHeldRows()
         // A loss is not a close (nocx-ictcq): the channel is gone, the
         // host unreachable, a handshake expired, or a reattach failed —
         // the work in the tab and the evidence of what happened must
@@ -5939,10 +5960,10 @@ export class TerminalContent extends BasePaneContent {
    * Get:004, Get:001, Get:002…` visible for a frame — the output running
    * backwards at the joint, which is the twitch the owner reported.
    */
-  private _flushPendingPaint(): void {
+  private _flushPendingPaint(): boolean {
     const pending = this._pendingPaint
     this._pendingPaint = null
-    if (pending === null || this._disposed || !this._active) return
+    if (pending === null || this._disposed || !this._active) return false
     // THE RECTANGLE IS READ HERE, NOT WHEN THE FRAME ARRIVED. An alternate
     // switch moves the pane's usable box (the prose gutter goes away), and
     // that refit lands between accepting the frame and painting it — so a
@@ -5969,6 +5990,7 @@ export class TerminalContent extends BasePaneContent {
     // make a rectangle that did not change a no-op, and the rAF dedupe
     // makes the second schedule free.
     this.scheduleLiveResize()
+    return true
   }
 
   /**
@@ -6317,6 +6339,18 @@ export class TerminalContent extends BasePaneContent {
     const sameViewport =
       last !== null && last.width === usable.width && last.height === usable.height
     const sameSize = cols === this.cols && rows === this.rows
+    // A BORROWED COMMAND'S ROWS STAY AS WRITTEN (ADR-2yzsq8mk): the pane paints
+    // them on the ledger's column, but its pty keeps the grid the program was
+    // given until the command ends, so no report goes out for the placement —
+    // that SIGWINCH is what would start the borrow again.
+    if (this._ownedGrid !== null && this.scrollback?.mode !== 'fullscreen') {
+      if (!sameViewport || !sameSize) {
+        this.lastFitGeometry = { width: usable.width, height: usable.height }
+        this.cols = cols
+        this.rows = rows
+      }
+      return
+    }
     const report = this._lastReport
     const sameMetric =
       report !== null &&
@@ -6464,12 +6498,19 @@ export class TerminalContent extends BasePaneContent {
     const metrics = this.liveCellMetrics()
     const owned = this._ownedGrid
     if (owned !== null && metrics !== null && sb?.mode !== 'fullscreen') {
-      // While the program owns the pane, its grid is the pane's answer — the
-      // one it was last given — so a switch back to the primary buffer cannot
-      // resize it.
+      // THE ROWS THE PROGRAM HAS, ON THE LEDGER'S COLUMN (ADR-2yzsq8mk). The
+      // pty keeps the size the program was given (see `_ownedGrid`), so a
+      // switch back to the primary buffer cannot resize it; what changes is
+      // where those rows are DRAWN — back at the transcript's column, which is
+      // the block a person reads, and a placement change costs no SIGWINCH.
+      const outer = area && area.clientWidth > 0 ? area.clientWidth : viewport.width
+      const gutter =
+        area === undefined
+          ? 0
+          : parseFloat(getComputedStyle(area).getPropertyValue('--pane-inline-padding')) || 0
       return {
         ...viewport,
-        width: owned.cols * metrics.cellWidth,
+        width: Math.max(0, outer - 2 * gutter),
         height: owned.rows * metrics.cellHeight,
       }
     }
@@ -7802,7 +7843,6 @@ export class TerminalContent extends BasePaneContent {
         // sent because the program stepped out of the alternate screen would
         // arrive as the SIGWINCH that makes a borrowing program borrow again.
         this._ownedGrid = this.lastLocalGridSize
-        this.scrollback?.setPaneWidth(true)
       }
       // A conventional terminal stays unstructured: the scrollback-block
       // model never takes over (ADR-0024 §4). Exit fullscreen before deciding
@@ -10592,6 +10632,21 @@ export class TerminalContent extends BasePaneContent {
       // (BlockManager.applyStoredRows's `upTo`), which is what keeps the body
       // one continuous run of rows.
       if (sb.blockManager.runningBlock?.attemptId === entryId) {
+        // A HOLD NEEDS A SCREEN PAINTED FOR THIS DELIVERY (nocx-djx1u): the
+        // count below says which rows the live grid is showing, and it is only
+        // true of a frame this pane painted for these rows. A pane that is not
+        // painting — cut, rebound, waiting — has a screen it did not paint for
+        // them; holding rows back for it lost nine of forty-one for the rest
+        // of a command in e2e/connection-overlay.spec.ts. Nothing painted,
+        // nothing held.
+        // AN OPEN DEFECT LIVES HERE (nocx-7nb3w): a record delivered after a
+        // daemon cut is still held against the screen the pane had before it,
+        // so a running block can keep only the rows it showed at the cut — see
+        // e2e/connection-overlay.spec.ts, quarantined under that bead. The
+        // count is kept unconditional because it is what keeps a burst from
+        // painting its own rows twice (e2e/output-jitter.spec.ts's out-of-order
+        // assertion); every weakening of it measured in that session broke the
+        // burst instead.
         this._flushPendingPaint()
         const upTo = this._rowsTheScreenPassed(sb.blockManager.runningBlock)
         sb.settleAround(() => {

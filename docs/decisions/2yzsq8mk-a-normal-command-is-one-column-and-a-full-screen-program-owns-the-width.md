@@ -45,21 +45,30 @@ two cases separated, which is what the two earlier records conflated.
 3. **Entering the alternate screen changes the column count and sends exactly
    one resize.** That is accepted, not a defect: a program that takes the pane
    should be told the pane's width, and it is told once per entry.
-4. **Leaving it does not resize the program.** The program keeps the grid it
-   was given until its command ends, and the running block that holds its rows
-   is drawn flush for the rest of that command, because its rows were written
-   at the pane's width. The prompt is where the transcript's column returns,
-   and the one resize owed for that happens at that boundary.
+4. **Leaving it does not resize the program, and it does return it to the
+   column.** The pty keeps the grid the program was given until that command
+   ends — a resize there is the SIGWINCH that starts the next borrow — but the
+   rows come back to the ledger's column at the moment the program leaves the
+   alternate screen, because where a row is DRAWN and what size the program was
+   TOLD are two different things and only the second costs a SIGWINCH. They are
+   drawn as written, so a row wider than the column is cut by the column until
+   the command ends; nothing jumps when the card freezes, and the prompt is
+   where the pty is told about the narrower grid.
 5. **No text touches the pane's edge.** In a normal command — the prompt, a
    running command, the frozen card — and in a markerless session (a plain ssh
    shell with no OSC 133 yet) every painted row keeps the ledger's margin on
    all four sides: `--pane-inline-padding` on the left and on the right, so the
    last column stops short of the pane's right edge, and the same token as the
-   live box's vertical margin, so the first row never touches the top edge and
-   the last never the bottom. The fit and the box read the same two numbers, so
-   nothing is clipped to pay for them. A markerless session has no blocks to
-   align with, but it is still text in a pane: the margin is not the ledger
-   column's, it is the pane's.
+   vertical margin of the box the scroller sits in, so the first row never
+   touches the top edge and the last never the bottom. The margin is on that
+   box rather than on the rows because a transcript scrolls: a padding inside
+   the scroller would travel with the content and the next line would be at the
+   edge again. The fit reads the same box, so nothing is clipped to pay for it.
+   **A markerless session keeps the left gutter.** It has no blocks to align
+   with, and that is not a reason to let its text touch the pane: text against
+   the edge is the thing this record exists to stop. Only a full-screen program
+   takes the whole width — flush left, no gutter, one row of bottom margin —
+   and it alone.
 6. **A block's header, its output and the composer's text are one column.**
    The composer's first glyph starts on `--pane-inline-padding` too — the x the
    directory, the time and the command start on — so the line a person types is
@@ -91,3 +100,9 @@ two cases separated, which is what the two earlier records conflated.
   alternate screen now shares. The composer reaches its column by giving up its
   own inline padding, not by moving its card: the card's margin is what is left
   of `--pane-inline-padding` after its border and padding.
+- A command that borrowed the alternate screen is drawn in the transcript's
+  column from the moment it steps out, at the width its pty still has. Its rows
+  are therefore as wide as the pane and the column cuts their right edge — a
+  few columns of a program's own repaint, for the rest of that command, in
+  exchange for a pty that is not resized by a presentation change and a card
+  that does not jump when it freezes. The next command is told the column.

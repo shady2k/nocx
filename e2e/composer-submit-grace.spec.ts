@@ -14,11 +14,14 @@ import type { Page, TestInfo } from '@playwright/test'
  *
  * THE THRESHOLD IS THE OWNER'S 40 ms AND A MACHINE IS NOT ALLOWED TO ARGUE WITH
  * IT. So the quick case does not assert an absolute outcome; it reads the
- * length the block itself printed — the same figure the product decided on —
- * and asserts the rule against it: under the grace the composer stayed in every
- * frame, over it the composer left. A slow machine prints a long block and is
- * judged by its own number. The case that must never depend on any of that is
- * `sleep 0.2`: a fifth of a second cannot be a quick command on any machine.
+ * length the block itself printed — the figure the product decided on — and
+ * asserts the rule's two implications: a block at or over the grace always
+ * leaves, and a composer that stayed means its block did not outlive the grace.
+ * The third combination — a quick block whose completion reached the renderer
+ * after the grace, so the composer left and came back — is the accepted price
+ * the record states, and it is the machine's call, not the rule's. The case
+ * that must never depend on any of that is `sleep 0.2`: a fifth of a second
+ * cannot be a quick command on any machine.
  */
 const TITLE = '.nocx-tab-title'
 const COMPOSER = '.pane.active .nocx-editor'
@@ -48,6 +51,10 @@ interface State {
   ghosts: number
   /** The composer's own text — what a leaked keystroke would appear in. */
   doc: string
+  /** The last block's printed length, exact (`title` of its duration meta), or
+   *  null while it is still running — so this is also the moment the block's
+   *  LOGICAL freeze landed, which is the completion fact. */
+  printed: string | null
   /** Whether the composer was on screen when the state was read. */
   drawn: boolean
 }
@@ -138,12 +145,14 @@ async function record(page: Page): Promise<void> {
         '.scrollback-inner > .cmd-block[data-block-kind="command"]',
       )
       const block = blocks[blocks.length - 1] as HTMLElement | undefined
+      const duration = block?.querySelector('.cmd-header-right [data-column="duration"]')
       return {
         at: Math.round((performance.now() - started) * 10) / 10,
         from: 'frame',
         key: '',
         blocks: blocks.length,
         outcome: block?.dataset.outcome ?? '-',
+        printed: duration?.getAttribute('title') ?? null,
         display: getComputedStyle(editor).display,
         opacity: Number(getComputedStyle(editor).opacity),
         height: editor.getBoundingClientRect().height,
@@ -251,25 +260,28 @@ test.describe('the submit grace (nocx-j9v81, ADR-tqjt5rkk)', () => {
       `wanted the command's block on screen with the composer's keys given up; saw ${dump}`,
     ).toBe(true)
 
+    // THE RULE, read off the record and off the length the block printed. Two
+    // implications, both the product's own, and neither needs a clock:
+    //
+    //   - a block at or over the grace always leaves: the grace is the
+    //     deadline, and a completion that long departs too;
+    //   - a composer that STAYED means the block did not outlive the grace.
+    //
+    // The other direction — a quick block whose completion arrived after the
+    // grace leaves and comes back — is the accepted price (ADR-tqjt5rkk) and
+    // is the machine's call, so it is not asserted here.
+    const stayed = absent(recorded).length === 0
     expect(blockMs, `wanted the block's own length; saw ${dump}`).not.toBeNull()
-    // The printed figure is the millisecond value ROUNDED for display, so the
-    // millisecond that brackets the grace is not asserted either way: the raw
-    // length can sit on either side of the line and the printed one cannot
-    // say which. Everything outside that one band is the rule.
-    if ((blockMs as number) <= GRACE_MS - 1) {
-      // The case the owner's decision is about: a command whose block ran
-      // inside the grace never takes the composer off the screen — the rule,
-      // not this machine's clock, is what says so.
-      expect(
-        absent(recorded),
-        `the block printed ${blockMs} ms — inside the ${GRACE_MS} ms grace — so every frame must show the composer; saw ${dump}`,
-      ).toEqual([])
-    } else if ((blockMs as number) >= GRACE_MS + 1) {
-      // This machine's own block for `true` outlived the grace, so the product
-      // is right to take the box down: the same rule, read the other way.
+    if ((blockMs as number) >= GRACE_MS + 1) {
       expect(
         recorded.some((state) => state.display === 'none'),
         `the block printed ${blockMs} ms — over the ${GRACE_MS} ms grace — so the composer must leave; saw ${dump}`,
+      ).toBe(true)
+    }
+    if (stayed) {
+      expect(
+        (blockMs as number) <= GRACE_MS - 1,
+        `the composer stayed in every frame, so its block must not have outlived the ${GRACE_MS} ms grace; saw ${dump}`,
       ).toBe(true)
     }
   })
@@ -356,9 +368,15 @@ test.describe('the submit grace (nocx-j9v81, ADR-tqjt5rkk)', () => {
     const afterSubmit = recorded.slice(enters[0].index + 1)
     const typed = afterSubmit.filter((state) => state.from === 'key' && state.key === 'q')
     expect(typed.length, `wanted the one typed key recorded; saw ${dump}`).toBe(1)
+    // THE KEY'S OWN MOMENT, and what must be true of it either way: the box was
+    // still drawn (the grace had not run out — the case this is about) or the
+    // grace had already taken it. A key typed in a 40 ms window is a race the
+    // machine can lose; a key that landed in the COMPOSER is the defect.
+    const drawn = typed[0].drawn
+    const departed = recorded.some((state) => state.display === 'none' && state.at <= typed[0].at)
     expect(
-      typed[0].drawn,
-      `wanted the key to arrive while the composer was still drawn; saw ${dump}`,
+      drawn || departed,
+      `wanted the key at a moment the composer was drawn or already gone — never in between; saw ${dump}`,
     ).toBe(true)
     expect(typed[0].doc, `wanted the key to reach nothing in the composer; saw ${dump}`).toBe('')
     expect(

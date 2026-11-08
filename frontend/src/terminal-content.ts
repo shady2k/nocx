@@ -351,58 +351,45 @@ function summonAnswersCeiling(pane: HTMLElement): number {
 const RESIZE_SETTLE_MS = 80
 
 /**
- * The submit grace (ADR-tqjt5rkk, `nocx-j9v81`): the block time under which a
- * submitted command never takes the composer off the screen.
+ * The submit grace (ADR-tqjt5rkk, `nocx-j9v81`): 40 ms, the owner's number,
+ * measured from Warp by the block time it prints (2026-11-08 — a 0.028 s block
+ * keeps its editor, a 0.052 s block hides it, so the threshold sits between 28
+ * and 52).
  *
- * A shell submit gives the keyboard to the program at once — ADR-0004 §1, and
- * the hand-off releases it synchronously — but the box used to leave in the
- * same task, so a command that returned in a few milliseconds took the
- * composer with it and put it back inside two frames. That is the flicker the
- * owner reported, once per Enter.
+ * It governs the composer's departure on BOTH sides of the completion, and the
+ * two uses are the same 40 ms:
  *
- * 40 ms is the owner's number, measured from Warp by the block time it prints
- * (2026-11-08): a 0.028 s block keeps its editor and a 0.052 s block hides it,
- * so the threshold sits between 28 and 52. On a real machine a no-op command
- * blocks for a few milliseconds and this keeps its composer.
+ *   - a command that has reported no completion 40 ms after the submit, on
+ *     this renderer's clock, takes the box down then. A command still running
+ *     is what the owner wants the box gone for, and no fact is needed to know
+ *     it has not finished;
+ *   - a completion that arrives BEFORE that deadline decides on the block's
+ *     own length — `completedAt` minus `startedAt`, the interval the block's
+ *     header prints — so a quick command, whose completion lands in time,
+ *     keeps its composer and a command that outlived the grace leaves at the
+ *     completion.
  *
- * The length it is compared against is the block's OWN: `completedAt` minus
- * `startedAt`, the two backend timestamps the attempt fact carries and the
- * same interval the block header prints. Not the renderer's clock: the
- * renderer learns that a command ended tens of milliseconds after it did, and
- * a deadline counted there takes a two-millisecond command off the screen on a
- * slow machine — which is a property of the machine the test runs on, never a
- * reason to move the owner's threshold. The e2e states the rule instead of the
- * machine: it reads the length the block itself printed and asserts the
- * composer's behaviour against it.
+ * A shell submit gives the keyboard to the program at once (ADR-0004 §1, and
+ * the hand-off releases it synchronously), so what waits is only the paint.
  *
- * Exported so the tests pin the decision: one millisecond under the grace
- * keeps the box, the grace itself takes it down.
+ * Exported so the tests pin the decision: a block one millisecond under the
+ * grace keeps the box, the grace itself takes it down.
  */
 export const SUBMIT_GRACE_MS = 40
 
 /**
- * How long the composer waits for a submitted command to report its own
- * length before it leaves anyway (ADR-tqjt5rkk, `nocx-j9v81`).
+ * How long a composer that STAYED waits for the prompt that ends the command
+ * (ADR-tqjt5rkk, `nocx-j9v81`).
  *
- * The grace above needs the COMPLETION, and the completion is a fact that can
- * be late: the renderer learns that a command ended well after it did (tens of
- * milliseconds on this suite's WebKit container). Two waits are bounded by
- * this one number, and both bound a wait for a fact that never came rather
- * than measure the command:
- *
- *   - a command that has not reported a completion in this long is NOT quick
- *     by any reading, so the box leaves and the running command gets the
- *     space;
- *   - a command that has completed but whose prompt mark never arrives would
- *     otherwise leave an inert composer on the screen holding nobody's keys.
- *
- * The value is a bound on a missing fact, not a threshold anybody measures a
- * command against: it sits far above the delivery tail a healthy machine
- * shows, and short enough that a long command gets its space back promptly. No
- * test asserts the number; the tests assert the two behaviours it protects.
+ * A completion under the grace keeps the box where it is, and the prompt mark —
+ * a few milliseconds behind the completion — is what hands the keyboard back.
+ * That mark can be lost, and then nothing would ever take down a box that owns
+ * nobody's keys, so this bounds that wait. It is a bound on a missing fact, not
+ * a measurement: well above the delivery tail a healthy machine shows, and
+ * short enough that a broken lane does not leave an empty composer on screen.
+ * No test asserts the number; the tests assert the behaviour it protects.
  */
-
-export const DEPARTURE_FALLBACK_MS = 250
+export const PROMPT_BACKSTOP_MS = 250
 
 /**
  * The LAST-RESORT release of an alternate-screen fence (nocx-1ebrs.10): how
@@ -3823,7 +3810,7 @@ export class TerminalContent extends BasePaneContent {
             // take down. The bound covers a command that never reports its
             // completion at all — no attempt, or no prompt — so the box cannot
             // wait forever on a fact that is not coming.
-            this._armDeparture('measuring', DEPARTURE_FALLBACK_MS)
+            this._armDeparture('measuring', SUBMIT_GRACE_MS)
             //
             // Both lines, always in this order and never one without the
             // other: the keyboard changes hands HERE, and from here until
@@ -9335,21 +9322,25 @@ export class TerminalContent extends BasePaneContent {
   private _submittedAwaitingStart = false
 
   /** The submitted command's departure (ADR-tqjt5rkk): armed by the person's
-   *  shell submit and settled by the command's own completion, by the prompt
-   *  that follows it, or by the fallback bound.
+   *  shell submit and settled by the command's completion, by the grace's own
+   *  deadline, by the prompt that follows it, or by the alternate screen.
    *
    *  While it is armed the composer's box is DRAWN but owns no keys
    *  (`editor.isVisible` is false; the grid holds them), so a lifecycle fact
    *  that reports "not at a prompt" — the running fact, one round trip later —
    *  must not take the box down on its own.
    *
-   *  `phase` is which wait is running. `measuring` is waiting for the command
-   *  to report its own length (`DEPARTURE_FALLBACK_MS`); `awaiting-prompt` is
-   *  a command that is over and was quick, so the box keeps its place until
-   *  the prompt mark arrives. `attemptId` names the attempt this departure is
-   *  about, taken from the first running fact: the grid owns the keys while
-   *  the box waits, so a command typed there can start and complete inside the
-   *  same window, and its completion decides nothing here. */
+   *  `phase` is which wait is running. `measuring` is the 40 ms from the
+   *  submit on THIS RENDERER'S clock: a command that has not completed by then
+   *  is still running as far as the person can see, and the box leaves. A
+   *  completion that arrives inside it settles the departure on the block's own
+   *  length — `awaiting-prompt` is that completion being quick, with the box
+   *  kept and the prompt mark awaited under the backstop.
+   *
+   *  `attemptId` names the attempt this departure is about, taken from the
+   *  first running fact: the grid owns the keys while the box waits, so a
+   *  command typed there can start and complete inside the same window, and its
+   *  completion decides nothing here. */
   private _departure: {
     timer: ReturnType<typeof setTimeout>
     phase: 'measuring' | 'awaiting-prompt'
@@ -9583,23 +9574,21 @@ export class TerminalContent extends BasePaneContent {
     else editor.hide()
   }
 
-  /** The submitted command is OVER: the block's own length decides
-   *  (ADR-tqjt5rkk).
+  /** A completion that arrived INSIDE the grace: the block's own length
+   *  decides (ADR-tqjt5rkk).
    *
-   *  This is the decision the record exists for, and it is taken HERE, at the
-   *  completion — the first moment the product knows how long the command ran.
-   *  Until it arrives nothing was decided: there is no 40 ms timer that fires
-   *  on its own, because a renderer clock cannot tell a command that ended
-   *  40 ms ago from one that is still running. The length is the block's own,
-   *  `attemptBlockMs` — the interval the attempt's two backend timestamps
-   *  carry, which is also the figure the block's header prints, so what the
-   *  block says and what the composer did cannot disagree.
+   *  The length is the block's, `attemptBlockMs` — the interval the attempt's
+   *  two backend timestamps carry, which is also the figure the block's header
+   *  prints, so what the block says and what the composer did cannot disagree.
+   *  A quick block keeps the box where it is and the prompt mark, a few
+   *  milliseconds behind, hands the keyboard back; a block that outlived the
+   *  grace takes the box down now. A completion that carries no timestamps at
+   *  all is treated as long: a composer the product has no evidence to keep
+   *  must not be kept.
    *
-   *  A quick command leaves the box where it is, and the prompt mark — a few
-   *  milliseconds behind the completion — is what hands the keyboard back. A
-   *  command that outlived the grace takes the box down now. A completion that
-   *  carries no timestamps at all is treated as long: a composer the product
-   *  has no evidence to keep must not be kept. */
+   *  A completion delivered AFTER the deadline never reaches this decision —
+   *  the grace already took the box down, and the prompt brings it back: the
+   *  accepted cost, stated in the record. */
   private _settleDeparture(attempt: ExecutionAttempt): void {
     // The attempt's own length, and the block manager's measurement when the
     // fact carries no timestamps — the same fallback the header takes, so the
@@ -9608,7 +9597,7 @@ export class TerminalContent extends BasePaneContent {
       attemptBlockMs(attempt) ?? this.scrollback?.blockManager.elapsedCommandMs() ?? null
     this._endDeparture()
     if (blockMs !== null && blockMs < SUBMIT_GRACE_MS) {
-      this._armDeparture('awaiting-prompt', DEPARTURE_FALLBACK_MS)
+      this._armDeparture('awaiting-prompt', PROMPT_BACKSTOP_MS)
       return
     }
     this._takeComposerDown()
@@ -9751,8 +9740,8 @@ export class TerminalContent extends BasePaneContent {
       // alternate buffer is the third, and it outranks the wait: a full-screen
       // program owns the whole viewport by the shell's own markers, and an
       // inert composer left under `vim` would sit on rows the program is
-      // drawing until the fallback took it — so entering it ends the wait and
-      // the box leaves NOW, in this same reconciliation.
+      // drawing until the grace's deadline took it — so entering it ends the
+      // wait and the box leaves NOW, in this same reconciliation.
       if (this._departure !== null) {
         if (this.lifecycle.buffer !== 'alternate') {
           const state = this.lifecycle.state

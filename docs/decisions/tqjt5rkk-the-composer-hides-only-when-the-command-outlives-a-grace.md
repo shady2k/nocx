@@ -50,8 +50,8 @@ changes is when the box is PAINTED away.
 **The hand-off keeps its step 1 where ownership is concerned, and loses it where
 paint is concerned.** At a person's shell submit the composer empties its draft,
 releases the keyboard and becomes `inert`, all in the submit's own task; the line
-goes out at once. The box then stays DRAWN, and what decides its departure is the
-command's own length.
+goes out at once. The box then stays DRAWN until one of the two ends below
+decides its departure.
 
 That length is the block's own, and the block's own is the attempt's: the
 interval its two BACKEND timestamps carry, `startedAt` to `completedAt` — the
@@ -59,31 +59,39 @@ figure the block's header prints, because the freeze takes it from the same
 attempt. One number, so the length a person reads on the block and the decision
 the composer took cannot disagree.
 
-**Nothing is decided before the completion arrives, and that is the point.**
-Between the grace and the completion the renderer holds no measurement of the
-command: a deadline counted on its own clock cannot tell a command that ended
-20 ms ago from one that is still running, because the fact that says so is
-exactly what has not arrived. So the box stays DRAWN and inert through that
-window, and the completion is what settles it:
+Two things end the wait, and the order between them is the decision:
 
-- a command whose block ran under the grace keeps the composer where it never
-  left it. The prompt mark, a few milliseconds behind the completion, hands the
-  keyboard back — no ghost, no fade, no layout change at all;
-- a command whose block outlived the grace takes the box down at that moment, in
-  the departure the hand-off used to perform at the submit: the ink fade, the
-  departure ghost, and the settle glide that plays the freed height back.
+- **the grace, on the renderer's clock.** Forty milliseconds after the submit
+  with no completion reported, the box leaves. A command that has not finished
+  by then is still running as far as the person can see, and that is what the
+  owner wants the box gone for. This is what a long command pays: nothing — it
+  gives the box up at the grace, not at its own end.
+- **the completion, on the block's own length.** A completion that arrives
+  inside those forty milliseconds decides on the length the block reports. Under
+  the grace the composer keeps the place it never lost, and the prompt mark — a
+  few milliseconds behind the completion — hands the keyboard back; at or over
+  the grace the box leaves at that moment, in the departure the hand-off used to
+  perform at the submit.
 
-**What a long command pays for that.** Its box stays on screen until its
-completion, so the pane's `DEPARTURE_FALLBACK_MS` (250 ms from the submit) is
-what a command that reports nothing gives up at — a command still unreported at
-that bound is long by any reading, and the box leaves then so the running
-command gets its space. The same bound covers the completion whose prompt mark
-never arrives. That wait is the price of never blinking a quick command; it is
-paid only by commands that run for at least a quarter of a second.
+**The accepted price.** That order costs one case: a quick command whose
+completion reaches the renderer MORE than forty milliseconds after the submit is
+taken off the screen by the grace and brought back by the prompt — one blink,
+for a command that had in fact returned. The renderer cannot know better before
+the fact arrives, and the fact is what is late. On the owner's machine that
+local delay is a few milliseconds and the case does not arise; in a loaded
+container it does, and that is the container's cost, not the rule's. The
+alternative — deciding only at the completion — was built and rejected: it keeps
+the composer up for the whole of every command, a quarter of a second for the
+ones that report nothing at all, which is the space a running command's output
+needs.
+
+A prompt mark that never arrives after a completion the box kept is bounded by
+the pane's `PROMPT_BACKSTOP_MS`, so no state exists in which an `inert` composer
+waits on a fact that is not coming.
 
 The alternate screen outranks the wait: a full-screen program owns the viewport
 by the shell's own markers, so entering it settles the departure at once instead
-of leaving an inert composer under `vim` until the bound.
+of leaving an inert composer under `vim` until the grace takes it.
 
 Keys typed while the box waits reach the program and never the composer. That is
 a consequence of the ownership step above rather than a second rule: the box is
@@ -119,12 +127,11 @@ during the wait cannot put the caret back either, which is what `inert` is for.
   where it was, which is what Warp's own editor does.
 - A command that outlives the grace departs exactly as every command used to,
   inside the departure's ink fade, ghost and glide; only its moment moves — to
-  the completion that reported the length, or to the fallback bound when no
-  completion is reported at all. The one visible cost of deciding at the
-  completion is that a command which ends before the bound leaves a few
-  milliseconds before its prompt returns: the fade is barely under way when it
-  is called back, which the departure's own ghost-and-return machinery already
-  handles (`nocx-1ebrs.40`).
+  the grace itself when no completion has arrived by then, or to the completion
+  when its own length was over the grace. The accepted price of that order — a
+  quick command whose completion lands after the grace blinks once — is stated
+  above, and the departure's own ghost-and-return machinery is what carries it
+  (`nocx-1ebrs.40`).
 - `isVisible` keeps its single meaning — the box owns the keyboard — and is now
   deliberately not the same question as "is the box on screen". Anything that
   asks the second must read `display`; anything routing a key must keep asking
@@ -144,3 +151,6 @@ during the wait cannot put the caret back either, which is what `inert` is for.
 - A second thing starts waiting on the grace (a summoned composer, an assistant
   turn). It is one timer with one meaning today, and a second caller should
   argue for its own record rather than reuse this one.
+- The renderer's own delay stops being a few milliseconds on the machines that
+  matter: the accepted price is paid per quick command there, and the answer
+  would be a cheaper path for the completion fact, not a larger grace.

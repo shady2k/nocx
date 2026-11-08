@@ -73,8 +73,8 @@ import {
 } from './input-target'
 import type { ConnectionCondition } from './connection-condition'
 import {
-  DEPARTURE_FALLBACK_MS,
   LiveSessionUncertainError,
+  PROMPT_BACKSTOP_MS,
   SUBMIT_GRACE_MS,
   TerminalContent,
   type SnippetFire,
@@ -3582,23 +3582,16 @@ describe('a submitted command leaves the composer only when it outlives the grac
   const STARTED_AT = '2026-11-08T12:00:00.000Z'
   const PROMPT = { lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 } as const
 
-  /** A pane at an authenticated prompt with its composer owning the keys, the
-   *  fake timers the fallback needs, and a CLOCK THE TEST MOVES.
-   *
-   *  The clock is the RENDERER's and it is deliberately not the length: a
-   *  completion reaches the renderer a long time after the command ended, and
-   *  `spend` is how a test says so without touching the length the completion
-   *  carries. */
+  /** A pane at an authenticated prompt with its composer owning the keys, and
+   *  the fake timers the grace's clock IS: `vi.advanceTimersByTime` is the
+   *  renderer's own time passing, which is what the deadline is measured on. */
   async function atPrompt() {
     const client = makeClient()
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     /* eslint-disable @typescript-eslint/unbound-method */
     const protoScrollTo = Element.prototype.scrollTo
-    const protoNow = performance.now
     /* eslint-enable @typescript-eslint/unbound-method */
     Element.prototype.scrollTo = () => {}
-    let at = 1_000_000
-    performance.now = () => at
     const mounted = await mountTerminal(makeClipboard(), { attachToDocument: true }, client)
     const handler = lifecycleHandler(client)
     handler(PROMPT)
@@ -3606,23 +3599,17 @@ describe('a submitted command leaves the composer only when it outlives the grac
       ...mounted,
       client,
       handler,
-      /** Let `ms` of RENDERER time pass — the wire, the frames, the fallback. */
-      spend: (ms: number) => {
-        at += ms
-      },
       restore: () => {
         Element.prototype.scrollTo = protoScrollTo
-        performance.now = protoNow
         mounted.teardown()
         vi.useRealTimers()
       },
     }
   }
 
-  // THE DECISION, AT ITS BOUNDARY, on the length the block reports for itself.
-  // The owner's 40 ms is the threshold and it is not the machine's to move:
-  // what a slow machine changes is how LATE the renderer learns the length,
-  // never the length it decides on.
+  // THE DECISION AT ITS BOUNDARY: a completion that arrives INSIDE the grace
+  // decides on the block's own length. The owner's 40 ms is the threshold and
+  // it is not the machine's to move.
   it("the owner's grace is 40 ms", () => {
     expect(SUBMIT_GRACE_MS).toBe(40)
   })
@@ -3646,8 +3633,9 @@ describe('a submitted command leaves the composer only when it outlives the grac
         expect(ed.isVisible).toBe(false)
 
         handler(started(client))
-        // Nothing is decided while the command runs — no timer of its own.
-        vi.advanceTimersByTime(DEPARTURE_FALLBACK_MS - 1)
+        // One millisecond short of the deadline the box is still there — the
+        // completion is what decides, not the clock.
+        vi.advanceTimersByTime(SUBMIT_GRACE_MS - 1)
         expect(ed.root.style.display).toBe('')
 
         handler(completed(blockMs))
@@ -3666,24 +3654,51 @@ describe('a submitted command leaves the composer only when it outlives the grac
     },
   )
 
-  it('a completion that reaches the renderer late still decides on the block\u2019s own length', async () => {
-    // THE READ'S SEQUENCE (P2 of the review of #763): a 20 ms command whose
-    // completion reaches the renderer 60 ms after its start. A deadline on the
-    // renderer's clock would have taken the composer down at 40 ms and brought
-    // it back at the prompt — the blink this record exists to remove.
-    const { ed, view, client, handler, spend, restore } = await atPrompt()
+  it('the grace wins over a completion that arrives too late, and the prompt brings the box back', async () => {
+    // THE READ'S SEQUENCE, and the price the record accepts: a 20 ms command
+    // whose completion reaches the renderer after the grace. The deadline
+    // cannot know, so the box leaves at 40 ms and the prompt brings it back —
+    // one blink. On the owner's machine the local delay is a few milliseconds
+    // and this cannot happen; in a loaded container it can, and that is the
+    // container's cost.
+    const { ed, view, client, handler, restore } = await atPrompt()
     try {
       submitCommand(view, 'true')
       handler(started(client))
-      spend(60)
+      vi.advanceTimersByTime(SUBMIT_GRACE_MS - 1)
       expect(ed.root.style.display).toBe('')
-      handler(completed(20))
-      expect(ed.root.style.display).toBe('')
+      vi.advanceTimersByTime(1)
+      expect(ed.root.style.display).toBe('none')
+      expect(ed.isVisible).toBe(false)
 
+      // The completion arrives late and finds the box already gone: it settles
+      // nothing, and the prompt is what returns the keyboard.
+      handler(completed(20))
+      expect(ed.root.style.display).toBe('none')
       handler(PROMPT)
       expect(ed.isVisible).toBe(true)
       expect(ed.root.style.display).toBe('')
-      expect(ed.root.contains(document.activeElement)).toBe(true)
+    } finally {
+      restore()
+    }
+  })
+
+  it('a command still running at the grace takes the box down, and the prompt brings it back', async () => {
+    const { ed, view, client, handler, restore } = await atPrompt()
+    try {
+      submitCommand(view, 'sleep 1000')
+      handler(started(client))
+      vi.advanceTimersByTime(SUBMIT_GRACE_MS - 1)
+      expect(ed.root.style.display).toBe('')
+      // A command with no completion 40 ms in is still running as far as the
+      // person can see: the box gives it the space. This is what a long
+      // command costs — nothing waits beyond the grace.
+      vi.advanceTimersByTime(1)
+      expect(ed.root.style.display).toBe('none')
+      handler(completed(1000))
+      handler(PROMPT)
+      expect(ed.isVisible).toBe(true)
+      expect(ed.root.style.display).toBe('')
     } finally {
       restore()
     }
@@ -3692,7 +3707,7 @@ describe('a submitted command leaves the composer only when it outlives the grac
   it('entering the alternate screen settles the departure at once', async () => {
     // `vim`, submitted and entering the alternate screen inside the grace: the
     // full-screen program owns the viewport, so an inert composer must not sit
-    // under it until the fallback takes it.
+    // under it for the rest of the grace.
     const { content, ed, view, client, handler, restore } = await atPrompt()
     try {
       submitCommand(view, 'vim')
@@ -3703,39 +3718,23 @@ describe('a submitted command leaves the composer only when it outlives the grac
       expect(ed.root.style.display).toBe('none')
       expect(ed.isVisible).toBe(false)
 
-      // No fallback is left running to take it down a second time.
-      vi.advanceTimersByTime(DEPARTURE_FALLBACK_MS * 4)
+      // No grace is left running to take it down a second time.
+      vi.advanceTimersByTime(SUBMIT_GRACE_MS * 4)
       expect(ed.root.style.display).toBe('none')
     } finally {
       restore()
     }
   })
 
-  it('a command that never reports its completion is taken down when the bound passes', async () => {
-    const { ed, view, client, handler, restore } = await atPrompt()
-    try {
-      submitCommand(view, 'sleep 1000')
-      handler(started(client))
-      vi.advanceTimersByTime(DEPARTURE_FALLBACK_MS - 1)
-      expect(ed.root.style.display).toBe('')
-      // A command that has not reported a completion in this long has not
-      // been a quick one by any reading: the box gives the running command
-      // its space, and no inert composer waits forever on a fact that is not
-      // coming. This is what a long command costs.
-      vi.advanceTimersByTime(1)
-      expect(ed.root.style.display).toBe('none')
-    } finally {
-      restore()
-    }
-  })
-
-  it('a prompt that never arrives after a quick command is bounded too', async () => {
+  it('a kept quick command whose prompt never arrives is bounded too', async () => {
     const { ed, view, client, handler, restore } = await atPrompt()
     try {
       submitCommand(view, 'true')
       handler(started(client))
       handler(completed(SUBMIT_GRACE_MS - 1))
-      vi.advanceTimersByTime(DEPARTURE_FALLBACK_MS - 1)
+      // The box kept its place; the prompt mark is what would end the wait, and
+      // a lost one must not leave an inert composer on the screen.
+      vi.advanceTimersByTime(PROMPT_BACKSTOP_MS - 1)
       expect(ed.root.style.display).toBe('')
       vi.advanceTimersByTime(1)
       expect(ed.root.style.display).toBe('none')

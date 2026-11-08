@@ -444,6 +444,23 @@ describe('PaneManager', () => {
     expect(manager.sessionDisplayName('mock-sid-does-not-exist')).toBeNull()
   })
 
+  // ── what a saved connection is called (nocx-ouru5.1.2) ────────────────
+  it('names an SSH tab after the saved connection, with its host beside it', async () => {
+    const { manager, bar } = await mountPaneManager()
+
+    manager.newSSHPane('ssh:test:1', 'host.example.com', 'dev', undefined, 'Production')
+    await vi.waitFor(() => expect(bar.querySelectorAll('.nocx-tab').length).toBe(2))
+    const titled = (): (string | null)[] =>
+      [...bar.querySelectorAll('.nocx-tab-title')].map((t) => t.textContent ?? null)
+    // The name first, the host beside it: the owner saw the bare IP.
+    await vi.waitFor(() => expect(titled()[1]).toBe('Production · host.example.com'))
+
+    // A connection with no name keeps the host alone.
+    manager.newSSHPane('ssh:test:2', 'plain.example.com')
+    await vi.waitFor(() => expect(bar.querySelectorAll('.nocx-tab').length).toBe(3))
+    await vi.waitFor(() => expect(titled()[2]).toBe('plain.example.com'))
+  })
+
   // ── where a session IS, in words (nocx-njn8s) ─────────────────────────
 
   it('says where a session is — the tab it is in and the machine it talks to', async () => {

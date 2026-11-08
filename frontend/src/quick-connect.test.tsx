@@ -185,7 +185,10 @@ describe('SSHQuickConnectProvider', () => {
     const items = await Promise.resolve(provider.getItems())
     items[0].run()
 
-    expect(newSSHPane).toHaveBeenCalledWith('ssh:custom:x:uuid', 'x.example.com', 'me', 47311)
+    // …and the connection's own NAME, which is what the tab and the
+    // composer call it by (nocx-ouru5.1.2). Losing it here is exactly how the
+    // owner's tabs came to be named by their IP.
+    expect(newSSHPane).toHaveBeenCalledWith('ssh:custom:x:uuid', 'x.example.com', 'me', 47311, 'X')
   })
 
   // A profile that names no port contributes none: the default belongs to
@@ -208,7 +211,13 @@ describe('SSHQuickConnectProvider', () => {
     const items = await Promise.resolve(provider.getItems())
     items[0].run()
 
-    expect(newSSHPane).toHaveBeenCalledWith('ssh:custom:y:uuid', 'y.example.com', 'me', undefined)
+    expect(newSSHPane).toHaveBeenCalledWith(
+      'ssh:custom:y:uuid',
+      'y.example.com',
+      'me',
+      undefined,
+      'Y',
+    )
   })
 
   it('handles empty profile list', async () => {
@@ -1536,7 +1545,13 @@ describe('the caret offers "New connection" (nocx-d4us)', () => {
     expect(input).toBeTruthy()
     input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
 
-    expect(newSSHPane).toHaveBeenCalledWith('ssh:custom:prod:uuid', 'example.com', 'deploy', 2202)
+    expect(newSSHPane).toHaveBeenCalledWith(
+      'ssh:custom:prod:uuid',
+      'example.com',
+      'deploy',
+      2202,
+      'Production DB',
+    )
     expect(newConnection).not.toHaveBeenCalled()
   })
 

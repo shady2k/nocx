@@ -103,6 +103,7 @@ import {
 import type { SessionLiveness as SessionLivenessFact } from './generated/session.liveness'
 import type { SessionHomeSource } from './where/session-home'
 import type { BranchSource, BranchRequest } from './where/branch-source'
+import { connectionLabel } from './connection-label'
 
 /** What a pane reads when nothing supplied the recording seam: the fact is
  *  unknown and stays unknown, so the card says nothing about this session's
@@ -2171,6 +2172,10 @@ export class TerminalContent extends BasePaneContent {
       host: string
       user?: string
       port?: number
+      /** The saved connection's own display name, when the person gave it one
+       *  (nocx-ouru5.1.2). It names the tab and the composer's place line
+       *  beside the host; absent keeps the host alone. */
+      name?: string
     },
     /** The optional host callbacks, NAMED. They used to be four trailing
      *  positional parameters, and a caller that skipped the middle two put
@@ -2464,7 +2469,7 @@ export class TerminalContent extends BasePaneContent {
   private pushTitle(): void {
     if (!this.host) return
     const commandTitle = this.runningCommandTitle()
-    const title = this.programTitle || commandTitle || this.cwdTitle
+    const title = this.programTitle || commandTitle || this.connectionTitle() || this.cwdTitle
     this.host.setTitle(title)
     // The location line earns a row only when the title is a name of its
     // own. With no program title the title IS the location, and a second
@@ -2476,6 +2481,22 @@ export class TerminalContent extends BasePaneContent {
     // Agent-state classification keys on the program's own title, never
     // on the composed one: tabs.ts feeds this into detectAgentStatus.
     this.hooks.onProgramTitleChange?.(this.programTitle)
+  }
+
+  /** What this tab calls itself when no program and no command has named it:
+   *  the saved connection's name beside its host, or the host alone for a
+   *  connection nobody named (nocx-ouru5.1.2). '' for a local pane, whose
+   *  title stays its directory.
+   *
+   *  The NAME is dropped once the pane has walked into a remote child: it is
+   *  the connection the pane was opened from, and that is not where the
+   *  command being typed will run — the same rule the ports scope and the
+   *  composer's place line keep. */
+  private connectionTitle(): string {
+    if (!this.sshOpts) return ''
+    const host = this._host || this.sshOpts.host
+    if (this._paneWalkedToRemoteChild) return host
+    return connectionLabel(this.sshOpts.name, host)
   }
 
   /** The name of the currently running command, or '' when none: the
@@ -2568,7 +2589,14 @@ export class TerminalContent extends BasePaneContent {
     // and the prompt's live destination must never disagree.
     const location = this._host ? this.locationLine() : ''
     this.scrollback?.blockManager.setLocation(location)
-    this.editor?.setLocation(location)
+    // The composer hears the connection's NAME too (nocx-ouru5.1.2): its
+    // place line answers "where does Enter go" with the saved connection first
+    // and the host beside it. Dropped inside a remote child, where the pane is
+    // somewhere the saved connection does not name (connectionTitle says why).
+    this.editor?.setLocation(
+      location,
+      this._paneWalkedToRemoteChild ? '' : (this.sshOpts?.name ?? ''),
+    )
     this.pushTitle()
     // The origin answer changed (cwd, host, or the active domain itself):
     // origin-following surfaces (the Files panel's reveal) follow it live,
@@ -5306,7 +5334,12 @@ export class TerminalContent extends BasePaneContent {
       host: this.sshOpts?.host || '',
       user: this.sshOpts?.user ?? '',
       isLocal: !this.sshOpts,
-      programTitle: this.sshOpts?.host || '',
+      // '' — not the host. This field is the PROGRAM's own OSC 0/2 title, and
+      // it used to be seeded with the host as a stand-in for "the tab has a
+      // name"; the tab now names itself (`connectionTitle` below), so the
+      // stand-in only made a stale address outrank the connection's name
+      // (nocx-ouru5.1.2).
+      programTitle: '',
     })
     this.env.attach()
 

@@ -254,7 +254,20 @@ func (c *Client) Call(ctx context.Context, service, op string, params, out any) 
 	_, err = c.conn.Stdin().Write(proto.EncodeFrame(proto.TypeRequest, 0, 0, payload))
 	c.writeMu.Unlock()
 	if err != nil {
-		return fmt.Errorf("helper: write request: %w", err)
+		// A FRAME THAT COULD NOT BE WRITTEN IS A LOST TRANSPORT (nocx-ouru5.1.8).
+		// The write is where a released helper is usually found out: its end of
+		// the socket is closed, the read pump has not reported anything yet, and
+		// this is the first call to touch the wire. Two facts follow, and both
+		// were wrong while this returned a plain error. The request never
+		// reached the daemon, so the caller may dial again and ask the same
+		// question — internal/app's local helper opener retries exactly
+		// ErrLost, and it gave up instead. And the connection is gone for
+		// EVERYONE riding it, not just this call, so it is marked lost here:
+		// Done closes, `connect` stops handing the dead client to the next
+		// open, and the panes attached through it learn what happened rather
+		// than waiting for a read that will never come.
+		c.lose(err)
+		return fmt.Errorf("%w: helper: write request: %v", ErrLost, err)
 	}
 
 	select {

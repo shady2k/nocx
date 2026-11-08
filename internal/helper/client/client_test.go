@@ -16,6 +16,8 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -415,6 +417,82 @@ func TestCallFailsOnTransportLoss(t *testing.T) {
 	case <-c.Done():
 	case <-time.After(5 * time.Second):
 		t.Fatal("Done did not close on transport loss")
+	}
+}
+
+// writeFails is a lane whose frames start failing on demand, so a test can
+// make the WRITE the first observer of a dead helper instead of racing the
+// read pump for the same event. Everything else is the fake it wraps.
+type writeFails struct {
+	lane   *fakeConn
+	mu     sync.Mutex
+	broken bool
+}
+
+func (w *writeFails) breakWrites() {
+	w.mu.Lock()
+	w.broken = true
+	w.mu.Unlock()
+}
+
+func (w *writeFails) Stdin() io.WriteCloser { return w }
+func (w *writeFails) Stdout() io.Reader     { return w.lane.Stdout() }
+func (w *writeFails) Stderr() io.Reader     { return w.lane.Stderr() }
+func (w *writeFails) Start(command string) error {
+	return w.lane.Start(command)
+}
+func (w *writeFails) Wait() (int, error)    { return w.lane.Wait() }
+func (w *writeFails) Done() <-chan struct{} { return w.lane.Done() }
+func (w *writeFails) LostErr() error        { return w.lane.LostErr() }
+func (w *writeFails) Close() error          { return w.lane.Close() }
+
+func (w *writeFails) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	broken := w.broken
+	w.mu.Unlock()
+	if broken {
+		return 0, syscall.EPIPE
+	}
+	return w.lane.stdin.Write(p)
+}
+
+// TestCallWhoseFrameCannotBeWrittenIsATransportLoss (nocx-ouru5.1.8): the
+// write is the first half of a call, and it can be the thing that discovers a
+// dead helper. The peer is gone but the read pump has not necessarily said so
+// yet, which is the ordinary way a released daemon is found out: the write
+// fails with EPIPE while nothing has reported the loss.
+//
+// That is a LOST TRANSPORT, not a refused operation. The frame never reached
+// the helper, so the caller may ask again — internal/app's local helper opener
+// retries exactly ErrLost and gave up instead — and the connection is gone for
+// every pane riding it, so it is marked lost here rather than left in place for
+// the next caller to trip over. A pane whose shell never started, behind an
+// error card, is what that produced: a replacement tab with no composer.
+func TestCallWhoseFrameCannotBeWrittenIsATransportLoss(t *testing.T) {
+	lane := &writeFails{lane: newFakeConn(helloOKPeer("testhash", ""))}
+	c, err := client.Dial(context.Background(), client.Config{
+		Exec: lane, Command: "/opt/nocx-helper", ExpectHash: "testhash", SentinelTTL: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	// From here on the wire takes nothing; the read side stays open, so the
+	// write is the first and only observer of this loss.
+	lane.breakWrites()
+
+	err = c.Call(context.Background(), "stub", "ping", pingParams{Msg: "x"}, nil)
+	if !errors.Is(err, client.ErrLost) {
+		t.Fatalf("a frame that could not be written is a lost transport, got %v", err)
+	}
+	select {
+	case <-c.Done():
+	default:
+		t.Fatal("Done stayed open after a frame could not be written")
+	}
+	if c.LostErr() == nil {
+		t.Fatal("LostErr did not name the write's cause")
 	}
 }
 

@@ -705,11 +705,13 @@ function main(): void {
   // agent-tree question was answered by whichever mount was faster, and the
   // one that had to wait for a person never was.
   mountClientHost(dispatcher, undefined, undefined, requestAgentHostApproval)
-  // The window half of the UI-state document (ADR-0101): the shell owns the
+  // The window half of the UI-state document (ADR-0098): the shell owns the
   // native window and the coordinator owns the document, and this renderer
   // is the only road between them. Mounted unconditionally like the client
   // host above — a client with no Wails runtime reads the saved geometry and
-  // stops there, because a browser window is not the window of record.
+  // stops there, because a browser window is not the window of record. The
+  // read itself waits for this client's first connection: mounted here it
+  // runs before dispatcher.start(), where every call is refused.
   mountWindowGeometry(dispatcher)
   // A question refused for want of an endpoint: the toast names the
   // problem, this opens where it is fixed — Settings → Endpoints with the

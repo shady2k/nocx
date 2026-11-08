@@ -177,6 +177,20 @@ func (rp *readoptPass) adoptLifecycle(ctx context.Context, carrier hostedCarrier
 	if rp.registry.environmentEntries != nil {
 		rp.registry.environmentEntries.register(sessionCtx, adapter.Lane(), downlink)
 	}
+	// THE TRANSPORT AND THE LANE ARE NEW HERE TOO (nocx-8gg8y). A replaced
+	// coordinator builds a fresh adapter for the shell it took back, and a
+	// fresh adapter has a transport id nothing has ever seen — so the same
+	// refusal the fresh-open route used to answer would come back after a
+	// restart, in a pane where nothing a person can see changed. Registered
+	// beside the downlink because both are the same fact: this leg is the one
+	// this coordinator will serve this far shell over, and the session is the
+	// one that owns it.
+	if rp.registry.transports != nil {
+		rp.registry.transports.register(adapter.TransportID(), transportKind{local: false})
+	}
+	if rp.registry.registerLane != nil {
+		rp.registry.registerLane(adapter.Lane(), entry.HostSessionID.Session)
+	}
 	// The leg's end ends every wait on its cursor: a pump that has stopped
 	// applies nothing more, so nobody may wait for it to reach a target.
 	go func() {

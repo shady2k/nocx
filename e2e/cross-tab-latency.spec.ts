@@ -43,11 +43,19 @@ const GRID = '.pane.active [role="grid"][aria-label="Terminal output"]'
  *  is the heavy end of ordinary, not a synthetic maximum. */
 const PRODUCER_HZ = 200
 /** A tab that is not loading the page proves nothing, so the phase refuses to
- *  be quiet about it. */
-const MIN_PRODUCER_FRAMES_PER_SECOND = 100
+ *  be quiet about it. Ten frames a second is the floor internal/app's wire
+ *  check uses for the same reason: the producer's own rate is the machine's,
+ *  and a floor near it asserts the runner (measured here: 71-130 frames/s on
+ *  the 2-CPU cap, and one run printed 91 against a floor of 100 while A was
+ *  plainly repainting). What the scenario needs at any speed is stated beside
+ *  the assertion: A repainted faster than the page could display. */
+const MIN_PRODUCER_FRAMES_PER_SECOND = 10
 
 interface Sample {
   kind: 'key' | 'command'
+  /** The instrument's own sequence number, so a command reads ITS sample and
+   *  never a neighbour's (see `__xtStart`). */
+  seq: number
   ms: number
 }
 
@@ -55,11 +63,10 @@ interface Sample {
 interface XtPage extends Window {
   __xtSamples: Sample[]
   __xtFrames: Record<string, FrameCount>
-  __xtEnter: number
-  __xtMarker: string
   __xtRaf: number[]
   __xtRafStart: () => void
-  __xtStart: () => void
+  /** Begin one command's wait and return its sequence number. */
+  __xtStart: (marker: string) => number
 }
 
 interface FrameCount {
@@ -86,15 +93,25 @@ async function installInstrument(page: import('@playwright/test').Page): Promise
     const w = window as unknown as XtPage
     w.__xtSamples = []
     w.__xtFrames = {}
-    w.__xtEnter = 0
-    w.__xtMarker = ''
+    let sampleSeq = 0
+    // THE COMMAND WHOSE ENTER HAS NOT LANDED YET, with that Enter's own time.
+    // It used to be one global `__xtEnter` plus a `__xtMarker` string, and a
+    // tick that outlived its command then read whatever the NEXT command had
+    // set: a sample computed from another command's Enter, or from 0 —
+    // `performance.now()` is the page's uptime, and those arrived as
+    // 9129 ms and 10732 ms "latencies" in the idle phase of runs that finished
+    // in 49 s. One wait per command, owned by that command, removes the path.
+    let pending: { marker: string; seq: number; enter: number } | null = null
     window.addEventListener(
       'keydown',
       (event) => {
         const t0 = performance.now()
-        setTimeout(() => w.__xtSamples.push({ kind: 'key', ms: performance.now() - t0 }), 0)
-        if (w.__xtMarker !== '' && w.__xtEnter === 0 && (event as KeyboardEvent).key === 'Enter') {
-          w.__xtEnter = performance.now()
+        setTimeout(
+          () => w.__xtSamples.push({ kind: 'key', seq: ++sampleSeq, ms: performance.now() - t0 }),
+          0,
+        )
+        if (pending !== null && pending.enter === 0 && (event as KeyboardEvent).key === 'Enter') {
+          pending.enter = performance.now()
         }
       },
       true,
@@ -104,11 +121,17 @@ async function installInstrument(page: import('@playwright/test').Page): Promise
     // a core. The two are different defects and this is what tells them
     // apart.
     ;(w as unknown as { __xtRaf: number[] }).__xtRaf = []
+    // ONE cadence loop at a time: the phase reads this array as the page's own
+    // display rate, and a loop left running from the previous phase would push
+    // a second sample per frame and double the count the premise reads.
+    let rafGeneration = 0
     ;(w as unknown as { __xtRafStart: () => void }).__xtRafStart = () => {
+      const generation = ++rafGeneration
       const samples = (w as unknown as { __xtRaf: number[] }).__xtRaf
       samples.length = 0
       let last = performance.now()
       const tick = (): void => {
+        if (generation !== rafGeneration) return
         const now = performance.now()
         samples.push(now - last)
         last = now
@@ -116,20 +139,31 @@ async function installInstrument(page: import('@playwright/test').Page): Promise
       }
       requestAnimationFrame(tick)
     }
-    w.__xtStart = () => {
-      const marker = w.__xtMarker
-      const tick = () => {
+    w.__xtStart = (marker: string): number => {
+      const state = { marker, seq: ++sampleSeq, enter: 0 }
+      pending = state
+      const tick = (): void => {
+        // A later command owns the wait now; this tick must not report for it.
+        if (pending !== state) return
         const grid = document.querySelector(
           '.pane.active [role="grid"][aria-label="Terminal output"]',
         )
-        if ((grid?.textContent ?? '').includes(marker)) {
-          w.__xtSamples.push({ kind: 'command', ms: performance.now() - w.__xtEnter })
-          w.__xtEnter = 0
+        if (!(grid?.textContent ?? '').includes(marker)) {
+          requestAnimationFrame(tick)
           return
         }
-        requestAnimationFrame(tick)
+        // The text can reach the grid before the Enter keydown has been
+        // dispatched. Reporting now would read 0, which is the page's uptime,
+        // so the wait belongs to a key that has not arrived yet.
+        if (state.enter === 0) {
+          requestAnimationFrame(tick)
+          return
+        }
+        w.__xtSamples.push({ kind: 'command', seq: state.seq, ms: performance.now() - state.enter })
+        pending = null
       }
       requestAnimationFrame(tick)
+      return state.seq
     }
     const proto = WebSocket.prototype
     const desc = Object.getOwnPropertyDescriptor(proto, 'onmessage')
@@ -216,20 +250,51 @@ const percentile = (xs: number[], fraction: number): number => {
 const samplesOf = async (
   page: import('@playwright/test').Page,
   kind: Sample['kind'],
-): Promise<number[]> => {
+): Promise<Sample[]> => {
   const all = await page.evaluate(() => (window as unknown as XtPage).__xtSamples)
-  return all.filter((s) => s.kind === kind).map((s) => s.ms)
+  return all.filter((s) => s.kind === kind)
 }
 
 const framesOf = (page: import('@playwright/test').Page): Promise<Record<string, FrameCount>> =>
   page.evaluate(() => (window as unknown as XtPage).__xtFrames)
 
-/** Type `n` keys into the editor and return each one's main-thread lag. */
+/** The draft in the active composer, with the completion's ghost removed —
+ *  what the person typed, not what the editor renders. The same reader
+ *  e2e/command-editor.spec.ts uses, and for the same reason: filling a locator
+ *  would bypass the keyboard this check is measuring. */
+const draft = (page: import('@playwright/test').Page): Promise<string | null> =>
+  page.evaluate(() => {
+    const content = document.querySelector<HTMLElement>('.pane.active .nocx-editor-input')
+    if (content === null) return null
+    const copy = content.cloneNode(true) as HTMLElement
+    for (const ghost of copy.querySelectorAll('.nocx-editor-ghost')) ghost.remove()
+    return copy.textContent ?? ''
+  })
+
+/** Type `n` keys into the editor and return each one's main-thread lag.
+ *
+ *  EACH KEY IS WAITED FOR, and the line is cleared by the product's own
+ *  Escape. Typing a burst and then pressing Ctrl-U left the tail of the burst
+ *  in the composer, and the next command arrived at the shell as one word:
+ *  `abcdprintf 'XT-%s-%s\n' IDLE 0` and `abcdefgprintf …` both measured here,
+ *  bash answered "command not found", and the marker the check waits for never
+ *  appeared. The editor commits input asynchronously; the clear ran between
+ *  two commits. Waiting for the draft first makes the fixture's own
+ *  precondition true — the line is exactly what was typed — and the number
+ *  below is still each keydown's wait for its next task, not the wait for the
+ *  draft.
+ */
 async function keyboardLag(page: import('@playwright/test').Page, n: number): Promise<number[]> {
+  const typed = 'abcdefghijklmnopqrstuvwxyz'
+  await expect.poll(() => draft(page), { timeout: 10_000 }).toBe('')
   const before = (await samplesOf(page, 'key')).length
-  for (let i = 0; i < n; i++) await page.keyboard.type('abcdefghijklmnopqrstuvwxyz'[i % 26])
-  await page.keyboard.press('Control+U')
-  return (await samplesOf(page, 'key')).slice(before)
+  for (let i = 0; i < n; i++) {
+    await page.keyboard.type(typed[i % typed.length])
+    await expect.poll(() => draft(page), { timeout: 10_000 }).toBe(typed.slice(0, i + 1))
+  }
+  await page.keyboard.press('Escape')
+  await expect.poll(() => draft(page), { timeout: 10_000 }).toBe('')
+  return (await samplesOf(page, 'key')).slice(before, before + n).map((s) => s.ms)
 }
 
 /** Run one command and return the Enter-to-visible latency.
@@ -237,23 +302,32 @@ async function keyboardLag(page: import('@playwright/test').Page, n: number): Pr
  *  THE MARKER IS NOT IN THE TYPED LINE: the shell echoes what was typed into
  *  the grid at once, so a command carrying its own marker would be "seen"
  *  before it ran. `printf` assembles the marker from two words instead.
+ *
+ *  THE SAMPLE IS THIS COMMAND'S OWN, and it is waited for. The page reports it
+ *  from an animation-frame tick after the marker is in the grid; reading the
+ *  list the moment Playwright saw the text returned the command before it — or
+ *  nothing. A misread sample is how a p50 of eight moved by an order of
+ *  magnitude between two runs of the same tree.
  */
 async function commandLatency(
   page: import('@playwright/test').Page,
   marker: string,
 ): Promise<number> {
   const [, word, index] = marker.split('-')
-  await page.evaluate((m) => {
-    const w = window as unknown as XtPage
-    w.__xtMarker = m
-    w.__xtEnter = 0
-    w.__xtStart()
-  }, marker)
+  const seq = await page.evaluate((m) => (window as unknown as XtPage).__xtStart(m), marker)
   await page.keyboard.type(`printf 'XT-%s-%s\\n' ${word} ${index}`)
   await page.keyboard.press('Enter')
   await expect(page.locator(GRID)).toContainText(marker, { timeout: 30_000 })
-  const all = await samplesOf(page, 'command')
-  return all[all.length - 1] ?? -1
+  await page.waitForFunction(
+    (wanted) =>
+      (window as unknown as XtPage).__xtSamples.some(
+        (s) => s.kind === 'command' && s.seq === wanted,
+      ),
+    seq,
+    { timeout: 10_000 },
+  )
+  const sample = (await samplesOf(page, 'command')).find((s) => s.seq === seq)
+  return sample?.ms ?? -1
 }
 
 test('a hidden tab repainting 200 times a second does not slow the tab in use (nocx-07ymy)', async ({
@@ -334,7 +408,10 @@ test('a hidden tab repainting 200 times a second does not slow the tab in use (n
       `XT main thread in the other tab's frames: ${(handlerShare * 100).toFixed(1)} % of the phase`,
       `XT key lag idle p50=${idleKeyP50.toFixed(1)}ms busy p50=${busyKeyP50.toFixed(1)}ms` +
         ` p95 idle=${percentile(idleKeys, 0.95).toFixed(1)}ms busy=${percentile(busyKeys, 0.95).toFixed(1)}ms`,
-      `XT command idle p50=${idleCommandP50.toFixed(1)}ms busy p50=${busyCommandP50.toFixed(1)}ms`,
+      `XT command idle p50=${idleCommandP50.toFixed(1)}ms p95=${percentile(idleCommands, 0.95).toFixed(1)}ms` +
+        ` busy p50=${busyCommandP50.toFixed(1)}ms p95=${percentile(busyCommands, 0.95).toFixed(1)}ms`,
+      `XT commands (ms, in order) idle ${idleCommands.map((x) => Math.round(x)).join(',')}` +
+        ` busy ${busyCommands.map((x) => Math.round(x)).join(',')}`,
       `XT CPU during the busy phase (cores): ${Object.keys(cpuAfter)
         .filter((name) => (cpuAfter[name] ?? 0) - (cpuBefore[name] ?? 0) > 0.2 * phaseSeconds)
         .map(
@@ -347,8 +424,17 @@ test('a hidden tab repainting 200 times a second does not slow the tab in use (n
     ].join('\n'),
   )
 
-  // THE PREMISE FIRST: a producer that did not load the page cannot pass.
+  // THE PREMISE FIRST: a producer that did not load the page cannot pass,
+  // and one that repainted slower than the page could display was not the
+  // scenario. The second half is the rate-free form of "A was busy": it
+  // compares A's frames with this page's own display cadence in the same
+  // phase, so a box that throttles both does not redden it, while a fixture
+  // whose producer died or crawled does. The absolute floor is the wire
+  // check's ten, not the runner's hundred (the header says why).
+  expect(frames).toBeGreaterThan(0)
+  expect(busyRaf.length).toBeGreaterThan(0)
   expect(framesPerSecond).toBeGreaterThan(MIN_PRODUCER_FRAMES_PER_SECOND)
+  expect(framesPerSecond).toBeGreaterThan(busyRaf.length / phaseSeconds)
 
   // THE CEILING IS SET BY THE REGRESSION THIS EXISTS TO CATCH, not by what
   // the product does today (nocx-5q0ej, #534): one shared worker put A's work

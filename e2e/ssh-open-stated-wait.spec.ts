@@ -254,14 +254,22 @@ test('a slow open states its wait in the pane, cancels, and draws no cursor with
         intervals: [200],
       })
       .toBe(true)
+    // Each open's own duration, by the request it names — and NOT the whole
+    // line: an open whose first prompt lands between the two reads gains
+    // `first_prompt=` after the fact, which is the record doing its job.
+    const durations = (lines: string[]): string[] =>
+      lines
+        .filter((line) => line.includes('duration='))
+        .map(
+          (line) =>
+            `${/request=[^ ]+/.exec(line)?.[0] ?? ''} ${/duration=[^ ]+/.exec(line)?.[0] ?? ''}`,
+        )
     const before = await readOpens()
     await page.waitForTimeout(2_000)
     const after = await readOpens()
     // The same opens, the same durations: the clock moved two seconds on and
     // no finished record grew by it.
-    expect(after.filter((line) => line.includes('duration='))).toEqual(
-      before.filter((line) => line.includes('duration=')),
-    )
+    expect(durations(after)).toEqual(durations(before))
   } finally {
     if (fixture !== null) {
       fixture.proc.kill()

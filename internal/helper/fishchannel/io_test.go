@@ -1,6 +1,7 @@
 package fishchannel
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/shady2k/nocx/internal/lifecycle"
@@ -112,24 +114,105 @@ func TestSocketWriteBackpressureDeadlineAndCancellation(t *testing.T) {
 	}
 }
 
+// fragmentReadFunc paces the real socket reader at the codec's read boundary.
+// Only scheduling is controlled: framing, socket reads and deadline decisions
+// still belong to the production consumer.
+type fragmentReadFunc func([]byte) (int, error)
+
+func (read fragmentReadFunc) Read(p []byte) (int, error) { return read(p) }
+
 func TestReceiveDeadlineIsNotRenewedByFragments(t *testing.T) {
-	socket, peer := socketPair(t)
-	op, err := newOperation(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer op.close()
-	op.deadline = time.Now().Add(150 * time.Millisecond)
-	if _, writeErr := peer.Write([]byte{0}); writeErr != nil {
-		t.Fatal(writeErr)
-	}
-	timer := time.AfterFunc(80*time.Millisecond, func() { _, _ = peer.Write([]byte{0}) })
-	defer timer.Stop()
-	start := time.Now()
-	s := &socketIO{op: op, fd: int(socket.Fd())}
-	_, err = lifecyclecodec.ReadRawFrame(s)
-	if !errors.Is(err, errTimeout) || s.read != 2 || time.Since(start) > 220*time.Millisecond {
-		t.Fatalf("deadline renewed: read=%d err=%v elapsed=%v", s.read, err, time.Since(start))
+	for _, tc := range []struct {
+		name      string
+		lastDelay time.Duration
+		cancel    bool
+		wantErr   error
+	}{
+		{name: "within deadline"},
+		{name: "whole operation deadline", lastDelay: 80 * time.Millisecond, wantErr: errTimeout},
+		{name: "delayed resumption", lastDelay: 227468875 * time.Nanosecond, wantErr: errTimeout},
+		{name: "cancellation", cancel: true, wantErr: context.Canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				socket, peer := socketPair(t)
+				fd := int(socket.Fd())
+				flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				op, err := newOperation(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				body := `{"s":"fragmented"}`
+				wire := frame(t, body)
+				next := frame(t, `{"s":"next"}`)
+				transport := &socketIO{op: op, fd: fd}
+				start := time.Now()
+				op.deadline = start.Add(150 * time.Millisecond)
+				// Header bytes arrive at 0ms and 80ms. The rest is available
+				// at 80ms, 160ms or after delayed consumer resumption. Unlike
+				// a wall-clock upper bound, the result cannot confuse a late
+				// scheduler with renewal of the original 150ms deadline.
+				pieces := [][]byte{wire[:1], wire[1:2], append(wire[2:], next...)}
+				delays := []time.Duration{0, 80 * time.Millisecond, tc.lastDelay}
+				step := 0
+				reader := fragmentReadFunc(func(p []byte) (int, error) {
+					if step < len(pieces) {
+						time.Sleep(delays[step])
+						if _, writeErr := peer.Write(pieces[step]); writeErr != nil {
+							t.Fatal(writeErr)
+						}
+						if tc.cancel && step == 2 {
+							cancel()
+						}
+						step++
+					}
+					return transport.Read(p)
+				})
+				var got []byte
+				func() {
+					defer op.close()
+					got, err = lifecyclecodec.ReadRawFrame(reader)
+				}()
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("frame = %q, err = %v; want %v (elapsed=%v, read=%d)",
+						got, err, tc.wantErr, time.Since(start), transport.read)
+				}
+				wantRead := len(wire)
+				if tc.wantErr != nil {
+					wantRead = 2
+					if got != nil {
+						t.Fatalf("failed receive returned partial frame: %q", got)
+					}
+				} else if string(got) != body {
+					t.Fatalf("frame = %q, want %q", got, body)
+				}
+				if transport.read != wantRead {
+					t.Fatalf("consumed %d bytes, want %d", transport.read, wantRead)
+				}
+				after, flagErr := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
+				if flagErr != nil || after != flags {
+					t.Fatalf("shared flags changed: before=%d after=%d err=%v", flags, after, flagErr)
+				}
+				// Expiry/cancellation must leave the late bytes untouched;
+				// success must leave the next frame for the surviving owner.
+				wantQueued := append(wire[wantRead:], next...)
+				queued := make([]byte, len(wire)+len(next))
+				n, _, readErr := unix.Recvfrom(fd, queued, unix.MSG_DONTWAIT)
+				if readErr != nil {
+					t.Fatalf("read surviving socket: %v", readErr)
+				}
+				if !bytes.Equal(queued[:n], wantQueued) {
+					t.Fatalf("surviving socket = %q; want %q", queued[:n], wantQueued)
+				}
+				t.Logf("consumer elapsed=%v read=%d err=%v; queued bytes preserved=%d",
+					time.Since(start), transport.read, err, n)
+			})
+		})
 	}
 }
 

@@ -36,9 +36,17 @@
 // The ceiling is deliberately loose, and set by the regression rather than by
 // today's numbers. It is not a performance target; it is the shape that must
 // not come back — a shared worker that put one session's work in front of
-// another's (nocx-5q0ej measured 7.5 s of it, ~750x). A 10x ceiling on a
-// 1.35–2.8x measurement catches that and cannot flake on a loaded runner;
+// another's (nocx-5q0ej measured 7.5 s of it, ~750x). The 10x ceiling stays;
 // every run prints the numbers so a trend is visible in the CI log.
+//
+// Both phases must measure the same work in B. The original idle phase began
+// on a partly empty screen; by the busy phase B was scrolling and persisting
+// departed rows. A Linux -race probe (nocx-nqmjq.6) measured command screens
+// at 1.62 ms initially, 12.34 ms with A busy, and 5.36 ms after A stopped:
+// stopping A did not restore the original baseline. Priming B through actual
+// screen deliveries until it scrolls removes that confound, not the 10x bound.
+// The historical VM measurements above remain historical; this probe does not
+// establish the cause of every macOS failure.
 package app
 
 import (
@@ -64,7 +72,10 @@ import (
 	"github.com/shady2k/nocx/internal/transport"
 )
 
-const xtMarkerDone = "XT-DONE-"
+const (
+	xtMarkerDone = "XT-DONE-"
+	xtRows       = 30
+)
 
 // TestCrossTabChildProcess is the program the panes run, selected only by its
 // own environment, which is scoped to the command, never to the test.
@@ -225,15 +236,16 @@ type xtWire struct {
 	writeMu sync.Mutex
 	nextID  atomic.Int64
 
-	mu      sync.Mutex
-	streams map[string][]byte
-	offsets map[string]uint64
-	markers map[string]*xtMarker
-	events  map[string][]xtEvent
-	frames  map[string]int
-	bytes   map[string]int
-	dataN   map[string]int
-	dataB   map[string]int
+	mu       sync.Mutex
+	streams  map[string][]byte
+	offsets  map[string]uint64
+	markers  map[string]*xtMarker
+	events   map[string][]xtEvent
+	frames   map[string]int
+	bytes    map[string]int
+	dataN    map[string]int
+	dataB    map[string]int
+	baseRows map[string]uint64
 
 	acks      chan map[string]any
 	responses chan xtResponse
@@ -249,7 +261,8 @@ func newXTWire(t *testing.T, a *App) *xtWire {
 		markers: map[string]*xtMarker{}, events: map[string][]xtEvent{},
 		frames: map[string]int{}, bytes: map[string]int{},
 		dataN: map[string]int{}, dataB: map[string]int{},
-		acks: make(chan map[string]any, 8192), responses: make(chan xtResponse, 8192),
+		baseRows: map[string]uint64{},
+		acks:     make(chan map[string]any, 8192), responses: make(chan xtResponse, 8192),
 		errors: make(chan error, 8), done: make(chan struct{}),
 	}
 	go w.read()
@@ -309,14 +322,10 @@ func (w *xtWire) read() {
 				w.publish(hits, "data", now)
 				w.acks <- map[string]any{"sessionId": sid, "offset": off}
 			case transport.MsgTypeMetadata:
-				if os.Getenv("NOCX_XT_NOPARSE") != "" {
-					w.mu.Lock()
-					w.frames[sid]++
-					w.bytes[sid] += len(raw)
-					w.mu.Unlock()
-					continue
-				}
 				var screen struct {
+					State struct {
+						BaseRow uint64 `json:"baseRow"`
+					} `json:"state"`
 					Rows []struct {
 						Text string `json:"text"`
 					} `json:"rows"`
@@ -326,6 +335,7 @@ func (w *xtWire) read() {
 					return
 				}
 				var b strings.Builder
+				b.WriteByte('\n')
 				for _, row := range screen.Rows {
 					b.WriteString(row.Text)
 					b.WriteByte('\n')
@@ -333,6 +343,7 @@ func (w *xtWire) read() {
 				w.mu.Lock()
 				w.frames[sid]++
 				w.bytes[sid] += len(raw)
+				w.baseRows[sid] = screen.State.BaseRow
 				hits := w.scanLocked(sid, []byte(b.String()), "screen")
 				w.mu.Unlock()
 				w.publish(hits, "screen", now)
@@ -350,7 +361,13 @@ func (w *xtWire) scanLocked(sid string, buf []byte, kind string) []string {
 		if m.sid != sid || m.seen[kind] {
 			continue
 		}
-		if bytes.Contains(buf, []byte(marker)) {
+		needle := []byte(marker)
+		if kind == "screen" && len(marker) == 1 {
+			// A keystroke is echoed onto its own row. An old command's
+			// "run" must not satisfy a new "r", "u" or "n" trial.
+			needle = []byte("\n" + marker + "\n")
+		}
+		if bytes.Contains(buf, needle) {
 			hits = append(hits, marker)
 		}
 	}
@@ -370,6 +387,9 @@ func (w *xtWire) publish(hits []string, kind string, now time.Time) {
 		}
 		m.seen[kind] = true
 		w.events[marker] = append(w.events[marker], xtEvent{at: now, kind: kind})
+		if kind != "screen" {
+			continue
+		}
 		select {
 		case <-m.ch:
 		default:
@@ -384,6 +404,41 @@ func (w *xtWire) expect(sid, marker string) chan struct{} {
 	ch := make(chan struct{})
 	w.markers[marker] = &xtMarker{sid: sid, ch: ch, seen: map[string]bool{}}
 	return ch
+}
+
+func (w *xtWire) baseRow(sid string) uint64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.baseRows[sid]
+}
+
+func TestCrossTabMarkerWaitsForScreenDelivery(t *testing.T) {
+	w := &xtWire{markers: map[string]*xtMarker{}, events: map[string][]xtEvent{}}
+	const marker = "visible-command-result"
+	ready := w.expect("pane", marker)
+	w.publish([]string{marker}, "data", time.Now())
+	select {
+	case <-ready:
+		t.Fatal("raw bytes completed a trial before its screen was delivered")
+	default:
+	}
+	w.publish([]string{marker}, "screen", time.Now())
+	select {
+	case <-ready:
+	default:
+		t.Fatal("the delivered screen did not complete the trial")
+	}
+}
+
+func TestCrossTabKeyMarkerRequiresItsOwnScreenRow(t *testing.T) {
+	w := &xtWire{markers: map[string]*xtMarker{}}
+	w.expect("pane", "r")
+	if hits := w.scanLocked("pane", []byte("\nXT-DONE-run000001\n"), "screen"); len(hits) != 0 {
+		t.Fatal("a letter in an old command satisfied a new keystroke")
+	}
+	if hits := w.scanLocked("pane", []byte("\nXT-DONE-run000001\nr\n"), "screen"); len(hits) != 1 {
+		t.Fatal("the echoed keystroke on its own row was not observed")
+	}
 }
 
 func (w *xtWire) forget(marker string) {
@@ -430,7 +485,7 @@ func (w *xtWire) call(method string, params any) (json.RawMessage, time.Duration
 
 func (w *xtWire) open() xtPane {
 	w.t.Helper()
-	raw, _ := w.call("open", map[string]any{"cols": 100, "rows": 30})
+	raw, _ := w.call("open", map[string]any{"cols": 100, "rows": xtRows})
 	var pane xtPane
 	if err := json.Unmarshal(raw, &pane); err != nil || pane.SessionID == "" || pane.AccessEpoch == 0 {
 		w.t.Fatalf("open returned no identity: %+v (%v)", pane, err)
@@ -724,11 +779,19 @@ func TestCrossTabLatencyAtTheWire(t *testing.T) {
 	}
 	runPhase := func(name string, base int) *phase {
 		p := &phase{name: name}
+		firstRow := w.baseRow(paneB.SessionID)
 		for i := 0; i < rounds; i++ {
 			p.keys = append(p.keys, keyTrial(i))
+			before := w.baseRow(paneB.SessionID)
 			p.cmds = append(p.cmds, cmdTrial(base+i))
+			if after := w.baseRow(paneB.SessionID); after <= before {
+				t.Fatalf("[%s] command %d did not scroll B: base row %d -> %d; idle and busy must measure the same work",
+					name, i, before, after)
+			}
 			p.control = append(p.control, control())
 		}
+		t.Logf("[%s] all %d commands scrolled B: base row %d -> %d", name, rounds,
+			firstRow, w.baseRow(paneB.SessionID))
 		return p
 	}
 	drain := func() {
@@ -781,6 +844,22 @@ func TestCrossTabLatencyAtTheWire(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	drain()
 
+	// Each command advances at least one row. Bound preparation by the
+	// viewport's height, but stop only when a delivered screen proves B
+	// has scrolled. No timing estimate or fixed warm-up count decides this.
+	scrolled := false
+	for i := 1; i <= xtRows; i++ {
+		before := w.baseRow(paneB.SessionID)
+		cmdTrial(-i)
+		if w.baseRow(paneB.SessionID) > before {
+			scrolled = true
+			t.Logf("B reached scrolling after %d preparation commands", i)
+			break
+		}
+	}
+	if !scrolled {
+		t.Fatal("B did not scroll after a viewport of commands")
+	}
 	home, homeErr := os.UserHomeDir()
 	if homeErr != nil {
 		t.Fatalf("this stand's home: %v", homeErr)
@@ -853,15 +932,11 @@ func TestCrossTabLatencyAtTheWire(t *testing.T) {
 	// assertion is only that B did not WAIT FOR A. nocx-5q0ej, #534, was one
 	// shared worker that put A's work in front of B's: a command in B waited
 	// 7.5 s for what takes 10 ms, a factor of ~750. The ceiling is 10x this
-	// run's own idle phase — two orders of magnitude under that regression,
-	// and x4 above the worst ratio measured here (2.8x, with a compiler
-	// running beside the test on a 2-core VM).
-	//
-	// ANYTHING TIGHTER IS NOISE. The same tree measures 1.35x–2.8x depending
-	// on what else the machine is doing, and a test may not depend on timing;
-	// what a fixed ceiling cannot say — that a hidden pane applies at most one
-	// frame per display frame — is asserted, deterministically, beside the
-	// renderer (frontend/src/terminal-content.test.ts, nocx-07ymy).
+	// run's own idle phase, with B demonstrably scrolling in BOTH phases.
+	// The ratio must not compare drawing into unused rows with persisting
+	// departed rows, nor treat raw-byte arrival as visible screen delivery.
+	// Hidden-pane renderer coalescing is checked separately beside the pane
+	// (frontend/src/terminal-content.test.ts, nocx-07ymy).
 	const bound = 10.0
 	for _, layer := range []struct {
 		name          string

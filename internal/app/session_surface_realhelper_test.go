@@ -485,13 +485,14 @@ func newS14RealStand(t *testing.T, mockDir, stateDir string, opts ...s14RealOpti
 	// mock claude sends is refused with "the lane maps to no session" —
 	// which is what made workers.spawn time out waiting for an enrolment
 	// that could never arrive, on the very first worker this test spawns.
-	local.noteChildDomainParent = func(t lifecycle.TransportID, lane lifecycle.LaneID, sid string) {
+	local.noteChildDomainParent = func(t lifecycle.TransportID, lane lifecycle.LaneID, sid string, local bool) {
 		// BOTH HALVES, as the composition root wires them (app.go's own
-		// closure): which transport a lane rides, and which session it speaks
-		// for. The first is what agentLaunchService.Resolve reads to answer
-		// "is this a launch on THIS machine" — without it a local pane's
-		// resolution is refused as an unregistered transport.
-		launchTransports.register(t, transportKind{local: true})
+		// closure): which transport a lane rides — and whether it is this
+		// machine's — and which session it speaks for. The first is what
+		// agentLaunchService.Resolve reads to answer "is this a launch on THIS
+		// machine"; without it a local pane's resolution is refused as an
+		// unregistered transport.
+		launchTransports.register(t, transportKind{local: local})
 		lanes.register(lane, sid)
 	}
 

@@ -84,6 +84,17 @@ export type CallOrigin = 'person' | 'background'
 export interface CallOptions {
   intent?: RpcIntent
   origin?: CallOrigin
+  /**
+   * Told the moment THIS call is announced as a person's operation, with the
+   * view the Operations source draws its row from — including the cancel that
+   * withdraws it (nocx-q9od5). It exists for the caller that owns the surface
+   * being waited on: a pane showing what its own open is doing needs its own
+   * call's id, and the announce is the only place the id is minted.
+   *
+   * Not called for a call that is not announced (a report, background work),
+   * and not called twice.
+   */
+  announced?: (call: PendingCallView) => void
 }
 
 /**
@@ -194,6 +205,10 @@ interface CallSlot {
   members: Set<CallMember>
   /** Whether the Operations source was told about this slot. */
   announced: boolean
+  /** Callers told when this slot was announced (CallOptions.announced), one
+   *  per member that asked. Kept on the slot because the announce happens
+   *  once while the slot outlives it. */
+  announceWatchers: ((call: PendingCallView) => void)[]
   startedAt: number
   state: 'queued' | 'sent' | 'done'
   /** The id the BACKEND is working on; null while queued or awaiting an
@@ -708,7 +723,9 @@ export class Dispatcher {
       const key = mergeKey(method, params, intent, origin)
       const joined = key === null ? undefined : this.groups.get(key)
       if (joined !== undefined && joined.state !== 'done') {
+        if (options.announced !== undefined) joined.announceWatchers.push(options.announced)
         this.attach(joined, member, signal)
+        this.answerWatchers(joined)
         return
       }
       const slot: CallSlot = {
@@ -720,6 +737,10 @@ export class Dispatcher {
         key,
         members: new Set(),
         announced: false,
+        // The watcher rides the slot rather than the member: announce fires
+        // once, and a slot that joins one already announced is answered by
+        // announceWatching below.
+        announceWatchers: options.announced === undefined ? [] : [options.announced],
         startedAt: Date.now(),
         state: 'queued',
         wireID: null,
@@ -796,14 +817,35 @@ export class Dispatcher {
     if (slot.announced || slot.state === 'done') return
     if (slot.intent !== 'operation' || slot.origin !== 'person') return
     slot.announced = true
-    const call: PendingCallView = {
+    const call = this.viewOf(slot)
+    for (const handler of this.callPendingHandlers) handler(call)
+    this.deliverToWatchers(slot, call)
+  }
+
+  /** Answer the callers that asked to be told (CallOptions.announced) when
+   *  their call is one the Operations source was told about. A call that is
+   *  never announced never answers them: a background read has no row, and a
+   *  pane that asked about one must not invent it. */
+  private answerWatchers(slot: CallSlot): void {
+    if (!slot.announced || slot.state === 'done') return
+    this.deliverToWatchers(slot, this.viewOf(slot))
+  }
+
+  private deliverToWatchers(slot: CallSlot, call: PendingCallView): void {
+    const watchers = slot.announceWatchers
+    if (watchers.length === 0) return
+    slot.announceWatchers = []
+    for (const watcher of watchers) watcher(call)
+  }
+
+  private viewOf(slot: CallSlot): PendingCallView {
+    return {
       id: slot.observeID,
       method: slot.method,
       startedAt: slot.startedAt,
       mutation: slot.mutation,
       cancel: () => this.cancel(slot.observeID),
     }
-    for (const handler of this.callPendingHandlers) handler(call)
   }
 
   /** Put a slot where it belongs: on the wire if it may go now, otherwise in

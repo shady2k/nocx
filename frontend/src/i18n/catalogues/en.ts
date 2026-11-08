@@ -316,6 +316,10 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'operations.waiting.notify.paneWorkFinished': 'Sending the notification',
   'operations.waiting.notify.raise': 'Sending the notification',
   'operations.waiting.open': 'Opening your terminal',
+  'opening.cancel': 'Cancel',
+  'opening.connecting': 'Connecting to {host}.',
+  'opening.to': 'to {host}',
+  'opening.waiting': 'Waiting for the remote shell.',
   'operations.waiting.operation.outcome': 'Checking what happened',
   'operations.waiting.panes.close': 'Changing the pane layout',
   'operations.waiting.panes.create': 'Changing the pane layout',
@@ -2131,16 +2135,32 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'reconnect.restoring': 'Restoring this session…',
   'reconnect.spent': 'Automatic attempts are spent.',
   'reconnect.staysAbove': 'What it printed stays above.',
-  'recovery.desc.gone': 'This tab was taken back after those bytes were gone: {causes}.',
-  'recovery.desc.unavailable':
-    'Recovery metadata could not be read. Some earlier session output may be missing.',
-  'recovery.title.missing': "{bytes} of this session's output is missing",
-  'recovery.title.unavailable': 'Could not check this session’s recovery status',
   'roles.asDefault': 'As default',
   'scrollback.answeredBy': 'answered by {model}',
   'scrollback.askAboutBlock': 'Ask about this block',
   'scrollback.block.aria': '{kind} block',
   'scrollback.block.aria.named': '{kind} block: {label}',
+  // The cut in a command's own history (nocx-ipuy3): the per-command output
+  // limit dropped a middle stretch, and the block shows this at the place a
+  // person scrolls to. The card this replaced announced a session total above
+  // the pane; the owner removed it on 2026-11-08.
+  'scrollback.cut.cap': {
+    one: "Earlier output was not kept: this session's size limit dropped {count} row here.",
+    other: "Earlier output was not kept: this session's size limit dropped {count} rows here.",
+  },
+  'scrollback.cut.rows': {
+    one: '{count} row of earlier output was not kept here.',
+    other: '{count} rows of earlier output were not kept here.',
+  },
+  // A block header's elapsed time (nocx-ouru5.1.7). One formatter, four
+  // shapes: tenths of a second, then minutes, then hours, then days. The
+  // numbers stay as figures; only the units are the catalogue's, which is
+  // what makes "43m 8s" read "43 мин 8 с" without a second formatter.
+  'scrollback.duration.ms': '{value}ms',
+  'scrollback.duration.seconds': '{value}s',
+  'scrollback.duration.minutes': '{minutes}m {seconds}s',
+  'scrollback.duration.hours': '{hours}h {minutes}m',
+  'scrollback.duration.days': '{days}d {hours}h',
   'scrollback.doNotWrap': 'Do not wrap',
   'scrollback.emptyCommand': '(empty)',
   'scrollback.evicted': 'Output is no longer kept',

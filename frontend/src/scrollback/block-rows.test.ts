@@ -472,6 +472,204 @@ describe('stored block rows', () => {
     expect(storedBlockRowsText(rows)).toBe(blockOutputText(block))
   })
 
+  // THE CUT IS WHERE A PERSON SEES IT (nocx-ipuy3). A stored block holds the
+  // rows the store kept, and when the per-command limit dropped a middle
+  // stretch, the rows either side of the hole are still here with a gap in
+  // their absolute row numbers. That gap is the only place in the product
+  // that says WHERE the output was cut, so the one quiet sentence a person
+  // reads belongs there — at the place they scroll to — instead of a card
+  // above the pane announcing a session-level accounting nobody can point at.
+  // The owner's decision of 2026-11-08 removed that card altogether.
+  describe('the cut a command’s stored rows carry (nocx-ipuy3)', () => {
+    const rowOf = (text: string): LedgerBlockRowsLine['row'] =>
+      wireRowOf([...text].map((char) => [char, 1, true] as CellSpec))
+
+    const cutStored = (over: Partial<StoredBlockRows> = {}): StoredBlockRows => ({
+      lines: [
+        { from: 0, row: rowOf('before') },
+        { from: 1, row: rowOf('cut-here') },
+        { from: 900, row: rowOf('after') },
+      ],
+      droppedRows: 898,
+      lostRows: 0,
+      truncated: 'cap',
+      sealed: true,
+      ...over,
+    })
+
+    const gapsOf = (block: HTMLElement): HTMLElement[] => [
+      ...block.querySelectorAll<HTMLElement>('.cmd-output-gap'),
+    ]
+
+    it('puts one quiet line between the rows either side of the cut', () => {
+      const block = document.createElement('article')
+
+      paintStoredRows(block, cutStored(), { metric: null, palette: DEFAULT_SNAPSHOT })
+
+      const [gap] = gapsOf(block)
+      expect(gapsOf(block)).toHaveLength(1)
+      expect(gap.previousElementSibling?.textContent).toBe('cut-here')
+      expect(gap.nextElementSibling?.textContent?.trim()).toBe('after')
+    })
+
+    it("names this session's size limit and the rows it took", () => {
+      const block = document.createElement('article')
+
+      paintStoredRows(block, cutStored(), { metric: null, palette: DEFAULT_SNAPSHOT })
+
+      expect(gapsOf(block)[0].textContent).toBe(
+        "Earlier output was not kept: this session's size limit dropped 898 rows here.",
+      )
+    })
+
+    it('says one row when the cut took one', () => {
+      const block = document.createElement('article')
+
+      paintStoredRows(
+        block,
+        cutStored({
+          lines: [
+            { from: 0, row: rowOf('before') },
+            { from: 2, row: rowOf('after') },
+          ],
+          droppedRows: 1,
+        }),
+        { metric: null, palette: DEFAULT_SNAPSHOT },
+      )
+
+      expect(gapsOf(block)[0].textContent).toBe(
+        "Earlier output was not kept: this session's size limit dropped 1 row here.",
+      )
+    })
+
+    it('says only that the rows were not kept when the store has named no cause yet', () => {
+      // An artifact is open while its command runs, and the verdict that it
+      // was the cap arrives with the seal. The rows are already gone, so the
+      // line is already at the cut; it may not blame a limit the store has
+      // not named.
+      const block = document.createElement('article')
+
+      paintStoredRows(block, cutStored({ truncated: null, sealed: false }), {
+        metric: null,
+        palette: DEFAULT_SNAPSHOT,
+      })
+
+      expect(gapsOf(block)[0].textContent).toBe('898 rows of earlier output were not kept here.')
+    })
+
+    it('does not blame the size limit for a stream that overflowed', () => {
+      const block = document.createElement('article')
+
+      paintStoredRows(block, cutStored({ truncated: 'gap', droppedRows: 0 }), {
+        metric: null,
+        palette: DEFAULT_SNAPSHOT,
+      })
+
+      expect(gapsOf(block)[0].textContent).toBe('898 rows of earlier output were not kept here.')
+    })
+
+    it('shows no line at all in a block whose rows are whole', () => {
+      const block = document.createElement('article')
+
+      paintStoredRows(
+        block,
+        { ...stored, sealed: true },
+        {
+          metric: null,
+          palette: DEFAULT_SNAPSHOT,
+        },
+      )
+
+      expect(gapsOf(block)).toHaveLength(0)
+    })
+
+    it('never puts a line before a block’s first row, which may start past zero', () => {
+      // A block begins where its command began; rows that departed before it
+      // belonged to no block, and the gap before the first row is not a cut
+      // in this command's output.
+      const block = document.createElement('article')
+
+      paintStoredRows(
+        block,
+        { ...stored, sealed: true },
+        {
+          metric: null,
+          palette: DEFAULT_SNAPSHOT,
+        },
+      )
+
+      expect(stored.lines[0].from).toBeGreaterThan(0)
+      expect(gapsOf(block)).toHaveLength(0)
+    })
+
+    it('keeps the line at the cut while later rows arrive and the cut widens', () => {
+      const block = document.createElement('article')
+      paintStoredRows(block, cutStored(), { metric: null, palette: DEFAULT_SNAPSHOT })
+      const painted = gapsOf(block)[0]
+
+      paintStoredRows(
+        block,
+        cutStored({
+          lines: [
+            { from: 0, row: rowOf('before') },
+            { from: 1, row: rowOf('cut-here') },
+            { from: 1900, row: rowOf('after') },
+            { from: 1901, row: rowOf('later') },
+          ],
+          droppedRows: 1898,
+        }),
+        { metric: null, palette: DEFAULT_SNAPSHOT },
+      )
+
+      const [gap] = gapsOf(block)
+      expect(gapsOf(block)).toHaveLength(1)
+      expect(gap).toBe(painted)
+      expect(gap.previousElementSibling?.textContent).toBe('cut-here')
+      expect(gap.textContent).toBe(
+        "Earlier output was not kept: this session's size limit dropped 1898 rows here.",
+      )
+    })
+
+    it('drops the line with the rows when a later read holds a whole body', () => {
+      const block = document.createElement('article')
+      paintStoredRows(block, cutStored(), { metric: null, palette: DEFAULT_SNAPSHOT })
+      expect(gapsOf(block)).toHaveLength(1)
+
+      paintStoredRows(
+        block,
+        { ...stored, sealed: true },
+        {
+          metric: null,
+          palette: DEFAULT_SNAPSHOT,
+        },
+      )
+
+      expect(gapsOf(block)).toHaveLength(0)
+    })
+
+    it('keeps the line out of a copy of the output, which is the program’s text', () => {
+      const block = document.createElement('article')
+
+      paintStoredRows(block, cutStored(), { metric: null, palette: DEFAULT_SNAPSHOT })
+
+      const copied = blockOutputText(block)
+      expect(copied).toContain('cut-here')
+      expect(copied).toContain('after')
+      expect(copied).not.toContain('Earlier output was not kept')
+    })
+
+    it('is the block’s body for a read with no rows at all, never a stray line', () => {
+      const block = document.createElement('article')
+
+      paintStoredRows(block, cutStored({ lines: [], truncated: 'cap' }), {
+        metric: null,
+        palette: DEFAULT_SNAPSHOT,
+      })
+
+      expect(gapsOf(block)).toHaveLength(0)
+    })
+  })
+
   it('uses the same missing-output sentences only when no readable rows exist', () => {
     const missing: StoredBlockRows = {
       ...stored,
@@ -495,12 +693,15 @@ describe('stored block rows', () => {
   // store counted one (nocx-zg3k3.5.5). A cause that arrives later — rows
   // lost while the coordinator was away, say — is one more table entry in
   // block-rows.ts, not a second derivation.
-  it('names the cap cause with its count and the setting that raises it', () => {
+  // THE CAP IS SAID AT THE CUT WHEN THERE IS ONE (nocx-ipuy3). The notice
+  // under the block is for a body that has no rows left to carry the line;
+  // a block whose rows do carry it states the cap once, at the place.
+  it('names the cap cause with its count and the setting that raises it, when no rows are left', () => {
     const block = document.createElement('article')
 
     paintStoredRows(
       block,
-      { ...stored, droppedRows: 3, truncated: 'cap', sealed: true },
+      { ...stored, lines: [], droppedRows: 3, truncated: 'cap', sealed: true },
       { metric: null, palette: DEFAULT_SNAPSHOT },
     )
 
@@ -509,12 +710,36 @@ describe('stored block rows', () => {
     )
   })
 
-  it('names the cap cause without a count while the block is still open', () => {
+  it('says the cap only at the cut, and never twice, when the block kept rows', () => {
     const block = document.createElement('article')
 
     paintStoredRows(
       block,
-      { ...stored, truncated: 'cap' },
+      {
+        ...stored,
+        lines: [
+          { from: 0, row: wireRowOf(okRow) },
+          { from: 900, row: wireRowOf(abcRow) },
+        ],
+        droppedRows: 899,
+        truncated: 'cap',
+        sealed: true,
+      },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+
+    expect(block.querySelector('[data-output-incomplete]')).toBeNull()
+    expect(block.querySelector('.cmd-output-gap')?.textContent).toBe(
+      "Earlier output was not kept: this session's size limit dropped 899 rows here.",
+    )
+  })
+
+  it('names the cap cause without a count while the block is still open and holds no rows', () => {
+    const block = document.createElement('article')
+
+    paintStoredRows(
+      block,
+      { ...stored, lines: [], truncated: 'cap' },
       { metric: null, palette: DEFAULT_SNAPSHOT },
     )
 
@@ -630,12 +855,12 @@ describe('stored block rows', () => {
     )
   })
 
-  it('names two causes at once, each with its own count', () => {
+  it('names two causes at once, each with its own count, when no rows are left', () => {
     const block = document.createElement('article')
 
     paintStoredRows(
       block,
-      { ...stored, droppedRows: 3, lostRows: 2, truncated: 'cap', sealed: true },
+      { ...stored, lines: [], droppedRows: 3, lostRows: 2, truncated: 'cap', sealed: true },
       { metric: null, palette: DEFAULT_SNAPSHOT },
     )
 
@@ -643,6 +868,33 @@ describe('stored block rows', () => {
     expect(text).toContain('3 rows are missing')
     expect(text).toContain('the output passed the history output limit')
     expect(text).toContain('output was lost 2 times')
+  })
+
+  it('keeps naming a loss at the block when a cut carries the cap', () => {
+    const block = document.createElement('article')
+
+    paintStoredRows(
+      block,
+      {
+        ...stored,
+        lines: [
+          { from: 0, row: wireRowOf(okRow) },
+          { from: 900, row: wireRowOf(abcRow) },
+        ],
+        droppedRows: 899,
+        lostRows: 2,
+        truncated: 'cap',
+        sealed: true,
+      },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+
+    const text = block.querySelector('[data-output-incomplete]')?.textContent ?? ''
+    expect(text).toContain('output was lost 2 times')
+    expect(text).not.toContain('history output limit')
+    expect(block.querySelector('.cmd-output-gap')?.textContent).toContain(
+      "this session's size limit dropped 899 rows here",
+    )
   })
 
   it('shows no missing-rows notice for a complete block (paired positive)', () => {
@@ -708,11 +960,12 @@ describe('stored block rows', () => {
   })
 
   it('renders every readable state with its own words, none an unexplained empty body', () => {
-    // The states a card can be read in (nocx-zg3k3.5.5): complete, capture
+    // The states a block can be read in (nocx-zg3k3.5.5): complete, capture
     // refused, incomplete with EACH cause, evicted, empty, unreadable. Each
     // must carry visible words, and no two may share them — a person staring
-    // at any card must be able to tell which state it is in without opening
-    // anything else.
+    // at any block must be able to tell which state it is in without opening
+    // anything else. The cap's words are AT ITS CUT now (nocx-ipuy3), so a
+    // cap state is painted with the rows a cut leaves.
     const paint = (over: Partial<StoredBlockRows>): string => {
       const block = document.createElement('article')
       paintStoredRows(
@@ -724,6 +977,10 @@ describe('stored block rows', () => {
       expect(text.trim(), `state ${JSON.stringify(over)} must render words`).not.toBe('')
       return text
     }
+    const cutRows = [
+      { from: 12, row: wireRowOf(okRow) },
+      { from: 900, row: wireRowOf(abcRow) },
+    ] satisfies LedgerBlockRowsLine[]
     const unreadable = document.createElement('article')
     paintUnreadableRows(unreadable)
     const evicted = restoredBlock(
@@ -748,11 +1005,11 @@ describe('stored block rows', () => {
 
     const states: ReadonlyArray<readonly [string, string]> = [
       ['complete', paint({})],
-      ['cap', paint({ droppedRows: 3, truncated: 'cap' })],
+      ['cap', paint({ lines: cutRows, droppedRows: 887, truncated: 'cap' })],
       ['lost', paint({ lostRows: 2 })],
       ['gap', paint({ truncated: 'gap' })],
       ['suppressed', paint({ truncated: 'suppressed' })],
-      ['two causes', paint({ droppedRows: 3, lostRows: 2, truncated: 'cap' })],
+      ['two causes', paint({ lines: cutRows, droppedRows: 887, lostRows: 2, truncated: 'cap' })],
       ['empty', paint({ lines: [] })],
       ['unreadable', unreadable.textContent ?? ''],
       ['evicted', evicted.textContent ?? ''],

@@ -2,11 +2,14 @@ package lifecyclepub_test
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
+	nocxlog "github.com/shady2k/nocx/internal/log"
 )
 
 type fakeLaunchResolver struct {
@@ -33,10 +36,11 @@ func (*fakeLaunchResolver) InvalidateDomain(lifecycle.TransportID, lifecycle.Lan
 }
 func (*fakeLaunchResolver) InvalidateTransport(lifecycle.TransportID) {}
 
-func establishedLaunchPublisher(t *testing.T, resolver lifecyclepub.AgentLaunchResolver) (*lifecyclepub.Publisher, *recordingPort, lifecycle.DomainHandle) {
+func establishedLaunchPublisher(t *testing.T, resolver lifecyclepub.AgentLaunchResolver, opts ...lifecyclepub.Option) (*lifecyclepub.Publisher, *recordingPort, lifecycle.DomainHandle) {
 	t.Helper()
 	k := lifecycle.New(lifecycle.Options{})
-	pub := lifecyclepub.New(k, lifecyclepub.WithAgentLaunchResolver(resolver))
+	options := append([]lifecyclepub.Option{lifecyclepub.WithAgentLaunchResolver(resolver)}, opts...)
+	pub := lifecyclepub.New(k, options...)
 	pub.SetEmitter(&recorder{})
 	port := &recordingPort{}
 	if err := pub.BindTransport("T", port); err != nil {
@@ -125,6 +129,42 @@ func TestRemoteLaunchResolutionCannotReturnLocalConfiguration(t *testing.T) {
 	answer := answerFrom(t, port, lifecycle.KindAgentLaunchResolved).Event.AgentLaunchResolved
 	if answer == nil || answer.Local || answer.Ticket != "" || answer.Payload != "" {
 		t.Fatalf("remote response carried local configuration: %+v", answer)
+	}
+}
+
+// A REFUSAL MUST CARRY ITS CAUSE, AND THE LOG MUST HOLD IT (nocx-8gg8y).
+//
+// A person typed their agent's name in an ssh pane and read "the local agent
+// record could not be resolved" — one sentence the publisher took in place of
+// the resolver's error. Three causes share that branch (no owner for records,
+// a frame whose context had already ended, a transport nobody registered) and
+// the backend log held no line about any of them, so the field could not name
+// which one it was. The refusal now carries the resolver's own words into the
+// pane, and the same error goes into the log with the frame's transport, lane,
+// domain and agent beside it.
+func TestALaunchRefusalCarriesAndLogsTheResolversOwnError(t *testing.T) {
+	const cause = "agent transport is not registered"
+	var buf syncBuffer
+	resolver := &fakeLaunchResolver{err: errors.New(cause)}
+	pub, port, handle := establishedLaunchPublisher(t, resolver, lifecyclepub.WithLogger(
+		nocxlog.NewSlogAdapter(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))))
+	mustIngest(t, pub, "T", env("L", handle, 2, launchResolveEvent("r-resolve-refused", "claude")))
+
+	answer := answerFrom(t, port, lifecycle.KindAgentLaunchResolved).Event.AgentLaunchResolved
+	if answer == nil {
+		t.Fatal("a refused launch reached no answer")
+	}
+	if !answer.Local || answer.ToolSurface {
+		t.Fatalf("a refused launch did not fail closed: %+v", answer)
+	}
+	if !strings.Contains(answer.Reason, cause) {
+		t.Fatalf("the refusal dropped the resolver's own error: %q", answer.Reason)
+	}
+	out := buf.String()
+	for _, want := range []string{cause, "transport=T", "lane=L", "domain=" + string(handle.Domain), "agent=claude"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("the refused launch was not logged with %q:\n%s", want, out)
+		}
 	}
 }
 

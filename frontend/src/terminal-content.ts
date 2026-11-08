@@ -81,20 +81,6 @@ import {
 } from './publish-notice'
 import type { SessionPublishFailed } from './generated/session.publishFailed'
 import type { SessionEffect } from './generated/session.effect'
-import type { SessionOutputGap } from './generated/session.outputGap'
-import {
-  mountRecoveryNotice,
-  mountLiveOutputGapNotice,
-  recoveryAccount,
-  uncoveredGapRanges,
-  type LiveOutputGapAccount,
-  type LiveOutputGapNoticeHandle,
-} from './recovery-notice'
-import {
-  RecoveryAnnouncementStore,
-  safeRecoveryStorage,
-  type AnnouncedRange,
-} from './recovery-announcements'
 import { mountUnreconciledNotice, type UnreconciledCause } from './unreconciled-notice'
 import { mountConnectionMark } from './connection-mark'
 import {
@@ -103,6 +89,7 @@ import {
   type ReconnectOfferHandle,
   type AttachOfferHandle,
 } from './reconnect-offer'
+import { mountOpeningCard, type OpeningCardHandle, type OpeningCardState } from './opening-card'
 import {
   autoReconnectDelayMs,
   AUTO_RECONNECT_ATTEMPTS,
@@ -117,6 +104,7 @@ import {
 import type { SessionLiveness as SessionLivenessFact } from './generated/session.liveness'
 import type { SessionHomeSource } from './where/session-home'
 import type { BranchSource, BranchRequest } from './where/branch-source'
+import { connectionLabel } from './connection-label'
 
 /** What a pane reads when nothing supplied the recording seam: the fact is
  *  unknown and stays unknown, so the card says nothing about this session's
@@ -146,6 +134,7 @@ import { attachTerminalLinks, type TerminalLinksHandle } from './terminal-links'
 import type { ClipboardBanner } from './banner'
 import { ScrollbackController } from './scrollback/controller'
 import { LiveHistorySurface } from './scrollback/live-history'
+import { openBlockMenuAt } from './scrollback/blocks'
 import type {
   AnswerToolCall,
   BlockRecord,
@@ -184,6 +173,7 @@ import { subscribeTerminalFontChanges } from './terminal-font'
 import { log, logDecision, isDecisionTracing } from './log'
 import type { BlockClosed } from './generated/block.closed'
 import type { WSClient, SessionHandle, OpenAnchor, SessionSize, SessionAttachment } from './ipc'
+import type { PendingCallView } from './dispatcher'
 import { showConfirm } from './ui/dialog'
 import { createFilesPanelServices } from './files/files-client'
 import { attachTerminalDrop, TERMINAL_DROP_TARGET } from './files/terminal-drop'
@@ -1383,7 +1373,17 @@ export class TerminalContent extends BasePaneContent {
       (this.editor.rootContains(active) ||
         this.scrollback?.terminalLiveContainer.contains(active) ||
         this.receipt?.root.contains(active) ||
-        active.closest('[data-block-control]'))
+        active.closest('[data-block-control]') ||
+        // …AND THE MENU A RIGHT-CLICK OPENS, which is the one overlay created
+        // DURING the gesture rather than after it (nocx-a9x6u). A press on a
+        // block arms this bounce; the contextmenu that arrives between that
+        // press and its release opens the block's menu and focuses its first
+        // row; the release then took the keyboard straight back out of it, so
+        // the menu was visible and dead — Escape and the arrows reached the
+        // composer. The ⋮'s menu never met this because it opens on click,
+        // after the release. A row of the kit's menu is an owner the gesture
+        // chose, exactly as the ⋮ and Stop are.
+        active.closest('.ui-context-menu'))
     )
       return
     this.editor.focus()
@@ -1803,41 +1803,6 @@ export class TerminalContent extends BasePaneContent {
    *  axis reads `starting` (nocx-ui8q6.1). Null means the terminal grid is
    *  showing — either the axis has answered, or this session never asked. */
   private _integrationWaitingDispose: (() => void) | null = null
-  /** The disposer for the reclaimed-pane card that names the output this
-   *  session produced and nothing kept (nocx-fz4qa). Separate from the card
-   *  above because the two report different KINDS of fact: that one is a
-   *  session state that comes and goes, this one is a settled fact about one
-   *  reclaim that will never stop being true. */
-  private _recoveryNoticeDispose: (() => void) | null = null
-  /** What an EARLIER window already announced for this session (nocx-ipuy3).
-   *  Captured once per bind from RecoveryAnnouncementStore, and never widened
-   *  by what this window says itself: the card a person is looking at must go
-   *  on stating the whole hole as the recording revises it (nocx-zg3k3.14.24),
-   *  while a window that comes back must say nothing about bytes an earlier
-   *  one named. Empty means nothing was announced before. */
-  private _recoveryToldBefore: readonly AnnouncedRange[] = []
-  /** The ranges the card currently up has named, as they were written to the
-   *  store. Dismissing moves them into _recoveryToldBefore, so a revision of
-   *  the same hole stays silent and a grown one names only the growth. */
-  private _recoveryTold: AnnouncedRange[] = []
-  /** The card a person has already been told about, per session, across
-   *  restarts (nocx-ipuy3): the same hole is not announced twice. */
-  private readonly _recoveryAnnouncements = new RecoveryAnnouncementStore(safeRecoveryStorage())
-  /** The account the mounted reclaim card states, as JSON — what a revision is
-   *  compared against before the card is rebuilt (nocx-zg3k3.14.24). Null when
-   *  no card is up. */
-  private _recoveryNoticeSignature: string | null = null
-  /** Presentation expires; the binding's loss account survives it. */
-  private _liveOutputGapNotice: LiveOutputGapNoticeHandle | null = null
-  private _liveOutputGapNoticeTimer: ReturnType<typeof setTimeout> | undefined
-  private _liveOutputGapAccount: LiveOutputGapAccount = {
-    missing: 0,
-    hostWindow: false,
-    unknownCause: false,
-  }
-  /** Every live range named during this session, used to partition those
-   *  bytes out of the historical recovery account. */
-  private _liveOutputGaps: SessionOutputGap[] = []
   /** The third state's card (nocx-k6p18.5), raised by a RESTORE rather
    *  than by a session: it is a fact about the blocks this pane read back,
    *  not about the pipe it is attached to now. */
@@ -2209,6 +2174,10 @@ export class TerminalContent extends BasePaneContent {
       host: string
       user?: string
       port?: number
+      /** The saved connection's own display name, when the person gave it one
+       *  (nocx-ouru5.1.2). It names the tab and the composer's place line
+       *  beside the host; absent keeps the host alone. */
+      name?: string
     },
     /** The optional host callbacks, NAMED. They used to be four trailing
      *  positional parameters, and a caller that skipped the middle two put
@@ -2237,6 +2206,16 @@ export class TerminalContent extends BasePaneContent {
    */
   get ready(): Promise<boolean> {
     return this._readyPromise
+  }
+
+  /** Whether the accepted backend screen frame says the program is tracking
+   *  the pointer (a DECSET 1000/1002/1003 program). One reading of one frame
+   *  field, for every gesture that asks — the pointer intents the program is
+   *  sent, the live selection's own stance, and the pane's right-click
+   *  (nocx-a9x6u). "Never" while no frame has been accepted: a pane with no
+   *  program is a pane whose right-clicks nobody else owns. */
+  private get mouseReporting(): boolean {
+    return this._cellModel?.current()?.state.mouseTracking ?? false
   }
 
   /** Whether the pane walked into a child domain that names a remote host
@@ -2492,7 +2471,7 @@ export class TerminalContent extends BasePaneContent {
   private pushTitle(): void {
     if (!this.host) return
     const commandTitle = this.runningCommandTitle()
-    const title = this.programTitle || commandTitle || this.cwdTitle
+    const title = this.programTitle || commandTitle || this.connectionTitle() || this.cwdTitle
     this.host.setTitle(title)
     // The location line earns a row only when the title is a name of its
     // own. With no program title the title IS the location, and a second
@@ -2504,6 +2483,22 @@ export class TerminalContent extends BasePaneContent {
     // Agent-state classification keys on the program's own title, never
     // on the composed one: tabs.ts feeds this into detectAgentStatus.
     this.hooks.onProgramTitleChange?.(this.programTitle)
+  }
+
+  /** What this tab calls itself when no program and no command has named it:
+   *  the saved connection's name beside its host, or the host alone for a
+   *  connection nobody named (nocx-ouru5.1.2). '' for a local pane, whose
+   *  title stays its directory.
+   *
+   *  The NAME is dropped once the pane has walked into a remote child: it is
+   *  the connection the pane was opened from, and that is not where the
+   *  command being typed will run — the same rule the ports scope and the
+   *  composer's place line keep. */
+  private connectionTitle(): string {
+    if (!this.sshOpts) return ''
+    const host = this._host || this.sshOpts.host
+    if (this._paneWalkedToRemoteChild) return host
+    return connectionLabel(this.sshOpts.name, host)
   }
 
   /** The name of the currently running command, or '' when none: the
@@ -2596,7 +2591,14 @@ export class TerminalContent extends BasePaneContent {
     // and the prompt's live destination must never disagree.
     const location = this._host ? this.locationLine() : ''
     this.scrollback?.blockManager.setLocation(location)
-    this.editor?.setLocation(location)
+    // The composer hears the connection's NAME too (nocx-ouru5.1.2): its
+    // place line answers "where does Enter go" with the saved connection first
+    // and the host beside it. Dropped inside a remote child, where the pane is
+    // somewhere the saved connection does not name (connectionTitle says why).
+    this.editor?.setLocation(
+      location,
+      this._paneWalkedToRemoteChild ? '' : (this.sshOpts?.name ?? ''),
+    )
     this.pushTitle()
     // The origin answer changed (cwd, host, or the active domain itself):
     // origin-following surfaces (the Files panel's reveal) follow it live,
@@ -2867,19 +2869,115 @@ export class TerminalContent extends BasePaneContent {
     if (this._latestViewport) {
       this.fitUsableViewport(this.usableViewport(this._latestViewport))
     }
-    if (!this.sshOpts) {
-      return this.client.openSession(this._reportedSize(), anchor)
+    // WHAT THE PERSON SEES WHILE THIS TAKES MINUTES (nocx-q9od5). The open's
+    // own stages end in 150 ms on a healthy link, but a first open of a host
+    // where the helper is not installed is mostly a 15.3 MB upload — and the
+    // pane said nothing at all for the whole of it. The card is mounted here,
+    // where the call is made, and retired when it settles.
+    this._beginOpeningStatement()
+    try {
+      if (!this.sshOpts) {
+        return await this.client.openSession(this._reportedSize(), anchor, this._watchOpeningCall)
+      }
+      if (this.sshOpts.profileId) {
+        return await this.client.openSSHSession(
+          this._reportedSize(),
+          this.sshOpts.profileId,
+          anchor,
+          this._watchOpeningCall,
+        )
+      }
+      return await this.client.openSSHSessionByHost(
+        this._reportedSize(),
+        this.sshOpts.host,
+        this.sshOpts.user,
+        anchor,
+        this._sessionDesiredModeOverride,
+        this._watchOpeningCall,
+      )
+    } finally {
+      this._endOpeningStatement()
     }
-    if (this.sshOpts.profileId) {
-      return this.client.openSSHSession(this._reportedSize(), this.sshOpts.profileId, anchor)
-    }
-    return this.client.openSSHSessionByHost(
-      this._reportedSize(),
-      this.sshOpts.host,
-      this.sshOpts.user,
-      anchor,
-      this._sessionDesiredModeOverride,
+  }
+
+  // ── The pane's own account of a slow open (nocx-q9od5) ──────────────────
+  /** The card, once the open has outlived the grace below. */
+  private _openingCard: OpeningCardHandle | null = null
+  /** The call the card is about: its id names the work the backend reports
+   *  inside it, and its cancel is what the card's button presses. */
+  private _openingCall: PendingCallView | null = null
+  /** The grace before the card is drawn. An open that finishes sooner than
+   *  this — every local pane, every repeat ssh open — shows no card rather
+   *  than one that flickers; an open that lasts is what the card is for. */
+  private static readonly OPENING_CARD_GRACE_MS = 300
+  private _openingTimer: ReturnType<typeof setTimeout> | null = null
+  private _openingUnsubs: (() => void)[] = []
+  /** The install progress the backend last reported for THIS call, so a frame
+   *  that arrives before the card is mounted still reaches it. */
+  private _openingProgress: { done: number; total: number } | undefined
+
+  /** The dispatcher's announce, handed to the client so the card can name its
+   *  own call and cancel it. Bound once, in the constructor, so the identity
+   *  the client keeps is stable. */
+  private _watchOpeningCall = (call: PendingCallView): void => {
+    this._openingCall = call
+  }
+
+  private _beginOpeningStatement(): void {
+    this._endOpeningStatement()
+    this._openingProgress = undefined
+    this._openingUnsubs.push(
+      this.client.onOperationRow((row) => {
+        if (this._openingCall === null || row.callID !== this._openingCall.id) return
+        this._openingProgress = row.total > 0 ? { done: row.done, total: row.total } : undefined
+        this._openingCard?.set(this._openingState(row.title))
+      }),
     )
+    this._openingTimer = setTimeout(() => {
+      this._openingTimer = null
+      this._showOpeningCard()
+    }, TerminalContent.OPENING_CARD_GRACE_MS)
+  }
+
+  private _openingState(title?: string): OpeningCardState {
+    return {
+      title: title ?? t('operations.waiting.open', 'Opening your terminal'),
+      host: this._openingDestination(),
+      progress: this._openingProgress,
+      onCancel: () => this._openingCall?.cancel(),
+    }
+  }
+
+  /** The machine the card names. The environment projection has not run yet
+   *  — nothing is bound — so the answer is the destination the person
+   *  clicked, which is the one thing about this wait that is already true. */
+  private _openingDestination(): string {
+    const bound = this.hostLabel()
+    if (bound !== '') return bound
+    const ssh = this.sshOpts
+    if (ssh === undefined) return ''
+    return remoteMachineName(ssh.user, ssh.host)
+  }
+
+  private _showOpeningCard(): void {
+    if (this._disposed || this._paneTarget === null) return
+    if (this._openingCard !== null) return
+    // A session that arrived is the end of the wait, whatever the call is
+    // still doing: a card under a live shell would be a claim about nothing.
+    if (this.session !== null) return
+    this._openingCard = mountOpeningCard(this._paneTarget, this._openingState())
+  }
+
+  private _endOpeningStatement(): void {
+    if (this._openingTimer !== null) {
+      clearTimeout(this._openingTimer)
+      this._openingTimer = null
+    }
+    for (const stop of this._openingUnsubs) stop()
+    this._openingUnsubs = []
+    this._openingCard?.dispose()
+    this._openingCard = null
+    this._openingCall = null
   }
 
   /** A one-shot integration-method override for a hand-typed connection with
@@ -3224,7 +3322,7 @@ export class TerminalContent extends BasePaneContent {
         // Mouse reporting is an emulator mode. Use only the latest accepted
         // backend frame; with no accepted mode the pointer remains available
         // to selection and native scrollback.
-        mouseTracking: () => this._cellModel?.current()?.state.mouseTracking ?? false,
+        mouseTracking: () => this.mouseReporting,
         // The wheel is counted in LINES, so it needs the row pitch: the
         // painter's accepted cell height, which is the same number the caret,
         // the selection and hit-testing are placed by (nocx-1ebrs.26). A
@@ -4520,7 +4618,8 @@ export class TerminalContent extends BasePaneContent {
       // gesture above. DOM block selection uses the document selectionchange
       // listener installed during mount; the painted grid has no DOM-text owner.
 
-      // Paste on right-click AND middle-click.
+      // Paste on middle-click. (Right-click used to paste too; it does not
+      // any more — nocx-a9x6u — and the chord is where paste lives.)
       const doPaste = async () => {
         try {
           const text = await this.clipboard.readText()
@@ -4539,9 +4638,33 @@ export class TerminalContent extends BasePaneContent {
         }
       }
 
+      // A RIGHT-CLICK IS NOT A PASTE (nocx-a9x6u, owner 2026-11-08). It was
+      // one here, on the whole pane: the clipboard landed in the editor or in
+      // the running program, which is a destructive answer to a gesture people
+      // make while aiming at something else. Paste stays on the chord (and on
+      // the middle button); nothing in the pane pastes on this one.
+      //
+      // ON A BLOCK it opens that block's OWN menu, the one behind its ⋮, at
+      // the pointer — the block decides which rows it offers (`items()` in
+      // scrollback/blocks.ts, which is why this asks the block rather than
+      // listing anything here), so a running block offers Stop and a finished
+      // one offers copy/wrap.
+      //
+      // A FULL-SCREEN PROGRAM THAT REPORTS THE MOUSE KEEPS ITS RIGHT-CLICKS.
+      // The press and release are already on their way to it as pointer
+      // intents (IntentInput, from the grid's own listeners); what the pane
+      // must not do is put a menu over the program's screen. The live region
+      // is a RUNNING BLOCK'S BODY (ADR-0091), so `closest('.cmd-block')` would
+      // claim it — `insideLiveRegion` is the one answer to "is this the
+      // terminal's surface".
       target.addEventListener('contextmenu', (e: MouseEvent) => {
+        // The native menu is never ours, in either case: a WebView's own
+        // Reload/Inspect entries over a terminal are chrome nobody asked for.
         e.preventDefault()
-        void doPaste()
+        if (this.mouseReporting && insideLiveRegion(e.target)) return
+        const block =
+          e.target instanceof Element ? e.target.closest<HTMLElement>('.cmd-block') : null
+        if (block !== null) openBlockMenuAt(block, e.clientX, e.clientY)
       })
 
       target.addEventListener('mousedown', (e: MouseEvent) => {
@@ -5171,24 +5294,12 @@ export class TerminalContent extends BasePaneContent {
       return 'aborted'
     }
 
-    this._dropRecoveryNotice()
-    this._dropLiveOutputGapNotice()
     // The previous binding's delivery fact is not the new one's: a rebind is a
     // new session whose own publish either landed (nothing to say) or did not
     // (its own notification, on its own id). Left standing, the old card would
     // describe a copy that this open may well have made.
     this._dropPublishNotice()
     this._publishNoticeDismissed = false
-    // WHAT AN EARLIER WINDOW SAID ABOUT THIS SESSION (nocx-ipuy3). Read at
-    // bind, before this window has announced anything of its own: a reopen
-    // meets a hole the person was already told about, and only bytes beyond
-    // it are news. The session id is the key because it is what survives a
-    // window — the pane id is the same pane, and the session is the stream
-    // the ranges are offsets into.
-    this._recoveryToldBefore = this._recoveryAnnouncements.announced(session.sessionId)
-    this._recoveryTold = []
-    this._liveOutputGaps = []
-    this._liveOutputGapAccount = { missing: 0, hostWindow: false, unknownCause: false }
     this.snapshotStore.reset()
     this.session = session
     // The question that was open is answered; the card's retry no longer has
@@ -5200,24 +5311,19 @@ export class TerminalContent extends BasePaneContent {
     // bind. A rebind replaces both with the new session's — a new session
     // is a new history space, and the bind forgets the painted past.
     this._liveHistory?.bind(session)
-    // What the reclaim could NOT give back, said where a person will see it
-    // (nocx-fz4qa). The recovered bytes are already queued for the terminal
-    // by the time this handle exists; the hole is the half the terminal
-    // cannot show, because a missing stretch of a byte stream looks exactly
-    // like a session that printed less. Mounted here, with the session,
-    // because that is where the fact arrives and where the pane is known.
-    this._showRecoveryNotice(session, target)
-    session.onOutputGap((gap) => this._showLiveOutputGapNotice(session, gap, target))
-    // AND THE RECORDING KEEPS TALKING AFTER THE RECLAIM (nocx-zg3k3.14.24).
-    // The reclaim read its answer before it attached — while the recorder was
-    // still appending the bytes the helper replayed — so the number that card
-    // states is a fact about an instant that has passed, and it goes on passing
-    // as the retention bound evicts. The handle owns the revised answer; this
-    // rebuilds the card from it, so a person who stays on the pane reads the
-    // number the ledger states. `_showRecoveryNotice` is the same door the
-    // live-gap notice already uses, and it keeps the dismissal sticky: a card
-    // the person closed is not resurrected by a revision.
-    session.onRecoveryChanged(() => this._showRecoveryNotice(session, target))
+    // NOTHING IS ANNOUNCED FOR THE RECLAIM (nocx-ipuy3, the owner's decision
+    // of 2026-11-08). A reclaim used to raise a card above the pane stating
+    // bytes the recording's size limit had dropped — a session-level number
+    // that named no place a person could look at, and that a full-screen
+    // program's redraws kept growing until the card returned every time it
+    // was closed. The missing output a person can READ is now said where it
+    // was cut, in the block's own history (scrollback/block-rows.ts): the
+    // stored rows carry absolute row numbers, so the hole between two kept
+    // rows is the place, and the line at it is the whole statement. Nothing
+    // arrives here for a live gap either: the byte cursor and its
+    // acknowledgement are the ipc layer's, and a loss with no readable rows
+    // behind it — a full-screen program's redraws above all — has nothing
+    // to say in a scrollback.
     session.onProtocolError((message) => showToast({ level: 'danger', message }))
     session.onAttachment((attachment) => {
       if (this._disposed || this.session !== session) return
@@ -5326,7 +5432,12 @@ export class TerminalContent extends BasePaneContent {
       host: this.sshOpts?.host || '',
       user: this.sshOpts?.user ?? '',
       isLocal: !this.sshOpts,
-      programTitle: this.sshOpts?.host || '',
+      // '' — not the host. This field is the PROGRAM's own OSC 0/2 title, and
+      // it used to be seeded with the host as a stand-in for "the tab has a
+      // name"; the tab now names itself (`connectionTitle` below), so the
+      // stand-in only made a stale address outrank the connection's name
+      // (nocx-ouru5.1.2).
+      programTitle: '',
     })
     this.env.attach()
 
@@ -5426,7 +5537,7 @@ export class TerminalContent extends BasePaneContent {
         surface: painterSurface,
         gestureRoot,
         surfaceId: this.pane.paneId,
-        mouseReportingActive: () => this._cellModel?.current()?.state.mouseTracking ?? false,
+        mouseReportingActive: () => this.mouseReporting,
         focusInput: () => this._intentInput?.focus(),
         copy: (text) => {
           if (shouldCopy(text)) {
@@ -7063,100 +7174,6 @@ export class TerminalContent extends BasePaneContent {
     return this.hooks.outputRecording ?? RECORDING_UNKNOWN
   }
 
-  /** Keep live transport loss separate from the reclaim's historical loss.
-   *  The live range is subtracted from the historical account before both
-   *  cards are mounted, so overlapping bytes are named exactly once. */
-  private _showLiveOutputGapNotice(
-    session: SessionHandle,
-    gap: SessionOutputGap,
-    target: HTMLElement,
-  ): void {
-    if (this._disposed || this.session !== session) return
-    const uncovered = uncoveredGapRanges(gap, this._liveOutputGaps)
-    if (uncovered.length === 0) return
-    const newGaps = uncovered.map((range) => ({ ...gap, ...range }))
-    const unannouncedBytes = uncovered.reduce((total, range) => total + range.end - range.start, 0)
-    this._liveOutputGaps.push(...newGaps)
-    this._liveOutputGapAccount = {
-      missing: this._liveOutputGapAccount.missing + unannouncedBytes,
-      hostWindow: this._liveOutputGapAccount.hostWindow || gap.reason === 'hostWindow',
-      unknownCause: this._liveOutputGapAccount.unknownCause || gap.reason !== 'hostWindow',
-    }
-    this._showRecoveryNotice(session, target)
-    if (this._liveOutputGapNotice) {
-      this._liveOutputGapNotice.update(this._liveOutputGapAccount)
-    } else {
-      this._liveOutputGapNotice = mountLiveOutputGapNotice(target, this._liveOutputGapAccount, () =>
-        this._dropLiveOutputGapNotice(),
-      )
-      const notice = this._liveOutputGapNotice
-      // Fixed from first mount: a busy stream must still give the space back.
-      this._liveOutputGapNoticeTimer = setTimeout(() => {
-        if (this._liveOutputGapNotice === notice) this._dropLiveOutputGapNotice()
-      }, 8000)
-    }
-    this.scheduleLiveResize()
-  }
-
-  /** Raise the reclaimed-pane card for the historical ranges not already
-   *  named by a live gap card. A fresh session or whole recording mounts none.
-   *
-   *  THE MOUNT IS THE ACCOUNT IT STATES (nocx-zg3k3.14.24). The recording
-   *  revises its answer while a saturated session keeps printing — once per
-   *  chunk — so this is called far more often than the number a person reads
-   *  changes. Rebuilding the card for a revision that states the same thing
-   *  would replace a DOM node, and re-measure the live region, for nothing, so
-   *  an account identical to the one on screen is left alone. The comparison is
-   *  on the derivation the card renders, not on the raw wire numbers, because
-   *  those move on every byte and the card does not. */
-  private _showRecoveryNotice(session: SessionHandle, target: HTMLElement): void {
-    // Everything already named to this person about this session: the live
-    // ranges this binding announced, and whatever an earlier window recorded.
-    // The account is what is left — which is the whole hole in the ordinary
-    // first bind, and only its growth when the window comes back (nocx-ipuy3).
-    const told = [...this._liveOutputGaps, ...this._recoveryToldBefore]
-    const account = recoveryAccount(session.recovered, told)
-    const signature = account === null ? null : JSON.stringify(account)
-    if (signature === this._recoveryNoticeSignature) return
-    this._dropRecoveryNotice()
-    this._recoveryNoticeDispose = session.recovered
-      ? mountRecoveryNotice(target, {
-          recovery: session.recovered,
-          liveGaps: told,
-          onDismiss: () => this._dismissRecoveryNotice(),
-        })
-      : null
-    this._recoveryNoticeSignature = this._recoveryNoticeDispose ? signature : null
-    if (this._recoveryNoticeDispose) {
-      // THE CARD IS THE ANNOUNCEMENT (nocx-ipuy3): the ranges it states are
-      // written down as told, so the next window — a fresh renderer over the
-      // same storage, with no memory of this one — subtracts them.
-      this._recoveryTold = this._toldRanges(session, told)
-      this._recoveryAnnouncements.record(session.sessionId, this._recoveryTold)
-    }
-    // The card takes its height off the top of the pane, so the scroller is
-    // smaller than the grid fitted to it — the same re-measure the
-    // integration card goes through, and for the same reason: the pane's own
-    // box is unchanged, so no viewport observer fires for this.
-    if (this._recoveryNoticeDispose) this.scheduleLiveResize()
-  }
-
-  /** The byte ranges one mounted card names: what it was handed as already
-   *  told, plus every hole it states on top of that. The union is what "this
-   *  person has been told about these bytes" means, which is why it is
-   *  recorded and why a live range, already named by the live card, is in it
-   *  too. */
-  private _toldRanges(
-    session: SessionHandle,
-    told: readonly Pick<SessionOutputGap, 'start' | 'end'>[],
-  ): AnnouncedRange[] {
-    const ranges: AnnouncedRange[] = told.map((range) => ({ start: range.start, end: range.end }))
-    for (const gap of session.recovered?.gaps ?? []) {
-      ranges.push(...uncoveredGapRanges(gap, told))
-    }
-    return ranges
-  }
-
   /** Raise the third state's card for a restored page, when it has one
    *  (nocx-k6p18.5).
    *
@@ -7177,8 +7194,8 @@ export class TerminalContent extends BasePaneContent {
       onDismiss: () => this._dropUnreconciledNotice(),
     })
     // The card takes its height off the top of the pane, so the scroller is
-    // smaller than the grid fitted to it — the same re-measure the reclaim
-    // card goes through, and for the same reason.
+    // smaller than the grid fitted to it — the same re-measure the
+    // integration card goes through, and for the same reason.
     if (this._unreconciledNoticeDispose) this.scheduleLiveResize()
   }
 
@@ -7189,36 +7206,6 @@ export class TerminalContent extends BasePaneContent {
     this._unreconciledNoticeDispose()
     this._unreconciledNoticeDispose = null
     this.scheduleLiveResize()
-  }
-
-  /** The person closed the card: the hole it named is settled as told, so a
-   *  revision of the SAME hole stays silent. A hole that grew is still news
-   *  and is announced by its growth alone. */
-  private _dismissRecoveryNotice(): void {
-    this._recoveryToldBefore = this._recoveryTold
-    this._dropRecoveryNotice()
-  }
-
-  /** Take the reclaim card down and give the pane back to the terminal. The
-   *  account it stated goes with it, so the next raise is compared against
-   *  nothing rather than against a card that is no longer there. */
-  private _dropRecoveryNotice(): void {
-    this._recoveryNoticeSignature = null
-    if (!this._recoveryNoticeDispose) return
-    this._recoveryNoticeDispose()
-    this._recoveryNoticeDispose = null
-    this.scheduleLiveResize()
-  }
-
-  /** Remove presentation only; dismissed and expired bytes stay accounted for. */
-  private _dropLiveOutputGapNotice(): void {
-    clearTimeout(this._liveOutputGapNoticeTimer)
-    this._liveOutputGapNoticeTimer = undefined
-    const notice = this._liveOutputGapNotice
-    this._liveOutputGapNotice = null
-    if (!notice) return
-    notice.dispose()
-    if (!this._disposed) this.scheduleLiveResize()
   }
 
   /** Take the card down and give the pane back to the terminal. */
@@ -9699,6 +9686,7 @@ export class TerminalContent extends BasePaneContent {
 
   dispose(): void {
     this._disposed = true
+    this._endOpeningStatement()
     this._cancelDeferredShellSubmissions()
     // The input element goes with the pane (nocx-zg3k3.3.1): it holds the
     // keyboard and a live listener set, and a disposed pane that kept either
@@ -9764,11 +9752,6 @@ export class TerminalContent extends BasePaneContent {
     this._noticeDispose = null
     this._integrationWaitingDispose?.()
     this._integrationWaitingDispose = null
-    this._recoveryNoticeDispose?.()
-    this._recoveryNoticeDispose = null
-    this._dropLiveOutputGapNotice()
-    this._liveOutputGaps = []
-    this._liveOutputGapAccount = { missing: 0, hostWindow: false, unknownCause: false }
     this._unreconciledNoticeDispose?.()
     this._unreconciledNoticeDispose = null
     this._lifecycleChangeUnsub?.()

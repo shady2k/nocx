@@ -365,15 +365,18 @@ type localHelperOpener struct {
 	// lifecycleStopping is the coordinator's stopping signal, the same one
 	// helperRegistry carries. Nil never stops.
 	lifecycleStopping *atomic.Bool
-	// noteChildDomainParent records the two facts a nested sudo/su needs
-	// about the pane it is opened inside: which transport its parent's
-	// lifecycle lane rides, and which session that lane speaks for
-	// (nocx-u7uh.11, and the worker record's pane enroller reads the second).
-	// It is a SEPARATE seam from the transport's own lane registration
-	// because the transport already owns that half — the hosted open path
-	// binds lane to session through laneRegistrar — and one closure doing
-	// both would put two owners on one statement.
-	noteChildDomainParent func(t lifecycle.TransportID, lane lifecycle.LaneID, sid string)
+	// noteChildDomainParent records what the composition root needs about the
+	// pane it is opened inside: which transport its parent's lifecycle lane
+	// rides, WHETHER THAT TRANSPORT IS THIS MACHINE'S, and which session the
+	// lane speaks for (nocx-u7uh.11; nocx-8gg8y added the middle fact).
+	//
+	// THE KIND IS NOT THE SAME FOR BOTH DESTINATIONS THIS OPENER SERVES. A
+	// local pane's domains ride the inherited descriptor; a REMOTE one's ride
+	// the helper's ssh channel, so no record of this machine's applies to a
+	// launch there and the agent launch resolver has to be able to say so.
+	// Registering every open as local — which this seam did while it carried no
+	// kind — is what made an ssh pane's typed agent answer a local question.
+	noteChildDomainParent func(t lifecycle.TransportID, lane lifecycle.LaneID, sid string, local bool)
 	// agentNames answers the ENABLED agent set a pane on this machine is born
 	// with (nocx-t5e7d): what its shell offers wrappers for. It is a closure
 	// rather than a captured list because a record the person edits must reach
@@ -851,7 +854,7 @@ func (o *localHelperOpener) openHostedOnce(ctx context.Context, cfg session.Conf
 		o.watchForReplacement(res.Session, launch.Pid, shell)
 	}
 	if res.LifecycleLane != "" && o.noteChildDomainParent != nil {
-		o.noteChildDomainParent(res.LifecycleTransport, res.LifecycleLane, string(sid))
+		o.noteChildDomainParent(res.LifecycleTransport, res.LifecycleLane, string(sid), remote == nil)
 	}
 	out := transport.HostedSessionOpen{
 		Session: res.Session,

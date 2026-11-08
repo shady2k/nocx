@@ -262,8 +262,10 @@ export interface SessionFake {
   /** The recording's own revision of what it still holds
    *  (session.recoveryChanged, nocx-zg3k3.14.24). The handle owns the fact,
    *  so firing it REPLACES `recovered` before telling the surface — exactly
-   *  what SessionHandle.onRecoveryChanged does, and what makes a card that
-   *  reads `recovered` again the behaviour under test. */
+   *  what SessionHandle.onRecoveryChanged does. Nothing in the product reads
+   *  it since the missing-output card was removed (nocx-ipuy3); the seam stays
+   *  because it is the handle's own fact, and a pane test that drives it is
+   *  measuring the handle. */
   onRecoveryChanged: (cb: () => void) => () => void
   /** Fire one revision of the recovery account, as the backend would. */
   fireRecoveryChanged(recovery: SessionRecovery): void
@@ -511,6 +513,25 @@ export interface ClientFake {
   onSessionReset: ReturnType<typeof vi.fn>
   onBlockOutputStart: (cb: (anchor: BlockOutputStart) => void) => () => void
   _fireBlockOutputStart: (anchor: BlockOutputStart) => void
+  /** The work the backend reports inside a person's call (nocx-q9od5): the
+   *  row a pane's stated wait draws. Returns an unsubscribe, like the real
+   *  one, and `_fireOperationRow` delivers a frame the way the socket does. */
+  onOperationRow: (
+    cb: (row: {
+      callID: number
+      title: string
+      done: number
+      total: number
+      machine: string
+    }) => void,
+  ) => () => void
+  _fireOperationRow: (row: {
+    callID: number
+    title: string
+    done: number
+    total: number
+    machine: string
+  }) => void
   /** Control-plane calls (history.record, history.query, …). Rejects by
    *  default — the no-store state, which the recall overlay labels
    *  source=session. */
@@ -675,6 +696,9 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
   const workerTabCreatedHandlers = new Set<(fact: WorkersTabCreated) => void>()
   const workerTabClosedHandlers = new Set<(fact: WorkersTabClosed) => void>()
   const blockOutputStartHandlers = new Set<(anchor: BlockOutputStart) => void>()
+  const operationRowHandlers = new Set<
+    (row: { callID: number; title: string; done: number; total: number; machine: string }) => void
+  >()
   const newSession = (): SessionFake => {
     const s = makeSession()
     sessions.push(s)
@@ -705,6 +729,13 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
     },
     _fireBlockOutputStart: (anchor) => {
       for (const cb of [...blockOutputStartHandlers]) cb(anchor)
+    },
+    onOperationRow: (cb) => {
+      operationRowHandlers.add(cb)
+      return () => operationRowHandlers.delete(cb)
+    },
+    _fireOperationRow: (row) => {
+      for (const cb of [...operationRowHandlers]) cb(row)
     },
     notifyPaneClosed: vi.fn(),
     onReconnectResult: vi.fn((cb: (r: { resumed: number; lost: number }) => void) => {

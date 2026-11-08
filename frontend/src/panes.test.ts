@@ -444,6 +444,23 @@ describe('PaneManager', () => {
     expect(manager.sessionDisplayName('mock-sid-does-not-exist')).toBeNull()
   })
 
+  // ── what a saved connection is called (nocx-ouru5.1.2) ────────────────
+  it('names an SSH tab after the saved connection, with its host beside it', async () => {
+    const { manager, bar } = await mountPaneManager()
+
+    manager.newSSHPane('ssh:test:1', 'host.example.com', 'dev', undefined, 'Production')
+    await vi.waitFor(() => expect(bar.querySelectorAll('.nocx-tab').length).toBe(2))
+    const titled = (): (string | null)[] =>
+      [...bar.querySelectorAll('.nocx-tab-title')].map((t) => t.textContent ?? null)
+    // The name first, the host beside it: the owner saw the bare IP.
+    await vi.waitFor(() => expect(titled()[1]).toBe('Production · host.example.com'))
+
+    // A connection with no name keeps the host alone.
+    manager.newSSHPane('ssh:test:2', 'plain.example.com')
+    await vi.waitFor(() => expect(bar.querySelectorAll('.nocx-tab').length).toBe(3))
+    await vi.waitFor(() => expect(titled()[2]).toBe('plain.example.com'))
+  })
+
   // ── where a session IS, in words (nocx-njn8s) ─────────────────────────
 
   it('says where a session is — the tab it is in and the machine it talks to', async () => {
@@ -1394,24 +1411,11 @@ describe('PaneManager', () => {
     expect(cb.writeText).toHaveBeenCalledWith('osc52 payload')
   })
 
-  it('pastes on right-click (contextmenu event)', async () => {
-    const cb = makeClipboard({
-      readText: vi.fn().mockResolvedValue('right-click text'),
-    })
-    const { bar, client } = await mountPaneManager(undefined, cb)
-
-    await Promise.resolve()
-    const session = client._sessions[0]
-    if (!session) throw new Error('session not opened')
-
-    const pane = bar.parentElement!.querySelector('.pane.active')!
-    pane.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }))
-
-    await vi.waitFor(() => {
-      expect(cb.readText).toHaveBeenCalled()
-    })
-    await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('paste', 'right-click text'))
-  })
+  // A RIGHT-CLICK IS NOT A PASTE any more (nocx-a9x6u): the gesture was taken
+  // off the whole pane, and the pane's own handler is asserted where it lives —
+  // terminal-content.test.ts, "a right-click in the terminal is not a paste".
+  // The paste path that remains is the middle button, and the two tests below
+  // are about its multi-line confirmation.
 
   it('pastes on middle-click', async () => {
     const cb = makeClipboard({
@@ -1450,7 +1454,7 @@ describe('PaneManager', () => {
     // Default _bufferType is 'normal'.
     confirm.mockResolvedValueOnce(false)
     const pane = bar.parentElement!.querySelector('.pane.active')!
-    pane.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }))
+    pane.dispatchEvent(new MouseEvent('mousedown', { button: 1, bubbles: true }))
 
     await vi.waitFor(() => {
       expect(cb.readText).toHaveBeenCalled()
@@ -1460,7 +1464,7 @@ describe('PaneManager', () => {
 
     // Now confirm.
     confirm.mockResolvedValueOnce(true)
-    pane.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }))
+    pane.dispatchEvent(new MouseEvent('mousedown', { button: 1, bubbles: true }))
     await vi.waitFor(() => {
       expect(session.intent).toHaveBeenCalledWith('paste', 'line1\nline2')
     })
@@ -1483,7 +1487,7 @@ describe('PaneManager', () => {
     fireFrameMetadata(client._sessions[0], 1, { bufferKind: 'alternate' })
 
     const pane = bar.parentElement!.querySelector('.pane.active')!
-    pane.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }))
+    pane.dispatchEvent(new MouseEvent('mousedown', { button: 1, bubbles: true }))
 
     await vi.waitFor(() => {
       expect(cb.readText).toHaveBeenCalled()

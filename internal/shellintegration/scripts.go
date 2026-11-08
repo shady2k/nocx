@@ -345,7 +345,15 @@ var (
 // the gap after that child exits reached no process: the shell's trap never ran
 // and the open-question wait, which has no deadline, never ended — the pane
 // showed ^C and then nothing. A shell still sourcing 68 has the window.
-const version = "69"
+// 70: zsh writes the render fence (and the completion it names) from its own
+// precmd hook, which this file now forces to the FRONT of precmd_functions —
+// right after the exit-status capture — instead of appending it. A precmd hook
+// a framework registered before nocx's runs first, so its title used to reach
+// the pty BEFORE the fence that closes the run, and the runtime read the
+// shell's own title as the program's and cleared it when the command ended
+// (nocx-ouru5.1.1). Every installed copy must be rewritten: a shell still
+// sourcing 69 loses the title its prompt draws on every command.
+const version = "70"
 
 // ScriptVersion is the integration script version other packages may read.
 // Command discovery puts it in its cache key (internal/commandnames): the

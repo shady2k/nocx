@@ -15,7 +15,7 @@ package sessionruntime
 // the order between them is the whole rule:
 //
 //	fence  …  C  …the command's own output, including its OSC 0…  fence
-//	                then the next prompt: the user's PROMPT_COMMAND title,
+//	                then the next prompt: the user's prompt hook's title,
 //	                OSC 133 D/A, OSC 7, and PS1 with the 133 B marker
 //
 // The shell's own title therefore arrives AFTER the fence that closed the run,
@@ -23,8 +23,23 @@ package sessionruntime
 // is C→fence, and it is read from the SAME ordered stream that carries both —
 // no clock, no lifecycle fact from another transport, and nothing inferred
 // from the title's text. A shell that draws its title in the prompt, or in a
-// prompt_command, keeps it: it arrives outside the window, and the runtime
-// never touches it.
+// prompt hook, keeps it: it arrives outside the window, and the runtime never
+// touches it.
+//
+// THE FENCE MUST BE THE PROMPT'S FIRST BYTES, and that is a requirement on
+// every shell tier, not a property of this rule (nocx-ouru5.1.1's second
+// half). A prompt hook that a framework registered before nocx's runs FIRST,
+// so a fence written from a hook arranged after it lands AFTER that hook's
+// title — and then this rule reads the shell's own title as the program's and
+// clears it the moment the command ends. Measured on zsh, whose precmd hooks
+// are ordered by registration: a theme's title was cleared on every command
+// until nocx.zsh's end-of-run hook was moved to the front of precmd_functions
+// (scripts/nocx.zsh, "THE END OF THE RUN, as its own hook and FIRST in the
+// prompt cycle"; the tier's version 70). bash writes the fence from its
+// channel block before the user's PROMPT_COMMAND and fish from fish_postexec
+// before the prompt function, so all three tiers put it first — a fourth must
+// do the same, or it needs its own test alongside
+// TestZshShellTitleSurvivesTheFenceThatClosesTheRun.
 //
 // A FENCE WITH NO RUN OPEN clears nothing: `runOutputSeen` is false until a C
 // has been sighted in this interval, and a program that forged a fence can

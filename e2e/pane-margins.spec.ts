@@ -215,19 +215,45 @@ test('a plain ssh shell keeps every edge too', async ({ page }) => {
         { timeout: 30_000 },
       )
       .toBe(true)
+    // THE SHELL MUST HAVE DRAWN BEFORE THE PERSON SPEAKS (nocx-djx1u). A
+    // keystroke is an intent, and an intent with no attached session is read
+    // and then gone (`sendIntent` in terminal-content.ts refuses it) — the
+    // person's line never reaches the pty, so the pane waits for an answer to
+    // a question nobody asked. CI run 128820214574, repeat 8 of 10, failed
+    // exactly there: this spec typed as soon as the pane was `unstructured`,
+    // which is set at attach time, and the shell never echoed the command.
+    // What the shell produces is the only honest readiness signal: its first
+    // painted row, which exists only once frames are flowing to an attached
+    // session.
+    await expect
+      .poll(
+        async () =>
+          page.evaluate(() => {
+            const rows = Array.from(
+              document.querySelectorAll('.pane.active .terminal-live-grid .term-grid-row'),
+            )
+            return rows.some((row) => (row.textContent ?? '').trim() !== '')
+          }),
+        { timeout: 30_000 },
+      )
+      .toBe(true)
     await page.locator('.pane.active .terminal-live-container').click()
     await page.keyboard.type(
       'printf "SSH-MARGIN-PROBE\\n"; for i in $(seq 1 40); do echo "SSH-$i"; done',
     )
+    // AND THE SHELL'S ECHO IS THE PROOF THE LINE ARRIVED. Whitespace is
+    // stripped because a painted row carries its grid's padding, which a
+    // wrapped line would otherwise put in the middle of this text.
+    const spoken = (): Promise<string> =>
+      page.evaluate(() =>
+        (document.querySelector('.pane.active')?.textContent ?? '').replace(/\s+/g, ''),
+      )
+    await expect
+      .poll(async () => (await spoken()).includes('SSH-MARGIN-PROBE'), { timeout: 30_000 })
+      .toBe(true)
     await page.keyboard.press('Enter')
     await expect
-      .poll(
-        async () =>
-          page.evaluate(() =>
-            (document.querySelector('.pane.active')?.textContent ?? '').includes('SSH-40'),
-          ),
-        { timeout: 30_000 },
-      )
+      .poll(async () => (await spoken()).includes('SSH-40'), { timeout: 30_000 })
       .toBe(true)
     await expect.poll(async () => (await edges(page)).rows, { timeout: 10_000 }).toBeGreaterThan(5)
     const e = await edges(page)

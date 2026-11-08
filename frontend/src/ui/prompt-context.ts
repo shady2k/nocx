@@ -14,6 +14,13 @@
 import { FolderIcon, GitBranchIcon, iconElement } from './icons'
 
 export interface PromptContextFacts {
+  /** What a person CALLED the saved connection this pane was opened from,
+   *  or nothing when there is no name — an unnamed connection, a hand-typed
+   *  host, a local pane (nocx-ouru5.1.2). It reads first, before the host,
+   *  because it is the thing they chose; the host is where it goes. The
+   *  composer is the only surface that passes one: a block's prompt line is
+   *  history and names the machine, never the bookmark. */
+  name?: string
   /** Where the command ran or will run — undefined/empty for this machine.
    *  The block's existing `location` fact, unchanged in meaning. */
   host?: string
@@ -57,6 +64,16 @@ function fill(el: HTMLSpanElement, facts: PromptContextFacts, opts: PromptContex
 
   const children: Element[] = []
   if (opts.presentation === 'composer') children.push(iconElement(FolderIcon))
+  if (facts.name) {
+    children.push(part('name', facts.name, false))
+    // A real span, not CSS `content`: the separator is part of the line a
+    // person reads and copies, and a pseudo-element is neither.
+    const divider = document.createElement('span')
+    divider.className = 'ui-prompt-context__divider'
+    divider.setAttribute('aria-hidden', 'true')
+    divider.textContent = '·'
+    children.push(divider)
+  }
   if (facts.host) {
     children.push(part('host', facts.host, facts.hostStrong === true))
     const colon = document.createElement('span')

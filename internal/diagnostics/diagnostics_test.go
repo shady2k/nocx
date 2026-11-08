@@ -222,3 +222,85 @@ func TestNoCreditOverrunSaysSo(t *testing.T) {
 		t.Fatalf("text lacks the empty overrun line:\n%s", text)
 	}
 }
+
+// nocx-q9od5: Copy diagnostics said a 1.6 s open took 22.8 s a minute later.
+// The recent arm read the clock instead of the finish, so every finished
+// record grew for as long as the process lived — and the record is the
+// instrument the owner's report is read with.
+func TestAFinishedOpenKeepsTheDurationItTook(t *testing.T) {
+	ctx, _ := testCtx(t)
+	rec := NewRecorder()
+	clock := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
+	rec.now = func() time.Time { return clock }
+
+	ctx, open := rec.Begin(ctx, OpenInfo{Kind: "ssh", Key: "ssh:profile:one"})
+	clock = clock.Add(1500 * time.Millisecond)
+	end := Stage(ctx, StageInstall)
+	clock = clock.Add(100 * time.Millisecond)
+	end(nil)
+	open.Finish(nil)
+
+	// THE PROCESS LIVES ON, which is what used to inflate the record.
+	clock = clock.Add(20 * time.Second)
+	snap := rec.Snapshot()
+	if len(snap.Recent) != 1 {
+		t.Fatalf("recent opens = %d, want 1", len(snap.Recent))
+	}
+	if got := snap.Recent[0].Elapsed; got != 1600*time.Millisecond {
+		t.Fatalf("a finished open's duration = %v, want the 1.6s it took (the clock moved 20s on)", got)
+	}
+	text := Render(snap, Facts{})
+	if !strings.Contains(text, "duration=1600ms") {
+		t.Fatalf("the text does not state the open's own duration:\n%s", text)
+	}
+	if strings.Contains(text, "duration=21.") {
+		t.Fatalf("the text states a duration the open did not take:\n%s", text)
+	}
+}
+
+// The last step of an open is the session's first prompt, and it happens
+// after the open returns. The record carries it for exactly that reason: the
+// owner's 20 to 30 silent seconds were that interval (nocx-q9od5).
+func TestAnOpensFirstPromptIsRecordedAfterItFinished(t *testing.T) {
+	ctx, _ := testCtx(t)
+	rec := NewRecorder()
+	clock := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
+	rec.now = func() time.Time { return clock }
+
+	ctx, open := rec.Begin(ctx, OpenInfo{Kind: "ssh", Key: "ssh:profile:one"})
+	clock = clock.Add(2 * time.Second)
+	open.Finish(nil)
+	// The far shell's prompt arrives two seconds after the open was adopted.
+	clock = clock.Add(2 * time.Second)
+	NoteFirstPrompt(ctx)
+	// And a later prompt_ready on the same session does not move it.
+	clock = clock.Add(30 * time.Second)
+	NoteFirstPrompt(ctx)
+
+	snap := rec.Snapshot()
+	if len(snap.Recent) != 1 {
+		t.Fatalf("recent opens = %d, want 1", len(snap.Recent))
+	}
+	if got := snap.Recent[0].FirstPrompt; got != 4*time.Second {
+		t.Fatalf("first prompt = %v, want 4s from the open's start", got)
+	}
+	if got := snap.Recent[0].Elapsed; got != 2*time.Second {
+		t.Fatalf("elapsed = %v, want the open's own 2s", got)
+	}
+	text := Render(snap, Facts{})
+	if !strings.Contains(text, "first_prompt=4000ms") {
+		t.Fatalf("the text does not state when the prompt came:\n%s", text)
+	}
+
+	// An open that never saw a prompt says nothing about one.
+	clock = clock.Add(time.Second)
+	ctx2, open2 := rec.Begin(ctx, OpenInfo{Kind: "local", Key: "local"})
+	open2.Finish(nil)
+	snap = rec.Snapshot()
+	for _, view := range snap.Recent {
+		if view.Kind == "local" && view.FirstPrompt != 0 {
+			t.Fatalf("a local open claims a first prompt: %+v", view)
+		}
+	}
+	_ = ctx2
+}

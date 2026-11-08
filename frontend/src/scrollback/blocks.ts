@@ -61,6 +61,7 @@ import {
   type PromptContextFacts,
 } from '../ui/prompt-context'
 import { t } from '../i18n/locale-model'
+import { formatElapsed } from './elapsed'
 // ── Clipboard helper ────────────────────────────────────────────────────────
 
 async function copyToClipboardImpl(text: string): Promise<void> {
@@ -776,49 +777,20 @@ function div(className: string, ...children: (string | HTMLElement)[]): HTMLElem
   return el
 }
 
-// ── Duration formatters ────────────────────────────────────────────────────
-
-/**
- * The elapsed time of a command that is still running (spec 2026-09-15
- * §1.7): one decimal below a minute — `Running · 12.4s`, ticking at
- * `--ticker: 100ms` (BlockManager._startTicker) rather than the whole-second
- * cadence the mockup's number could not otherwise show. A minute or more
- * keeps the coarser `Nm Ns` shape: a decimal digit on a multi-minute figure
- * would read as false precision for a wait that long.
- *
- * Never called below `DURATION_FLOOR_MS`: `_startTicker` shows bare
- * "Running" instead until then (round 3) — this function has no `<0.1s`
- * branch of its own because that state is the ABSENCE of a duration meta
- * (and its separator) entirely, not a string this formatter could return.
- */
-function formatRunningDuration(ms: number): string {
-  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
-  const min = Math.floor(ms / 60000)
-  const sec = Math.floor((ms % 60000) / 1000)
-  return `${min}m ${sec}s`
-}
+// ── Duration ───────────────────────────────────────────────────────────────
 
 /** Below this, `Running · 0.0s` and a finished `0.0s` both read as "took no
  *  time" or "the timer is broken" rather than as an honest measurement
- *  (spec 2026-09-15 §1.7 round 3) — the mockup pass's own tenths precision
- *  cannot represent anything smaller. Shared by `formatDuration`'s `<0.1s`
- *  branch below and `BlockManager._startTicker`'s running-header threshold,
- *  so the two readings of "not enough time has passed to say a number"
- *  cannot drift to different figures. */
+ *  (spec 2026-09-15 §1.7 round 3). It is `_startTicker`'s running-header
+ *  threshold: below it there is no duration meta and no separator at all,
+ *  which is the absence of a figure rather than a string the formatter could
+ *  return. The FIGURES themselves are `formatElapsed`'s (./elapsed), one
+ *  wording for a running and a finished block — "167m 36s" was the second
+ *  wording's own answer to a long run (nocx-ouru5.1.7). */
 const DURATION_FLOOR_MS = 100
 
-/** Finished durations use milliseconds below a second, then tenths of seconds.
- * The exact millisecond value remains available in the title. */
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${Math.round(ms)}ms`
-  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
-  const min = Math.floor(ms / 60000)
-  const sec = ((ms % 60000) / 1000).toFixed(0)
-  return `${min}m ${sec}s`
-}
-
-/** The exact figure `formatDuration`'s tenths rounds away — a hover/title
- *  value only, never the header's own text (spec 2026-09-15 §1.7). */
+/** The exact figure the header's tenths rounds away — a hover/title value
+ *  only, never the header's own text (spec 2026-09-15 §1.7). */
 function formatDurationTitle(ms: number): string {
   return `${ms.toFixed(0)}ms`
 }
@@ -826,8 +798,9 @@ function formatDurationTitle(ms: number): string {
 // ── The header's right-hand group and the block's outcome: one owner ───────
 
 /** THE duration fact, for every kind and both states that show one. The TEXT
- *  is the caller's: a running command's ticks (formatRunningDuration) or a
- *  finished one's tenths (formatDuration, nocx-hoeq3, spec 2026-09-15 §1.7).
+ *  is the caller's, and both callers ask the SAME formatter (formatElapsed):
+ *  a running block's tenth-second ticks and a finished block's one figure are
+ *  one wording (nocx-ouru5.1.7, cf. nocx-hoeq3, spec 2026-09-15 §1.7).
  *  `titleMs`, when given, is the precise figure the tenths display rounds
  *  away — a finished duration's own; a running duration re-derives its
  *  title from the live clock instead (BlockManager._startTicker) and passes
@@ -890,7 +863,7 @@ export function settleBlockOutcome(
   const chips: Element[] = []
   for (const slot of rules.chips) {
     if (slot === 'duration') {
-      if (durationMs !== null) chips.push(durationMeta(formatDuration(durationMs), durationMs))
+      if (durationMs !== null) chips.push(durationMeta(formatElapsed(durationMs), durationMs))
       continue
     }
     const spec = rules.terminal(outcome)
@@ -1262,6 +1235,11 @@ export interface RunningBlockActions {
 
 const overflowMenuClosers = new WeakMap<HTMLElement, () => void>()
 
+/** Each block's menu, reachable at a point — the pane's right-click door
+ *  (nocx-a9x6u). Registered where the ⋮ and the rows are built, so the two
+ *  doors can never name two lists. */
+const blockMenuOpeners = new WeakMap<HTMLElement, (x: number, y: number) => void>()
+
 /**
  * Build the block's "⋮" (nocx-9bpeq.5): a kit IconButton whose click mounts
  * the kit ContextMenu as a render island — created on open, disposed on
@@ -1473,19 +1451,33 @@ function buildOverflowMenu(
     return list
   }
 
-  function openMenu(): void {
-    // Right-aligned to the button, below it: the kit turns `align: 'end'` into
-    // `x - width` and clamps through menu-geometry.ts (nocx-vnirv.2).
-    const rect = btn.getBoundingClientRect()
+  /** Show this block's menu at a point in viewport pixels.
+   *
+   *  TWO DOORS, ONE MENU (nocx-a9x6u). The ⋮ opens it hanging from its own
+   *  right edge (`align: 'end'`); a right-click on the block opens it AT THE
+   *  POINTER (`align: 'start'`, no anchor). Both reach `items()` above, the
+   *  one place the rows are decided — a second list built for the pointer
+   *  would agree with this one everywhere anyone looked and disagree about
+   *  Stop or the grant the first time a block was running.
+   *
+   *  Re-opened rather than toggled: a second right-click is a new question
+   *  about a new place, not a request to put the first answer away. */
+  function showMenu(point: {
+    x: number
+    y: number
+    align: 'start' | 'end'
+    anchor?: HTMLElement
+  }): void {
+    closeMenu()
     const host = document.createElement('div')
     dispose = render(
       () =>
         createComponent(ContextMenu, {
           open: true,
-          align: 'end',
-          anchor: btn,
-          x: rect.right,
-          y: rect.bottom + 2,
+          align: point.align,
+          anchor: point.anchor,
+          x: point.x,
+          y: point.y,
           items: items(),
           onClose: closeMenu,
           'data-testid': 'block-actions-menu',
@@ -1494,7 +1486,30 @@ function buildOverflowMenu(
     )
   }
 
+  function openMenu(): void {
+    // Right-aligned to the button, below it: the kit turns `align: 'end'` into
+    // `x - width` and clamps through menu-geometry.ts (nocx-vnirv.2).
+    const rect = btn.getBoundingClientRect()
+    showMenu({ x: rect.right, y: rect.bottom + 2, align: 'end', anchor: btn })
+  }
+
+  // The block's own menu, openable from outside this closure: the pane's
+  // right-click handler asks the BLOCK which rows it offers rather than
+  // deciding any itself (nocx-a9x6u).
+  blockMenuOpeners.set(blockEl, (x, y) => showMenu({ x, y, align: 'start' }))
+
   return btn
+}
+
+/** The block's menu at a point, for the gesture the block itself does not
+ *  receive — a right-click handled by the pane. Answers whether the block has
+ *  a menu at all: a kind with no header draws no ⋮ (BlockKind.noHeader), and
+ *  a right-click there does nothing of its own. */
+export function openBlockMenuAt(blockEl: HTMLElement, x: number, y: number): boolean {
+  const open = blockMenuOpeners.get(blockEl)
+  if (open === undefined) return false
+  open(x, y)
+  return true
 }
 
 // ── Selection helpers ──────────────────────────────────────────────────────
@@ -3025,7 +3040,7 @@ export class BlockManager {
       const elapsed = this._now() - started
       if (elapsed < DURATION_FLOOR_MS) return
       if (meta) {
-        updateMeta(meta, [formatRunningDuration(elapsed)], {
+        updateMeta(meta, [formatElapsed(elapsed)], {
           tone: 'muted',
           column: 'duration',
           size: 'terminal',
@@ -3034,7 +3049,7 @@ export class BlockManager {
       }
       const before = right.querySelector('[data-block-control], [data-block-actions]')
       right.insertBefore(createMetaSeparator({ size: 'terminal' }), before)
-      meta = durationMeta(formatRunningDuration(elapsed))
+      meta = durationMeta(formatElapsed(elapsed))
       right.insertBefore(meta, before)
     }
     // A hidden tab gains nothing from repainting ten times a second — this

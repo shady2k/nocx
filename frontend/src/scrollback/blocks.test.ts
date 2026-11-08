@@ -13,6 +13,7 @@ import {
   freezeBlock,
   deselectAllBlocks,
   getSelectedBlock,
+  openBlockMenuAt,
   blockOutputText,
   blockCommandText,
   blockKindRules,
@@ -975,6 +976,38 @@ describe('BlockManager', () => {
     }
   })
 
+  it('counts a long run in hours and days, and keeps that wording when it settles', () => {
+    // nocx-ouru5.1.7: the owner saw "167m 36s" on a finished block. One
+    // formatter answers for both states now, so the figure a person watches
+    // and the figure it becomes when the command ends cannot be two
+    // different wordings of one duration.
+    vi.useFakeTimers()
+    try {
+      const rec = manager.startBlock('make it take a while', '~', 10)
+      const durationSelector =
+        ':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]'
+      const shown = () => rec.el.querySelector<HTMLElement>(durationSelector)?.textContent ?? null
+
+      const started = fixedNow
+      const tick = (elapsed: number): void => {
+        fixedNow = started + elapsed
+        vi.advanceTimersByTime(100)
+      }
+
+      tick(43 * 60_000 + 8_000)
+      expect(shown()).toBe('43m 8s')
+      tick(2 * 3_600_000 + 47 * 60_000)
+      expect(shown()).toBe('2h 47m')
+      tick(24 * 3_600_000 + 3 * 3_600_000)
+      expect(shown()).toBe('1d 3h')
+
+      closeRunningBlock(manager)
+      expect(shown()).toBe('1d 3h')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   // `document.hidden` has one owner, app-visible.ts (grant.test.ts's "keeps
   // direct document visibility reads in the app visibility module"), so the
   // ticker's pause/resume reads it through an injected `AppVisibility`
@@ -1367,6 +1400,71 @@ describe('overflow menu (P1-6)', () => {
 
     // Clean up
     menu?.remove()
+    document.body.removeChild(container)
+  })
+
+  it('opens the SAME rows at the pointer — the pane’s right-click door (nocx-a9x6u)', () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const el = createCommandBlock(
+      'command',
+      1,
+      'echo hello',
+      '~',
+      '',
+      'output',
+      42,
+      0,
+      'success',
+      () => container,
+      noopSelect,
+      freshStore(),
+      'shell',
+    )
+    container.appendChild(el)
+
+    const rows = (menu: HTMLElement): (string | undefined)[] =>
+      [...menu.querySelectorAll<HTMLElement>('.ui-context-menu__item')].map((r) => r.dataset.itemId)
+
+    const fromButton = rows(openBlockMenu(el))
+    // The pointer's door reports that a menu exists, so the pane can let the
+    // event go when it does not.
+    expect(openBlockMenuAt(el, 120, 40)).toBe(true)
+    const menu = document.body.querySelector<HTMLElement>('[data-testid="block-actions-menu"]')!
+    // ONE LIST: the ⋮'s rows, not a second table written for the pointer.
+    expect(rows(menu)).toEqual(fromButton)
+    expect(fromButton).toContain('copy-command')
+    // AT THE POINTER: the kit places its own left/top from the point it is
+    // given (context-menu.tsx), and this asks for the top-left corner.
+    expect(menu.style.left).toBe('120px')
+    expect(menu.style.top).toBe('40px')
+
+    menu.remove()
+    document.body.removeChild(container)
+  })
+
+  it('offers no menu to open on a kind that draws no header', () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const el = createCommandBlock(
+      'text',
+      2,
+      '',
+      '~',
+      '',
+      'a run of prose',
+      0,
+      0,
+      'success',
+      () => container,
+      noopSelect,
+      freshStore(),
+      'shell',
+    )
+    container.appendChild(el)
+    expect(el.querySelector('[data-block-actions]')).toBeNull()
+    expect(openBlockMenuAt(el, 120, 40)).toBe(false)
+    expect(document.body.querySelector('[data-testid="block-actions-menu"]')).toBeNull()
     document.body.removeChild(container)
   })
 

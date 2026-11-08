@@ -315,8 +315,20 @@ export class ActionsQuickConnectProvider implements QuickConnectProvider {
  * decoration: the pane stores the endpoint it applies at, so a call that left
  * it off stored `:22` for every profile and the restore could no longer match
  * the pane back to the profile it was opened from (nocx-xhm9e).
+ *
+ * `name` is the saved connection's own name, and it is the fifth argument
+ * rather than decoration too: without it every tab opened from this palette
+ * was named by its IP, and the connection the person had named was nowhere on
+ * screen (nocx-ouru5.1.2). The `CallableWith<F, 5>` guard below is what keeps
+ * a lambda from silently dropping it the way one dropped `port`.
  */
-export type SSHPaneOpener = (profileId: string, host: string, user?: string, port?: number) => Pane
+export type SSHPaneOpener = (
+  profileId: string,
+  host: string,
+  user?: string,
+  port?: number,
+  name?: string,
+) => Pane
 
 /** The same, for rows that have no profile behind them — aliases and ad-hoc. */
 export type HostPaneOpener = (host: string, user?: string, port?: number) => Pane
@@ -371,7 +383,7 @@ export class SSHQuickConnectProvider<
      *  composition root passes the manager's method itself rather than a
      *  lambda re-listing these arguments, so there is no second parameter
      *  list to forget one in; `CallableWith` refuses one that has fewer. */
-    private newSSHPane: F & CallableWith<F, 4>,
+    private newSSHPane: F & CallableWith<F, 5>,
   ) {}
 
   async getItems(): Promise<QuickConnectItem[]> {
@@ -385,7 +397,10 @@ export class SSHQuickConnectProvider<
       kind: 'host' as const,
       label: p.label,
       detail: p.detail,
-      run: () => void this.newSSHPane(p.id, p.host, p.user, p.port),
+      // `detail` IS the saved connection's display name on a profile row
+      // (profileRows: `detail: p.name`), and it is what the tab and the
+      // composer's place line name first, beside the host (nocx-ouru5.1.2).
+      run: () => void this.newSSHPane(p.id, p.host, p.user, p.port, p.detail),
     }))
   }
 }

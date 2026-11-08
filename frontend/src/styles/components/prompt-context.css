@@ -29,6 +29,14 @@
   color: var(--color-text-muted);
 }
 
+/* The gap between a saved connection's name and its host (nocx-ouru5.1.2).
+   Its own element because the parts are bare adjacent spans: DOM adjacency
+   contributes no space, and the glyph is part of the line a person reads. */
+.ui-prompt-context__divider {
+  color: var(--color-text-muted);
+  margin-inline: 0.35em;
+}
+
 .ui-prompt-context__part[data-part='path'] {
   color: var(--color-text-muted);
 }

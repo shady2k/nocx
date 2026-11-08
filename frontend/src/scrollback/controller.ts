@@ -97,6 +97,10 @@ export class ScrollbackController {
   private readonly _liveContentHeight: () => number | null
   private readonly _cellMetrics: () => { cellWidth: number; cellHeight: number } | null
   private _mode: LiveRegionMode = 'idle'
+  /** The grid on screen is the one a full-screen program was given, kept after
+   *  it left the alternate screen and not yet handed back (ADR-2yzsq8mk
+   *  decision 4; nocx-djx1u). Only the unstructured layout reacts to it. */
+  private _borrowedGrid = false
   /** A ready prompt asked for the idle layout while a completed block was
    *  still waiting for its block.closed; applied when the close lands, and
    *  dropped the moment a command owns the live region again. */
@@ -701,7 +705,30 @@ export class ScrollbackController {
    *  announces itself through here, so the class cannot lag the mode. */
   private _announceMode(): void {
     this.scrollbackLayout.classList.toggle('inner-pane-program', this._mode === 'fullscreen')
+    // A BORROWED GRID IS THE PANE'S OWN GEOMETRY (nocx-djx1u). A markerless
+    // session has no prompt marker to hand a borrowed grid back, so the rows a
+    // full-screen program left behind are the pane's for as long as it holds
+    // them — and the four-side margin is two rows it cannot show. In the
+    // unstructured mode, and only there, the layout gives the margin up and the
+    // program's own box (no top edge, one row at the bottom) is the pane. The
+    // structured modes keep it: there the block owns the rows and scrolls.
+    this.scrollbackLayout.classList.toggle(
+      'inner-borrowed-grid',
+      this._borrowedGrid && this._mode === 'unstructured',
+    )
     this._onModeChanged?.(this._mode)
+  }
+
+  /**
+   * Say whether the grid on screen is one a program borrowed — the rows a
+   * full-screen program was given, kept after it left the alternate screen
+   * (ADR-2yzsq8mk decision 4) — so the unstructured layout can size the pane
+   * for them instead of for the ledger's margin (nocx-djx1u).
+   */
+  setBorrowedGrid(borrowed: boolean): void {
+    if (this._borrowedGrid === borrowed) return
+    this._borrowedGrid = borrowed
+    this._announceMode()
   }
 
   /** Show the alternate grid beneath the same one-line running header

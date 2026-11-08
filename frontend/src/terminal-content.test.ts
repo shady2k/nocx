@@ -21107,6 +21107,60 @@ describe('an alternate-screen switch holds input for its applied grid (nocx-1ebr
     }
   })
 
+  it('sends no exit resize from a settle timer armed before the program left (nocx-djx1u)', async () => {
+    // THE TIMER OUTLIVES THE REASON IT WAS ARMED FOR. The settle timer exists
+    // for a pane whose own grid moved; a borrowed command's grid is not this
+    // window's to report, and the scheduler says so (`fitUsableViewport`
+    // skipped it while `_ownedGrid` is set). But a timer armed BEFORE the
+    // program left is not the scheduler: it fires into the exit and sends
+    // whatever `lastLocalGridSize` says by then — the guttered column the
+    // ordinary refit just measured — which is the SIGWINCH the ADR exists to
+    // prevent (decision 4), and it is 94 columns to a pty holding 100.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const { content, session, switchFrame, drawProgramFrame, receipt, flushFrames, teardown } =
+      await switchingPane()
+    try {
+      const scrollback = scrollbackFor(content)
+      // The ledger's column, so the ordinary fit is narrower than the pane's
+      // own width and the two grids are distinguishable.
+      scrollback.scrollbackArea.style.setProperty('--pane-inline-padding', '24px')
+
+      // 1. The switch is over: its receipt applied, the fence is closed.
+      switchFrame()
+      receipt('applied')
+      // The receipt's own handler is a promise continuation, so the fence is
+      // closed one microtask later — drain them rather than a clock.
+      for (let turn = 0; turn < 10; turn++) await Promise.resolve()
+      expect(session.resizeApplied).toHaveBeenCalled()
+      const fence = content as unknown as { _fence: unknown }
+      expect(fence._fence).toBeNull()
+
+      // 2. A frame of the program's own grid arms the settle timer.
+      drawProgramFrame(3, FITTED.cols)
+      flushFrames()
+      const timer = content as unknown as { resizeTimer: number | undefined }
+      expect(timer.resizeTimer).not.toBeUndefined()
+
+      // 3. The program leaves while its command continues. The ordinary refit
+      //    runs in the same turn (the mode change schedules it) and measures
+      //    the guttered column.
+      const thaw = screenFrame(4, ['$ '], { ...CELL, cols: FITTED.cols, rows: ALT_ROWS })
+      session.fireScreenFrame(thaw)
+      flushFrames()
+      const owned = (content as unknown as { lastLocalGridSize: { cols: number } | null })
+        .lastLocalGridSize
+      expect(owned?.cols).toBe(FITTED.cols - 6)
+
+      // 4. The timer fires after the exit: nothing goes out.
+      session.sendResize.mockClear()
+      vi.advanceTimersByTime(80)
+      expect(session.sendResize).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+      vi.useRealTimers()
+    }
+  })
+
   it('holds an intent the mode change itself produces, behind the resize', async () => {
     // The mode change seats the keyboard surface, and seating it emits a focus
     // intent. That intent is produced by the switch, so it belongs behind the

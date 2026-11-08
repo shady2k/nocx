@@ -4103,6 +4103,7 @@ export class TerminalContent extends BasePaneContent {
           // ended, and this boundary is where the transcript's column returns
           // — one resize, owed here, never inside the borrow.
           this._ownedGrid = null
+          this.scrollback?.setBorrowedGrid(false)
           this.scrollback?.setIdle()
         } else if (
           this.lifecycle.state.kind === 'running' &&
@@ -6247,6 +6248,25 @@ export class TerminalContent extends BasePaneContent {
   private _ownedGrid: { cols: number; rows: number } | null = null
 
   /**
+   * Whether the grid on screen is the one a PROGRAM owns — borrowed, not
+   * measured by this window — which is the one question both resize paths ask
+   * before they report a size (nocx-djx1u).
+   *
+   * It has to be asked twice and for the same reason. `fitUsableViewport`
+   * asks it when it decides whether a fit may arm a report at all; the settle
+   * timer asks it again when it FIRES, because a timer armed before the
+   * program left outlives the reason it was armed for: it fires into the exit,
+   * after the ordinary refit has measured the ledger's column, and would send
+   * that column's width to a pty still holding the program's. That is exactly
+   * the SIGWINCH leaving the alternate screen must not cause (ADR-2yzsq8mk
+   * decision 4), so the answer is read at the wire, not only at the
+   * scheduling.
+   */
+  private _gridIsBorrowed(): boolean {
+    return this._ownedGrid !== null && this.scrollback?.mode !== 'fullscreen'
+  }
+
+  /**
    * The size report this window would send now: its locally fitted grid and
    * the cell metric in the wire's own unit — the whole text area in device
    * pixels, columns × the committed device-cell metric (TIOCSWINSZ's
@@ -6346,6 +6366,12 @@ export class TerminalContent extends BasePaneContent {
     }
     clearTimeout(this.resizeTimer)
     this.resizeTimer = window.setTimeout(() => {
+      // THE GRID MAY HAVE BEEN BORROWED WHILE THIS TIMER WAS ARMED (nocx-djx1u).
+      // The program's exit re-measures the pane at the ledger's column, and
+      // reporting that here would be the resize decision 4 forbids: the pty
+      // keeps the program's grid until its command ends, and the column is
+      // sent at the prompt — where the ordinary fit arms its own report.
+      if (this._gridIsBorrowed()) return
       // A resize makes the shell redraw its prompt, and that redraw arrives
       // on `session.onData` looking exactly like output the user has not
       // seen. It is not: we asked for it. Switching the strip from vertical
@@ -6444,7 +6470,7 @@ export class TerminalContent extends BasePaneContent {
     // them on the ledger's column, but its pty keeps the grid the program was
     // given until the command ends, so no report goes out for the placement —
     // that SIGWINCH is what would start the borrow again.
-    if (this._ownedGrid !== null && this.scrollback?.mode !== 'fullscreen') {
+    if (this._gridIsBorrowed()) {
       if (!sameViewport || !sameSize) {
         this.lastFitGeometry = { width: usable.width, height: usable.height }
         this.cols = cols
@@ -6598,7 +6624,7 @@ export class TerminalContent extends BasePaneContent {
     const sb = this.scrollback
     const metrics = this.liveCellMetrics()
     const owned = this._ownedGrid
-    if (owned !== null && metrics !== null && sb?.mode !== 'fullscreen') {
+    if (owned !== null && metrics !== null && this._gridIsBorrowed()) {
       // THE ROWS THE PROGRAM HAS, ON THE LEDGER'S COLUMN (ADR-2yzsq8mk). The
       // pty keeps the size the program was given (see `_ownedGrid`), so a
       // switch back to the primary buffer cannot resize it; what changes is
@@ -7820,6 +7846,11 @@ export class TerminalContent extends BasePaneContent {
         // sent because the program stepped out of the alternate screen would
         // arrive as the SIGWINCH that makes a borrowing program borrow again.
         this._ownedGrid = this.lastLocalGridSize
+        // AND THE LAYOUT KNOWS, because in a markerless session nothing will
+        // ever hand it back (nocx-djx1u): the four-side margin is two rows
+        // shorter than the box the program had, and the rows it clipped were
+        // the newest ones — the prompt.
+        this.scrollback?.setBorrowedGrid(true)
       }
       // A conventional terminal stays unstructured: the scrollback-block
       // model never takes over (ADR-0024 §4). Exit fullscreen before deciding

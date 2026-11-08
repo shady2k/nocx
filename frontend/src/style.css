@@ -716,6 +716,18 @@
   padding-block: 0;
 }
 
+/* AND SO DOES THE GRID A PROGRAM LEFT BEHIND (nocx-djx1u). A markerless shell
+   has no prompt marker, so the rows a full-screen program was given stay the
+   pane's after it leaves (ADR-2yzsq8mk decision 4) — and the ledger's two-row
+   vertical margin is two rows those rows do not have. While the borrowed grid
+   is on screen the layout gives the margin up, which is the same box the
+   program had: no top edge, one row of margin below (the box's own height is
+   the grid's, from `paneFillHeight`). Every painted row is inside the pane
+   again, which is the one thing decision 5 does not let the exit cost. */
+.scrollback-layout.inner-borrowed-grid {
+  padding-block: 0;
+}
+
 .scrollback-inner.inner-fullscreen-mode
   > :not(
     .terminal-live-container,

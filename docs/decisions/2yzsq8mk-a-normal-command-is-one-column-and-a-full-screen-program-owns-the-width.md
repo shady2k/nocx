@@ -100,6 +100,22 @@ two cases separated, which is what the two earlier records conflated.
   alternate screen now shares. The composer reaches its column by giving up its
   own inline padding, not by moving its card: the card's margin is what is left
   of `--pane-inline-padding` after its border and padding.
+- **A borrowed grid keeps the box it was given, where nothing can hand it back.**
+  Decision 4's release is the prompt, and a plain ssh shell has no marker to
+  announce one: the grid a full-screen program left behind stays the pane's
+  (`_ownedGrid`), and the ledger's four-side margin is two rows shorter than the
+  box the program had — one top and one bottom, against the alternate screen's
+  one bottom. The borrowed grid was drawn past the pane's bottom edge and the
+  rows it lost were the newest ones, the prompt included (nocx-djx1u, measured
+  at a 400 px pane: a 24-row grid in 22 rows of box). So in the UNSTRUCTURED
+  layout, and only there, the vertical margin gives way while a borrowed grid is
+  on screen: the pane is the program's own box — its top edge, its one row of
+  bottom margin — with the ledger's column for its width, every row it holds is
+  visible, and no resize is sent. A structured session is unchanged: the block
+  owns those rows and scrolls them, and the margin returns with the column at
+  the prompt. The price, stated: until that shell integrates or its tab closes,
+  its screen starts at the pane's top edge, which is the exception decision 5
+  already makes for a program that owns the pane.
 - A command that borrowed the alternate screen is drawn in the transcript's
   column from the moment it steps out, at the width its pty still has. Its rows
   are therefore as wide as the pane and the column cuts their right edge — a

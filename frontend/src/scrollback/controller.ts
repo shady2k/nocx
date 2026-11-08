@@ -745,7 +745,14 @@ export class ScrollbackController {
     // `runningLiveCap`).
     const cell = this._cellMetrics()?.cellHeight ?? 0
     const height = cell > 0 && max > cell ? gridRows(max, cell) * cell : max
-    this.terminalLiveContainer.style.height = `${height}px`
+    // AND THE FULL-SCREEN BOX GIVES BACK THE MARGIN ROW (ADR-2yzsq8mk). The
+    // stylesheet keeps `margin-bottom: var(--term-cell-height)` under the
+    // alternate screen, and `terminal-content`'s fit tells the program one row
+    // fewer for the same reason; a box still as tall as the whole pane would
+    // put that margin outside the scroller — no margin on screen, and a stack
+    // one row taller than the box it is drawn in.
+    const box = this._mode === 'fullscreen' && cell > 0 ? Math.max(0, height - cell) : height
+    this.terminalLiveContainer.style.height = `${box}px`
   }
 
   /** Exit alt-screen: restore normal layout. */

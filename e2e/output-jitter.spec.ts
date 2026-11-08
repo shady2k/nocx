@@ -522,15 +522,12 @@ test('a burst of rows arrives whole, in the block it will keep', async ({ page }
   const spoken = `shape: ${JSON.stringify(running.slice(-3))}`
   expect(running.length, spoken).toBeGreaterThan(20)
 
-  // THE DECIDED GEOMETRY (ADR-3kqrem7v, asserted from the outside by
-  // e2e/row-gutter.spec.ts and e2e/grid-width.spec.ts): the active rows are
-  // edge to edge — the running row starts at the pane's own left edge — while
-  // the frozen column keeps the transcript's gutter. ADR-v26axn1t asked for one
-  // column and cannot have it with those two specs; the owner keeps the
-  // behaviour and decides the shape (see the report).
+  // ONE SHAPE (ADR-2yzsq8mk): a normal command, running or finished, sits in the
+  // transcript's column, so a running row starts where the frozen one does —
+  // and that column is inset, not the pane's own edge.
   const frozenX = frames.filter((f) => f.frozenRowX === f.frozenRowX).map((f) => f.frozenRowX)
   expect(frozenX.length, spoken).toBeGreaterThan(0)
-  expect([...new Set(running.map((f) => f.rowX))], spoken).toEqual([0])
+  expect([...new Set(running.map((f) => f.rowX))], spoken).toEqual([frozenX[frozenX.length - 1]])
   expect(frozenX[frozenX.length - 1], spoken).toBeGreaterThan(0)
   expect(new Set(running.map((f) => f.blockLeft)).size, spoken).toBe(1)
 
@@ -554,4 +551,45 @@ test('a burst of rows arrives whole, in the block it will keep', async ({ page }
     frames.filter((f) => f.liveBottom - f.liveTop > f.clientH + 0.5),
     spoken,
   ).toEqual([])
+})
+
+test('a full-screen program keeps one row of margin below its last row', async ({ page }) => {
+  test.setTimeout(120_000)
+  await page.goto('/')
+  await promptReady(page)
+  await clickIntoEditor(page)
+  await page.keyboard.type("printf '\\033[?1049h\\033[H'; seq 1 200; sleep 300")
+  await page.keyboard.press('Enter')
+  const geometry = () =>
+    page.evaluate(() => {
+      const pane = document.querySelector<HTMLElement>('.pane.active')
+      const area = pane?.querySelector<HTMLElement>('.scrollback-area')
+      const live = pane?.querySelector<HTMLElement>('.terminal-live-container')
+      const grid = pane?.querySelector<HTMLElement>('.terminal-live-grid')
+      const inner = pane?.querySelector<HTMLElement>('.scrollback-inner')
+      if (!area || !live || !grid || !inner) return { settled: false }
+      const sr = area.getBoundingClientRect()
+      const lr = live.getBoundingClientRect()
+      const rows = [...grid.querySelectorAll<HTMLElement>('.term-grid-row')]
+      const painted = rows.filter((row) => (row.textContent ?? '').trim() !== '')
+      const last = painted[painted.length - 1]
+      const pitch = parseFloat(getComputedStyle(inner).getPropertyValue('--term-cell-height')) || 0
+      const lastBottom = last ? last.getBoundingClientRect().bottom : NaN
+      return {
+        // The box's own bottom edge sits one row above the pane's.
+        boxMargin: Math.round((sr.bottom - lr.bottom) * 100) / 100,
+        // And the program's last painted row is inside the box, not on its edge.
+        rowMargin: Math.round((sr.bottom - lastBottom) * 100) / 100,
+        pitch: Math.round(pitch * 100) / 100,
+        fullscreen: live.classList.contains('live-fullscreen'),
+        settled: live.classList.contains('live-fullscreen') && pitch > 0 && painted.length > 5,
+      }
+    })
+  await expect.poll(async () => (await geometry()).settled, { timeout: 20_000 }).toBe(true)
+  const g = await geometry()
+  const said = `full-screen bottom margin: ${JSON.stringify(g)}`
+  // ONE ROW OF MARGIN, inside a row's tolerance: the owner's Warp parity, so a
+  // program's last row never touches the window's bottom edge.
+  expect(Math.abs(g.boxMargin! - g.pitch!), said).toBeLessThanOrEqual(1)
+  expect(g.rowMargin!, said).toBeGreaterThan(g.pitch! - 1)
 })

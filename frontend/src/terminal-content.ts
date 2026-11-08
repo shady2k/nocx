@@ -6369,7 +6369,12 @@ export class TerminalContent extends BasePaneContent {
     if (cell > 0) {
       const max = sb.runningLiveCap
       const height = max ?? Math.max(0, this._terminalAreaPx(area!) - sb.runningHeaderHeightPx)
-      return gridRows(height, cell) * cell
+      const rows = gridRows(height, cell)
+      // A FULL-SCREEN PROGRAM ENDS ONE ROW ABOVE THE WINDOW'S EDGE
+      // (ADR-2yzsq8mk, the owner's Warp pass): the box pays that margin, so the
+      // fit gives the program one row less than the pane holds and its last row
+      // is never the window's last pixel.
+      return (sb.mode === 'fullscreen' ? Math.max(1, rows - 1) : rows) * cell
     }
     const cap = sb.runningLiveCap
     if (cap !== null) return Math.max(0, cap)
@@ -6428,11 +6433,22 @@ export class TerminalContent extends BasePaneContent {
     // own: jsdom reports 0 for both, a real pane mid-layout can report one.
     // The height is `_gridHeight`'s: the running cap, held at the prompt.
     const height = this._gridHeight(area, viewport)
-    // ADR-3kqrem7v: the active rows are edge to edge in both buffers, so the
-    // fit is the scroller's own content box — the pane's width — and a switch
-    // between the normal and alternate screen cannot change a column.
+    // ADR-2yzsq8mk: a normal command is one column with the transcript's gutter,
+    // and a full-screen program owns the whole width. The gutter is read from
+    // the STYLESHEET, not measured off the live region: measured, it lags — the
+    // running live region lives inside the block, whose width is written from
+    // the scroller's on the next sizing pass, so a pane that had just changed
+    // size was fitted against the OLD box for a frame, and the size report that
+    // followed the real box looked like a resize caused by whatever landed in
+    // between (the alternate-screen switch). The scroller's clientWidth is the
+    // pane's own content box and moves with the pane; the gutter is the one
+    // declared number every row of the ledger pays.
     const outer = area && area.clientWidth > 0 ? area.clientWidth : viewport.width
-    const width = Math.max(0, outer)
+    const gutter =
+      this.scrollback?.mode === 'fullscreen' || area === undefined
+        ? 0
+        : parseFloat(getComputedStyle(area).getPropertyValue('--pane-inline-padding')) || 0
+    const width = Math.max(0, outer - 2 * gutter)
     return { ...viewport, width, height }
   }
 

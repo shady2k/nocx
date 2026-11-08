@@ -665,12 +665,14 @@
   min-height: auto;
 }
 
-/* ADR-3kqrem7v: the alternate-screen grid fills the pane, like the primary
-   one — `e2e/grid-width.spec.ts` measures the program's columns against the
-   pane's own width. Both buffers at the pane's edge is also what makes a
-   switch change no column. */
+/* ADR-2yzsq8mk: a full-screen program owns the whole width — no ledger gutter —
+   and keeps one row of margin below its last row, the way Warp does. The margin
+   is the fit's too (`_gridHeight` gives the program one row less than the pane
+   holds, and the controller's box gives that row back), so the box never clips
+   the row it made room for. */
 .scrollback-inner > .terminal-live-container.live-fullscreen {
   padding-inline: 0;
+  margin-bottom: var(--term-cell-height, 1.2em);
 }
 
 /* ADR-3kqrem7v: alternate mode hides transcript content, while keeping the
@@ -1406,20 +1408,14 @@
 
 /* ADR-3kqrem7v: running geometry is a pane property, never a buffer-mode
    property. Frozen rows retain the ordinary transcript gutter and rhythm. */
-/* ADR-3kqrem7v, AND IT WINS HERE (see ADR-v26axn1t, which asked for one column
-   and cannot have it): the active rows are edge to edge — the running block,
-   its committed body and the live region pay no inline gutter — while the frozen
-   column keeps the transcript's. `e2e/row-gutter.spec.ts` and
-   `e2e/grid-width.spec.ts` assert exactly that ("the active grid fills the
-   pane"), and a program is fitted to the pane's own width in both buffers, so a
-   switch cannot change its column count. */
-.cmd-block.cmd-block-running,
-.scrollback-inner > .terminal-live-container.live-idle,
-.scrollback-inner > .terminal-live-container.live-unstructured,
-.cmd-block.cmd-block-running > .cmd-output,
-.cmd-block.cmd-block-running > .terminal-live-container.live-running {
-  padding-inline: 0;
-}
+/* ONE COLUMN FOR A NORMAL COMMAND, WHOLE WIDTH FOR A PROGRAM (ADR-2yzsq8mk).
+   A normal command — running or finished, at the prompt or under an
+   unstructured session — wears the transcript's gutter exactly as the frozen
+   rows do, so nothing moves when a command ends. Only the alternate screen is
+   flush, and it pays a bottom margin of one row so its last row does not touch
+   the window's edge. The running body keeps `padding-block: 0`: only the
+   inline shape is one column, and the body's vertical rhythm arrives with the
+   frozen card. */
 .cmd-block.cmd-block-running > .cmd-output {
   padding-block: 0;
 }

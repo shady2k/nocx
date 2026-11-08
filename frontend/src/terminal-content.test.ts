@@ -21094,19 +21094,29 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
     }
   })
 
-  it('keeps the same desired grid across alternate entry, output, and return with no bottom panel', async () => {
+  it('gives the alternate screen the pane’s columns and one row less, and keeps them on return', async () => {
     const { content, session, tab, sb, fits, openCommand, resize, restore } = await paneWithLayout()
     try {
       openCommand()
       const initial = fits()[fits().length - 1]
       const before = fits().length
       expect(tab.pane.querySelector('.ui-process-bar')).toBeNull()
+      // ADR-2yzsq8mk: a normal command is one column, a full-screen program
+      // owns the width and keeps one row of bottom margin — so a switch is a
+      // grid change of exactly that much, and it sends exactly one request.
+      // The pane here is 676px with the 32px header reserved, 644px of rows at
+      // a 16px pitch: 40 rows for the command, 39 for the program.
+      const alternateGrid = { cols: initial.cols, rows: 39, xpixel: 920, ypixel: 624 }
       const alternate = screenFrame(10, ['ALT'], { cols: 40, rows: 20 })
       alternate.state.bufferKind = 'alternate'
       session.fireScreenFrame(alternate)
       expect(sb.mode).toBe('fullscreen')
-      expect(session.resizeApplied).toHaveBeenLastCalledWith(initial)
+      // The columns do not move — the switch is not a re-measure of the pane —
+      // and the one row the program gives up is the margin, not a clipped row.
+      expect(session.resizeApplied).toHaveBeenLastCalledWith(alternateGrid)
       expect(tab.pane.querySelector('.ui-process-bar')).toBeNull()
+      // The request is the fence's own, not a settle report: `sendResize` is
+      // the debounced path and it stays silent.
       expect(fits()).toHaveLength(before)
 
       // Output and the header's new DOM seat are not a real pane resize.
@@ -21116,15 +21126,17 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
       content.viewportChanged({ width: 936, height: 676 })
       expect(fits()).toHaveLength(before)
 
-      // The equal applied receipt opens the switch fence. A later genuine
-      // resize follows the normal report path, rather than replacing an
-      // outstanding receipt (whose mock does not call sendResize).
+      // The applied receipt opens the switch fence. A later genuine resize
+      // follows the normal report path, rather than replacing an outstanding
+      // receipt (whose mock does not call sendResize).
       typeIntoPane(content, 'x')
       await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('text', 'x'))
       resize(776)
       await vi.waitFor(() => expect(fits()).toHaveLength(before + 1))
       const resized = fits()[fits().length - 1]
-      expect(resized).toEqual({ cols: 115, rows: 46, xpixel: 920, ypixel: 736 })
+      // The pane grew by a hundred pixels: 46 rows fit above the header, and
+      // the program is told 45 of them.
+      expect(resized).toEqual({ cols: 115, rows: 45, xpixel: 920, ypixel: 720 })
       session.fireScreenFrame(screenFrame(12, ['PRIMARY'], { cols: 40, rows: 20 }))
       expect(sb.mode).toBe('running')
       expect(fits()).toHaveLength(before + 1)
@@ -21328,8 +21340,15 @@ describe('the copy chord does not claim plain Ctrl+C (nocx-1ebrs.19.1)', () => {
 describe('an alternate-screen switch holds input for its applied grid (nocx-1ebrs.10)', () => {
   const PANE = { width: 800, height: 400 }
   const CELL = { cellWidthPx: 8, cellHeightPx: 16 }
-  /** One full-width pane less the same 32px header in both buffers. */
+  /** One pane less the same 32px header in both buffers: 400px of pane, 32px
+   *  of header, 23 rows of 16px. */
   const FITTED = { cols: 100, rows: 23 }
+  /** ADR-2yzsq8mk: the alternate screen keeps one row of bottom margin, so the
+   *  program owns one row less than the pane holds. The COLUMNS do not change
+   *  here because jsdom loads no stylesheet and computes no gutter — what this
+   *  fixture can state about a switch is the margin row. */
+  const ALT_ROWS = FITTED.rows - 1
+  const ALT_GRID_HEIGHT = ALT_ROWS * CELL.cellHeightPx
   const GRID_HEIGHT = FITTED.rows * CELL.cellHeightPx
 
   /** Mount a pane, give it a measured box and a live normal-buffer frame, then
@@ -21510,12 +21529,14 @@ describe('an alternate-screen switch holds input for its applied grid (nocx-1ebr
       switchFrame()
       // Synchronously: the switch is a known moment, and there is nothing
       // to settle. The frame the pane just accepted says 40 columns; the
-      // pane says 100, and the pane is the one that knows its box.
+      // pane says 100, and the pane is the one that knows its box. The grid
+      // the switch asks for is the full-screen one: the pane's columns, and
+      // one row less for the margin below the program's last row.
       expect(session.resizeApplied).toHaveBeenCalledWith({
         cols: FITTED.cols,
-        rows: FITTED.rows,
+        rows: ALT_ROWS,
         xpixel: PANE.width,
-        ypixel: GRID_HEIGHT,
+        ypixel: ALT_GRID_HEIGHT,
       })
     } finally {
       teardown()
@@ -21558,7 +21579,7 @@ describe('an alternate-screen switch holds input for its applied grid (nocx-1ebr
     }
   })
 
-  it('keeps the primary grid across alternate entry instead of deriving a new fit from its DOM seat', async () => {
+  it('derives the alternate grid from the pane, not from its DOM seat or its ancestors’ insets', async () => {
     const { content, session, tab, grid, switchFrame, flushFrames, teardown } =
       await switchingPane()
     try {
@@ -21566,17 +21587,20 @@ describe('an alternate-screen switch holds input for its applied grid (nocx-1ebr
       const block = scrollback.blockManager.runningBlock!
       const header = block.el.querySelector('.cmd-header')!
       // Transcript ancestors can retain prose insets. They do not own the
-      // desired grid, and seating the active live node elsewhere changes none
+      // desired grid: the full-screen program is fitted to the pane's own
+      // content width, and seating the active live node elsewhere changes none
       // of its columns or rows.
       scrollback.scrollbackInner.style.paddingLeft = '24px'
       scrollback.scrollbackInner.style.paddingRight = '24px'
       switchFrame()
       flushFrames()
+      // The switch's own request, and only it: the pane's columns and one row
+      // less for the margin (ADR-2yzsq8mk).
       expect(session.resizeApplied).toHaveBeenLastCalledWith({
         cols: FITTED.cols,
-        rows: FITTED.rows,
+        rows: ALT_ROWS,
         xpixel: PANE.width,
-        ypixel: GRID_HEIGHT,
+        ypixel: ALT_GRID_HEIGHT,
       })
       expect(session.sendResize).not.toHaveBeenCalled()
       expect(tab.pane.contains(header)).toBe(true)
@@ -21683,9 +21707,9 @@ describe('an alternate-screen switch holds input for its applied grid (nocx-1ebr
       await vi.waitFor(() =>
         expect(session.resizeApplied).toHaveBeenLastCalledWith({
           cols: 120,
-          rows: FITTED.rows,
+          rows: ALT_ROWS,
           xpixel: 960,
-          ypixel: GRID_HEIGHT,
+          ypixel: ALT_GRID_HEIGHT,
         }),
       )
       expect(session.intent).not.toHaveBeenCalledWith('text', 'q')
@@ -21695,9 +21719,9 @@ describe('an alternate-screen switch holds input for its applied grid (nocx-1ebr
       // The pointer and the keyboard both read the grid the receipt named.
       expect(session.resizeApplied).toHaveBeenLastCalledWith({
         cols: 120,
-        rows: FITTED.rows,
+        rows: ALT_ROWS,
         xpixel: 960,
-        ypixel: GRID_HEIGHT,
+        ypixel: ALT_GRID_HEIGHT,
       })
       expect(tab.pane.querySelector('.term-grid')?.textContent).toContain('ALT-READY')
     } finally {

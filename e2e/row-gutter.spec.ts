@@ -1,16 +1,15 @@
 /**
- * Rows are full width, and the gutter each kind of row wears is the one that
- * kind decided (nocx-9bpeq.8, spec 2026-09-14 §4, ADR-3kqrem7v).
+ * Rows are full width, and a normal command's rows all sit in the transcript's
+ * column (nocx-9bpeq.8, spec 2026-09-14 §4, ADR-2yzsq8mk).
  *
  * The pane used to inset everything; the ledger's rows carry that inset now so
- * a row can paint to the edge, and ADR-3kqrem7v splits the two kinds apart on
- * purpose: a FROZEN row keeps the transcript's 24px gutter, while the ACTIVE
- * grid fills the pane edge to edge, because a presentation that costs columns
- * is what let a program's screen-mode switch resize the PTY. The risk is
- * geometry, not colour: cols come from a width the fit computes, the frozen
- * block reproduces the grid at a measured cell width (nocx-dvf6k), and the
- * scrollbar must stay the pane's edge (nocx-mvbne). Every wait is on a settled
- * layout, never on a duration.
+ * a row can paint to the edge. ADR-2yzsq8mk decides which rows wear it: a
+ * normal command — running or finished — sits in the transcript's 24px gutter,
+ * so nothing moves when its card freezes, and only a full-screen program owns
+ * the whole width (e2e/grid-width.spec.ts). The risk is geometry, not colour:
+ * cols come from a width the fit computes, the frozen block reproduces the grid
+ * at a measured cell width (nocx-dvf6k), and the scrollbar must stay the pane's
+ * edge (nocx-mvbne). Every wait is on a settled layout, never on a duration.
  */
 import { test, expect, promptReady } from './harness'
 import type { Page } from './harness'
@@ -37,9 +36,9 @@ async function measure(page: Page) {
     const cs = getComputedStyle(live)
     const inlineInset = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight)
     const liveContent = live.clientWidth - inlineInset
-    // The transcript gutter a frozen block's own rows wear, read from the box
-    // that pays it rather than hard-coded: ADR-3kqrem7v keeps it on frozen
-    // rows only.
+    // The transcript gutter a normal row wears, read from the box that pays it
+    // rather than hard-coded: the frozen block and the active grid are one
+    // column (ADR-2yzsq8mk).
     const blockStyle = block ? getComputedStyle(block) : null
     const blockPadLeft = blockStyle ? parseFloat(blockStyle.paddingLeft) : 0
     // Match terminal-content.ts `usableViewport`: fitting starts at the
@@ -112,15 +111,15 @@ async function settled(page: Page, previousCols: number | null) {
 }
 
 function assertAligned(m: Awaited<ReturnType<typeof measure>>) {
-  // Each kind of row sits where its own decision puts it (ADR-3kqrem7v): the
-  // frozen column at the transcript's gutter, the active grid at the pane's
-  // edge. What is NOT allowed is either one drifting from its own rule — a
-  // frozen row off the block's padding, or an active row inset by a gutter
-  // the fit did not subtract.
+  // ONE COLUMN (ADR-2yzsq8mk): a normal command, running or finished, sits at
+  // the transcript's gutter — so nothing moves when the card freezes. What is
+  // NOT allowed is either one drifting from that rule: a frozen row off the
+  // block's padding, or an active row off the same gutter.
   expect(Math.abs((m.frozenInset ?? NaN) - m.blockPadLeft)).toBeLessThanOrEqual(GUTTER_TOLERANCE)
-  expect(Math.abs(m.liveInset), 'the active grid fills the pane').toBeLessThanOrEqual(
-    GUTTER_TOLERANCE,
-  )
+  expect(
+    Math.abs(m.liveInset - m.blockPadLeft),
+    'the active row shares the frozen column',
+  ).toBeLessThanOrEqual(GUTTER_TOLERANCE)
   if (m.gridOwner === 'session' && m.cols < m.expectedCols) {
     // An accepted session grid is not resized to fit this window. A narrower
     // grid is valid only while the scroller preserves it as a whole, and its
@@ -138,7 +137,7 @@ function assertAligned(m: Awaited<ReturnType<typeof measure>>) {
   expect(Math.abs(m.areaRight - m.paneRight)).toBeLessThanOrEqual(GUTTER_TOLERANCE)
 }
 
-test('the frozen column keeps the transcript gutter and the live grid fills the pane, before and after a resize', async ({
+test('the frozen column and the live grid share the transcript gutter, before and after a resize', async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1280, height: 800 })

@@ -731,6 +731,11 @@ export class ScrollbackController {
     this._announceMode()
   }
 
+  /** Whether the layout is holding the margin back for a borrowed grid. */
+  isBorrowedGrid(): boolean {
+    return this._borrowedGrid && this._mode === 'unstructured'
+  }
+
   /** Show the alternate grid beneath the same one-line running header
    * (ADR-3kqrem7v), preserving the actual header node and its controls. */
   enterFullscreen(): void {

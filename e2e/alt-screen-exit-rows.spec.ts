@@ -5,23 +5,30 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-// A FULL-SCREEN PROGRAM MUST NOT LEAVE THE PANE ROWS IT CANNOT SHOW (nocx-djx1u).
+// A FULL-SCREEN PROGRAM MUST NOT LEAVE THE PANE ROWS IT CANNOT SHOW, AND ITS
+// EXIT MUST NOT BE THE RESIZE (nocx-djx1u).
 //
 // Leaving the alternate screen sends no resize: a resize there is the SIGWINCH
 // that starts the next borrow (ADR-2yzsq8mk decision 4). So the pty keeps the
-// grid the program was given — including its ROWS. A plain ssh shell has no OSC
-// 133, so no authenticated prompt ever comes to release that ownership, and the
-// ordinary layout's four-side margin (one top, one bottom) is two rows shorter
-// than the full-screen box was. The borrowed grid therefore did not fit the box
-// it was drawn in, and the rows that fell off the bottom were the newest ones —
-// the prompt a person was about to type at.
+// grid the program was given — its ROWS included — and the four-side margin
+// (decision 5) is two rows shorter than the box that program had. A plain ssh
+// shell has no OSC 133, so no authenticated prompt ever comes to hand the grid
+// back; the rows that used to fall off the bottom were the newest ones, the
+// prompt included.
 //
-// The assertion is a shape, not a number: every painted row of the grid lies
-// inside the pane's visible box, and the last row of a screenful is one of
-// them. It holds at any pane height and any cell metric.
+// The owner's answer, and this is what the spec proves in order:
+//
+//   1. until something hands the grid back, the pane IS the program's box — rows
+//      all visible, no vertical margin — because the alternative is clipping;
+//   2. the hand-back moment is the person's FIRST KEY: the shell is what reads a
+//      key, so that key is the prompt a markerless session can observe, and the
+//      exit itself stays untouched;
+//   3. at that key the ledger's column and its four margins return, with exactly
+//      ONE resize — never one the program's own exit caused, and never two.
 
 const GRID = '.pane.active .terminal-live-grid'
 const ROW = '.term-grid-row'
+const LAYOUT = '.pane.active .scrollback-layout'
 
 interface Frame {
   /** The pane's visible box: the scroller the grid is drawn in. */
@@ -31,6 +38,16 @@ interface Frame {
   painted: { text: string; top: number; bottom: number }[]
   /** True when the grid box is inside the pane's box: nothing is cut. */
   fits: boolean
+}
+
+interface Layout {
+  /** The layout class that gives the vertical margin up for a borrowed grid. */
+  borrowed: boolean
+  /** The margin the layout is paying right now, in CSS pixels. */
+  paddingTop: number
+  paddingBottom: number
+  /** How many resize RPCs this page has sent since it loaded. */
+  resizes: number
 }
 
 async function frame(page: import('@playwright/test').Page): Promise<Frame | null> {
@@ -56,7 +73,22 @@ async function frame(page: import('@playwright/test').Page): Promise<Frame | nul
   )
 }
 
-test('the rows a full-screen program leaves behind are all visible (nocx-djx1u)', async ({
+async function layout(page: import('@playwright/test').Page): Promise<Layout | null> {
+  return page.evaluate((layoutSelector) => {
+    const el = document.querySelector(layoutSelector)
+    if (!(el instanceof HTMLElement)) return null
+    const style = getComputedStyle(el)
+    const counter = (window as unknown as { __nocxResizes?: unknown[] }).__nocxResizes
+    return {
+      borrowed: el.classList.contains('inner-borrowed-grid'),
+      paddingTop: parseFloat(style.paddingTop) || 0,
+      paddingBottom: parseFloat(style.paddingBottom) || 0,
+      resizes: Array.isArray(counter) ? counter.length : -1,
+    }
+  }, LAYOUT)
+}
+
+test('a borrowed grid is shown whole, and one key gives the pane its margins back (nocx-djx1u)', async ({
   page,
 }) => {
   test.setTimeout(240_000)
@@ -65,6 +97,19 @@ test('the rows a full-screen program leaves behind are all visible (nocx-djx1u)'
   const fixture = await startSshd({ home: remoteHome, cwd: remoteCwd })
   let createdId: string | null = null
   try {
+    // Every resize this page SENDS is counted, in the browser, so "exactly one"
+    // is a fact about the wire and not about what the pane drew.
+    await page.addInitScript(() => {
+      const counter: string[] = []
+      ;(window as unknown as { __nocxResizes?: unknown[] }).__nocxResizes = counter
+      const Native = window.WebSocket
+      window.WebSocket = class extends Native {
+        override send(data: Parameters<WebSocket['send']>[0]): void {
+          if (typeof data === 'string' && data.includes('"method":"resize"')) counter.push(data)
+          super.send(data)
+        }
+      }
+    })
     const sshDir = path.join(readStand().home, '.ssh')
     mkdirSync(sshDir, { recursive: true, mode: 0o700 })
     writeFileSync(path.join(sshDir, 'known_hosts'), fixture.knownHosts + '\n')
@@ -82,7 +127,7 @@ test('the rows a full-screen program leaves behind are all visible (nocx-djx1u)'
         user: fixture.user,
         keyPath: fixture.userKey,
         // No integration at all: a conventional shell, which is the mode with
-        // no prompt marker to release a borrowed grid.
+        // no prompt marker to hand a borrowed grid back.
         desiredMode: 'raw',
       },
     })
@@ -96,9 +141,8 @@ test('the rows a full-screen program leaves behind are all visible (nocx-djx1u)'
     })
     await page.keyboard.press('Enter')
 
-    // The shell must have drawn before the person speaks (the keystroke rule
-    // the layout branch's own pane-margins case records): the first painted
-    // row is the only honest readiness signal a markerless pane has.
+    // The shell must have drawn before the person speaks: the first painted row
+    // is the only honest readiness signal a markerless pane has.
     await expect
       .poll(
         async () =>
@@ -132,8 +176,8 @@ test('the rows a full-screen program leaves behind are all visible (nocx-djx1u)'
     )
     await page.keyboard.press('Enter')
 
-    // The screenful's last row is the witness: it is the newest row, and the
-    // one the clip took.
+    // 1. THE SCREENFUL IS WHOLE. The last row is the witness: it is the newest
+    //    row, and the one a two-row-short box used to cut.
     await expect
       .poll(
         async () => {
@@ -143,18 +187,44 @@ test('the rows a full-screen program leaves behind are all visible (nocx-djx1u)'
         { timeout: 40_000 },
       )
       .toBe(true)
+    const before = await frame(page)
+    const beforeLayout = await layout(page)
+    const spoken = `borrowed: ${JSON.stringify(before)} ${JSON.stringify(beforeLayout)}`
+    expect(before, spoken).not.toBeNull()
+    expect(beforeLayout, spoken).not.toBeNull()
+    // NOTHING IS CUT: the grid's box is the pane's box…
+    expect(before!.fits, spoken).toBe(true)
+    const newest = before!.painted.find((row) => row.text === 'EXITROW-40')
+    expect(newest, spoken).toBeDefined()
+    expect(newest!.bottom, spoken).toBeLessThanOrEqual(before!.area.bottom + 1)
+    // …and that is the program's own box: the pane has given up the vertical
+    // margin to hold those rows, which is the state the exit leaves behind.
+    expect(beforeLayout!.borrowed, spoken).toBe(true)
+    expect(beforeLayout!.paddingTop, spoken).toBe(0)
+    expect(beforeLayout!.paddingBottom, spoken).toBe(0)
 
-    const measured = await frame(page)
-    const spoken = `alt-screen exit: ${JSON.stringify(measured)}`
-    expect(measured, spoken).not.toBeNull()
-    // NOTHING IS CUT: the grid's box is the pane's box.
-    expect(measured!.fits, spoken).toBe(true)
-    // AND THE NEWEST ROW IS INSIDE IT — a visible row of the grid, not one
-    // painted past the pane's bottom edge.
-    const last = measured!.painted.find((row) => row.text === 'EXITROW-40')
-    expect(last, spoken).toBeDefined()
-    expect(last!.bottom, spoken).toBeLessThanOrEqual(measured!.area.bottom + 1)
-    expect(last!.top, spoken).toBeGreaterThanOrEqual(measured!.area.top - 1)
+    // 2. THE FIRST KEY IS THE PROMPT A MARKERLESS SESSION HAS. One character at
+    //    the shell; it is read, and it is what hands the grid back.
+    await page.keyboard.type('x')
+    await expect.poll(async () => (await layout(page))?.borrowed, { timeout: 20_000 }).toBe(false)
+
+    // 3. THE MARGINS ARE BACK, and the rows are the ordinary box's.
+    const after = await frame(page)
+    const afterLayout = await layout(page)
+    const spokenAfter = `released: ${JSON.stringify(after)} ${JSON.stringify(afterLayout)}`
+    expect(after, spokenAfter).not.toBeNull()
+    expect(afterLayout, spokenAfter).not.toBeNull()
+    expect(afterLayout!.paddingTop, spokenAfter).toBeGreaterThan(0)
+    expect(afterLayout!.paddingBottom, spokenAfter).toBeGreaterThan(0)
+    expect(after!.fits, spokenAfter).toBe(true)
+    // The grid came down to the box the margin leaves: the borrowed grid's rows
+    // were the full-screen count, and this one is the pane's own.
+    expect(after!.grid.rows, spokenAfter).toBeLessThan(before!.grid.rows)
+    // AND EXACTLY ONE RESIZE CAME OF IT — the one the hand-back owes, never one
+    // the exit caused, and never a second from the key or the settle.
+    await page.waitForTimeout(500)
+    const settled = await layout(page)
+    expect(settled!.resizes - beforeLayout!.resizes, spokenAfter).toBe(1)
   } finally {
     try {
       const info = await resolveBackend(page)

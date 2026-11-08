@@ -20790,7 +20790,7 @@ describe('a full-screen program is told the box that shows it (ADR-2yzsq8mk)', (
   async function markerlessPane() {
     const client = makeClient()
     const mounted = await mountTerminal(makeClipboard(), { attachToDocument: true }, client)
-    const { content } = mounted
+    const { content, tab } = mounted
     const raf = globalThis.requestAnimationFrame
     let queued: FrameRequestCallback[] = []
     globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
@@ -20826,7 +20826,7 @@ describe('a full-screen program is told the box that shows it (ADR-2yzsq8mk)', (
       scrollback.setUnstructured()
       session.fireScreenFrame(screenFrame(1, ['$ top'], CELL))
       flushFrames()
-      return { content, session, scrollback, flushFrames, teardown }
+      return { content, session, scrollback, flushFrames, tab, teardown }
     } catch (err) {
       teardown()
       throw err
@@ -20861,6 +20861,59 @@ describe('a full-screen program is told the box that shows it (ADR-2yzsq8mk)', (
       expect(after.cols).toBe(Math.floor((PANE.width - 48) / CELL.cellWidthPx))
     } finally {
       teardown()
+    }
+  })
+
+  it('keeps the borrowed grid’s rows, and hands the pane back at the first key (nocx-djx1u)', async () => {
+    // THE MARGIN IS THE PANE'S AGAIN, AND THE KEY IS WHERE IT COMES BACK. A
+    // markerless shell has no prompt marker to hand a borrowed grid back, so
+    // the exit cannot be the moment (a resize there is the SIGWINCH the
+    // borrow exists to avoid). The person's own key is the proof something is
+    // at the shell waiting to read it: the margins and the ledger's column
+    // return, one resize, never twice.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const { content, session, scrollback, flushFrames, tab, teardown } = await markerlessPane()
+    try {
+      // The paint batch — where the margin's return is decided — is a visible
+      // pane's work.
+      tab.setActive(true)
+      const alternate = screenFrame(2, ['ALT-READY'], CELL)
+      alternate.state.bufferKind = 'alternate'
+      session.fireScreenFrame(alternate)
+      flushFrames()
+      expect(scrollback.mode).toBe('fullscreen')
+      // The receipt of the switch's own resize lands, so the fence is over.
+      for (let turn = 0; turn < 10; turn++) await Promise.resolve()
+
+      // The program leaves: its rows stay the pane's, and the layout gives the
+      // vertical margin up for them (the four-side margin is two rows shorter
+      // than the box the program had).
+      const thaw = screenFrame(3, ['$ '], CELL)
+      session.fireScreenFrame(thaw)
+      flushFrames()
+      expect(scrollback.scrollbackLayout.classList.contains('inner-borrowed-grid')).toBe(true)
+
+      // The first key: the grid is handed back, and exactly one report goes
+      // out. The MARGIN waits for the paint that proves the rows fit inside it
+      // — the hand-back is a round trip, and flipping the margin at the key
+      // would cut those two rows again for its length.
+      session.sendResize.mockClear()
+      typeIntoPane(content, 'x')
+      expect(scrollback.scrollbackLayout.classList.contains('inner-borrowed-grid')).toBe(true)
+      session.fireScreenFrame(screenFrame(4, ['$ '], CELL))
+      flushFrames()
+      expect(scrollback.scrollbackLayout.classList.contains('inner-borrowed-grid')).toBe(false)
+      vi.advanceTimersByTime(80)
+      expect(session.sendResize).toHaveBeenCalledTimes(1)
+      // …and it is the pane's own grid, not the program's.
+      const report = session.sendResize.mock.calls[0][0]
+      const local = (content as unknown as { lastLocalGridSize: { cols: number; rows: number } })
+        .lastLocalGridSize
+      expect(report.cols).toBe(local.cols)
+      expect(report.rows).toBe(local.rows)
+    } finally {
+      teardown()
+      vi.useRealTimers()
     }
   })
 

@@ -113,9 +113,22 @@ two cases separated, which is what the two earlier records conflated.
   bottom margin — with the ledger's column for its width, every row it holds is
   visible, and no resize is sent. A structured session is unchanged: the block
   owns those rows and scrolls them, and the margin returns with the column at
-  the prompt. The price, stated: until that shell integrates or its tab closes,
-  its screen starts at the pane's top edge, which is the exception decision 5
-  already makes for a program that owns the pane.
+  the prompt.
+  **A markerless session's hand-back is the person's first key.** That session
+  has no prompt marker, and the exit itself must not resize (decision 4), so the
+  moment is the one the session can actually observe: the first key, committed
+  text or paste the person sends after the program left the alternate screen. A
+  program still drawing the pane would not be reading their typing, and the
+  shell is what reads it — so that key is the prompt this session has. At it the
+  ledger's column and the four margins come back together, in ONE resize: never
+  one the program's own exit caused, and never a second (a timer armed before the
+  exit is dropped at the wire, so the hand-back cannot send twice).
+  The price, stated: until that key — not until the shell integrates and not
+  until the tab closes — the shell's screen starts at the pane's top edge, which
+  is the exception decision 5 already makes for a program that owns the pane.
+  The owner's rule for the margins is untouched: a plain ssh session keeps its
+  four sides, and the only interval it gives up is the one before the person has
+  typed anything into the shell that now owns the pane.
 - A command that borrowed the alternate screen is drawn in the transcript's
   column from the moment it steps out, at the width its pty still has. Its rows
   are therefore as wide as the pane and the column cuts their right edge — a

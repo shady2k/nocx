@@ -4102,8 +4102,7 @@ export class TerminalContent extends BasePaneContent {
           // borrowed the alternate screen kept the pane's width until it
           // ended, and this boundary is where the transcript's column returns
           // — one resize, owed here, never inside the borrow.
-          this._ownedGrid = null
-          this.scrollback?.setBorrowedGrid(false)
+          this._releaseBorrowedGrid()
           this.scrollback?.setIdle()
         } else if (
           this.lifecycle.state.kind === 'running' &&
@@ -6050,6 +6049,15 @@ export class TerminalContent extends BasePaneContent {
     // rows that was a step of 170px with the newest rows clipped until it
     // landed.
     this.scrollback?.setLiveHeight(this.liveContentHeight(this._presentedSnapshot(pending)))
+    // AND THE MARGIN RETURNS WHEN THE PANE CAN HOLD THE ROWS WITH IT
+    // (nocx-djx1u). A borrowed grid is given the pane's own box because the
+    // four-side margin is two rows shorter than the box the program had; once
+    // the person's first key has handed the grid back, the shell redraws at the
+    // pane's size and this frame is the proof it has. Flipping the margin back
+    // at the key instead would cut those two rows again for the round trip the
+    // resize needs — the clipping this whole rule exists to stop, this time for
+    // a tenth of a second.
+    this._dropBorrowedMarginWhenItFits(this._presentedSnapshot(pending))
     this._widenRunningRowsToScreen()
     // A REPAINT CHANGES WHAT THE MEASUREMENT READS (nocx-1ebrs.42). The
     // output-driven resize path runs its refit in a frame scheduled BEFORE
@@ -6247,6 +6255,11 @@ export class TerminalContent extends BasePaneContent {
    */
   private _ownedGrid: { cols: number; rows: number } | null = null
 
+  /** Whether the borrowed grid has been handed back and the pane is waiting for
+   *  the shell to redraw at its own size, so the fit must leave the vertical
+   *  margin out of the height it reads (nocx-djx1u). */
+  private _borrowedReleased = false
+
   /**
    * Whether the grid on screen is the one a PROGRAM owns — borrowed, not
    * measured by this window — which is the one question both resize paths ask
@@ -6264,6 +6277,57 @@ export class TerminalContent extends BasePaneContent {
    */
   private _gridIsBorrowed(): boolean {
     return this._ownedGrid !== null && this.scrollback?.mode !== 'fullscreen'
+  }
+
+  /**
+   * Hand a borrowed grid back to the pane's own layout: the ledger's column and
+   * its four margins (ADR-2yzsq8mk decisions 4 and 5, nocx-djx1u).
+   *
+   * Called from the two moments a session can prove the program is done with
+   * the pane — an authenticated `prompt_ready`, and the person's first key in a
+   * session that has no markers. The fit that follows is the ordinary one and
+   * arms ONE settle report, so the pty is told once and the margins return with
+   * it. Nothing is sent at the alternate screen's exit itself, which is the
+   * rule the whole borrow exists to keep.
+   */
+  private _releaseBorrowedGrid(): void {
+    if (this._ownedGrid === null) return
+    this._ownedGrid = null
+    // THE PANE IS MEASURED WITH THE MARGIN IT IS GOING BACK TO (nocx-djx1u). The
+    // box still holds the borrowed rows until the shell's own redraw proves they
+    // fit inside the margin, so the fit is told to leave that margin out of the
+    // height it reads (`usableViewport`) and report the pane's own grid. Without
+    // it the fit reads the borrowed box, reports the size the pty already has,
+    // and nothing moves.
+    this._borrowedReleased = true
+    this.refitIfResized()
+  }
+
+  /**
+   * Put the ledger's vertical margin back on the paint that proves the rows fit
+   * inside it (nocx-djx1u; ADR-2yzsq8mk decision 5).
+   *
+   * The hand-back is a round trip: the key releases the grid, the report goes
+   * out, and the shell redraws at the pane's own size. Until that redraw lands
+   * the rows are still the program's, and the margin is two of them too short —
+   * so the margin waits for the frame that fits, rather than for the key.
+   */
+  private _dropBorrowedMarginWhenItFits(snapshot: ScreenSnapshot): void {
+    const sb = this.scrollback
+    if (!sb || !sb.isBorrowedGrid() || this._gridIsBorrowed()) return
+    const area = sb.scrollbackArea
+    const content = this.liveContentHeight(snapshot)
+    if (content === null || area.clientHeight <= 0) return
+    if (content <= area.clientHeight - 2 * this._paneMarginPx(area)) {
+      this._borrowedReleased = false
+      sb.setBorrowedGrid(false)
+    }
+  }
+
+  /** The ledger's margin, one number for the gutter and for the vertical pair
+   *  (ADR-2yzsq8mk): read from the stylesheet, never measured off a row. */
+  private _paneMarginPx(area: HTMLElement): number {
+    return parseFloat(getComputedStyle(area).getPropertyValue('--pane-inline-padding')) || 0
   }
 
   /**
@@ -6645,7 +6709,15 @@ export class TerminalContent extends BasePaneContent {
     // and the next viewport delivery corrects it. Each axis falls back on its
     // own: jsdom reports 0 for both, a real pane mid-layout can report one.
     // The height is `_gridHeight`'s: the running cap, held at the prompt.
-    const height = this._gridHeight(area, viewport)
+    // A HANDED-BACK GRID IS MEASURED WITH THE MARGIN IT RETURNS TO (nocx-djx1u).
+    // The box still holds the borrowed rows until the shell's redraw, and the
+    // fit must not report that box: the pane's own grid is the one the margin
+    // leaves, and it is the size the pty is owed. Both sides of the vertical
+    // pair come off, which is the same token the gutter uses.
+    const height =
+      this._borrowedReleased && area !== undefined
+        ? Math.max(0, this._gridHeight(area, viewport) - 2 * this._paneMarginPx(area))
+        : this._gridHeight(area, viewport)
     // ADR-2yzsq8mk: a normal command is one column with the transcript's gutter,
     // and a full-screen program owns the whole width. The gutter is read from
     // the STYLESHEET, not measured off the live region: measured, it lags — the
@@ -7846,6 +7918,7 @@ export class TerminalContent extends BasePaneContent {
         // sent because the program stepped out of the alternate screen would
         // arrive as the SIGWINCH that makes a borrowing program borrow again.
         this._ownedGrid = this.lastLocalGridSize
+        this._borrowedReleased = false
         // AND THE LAYOUT KNOWS, because in a markerless session nothing will
         // ever hand it back (nocx-djx1u): the four-side margin is two rows
         // shorter than the box the program had, and the rows it clipped were
@@ -9504,6 +9577,25 @@ export class TerminalContent extends BasePaneContent {
   private onSessionIntent(intent: SessionIntent): boolean {
     if (this._attachment.kind !== 'attached') return false
     if (isAwaitingIntegration(this._integration, this._awaitsIntegration)) return false
+    // THE FIRST KEY HANDS A BORROWED GRID BACK (nocx-djx1u; ADR-2yzsq8mk
+    // decision 4). In a session with an authenticated prompt that job belongs
+    // to the prompt; a markerless session has none, and leaving the alternate
+    // screen must not resize — that SIGWINCH is what makes a program borrow
+    // again. What the person's own key proves is that something is at the
+    // shell, waiting: a program that is still drawing the pane would not be
+    // reading their typing, and the shell is what reads it. So that key is the
+    // prompt a markerless session can observe, and it is where the ledger's
+    // column and its four margins come back — one resize, once per exit, and
+    // never one the program's own exit caused.
+    //
+    // Only input counts: a focus change or a pointer report is not the person
+    // speaking to a shell.
+    if (
+      this._ownedGrid !== null &&
+      (intent.kind === 'key' || intent.kind === 'text' || intent.kind === 'paste')
+    ) {
+      this._releaseBorrowedGrid()
+    }
     // THE SWITCH'S FENCE COMES FIRST (nocx-1ebrs.10). Everything the person
     // produces after an alternate-screen switch waits for the resize receipt,
     // and it waits in ONE queue so the order they produced survives — a focus

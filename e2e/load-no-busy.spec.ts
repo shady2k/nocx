@@ -59,7 +59,7 @@ interface FilesCall {
   bindingId?: string
   path?: string
   state?: string
-  error?: unknown
+  error?: { code?: number; message?: string }
 }
 
 interface WireStats {
@@ -217,7 +217,17 @@ async function installWireInstrument(page: Page): Promise<void> {
                 const call = stats.files.find((entry) => entry.id === frame.id)
                 if (call !== undefined) {
                   call.state = frame.result?.state
-                  call.error = frame.error
+                  const error = frame.error
+                  if (typeof error === 'object' && error !== null) {
+                    call.error = {
+                      code:
+                        'code' in error && typeof error.code === 'number' ? error.code : undefined,
+                      message:
+                        'message' in error && typeof error.message === 'string'
+                          ? error.message
+                          : undefined,
+                    }
+                  }
                   if (frame.result?.bindingId !== undefined) {
                     call.bindingId = frame.result.bindingId
                   }
@@ -531,14 +541,18 @@ test('a person never sees busy under load', async ({ page }, testInfo) => {
     // The fixture's finally closes both SSH tabs. The shared reporter runs
     // afterwards, when its snapshot and last frames no longer show the
     // failed directory or its response. Preserve this boundary first.
-    await testInfo.attach('files-before-teardown', {
-      contentType: 'application/json',
-      body: JSON.stringify({
-        fault,
-        wire: await wireStats(page),
-        tree: await page.getByRole('tree', { name: 'Files', exact: true }).ariaSnapshot(),
-      }),
-    })
+    try {
+      await testInfo.attach('files-before-teardown', {
+        contentType: 'application/json',
+        body: JSON.stringify({
+          fault,
+          wire: await wireStats(page),
+          tree: await page.getByRole('tree', { name: 'Files', exact: true }).ariaSnapshot(),
+        }),
+      })
+    } catch {
+      // Evidence collection must not replace the assertion that failed.
+    }
     throw error
   } finally {
     churnerProc?.kill('SIGKILL')

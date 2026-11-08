@@ -21931,3 +21931,136 @@ describe('a cancelled open', () => {
     }
   })
 })
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A slow open says so in the pane (nocx-q9od5)
+// ═══════════════════════════════════════════════════════════════════════════
+// The owner's blank pane: a first open of a host where the helper is not
+// installed is mostly a 15.3 MB upload, and for the whole of it the pane drew
+// nothing. The Operations row existed and the person was not looking at it.
+//
+// What is asserted here is the WIRING, which the card's own unit test cannot
+// see: the pane mounts a card once the open has outlived its grace, the card
+// is named by the work the backend reports INSIDE that call (matched by the
+// call id the dispatcher announced, so a frame about another call is not
+// shown), its Cancel withdraws that call, and the card goes when the call
+// settles.
+describe('a slow open states what it is doing in the pane (nocx-q9od5)', () => {
+  function mountOpeningSsh(pending: Promise<SessionFake>, cancel: () => void) {
+    const clientFake = makeClient({
+      openSSHSessionByHost: vi.fn(
+        (
+          _size: unknown,
+          _host: string,
+          _user: string | undefined,
+          _anchor: unknown,
+          _mode: string | undefined,
+          watch?: (call: {
+            id: number
+            method: string
+            startedAt: number
+            cancel: () => void
+          }) => void,
+        ) => {
+          watch?.({ id: 7, method: 'open', startedAt: Date.now(), cancel })
+          return pending
+        },
+      ),
+    })
+    const content = new TerminalContent(
+      clientFake as unknown as WSClient,
+      anchoredPane(),
+      makeClipboard(),
+      new ClipboardGate(),
+      makeBanner(),
+      null,
+      () => {},
+      { profileId: '', host: '192.0.2.57', user: 'root' },
+    )
+    const tab = new Pane(
+      content,
+      {
+        surfaceType: SURFACE_TERMINAL,
+        singletonKey: null,
+        restoreDescriptor: { type: 'local' },
+        supportsAttention: true,
+        defaultTitle: 'Terminal',
+      },
+      99,
+      'tab-99',
+    )
+    const parent = document.createElement('div')
+    parent.append(tab.pane)
+    document.body.append(parent)
+    // NOT awaited: the open is the thing under test, and it has not answered.
+    const started = tab.start()
+    return {
+      clientFake,
+      content,
+      tab,
+      started,
+      teardown: () => {
+        tab.close()
+        parent.remove()
+      },
+    }
+  }
+
+  it('mounts no card until the open outlives the grace, then names the call’s own work', async () => {
+    // Promise.withResolvers needs ES2024 and this project targets ES2021.
+    let resolve!: (s: SessionFake) => void
+    const promise = new Promise<SessionFake>((done) => {
+      resolve = done
+    })
+    const cancel = vi.fn()
+    const { clientFake, tab, started, teardown } = mountOpeningSsh(promise, cancel)
+    try {
+      // The mount reaches the open through its own awaits; the grace starts
+      // when the CALL is sent, which is the state this test drives.
+      await vi.waitFor(() => expect(clientFake.openSSHSessionByHost).toHaveBeenCalled())
+      // THE FREE FLASH IS NOT DRAWN: an open that answers inside the grace
+      // shows no card at all, so a local tab never flickers one.
+      expect(tab.pane.querySelector('.ui-status-card')).toBeNull()
+      await vi.waitFor(() => expect(tab.pane.querySelector('.ui-status-card')).not.toBeNull())
+      const card = tab.pane.querySelector('.ui-status-card')
+      expect(card).not.toBeNull()
+      expect(card?.textContent).toContain('Opening your terminal')
+      expect(card?.textContent).toContain('192.0.2.57')
+
+      // The backend's account of the work inside THIS call replaces the
+      // title and adds the numbers — the same words the Operations row uses.
+      clientFake._fireOperationRow({
+        callID: 7,
+        title: 'Copying the nocx helper',
+        done: 3_200_000,
+        total: 15_300_000,
+        machine: 'root@192.0.2.57',
+      })
+      expect(card?.textContent).toContain('Copying the nocx helper')
+      expect(card?.textContent).toContain('3.2 MB of 15.3 MB')
+
+      // A ROW ABOUT ANOTHER CALL IS NOT THIS PANE'S (somebody else's install).
+      clientFake._fireOperationRow({
+        callID: 99,
+        title: 'Copying the nocx helper',
+        done: 1,
+        total: 15_300_000,
+        machine: 'other@elsewhere',
+      })
+      expect(card?.textContent).toContain('3.2 MB of 15.3 MB')
+
+      // Cancel is the call's own withdrawal, not a second one.
+      const button = card?.querySelector('button')
+      if (!button) throw new Error('the card drew no Cancel')
+      button.click()
+      expect(cancel).toHaveBeenCalledTimes(1)
+
+      // And the call settling retires the card.
+      resolve(makeSession())
+      await started
+      expect(tab.pane.querySelector('.ui-status-card')).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+})

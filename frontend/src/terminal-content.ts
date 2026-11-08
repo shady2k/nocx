@@ -103,6 +103,7 @@ import {
   type ReconnectOfferHandle,
   type AttachOfferHandle,
 } from './reconnect-offer'
+import { mountOpeningCard, type OpeningCardHandle, type OpeningCardState } from './opening-card'
 import {
   autoReconnectDelayMs,
   AUTO_RECONNECT_ATTEMPTS,
@@ -184,6 +185,7 @@ import { subscribeTerminalFontChanges } from './terminal-font'
 import { log, logDecision, isDecisionTracing } from './log'
 import type { BlockClosed } from './generated/block.closed'
 import type { WSClient, SessionHandle, OpenAnchor, SessionSize, SessionAttachment } from './ipc'
+import type { PendingCallView } from './dispatcher'
 import { showConfirm } from './ui/dialog'
 import { createFilesPanelServices } from './files/files-client'
 import { attachTerminalDrop, TERMINAL_DROP_TARGET } from './files/terminal-drop'
@@ -2867,19 +2869,115 @@ export class TerminalContent extends BasePaneContent {
     if (this._latestViewport) {
       this.fitUsableViewport(this.usableViewport(this._latestViewport))
     }
-    if (!this.sshOpts) {
-      return this.client.openSession(this._reportedSize(), anchor)
+    // WHAT THE PERSON SEES WHILE THIS TAKES MINUTES (nocx-q9od5). The open's
+    // own stages end in 150 ms on a healthy link, but a first open of a host
+    // where the helper is not installed is mostly a 15.3 MB upload — and the
+    // pane said nothing at all for the whole of it. The card is mounted here,
+    // where the call is made, and retired when it settles.
+    this._beginOpeningStatement()
+    try {
+      if (!this.sshOpts) {
+        return await this.client.openSession(this._reportedSize(), anchor, this._watchOpeningCall)
+      }
+      if (this.sshOpts.profileId) {
+        return await this.client.openSSHSession(
+          this._reportedSize(),
+          this.sshOpts.profileId,
+          anchor,
+          this._watchOpeningCall,
+        )
+      }
+      return await this.client.openSSHSessionByHost(
+        this._reportedSize(),
+        this.sshOpts.host,
+        this.sshOpts.user,
+        anchor,
+        this._sessionDesiredModeOverride,
+        this._watchOpeningCall,
+      )
+    } finally {
+      this._endOpeningStatement()
     }
-    if (this.sshOpts.profileId) {
-      return this.client.openSSHSession(this._reportedSize(), this.sshOpts.profileId, anchor)
-    }
-    return this.client.openSSHSessionByHost(
-      this._reportedSize(),
-      this.sshOpts.host,
-      this.sshOpts.user,
-      anchor,
-      this._sessionDesiredModeOverride,
+  }
+
+  // ── The pane's own account of a slow open (nocx-q9od5) ──────────────────
+  /** The card, once the open has outlived the grace below. */
+  private _openingCard: OpeningCardHandle | null = null
+  /** The call the card is about: its id names the work the backend reports
+   *  inside it, and its cancel is what the card's button presses. */
+  private _openingCall: PendingCallView | null = null
+  /** The grace before the card is drawn. An open that finishes sooner than
+   *  this — every local pane, every repeat ssh open — shows no card rather
+   *  than one that flickers; an open that lasts is what the card is for. */
+  private static readonly OPENING_CARD_GRACE_MS = 300
+  private _openingTimer: ReturnType<typeof setTimeout> | null = null
+  private _openingUnsubs: (() => void)[] = []
+  /** The install progress the backend last reported for THIS call, so a frame
+   *  that arrives before the card is mounted still reaches it. */
+  private _openingProgress: { done: number; total: number } | undefined
+
+  /** The dispatcher's announce, handed to the client so the card can name its
+   *  own call and cancel it. Bound once, in the constructor, so the identity
+   *  the client keeps is stable. */
+  private _watchOpeningCall = (call: PendingCallView): void => {
+    this._openingCall = call
+  }
+
+  private _beginOpeningStatement(): void {
+    this._endOpeningStatement()
+    this._openingProgress = undefined
+    this._openingUnsubs.push(
+      this.client.onOperationRow((row) => {
+        if (this._openingCall === null || row.callID !== this._openingCall.id) return
+        this._openingProgress = row.total > 0 ? { done: row.done, total: row.total } : undefined
+        this._openingCard?.set(this._openingState(row.title))
+      }),
     )
+    this._openingTimer = setTimeout(() => {
+      this._openingTimer = null
+      this._showOpeningCard()
+    }, TerminalContent.OPENING_CARD_GRACE_MS)
+  }
+
+  private _openingState(title?: string): OpeningCardState {
+    return {
+      title: title ?? t('operations.waiting.open', 'Opening your terminal'),
+      host: this._openingDestination(),
+      progress: this._openingProgress,
+      onCancel: () => this._openingCall?.cancel(),
+    }
+  }
+
+  /** The machine the card names. The environment projection has not run yet
+   *  — nothing is bound — so the answer is the destination the person
+   *  clicked, which is the one thing about this wait that is already true. */
+  private _openingDestination(): string {
+    const bound = this.hostLabel()
+    if (bound !== '') return bound
+    const ssh = this.sshOpts
+    if (ssh === undefined) return ''
+    return remoteMachineName(ssh.user, ssh.host)
+  }
+
+  private _showOpeningCard(): void {
+    if (this._disposed || this._paneTarget === null) return
+    if (this._openingCard !== null) return
+    // A session that arrived is the end of the wait, whatever the call is
+    // still doing: a card under a live shell would be a claim about nothing.
+    if (this.session !== null) return
+    this._openingCard = mountOpeningCard(this._paneTarget, this._openingState())
+  }
+
+  private _endOpeningStatement(): void {
+    if (this._openingTimer !== null) {
+      clearTimeout(this._openingTimer)
+      this._openingTimer = null
+    }
+    for (const stop of this._openingUnsubs) stop()
+    this._openingUnsubs = []
+    this._openingCard?.dispose()
+    this._openingCard = null
+    this._openingCall = null
   }
 
   /** A one-shot integration-method override for a hand-typed connection with
@@ -9699,6 +9797,7 @@ export class TerminalContent extends BasePaneContent {
 
   dispose(): void {
     this._disposed = true
+    this._endOpeningStatement()
     this._cancelDeferredShellSubmissions()
     // The input element goes with the pane (nocx-zg3k3.3.1): it holds the
     // keyboard and a live listener set, and a disposed pane that kept either

@@ -15,11 +15,17 @@ export interface SessionSize {
 import type { Gap as RecoveryGap, SessionRecoveryStatus } from './generated/session.recoveryStatus'
 import type { SessionOutputGap as SessionOutputGapNotification } from './generated/session.outputGap'
 import type { SessionRecoveryChanged } from './generated/session.recoveryChanged'
-// The stretch nothing kept is spelled once, in recovery-account.ts, where the
-// account that renders it is derived. Imported here because this file is what
-// mints the derived range at a reclaim (reclaimSession), and one spelling of
-// the word is the whole point (nocx-fz4qa).
-import { UNRECORDED } from './recovery-account'
+/** The gap reason for a stretch that neither the recording nor the ring
+ *  holds. The renderer DERIVES this one because only it can: `produced`
+ *  belongs to session.output and `replayFrom` to sessions.live, and neither
+ *  owner can see the other's number. Minted here, at the one place that
+ *  holds both (reclaimSession), and carried to the wire's readers as the
+ *  range's reason. The backend mints the same word for a range nobody
+ *  recorded on its side (internal/content's GapReasonUnrecorded,
+ *  nocx-k6p18.2): one fact — nobody has these bytes — arrived at from two
+ *  directions, and one fact told to a person in two vocabularies is the
+ *  defect. Keep them equal. */
+const UNRECORDED = 'unrecorded'
 
 import type { SessionDisplaced } from './generated/session.displaced'
 import type { SessionLiveness } from './generated/session.liveness'
@@ -528,15 +534,31 @@ export class SessionHandle {
     this.client.onSessionReset(this.sessionId, cb)
   }
 
-  /** Registers the visible live-stream notice for an output gap. */
+  /** Observes a live output gap the transport reported, in stream order.
+   *
+   *  NOTHING PAINTS IT ANY MORE (nocx-ipuy3, the owner's decision of
+   *  2026-11-08): the card that stated these bytes was removed, and what a
+   *  person can READ is stated at a cut in the block's own stored rows
+   *  (scrollback/block-rows.ts). The gap is still this layer's fact — it
+   *  moves the byte cursor and is acknowledged here, and one that does not
+   *  meet the cursor stops the session — so the handle still carries it for
+   *  whoever observes the stream, the ipc tests among them. */
   onOutputGap(cb: (gap: SessionOutputGapNotification) => void): void {
     this.client.onSessionOutputGap(this.sessionId, cb)
   }
 
   /** Registers for the recording's own revisions of what this session no
    *  longer holds (nocx-zg3k3.14.24). The callback carries nothing: this handle
-   *  is where the fact lives, so a surface re-reads `recovered` — the same
+   *  is where the fact lives, so an observer re-reads `recovered` — the same
    *  field it read when the pane mounted, now stating what the ledger states.
+   *
+   *  NOTHING SUBSCRIBES TODAY (nocx-ipuy3, the owner's decision of
+   *  2026-11-08): the card that stated this number was removed, and the
+   *  replacement names a cut in the block's rows, which is the store's own
+   *  fact and needs no revision pushed to it. The handle keeps the revision
+   *  so `recovered` never goes stale for the reader that states it next —
+   *  the reclaim read its answer before it attached, while the recorder was
+   *  still catching up.
    *
    *  The latest revision is delivered at registration as well as on arrival
    *  (WSClient.onSessionRecoveryChanged), because a revision that landed
@@ -552,10 +574,9 @@ export class SessionHandle {
   /** Compose one revision with what only this handle could derive. The ledger
    *  owns its gaps; this handle owns the stretch nothing kept, and dropping it
    *  because the ledger has nothing to say about it would shrink the account
-   *  the card states. Null `recovered` — a handle that opened rather than
-   *  reclaimed — learns nothing from a revision: it has no card to correct, and
-   *  giving it one would raise a notice about a session that never lost
-   *  anything. */
+   *  `recovered` states. Null `recovered` — a handle that opened rather than
+   *  reclaimed — learns nothing from a revision: it recovered nothing, and
+   *  giving it a record would claim a session that never lost anything. */
   private applyRecoveryRevision(revision: SessionRecoveryChanged): void {
     if (this.recovered === null) return
     this.recovered = {

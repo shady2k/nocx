@@ -1145,18 +1145,6 @@
       "snippet": "search history"
     },
     {
-      "file": "src/recovery-notice.tsx",
-      "line": 116,
-      "context": "attr:ariaLabel",
-      "snippet": "Dismiss"
-    },
-    {
-      "file": "src/recovery-notice.tsx",
-      "line": 194,
-      "context": "attr:title",
-      "snippet": "bytes of live output are missing"
-    },
-    {
       "file": "src/scrollback/blocks.ts",
       "line": 994,
       "context": "prop:label",

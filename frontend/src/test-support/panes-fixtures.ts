@@ -262,8 +262,10 @@ export interface SessionFake {
   /** The recording's own revision of what it still holds
    *  (session.recoveryChanged, nocx-zg3k3.14.24). The handle owns the fact,
    *  so firing it REPLACES `recovered` before telling the surface — exactly
-   *  what SessionHandle.onRecoveryChanged does, and what makes a card that
-   *  reads `recovered` again the behaviour under test. */
+   *  what SessionHandle.onRecoveryChanged does. Nothing in the product reads
+   *  it since the missing-output card was removed (nocx-ipuy3); the seam stays
+   *  because it is the handle's own fact, and a pane test that drives it is
+   *  measuring the handle. */
   onRecoveryChanged: (cb: () => void) => () => void
   /** Fire one revision of the recovery account, as the backend would. */
   fireRecoveryChanged(recovery: SessionRecovery): void

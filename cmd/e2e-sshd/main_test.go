@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/creack/pty"
 	"github.com/pkg/sftp"
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -842,5 +843,64 @@ func TestSFTPUploadRateIsTheSlowLinkOnlyWhileItsGateIsAbsent(t *testing.T) {
 	}
 	if got := sftpUploadRate(); got != 0 {
 		t.Fatalf("once the gate exists the link is paced at %d, want ordinary", got)
+	}
+}
+
+// The far program's input record: what a spec reads to decide "the bytes the
+// shell received equal the bytes that were typed" (nocx-3j4ua).
+//
+// The writer must record exactly what the pty ACCEPTED, never what it tried
+// to write: a short write recorded whole would make the file claim bytes the
+// program never had, which is the one error a comparison against typed input
+// cannot absorb.
+func TestInputLog_RecordsOnlyTheBytesThePtyAccepted(t *testing.T) {
+	dir := t.TempDir()
+	inputLogDir = dir
+	t.Cleanup(func() { inputLogDir = "" })
+
+	first, firstName, err := openInputLog()
+	if err != nil {
+		t.Fatalf("openInputLog: %v", err)
+	}
+	if firstName == "" || !strings.HasPrefix(firstName, dir) {
+		t.Fatalf("the input log path %q is not under the directory that was asked for (%q)", firstName, dir)
+	}
+	second, secondName, err := openInputLog()
+	if err != nil {
+		t.Fatalf("openInputLog: %v", err)
+	}
+	if secondName == firstName {
+		t.Fatalf("two shell channels share the input log %q; a spec could not tell one session's bytes from another's", firstName)
+	}
+
+	// A real pty on one side, so the accepted count is the kernel's answer
+	// rather than a number this test made up.
+	master, slave, err := pty.Open()
+	if err != nil {
+		t.Fatalf("pty open: %v", err)
+	}
+	t.Cleanup(func() { _ = master.Close(); _ = slave.Close() })
+	w := recordingWriter{master: master, log: first}
+	payload := []byte("apt-get update\r")
+	n, werr := w.Write(payload)
+	if werr != nil || n != len(payload) {
+		t.Fatalf("recorded write = (%d, %v), want (%d, nil)", n, werr, len(payload))
+	}
+	_ = first.Close()
+	_ = second.Close()
+
+	recorded, err := os.ReadFile(firstName) //nolint:gosec // a path this test just created under t.TempDir()
+	if err != nil {
+		t.Fatalf("read the input log: %v", err)
+	}
+	if string(recorded) != string(payload) {
+		t.Fatalf("the log holds %q, want exactly the bytes the pty accepted %q", recorded, payload)
+	}
+	other, err := os.ReadFile(secondName) //nolint:gosec // a path this test just created under t.TempDir()
+	if err != nil {
+		t.Fatalf("read the second input log: %v", err)
+	}
+	if len(other) != 0 {
+		t.Fatalf("the second shell channel's log holds %q; it saw no input", other)
 	}
 }

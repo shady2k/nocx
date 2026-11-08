@@ -15,9 +15,9 @@
  *
  * WHY A CARD AND NOT A CHIP PER BLOCK. The cause is one fact about one host,
  * and five blocks from the same session would repeat it five times while each
- * copy had room for a word rather than a sentence. It is the shape
- * recovery-notice.tsx settled on for the same reason, and everything visible
- * here is a kit component this surface places (frontend/src/ui/README.md).
+ * copy had room for a word rather than a sentence. It is the same shape the
+ * integration card settled on, and everything visible here is a kit component
+ * this surface places (frontend/src/ui/README.md).
  *
  * WHAT IT MUST NOT SAY. It never claims the session ended and it never claims
  * it is still running — nobody knows, which is the whole point. It says what
@@ -120,7 +120,7 @@ function unreconciledTitle(account: UnreconciledAccount): string {
 
 /** …and why. A cause this build has no sentence for is carried through in the
  *  wire's own word rather than translated into something this build cannot
- *  stand behind — the rule recovery-notice.tsx states for a gap reason. */
+ *  stand behind — the rule the block-rows cut marker states for a gap reason. */
 function unreconciledDescription(account: UnreconciledAccount): string {
   const reasons = account.causes.map((c) => SENTENCES[c] ?? `nobody could be asked ("${c}").`)
   return t('panes.unreconciled.desc', 'Their session may still be running: {reasons}', {
@@ -163,7 +163,7 @@ function UnreconciledNotice(props: { account: UnreconciledAccount; onDismiss: ()
  * nothing to report.
  *
  * NULL RATHER THAN AN EMPTY MOUNT, so the decision is taken exactly once, here,
- * from unreconciledAccount — the same shape mountRecoveryNotice uses, and it
+ * from unreconciledAccount — the same shape mountPublishNotice uses, and it
  * goes in the same place for the same reason: the pane is a flex column, the
  * card takes its own height off the top, and a message about the session must
  * not cover the session.

@@ -491,10 +491,23 @@ test('a person never sees busy under load', async ({ page }, testInfo) => {
     const pendingItem = pending.locator('.ui-tree-row')
     await expect(pendingItem).toHaveAttribute('aria-expanded', 'false')
     await expect(pendingItem).not.toHaveAttribute('data-busy', 'true')
-    const beforeBlock = await wireStats(page)
-    const blockedBinding = beforeBlock.files.findLast((call) => call.method === 'files.open')
-    expect(blockedBinding?.bindingId, 'the blocked tab opened its Files binding').toBeTruthy()
     const pendingPath = await pending.getAttribute('data-path')
+    const beforeBlock = await wireStats(page)
+    // Other consumers open bindings on the same session. Follow the listing
+    // that populated this row's parent, not the last files.open response.
+    const parentListing = beforeBlock.files.findLast(
+      (call) =>
+        call.method === 'files.list' &&
+        call.path === pendingPath?.slice(0, pendingPath.lastIndexOf('/')) &&
+        call.state === 'ok',
+    )
+    const blockedBinding = beforeBlock.files.find(
+      (call) => call.method === 'files.open' && call.bindingId === parentListing?.bindingId,
+    )
+    expect(blockedBinding?.bindingId, 'the blocked tab opened its Files binding').toBeTruthy()
+    expect(blockedBinding?.sessionId, 'the parent listing belongs to the newly opened tab').toBe(
+      beforeBlock.files.findLast((call) => call.method === 'files.open')?.sessionId,
+    )
     blocked.blackhole()
     fault = 'blackhole'
     await pending.click({ noWaitAfter: true })

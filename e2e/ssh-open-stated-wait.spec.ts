@@ -171,7 +171,7 @@ test('a slow open states its wait in the pane, cancels, and draws no cursor with
     // ── the cursor is not drawn while there is no grid ───────────────────
     // Read across the wait, not once: a cursor that appears for a frame and
     // is hidden again is the owner's defect too.
-    for (const _ of [1, 2, 3]) {
+    for (let reading = 0; reading < 3; reading++) {
       await expect(page.locator(CURSOR)).toBeHidden()
     }
 

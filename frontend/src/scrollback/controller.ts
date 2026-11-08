@@ -493,6 +493,17 @@ export class ScrollbackController {
     // it, this region is that body while the command runs, and the cap is a
     // ceiling on the whole box rather than on the rows inside it.
     const content = Math.min(Math.max(0, px - this._echoShiftPx()), Math.max(0, max - pad))
+    // ONE ARITHMETIC FOR THE BOX AND THE GRID (owner, 2026-11-08: "a row never
+    // moves down by a line when the live box grows by one"). The grid is
+    // translated by exactly what the box does NOT show — `px - content` —
+    // never by the anchor's own offset. The two agree while the box is
+    // growing with its rows; they part company the moment the CAP clamps,
+    // which is where the echo shift's release used to land: a frame measured
+    // in an ssh session carried the shift from 68px to 0 (four rows) while
+    // the box grew by only three, and every visible row moved DOWN a line.
+    // Derived this way a row's place is `bottom + row·cell - px`: a function
+    // of the painted content alone, so releasing the shift cannot move it.
+    this._applyShift(px - content)
     const box = `${content + pad}px`
     // Keep the block's bottom at the bottom of the view — but only on the
     // frames where the box actually CHANGED SIZE. This runs on every chunk of
@@ -624,9 +635,17 @@ export class ScrollbackController {
   /** Apply the echo shift to the grid, or clear it. The write is guarded:
    *  identical values are skipped so the per-frame sizing pass does not
    *  rewrite the style on every chunk of output. */
+  /** The grid's translation for the region's current structural state — the
+   *  anchor's own offset, for the frames before a height has been measured. */
   private _applyEchoShift(): void {
-    const px = this._echoShiftPx()
-    const next = px > 0 ? `translateY(-${px}px)` : ''
+    this._applyShift(this._echoShiftPx())
+  }
+
+  /** Translate the grid so that the rows below `shift` px of it are the ones
+   *  the box shows. The write is guarded: identical values are skipped so the
+   *  per-frame sizing pass does not rewrite the style on every chunk. */
+  private _applyShift(shift: number): void {
+    const next = shift > 0.01 ? `translateY(-${Math.round(shift * 100) / 100}px)` : ''
     if (this.terminalLiveInner.style.transform === next) return
     this.terminalLiveInner.style.transform = next
   }

@@ -644,12 +644,17 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     expect(controller.terminalLiveContainer.style.height).toBe('0px')
     expect(controller.terminalLiveViewport.style.height).toBe('0px')
 
-    // A backend frame can move the base row past the anchor. Its new offset
-    // is zero, so the first real output row is no longer shifted.
+    // A backend frame can move the base row past the anchor: its new offset is
+    // zero, so the ECHO no longer needs hiding. The grid is still shifted here
+    // — by what the cap hides, not by the anchor — because 384px of content
+    // against a 320px box means the box shows the last 320px of it. Deriving
+    // the translation from the box is what keeps a row still when the cap
+    // clamps (owner, 2026-11-08); an anchor-only shift moved every row down a
+    // line in exactly that frame.
     record.outputAnchorOffset = 0
     controller.outputAnchorChanged()
     controller.setLiveHeight(24 * 16)
-    expect(controller.terminalLiveInner.style.transform).toBe('')
+    expect(controller.terminalLiveInner.style.transform).toBe('translateY(-64px)')
     // Both the content clip and flow box clamp to the live-region cap.
     expect(controller.terminalLiveViewport.style.height).toBe('320px')
     expect(controller.terminalLiveContainer.style.height).toBe('320px')

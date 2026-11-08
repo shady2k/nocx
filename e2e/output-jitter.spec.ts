@@ -83,6 +83,10 @@ interface Frame {
   blockHeight: number
   /** The stack's live transform — a FLIP settle, when one is playing. */
   transform: string
+  liveH: number
+  liveTop: number
+  gridTransform: string
+  innerH: number
   rows: VisibleRow[]
 }
 
@@ -132,12 +136,18 @@ async function framesOf(page: Page, doneText: string): Promise<Frame[]> {
             rows.push({ y: round(box.top - sr.top), text: (row.textContent ?? '').trimEnd() })
           }
           const frameBox = block.getBoundingClientRect()
+          const liveBox = pane.querySelector<HTMLElement>('.terminal-live-container')
+          const liveInner = pane.querySelector<HTMLElement>('.terminal-live-inner')
           frames.push({
             t: round(performance.now()),
             scrollTop: round(scroller.scrollTop),
             blockTop: round(frameBox.top - sr.top),
             blockHeight: round(frameBox.height),
             transform: getComputedStyle(stack).transform,
+            liveH: liveBox ? round(liveBox.getBoundingClientRect().height) : NaN,
+            liveTop: liveBox ? round(liveBox.getBoundingClientRect().top - sr.top) : NaN,
+            gridTransform: liveInner ? liveInner.style.transform : '',
+            innerH: liveInner ? round(liveInner.getBoundingClientRect().height) : NaN,
             rows,
           })
           if ((pane.textContent ?? '').includes(doneText)) {
@@ -208,6 +218,8 @@ function judge(frames: readonly Frame[], pitch: number): Jitter {
           `${JSON.stringify(text.slice(0, 40))} ` +
           `(scrollTop ${previous.scrollTop} → ${frame.scrollTop}, ` +
           `block ${previous.blockTop}+${previous.blockHeight} → ${frame.blockTop}+${frame.blockHeight}, ` +
+          `live ${previous.liveTop}+${previous.liveH} → ${frame.liveTop}+${frame.liveH}, ` +
+          `inner ${previous.innerH} "${previous.gridTransform}" → ${frame.innerH} "${frame.gridTransform}", ` +
           `transform ${frame.transform})`,
       )
     }

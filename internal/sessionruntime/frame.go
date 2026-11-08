@@ -288,6 +288,30 @@ func EncodeRows(rows []emulator.Row) ([]byte, error) {
 	return raw, nil
 }
 
+// CompactRows releases trailing default-cell padding that EncodeRows already
+// omits. It is for retained wire rows, not live grids: source rows are unchanged,
+// and rows without removable padding keep their immutable backing storage.
+// Shortened rows get new cell arrays so retaining them does not retain padding.
+func CompactRows(rows []emulator.Row) []emulator.Row {
+	var compact []emulator.Row
+	for i, row := range rows {
+		cells := trimTrailingDefaultBlanks(row.Cells)
+		if len(cells) == len(row.Cells) {
+			continue
+		}
+		if compact == nil {
+			compact = make([]emulator.Row, len(rows))
+			copy(compact, rows)
+		}
+		compact[i].Cells = make([]emulator.Cell, len(cells))
+		copy(compact[i].Cells, cells)
+	}
+	if compact != nil {
+		return compact
+	}
+	return rows
+}
+
 // trimTrailingDefaultBlanks drops a trailing run of cells that are entirely
 // the zero value: no text, narrow, the zero style. Anything else — text, a
 // non-narrow width (a styled trailing blank is still a blank, but a spacer

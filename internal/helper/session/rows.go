@@ -97,7 +97,7 @@ type rowEmission struct {
 }
 
 // emissionBytes estimates the unique heap retained by one emission: its rows,
-// cell by cell as the emulator hands them over, plus fixed overhead.
+// cell by cell after default-padding compaction, plus fixed overhead.
 func emissionBytes(em rowEmission) int64 {
 	const emissionOverhead = int64(unsafe.Sizeof(rowEmission{}))
 	n := emissionOverhead
@@ -127,7 +127,7 @@ func fifoEmissionBytes(em rowEmission) int64 {
 	return em.bytes
 }
 
-// retainedRowSpan owns the original cells at their absolute departure indices.
+// retainedRowSpan owns the wire-visible cells at their absolute departure indices.
 // The wire FIFO references the same backing rows until delivery, so its pool
 // charge covers only the separate emission record.
 type retainedRowSpan struct {
@@ -228,6 +228,11 @@ func (s *hostSession) enqueueRowEmission(em rowEmission) {
 			return
 		}
 	}
+	// Retain the same explicit cells the wire carries, not the full grid's
+	// default padding. Compaction leaves the runtime's rows untouched and
+	// releases shortened backing arrays before the shared pool charges them.
+	em.rows = sessionruntime.CompactRows(em.rows)
+	em.closing = sessionruntime.CompactRows(em.closing)
 	em.bytes = emissionBytes(em)
 	budget := s.rowBufferBytes
 	if budget <= 0 {

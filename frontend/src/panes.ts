@@ -817,6 +817,20 @@ export class PaneManager {
    *  the chain at all. */
   private readonly registered = new Set<string>()
   /**
+   * THE TAB THIS WINDOW ASKED FOR, for a create whose answer has not come back
+   * (nocx-ouru5.1.3).
+   *
+   * A pane's row reaches the cache one round trip after the tab is minted, and
+   * the seat of the NEXT create is "immediately after the tab in front". Two
+   * creates in the same turn — a second Cmd+T before the first answer — would
+   * otherwise resolve that seat through the cache, find nothing, and seat the
+   * second tab at the head of the strip. The renderer knows what it asked for,
+   * so it remembers it here: the tab id `openTab` minted for a pane, dropped
+   * as soon as the chain answers (the cache outranks it from then on, because
+   * a pane can be MOVED to another tab).
+   */
+  private readonly tabIdOfCreatedPane = new Map<string, string>()
+  /**
    * THE SAVED CONNECTIONS, read once before the chain is drawn.
    *
    * A CACHE and never an authority: it answers exactly one question — which
@@ -1643,6 +1657,19 @@ export class PaneManager {
   // ── Tab creation ──────────────────────────────────────────────────────
 
   /**
+   * The tab a pane is in, as far as this window can know it: the chain's
+   * answer when the chain has answered, and otherwise the tab this window
+   * minted for that pane a moment ago and is still waiting to hear about.
+   *
+   * THE ORDER IS DELIBERATE. The cache is asked first because it is the
+   * backend's own account and a pane can be moved between tabs (panes.move);
+   * the renderer's note is only ever a STAND-IN for a create still in flight.
+   */
+  private tabIdOfPane(pane: Pane): string | undefined {
+    return this.layout.tabOf(pane.wireId)?.id ?? this.tabIdOfCreatedPane.get(pane.wireId)
+  }
+
+  /**
    * The pane's one identity, and the row that goes with it.
    *
    * The id is minted HERE and the object is created THERE, which is §7's
@@ -1687,9 +1714,13 @@ export class PaneManager {
       // so here, which is also what lets the new shell start there.
       { kind, endpoint, cwd: seat?.cwd ?? '' },
       seat?.workspaceId ?? this.currentWorkspaceId(),
-      seat?.afterTabId ??
-        (this.activePane ? this.layout.tabOf(this.activePane.wireId)?.id : undefined),
+      seat?.afterTabId ?? (this.activePane ? this.tabIdOfPane(this.activePane) : undefined),
     )
+    // WHAT THIS CREATE ASKED FOR, recorded before the answer exists: the seat
+    // of the NEXT create is this tab, and a create asked for in the same turn
+    // — a second Cmd+T before the first answer arrives — has no row in the
+    // cache to name it by (nocx-ouru5.1.3).
+    this.tabIdOfCreatedPane.set(opened.paneId, opened.tabId)
     // ONE handler with both arms, not a .then() and a .catch(): two handlers
     // on the same promise leave the first one's rejection unhandled, which
     // surfaces as a process-level unhandled rejection rather than as the
@@ -1701,6 +1732,11 @@ export class PaneManager {
     const registered = opened.created.then(
       () => {
         this.registered.add(opened.paneId)
+        // The chain has the row now, so the renderer's own note of "the tab I
+        // asked for" has done its job and must not outlive it: a pane can be
+        // MOVED to another tab (panes.move), and a stale answer here would
+        // outvote the chain's.
+        this.tabIdOfCreatedPane.delete(opened.paneId)
         // AND THEN ASK FOR THE STRIP, because a create seats the tab beside
         // its anchor by RENUMBERING the strip, and its answer carries only
         // the row it minted (nocx-ouru5.1.3). The neighbours' new positions
@@ -1722,6 +1758,7 @@ export class PaneManager {
         return true
       },
       (err: unknown) => {
+        this.tabIdOfCreatedPane.delete(opened.paneId)
         const message = err instanceof Error ? err.message : String(err)
         log.error('nocx: the backend refused a new tab', { error: message })
         showToast({ level: 'danger', message: `Could not open a tab: ${message}` })

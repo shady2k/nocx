@@ -834,6 +834,17 @@ export function makeBanner(overrides?: Partial<BannerFake>): BannerFake {
 export function makeLayoutBackend(): LayoutClientLike & {
   rows: () => { tabs: LayoutTab[]; panes: LayoutPane[]; workspaces: LayoutWorkspace[] }
   fail: (method: keyof LayoutClientLike, err: Error) => void
+  /**
+   * WITHHOLD THE ANSWERS TO `createTab` until the returned release is called.
+   *
+   * A create's row reaches the renderer one round trip after the tab is
+   * minted, and two creates can be asked for inside that window — a second
+   * Cmd+T before the first answer (nocx-ouru5.1.3). A fake that answers
+   * synchronously cannot present that state at all, so a test of it would be
+   * testing a sequence the product never sees. The row is written when the
+   * answer is released, exactly as a backend writes it when it answers.
+   */
+  holdCreates: () => { release: () => void }
 } {
   const DEFAULT_WS = 'workspace:default'
   let tabs: LayoutTab[] = []
@@ -843,6 +854,9 @@ export function makeLayoutBackend(): LayoutClientLike & {
    *  and `read` supplies it whenever a tab is in it. */
   let made: LayoutWorkspace[] = []
   const failures = new Map<string, Error>()
+  /** Creates still unanswered because the test is holding them. */
+  let heldCreates: Array<() => void> = []
+  let holdingCreates = false
 
   const refuse = <T>(method: string): Promise<T> | null => {
     const err = failures.get(method)
@@ -887,6 +901,17 @@ export function makeLayoutBackend(): LayoutClientLike & {
   return {
     rows: () => ({ tabs: [...tabs], panes: [...panes], workspaces: allWorkspaces() }),
     fail: (method, err) => failures.set(method, err),
+    holdCreates: () => {
+      holdingCreates = true
+      return {
+        release: () => {
+          holdingCreates = false
+          const waiting = heldCreates
+          heldCreates = []
+          for (const answer of waiting) answer()
+        },
+      }
+    },
 
     read: () =>
       refuse('read') ??
@@ -983,15 +1008,26 @@ export function makeLayoutBackend(): LayoutClientLike & {
     createTab: (t) => {
       const refused = refuse<never>('createTab')
       if (refused) return refused
-      const tab = tabRow(t.id, { position: 0, workspaceId: t.workspaceId })
-      const first = paneRow(t.firstPane.id, t.id, {
-        cwd: t.firstPane.cwd,
-        kind: t.firstPane.kind,
-        endpoint: t.firstPane.endpoint,
+      // THE SEAT IS NOT MODELLED HERE, and a test that needs it asserts the
+      // PARAMS the renderer asked with instead (see the callers): positions
+      // are written by content.createTab's renumbering, which the renderer
+      // never computes, and a fake renumbering of its own would be a second
+      // answer to a question the chain owns.
+      const write = () => {
+        const tab = tabRow(t.id, { position: 0, workspaceId: t.workspaceId })
+        const first = paneRow(t.firstPane.id, t.id, {
+          cwd: t.firstPane.cwd,
+          kind: t.firstPane.kind,
+          endpoint: t.firstPane.endpoint,
+        })
+        tabs = [...tabs, tab]
+        panes = [...panes, first]
+        return { tab, firstPane: first, replayed: false }
+      }
+      if (!holdingCreates) return Promise.resolve(write())
+      return new Promise((resolve) => {
+        heldCreates.push(() => resolve(write()))
       })
-      tabs = [...tabs, tab]
-      panes = [...panes, first]
-      return Promise.resolve({ tab, firstPane: first, replayed: false })
     },
 
     createPane: (p) => {

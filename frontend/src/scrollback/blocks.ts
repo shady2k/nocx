@@ -2556,6 +2556,15 @@ export class BlockManager {
     return this._cmdStartTime
   }
 
+  /** How long the running command has been running, on this manager's own
+   *  clock — the figure the block's header prints when it freezes, available
+   *  while it still runs (ADR-tqjt5rkk). ONE formula: the composer's departure
+   *  and the header read the same length, so what the block says and what the
+   *  composer did cannot disagree. Null when no command is running. */
+  elapsedCommandMs(): number | null {
+    return this._cmdStartTime === null ? null : this._now() - this._cmdStartTime
+  }
+
   /** The currently selected block id, or null (P1-8). */
   get selectedBlockId(): number | null {
     return this._selectedBlockId
@@ -3138,7 +3147,7 @@ export class BlockManager {
     // a terminal freeze is a close, and no dots may type a command that
     // will not write any more (nocx-vnirv.1).
     this._clearCommandIndicator()
-    rec.durationMs = this._cmdStartTime !== null ? this._now() - this._cmdStartTime : null
+    rec.durationMs = this.elapsedCommandMs()
     this._cmdStartTime = null
     rec.exitCode = exitCode
     rec.status = status

@@ -73,7 +73,9 @@ import {
 } from './input-target'
 import type { ConnectionCondition } from './connection-condition'
 import {
+  DEPARTURE_FALLBACK_MS,
   LiveSessionUncertainError,
+  SUBMIT_GRACE_MS,
   TerminalContent,
   type SnippetFire,
   type TerminalContentHooks,
@@ -3409,6 +3411,209 @@ describe('the lifecycle fact wires editor ownership (ADR-0024 §6)', () => {
   })
 })
 
+describe('a submitted command leaves the composer only when it outlives the grace (ADR-tqjt5rkk, nocx-j9v81)', () => {
+  /** Type a command and press Enter — a person's submit, through the same
+   *  keystroke the two hand-off tests above use. */
+  function submitCommand(view: EditorView, text: string): void {
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } })
+    view.contentDOM.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+    )
+  }
+
+  /** The running fact the runtime publishes a round trip after the submit. */
+  function started(client: ClientFake, id = 'att-1') {
+    return {
+      lane: 'lane-1',
+      lifecycle: 'running',
+      domain: 'd1',
+      epoch: 1,
+      attempt: {
+        id,
+        state: 'open',
+        origin: 'app',
+        submitId: submitToken(client),
+        command: 'true',
+        startedAt: '2026-11-08T12:00:00.000Z',
+      },
+    } as const
+  }
+
+  /** The completion of `started`'s attempt. */
+  function completed(id = 'att-1') {
+    return {
+      lane: 'lane-1',
+      lifecycle: 'running',
+      domain: 'd1',
+      epoch: 1,
+      attempt: {
+        id,
+        state: 'completed',
+        exitCode: 0,
+        fence: 'a'.repeat(64),
+        startedAt: '2026-11-08T12:00:00.000Z',
+        completedAt: '2026-11-08T12:00:00.020Z',
+      },
+    } as const
+  }
+
+  const PROMPT = { lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 } as const
+
+  /** A pane at an authenticated prompt with its composer owning the keys, the
+   *  fake timers the departure's bounds need, and a CLOCK THE TEST MOVES.
+   *
+   *  The block measures the command itself — `performance.now()` at its
+   *  authenticated start, the same at its completion — and that interval is
+   *  what the decision reads and what the header prints. Spending it by hand
+   *  is what makes the boundary testable at 39, 40 and 41 ms without a
+   *  machine anywhere in the answer. */
+  async function atPrompt() {
+    const client = makeClient()
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoNow = performance.now
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    let at = 1_000_000
+    performance.now = () => at
+    const mounted = await mountTerminal(makeClipboard(), { attachToDocument: true }, client)
+    const handler = lifecycleHandler(client)
+    handler(PROMPT)
+    return {
+      ...mounted,
+      client,
+      handler,
+      /** Let the command's block run for `ms`. */
+      spend: (ms: number) => {
+        at += ms
+      },
+      restore: () => {
+        Element.prototype.scrollTo = protoScrollTo
+        performance.now = protoNow
+        mounted.teardown()
+        vi.useRealTimers()
+      },
+    }
+  }
+
+  // THE DECISION, AT ITS BOUNDARY. The owner's 40 ms is the threshold and it
+  // is not the machine's to move; what a slow machine changes is how long a
+  // command's block measures, never where the line is drawn.
+  it("the owner's grace is 40 ms", () => {
+    expect(SUBMIT_GRACE_MS).toBe(40)
+  })
+
+  it.each([
+    { blockMs: SUBMIT_GRACE_MS - 1, stays: true },
+    { blockMs: SUBMIT_GRACE_MS, stays: false },
+    { blockMs: SUBMIT_GRACE_MS + 1, stays: false },
+  ])(
+    'a block of $blockMs ms decides the composer by its own length (kept: $stays)',
+    async ({ blockMs, stays }) => {
+      const { ed, view, client, handler, spend, restore } = await atPrompt()
+      try {
+        expect(ed.isVisible).toBe(true)
+        submitCommand(view, 'true')
+        // Drawn and owning nothing: the keys went to the grid at the submit,
+        // and `inert` is what keeps a click from putting the caret back into
+        // the draft on its way to the pty.
+        expect(ed.root.style.display).toBe('')
+        expect(ed.root.hasAttribute('inert')).toBe(true)
+        expect(ed.isVisible).toBe(false)
+
+        handler(started(client))
+        // Nothing has decided anything yet, however much time the bounds
+        // spend: a renderer clock on its own is not a measurement of command.
+        vi.advanceTimersByTime(DEPARTURE_FALLBACK_MS - 1)
+        expect(ed.root.style.display).toBe('')
+
+        spend(blockMs)
+        handler(completed())
+        expect(ed.root.style.display).toBe(stays ? '' : 'none')
+
+        // And the prompt mark hands the keyboard back either way — a kept box
+        // never left, and a departed one returns.
+        handler(PROMPT)
+        expect(ed.isVisible).toBe(true)
+        expect(ed.root.style.display).toBe('')
+        expect(ed.root.hasAttribute('inert')).toBe(false)
+        expect(ed.root.contains(document.activeElement)).toBe(true)
+      } finally {
+        restore()
+      }
+    },
+  )
+
+  it('a command that never reports its completion is taken down when the bound passes', async () => {
+    const { ed, view, client, handler, restore } = await atPrompt()
+    try {
+      submitCommand(view, 'sleep 1000')
+      handler(started(client))
+      vi.advanceTimersByTime(DEPARTURE_FALLBACK_MS - 1)
+      expect(ed.root.style.display).toBe('')
+      // A command that has not reported a completion in this long has not
+      // been a quick one by any reading: the box gives the running command
+      // its space, and no inert composer waits forever on a fact that is not
+      // coming.
+      vi.advanceTimersByTime(1)
+      expect(ed.root.style.display).toBe('none')
+    } finally {
+      restore()
+    }
+  })
+
+  it('a prompt that never arrives after a quick command is bounded too', async () => {
+    const { ed, view, client, handler, restore } = await atPrompt()
+    try {
+      submitCommand(view, 'true')
+      handler(started(client))
+      handler(completed())
+      vi.advanceTimersByTime(DEPARTURE_FALLBACK_MS - 1)
+      expect(ed.root.style.display).toBe('')
+      vi.advanceTimersByTime(1)
+      expect(ed.root.style.display).toBe('none')
+    } finally {
+      restore()
+    }
+  })
+
+  it("another command's completion decides nothing about this box", async () => {
+    // The grid owns the keys while the box waits, so a command typed there can
+    // start and complete inside the same window. Its completion is not this
+    // submit's, and a departure must not be settled by it.
+    const { ed, view, client, handler, spend, restore } = await atPrompt()
+    try {
+      submitCommand(view, 'true')
+      spend(SUBMIT_GRACE_MS * 10)
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 3,
+        attempt: {
+          id: 'att-somebody-else',
+          state: 'completed',
+          origin: 'shell',
+          command: 'ls',
+          exitCode: 0,
+          fence: 'b'.repeat(64),
+          startedAt: '2026-11-08T12:00:00.000Z',
+          completedAt: '2026-11-08T12:00:09.000Z',
+        },
+      })
+      expect(ed.root.style.display).toBe('')
+      // …and its own block's quick completion, when it comes, settles it.
+      handler(started(client))
+      spend(1)
+      handler(completed())
+      expect(ed.root.style.display).toBe('')
+    } finally {
+      restore()
+    }
+  })
+})
+
 describe('the restoration episode (ADR-0024 decision 8)', () => {
   const LOST_WITH_RECOVERY = {
     lane: 'lane-1',
@@ -6678,17 +6883,20 @@ describe('the projections consume the kernel through the composition root (ADR-0
       expect(ed.isVisible).toBe(true)
       expect(ed.root.contains(document.activeElement)).toBe(true)
 
-      // The atomic handoff: the editor leaves the layout at commit, box and
-      // all (nocx-g6hnk), and the submit callback makes the grid writable in
-      // the same synchronous step the bytes go out — keys typed before the
-      // running fact lands reach the pty. The ORDER is what this asserts;
-      // where the composer's 77px went is asserted in editor.test.ts.
+      // The atomic handoff: the editor gives the keyboard up at commit and the
+      // submit callback makes the grid writable in the same synchronous step
+      // the bytes go out — keys typed before the running fact lands reach the
+      // pty. The ORDER is what this asserts. The BOX stays drawn for the
+      // submit grace (ADR-tqjt5rkk) and owns nothing: `inert` is what keeps a
+      // click from putting the caret back into a draft already on its way to
+      // the pty, and `isVisible` — the keyboard's own word — is already false.
       ed.insertText('read x')
       view.contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
       expect(ed.isVisible).toBe(false)
-      expect(ed.root.style.display).toBe('none')
+      expect(ed.root.style.display).toBe('')
+      expect(ed.root.hasAttribute('inert')).toBe(true)
       expect(document.activeElement).toBe(input)
 
       // The published attempt opens the running interval; the sync keeps
@@ -6707,11 +6915,13 @@ describe('the projections consume the kernel through the composition root (ADR-0
           command: 'read x',
         },
       })
-      // Still gone, still writable: the lifecycle only RECONCILES here — the
-      // commit already removed the composer — and reconciling must not
-      // resurrect it or take the keyboard back off the program.
+      // Still nobody's keys, still writable: the lifecycle only RECONCILES
+      // here — the commit already handed the keyboard over — and reconciling
+      // must not resurrect the composer's ownership. The grace is armed, so
+      // the running fact is not the deadline: the box is still drawn.
       expect(ed.isVisible).toBe(false)
-      expect(ed.root.style.display).toBe('none')
+      expect(ed.root.style.display).toBe('')
+      expect(ed.root.hasAttribute('inert')).toBe(true)
       expect(document.activeElement).toBe(input)
       // The completion closes the interval, and back at the prompt the
       // editor returns and the grid locks again.

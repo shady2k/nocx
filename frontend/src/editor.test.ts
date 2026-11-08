@@ -442,6 +442,31 @@ describe('CommandEditor', () => {
     expect(context(container).textContent).toContain('srv/nocx')
   })
 
+  it('names the saved connection first, then its host (nocx-ouru5.1.2)', () => {
+    // The owner saw 'dev@<ip> : ~' with no sign of the connection's own name.
+    // Both, the name first and the host beside it.
+    const { ed, container } = setup()
+    ed.show()
+    ed.setCwd('/srv/nocx')
+    ed.setLocation('root@192.0.2.57', 'Production')
+    const parts = [...context(container).querySelectorAll('.ui-prompt-context__part')].map(
+      (p) => p.textContent,
+    )
+    expect(parts).toEqual(['Production', 'root@192.0.2.57', '/srv/nocx'])
+    // The host is still the strong half: it is the answer to "where does
+    // Enter go", and the name is what the person called it.
+    const strong = context(container).querySelector('[data-emphasis="strong"]')
+    expect(strong?.textContent).toBe('root@192.0.2.57')
+  })
+
+  it('a connection with no name keeps the host alone (nocx-ouru5.1.2)', () => {
+    const { ed, container } = setup()
+    ed.show()
+    ed.setLocation('root@192.0.2.57')
+    expect(context(container).querySelector('[data-part="name"]')).toBeNull()
+    expect(context(container).querySelector('.ui-prompt-context__divider')).toBeNull()
+  })
+
   it('a local session names no host at all (nocx-3779)', () => {
     const { ed, container } = setup()
     ed.show()

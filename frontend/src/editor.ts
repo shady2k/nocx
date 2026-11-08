@@ -249,6 +249,11 @@ export class CommandEditor {
    *  shows (routed from locationLine, never derived a second way). Empty
    *  for a local session, where the absence of a chip is the information. */
   private _location = ''
+  /** What the person called the saved connection behind `_location`, or ''
+   *  (nocx-ouru5.1.2). Set with the location, because the two are one fact
+   *  about one place — a name without a host would name a connection the
+   *  command is not going to. */
+  private _locationName = ''
 
   /** The row count (capped at MAX_ROWS) the host was last told about. */
   private _lastRowCount = 1
@@ -776,9 +781,16 @@ export class CommandEditor {
    * a second way (two derivations of "which host" are how they start
    * disagreeing). Empty for a local session: no host, and the absence is
    * the information.
+   *
+   * `name` is the saved connection's own name, when the pane was opened from
+   * one (nocx-ouru5.1.2): the line reads "Production · dev@host : ~", the name
+   * first because it is what the person chose, the host beside it because it
+   * is where Enter goes. It is an argument rather than a second setter so the
+   * two halves of one fact cannot be set apart.
    */
-  setLocation(location: string): void {
+  setLocation(location: string, name = ''): void {
     this._location = location
+    this._locationName = location === '' ? '' : name
     this.renderContext()
   }
 
@@ -804,6 +816,7 @@ export class CommandEditor {
   private renderContext(): void {
     const facts: PromptContextFacts = { path: cwdLabel(this._cwd, this._home) }
     if (this._location) {
+      if (this._locationName !== '') facts.name = this._locationName
       facts.host = this._location
       facts.hostStrong = true
     }

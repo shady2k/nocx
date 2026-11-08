@@ -252,6 +252,15 @@ export function createCellPainter(opts: CellPainterOptions): CellPainter {
   const cursor = document.createElement('div')
   cursor.className = CURSOR_CLASS
   cursor.setAttribute('aria-hidden', 'true')
+  // NOTHING IS PAINTED BEFORE THERE IS A GRID TO PAINT IT IN (nocx-q9od5).
+  // The overlay is absolutely positioned at the mapping's answer for the
+  // runtime's cell, and the mapping answers null until a frame carries the
+  // committed cell metric — but an element with no size and a 1px border is
+  // still a 2x2 box at the surface's origin, drawn in the pane's top-left
+  // corner before the pane has a box of its own. On the owner's nightly that
+  // was the only thing a 20-second ssh open showed: a blinking cursor cut by
+  // the pane's top edge. Hidden until placeCursor has a measured position.
+  cursor.hidden = true
   // A cursor that has been sitting there is blinking before the first input
   // of the session, which is the state every terminal opens in (nocx-1ebrs.37).
   cursor.setAttribute(CARET_PHASE_ATTR, 'blinking')

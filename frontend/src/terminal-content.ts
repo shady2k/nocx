@@ -90,6 +90,7 @@ import {
   type ReconnectOfferHandle,
   type AttachOfferHandle,
 } from './reconnect-offer'
+import { mountOpeningCard, type OpeningCardHandle, type OpeningCardState } from './opening-card'
 import {
   autoReconnectDelayMs,
   AUTO_RECONNECT_ATTEMPTS,
@@ -104,6 +105,7 @@ import {
 import type { SessionLiveness as SessionLivenessFact } from './generated/session.liveness'
 import type { SessionHomeSource } from './where/session-home'
 import type { BranchSource, BranchRequest } from './where/branch-source'
+import { connectionLabel } from './connection-label'
 
 /** What a pane reads when nothing supplied the recording seam: the fact is
  *  unknown and stays unknown, so the card says nothing about this session's
@@ -133,6 +135,7 @@ import { attachTerminalLinks, type TerminalLinksHandle } from './terminal-links'
 import type { ClipboardBanner } from './banner'
 import { ScrollbackController } from './scrollback/controller'
 import { LiveHistorySurface } from './scrollback/live-history'
+import { openBlockMenuAt } from './scrollback/blocks'
 import type {
   AnswerToolCall,
   BlockRecord,
@@ -171,6 +174,7 @@ import { subscribeTerminalFontChanges } from './terminal-font'
 import { log, logDecision, isDecisionTracing } from './log'
 import type { BlockClosed } from './generated/block.closed'
 import type { WSClient, SessionHandle, OpenAnchor, SessionSize, SessionAttachment } from './ipc'
+import type { PendingCallView } from './dispatcher'
 import { showConfirm } from './ui/dialog'
 import { createFilesPanelServices } from './files/files-client'
 import { attachTerminalDrop, TERMINAL_DROP_TARGET } from './files/terminal-drop'
@@ -1424,7 +1428,17 @@ export class TerminalContent extends BasePaneContent {
       (this.editor.rootContains(active) ||
         this.scrollback?.terminalLiveContainer.contains(active) ||
         this.receipt?.root.contains(active) ||
-        active.closest('[data-block-control]'))
+        active.closest('[data-block-control]') ||
+        // …AND THE MENU A RIGHT-CLICK OPENS, which is the one overlay created
+        // DURING the gesture rather than after it (nocx-a9x6u). A press on a
+        // block arms this bounce; the contextmenu that arrives between that
+        // press and its release opens the block's menu and focuses its first
+        // row; the release then took the keyboard straight back out of it, so
+        // the menu was visible and dead — Escape and the arrows reached the
+        // composer. The ⋮'s menu never met this because it opens on click,
+        // after the release. A row of the kit's menu is an owner the gesture
+        // chose, exactly as the ⋮ and Stop are.
+        active.closest('.ui-context-menu'))
     )
       return
     this.editor.focus()
@@ -2215,6 +2229,10 @@ export class TerminalContent extends BasePaneContent {
       host: string
       user?: string
       port?: number
+      /** The saved connection's own display name, when the person gave it one
+       *  (nocx-ouru5.1.2). It names the tab and the composer's place line
+       *  beside the host; absent keeps the host alone. */
+      name?: string
     },
     /** The optional host callbacks, NAMED. They used to be four trailing
      *  positional parameters, and a caller that skipped the middle two put
@@ -2243,6 +2261,16 @@ export class TerminalContent extends BasePaneContent {
    */
   get ready(): Promise<boolean> {
     return this._readyPromise
+  }
+
+  /** Whether the accepted backend screen frame says the program is tracking
+   *  the pointer (a DECSET 1000/1002/1003 program). One reading of one frame
+   *  field, for every gesture that asks — the pointer intents the program is
+   *  sent, the live selection's own stance, and the pane's right-click
+   *  (nocx-a9x6u). "Never" while no frame has been accepted: a pane with no
+   *  program is a pane whose right-clicks nobody else owns. */
+  private get mouseReporting(): boolean {
+    return this._cellModel?.current()?.state.mouseTracking ?? false
   }
 
   /** Whether the pane walked into a child domain that names a remote host
@@ -2498,7 +2526,7 @@ export class TerminalContent extends BasePaneContent {
   private pushTitle(): void {
     if (!this.host) return
     const commandTitle = this.runningCommandTitle()
-    const title = this.programTitle || commandTitle || this.cwdTitle
+    const title = this.programTitle || commandTitle || this.connectionTitle() || this.cwdTitle
     this.host.setTitle(title)
     // The location line earns a row only when the title is a name of its
     // own. With no program title the title IS the location, and a second
@@ -2510,6 +2538,22 @@ export class TerminalContent extends BasePaneContent {
     // Agent-state classification keys on the program's own title, never
     // on the composed one: tabs.ts feeds this into detectAgentStatus.
     this.hooks.onProgramTitleChange?.(this.programTitle)
+  }
+
+  /** What this tab calls itself when no program and no command has named it:
+   *  the saved connection's name beside its host, or the host alone for a
+   *  connection nobody named (nocx-ouru5.1.2). '' for a local pane, whose
+   *  title stays its directory.
+   *
+   *  The NAME is dropped once the pane has walked into a remote child: it is
+   *  the connection the pane was opened from, and that is not where the
+   *  command being typed will run — the same rule the ports scope and the
+   *  composer's place line keep. */
+  private connectionTitle(): string {
+    if (!this.sshOpts) return ''
+    const host = this._host || this.sshOpts.host
+    if (this._paneWalkedToRemoteChild) return host
+    return connectionLabel(this.sshOpts.name, host)
   }
 
   /** The name of the currently running command, or '' when none: the
@@ -2602,7 +2646,14 @@ export class TerminalContent extends BasePaneContent {
     // and the prompt's live destination must never disagree.
     const location = this._host ? this.locationLine() : ''
     this.scrollback?.blockManager.setLocation(location)
-    this.editor?.setLocation(location)
+    // The composer hears the connection's NAME too (nocx-ouru5.1.2): its
+    // place line answers "where does Enter go" with the saved connection first
+    // and the host beside it. Dropped inside a remote child, where the pane is
+    // somewhere the saved connection does not name (connectionTitle says why).
+    this.editor?.setLocation(
+      location,
+      this._paneWalkedToRemoteChild ? '' : (this.sshOpts?.name ?? ''),
+    )
     this.pushTitle()
     // The origin answer changed (cwd, host, or the active domain itself):
     // origin-following surfaces (the Files panel's reveal) follow it live,
@@ -2873,19 +2924,115 @@ export class TerminalContent extends BasePaneContent {
     if (this._latestViewport) {
       this.fitUsableViewport(this.usableViewport(this._latestViewport))
     }
-    if (!this.sshOpts) {
-      return this.client.openSession(this._reportedSize(), anchor)
+    // WHAT THE PERSON SEES WHILE THIS TAKES MINUTES (nocx-q9od5). The open's
+    // own stages end in 150 ms on a healthy link, but a first open of a host
+    // where the helper is not installed is mostly a 15.3 MB upload — and the
+    // pane said nothing at all for the whole of it. The card is mounted here,
+    // where the call is made, and retired when it settles.
+    this._beginOpeningStatement()
+    try {
+      if (!this.sshOpts) {
+        return await this.client.openSession(this._reportedSize(), anchor, this._watchOpeningCall)
+      }
+      if (this.sshOpts.profileId) {
+        return await this.client.openSSHSession(
+          this._reportedSize(),
+          this.sshOpts.profileId,
+          anchor,
+          this._watchOpeningCall,
+        )
+      }
+      return await this.client.openSSHSessionByHost(
+        this._reportedSize(),
+        this.sshOpts.host,
+        this.sshOpts.user,
+        anchor,
+        this._sessionDesiredModeOverride,
+        this._watchOpeningCall,
+      )
+    } finally {
+      this._endOpeningStatement()
     }
-    if (this.sshOpts.profileId) {
-      return this.client.openSSHSession(this._reportedSize(), this.sshOpts.profileId, anchor)
-    }
-    return this.client.openSSHSessionByHost(
-      this._reportedSize(),
-      this.sshOpts.host,
-      this.sshOpts.user,
-      anchor,
-      this._sessionDesiredModeOverride,
+  }
+
+  // ── The pane's own account of a slow open (nocx-q9od5) ──────────────────
+  /** The card, once the open has outlived the grace below. */
+  private _openingCard: OpeningCardHandle | null = null
+  /** The call the card is about: its id names the work the backend reports
+   *  inside it, and its cancel is what the card's button presses. */
+  private _openingCall: PendingCallView | null = null
+  /** The grace before the card is drawn. An open that finishes sooner than
+   *  this — every local pane, every repeat ssh open — shows no card rather
+   *  than one that flickers; an open that lasts is what the card is for. */
+  private static readonly OPENING_CARD_GRACE_MS = 300
+  private _openingTimer: ReturnType<typeof setTimeout> | null = null
+  private _openingUnsubs: (() => void)[] = []
+  /** The install progress the backend last reported for THIS call, so a frame
+   *  that arrives before the card is mounted still reaches it. */
+  private _openingProgress: { done: number; total: number } | undefined
+
+  /** The dispatcher's announce, handed to the client so the card can name its
+   *  own call and cancel it. Bound once, in the constructor, so the identity
+   *  the client keeps is stable. */
+  private _watchOpeningCall = (call: PendingCallView): void => {
+    this._openingCall = call
+  }
+
+  private _beginOpeningStatement(): void {
+    this._endOpeningStatement()
+    this._openingProgress = undefined
+    this._openingUnsubs.push(
+      this.client.onOperationRow((row) => {
+        if (this._openingCall === null || row.callID !== this._openingCall.id) return
+        this._openingProgress = row.total > 0 ? { done: row.done, total: row.total } : undefined
+        this._openingCard?.set(this._openingState(row.title))
+      }),
     )
+    this._openingTimer = setTimeout(() => {
+      this._openingTimer = null
+      this._showOpeningCard()
+    }, TerminalContent.OPENING_CARD_GRACE_MS)
+  }
+
+  private _openingState(title?: string): OpeningCardState {
+    return {
+      title: title ?? t('operations.waiting.open', 'Opening your terminal'),
+      host: this._openingDestination(),
+      progress: this._openingProgress,
+      onCancel: () => this._openingCall?.cancel(),
+    }
+  }
+
+  /** The machine the card names. The environment projection has not run yet
+   *  — nothing is bound — so the answer is the destination the person
+   *  clicked, which is the one thing about this wait that is already true. */
+  private _openingDestination(): string {
+    const bound = this.hostLabel()
+    if (bound !== '') return bound
+    const ssh = this.sshOpts
+    if (ssh === undefined) return ''
+    return remoteMachineName(ssh.user, ssh.host)
+  }
+
+  private _showOpeningCard(): void {
+    if (this._disposed || this._paneTarget === null) return
+    if (this._openingCard !== null) return
+    // A session that arrived is the end of the wait, whatever the call is
+    // still doing: a card under a live shell would be a claim about nothing.
+    if (this.session !== null) return
+    this._openingCard = mountOpeningCard(this._paneTarget, this._openingState())
+  }
+
+  private _endOpeningStatement(): void {
+    if (this._openingTimer !== null) {
+      clearTimeout(this._openingTimer)
+      this._openingTimer = null
+    }
+    for (const stop of this._openingUnsubs) stop()
+    this._openingUnsubs = []
+    this._openingCard?.dispose()
+    this._openingCard = null
+    this._openingCall = null
   }
 
   /** A one-shot integration-method override for a hand-typed connection with
@@ -3230,7 +3377,7 @@ export class TerminalContent extends BasePaneContent {
         // Mouse reporting is an emulator mode. Use only the latest accepted
         // backend frame; with no accepted mode the pointer remains available
         // to selection and native scrollback.
-        mouseTracking: () => this._cellModel?.current()?.state.mouseTracking ?? false,
+        mouseTracking: () => this.mouseReporting,
         // The wheel is counted in LINES, so it needs the row pitch: the
         // painter's accepted cell height, which is the same number the caret,
         // the selection and hit-testing are placed by (nocx-1ebrs.26). A
@@ -4535,7 +4682,8 @@ export class TerminalContent extends BasePaneContent {
       // gesture above. DOM block selection uses the document selectionchange
       // listener installed during mount; the painted grid has no DOM-text owner.
 
-      // Paste on right-click AND middle-click.
+      // Paste on middle-click. (Right-click used to paste too; it does not
+      // any more — nocx-a9x6u — and the chord is where paste lives.)
       const doPaste = async () => {
         try {
           const text = await this.clipboard.readText()
@@ -4554,9 +4702,33 @@ export class TerminalContent extends BasePaneContent {
         }
       }
 
+      // A RIGHT-CLICK IS NOT A PASTE (nocx-a9x6u, owner 2026-11-08). It was
+      // one here, on the whole pane: the clipboard landed in the editor or in
+      // the running program, which is a destructive answer to a gesture people
+      // make while aiming at something else. Paste stays on the chord (and on
+      // the middle button); nothing in the pane pastes on this one.
+      //
+      // ON A BLOCK it opens that block's OWN menu, the one behind its ⋮, at
+      // the pointer — the block decides which rows it offers (`items()` in
+      // scrollback/blocks.ts, which is why this asks the block rather than
+      // listing anything here), so a running block offers Stop and a finished
+      // one offers copy/wrap.
+      //
+      // A FULL-SCREEN PROGRAM THAT REPORTS THE MOUSE KEEPS ITS RIGHT-CLICKS.
+      // The press and release are already on their way to it as pointer
+      // intents (IntentInput, from the grid's own listeners); what the pane
+      // must not do is put a menu over the program's screen. The live region
+      // is a RUNNING BLOCK'S BODY (ADR-0091), so `closest('.cmd-block')` would
+      // claim it — `insideLiveRegion` is the one answer to "is this the
+      // terminal's surface".
       target.addEventListener('contextmenu', (e: MouseEvent) => {
+        // The native menu is never ours, in either case: a WebView's own
+        // Reload/Inspect entries over a terminal are chrome nobody asked for.
         e.preventDefault()
-        void doPaste()
+        if (this.mouseReporting && insideLiveRegion(e.target)) return
+        const block =
+          e.target instanceof Element ? e.target.closest<HTMLElement>('.cmd-block') : null
+        if (block !== null) openBlockMenuAt(block, e.clientX, e.clientY)
       })
 
       target.addEventListener('mousedown', (e: MouseEvent) => {
@@ -5327,7 +5499,12 @@ export class TerminalContent extends BasePaneContent {
       host: this.sshOpts?.host || '',
       user: this.sshOpts?.user ?? '',
       isLocal: !this.sshOpts,
-      programTitle: this.sshOpts?.host || '',
+      // '' — not the host. This field is the PROGRAM's own OSC 0/2 title, and
+      // it used to be seeded with the host as a stand-in for "the tab has a
+      // name"; the tab now names itself (`connectionTitle` below), so the
+      // stand-in only made a stale address outrank the connection's name
+      // (nocx-ouru5.1.2).
+      programTitle: '',
     })
     this.env.attach()
 
@@ -5427,7 +5604,7 @@ export class TerminalContent extends BasePaneContent {
         surface: painterSurface,
         gestureRoot,
         surfaceId: this.pane.paneId,
-        mouseReportingActive: () => this._cellModel?.current()?.state.mouseTracking ?? false,
+        mouseReportingActive: () => this.mouseReporting,
         focusInput: () => this._intentInput?.focus(),
         copy: (text) => {
           if (shouldCopy(text)) {
@@ -9699,6 +9876,7 @@ export class TerminalContent extends BasePaneContent {
 
   dispose(): void {
     this._disposed = true
+    this._endOpeningStatement()
     this._cancelDeferredShellSubmissions()
     // A departure timer outliving the pane would fire against a disposed
     // editor.

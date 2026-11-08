@@ -365,13 +365,25 @@ type Trace struct {
 	stack        []stageFrame
 	stages       []*StageRecord
 	finished     bool
-	outcome      string
-	detail       string
-	publish      string
-	integration  string
-	closedBy     string
-	stop         chan struct{}
-	stopOnce     sync.Once
+	// finishedAt is when Finish ran. A finished open's duration is
+	// finishedAt - started and NEVER now - started: the render used the
+	// latter, so every recent open in Copy diagnostics reported a duration
+	// that grew for as long as the process lived (nocx-q9od5). The owner's
+	// own instrument said a 1.6 s open took 22.8 s a minute later.
+	finishedAt  time.Time
+	outcome     string
+	detail      string
+	publish     string
+	integration string
+	closedBy    string
+	// promptAt is when this open's session authenticated its first prompt — the
+	// end of the walk a person actually makes from "I clicked" to "I can type".
+	// It is noted AFTER Finish (the pane's prompt arrives after the open
+	// returns) and zero for a local open, which is not a claim that a prompt
+	// came instantly.
+	promptAt time.Time
+	stop     chan struct{}
+	stopOnce sync.Once
 	// ctx is the context this open began in, after the trace was made: every
 	// stage line is written through it, so it carries the request id and the
 	// trace id without any call site passing them.
@@ -535,6 +547,28 @@ func NoteLifecycleClosed(ctx context.Context, closer string) {
 	}
 }
 
+// NoteFirstPrompt records when this open's session authenticated its first
+// prompt (nocx-q9od5). It is the last step of the walk a person makes — from
+// the click to the moment they can type — and it happens AFTER the open's own
+// stages are done, which is exactly why the record must carry it: the owner's
+// blank pane was the interval between "session opened" and the far shell's
+// first prompt, and no stage owned it.
+//
+// It is written at most once per open, and it accepts a context whose open has
+// already finished: the trace stays in the recent ring, and this is the fact
+// that explains the seconds after it.
+func NoteFirstPrompt(ctx context.Context) {
+	t, ok := ctx.Value(openTraceKey{}).(*Trace)
+	if !ok || t == nil {
+		return
+	}
+	t.mu.Lock()
+	if t.promptAt.IsZero() {
+		t.promptAt = t.rec.now()
+	}
+	t.mu.Unlock()
+}
+
 // Finish ends the open's record: says its outcome at info, stops the pending
 // reporter, and moves it to the bounded recent list.
 func (t *Trace) Finish(err error) {
@@ -547,12 +581,13 @@ func (t *Trace) Finish(err error) {
 		return
 	}
 	t.finished = true
+	t.finishedAt = t.rec.now()
 	t.stopOnce.Do(func() { close(t.stop) })
 	// A stage still open at the end is part of the record: it is the stage the
 	// open died in, and its duration is the time spent there.
 	if t.current != "" {
 		if rec := t.findOpenLocked(t.current); rec != nil {
-			rec.Took = t.rec.now().Sub(rec.Start)
+			rec.Took = t.finishedAt.Sub(rec.Start)
 			rec.Done = true
 		}
 		t.current = ""
@@ -562,8 +597,7 @@ func (t *Trace) Finish(err error) {
 	} else {
 		t.outcome = "opened"
 	}
-	now := t.rec.now()
-	elapsed := now.Sub(t.started)
+	elapsed := t.finishedAt.Sub(t.started)
 	stages := len(t.stages)
 	last := t.lastStageLocked()
 	lg := log.From(t.ctx)
@@ -704,12 +738,15 @@ type OpenView struct {
 	Elapsed      time.Duration
 	Current      string
 	CurrentSince time.Duration
-	Stages       []StageRecord
-	Outcome      string
-	Detail       string
-	Publish      string
-	Integration  string
-	ClosedBy     string
+	// FirstPrompt is when the session authenticated its first prompt, measured
+	// from the open's start; zero when none was seen.
+	FirstPrompt time.Duration
+	Stages      []StageRecord
+	Outcome     string
+	Detail      string
+	Publish     string
+	Integration string
+	ClosedBy    string
 }
 
 // Snapshot copies the bounded record.
@@ -738,12 +775,24 @@ func (r *Recorder) Snapshot() Snapshot {
 func (t *Trace) viewLocked() OpenView {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	// A FINISHED OPEN'S DURATION IS THE ONE IT TOOK. The pending arm still
+	// reads the clock — a wait has no end yet — but the recent arm must not,
+	// or every record in the ring grows with the process (nocx-q9od5).
+	end := t.finishedAt
+	if end.IsZero() {
+		end = t.rec.now()
+	}
+	firstPrompt := time.Duration(0)
+	if !t.promptAt.IsZero() {
+		firstPrompt = t.promptAt.Sub(t.started)
+	}
 	return OpenView{
 		Label: t.label, Kind: t.kind, Trace: t.traceID, Request: t.requestID,
-		Started: t.started, Elapsed: t.rec.now().Sub(t.started),
+		Started: t.started, Elapsed: end.Sub(t.started),
 		Current: t.current, CurrentSince: t.rec.now().Sub(t.currentSince),
-		Stages:  t.stageValuesLocked(),
-		Outcome: t.outcome, Detail: t.detail, Publish: t.publish,
+		Stages:      t.stageValuesLocked(),
+		FirstPrompt: firstPrompt,
+		Outcome:     t.outcome, Detail: t.detail, Publish: t.publish,
 		Integration: t.integration, ClosedBy: t.closedBy,
 	}
 }

@@ -2047,6 +2047,14 @@ export class TerminalContent extends BasePaneContent {
       // cannot hold its rows for a screen nobody is painting.
       this._screenGeneration++
       this.scrollback?.blockManager.releaseHeldRows()
+    } else {
+      // THE SESSION IS USABLE, SO A LINE HELD ACROSS ITS BIND CAN GO (review
+      // round 7). A bind finishes before its handle is attached, and a session
+      // that will never send `prompt_ready` (raw, or local) has no other event
+      // to release on: the attachment is its own. `_releaseDeferredShellSubmissions`
+      // decides whether the startup interval is really over — this only offers
+      // the moment.
+      this._releaseDeferredShellSubmissions()
     }
     this._syncAttachOffer()
     if (changed) this._syncLifecycleOwnership()
@@ -7777,6 +7785,15 @@ export class TerminalContent extends BasePaneContent {
     // its replacement. Checked first, before the settle answers below, because
     // those answers are about the session that is bound NOW.
     if (!this._bindIsCurrent(origin)) return false
+    // THE DRAFT MAY HAVE MOVED WHILE A REFERENCE RESOLVED OVER THE WIRE
+    // (sequence 4), and this is asked BEFORE any queueing decision — the
+    // bind-in-flight branch included (review round 7). A person who pressed
+    // Ctrl-C while the verdict was in flight emptied the editor; the verdict
+    // that lands during a rebind was queued first and only then judged stale,
+    // and the replacement ran a command they had withdrawn. A line whose draft
+    // is no longer the submitted one is their own withdrawal, whatever the
+    // session is doing.
+    if (this.editor !== null && this.editor.getDoc() !== plan.recordLine) return false
     // A REBIND IS IN FLIGHT (CI run 42658168728). The generation already moved
     // and the new handle does not exist yet, so writing now would go into the
     // dead shell the pane is about to replace — the command would be accepted
@@ -7788,12 +7805,6 @@ export class TerminalContent extends BasePaneContent {
     }
     if (!this._awaitsFirstPrompt()) return plan
     if (this.lifecycle.state.kind === 'prompt_ready' || isDegraded(this._integration)) return plan
-    // THE DRAFT MAY HAVE MOVED WHILE A REFERENCE RESOLVED OVER THE WIRE
-    // (sequence 4): the verdict the host is handed results from a round trip,
-    // and the person can edit or clear the draft inside it. A line whose draft
-    // is no longer the submitted one is the person's own withdrawal — the
-    // editor's stale-plan rule for every other verdict — so it is not queued.
-    if (this.editor !== null && this.editor.getDoc() !== plan.recordLine) return false
     this._deferredShellSubmissions.push({ plan, target, origin })
     return 'held'
   }
@@ -7827,8 +7838,29 @@ export class TerminalContent extends BasePaneContent {
 
   private _releaseDeferredShellSubmissions(): void {
     if (this._releasingDeferredShellSubmissions) return
-    if (this.lifecycle.state.kind !== 'prompt_ready' && !isDegraded(this._integration)) return
+    if (!this._startupCanHold()) return
     void this._drainDeferredShellSubmissions()
+  }
+
+  /**
+   * Whether the startup interval that justifies HOLDING a submit is over — or
+   * can never begin.
+   *
+   * Two ways, and the second is the one review round 7 added. A settled
+   * session is one whose prompt arrived (`prompt_ready`) or whose integration
+   * answered (`degraded`). A session that never entered the integration axis
+   * at all — a raw ssh pane, or a local one — is `native` with no fact and
+   * `_awaitsIntegration` false: nothing will EVER settle it, because absence
+   * is how "conventional by design" is expressed (integration/status.ts). A
+   * command held across such a session's rebind was held forever; the bind's
+   * own completion is its release, and this is what says so.
+   */
+  private _startupCanHold(): boolean {
+    if (this.lifecycle.state.kind === 'prompt_ready') return true
+    if (isDegraded(this._integration)) return true
+    // No integration was ever requested for this session, so no verdict is
+    // coming and no prompt mark will ever arrive.
+    return this._integration === null && !this._awaitsIntegration
   }
 
   /** Deliver the held lines ONE AT A TIME, in the order the person made them,
@@ -7845,7 +7877,7 @@ export class TerminalContent extends BasePaneContent {
     try {
       while (this._deferredShellSubmissions.length > 0) {
         if (this._attachment.kind !== 'attached') break
-        if (this.lifecycle.state.kind !== 'prompt_ready' && !isDegraded(this._integration)) break
+        if (!this._startupCanHold()) break
         // Taken before it is submitted: a cancel that lands during the await
         // clears whatever is still queued, and this line's own outcome is the
         // attempt's business (the held window the submit arms).

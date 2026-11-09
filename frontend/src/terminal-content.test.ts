@@ -3504,10 +3504,11 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       const onExit = session.onExit.mock.calls[0]?.[0] as
         ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
       onExit!({ sessionId: session.sessionId, cause: 'interrupted' })
-      const defaultOpen = client.openSession.getMockImplementation()
-      client.openSession.mockImplementation(async (size, anchor) => {
+      const replacement = makeSession({ awaitsIntegration: true })
+      client.openSession.mockImplementation(async () => {
         await newOpen
-        return defaultOpen!(size, anchor)
+        client._sessions.push(replacement)
+        return replacement
       })
       const reopening = content.reconnect()
 
@@ -3518,11 +3519,10 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
 
+      replacement.intent.mockClear()
       openNew()
       expect(await reopening).toBe(true)
-      const replacement = client._sessions[client._sessions.length - 1]
       expect(replacement.sessionId).not.toBe(session.sessionId)
-      replacement.intent.mockClear()
 
       // The new shell settles (or is already live); either way the line the
       // person typed must reach it.
@@ -3538,6 +3538,128 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       expect(
         replacement.intent.mock.calls.filter((call) => call[0] !== 'focus').map((call) => call[1]),
       ).toEqual(['echo after-the-reconnect', 'enter'])
+    } finally {
+      teardown()
+    }
+  })
+
+  // REVIEW ROUND 7, FINDING 1 (P1): a reference command CANCELLED during a
+  // reconnect still ran in the replacement. The verdict resolves while the bind
+  // is in flight; the stale-draft check (the person's Ctrl-C emptied the
+  // editor) sat BELOW the bind-in-flight branch, so the withdrawn line was
+  // queued and the new shell ran it.
+  it('a reference command cancelled during a reconnect is not run in its replacement (sequence 12)', async () => {
+    const client = makeClient()
+    let releaseResolve!: () => void
+    const resolved = new Promise<void>((resolve) => {
+      releaseResolve = resolve
+    })
+    client.call.mockImplementation((method: string) => {
+      if (method === 'vault.resolveLine') {
+        return resolved.then(() => ({
+          line: 'echo secret-value',
+          refs: [{ name: 'x', resolved: true }],
+        }))
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const session = client._sessions[0]
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    let openNew!: () => void
+    const newOpen = new Promise<void>((resolve) => {
+      openNew = resolve
+    })
+    try {
+      const onExit = session.onExit.mock.calls[0]?.[0] as
+        ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
+      onExit!({ sessionId: session.sessionId, cause: 'interrupted' })
+      const defaultOpen = client.openSession.getMockImplementation()
+      client.openSession.mockImplementation(async (size, anchor) => {
+        await newOpen
+        return defaultOpen!(size, anchor)
+      })
+      const reopening = content.reconnect()
+
+      // A reference line typed while the rebind is in flight, then withdrawn.
+      editor.insertText('echo {{secret:x}}')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true, cancelable: true }),
+      )
+      expect(editor.getDoc()).toBe('')
+
+      // Resolution lands while the bind is still in flight.
+      releaseResolve()
+      for (let i = 0; i < 12; i++) await Promise.resolve()
+
+      openNew()
+      expect(await reopening).toBe(true)
+      const replacement = client._sessions[client._sessions.length - 1]
+      replacement.intent.mockClear()
+      replacement.send.mockClear()
+      integrationHandler(client)({
+        sessionId: replacement.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(replacement.intent).not.toHaveBeenCalled()
+      expect(replacement.send).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  // REVIEW ROUND 7, FINDING 2 (P2): a raw session never enters the integration
+  // axis, so nothing ever settles it — a command held across its rebind was
+  // held forever. The bind's own completion releases it when no prompt_ready
+  // will ever come.
+  it('a plain command typed during a raw session’s reconnect still runs (sequence 13)', async () => {
+    const client = makeClient()
+    const session = makeSession({ awaitsIntegration: false })
+    client.openSession.mockResolvedValue(session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    let openNew!: () => void
+    const newOpen = new Promise<void>((resolve) => {
+      openNew = resolve
+    })
+    try {
+      const onExit = session.onExit.mock.calls[0]?.[0] as
+        ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
+      onExit!({ sessionId: session.sessionId, cause: 'interrupted' })
+      const next = makeSession({ awaitsIntegration: false })
+      client.openSession.mockImplementation(async () => {
+        await newOpen
+        client._sessions.push(next)
+        return next
+      })
+      const reopening = content.reconnect()
+
+      // Typed while the rebind is in flight, into a session that will never
+      // report a prompt: no integration verdict is coming.
+      editor.insertText('echo raw-after-reconnect')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+
+      next.intent.mockClear()
+      next.send.mockClear()
+      openNew()
+      expect(await reopening).toBe(true)
+      await vi.waitFor(() => expect(next.intent).toHaveBeenCalled())
+      expect(
+        next.intent.mock.calls.filter((call) => call[0] !== 'focus').map((call) => call[1]),
+      ).toEqual(['echo raw-after-reconnect', 'enter'])
     } finally {
       teardown()
     }

@@ -609,7 +609,7 @@ func containsWordWith(argv []string, want string) bool {
 // the environment surface is read rather than assumed, and waits for the
 // marker that says the dump finished — an observable state change, never a
 // duration.
-func dumpFarEnvironment(t *testing.T, ch ssh.Channel, out *outputBuffer, marker string) {
+func dumpFarEnvironment(t *testing.T, ch ssh.Channel, out *sessionOutput, marker string) {
 	t.Helper()
 	line := "env; cat /proc/$$/environ | tr '\\000' '\\n'; printf '" + marker + "\\n'\n"
 	if _, err := ch.Write([]byte(line)); err != nil {

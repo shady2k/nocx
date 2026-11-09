@@ -21060,6 +21060,141 @@ describe('a full-screen program is told the box that shows it (ADR-2yzsq8mk)', (
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
+// The hand-back's own rounding (nocx-djx1u)
+// ═══════════════════════════════════════════════════════════════════════════
+// ONE FLOOR, ON THE RAW BOX. The fit that gives the margin back is the only
+// fit that subtracts a margin, and `_gridHeight` answers in whole rows already
+// (`paneFillHeight` is `gridRows` of the box); `fitUsableViewport` floors
+// again. In the independent read's numbers — a 422px box, 17px cells and a
+// 24px margin — the exit's first key asked floor((408 − 48)/17) = 21 rows
+// where the pane has floor((422 − 48)/17) = 22. The returning frame then fit
+// 22, the margin came back, and the ordinary fit asked for 22 again: a second
+// resize with no pane change at all.
+describe('a handed-back grid is measured with one floor (nocx-djx1u)', () => {
+  const PANE = { width: 800, height: 422 }
+  const CELL = { cellWidthPx: 8, cellHeightPx: 17 }
+  /** `--pane-inline-padding`: the gutter and the vertical pair, one token. */
+  const MARGIN = 24
+  /** The scroller's box with the layout's vertical margin on it, and without. */
+  const WITH_MARGIN = PANE.height - 2 * MARGIN
+  /** What the pane holds with its margin: floor((422 − 48) / 17) rows, and
+   *  floor((800 − 48) / 8) columns in the ledger's column. */
+  const PANE_ROWS = 22
+  const PANE_COLS = 94
+
+  async function borrowedPane() {
+    const client = makeClient()
+    const mounted = await mountTerminal(makeClipboard(), { attachToDocument: true }, client)
+    const { content, tab } = mounted
+    const raf = globalThis.requestAnimationFrame
+    let queued: FrameRequestCallback[] = []
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      queued.push(cb)
+      return queued.length
+    }
+    const flushFrames = (): void => {
+      for (let pass = 0; pass < 50 && queued.length > 0; pass++) {
+        const frame = queued
+        queued = []
+        for (const cb of frame) cb(0)
+      }
+    }
+    const teardown = (): void => {
+      queued = []
+      globalThis.requestAnimationFrame = raf
+      mounted.teardown()
+    }
+    try {
+      tab.setActive(true)
+      const session = sessionOf(content)
+      const scrollback = scrollbackFor(content)
+      const area = scrollback.scrollbackArea
+      area.style.setProperty('--pane-inline-padding', `${MARGIN}px`)
+      Object.defineProperty(area, 'clientWidth', { configurable: true, value: PANE.width })
+      // THE BOX THE REAL LAYOUT HAS — the one thing jsdom does not compute.
+      // `.scrollback-layout` pays the vertical margin as padding; while the
+      // borrowed grid is on, that padding is zero and the scroller IS the
+      // pane. Reading the class here answers what a browser's `clientHeight`
+      // says after each mode change, which is what the double rounding needs
+      // to be visible at all.
+      Object.defineProperty(area, 'clientHeight', {
+        configurable: true,
+        get: () =>
+          scrollback.scrollbackLayout.classList.contains('inner-borrowed-grid')
+            ? PANE.height
+            : WITH_MARGIN,
+      })
+      content.viewportChanged({ width: PANE.width, height: PANE.height })
+      // A plain ssh shell before its first marker: no blocks, no running
+      // header, the terminal is the pane.
+      scrollback.setUnstructured()
+      session.fireScreenFrame(screenFrame(1, ['$ vim'], CELL))
+      flushFrames()
+      return { content, session, scrollback, flushFrames, teardown }
+    } catch (err) {
+      teardown()
+      throw err
+    }
+  }
+
+  it('subtracts the margin before the row count, and asks for one size', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const { content, session, scrollback, flushFrames, teardown } = await borrowedPane()
+    try {
+      // Setup's own fit is the shell's; its report is not this test's subject.
+      vi.advanceTimersByTime(80)
+      session.sendResize.mockClear()
+
+      // The program owns the pane, then leaves it while its command runs: the
+      // rows stay, and the layout gives the margin up to hold them.
+      const alternate = screenFrame(2, ['ALT-READY'], CELL)
+      alternate.state.bufferKind = 'alternate'
+      session.fireScreenFrame(alternate)
+      flushFrames()
+      expect(scrollback.mode).toBe('fullscreen')
+      session.fireScreenFrame(screenFrame(3, ['$'], CELL))
+      flushFrames()
+      expect(scrollback.scrollbackLayout.classList.contains('inner-borrowed-grid')).toBe(true)
+
+      // The person's first key hands the grid back: ONE report, and it is the
+      // pane's own grid — 22 rows, not the 21 a second floor asks for.
+      session.sendResize.mockClear()
+      typeIntoPane(content, 'x')
+      vi.advanceTimersByTime(80)
+      expect(session.sendResize).toHaveBeenCalledTimes(1)
+      expect(session.sendResize.mock.calls[0][0]).toMatchObject({
+        cols: PANE_COLS,
+        rows: PANE_ROWS,
+      })
+
+      // The shell redraws at that size — a screenful, so the margin waits for
+      // the resize — and returns on the paint that proves the rows fit inside
+      // it. Every size asked for after the key must be that one size: a
+      // second, different report is a resize with no pane change behind it.
+      session.sendResize.mockClear()
+      session.fireScreenFrame(
+        screenFrame(
+          4,
+          Array.from({ length: PANE_ROWS }, (_, row) => `EXITROW-${row + 1}`),
+          { ...CELL, cols: PANE_COLS, rows: PANE_ROWS },
+        ),
+      )
+      flushFrames()
+      expect(scrollback.scrollbackLayout.classList.contains('inner-borrowed-grid')).toBe(false)
+      vi.advanceTimersByTime(80)
+      const asked = session.sendResize.mock.calls.map((call) => {
+        const size = call[0] as { cols: number; rows: number }
+        return `${size.cols}x${size.rows}`
+      })
+      expect(asked).toEqual([`${PANE_COLS}x${PANE_ROWS}`])
+    } finally {
+      teardown()
+      vi.useRealTimers()
+    }
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Measured on the tree before this fix: the first alternate-screen frames
 // carried the PREVIOUS mode's geometry (192 columns with the pane settled
 // wider; 70 columns in a 1394 px pane), the program read the person's keys
@@ -21104,6 +21239,8 @@ describe('an alternate-screen switch holds input for its applied grid (nocx-1ebr
     fail: (error: Error) => void
     switchFrame: () => SessionFrame
     drawProgramFrame: (revision: number, cols?: number) => SessionFrame
+    /** Deliver a lifecycle fact — the seam the backend publishes on. */
+    lifecycle: (fact: unknown) => void
     /** The number of resize requests this pane has issued. */
     requested: () => number
     /** Run every animation frame the pane has scheduled, in order. */
@@ -21249,6 +21386,7 @@ describe('an alternate-screen switch holds input for its applied grid (nocx-1ebr
         fail: (error) => failures[failures.length - 1]?.(error),
         switchFrame,
         drawProgramFrame,
+        lifecycle,
         requested: () => receipts.length,
         flushFrames,
         teardown,
@@ -21327,6 +21465,154 @@ describe('an alternate-screen switch holds input for its applied grid (nocx-1ebr
       session.sendResize.mockClear()
       vi.advanceTimersByTime(80)
       expect(session.sendResize).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+      vi.useRealTimers()
+    }
+  })
+
+  it('takes the pane’s own rows back at the authenticated prompt, and keeps them (nocx-djx1u)', async () => {
+    // A STRUCTURED SESSION NEVER GAVE THE MARGIN UP, SO THE RELEASE OWES IT
+    // NOTHING (independent read, 2026-11-08). The running block owns the rows
+    // and the four-side margin is on the box the fit reads, so the hand-back
+    // is the ledger's column and ONE report. Holding the margin out of the
+    // height as well took two rows off it, and nothing ever put them back: the
+    // clear lives in the borrowed layout (`_dropBorrowedMarginWhenItFits`
+    // asks `isBorrowedGrid`), which a structured session is never in. Every
+    // later fit stayed short until another alternate exit reset the flag.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const { content, session, switchFrame, receipt, lifecycle, flushFrames, teardown } =
+      await switchingPane()
+    try {
+      const scrollback = scrollbackFor(content)
+      // The stylesheet's margin, so a fit that subtracts it again is visible.
+      scrollback.scrollbackArea.style.setProperty('--pane-inline-padding', '24px')
+
+      // The program takes the pane and gives it back while its command runs.
+      switchFrame()
+      receipt('applied')
+      for (let turn = 0; turn < 10; turn++) await Promise.resolve()
+      session.fireScreenFrame(
+        screenFrame(4, ['$ '], { ...CELL, cols: FITTED.cols, rows: ALT_ROWS }),
+      )
+      flushFrames()
+      // The premise: the layout never gave the margin up here. Its rows are
+      // held by the running block, not by the markerless pane.
+      expect(scrollback.scrollbackLayout.classList.contains('inner-borrowed-grid')).toBe(false)
+      expect(scrollback.mode).toBe('running')
+
+      // The authenticated prompt is this session's hand-back moment.
+      session.sendResize.mockClear()
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      vi.advanceTimersByTime(80)
+      // ONE report, and it is the PANE's grid: the ledger's column and the
+      // rows the pane holds with its own margin already on the box.
+      expect(session.sendResize).toHaveBeenCalledTimes(1)
+      expect(session.sendResize.mock.calls[0][0]).toMatchObject({
+        cols: FITTED.cols - 6,
+        rows: FITTED.rows,
+      })
+
+      // AND THE ROWS STAY: a pane that changes size afterwards is measured by
+      // the same pane, not by a flag two rows short that can never clear.
+      session.sendResize.mockClear()
+      Object.defineProperty(scrollback.scrollbackArea, 'clientHeight', {
+        configurable: true,
+        value: PANE.height + 64,
+      })
+      content.viewportChanged({ width: PANE.width, height: PANE.height + 64 })
+      vi.advanceTimersByTime(80)
+      expect(session.sendResize).toHaveBeenCalledTimes(1)
+      expect(session.sendResize.mock.calls[0][0]).toMatchObject({ rows: FITTED.rows + 4 })
+    } finally {
+      teardown()
+      vi.useRealTimers()
+    }
+  })
+
+  it('a key at a structured command’s own prompt is the prompt’s to hand back (nocx-djx1u)', async () => {
+    // THE KEY IS A MARKERLESS SESSION'S PROMPT, NOT EVERY SESSION'S (independent
+    // read, 2026-11-08). A structured running command's release belongs to its
+    // authenticated prompt: the key path checked neither the buffer nor the
+    // mode, so typing into a running command handed the grid back early and
+    // refitted the pane before anything said the command was done — a second
+    // resize, and the pty told about the column while its program still runs.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const { content, session, switchFrame, receipt, lifecycle, flushFrames, teardown } =
+      await switchingPane()
+    try {
+      const scrollback = scrollbackFor(content)
+      scrollback.scrollbackArea.style.setProperty('--pane-inline-padding', '24px')
+      switchFrame()
+      receipt('applied')
+      for (let turn = 0; turn < 10; turn++) await Promise.resolve()
+      session.fireScreenFrame(
+        screenFrame(4, ['$ '], { ...CELL, cols: FITTED.cols, rows: ALT_ROWS }),
+      )
+      flushFrames()
+
+      // The person types into the running command. Nothing is owed by that
+      // key: the command is still running and its prompt has not come.
+      session.sendResize.mockClear()
+      typeIntoPane(content, 'x')
+      vi.advanceTimersByTime(80)
+      expect(session.sendResize).not.toHaveBeenCalled()
+
+      // …and the prompt that does come hands the grid back, once.
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      vi.advanceTimersByTime(80)
+      expect(session.sendResize).toHaveBeenCalledTimes(1)
+      expect(session.sendResize.mock.calls[0][0]).toMatchObject({ rows: FITTED.rows })
+      // The grid is no longer held: the prompt owned the release, not the key.
+      expect(scrollback.scrollbackLayout.classList.contains('inner-borrowed-grid')).toBe(false)
+    } finally {
+      teardown()
+      vi.useRealTimers()
+    }
+  })
+
+  it('a key inside a program that borrowed the screen again does not release the grid (nocx-djx1u)', async () => {
+    // ENTERING THE ALTERNATE SCREEN RETIRES THE RETAINED GRID (independent read,
+    // 2026-11-08). The exit keeps the program's grid for its remaining command;
+    // a program that walks back into the alternate screen owns the pane again,
+    // and its keys are the program's. Nothing cleared the retained grid on the
+    // way in, so the first key a person pressed inside the program released a
+    // grid it still owned and refitted the pane — one resize with the margin
+    // subtracted twice, under a full-screen program.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const { content, session, switchFrame, drawProgramFrame, receipt, flushFrames, teardown } =
+      await switchingPane()
+    try {
+      const scrollback = scrollbackFor(content)
+      scrollback.scrollbackArea.style.setProperty('--pane-inline-padding', '24px')
+      switchFrame()
+      receipt('applied')
+      for (let turn = 0; turn < 10; turn++) await Promise.resolve()
+      // The exit retains the program's grid while its command runs…
+      session.fireScreenFrame(
+        screenFrame(4, ['$ '], { ...CELL, cols: FITTED.cols, rows: ALT_ROWS }),
+      )
+      flushFrames()
+      // …and the program enters the alternate screen again.
+      drawProgramFrame(5, FITTED.cols)
+      receipt('applied')
+      for (let turn = 0; turn < 10; turn++) await Promise.resolve()
+      flushFrames()
+      expect(scrollback.mode).toBe('fullscreen')
+      const owned = (content as unknown as { lastLocalGridSize: { cols: number; rows: number } })
+        .lastLocalGridSize
+
+      // A key inside the program is the program's key. Nothing is handed back
+      // and no report goes out while it owns the pane.
+      session.sendResize.mockClear()
+      typeIntoPane(content, 'x')
+      vi.advanceTimersByTime(80)
+      expect(session.sendResize).not.toHaveBeenCalled()
+      expect(
+        (content as unknown as { lastLocalGridSize: { cols: number; rows: number } })
+          .lastLocalGridSize,
+      ).toEqual(owned)
+      expect(session.intent).toHaveBeenCalled()
     } finally {
       teardown()
       vi.useRealTimers()

@@ -129,6 +129,21 @@ two cases separated, which is what the two earlier records conflated.
   The owner's rule for the margins is untouched: a plain ssh session keeps its
   four sides, and the only interval it gives up is the one before the person has
   typed anything into the shell that now owns the pane.
+  **The hand-back is asked for where the margin was given up, and it rounds
+  once.** Three ways the first cut of that rule was wrong (independent read,
+  2026-11-08), each found by a test that failed before its fix. A structured
+  session never gave the margin up: the block owns the rows and the margin is
+  on the box the fit reads, so its release owes the ledger's column and ONE
+  report, never a second subtraction — that flag could only be cleared by a
+  borrowed layout, so every later fit stayed two rows short until another
+  alternate exit. A program that enters the alternate screen again owns the
+  pane again, so the retained grid is retired at that entry: the person's next
+  key is the program's key, not a prompt, and releasing it there resized a pty
+  under a running full-screen program. And the margin comes off the box BEFORE
+  the row count is floored: the fit's height is already a whole number of rows,
+  so subtracting from it asked a 422px pane with 17px cells for 21 rows where
+  it holds 22 — the returning frame then fitted 22, the margin came back, and
+  the ordinary fit asked for 22 again, a second resize with no pane change.
 - A command that borrowed the alternate screen is drawn in the transcript's
   column from the moment it steps out, at the width its pty still has. Its rows
   are therefore as wide as the pane and the column cuts their right edge — a

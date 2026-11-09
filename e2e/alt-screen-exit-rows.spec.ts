@@ -88,14 +88,32 @@ async function layout(page: import('@playwright/test').Page): Promise<Layout | n
   }, LAYOUT)
 }
 
-test('a borrowed grid is shown whole, and one key gives the pane its margins back (nocx-djx1u)', async ({
-  page,
-}) => {
-  test.setTimeout(240_000)
+interface MarkerlessPane {
+  fixture: Awaited<ReturnType<typeof startSshd>>
+  /** Delete the profile this pane was opened with and stop its sshd. */
+  close: () => Promise<void>
+}
+
+/**
+ * Open this page on a plain ssh shell: no integration, so no OSC 133 and no
+ * authenticated prompt to hand a borrowed grid back. Returns once the shell
+ * has painted its first row — the only readiness signal a markerless pane has —
+ * with the keyboard in the pane.
+ */
+async function openMarkerlessPane(page: import('@playwright/test').Page): Promise<MarkerlessPane> {
   const remoteHome = mkdtempSync(path.join(tmpdir(), 'alt-exit-remote-'))
   const remoteCwd = mkdtempSync(path.join(tmpdir(), 'alt-exit-cwd-'))
   const fixture = await startSshd({ home: remoteHome, cwd: remoteCwd })
   let createdId: string | null = null
+  const close = async (): Promise<void> => {
+    try {
+      const info = await resolveBackend(page)
+      if (createdId !== null) await rpc(page, info, 'profiles.delete', { id: createdId })
+    } catch {
+      /* the pane may already be gone */
+    }
+    fixture.proc.kill('SIGKILL')
+  }
   try {
     // Every resize this page SENDS is counted, in the browser, so "exactly one"
     // is a fact about the wire and not about what the pane drew.
@@ -141,8 +159,7 @@ test('a borrowed grid is shown whole, and one key gives the pane its margins bac
     })
     await page.keyboard.press('Enter')
 
-    // The shell must have drawn before the person speaks: the first painted row
-    // is the only honest readiness signal a markerless pane has.
+    // The shell must have drawn before the person speaks.
     await expect
       .poll(
         async () =>
@@ -166,7 +183,19 @@ test('a borrowed grid is shown whole, and one key gives the pane its margins bac
       )
       .toBe(true)
     await page.locator('.pane.active .terminal-live-container').click()
+    return { fixture, close }
+  } catch (err) {
+    await close()
+    throw err
+  }
+}
 
+test('a borrowed grid is shown whole, and one key gives the pane its margins back (nocx-djx1u)', async ({
+  page,
+}) => {
+  test.setTimeout(240_000)
+  const stand = await openMarkerlessPane(page)
+  try {
     // ONE COMMAND, because the shell is markerless: enter the alternate screen,
     // hold it long enough for the switch's resize to apply and settle, leave it,
     // then print a screenful on the primary buffer.
@@ -226,12 +255,76 @@ test('a borrowed grid is shown whole, and one key gives the pane its margins bac
     const settled = await layout(page)
     expect(settled!.resizes - beforeLayout!.resizes, spokenAfter).toBe(1)
   } finally {
-    try {
-      const info = await resolveBackend(page)
-      if (createdId !== null) await rpc(page, info, 'profiles.delete', { id: createdId })
-    } catch {
-      /* the pane may already be gone */
-    }
-    fixture.proc.kill('SIGKILL')
+    await stand.close()
+  }
+})
+
+// A PROGRAM THAT TAKES THE PANE AGAIN OWNS ITS KEYS AGAIN (nocx-djx1u).
+//
+// The exit keeps the grid the program was given, and in a markerless session
+// the person's first key is what hands it back. But "leaving the alternate
+// screen" is not the same state as "outside it": a program that walks back in
+// owns the pane again — vim re-entering after a suspend, a TUI that redraws by
+// leaving and entering — and a key pressed there is the PROGRAM's key, not a
+// prompt. Nothing retired the retained grid on the way in, so that key used to
+// release a grid the program still owned and refit the pane with the margin
+// subtracted twice: a resize under a running full-screen program, which is the
+// SIGWINCH decision 4 of ADR-2yzsq8mk exists to prevent.
+//
+// The sequence a browser is needed for, in one shell line: enter, leave (the
+// grid is retained), enter again and hold, leave again, and print a row on the
+// primary buffer.
+test('a program that takes the pane again keeps the grid from its keys (nocx-djx1u)', async ({
+  page,
+}) => {
+  test.setTimeout(240_000)
+  const stand = await openMarkerlessPane(page)
+  try {
+    await page.keyboard.type(
+      "printf '\\033[?1049h\\033[H'; sleep 1.2; printf '\\033[?1049l'; sleep 1.2; " +
+        "printf '\\033[?1049h\\033[H'; sleep 6; printf '\\033[?1049l'; printf 'AFTER\\n'",
+    )
+    await page.keyboard.press('Enter')
+
+    const program = '.pane.active .scrollback-layout.inner-pane-program'
+    const borrowed = '.pane.active .scrollback-layout.inner-borrowed-grid'
+
+    // 1. The program owns the pane…
+    await expect(page.locator(program)).toHaveCount(1, { timeout: 30_000 })
+    // 2. …leaves it, and the grid it was given stays the pane's — the state a
+    //    key at the shell is what releases.
+    await expect(page.locator(borrowed)).toHaveCount(1, { timeout: 30_000 })
+    // 3. …and takes it again while its command still runs.
+    await expect(page.locator(program)).toHaveCount(1, { timeout: 30_000 })
+    await page.locator('.pane.active .terminal-live-container').click()
+
+    // A KEY INSIDE THE PROGRAM IS THE PROGRAM'S. It proves no prompt, so
+    // nothing is handed back and no resize goes out while the pane is the
+    // program's.
+    const before = await layout(page)
+    expect(before).not.toBeNull()
+    await page.keyboard.press('x')
+    await page.waitForTimeout(600)
+    const during = await layout(page)
+    const spoken = `during: ${JSON.stringify(before)} → ${JSON.stringify(during)}`
+    expect(during, spoken).not.toBeNull()
+    expect(during!.borrowed, spoken).toBe(false)
+    expect(during!.resizes - before!.resizes, spoken).toBe(0)
+    // …and the program is still there: the hold was long enough to say so.
+    await expect(page.locator(program)).toHaveCount(1)
+
+    // 4. Out again: the grid it was given is retained once more — clearing the
+    //    old borrow on the way in did not cost this exit its rows — and the
+    //    person's own key at the shell hands it back, one resize, once.
+    await expect(page.locator(borrowed)).toHaveCount(1, { timeout: 30_000 })
+    const released = await layout(page)
+    expect(released).not.toBeNull()
+    await page.keyboard.type('y')
+    await expect.poll(async () => (await layout(page))?.borrowed, { timeout: 20_000 }).toBe(false)
+    await page.waitForTimeout(500)
+    const settled = await layout(page)
+    expect(settled!.resizes - released!.resizes).toBe(1)
+  } finally {
+    await stand.close()
   }
 })

@@ -6336,7 +6336,14 @@ export class TerminalContent extends BasePaneContent {
 
   /** Whether the borrowed grid has been handed back and the pane is waiting for
    *  the shell to redraw at its own size, so the fit must leave the vertical
-   *  margin out of the height it reads (nocx-djx1u). */
+   *  margin out of the height it reads (nocx-djx1u).
+   *
+   *  It is a sub-state of the LAYOUT's `inner-borrowed-grid`, never a state of
+   *  its own: the vertical margin is only missing from the box while that class
+   *  is on, so this flag is read through `_borrowedMarginOwed()` and nothing
+   *  else. A structured session has the margin on its box already — subtracting
+   *  it again there cost every later fit its rows (independent read,
+   *  2026-11-08). */
   private _borrowedReleased = false
 
   /**
@@ -6359,6 +6366,22 @@ export class TerminalContent extends BasePaneContent {
   }
 
   /**
+   * Whether the vertical margin is OWED to a handed-back grid — holding the
+   * margin out of the height the fit reads, until the paint that proves the
+   * rows fit inside it (nocx-djx1u).
+   *
+   * The margin is missing from the box exactly while the layout wears
+   * `inner-borrowed-grid`, so this is the layout's answer ANDed with the
+   * hand-back's: a structured session's box already has the margin (the block
+   * owns the rows and scrolls), and subtracting it there again took two rows
+   * off every later fit until the next alternate exit (independent read,
+   * 2026-11-08).
+   */
+  private _borrowedMarginOwed(): boolean {
+    return this._borrowedReleased && this.scrollback?.isBorrowedGrid() === true
+  }
+
+  /**
    * Hand a borrowed grid back to the pane's own layout: the ledger's column and
    * its four margins (ADR-2yzsq8mk decisions 4 and 5, nocx-djx1u).
    *
@@ -6372,13 +6395,25 @@ export class TerminalContent extends BasePaneContent {
   private _releaseBorrowedGrid(): void {
     if (this._ownedGrid === null) return
     this._ownedGrid = null
-    // THE PANE IS MEASURED WITH THE MARGIN IT IS GOING BACK TO (nocx-djx1u). The
-    // box still holds the borrowed rows until the shell's own redraw proves they
-    // fit inside the margin, so the fit is told to leave that margin out of the
-    // height it reads (`usableViewport`) and report the pane's own grid. Without
-    // it the fit reads the borrowed box, reports the size the pty already has,
-    // and nothing moves.
-    this._borrowedReleased = true
+    const sb = this.scrollback
+    if (sb?.isBorrowedGrid() === true) {
+      // THE PANE IS MEASURED WITH THE MARGIN IT IS GOING BACK TO (nocx-djx1u).
+      // The box still holds the borrowed rows until the shell's own redraw
+      // proves they fit inside the margin, so the fit is told to leave that
+      // margin out of the height it reads (`usableViewport`) and report the
+      // pane's own grid. Without it the fit reads the borrowed box, reports the
+      // size the pty already has, and nothing moves.
+      this._borrowedReleased = true
+    } else {
+      // NOTHING WAS GIVEN UP, SO NOTHING IS OWED (independent read,
+      // 2026-11-08). A structured session's margin is on the box already: the
+      // block owns the rows, the fit's height never included the margin, and
+      // holding the margin out of it here would take two rows off every fit
+      // until the next alternate exit reset the flag — which never came,
+      // because the release that would clear it lives in the borrowed layout.
+      this._borrowedReleased = false
+      sb?.setBorrowedGrid(false)
+    }
     this.refitIfResized()
   }
 
@@ -6762,6 +6797,28 @@ export class TerminalContent extends BasePaneContent {
     this.fitUsableViewport(this.usableViewport(v))
   }
 
+  /**
+   * THE HEIGHT A FIT THAT GIVES THE MARGIN BACK MUST READ (nocx-djx1u).
+   *
+   * This is the one fit that subtracts a margin, so it is the one that must
+   * subtract it from the box BEFORE the row count is floored. `_gridHeight`
+   * answers in whole rows already — `paneFillHeight` is `gridRows(box) * cell`
+   * — and `fitUsableViewport` floors again, so subtracting the margin from
+   * that answer rounds twice: a 422px box, 17px cells and a 24px margin asked
+   * for floor((408 − 48)/17) = 21 rows where the pane has
+   * floor((422 − 48)/17) = 22. The returning frame then fitted 22, the margin
+   * came back, and the ordinary fit asked for 22 again — a second resize with
+   * no pane change. One floor, on the raw box.
+   */
+  private _releasedFitHeight(area: HTMLElement, viewport: ContentViewport): number {
+    const box = this.scrollback?.paneBoxHeight ?? 0
+    const raw =
+      box > 0 ? box : this._areaHeightPx(area) > 0 ? this._areaHeightPx(area) : viewport.height
+    const height = Math.max(0, raw - 2 * this._paneMarginPx(area))
+    const cell = this.liveCellMetrics()?.cellHeight ?? 0
+    return cell > 0 ? gridRows(height, cell) * cell : height
+  }
+
   private usableViewport(viewport: ContentViewport): ContentViewport {
     const area = this.scrollback?.scrollbackArea
     const sb = this.scrollback
@@ -6792,10 +6849,11 @@ export class TerminalContent extends BasePaneContent {
     // The box still holds the borrowed rows until the shell's redraw, and the
     // fit must not report that box: the pane's own grid is the one the margin
     // leaves, and it is the size the pty is owed. Both sides of the vertical
-    // pair come off, which is the same token the gutter uses.
+    // pair come off, which is the same token the gutter uses — and they come
+    // off BEFORE the row count is floored (`_releasedFitHeight`).
     const height =
-      this._borrowedReleased && area !== undefined
-        ? Math.max(0, this._gridHeight(area, viewport) - 2 * this._paneMarginPx(area))
+      area !== undefined && this._borrowedMarginOwed()
+        ? this._releasedFitHeight(area, viewport)
         : this._gridHeight(area, viewport)
     // ADR-2yzsq8mk: a normal command is one column with the transcript's gutter,
     // and a full-screen program owns the whole width. The gutter is read from
@@ -7979,6 +8037,17 @@ export class TerminalContent extends BasePaneContent {
     // ownership. The runtime's frame supplies this state independently.
     this.lifecycle.setBuffer(type)
     if (type === 'alternate') {
+      // A NEW BORROW REPLACES THE ONE THE PANE WAS HOLDING (independent read,
+      // 2026-11-08). A program that walks back into the alternate screen owns
+      // the pane again: its keys are the program's, not the shell's proof of a
+      // prompt, and the grid it is given now is the one its own exit will keep.
+      // Leaving these set let the person's first key inside the program release
+      // a grid it still owned — a resize under a running full-screen program,
+      // the SIGWINCH decision 4 exists to prevent — and the margin it had
+      // already given back with it.
+      this._ownedGrid = null
+      this._borrowedReleased = false
+      this.scrollback?.setBorrowedGrid(false)
       // ADR-3kqrem7v: switching the presentation does not change desired
       // geometry. Keep the receipt fence for a REAL pane resize in flight;
       // an equal applied size reuses its receipt and sends no resize RPC.
@@ -9668,9 +9737,15 @@ export class TerminalContent extends BasePaneContent {
     // never one the program's own exit caused.
     //
     // Only input counts: a focus change or a pointer report is not the person
-    // speaking to a shell.
+    // speaking to a shell. And only a key into the PRIMARY buffer counts: an
+    // alternate-screen program is reading its own keys, and a structured
+    // command's release belongs to its authenticated prompt — its box already
+    // has the margin, so a key there has nothing to hand back (independent
+    // read, 2026-11-08).
     if (
       this._ownedGrid !== null &&
+      this._bufferType === 'normal' &&
+      this.scrollback?.isBorrowedGrid() === true &&
       (intent.kind === 'key' || intent.kind === 'text' || intent.kind === 'paste')
     ) {
       this._releaseBorrowedGrid()

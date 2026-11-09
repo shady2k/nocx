@@ -806,11 +806,23 @@ export class ScrollbackController {
    * margin together are the pane and no row is clipped for the margin.
    */
   get paneFillHeight(): number {
-    const max = this._areaHeightPx() - (this._fullscreenHeader ? this.runningHeaderHeightPx : 0)
+    const max = this.paneBoxHeight
     if (max <= 0) return 0
     const cell = this._cellMetrics()?.cellHeight ?? 0
     const height = cell > 0 && max > cell ? gridRows(max, cell) * cell : max
     return this._mode === 'fullscreen' && cell > 0 ? Math.max(0, height - cell) : height
+  }
+
+  /** THE SAME BOX, BEFORE ITS ROWS ARE COUNTED (nocx-djx1u). `paneFillHeight`
+   *  answers in whole rows, which is what a box and a pty are told; the one
+   *  fit that must SUBTRACT a margin from it has to subtract before that
+   *  rounding, or it rounds twice — floor((422 − 48)/17) = 22 rows against
+   *  floor((408 − 48)/17) = 21 — and asks the shell for a grid the pane does
+   *  not have. So the unrounded expression is the one owner, and the floored
+   *  one is derived from it. */
+  get paneBoxHeight(): number {
+    const max = this._areaHeightPx() - (this._fullscreenHeader ? this.runningHeaderHeightPx : 0)
+    return Math.max(0, max)
   }
 
   /** Exit alt-screen: restore normal layout. */

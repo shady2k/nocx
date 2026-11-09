@@ -54,6 +54,8 @@ func (a helperUninstallFS) Rename(s, d string) error                  { return a
 func (a helperUninstallFS) Remove(p string) error                     { return a.conn.Remove(p) }
 func (a helperUninstallFS) ReadDir(p string) ([]iofs.FileInfo, error) { return a.conn.ReadDir(p) }
 func (a helperUninstallFS) ReadFile(p string) ([]byte, error)         { return a.conn.ReadFile(p) }
+func (a helperUninstallFS) Chmod(p string, m os.FileMode) error       { return a.conn.Chmod(p, m) }
+func (a helperUninstallFS) Sync(p string) error                       { return a.conn.Sync(p) }
 
 // uninstallFile promotes the lease's File (io.Writer + Sync + Close) to
 // deploy.File.

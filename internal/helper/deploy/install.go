@@ -85,6 +85,35 @@ const (
 // a person's open.
 type Progress func(stage Stage, written, total int64)
 
+// Inflate decompresses ONE `.gz` file in place on the host, with whatever the
+// host has (nocx-evj4b.1.3). The install calls it with the path it just wrote;
+// a nil error means the file is decompressed and the `.gz` is gone.
+//
+// IT IS A SEAM AND NEVER A REQUIREMENT: every failure it reports — no gzip on
+// the host, an exec the server refuses, a transport that went — makes the
+// install fall back to sending the decompressed artifact, which is the only
+// path there was before this existed. The remote-helper design's D20 chose not
+// to depend on a remote tool for exactly that reason; what changed is the
+// price, not the rule: the artifact crossing the link compressed is ~5 MB
+// where the decompressed helper is 15.3 MB, on every host, after every update.
+type Inflate func(ctx context.Context, path string) error
+
+// Option shapes one install. The zero set is the install this package has
+// always done.
+type Option func(*installOptions)
+
+type installOptions struct {
+	inflate Inflate
+}
+
+// WithInflate lets the install write the artifact's own bytes and ask the host
+// to decompress them, falling back to the plain upload when it cannot. The
+// caller supplies it only where it knows how to run one command on the host
+// (internal/app's ssh route); a nil Inflate is the plain path.
+func WithInflate(fn Inflate) Option {
+	return func(o *installOptions) { o.inflate = fn }
+}
+
 // RemoteFS is the filesystem seam the installer writes through: the same
 // shape as the shell-integration publisher's seam, so one SFTP adapter
 // serves both, and the seam keeps deploy testable against a fake with no
@@ -100,6 +129,20 @@ type RemoteFS interface {
 	Remove(path string) error
 	ReadDir(path string) ([]iofs.FileInfo, error)
 	ReadFile(path string) ([]byte, error)
+	// Chmod sets a file's mode. It exists for the ONE file this package does
+	// not create itself: a host's own gzip writes the decompressed helper, and
+	// what it writes carries the umask rather than the install's 0700
+	// (nocx-evj4b.1.3).
+	Chmod(path string, mode os.FileMode) error
+	// Sync makes an EXISTING file's bytes durable. It exists for the same file
+	// Chmod does: the install's own temporary is synced through the File it
+	// created (writePlain), but the host's gzip wrote this one, and a rename of
+	// a name whose bytes are still in the host's page cache would let a power
+	// cut leave .install-complete beside a truncated helper — the marker's whole
+	// meaning is that the binary beside it is on disk (D7, reviewed on
+	// nocx-evj4b.1.3). Transports without fsync may no-op, the same carve-out
+	// SyncDir states.
+	Sync(path string) error
 }
 
 // File is a handle returned by RemoteFS.Create: Write, Sync and Close are
@@ -233,7 +276,11 @@ func InstalledBinary(dir string) string {
 // running from them, so an install followed by a start that fails is still
 // exactly as reusable as one followed by a start that succeeds. Liveness has
 // one authority and it is the endpoint socket.
-func Ensure(ctx context.Context, fs RemoteFS, src ArtifactSource, home string, p Platform, progress Progress) (binaryPath, contentHash string, err error) {
+func Ensure(ctx context.Context, fs RemoteFS, src ArtifactSource, home string, p Platform, progress Progress, opts ...Option) (binaryPath, contentHash string, err error) {
+	var options installOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
 	scope := catalog.BeginInternal(ctx, catalog.OpInternalHelperInstall)
 	defer scope.Complete()
 	data, contentHash, err := src.Artifact(p)
@@ -268,7 +315,7 @@ func Ensure(ctx context.Context, fs RemoteFS, src ArtifactSource, home string, p
 	if err = ctx.Err(); err != nil {
 		return "", "", err
 	}
-	if err = install(ctx, fs, dir, binary, contentHash, data, progress); err != nil {
+	if err = install(ctx, fs, dir, binary, contentHash, data, progress, options.inflate); err != nil {
 		return "", "", err
 	}
 	return binary, contentHash, nil
@@ -316,13 +363,9 @@ func hashesTo(fs RemoteFS, binary, contentHash string) (bool, error) {
 // so a cancelled install removes its temporary and leaves a markerless tree.
 // Neither reader can exist if the whole payload goes out in one Write, which
 // is what this used to do.
-func install(ctx context.Context, fs RemoteFS, dir, binary, contentHash string, compressed []byte, progress Progress) error {
+func install(ctx context.Context, fs RemoteFS, dir, binary, contentHash string, compressed []byte, progress Progress, inflate Inflate) error {
 	if err := mkdirAll(fs, dir, dirMode); err != nil {
 		return fmt.Errorf("deploy: install directory: %w", err)
-	}
-	payload, err := decompressedPayload(compressed)
-	if err != nil {
-		return fmt.Errorf("deploy: decompress helper: %w", err)
 	}
 	report := func(stage Stage, written, total int64) {
 		if progress != nil {
@@ -334,6 +377,119 @@ func install(ctx context.Context, fs RemoteFS, dir, binary, contentHash string, 
 	// same artifact on one host never collide on one temp file, and the
 	// final rename is last-writer-wins over byte-identical content.
 	tmp := path.Join(dir, ".install-"+nonce())
+
+	// WHAT CROSSES IS THE ARTIFACT'S OWN BYTES WHERE THE HOST CAN WRITE THE
+	// FILE ITSELF (nocx-evj4b.1.3). The embedded artifact is already gzip and
+	// the host is going to write the decompressed helper anyway, so sending
+	// the compressed ~5 MB and letting its gzip produce the file is the same
+	// result as sending 15.3 MB. A host without gzip is not a failure: every
+	// error here falls through to the upload this package has always done.
+	if inflate != nil && writeInflated(ctx, fs, tmp, compressed, report, inflate) {
+		return commitInstall(ctx, fs, dir, tmp, binary, contentHash, report)
+	}
+	payload, err := decompressedPayload(compressed)
+	if err != nil {
+		return fmt.Errorf("deploy: decompress helper: %w", err)
+	}
+	if err := writePlain(ctx, fs, tmp, payload, report); err != nil {
+		return err
+	}
+	return commitInstall(ctx, fs, dir, tmp, binary, contentHash, report)
+}
+
+// writeInflated sends the artifact's own bytes and asks the host to decompress
+// them in place, answering whether tmp now holds the helper.
+//
+// A false answer is never an error the install reports: it means the host could
+// not do it — no gzip, an exec the server refuses — and the caller's answer is
+// the plain upload. What it must not leave behind is a half-written pair, so
+// both names are removed before it answers, and the plain path then writes tmp
+// itself.
+func writeInflated(ctx context.Context, fs RemoteFS, tmp string, compressed []byte, report func(Stage, int64, int64), inflate Inflate) bool {
+	gz := tmp + ".gz"
+	f, err := fs.Create(gz, markerMode)
+	if err != nil {
+		// CREATE CAN HAVE MADE THE FILE ANYWAY: the adapters create and then
+		// chmod (ssh_sftpfs.go), so a Create that failed on its second step has
+		// already left a file on the host. The plain fallback below writes tmp
+		// and the install is then marked complete, so a name nobody reads would
+		// sit inside a directory that says it is whole, for as long as the
+		// install lives. Removing it is what makes the fallback leave nothing
+		// (nocx-evj4b.1.3, review).
+		_ = fs.Remove(gz)
+		return false
+	}
+	total := int64(len(compressed))
+	report(StageCopying, 0, total)
+	written := 0
+	werr := ctx.Err()
+	for werr == nil && written < len(compressed) {
+		if cerr := ctx.Err(); cerr != nil {
+			werr = cerr
+			break
+		}
+		size := min(writeChunk, len(compressed)-written)
+		n, writeErr := f.Write(compressed[written : written+size])
+		if writeErr != nil {
+			werr = writeErr
+			break
+		}
+		if n != size {
+			werr = io.ErrShortWrite
+			break
+		}
+		written += n
+		report(StageCopying, int64(written), total)
+	}
+	if werr == nil {
+		werr = ctx.Err()
+	}
+	if werr == nil {
+		werr = f.Sync()
+	}
+	closeErr := f.Close()
+	if werr == nil {
+		werr = closeErr
+	}
+	if werr != nil {
+		_ = fs.Remove(gz)
+		return false
+	}
+	if err := inflate(ctx, gz); err != nil {
+		// The host's own answer, which the caller's log keeps: an optimised
+		// path that failed must not be silent about why.
+		_ = fs.Remove(gz)
+		_ = fs.Remove(tmp)
+		return false
+	}
+	// THE FILE THE HOST WROTE IS SYNCED HERE, BEFORE IT HAS A NAME THAT MEANS
+	// ANYTHING. The install's own temporary is synced through the File it
+	// created; this one was written by the host's gzip, and the rename below is
+	// the moment the marker's promise — the binary beside it is whole — starts
+	// to apply. Syncing after the rename would leave a window a power cut can
+	// land in: .install-complete present, the bytes it vouches for still in the
+	// page cache (D7; nocx-evj4b.1.3, review).
+	if err := fs.Sync(tmp); err != nil {
+		_ = fs.Remove(gz)
+		_ = fs.Remove(tmp)
+		return false
+	}
+	// gzip wrote the file with the umask, not with the install's 0700.
+	if err := fs.Chmod(tmp, binaryMode); err != nil {
+		// The .gz is already consumed by a gzip -d that succeeded, so this is a
+		// best-effort sweep of a name that should be gone — the same rule as
+		// every other failure here: the fallback never inherits a leftover.
+		_ = fs.Remove(gz)
+		_ = fs.Remove(tmp)
+		return false
+	}
+	return true
+}
+
+// writePlain is the install every host has: the decompressed helper, chunked so
+// a person's Cancel is answered within one chunk and the progress row moves on a
+// slow link.
+func writePlain(ctx context.Context, fs RemoteFS, tmp string, payload []byte, report func(Stage, int64, int64)) error {
 	f, err := fs.Create(tmp, binaryMode)
 	if err != nil {
 		return fmt.Errorf("deploy: create temp: %w", err)
@@ -389,6 +545,16 @@ func install(ctx context.Context, fs RemoteFS, dir, binary, contentHash string, 
 		// precisely the state a later Ensure must find clean.
 		_ = fs.Remove(tmp)
 		return fmt.Errorf("deploy: write helper: %w", werr)
+	}
+	return nil
+}
+
+// commitInstall renames the written helper into place, verifies it once and
+// writes the marker (D7, D21).
+func commitInstall(ctx context.Context, fs RemoteFS, dir, tmp, binary, contentHash string, report func(Stage, int64, int64)) error {
+	if err := ctx.Err(); err != nil {
+		_ = fs.Remove(tmp)
+		return err
 	}
 	if rerr := fs.Rename(tmp, binary); rerr != nil {
 		_ = fs.Remove(tmp)

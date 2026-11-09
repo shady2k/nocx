@@ -263,7 +263,7 @@ func (h *Host) hello(ty proto.FrameType, payload []byte) error {
 	if err != nil {
 		return fmt.Errorf("host: helloOK: %w", err)
 	}
-	h.writeFrame(proto.TypeHelloOK, raw)
+	_ = h.writeFrame(proto.TypeHelloOK, raw)
 	return nil
 }
 
@@ -624,7 +624,7 @@ func (h *Host) request(reqCtx context.Context, entry *pendingRequest, req proto.
 		// A refusal is an answer: from here a withdrawal is too late, and
 		// there is nothing it could otherwise release.
 		entry.answerWriting()
-		h.respond(resp)
+		_ = h.respond(resp)
 	}
 
 	svc := h.serviceByName(req.Service)
@@ -663,7 +663,21 @@ func (h *Host) request(reqCtx context.Context, entry *pendingRequest, req proto.
 	// returning — is deciding before the answer exists, and the gap between
 	// those two is exactly the window a session was leaked in.
 	delivery := entry.answerWriting()
-	h.respond(resp)
+	// THE WRITE ITSELF IS THE LAST WORD (nocx-ouru5.1.9). The arbitration above
+	// decided what the CALLER had done; this decides whether the frame carrying
+	// the answer reached the wire at all. A transport that died between the two
+	// lines, or a frame the writer refused, means the answer reached NOBODY —
+	// and a service that made something the answer carries must hear that, not
+	// the optimistic verdict. It is the same report a withdrawn request gets,
+	// because it is the same fact: nobody was told.
+	if !h.respond(resp) {
+		// Logged through the request's own context, like every other line about
+		// a request (nocx-n14oo.9): the corr and the trace are what pair this
+		// with the caller's side of a delivery that failed.
+		nocxlog.From(reqCtx).Warn("helper: an answer could not be written; its caller was told nothing",
+			"op", req.Service+"."+req.Op, "id", req.ID)
+		delivery.Withdrawn = true
+	}
 	// AFTER the write, and that is the whole of this hook's contract
 	// (ResponseObserver): a service whose handler deferred a pump gets to
 	// start it knowing the caller's answer is already on the wire, so the
@@ -761,7 +775,7 @@ func (h *Host) cancel(payload []byte) {
 	}
 	if svc := h.serviceByName(entry.service); svc != nil {
 		if policy, ok := svc.(CancelPolicy); ok && policy.RefusesCancel(entry.op) {
-			h.respond(proto.Response{ID: c.ID, Error: &proto.Error{
+			_ = h.respond(proto.Response{ID: c.ID, Error: &proto.Error{
 				Code:    proto.ErrCodeCancelRefused,
 				Message: "operation refuses cancellation",
 			}})
@@ -789,20 +803,26 @@ func (h *Host) serviceByName(name string) Service {
 	return nil
 }
 
-// respond sends one response. A response whose frame would exceed the
-// payload bound is chunked (D14): a ChunkedResult sentinel followed by
-// TypeChunk frames, which the receiver reassembles by concatenation.
-func (h *Host) respond(resp proto.Response) {
+// respond sends one response and answers whether it reached the wire. A
+// response whose frame would exceed the payload bound is chunked (D14): a
+// ChunkedResult sentinel followed by TypeChunk frames, which the receiver
+// reassembles by concatenation.
+//
+// THE BOOLEAN IS THE ANSWER'S DELIVERY, and it is returned rather than logged
+// because the request's own claim on what it made depends on it
+// (nocx-ouru5.1.9): a marshal failure, a chunk that could not be written, or a
+// wire that died between the arbitration and this write all mean the frame
+// reached NOBODY, whatever the caller intended.
+func (h *Host) respond(resp proto.Response) bool {
 	raw, err := json.Marshal(resp)
 	if err != nil {
 		h.log.Error("marshal response", "err", err)
-		return
+		return false
 	}
 	if len(raw) > proto.MaxFrameBytes && resp.Error == nil {
-		h.respondChunked(resp.ID, resp.Result)
-		return
+		return h.respondChunked(resp.ID, resp.Result)
 	}
-	h.writeFrame(proto.TypeResponse, raw)
+	return h.writeFrame(proto.TypeResponse, raw) == nil
 }
 
 // respondChunked sends one response as a ChunkedResult sentinel followed by
@@ -813,7 +833,7 @@ func (h *Host) respond(resp proto.Response) {
 // sentinel and its chunks may interleave with other responses on the wire —
 // the stream id routes them, which is what keeps chunking compatible with
 // one goroutine per request (D13).
-func (h *Host) respondChunked(id uint64, result json.RawMessage) {
+func (h *Host) respondChunked(id uint64, result json.RawMessage) bool {
 	h.mu.Lock()
 	h.streamSeq++
 	streamID := h.streamSeq
@@ -831,23 +851,30 @@ func (h *Host) respondChunked(id uint64, result json.RawMessage) {
 	})
 	if err != nil {
 		h.log.Error("marshal chunked sentinel", "err", err)
-		return
+		return false
 	}
 	sentinel := proto.Response{ID: id, Result: sentinelResult}
 	raw, err := json.Marshal(sentinel)
 	if err != nil {
 		h.log.Error("marshal chunked response", "err", err)
-		return
+		return false
 	}
-	h.writeFrame(proto.TypeResponse, raw)
+	if werr := h.writeFrame(proto.TypeResponse, raw); werr != nil {
+		return false
+	}
 	for _, piece := range chunks {
 		raw, err = json.Marshal(proto.Chunk{ChunkedStreamID: streamID, Bytes: piece})
 		if err != nil {
 			h.log.Error("marshal chunk", "err", err)
-			return
+			return false
 		}
-		h.writeFrame(proto.TypeChunk, raw)
+		if werr := h.writeFrame(proto.TypeChunk, raw); werr != nil {
+			// A PARTIAL ANSWER IS NOT AN ANSWER: the receiver reassembles by
+			// stream id, and a chunk missing leaves it with nothing.
+			return false
+		}
 	}
+	return true
 }
 
 // chunkPayloadCapacity is the largest raw result piece whose Chunk envelope
@@ -872,13 +899,17 @@ func splitChunks(b []byte, size int) [][]byte {
 	return out
 }
 
-// writeFrame writes one frame and logs a failure. It is the response path,
-// where there is nothing else to do with the error: the request it answers is
-// already finished.
-func (h *Host) writeFrame(ty proto.FrameType, raw []byte) {
-	if err := h.write(ty, raw); err != nil {
+// writeFrame writes one frame and logs a failure. Most callers have nothing
+// else to do with the error: the frame is a notification or a hello, and the
+// request it belongs to is already over. The RESPONSE path is the exception and
+// keeps it — respond returns it, because "the answer reached the wire" is a fact
+// a service acts on (AnswerDelivery, nocx-ouru5.1.9).
+func (h *Host) writeFrame(ty proto.FrameType, raw []byte) error {
+	err := h.write(ty, raw)
+	if err != nil {
 		h.log.Error("write frame", "type", ty, "err", err)
 	}
+	return err
 }
 
 // write puts one frame on the wire under the writer mutex, so concurrent

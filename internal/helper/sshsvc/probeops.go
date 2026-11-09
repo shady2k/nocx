@@ -123,6 +123,7 @@ func (s *Service) probeOps() []string {
 		proto.OpSamplePorts,
 		proto.OpCompletion,
 		proto.OpCommandNames,
+		proto.OpInflate,
 	}
 }
 
@@ -221,6 +222,33 @@ func (s *Service) leaseByID(id proto.LeaseID) (*probeLease, error) {
 // uname runs the platform probe (D20).
 func (s *Service) uname(ctx context.Context, p proto.UnameParams) (proto.ProbeExecResult, error) {
 	return s.runProbe(ctx, p.Lease, remoteprobe.UnameCommand)
+}
+
+// inflate decompresses one file on the far host, in place (nocx-evj4b.1.3).
+//
+// It is a PROBE in this file's sense and not a new capability: one fixed
+// command, one argument, run on the lease the caller holds, answered with the
+// remote exit status. The caller decides what an exit status means — 127 is "no
+// gzip here", which is the fallback, and any other non-zero is the host's own
+// answer to a file it would not decompress — exactly as discovery decides what
+// 127 means for `ss`.
+//
+// NO OUTPUT IS EXPECTED, and stdout is captured anyway: a gzip that complains
+// writes to stderr and one that succeeds writes nothing, so the captured streams
+// cost nothing and give the coordinator's log the host's own words when the
+// fallback runs.
+func (s *Service) inflate(ctx context.Context, p proto.InflateParams) (proto.ProbeExecResult, error) {
+	// AN EMPTY PATH IS THE AVAILABILITY QUESTION, asked before the upload so a
+	// host without gzip never pays the compressed transfer (remoteprobe's own
+	// note).
+	command := remoteprobe.InflateProbe()
+	if p.Path != "" {
+		command = remoteprobe.InflateCommand(p.Path)
+	}
+	if command == "" {
+		return proto.ProbeExecResult{}, fmt.Errorf("%w: path %q", errBadLeaseParams, p.Path)
+	}
+	return s.runProbe(ctx, p.Lease, command)
 }
 
 // home answers where the account's home directory is.

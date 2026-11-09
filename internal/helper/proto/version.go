@@ -315,6 +315,17 @@ package proto
 // This is 21 rather than 20 because TypeSessionEffect gained the
 // commandSnapshot kind. A 20-helper rejects its kind value, so both peers must
 // fence the new typed session-local command state at hello.
+// This is 24 rather than 23 because the `ssh` service gained an op: `inflate`
+// asks a host to decompress a file the install has already written, so the
+// helper install can send the artifact's own ~5 MB instead of the 15.3 MB
+// decompressed helper (nocx-evj4b.1.3). Nothing about it changes a shared
+// shape — the params and the result are a path and a command's exit status —
+// but the op IS the agreement: a 23-helper answers `bad_params` for an op it
+// does not have, which is a sentence about the request and a lie about the
+// helper, and the install would spend a compressed upload finding out. The
+// strict rule applies because a generation is published: the number moves, the
+// install lands beside the old one, and the peers fence at hello.
+//
 // This is 23 rather than 22 because the wire's SCREEN CELL gained a field, and a
 // field on a frozen shape is the half that cannot be added: `screenCell` is
 // `additionalProperties: false` on both sides, so a 22-helper REJECTS a frame
@@ -330,4 +341,4 @@ package proto
 // directions, which is what makes the number the whole of the compatibility
 // story, and no shim reads one shape as the other: a generation that cannot
 // state the rendering does not answer this coordinator at all.
-const Version = "23"
+const Version = "24"

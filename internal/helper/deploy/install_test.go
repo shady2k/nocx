@@ -332,6 +332,8 @@ type fakeFS struct {
 
 	dirs  map[string]bool
 	files map[string][]byte
+	// modes records Chmod calls, keyed by path.
+	modes map[string]os.FileMode
 
 	creates       int
 	binaryCreates int
@@ -348,10 +350,23 @@ type fakeFS struct {
 	// total written so far. It is how a test puts a cancellation in the
 	// middle of an upload instead of before it.
 	afterWrite func(written int)
+	// createLeavesFile, when set, is the create-then-chmod shape of the real
+	// adapters: Create has already made the file when it fails. One call only.
+	createLeavesFile error
+	// events is the ordered log of the boundaries the install crossed
+	// ("create:<path>", "syncpath:<path>", "rename:<src>-><dst>", …), which is
+	// how a test asserts that a step happened BEFORE another rather than
+	// merely that it happened.
+	events []string
 }
 
 func newFakeFS() *fakeFS {
-	return &fakeFS{dirs: map[string]bool{"/": true}, files: map[string][]byte{}, fail: map[string]error{}}
+	return &fakeFS{
+		dirs:  map[string]bool{"/": true},
+		files: map[string][]byte{},
+		modes: map[string]os.FileMode{},
+		fail:  map[string]error{},
+	}
 }
 
 // failNext makes the next call to op fail. The op names are this fake's own
@@ -485,6 +500,13 @@ func (f *fakeFS) Create(path string, mode os.FileMode) (deploy.File, error) {
 	if !f.dirs[filepath.Dir(path)] {
 		return nil, fs.ErrNotExist
 	}
+	if err := f.createLeavesFile; err != nil {
+		f.createLeavesFile = nil
+		f.files[path] = []byte{}
+		f.modes[path] = mode
+		f.events = append(f.events, "create:"+path+":failed")
+		return nil, err
+	}
 	op := "create"
 	if filepath.Base(path) == ".install-complete" {
 		op = "createmarker"
@@ -493,9 +515,13 @@ func (f *fakeFS) Create(path string, mode os.FileMode) (deploy.File, error) {
 		return nil, err
 	}
 	f.creates++
+	f.events = append(f.events, "create:"+path)
 	if filepath.Base(path) != ".install-complete" {
 		f.binaryCreates++
 	}
+	// The real adapters set the mode at creation (mkdir+chmod, create+chmod); the
+	// fake records it so an install's mode discipline is assertable.
+	f.modes[path] = mode
 	return &fakeFile{fs: f, path: path}, nil
 }
 
@@ -505,15 +531,38 @@ func (f *fakeFS) SyncDir(string) error {
 	return f.takeLocked("syncdir")
 }
 
+// Sync is the RemoteFS.Sync boundary, named "syncpath" so a test can break the
+// sync of the file the HOST wrote without touching the File.Sync the install
+// does on its own temporary ("sync").
+func (f *fakeFS) Sync(p string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.takeLocked("syncpath"); err != nil {
+		return err
+	}
+	f.events = append(f.events, "syncpath:"+p)
+	if _, ok := f.files[p]; !ok {
+		return fs.ErrNotExist
+	}
+	return nil
+}
+
 func (f *fakeFS) Rename(src, dst string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.takeLocked("rename"); err != nil {
 		return err
 	}
+	f.events = append(f.events, "rename:"+src+"->"+dst)
 	if data, ok := f.files[src]; ok {
 		delete(f.files, src)
 		f.files[dst] = data
+		// A mode travels with the inode through a rename, which is exactly why
+		// the install chmods the temporary before committing it (nocx-evj4b.1.3).
+		if mode, ok := f.modes[src]; ok {
+			delete(f.modes, src)
+			f.modes[dst] = mode
+		}
 		return nil
 	}
 	if f.dirs[src] {
@@ -539,6 +588,18 @@ func (f *fakeFS) Remove(path string) error {
 		return nil
 	}
 	return fs.ErrNotExist
+}
+
+// Chmod records the mode the installer asked for. The host's gzip is the one
+// writer whose file this package must re-mode (nocx-evj4b.1.3).
+func (f *fakeFS) Chmod(p string, mode os.FileMode) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.takeLocked("chmod"); err != nil {
+		return err
+	}
+	f.modes[p] = mode
+	return nil
 }
 
 func (f *fakeFS) ReadDir(dir string) ([]fs.FileInfo, error) {

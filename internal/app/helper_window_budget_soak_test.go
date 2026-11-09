@@ -206,6 +206,14 @@ func (s *soakSpawner) SpawnSSH(_ context.Context, req helpersession.SSHSpawnRequ
 // askedForLifecycle answers whether this session's spawn reserved the second
 // window, which is the one fact the inventory cannot report and this test
 // cannot compute.
+// count is how many shells this daemon was asked to fork, so a test can say
+// whether a retry was handed a session or made a second one.
+func (s *soakSpawner) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.spawned
+}
+
 func (s *soakSpawner) askedForLifecycle(sid string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -261,7 +269,104 @@ func (s *soakSpawner) emit(t *testing.T, sid string, total int64) {
 type soakHelper struct {
 	ln      net.Listener
 	svc     *helpersession.Service
+	answers *heldAnswers
 	spawner *soakSpawner
+}
+
+// heldAnswers is this machine's daemon with one seam: it can hold the ANSWER to
+// the first spawn it serves, after the service has done everything it does.
+//
+// The interval it holds open is the one the review round 2 findings are about:
+// the shell exists, the claim is resolved, and the frame carrying the session's
+// id has NOT been written yet. A withdrawal on one side of that instant and the
+// other are two different outcomes, so a test must be able to stand exactly
+// there.
+type heldAnswers struct {
+	*helpersession.Service
+
+	mu      sync.Mutex
+	hold    chan struct{}
+	holding chan struct{}
+	held    bool
+	// withdrawnDone is signalled after an answer whose delivery was a
+	// withdrawal has been acted on. A test that must prove the DECISION — that
+	// a session somebody else holds was NOT ended, which no amount of polling
+	// can distinguish from "the decision has not been taken yet" — waits for
+	// this edge rather than for a verdict about time.
+	withdrawnDone chan struct{}
+}
+
+// holdNextSpawn arms the hold and answers the signal that it has been reached,
+// with the release. Only the first spawn served is held: a retry for the same
+// claim is an answer of its own and runs straight through.
+func (h *heldAnswers) holdNextSpawn() (<-chan struct{}, func()) {
+	hold, holding := make(chan struct{}), make(chan struct{})
+	h.mu.Lock()
+	h.hold, h.holding, h.held = hold, holding, false
+	h.mu.Unlock()
+	return holding, func() {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		select {
+		case <-hold:
+		default:
+			close(hold)
+		}
+	}
+}
+
+func (h *heldAnswers) Call(ctx context.Context, op string, params json.RawMessage) (any, error) {
+	result, err := h.Service.Call(ctx, op, params)
+	if err != nil || (op != proto.OpSpawn && op != proto.OpSpawnSSH) {
+		return result, err
+	}
+	h.mu.Lock()
+	if h.hold == nil || h.held {
+		h.mu.Unlock()
+		return result, err
+	}
+	h.held = true
+	hold, holding := h.hold, h.holding
+	h.mu.Unlock()
+	close(holding)
+	<-hold
+	return result, err
+}
+
+// ResponseWritten forwards the answer's fate to the service — which is what
+// decides whether an unread answer's session is ended — and says when that has
+// been done for a withdrawal.
+func (h *heldAnswers) ResponseWritten(ctx context.Context, op string, result any, delivery host.AnswerDelivery) {
+	h.Service.ResponseWritten(ctx, op, result, delivery)
+	if !delivery.Withdrawn {
+		return
+	}
+	h.mu.Lock()
+	done := h.withdrawnDone
+	h.mu.Unlock()
+	if done != nil {
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// awaitWithdrawal waits until the daemon has acted on an answer that reached
+// nobody.
+func (h *heldAnswers) awaitWithdrawal(t *testing.T) {
+	t.Helper()
+	h.mu.Lock()
+	done := h.withdrawnDone
+	h.mu.Unlock()
+	if done == nil {
+		t.Fatal("no withdrawal edge was armed")
+	}
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the daemon never acted on an answer that reached nobody")
+	}
 }
 
 func startSoakHelper(t *testing.T, dir, generation string, spawner *soakSpawner) *soakHelper {
@@ -277,7 +382,8 @@ func startSoakHelper(t *testing.T, dir, generation string, spawner *soakSpawner)
 		Log:        discardLogger(t),
 	})
 	t.Cleanup(svc.Close)
-	helper := &soakHelper{ln: ln, svc: svc, spawner: spawner}
+	answers := &heldAnswers{Service: svc, withdrawnDone: make(chan struct{}, 4)}
+	helper := &soakHelper{ln: ln, svc: svc, answers: answers, spawner: spawner}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() {
 		cancel()
@@ -287,7 +393,10 @@ func startSoakHelper(t *testing.T, dir, generation string, spawner *soakSpawner)
 		_ = endpoint.Serve(ctx, ln, func(conn net.Conn) {
 			h := host.New(conn, conn, generation, "instance-1", discardLogger(t))
 			h.Register(hostsvc.New(localgit.NewFactory()))
-			h.Register(svc)
+			// The wrapper, not the service: it forwards everything and can hold
+			// one spawn's answer. It promotes the service's ResponseWritten, so
+			// the answer's fate still reaches the party that acts on it.
+			h.Register(answers)
 			release := svc.Bind(h)
 			defer release()
 			_ = h.Serve(ctx)
@@ -559,6 +668,161 @@ func TestACancelledOpenLeavesNothingReservedOnTheHelper(t *testing.T) {
 			// The daemon finishes the spawn it was already running. What it
 			// must NOT do is keep the result: nobody heard the session's id.
 			assertNothingReserved(t, stand, "after a withdrawn open")
+		})
+	}
+}
+
+// TestAWithdrawalBeforeTheAnswerIsWrittenLeavesNothingReserved is the second of
+// the review's findings (nocx-ouru5.1.5, review round 2): the withdrawal lands
+// in the gap between the spawn's own work and the frame that carries its id, so
+// the decision cannot be taken inside the handler — it is taken where the answer
+// is written, and the session is released there.
+//
+// The gap is opened deliberately, from the daemon's side: the shell exists, the
+// claim is resolved, and the answer is held. The caller is then withdrawn, the
+// withdrawal is ordered against the wire, and only then is the answer allowed
+// out. Nothing read the frame; nothing may keep the reservation.
+func TestAWithdrawalBeforeTheAnswerIsWrittenLeavesNothingReserved(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		remote bool
+	}{
+		{"local", false},
+		{"ssh", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stand := startSoakStand(t)
+			holding, release := stand.helper.answers.holdNextSpawn()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			type opened struct {
+				selected bool
+				err      error
+			}
+			result := make(chan opened, 1)
+			go func() {
+				_, selected, err := stand.opener.OpenHosted(ctx,
+					stand.configFor("pane-withdrawn-answer", tc.remote), "")
+				result <- opened{selected: selected, err: err}
+			}()
+
+			select {
+			case <-holding:
+			case <-time.After(30 * time.Second):
+				t.Fatal("the daemon never finished making the shell")
+			}
+			// THE SESSION IS REAL AND ITS ANSWER IS NOT WRITTEN: this is the
+			// interval, and it is a state the helper can be asked about.
+			if used := stand.helper.svc.WindowBytesInUse(); used == 0 {
+				t.Fatal("the held answer reserved nothing, so this test would prove nothing")
+			}
+			if entries := stand.inventory(t); len(entries) != 1 {
+				t.Fatalf("the held answer holds %d session(s), want the one whose answer is being written", len(entries))
+			}
+
+			cancel()
+			got := <-result
+			if got.err == nil {
+				t.Fatalf("a withdrawn open reported success (selected=%v)", got.selected)
+			}
+			// The withdrawal is on the wire before the answer is allowed out.
+			stand.barrier(t)
+			release()
+			stand.helper.answers.awaitWithdrawal(t)
+
+			assertNothingReserved(t, stand, "after a withdrawal before the answer was written")
+		})
+	}
+}
+
+// TestARetryHandedTheSessionKeepsItWhenTheFirstSpawnWithdraws is the first of
+// the review's findings (nocx-ouru5.1.5, review round 2): a retry waiting on
+// the same idempotency key is woken by the claim's resolution and handed the
+// session — and the spawn that made that session, whose own answer then turns
+// out to have reached nobody, must not end it. One owner, decided once.
+func TestARetryHandedTheSessionKeepsItWhenTheFirstSpawnWithdraws(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		remote bool
+	}{
+		{"local", false},
+		{"ssh", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stand := startSoakStand(t)
+			holding, release := stand.helper.answers.holdNextSpawn()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			const claim = "soak-shared-claim"
+			type opened struct {
+				id       session.ID
+				selected bool
+				err      error
+			}
+			first := make(chan opened, 1)
+			go func() {
+				openedSess, selected, err := stand.opener.OpenHosted(ctx,
+					stand.configFor("pane-first-attempt", tc.remote), claim)
+				var id session.ID
+				if openedSess.Session != nil {
+					id = openedSess.Session.ID()
+				}
+				first <- opened{id: id, selected: selected, err: err}
+			}()
+
+			select {
+			case <-holding:
+			case <-time.After(30 * time.Second):
+				t.Fatal("the daemon never finished making the shell")
+			}
+
+			heldID := stand.inventory(t)[0].Session.Session
+
+			// THE RETRY, with the same claim: the resolved claim hands it the
+			// existing session, which it attaches to and adopts. This is the
+			// shell the first attempt must not kill.
+			retried, selected, err := stand.opener.OpenHosted(context.Background(),
+				stand.configFor("pane-retry", tc.remote), claim)
+			if err != nil || !selected {
+				t.Fatalf("the retry waiting on the first spawn's claim: selected=%v, err=%v", selected, err)
+			}
+			retryID := retried.Session.ID()
+			if forks := stand.helper.spawner.count(); forks != 1 {
+				t.Fatalf("the retry forked a second shell (%d spawns); a resolved claim is an answer, "+
+					"and this test is about the session it was handed", forks)
+			}
+			if string(retryID) != heldID {
+				// The retry must be the SAME session the first attempt made.
+				t.Fatalf("the retry was given %s, not the first attempt's session %s", retryID, heldID)
+			}
+
+			// Now the first attempt's caller gives up, and its answer is
+			// written to nobody.
+			cancel()
+			got := <-first
+			if got.err == nil {
+				t.Fatalf("a withdrawn open reported success (selected=%v)", got.selected)
+			}
+			stand.barrier(t)
+			release()
+			stand.helper.answers.awaitWithdrawal(t)
+
+			// THE RETRY'S SHELL IS STILL THERE, whole, and still somebody's.
+			stand.check(t, "after the first attempt withdrew with its session handed to a retry", 1)
+			entries := stand.inventory(t)
+			if entries[0].Session.Session != string(retryID) {
+				t.Fatalf("the helper holds %s, want the retry's session %s", entries[0].Session.Session, retryID)
+			}
+			if entries[0].Exit != nil {
+				t.Fatal("the retry's shell exited when the first attempt withdrew")
+			}
+			stand.helper.spawner.emit(t, string(retryID), 4<<10)
+			stand.check(t, "the retry's shell after the first attempt withdrew", 1)
+
+			stand.closePane(t, retryID)
+			stand.check(t, "the retry's pane closed", 0)
 		})
 	}
 }

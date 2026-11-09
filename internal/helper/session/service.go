@@ -65,14 +65,8 @@ var (
 	ErrStaleLease    = errors.New("session: the frame carries a stale lease epoch")
 	ErrBudget        = errors.New("session: the helper's aggregate window budget is exhausted")
 	ErrSpawn         = errors.New("session: the shell could not be started")
-	// ErrSpawnWithdrawn is a spawn that ran to a registered session and was
-	// undone because the caller withdrew before it could be told the session's
-	// id (nocx-ouru5.1.5). It is not ErrSpawn: the shell started. It is a
-	// failure of the ANSWER, and its reservation is released by the same closer
-	// every other end uses.
-	ErrSpawnWithdrawn = errors.New("session: the caller stopped waiting before it could be told the session")
-	ErrSignal         = errors.New("session: signal is invalid or unavailable")
-	ErrBadKey         = errors.New("session: the idempotency key is longer than the protocol allows")
+	ErrSignal        = errors.New("session: signal is invalid or unavailable")
+	ErrBadKey        = errors.New("session: the idempotency key is longer than the protocol allows")
 	// ErrReplay is a capture the helper will not feed to an emulator: a
 	// geometry it refuses to allocate, marks it cannot honour, or a chunk the
 	// terminal would not take. It is BadParams rather than internal because
@@ -679,10 +673,7 @@ func (s *Service) Refusal(err error) (string, json.RawMessage) {
 		return proto.ErrCodeBadParams, nil
 	case errors.Is(err, ErrReplay):
 		return proto.ErrCodeBadParams, nil
-	case errors.Is(err, ErrSpawn), errors.Is(err, ErrSpawnWithdrawn):
-		// The same code, because it is the same fact for the pane: no session
-		// came of this request. A caller that receives it at all is one whose
-		// withdrawal raced its own answer.
+	case errors.Is(err, ErrSpawn):
 		return proto.ErrCodeSpawnFailed, nil
 	case errors.Is(err, ErrNoSSHSpawner):
 		return proto.ErrCodeNoSSHClient, nil
@@ -1092,7 +1083,7 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 	if facts, ok := proc.(interface{ IntegrationLaunchFacts() (string, string) }); ok {
 		integrationRefusal, shellVersion = facts.IntegrationLaunchFacts()
 	}
-	res, err := s.finishSpawn(claim, proc, proto.LaunchRecord{
+	return s.finishSpawn(claim, proc, proto.LaunchRecord{
 		Kind: proto.LaunchKindLocal,
 		Local: &proto.LocalLaunchRecord{
 			Shell:              proc.Shell(),
@@ -1111,7 +1102,6 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 		cols: cols, rows: rows, xpixel: p.XPixel, ypixel: p.YPixel, bound: bound, reserved: reserved,
 		rowBuffer: rowBuffer, scrollback: scrollbackOf(p.ScrollbackLines), lifecycle: p.Lifecycle,
 	}, lg, &spawned)
-	return s.answerSpawn(ctx, res, err, lg)
 }
 
 // spawnSSH opens a session whose process is a shell channel on a FAR host
@@ -1279,7 +1269,7 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 		return proto.SpawnResult{}, fmt.Errorf("%w: %v", ErrSpawn, err)
 	}
 
-	res, err := s.finishSpawn(claim, proc, proto.LaunchRecord{
+	return s.finishSpawn(claim, proc, proto.LaunchRecord{
 		Kind: proto.LaunchKindSSH,
 		SSH: &proto.SSHLaunchRecord{
 			Host:        p.Destination.Host,
@@ -1300,7 +1290,6 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 		cols: cols, rows: rows, xpixel: p.XPixel, ypixel: p.YPixel, bound: bound, reserved: reserved,
 		rowBuffer: rowBuffer, scrollback: scrollbackOf(p.ScrollbackLines), lifecycle: p.Lifecycle,
 	}, lg, &spawned)
-	return s.answerSpawn(ctx, res, err, lg)
 }
 
 // validateSSHSpawn refuses a remote spawn the helper will not perform, before
@@ -1618,75 +1607,64 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 	return proto.SpawnResult{Entry: hs.entry(s.inspector)}, nil
 }
 
-// answerSpawn is the LAST thing a spawn does: it answers with the session it
-// made, or — when the caller stopped waiting before the answer could be
-// delivered — ends that session and answers with the caller's own failure.
+// releaseUnheardSpawn ends a spawn's session when the answer that carried its id
+// was written to nobody: the caller had withdrawn before the frame went out, so
+// no coordinator ever learned the session exists (nocx-ouru5.1.5, GitHub #689).
 //
-// THE CASE THIS EXISTS FOR (nocx-ouru5.1.5, GitHub #689). The person withdraws
-// a slow open — the Operations row's Cancel is a `rpc.cancel`, the renderer
-// going away is the same event one layer down, and a far route's answer bound
-// is the third — and the withdrawal reaches this daemon as a cancelled request
-// context. A fork is not recallable: by the time the cancellation is seen, the
-// shell exists and this service has registered it. Its id is then written into
-// an answer that nobody reads, and from that moment NOTHING on either side can
-// ever name it again: no pane holds it, no coordinator recorded it as a
-// binding, and the sweep cannot retire it either, because that sweep closes
-// EXITED sessions and an interactive shell at a prompt never exits. It would
-// hold one pane's whole reservation — window, row buffer and lifecycle window,
-// 28 MiB at the shipped settings — for the life of the daemon.
+// THE CASE, IN FULL. The person withdraws a slow open — the Operations row's
+// Cancel is an `rpc.cancel`, the renderer going away or the tab being closed is
+// the same event one layer down, and a far route's answer bound is the third —
+// and the withdrawal reaches this daemon as a cancelled request context. A fork
+// is not recallable: by the time anybody knows, the shell exists and this
+// service has registered it, with its output window, row buffer and lifecycle
+// window reserved. The sweep cannot retire it either, because that sweep closes
+// EXITED sessions and an interactive shell at a prompt never exits; and nothing
+// can close it by name, because the only place its name exists is an answer
+// nobody read.
 //
 // WHY IT IS THE HELPER'S TO DO, and not the coordinator's. The coordinator
-// cannot: in exactly this case it never learned the session id, and the entry
-// that carries it was never read. The helper is the only party that both made
-// the session and knows the answer had nowhere to go. The interval is this
-// function's own, both ends named: from the moment the spawn is registered
-// until the host writes its answer, a request context that has ended means the
-// caller is not there to receive it — a cancellation frame, or a transport the
-// host has abandoned — and the reservation is released here rather than left
-// to a sweep that cannot free it.
+// cannot: in exactly this case it never learned the session id. The helper is
+// the only party that both made the session and knows the answer reached
+// nobody — and it learns that from the host, at the one instant the question
+// can be answered (Host's AnswerDelivery, decided where the answer is written).
 //
-// A context cannot be cancelled for an answer that WAS delivered: the host
-// cancels a request's context either on the client's own withdraw or when the
-// transport dies, and it writes the answer only after this returns.
-func (s *Service) answerSpawn(ctx context.Context, res proto.SpawnResult, err error, lg nocxlog.Logger) (proto.SpawnResult, error) {
-	if err != nil {
-		return res, err
-	}
-	if cause := ctx.Err(); cause != nil {
-		lg.Info("helper: a spawn's caller stopped waiting; ending the session nobody can name",
-			"session", res.Entry.Session.Session, "cause", cause)
-		s.releaseUnheardSpawn(res.Entry.Session)
-		return proto.SpawnResult{}, fmt.Errorf("%w: %w", ErrSpawnWithdrawn, cause)
-	}
-	return res, nil
-}
-
-// releaseUnheardSpawn ends one session that no coordinator can ever learn the
-// id of, through the same closer close-session, the TTL sweep and eviction use:
-// one implementation of "a session is over", never a second one that could
-// drift from the first (AGENTS.md).
+// ONE OWNER, DECIDED ONCE. This runs under the same mutex the idempotency claim
+// is resolved and read under, and it refuses to end a session anybody else has
+// been given:
+//
+//   - a retry waiting on the same key is woken by finishSpawn's resolution,
+//     takes the existing session and marks it handed out — all under this
+//     mutex — so the spawn that made it can never kill the shell the retry is
+//     holding (the race this refusal exists for: the caller withdrew, the retry
+//     arrived, and the answer's write was the last thing to learn it);
+//   - a claim that names a session being ended here must never answer with it,
+//     so the map entry goes first, under the same lock, and the retry forks.
 func (s *Service) releaseUnheardSpawn(id proto.HostSessionID) {
-	hs, err := s.find(id)
-	if err != nil {
-		// The session is already gone — a Close raced this answer, which means
-		// its budget is already back. Nothing to release and nothing to warn
-		// about.
+	s.mu.Lock()
+	hs, live := s.sessions[id.Session]
+	if !live || hs.id.Generation != id.Generation {
+		// Already gone: its budget is back and there is nothing to release.
+		s.mu.Unlock()
 		return
 	}
-	// THE CLAIM GOES FIRST, and it is the reason this is not simply a
-	// removeSession call: a coordinator whose connection was lost mid-spawn
-	// asks again with the SAME idempotency key (internal/app's local helper
-	// open retries exactly that, and its claim is durable), and the answer it
-	// deserves is a fresh shell rather than the id of the one this call is
-	// about to end. Dropping the claim first makes the next ask fork; leaving
-	// it would answer with a session that is already closing.
-	s.mu.Lock()
+	if hs.handedOut || hs.withdrawn {
+		// SOMEBODY ELSE HAS IT, or this decision was already taken. Both are
+		// the same answer: the session is not this spawn's to end.
+		s.mu.Unlock()
+		return
+	}
+	hs.withdrawn = true
+	// THE CLAIM GOES FIRST, so a coordinator whose connection was lost
+	// mid-spawn — it asks again with the SAME durable idempotency key — forks a
+	// fresh shell instead of being handed the session this call is ending.
 	if hs.key != "" {
 		if claim, held := s.keys[hs.key]; held && claim.session == hs.id.Session {
 			delete(s.keys, hs.key)
 		}
 	}
 	s.mu.Unlock()
+	s.log.Info("helper: a spawn's answer reached nobody; ending the session nobody can name",
+		"session", hs.id.Session)
 	s.lifecycle.fireDrained(s.removeSession(hs, "spawn-abandoned"))
 }
 
@@ -1748,14 +1726,24 @@ func (s *Service) claimKey(ctx context.Context, key string) (claim *keyClaim, ex
 			// Resolved. The invariant that both maps are written under this
 			// one mutex is what makes the lookup total rather than hopeful.
 			hs, live := s.sessions[held.session]
-			s.mu.Unlock()
-			if live {
+			// HANDING IT OUT IS THE OTHER HALF OF THE WITHDRAWAL DECISION
+			// (nocx-ouru5.1.5, review round 2). From this line the session has a
+			// caller that knows its id, so the spawn that made it may no longer
+			// end it — and because the mark and the withdrawal are decided under
+			// THIS mutex, the two can never both win: a retry either marks the
+			// session here and keeps a live shell, or finds it withdrawn (below)
+			// and forks.
+			if live && !hs.withdrawn {
+				hs.handedOut = true
+				s.mu.Unlock()
 				return nil, hs, nil
 			}
-			// Unreachable while the invariant holds; treated as a released
-			// claim rather than trusted, because a claim pointing at nothing
-			// must never be an answer.
-			s.mu.Lock()
+			// A CLAIM THAT NAMES A SESSION BEING ENDED IS A CLAIM ON NOTHING: the row
+			// is gone, or the spawn that made it has decided to end it because its
+			// own answer reached nobody. Answering with it would hand a caller a
+			// shell that is about to die, so the claim is released and the caller
+			// forks its own — which is also what the unreachable arm below does for
+			// a claim pointing at no row at all.
 			if s.keys[key] == held {
 				delete(s.keys, key)
 			}
@@ -2371,11 +2359,22 @@ type closedSession struct {
 // pane waited for a reply that the closed socket had swallowed. Admission is
 // already shut when the handler returns (markSessionEnded), so deferring the
 // drain to here opens no window in which a spawn could be acknowledged.
-func (s *Service) ResponseWritten(_ context.Context, op string, result any) {
-	if op != proto.OpCloseSession {
-		return
-	}
-	if closed, ok := result.(closedSession); ok {
-		s.lifecycle.fireDrained(closed.drains)
+func (s *Service) ResponseWritten(_ context.Context, op string, result any, delivery host.AnswerDelivery) {
+	switch op {
+	case proto.OpCloseSession:
+		if closed, ok := result.(closedSession); ok {
+			s.lifecycle.fireDrained(closed.drains)
+		}
+	case proto.OpSpawn, proto.OpSpawnSSH:
+		// THE ANSWER CARRIED THIS SESSION'S ONLY NAME (nocx-ouru5.1.5). If its
+		// caller had already withdrawn when the frame was written, the name
+		// reached nobody and the session can never be closed by anybody else;
+		// releaseUnheardSpawn ends it, unless a retry was handed it first.
+		if !delivery.Withdrawn {
+			return
+		}
+		if spawned, ok := result.(proto.SpawnResult); ok {
+			s.releaseUnheardSpawn(spawned.Entry.Session)
+		}
 	}
 }

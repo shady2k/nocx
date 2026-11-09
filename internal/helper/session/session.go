@@ -370,7 +370,23 @@ type hostSession struct {
 	launch           proto.LaunchRecord
 	proc             Process
 	lifecycleCounted bool // guarded by Service.mu; true while the row keeps the daemon alive
-	win              *window
+	// handedOut and withdrawn are the two facts that decide who may end a
+	// spawn's session (nocx-ouru5.1.5, review round 2), and both are guarded by
+	// Service.mu because both are decided in the critical sections that resolve
+	// and read the idempotency claim:
+	//
+	//   - handedOut is true once a caller has been given this session's id under
+	//     its claim (a retry that found the claim resolved). From then on the
+	//     spawn that made it may not end it: somebody is holding the shell.
+	//   - withdrawn is true once that spawn HAS decided to end it because its
+	//     own answer reached nobody. It stops the claim from handing out a
+	//     session that is about to be removed.
+	//
+	// They are never both true, and exactly one of them is set by the first
+	// arbiter to reach the session.
+	handedOut bool
+	withdrawn bool
+	win       *window
 	// runtime is this session's ONE terminal-state owner (ADR-0066): the
 	// emulator, the modes the program set, the committed geometry and the
 	// answers to the program's own questions. It is created in spawn before

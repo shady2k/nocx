@@ -52,6 +52,8 @@ interface HeaderReading {
   readonly height: number
   /** Whether the controller says this header is the one held at the top. */
   readonly stuck: boolean
+  /** Whether the controller allows this header to pin at all. */
+  readonly pinnable: boolean
   /** Whether this is the one-line running variance (ADR-3kqrem7v). */
   readonly running: boolean
 }
@@ -105,6 +107,7 @@ async function read(page: Page): Promise<Reading> {
                   top: round(hr.top - sr.top),
                   height: round(hr.height),
                   stuck: header.hasAttribute('data-stuck'),
+                  pinnable: header.getAttribute('data-pinnable') !== 'false',
                   running: header.dataset.variant === 'running',
                 }
               : null,
@@ -492,6 +495,110 @@ test.describe('a tall block keeps its own header at the top of the pane', () => 
         /^unit-\d\d$/,
       )
       expect(probe.rowIsTop, `the row at the top is not covered at +${extra}`).toBe(true)
+    }
+  })
+
+  test("a modal is not in the way of the resize that ends a header's pinning", async ({ page }) => {
+    // P2 from the second review: the oversized-header decision used
+    // elementFromPoint, so a modal's backdrop took the point and the lookup
+    // found no block. Pin a wrapped command's header, open a modal, shrink the
+    // window until the header is more than a third of the scroller, close the
+    // modal without scrolling -- and the oversized header stayed sticky over
+    // the output. The block must be found from geometry, not from pixels.
+    await page.setViewportSize({ width: 1280, height: 720 })
+    await page.goto('/')
+    await promptReady(page)
+    const words = Array.from({ length: 50 }, (_, i) => `word-${String(i + 1).padStart(2, '0')}`)
+    const command = `printf "WRAP-START\\n"; printf '%s\\n' ${words.join(' ')}`
+    await clickIntoEditor(page)
+    await page.locator('.pane.active .nocx-editor-input').fill(command)
+    await page.keyboard.press('Enter')
+    await expect
+      .poll(
+        async () =>
+          page.evaluate(() =>
+            (document.querySelector('.pane.active')?.textContent ?? '').includes('word-50'),
+          ),
+        { timeout: 30_000 },
+      )
+      .toBe(true)
+    await promptReady(page)
+
+    const rest = await read(page)
+    const block = blockOf(rest, command)
+    // THE PREMISE: at this size this header legitimately pins -- it is a small
+    // part of the scroller -- and there is enough output to scroll into.
+    expect(
+      block.header!.height,
+      'the wrapped header is compact enough to pin at first',
+    ).toBeLessThanOrEqual(rest.clientHeight / 3)
+    expect(block.rows.length, 'the command printed rows to scroll through').toBeGreaterThan(20)
+    await scrollTo(page, block.top + 120)
+    await expect
+      .poll(async () => blockOf(await read(page), command).header?.top ?? null, { timeout: 5_000 })
+      .toBeCloseTo(0, 0)
+    const pinned = await read(page)
+    expect(blockOf(pinned, command).header!.pinnable, 'it is pinned at this size').toBe(true)
+
+    // A MODAL'S BACKDROP, as a native <dialog> puts over the app: while it is
+    // up, the pixels at the top of the scroller are not the transcript.
+    await page.evaluate(() => {
+      const veil = document.createElement('div')
+      veil.id = 'w27-modal-veil'
+      veil.style.cssText = 'position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,0.4)'
+      document.body.appendChild(veil)
+    })
+    const before = await read(page)
+
+    // THE WINDOW SHRINKS UNDER THE MODAL, so the same header is now more than
+    // a third of the scroller and may no longer pin. The backdrop stays up
+    // until the new size has landed and the observer has had its frame: that
+    // is the state the person is in -- the modal is open across the resize --
+    // and the state in which hit testing cannot answer.
+    const beforeClientHeight = await page.evaluate(
+      () => document.querySelector<HTMLElement>('.pane.active .scrollback-area')!.clientHeight,
+    )
+    await page.setViewportSize({ width: 1280, height: 300 })
+    await expect
+      .poll(
+        async () =>
+          page.evaluate(
+            () =>
+              document.querySelector<HTMLElement>('.pane.active .scrollback-area')!.clientHeight,
+          ),
+        { timeout: 5_000 },
+      )
+      .toBeLessThan(beforeClientHeight)
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+        }),
+    )
+    await page.evaluate(() => document.getElementById('w27-modal-veil')?.remove())
+
+    // Nothing scrolls and nothing else changes when the modal closes. The only
+    // chance to re-judge was the resize, and it must not have needed a pixel.
+    await expect
+      .poll(async () => blockOf(await read(page), command).header?.top ?? null, {
+        timeout: 5_000,
+      })
+      .toBeLessThan(-50)
+    const after = await read(page)
+    const afterBlock = blockOf(after, command)
+    expect(afterBlock.header!.pinnable, 'the header may not pin at this size').toBe(false)
+    expect(after.pinned, 'no header is pinned over the output').toHaveLength(0)
+    expect(after.scrollTop, 'nothing scrolled').toBeCloseTo(before.scrollTop, 1)
+
+    // AND NO ROW MOVED: the decision is a position change only.
+    const beforeRows = new Map(blockOf(before, command).rows.map((row) => [row.text, row.y]))
+    const shared = afterBlock.rows.filter((row) => beforeRows.has(row.text))
+    expect(shared.length).toBeGreaterThan(20)
+    for (const row of shared) {
+      expect(
+        Math.abs(row.y - beforeRows.get(row.text)!),
+        `row ${JSON.stringify(row.text)} kept its place in the content`,
+      ).toBeLessThanOrEqual(0.5)
     }
   })
 })

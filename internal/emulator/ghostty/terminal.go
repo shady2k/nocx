@@ -196,6 +196,10 @@ type terminal struct {
 	outputMarkIdx int
 	// promptBoundaryIdx scans the untrusted OSC 133 B prompt observation.
 	promptBoundaryIdx int
+	// commandEndIdx scans the shell's own command-end mark, OSC 133 D
+	// (output_mark.go): its prefix position, or len(commandEndFixed) once the
+	// prefix matched and the scanner is inside the payload.
+	commandEndIdx int
 	// eraseIdx is the clear-boundary scanner's own position (erase.go): ED3,
 	// `ESC [ 3 J`. Its prefix (ESC `[`) does not overlap the fence's or the
 	// output mark's (ESC `]`), so it needs no shared divergence point with
@@ -697,6 +701,8 @@ func (t *terminal) ingestLocked(b []byte) {
 				Kind:         emulator.EffectPromptBoundary,
 				StreamOffset: t.streamOffset + uint64(start+n),
 			})
+		case markKindCommandEnd:
+			t.effects = append(t.effects, emulator.Effect{Kind: emulator.EffectCommandEnd})
 		case markKindClearBoundary:
 			t.sightEraseSavedLines()
 		case markKindEraseDisplay:
@@ -726,6 +732,7 @@ const (
 	markKindRecovery
 	markKindOutputMark
 	markKindPromptBoundary
+	markKindCommandEnd
 	markKindClearBoundary
 	// markKindAltExit needs nothing sighted: the split itself is the point,
 	// since the chunk it ends is measured on its own (altscreen.go).
@@ -805,6 +812,30 @@ func (t *terminal) scanMarkers(b []byte) (n int, kind markKind) {
 			t.promptBoundaryIdx = 1
 		} else {
 			t.promptBoundaryIdx = 0
+		}
+
+		// THE COMMAND-END MARK, matched as a prefix and read to its BEL: it
+		// carries the exit status (and, on the authenticated form, a nonce), so
+		// it cannot be one fixed string (output_mark.go).
+		switch {
+		case t.commandEndIdx < len(commandEndFixed):
+			if commandEndMatches(t.commandEndIdx, c) {
+				t.commandEndIdx++
+			} else if c == commandEndFixed[0] {
+				t.commandEndIdx = 1
+			} else {
+				t.commandEndIdx = 0
+			}
+		case c == '\x07':
+			t.commandEndIdx = 0
+			return i + 1, markKindCommandEnd
+		default:
+			t.commandEndIdx++
+			if t.commandEndIdx > len(commandEndFixed)+maxCommandEndPayload {
+				// Not this protocol: abandon the candidate and let the bytes be
+				// the program's own.
+				t.commandEndIdx = 0
+			}
 		}
 
 		if eraseSavedLinesMatches(t.eraseIdx, c) {

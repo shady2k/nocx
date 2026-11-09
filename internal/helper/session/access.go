@@ -54,9 +54,11 @@ func (o *sessionOwner) interactiveGate(it ownerItem) bool {
 		o.resolve(it, ownerResult{State: sessionruntime.IntentStateRefused, Err: errAccessRevoked})
 		return true
 	}
-	// A DEGRADED PASTE IS PAST ITS DEADLINE ON PURPOSE — the deadline released
-	// it instead of refusing it (owner.go's advance), so it must not be refused
-	// here either (nocx-evj4b.1.2).
+	// A PASTE IS RELEASED, NOT REFUSED, PAST ITS DEADLINE (releaseLatePaste) —
+	// one decision, made here as it is at the commit point and in the expiry
+	// sweep, so no ordering of those gates can drop a person's submission
+	// (nocx-evj4b.1.2, review).
+	o.releaseLatePaste(it.intent)
 	if !it.intent.degraded && it.intent.CommitBy != 0 && o.nowMono() > it.intent.CommitBy {
 		o.resolve(it, ownerResult{State: sessionruntime.IntentStateRefused, Err: errCommitDeadline})
 		return true

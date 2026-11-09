@@ -1423,6 +1423,18 @@ func (s *Session) Ingest(b []byte) error {
 				}
 				continue
 			}
+			if e.Kind == emulator.EffectCommandEnd {
+				// THE SHELL HAS FINISHED A COMMAND, whichever integration level
+				// it reached (nocx-evj4b.1.2): D is written by every level, the
+				// 1337 fence only by the authenticated one, so the owner learns
+				// it is no longer waiting on a program here as well as there.
+				if sink, ok := s.replies.(CommandEndSink); ok {
+					if err := sink.CommandEnded(); err != nil {
+						return err
+					}
+				}
+				continue
+			}
 			if e.Kind == emulator.EffectOutputMark {
 				// Same reasoning as the fence: a sighted mark locates rather
 				// than authorises (ADR-0024 decision 1), is not a consumer

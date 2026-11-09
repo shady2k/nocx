@@ -22,12 +22,17 @@ import (
 // and asks for OSC 9 and OSC 777 notifications. The port reports six effects
 // with exact title/body fields, in that order.
 //
-// The two sequences AFTER them are the negative half, and they are what keeps
-// this from being satisfied by "any escape sequence produces something": OSC
-// 9;4 is a progress report and OSC 133 is a shell-integration fence, neither is
-// an effect, and an implementation that installed a callback for every OSC
-// would report them. The count assertion makes that bind: the six requested
-// effects arrived and nothing else did.
+// The sequence AFTER them is the negative half, and it is what keeps this from
+// being satisfied by "any escape sequence produces something": OSC 9;4 is a
+// progress report and is not an effect, so an implementation that installed a
+// callback for every OSC would report it. The count assertion makes that bind:
+// the six requested effects arrived and nothing else did.
+//
+// OSC 133 used to be in that negative half too, and OSC 133 D is an effect
+// now — the shell's command end, which is how a session learns a command is
+// over on an integration level that cannot write the fence
+// (nocx-evj4b.1.2). It is asserted on its own below rather than smuggled into
+// "requests", because it is not one.
 func TestEffectsAreTheProgramsNonVisualRequests(t *testing.T) {
 	term := newTerminal(t, 20, 4)
 	// The replies are captured and asserted empty: an effect is REPORTED, not
@@ -41,8 +46,7 @@ func TestEffectsAreTheProgramsNonVisualRequests(t *testing.T) {
 		"\x1b]52;c;aGVsbG8=\x07"+ // base64 of "hello": the port carries the payload, not the encoding
 		"\x1b]9;build finished\x07"+
 		"\x1b]777;notify;Tests failed;2 failed\x07"+
-		"\x1b]9;4;1;50\x07"+ // progress: a hint, deliberately not an effect
-		"\x1b]133;D;0\x07") // a shell-integration fence: not an effect either
+		"\x1b]9;4;1;50\x07") // progress: a hint, deliberately not an effect
 	if len(replies) != 0 {
 		t.Errorf("the chunk answered the program with %q, want nothing", replies)
 	}

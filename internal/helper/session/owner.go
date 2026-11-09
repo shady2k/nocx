@@ -171,13 +171,46 @@ func (o *sessionOwner) CommandEnded() error {
 // worse than the wrong arrow-key encoding nobody can observe on a blank
 // screen.
 func (pi *pendingIntent) awaitsTheProgramsPrompt(o *sessionOwner) bool {
-	if !pi.Interactive || pi.Intent.Kind != sessionruntime.IntentKindPaste {
+	if !pi.isInteractivePaste() {
 		return false
 	}
 	if pi.degraded {
 		return false
 	}
 	return !o.atPrompt && !o.commandRunning && o.marksPrompts()
+}
+
+// isInteractivePaste reports whether this intent is a person's paste: the one
+// kind whose bytes are framed by a mode the program announced.
+func (pi *pendingIntent) isInteractivePaste() bool {
+	return pi.Interactive && pi.Intent.Kind == sessionruntime.IntentKindPaste
+}
+
+// releaseLatePaste is the ONE decision every deadline gate makes about a
+// person's paste (nocx-evj4b.1.2, review).
+//
+// A paste is never refused for outliving its deadline: it is released — marked
+// degraded, logged, and written with the mode in force — because the deadline
+// exists so input does not arrive stale, and a submission silently dropped is a
+// worse answer than a framing nobody could prove. Making this one function
+// every gate calls is the point: a held paste that the PROMPT releases and the
+// DEADLINE catches in the same turn used to be refused by the expiry sweep
+// before advance could release it, and no ordering may decide whether a
+// person's submit survives.
+func (o *sessionOwner) releaseLatePaste(pi *pendingIntent) bool {
+	if pi == nil || !pi.isInteractivePaste() {
+		return false
+	}
+	if pi.degraded {
+		return true
+	}
+	if pi.CommitBy == 0 || o.nowMono() <= pi.CommitBy {
+		return false
+	}
+	pi.degraded = true
+	o.log.Warn("session: a paste outlived its deadline and is sent with the mode in force",
+		"bytes", len(pi.Intent.Payload))
+	return true
 }
 
 // The interactive lane relaxes draining only for truly unconditional input.
@@ -967,10 +1000,8 @@ func (o *sessionOwner) advance() {
 		// degradation is logged, because a framing nobody could prove is worth
 		// a line in the record. This is checked BEFORE the expiry refusal, which
 		// is what every other intent still gets.
-		if it.kind == itemIntent && it.intent.awaitsTheProgramsPrompt(o) && it.intent.pastDeadline(o) {
-			o.log.Warn("session: a paste waited out its deadline for a prompt announcement; sending it with the mode in force",
-				"bytes", len(it.intent.Intent.Payload))
-			it.intent.degraded = true
+		if it.kind == itemIntent {
+			o.releaseLatePaste(it.intent)
 		}
 		if it.kind == itemIntent && o.refuseExpiredIntent(it) {
 			o.pending = o.pending[1:]
@@ -1074,15 +1105,10 @@ func (o *sessionOwner) expirePending() {
 	// no bytes, so removing expired items does not reorder surviving input.
 	kept := o.pending[:0]
 	for _, it := range o.pending {
-		// A HELD PASTE IS NOT EXPIRED HERE, it is DEGRADED (advance): the hold
-		// is for the framing, and the intent's own deadline is the point where
-		// the framing stops being worth the submission. Refusing it here would
-		// resolve it before advance ever sees the deadline
-		// (nocx-evj4b.1.2, review).
-		if it.kind == itemIntent && it.intent.awaitsTheProgramsPrompt(o) {
-			kept = append(kept, it)
-			continue
-		}
+		// A paste is RELEASED rather than refused here, by the same single
+		// decision every deadline gate makes (releaseLatePaste), so whether the
+		// prompt and the deadline land in the same turn cannot decide whether a
+		// person's submission survives (nocx-evj4b.1.2, review).
 		if it.kind != itemIntent || !o.refuseExpiredIntent(it) {
 			kept = append(kept, it)
 		}
@@ -1141,22 +1167,10 @@ func (o *sessionOwner) armPendingDeadline() {
 // refuseExpiredIntent runs between read quanta, never against the screen.
 // Caller cancellation deliberately does not cancel an admitted wire intent
 // (intent_ops.go, D11); shutdown and access bumps retain their existing paths.
-// pastDeadline reports whether this intent's own deadline has passed. It is
-// refuseExpiredIntent's condition without the refusal: a held paste asks it to
-// know when to stop waiting (advance).
-func (pi *pendingIntent) pastDeadline(o *sessionOwner) bool {
-	if pi.degraded {
-		// A degraded paste is past its deadline by decision, not by accident.
-		return false
-	}
-	return pi.CommitBy != 0 && o.nowMono() > pi.CommitBy
-}
-
 func (o *sessionOwner) refuseExpiredIntent(it ownerItem) bool {
 	pi := it.intent
-	if pi.degraded {
-		// Released by its own deadline rather than refused (advance): the
-		// deadline has already done its work (nocx-evj4b.1.2).
+	if o.releaseLatePaste(pi) {
+		// Released, not refused: the one decision (releaseLatePaste).
 		return false
 	}
 	var err error
@@ -1233,9 +1247,8 @@ func (o *sessionOwner) commitIntent(it ownerItem) {
 		o.resolve(it, ownerResult{State: sessionruntime.IntentStateRefused, Err: errAccessRevoked})
 		return
 	}
-	// A DEGRADED PASTE IS PAST ITS DEADLINE ON PURPOSE: it was released by the
-	// deadline rather than refused (advance), so the deadline itself must not
-	// refuse it here (nocx-evj4b.1.2).
+	// A PASTE IS RELEASED, NOT REFUSED, PAST ITS DEADLINE (releaseLatePaste).
+	o.releaseLatePaste(pi)
 	if pi.Interactive && !pi.degraded && pi.CommitBy != 0 && o.nowMono() > pi.CommitBy {
 		o.resolve(it, ownerResult{State: sessionruntime.IntentStateRefused, Err: errCommitDeadline})
 		return

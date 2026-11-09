@@ -169,7 +169,9 @@ func TestForeignAndMalformedFencesYieldNothing(t *testing.T) {
 		{"non-hex nonce", "\x1b]1337;NOCX_FENCE;" + strings.Repeat("g", 64) + "\x07"},
 		{"unterminated", "\x1b]1337;NOCX_FENCE;" + fenceNonce},
 		{"empty payload", "\x1b]1337;\x07"},
-		{"osc 133 marker", "\x1b]133;D;0\x07"},
+		// OSC 133 D is deliberately NOT here any more: it is not a fence, but it
+		// is now an effect of its own (EffectCommandEnd, command_end_test.go),
+		// and this table asserts "no effects at all" (nocx-evj4b.1.2).
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			term := newTerminal(t, 20, 4)

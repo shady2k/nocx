@@ -27,7 +27,24 @@ import "github.com/shady2k/nocx/internal/emulator"
 const (
 	outputMarkFixed     = "\x1b]133;C\x07"
 	promptBoundaryFixed = "\x1b]133;B\x07"
+	// commandEndFixed is the shell's command-end mark, OSC 133 D. It carries a
+	// payload (the exit status, and a 1337 suffix for the authenticated form),
+	// so it is matched as a PREFIX and read to its BEL rather than as one fixed
+	// string — see commandEndMatches.
+	commandEndFixed = "\x1b]133;D"
 )
+
+// maxCommandEndPayload bounds how much may sit between the D and its BEL. The
+// real payloads are a status number and an optional fence nonce; a "D" that
+// never terminates is not this protocol and must not swallow a stream.
+const maxCommandEndPayload = 128
+
+// commandEndMatches reports whether b is the idx'th byte of the command-end
+// prefix; idx == len(commandEndFixed) means the prefix matched and the scanner
+// is inside the payload.
+func commandEndMatches(idx int, b byte) bool {
+	return idx < len(commandEndFixed) && b == commandEndFixed[idx]
+}
 
 func promptBoundaryMatches(idx int, b byte) bool {
 	return idx < len(promptBoundaryFixed) && b == promptBoundaryFixed[idx]

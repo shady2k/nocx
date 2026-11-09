@@ -72,6 +72,14 @@ const (
 	EffectOutputMark
 	// EffectPromptBoundary is OSC 133 B: an untrusted observation that a conventional shell emitted its prompt boundary. It carries no authority.
 	EffectPromptBoundary
+	// EffectCommandEnd is OSC 133 D: the shell saying a command has finished and
+	// the terminal is its own again. Like the fence and the other marks it
+	// LOCATES and authorises nothing (ADR-0024 decision 1), and it exists
+	// because the fence does not arrive on every integration level: a shell
+	// whose lifecycle channel is unavailable writes D without the 1337 fence,
+	// and a reader that waited only for the fence would still believe a command
+	// was running (nocx-evj4b.1.2). Body is always empty.
+	EffectCommandEnd
 	// EffectClearBoundary is the program erasing the display AND its saved
 	// lines: ED3, `CSI 3 J`, written to the pty after `CSI H` and `CSI 2 J`
 	// — exactly what `clear(1)` emits (nocx-zg3k3.10.3's owner decision,

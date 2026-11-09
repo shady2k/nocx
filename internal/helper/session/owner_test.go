@@ -956,6 +956,10 @@ const (
 	modeOff       = "\x1b[?2004l"
 	commandStart  = "\x1b]133;C\a"
 	commandEnd    = "\x1b]1337;NOCX_FENCE;0000000000000000000000000000000000000000000000000000000000000001\a"
+	// commandEndMark is the PLAIN OSC 133 D every integration level writes —
+	// no fence, which is what a shell whose lifecycle channel is unavailable
+	// or failed emits (nocx-evj4b.1.2, P2).
+	commandEndMark = "\x1b]133;D;0\a"
 )
 
 // pasteIntent is one person's paste, as the owner receives it.
@@ -1281,4 +1285,78 @@ func TestAKeystrokeIsNotHeldForTheProgramsPrompt(t *testing.T) {
 	ctrl := grantAgent(t, rt)
 
 	awaitExecuted(t, submitAndWait(t, owner, interactiveKey(rt, ctrl, "Enter")), "the key")
+}
+
+// TestAnExpiredHeldPasteIsReleasedWhenThePromptArrivesInTheSameTurn is the
+// ordering the expiry sweep used to decide (nocx-evj4b.1.2, review): when a
+// held paste's deadline and the prompt were both ready, the READ was selected
+// first, the prompt cleared the hold, and expirePending then refused the
+// expired paste before advance could release it — the submission lost to the
+// order of two gates.
+//
+// The two gates are driven here in exactly that order, without a running loop,
+// so the assertion is about the decision rather than a race: after the sweep
+// the paste is still queued, and it is not refused.
+func TestAnExpiredHeldPasteIsReleasedWhenThePromptArrivesInTheSameTurn(t *testing.T) {
+	proc := newOwnerFakeProcess()
+	proc.setMarksPrompts(true)
+	owner, rt := newTestOwner(t, proc)
+	ctrl := grantAgent(t, rt)
+
+	pi := pasteIntent(rt, ctrl, "make test")
+	pi.CommitBy = owner.nowMono() + int64(time.Hour)
+	done := make(chan ownerResult, 1)
+	owner.pending = []ownerItem{{kind: itemIntent, intent: pi, done: done}}
+
+	// The prompt lands first, which clears the hold; then the deadline passes
+	// and the sweep runs before anything advances the queue.
+	if err := owner.CommandEnded(); err != nil {
+		t.Fatalf("command ended: %v", err)
+	}
+	if err := owner.PromptBoundary(sessionruntime.Effect{Kind: sessionruntime.EffectPromptBoundary}); err != nil {
+		t.Fatalf("prompt boundary: %v", err)
+	}
+	pi.CommitBy = owner.nowMono() - 1
+	owner.expirePending()
+
+	select {
+	case res := <-done:
+		t.Fatalf("the expired held paste was decided by the expiry sweep: state=%v err=%v", res.State, res.Err)
+	default:
+	}
+	if len(owner.pending) != 1 {
+		t.Fatalf("the expired paste was dropped from the queue: %d pending", len(owner.pending))
+	}
+	if !pi.degraded {
+		t.Fatal("the expired paste was not released (degraded) by the sweep that saw it")
+	}
+}
+
+// TestAPasteAfterAPlainCommandEndWaitsForTheNextPrompt is the P2: a shell whose
+// lifecycle channel is unavailable writes OSC 133 D and no fence, so the fence
+// alone cannot say a command is over. D must end it on every integration level,
+// or a paste between D and the next prompt is encoded at once with the old
+// mode — the original defect, for every level that cannot fence.
+func TestAPasteAfterAPlainCommandEndWaitsForTheNextPrompt(t *testing.T) {
+	proc := newOwnerFakeProcess()
+	proc.setMarksPrompts(true)
+	owner, rt := newTestOwner(t, proc)
+	go owner.run()
+	t.Cleanup(func() { owner.stop(true, time.Time{}) })
+	ctrl := grantAgent(t, rt)
+
+	proc.produce([]byte(promptAndMode))
+	awaitExecuted(t, submitAndWait(t, owner, pasteIntent(rt, ctrl, "one")), "the first paste")
+	// The command runs and ends with D alone: readline turned the mode off, the
+	// shell drew no fence because it has no authenticated channel.
+	proc.produce([]byte(modeOff + commandStart + "\r\nout\r\n" + commandEndMark))
+
+	second := submitAndWait(t, owner, pasteIntent(rt, ctrl, "two"))
+	waitHeld(t, second, "the paste after a fence-less command end")
+	proc.produce([]byte(promptAndMode))
+	awaitExecuted(t, second, "the second paste")
+	written := proc.writtenPayloads()
+	if len(written) != 2 || string(written[1]) != "\x1b[200~two\x1b[201~" {
+		t.Fatalf("the submits reached the program as %q, want the second one framed", written)
+	}
 }

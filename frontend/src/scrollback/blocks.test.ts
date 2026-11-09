@@ -4937,8 +4937,8 @@ describe('backend-owned block rows', () => {
       }) as typeof inner.replaceChild
       closeRunningBlock(manager)
       expect(arrived).toHaveLength(1)
-      expect(arrived[0]!.body, 'the frozen block arrived without its rows').toBe(true)
-      expect(blockOutputText(arrived[0]!.node)).toContain('second line')
+      expect(arrived[0].body, 'the frozen block arrived without its rows').toBe(true)
+      expect(blockOutputText(arrived[0].node)).toContain('second line')
     } finally {
       manager.dispose()
       inner.remove()

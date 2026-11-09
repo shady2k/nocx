@@ -370,7 +370,28 @@ type hostSession struct {
 	launch           proto.LaunchRecord
 	proc             Process
 	lifecycleCounted bool // guarded by Service.mu; true while the row keeps the daemon alive
-	win              *window
+	// delivered, answers and withdrawn decide who may end a spawn's session,
+	// and all three are guarded by Service.mu because all three are decided in
+	// the critical sections that resolve, hand over and report the session's
+	// idempotency claim (nocx-ouru5.1.5; nocx-ouru5.1.9 for the counting).
+	//
+	//   - answers counts the answers that name this session and have not been
+	//     reported yet: the spawn that made it, plus every retry the claim has
+	//     handed it to. Ownership is a fact about the SET — a retry is given the
+	//     id before its own answer is written, so that answer may still be the
+	//     one that reaches somebody.
+	//   - delivered is true once one of those answers was written to a caller
+	//     that was still there. From then on the session is that caller's, and
+	//     no later answer's failure may end it.
+	//   - withdrawn is true once the last answer has been reported as reaching
+	//     nobody and the spawn that made the session has decided to end it. It
+	//     stops the claim from handing out a session that is about to be removed.
+	//
+	// delivered and withdrawn are never both true.
+	delivered bool
+	answers   int
+	withdrawn bool
+	win       *window
 	// runtime is this session's ONE terminal-state owner (ADR-0066): the
 	// emulator, the modes the program set, the committed geometry and the
 	// answers to the program's own questions. It is created in spawn before

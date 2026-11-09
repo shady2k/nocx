@@ -61,16 +61,22 @@ test('answering the OSC 52 banner preserves every open terminal pane', async ({ 
   await expect(page.locator('.pane')).toHaveCount(2)
 
   const tabs = page.locator('.nocx-tab')
-  const titles = page.locator('.nocx-tab-title')
   const markers = [`OSC52-A-${Date.now().toString(36)}`, `OSC52-B-${Date.now().toString(36)}`]
 
   for (const [index, marker] of markers.entries()) {
     await tabs.nth(index).click()
     await promptReady(page)
     await clickIntoEditor(page)
-    await page.keyboard.type(`printf '\\033]0;${marker}\\007'`)
+    // EACH TAB'S OWN SHELL ANSWERS, and the answer is its command's block.
+    // The instrument used to be the tab's title (`printf '\033]0;…'`), which
+    // stopped being an echo of what the shell received when nocx-ouru5.1.1
+    // made a program's title end with that program's run. A block on screen
+    // exists only because the bytes reached THIS tab's shell.
+    await page.keyboard.type(`echo ${marker}`)
     await page.keyboard.press('Enter')
-    await expect(titles.nth(index)).toContainText(marker)
+    await expect(page.locator('.pane.active .cmd-block', { hasText: marker })).toBeVisible({
+      timeout: 10_000,
+    })
   }
 })
 

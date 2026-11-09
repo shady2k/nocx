@@ -2225,3 +2225,76 @@ builtin printf '%s' "$__nocx_lc_json_unescaped"
 		t.Errorf("unescaped bootstrap mismatch:\n got %q\nwant %q", out, payload)
 	}
 }
+
+// TestZshShellTitleSurvivesTheFenceThatClosesTheRun is the second half of
+// nocx-ouru5.1.1, and it is a ZSH test because only zsh had the defect.
+//
+// The runtime ends a program's title at the render fence: a title reported
+// inside the run's own output window (OSC 133 C … fence) belongs to the
+// program, and one reported after the fence belongs to the shell. That rule is
+// only as good as WHERE the fence lands. A precmd hook registered before
+// nocx's runs first — oh-my-zsh, a prompt theme, a person's own title
+// function — and while the fence was written at the top of __nocx_precmd, such
+// a hook's title reached the pty BEFORE the fence: the runtime read the
+// shell's own title as the program's and cleared it when the command ended.
+// bash and fish were already right (their fence is written before any prompt
+// hook), so the assertion here is about ordering in the one tier that was not.
+//
+// The channel is injected the way the other script tests inject it: a live
+// descriptor, an address and a capability, so the completion path really runs
+// and really writes its nonce to the pty. With no attempt open there would be
+// no fence at all, which is what the attempt fields below are for.
+func TestZshShellTitleSurvivesTheFenceThatClosesTheRun(t *testing.T) {
+	zsh := requireShell(t, "zsh")
+	script := writeScriptFile(t, "nocx.zsh", zshScript)
+
+	prog := `
+autoload -Uz add-zsh-hook
+# THE SHELL'S OWN TITLE, from a hook registered BEFORE nocx — the framework or
+# the person's own precmd that draws the tab's name.
+__title_hook() { builtin printf '\e]0;SHELL-TITLE\a'; }
+add-zsh-hook precmd __title_hook
+export NOCX_SHELL_INTEGRATION=1
+source "$1"
+exec 9>/dev/null
+__nocx_lc_shell=zsh
+__nocx_lc_owner=$$
+__nocx_lc_subshell=${ZSH_SUBSHELL:-0}
+__nocx_lc_fd=9
+__nocx_lc_lane=L
+__nocx_lc_dom=D
+__nocx_lc_epoch=1
+__nocx_lc_seq=0
+__nocx_lc_lane_esc=L
+__nocx_lc_dom_esc=D
+__nocx_cap=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+__nocx_lc_active=1
+# A command just finished: the shell minted an attempt at start, and the
+# status was captured before any other hook ran.
+__nocx_lc_attempt_open=1
+__nocx_lc_attempt_id=s-D-0
+__nocx_exit_code=0
+# …and the prompt cycle runs in the order zsh itself runs it.
+for f in $precmd_functions; do $f; done
+`
+	out := runShellProg(t, zsh, prog, script)
+
+	fence := strings.Index(out, "]1337;NOCX_FENCE;")
+	title := strings.Index(out, "]0;SHELL-TITLE")
+	if fence < 0 {
+		t.Fatalf("no render fence was written; the probe proves nothing:\n%s", out)
+	}
+	if title < 0 {
+		t.Fatalf("the shell's own title hook did not run:\n%s", out)
+	}
+	if title < fence {
+		t.Fatalf("the shell's title was written BEFORE the fence that closes the run, so the runtime reads it as the program's and clears it when the command ends:\n%s", out)
+	}
+	// And the end of the run is the FIRST thing the prompt cycle does: the
+	// fence precedes the prompt's own markers as well.
+	for _, marker := range []string{"]133;A", "]133;B"} {
+		if at := strings.Index(out, marker); at >= 0 && at < fence {
+			t.Fatalf("%s was written before the fence, so the prompt started before the run ended:\n%s", marker, out)
+		}
+	}
+}

@@ -14,6 +14,7 @@ import {
 import { LifecycleProjections } from './lifecycle/projections'
 import type { UnattributedCommand } from './lifecycle/projections'
 import { CommandEditor } from './editor'
+import { attemptBlockMs } from './scrollback/blocks'
 import { machineName, remoteMachineName } from './machine-name'
 import { shellExtensions } from './shell-highlight'
 import { RecallOverlay, queryLedgerHistory, withSessionText, type RecallQuery } from './recall'
@@ -350,6 +351,47 @@ function summonAnswersCeiling(pane: HTMLElement): number {
 const RESIZE_SETTLE_MS = 80
 
 /**
+ * The submit grace (ADR-tqjt5rkk, `nocx-j9v81`): 40 ms, the owner's number,
+ * measured from Warp by the block time it prints (2026-11-08 — a 0.028 s block
+ * keeps its editor, a 0.052 s block hides it, so the threshold sits between 28
+ * and 52).
+ *
+ * It governs the composer's departure on BOTH sides of the completion, and the
+ * two uses are the same 40 ms:
+ *
+ *   - a command that has reported no completion 40 ms after the submit, on
+ *     this renderer's clock, takes the box down then. A command still running
+ *     is what the owner wants the box gone for, and no fact is needed to know
+ *     it has not finished;
+ *   - a completion that arrives BEFORE that deadline decides on the block's
+ *     own length — `completedAt` minus `startedAt`, the interval the block's
+ *     header prints — so a quick command, whose completion lands in time,
+ *     keeps its composer and a command that outlived the grace leaves at the
+ *     completion.
+ *
+ * A shell submit gives the keyboard to the program at once (ADR-0004 §1, and
+ * the hand-off releases it synchronously), so what waits is only the paint.
+ *
+ * Exported so the tests pin the decision: a block one millisecond under the
+ * grace keeps the box, the grace itself takes it down.
+ */
+export const SUBMIT_GRACE_MS = 40
+
+/**
+ * How long a composer that STAYED waits for the prompt that ends the command
+ * (ADR-tqjt5rkk, `nocx-j9v81`).
+ *
+ * A completion under the grace keeps the box where it is, and the prompt mark —
+ * a few milliseconds behind the completion — is what hands the keyboard back.
+ * That mark can be lost, and then nothing would ever take down a box that owns
+ * nobody's keys, so this bounds that wait. It is a bound on a missing fact, not
+ * a measurement: well above the delivery tail a healthy machine shows, and
+ * short enough that a broken lane does not leave an empty composer on screen.
+ * No test asserts the number; the tests assert the behaviour it protects.
+ */
+export const PROMPT_BACKSTOP_MS = 250
+
+/**
  * The LAST-RESORT release of an alternate-screen fence (nocx-1ebrs.10): how
  * long the switch may hold the person's input with no answer at all.
  *
@@ -598,6 +640,17 @@ export interface PaneIdentity {
    * the ordinary case look exceptional.
    */
   readonly registered: Promise<boolean>
+  /**
+   * Where this pane's shell is asked to START, or undefined for the ordinary
+   * "wherever an unconfigured local shell starts".
+   *
+   * Only a duplicate names one (nocx-ouru5.1.4): it copies a pane that is
+   * already standing in a directory, and a copy in another directory would not
+   * be one. It rides the OPEN rather than arriving as a command typed into the
+   * new shell, because a `cd` a person did not type is a line in their
+   * history and a block they never ran.
+   */
+  readonly startCwd?: string
 }
 
 /** A scrollback selection held across a transaction that would overwrite it. */
@@ -2242,6 +2295,24 @@ export class TerminalContent extends BasePaneContent {
    *  profile until it is adopted, so it has no valid ports scope. Null
    *  also while the pane walks on a remote host it reached by hand — the
    *  scope follows where the pane IS, never how it was opened. */
+  /**
+   * HOW THIS PANE WAS OPENED, for a caller that must open another one the same
+   * way — the tab menu's Duplicate (nocx-ouru5.1.4). Null for a local pane.
+   *
+   * THE CHROME IS THE ONLY THING THAT KNOWS IT: the chain stores where a pane
+   * APPLIES (`user@host:port`), never which saved connection it was opened
+   * from, and a saved connection carries the port and the credentials. A copy
+   * that resolved the endpoint instead would dial the same host on its default
+   * ssh port with no profile behind it, which is a different service and not a
+   * copy of this tab.
+   *
+   * Read-only and unparsed: the caller hands it straight back to buildSSHPane,
+   * which is the one place that decides what an ssh pane is opened with.
+   */
+  sshOptions(): { profileId: string; host: string; user?: string; port?: number } | null {
+    return this.sshOpts ?? null
+  }
+
   get portsTargetId(): string | null {
     if (this._paneWalkedToRemoteChild) return null
     if (this.sshOpts === undefined) return LOCAL_TARGET_ID
@@ -2863,7 +2934,15 @@ export class TerminalContent extends BasePaneContent {
   private async openRequestedSession(): Promise<SessionHandle> {
     const adopted = await this.adoptLiveSession()
     if (adopted !== null) return adopted
-    const anchor: OpenAnchor = (await this.pane.registered) ? { paneId: this.pane.paneId } : {}
+    // THE STARTING DIRECTORY, when this pane was born with one (a duplicate:
+    // nocx-ouru5.1.4). It travels with the pane's own id rather than as a
+    // command typed into the new shell, because a `cd` nobody typed would be
+    // a line in the person's history and a block they never ran.
+    const startCwd = this.pane.startCwd
+    const anchor: OpenAnchor = {
+      ...((await this.pane.registered) ? { paneId: this.pane.paneId } : {}),
+      ...(startCwd ? { cwd: startCwd } : {}),
+    }
     // AD-1: the shell must start in the measured grid, before it can print.
     // Adopted sessions keep their accepted geometry until this pane fits them.
     if (this._latestViewport) {
@@ -3754,12 +3833,21 @@ export class TerminalContent extends BasePaneContent {
             }
             // The atomic handoff transfers input ownership to the grid at
             // the moment the editor gives it up — not when the running fact
-            // lands (an RPC round trip later). The editor already hid itself
-            // in commit; a grid that is not yet the keyboard's owner drops
-            // keys typed into the gap, so a program waiting on stdin (read,
-            // ssh, less) starves with no editor and no input surface
+            // lands (an RPC round trip later). The editor already released the
+            // keys in commit; a grid that is not yet the keyboard's owner
+            // drops keys typed into the gap, so a program waiting on stdin
+            // (read, ssh, less) starves with no editor and no input surface
             // (nocx-u7uh.23, nocx-yb5y).
             // _syncLifecycleOwnership reconciles this on every fact.
+            //
+            // THE BOX KEEPS ITS PLACE UNTIL THE COMMAND'S OWN LENGTH SAYS
+            // OTHERWISE (ADR-tqjt5rkk). Armed HERE, on the person's own shell
+            // submit and nowhere else: this is the only call that took the
+            // composer off the screen, and the only one that has a composer to
+            // take down. The bound covers a command that never reports its
+            // completion at all — no attempt, or no prompt — so the box cannot
+            // wait forever on a fact that is not coming.
+            this._armDeparture('measuring', SUBMIT_GRACE_MS)
             //
             // Both lines, always in this order and never one without the
             // other: the keyboard changes hands HERE, and from here until
@@ -5164,6 +5252,9 @@ export class TerminalContent extends BasePaneContent {
         // clock, because the backend's line for the same fact may be missing
         // from the report entirely.
         attempt: fact.attempt?.id,
+        tn: Math.round(performance.now()),
+        attemptState: fact.attempt?.state,
+        attemptOrigin: fact.attempt?.origin,
         at: new Date().toISOString(),
         from: before.kind,
         to: this.lifecycle.state.kind,
@@ -9267,6 +9358,32 @@ export class TerminalContent extends BasePaneContent {
    *  makes the command the running owner. */
   private _submittedAwaitingStart = false
 
+  /** The submitted command's departure (ADR-tqjt5rkk): armed by the person's
+   *  shell submit and settled by the command's completion, by the grace's own
+   *  deadline, by the prompt that follows it, or by the alternate screen.
+   *
+   *  While it is armed the composer's box is DRAWN but owns no keys
+   *  (`editor.isVisible` is false; the grid holds them), so a lifecycle fact
+   *  that reports "not at a prompt" — the running fact, one round trip later —
+   *  must not take the box down on its own.
+   *
+   *  `phase` is which wait is running. `measuring` is the 40 ms from the
+   *  submit on THIS RENDERER'S clock: a command that has not completed by then
+   *  is still running as far as the person can see, and the box leaves. A
+   *  completion that arrives inside it settles the departure on the block's own
+   *  length — `awaiting-prompt` is that completion being quick, with the box
+   *  kept and the prompt mark awaited under the backstop.
+   *
+   *  `attemptId` names the attempt this departure is about, taken from the
+   *  first running fact: the grid owns the keys while the box waits, so a
+   *  command typed there can start and complete inside the same window, and its
+   *  completion decides nothing here. */
+  private _departure: {
+    timer: ReturnType<typeof setTimeout>
+    phase: 'measuring' | 'awaiting-prompt'
+    attemptId: string | null
+  } | null = null
+
   /** The pane's input element (nocx-zg3k3.3.1): a real focusable textarea that
    *  the keyboard, the IME and the focus are read from, and whose position
    *  follows the caret the painter draws. Null until mount, and again after
@@ -9450,11 +9567,77 @@ export class TerminalContent extends BasePaneContent {
 
   private enterNativeMode(): void {
     this.nativeMode = true
+    this._endDeparture()
     this.editor?.hide()
     this.takeKeyboardToGrid()
     this.onSessionIntent({ kind: 'text', payload: NATIVE_RESTORE_COMMAND })
     this.onSessionIntent({ kind: 'key', payload: 'enter' })
     this._updateCapability()
+  }
+
+  /** Arm the submitted command's departure (ADR-tqjt5rkk): the box keeps its
+   *  place until the command reports its own length, the prompt comes back, or
+   *  the bound in `ms` passes.
+   *
+   *  Armed by the person's shell submit — the one action that hands the keys
+   *  over — and never by an assistant submission: that lane opens its attempt
+   *  without a composer to take down, and nothing about it changed. */
+  private _armDeparture(phase: 'measuring' | 'awaiting-prompt', ms: number): void {
+    this._endDeparture()
+    const timer = setTimeout(() => {
+      this._departure = null
+      this._takeComposerDown()
+    }, ms)
+    this._departure = { timer, phase, attemptId: null }
+  }
+
+  /** The wait is over, whichever way it ended: the prompt came back (the box
+   *  kept its place), the command's own length settled it, or something else
+   *  took the box down. */
+  private _endDeparture(): void {
+    if (this._departure === null) return
+    clearTimeout(this._departure.timer)
+    this._departure = null
+  }
+
+  /** THE DEPARTURE ITSELF — the transition the hand-off used to perform at the
+   *  submit. One glided one: the composer's box leaving is what moves the
+   *  scrollback, and the ghost carries its ink out (see CommandEditor.hide). */
+  private _takeComposerDown(): void {
+    const editor = this.editor
+    if (editor === null) return
+    const sb = this.scrollback
+    if (sb) sb.settleAround(() => editor.hide())
+    else editor.hide()
+  }
+
+  /** A completion that arrived INSIDE the grace: the block's own length
+   *  decides (ADR-tqjt5rkk).
+   *
+   *  The length is the block's, `attemptBlockMs` — the interval the attempt's
+   *  two backend timestamps carry, which is also the figure the block's header
+   *  prints, so what the block says and what the composer did cannot disagree.
+   *  A quick block keeps the box where it is and the prompt mark, a few
+   *  milliseconds behind, hands the keyboard back; a block that outlived the
+   *  grace takes the box down now. A completion that carries no timestamps at
+   *  all is treated as long: a composer the product has no evidence to keep
+   *  must not be kept.
+   *
+   *  A completion delivered AFTER the deadline never reaches this decision —
+   *  the grace already took the box down, and the prompt brings it back: the
+   *  accepted cost, stated in the record. */
+  private _settleDeparture(attempt: ExecutionAttempt): void {
+    // The attempt's own length, and the block manager's measurement when the
+    // fact carries no timestamps — the same fallback the header takes, so the
+    // two still read one number.
+    const blockMs =
+      attemptBlockMs(attempt) ?? this.scrollback?.blockManager.elapsedCommandMs() ?? null
+    this._endDeparture()
+    if (blockMs !== null && blockMs < SUBMIT_GRACE_MS) {
+      this._armDeparture('awaiting-prompt', PROMPT_BACKSTOP_MS)
+      return
+    }
+    this._takeComposerDown()
   }
 
   /** The editor owns keys because the lifecycle axis says PromptReady
@@ -9469,6 +9652,9 @@ export class TerminalContent extends BasePaneContent {
     const editor = this.editor
     if (editor === null) return
     if (this._attachment.kind !== 'attached') {
+      // A box that was waiting for a submitted command's length has nobody
+      // left to wait for: the session it belonged to is gone (ADR-tqjt5rkk).
+      this._endDeparture()
       editor.hide()
       return
     }
@@ -9521,6 +9707,12 @@ export class TerminalContent extends BasePaneContent {
     // (nocx-u7uh.23). The invariant: editor shown ⟺ grid read-only.
     const answerInSummon = this._summoned && this._currentSummonedAnswer() !== null
     if (show) {
+      // THE SHELL IS BACK INSIDE THE WAIT (ADR-tqjt5rkk). The box never left
+      // the screen, so there is nothing to restore: calling the departure off
+      // is the whole of it, and the show below only hands the keyboard back.
+      // A visible composer that kept its place must not be faded in — show()
+      // fades only a box that was display:none, so nothing here repaints it.
+      this._endDeparture()
       // The composer is back, so no submitted command can still be waiting
       // for its start: a conventional shell may never publish one, and the
       // next prompt is the end of the interval regardless (nocx-atpw5.1.20).
@@ -9568,13 +9760,40 @@ export class TerminalContent extends BasePaneContent {
       // command, which is space an inline TUI on the normal buffer needs —
       // `top` was drawing four rows fewer than the pane could show, while
       // `htop` on the alternate buffer got the whole pane.
-      // NOT glided, and it is normally a no-op: the editor already left the
-      // layout inside commit's settle, and this call only reconciles. Wrapping
-      // it cost more than it bought — the running fact arrives in a later
-      // task, often while the submit settle is still animating, and `_glide`
-      // cancels in-flight settles before it measures. A no-op mutation would
-      // therefore kill a live animation mid-flight and snap the stack, which
-      // is the jitter it was meant to remove.
+      // NOT glided, and it is normally a no-op: a submitted composer leaves
+      // the layout at its own departure — inside the submit's settle before
+      // ADR-tqjt5rkk, inside the completion's now — and this call only
+      // reconciles. Wrapping it cost more than it bought — the running fact
+      // arrives in a later task, often while a settle is still animating, and
+      // `_glide` cancels in-flight settles before it measures. A no-op
+      // mutation would therefore kill a live animation mid-flight and snap the
+      // stack, which is the jitter it was meant to remove.
+      // THE DEPARTURE OWNS THE BOX WHILE IT WAITS (ADR-tqjt5rkk) — EXCEPT FOR
+      // THE ALTERNATE SCREEN. A fact that says "not at a prompt" is what the
+      // command publishes after the submit, and it is not a reason to take
+      // down a box that already gave up the keys. Two facts do speak: the
+      // command's START, which names the attempt this departure is about, and
+      // its COMPLETION, whose own length the grace is compared against. The
+      // alternate buffer is the third, and it outranks the wait: a full-screen
+      // program owns the whole viewport by the shell's own markers, and an
+      // inert composer left under `vim` would sit on rows the program is
+      // drawing until the grace's deadline took it — so entering it ends the
+      // wait and the box leaves NOW, in this same reconciliation.
+      if (this._departure !== null) {
+        if (this.lifecycle.buffer !== 'alternate') {
+          const state = this.lifecycle.state
+          if (state.kind === 'running') {
+            if (state.attempt.state === 'open') {
+              this._departure.attemptId ??= state.attempt.id
+            } else if (state.attempt.id === this._departure.attemptId) {
+              this._settleDeparture(state.attempt)
+            }
+          }
+          this._updateCapability()
+          return
+        }
+        this._endDeparture()
+      }
       this._setEditorPlacement('inline')
       const keyboardWasInEditor = editor.root.contains(document.activeElement)
       // A KEYSTROKE IS NEVER THE PRICE OF A FLICKER (nocx-atpw5.1.41). A
@@ -9589,7 +9808,8 @@ export class TerminalContent extends BasePaneContent {
       // NO RUNNING BLOCK IS CONSULTED, deliberately: a `running` fact opens
       // its card, so `hasRunningCommand()` is already true by the time this
       // runs, and it was true for the spurious interval too. The line is the
-      // evidence — a submit hides this composer synchronously, so a visible
+      // evidence — a submit empties this composer and gives the keyboard up
+      // synchronously (ADR-tqjt5rkk keeps only the PAINT for the grace), so a
       // composer holding text and the keyboard means nobody submitted.
       const typedLineKept = keyboardWasInEditor && editor.getDoc().length > 0
       if (typedLineKept) {
@@ -9688,6 +9908,9 @@ export class TerminalContent extends BasePaneContent {
     this._disposed = true
     this._endOpeningStatement()
     this._cancelDeferredShellSubmissions()
+    // A departure timer outliving the pane would fire against a disposed
+    // editor.
+    this._endDeparture()
     // The input element goes with the pane (nocx-zg3k3.3.1): it holds the
     // keyboard and a live listener set, and a disposed pane that kept either
     // would take keys for a session it no longer has.

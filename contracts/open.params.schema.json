@@ -25,6 +25,11 @@
       "type": "string",
       "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
     },
+    "cwd": {
+      "type": "string",
+      "maxLength": 4096,
+      "description": "The directory the pane's program starts in, for a LOCAL open (nocx-ouru5.1.4, the tab menu's Duplicate). A tab the person opens names none: its shell starts wherever an unconfigured local shell starts. A duplicate names the SOURCE pane's own verified report, because a copy standing in another directory is not one. Absent and empty are one answer. A far login shell cannot be moved, so an ssh open carrying one is refused rather than handed a value nothing acts on."
+    },
     "parent": {
       "type": ["object", "null"],
       "additionalProperties": false,

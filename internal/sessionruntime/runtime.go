@@ -191,6 +191,14 @@ type Session struct {
 	// are state for a full frame, not replayable effect deliveries.
 	title *string
 	cwd   *CwdReport
+	// runOutputSeen is whether the stream has carried the shell's OSC 133 C
+	// output mark since the last render fence: the command's own output has
+	// begun, and everything a title report says from here until that fence is
+	// the RUN's, not the shell's (nocx-ouru5.1.1, title.go).
+	runOutputSeen bool
+	// titleFromRun is whether the title held in `title` arrived inside that
+	// window, and therefore ends with the run.
+	titleFromRun bool
 	// commandNames is the latest session-local shell snapshot. It is copied to
 	// a newly attached consumer as current state, never replayed from output.
 	commandNames []string
@@ -1398,6 +1406,11 @@ func (s *Session) Ingest(b []byte) error {
 				// (the split above), so the screen read here is the screen
 				// exactly as the fence left it.
 				s.sightDrainedFenceLocked(e)
+				// AND THE RUN IT CLOSES (nocx-ouru5.1.1): a fence is the
+				// shell's own end-of-command boundary, drawn in the same byte
+				// stream as the title reports around it, so this is the moment
+				// a title the program set stops being the tab's.
+				s.commandRunEndedLocked()
 				continue
 			}
 			if e.Kind == emulator.EffectOutputMark {
@@ -1407,6 +1420,9 @@ func (s *Session) Ingest(b []byte) error {
 				// fed yet (the split above) is what lets the screen read
 				// inside it be the screen exactly as THIS mark left it.
 				s.sightOutputMarkLocked()
+				// THE COMMAND'S OUTPUT HAS BEGUN: from here until the fence, a
+				// title report is the RUN's (nocx-ouru5.1.1).
+				s.runOutputSeen = true
 				continue
 			}
 			if e.Kind == emulator.EffectEraseDisplay {
@@ -1434,8 +1450,7 @@ func (s *Session) Ingest(b []byte) error {
 			// restore title and cwd without replaying session.effect.
 			switch e.Kind {
 			case emulator.EffectTitle:
-				title := string(e.Body)
-				s.title = &title
+				s.sightTitleLocked(e.Body)
 			case emulator.EffectCwdReport:
 				if cwd, ok := decodeCwdReport(e.Body); ok {
 					s.cwd = &cwd

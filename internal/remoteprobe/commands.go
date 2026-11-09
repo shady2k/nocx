@@ -3,6 +3,8 @@ package remoteprobe
 import (
 	_ "embed"
 	"fmt"
+	"path"
+	"strings"
 )
 
 // # The probes, one family at a time
@@ -247,6 +249,60 @@ func CompletionCommand(cwd, line string, pos, limit int, nonce string) string {
 		"NOCXEOF_"+nonce,
 		completionScript,
 	)
+}
+
+// InflateCommand composes the one command that decompresses a file on the far
+// host, in place (nocx-evj4b.1.3).
+//
+// gzip IS THE CHOICE because it is what a host is overwhelmingly likely to have
+// — GNU gzip, BSD gzip, busybox's applet and macOS's own all accept `-d --` —
+// and because `-d` writes the file ITSELF: there is no shell redirection, so no
+// `sh` is required, and the decompressed bytes never travel back over the link
+// (the reason a "read stdout and write it over SFTP" shape was rejected: on a
+// remote host that reads 15.3 MB over the link and writes it back).
+//
+// The path is the caller's, and it is QUOTED here for the reason
+// CompletionCommand's arguments are: it is data, and it cannot become shell
+// syntax. An unusable path answers "" and the caller does not run it.
+//
+// A HOST WITHOUT gzip IS NOT AN ERROR THIS COMMAND CAN HIDE: the remote shell
+// answers 127, the caller sees a non-zero status, and the install falls back to
+// sending the decompressed artifact — the plain upload that was the only path
+// before this existed. Nothing about an install may REQUIRE a tool.
+// InflateAvailableCommand asks whether the host can decompress at all: `command
+// -v gzip` exits 0 when it can and 1 when it cannot.
+//
+// IT IS ASKED BEFORE THE UPLOAD, and that ordering is the whole point of a
+// separate question: learning that gzip is absent AFTER sending the compressed
+// bytes would pay both uploads — ~6 MB and then 19 MB — where the plain upload
+// alone is 19 MB. One command costs a round trip and saves a wasted transfer on
+// exactly the hosts that fall back (nocx-evj4b.1.3).
+const InflateAvailableCommand = "command -v gzip"
+
+// InflateCommand is the availability probe spelled as the one command above when
+// p is empty: one op, one question either way.
+func InflateProbe() string { return InflateAvailableCommand }
+
+func InflateCommand(p string) string {
+	if !UsableInflatePath(p) {
+		return ""
+	}
+	return "gzip -d -- " + ShellQuote(p)
+}
+
+// UsableInflatePath reports whether a path may be handed to InflateCommand: an
+// absolute, clean path to a `.gz` file, with no character that has to be trusted
+// to a remote shell even after quoting. It is conservative on purpose — the
+// caller derives the path from the install directory's own layout
+// (deploy's temp name), so nothing legitimate is excluded.
+func UsableInflatePath(p string) bool {
+	if len(p) < 4 || !strings.HasSuffix(p, ".gz") || !strings.HasPrefix(p, "/") {
+		return false
+	}
+	if path.Clean(p) != p {
+		return false
+	}
+	return !strings.ContainsAny(p, "\x00\n\r")
 }
 
 // CompletionStart and CompletionEnd spell the markers the completion script

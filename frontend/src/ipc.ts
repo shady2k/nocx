@@ -188,6 +188,20 @@ export interface OpenAnchor {
    * blank.
    */
   paneId?: string
+  /**
+   * Where the pane's program must START, when the caller knows it.
+   *
+   * A tab the person opened names none: its shell starts wherever an
+   * unconfigured local shell starts, and the directory it lands in is the
+   * shell's to report a round trip later. A DUPLICATE names one
+   * (nocx-ouru5.1.4): it copies a pane that is already standing in a
+   * directory, and a copy elsewhere would not be a copy. The value is the
+   * source pane's OWN verified report — the renderer owns no directory it did
+   * not receive (AD-5) — and it is a LOCAL fact: a far login shell cannot be
+   * moved, so the validator refuses a cwd on an ssh open rather than letting
+   * one travel where nothing acts on it.
+   */
+  cwd?: string
 }
 
 /** The paneId as the wire wants it: the key, or no key at all. One helper for
@@ -195,6 +209,13 @@ export interface OpenAnchor {
  *  and three copies of `...(x ? {paneId: x} : {})` would be three. */
 function paneParam(anchor: OpenAnchor): { paneId?: string } {
   return anchor.paneId ? { paneId: anchor.paneId } : {}
+}
+
+/** The starting directory as the wire wants it, on the same rule: absent and
+ *  empty are one answer, and it is the one every opener sent before this
+ *  existed. */
+function cwdParam(anchor: OpenAnchor): { cwd?: string } {
+  return anchor.cwd ? { cwd: anchor.cwd } : {}
 }
 
 // Ack throttle: at most one ack per session per ~100 ms. Per-frame acks on
@@ -1414,6 +1435,11 @@ export class WSClient {
         {
           ...size,
           ...paneParam(anchor),
+          // ONLY the local opener carries a starting directory, and the two ssh
+          // openers below deliberately do not: a far login shell starts where
+          // that host says, so a cwd here would be a value nothing acts on —
+          // the wire refuses it outright rather than letting it travel.
+          ...cwdParam(anchor),
         },
         undefined,
         { announced: watch },

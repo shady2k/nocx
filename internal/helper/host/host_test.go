@@ -32,6 +32,17 @@ type fakeService struct {
 	// recognises, so they cross with their code and details instead of
 	// internal.
 	refusalFn func(err error) (string, json.RawMessage)
+	// written is an optional ResponseObserver: what the host reports about each
+	// answer after it is on the wire, in order.
+	written func(op string, delivery host.AnswerDelivery)
+}
+
+// ResponseWritten is ResponseObserver: the answer's fate, reported after the
+// frame went out.
+func (f *fakeService) ResponseWritten(_ context.Context, op string, _ any, delivery host.AnswerDelivery) {
+	if f.written != nil {
+		f.written(op, delivery)
+	}
 }
 
 // RefusesCancel is the optional CancelPolicy capability: false when the
@@ -1236,5 +1247,252 @@ func TestACancelReadBeforeTheHandlerRunsStillCancelsIt(t *testing.T) {
 	_ = inW.Close()
 	if err := <-serveDone; err != nil {
 		t.Fatalf("serve: %v", err)
+	}
+}
+
+// TestAnAnswerWrittenAfterTheCallerWithdrewIsReportedWithdrawn is the decision
+// the helper's window-budget release hangs on (nocx-ouru5.1.5, review round
+// 2): the caller withdrew BEFORE the answer was written, so the frame reached
+// nobody and the service is told so at the one instant the question can be
+// answered.
+//
+// THE ORDER IS FORCED, NOT HOPED FOR. The handler is held by the test, a cancel
+// is written, and a SECOND request is written behind it: the host reads frames
+// in order and applies a cancel on the read loop, so the second request's answer
+// cannot arrive before the withdrawal has been recorded. Only then is the first
+// handler released.
+func TestAnAnswerWrittenAfterTheCallerWithdrewIsReportedWithdrawn(t *testing.T) {
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	h := host.New(inR, outW, "hash", "inst", discardLogger())
+	started := make(chan struct{})
+	release := make(chan struct{})
+	reported := make(chan host.AnswerDelivery, 2)
+	h.Register(&fakeService{
+		name: "test",
+		ops:  map[string]any{"wait": struct{}{}, "read": struct{}{}},
+		callFn: func(ctx context.Context, op string, params json.RawMessage) (any, error) {
+			if op == "wait" {
+				close(started)
+				<-release
+			}
+			return map[string]any{"op": op}, nil
+		},
+		written: func(op string, delivery host.AnswerDelivery) {
+			if op == "wait" {
+				reported <- delivery
+			}
+		},
+	})
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- h.Serve(context.Background()) }()
+	t.Cleanup(func() {
+		_ = inW.Close()
+		<-serveDone
+	})
+
+	writeFrame(t, inW, proto.TypeHello, mustJSON(proto.Hello{Version: proto.Version, Nonce: "n"}))
+	readSentinel(t, outR)
+	outCh := startReader(t, outR)
+	if f := readFrame(t, outCh); f.ty != proto.TypeHelloOK {
+		t.Fatalf("want HelloOK, got %v", f.ty)
+	}
+
+	writeFrame(t, inW, proto.TypeRequest, mustJSON(proto.Request{ID: 1, Service: "test", Op: "wait"}))
+	<-started
+
+	writeFrame(t, inW, proto.TypeCancel, mustJSON(struct {
+		ID uint64 `json:"id"`
+	}{ID: 1}))
+	// THE BARRIER: a request written after the cancel, whose answer cannot come
+	// back before the read loop has applied the cancel.
+	writeFrame(t, inW, proto.TypeRequest, mustJSON(proto.Request{ID: 2, Service: "test", Op: "read"}))
+	if resp := readResponse(t, outCh); resp.ID != 2 {
+		t.Fatalf("want the barrier's answer (id 2), got id %d", resp.ID)
+	}
+
+	close(release)
+	if resp := readResponse(t, outCh); resp.ID != 1 {
+		t.Fatalf("want the held answer (id 1), got id %d", resp.ID)
+	}
+	select {
+	case delivery := <-reported:
+		if !delivery.Withdrawn {
+			t.Fatal("an answer written after the caller withdrew was reported as delivered to somebody")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the host never reported what became of the answer")
+	}
+}
+
+// TestACancelAfterTheAnswerIsWrittenIsNotAWithdrawal is the other end of the
+// same interval: once the frame is going out, a withdrawal can no longer win,
+// because the caller may be holding what it carries.
+func TestACancelAfterTheAnswerIsWrittenIsNotAWithdrawal(t *testing.T) {
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	h := host.New(inR, outW, "hash", "inst", discardLogger())
+	reported := make(chan host.AnswerDelivery, 1)
+	h.Register(&fakeService{
+		name: "test",
+		ops:  map[string]any{"read": struct{}{}},
+		callFn: func(ctx context.Context, op string, params json.RawMessage) (any, error) {
+			return map[string]any{"op": op}, nil
+		},
+		written: func(op string, delivery host.AnswerDelivery) { reported <- delivery },
+	})
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- h.Serve(context.Background()) }()
+	t.Cleanup(func() {
+		_ = inW.Close()
+		<-serveDone
+	})
+
+	writeFrame(t, inW, proto.TypeHello, mustJSON(proto.Hello{Version: proto.Version, Nonce: "n"}))
+	readSentinel(t, outR)
+	outCh := startReader(t, outR)
+	if f := readFrame(t, outCh); f.ty != proto.TypeHelloOK {
+		t.Fatalf("want HelloOK, got %v", f.ty)
+	}
+
+	writeFrame(t, inW, proto.TypeRequest, mustJSON(proto.Request{ID: 3, Service: "test", Op: "read"}))
+	// THE ANSWER FIRST: reading it means it is on the wire, which is the moment
+	// the decision closes.
+	if resp := readResponse(t, outCh); resp.ID != 3 || resp.Error != nil {
+		t.Fatalf("want the answer (id 3), got id %d error %+v", resp.ID, resp.Error)
+	}
+	writeFrame(t, inW, proto.TypeCancel, mustJSON(struct {
+		ID uint64 `json:"id"`
+	}{ID: 3}))
+	// AND A REQUEST BEHIND IT, so the cancel has certainly been read before this
+	// test says anything about it.
+	writeFrame(t, inW, proto.TypeRequest, mustJSON(proto.Request{ID: 4, Service: "test", Op: "read"}))
+	if resp := readResponse(t, outCh); resp.ID != 4 {
+		t.Fatalf("want the barrier's answer (id 4), got id %d", resp.ID)
+	}
+
+	select {
+	case delivery := <-reported:
+		if delivery.Withdrawn {
+			t.Fatal("an answer already on the wire was reported as delivered to nobody")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the host never reported what became of the answer")
+	}
+}
+
+// failAfter is a wire that accepts every frame until it is told not to. It
+// stands for a transport that dies between the arbitration and the write — a
+// case no caller can see and only the writer can report.
+type failAfter struct {
+	inner io.Writer
+	mu    sync.Mutex
+	fail  bool
+}
+
+func (w *failAfter) Write(b []byte) (int, error) {
+	w.mu.Lock()
+	fail := w.fail
+	w.mu.Unlock()
+	if fail {
+		return 0, errors.New("broken pipe")
+	}
+	return w.inner.Write(b)
+}
+
+func (w *failAfter) setFail(v bool) {
+	w.mu.Lock()
+	w.fail = v
+	w.mu.Unlock()
+}
+
+// TestAnAnswerWhoseFrameCouldNotBeWrittenIsReportedWithdrawn is the second of
+// the review's findings (nocx-ouru5.1.9): the arbitration decided the answer was
+// delivered, the wire then refused the frame, and the verdict went to the
+// service unchanged — so a session whose id reached nobody was kept for the life
+// of the daemon. "Delivered" means the frame reached the wire; a write that
+// failed reached nobody, and the verdict has to say so.
+func TestAnAnswerWhoseFrameCouldNotBeWrittenIsReportedWithdrawn(t *testing.T) {
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	wire := &failAfter{inner: outW}
+	h := host.New(inR, wire, "hash", "inst", discardLogger())
+	reported := make(chan host.AnswerDelivery, 1)
+	h.Register(&fakeService{
+		name: "test",
+		ops:  map[string]any{"read": struct{}{}},
+		callFn: func(ctx context.Context, op string, params json.RawMessage) (any, error) {
+			return map[string]any{"op": op}, nil
+		},
+		written: func(op string, delivery host.AnswerDelivery) { reported <- delivery },
+	})
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- h.Serve(context.Background()) }()
+	t.Cleanup(func() {
+		_ = inW.Close()
+		<-serveDone
+	})
+
+	// THE HANDSHAKE COMPLETES FIRST, read off the wire, so the failure below is
+	// the ANSWER's and nobody else's.
+	writeFrame(t, inW, proto.TypeHello, mustJSON(proto.Hello{Version: proto.Version, Nonce: "n"}))
+	readSentinel(t, outR)
+	outCh := startReader(t, outR)
+	if f := readFrame(t, outCh); f.ty != proto.TypeHelloOK {
+		t.Fatalf("want HelloOK, got %v", f.ty)
+	}
+	// THE WIRE DIES BEFORE THE ANSWER: from here nothing reaches the peer.
+	wire.setFail(true)
+	writeFrame(t, inW, proto.TypeRequest, mustJSON(proto.Request{ID: 11, Service: "test", Op: "read"}))
+
+	select {
+	case delivery := <-reported:
+		if !delivery.Withdrawn {
+			t.Fatal("an answer whose frame could not be written was reported as delivered to somebody")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the host never reported what became of the answer")
+	}
+}
+
+// TestAnAnswerOnAWireThatHeldIsReportedDelivered is the control: the same
+// request, the same service, a wire that works. The verdict must not be a
+// constant.
+func TestAnAnswerOnAWireThatHeldIsReportedDelivered(t *testing.T) {
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	wire := &failAfter{inner: outW}
+	h := host.New(inR, wire, "hash", "inst", discardLogger())
+	reported := make(chan host.AnswerDelivery, 1)
+	h.Register(&fakeService{
+		name: "test",
+		ops:  map[string]any{"read": struct{}{}},
+		callFn: func(ctx context.Context, op string, params json.RawMessage) (any, error) {
+			return map[string]any{"op": op}, nil
+		},
+		written: func(op string, delivery host.AnswerDelivery) { reported <- delivery },
+	})
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- h.Serve(context.Background()) }()
+	t.Cleanup(func() {
+		_ = inW.Close()
+		<-serveDone
+	})
+
+	writeFrame(t, inW, proto.TypeHello, mustJSON(proto.Hello{Version: proto.Version, Nonce: "n"}))
+	readSentinel(t, outR)
+	outCh := startReader(t, outR)
+	if f := readFrame(t, outCh); f.ty != proto.TypeHelloOK {
+		t.Fatalf("want HelloOK, got %v", f.ty)
+	}
+	writeFrame(t, inW, proto.TypeRequest, mustJSON(proto.Request{ID: 12, Service: "test", Op: "read"}))
+
+	select {
+	case delivery := <-reported:
+		if delivery.Withdrawn {
+			t.Fatal("an answer on a working wire was reported as delivered to nobody")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the host never reported what became of the answer")
 	}
 }

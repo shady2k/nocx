@@ -55,6 +55,25 @@ type ChannelDataPlane interface {
 	ChannelData(context.Context, proto.ChannelFrame)
 }
 
+// AnswerDelivery is what became of the answer ResponseWritten follows: whether
+// the caller that asked for it was still there when the frame was written.
+//
+// IT IS ONE DECISION, MADE IN ONE PLACE (nocx-ouru5.1.5, review round 2). A
+// TypeCancel is read on this host's read loop while the request's own goroutine
+// is answering, so "the caller withdrew" and "an answer is going out" can be
+// seen in either order — and a service that decided from its request context
+// BEFORE the write decided too early: a withdrawal landing in the gap between
+// that decision and the frame left a session nobody had been told about and
+// nobody could release. The host therefore arbitrates the two under the
+// request's own mutex at the instant the answer is written, and this value is
+// the arbitration's result. Withdrawn means the caller had already given up
+// before the frame went out, so the frame reached nobody and what it carries is
+// nobody's; false means the answer went out first, and a caller may be holding
+// it.
+type AnswerDelivery struct {
+	Withdrawn bool
+}
+
 // ResponseObserver is the optional capability a Service implements to be told
 // that the response to one of its calls is already on the wire.
 //
@@ -74,8 +93,9 @@ type ChannelDataPlane interface {
 type ResponseObserver interface {
 	// ResponseWritten is called once per SUCCESSFUL call, after its response
 	// frame has been written. result is what Call returned, so a service
-	// holding several deferred starts can tell which one this was.
-	ResponseWritten(ctx context.Context, op string, result any)
+	// holding several deferred starts can tell which one this was, and
+	// delivery is whether anybody was still waiting for it.
+	ResponseWritten(ctx context.Context, op string, result any, delivery AnswerDelivery)
 }
 
 // RefusalCoder is an optional capability a Service implements to give its

@@ -376,7 +376,7 @@ func openSubsystemStream(pool *ssh.PooledConn, subsystem string) (*subsystemEnd,
 // handler could put a frame on the wire describing something the caller cannot
 // address yet — bytes dropped as orphaned, for the sftp handshake that is a
 // hang, and for a forwarded connection a stream nobody can read.
-func (s *Service) ResponseWritten(_ context.Context, op string, result any) {
+func (s *Service) ResponseWritten(_ context.Context, op string, result any, _ host.AnswerDelivery) {
 	switch op {
 	case proto.OpOpen, proto.OpLane:
 		res, ok := result.(proto.OpenChannelResult)

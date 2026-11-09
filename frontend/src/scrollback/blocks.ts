@@ -2837,6 +2837,22 @@ export class BlockManager {
     rec.startOffset = index <= 0 ? 0 : Math.min(index, snapshot.geometry.rows - 1)
   }
 
+  /** The block whose body is still joined to the live grid: the one that
+   *  holds `_liveContainer` as its child. It is the running block until the
+   *  visual freeze moves the region out, and it stays this block across the
+   *  LOGICAL freeze — the step that clears `runningBlock` while the card is
+   *  still the running presentation and the grid below still shows the
+   *  command's screen. The body's hold is needed for exactly as long as the
+   *  two are joined (nocx-4y82c.1.1). */
+  get liveBlock(): BlockRecord | null {
+    const host = this._liveContainer.parentElement
+    if (host !== null) {
+      const joined = this._blocks.find((b) => b.el === host)
+      if (joined !== undefined) return joined
+    }
+    return this._runningBlock
+  }
+
   /** The block bound to an attempt id — running or frozen. */
   blockForAttempt(attemptId: string): BlockRecord | null {
     return this._blocks.find((b) => b.attemptId === attemptId) ?? null
@@ -2875,7 +2891,15 @@ export class BlockManager {
       return
     }
     this._deferredStoredPaint.delete(block)
-    this._paintStoredRows?.(block, rows)
+    // EVERY DOOR RESPECTS THE HOLD (nocx-4y82c.1.1). The rows this door is
+    // handed are the whole artifact; a running block may paint only the part
+    // the painted screen has passed, whichever caller arrived here — a
+    // binding that drained rows stashed before it, a hidden pane flushing
+    // what it deferred, or a delivery. Measured: a late binding painted the
+    // full 208 rows while the hold said 207, and the body showed the two rows
+    // the grid still had.
+    const painted = this._paintableRows(block, rows)
+    this._paintStoredRows?.(block, painted)
     this._keepLiveBodyLast(block)
   }
 
@@ -2940,13 +2964,25 @@ export class BlockManager {
     if (painted !== null) this.paintStoredRows(rec.el, painted)
   }
 
+  /** The rows one paint may show, for the block it is painting: the whole
+   *  artifact for every block but the running one, which stops where the
+   *  painted screen has stopped. The one place the hold is applied, so a door
+   *  that was handed the full rows cannot paint them. */
+  private _paintableRows(block: HTMLElement, rows: StoredBlockRows): StoredBlockRows {
+    const rec = this._blocks.find((b) => b.el === block)
+    if (rec === undefined || rec.storedUpTo === undefined) return rows
+    if (this._liveContainer.parentElement !== block) return rows
+    if (rec.storedUpTo >= rows.lines.length) return rows
+    return { ...rows, lines: rows.lines.slice(0, Math.max(0, rec.storedUpTo)) }
+  }
+
   /** The part of a block's stored rows its body may paint: all of them,
    *  except the running block's, which stops where the painted screen has
    *  stopped (`applyStoredRows`'s `upTo`). */
   private _paintedLines(rec: BlockRecord): StoredBlockRows | null {
     const rows = rec.storedRows
     if (rows === undefined) return null
-    const limit = rec === this._runningBlock ? rec.storedUpTo : undefined
+    const limit = rec.el === this._liveContainer.parentElement ? rec.storedUpTo : undefined
     if (limit === undefined || limit >= rows.lines.length) return rows
     return { ...rows, lines: rows.lines.slice(0, Math.max(0, limit)) }
   }
@@ -2963,7 +2999,7 @@ export class BlockManager {
    *  stops, the transcript keeps the output (e2e/connection-overlay.spec.ts
    *  measured nine of forty-one rows kept for the rest of a command). */
   releaseHeldRows(): void {
-    const rec = this._runningBlock
+    const rec = this.liveBlock
     if (rec === null || rec.storedUpTo === undefined) return
     rec.storedUpTo = undefined
     const painted = this._paintedLines(rec)
@@ -2987,7 +3023,7 @@ export class BlockManager {
    *  (nocx-4y82c.1.1). */
   holdStoredRows(entryId: string, upTo: number | null): boolean {
     const rec = this.blockForAttempt(entryId)
-    if (rec === null || rec !== this._runningBlock) return false
+    if (rec === null || rec.el !== this._liveContainer.parentElement) return false
     if (rec.storedRows === undefined) return false
     if (upTo === null) {
       if (rec.storedUpTo === undefined) return false

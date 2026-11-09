@@ -5107,6 +5107,35 @@ describe('backend-owned block rows', () => {
     expect(manager.holdStoredRows('entry-stream', 4)).toBe(false)
   })
 
+  it('a paint handed the whole artifact shows only what the screen passed (nocx-4y82c.1.1)', () => {
+    // The binding and the deferred-visibility flush both arrive at the one
+    // paint door with the whole artifact — not the slice a delivery carries —
+    // and a running block may show only the rows the painted screen has
+    // passed. Measured on webkit under load: a late binding painted the full
+    // 208 rows while the hold said 207, and the body showed the two rows the
+    // grid still had.
+    const { manager } = newManager()
+    manager.startBlock('printf rows', '/repo', 0)
+    manager.bindAttempt('entry-stream')
+    const four = {
+      lines: [
+        { from: 0, row: row('first ') },
+        { from: 1, row: row('second') },
+        { from: 2, row: row('third ') },
+        { from: 3, row: row('fourth') },
+      ],
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+    }
+    manager.applyStoredRows('entry-stream', four, 4)
+    expect(manager.holdStoredRows('entry-stream', 2)).toBe(true)
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond')
+
+    manager.paintStoredRows(manager.runningBlock!.el, four)
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond')
+  })
+
   it("keeps the body's order: its rows above the live region, on every growth (ADR-0091)", () => {
     // `paintStoredRows` replaces `.cmd-output` on each block.grew, so the rows
     // it appends land after the live region unless the seat is restored with

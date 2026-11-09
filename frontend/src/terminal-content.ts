@@ -6303,7 +6303,11 @@ export class TerminalContent extends BasePaneContent {
    *  screen to wait for takes every row the record holds. */
   private _widenRunningRowsToScreen(): void {
     const sb = this.scrollback
-    const rec = sb?.blockManager.runningBlock ?? null
+    // THE BLOCK THE GRID IS JOINED TO, not the running slot: the logical
+    // freeze clears `runningBlock` while the card is still the running
+    // presentation, and the body's hold must follow the painted screen for
+    // as long as the two are one block (nocx-4y82c.1.1).
+    const rec = sb?.blockManager.liveBlock ?? null
     if (!sb || rec === null || rec.attemptId === undefined) return
     const upTo = this._rowsTheScreenPassed(rec)
     if (!sb.blockManager.holdStoredRows(rec.attemptId, upTo)) return

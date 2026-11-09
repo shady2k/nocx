@@ -4252,7 +4252,9 @@ export class TerminalContent extends BasePaneContent {
           // presentation. A later running fact restores that same binding;
           // projections must not open the block twice. New attempts still
           // enter through the projection, and fullscreen keeps its own guard.
-          this.scrollback.setRunning()
+          // A RESTORE, NOT A START: no command opened here, so nothing may
+          // claim the tail under a reader who is away (nocx-3wmve).
+          this.scrollback.setRunning(false)
         }
       })
 
@@ -8211,8 +8213,10 @@ export class TerminalContent extends BasePaneContent {
       } else if (this.lifecycle.state.kind === 'running') {
         // A command still in flight owns the live region until its completion
         // freezes the block. A ready prompt returns to the structured idle
-        // layout (nocx-u7uh.26).
-        this.scrollback?.setRunning()
+        // layout (nocx-u7uh.26). NOT a command start: the program just handed
+        // the pane back, and the reader's place was restored by
+        // `exitFullscreen` a line earlier (nocx-3wmve).
+        this.scrollback?.setRunning(false)
       }
     }
     // Read pane context after the transition because it reads scrollback.mode.

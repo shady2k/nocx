@@ -72,6 +72,13 @@ export class TailFollow {
     this._following = true
   }
 
+  /** Put the remembered intent back. For a caller that had to stop listening
+   *  for a while — a full-screen program owning the pane — and must not hand
+   *  the person a different answer when it starts again. */
+  restore(following: boolean): void {
+    this._following = following
+  }
+
   /** Put the scroller at its tail and remember that this is where it belongs.
    *  The one place a caller says "go to the end" about a plain scroller. */
   toTail(el: HTMLElement): void {
@@ -80,9 +87,15 @@ export class TailFollow {
   }
 
   /** Remembered intent, widened by the geometry. Never clears: the caller has
-   *  a watcher of its own that owns leaving the live end. */
+   *  a watcher of its own that owns leaving the live end.
+   *
+   *  THE GEOMETRY ONLY ANSWERS WHERE THERE IS AN END TO BE AT (nocx-3wmve): a
+   *  scroller whose content fits is trivially "at its end", and that reading
+   *  is not about the reader at all — it is the state a transcript passes
+   *  through while it is out of the flow behind a full-screen program, and
+   *  trusting it re-engaged following for a person who had scrolled up. */
   intent(el: TailGeometry): boolean {
-    return this._following || isAtTail(el)
+    return this._following || (el.scrollHeight > el.clientHeight && isAtTail(el))
   }
 
   /** Re-read the scroller and update the intent — but ONLY from a measurable

@@ -170,6 +170,15 @@ function producer(name: string, lines: string[]): string {
   return file
 }
 
+/** A Node program on disk — for the shapes a shell cannot write safely: an
+ *  escape that changes the screen, written from bytes the program owns. */
+function script(name: string, lines: string[]): string {
+  const dir = mkdtempSync(path.join(tmpdir(), `nocx-${name}-`))
+  const file = path.join(dir, 'producer.mjs')
+  writeFileSync(file, lines.join('\n') + '\n', { mode: 0o755 })
+  return file
+}
+
 test('arriving output does not move a reader scrolled into history', async ({ page }) => {
   test.setTimeout(180_000)
   await page.goto('/')
@@ -184,17 +193,17 @@ test('arriving output does not move a reader scrolled into history', async ({ pa
 
   // The producer: still printing while the person reads.
   await page.keyboard.type(
-    'for i in $(seq -f "%03g" 1 60); do echo LIVE-$i; sleep 0.12; done; echo LIVE-DONE',
+    'for i in $(seq -f "%03g" 1 200); do echo LIVE-$i; sleep 0.1; done; echo LIVE-DONE',
   )
   await page.keyboard.press('Enter')
-  await waitForText(page, 'LIVE-005')
+  await waitForText(page, 'LIVE-060')
 
   await wheelIntoHistory(page, /HIST-070/)
   const before = await readerPlace(page)
   const topBefore = await scrollerTop(page)
 
-  // Several more lines arrive; the person has not scrolled.
-  await waitForText(page, 'LIVE-040')
+  // Sixty more lines arrive; the person has not scrolled.
+  await waitForText(page, 'LIVE-120')
   const after = await readerPlace(page)
   const topAfter = await scrollerTop(page)
 
@@ -248,14 +257,14 @@ test('an inline program redrawing its region does not move a reader in history',
   const file = producer('region', [
     'for i in $(seq -f "%03g" 1 120); do echo REGION-HIST-$i; done',
     'height=0',
-    'for i in $(seq 1 40); do',
+    'for i in $(seq 1 60); do',
     '  if [ "$height" -gt 0 ]; then printf "\\033[${height}A\\033[J"; fi',
     '  printf "REGION-HDR-%03d\\n" "$i"',
     '  if [ $((i % 2)) -eq 0 ]; then rows=28; else rows=2; fi',
     '  r=1',
     '  while [ "$r" -lt "$rows" ]; do printf "region row %s\\n" "$r"; r=$((r + 1)); done',
     '  height=$rows',
-    '  sleep 0.12',
+    '  sleep 0.2',
     'done',
     'echo REGION-DONE',
   ])
@@ -265,19 +274,66 @@ test('an inline program redrawing its region does not move a reader in history',
   await clickIntoEditor(page)
   await page.keyboard.type(`bash ${file}`)
   await page.keyboard.press('Enter')
-  await waitForText(page, 'REGION-HDR-004')
+  await waitForText(page, 'REGION-HIST-120')
 
   await wheelIntoHistory(page, /REGION-HIST-\d{3}/, -300)
   const before = await readerPlace(page)
   const topBefore = await scrollerTop(page)
 
-  // The program redraws its region forty times; nothing the person does in
+  // The program redraws its region sixty times; nothing the person does in
   // between may move them.
   await waitForText(page, 'REGION-DONE')
   const after = await readerPlace(page)
   const topAfter = await scrollerTop(page)
 
   expectUnmoved(before, after, 'an inline program redrawing its region', {
+    before: topBefore,
+    after: topAfter,
+  })
+})
+
+test('a full-screen program leaves a reader in history where they were', async ({ page }) => {
+  test.setTimeout(180_000)
+  const file = script('fullscreen', [
+    'const { stdin, stdout } = process',
+    'const sleep = (ms) => new Promise((r) => setTimeout(r, ms))',
+    ';(async () => {',
+    "  for (let i = 0; i < 120; i++) stdout.write('FULL-HIST-' + String(i).padStart(3, '0') + '\\n')",
+    '  await sleep(1500)',
+    '  stdin.setRawMode(true)',
+    "  stdout.write('\\x1b[?1049h\\x1b[?1000h\\x1b[?1006h\\x1b[2J\\x1b[5;1HFULL-READY')",
+    '  for (let i = 0; i < 10; i++) {',
+    "    stdout.write('\\x1b[H\\x1b[2JFULL-FRAME-' + String(i).padStart(3, '0') + '\\nrow a\\nrow b\\n')",
+    '    await sleep(150)',
+    '  }',
+    "  stdout.write('\\x1b[?1000l\\x1b[?1006l\\x1b[?1049l')",
+    "  stdout.write('FULL-DONE\\n')",
+    '})()',
+  ])
+
+  await page.goto('/')
+  await promptReady(page)
+  await clickIntoEditor(page)
+  await page.keyboard.type(`node ${file}`)
+  await page.keyboard.press('Enter')
+  await waitForText(page, 'FULL-HIST-119')
+
+  await wheelIntoHistory(page, /FULL-HIST-\d{3}/)
+  const before = await readerPlace(page)
+  const topBefore = await scrollerTop(page)
+
+  // The program takes the pane, redraws a screen of its own, and gives the
+  // pane back. None of that is the person asking to be moved.
+  await expect(page.locator('.pane.active .terminal-live-container')).toHaveClass(
+    /live-fullscreen/,
+    { timeout: 30_000 },
+  )
+  await waitForText(page, 'FULL-DONE')
+  await promptReady(page)
+
+  const after = await readerPlace(page)
+  const topAfter = await scrollerTop(page)
+  expectUnmoved(before, after, 'a full-screen program over a reader in history', {
     before: topBefore,
     after: topAfter,
   })

@@ -22,6 +22,18 @@ import { windowPet } from '../pets/window-pet'
 import { isAtTail, TailFollow } from './tail-follow'
 export type LiveRegionMode = 'idle' | 'running' | 'fullscreen' | 'unstructured'
 
+/** A reader's place in the transcript, named the way the painted rows are
+ *  (nocx-3wmve): the block that holds them and the row's own line in it, with
+ *  where that row sat from the scroller's top edge. `blockId`/`logicalLine` are
+ *  null when nothing painted in the viewport could be named, and then only the
+ *  scroller's own `top` is held. */
+interface ReaderPlace {
+  blockId: string | null
+  logicalLine: string | null
+  offset: number
+  top: number
+}
+
 export interface ScrollbackControllerOpts {
   /** The pane this controller owns the scrollback inside. */
   pane: HTMLElement
@@ -205,6 +217,11 @@ export class ScrollbackController {
     this._blockManager = new BlockManager(this.scrollbackInner, this.terminalLiveContainer, {
       now,
       snapshotStore: opts.snapshotStore,
+      // The freeze replaces a block's whole element, and the frozen card's
+      // header and body rhythm are not the running one's: the rows under it
+      // move by 30px as it arrives. A reader scrolled into that output is
+      // reading those rows (nocx-3wmve).
+      holdReaderPlace: (mutate) => this.holdReaderPlace(mutate),
       // A DEFERRED freeze landed inside the manager (the backend's
       // block.closed met the completion): settle the block the way a direct
       // freeze does — the pet
@@ -1003,6 +1020,89 @@ export class ScrollbackController {
    */
   scrollToBottomIfFollowing(): void {
     if (this._tail.following) this._scrollToBottom()
+  }
+
+  /** WHERE THE PERSON'S EYES ARE, so a mutation can give it back (nocx-3wmve).
+   *
+   * A row is named by the block it belongs to and its own line in that block
+   * (`data-block-id` + `data-logical-line`, the identity the painted rows
+   * carry), never by its element: a freeze re-paints the block's body, and the
+   * row a reader is on is the same LINE in the same block, not the same DOM
+   * node. `offset` is where that row sat, measured from the scroller's top
+   * edge — the one thing "not moved" means. */
+  private _captureReaderPlace(): ReaderPlace | null {
+    const area = this.scrollbackArea
+    if (area.scrollHeight <= area.clientHeight) return null
+    // The GEOMETRY answers "is this person reading rows", not the remembered
+    // intent: a wheel that has not reached the observer yet already moved
+    // them, and the intent's own staleness is what the observer exists to
+    // absorb. A reader at the live end is the tail rule's, and it is not this
+    // one's business.
+    if (isAtTail(area)) return null
+    const clip = area.getBoundingClientRect()
+    // ONLY THE BLOCK THE VIEWPORT'S TOP IS IN, not the whole transcript: a
+    // restored pane can hold thousands of rows, and a freeze must not read
+    // every one of them to name the row a person is on.
+    for (const block of this.scrollbackInner.querySelectorAll<HTMLElement>(':scope > .cmd-block')) {
+      const box = block.getBoundingClientRect()
+      if (box.bottom <= clip.top) continue
+      if (box.top >= clip.bottom) break
+      for (const row of block.querySelectorAll<HTMLElement>(
+        ':scope > .cmd-output > .term-grid-row',
+      )) {
+        const cell = row.getBoundingClientRect()
+        if (cell.height <= 0) continue
+        // The first row that starts inside the viewport: the top of what the
+        // person is reading, and the least ambiguous witness (a row clipped by
+        // the top edge has no stable offset).
+        if (cell.top < clip.top - 0.5) continue
+        if (cell.top >= clip.bottom - 0.5) break
+        const blockId = row.dataset.blockId
+        const logicalLine = row.dataset.logicalLine
+        if (blockId === undefined || logicalLine === undefined) continue
+        return { blockId, logicalLine, offset: cell.top - clip.top, top: area.scrollTop }
+      }
+    }
+    // Nothing painted in the viewport is a row this can name (the live grid
+    // above the fold, an empty body). The scroller's own position still
+    // survives a shrink that is paid back in the same task.
+    return { blockId: null, logicalLine: null, offset: 0, top: area.scrollTop }
+  }
+
+  private _restoreReaderPlace(place: ReaderPlace): void {
+    const area = this.scrollbackArea
+    if (place.blockId !== null && place.logicalLine !== null) {
+      const row = area.querySelector<HTMLElement>(
+        `.cmd-block .cmd-output .term-grid-row[data-block-id="${place.blockId}"]` +
+          `[data-logical-line="${place.logicalLine}"]`,
+      )
+      if (row !== null) {
+        const shift =
+          row.getBoundingClientRect().top - area.getBoundingClientRect().top - place.offset
+        if (Math.abs(shift) >= 0.5) area.scrollTop = Math.max(0, area.scrollTop + shift)
+        return
+      }
+    }
+    // The row is gone (the block was cleared, or the surface replaced it):
+    // the position is still the person's, as far as the content allows.
+    const max = Math.max(0, area.scrollHeight - area.clientHeight)
+    if (area.scrollTop !== place.top) area.scrollTop = Math.min(place.top, max)
+  }
+
+  /** Run `mutate` and leave a reader who has scrolled away exactly where they
+   *  were.
+   *
+   * The transcript changes shape for reasons that are nobody's gesture: a
+   * command ends and its card takes the frozen rhythm, a block is rebuilt, a
+   * body is re-painted. None of that is the person asking to be moved, and the
+   * scroller owns its position (`overflow-anchor: none` is deliberate — one
+   * controller, nocx-6w4z), so the compensation is here rather than left to
+   * the engine. A follower is untouched: their end is the bottom edge, and the
+   * callers that move them (`settleAtTail`) are the ones that own it. */
+  holdReaderPlace(mutate: () => void): void {
+    const place = this._captureReaderPlace()
+    mutate()
+    if (place !== null) this._restoreReaderPlace(place)
   }
 
   /**

@@ -4907,6 +4907,44 @@ describe('backend-owned block rows', () => {
     }
   })
 
+  it('freezes a block whole: the element that arrives already carries its rows', () => {
+    const { manager, inner } = newManager()
+    manager.startBlock('printf rows', '~', 0)
+    manager.bindAttempt('entry-whole')
+    manager.applyStoredRows('entry-whole', {
+      lines: [
+        { from: 0, row: row('first line') },
+        { from: 1, row: row('second line') },
+      ],
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+    })
+    try {
+      // THE NODE THE SWAP HANDS OVER, AS IT ARRIVED. A reader scrolled into a
+      // running command's output is reading rows of exactly this block, so a
+      // block that arrives bodyless takes their place in the transcript away
+      // for as long as the paint takes — and the first layout read in that
+      // window clamps them to the top of the history (nocx-3wmve; measured in
+      // e2e/scroll-anchor-while-running.spec.ts at scrollTop 5956 -> 2672).
+      const arrived: Array<{ node: HTMLElement; body: boolean }> = []
+      const replaceChild = inner.replaceChild.bind(inner)
+      inner.replaceChild = ((node: Node, old: Node) => {
+        if (node instanceof HTMLElement) {
+          arrived.push({ node, body: node.querySelector('.cmd-output') !== null })
+        }
+        return replaceChild(node, old)
+      }) as typeof inner.replaceChild
+      closeRunningBlock(manager)
+      expect(arrived).toHaveLength(1)
+      expect(arrived[0]!.body, 'the frozen block arrived without its rows').toBe(true)
+      expect(blockOutputText(arrived[0]!.node)).toContain('second line')
+    } finally {
+      manager.dispose()
+      inner.remove()
+    }
+  })
+
   it('forgets hidden output after clear and disposal but keeps the clear-boundary owner', () => {
     const { manager, inner } = newManager()
     const rows = {

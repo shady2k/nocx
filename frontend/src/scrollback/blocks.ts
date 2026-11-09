@@ -1988,6 +1988,11 @@ export function freezeBlock(
   author: CommandAuthor = 'shell',
   menuActions?: RunningBlockActions,
   entryId?: string,
+  /** Runs on the frozen element while it is BUILT and still OFF the document,
+   *  before it replaces the running one (nocx-3wmve). The one caller paints
+   *  the rows the block already shows into it, so the transcript never has a
+   *  frame — nor a layout — where the body of the block being read is gone. */
+  beforeSwap?: (el: HTMLElement) => void,
 ): HTMLElement {
   const newEl = createCommandBlock(
     'command',
@@ -2008,6 +2013,7 @@ export function freezeBlock(
     entryId,
     undefined,
   )
+  beforeSwap?.(newEl)
   if (el.parentNode) {
     el.parentNode.replaceChild(newEl, el)
   }
@@ -2082,6 +2088,13 @@ export interface BlockManagerOpts {
   onBlockFrozen?: (rec: BlockRecord) => void
   /** Paints rows read from the backend's block artifact. */
   paintStoredRows?: (block: HTMLElement, rows: StoredBlockRows) => void
+  /** Runs a mutation that changes the transcript's shape — the freeze swaps a
+   *  block's whole element — and leaves a reader who has scrolled away exactly
+   *  where they were (nocx-3wmve). The scroller and the reader's place are the
+   *  controller's, so this manager asks rather than reaching for
+   *  `scrollTop` itself. Absent in a bare-bones embedding, and then nothing
+   *  is held (there is no reader to keep). */
+  holdReaderPlace?: (mutate: () => void) => void
   /** What a session is called TO A PERSON, for a tool block whose call named
    *  one (nocx-vnzek). The manager holds no pane list, so the caller that
    *  does supplies the tab strip's own derivation
@@ -2155,6 +2168,7 @@ export class BlockManager {
   private _snapshotStore: CommandSnapshotStore
   private _onDeferredFreeze?: (rec: BlockRecord) => void
   private _paintStoredRows?: (block: HTMLElement, rows: StoredBlockRows) => void
+  private _holdReaderPlace?: (mutate: () => void) => void
   private _visible = true
   /** Hidden paints belong to their DOM owner, not a second block registry.
    *  Removed/replaced owners can be collected without draining a strong queue. */
@@ -2243,6 +2257,7 @@ export class BlockManager {
     this._onDeferredFreeze = opts.onDeferredFreeze
     this._onBlockFrozen = opts.onBlockFrozen
     this._paintStoredRows = opts.paintStoredRows
+    this._holdReaderPlace = opts.holdReaderPlace
     this._sessionName = opts.sessionName
     this._answerText = opts.answerText
     this._dump = opts.dump
@@ -3340,30 +3355,53 @@ export class BlockManager {
     // running chrome survives outside the frozen record (ADR-3kqrem7v).
     if (rec.header && rec.header.parentElement !== rec.el) rec.el.prepend(rec.header)
     rec.header = undefined
-    const newEl = freezeBlock(
-      rec.el,
-      rec.id,
-      rec.command,
-      rec.cwd,
-      location,
-      '',
-      rec.durationMs ?? 0,
-      rec.exitCode,
-      this._getContainer,
-      (bid, sel) => {
-        if (sel) this._onBlockSelected(bid)
-        else this._onBlockDeselected(bid)
-      },
-      this._snapshotStore,
-      status,
-      rec.author,
-      this._runningActions,
-      rec.attemptId,
-    )
+    // THE SWAP, AS ONE PIECE (nocx-3wmve). Two things are true of it that a
+    // reader scrolled into the output must not feel. The frozen card is not
+    // the running card's shape — its header takes the transcript's vertical
+    // padding and its body the rhythm the live one leaves to the box — so the
+    // rows under it sit 30px lower the moment it arrives; and the card is
+    // built with an empty body, whose rows the paint then fills in. Either
+    // one moves the rows a person is reading, so the whole replacement is
+    // handed to the controller, which knows whether the person is following
+    // the tail and holds their place when they are not.
+    const swap = (): void => {
+      const newEl = freezeBlock(
+        rec.el,
+        rec.id,
+        rec.command,
+        rec.cwd,
+        location,
+        '',
+        rec.durationMs ?? 0,
+        rec.exitCode,
+        this._getContainer,
+        (bid, sel) => {
+          if (sel) this._onBlockSelected(bid)
+          else this._onBlockDeselected(bid)
+        },
+        this._snapshotStore,
+        status,
+        rec.author,
+        this._runningActions,
+        rec.attemptId,
+        // THE CARD IS BUILT WHOLE, BEFORE IT IS SWAPPED IN. The rows the
+        // running block showed are the record's own (`rec.storedRows` — the
+        // same backend rows, not the input buffer), and painting them into the
+        // new element while it is still off the document means no layout can
+        // ever see this block bodyless. Measured in the replay: built empty,
+        // the clamp that followed the swap took a reader's scrollTop from 5956
+        // to 2672 and left their row FAST-194 replaced by FAST-001.
+        (el) => {
+          if (rec.storedRows) this.paintStoredRows(el, rec.storedRows)
+        },
+      )
 
-    this._reown(rec.el, newEl)
-    rec.el = newEl
-    if (rec.storedRows) this.paintStoredRows(newEl, rec.storedRows)
+      this._reown(rec.el, newEl)
+      rec.el = newEl
+      if (rec.storedRows) this.paintStoredRows(newEl, rec.storedRows)
+    }
+    if (this._holdReaderPlace) this._holdReaderPlace(swap)
+    else swap()
     if (rec.rowsUnreadable !== undefined && rec.attemptId) {
       this.markRowsUnreadable(rec.attemptId, rec.rowsUnreadable)
     }

@@ -341,66 +341,103 @@ test.describe('the body of a running block that has outgrown its screen', () => 
       const box = block.getBoundingClientRect()
       const headerRect = header.getBoundingClientRect()
       const rect = target?.getBoundingClientRect() ?? null
-      const headerTopDelta = box.top - headerRect.top
-      const headerGeometry =
-        Math.abs(headerTopDelta) < 0.5
-          ? null
-          : (() => {
-              const measure = (el: HTMLElement) => {
-                const r = el.getBoundingClientRect()
-                const s = getComputedStyle(el)
-                return {
-                  node: `${el.tagName.toLowerCase()}${el.id ? `#${el.id}` : ''}${
-                    typeof el.className === 'string' && el.className.trim()
-                      ? `.${el.className.trim().split(/\s+/).join('.')}`
-                      : ''
-                  }`.slice(0, 180),
-                  rect: {
-                    top: +r.top.toFixed(3),
-                    bottom: +r.bottom.toFixed(3),
-                    height: +r.height.toFixed(3),
-                  },
-                  offsetTop: el.offsetTop,
-                  offsetHeight: el.offsetHeight,
-                  offsetParent:
-                    el.offsetParent instanceof HTMLElement
-                      ? `${el.offsetParent.tagName.toLowerCase()}${el.offsetParent.id ? `#${el.offsetParent.id}` : ''}${
-                          typeof el.offsetParent.className === 'string' &&
-                          el.offsetParent.className.trim()
-                            ? `.${el.offsetParent.className.trim().split(/\s+/).join('.')}`
-                            : ''
-                        }`.slice(0, 180)
-                      : null,
-                  style: {
-                    position: s.position,
-                    top: s.top,
-                    marginTop: s.marginTop,
-                    paddingTop: s.paddingTop,
-                    borderTopWidth: s.borderTopWidth,
-                    boxSizing: s.boxSizing,
-                    display: s.display,
-                    transform: s.transform,
-                    zoom: s.zoom,
-                  },
-                }
-              }
-              const ancestors: HTMLElement[] = []
-              for (
-                let el: HTMLElement | null = header;
-                el && ancestors.length < 8;
-                el = el.parentElement
-              ) {
-                ancestors.push(el)
-                if (el === pane) break
-              }
+      // THE BOX'S STRUCTURE, NOT THE HEADER'S PAINT. The header is sticky now,
+      // so its painted top is the pane's top whenever the block's box has
+      // scrolled up (CI measured blockHeaderTopDelta -441); the ADR-0091
+      // invariant is the block's own surface, whose first line is the header's
+      // in-flow slot. The diagnostic is kept for the state that would break
+      // that: a header outside the block (a second surface).
+      const headerIsFirst = block.firstElementChild === header
+      const headerInBox = block.contains(header)
+      // THE HEADER'S FLOW SLOT, WITH STICKY OUT OF THE WAY -- AND ONLY STICKY.
+      // Its painted top is the pane's top while the block's box has scrolled
+      // up, and engines report that shifted position in offsetTop, so the
+      // static slot is measured directly: take sticky off, read, put it back
+      // -- synchronously, before any paint. But a header that is ABSOLUTE or
+      // FIXED is not in the block's flow at all, and forcing it to relative to
+      // measure would manufacture the slot this check exists to find. So the
+      // computed position must already be flow-permitting (sticky or static);
+      // anything else is reported and the slot is not measured.
+      const computedPosition = getComputedStyle(header).position
+      const flowPermitting = computedPosition === 'sticky' || computedPosition === 'static'
+      let slotTop: number | null = null
+      if (flowPermitting) {
+        if (computedPosition === 'sticky') {
+          const declared = header.style.position
+          header.style.position = 'relative'
+          slotTop = header.getBoundingClientRect().top
+          header.style.position = declared
+        } else {
+          slotTop = header.getBoundingClientRect().top
+        }
+      }
+      const blockStyle = getComputedStyle(block)
+      const contentTop =
+        box.top +
+        parseFloat(blockStyle.borderTopWidth || '0') +
+        parseFloat(blockStyle.paddingTop || '0')
+      const slotDelta = slotTop === null ? null : slotTop - contentTop
+      const structureWrong =
+        !headerIsFirst || !headerInBox || slotDelta === null || Math.abs(slotDelta) >= 0.5
+      const headerGeometry = !structureWrong
+        ? null
+        : (() => {
+            const headerTopDelta = box.top - headerRect.top
+            const measure = (el: HTMLElement) => {
+              const r = el.getBoundingClientRect()
+              const s = getComputedStyle(el)
               return {
-                devicePixelRatio,
-                blockHeaderTopDelta: +headerTopDelta.toFixed(3),
-                block: measure(block),
-                header: measure(header),
-                ancestors: ancestors.map(measure),
+                node: `${el.tagName.toLowerCase()}${el.id ? `#${el.id}` : ''}${
+                  typeof el.className === 'string' && el.className.trim()
+                    ? `.${el.className.trim().split(/\s+/).join('.')}`
+                    : ''
+                }`.slice(0, 180),
+                rect: {
+                  top: +r.top.toFixed(3),
+                  bottom: +r.bottom.toFixed(3),
+                  height: +r.height.toFixed(3),
+                },
+                offsetTop: el.offsetTop,
+                offsetHeight: el.offsetHeight,
+                offsetParent:
+                  el.offsetParent instanceof HTMLElement
+                    ? `${el.offsetParent.tagName.toLowerCase()}${el.offsetParent.id ? `#${el.offsetParent.id}` : ''}${
+                        typeof el.offsetParent.className === 'string' &&
+                        el.offsetParent.className.trim()
+                          ? `.${el.offsetParent.className.trim().split(/\s+/).join('.')}`
+                          : ''
+                      }`.slice(0, 180)
+                    : null,
+                style: {
+                  position: s.position,
+                  top: s.top,
+                  marginTop: s.marginTop,
+                  paddingTop: s.paddingTop,
+                  borderTopWidth: s.borderTopWidth,
+                  boxSizing: s.boxSizing,
+                  display: s.display,
+                  transform: s.transform,
+                  zoom: s.zoom,
+                },
               }
-            })()
+            }
+            const ancestors: HTMLElement[] = []
+            for (
+              let el: HTMLElement | null = header;
+              el && ancestors.length < 8;
+              el = el.parentElement
+            ) {
+              ancestors.push(el)
+              if (el === pane) break
+            }
+            return {
+              devicePixelRatio,
+              blockHeaderTopDelta: +headerTopDelta.toFixed(3),
+              block: measure(block),
+              header: measure(header),
+              ancestors: ancestors.map(measure),
+            }
+          })()
       return {
         found: target !== undefined,
         inBlockTree: target !== undefined && block.contains(target),
@@ -414,6 +451,12 @@ test.describe('the body of a running block that has outgrown its screen', () => 
           rect.right <= box.right + 0.5,
         boxTop: +box.top.toFixed(2),
         headerTop: +headerRect.top.toFixed(2),
+        headerIsFirst,
+        headerInBox,
+        headerPosition: computedPosition,
+        slotTop: slotTop === null ? null : +slotTop.toFixed(2),
+        contentTop: +contentTop.toFixed(2),
+        slotDelta: slotDelta === null ? null : +slotDelta.toFixed(2),
         headerGeometry,
         boxBottom: +box.bottom.toFixed(2),
         lastRow: last ? printed(last) : null,
@@ -428,7 +471,20 @@ test.describe('the body of a running block that has outgrown its screen', () => 
     expect(where.insideBox, said).toBe(true)
     // ... and that box starts at the block's header and reaches its last
     // painted row: ONE surface, header to last row, no second box under it.
-    expect(Math.abs(where.boxTop - where.headerTop), said).toBeLessThan(0.5)
+    // The header's IN-FLOW SLOT is the box's first line: it is the block's own
+    // first element and it is inside the block. Its painted top is not the
+    // seam any more -- sticky moves that to the pane's top while the box has
+    // scrolled up, which is the pin, not a second surface.
+    expect(where.headerIsFirst, said).toBe(true)
+    expect(where.headerInBox, said).toBe(true)
+    // Only a flow-permitting header has a slot to measure; absolute or fixed
+    // is the defect itself, not something to normalise away before measuring.
+    expect(['sticky', 'static'], `${said} -- the header's position`).toContain(where.headerPosition)
+    expect(where.slotDelta, said).not.toBeNull()
+    expect(
+      Math.abs(where.slotDelta!),
+      `${said} -- the header's flow slot is the block's own content top`,
+    ).toBeLessThan(0.5)
     expect(where.lastRowBottom, said).not.toBeNull()
     expect(where.boxBottom, said).toBeGreaterThanOrEqual(where.lastRowBottom! - 0.5)
     // Hovering a LIVE row is hovering the block, which is the same fact said

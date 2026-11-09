@@ -39,6 +39,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/shady2k/nocx/internal/commandnames"
 	"github.com/shady2k/nocx/internal/completion"
@@ -198,6 +199,35 @@ func (p *helperProbes) HelperPlatformProbe(ctx context.Context, host string, opt
 	return &platformLease{helperProbeLease: l, host: host}, nil
 }
 
+// HelperInflate decompresses one file in place on a host, through this
+// machine's helper and the host's own gzip (nocx-evj4b.1.3).
+//
+// IT LEASES FOR ITSELF, AND THAT IS THE SHAPE THE INSTALL WANTS: the install
+// already holds an SFTP lease, and this is a second reference on the same pooled
+// connection — acquired, used for one command, released. A caller that is not a
+// lease keeps no vocabulary for pooled references, and the helper's pool is what
+// makes the second reference cost no second authentication.
+//
+// No error means the file was decompressed and the `.gz` is gone; EVERY failure
+// — no gzip, an exec refused, a connection gone — is reported to the caller,
+// whose answer is the plain upload the install had before this existed.
+func (p *helperProbes) HelperInflate(ctx context.Context, host, path string, opts ...ssh.ConnectOption) error {
+	l, err := p.acquire(ctx, host, opts...)
+	if err != nil {
+		return fmt.Errorf("inflate lease for %s: %w", host, err)
+	}
+	defer func() { _ = l.Close() }()
+	res, err := l.Inflate(ctx, path)
+	if err != nil {
+		return fmt.Errorf("inflate %s on %s: %w", path, host, err)
+	}
+	if res.ExitStatus != 0 {
+		return fmt.Errorf("inflate %s on %s: command exited %d: %s",
+			path, host, res.ExitStatus, strings.TrimSpace(string(res.Stderr)))
+	}
+	return nil
+}
+
 // probeCommands is the lease as everything in this package uses it: the named
 // probes, the identity the install path keys consent by, and the lifetime
 // signals. It is an interface so the adapters above can be driven without a
@@ -210,6 +240,7 @@ type probeCommands interface {
 	SamplePorts(ctx context.Context, probe remoteprobe.PortProbe) (*remoteprobe.Result, error)
 	Completion(ctx context.Context, cwd, line string, pos, limit int, nonce string) (*remoteprobe.Result, error)
 	CommandNames(ctx context.Context, phase remoteprobe.CommandNamesPhase, nonce string) (*remoteprobe.Result, error)
+	Inflate(ctx context.Context, path string) (*remoteprobe.Result, error)
 	Fingerprint() string
 	Done() <-chan struct{}
 	LostErr() error
@@ -231,6 +262,13 @@ type helperProbeLease struct {
 // for the lifetime of the publish so that its sftp channel lands on the same
 // pooled connection (helper_publish.go).
 func (l *helperProbeLease) Home(ctx context.Context) (string, error) { return l.lease.Home(ctx) }
+
+// Inflate decompresses one file in place on the far host (nocx-evj4b.1.3), for
+// the install's one caller. The exit status is the host's answer and the caller
+// reads it.
+func (l *helperProbeLease) Inflate(ctx context.Context, path string) (*remoteprobe.Result, error) {
+	return l.lease.Inflate(ctx, path)
+}
 
 // Sample answers discovery's ExecConn: one rung of the port ladder, named.
 func (l *helperProbeLease) Sample(ctx context.Context, probe discovery.ProbeName) (*discovery.ExecResult, error) {

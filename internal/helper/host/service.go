@@ -66,8 +66,10 @@ type ChannelDataPlane interface {
 // that decision and the frame left a session nobody had been told about and
 // nobody could release. The host therefore arbitrates the two under the
 // request's own mutex at the instant the answer is written, and this value is
-// the arbitration's result. Withdrawn means the caller had already given up
-// before the frame went out, so the frame reached nobody and what it carries is
+// the arbitration's result. Withdrawn means the frame reached NOBODY — the
+// caller had already given up before it went out, or the WRITE ITSELF FAILED
+// (nocx-ouru5.1.9: a frame the transport refused reached nobody just as surely
+// as one addressed to a caller who had gone) — so what the answer carries is
 // nobody's; false means the answer went out first, and a caller may be holding
 // it.
 type AnswerDelivery struct {

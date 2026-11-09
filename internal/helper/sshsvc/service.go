@@ -206,6 +206,8 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 		return host.SchemaFor(proto.CompletionParams{})
 	case proto.OpCommandNames:
 		return host.SchemaFor(proto.CommandNamesParams{})
+	case proto.OpInflate:
+		return host.SchemaFor(proto.InflateParams{})
 	case proto.OpLane:
 		return host.SchemaFor(proto.LaneParams{})
 	case proto.OpToolSocket:
@@ -331,6 +333,14 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 			}
 		}
 		return s.completion(ctx, p)
+	case proto.OpInflate:
+		var p proto.InflateParams
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, fmt.Errorf("%w: %w", errBadLeaseParams, err)
+			}
+		}
+		return s.inflate(ctx, p)
 	case proto.OpCommandNames:
 		var p proto.CommandNamesParams
 		if len(params) > 0 {

@@ -323,6 +323,17 @@ func TestAFarHelperThatStopsAnsweringFailsTheOpenInsteadOfHoldingIt(t *testing.T
 	if !got.selected {
 		t.Fatal("the far helper declined a destination it hosted, so the refusal says nothing about the silent helper")
 	}
+	// AND THE CHANNEL THE FAILED OPEN DIALED IS ENDED BY THE OPEN, not left for
+	// a teardown that cannot see it: this client never reached the registry,
+	// so nothing else in the product would close it, and what it holds is a
+	// lane to a helper on another machine that is serving a pane which never
+	// came (nocx-ouru5.1.8).
+	if lanes := stand.provider.laneCount(); lanes != 1 {
+		t.Fatalf("the failed open used %d lanes, want 1", lanes)
+	}
+	if got := stand.provider.lane(0).closeCount(); got != 1 {
+		t.Fatalf("the lane a failed far open dialed was closed %d times, want 1 — the client it carried is in no registry, so no teardown will end it", got)
+	}
 }
 
 // immediateTools is the same surface without a gate: the open reaches its

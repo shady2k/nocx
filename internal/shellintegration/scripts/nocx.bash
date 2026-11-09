@@ -2611,9 +2611,22 @@ __nocx_snapshot_emit() {
 # that has already been announced. See the latch's own comment for what the
 # second hello cost.
 if (( __nocx_snapshot_announce )); then
+    # IT GIVES THE TERMINAL BACK BEFORE IT RUNS (nocx-evj4b.1.5). A background
+    # job inherits the shell's descriptors, and the pty is three of them: a job
+    # that is still holding it when the shell exits keeps the SESSION alive,
+    # because sshd ends a pty session by draining that pty — `exit` returns the
+    # shell and not the session, the tab hangs, and a closed window leaves a
+    # session behind on the machine. That is the class ci-mac met as a stand
+    # waiting 20 s for a session to end after `exit` (PR #752); which process
+    # held the pty there is not something this box can settle, and it does not
+    # need to be settled to fix the only process nocx itself leaves behind: no
+    # background work of ours should own a descriptor of the person's terminal.
+    # `</dev/null` plus the subshell-level stderr keep every one of them out,
+    # and the job writes its snapshot to a file and reads nothing, which is
+    # what makes both redirections exact rather than merely harmless.
     ( compgen -abkA function 2>/dev/null | LC_ALL=C sort -u | __nocx_snapshot_build \
         >| "$__nocx_snap_staging" 2>/dev/null \
-        && mv -f "$__nocx_snap_staging" "$__nocx_snap_file" ) &
+        && mv -f "$__nocx_snap_staging" "$__nocx_snap_file" ) </dev/null 2>/dev/null &
     __nocx_snap_job=$!
     # Record the job's identity for the EXIT trap (PID + start time), then
     # disown: without disown, bash prints "[N]+ Done ( compgen ... )" — the

@@ -70,10 +70,21 @@ package coordinator
 // fingerprint, because contracts and the embedded scripts are both part of the
 // surface ADR-0104 declares.
 //
+// 21 (fix/nocx-evj4b.1.5-mac-sshd, over main's 20): the embedded shell
+// integration moved again, in both script tiers. Their background snapshot job
+// now gives the terminal up before it runs — `</dev/null` plus a subshell-level
+// stderr in scripts/nocx.bash, `</dev/null >/dev/null 2>&1` in
+// scripts/nocx.zsh — because a job that inherits the pty keeps the SESSION
+// alive after its shell has exited: sshd ends a pty session by draining that
+// pty, so `exit` returned the shell and not the session on macOS, and a closed
+// window left a session behind (nocx-evj4b.1.5). No frame changed; the scripts
+// are part of the surface ADR-0104 declares, and a published byte of them
+// moving is a bump.
+//
 // The number in a stage branch means only that ITS surface moved; this is the
 // number the integrated surface carries, and its golden is the one written by
 // the recipe over all four stages at once.
-const ProtocolVersion = 21
+const ProtocolVersion = 22
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

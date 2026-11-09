@@ -7,7 +7,7 @@ the filesystem seam and counts calls across publish paths.
 ## Current maximum
 
 - Maximum filesystem-seam calls per publish: **63**.
-- Maximum bytes written per publish: **92,949**.
+- Maximum bytes written per publish: **93,216**.
 - Measured worst path: replacement plus sweep, with the launch carrier absent.
 - Fault position used for the reported worst case: `remove#4`.
 
@@ -131,10 +131,23 @@ body sets the fact, the check after the enrolment prints the cancel sentence,
 and `__nocx_agent_launch_exec` refuses to run the agent on it. `nocx.bash` and
 `nocx.zsh` both moved; `nocx.posix` did not, and the worst path is unchanged.
 
-The 2026-11-09 measurement on branch `fix/nocx-ouru5.1.11-ctrlc` is **614 bytes
-above** that 92,949-byte figure, at **93,780**, and keeps the **63**-call
-maximum. The growth is the interrupt's second witness (nocx-ouru5.1.11): a
-cancel window's wait no longer trusts the INT trap to have run. bash defers a
+The 2026-11-09 measurement on branch `fix/nocx-evj4b.1.5-mac-sshd` is **50 bytes
+above** the 93,166-byte figure the test already asserted, at **93,216**, and
+keeps the **63**-call maximum. (This bullet moves with it, 92,949 → 93,216: it
+had been left one measurement behind, at the figure the zsh end-of-run hook
+replaced.) The growth is the snapshot job's terminal handback: both script
+tiers' background job now gives the terminal up before it runs — `</dev/null`
+plus a subshell-level `2>/dev/null` in `scripts/nocx.bash` (22 bytes), and
+`</dev/null >/dev/null 2>&1` on `scripts/nocx.zsh`'s job (28 bytes). A
+background job inherits the shell's descriptors, the pty among them, and a job
+still holding it after the shell exits keeps the SESSION alive, because sshd
+ends a pty session by draining that pty. No file is added, removed or written
+twice: the call count is unchanged.
+The 2026-11-09 measurement on branch `fix/nocx-ouru5.1.11-ctrlc`, on a tree that
+already carries the snapshot job's handback above, is **614 bytes above** that
+93,216-byte figure, at **93,830**, and keeps the **63**-call maximum. The growth
+is the interrupt's second witness (nocx-ouru5.1.11): a cancel window's wait no
+longer trusts the INT trap to have run. bash defers a
 trapped interrupt while a foreground child runs, and CI captured the trap's own
 run being LOST — `bash: interrupt trap: line 2: unexpected EOF while looking for
 matching ')'` — after which the launch's open-question wait, which has no

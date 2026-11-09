@@ -133,12 +133,25 @@ type frameCursor struct {
 // array — encoding/json drops a nil slice under omitempty) when the row
 // needs neither: no styling beyond the default, no cluster whose codepoint
 // count or column width departs from the default (narrow, one codepoint).
+//
+// RUNS IS PRE-ENCODED JSON, and that is the allocation budget's doing
+// (nocx-4y82c.1.5). The shape it used to carry — [][2]any, one `any` holding
+// either the integer 0 or the five style numbers, and one holding the length
+// — put two interface values per run through encoding/json. Go 1.26's encoder
+// marshalled them in place; Go 1.27's marshals on encoding/json/v2, which
+// makes each interface value ADDRESSABLE first (makeInterfaceArshaler →
+// newAddressableValue → reflect.New), so a link of styled output paid two
+// extra allocations per style run: measured 82,799 allocs/MiB against 52,868
+// on the same tree under 1.26, and the pump's budget is 67,000. The runs
+// array is now written by encodeRow itself (appendStyleRun, below), byte for
+// byte what the encoder wrote, and carried as json.RawMessage — no interface
+// value reaches the encoder at all.
 type frameRow struct {
-	Text         string   `json:"text"`
-	Marks        [][3]int `json:"marks,omitempty"`
-	Runs         [][2]any `json:"runs,omitempty"`
-	Wrap         bool     `json:"wrap,omitempty"`
-	Continuation bool     `json:"continuation,omitempty"`
+	Text         string          `json:"text"`
+	Marks        [][3]int        `json:"marks,omitempty"`
+	Runs         json.RawMessage `json:"runs,omitempty"`
+	Wrap         bool            `json:"wrap,omitempty"`
+	Continuation bool            `json:"continuation,omitempty"`
 }
 
 // EncodeFrame renders one snapshot as the wire frame. It takes the rows the
@@ -179,8 +192,14 @@ func EncodeFrame(snap Snapshot) ([]byte, error) {
 		},
 		Rows: make([]frameRow, 0, len(snap.Rows)),
 	}
+	// ONE runs buffer for the whole batch: every row's `runs` is a sub-slice of
+	// it, so a snapshot costs one growable allocation rather than one per row
+	// (nocx-4y82c.1.5, and the note on frameRow).
+	var runsScratch []byte
 	for _, row := range snap.Rows {
-		f.Rows = append(f.Rows, encodeRow(row))
+		var encoded frameRow
+		encoded, runsScratch = encodeRow(row, runsScratch)
+		f.Rows = append(f.Rows, encoded)
 	}
 	raw, err := json.Marshal(f)
 	if err != nil {
@@ -206,18 +225,33 @@ func frameBufferKind(alternate bool) string {
 // Trailing cells that are entirely the zero value (no text, narrow, default
 // style) are dropped: the row's own length is what tells a receiver where
 // its explicit content ends, and the frame's geometry supplies the rest.
-func encodeRow(row emulator.Row) frameRow {
+//
+// THE RUNS ARRAY IS WRITTEN HERE, into the caller's scratch buffer, and the
+// row holds a SUB-SLICE of it — so a batch of rows shares one growable
+// allocation instead of one buffer per row (nocx-4y82c.1.5). The scratch is
+// returned grown; a slice handed to an earlier row stays valid when the
+// buffer is reallocated, because append copies and the old array lives on.
+func encodeRow(row emulator.Row, scratch []byte) (frameRow, []byte) {
 	cells := trimTrailingDefaultBlanks(row.Cells)
 	var text strings.Builder
 	var marks [][3]int
-	var runs [][2]any
+	start := len(scratch)
+	scratch = append(scratch, '[')
+	runs := 0
+	firstRunIsDefault := false
 	var runStyle emulator.Style
 	var runLength int
 	flush := func() {
 		if runLength == 0 {
 			return
 		}
-		runs = append(runs, [2]any{encodeStyleValue(runStyle), runLength})
+		if runs > 0 {
+			scratch = append(scratch, ',')
+		} else {
+			firstRunIsDefault = runStyle == (emulator.Style{})
+		}
+		scratch = appendStyleRun(scratch, runStyle, runLength)
+		runs++
 		runLength = 0
 	}
 	pos := 0
@@ -252,22 +286,41 @@ func encodeRow(row emulator.Row) frameRow {
 		Wrap:         row.Wrap,
 		Continuation: row.Continuation,
 	}
-	if !isImplicitDefaultRuns(runs) {
-		out.Runs = runs
+	// A row whose styling is exactly what a receiver assumes when `runs` is
+	// absent says nothing: one run of the default style over the whole row
+	// (the shortcut isImplicitDefaultRuns used to take), or no cells at all.
+	if runs == 0 || (runs == 1 && firstRunIsDefault) {
+		return out, scratch[:start]
 	}
-	return out
+	scratch = append(scratch, ']')
+	out.Runs = json.RawMessage(scratch[start:])
+	return out, scratch
 }
 
-// isImplicitDefaultRuns reports whether runs is exactly the one a receiver
-// assumes when `runs` is absent from the wire: a single run of the default
-// style. Omitting it is the shortcut a fully unstyled row (or the unstyled
-// remainder of an otherwise-trimmed row) takes.
-func isImplicitDefaultRuns(runs [][2]any) bool {
-	if len(runs) != 1 {
-		return false
+// appendStyleRun writes one `[style, columns]` run — the exact bytes
+// encoding/json wrote for [][2]any{styleValue, length}: the bare integer 0
+// for the default style, or the five style numbers in one array.
+// encodeColorValue packs a colour into its single integer.
+func appendStyleRun(scratch []byte, style emulator.Style, length int) []byte {
+	scratch = append(scratch, '[')
+	if style == (emulator.Style{}) {
+		scratch = append(scratch, '0')
+	} else {
+		scratch = append(scratch, '[')
+		scratch = strconv.AppendInt(scratch, int64(encodeColorValue(style.Foreground)), 10)
+		scratch = append(scratch, ',')
+		scratch = strconv.AppendInt(scratch, int64(encodeColorValue(style.Background)), 10)
+		scratch = append(scratch, ',')
+		scratch = strconv.AppendInt(scratch, int64(encodeColorValue(style.UnderlineColor)), 10)
+		scratch = append(scratch, ',')
+		scratch = strconv.AppendInt(scratch, int64(style.Attributes), 10)
+		scratch = append(scratch, ',')
+		scratch = strconv.AppendInt(scratch, int64(style.Underline), 10)
+		scratch = append(scratch, ']')
 	}
-	style, ok := runs[0][0].(int)
-	return ok && style == 0
+	scratch = append(scratch, ',')
+	scratch = strconv.AppendInt(scratch, int64(length), 10)
+	return append(scratch, ']')
 }
 
 // EncodeRows renders departed rows as the frame contract's rows array —
@@ -278,8 +331,13 @@ func isImplicitDefaultRuns(runs [][2]any) bool {
 // vocabulary, encoded by ONE encoder.
 func EncodeRows(rows []emulator.Row) ([]byte, error) {
 	out := make([]frameRow, 0, len(rows))
+	// The same one-buffer rule EncodeFrame follows, and it matters more here:
+	// this is the pump's own window.
+	var runsScratch []byte
 	for _, row := range rows {
-		out = append(out, encodeRow(row))
+		var encoded frameRow
+		encoded, runsScratch = encodeRow(row, runsScratch)
+		out = append(out, encoded)
 	}
 	raw, err := json.Marshal(out)
 	if err != nil {
@@ -306,23 +364,6 @@ func isDefaultBlankCell(cell emulator.Cell) bool {
 		!cell.HasText &&
 		cell.Width == emulator.WidthNarrow &&
 		cell.Style == (emulator.Style{})
-}
-
-// encodeStyleValue packs one style as the wire's own vocabulary: the bare
-// integer 0 when every field is the zero value (the overwhelmingly common
-// case — plain, unstyled output), or the 5-element tuple [foreground,
-// background, underlineColor, attributes, underline] otherwise.
-func encodeStyleValue(style emulator.Style) any {
-	if style == (emulator.Style{}) {
-		return 0
-	}
-	return [5]int{
-		encodeColorValue(style.Foreground),
-		encodeColorValue(style.Background),
-		encodeColorValue(style.UnderlineColor),
-		int(style.Attributes),
-		int(style.Underline),
-	}
 }
 
 // encodeColorValue packs one colour as a single integer: 0 the terminal's

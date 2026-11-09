@@ -39,6 +39,7 @@ function node(name: string, path = `/${name}`): FilesNode {
     nextOffset: 0,
     appliedGeneration: 0,
     wantsNextPage: false,
+    busySeq: 0,
   }
 }
 

@@ -370,21 +370,26 @@ type hostSession struct {
 	launch           proto.LaunchRecord
 	proc             Process
 	lifecycleCounted bool // guarded by Service.mu; true while the row keeps the daemon alive
-	// handedOut and withdrawn are the two facts that decide who may end a
-	// spawn's session (nocx-ouru5.1.5, review round 2), and both are guarded by
-	// Service.mu because both are decided in the critical sections that resolve
-	// and read the idempotency claim:
+	// delivered, answers and withdrawn decide who may end a spawn's session,
+	// and all three are guarded by Service.mu because all three are decided in
+	// the critical sections that resolve, hand over and report the session's
+	// idempotency claim (nocx-ouru5.1.5; nocx-ouru5.1.9 for the counting).
 	//
-	//   - handedOut is true once a caller has been given this session's id under
-	//     its claim (a retry that found the claim resolved). From then on the
-	//     spawn that made it may not end it: somebody is holding the shell.
-	//   - withdrawn is true once that spawn HAS decided to end it because its
-	//     own answer reached nobody. It stops the claim from handing out a
-	//     session that is about to be removed.
+	//   - answers counts the answers that name this session and have not been
+	//     reported yet: the spawn that made it, plus every retry the claim has
+	//     handed it to. Ownership is a fact about the SET — a retry is given the
+	//     id before its own answer is written, so that answer may still be the
+	//     one that reaches somebody.
+	//   - delivered is true once one of those answers was written to a caller
+	//     that was still there. From then on the session is that caller's, and
+	//     no later answer's failure may end it.
+	//   - withdrawn is true once the last answer has been reported as reaching
+	//     nobody and the spawn that made the session has decided to end it. It
+	//     stops the claim from handing out a session that is about to be removed.
 	//
-	// They are never both true, and exactly one of them is set by the first
-	// arbiter to reach the session.
-	handedOut bool
+	// delivered and withdrawn are never both true.
+	delivered bool
+	answers   int
 	withdrawn bool
 	win       *window
 	// runtime is this session's ONE terminal-state owner (ADR-0066): the

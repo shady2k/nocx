@@ -357,6 +357,8 @@ jobs:
         run: |
           echo "pkgs=$(make -s print-mac-pkgs)" >> "$GITHUB_OUTPUT"
           echo "run=$(make -s print-mac-select)" >> "$GITHUB_OUTPUT"
+          echo "tagged_pkgs=$(make -s print-mac-tagged-pkgs)" >> "$GITHUB_OUTPUT"
+          echo "tagged_run=$(make -s print-mac-tagged-select)" >> "$GITHUB_OUTPUT"
 
       - name: The OS split has not drifted
         run: make ci-os-split
@@ -431,12 +433,29 @@ jobs:
             go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_framecheck -count=1 -run "$RUN" $PKGS
           node scripts/summarize-go-test-json.mjs < "$NOCX_TEST_LOG_DIR/go-mac-os.log"
 
-      # THE SECOND PASS IS GONE FROM THIS JOB (nocx-ouru5.1.13), and nothing was
-      # dropped with it: its packages were internal/app and internal/helper/
-      # session, whose tagged tests are the ssh client's, not the Mac's — every
-      # one of them runs in ci-linux's tagged pass over the same two packages.
-      # `make ci-local-ssh-split` still proves the sets, and the OS-partition
-      # check refuses a mac-only test that lives behind the tag.
+      # THE TAGGED HALF, AND ONLY ITS OWN TESTS (nocx-ouru5.1.13, review of PR
+      # #776). This used to run every test of internal/app and
+      # internal/helper/session with nocx_local_ssh — 545 s — because the tag is
+      # a second build and the job owned those packages. It runs the TAGGED
+      # selection now: the tests the tagged analysis finds reaching a darwin
+      # implementation (scripts/mac-only-tests-tagged.txt, re-derived by
+      # `make mac-check`), minus the ones the pass above already ran. Nothing is
+      # dropped: the rest of those packages' tagged tests run in ci-linux's
+      # tagged pass, and the tests this one keeps cannot run anywhere else — the
+      # tag is what makes them exist, and on Linux they exercise the linux
+      # bodies. `$^` is printed for an empty selection, which matches nothing; an
+      # empty `-run` would match everything.
+      - name: Test (the macOS-only tests, nocx_local_ssh)
+        env:
+          PKGS: ${{ steps.mac.outputs.tagged_pkgs }}
+          RUN: ${{ steps.mac.outputs.tagged_run }}
+        run: |
+          if [ -z "$PKGS" ] || [ "$RUN" = '$^' ]; then
+            scripts/ci-run-logged.sh go-mac-local-ssh sh -c 'echo "no macOS-only test needs nocx_local_ssh"'
+            exit 0
+          fi
+          scripts/ci-run-logged.sh go-mac-local-ssh \
+            go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 -run "$RUN" $PKGS
 
       # THE TESTS THIS PULL REQUEST ADDS OR CHANGES, REPEATED (nocx-1ebrs.66.1.37).
       #
@@ -522,7 +541,7 @@ jobs:
       - name: Quarantined failures decide this job
         if: always()
         env:
-          NOCX_EXPECTED_STEPS: go-mac-zsh-plugins go-mac-fish go-mac-os e2e-macos-first-command
+          NOCX_EXPECTED_STEPS: go-mac-zsh-plugins go-mac-fish go-mac-os go-mac-local-ssh e2e-macos-first-command
           NOCX_QUARANTINE_JOB: ci-mac
           NOCX_QUARANTINE_PULL: ${{ github.event.pull_request.number }}
         run: node scripts/quarantine-gate.mjs

@@ -68,8 +68,22 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 /** The committed reachability selection `cmd/mactests --write` produces. */
 export const REACHED_FILE = join(ROOT, 'scripts/mac-only-tests.txt')
 
+/** The same for the TAGGED pass: the analysis differs, because nocx_local_ssh
+ * adds files. A tagged test can reach a darwin implementation just as an
+ * untagged one can, and the tagged pass on the Mac is where it runs. */
+export const REACHED_TAGGED_FILE = join(ROOT, 'scripts/mac-only-tests-tagged.txt')
+
 /** The reachability entries, as `pkg<TAB>name` pairs. Comments are skipped. */
 export function reachedSelection(text = readFileSync(REACHED_FILE, 'utf8')) {
+  return parseReached(text)
+}
+
+/** The TAGGED pass's reachability entries, same shape. */
+export function reachedTaggedSelection(text = readFileSync(REACHED_TAGGED_FILE, 'utf8')) {
+  return parseReached(text)
+}
+
+function parseReached(text) {
   const out = []
   for (const line of text.split('\n')) {
     if (line === '' || line.startsWith('#')) continue
@@ -250,12 +264,13 @@ export function declaredTests(dir) {
 }
 
 /** Everything `check` proves, as a list of failures (empty is a pass). */
-export function checkPartition(dirs) {
+export function checkPartition(dirs, taggedDirs = []) {
   const wanted = new Set(dirs)
   const failures = []
   if (dirs.length === 0) failures.push('no OS package directory was given')
 
   const { derived, listed, reached, seen } = macOnly(dirs)
+  const reachedTaggedDirs = new Set(taggedDirs)
   const mac = new Map()
   for (const entry of [...derived, ...reached, ...listed]) {
     const key = `${entry.pkg} ${entry.name}`
@@ -304,6 +319,22 @@ export function checkPartition(dirs) {
     if (!wanted.has(entry.pkg)) failures.push(`LISTED names ${entry.pkg}, which is not in OS_PKG_DIRS`)
   }
 
+  // EVERY COMMITTED TAGGED ENTRY obeys the same rules, against the tagged
+  // package set: it exists, it is not already derived, and it is not a test the
+  // darwin build does not compile. The analysis that produced it ran with
+  // nocx_local_ssh, so a test declared in a tagged-only file is expected here.
+  for (const entry of reachedTaggedSelection().filter((e) => reachedTaggedDirs.has(e.pkg))) {
+    const declared = declaredTests(entry.pkg)
+    const hit = declared.get(entry.name)
+    if (!hit) {
+      failures.push(`mac-only-tests-tagged.txt names ${entry.pkg} ${entry.name}, which no test file declares`)
+      continue
+    }
+    if (darwinOnlyFile(hit.file, hit.text) || linuxOnlyFile(hit.file, hit.text)) {
+      failures.push(`mac-only-tests-tagged.txt names ${entry.pkg} ${entry.name}, which the file rule already owns`)
+    }
+  }
+
   // EVERY COMMITTED REACHABILITY ENTRY must be a test that exists, in a file the
   // darwin build compiles, in a package this job runs. The tool that writes the
   // file enforces the same three things where it can see the darwin build; this
@@ -350,6 +381,31 @@ export function macSelector(dirs) {
   return names.length === 0 ? '' : `^(${names.join('|')})$`
 }
 
+/**
+ * The TAGGED pass's selection (review of PR #776). Its committed entries minus
+ * the ones the untagged pass already runs — a tagged invocation re-runs nothing
+ * — so what is left is exactly the tests that only exist, or only reach darwin
+ * code, under nocx_local_ssh: the Mac runs those with the tag, and only those.
+ */
+export function macTaggedOnly(osDirs, taggedDirs) {
+  const untagged = new Set(macOnly(osDirs).derived.concat(macOnly(osDirs).reached).map((entry) => entry.name))
+  const reached = reachedTaggedSelection().filter((entry) => taggedDirs.includes(entry.pkg))
+  return reached.filter((entry) => !untagged.has(entry.name))
+}
+
+/** `./dir/...` for the packages holding a tagged macOS-only test. */
+export function macTaggedPackages(osDirs, taggedDirs) {
+  const pkgs = [...new Set(macTaggedOnly(osDirs, taggedDirs).map((entry) => entry.pkg))].sort()
+  return pkgs.map((pkg) => `./${pkg}/...`)
+}
+
+/** The tagged pass's anchored selection; `$^` when there is none, which matches
+ * nothing — an empty regexp would match every test in the package set. */
+export function macTaggedSelector(osDirs, taggedDirs) {
+  const names = [...new Set(macTaggedOnly(osDirs, taggedDirs).map((entry) => entry.name))].sort()
+  return names.length === 0 ? '$^' : `^(${names.join('|')})$`
+}
+
 /** `./dir/...` for every package carrying a darwin file (the mac lint's set). */
 export function darwinPackages() {
   const out = []
@@ -365,11 +421,19 @@ export function darwinPackages() {
 }
 
 function main(argv) {
+  // `--tagged <dir>...` names the tagged package set for the subcommands that
+  // need both lists; everything before it is the OS set.
+  let taggedDirs = []
+  const at = argv.indexOf('--tagged')
+  if (at >= 0) {
+    taggedDirs = argv.slice(at + 1)
+    argv = argv.slice(0, at)
+  }
   const [command, ...rest] = argv
   const dirs = rest.map((dir) => relative(ROOT, join(ROOT, dir.replace(/^\.\//, ''))).replaceAll('\\', '/')).filter(Boolean)
   switch (command) {
     case 'check': {
-      const failures = checkPartition(dirs)
+      const failures = checkPartition(dirs, taggedDirs)
       if (failures.length === 0) {
         const { derived, listed, reached } = macOnly(dirs)
         const total = derived.length + reached.length + listed.length
@@ -388,6 +452,12 @@ function main(argv) {
       return 0
     case 'select':
       console.log(macSelector(dirs))
+      return 0
+    case 'tagged-pkgs':
+      console.log(macTaggedPackages(dirs, taggedDirs).join(' '))
+      return 0
+    case 'tagged-select':
+      console.log(macTaggedSelector(dirs, taggedDirs))
       return 0
     case 'darwin-pkgs':
       console.log(darwinPackages().join(' '))

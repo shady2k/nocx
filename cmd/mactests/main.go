@@ -74,17 +74,41 @@ import (
 	"golang.org/x/tools/go/ssa/ssautil"
 )
 
+// repoRoot is the module root, found by walking up for go.mod. Every path this
+// command takes is relative to it (the Makefile passes OS_PKG_DIRS), so the work
+// is done there whatever directory the command was started from — which is what
+// lets its own tests run from cmd/mactests.
+var repoRoot = func() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	for dir := wd; ; dir = filepath.Dir(dir) {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		if filepath.Dir(dir) == dir {
+			return wd
+		}
+	}
+}()
+
 // modulePath is the import path prefix every analysed directory is under.
 const modulePath = "github.com/shady2k/nocx/"
 
-// tags are the build tags the macOS test step runs with, so the graph is the
-// graph those tests have. gtk3 is harmless on darwin (the platform tag list is
-// empty there) and nocx_framecheck is the test-only detector ci.yml enables.
-const tags = "gtk3,nocx_framecheck"
+// defaultTags are the build tags the untagged macOS test step runs with, so the
+// graph is the graph those tests have. gtk3 is harmless on darwin (the platform
+// tag list is empty there) and nocx_framecheck is the test-only detector ci.yml
+// enables. The TAGGED half of the selection runs with nocx_local_ssh as well
+// (`--tags`), because the tag decides which files exist: a tagged test can reach
+// a darwin implementation just as an untagged one can, and it is a different
+// analysis.
+const defaultTags = "gtk3,nocx_framecheck"
 
 func main() {
 	write := flag.String("write", "", "write the selection to this file")
 	check := flag.String("check", "", "verify this file is the current selection")
+	tags := flag.String("tags", defaultTags, "build tags the analysed pass runs with")
 	flag.Parse()
 	dirs := flag.Args()
 	if len(dirs) == 0 {
@@ -92,12 +116,12 @@ func main() {
 		os.Exit(2)
 	}
 
-	selection, err := derive(dirs)
+	selection, err := derive(dirs, *tags)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "mactests: %v\n", err)
 		os.Exit(1)
 	}
-	rendered := render(selection)
+	rendered := render(selection, *tags)
 
 	switch {
 	case *write != "":
@@ -123,6 +147,22 @@ func main() {
 	}
 }
 
+// splitTags turns the flag's comma-joined spelling into the list go list and
+// go/packages each want.
+func splitTags(tags string) []string {
+	if tags == "" {
+		return nil
+	}
+	parts := strings.Split(tags, ",")
+	out := parts[:0]
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
 // entry is one selected test: the package directory as the Makefile spells it
 // (`internal/pty`) and the test function.
 type entry struct {
@@ -130,7 +170,7 @@ type entry struct {
 	test string
 }
 
-func render(selection []entry) string {
+func render(selection []entry, tags string) string {
 	var b strings.Builder
 	b.WriteString("# macOS-only tests REACHED through darwin implementations (nocx-ouru5.1.13).\n")
 	b.WriteString("#\n")
@@ -152,58 +192,115 @@ func render(selection []entry) string {
 	return b.String()
 }
 
-// darwinOnlyFiles is the set of NON-TEST files in this directory that the darwin
-// build compiles and the linux build does not, as paths relative to the worktree.
-// Asked of the go tool rather than parsed out of the constraints, so `darwin`,
-// `!linux` and a filename suffix all answer alike. CGO_ENABLED=0 in both listings
-// so a cgo file cannot make the two sides disagree about a name that has nothing
-// to do with the platform split.
-func darwinOnlyFiles(dir string) ([]string, []string, error) {
-	linuxRegular, linuxTests, err := listedFiles(dir, "linux")
-	if err != nil {
-		return nil, nil, err
-	}
-	darwinRegular, darwinTests, err := listedFiles(dir, "darwin")
-	if err != nil {
-		return nil, nil, err
-	}
-	linux := map[string]bool{}
-	for _, name := range linuxRegular {
-		linux[name] = true
-	}
-	onDarwin := map[string]bool{}
-	for _, name := range darwinTests {
-		onDarwin[name] = true
-	}
-	var darwinImpl []string
-	for _, name := range darwinRegular {
-		if !linux[name] {
-			darwinImpl = append(darwinImpl, filepath.Join(dir, name))
-		}
-	}
-	// TEST files the darwin build does not compile. A test declared in one of
-	// them cannot be the Mac's — it does not exist there — and selecting it would
-	// take it off the Linux side too, which is the one thing the partition must
-	// never do.
-	var linuxOnlyTests []string
-	for _, name := range linuxTests {
-		if !onDarwin[name] {
-			linuxOnlyTests = append(linuxOnlyTests, name)
-		}
-	}
-	return darwinImpl, linuxOnlyTests, nil
+// fileSets is one directory's build classification, asked of the go tool under
+// both GOOS values with the pass's tags: which NON-TEST files only darwin
+// compiles (the implementations a test can reach), and which TEST files only one
+// of the two builds compiles.
+type fileSets struct {
+	// darwinImpl are the non-test files the darwin build compiles and the linux
+	// build does not.
+	darwinImpl []string
+	// darwinTests are TEST files only the darwin build compiles. Their tests are
+	// the DERIVED selection already — macOS-only by their own file — so the
+	// reachability walk must not list them again: on a Mac they load, they run,
+	// and they call the darwin implementation directly, which is how the
+	// committed file stopped matching what `make mac-check` re-derived.
+	darwinTests map[string]bool
+	// linuxTests are TEST files only the linux build compiles. A test declared in
+	// one cannot be the Mac's, and selecting it would also take it off the Linux
+	// side, which is the only side that runs it.
+	linuxTests map[string]bool
+	// darwinTestNames and linuxTestNames are the tests those two file sets
+	// DECLARE. The walk skips by name as well as by file position: the position
+	// is only visible in the build being analysed, and the analysis that has to
+	// be exactly right runs on the Mac, where the darwin-only test files exist
+	// and their tests load and run like any other.
+	darwinTestNames map[string]bool
+	linuxTestNames  map[string]bool
 }
 
-// listedFiles asks the go tool which non-test files a build for goos compiles in
-// this directory. Listing needs no compiler of that platform, so this half runs
-// anywhere.
-func listedFiles(dir, goos string) (regular []string, tests []string, err error) {
-	const format = "{{range .GoFiles}}{{.}}\n{{end}}{{range .TestGoFiles}}test/{{.}}\n{{end}}{{range .XTestGoFiles}}test/{{.}}\n{{end}}"
-	cmd := exec.Command("go", "list", "-f", format, "./"+strings.TrimSuffix(dir, "/")) //nolint:gosec // the directory is this repository's own package path, passed by the Makefile from OS_PKG_DIRS
-	cmd.Env = append(os.Environ(), "GOOS="+goos, "CGO_ENABLED=0")
-	out, err := cmd.Output()
+// classify asks the go tool which files each build compiles in this directory.
+// Listing needs no compiler for either platform, so this half of the derivation
+// runs anywhere.
+func classify(dir string, tags []string) (fileSets, error) {
+	linuxRegular, linuxTests, err := listedFiles(dir, "linux", tags)
 	if err != nil {
-		return nil, nil, fmt.Errorf("go list GOOS=%s ./%s: %w", goos, dir, err)
+		return fileSets{}, err
+	}
+	darwinRegular, darwinTests, err := listedFiles(dir, "darwin", tags)
+	if err != nil {
+		return fileSets{}, err
+	}
+	onLinux := map[string]bool{}
+	for _, name := range linuxRegular {
+		onLinux[name] = true
+	}
+	onLinuxTest := map[string]bool{}
+	for _, name := range linuxTests {
+		onLinuxTest[name] = true
+	}
+	onDarwinTest := map[string]bool{}
+	for _, name := range darwinTests {
+		onDarwinTest[name] = true
+	}
+	sets := fileSets{
+		darwinTests:     map[string]bool{},
+		linuxTests:      map[string]bool{},
+		darwinTestNames: map[string]bool{},
+		linuxTestNames:  map[string]bool{},
+	}
+	for _, name := range darwinRegular {
+		if !onLinux[name] {
+			sets.darwinImpl = append(sets.darwinImpl, filepath.Join(dir, name))
+		}
+	}
+	for _, name := range darwinTests {
+		if !onLinuxTest[name] {
+			sets.darwinTests[name] = true
+		}
+	}
+	for _, name := range linuxTests {
+		if !onDarwinTest[name] {
+			sets.linuxTests[name] = true
+		}
+	}
+	for name := range sets.darwinTests {
+		names, err := testNamesIn(filepath.Join(repoRoot, dir, name))
+		if err != nil {
+			return fileSets{}, err
+		}
+		for _, test := range names {
+			sets.darwinTestNames[test] = true
+		}
+	}
+	for name := range sets.linuxTests {
+		names, err := testNamesIn(filepath.Join(repoRoot, dir, name))
+		if err != nil {
+			return fileSets{}, err
+		}
+		for _, test := range names {
+			sets.linuxTestNames[test] = true
+		}
+	}
+	return sets, nil
+}
+
+// listedFiles asks the go tool which files a build for goos — with this pass's
+// tags — compiles in this directory, regular and test files apart. Listing needs
+// no compiler of that platform, so this half runs anywhere.
+func listedFiles(dir, goos string, tags []string) (regular []string, tests []string, err error) {
+	const format = "{{range .GoFiles}}{{.}}\n{{end}}{{range .TestGoFiles}}test/{{.}}\n{{end}}{{range .XTestGoFiles}}test/{{.}}\n{{end}}"
+	args := []string{"list", "-f", format}
+	if len(tags) > 0 {
+		args = append(args, "-tags="+strings.Join(tags, ","))
+	}
+	args = append(args, "./"+strings.TrimSuffix(dir, "/"))
+	cmd := exec.Command("go", args...) //nolint:gosec // the directory is this repository's own package path, passed by the Makefile from OS_PKG_DIRS
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(), "GOOS="+goos, "CGO_ENABLED=0")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, nil, fmt.Errorf("go list GOOS=%s ./%s: %w: %s", goos, dir, err, strings.TrimSpace(string(out)))
 	}
 	for _, line := range strings.Split(string(out), "\n") {
 		if line = strings.TrimSpace(line); line == "" {
@@ -216,6 +313,25 @@ func listedFiles(dir, goos string) (regular []string, tests []string, err error)
 		regular = append(regular, line)
 	}
 	return regular, tests, nil
+}
+
+// testNamesIn parses one test file and answers the test functions it declares.
+func testNamesIn(path string) ([]string, error) {
+	file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Recv != nil {
+			continue
+		}
+		if strings.HasPrefix(fn.Name.Name, "Test") && fn.Name.Name != "TestMain" {
+			out = append(out, fn.Name.Name)
+		}
+	}
+	return out, nil
 }
 
 // darwinNames reads the names those files declare: functions, methods (as
@@ -279,18 +395,18 @@ func receiverName(expr ast.Expr) string {
 	}
 }
 
-func derive(dirs []string) ([]entry, error) {
+func derive(dirs []string, tags string) ([]entry, error) {
 	selected := map[entry]bool{}
 	for _, dir := range dirs {
 		dir = strings.TrimSuffix(dir, "/")
-		if _, err := os.Stat(dir); err != nil {
+		if _, err := os.Stat(filepath.Join(repoRoot, dir)); err != nil {
 			return nil, fmt.Errorf("%s: %w", dir, err)
 		}
 		// ONE DIRECTORY AT A TIME, and that is a memory bound as well as the
 		// boundary the analysis already has: SSA over the whole OS set at once
 		// holds every one of its packages' bodies, which is gigabytes, while one
 		// directory's universe is its own code and its dependencies.
-		got, err := deriveDir(dir)
+		got, err := deriveDir(dir, splitTags(tags))
 		if err != nil {
 			return nil, err
 		}
@@ -314,12 +430,12 @@ func derive(dirs []string) ([]entry, error) {
 
 // deriveDir is the analysis for one directory: load it with its tests, build the
 // graph, and walk from every test function.
-func deriveDir(dir string) ([]entry, error) {
-	files, linuxOnlyTests, err := darwinOnlyFiles(dir)
+func deriveDir(dir string, tags []string) ([]entry, error) {
+	sets, err := classify(dir, tags)
 	if err != nil {
 		return nil, err
 	}
-	names, err := darwinNames(files)
+	names, err := darwinNames(sets.darwinImpl)
 	if err != nil {
 		return nil, err
 	}
@@ -339,7 +455,8 @@ func deriveDir(dir string) ([]entry, error) {
 			packages.NeedImports | packages.NeedTypes |
 			packages.NeedSyntax | packages.NeedTypesInfo | packages.NeedTypesSizes,
 		Tests:      true,
-		BuildFlags: []string{"-tags", tags},
+		Dir:        repoRoot,
+		BuildFlags: []string{"-tags", strings.Join(tags, ",")},
 	}
 	pkgs, err := packages.Load(cfg, "./"+dir+"/...")
 	if err != nil {
@@ -386,10 +503,6 @@ func deriveDir(dir string) ([]entry, error) {
 		return false
 	}
 
-	linuxOnly := map[string]bool{}
-	for _, name := range linuxOnlyTests {
-		linuxOnly[name] = true
-	}
 	var out []entry
 	for _, pkg := range ssaPkgs {
 		if dirOf(pkg) != dir {
@@ -406,11 +519,25 @@ func deriveDir(dir string) ([]entry, error) {
 			if !test.Pos().IsValid() {
 				continue
 			}
-			file := prog.Fset.Position(test.Pos()).Filename
-			if linuxOnly[filepath.Base(file)] {
+			if sets.darwinTestNames[name] || sets.linuxTestNames[name] {
+				// The file rule already owns this test: a darwin-only test file
+				// IS the derived selection (and on a Mac its test loads, runs and
+				// calls the darwin implementation directly), and a linux-only one
+				// cannot exist on the Mac at all.
+				continue
+			}
+			file := filepath.Base(prog.Fset.Position(test.Pos()).Filename)
+			if sets.linuxTests[file] {
 				// Declared in a test file the darwin build does not compile: it
 				// cannot run on the Mac, and selecting it would remove it from
 				// Linux as well.
+				continue
+			}
+			if sets.darwinTests[file] {
+				// Declared in a test file only the darwin build compiles: its
+				// tests are the DERIVED selection already (macOS-only by their
+				// file), and listing them here would make the committed file
+				// disagree with the list the file rule derives on any platform.
 				continue
 			}
 			if reachesDarwin(graph, test, dir, dirOf, darwinName, names) {

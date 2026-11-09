@@ -660,12 +660,14 @@ test('gate manifests come from each actual workflow job and matrix choice', () =
     ciJobNames(readFileSync('.github/workflows/ci.yml', 'utf8'), { gated: true }),
   )
   // The macOS job holds only the tests that cannot run without a Mac
-  // (nocx-ouru5.1.13): the ssh half and the release-tag pass moved to
-  // ci-linux, and its OS step now runs the darwin-only selection.
+  // (nocx-ouru5.1.13): its OS step runs the untagged selection, its tagged step
+  // runs the tagged one (review of PR #776 — a tagged test can reach a darwin
+  // implementation too), and the release-tag pass moved to ci-linux.
   assert.deepEqual(manifests['ci-mac'], [
     'go-mac-zsh-plugins',
     'go-mac-fish',
     'go-mac-os',
+    'go-mac-local-ssh',
     'e2e-macos-first-command',
   ])
   for (const keyring of ['with-secret-service', 'no-secret-service']) {

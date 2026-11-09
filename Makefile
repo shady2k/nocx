@@ -3,7 +3,7 @@
         helpers helper-local helpers-this-machine \
         require-local-helper \
         print-os-pkgs print-portable-pkgs print-local-ssh-pkgs \
-        print-mac-pkgs print-mac-select print-darwin-pkgs mac-only-tests mac-check \
+        print-mac-pkgs print-mac-select print-darwin-pkgs print-mac-tagged-pkgs print-mac-tagged-select mac-only-tests mac-check \
         print-os-local-ssh-pkgs print-portable-local-ssh-pkgs \
         lint-ci test-ci build-ci root-ci frontend-ci test-alloc-budgets print-alloc-budget-pkgs
 
@@ -659,6 +659,12 @@ MAC_TESTS := node scripts/mac-only-tests.mjs
 # darwin IMPLEMENTATION, derived by cmd/mactests from the call graph and
 # committed, because only a Mac can build the darwin files it needs to see.
 MAC_REACHED := scripts/mac-only-tests.txt
+# THE TAGGED HALF, derived by its own analysis (review of PR #776): nocx_local_ssh
+# decides which files exist, so a tagged test can reach a darwin implementation
+# that an untagged test cannot — and the tagged pass on the Mac is where such a
+# test runs. Its own committed file, its own two tags, its own package set.
+MAC_REACHED_TAGGED := scripts/mac-only-tests-tagged.txt
+MAC_TAGGED_TAGS := gtk3,nocx_local_ssh,nocx_framecheck
 MAC_GO := $(GO) run ./cmd/mactests
 
 # Regenerate the committed reachability selection. Run it on a Mac and commit
@@ -666,19 +672,30 @@ MAC_GO := $(GO) run ./cmd/mactests
 # this command.
 mac-only-tests:
 	@$(MAC_GO) --write $(MAC_REACHED) $(OS_PKG_DIRS)
-	@$(MAC_TESTS) check $(OS_PKG_DIRS)
+	@$(MAC_GO) --tags $(MAC_TAGGED_TAGS) --write $(MAC_REACHED_TAGGED) $(LOCAL_SSH_PKG_DIRS)
+	@$(MAC_TESTS) check $(OS_PKG_DIRS) --tagged $(LOCAL_SSH_PKG_DIRS)
 
 # Is the committed selection still what the tree says? ci-mac runs this before
 # its tests: the analysis needs a build that loads (cgo on) and the darwin files,
 # so this job is the only place the answer can be checked.
 mac-check:
 	@$(MAC_GO) --check $(MAC_REACHED) $(OS_PKG_DIRS)
+	@$(MAC_GO) --tags $(MAC_TAGGED_TAGS) --check $(MAC_REACHED_TAGGED) $(LOCAL_SSH_PKG_DIRS)
 
 print-mac-pkgs:
 	@$(MAC_TESTS) pkgs $(OS_PKG_DIRS)
 
 print-mac-select:
 	@$(MAC_TESTS) select $(OS_PKG_DIRS)
+
+# The tagged pass's own two answers: the packages holding a tagged macOS-only
+# test, and the anchored selection over them. `$^` when there are none, because
+# an empty `-run` matches every test in the set.
+print-mac-tagged-pkgs:
+	@$(MAC_TESTS) tagged-pkgs $(OS_PKG_DIRS) --tagged $(LOCAL_SSH_PKG_DIRS)
+
+print-mac-tagged-select:
+	@$(MAC_TESTS) tagged-select $(OS_PKG_DIRS) --tagged $(LOCAL_SSH_PKG_DIRS)
 
 # The mac LINT's set (nacx-ouru5.1.13): every package carrying a darwin file,
 # and only those. golangci-lint analyses packages, so a package in this list is

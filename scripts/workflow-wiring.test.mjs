@@ -190,6 +190,30 @@ test('ci-mac runs the derived macOS-only selection, and ci-linux excludes it', (
   assert.ok(macTestStep.includes('steps.mac.outputs.pkgs'), 'the mac test step does not take the derived package set')
   assert.ok(macTestStep.includes('steps.mac.outputs.run'), 'the mac test step does not take the derived selection')
 
+  // THE TAGGED HALF IS DERIVED TOO (review of PR #776). A nocx_local_ssh-tagged
+  // test can reach a darwin implementation just as an untagged one can, and the
+  // tagged pass on the Mac is where such a test runs — so the Mac runs the
+  // TAGGED selection with the tag, which can only come from its own committed
+  // file (the analysis differs: the tag selects which files exist).
+  const taggedStep = workflow.slice(workflow.indexOf('name: Test (the macOS-only tests, nocx_local_ssh)'))
+  assert.ok(taggedStep.length > 0, 'the Mac no longer runs the tagged half of the selection')
+  const taggedBlock = taggedStep.slice(0, taggedStep.indexOf('\n\n'))
+  assert.ok(taggedBlock.includes('-tags gtk3,nocx_local_ssh,nocx_framecheck'), 'the tagged Mac pass does not pass the tag')
+  assert.ok(taggedBlock.includes('-run "$RUN" $PKGS'), 'the tagged Mac pass does not run only its own selection')
+  assert.ok(taggedBlock.includes('steps.mac.outputs.tagged_pkgs'), 'the tagged Mac pass does not take its package set from the Makefile')
+  assert.ok(taggedBlock.includes('steps.mac.outputs.tagged_run'), 'the tagged Mac pass does not take its selection from the Makefile')
+  const macResolve = block('name: Resolve the macOS-only test selection')
+  assert.ok(macResolve.includes('make -s print-mac-tagged-pkgs'), 'the mac selection step asks for no tagged package set')
+  assert.ok(macResolve.includes('make -s print-mac-tagged-select'), 'the mac selection step asks for no tagged selection')
+  assert.ok(
+    existsSync(join(ROOT, 'scripts/mac-only-tests-tagged.txt')),
+    'the committed tagged reachability selection is missing',
+  )
+  assert.ok(
+    workflow.includes('run: make mac-check'),
+    'the macOS-only selection is current',
+  )
+
   // LINUX RUNS EVERYTHING (owner's rule, 2026-11-09): the selection limits what
   // the MAC runs. A test that reaches a platform seam exercises the linux
   // implementation there, and Linux ships too, so the Linux job passes no

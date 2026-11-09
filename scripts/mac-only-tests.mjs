@@ -18,12 +18,19 @@
 //      shared file but is macOS's subject anyway. Today there is exactly one,
 //      and the check refuses a list entry whose body does not prove it (a
 //      `runtime.GOOS != "darwin"` guard and a skip).
-//   3. Everything else in the OS package set is Linux's. `make ci-os-split`
-//      runs `check`, which proves the partition: every darwin-only test file in
-//      the tree belongs to a package in OS_PKG_DIRS, every listed name exists
-//      and proves itself, and every mac-only name is unique across the set (the
-//      workflow passes them as ONE anchored regexp, so a name shared with a
-//      Linux test would select the wrong test).
+//   3. Everything else runs on Linux, AND STAYS on Linux — the Linux job passes
+//      no selection at all. A test that reaches a platform seam exercises the
+//      LINUX implementation there, and Linux ships too, so skipping it would
+//      lose the linux half of the very code the seam exists for; the owner's
+//      rule limits what the MAC runs, not what Linux does. What Linux cannot run
+//      is a test in a darwin-only TEST file, which the compiler already excludes
+//      there. `make ci-os-split` runs `check`, which proves the selection is
+//      honest: every darwin-only test file in the tree belongs to a package in
+//      OS_PKG_DIRS, every selected test is darwin-only, reachability-selected or
+//      listed, every listed name exists and proves itself, no selected test
+//      lives in a file the darwin build does not compile, and every mac-only
+//      name is unique across the set (the Mac passes them as ONE anchored
+//      regexp, so a name shared with another test would select the wrong one).
 //
 // AND THE THIRD SOURCE, WHICH THE FILE RULE CANNOT SEE (review round 2): a test
 // in an UNTAGGED file whose code under test is a darwin IMPLEMENTATION —
@@ -33,7 +40,7 @@
 // at scripts/mac-only-tests.txt, because the analysis needs a build that loads
 // and only a Mac supplies the darwin files: ci-mac re-derives it (`make
 // mac-check`) and fails when the file is stale, and this script reads the file
-// so ci-linux can act on it without a Mac. The checks here are the file's own —
+// so a checkout without a Mac can still see, check and select what the Mac runs. The checks here are the file's own —
 // every entry exists, is not already derived, and is not a test the darwin build
 // does not compile.
 //
@@ -108,6 +115,24 @@ export function testNames(text) {
     if (match[1] !== 'TestMain') out.push(match[1])
   }
   return out
+}
+
+/**
+ * Is this test FILE one the darwin build does not compile? True when its
+ * constraint names linux and not darwin, or excludes darwin outright, or its
+ * name is the compiler's own `_linux_test.go` suffix. A test declared there
+ * cannot be the Mac's, and selecting it would also take it off the Linux side —
+ * which is now the only side that runs it.
+ */
+export function linuxOnlyFile(file, text) {
+  if (/_linux_test\.go$/.test(file)) return true
+  if (/_darwin(_test)?\.go$/.test(file)) return false
+  const constraint = buildConstraint(text)
+  if (!constraint) return false
+  const tokens = new Set(constraint.split(/[^A-Za-z0-9_]+/).filter(Boolean))
+  if (/!\s*darwin/.test(constraint)) return !tokens.has('linux')
+  if (!tokens.has('linux')) return false
+  return !tokens.has('darwin')
 }
 
 /**
@@ -270,6 +295,9 @@ export function checkPartition(dirs) {
     if (/nocx_local_ssh/.test(buildConstraint(text) ?? '')) {
       failures.push(`LISTED names ${entry.pkg} ${entry.name}, which lives behind nocx_local_ssh`)
     }
+    if (linuxOnlyFile(hit.name, text)) {
+      failures.push(`LISTED names ${entry.pkg} ${entry.name}, which the darwin build does not compile`)
+    }
     if (!selfDeclaredDarwin(testBodies(text).get(entry.name))) {
       failures.push(`LISTED names ${entry.pkg} ${entry.name}, whose body does not guard on GOOS != "darwin" with a skip`)
     }
@@ -290,7 +318,7 @@ export function checkPartition(dirs) {
     if (darwinOnlyFile(hit.file, hit.text)) {
       failures.push(`mac-only-tests.txt names ${entry.pkg} ${entry.name}, which its file already derives; drop the entry`)
     }
-    if (hit.file.endsWith('_linux_test.go') || /^\/\/go:build[^\n]*\b(linux|!darwin)\b/.test(hit.text)) {
+    if (linuxOnlyFile(hit.file, hit.text)) {
       failures.push(`mac-only-tests.txt names ${entry.pkg} ${entry.name}, which the darwin build does not compile`)
     }
   }
@@ -348,7 +376,7 @@ function main(argv) {
         console.log(
           `ok — ${total} macOS-only test(s) in ${macPackages(dirs).length} package(s) ` +
             `(${derived.length} in darwin test files, ${reached.length} reaching a darwin implementation, ${listed.length} listed); ` +
-            'every other test in the set runs on Linux',
+            'the Linux job runs every test in the set — only the darwin test files cannot compile there',
         )
         return 0
       }

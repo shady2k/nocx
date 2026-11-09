@@ -119,13 +119,6 @@ else
     LOCAL_SSH_PKGS="$(cd "$REPO" && make -s print-local-ssh-pkgs)"
 fi
 
-# THE TESTS macOS ALONE CAN RUN, EXCLUDED HERE TOO (nocx-ouru5.1.13). ci-linux
-# passes `-skip` with the selection make print-mac-select derives, so the two
-# partitions name the same list at the point of use rather than agreeing by
-# accident. Unset for the portable half (`make ci-backend`), where no mac-only
-# test lives.
-MAC_SKIP="${NOCX_MAC_SKIP:-}"
-
 # THE ALLOCATION BUDGETS (nocx-zg3k3.5.8), run without -race in the no-Secret-
 # Service variant. `make ci-backend` passes them (its job owns both packages);
 # `make ci-linux` passes none; a bare invocation, which runs the whole tree,
@@ -195,7 +188,6 @@ run_variant() {
         -e PKGS="$PKGS" \
         -e TEST_P="$TEST_P" \
         -e LOCAL_SSH_PKGS="$LOCAL_SSH_PKGS" \
-        -e MAC_SKIP="$MAC_SKIP" \
         -e ALLOC_BUDGET_PKGS="$ALLOC_BUDGET_PKGS" \
         -e INNER="$_cmd" \
         -w /src \
@@ -208,15 +200,6 @@ run_variant() {
             # database knows — same fixture requirement as the hook image.
             groupadd --gid "$RUN_GID" nocx-sshtest 2>/dev/null || true
             useradd -M -u "$RUN_UID" -g "$RUN_GID" -s /bin/bash -d "$HOME" nocx-sshtest 2>/dev/null || true
-            # ...and sshd refuses to start without its privilege-separation
-            # directory. On a host with openssh-server installed /run/sshd is
-            # there, which is why the runner image never needs this line; in a
-            # nested container /run is a fresh tmpfs and the fixture dies with
-            # "Missing privilege separation directory: /run/sshd" — measured on
-            # the box that wrote this, where ten internal/app tests failed for
-            # nothing but that. A runner provision, like the two lines above: no
-            # product test is changed for it.
-            mkdir -p /run/sshd && chmod 0755 /run/sshd
             # THE WIDGET-WRAPPING ZSH PLUGINS (nocx-1ebrs.27). The shell-integration
             # composition test fails, not skips, when they are absent, and this
             # container runs the same package set the ci-backend job runs. Fetched
@@ -241,8 +224,8 @@ if [ "$RUN_NO_KEYRING" = 1 ]; then
     # which instruments allocations; they are measured here, without it, in
     # the variant ci.yml runs them in (make test-alloc-budgets owns the list).
     run_variant "no Secret Service" '
-        go test -race -p "$TEST_P" -tags gtk3,nocx_framecheck -count=1 ${MAC_SKIP:+-skip "$MAC_SKIP"} $PKGS
-        go test -race -p "$TEST_P" -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 ${MAC_SKIP:+-skip "$MAC_SKIP"} $LOCAL_SSH_PKGS
+        go test -race -p "$TEST_P" -tags gtk3,nocx_framecheck -count=1 $PKGS
+        go test -race -p "$TEST_P" -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
         if [ -n "$ALLOC_BUDGET_PKGS" ]; then
             go test -count=1 -p "$TEST_P" -tags gtk3,nocx_local_ssh -run "StaysWithinItsBudget\$" $ALLOC_BUDGET_PKGS
         fi
@@ -260,8 +243,8 @@ if [ "$RUN_KEYRING" = 1 ]; then
             set -euo pipefail
             eval \"\$(echo -n nocx-ci | gnome-keyring-daemon --daemonize --login)\"
             echo -n nocx-ci | gnome-keyring-daemon --unlock
-            go test -race -p "$TEST_P" -tags gtk3,nocx_framecheck -count=1 ${MAC_SKIP:+-skip "$MAC_SKIP"} $PKGS
-            go test -race -p "$TEST_P" -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 ${MAC_SKIP:+-skip "$MAC_SKIP"} $LOCAL_SSH_PKGS
+            go test -race -p "$TEST_P" -tags gtk3,nocx_framecheck -count=1 $PKGS
+            go test -race -p "$TEST_P" -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
         "' || RC=1
 fi
 

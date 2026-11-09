@@ -190,20 +190,21 @@ test('ci-mac runs the derived macOS-only selection, and ci-linux excludes it', (
   assert.ok(macTestStep.includes('steps.mac.outputs.pkgs'), 'the mac test step does not take the derived package set')
   assert.ok(macTestStep.includes('steps.mac.outputs.run'), 'the mac test step does not take the derived selection')
 
-  // Linux excludes exactly the same selection, at the point of use.
+  // LINUX RUNS EVERYTHING (owner's rule, 2026-11-09): the selection limits what
+  // the MAC runs. A test that reaches a platform seam exercises the linux
+  // implementation there, and Linux ships too, so the Linux job passes no
+  // selection at all — a `-skip` here, or a skip list resolved for it, would be
+  // coverage lost on the side that runs the other half of the same code.
   const linux = workflow.slice(workflow.indexOf('\n  ci-linux:'))
-  const linuxResolve = linux.slice(
-    linux.indexOf('name: Resolve the macOS-only test selection'),
-    linux.indexOf('\n\n', linux.indexOf('name: Resolve the macOS-only test selection')),
-  )
-  assert.ok(linuxResolve.includes('make -s print-mac-select'), 'ci-linux does not ask the Makefile for the mac selection')
-  assert.ok(linuxResolve.includes('skip='), 'ci-linux resolves no skip list')
-  const linuxSkips = [...linux.matchAll(/-skip "\$MAC_SKIP"/g)].length
-  assert.ok(linuxSkips >= 2, `the Linux OS runs do not exclude the mac-only tests (${linuxSkips} of them do)`)
+  assert.ok(!linux.includes('print-mac-select'), 'ci-linux resolves a mac selection it has no business acting on')
+  assert.ok(!/-skip "\$MAC_SKIP"/.test(linux), 'a Linux OS run excludes the macOS-only tests')
+  assert.ok(!/MAC_SKIP/.test(linux), 'ci-linux carries a mac skip list')
+  assert.ok(!/--skip "\$MAC_SKIP"/.test(linux), 'the Linux repeat excludes the macOS-only tests')
+  const ciLinuxScript = readFileSync(join(ROOT, 'scripts/ci-linux.sh'), 'utf8')
+  assert.ok(!/MAC_SKIP|-skip/.test(ciLinuxScript), 'scripts/ci-linux.sh can exclude tests');
 
-  // The repeat follows the same rule on each side.
+  // The Mac's repeat follows the Mac's rule.
   assert.ok(workflow.includes('--only "$RUN"'), 'the mac repeat does not run only the macOS-only tests')
-  assert.ok(linux.includes('--skip "$MAC_SKIP"'), 'the Linux repeat does not exclude the macOS-only tests')
 
   // The Mac lints what Linux cannot see, and nothing else.
   assert.ok(!workflow.includes('golangci-lint run ./...'), 'a whole-tree lint is back on a job; that pass belongs to ci-linux')

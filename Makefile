@@ -641,11 +641,19 @@ OS_PKGS := $(addprefix ./,$(addsuffix /...,$(OS_PKG_DIRS)))
 # there (`-skip`) and handed over for the one pass that was Mac-only (the
 # release-tag one, below).
 #
-# ONE REGEXP, BOTH SIDES. print-mac-select is what ci-mac passes to `-run` and
-# what ci-linux passes to `-skip`; `make ci-os-split` proves the list is a
-# partition (every darwin-only test file in the tree is inside OS_PKG_DIRS,
-# every listed name exists and proves itself, and every selected name is unique
-# across the set so one anchored regexp cannot select somebody else's test).
+# WHAT THE MAC RUNS, AND WHAT LINUX KEEPS. print-mac-select is what ci-mac
+# passes to `-run`. The Linux job passes NO selection at all: it runs the whole
+# OS set, because a test that reaches a platform seam exercises the LINUX
+# implementation there — and Linux ships too — so skipping it would lose the
+# linux half of the very code the seam exists for. What Linux cannot run is the
+# darwin-only TEST files, which the compiler already excludes.
+#
+# `make ci-os-split` still proves the selection is honest: every darwin-only
+# test file in the tree is inside OS_PKG_DIRS, every selected test is
+# darwin-only, reachability-selected (the committed file, re-derived by ci-mac)
+# or listed, every listed name exists and proves itself, and every selected name
+# is unique across the set so one anchored regexp cannot select somebody else's
+# test.
 MAC_TESTS := node scripts/mac-only-tests.mjs
 # The reachability half (review round 2): the tests whose code under test is a
 # darwin IMPLEMENTATION, derived by cmd/mactests from the call graph and
@@ -862,7 +870,6 @@ ci-linux:
 	@echo "=== ci-linux: the OS-specific half of ci.yml's backend-linux job ==="
 	NOCX_LOCAL_SSH_PKGS='$(LOCAL_SSH_OS_PKGS)' \
 	NOCX_CI_TEST_P='$(GO_TEST_P)' \
-	NOCX_MAC_SKIP='$$($(MAC_TESTS) select $(OS_PKG_DIRS))' \
 	  ./scripts/ci-linux.sh -- $(OS_PKGS)
 
 # ci-os-split re-derives the OS package list from the build constraints and

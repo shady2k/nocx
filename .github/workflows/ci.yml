@@ -347,8 +347,11 @@ jobs:
       # per TEST rather than per package: `pkgs` is the OS packages that hold at
       # least one, `run` is the anchored name selection. Both come from
       # scripts/mac-only-tests.mjs, which derives them from the build
-      # constraints; `make ci-os-split` proves they partition the OS set with
-      # ci-linux's `-skip`, and no test name is written in this file.
+      # constraints and the committed reachability file; `make ci-os-split`
+      # proves every selected test is darwin-only, reachability-selected or
+      # listed, and no test name is written in this file. The Linux job runs the
+      # whole OS set — a test that reaches a platform seam exercises the LINUX
+      # implementation there, and Linux ships too.
       - name: Resolve the macOS-only test selection
         id: mac
         run: |
@@ -937,15 +940,6 @@ jobs:
         id: localssh
         run: echo "list=$(make -s print-os-local-ssh-pkgs)" >> "$GITHUB_OUTPUT"
 
-      # THE TESTS macOS ALONE CAN RUN, EXCLUDED HERE (nocx-ouru5.1.13). ci-mac
-      # runs exactly this selection with `-run`; every other test in the OS set
-      # is this job's, and `--skip` says so at the point of use rather than
-      # leaving the partition to two lists agreeing by eye. The selection is
-      # derived from the build constraints, so a new darwin test moves itself.
-      - name: Resolve the macOS-only test selection
-        id: mac
-        run: echo "skip=$(make -s print-mac-select)" >> "$GITHUB_OUTPUT"
-
       - name: The OS split has not drifted
         run: make ci-os-split
 
@@ -1026,7 +1020,6 @@ jobs:
         env:
           PKGS: ${{ steps.pkgs.outputs.list }}
           LOCAL_SSH_PKGS: ${{ steps.localssh.outputs.list }}
-          MAC_SKIP: ${{ steps.mac.outputs.skip }}
         # Ordinary test failures are recorded by the helper, which returns zero
         # so both suites run. Fixture and helper infrastructure failures must
         # stop the step before a later successful command can hide them.
@@ -1039,9 +1032,9 @@ jobs:
           echo "=== Unlocking login keyring ==="
           printf '%s' "nocx-ci" | gnome-keyring-daemon --unlock
           echo "=== Running tests ==="
-          scripts/ci-run-logged.sh go-linux go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_framecheck -count=1 -skip "$MAC_SKIP" $PKGS
+          scripts/ci-run-logged.sh go-linux go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_framecheck -count=1 $PKGS
           echo "=== Running the local helper's ssh tests (nocx_local_ssh) ==="
-          scripts/ci-run-logged.sh go-linux-local-ssh go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 -skip "$MAC_SKIP" $LOCAL_SSH_PKGS
+          scripts/ci-run-logged.sh go-linux-local-ssh go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
           TESTEOF
 
       - name: Test (no Secret Service)
@@ -1049,11 +1042,10 @@ jobs:
         env:
           PKGS: ${{ steps.pkgs.outputs.list }}
           LOCAL_SSH_PKGS: ${{ steps.localssh.outputs.list }}
-          MAC_SKIP: ${{ steps.mac.outputs.skip }}
         run: |
-          scripts/ci-run-logged.sh go-linux go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_framecheck -count=1 -skip "$MAC_SKIP" $PKGS
+          scripts/ci-run-logged.sh go-linux go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_framecheck -count=1 $PKGS
           echo "=== Running the local helper's ssh tests (nocx_local_ssh) ==="
-          scripts/ci-run-logged.sh go-linux-local-ssh go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 -skip "$MAC_SKIP" $LOCAL_SSH_PKGS
+          scripts/ci-run-logged.sh go-linux-local-ssh go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
 
       # THE SHIPPED PROFILE DIRECTORY'S OWN PASS, MOVED HERE FROM ci-mac
       # (nocx-ouru5.1.13). internal/storage lives behind `-tags release`
@@ -1085,15 +1077,14 @@ jobs:
           GO_TESTS: ${{ needs.changes.outputs.go_tests }}
           PKGS: ${{ steps.pkgs.outputs.list }}
           LOCAL_SSH_PKGS: ${{ steps.localssh.outputs.list }}
-          MAC_SKIP: ${{ steps.mac.outputs.skip }}
         run: |
           dbus-run-session -- bash <<'REPEATEOF'
           set -euo pipefail
           daemon_env=$(printf '%s' "nocx-ci" | gnome-keyring-daemon --daemonize --login) || exit "$?"
           eval "$daemon_env"
           printf '%s' "nocx-ci" | gnome-keyring-daemon --unlock
-          node scripts/changed-tests.mjs run --plan "$GO_TESTS" --packages "$PKGS" --tags gtk3,nocx_framecheck --count 20 --race --skip "$MAC_SKIP"
-          node scripts/changed-tests.mjs run --plan "$GO_TESTS" --packages "$LOCAL_SSH_PKGS" --tags gtk3,nocx_local_ssh,nocx_framecheck --count 20 --race --skip "$MAC_SKIP"
+          node scripts/changed-tests.mjs run --plan "$GO_TESTS" --packages "$PKGS" --tags gtk3,nocx_framecheck --count 20 --race
+          node scripts/changed-tests.mjs run --plan "$GO_TESTS" --packages "$LOCAL_SSH_PKGS" --tags gtk3,nocx_local_ssh,nocx_framecheck --count 20 --race
           REPEATEOF
 
       # The quarantine decides this job, once, here: see the header for why the

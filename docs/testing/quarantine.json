@@ -64,6 +64,14 @@
     {
       "test": "e2e:e2e/enhanced-input.spec.ts › enhanced input raw routing › read command receives input after enhanced submit",
       "bead": "nocx-atpw5.1.38"
+    },
+    {
+      "test": "e2e:e2e/output-jitter.spec.ts › a command printing at apt pace over ssh never moves its output backwards",
+      "bead": "nocx-4y82c.1.12"
+    },
+    {
+      "test": "e2e:e2e/output-jitter.spec.ts › a local command printing at apt pace never moves its output backwards",
+      "bead": "nocx-4y82c.1.12"
     }
   ]
 }

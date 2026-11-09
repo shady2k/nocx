@@ -679,17 +679,26 @@ MAC_GO := $(GO) run ./cmd/mactests
 # committed copy: the analysis is the host build's, and only a Mac's host build
 # answers for a Mac. ci-mac runs this before its tests; `make ci-os-split` then
 # validates what it produced.
-mac-selection:
-	@mkdir -p $(dir $(MAC_REACHED))
-	@$(MAC_GO) --write $(MAC_REACHED) $(OS_PKG_DIRS)
-	@$(MAC_GO) --tags $(MAC_TAGGED_TAGS) --write $(MAC_REACHED_TAGGED) $(LOCAL_SSH_PKG_DIRS)
+# THE TWO COMMANDS, AS TEXT, so `ci-mac` can run the same derivation without
+# recursing into make: a recipe line that mentions $(MAKE) is treated as
+# RECURSIVE and RUN even under `-n`, which is how a dry run once built a
+# container image (see PORTABLE_PKGS_CMD's own note). `make -n ci-mac` must stay
+# a dry run.
+MAC_SELECTION_CMD = mkdir -p $(dir $(MAC_REACHED)) && $(MAC_GO) --write $(MAC_REACHED) $(OS_PKG_DIRS) && $(MAC_GO) --tags $(MAC_TAGGED_TAGS) --write $(MAC_REACHED_TAGGED) $(LOCAL_SSH_PKG_DIRS)
+MAC_CHECK_CMD = $(MAC_GO) --check $(MAC_REACHED) $(OS_PKG_DIRS) && $(MAC_GO) --tags $(MAC_TAGGED_TAGS) --check $(MAC_REACHED_TAGGED) $(LOCAL_SSH_PKG_DIRS)
 
-# Does a SAVED copy still match this build's derivation? Not a CI gate — nothing
-# is committed to compare against — but the diagnostic that names every test that
-# would be added or removed, which is what a mismatch needs to be actionable.
+mac-selection:
+	@$(MAC_SELECTION_CMD)
+
+# DOES THE FILE THE TESTS WILL READ MATCH A FRESH DERIVATION? It is never a
+# comparison against another machine's answer — the derivation happens in the job
+# — but build/ PERSISTS between runs on a workstation, so a file from a previous
+# tree revision, or one edited by hand, is a real hazard. This re-derives and
+# names every test it would add and remove (`cmd/mactests --check`). ci-mac runs
+# it immediately after `mac-selection`, exactly as the job does: generate, then
+# verify, never the other way round.
 mac-check:
-	@$(MAC_GO) --check $(MAC_REACHED) $(OS_PKG_DIRS)
-	@$(MAC_GO) --tags $(MAC_TAGGED_TAGS) --check $(MAC_REACHED_TAGGED) $(LOCAL_SSH_PKG_DIRS)
+	@$(MAC_CHECK_CMD)
 
 print-mac-pkgs:
 	@$(MAC_TESTS) pkgs $(OS_PKG_DIRS)
@@ -1088,7 +1097,8 @@ ci-local-ssh-split:
 # lands inside it at all. The chmod stays as the belt to that braces.
 ci-mac:
 	@echo "=== ci-mac: the tests macOS alone can run, natively, in a disposable root ==="
-	@$(MAKE) -s mac-check
+	@$(MAC_SELECTION_CMD)
+	@$(MAC_CHECK_CMD)
 	@set -eu; \
 	  tmpbase="$${TMPDIR:-/tmp}"; tmpbase="$${tmpbase%/}"; \
 	  case "$$tmpbase" in \

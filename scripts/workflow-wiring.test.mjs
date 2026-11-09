@@ -202,6 +202,40 @@ test('ci-mac runs the derived macOS-only selection, and ci-linux excludes it', (
     'build/ is not ignored, so the derived selection could be committed',
   )
 
+  // GENERATE BEFORE YOU CHECK (review of PR #776, round 5). Both files are
+  // ignored build output, so a `make ci-mac` that checked first exited "does not
+  // exist" on a fresh checkout before a single test. The job and the local target
+  // must run the same order, or one of them is the untested path.
+  const makefile = readFileSync(join(ROOT, 'Makefile'), 'utf8')
+  const recipe = (name) => {
+    const at = makefile.indexOf(`\n${name}:\n`)
+    assert.ok(at > -1, `no ${name} target`)
+    return makefile.slice(at, makefile.indexOf('\n\n', at))
+  }
+  const ciMac = recipe('ci-mac')
+  const selectAt = ciMac.indexOf('$(MAC_SELECTION_CMD)')
+  const checkAt = ciMac.indexOf('$(MAC_CHECK_CMD)')
+  assert.ok(selectAt > -1, 'make ci-mac no longer derives the selection')
+  assert.ok(checkAt > selectAt, 'make ci-mac checks the selection before deriving it')
+  assert.ok(
+    ciMac.indexOf('test -race') > checkAt,
+    'make ci-mac runs its tests before the selection it derived is verified',
+  )
+  assert.ok(
+    !ciMac.includes('$(MAKE)'),
+    'make ci-mac recurses into make, which runs under -n and is not a dry run',
+  )
+  const deriveStep = workflow.indexOf('run: make mac-selection')
+  const currentStep = workflow.indexOf('run: make mac-check')
+  assert.ok(
+    deriveStep > -1 && currentStep > deriveStep,
+    'ci-mac derives and checks out of the order the local target uses',
+  )
+  assert.ok(
+    currentStep < workflow.indexOf('name: Test (the macOS-only tests'),
+    'ci-mac verifies the selection after it starts testing',
+  )
+
   // The Mac runs it with -run, over the packages that hold at least one.
   const macTests = workflow.slice(workflow.indexOf('name: Test (the macOS-only tests'))
   const macTestStep = macTests.slice(0, macTests.indexOf('\n\n'))

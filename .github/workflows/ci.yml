@@ -340,6 +340,13 @@ jobs:
       - name: Derive the macOS-only test selection
         run: make mac-selection
 
+      # DOES the file the tests will read match a fresh derivation? `build/`
+      # persists, so a file from a previous revision — or one edited by hand — is
+      # the one hazard left after generating here, and this names every test it
+      # would add or remove. Generate, then verify; never the other way round.
+      - name: The macOS-only selection is current
+        run: make mac-check
+
       # THE MACOS-ONLY TESTS, RESOLVED FROM THE SOURCE (nocx-ouru5.1.13).
       # This job needs neither the OS package set nor the tagged one any more:
       # the Tagged set's packages are internal/app and internal/helper/session,

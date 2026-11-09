@@ -21,6 +21,23 @@ import { findReferences } from '../secret-reference'
 import { commandFragment } from '../command-text'
 import { KIND_LABELS, type SecretKind } from '../secret-kind'
 import type { ExecutionAttempt } from '../lifecycle/state'
+
+/** The block's own length, in milliseconds, from the two backend timestamps its
+ *  attempt carries (ADR-tqjt5rkk) — the interval the block's header prints and
+ *  the figure the composer's departure is decided on.
+ *
+ *  NOT the renderer's clock: a completion reaches the renderer well after the
+ *  command ended, so `performance.now()` between two facts measures the wire,
+ *  not the command. These timestamps land where the command ran.
+ *
+ *  Null when either is missing: a fact or a restored record that cannot say how
+ *  long the command ran prints no duration, and the composer treats it as long
+ *  (a composer the product has no evidence to keep must not be kept). */
+export function attemptBlockMs(attempt: ExecutionAttempt): number | null {
+  if (attempt.startedAt === undefined || attempt.completedAt === undefined) return null
+  const ms = Date.parse(attempt.completedAt) - Date.parse(attempt.startedAt)
+  return Number.isFinite(ms) ? ms : null
+}
 import type { CommandAuthor } from '../command-ledger'
 import { createAnswerBody, type AnswerBody } from './answer-body'
 import { toolCallTitle } from './tool-call-title'
@@ -2571,6 +2588,15 @@ export class BlockManager {
     return this._cmdStartTime
   }
 
+  /** How long the running command has been running on this manager's own
+   *  clock. It drives the header's running ticker, and it is the fallback a
+   *  freeze with no attempt to ask uses; the FINISHED figure is the attempt's
+   *  own (`attemptBlockMs`), never this one (ADR-tqjt5rkk). Null when no
+   *  command is running. */
+  elapsedCommandMs(): number | null {
+    return this._cmdStartTime === null ? null : this._now() - this._cmdStartTime
+  }
+
   /** The currently selected block id, or null (P1-8). */
   get selectedBlockId(): number | null {
     return this._selectedBlockId
@@ -3142,18 +3168,27 @@ export class BlockManager {
    *  alone; the running slot is freed and the ticker stops. The DOM is
    *  untouched: which rows belong to the block is the VISUAL freeze's
    *  question, and it waits for the backend's block.closed — nothing else
-   *  (nocx-2v80t.3.27). */
+   *  (nocx-2v80t.3.27).
+   *
+   *  `blockMs` is the length the attempt itself reports (ADR-tqjt5rkk): the
+   *  interval its two backend timestamps carry, printed by this block's header
+   *  and compared by the composer's decision, so the figure a person reads and
+   *  the figure the product acted on are one number. A freeze with no attempt
+   *  to ask — an abandoned entry, a session that left — falls back to this
+   *  manager's own clock, and an attempt whose fact carries no timestamps
+   *  reports null, which the header prints as no duration at all. */
   private _logicalFreeze(
     rec: BlockRecord,
     exitCode: number | null,
     status: FrozenStatus,
+    blockMs?: number | null,
   ): FrozenStatus {
     this._stopTicker()
     // The running command's stand-in stands down with the command itself:
     // a terminal freeze is a close, and no dots may type a command that
     // will not write any more (nocx-vnirv.1).
     this._clearCommandIndicator()
-    rec.durationMs = this._cmdStartTime !== null ? this._now() - this._cmdStartTime : null
+    rec.durationMs = blockMs === undefined ? this.elapsedCommandMs() : blockMs
     this._cmdStartTime = null
     rec.exitCode = exitCode
     rec.status = status
@@ -3272,7 +3307,10 @@ export class BlockManager {
 
     // LOGICAL freeze — the authenticated event alone flips the block's
     // status, exit code and duration and frees the running slot.
-    const terminal = this._logicalFreeze(rec, code, status)
+    // The length the block reports is the attempt's own when its fact carries
+    // both timestamps; a fact that cannot say (a replayed or foreign attempt)
+    // keeps what this manager measured, which is what it always printed.
+    const terminal = this._logicalFreeze(rec, code, status, attemptBlockMs(attempt) ?? undefined)
     this._attemptId = null
 
     return this._closeOnBackend(rec, endLine, terminal) ? rec : null

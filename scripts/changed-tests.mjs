@@ -320,23 +320,37 @@ export function repeatTimeoutMs(count) {
   return Math.min(count * REPEAT_TIMEOUT_PER_RUN_MS, REPEAT_TIMEOUT_CEILING_MS)
 }
 
-/** One `go test` invocation per package, selecting exactly the named tests. */
+/**
+ * One `go test` invocation per package, selecting exactly the named tests.
+ *
+ * `only` is the OS partition's own vocabulary (nocx-ouru5.1.13): a repeat
+ * belongs to the job that OWNS each changed test, and the mac job holds only the
+ * tests macOS alone can run. It is an anchored regexp over test names — the same
+ * string `make -s print-mac-select` prints — so a repeat and the suite it
+ * repeats cannot disagree about which side a test is on. There is no `skip`
+ * twin: the Linux job runs the whole set, so it filters nothing.
+ */
 export function repeatInvocations(
   plan,
-  { packages, module, tags = '', count = 20, race = false, go = 'go' },
+  { packages, module, tags = '', count = 20, race = false, go = 'go', only = '' },
 ) {
   if (!Number.isSafeInteger(count) || count < 1) throw new Error('count must be a positive integer')
   const timeout = `${Math.round(repeatTimeoutMs(count) / 1000)}s`
-  return filterPlan(plan, packages, module).map((entry) => {
-    const args = ['test']
-    if (race) args.push('-race')
-    if (tags) args.push('-tags', tags)
-    args.push('-count', String(count))
-    args.push('-timeout', timeout)
-    args.push('-run', `^(${entry.tests.join('|')})$`)
-    args.push(entry.package)
-    return { command: go, args }
-  })
+  const onlyRe = only ? new RegExp(only) : null
+  const kept = (tests) => tests.filter((name) => !onlyRe || onlyRe.test(name))
+  return filterPlan(plan, packages, module)
+    .map((entry) => ({ ...entry, tests: kept(entry.tests) }))
+    .filter((entry) => entry.tests.length > 0)
+    .map((entry) => {
+      const args = ['test']
+      if (race) args.push('-race')
+      if (tags) args.push('-tags', tags)
+      args.push('-count', String(count))
+      args.push('-timeout', timeout)
+      args.push('-run', `^(${entry.tests.join('|')})$`)
+      args.push(entry.package)
+      return { command: go, args }
+    })
 }
 
 export function runGit(args, cwd) {
@@ -352,7 +366,7 @@ function usage() {
     'Usage:',
     '  node scripts/changed-tests.mjs --base <sha> --head <sha> [--format json|e2e|github]',
     '  node scripts/changed-tests.mjs run --plan <json> --packages <list>',
-    '       [--tags <go,tags>] [--count 20] [--race] [--go go]',
+    '       [--tags <go,tags>] [--count 20] [--race] [--go go] [--only <regexp>]',
   ].join('\n')
 }
 
@@ -384,6 +398,7 @@ function main(argv) {
       count: Number(option(argv, '--count', '20')),
       race: argv.includes('--race'),
       go: option(argv, '--go', 'go'),
+      only: option(argv, '--only', ''),
     })
     if (invocations.length === 0) {
       console.log('changed-tests: no changed Go test in this package set')

@@ -85,6 +85,11 @@ func (FS) Remove(p string) error { return os.Remove(p) }
 // ReadDir reports entries with lstat semantics: a symlink is reported as a
 // symlink, so the installer's removal takes the link and never what it points
 // at.
+// Chmod sets one file's mode. It is here for the file this package does not
+// create: a host's own gzip writes the decompressed helper with the umask
+// (nocx-evj4b.1.3).
+func (FS) Chmod(p string, mode fs.FileMode) error { return os.Chmod(p, mode) }
+
 func (FS) ReadDir(p string) ([]fs.FileInfo, error) {
 	entries, err := os.ReadDir(p)
 	if err != nil {

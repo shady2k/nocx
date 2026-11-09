@@ -132,6 +132,11 @@ func (f *SFTPFS) ReadFile(path string) ([]byte, error) {
 // RealPath resolves path to the server's canonical absolute form — the
 // helper-install lease's Home() uses it for "." (the SFTP session's
 // starting directory is the remote account's home).
+// Chmod sets one file's mode on the far side. It exists for the file this
+// package does not create: a host's gzip writes the decompressed helper, and
+// SFTP is what gives that file the install's 0700 (nocx-evj4b.1.3).
+func (f *SFTPFS) Chmod(p string, mode os.FileMode) error { return f.client.Chmod(p, mode) }
+
 func (f *SFTPFS) RealPath(path string) (string, error) { return f.client.RealPath(path) }
 
 // sftpFile adapts *sftp.File to the File boundary.

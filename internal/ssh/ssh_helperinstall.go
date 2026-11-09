@@ -53,6 +53,10 @@ type HelperInstallConn interface {
 	Remove(path string) error
 	ReadDir(path string) ([]iofs.FileInfo, error)
 	ReadFile(path string) ([]byte, error)
+	// Chmod sets one file's mode: a host's own gzip writes the decompressed
+	// helper, and what it writes carries the umask rather than the install's
+	// 0700 (nocx-evj4b.1.3).
+	Chmod(path string, mode os.FileMode) error
 	// Home resolves the remote account's home directory, SFTP-native: the
 	// server canonicalises "." — the SFTP session's starting directory is
 	// the remote account's home — so no `echo $HOME` over exec is needed

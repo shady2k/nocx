@@ -330,6 +330,10 @@ type fakeLaneProvider struct {
 	home        string // the install lease's home; default "/home/u"
 	probeFail   error  // when set, DiscoveryConn fails
 	installFail error  // when set, HelperInstallConn fails
+	// inflate, when set, is the install's decompression seam; nil refuses it, so
+	// every test that is not about the optimisation installs the plain way
+	// (nocx-evj4b.1.3).
+	inflate func(path string) error
 
 	mu      sync.Mutex
 	conns   []*fakeLaneConn
@@ -418,6 +422,18 @@ func (p *fakeLaneProvider) HelperInstallConn(_ context.Context, _ string, _ ...s
 	return p.install, nil
 }
 
+// HelperInflate is the install's decompression seam. The double refuses it,
+// which is the one behaviour every test here wants: the install falls back to
+// the plain upload, so a test that is not about the optimisation measures the
+// install it always measured (nocx-evj4b.1.3). A test that IS about it sets
+// inflate.
+func (p *fakeLaneProvider) HelperInflate(_ context.Context, _ string, path string, _ ...ssh.ConnectOption) error {
+	if p.inflate != nil {
+		return p.inflate(path)
+	}
+	return errors.New("no inflate on this double")
+}
+
 func (p *fakeLaneProvider) laneCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -453,6 +469,7 @@ type fakeInstallConn struct {
 	mu      sync.Mutex
 	dirs    map[string]bool
 	files   map[string][]byte
+	modes   map[string]iofs.FileMode
 	home    string
 	uploads int
 
@@ -470,6 +487,7 @@ func newFakeInstallConn(home string) *fakeInstallConn {
 	return &fakeInstallConn{
 		dirs:  map[string]bool{"/": true},
 		files: map[string][]byte{},
+		modes: map[string]iofs.FileMode{},
 		home:  home,
 	}
 }
@@ -585,6 +603,13 @@ func (f *fakeInstallConn) ReadDir(dir string) ([]iofs.FileInfo, error) {
 		}
 	}
 	return out, nil
+}
+
+func (f *fakeInstallConn) Chmod(p string, mode iofs.FileMode) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.modes[p] = mode
+	return nil
 }
 
 func (f *fakeInstallConn) ReadFile(p string) ([]byte, error) {

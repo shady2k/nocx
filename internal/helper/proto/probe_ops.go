@@ -75,6 +75,23 @@ const (
 	// invalidation probe, or the full scan. Two members of a closed set rather
 	// than a flag, because the two are bounded differently.
 	OpCommandNames = "command-names"
+	// OpInflate decompresses ONE file on the far host, in place, with the
+	// host's own gzip (nocx-evj4b.1.3).
+	//
+	// It exists because the one step of an ssh open that scales with the link
+	// is the helper install: 15.3 MB, ~30 s at 0.5 MB/s, paid by every host
+	// after every update. The artifact is already gzip on this side; sending
+	// the bytes the app already carries and letting the host write the file it
+	// is going to write anyway is the difference between 15.3 MB and ~5 MB
+	// crossing the link.
+	//
+	// The PATH is the only argument, and it arrives as an ARGUMENT to a fixed
+	// command (remoteprobe.InflateCommand quotes it): no caller text becomes
+	// shell syntax, the same rule OpCompletion states for its line. A host with
+	// no gzip answers with gzip's own exit status and the caller falls back to
+	// the plain upload — this op is an optimisation and never a requirement
+	// (remote-helper design D20, amended).
+	OpInflate = "inflate"
 )
 
 // LeaseParams asks for one pooled reference to a resolved destination.
@@ -191,6 +208,17 @@ type CompletionParams struct {
 	Pos   int    `json:"pos"`
 	Limit int    `json:"limit"`
 	Nonce string `json:"nonce"`
+}
+
+// InflateParams decompresses one `.gz` file in place on the far host.
+//
+// The path is ABSOLUTE and inside the install directory the caller just wrote;
+// the helper appends it to a fixed command as a quoted argument
+// (remoteprobe.InflateCommand), so an unusable path is refused by name rather
+// than reaching a shell.
+type InflateParams struct {
+	ProbeRunParams
+	Path string `json:"path"`
 }
 
 // CommandNamesPhase names which half of the PATH enumeration to run.

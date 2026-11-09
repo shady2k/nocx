@@ -180,6 +180,9 @@ func (f *fakeProbeCommands) Completion(context.Context, string, string, int, int
 func (f *fakeProbeCommands) CommandNames(context.Context, remoteprobe.CommandNamesPhase, string) (*remoteprobe.Result, error) {
 	return nil, errors.New("not asked")
 }
+func (f *fakeProbeCommands) Inflate(context.Context, string) (*remoteprobe.Result, error) {
+	return nil, errors.New("not asked")
+}
 func (f *fakeProbeCommands) Fingerprint() string   { return "SHA256:host" }
 func (f *fakeProbeCommands) Done() <-chan struct{} { return nil }
 func (f *fakeProbeCommands) LostErr() error        { return nil }

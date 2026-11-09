@@ -292,15 +292,15 @@ test('an inline program redrawing its region does not move a reader in history',
   })
 })
 
-// NOT FIXED HERE, AND LEFT AS ITS OWN CASE (nocx-3wmve). A program that owns
-// the pane takes the transcript out of the flow, the scroller loses its
-// position, and the follow sentinel then reports "the live end" for a reader
-// who never moved — measured: scrollTop 1062 before the program, 1644 after it,
-// and 1644 is exactly scrollHeight - clientHeight. The two fixes on this branch
-// hold a reader across a *freeze*; they do not hold one across the pane being
-// handed to a program and back, which needs the follow intent itself to be
-// answered differently for a transcript that is out of the flow. The assertion
-// stays in the tree, disabled, so whoever fixes it removes one line.
+// NOT FIXED HERE; ITS OWN BEAD (nocx-4y82c.1.9). A program that owns the pane
+// takes the transcript out of the flow, the scroller loses its position, and the
+// follow sentinel then reports "the live end" for a reader who never moved —
+// measured: scrollTop 1062 before the program, 1644 after it, and 1644 is
+// exactly scrollHeight - clientHeight. The fixes on this branch hold a reader
+// across a *freeze*; they do not hold one across the pane being handed to a
+// program and back, which needs the follow intent itself to be answered
+// differently for a transcript that is out of the flow (nocx-4y82c.1.9). The
+// assertion stays in the tree, disabled, so whoever fixes it removes one line.
 test.fixme('a full-screen program leaves a reader in history where they were', async ({ page }) => {
   test.setTimeout(180_000)
   const file = script('fullscreen', [

@@ -212,7 +212,14 @@ func (s *WSServer) armStartupBoundLocked(sid session.ID, status string) {
 	if s.integrationStartupBounds == nil {
 		s.integrationStartupBounds = make(map[session.ID]*time.Timer)
 	}
-	s.integrationStartupBounds[sid] = time.AfterFunc(s.startupBound(), func() {
+	bound := s.startupBound()
+	// The stand's own number, when this session was opened under its marker
+	// (dev_bind_dev.go). Taken once, here, so the timer and the record cannot
+	// disagree and a later open cannot inherit it.
+	if devBound, ok := devTakeStartupBound(sid); ok {
+		bound = devBound
+	}
+	s.integrationStartupBounds[sid] = time.AfterFunc(bound, func() {
 		s.expireIntegrationStartup(sid)
 	})
 }
@@ -267,6 +274,15 @@ func (s *WSServer) expireIntegrationStartup(sid session.ID) {
 // expressed (the schema says so in as many words), and a raw-mode connection
 // has no integration to nag about.
 func (s *WSServer) registerOpenedIntegration(sess session.Session, cfg session.Config, hosted *HostedSessionOpen) {
+	// The stand's per-session startup bound, if this build has the seam and
+	// this open names the marker (dev_bind_dev.go). Before RegisterIntegration,
+	// because that is where the bound is armed; the shipped build's two
+	// functions are no-ops.
+	user := ""
+	if cfg.Remote != nil {
+		user = cfg.Remote.User
+	}
+	devNoteStartupBound(sess.ID(), user)
 	if hosted != nil && hosted.IntegrationStatus != "" && hosted.IntegrationShell != "" {
 		s.RegisterIntegration(sess.ID(), hosted.IntegrationShell, hosted.IntegrationStatus, hosted.IntegrationReason, hosted.IntegrationShellVersion)
 		return

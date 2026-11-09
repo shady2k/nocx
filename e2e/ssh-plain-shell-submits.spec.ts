@@ -27,7 +27,7 @@
  * So a reading of the log with fewer than five Enters — or with two lines
  * joined — is the bug, not a slow machine.
  *
- * # The startup interval is HELD at the shell, not raced
+ * # The startup interval is HELD at the shell, and its bound is the stand's
  *
  * The host's account shell is a wrapper that waits for a file and then becomes
  * `/bin/sh`. The loader, stage-1, the capability frame and the launcher all run
@@ -38,6 +38,14 @@
  * the spec needs, and nothing in it turns on how long the browser took. The
  * spec submits, asserts the interval is still open, then releases the shell;
  * the settle that follows releases the held lines into a running shell.
+ *
+ * The bound that ends that interval is the stand's too (review round 3): the
+ * backend is built with its dev tag, and a session opened under the account
+ * name this spec uses gets 120 s instead of the product's 10 s
+ * (internal/transport/dev_bind_dev.go). Without it, five Playwright submits on
+ * a loaded runner could outlast the default and the test would be racing a
+ * clock; with it, the interval is long enough that the submits are the only
+ * thing that ends it. The 10 s default is untouched for every other spec.
  *
  * # Nothing else is waited out
  *
@@ -158,7 +166,11 @@ test('an ssh pane on a non-integrated sh runs five composer submits, each its ow
       options: {
         host: fixture.host,
         port: fixture.port,
-        user: 'e2e',
+        // THE STARTUP BOUND'S MARKER, IN THE ONE PLACE THE OPEN CARRIES: the
+        // stand gives a session opened under this account a long integration
+        // startup bound (internal/transport/dev_bind_dev.go). The fixture
+        // authenticates the key and does not care about the name.
+        user: 'nocx-e2e-long-bound',
         keyPath: fixture.userKey,
         desiredMode: 'script',
       },

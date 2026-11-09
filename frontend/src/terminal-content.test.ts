@@ -4104,12 +4104,38 @@ describe('a tall block keeps its own header at the top of the pane (nocx-4y82c.1
     expect(body).toMatch(/(^|;)\s*top\s*:\s*0/)
   })
 
-  it("paints the header on an opaque ground and keeps the block's own tint", () => {
+  it('paints the ground only on the header that can pin, never on a nested one', () => {
+    // THE OPAQUE GROUND BELONGS TO THE PINNABLE SEAT (nocx-4y82c.1.3, P2). A
+    // nested block's header never leaves its turn's flow, so an opaque ground
+    // there masks the turn's own selection/hover tint as a rectangle per child
+    // header. Only the ledger-level header can find rows underneath it, and
+    // only it paints one.
     const frame = stripComments(readFileSync(COMMAND_BLOCK_FRAME_STYLE_ENTRY, 'utf8'))
-    const header = stripComments(extractRuleBlock(frame, 'cmd-header') ?? '')
-    expect(header).not.toBe('')
-    expect(header).toMatch(/--cmd-block-ground/)
-    expect(header).toMatch(/var\(--terminal-background\)/)
+    const base = stripComments(extractRuleBlock(frame, 'cmd-header') ?? '')
+    expect(base).not.toBe('')
+    expect(base, 'the base header paints no background').not.toMatch(/(^|;)\s*background/)
+    const seat =
+      frame.match(/\.scrollback-inner\s*>\s*\.cmd-block\s*>\s*\.cmd-header\s*\{([^}]*)\}/s)?.[1] ??
+      ''
+    expect(seat, 'the ledger-level header paints one').toMatch(/--cmd-block-ground/)
+    expect(seat).toMatch(/var\(--terminal-background\)/)
+  })
+
+  it('unpins a header too tall to be a compact part of the view', () => {
+    // THE BOUND IS THE VIEW, NOT THE HEADER (nocx-4y82c.1.3, P2). A multiline
+    // command can wrap its own header past the scrollport; pinned whole and
+    // opaque it hides every row. The stylesheet's answer is the position rule
+    // this test names, and the controller sets the attribute from the header's
+    // measured share of the scroller. Position only: the header's box is
+    // untouched, so no row moves when it stops pinning.
+    const css = stripComments(readFileSync(COMMAND_BLOCK_SURFACE_STYLE_ENTRY, 'utf8'))
+    const body =
+      css.match(
+        /\.scrollback-inner\s*>\s*\.cmd-block\s*>\s*\.cmd-header\[data-pinnable='false'\]\s*\{([^}]*)\}/,
+      )?.[1] ?? ''
+    expect(body, 'the tall-header rule exists').not.toBe('')
+    expect(body).toMatch(/position\s*:\s*relative/)
+    expect(body).toMatch(/(^|;)\s*top\s*:\s*auto/)
   })
 })
 

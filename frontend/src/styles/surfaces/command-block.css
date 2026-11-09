@@ -108,3 +108,23 @@
   position: sticky;
   top: 0;
 }
+
+/* A HEADER TOO TALL TO BE COMPACT DOES NOT PIN (nocx-4y82c.1.3, P2).
+
+   A multiline command wraps its own header, and in a short pane that header
+   can be taller than the scrollport: pinned whole and opaque it covers every
+   row, which is worse than not being there. Warp pins a compact header, so the
+   controller measures the header as a share of the scroller and marks one that
+   cannot be compact. Position is the only thing this rule touches: the header
+   keeps its box in the block's flow, scrolls away exactly as it did before the
+   feature, and no row moves when the decision flips.
+
+   WHY NOT A CLIPPED PINNED HEADER: clipping the paint bounds what it covers,
+   but a narrow block reflows its status group (the Stop and the ⋮) onto a row
+   BELOW the command lines (command-block-frame.css's container query); a fixed
+   clip band would hide those controls exactly when a person needs them. Not
+   pinning leaves the whole header reachable by scrolling to the block's top. */
+.scrollback-inner > .cmd-block > .cmd-header[data-pinnable='false'] {
+  position: relative;
+  top: auto;
+}

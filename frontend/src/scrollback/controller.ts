@@ -22,6 +22,26 @@ import { windowPet } from '../pets/window-pet'
 import { isAtTail, TailFollow } from './tail-follow'
 export type LiveRegionMode = 'idle' | 'running' | 'fullscreen' | 'unstructured'
 
+/**
+ * HOW MUCH OF THE VIEW A PINNED HEADER MAY COVER (nocx-4y82c.1.3, P2).
+ *
+ * A multiline command wraps its own header, and a header taller than the
+ * scrollport would cover every row when pinned. The owner's rule is that the
+ * pinned header is a COMPACT part of the view -- Warp's is one line -- so a
+ * header that is more than a third of the scrollport does not pin at all; it
+ * scrolls away the way it did before the feature. One third is the bound
+ * because it is a share of the thing being covered, not a font-size constant:
+ * a short pane clamps sooner, a tall pane is allowed a taller header, and the
+ * rows always keep the other two thirds.
+ */
+const PINNED_HEADER_MAX_SHARE = 1 / 3
+
+/** `true` when a header of `headerHeight` may be pinned in `viewportHeight`. */
+export function headerFitsPinned(headerHeight: number, viewportHeight: number): boolean {
+  if (!(viewportHeight > 0)) return false
+  return headerHeight <= viewportHeight * PINNED_HEADER_MAX_SHARE
+}
+
 export interface ScrollbackControllerOpts {
   /** The pane this controller owns the scrollback inside. */
   pane: HTMLElement
@@ -124,6 +144,12 @@ export class ScrollbackController {
   private _paintWatch = 0
   private _painting = false
   private _followObserver: IntersectionObserver | null = null
+  /** The frame that re-decides which header may pin, and the listener that
+   *  asks for it (nocx-4y82c.1.3). */
+  private _pinnableFrame: number | null = null
+  private readonly _onScrollPinnable = (): void => {
+    this._schedulePinnableHeader()
+  }
   /** Watches the scroller's own box, so a box the mutation paths know
    *  nothing about still keeps the tail — see the constructor. */
   private _boxResizeObserver: ResizeObserver | null = null
@@ -246,6 +272,10 @@ export class ScrollbackController {
     // box that caused it. Guarded like the observer below: jsdom has none.
     if (typeof ResizeObserver === 'function') {
       this._boxResizeObserver = new ResizeObserver(() => {
+        // A BOX THAT MOVES CAN CHANGE WHAT IS TOO TALL TO PIN: the header's
+        // share is its height against the scroller's own. Re-decide it in the
+        // same observer, before the box's paint.
+        this._schedulePinnableHeader()
         // A SCROLLER THAT CHANGED SIZE RESIZES THE LIVE BOX IN THE SAME TASK
         // (owner, 2026-11-08: "the composer is back, the live grid is cut
         // short mid-row, and a blank band lies between them"). The composer
@@ -260,6 +290,14 @@ export class ScrollbackController {
       })
       this._boxResizeObserver.observe(this.scrollbackArea)
     }
+
+    // A HEADER THAT IS TOO TALL TO BE COMPACT DOES NOT PIN (nocx-4y82c.1.3, P2).
+    // The decision needs the header's own height against the scroller's, which
+    // no WebKit-supported scroll-state query can answer (scroll-state(stuck)
+    // is not in WebKit), so one scroll-driven frame asks it for the block the
+    // top of the view is in. It is one measurement per frame, and the answer
+    // changes an attribute only -- never a box.
+    this.scrollbackArea.addEventListener('scroll', this._onScrollPinnable, { passive: true })
 
     // Whether the end of the live output is on screen. Not "did the last scroll
     // look like a human" — that question has no answer: the `scroll` event does
@@ -1146,7 +1184,59 @@ export class ScrollbackController {
     return false
   }
 
+  /** One frame per scroll: find the block the top of the view is in and decide
+   *  whether its header may pin (nocx-4y82c.1.3). */
+  private _schedulePinnableHeader(): void {
+    if (this._pinnableFrame !== null) return
+    if (typeof requestAnimationFrame !== 'function') return
+    this._pinnableFrame = requestAnimationFrame(() => {
+      this._pinnableFrame = null
+      this._markPinnableHeader()
+    })
+  }
+
+  /** Mark the header at the top as pinnable or not, from its measured share of
+   *  the scroller. An attribute, never a box: the header keeps its place in the
+   *  block's flow whatever the answer, so deciding it moves no row. */
+  private _markPinnableHeader(): void {
+    const header = this._headerAtTheTop()
+    if (header === null) return
+    const fits = headerFitsPinned(header.offsetHeight, this.scrollbackArea.clientHeight)
+    if (fits) header.removeAttribute('data-pinnable')
+    else header.setAttribute('data-pinnable', 'false')
+  }
+
+  /** The header of the ledger-level block the top of the view is in, if one
+   *  owns it. `elementFromPoint` answers in one hit what a scan of every block
+   *  would answer in hundreds: a pinned header takes the point when it is
+   *  holding the top, a row of its block takes it when it is not. */
+  private _headerAtTheTop(): HTMLElement | null {
+    if (typeof document.elementFromPoint !== 'function') return null
+    const area = this.scrollbackArea
+    const sr = area.getBoundingClientRect()
+    // WHAT A PERSON CAN SEE, not the box's declared edges: a window shorter
+    // than the app puts the scroller's own top above the viewport (measured at
+    // a 360px window: `top` -64), and a point outside the window hits nothing.
+    const left = Math.max(sr.left, 0)
+    const top = Math.max(sr.top, 0)
+    const right = Math.min(sr.right, window.innerWidth)
+    const bottom = Math.min(sr.bottom, window.innerHeight)
+    if (right - left < 1 || bottom - top < 1) return null
+    // A few pixels inside the row gutter: inside the scroller, outside the
+    // header's own border box, so the point belongs to the block either way.
+    const hit = document.elementFromPoint(left + Math.min(8, (right - left) / 2), top + 1)
+    if (!(hit instanceof Element)) return null
+    let block = hit.closest<HTMLElement>('.cmd-block')
+    while (block !== null && block.parentElement !== this.scrollbackInner) {
+      block = block.parentElement?.closest<HTMLElement>('.cmd-block') ?? null
+    }
+    return block?.querySelector<HTMLElement>(':scope > .cmd-header') ?? null
+  }
+
   dispose(): void {
+    this.scrollbackArea.removeEventListener('scroll', this._onScrollPinnable)
+    if (this._pinnableFrame !== null) cancelAnimationFrame(this._pinnableFrame)
+    this._pinnableFrame = null
     this._followObserver?.disconnect()
     this._followObserver = null
     this._boxResizeObserver?.disconnect()

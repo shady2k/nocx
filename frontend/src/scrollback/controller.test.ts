@@ -9,7 +9,7 @@ import {
   type Mock,
   type MockInstance,
 } from 'vitest'
-import { ScrollbackController } from './controller'
+import { headerFitsPinned, ScrollbackController } from './controller'
 import { LIVE_REGION_SELECTOR, insideLiveRegion } from '../live-region'
 import { CommandSnapshotStore } from '../command-snapshot'
 import type { LiveContentHeightSpy } from '../test-support/panes-fixtures'
@@ -1617,5 +1617,14 @@ describe('the scroller box keeps the tail (nocx-1ebrs.40)', () => {
     } finally {
       vi.unstubAllGlobals()
     }
+  })
+})
+
+describe('a pinned header is a compact part of the view (nocx-4y82c.1.3, P2)', () => {
+  it('allows at most a third of the scrollport, and nothing before layout', () => {
+    expect(headerFitsPinned(100, 300), 'a third exactly').toBe(true)
+    expect(headerFitsPinned(101, 300), 'one pixel over a third').toBe(false)
+    expect(headerFitsPinned(600, 300), 'a header taller than the view').toBe(false)
+    expect(headerFitsPinned(20, 0), 'no scrollport yet').toBe(false)
   })
 })

@@ -119,6 +119,35 @@ type pendingIntent struct {
 	admittedID sessionruntime.IntentID
 }
 
+// awaitsTheProgramsPrompt reports whether this intent must wait for the
+// program to announce a prompt before it can be encoded (nocx-evj4b.1.2).
+//
+// It is the paste and only the paste, and only on a session whose far side
+// marks its prompts. A paste is framed by mode 2004 — `ESC[200~` around the
+// text when the program asked for it, the text bare when it did not — and the
+// wrong one is silent damage: a shell that asked gets no frame, and a shell
+// that did not gets the escape RUN AS TEXT (dash, sh, bash --noediting print
+// `\\x1b[200~echo …`). The mode is the program's announcement and nothing else,
+// so the encoder must not read it before the announcement that accompanies the
+// prompt could have arrived.
+//
+// The wait ends on the program's own words: the prompt boundary it marked,
+// whose chunk carries the announcements for that prompt on every shell this
+// product integrates (measured on the ssh stand: `\\x1b[?2004h\\x1b]133;B`
+// arrive together, in one write).
+//
+// A key is deliberately NOT held. It is mode-dependent too (DECCKM), but a
+// program that has drawn nothing has an unknown mode either way, and holding a
+// keystroke makes a TUI that has not painted yet stop taking input, which is
+// worse than the wrong arrow-key encoding nobody can observe on a blank
+// screen.
+func (pi *pendingIntent) awaitsTheProgramsPrompt(o *sessionOwner) bool {
+	if !pi.Interactive || pi.Intent.Kind != sessionruntime.IntentKindPaste {
+		return false
+	}
+	return !o.promptSeen && o.marksPrompts()
+}
+
 // The interactive lane relaxes draining only for truly unconditional input.
 // A token, check or precondition always requires the actual read barrier.
 func (pi *pendingIntent) requiresReadBarrier() bool {
@@ -351,6 +380,13 @@ type sessionOwner struct {
 	writerBusy bool
 	inFlight   *inFlightItem
 	eofSeen    bool
+	// promptSeen is whether the program has announced a PROMPT — the
+	// runtime's own parse of OSC 133 B, delivered here through
+	// PromptBoundary — since this session began. A paste waits for it (see
+	// awaitsTheProgramsPrompt) because a paste is for a program sitting at a
+	// prompt, and that is the moment the program's announcements are in
+	// (nocx-evj4b.1.2).
+	promptSeen bool
 	replyBytes int
 	nextFence  sessionruntime.Fence
 	// readableCh is where the readiness goroutine reports back, for a
@@ -897,6 +933,21 @@ func (o *sessionOwner) advance() {
 			// conditional write while it waits for a genuine read barrier.
 			return
 		}
+		if it.kind == itemIntent && it.intent.awaitsTheProgramsPrompt(o) {
+			// THE PROGRAM HAS NOT SAID IT IS AT A PROMPT YET (nocx-evj4b.1.2).
+			// A paste is framed by the mode the program announced for the prompt
+			// it is sitting at, and a session cannot encode one against an
+			// announcement it has not ingested: on an ssh channel — no EAGAIN,
+			// no read barrier — the prompt carrying `?2004h` can still be in the
+			// reader's hands when the submit arrives, and the submit goes out
+			// bare beside four framed ones from the same person in the same
+			// session. So the head stays where it is until the program announces
+			// a prompt, and run()'s loop re-enters here the moment it does. The
+			// intent's deadline still bounds a program that never marks one
+			// (refuseExpiredIntent, above), and a pane whose shell was never
+			// integrated is never held at all (marksPrompts).
+			return
+		}
 		o.pending = o.pending[1:]
 		o.processHead(it)
 	}
@@ -1280,6 +1331,10 @@ func (o *sessionOwner) PromptBoundary(effect sessionruntime.Effect) error {
 	if effect.Kind != sessionruntime.EffectPromptBoundary {
 		return errors.New("session owner: ordered boundary callback received another effect kind")
 	}
+	// The program is at a prompt: whatever it announced for this prompt is in
+	// the emulator now, so a paste the owner is holding can be framed (advance,
+	// awaitsTheProgramsPrompt).
+	o.promptSeen = true
 	dropped, err := o.win.markPromptBoundary(effect)
 	if err != nil {
 		o.log.Warn("prompt boundary could not be ordered with session output", "stream_offset", effect.StreamOffset, "error", err)

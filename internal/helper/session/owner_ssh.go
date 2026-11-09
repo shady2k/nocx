@@ -49,6 +49,26 @@ func (o *sessionOwner) hasReadBarrier() bool {
 	return o.mode() == readRawLocal
 }
 
+// promptMarker is a Process whose far side announces its prompts (OSC 133),
+// and therefore announces the terminal modes that go with them. It is asked
+// once per paste at most (owner.go's awaitsTheProgramsPrompt) and only ever by
+// the ssh spawner, whose shell is integrated or is not.
+//
+// A Process that does not implement it never holds a paste, which is right for
+// every local pane: the local PTY has a read barrier, so the announcement
+// cannot be sitting unread when the intent is encoded, and a raw-mode pane
+// marks nothing at all.
+type promptMarker interface {
+	MarksPrompts() bool
+}
+
+// marksPrompts reports whether this session's program is one that announces
+// prompt boundaries.
+func (o *sessionOwner) marksPrompts() bool {
+	pm, ok := o.proc.(promptMarker)
+	return ok && pm.MarksPrompts()
+}
+
 // ErrNoReadBarrier is why an intent on a session with no read barrier is
 // refused — spec §5.2 and §6.5's `no_read_barrier` cause. Exported: a later
 // task's wire translation (nocx-6q1uh.4/.5) and a test in another package

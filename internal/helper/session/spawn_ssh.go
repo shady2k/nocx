@@ -53,6 +53,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -342,7 +343,13 @@ type sshProcess struct {
 	// handover from the bootstrap driver to the session's pump a sequence
 	// rather than a race.
 	bootstrapDone chan struct{}
-	done          chan struct{}
+	// integrated is set once stage-1 reports that the far shell came up
+	// integrated — the one fact that says this shell marks its prompts, and so
+	// announces the terminal modes each prompt carries. It is what
+	// MarksPrompts answers, and it is false for a plain shell (no launcher, or
+	// a far side that declined), which never announces either.
+	integrated atomic.Bool
+	done       chan struct{}
 
 	mu      sync.Mutex
 	waitErr error
@@ -404,6 +411,11 @@ func (p *sshProcess) Read(b []byte) (int, error) {
 	}
 	return p.feed.Read(b)
 }
+
+// MarksPrompts reports whether the far shell came up integrated, and so marks
+// its prompts — the question owner.sesssion's paste fence asks before it
+// encodes a paste against a mode the prompt announces (nocx-evj4b.1.2).
+func (p *sshProcess) MarksPrompts() bool { return p.integrated.Load() }
 
 // Write sends bytes to the far shell's input.
 func (p *sshProcess) Write(b []byte) (int, error) {
@@ -558,6 +570,7 @@ func (p *sshProcess) bootstrap(ctx context.Context, plan shellintegration.Bootst
 	// declined — reports `channel-unavailable` after a successful integration
 	// and a native shell otherwise: both are answers, and neither is a failure
 	// of the pane.
+	p.integrated.Store(outcome == shellintegration.OutcomeBootstrapAccepted)
 	p.log.Info("ssh pane: the bootstrap reached its outcome",
 		"outcome", string(outcome), "integrated", outcome == shellintegration.OutcomeBootstrapAccepted)
 }

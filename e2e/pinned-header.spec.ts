@@ -196,6 +196,42 @@ async function outputReady(page: Page, command: string, marker: string): Promise
     .toBe(true)
 }
 
+/** Wait until the frozen body stops changing: the same row count, first and
+ *  last row text and body height on two consecutive polls. The stored rows can
+ *  be repainted after the block freezes -- a later artifact read replaces the
+ *  first -- and re-wrapping the command echo moves every row below it. A
+ *  measurement taken across that repaint is not a row moving (nocx-4y82c.1.3):
+ *  on the CI runner the repaint landed between the two reads. */
+async function bodySettled(page: Page, command: string): Promise<void> {
+  let previous: string | null = null
+  await expect
+    .poll(
+      async () => {
+        const signature = await page.evaluate((text) => {
+          const block = [
+            ...document.querySelectorAll<HTMLElement>(
+              '.pane.active .scrollback-inner > .cmd-block',
+            ),
+          ].find(
+            (candidate) =>
+              (candidate.querySelector('.cmd-header-text')?.textContent ?? '').trim() === text,
+          )
+          const body = block?.querySelector('.cmd-output')
+          if (!body) return 'absent'
+          const rows = [...body.querySelectorAll<HTMLElement>('.term-grid-row')]
+          const first = (rows[0]?.textContent ?? '').trim().slice(0, 24)
+          const last = (rows[rows.length - 1]?.textContent ?? '').trim().slice(0, 24)
+          return `${rows.length}:${first}:${last}:${Math.round(body.getBoundingClientRect().height)}`
+        }, command)
+        const stable = signature === previous
+        previous = signature
+        return stable ? signature : null
+      },
+      { timeout: 10_000 },
+    )
+    .not.toBeNull()
+}
+
 /** The one block whose header shows `command`. */
 function blockOf(reading: Reading, command: string): BlockReading {
   const block = reading.blocks.find((candidate) => candidate.command === command)
@@ -220,6 +256,8 @@ test.describe('a tall block keeps its own header at the top of the pane', () => 
     await runCommand(page, SHORT, 'SHORT-BLOCK')
     await runCommand(page, LONG_A, 'A-END')
     await runCommand(page, LONG_B, 'B-END')
+    await bodySettled(page, LONG_A)
+    await bodySettled(page, LONG_B)
 
     const settled = await read(page)
     const a = blockOf(settled, LONG_A)
@@ -268,8 +306,9 @@ test.describe('a tall block keeps its own header at the top of the pane', () => 
     // holds its place in the scroller's content, and the block's own top and
     // height are unchanged — the header is overlaying the output, not taking
     // a row of it.
-    const unpinnedRows = new Map(unpinnedA.rows.map((row) => [row.text, row.y]))
-    const shared = pinnedA.rows.filter((row) => unpinnedRows.has(row.text))
+    const outputRow = (row: RowReading): boolean => /^A-ROW-\d+$/.test(row.text)
+    const unpinnedRows = new Map(unpinnedA.rows.filter(outputRow).map((row) => [row.text, row.y]))
+    const shared = pinnedA.rows.filter((row) => outputRow(row) && unpinnedRows.has(row.text))
     expect(shared.length, 'the shared output rows are still the rows being read').toBeGreaterThan(
       20,
     )
@@ -398,6 +437,7 @@ test.describe('a tall block keeps its own header at the top of the pane', () => 
     await page.keyboard.press('Enter')
     await promptReady(page)
     await outputReady(page, command, 'unit-90')
+    await bodySettled(page, command)
 
     const rest = await read(page)
     const block = blockOf(rest, command)
@@ -432,8 +472,12 @@ test.describe('a tall block keeps its own header at the top of the pane', () => 
 
     // NO ROW MOVED (ADR-2yzsq8mk): the decision is a position change only, so
     // every shared row holds its place in the scroller's content.
-    const restRows = new Map(block.rows.map((row) => [row.text, row.y]))
-    const shared = scrolledBlock.rows.filter((row) => restRows.has(row.text))
+    // THE COMMAND'S OWN LINES, not the wrapped echo of the command: the echo
+    // is the command text re-rendered by the block, and a repaint of it is not
+    // an output row moving.
+    const outputRow = (row: RowReading): boolean => /^unit-\d\d$/.test(row.text)
+    const restRows = new Map(block.rows.filter(outputRow).map((row) => [row.text, row.y]))
+    const shared = scrolledBlock.rows.filter((row) => outputRow(row) && restRows.has(row.text))
     expect(shared.length, 'the output rows are still the rows being read').toBeGreaterThan(20)
     for (const row of shared) {
       expect(
@@ -530,6 +574,7 @@ test.describe('a tall block keeps its own header at the top of the pane', () => 
     await page.keyboard.press('Enter')
     await promptReady(page)
     await outputReady(page, command, 'word-50')
+    await bodySettled(page, command)
 
     const rest = await read(page)
     const block = blockOf(rest, command)
@@ -598,8 +643,14 @@ test.describe('a tall block keeps its own header at the top of the pane', () => 
     expect(after.scrollTop, 'nothing scrolled').toBeCloseTo(before.scrollTop, 1)
 
     // AND NO ROW MOVED: the decision is a position change only.
-    const beforeRows = new Map(blockOf(before, command).rows.map((row) => [row.text, row.y]))
-    const shared = afterBlock.rows.filter((row) => beforeRows.has(row.text))
+    const beforeRows = new Map(
+      blockOf(before, command)
+        .rows.filter((row) => /^word-\d\d$/.test(row.text))
+        .map((row) => [row.text, row.y]),
+    )
+    const shared = afterBlock.rows.filter(
+      (row) => /^word-\d\d$/.test(row.text) && beforeRows.has(row.text),
+    )
     expect(shared.length).toBeGreaterThan(20)
     for (const row of shared) {
       expect(

@@ -11171,7 +11171,14 @@ export class TerminalContent extends BasePaneContent {
       // The pending frame is painted first and the rows past it are held
       // (BlockManager.applyStoredRows's `upTo`), which is what keeps the body
       // one continuous run of rows.
-      if (sb.blockManager.runningBlock?.attemptId === entryId) {
+      // ONE OWNER OF "WHICH BLOCK HOLDS THE GRID" (nocx-4y82c.1.1): liveBlock
+      // — the block the live container is inside — not the running slot. The
+      // logical freeze clears the slot while the card still owns the grid, and
+      // a delivery landing in that window must still be held against the
+      // painted screen (an unbound running block is that same block, before
+      // its attempt is named).
+      const live = sb.blockManager.liveBlock
+      if (live !== null && (live.attemptId === entryId || live.attemptId === undefined)) {
         // THE HOLD IS THIS DELIVERY'S ANSWER ABOUT THE LIVE SCREEN, asked
         // after the frame in flight has been painted, and null when there is
         // no live screen to answer for (`_rowsTheScreenPassed`) — in which
@@ -11181,7 +11188,7 @@ export class TerminalContent extends BasePaneContent {
         // the block kept the eight rows that screen had passed out of
         // forty-one for the rest of the command.
         this._flushPendingPaint()
-        const upTo = this._rowsTheScreenPassed(sb.blockManager.runningBlock)
+        const upTo = this._rowsTheScreenPassed(live)
         sb.settleAround(() => {
           sb.blockManager.applyStoredRows(entryId, rows, upTo)
           sb.scrollToBottomIfFollowing()

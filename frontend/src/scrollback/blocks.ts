@@ -3396,10 +3396,13 @@ export class BlockManager {
     this._cmdStartTime = null
     rec.exitCode = exitCode
     rec.status = status
-    // A FROZEN BODY HAS NO LIVE GRID TO STAY DISJOINT FROM: the hold that
-    // keeps a running block's rows from doubling the screen has nothing to
-    // hold against now, so the body takes everything the record holds.
-    rec.storedUpTo = undefined
+    // THE HOLD OUTLIVES THE LOGICAL FREEZE (nocx-4y82c.1.1). The card is
+    // still the running presentation and the live grid is still under it until
+    // the VISUAL freeze moves the region out, so an outstanding artifact
+    // response landing in that window must still stop where the grid stops —
+    // clearing it here painted the whole artifact over rows the screen still
+    // showed, duplicating them until block.closed. `_freezeCard` ends the hold
+    // when the grid leaves the block.
     this._runningBlock = null
     return status
   }
@@ -3421,6 +3424,10 @@ export class BlockManager {
     // (ADR-3kqrem7v). The region goes back to the stack, right after the block it
     // has just stopped being the body of.
     this.releaseLiveRegion()
+    // THE HOLD ENDS WHERE THE GRID LEAVES THE BLOCK (nocx-4y82c.1.1): the
+    // frozen card has no live screen under it, so it takes every row the
+    // record holds.
+    rec.storedUpTo = undefined
 
     // block.closed can finish independently of controller reconciliation.
     // Reclaim its borrowed header before replacing the old block so no

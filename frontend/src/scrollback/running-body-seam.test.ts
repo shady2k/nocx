@@ -177,4 +177,14 @@ describe('a running block whose body outgrew its screen (nocx-zg3k3.14.26, ADR-3
       'var(--pane-inline-padding)',
     )
   })
+
+  it('seats the running header on that one column, not one gutter right of it', () => {
+    // THE HEADER IS A ROW OF THE SAME COLUMN (nocx-4y82c.1.13). The stack's row
+    // rule pays the gutter once, on the block, and the header sits inside that
+    // content box; an inline padding of its own pays it twice. Measured on the
+    // owner's nightly: the running chevron at 48px and its own output's first
+    // column at 24px, while the frozen card put both on 24. Nothing inside a
+    // running block may declare an inline inset — the header included.
+    expect(declared(".ui-command-block-frame[data-variant='running']", 'padding')).toBe('0')
+  })
 })

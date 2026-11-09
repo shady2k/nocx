@@ -1819,6 +1819,11 @@ export class TerminalContent extends BasePaneContent {
   private readonly _deferredShellSubmissions: Array<{
     readonly plan: SubmitPlan
     readonly target: InputTarget
+    /** The bind this line was held for (review round 4). A reconnect moves
+     *  `_bindGeneration`, and a line typed for the shell that is gone is
+     *  dropped at release rather than opened against its replacement. */
+    readonly bindGeneration: number
+    readonly sessionId: string
   }> = []
   /** True while the queue is being delivered. The release is one CHAIN, not a
    *  loop of independent submissions: no later fact may start a second chain
@@ -7731,7 +7736,12 @@ export class TerminalContent extends BasePaneContent {
     // is no longer the submitted one is the person's own withdrawal — the
     // editor's stale-plan rule for every other verdict — so it is not queued.
     if (this.editor !== null && this.editor.getDoc() !== plan.recordLine) return false
-    this._deferredShellSubmissions.push({ plan, target })
+    this._deferredShellSubmissions.push({
+      plan,
+      target,
+      bindGeneration: this._bindGeneration,
+      sessionId: this.session?.sessionId ?? '',
+    })
     return 'held'
   }
 
@@ -7787,6 +7797,22 @@ export class TerminalContent extends BasePaneContent {
         // clears whatever is still queued, and this line's own outcome is the
         // attempt's business (the held window the submit arms).
         const held = this._deferredShellSubmissions.shift()!
+        // A line held for a bind that is gone is dropped, never opened against
+        // the one that replaced it (review round 4). The write fences itself
+        // too — a loss inside the attempt round trip is the other half — but a
+        // stale line should not even open a ledger record or an attempt on a
+        // shell nobody typed it for.
+        if (
+          held.bindGeneration !== this._bindGeneration ||
+          held.sessionId !== (this.session?.sessionId ?? '')
+        ) {
+          log.warn('nocx: a held command was dropped — its session is gone', {
+            pane: this.pane.paneId,
+            heldGeneration: held.bindGeneration,
+            generation: this._bindGeneration,
+          })
+          continue
+        }
         let delivered!: () => void
         const settled = new Promise<void>((resolve) => {
           delivered = resolve
@@ -10834,6 +10860,15 @@ export class TerminalContent extends BasePaneContent {
       throw new Error('Session is not attached. Retry attachment before submitting a command.')
     }
     const { doc, recordLine, author, takeKeys, sendLine, beforeWrite } = opts
+    // THE SESSION THIS WRITE BELONGS TO (review round 4). The write happens
+    // after the attempt round trip, and the byte route reads THIS.session when
+    // it finally runs — so a session lost and replaced inside that window would
+    // receive a command typed for its predecessor. The bind generation is the
+    // pane's own monotonic identity for the current bind (it moves on every
+    // `_bindSession`), so it is the one value that answers "is this the session
+    // this command was for" without a second notion of identity.
+    const writeGeneration = this._bindGeneration
+    const writeSession = this.session
     // ONE delivery fact per submission, however many paths can end it.
     let delivered = false
     const settle = (): void => {
@@ -10868,6 +10903,19 @@ export class TerminalContent extends BasePaneContent {
     // conventional.
     const write = (): void => {
       try {
+        // A COMMAND HELD FOR A SESSION THAT IS GONE IS DROPPED, never delivered
+        // elsewhere (review round 4). Checked at the write itself, because the
+        // round trip above is exactly the window a loss and reconnect fit in;
+        // the held queue checks it again at release, so a line that outlived
+        // its session is not even opened against the new one.
+        if (this._bindGeneration !== writeGeneration || this.session !== writeSession) {
+          log.warn('nocx: a submitted command was dropped — its session is gone', {
+            pane: this.pane.paneId,
+            heldGeneration: writeGeneration,
+            generation: this._bindGeneration,
+          })
+          return
+        }
         // This is deliberately after lifecycle.submitAttempt resolved: the
         // broker can withdraw the request during that round trip, and a
         // check at submit entry would miss the only unsafe window.

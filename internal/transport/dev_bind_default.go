@@ -4,8 +4,6 @@ package transport
 
 import (
 	"time"
-
-	"github.com/shady2k/nocx/internal/session"
 )
 
 // THE SHIPPED HALF, and the default: the listener takes its port from the OS
@@ -36,9 +34,6 @@ const (
 // the only answer this build has.
 func devBindPort() (int, error) { return 0, nil }
 
-// devNoteStartupBound records nothing: a shipped build has one startup bound,
-// and it is the product's own.
-func devNoteStartupBound(session.ID, string) {}
-
-// devTakeStartupBound answers nothing, for the same reason.
-func devTakeStartupBound(session.ID) (time.Duration, bool) { return 0, false }
+// devIntegrationStartupBound answers nothing: a shipped build has one startup
+// bound, and it is the product's own.
+func devIntegrationStartupBound(string) time.Duration { return 0 }

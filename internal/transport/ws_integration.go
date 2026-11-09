@@ -172,6 +172,17 @@ type integrationDetail struct {
 // first notification is sent by the open handler after the ack —
 // emitIntegration below.
 func (s *WSServer) RegisterIntegration(sid session.ID, shell string, status string, reason ssh.RefusalReason, shellVersion string) {
+	s.registerIntegration(sid, shell, status, reason, shellVersion, 0)
+}
+
+// registerIntegration is RegisterIntegration with the startup bound this OPEN
+// asked for; zero means the product's own (s.startupBound()).
+//
+// THE BOUND TRAVELS WITH THE OPEN rather than through a side table (review
+// round 4): the stand's per-session number is decided by the config this call
+// already has, so it needs no shared state, no lock of its own, and no window
+// in which two concurrent opens could see each other's value.
+func (s *WSServer) registerIntegration(sid session.ID, shell string, status string, reason ssh.RefusalReason, shellVersion string, bound time.Duration) {
 	if sid == "" || shell == "" {
 		return
 	}
@@ -185,7 +196,7 @@ func (s *WSServer) RegisterIntegration(sid session.ID, shell string, status stri
 		s.integrations = make(map[session.ID]*integrationStatus)
 	}
 	s.integrations[sid] = &integrationStatus{shell: shell, shellVersion: shellVersion, status: status, reason: reason}
-	s.armStartupBoundLocked(sid, status)
+	s.armStartupBoundLocked(sid, status, bound)
 	s.integrationMu.Unlock()
 	if cause := s.pendingSessionLoss[sid]; cause != "" {
 		delete(s.pendingSessionLoss, sid)
@@ -204,7 +215,7 @@ func (s *WSServer) RegisterIntegration(sid session.ID, shell string, status stri
 // emit follows the registration that applied the queued loss), so the two
 // orders — loss first, answer first — converge on one state instead of two
 // paths that each have to remember to cancel.
-func (s *WSServer) armStartupBoundLocked(sid session.ID, status string) {
+func (s *WSServer) armStartupBoundLocked(sid session.ID, status string, bound time.Duration) {
 	s.stopStartupBoundLocked(sid)
 	if status != IntegrationStarting {
 		return
@@ -212,12 +223,12 @@ func (s *WSServer) armStartupBoundLocked(sid session.ID, status string) {
 	if s.integrationStartupBounds == nil {
 		s.integrationStartupBounds = make(map[session.ID]*time.Timer)
 	}
-	bound := s.startupBound()
-	// The stand's own number, when this session was opened under its marker
-	// (dev_bind_dev.go). Taken once, here, so the timer and the record cannot
-	// disagree and a later open cannot inherit it.
-	if devBound, ok := devTakeStartupBound(sid); ok {
-		bound = devBound
+	// The open's own number when the stand gave it one (dev_bind_dev.go),
+	// else the product's. Passed in, never looked up: a side table would need
+	// its own lock and would put a concurrent open's value in reach of this
+	// one (review round 4).
+	if bound <= 0 {
+		bound = s.startupBound()
 	}
 	s.integrationStartupBounds[sid] = time.AfterFunc(bound, func() {
 		s.expireIntegrationStartup(sid)
@@ -275,16 +286,16 @@ func (s *WSServer) expireIntegrationStartup(sid session.ID) {
 // has no integration to nag about.
 func (s *WSServer) registerOpenedIntegration(sess session.Session, cfg session.Config, hosted *HostedSessionOpen) {
 	// The stand's per-session startup bound, if this build has the seam and
-	// this open names the marker (dev_bind_dev.go). Before RegisterIntegration,
-	// because that is where the bound is armed; the shipped build's two
-	// functions are no-ops.
+	// this open names the marker (dev_bind_dev.go). Computed from THIS open's
+	// config and carried into registration, so two concurrent opens cannot see
+	// each other's number and nothing needs a lock of its own.
 	user := ""
 	if cfg.Remote != nil {
 		user = cfg.Remote.User
 	}
-	devNoteStartupBound(sess.ID(), user)
+	bound := devIntegrationStartupBound(user)
 	if hosted != nil && hosted.IntegrationStatus != "" && hosted.IntegrationShell != "" {
-		s.RegisterIntegration(sess.ID(), hosted.IntegrationShell, hosted.IntegrationStatus, hosted.IntegrationReason, hosted.IntegrationShellVersion)
+		s.registerIntegration(sess.ID(), hosted.IntegrationShell, hosted.IntegrationStatus, hosted.IntegrationReason, hosted.IntegrationShellVersion, bound)
 		return
 	}
 	if sess.Kind() != session.KindRemote {
@@ -307,7 +318,7 @@ func (s *WSServer) registerOpenedIntegration(sess session.Session, cfg session.C
 	if reason != ssh.ReasonNone {
 		status = IntegrationConventional
 	}
-	s.RegisterIntegration(sess.ID(), remoteShellName(cfg.Remote), status, reason, "")
+	s.registerIntegration(sess.ID(), remoteShellName(cfg.Remote), status, reason, "", bound)
 }
 
 // sessionAwaitsIntegration answers whether sid has just entered the

@@ -2,11 +2,7 @@
 
 package transport
 
-import (
-	"testing"
-
-	"github.com/shady2k/nocx/internal/session"
-)
+import "testing"
 
 // The shipped build reads neither name, and this is the assertion that says so
 // — the sibling of TestDevBindPortIsIgnoredWithoutTheTag, for the stand's
@@ -17,9 +13,7 @@ func TestStartupBoundIgnoresTheStandsNumberWithoutTheTag(t *testing.T) {
 	t.Setenv(devStartupBoundEnv, "120s")
 	t.Setenv(devStartupBoundUserEnv, "nocx-e2e-long-bound")
 
-	sid := session.ID("sid-shipped")
-	devNoteStartupBound(sid, "nocx-e2e-long-bound")
-	if bound, ok := devTakeStartupBound(sid); ok {
-		t.Fatalf("the shipped build took the stand's startup bound (%v)", bound)
+	if got := devIntegrationStartupBound("nocx-e2e-long-bound"); got != 0 {
+		t.Fatalf("the shipped build took the stand's startup bound (%v)", got)
 	}
 }

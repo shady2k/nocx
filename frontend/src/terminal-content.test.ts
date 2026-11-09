@@ -3250,6 +3250,66 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
     }
   })
 
+  // REVIEW ROUND 4, FINDING 1 (P1): a command whose write is still in flight
+  // when its session is lost must never land in the socket's replacement. The
+  // write happens after the attempt round trip, and .sendIntent uses
+  // THIS.session — the new one — so an unfenced write reconnects a command into
+  // a shell nobody typed it for.
+  it('a released command whose session is replaced before its write is dropped (sequence 8)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const session = client._sessions[0]
+    const fireIntegration = integrationHandler(client, session)
+    const lifecycle = lifecycleHandler(client, session.sessionId)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    let releaseA!: (attempt: unknown) => void
+    const aAttempt = new Promise((resolve) => {
+      releaseA = resolve
+    })
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/bash' })
+      session.intent.mockClear()
+      session.send.mockClear()
+      holdOne(editor, view, 'echo for-the-old-shell')
+      const script = attemptScript(client, [() => aAttempt])
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      await vi.waitFor(() => expect(script.calls()).toBe(1))
+
+      // The session is lost and the pane reconnects to a REPLACEMENT.
+      const onExit = session.onExit.mock.calls[0]?.[0] as
+        ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
+      expect(onExit).toBeDefined()
+      onExit!({ sessionId: session.sessionId, cause: 'interrupted' })
+      expect(await content.reconnect()).toBe(true)
+      const replacement = client._sessions[client._sessions.length - 1]
+      expect(replacement.sessionId).not.toBe(session.sessionId)
+      replacement.intent.mockClear()
+      replacement.send.mockClear()
+
+      // The attempt the OLD session opened settles now. Its write must not go
+      // anywhere: the command was held for a session that is gone.
+      releaseA({
+        id: 'att-A',
+        domain: 'd1',
+        state: 'open',
+        command: 'echo for-the-old-shell',
+        cwd: '',
+        host: '',
+        origin: 'app',
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(replacement.intent).not.toHaveBeenCalled()
+      expect(replacement.send).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
   // nocx-xn63t.6.27, CI run 38577867125: a command typed into the startup
   // composer of a reconnected ssh session reached the shell as
   // `echo after-the-reconnec`. The integration status reaches `integrated` a

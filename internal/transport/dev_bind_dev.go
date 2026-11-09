@@ -7,8 +7,6 @@ import (
 	"os"
 	"strconv"
 	"time"
-
-	"github.com/shady2k/nocx/internal/session"
 )
 
 // THE DEV STAND'S HALF. `-tags nocx_dev_bind` is a build saying: something in
@@ -60,39 +58,28 @@ const (
 	devStartupBoundUserEnv = "NOCX_DEV_INTEGRATION_BOUND_USER"
 )
 
-// devStartupBounds holds the stand's bound per session, from the open that
-// decided it to the timer that applies it; both run on the open's own path,
-// under integrationMu.
-var devStartupBounds map[session.ID]time.Duration
-
-// devNoteStartupBound records the stand's bound for one session, when this
-// open's user names the marker.
-func devNoteStartupBound(sid session.ID, user string) {
+// devIntegrationStartupBound answers the bound the stand asks for, for the
+// session opened by `user`; zero means the product's own.
+//
+// IT IS A PURE READ OF THE ENVIRONMENT, on purpose (review round 4). The first
+// shape kept a map from the open that decided the bound to the timer that armed
+// from it, and two concurrent opens wrote and read it outside the lock — a real
+// data race. The bound belongs to the OPEN, so it travels as the argument that
+// registration already takes, and there is no shared state to guard.
+func devIntegrationStartupBound(user string) time.Duration {
 	raw, ok := os.LookupEnv(devStartupBoundEnv)
 	if !ok || raw == "" {
-		return
+		return 0
 	}
 	marker, ok := os.LookupEnv(devStartupBoundUserEnv)
 	if !ok || marker == "" || user != marker {
-		return
+		return 0
 	}
 	bound, err := time.ParseDuration(raw)
 	if err != nil || bound <= 0 {
-		return
+		return 0
 	}
-	if devStartupBounds == nil {
-		devStartupBounds = make(map[session.ID]time.Duration)
-	}
-	devStartupBounds[sid] = bound
-}
-
-// devTakeStartupBound answers the bound recorded for this session, once.
-func devTakeStartupBound(sid session.ID) (time.Duration, bool) {
-	bound, ok := devStartupBounds[sid]
-	if ok {
-		delete(devStartupBounds, sid)
-	}
-	return bound, ok
+	return bound
 }
 
 // devBindPort is the port to ask the OS for; zero means "you pick", which is

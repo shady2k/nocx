@@ -126,6 +126,11 @@ interface DirListing {
    *  dropped, because a change-driven re-list owns the enumeration but not
    *  the person's intent (nocx-atpw5.1.16). */
   wantsNextPage: boolean
+  /** Which request set `busy`, so the request — and only the request — can
+   *  clear it (nocx-4y82c.1.6). A listing that answers for a scope the store
+   *  has left must not touch the TREE; it must still take its own busy flag
+   *  down, or a person watches a row spin for as long as the panel lives. */
+  busySeq: number
 }
 
 function emptyListing(): DirListing {
@@ -143,6 +148,7 @@ function emptyListing(): DirListing {
     nextOffset: 0,
     appliedGeneration: -1,
     wantsNextPage: false,
+    busySeq: 0,
   }
 }
 
@@ -305,6 +311,10 @@ interface ListCtx {
 
 export function createFilesTreeStore(services: FilesPanelServices): FilesTreeStore {
   let generation = 0
+  /** The claim counter behind DirListing.busySeq (claimBusy): one number per
+   *  request that takes a directory's busy flag, so the flag can only be
+   *  cleared by the request that took it (nocx-4y82c.1.6). */
+  let busySeq = 0
   /** True between dispose() and the next rescope(): late responses from a
    *  previous life of this store must not touch the reset state. */
   let closed = true
@@ -1009,6 +1019,35 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     }
   }
 
+  /** Claim a directory's busy flag for one request, and answer the settle
+   *  that request owes it (nocx-4y82c.1.6).
+   *
+   *  THE FLAG AND THE REQUEST ARE ONE FACT. It used to be a bare boolean
+   *  cleared by whichever apply path happened to own the answer — and every
+   *  one of those paths begins by dropping answers that belong to a scope the
+   *  store has left. The tree is right to be protected from those answers;
+   *  the busy flag is not, because nothing else will ever clear it: the row
+   *  spun for as long as the panel lived, which is the one thing ADR-8eej3e66
+   *  forbids ("a person never sees busy"). Measured on CI:
+   *  [data-testid=files-row][data-path$=/churn/d08] .ui-tree-row kept
+   *  data-busy="true" for the whole 30 s bound under the 50,000-entry churn.
+   *
+   *  So the request carries a sequence number, `settle` clears the flag iff
+   *  no later request has taken it over (a stale answer must not un-busy a
+   *  row a newer listing is still filling), and every settle path calls it
+   *  BEFORE any scope or generation check. */
+  function claimBusy(dir: FilesRoot | FilesNode): () => void {
+    const seq = ++busySeq
+    dir.busy = true
+    dir.busySeq = seq
+    bumpTree()
+    return () => {
+      if (dir.busySeq !== seq) return
+      dir.busy = false
+      bumpTree()
+    }
+  }
+
   function issueList(
     dir: FilesRoot | FilesNode,
     offset: number,
@@ -1016,16 +1055,17 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     ctx: ListCtx,
     origin: CallOrigin = 'person',
   ): Promise<void> {
-    dir.busy = true
-    bumpTree()
+    const settle = claimBusy(dir)
     return services.list(ctx.bindingId as string, dir.path, offset, limit, origin).then(
       (res) =>
         untrack(() => {
+          settle()
           applyListing(dir, ctx, res)
           resumePendingPage(dir)
         }),
       (e) =>
         untrack(() => {
+          settle()
           applyListError(dir, ctx, e)
           resumePendingPage(dir)
         }),
@@ -1617,9 +1657,9 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     walk: number,
     onDone: () => void,
   ): void {
-    dir.busy = true
-    bumpTree()
+    const settle = claimBusy(dir)
     const apply = (res: FilesListResult): void => {
+      settle()
       // The walk-identity check guards CONTINUING the walk, never applying
       // the answer. A superseded walk has already committed its expansion
       // to the tree — the directory is open and on screen — so dropping its
@@ -1674,6 +1714,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
       .list(ctx.bindingId as string, dir.path, dir.nextOffset, FILES_PAGE_SIZE, 'background')
       .then(apply, (e) =>
         untrack(() => {
+          settle()
           if (!scopeCurrent(ctx)) return
           applyListError(dir, ctx, e)
           if (walk === revealWalkId) onDone()
@@ -1769,15 +1810,18 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
   /** One page request: append the answer to what is already displayed. */
   function requestNextPage(dir: FilesRoot | FilesNode, ctx: ListCtx): void {
     const offset = dir.nextOffset
-    dir.busy = true
-    bumpTree()
+    const settle = claimBusy(dir)
     services.list(ctx.bindingId as string, dir.path, offset, FILES_PAGE_SIZE).then(
       (res) => {
-        untrack(() => applyNextPage(dir, ctx, res))
+        untrack(() => {
+          settle()
+          applyNextPage(dir, ctx, res)
+        })
         untrack(() => resumePendingPage(dir))
       },
       (e) =>
         untrack(() => {
+          settle()
           applyListError(dir, ctx, e)
           resumePendingPage(dir)
         }),

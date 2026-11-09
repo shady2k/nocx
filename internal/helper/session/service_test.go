@@ -832,7 +832,7 @@ func TestAnExitedUnclaimedSessionKeepsTheDaemonAliveUntilItsRowIsClosed(t *testi
 	if err != nil {
 		t.Fatalf("close-session: %v", err)
 	}
-	svc.ResponseWritten(callCtx(), proto.OpCloseSession, closed)
+	svc.ResponseWritten(callCtx(), proto.OpCloseSession, closed, host.AnswerDelivery{})
 	select {
 	case <-drained:
 	default:
@@ -1109,7 +1109,7 @@ func TestExplicitCloseOfLastSessionDrainsDaemon(t *testing.T) {
 		t.Fatal("the daemon drained before the close-session answer was written; its caller never hears it")
 	default:
 	}
-	svc.ResponseWritten(callCtx(), proto.OpCloseSession, result)
+	svc.ResponseWritten(callCtx(), proto.OpCloseSession, result, host.AnswerDelivery{})
 	select {
 	case <-drained:
 	default:
@@ -1138,7 +1138,7 @@ func TestCloseSessionOfANonFinalSessionDoesNotDrainWhenAnswered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("close-session: %v", err)
 	}
-	svc.ResponseWritten(callCtx(), proto.OpCloseSession, result)
+	svc.ResponseWritten(callCtx(), proto.OpCloseSession, result, host.AnswerDelivery{})
 	select {
 	case <-drained:
 		t.Fatal("closing one of two sessions drained the daemon")

@@ -1124,6 +1124,15 @@ export class ScrollbackController {
     this.settleAtTail(() => {
       this._applyEchoShift()
     }, followIntent)
+    // THE HEADER WAS REPLACED, SO ITS SIZE IS NEW (nocx-4y82c.1.3, P2). A
+    // running block's 32px one-line header becomes the frozen block's
+    // two-line header, and a long command's wraps taller -- after the
+    // composer's own resize has already settled, so neither a scroll nor the
+    // scroller's ResizeObserver would ask again, and the oversized header
+    // stayed sticky over the rows. The replacement schedules the same check;
+    // there is no second judge, only this trigger for a layout change the
+    // scroll and resize paths cannot see.
+    this._schedulePinnableHeader()
   }
 
   private _updateSeparator(): void {

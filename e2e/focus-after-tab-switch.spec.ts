@@ -17,9 +17,39 @@ import { test, expect, promptReady, clickIntoEditor } from './harness'
  * where the editor is focused and read-only.
  */
 
-const TITLE = '.nocx-tab-title'
 const TAB = '.nocx-tab'
 const TAB_ADD = '[aria-label="New tab"]'
+
+/**
+ * A keystroke that demonstrably reached THIS tab's shell, and the proof that
+ * no other tab saw it.
+ *
+ * THE INSTRUMENT USED TO BE THE TAB'S TITLE: type `printf '\033]0;MARK\007'`
+ * and watch the strip take MARK. That was the cheapest observable round trip,
+ * and since nocx-ouru5.1.1 it is no longer one — a title a PROGRAM sets belongs
+ * to that program's run and is gone the moment the command ends, which is the
+ * whole point of that bead. A command whose OUTPUT the pane shows is the same
+ * round trip one layer lower: the block exists only because the bytes reached
+ * this tab's shell, and it stays on screen to be read.
+ */
+async function runInActiveTab(
+  page: import('@playwright/test').Page,
+  marker: string,
+): Promise<void> {
+  await page.keyboard.type(`echo ${marker}`)
+  await page.keyboard.press('Enter')
+  await expect(page.locator('.pane.active .cmd-block', { hasText: marker })).toBeVisible({
+    timeout: 10_000,
+  })
+}
+
+/** The tab that did NOT get the keystroke carries no trace of it. */
+async function expectOtherTabsSilent(
+  page: import('@playwright/test').Page,
+  marker: string,
+): Promise<void> {
+  await expect(page.locator('.pane:not(.active) .cmd-block', { hasText: marker })).toHaveCount(0)
+}
 
 /** The class of the focused element, scoped to nothing — focus is global. */
 const focusedClass = (page: import('@playwright/test').Page) =>
@@ -53,24 +83,10 @@ test.describe('focus after switching back to a tab (nocx-4ff.29)', () => {
     })
     expect(focusedInActivePane).toBe(true)
 
-    // (2) A keystroke reaches tab 1's shell. OSC 0 is the cheapest observable
-    // round trip: it proves the bytes reached the PTY and came back.
+    // (2) A keystroke reaches tab 1's shell, and only tab 1's.
     const marker = `SW-${Date.now().toString(36)}`
-    await page.keyboard.type(`printf '\\033]0;${marker}\\007'`)
-    await page.keyboard.press('Enter')
-
-    await expect(page.locator(TITLE).first()).toHaveText(marker, { timeout: 5000 })
-    // The other tab must not have received it — stated as "never shows the
-    // marker" rather than "still equals a title captured earlier". A fresh
-    // tab's title starts as `~` and becomes its real cwd when the shell's
-    // OSC 7 lands, which is after promptReady; the captured form asserted
-    // that self-change did not happen and failed on `.e2e/home` whenever the
-    // machine was slow enough for OSC 7 to arrive after the snapshot. Same
-    // defect, same fix, as multi-tab-input.spec.ts — see the long note there.
-    //
-    // Safe rather than vacuous because tab 1's title has already become the
-    // marker above: the keystroke has demonstrably been routed by now.
-    await expect(page.locator(TITLE).nth(1)).not.toHaveText(marker)
+    await runInActiveTab(page, marker)
+    await expectOtherTabsSilent(page, marker)
   })
 
   /**
@@ -119,9 +135,7 @@ test.describe('focus after switching back to a tab (nocx-4ff.29)', () => {
     await expect.poll(() => focusedClass(page), { timeout: 5000 }).toContain('nocx-editor-input')
 
     const marker = `CL-${Date.now().toString(36)}`
-    await page.keyboard.type(`printf '\\033]0;${marker}\\007'`)
-    await page.keyboard.press('Enter')
-    await expect(page.locator(TITLE).first()).toHaveText(marker, { timeout: 5000 })
+    await runInActiveTab(page, marker)
   })
 
   /**
@@ -153,9 +167,7 @@ test.describe('focus after switching back to a tab (nocx-4ff.29)', () => {
     expect(focusedInActivePane).toBe(true)
 
     const marker = `KB-${Date.now().toString(36)}`
-    await page.keyboard.type(`printf '\\033]0;${marker}\\007'`)
-    await page.keyboard.press('Enter')
-    await expect(page.locator(TITLE).first()).toHaveText(marker, { timeout: 5000 })
+    await runInActiveTab(page, marker)
   })
 
   test('closing the active tab leaves the survivor taking keystrokes', async ({ page }) => {
@@ -174,8 +186,6 @@ test.describe('focus after switching back to a tab (nocx-4ff.29)', () => {
     await expect.poll(() => focusedClass(page), { timeout: 5000 }).toContain('nocx-editor-input')
 
     const marker = `CW-${Date.now().toString(36)}`
-    await page.keyboard.type(`printf '\\033]0;${marker}\\007'`)
-    await page.keyboard.press('Enter')
-    await expect(page.locator(TITLE).first()).toHaveText(marker, { timeout: 5000 })
+    await runInActiveTab(page, marker)
   })
 })

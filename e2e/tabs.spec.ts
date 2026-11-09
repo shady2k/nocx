@@ -216,11 +216,17 @@ test.describe('vertical tab placement', () => {
     await expect(page.locator(TAB)).toHaveCount(1)
     await expect(page.locator('.nocx-tab-subtitle')).toHaveCount(0)
 
-    // Give the tab a name of its own via OSC 0. Now the location is extra information
-    // and earns its line.
+    // Give the tab a name of its own via OSC 0 — FROM THE SHELL, at its
+    // prompt. A title a COMMAND sets belongs to that command's run and is gone
+    // by the time this assertion could read it (nocx-ouru5.1.1), which is the
+    // whole reason this line writes the title from the prompt command instead
+    // of running a `printf` as the command: what is asserted here is the
+    // strip's second line, and it needs a title that outlives a run.
     await clickIntoEditor(page)
     const marker = `NAME-${Date.now().toString(36)}`
-    await page.keyboard.type(`printf '\\033]0;${marker}\\007'`)
+    await page.keyboard.type(
+      `PROMPT_COMMAND='__nocx_prompt_command; printf "\\033]0;${marker}\\007"'`,
+    )
     await page.keyboard.press('Enter')
 
     await expect(page.locator('.nocx-tab-title').first()).toHaveText(marker, { timeout: 5000 })

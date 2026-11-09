@@ -48,6 +48,17 @@ func TestOpenRefusesBeforeDialingWithAReasonAUserCanAct(t *testing.T) {
 			message: "SSH config resolver not available",
 		},
 		{
+			// A FAR LOGIN SHELL CANNOT BE MOVED (nocx-ouru5.1.4): the renderer
+			// names a starting directory for a LOCAL pane only, and an ssh
+			// open carrying one is refused here rather than one hop later by
+			// the helper's own wire, which would answer a caller that never
+			// knew it had sent anything unusual.
+			name:    "an ssh open naming a starting directory",
+			params:  map[string]any{"kind": "ssh", "profileId": "p", "host": "myhost", "cols": 80, "rows": 24, "cwd": "/tmp"},
+			code:    -32602,
+			message: "Invalid params: cwd cannot be named for an ssh session",
+		},
+		{
 			// Answered by validateOpenRaw, which runs before the handler.
 			// Writing this test found that the handler carries a SECOND
 			// answer to the same question — an else-branch replying
@@ -224,5 +235,22 @@ func TestTheBackendCallerIsReadyBeforeTheServerServes(t *testing.T) {
 	}
 	if opened.Session == nil {
 		t.Fatalf("no session")
+	}
+}
+
+// A LOCAL OPEN MAY NAME THE DIRECTORIES ITS PROGRAM STARTS IN (nocx-ouru5.1.4):
+// the tab menu's Duplicate copies the directory the source pane's own shell
+// reported, and the validator is where a caller learns that a local open can
+// say so at all — the refusal beside it is the half that says an ssh open
+// cannot.
+func TestOpenAcceptsAStartingDirectoryForALocalSession(t *testing.T) {
+	if msg := validateOpenRaw(json.RawMessage(`{"cols":80,"rows":24,"cwd":"/tmp/one"}`)); msg != "" {
+		t.Fatalf("a local open naming a directory was refused: %s", msg)
+	}
+	if msg := validateOpenRaw(json.RawMessage(`{"cols":80,"rows":24,"kind":"local","cwd":"/tmp/one"}`)); msg != "" {
+		t.Fatalf("an explicit local open naming a directory was refused: %s", msg)
+	}
+	if msg := validateOpenRaw(json.RawMessage(`{"cols":80,"rows":24,"cwd":""}`)); msg != "" {
+		t.Fatalf("an empty directory is the ordinary answer and was refused: %s", msg)
 	}
 }

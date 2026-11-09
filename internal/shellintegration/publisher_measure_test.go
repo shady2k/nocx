@@ -286,9 +286,19 @@ import (
 // moved by the same three lines (the trap body sets it, the check reads it,
 // the exec refuses on it); `nocx.posix` publishes the same bytes, because its
 // wrapper has no resolution window to interrupt.
+//
+// The zsh end-of-run hook measured 93166 bytes (+217), still 63 calls
+// (nocx-ouru5.1.1): the zsh tier's fence moved into a hook of its own, forced
+// to the front of precmd_functions so it is written before any precmd hook the
+// user registered — which is what makes a shell's own title land after the
+// fence and survive. One script moved and the +217 is CODE (the new function
+// and the registration that puts it first); comments never reach these bytes,
+// because the published scripts are stripped at embed time (scripts.go). The
+// call count is unchanged because the same files are created and written as
+// before.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 92949
+	measuredMaxPublishBytes = 93166
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

@@ -4,18 +4,44 @@ import { test, expect, promptReady, clickIntoEditor } from './harness'
 // keyboard input. The user-observable contract is that every tab accepts
 // keystrokes when it is active, regardless of how many other tabs exist.
 
-const TITLE = '.nocx-tab-title'
 const TAB = '.nocx-tab'
 const TAB_ADD = '[aria-label="New tab"]'
+
+/**
+ * THE INSTRUMENT, and why it is not the tab's title any more.
+ *
+ * These cases used to type `printf '\033]0;MARK\007'` and watch the strip
+ * take MARK: the cheapest observable round trip, because a program's title
+ * came back as the tab's name. Since nocx-ouru5.1.1 a title a PROGRAM sets
+ * belongs to that program's run and is gone when the command ends — so the
+ * title stopped being an echo of what the shell received. A command whose
+ * output the pane shows is the same round trip one layer lower: the block
+ * exists only because the bytes reached this tab's shell.
+ */
+async function runInActiveTab(
+  page: import('@playwright/test').Page,
+  marker: string,
+): Promise<void> {
+  await page.keyboard.type(`echo ${marker}`)
+  await page.keyboard.press('Enter')
+  await expect(page.locator('.pane.active .cmd-block', { hasText: marker })).toBeVisible({
+    timeout: 10_000,
+  })
+}
+
+/** The tab that did NOT get the keystroke carries no trace of it. */
+async function expectOtherTabsSilent(
+  page: import('@playwright/test').Page,
+  marker: string,
+): Promise<void> {
+  await expect(page.locator('.pane:not(.active) .cmd-block', { hasText: marker })).toHaveCount(0)
+}
 
 test.describe('multi-tab input (nocx-4ff.28)', () => {
   test('first tab still accepts input after second tab is created', async ({ page }) => {
     await page.goto('/')
     await expect(page.locator(TAB)).toHaveCount(1)
     await promptReady(page)
-
-    // Record tab 1's current title so we can assert it changes.
-    const tab1InitialTitle = await page.locator(TITLE).first().textContent()
 
     // Create a second tab.
     await page.locator(TAB_ADD).click()
@@ -36,50 +62,16 @@ test.describe('multi-tab input (nocx-4ff.28)', () => {
       .poll(() => page.evaluate(() => document.activeElement?.className ?? ''), { timeout: 5000 })
       .toContain('nocx-editor-input')
 
-    // Now type a command that sets the OSC 0 title.
-    // If Tab 2's _globalKeydown steals focus, the keystroke lands in tab 2's
-    // editor and tab 1's title never changes.
+    // Now type a command into tab 1. If tab 2's _globalKeydown steals focus,
+    // the keystroke lands in tab 2's editor and tab 1's pane never shows it.
     const marker = `T1-${Date.now().toString(36)}`
-    await page.keyboard.type(`printf '\\033]0;${marker}\\007'`)
-    await page.keyboard.press('Enter')
+    await runInActiveTab(page, marker)
 
-    // Tab 1's title must reflect the keystroke.
-    await expect(page.locator(TITLE).first()).toHaveText(marker, { timeout: 5000 })
-
-    // Tab 2 must NOT have received the keystroke.
-    //
-    // Stated as "tab 2 never shows the marker", not as "tab 2's title equals
-    // the string we captured earlier". The captured form asserted something
-    // the product never promised: a fresh tab's title starts as `~` and
-    // becomes its real cwd when the shell's OSC 7 arrives, which is AFTER
-    // promptReady — the editor is focused before the shell has reported where
-    // it is. So the snapshot caught `~` mid-transition and the assertion
-    // failed on `.e2e/home`, a change the tab made by itself with no keystroke
-    // involved.
-    //
-    // That window is a function of machine speed, which is exactly why this
-    // was a CI-only failure: with cores to spare the OSC 7 lands before the
-    // capture and the strings match. Capped at the runner's 4 vCPU it lands
-    // after, and the same tree fails. The defect was in the assertion, not in
-    // the product and not in the runner.
-    //
-    // Ordering is what makes this safe rather than vacuous: tab 1's title has
-    // already become the marker above, so the keystroke is known to have been
-    // routed and rendered by the time this runs. A `not` assertion here is
-    // therefore a real check, not one that passes because nothing has
-    // happened yet.
-    await expect(page.locator(TITLE).nth(1)).not.toHaveText(marker)
-
-    // And tab 1's title is definitely different from initial.
-    //
-    // This was missing its await, which is why nocx-ifgp looked load-dependent:
-    // an unawaited web-first assertion returns a promise nobody holds, so it
-    // never runs at the point it is written and its eventual rejection surfaces
-    // somewhere else — or not at all. It asserted nothing on a good day and
-    // failed the run on a bad one.
-    await expect(page.locator(TITLE).first()).not.toHaveText(tab1InitialTitle!, {
-      timeout: 5000,
-    })
+    // Tab 2 must NOT have received the keystroke. Ordering is what makes this
+    // check real rather than vacuous: tab 1's block is on screen already, so
+    // the keystroke is known to have been routed and rendered by the time this
+    // runs, and an empty answer here means tab 2's pane never got it.
+    await expectOtherTabsSilent(page, marker)
   })
 
   test('second tab accepts input while it is active', async ({ page }) => {
@@ -92,12 +84,9 @@ test.describe('multi-tab input (nocx-4ff.28)', () => {
     await expect(page.locator(TAB)).toHaveCount(2)
     await promptReady(page)
 
-    // Tab 2 is now active. Type a command into it.
+    // Tab 2 is now active. Type a command into it — and it lands in the pane
+    // in front, which is tab 2's.
     const marker = `T2-${Date.now().toString(36)}`
-    await page.keyboard.type(`printf '\\033]0;${marker}\\007'`)
-    await page.keyboard.press('Enter')
-
-    // Tab 2's title must reflect the keystroke (nth(1) = second tab).
-    await expect(page.locator(TITLE).nth(1)).toHaveText(marker, { timeout: 5000 })
+    await runInActiveTab(page, marker)
   })
 })

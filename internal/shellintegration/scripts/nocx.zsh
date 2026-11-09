@@ -1442,10 +1442,11 @@ __nocx_nested_launch() {
 # does NOT run the precmd hooks for that (measured, nocx-u7uh.28) — but
 # the nested launch just closed the child, which IS a prompt boundary, and
 # §9's domain_activated must ride THIS boundary, not the user's next
-# command. The hooks are the same chain a real boundary runs (capture,
-# __nocx_precmd, the marker-only prompt armer), so the second boundary the
-# user eventually produces finds nested_active already cleared and sends
-# nothing further.
+# command. The hooks are the same chain a real boundary runs (the status
+# capture, the end of the run, the user's own precmd hooks, __nocx_precmd
+# and the marker-only prompt armer), so the second boundary the user
+# eventually produces finds nested_active already cleared and sends nothing
+# further.
 __nocx_widget_prompt_boundary() {
     local __nocx_f
     for __nocx_f in $precmd_functions; do
@@ -1548,13 +1549,27 @@ __nocx_lc_recover() {
     __nocx_lc_recovered=1
 }
 
-__nocx_precmd() {
-    # Authenticated channel first: refresh, complete (with the exit status
-    # and a fresh fence nonce), write the SAME nonce to the pty after the
-    # command's output (the render-order rendezvous, decision 1 carve-out),
-    # then prompt_ready. The complete names the attempt this shell minted
-    # at start (ADR-0077): the block's identity across coordinators.
-    # A nested child whose command the widget consumed leaves __nocx_exit_code
+# THE END OF THE RUN, as its own hook and FIRST in the prompt cycle
+# (nocx-ouru5.1.1's second half).
+#
+# `precmd_functions` runs in registration order, and a framework that
+# registered a precmd hook before this file was sourced — oh-my-zsh, a
+# prompt theme, a person's own title hook — runs BEFORE `__nocx_precmd`.
+# While the fence and the completion lived at the top of `__nocx_precmd`,
+# such a hook's title reached the pty BEFORE the fence that closes the run,
+# and the runtime read it as the program's: the shell's own title was cleared
+# the moment the command ended. Measured on the zsh tier alone; bash writes
+# the same fence from its channel block before the user's PROMPT_COMMAND, and
+# fish from fish_postexec before the prompt function, so this makes the three
+# agree: the fence IS the prompt start, because nothing of the prompt has been
+# written yet when it lands.
+#
+# Everything the fence travels with stays together — the nested child's
+# activation (which MUST precede the complete, §9), the completion and its
+# nonce, and prompt_ready — so splitting it off moved no ordering inside the
+# channel protocol, only the moment the whole boundary happens.
+__nocx_postexec() {
+    # A nested child whose command consumed the widget leaves __nocx_exit_code
     # = the widget's own last status (the launch's assignments clobbered $?);
     # the child's REAL status was captured right after the launch and
     # overrides here, exactly as the bash tier's __nocx_nested_rc does.
@@ -1605,6 +1620,11 @@ __nocx_precmd() {
             __nocx_lc_send prompt_ready || __nocx_lc_recover
         fi
     fi
+}
+
+__nocx_precmd() {
+    # THE PROMPT, after the run has already ended (__nocx_postexec ran first —
+    # see the ordering note there). Nothing here closes an interval.
     if [[ -n "$__nocx_first_prompt" ]]; then
         __nocx_marker D "$__nocx_exit_code"
     fi
@@ -1628,6 +1648,7 @@ __nocx_precmd() {
     # the bottom of this file for the protocol and the bounds.
     __nocx_snapshot_pump
 }
+
 
 __nocx_preexec() {
     # zsh's preexec hook receives the full command line as $1.
@@ -1657,13 +1678,24 @@ __nocx_preexec() {
 }
 
 add-zsh-hook precmd __nocx_capture_status
+add-zsh-hook precmd __nocx_postexec
 add-zsh-hook precmd __nocx_precmd
 add-zsh-hook preexec __nocx_preexec
 
-# Force the status capture to the front of precmd_functions so a precmd hook the
-# user registered earlier (oh-my-zsh, plugins, sourced before our gate) cannot
-# clobber $? before we read it. Dedupe first so re-sourcing stays idempotent.
-precmd_functions=(__nocx_capture_status ${precmd_functions:#__nocx_capture_status})
+# The status capture and the end of the run go to the FRONT of
+# precmd_functions, in that order, and the reason is a title (nocx-ouru5.1.1):
+# a precmd hook the user registered earlier (oh-my-zsh, plugins, a title
+# function, sourced before our gate) runs first if we are merely appended, and
+# a title it draws would then reach the pty BEFORE the fence that closes the
+# run — so the runtime read the shell's own title as the program's and cleared
+# it when the command ended. Capture first (a hook must not clobber $? before
+# we read it), the fence second, the prompt third, the user's hooks before the
+# prompt and after the fence, which is where a shell's own title belongs.
+# Dedupe first so re-sourcing this file stays idempotent.
+__nocx_rest_of_precmd=(${precmd_functions:#__nocx_capture_status})
+__nocx_rest_of_precmd=(${__nocx_rest_of_precmd:#__nocx_postexec})
+precmd_functions=(__nocx_capture_status __nocx_postexec $__nocx_rest_of_precmd)
+unset __nocx_rest_of_precmd
 
 # Non-printing B marker (zsh %{...%} so it takes zero prompt width).
 __nocx_b_marker=$'%{\e]133;B\a%}'

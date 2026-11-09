@@ -62,6 +62,45 @@ const REPEATED = 'apt-get update'
 /** How many times in a row the report's alternation is watched. */
 const REPEATS = 5
 
+/**
+ * APT IS PINNED TO A SOURCE THAT FAILS INSTANTLY, on BOTH sides of this spec.
+ *
+ * `apt-get update` is the owner's own line and it stays exactly that, but its
+ * runtime is the network's: with a runner whose mirrors are slow or blackholed,
+ * apt waits out its own 30-second timeouts and retries — CI measured 37 s for
+ * one run and more than 120 s for the next — and this spec's settle window is a
+ * hang detector, not a claim about how long apt may take (nocx-4y82c.1.5).
+ * Measured, to be sure it was not the product: a 300-second command over ssh
+ * settles at 300.7 s, so blocks do end with their commands; only apt's runtime
+ * was ever the variable.
+ *
+ * So both panes are given one apt config, by the variable apt reads, with a
+ * source that refuses the connection: the same exit code on both sides, in
+ * about a tenth of a second, on any machine. `Dir::Etc::sourceparts` is emptied
+ * as well, because the machine's own sources are what the run would otherwise
+ * reach for.
+ */
+function hermeticAptConfig(dir: string): string {
+  mkdirSync(path.join(dir, 'empty'), { recursive: true })
+  writeFileSync(
+    path.join(dir, 'sources.list'),
+    'deb [trusted=yes] http://127.0.0.1:1/nocx-e2e-apt/ ./\n',
+  )
+  const conf = path.join(dir, 'apt.conf')
+  writeFileSync(
+    conf,
+    [
+      `Dir::Etc::sourcelist "${path.join(dir, 'sources.list')}";`,
+      `Dir::Etc::sourceparts "${path.join(dir, 'empty')}";`,
+      'Acquire::Retries "0";',
+      'Acquire::http::Timeout "2";',
+      'Acquire::https::Timeout "2";',
+      '',
+    ].join('\n'),
+  )
+  return conf
+}
+
 interface RunResult {
   /** What the far side received for this submit. */
   readonly received: string
@@ -204,6 +243,11 @@ test('an ssh pane submits the bytes it was given, five times in a row', async ({
   const remoteHome = path.join(hostRoot, 'home')
   mkdirSync(remoteHome, { recursive: true, mode: 0o700 })
   const logRoot = mkdtempSync(path.join(tmpdir(), 'nocx-ssh-submit-log-'))
+  // Both panes run on THIS machine (the far side of the fixture is this
+  // container), so one file is the config for both; the setup line below is
+  // the only thing that points them at it.
+  const aptConfig = hermeticAptConfig(mkdtempSync(path.join(tmpdir(), 'nocx-ssh-submit-apt-')))
+  const aptSetup = `export APT_CONFIG=${aptConfig}`
 
   let fixture: SshdFixture | null = null
   let profileId: string | null = null
@@ -228,6 +272,9 @@ test('an ssh pane submits the bytes it was given, five times in a row', async ({
     // ── the LOCAL baseline: what each line's own exit code is ───────────
     const local: RunResult[] = []
     await promptReady(page)
+    // Typed rather than written into the stand's home: that home is shared by
+    // every spec of the run, and this is one pane's environment for one test.
+    await submitOne(page, aptSetup)
     for (const line of [REPEATED, ...OWNER_LINES]) {
       local.push({ received: '', exitCode: await submitOne(page, line) })
     }
@@ -297,6 +344,17 @@ test('an ssh pane submits the bytes it was given, five times in a row', async ({
       "opening the ssh pane left bytes in the remote shell's input after its bootstrap frames; " +
         'the shell will read them as the first thing a person types',
     ).toBe('')
+
+    // ── the far side's apt config, typed before anything is measured ─────
+    //
+    // The bytes still check: this is a line a person could type, it is the
+    // first thing this shell receives after the open, and its own submit is
+    // read off the far side exactly like the measured ones. It is not one of
+    // the REPORTED lines, so it is not counted in the loop below.
+    await submitOne(page, aptSetup)
+    const setup = receivedSince(logPath, offset)
+    offset = setup.next
+    expectExactlyTyped(setup.bytes, aptSetup, 'the apt setup line')
 
     for (const line of [...OWNER_LINES, ...Array<string>(REPEATS).fill(REPEATED)]) {
       const code = await submitOne(page, line)

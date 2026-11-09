@@ -130,3 +130,18 @@ the agent started. Three published lines per script tier carry it: the trap
 body sets the fact, the check after the enrolment prints the cancel sentence,
 and `__nocx_agent_launch_exec` refuses to run the agent on it. `nocx.bash` and
 `nocx.zsh` both moved; `nocx.posix` did not, and the worst path is unchanged.
+
+The 2026-11-09 measurement on branch `fix/nocx-ouru5.1.11-ctrlc` is **614 bytes
+above** that 92,949-byte figure, at **93,780**, and keeps the **63**-call
+maximum. The growth is the interrupt's second witness (nocx-ouru5.1.11): a
+cancel window's wait no longer trusts the INT trap to have run. bash defers a
+trapped interrupt while a foreground child runs, and CI captured the trap's own
+run being LOST — `bash: interrupt trap: line 2: unexpected EOF while looking for
+matching ')'` — after which the launch's open-question wait, which has no
+deadline, never ended: the pane showed `^C` and nothing else for as long as the
+test watched. The wait's children now report the interrupt themselves (a child
+killed by SIGINT is 130, recorded by `__nocx_agent_note_int` after every
+`sleep 1`, after the probe, and after the frame read). `nocx.bash` moved by the
+helper, its three call sites and the flag that scopes them; `nocx.zsh` did not
+(its wait polls with the `zselect` builtin and starts no child whose death could
+be read), `nocx.posix` has no launch window, and the worst path is unchanged.

@@ -296,9 +296,22 @@ import (
 // because the published scripts are stripped at embed time (scripts.go). The
 // call count is unchanged because the same files are created and written as
 // before.
+//
+// The interrupt's second witness measured 93780 bytes (+614), still 63 calls
+// (nocx-ouru5.1.11): a cancel window's wait no longer trusts the INT trap to
+// have run. The trap is deferred while a foreground child runs and CI saw its
+// own run lost outright (`bash: interrupt trap: line 2: unexpected EOF while
+// looking for matching `)'`), after which the open-question wait — which has no
+// deadline — never ended and the pane sat inside the wrapper with `^C` echoed
+// and nothing else. The wait's children report the interrupt themselves: a
+// child killed by SIGINT is 130, recorded by `__nocx_agent_note_int` after
+// every `sleep 1`, after the probe, and after the frame read. One helper, three
+// call sites and the flag that scopes them, in `nocx.bash` only — the zsh tier
+// polls with the `zselect` builtin and starts no child to read a death from,
+// and `nocx.posix` has no launch window at all.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 93166
+	measuredMaxPublishBytes = 93780
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

@@ -147,3 +147,55 @@ test('the native Fish archive is cached under the identity its installer owns', 
     'a cache path is spelled in the workflow; the installer owns it',
   )
 })
+
+// THE macOS JOB HOLDS ONLY WHAT NEEDS A MAC (nocx-ouru5.1.13). The selection is
+// derived from the build constraints by scripts/mac-only-tests.mjs and asked for
+// over `make -s`, so the workflow may not carry a second copy of it: a test name
+// written here, or a package set spelled beside the derivation, would drift the
+// day a darwin file is added — and the drift would show up as a test that ran on
+// neither side.
+test('ci-mac runs the derived macOS-only selection, and ci-linux excludes it', () => {
+  const workflow = readFileSync(join(WORKFLOWS, 'ci.yml'), 'utf8')
+  const block = (from) => workflow.slice(workflow.indexOf(from), workflow.indexOf('\n\n', workflow.indexOf(from)))
+
+  // The resolution: both halves come from the Makefile's targets, which ask the
+  // one owner.
+  const mac = block('name: Resolve the macOS-only test selection')
+  assert.ok(mac.length > 0, 'ci-mac no longer resolves a macOS-only test selection')
+  assert.match(mac, /id: mac/, 'the Mac selection has no step id for the test step to read')
+  assert.ok(mac.includes('make -s print-mac-pkgs'), 'the Mac package set is not asked of the Makefile')
+  assert.ok(mac.includes('make -s print-mac-select'), 'the Mac test selection is not asked of the Makefile')
+
+  // The Mac runs it with -run, over the packages that hold at least one.
+  const macTests = workflow.slice(workflow.indexOf('name: Test (the macOS-only tests'))
+  const macTestStep = macTests.slice(0, macTests.indexOf('\n\n'))
+  assert.ok(macTestStep.includes('-run "$RUN" $PKGS'), 'the mac test step does not run the derived selection')
+  assert.ok(macTestStep.includes('steps.mac.outputs.pkgs'), 'the mac test step does not take the derived package set')
+  assert.ok(macTestStep.includes('steps.mac.outputs.run'), 'the mac test step does not take the derived selection')
+
+  // Linux excludes exactly the same selection, at the point of use.
+  const linux = workflow.slice(workflow.indexOf('\n  ci-linux:'))
+  const linuxResolve = linux.slice(
+    linux.indexOf('name: Resolve the macOS-only test selection'),
+    linux.indexOf('\n\n', linux.indexOf('name: Resolve the macOS-only test selection')),
+  )
+  assert.ok(linuxResolve.includes('make -s print-mac-select'), 'ci-linux does not ask the Makefile for the mac selection')
+  assert.ok(linuxResolve.includes('skip='), 'ci-linux resolves no skip list')
+  const linuxSkips = [...linux.matchAll(/-skip "\$MAC_SKIP"/g)].length
+  assert.ok(linuxSkips >= 2, `the Linux OS runs do not exclude the mac-only tests (${linuxSkips} of them do)`)
+
+  // The repeat follows the same rule on each side.
+  assert.ok(workflow.includes('--only "$RUN"'), 'the mac repeat does not run only the macOS-only tests')
+  assert.ok(linux.includes('--skip "$MAC_SKIP"'), 'the Linux repeat does not exclude the macOS-only tests')
+
+  // The Mac lints what Linux cannot see, and nothing else.
+  assert.ok(!workflow.includes('golangci-lint run ./...'), 'a whole-tree lint is back on a job; that pass belongs to ci-linux')
+  assert.ok(workflow.includes('golangci-lint run $(make -s print-darwin-pkgs)'), 'the mac lint no longer scopes to the darwin packages')
+  assert.ok(linux.includes('golangci-lint run --build-tags=gtk3 ./...'), 'ci-linux does not run the whole-tree lint the Mac gave up')
+
+  // No macOS-only test NAME is spelled in the workflow.
+  const select = execFileSync('make', ['-s', 'print-mac-select'], { cwd: ROOT, encoding: 'utf8' }).trim()
+  for (const name of select.replace(/^\^\(|\)\$$/g, '').split('|')) {
+    assert.ok(!workflow.includes(name), `${name} is written in ci.yml; the selection has one owner`)
+  }
+})

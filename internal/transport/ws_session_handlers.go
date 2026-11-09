@@ -455,6 +455,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		User:        params.User,
 		DesiredMode: params.DesiredMode,
 		Shell:       params.Shell,
+		Cwd:         params.Cwd,
 	}
 	if params.Parent != nil {
 		spec.Parent = &session.Ref{
@@ -1428,6 +1429,19 @@ func validateOpenRaw(raw json.RawMessage) string {
 	// Absent is legitimate — a session attached to no recorded pane.
 	if p.PaneID != "" {
 		if msg := layoutID("paneId", p.PaneID); msg != "" {
+			return msg
+		}
+	}
+	// The starting directory is a LOCAL open's fact (nocx-ouru5.1.4): a far
+	// login shell starts where that host says, so an ssh open carrying one
+	// would be carrying a value nothing acts on. Refused here rather than one
+	// hop later, because the helper's own refusal is about its wire and says
+	// nothing to a renderer that sent the field.
+	if p.Cwd != "" {
+		if p.Kind == "ssh" {
+			return "cwd cannot be named for an ssh session"
+		}
+		if msg := boundedRunes("cwd", p.Cwd, maxCwdRunes); msg != "" {
 			return msg
 		}
 	}

@@ -56,7 +56,7 @@ type Host struct {
 	// mid-frame.
 	mu       sync.Mutex
 	services []Service
-	requests map[uint64]pendingRequest
+	requests map[uint64]*pendingRequest
 
 	// reverse holds the answers this host is waiting for: the requests IT sent
 	// to the coordinator (Ask, reverse.go), keyed by the ids it minted. It is
@@ -81,11 +81,51 @@ type Host struct {
 // pendingRequest is the per-request state a TypeCancel reaches: the
 // request's own stop function plus the service and op it is serving, which
 // is what lets a cancel decide whether the operation refuses cancellation
-// (D11).
+// (D11) — and the arbitration of the one question the answer's fate turns on.
+//
+// THE ANSWER'S FATE IS ONE DECISION (nocx-ouru5.1.5, review round 2). The
+// request's goroutine writes the answer, the read loop applies a TypeCancel,
+// and both run at once: "the caller withdrew" and "an answer went out" must not
+// be able to disagree, or a service ends what somebody else was just given. So
+// they are decided under this mutex, at the instant before the frame is
+// written: a withdrawal that arrives first wins and the answer is reported as
+// one nobody was waiting for; a withdrawal that arrives after the answer is
+// underway has lost, because the caller may be holding what it carries.
+//
+// A pointer, not a value: the two arbiters are different goroutines and the
+// map is copied out from under them.
 type pendingRequest struct {
 	stop    context.CancelFunc
 	service string
 	op      string
+
+	mu        sync.Mutex
+	answered  bool
+	withdrawn bool
+}
+
+// withdraw records that the caller gave up, and answers whether it was still
+// time to. false means the answer was already being written: the caller may
+// hold what it carries, so the request must not be treated as abandoned.
+func (r *pendingRequest) withdraw() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.answered {
+		return false
+	}
+	r.withdrawn = true
+	return true
+}
+
+// answerWriting closes the interval: from here an answer is on its way out, so
+// no withdrawal can still win. It answers what the delivery was, for the hook
+// that runs after the write.
+func (r *pendingRequest) answerWriting() AnswerDelivery {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delivery := AnswerDelivery{Withdrawn: r.withdrawn}
+	r.answered = true
+	return delivery
 }
 
 // New builds a host over in and out. out is the wire: sentinel line, then
@@ -96,7 +136,7 @@ func New(in io.Reader, out io.Writer, contentHash, instanceID string, log *slog.
 		out:         out,
 		contentHash: contentHash,
 		instanceID:  instanceID,
-		requests:    make(map[uint64]pendingRequest),
+		requests:    make(map[uint64]*pendingRequest),
 		log:         log,
 	}
 }
@@ -243,13 +283,14 @@ func (h *Host) frame(ctx context.Context, ty proto.FrameType, payload []byte) {
 		// goroutine, a cancel read first found nothing, and the handler ran
 		// later with a live context after its caller had given up.
 		reqCtx, stop := context.WithCancel(WithConnection(ctx, h))
+		entry := &pendingRequest{stop: stop, service: req.Service, op: req.Op}
 		h.mu.Lock()
-		h.requests[req.ID] = pendingRequest{stop: stop, service: req.Service, op: req.Op}
+		h.requests[req.ID] = entry
 		h.mu.Unlock()
 		h.inflight.Add(1)
 		go func() {
 			defer h.inflight.Done()
-			h.request(reqCtx, stop, req)
+			h.request(reqCtx, entry, req)
 		}()
 	case proto.TypeResponse:
 		// An answer to a request THIS helper sent (Ask, reverse.go). Until the
@@ -537,12 +578,12 @@ func (h *Host) SendNotification(n proto.Notification) error {
 // never stalls the read loop or another request (D13). reqCtx is the
 // per-request context the read loop already stored by id, so a TypeCancel
 // can reach it; stop releases it when the request is done.
-func (h *Host) request(reqCtx context.Context, stop context.CancelFunc, req proto.Request) {
+func (h *Host) request(reqCtx context.Context, entry *pendingRequest, req proto.Request) {
 	defer func() {
 		h.mu.Lock()
 		delete(h.requests, req.ID)
 		h.mu.Unlock()
-		stop()
+		entry.stop()
 	}()
 
 	// The exchange the CALLER is in becomes this request's parent, so the
@@ -580,6 +621,9 @@ func (h *Host) request(reqCtx context.Context, stop context.CancelFunc, req prot
 		lg.Warn("helper refused the request", "code", code, "message", message)
 		resp.Error = &proto.Error{Code: code, Message: message, Details: details}
 		end(errors.New(code))
+		// A refusal is an answer: from here a withdrawal is too late, and
+		// there is nothing it could otherwise release.
+		entry.answerWriting()
 		h.respond(resp)
 	}
 
@@ -610,13 +654,24 @@ func (h *Host) request(reqCtx context.Context, stop context.CancelFunc, req prot
 	}
 	resp.Result = raw
 	end(nil)
+	// THE ANSWER'S FATE, DECIDED ONCE, WHERE THE ANSWER IS WRITTEN
+	// (nocx-ouru5.1.5, review round 2). This is the instant the withdrawal stops
+	// being able to win: a TypeCancel read before now has already marked the
+	// request withdrawn and is reported below as one nobody was waiting for; one
+	// read after now lost, because this frame is going out and its caller may
+	// hold what it carries. Deciding it anywhere else — in the handler, before
+	// returning — is deciding before the answer exists, and the gap between
+	// those two is exactly the window a session was leaked in.
+	delivery := entry.answerWriting()
 	h.respond(resp)
 	// AFTER the write, and that is the whole of this hook's contract
 	// (ResponseObserver): a service whose handler deferred a pump gets to
 	// start it knowing the caller's answer is already on the wire, so the
-	// caller has a chance to register what the pump will write about.
+	// caller has a chance to register what the pump will write about — and a
+	// service that made something the answer carries learns here whether
+	// anybody was still waiting for it.
 	if observer, ok := svc.(ResponseObserver); ok {
-		observer.ResponseWritten(reqCtx, req.Op, result)
+		observer.ResponseWritten(reqCtx, req.Op, result, delivery)
 	}
 }
 
@@ -646,7 +701,7 @@ func ConnectionFrom(ctx context.Context) any { return ctx.Value(connKey{}) }
 // left alone and runs to completion — that is what Serve then waits for.
 func (h *Host) abandonCancellable() {
 	h.mu.Lock()
-	pending := make([]pendingRequest, 0, len(h.requests))
+	pending := make([]*pendingRequest, 0, len(h.requests))
 	for _, entry := range h.requests {
 		pending = append(pending, entry)
 	}
@@ -657,7 +712,13 @@ func (h *Host) abandonCancellable() {
 				continue
 			}
 		}
-		entry.stop()
+		// A DEAD TRANSPORT IS A WITHDRAWAL, on the same terms as a TypeCancel:
+		// the answer has nowhere to go, so it is reported as delivered to
+		// nobody. An answer already being written keeps its fate — the frame
+		// may still have reached the peer before the transport died.
+		if entry.withdraw() {
+			entry.stop()
+		}
 	}
 }
 
@@ -707,7 +768,14 @@ func (h *Host) cancel(payload []byte) {
 			return
 		}
 	}
-	entry.stop()
+	// THE WITHDRAWAL AND THE ANSWER RACE, AND THIS IS WHERE THEY ARE DECIDED
+	// (nocx-ouru5.1.5, review round 2). A cancel that lost to the answer is not
+	// applied at all: the caller may be holding what the frame carries, and
+	// telling the handler it was abandoned would end something it was just
+	// given.
+	if entry.withdraw() {
+		entry.stop()
+	}
 }
 
 // serviceByName finds a service by name through Services(), the same

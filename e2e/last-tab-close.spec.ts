@@ -77,15 +77,16 @@ test.describe('closing every tab leaves a usable tab (nocx-v408b)', () => {
     await promptReady(page)
     const marker = `REPLACED-${Date.now().toString(36)}`
     await clickIntoEditor(page)
-    // The tab title moves only when the SHELL ran the command (OSC 0), so the
-    // pair below separates "the keys reached an editor" from "there is a shell
-    // behind it that executed them and printed the answer".
-    await page.keyboard.type(`printf '\\033]0;${marker}\\007'; echo ${marker}`)
+    // THE KEYS REACHED A SHELL, NOT MERELY AN EDITOR, and two rows say so: the
+    // command's own block, and the marker as OUTPUT in the grid. The tab's
+    // title used to be the third witness here (`printf '\033]0;…'`), and it
+    // stopped being one when nocx-ouru5.1.1 made a title a PROGRAM sets end
+    // with that program's run — a title that is gone by the time this reads it.
+    await page.keyboard.type(`echo ${marker}`)
     await page.keyboard.press('Enter')
     await expect(page.locator(COMMAND_BLOCK).filter({ hasText: marker })).toHaveCount(1, {
       timeout: 15_000,
     })
-    await expect(page.locator(TITLE).first()).toHaveText(marker, { timeout: 15_000 })
     await expect(
       page
         .locator('.pane.active [role="grid"][aria-label="Terminal output"]')
@@ -118,12 +119,11 @@ test.describe('closing every tab leaves a usable tab (nocx-v408b)', () => {
 
     const marker = `SURVIVOR-${Date.now().toString(36)}`
     await clickIntoEditor(page)
-    await page.keyboard.type(`printf '\\033]0;${marker}\\007'; echo ${marker}`)
+    await page.keyboard.type(`echo ${marker}`)
     await page.keyboard.press('Enter')
     await expect(page.locator(COMMAND_BLOCK).filter({ hasText: marker })).toHaveCount(1, {
       timeout: 15_000,
     })
-    await expect(page.locator(TITLE).first()).toHaveText(marker, { timeout: 15_000 })
     await expect(
       page
         .locator('.pane.active [role="grid"][aria-label="Terminal output"]')

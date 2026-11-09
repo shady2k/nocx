@@ -620,7 +620,7 @@
 .live-history {
   display: none;
   flex: none;
-  font-family: var(--font-family-mono);
+  font-family: var(--font-family-terminal);
 }
 
 .scrollback-inner.inner-unstructured > .live-history:not([hidden]) {
@@ -848,7 +848,7 @@
      the running region and the frozen body it becomes must occupy the same
      height, or the pane moves at the moment one replaces the other. */
   padding: var(--cmd-output-pad-top) 0 var(--cmd-output-pad-bottom);
-  font-family: var(--font-family-mono);
+  font-family: var(--font-family-terminal);
   font-size: var(--font-size-terminal);
   line-height: 1.2;
   color: var(--color-text);
@@ -1033,7 +1033,7 @@
    selection gesture reads, so the two cannot disagree. */
 .term-grid {
   position: relative;
-  font-family: var(--font-family-mono);
+  font-family: var(--font-family-terminal);
   cursor: text;
 }
 
@@ -1441,7 +1441,7 @@
   visibility: hidden;
   pointer-events: none;
   white-space: pre;
-  font-family: var(--font-family-mono);
+  font-family: var(--font-family-terminal);
   font-size: var(--font-size-terminal);
   line-height: 1.2;
 }

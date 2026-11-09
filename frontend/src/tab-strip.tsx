@@ -16,6 +16,7 @@ import type { WorkspaceMenuRow } from './workspace-menu'
 import {
   ChevronDownIcon,
   CloseIcon,
+  CopyIcon,
   KeyIcon,
   LayersIcon,
   PencilIcon,
@@ -83,6 +84,15 @@ export interface PaneView {
   /** When true, the tab offers a save action (alias adoption). */
   readonly adoptable?: boolean
   readonly onAdopt?: (() => void) | null
+  /**
+   * When true, this row's menu offers Duplicate (nocx-ouru5.1.4) — because it
+   * stands for a pane the chain holds, which is the only kind of row there is
+   * something to copy. A surface the window draws without storing it
+   * (Settings, a file viewer) has no directory, no connection and no row to
+   * seat a copy beside, so its menu carries no such row: an action that can
+   * only decline must not look like one that can do something.
+   */
+  readonly duplicable?: boolean
   /** The environment degraded or became uncertain (nocx-4t37.2): tab
    *  chrome carries at most this warning mark, never a permanent badge. */
   readonly warning?: boolean
@@ -121,6 +131,7 @@ interface PaneDisplayRecord {
   subtitle: string
   preview: string
   adoptable: boolean
+  duplicable: boolean
   warning: boolean
   warningLabel: string
   hasActivity: boolean
@@ -140,6 +151,7 @@ function paneDisplayRecord(tab: PaneView): PaneDisplayRecord {
     subtitle: tab.subtitle,
     preview: tab.preview,
     adoptable: tab.adoptable === true,
+    duplicable: tab.duplicable === true,
     warning: tab.warning === true,
     warningLabel: tab.warningLabel ?? '',
     hasActivity: tab.hasActivity,
@@ -294,6 +306,16 @@ export interface TabStrip {
   /** null clears the colour, which is a real operation and not a no-op. */
   onRecolour: ((paneId: number, colour: string | null) => void) | null
   onPin: ((paneId: number, pinned: boolean) => void) | null
+  /**
+   * DUPLICATE was chosen for this row (nocx-ouru5.1.4): open a NEW tab beside
+   * it, in the same place — the same directory, or the same connection for an
+   * ssh tab (a new session, never a mirror of the old one's screen).
+   *
+   * The strip raises the intent and copies nothing: what a copy of a pane IS
+   * belongs to the one model that holds the panes, and a strip that built one
+   * itself would be building chrome for a row the backend had not stored.
+   */
+  onDuplicate: ((paneId: number) => void) | null
   onQuickConnect: (() => void) | null
   onInsertSecret: (() => void) | null
   /** The snippets action was pressed. Shaped exactly like onQuickConnect
@@ -351,6 +373,7 @@ abstract class TabStripBase implements TabStrip {
   onRename: ((paneId: number) => void) | null = null
   onRecolour: ((paneId: number, colour: string | null) => void) | null = null
   onPin: ((paneId: number, pinned: boolean) => void) | null = null
+  onDuplicate: ((paneId: number) => void) | null = null
   onQuickConnect: (() => void) | null = null
   onInsertSecret: (() => void) | null = null
   onSnippets: (() => void) | null = null
@@ -630,6 +653,7 @@ abstract class TabStripBase implements TabStrip {
        */
       const menuItems = (paneId: number) => {
         const pinned = display.records[paneId]?.pinned === true
+        const duplicable = display.records[paneId]?.duplicable === true
         return [
           {
             id: 'rename',
@@ -643,6 +667,22 @@ abstract class TabStripBase implements TabStrip {
             icon: PinIcon,
             onSelect: () => this.onPin?.(paneId, !pinned),
           },
+          // DUPLICATE SITS AFTER THE DECORATION AND BEFORE THE CLOSE, and in
+          // this list rather than in a menu of its own: this function is the
+          // ONE owner of what a tab's menu offers, which is what keeps the row
+          // from appearing in one of the two menus and not the other, or
+          // meaning two things. It is drawn only for a row the chain holds —
+          // an ungrouped surface (Settings, a viewer) has nothing to copy.
+          ...(duplicable
+            ? [
+                {
+                  id: 'duplicate',
+                  label: t('tabs.duplicate', 'Duplicate'),
+                  icon: CopyIcon,
+                  onSelect: () => this.onDuplicate?.(paneId),
+                },
+              ]
+            : []),
           {
             id: 'close',
             label: 'Close',

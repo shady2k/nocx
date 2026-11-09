@@ -116,18 +116,31 @@ describe('CommandEditor', () => {
     }
   })
 
-  it('Enter hides+clears before submit (atomic handoff)', () => {
+  // ADR-0004 §2 step 1 hid the box before sending anything; ADR-tqjt5rkk keeps
+  // the OWNERSHIP half of that step and leaves the PAINT to the host's submit
+  // grace, so a command that returns in a few milliseconds no longer flashes
+  // the composer off the screen and back.
+  it('Enter empties the draft and gives the keyboard up before submit; the box stays drawn (ADR-tqjt5rkk)', () => {
     const { ed, view, submit, order } = setup()
     ed.show()
     ed.insertText('echo hi')
     submit.mockImplementation((d: string) => order.push(`visible@submit:${ed.isVisible}|${d}`))
     enter(view)
     expect(submit).toHaveBeenCalledWith('echo hi')
-    expect(order[0]).toBe('visible@submit:false|echo hi') // hidden BEFORE submit
+    expect(order[0]).toBe('visible@submit:false|echo hi') // the keys are gone BEFORE submit
+    // The box is where it was. It is not an input surface any more — inert is
+    // what a click and the caret find — and nothing the person types from here
+    // reaches it: the host has already taken the keyboard to the grid.
+    expect(ed.root.style.display).toBe('')
+    expect(ed.root.hasAttribute('inert')).toBe(true)
+    expect(ed.root.contains(document.activeElement)).toBe(false)
 
     // The clear half of the handoff, observed publicly: the next prompt shows
     // an empty editor — had 'echo hi' survived, this submit would carry it.
+    // Showing it again is what the host does when the shell comes back inside
+    // the grace, and it hands the keyboard back with the box.
     ed.show()
+    expect(ed.root.hasAttribute('inert')).toBe(false)
     ed.insertText('fresh')
     enter(view)
     expect(submit).toHaveBeenLastCalledWith('fresh')
@@ -687,7 +700,7 @@ describe('CommandEditor', () => {
     expect(submit).toHaveBeenCalledWith('a\nb')
   })
 
-  it('a throwing submit leaves the editor hidden and cleared (state consistent)', () => {
+  it('a throwing submit leaves the editor cleared and its keys given up (state consistent)', () => {
     const { ed, view } = setup({
       submit: (d: string) => {
         throw new Error(`submit exploded on ${d}`)
@@ -700,8 +713,9 @@ describe('CommandEditor', () => {
     // process 'uncaughtException' (failing the run) unless a user error
     // listener exists. So the throw cannot be observed with toThrow here; in a
     // real browser it surfaces as an uncaught error AFTER the handoff. What
-    // matters is the editor's state: the handoff (clear + hide) already
-    // completed before the throw.
+    // matters is the editor's state: the handoff (clear + release the keys)
+    // already completed before the throw, and the host's grace still holds the
+    // box on its own clock, so nothing is left half-owned.
     const swallowWindowError = () => {}
     window.addEventListener('error', swallowWindowError)
     try {

@@ -357,10 +357,17 @@ function assertMotion(records: Awaited<ReturnType<typeof finish>>) {
 }
 
 test.describe('the submit hand-off (nocx-1ebrs.40)', () => {
-  test('a quick command dips the panel and turns it around; the geometry never animates', async ({
+  test('a command that comes back inside the departure turns it around; the geometry never animates', async ({
     page,
   }, testInfo) => {
-    await begin(page, 'true', true)
+    // A command that outlives the grace is what departs at all now: a quick
+    // one never leaves the screen, so there is no ghost to cancel
+    // (composer-submit-grace.spec.ts states that side, ADR-tqjt5rkk). What
+    // this asserts is unchanged — the departure is one fade, the return
+    // cancels it rather than painting over it, and the composer's box never
+    // animates its height — and `interruptDeparture` builds the quick-return
+    // overlap even when the shell is slower than the fade.
+    await begin(page, 'sleep 0.2', true)
     const records = await finish(page, testInfo)
     assertMotion(records)
     expect(

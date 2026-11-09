@@ -230,7 +230,8 @@ describe('frozen output lays out on the terminal cell metric (nocx-yy9g)', () =>
   })
 
   it('declares the hidden probe the publisher measures with the block\u2019s own font', () => {
-    // The probe must carry the block's font chain (--font-family-mono,
+    // The probe must carry the block's font chain (--font-family-terminal, the
+    // mono stack plus the private-use fallback since nocx-15b13),
     // --font-size-terminal) EXPLICITLY, or the measured natural advance
     // would be for a different font than the one the block actually renders.
     // It does not inherit it: the scrollback container has no font-family at
@@ -239,7 +240,7 @@ describe('frozen output lays out on the terminal cell metric (nocx-yy9g)', () =>
     // (nocx-ec18).
     const probe = RULES.find((r) => r.selectors.includes('.cell-metric-probe'))
     expect(probe).toBeDefined()
-    expect(probe!.body).toMatch(/font-family\s*:\s*var\(--font-family-mono\)/)
+    expect(probe!.body).toMatch(/font-family\s*:\s*var\(--font-family-terminal\)/)
     expect(probe!.body).toMatch(/visibility\s*:\s*hidden/)
   })
 })

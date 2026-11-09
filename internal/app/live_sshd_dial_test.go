@@ -155,7 +155,7 @@ func (fx *liveSshd) authCount() int {
 // same composition root types app.go wires — and starts collecting the
 // terminal output. An optional installer exercises the saved-profile
 // publication path inside RealClient.Connect.
-func (fx *liveSshd) connect(t *testing.T, kernel *recordingKernel, shell ssh.ShellKind, installers ...ssh.RemoteInstaller) (ssh.Channel, *outputBuffer) {
+func (fx *liveSshd) connect(t *testing.T, kernel *recordingKernel, shell ssh.ShellKind, installers ...ssh.RemoteInstaller) (ssh.Channel, *sessionOutput) {
 	t.Helper()
 	logger := fx.log()
 	client, err := ssh.NewReal(logger, ssh.WithKnownHostsFile(fx.knownHostsPath(t)))
@@ -204,8 +204,14 @@ func (fx *liveSshd) connect(t *testing.T, kernel *recordingKernel, shell ssh.She
 		t.Fatalf("connect to %s: %v", fx.addr, err)
 	}
 	t.Cleanup(func() { _ = ch.Close() })
-	out := &outputBuffer{}
-	go func() { _, _ = io.Copy(out, ch) }()
+	out := newSessionOutput()
+	go func() {
+		_, _ = io.Copy(out, ch)
+		// The far side's terminal is over. Recorded before anything the
+		// fixture's cleanup does, so a stand can wait on the one fact its
+		// session-end wait is about (see endTheSession).
+		out.end()
+	}()
 	return ch, out
 }
 
@@ -232,7 +238,7 @@ func (fx *liveSshd) laneFailureContext(kernel *recordingKernel) string {
 // names the suspect (nocx-1ebrs.66.1.18).
 const terminalTailBytes = 1200
 
-func terminalTail(out *outputBuffer, limit int) string {
+func terminalTail(out *sessionOutput, limit int) string {
 	all := out.String()
 	tail := all
 	if len(tail) > limit {

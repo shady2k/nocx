@@ -296,9 +296,18 @@ import (
 // because the published scripts are stripped at embed time (scripts.go). The
 // call count is unchanged because the same files are created and written as
 // before.
+//
+// The snapshot job's terminal handback measured 93216 bytes (+50), still 63
+// calls (nocx-evj4b.1.5): both script tiers' background snapshot job now gives
+// the terminal up before it runs — the bash tier's subshell takes `</dev/null`
+// and a subshell-level `2>/dev/null` (22 bytes), the zsh tier's function takes
+// `</dev/null >/dev/null 2>&1` (28 bytes). A job that inherits the pty keeps
+// the session's pty alive after the shell exits, and sshd ends a pty session by
+// draining that pty. The call count is unchanged: no file is added, removed or
+// written a second time.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 93166
+	measuredMaxPublishBytes = 93216
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

@@ -63,6 +63,11 @@ interface HeaderReading {
 }
 
 interface RowReading {
+  /** The row's identity: its artifact's block id and logical line. Two different
+   *  rows can carry the same text (the command echo is stored at the column
+   *  count it was drawn at, and again after a reflow), so a text key compares
+   *  the wrong rows; the artifact's own identity does not (nocx-4y82c.1.3). */
+  readonly id: string
   readonly text: string
   /** The row's top edge in the scroller's CONTENT space. */
   readonly y: number
@@ -118,10 +123,16 @@ async function read(page: Page): Promise<Reading> {
           top: round(br.top - sr.top + scroller.scrollTop),
           height: round(br.height),
           rows: [...block.querySelectorAll<HTMLElement>('.cmd-output .term-grid-row')].map(
-            (row) => ({
-              text: (row.textContent ?? '').trimEnd(),
-              y: round(row.getBoundingClientRect().top - sr.top + scroller.scrollTop),
-            }),
+            (row) => {
+              const text = (row.textContent ?? '').trimEnd()
+              const blockId = row.dataset.blockId ?? ''
+              const logical = row.dataset.logicalLine ?? ''
+              return {
+                id: blockId || logical ? `${blockId}#${logical}` : `text:${text}`,
+                text,
+                y: round(row.getBoundingClientRect().top - sr.top + scroller.scrollTop),
+              }
+            },
           ),
         }
       },
@@ -196,18 +207,16 @@ async function outputReady(page: Page, command: string, marker: string): Promise
     .toBe(true)
 }
 
-/** Wait until the frozen body stops changing: the same row count, first and
- *  last row text and body height on two consecutive polls. The stored rows can
- *  be repainted after the block freezes -- a later artifact read replaces the
- *  first -- and re-wrapping the command echo moves every row below it. A
- *  measurement taken across that repaint is not a row moving (nocx-4y82c.1.3):
- *  on the CI runner the repaint landed between the two reads. */
-async function bodySettled(page: Page, command: string): Promise<void> {
-  let previous: string | null = null
+/** Wait until the block's body is painted from its FINAL, SEALED artifact.
+ *  The seal is the artifact's own state (`data-rows-sealed`, written where the
+ *  rows are painted): an open artifact may still grow and may be re-read, and a
+ *  measurement taken across that is not a row moving. A sealed one holds every
+ *  row the command will ever have (nocx-4y82c.1.3). */
+async function sealedBody(page: Page, command: string): Promise<void> {
   await expect
     .poll(
-      async () => {
-        const signature = await page.evaluate((text) => {
+      async () =>
+        page.evaluate((text) => {
           const block = [
             ...document.querySelectorAll<HTMLElement>(
               '.pane.active .scrollback-inner > .cmd-block',
@@ -216,20 +225,11 @@ async function bodySettled(page: Page, command: string): Promise<void> {
             (candidate) =>
               (candidate.querySelector('.cmd-header-text')?.textContent ?? '').trim() === text,
           )
-          const body = block?.querySelector('.cmd-output')
-          if (!body) return 'absent'
-          const rows = [...body.querySelectorAll<HTMLElement>('.term-grid-row')]
-          const first = (rows[0]?.textContent ?? '').trim().slice(0, 24)
-          const last = (rows[rows.length - 1]?.textContent ?? '').trim().slice(0, 24)
-          return `${rows.length}:${first}:${last}:${Math.round(body.getBoundingClientRect().height)}`
-        }, command)
-        const stable = signature === previous
-        previous = signature
-        return stable ? signature : null
-      },
-      { timeout: 10_000 },
+          return block?.dataset.rowsSealed ?? 'absent'
+        }, command),
+      { timeout: 15_000 },
     )
-    .not.toBeNull()
+    .toBe('true')
 }
 
 /** The one block whose header shows `command`. */
@@ -256,8 +256,8 @@ test.describe('a tall block keeps its own header at the top of the pane', () => 
     await runCommand(page, SHORT, 'SHORT-BLOCK')
     await runCommand(page, LONG_A, 'A-END')
     await runCommand(page, LONG_B, 'B-END')
-    await bodySettled(page, LONG_A)
-    await bodySettled(page, LONG_B)
+    await sealedBody(page, LONG_A)
+    await sealedBody(page, LONG_B)
 
     const settled = await read(page)
     const a = blockOf(settled, LONG_A)
@@ -306,16 +306,15 @@ test.describe('a tall block keeps its own header at the top of the pane', () => 
     // holds its place in the scroller's content, and the block's own top and
     // height are unchanged — the header is overlaying the output, not taking
     // a row of it.
-    const outputRow = (row: RowReading): boolean => /^A-ROW-\d+$/.test(row.text)
-    const unpinnedRows = new Map(unpinnedA.rows.filter(outputRow).map((row) => [row.text, row.y]))
-    const shared = pinnedA.rows.filter((row) => outputRow(row) && unpinnedRows.has(row.text))
+    const unpinnedRows = new Map(unpinnedA.rows.map((row) => [row.id, row.y]))
+    const shared = pinnedA.rows.filter((row) => unpinnedRows.has(row.id))
     expect(shared.length, 'the shared output rows are still the rows being read').toBeGreaterThan(
       20,
     )
     for (const row of shared) {
       expect(
-        Math.abs(row.y - unpinnedRows.get(row.text)!),
-        `row ${JSON.stringify(row.text)} kept its place in the content (unpinned ${unpinnedRows.get(row.text)}, pinned ${row.y})`,
+        Math.abs(row.y - unpinnedRows.get(row.id)!),
+        `row ${JSON.stringify(row.text)} (${row.id}) kept its place in the content (unpinned ${unpinnedRows.get(row.id)}, pinned ${row.y})`,
       ).toBeLessThanOrEqual(0.5)
     }
     expect(pinnedA.top, "the block's own offset is unchanged").toBeCloseTo(unpinnedA.top, 1)
@@ -437,7 +436,7 @@ test.describe('a tall block keeps its own header at the top of the pane', () => 
     await page.keyboard.press('Enter')
     await promptReady(page)
     await outputReady(page, command, 'unit-90')
-    await bodySettled(page, command)
+    await sealedBody(page, command)
 
     const rest = await read(page)
     const block = blockOf(rest, command)
@@ -471,18 +470,15 @@ test.describe('a tall block keeps its own header at the top of the pane', () => 
     expect(scrolled.pinned, 'no header is pinned over the view').toHaveLength(0)
 
     // NO ROW MOVED (ADR-2yzsq8mk): the decision is a position change only, so
-    // every shared row holds its place in the scroller's content.
-    // THE COMMAND'S OWN LINES, not the wrapped echo of the command: the echo
-    // is the command text re-rendered by the block, and a repaint of it is not
-    // an output row moving.
-    const outputRow = (row: RowReading): boolean => /^unit-\d\d$/.test(row.text)
-    const restRows = new Map(block.rows.filter(outputRow).map((row) => [row.text, row.y]))
-    const shared = scrolledBlock.rows.filter((row) => outputRow(row) && restRows.has(row.text))
+    // every shared row holds its place in the scroller's content -- and the
+    // shared set is the SAME artifact rows, matched by identity.
+    const restRows = new Map(block.rows.map((row) => [row.id, row.y]))
+    const shared = scrolledBlock.rows.filter((row) => restRows.has(row.id))
     expect(shared.length, 'the output rows are still the rows being read').toBeGreaterThan(20)
     for (const row of shared) {
       expect(
-        Math.abs(row.y - restRows.get(row.text)!),
-        `row ${JSON.stringify(row.text)} kept its place in the content`,
+        Math.abs(row.y - restRows.get(row.id)!),
+        `row ${JSON.stringify(row.text)} (${row.id}) kept its place in the content`,
       ).toBeLessThanOrEqual(0.5)
     }
 
@@ -574,7 +570,7 @@ test.describe('a tall block keeps its own header at the top of the pane', () => 
     await page.keyboard.press('Enter')
     await promptReady(page)
     await outputReady(page, command, 'word-50')
-    await bodySettled(page, command)
+    await sealedBody(page, command)
 
     const rest = await read(page)
     const block = blockOf(rest, command)
@@ -642,20 +638,15 @@ test.describe('a tall block keeps its own header at the top of the pane', () => 
     expect(after.pinned, 'no header is pinned over the output').toHaveLength(0)
     expect(after.scrollTop, 'nothing scrolled').toBeCloseTo(before.scrollTop, 1)
 
-    // AND NO ROW MOVED: the decision is a position change only.
-    const beforeRows = new Map(
-      blockOf(before, command)
-        .rows.filter((row) => /^word-\d\d$/.test(row.text))
-        .map((row) => [row.text, row.y]),
-    )
-    const shared = afterBlock.rows.filter(
-      (row) => /^word-\d\d$/.test(row.text) && beforeRows.has(row.text),
-    )
+    // AND NO ROW MOVED: the decision is a position change only. Keyed by row
+    // identity, not by text -- a block can hold two rows with the same text.
+    const beforeRows = new Map(blockOf(before, command).rows.map((row) => [row.id, row.y]))
+    const shared = afterBlock.rows.filter((row) => beforeRows.has(row.id))
     expect(shared.length).toBeGreaterThan(20)
     for (const row of shared) {
       expect(
-        Math.abs(row.y - beforeRows.get(row.text)!),
-        `row ${JSON.stringify(row.text)} kept its place in the content`,
+        Math.abs(row.y - beforeRows.get(row.id)!),
+        `row ${JSON.stringify(row.text)} (${row.id}) kept its place in the content`,
       ).toBeLessThanOrEqual(0.5)
     }
   })

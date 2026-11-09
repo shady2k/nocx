@@ -349,7 +349,24 @@ test.describe('the body of a running block that has outgrown its screen', () => 
       // that: a header outside the block (a second surface).
       const headerIsFirst = block.firstElementChild === header
       const headerInBox = block.contains(header)
-      const structureWrong = !headerIsFirst || !headerInBox
+      // THE HEADER'S FLOW SLOT, WITH STICKY OUT OF THE WAY. Its painted top is
+      // the pane's top while the block's box has scrolled up, and engines
+      // report that shifted position in offsetTop, so the static slot is
+      // measured directly: take sticky off, read, put it back -- synchronously,
+      // before any paint. The slot must be the block's own content-box top: a
+      // detached header or a second box fails this even when the paint looks
+      // right.
+      const declared = header.style.position
+      header.style.position = 'relative'
+      const slotTop = header.getBoundingClientRect().top
+      header.style.position = declared
+      const blockStyle = getComputedStyle(block)
+      const contentTop =
+        box.top +
+        parseFloat(blockStyle.borderTopWidth || '0') +
+        parseFloat(blockStyle.paddingTop || '0')
+      const slotDelta = slotTop - contentTop
+      const structureWrong = !headerIsFirst || !headerInBox || Math.abs(slotDelta) >= 0.5
       const headerGeometry = !structureWrong
         ? null
         : (() => {
@@ -424,6 +441,9 @@ test.describe('the body of a running block that has outgrown its screen', () => 
         headerTop: +headerRect.top.toFixed(2),
         headerIsFirst,
         headerInBox,
+        slotTop: +slotTop.toFixed(2),
+        contentTop: +contentTop.toFixed(2),
+        slotDelta: +slotDelta.toFixed(2),
         headerGeometry,
         boxBottom: +box.bottom.toFixed(2),
         lastRow: last ? printed(last) : null,
@@ -444,6 +464,10 @@ test.describe('the body of a running block that has outgrown its screen', () => 
     // scrolled up, which is the pin, not a second surface.
     expect(where.headerIsFirst, said).toBe(true)
     expect(where.headerInBox, said).toBe(true)
+    expect(
+      Math.abs(where.slotDelta),
+      `${said} -- the header's flow slot is the block's own content top`,
+    ).toBeLessThan(0.5)
     expect(where.lastRowBottom, said).not.toBeNull()
     expect(where.boxBottom, said).toBeGreaterThanOrEqual(where.lastRowBottom! - 0.5)
     // Hovering a LIVE row is hovering the block, which is the same fact said

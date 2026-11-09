@@ -6218,7 +6218,13 @@ export class TerminalContent extends BasePaneContent {
     // re-pinned to a height the frame before had not had; on a burst of ten
     // rows that was a step of 170px with the newest rows clipped until it
     // landed.
-    this.scrollback?.setLiveHeight(this.liveContentHeight(this._presentedSnapshot(pending)))
+    this.scrollback?.setLiveHeight(
+      this.liveContentHeight(this._presentedSnapshot(pending)),
+      // THE ONE DOOR THAT PAINTED THE ROWS. Every other sizing pass re-applies
+      // this height, so a box can never take a measurement the grid has not
+      // drawn (nocx-4y82c.1.1).
+      true,
+    )
     // AND THE MARGIN RETURNS WHEN THE PANE CAN HOLD THE ROWS WITH IT
     // (nocx-djx1u). A borrowed grid is given the pane's own box because the
     // four-side margin is two rows shorter than the box the program had; once

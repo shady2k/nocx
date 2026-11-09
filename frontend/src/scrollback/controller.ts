@@ -454,9 +454,26 @@ export class ScrollbackController {
     this.setLiveHeight(this._lastLiveHeightPx ?? this._liveContentHeight())
   }
 
-  setLiveHeight(px: number | null): void {
+  /**
+   * Size the live box, from the height of the frame its rows were painted
+   * from.
+   *
+   * `painted` says the caller HAS just painted those rows and is handing in
+   * that frame's height; it is the only caller allowed to move the box. Every
+   * other door — the per-paint resize pass, a box change, a mode entry, a
+   * stored-rows delivery — re-applies the height the last paint recorded,
+   * because a box sized from a fresher model is a box the rows on screen do
+   * not agree with. With the block's bottom pinned, a row's place is
+   * `blockBottom - (px - row·cell)`: a box that takes two rows the grid has
+   * not painted moves every visible row down two rows while the box and the
+   * grid's translation stay exactly where they were (nocx-4y82c.1.1, the
+   * signature 9e7e2110a named for `settleAtTail`).
+   */
+  setLiveHeight(px: number | null, painted = false): void {
+    if (painted) this._lastLiveHeightPx = px
+    const height = painted ? px : (this._lastLiveHeightPx ?? px)
     // The two modes where the terminal owns the pane are re-measured from the
-    // scroller, and `px` — the running region's measured content — is not
+    // scroller, and `height` — the running region's measured content — is not
     // consulted there: the box is the pane, whatever the grid holds. This is
     // the seam terminal-content's scheduleLiveResize already calls on every
     // re-measure, which is why the fill belongs here rather than in a method
@@ -468,7 +485,6 @@ export class ScrollbackController {
     }
     if (this._mode !== 'running') return
     this._sizeRunningSeat()
-    this._lastLiveHeightPx = px
     // The backend anchor and its accepted frame decide the echo shift. Apply
     // it before height guards so a frame update can release the shift even
     // when the measured live box does not change.
@@ -480,9 +496,9 @@ export class ScrollbackController {
     // border-box-sized live region would clip it before the editor's next
     // layout pass. Once output retires the stand-in, zero may size the
     // region to the body's padding again.
-    if (px === null) return
+    if (height === null) return
     if (
-      px === 0 &&
+      height === 0 &&
       this.terminalLiveContainer.querySelector(':scope > .cmd-answer-typing') !== null
     ) {
       return
@@ -496,7 +512,7 @@ export class ScrollbackController {
     // so the flow box must not reserve it. The padding: the block body has
     // it, this region is that body while the command runs, and the cap is a
     // ceiling on the whole box rather than on the rows inside it.
-    const content = Math.min(Math.max(0, px - this._echoShiftPx()), Math.max(0, max - pad))
+    const content = Math.min(Math.max(0, height - this._echoShiftPx()), Math.max(0, max - pad))
     // ONE ARITHMETIC FOR THE BOX AND THE GRID (owner, 2026-11-08: "a row never
     // moves down by a line when the live box grows by one"). The grid is
     // translated by exactly what the box does NOT show — `px - content` —
@@ -507,7 +523,7 @@ export class ScrollbackController {
     // the box grew by only three, and every visible row moved DOWN a line.
     // Derived this way a row's place is `bottom + row·cell - px`: a function
     // of the painted content alone, so releasing the shift cannot move it.
-    this._applyShift(px - content)
+    this._applyShift(height - content)
     const box = `${content + pad}px`
     // Keep the block's bottom at the bottom of the view — but only on the
     // frames where the box actually CHANGED SIZE. This runs on every chunk of

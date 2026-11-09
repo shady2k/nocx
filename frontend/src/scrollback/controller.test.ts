@@ -977,7 +977,7 @@ describe('a delivery sizes the box from what was painted (owner, 2026-11-08)', (
     const { controller } = runningController(content)
     try {
       // The paint that put three rows on screen.
-      controller.setLiveHeight(content.px)
+      controller.setLiveHeight(content.px, true)
       expect(controller.terminalLiveContainer.style.height).toBe('48px')
 
       // The delivery: the model has moved on (two rows of text, say), but no
@@ -987,8 +987,136 @@ describe('a delivery sizes the box from what was painted (owner, 2026-11-08)', (
       expect(controller.terminalLiveContainer.style.height).toBe('48px')
 
       // The paint that does show them takes the measurement.
-      controller.setLiveHeight(content.px)
+      controller.setLiveHeight(content.px, true)
       expect(controller.terminalLiveContainer.style.height).toBe('32px')
+    } finally {
+      controller.blockManager.clearAll()
+      controller.scrollbackArea.remove()
+    }
+  })
+
+  it('a sizing pass before the paint cannot become the height a delivery trusts', () => {
+    // THE BEAD'S FRAME (nocx-4y82c.1.1): scrollTop 156 -> 173, the block
+    // -155+831 -> -172+848, the live box 629 both frames and the grid's
+    // translateY(-34px) both frames — and a visible row 34px DOWN. Nothing
+    // about the live region moved, so the box was sized from a frame the grid
+    // had not painted: the per-paint resize pass (`scheduleLiveResize`) wrote
+    // the box AND the remembered painted height from the model, and the
+    // stored-rows delivery that followed sized from that number. The grid
+    // showed the older frame, so every visible row moved down by the two rows
+    // the model was ahead.
+    const content = { px: 3 * 16 }
+    const { controller } = runningController(content)
+    try {
+      // The paint that put three rows on screen.
+      controller.setLiveHeight(content.px, true)
+      expect(controller.terminalLiveContainer.style.height).toBe('48px')
+
+      // The per-paint resize pass: the model has a frame two rows on, and no
+      // paint has drawn it.
+      content.px = 2 * 16
+      controller.setLiveHeight(content.px)
+      // A pass that did not paint re-applies the painted height.
+      expect(controller.terminalLiveContainer.style.height).toBe('48px')
+
+      // The delivery that lands next sizes from the same painted height, not
+      // from the number the pass left behind.
+      controller.settleAround(() => {})
+      expect(controller.terminalLiveContainer.style.height).toBe('48px')
+
+      // The paint that shows the newer frame is the one that moves the box.
+      controller.setLiveHeight(content.px, true)
+      expect(controller.terminalLiveContainer.style.height).toBe('32px')
+    } finally {
+      controller.blockManager.clearAll()
+      controller.scrollbackArea.remove()
+    }
+  })
+
+  it('a box change keeps the painted height, not the model at that instant', () => {
+    // The scroller's own box watcher is the same door: it fires between a
+    // frame's acceptance and its paint (the composer leaving, a pane resize),
+    // and it used to size the live box from the model it read at that moment.
+    class BoxObserver {
+      static latest: BoxObserver | null = null
+      readonly disconnect = vi.fn()
+      private readonly cb: ResizeObserverCallback
+      constructor(cb: ResizeObserverCallback) {
+        this.cb = cb
+        BoxObserver.latest = this
+      }
+      observe(): void {}
+      unobserve(): void {}
+      deliver(): void {
+        this.cb([], {} as ResizeObserver)
+      }
+    }
+    vi.stubGlobal('ResizeObserver', BoxObserver)
+    const content = { px: 3 * 16 }
+    try {
+      const pane = document.createElement('div')
+      const controller = new ScrollbackController({
+        pane,
+        liveContentHeight: () => content.px,
+        cellMetrics: () => ({ cellWidth: 8, cellHeight: 16 }),
+        snapshotStore: new CommandSnapshotStore(),
+      })
+      document.body.appendChild(controller.scrollbackArea)
+      Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
+        value: 360,
+        configurable: true,
+      })
+      Object.defineProperty(controller.scrollbackArea, 'scrollHeight', {
+        value: 360,
+        configurable: true,
+      })
+      controller.scrollbackArea.scrollTo = vi.fn()
+      controller.beginBlock('ls', '~', 0)
+      try {
+        controller.setLiveHeight(content.px, true)
+        expect(controller.terminalLiveContainer.style.height).toBe('48px')
+        content.px = 2 * 16
+        BoxObserver.latest!.deliver()
+        expect(controller.terminalLiveContainer.style.height).toBe('48px')
+      } finally {
+        controller.blockManager.clearAll()
+        controller.scrollbackArea.remove()
+      }
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('entering the running layout sizes from the frame the grid already shows', () => {
+    // The mode entry is the third door of the same kind. The grid is the
+    // painter's last frame — painted while the pane was idle — and the model
+    // may already hold a newer one; the box must take the painted height.
+    const content = { px: 2 * 16 }
+    const pane = document.createElement('div')
+    const controller = new ScrollbackController({
+      pane,
+      liveContentHeight: () => content.px,
+      cellMetrics: () => ({ cellWidth: 8, cellHeight: 16 }),
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    document.body.appendChild(controller.scrollbackArea)
+    Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
+      value: 360,
+      configurable: true,
+    })
+    Object.defineProperty(controller.scrollbackArea, 'scrollHeight', {
+      value: 360,
+      configurable: true,
+    })
+    controller.scrollbackArea.scrollTo = vi.fn()
+    try {
+      // The paint that put three rows on screen, at the prompt.
+      controller.setLiveHeight(3 * 16, true)
+      // A newer frame the painter has not drawn.
+      content.px = 2 * 16
+      controller.beginBlock('ls', '~', 0)
+      expect(controller.mode).toBe('running')
+      expect(controller.terminalLiveContainer.style.height).toBe('48px')
     } finally {
       controller.blockManager.clearAll()
       controller.scrollbackArea.remove()

@@ -5199,6 +5199,30 @@ describe('backend-owned block rows', () => {
     expect(blockOutputText(manager.runningBlock!.el)).toBe('c\nd')
   })
 
+  it('a response parked before the binding keeps its hold (nocx-4y82c.1.1)', () => {
+    // The delivery arrives before the attempt is bound: `blockForAttempt`
+    // finds nothing, so the rows are parked — with the hold the painted frame
+    // gave them. Draining the parking without it painted the whole artifact
+    // over rows the grid still showed, and a quiet command kept the overlap
+    // until its next frame, because binding never widens the hold.
+    const { manager } = newManager()
+    manager.startBlock('printf rows', '/repo', 0)
+    const four = {
+      lines: [
+        { from: 0, row: row('first ') },
+        { from: 1, row: row('second') },
+        { from: 2, row: row('third ') },
+        { from: 3, row: row('fourth') },
+      ],
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+    }
+    manager.applyStoredRows('entry-stream', four, 2)
+    manager.bindAttempt('entry-stream')
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond')
+  })
+
   it("keeps the body's order: its rows above the live region, on every growth (ADR-0091)", () => {
     // `paintStoredRows` replaces `.cmd-output` on each block.grew, so the rows
     // it appends land after the live region unless the seat is restored with

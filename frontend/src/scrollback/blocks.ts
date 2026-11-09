@@ -2167,7 +2167,12 @@ export class BlockManager {
     HTMLElement,
     { rows?: StoredBlockRows; unreadable?: boolean }
   >()
-  private _pendingStoredRows = new Map<string, StoredBlockRows>()
+  /** Rows parked for an entry the binding has not named yet, with the hold
+   *  the delivery carried. The hold is computed from the painted frame at
+   *  delivery time and must survive the parking: draining it without the
+   *  hold paints the whole artifact, and a quiet command never widens it
+   *  (nocx-4y82c.1.1). */
+  private _pendingStoredRows = new Map<string, { rows: StoredBlockRows; upTo?: number | null }>()
   /** The highest row cursor `applyStoredRows` has accepted per entry — the
    *  last stored line's `from` (block.grew.schema.json: absolute row index,
    *  strictly increasing across deliveries, and never lower after a close,
@@ -2697,9 +2702,16 @@ export class BlockManager {
       this._runningBlock.el.dataset.entryId = attemptId
       const pending = this._pendingStoredRows.get(attemptId)
       if (pending) {
-        this._runningBlock.storedRows = pending
         this._pendingStoredRows.delete(attemptId)
-        this.paintStoredRows(this._runningBlock.el, pending)
+        this._runningBlock.storedRows = pending.rows
+        // THE HOLD THE PARKED RESPONSE CARRIED (nocx-4y82c.1.1). It was
+        // computed from the painted frame before the binding existed; dropping
+        // it here drained the whole artifact over rows the grid still showed,
+        // and a quiet command kept the overlap until its next frame.
+        if (pending.upTo === null) this._runningBlock.storedUpTo = undefined
+        else if (pending.upTo !== undefined) this._runningBlock.storedUpTo = pending.upTo
+        const painted = this._paintedLines(this._runningBlock)
+        if (painted !== null) this.paintStoredRows(this._runningBlock.el, painted)
       }
     }
   }
@@ -2956,7 +2968,7 @@ export class BlockManager {
         const oldest = this._pendingStoredRows.keys().next().value
         if (oldest !== undefined) this._pendingStoredRows.delete(oldest)
       }
-      this._pendingStoredRows.set(entryId, rows)
+      this._pendingStoredRows.set(entryId, { rows, upTo })
       return
     }
     rec.storedRows = rows

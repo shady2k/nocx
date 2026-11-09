@@ -5223,6 +5223,49 @@ describe('backend-owned block rows', () => {
     expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond')
   })
 
+  it('places a block from the anchor row, which is already absolute (nocx-4y82c.1.10)', () => {
+    // A session that had scrolled before the command: the backend's
+    // `screenRowAnchorLocked` emits `Row = base + cursorRow`, so `row` is
+    // already absolute in the shared screen coordinate and adding the stream
+    // counter (`fromRow`) again would place the block 80 rows too low.
+    const { manager } = newManager()
+    manager.startBlock('printf rows', '/repo', 0)
+    manager.bindAttempt('entry-stream')
+    manager.setOutputStartAnchor(
+      'entry-stream',
+      {
+        entryId: 'entry-stream',
+        row: 105,
+        fromRow: 80,
+        screenRevision: 5,
+        bufferKind: 'normal',
+        bufferInstance: '1',
+        cols: 80,
+        rows: 24,
+      },
+      0,
+    )
+    const emptyRow = { cells: [], wrap: false }
+    const snapshot = {
+      revision: 10,
+      geometry: { cols: 80, rows: 24, cellWidthPx: 8, cellHeightPx: 17, revision: 10 },
+      state: {
+        bufferKind: 'normal',
+        bufferInstance: '1',
+        baseRow: 100,
+        bracketedPaste: false,
+        mouseTracking: false,
+        pointerShape: null,
+        title: null,
+        cwd: null,
+      },
+      rows: [],
+      rowAt: () => emptyRow,
+    } as unknown as Parameters<typeof manager.acceptOutputStartFrame>[0]
+    manager.acceptOutputStartFrame(snapshot)
+    expect(manager.runningBlock!.outputStart).toBe(105)
+  })
+
   it("keeps the body's order: its rows above the live region, on every growth (ADR-0091)", () => {
     // `paintStoredRows` replaces `.cmd-output` on each block.grew, so the rows
     // it appends land after the live region unless the seat is restored with

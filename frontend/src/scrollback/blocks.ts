@@ -2774,18 +2774,22 @@ export class BlockManager {
       // release the shift through the echo check. A block not yet placed
       // takes the estimate whole: its echo check still guards it.
       if (snapshot.geometry.cols !== anchor.cols && rec.outputAnchorOffset !== undefined) {
-        const index = anchor.fromRow + anchor.row - snapshot.state.baseRow
+        const index = anchor.row - snapshot.state.baseRow
         rec.outputAnchorOffset = Math.max(0, Math.min(index, snapshot.geometry.rows - 1))
         continue
       }
-      // THE ONE COORDINATE (nocx-4y82c.1.10). The first output row is
-      // `fromRow` in the ordered rows stream — the coordinate a stored row's
-      // `from` uses — and `row` is that row's screen position at the mark, so
-      // the absolute row is their sum. Before this, the screen row alone was
-      // taken as absolute, which is only true for a block that opened at the
-      // top of the screen; a session that had scrolled before the command
-      // put the block that many rows too low in the body's hold.
-      rec.outputStart = anchor.fromRow + anchor.row
+      // THE TWO NUMBERS, AND WHAT EACH ONE MEANS (nocx-4y82c.1.10). `row` is
+      // the block's first output row in the SHARED SCREEN coordinate and is
+      // ALREADY ABSOLUTE: the backend's screenRowAnchorLocked emits
+      // `Row = base + cursorRow` (internal/sessionruntime/screen_capture.go),
+      // and a frame's `state.baseRow` is that same coordinate. So the echo
+      // shift — the row's position on the screen now — is `row - baseRow`,
+      // and the hold — the rows the screen has passed since that first output
+      // row — is `baseRow - row`. `fromRow` is the same row in a DIFFERENT
+      // coordinate: the ordered rows stream, the index a stored row's `from`
+      // carries, so it is what the body's slice maps through and it is never
+      // added to `row`.
+      rec.outputStart = anchor.row
       rec.outputScreen = rec.outputAnchorScreen
       const index = rec.outputStart - snapshot.state.baseRow
       if (index <= 0) {

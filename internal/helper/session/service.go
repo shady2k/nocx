@@ -1570,6 +1570,10 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 		rowWake:         make(chan struct{}, 1),
 		rowsDone:        make(chan struct{}),
 		rowBufferBytes:  shape.rowBuffer,
+		// THIS SPAWN OWES AN ANSWER that will name the session, and it is the
+		// first of them: a retry handed the session adds its own before it can
+		// answer (nocx-ouru5.1.9).
+		answers: 1,
 	}
 	hs.scrollback.Store(shape.scrollback)
 	// The book's tokens report themselves under this session's id — minted
@@ -1607,39 +1611,45 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 	return proto.SpawnResult{Entry: hs.entry(s.inspector)}, nil
 }
 
-// releaseUnheardSpawn ends a spawn's session when the answer that carried its id
-// was written to nobody: the caller had withdrawn before the frame went out, so
-// no coordinator ever learned the session exists (nocx-ouru5.1.5, GitHub #689).
+// noteSpawnAnswer records what became of ONE answer that carried a session's id,
+// and ends the session when that was the last answer and none of them reached
+// anybody (nocx-ouru5.1.5, GitHub #689; nocx-ouru5.1.9 for the set).
 //
 // THE CASE, IN FULL. The person withdraws a slow open — the Operations row's
 // Cancel is an `rpc.cancel`, the renderer going away or the tab being closed is
 // the same event one layer down, and a far route's answer bound is the third —
-// and the withdrawal reaches this daemon as a cancelled request context. A fork
-// is not recallable: by the time anybody knows, the shell exists and this
-// service has registered it, with its output window, row buffer and lifecycle
-// window reserved. The sweep cannot retire it either, because that sweep closes
-// EXITED sessions and an interactive shell at a prompt never exits; and nothing
-// can close it by name, because the only place its name exists is an answer
-// nobody read.
+// and the withdrawal reaches this daemon as a cancelled request. A fork is not
+// recallable: by the time anybody knows, the shell exists and this service has
+// registered it, with its output window, row buffer and lifecycle window
+// reserved. The sweep cannot retire it either, because that sweep closes EXITED
+// sessions and an interactive shell at a prompt never exits; and nothing can
+// close it by name, because the only place its name exists is an answer nobody
+// read.
 //
 // WHY IT IS THE HELPER'S TO DO, and not the coordinator's. The coordinator
 // cannot: in exactly this case it never learned the session id. The helper is
-// the only party that both made the session and knows the answer reached
-// nobody — and it learns that from the host, at the one instant the question
-// can be answered (Host's AnswerDelivery, decided where the answer is written).
+// the only party that both made the session and knows what became of the answer
+// — and it learns that from the host, at the one instant the question can be
+// answered (Host's AnswerDelivery: the caller had gone, or the frame could not
+// be written at all).
 //
-// ONE OWNER, DECIDED ONCE. This runs under the same mutex the idempotency claim
-// is resolved and read under, and it refuses to end a session anybody else has
-// been given:
+// OWNERSHIP IS DECIDED ONCE, OVER THE WHOLE SET OF ANSWERS. A session's id can
+// be in more than one answer at a time: the spawn that made it, and every retry
+// the idempotency claim handed it to before that answer was written
+// (nocx-ouru5.1.9 — a hand-over is an answer still to come, not a delivery). So
+// this counts rather than guesses:
 //
-//   - a retry waiting on the same key is woken by finishSpawn's resolution,
-//     takes the existing session and marks it handed out — all under this
-//     mutex — so the spawn that made it can never kill the shell the retry is
-//     holding (the race this refusal exists for: the caller withdrew, the retry
-//     arrived, and the answer's write was the last thing to learn it);
-//   - a claim that names a session being ended here must never answer with it,
-//     so the map entry goes first, under the same lock, and the retry forks.
-func (s *Service) releaseUnheardSpawn(id proto.HostSessionID) {
+//   - each answer takes one off `answers` as it is reported;
+//   - an answer that REACHED somebody sets `delivered`, which is final: the id
+//     is that caller's and no later failure may end the session;
+//   - the session is ended only when the LAST answer has been reported and none
+//     of them reached anybody.
+//
+// AND THE KEY IS HELD CLOSED UNTIL THE SHELL IS GONE. The claim is marked
+// closing under this lock, so no retry can take it, and `closed` is closed only
+// after removeSession has stopped the process — a retry that was waiting then
+// forks beside nothing rather than beside a shell that is still running.
+func (s *Service) noteSpawnAnswer(id proto.HostSessionID, delivery host.AnswerDelivery) {
 	s.mu.Lock()
 	hs, live := s.sessions[id.Session]
 	if !live || hs.id.Generation != id.Generation {
@@ -1647,25 +1657,38 @@ func (s *Service) releaseUnheardSpawn(id proto.HostSessionID) {
 		s.mu.Unlock()
 		return
 	}
-	if hs.handedOut || hs.withdrawn {
-		// SOMEBODY ELSE HAS IT, or this decision was already taken. Both are
-		// the same answer: the session is not this spawn's to end.
+	if hs.answers > 0 {
+		hs.answers--
+	}
+	if !delivery.Withdrawn {
+		// SOMEBODY WAS TOLD. Whatever becomes of the other answers naming this
+		// session, the id is out and the session is theirs.
+		hs.delivered = true
+		s.mu.Unlock()
+		return
+	}
+	if hs.delivered || hs.withdrawn || hs.answers > 0 {
+		// Somebody holds it, this decision is already taken, or another answer
+		// naming it is still to be written and may yet be read.
 		s.mu.Unlock()
 		return
 	}
 	hs.withdrawn = true
-	// THE CLAIM GOES FIRST, so a coordinator whose connection was lost
-	// mid-spawn — it asks again with the SAME durable idempotency key — forks a
-	// fresh shell instead of being handed the session this call is ending.
+	var claim *keyClaim
 	if hs.key != "" {
-		if claim, held := s.keys[hs.key]; held && claim.session == hs.id.Session {
-			delete(s.keys, hs.key)
+		if held, ok := s.keys[hs.key]; ok && held.session == hs.id.Session {
+			held.closing = true
+			claim = held
 		}
 	}
 	s.mu.Unlock()
-	s.log.Info("helper: a spawn's answer reached nobody; ending the session nobody can name",
+	s.log.Info("helper: every answer naming a session reached nobody; ending it",
 		"session", hs.id.Session)
 	s.lifecycle.fireDrained(s.removeSession(hs, "spawn-abandoned"))
+	if claim != nil {
+		// THE KEY IS FREE ONLY NOW: removeSession has stopped the process.
+		close(claim.closed)
+	}
 }
 
 // keyClaim is one live idempotency claim (L7). It is a pointer held by the
@@ -1683,6 +1706,13 @@ type keyClaim struct {
 	// session is the row this claim resolved onto, set under s.mu exactly
 	// once. Empty means the claim is still in flight.
 	session string
+	// closing is true once the spawn that owns this claim has decided to end
+	// the session it names, and closed is closed when that session's process is
+	// GONE. A retry that finds closing set waits for closed instead of forking
+	// (nocx-ouru5.1.9): the key must not be free while the shell it named is
+	// still running, or one key would briefly have two live shells.
+	closing bool
+	closed  chan struct{}
 }
 
 // claimKey takes the caller's idempotency claim, or answers with the session
@@ -1711,13 +1741,13 @@ func (s *Service) claimKey(ctx context.Context, key string) (claim *keyClaim, ex
 	if key == "" {
 		// No claim was minted, so there is nothing to hold and nothing to
 		// promise: two keyless spawns are two sessions, as they always were.
-		return &keyClaim{done: make(chan struct{})}, nil, nil
+		return &keyClaim{done: make(chan struct{}), closed: make(chan struct{})}, nil, nil
 	}
 	for {
 		s.mu.Lock()
 		held, ok := s.keys[key]
 		if !ok {
-			c := &keyClaim{key: key, done: make(chan struct{})}
+			c := &keyClaim{key: key, done: make(chan struct{}), closed: make(chan struct{})}
 			s.keys[key] = c
 			s.mu.Unlock()
 			return c, nil, nil
@@ -1726,24 +1756,36 @@ func (s *Service) claimKey(ctx context.Context, key string) (claim *keyClaim, ex
 			// Resolved. The invariant that both maps are written under this
 			// one mutex is what makes the lookup total rather than hopeful.
 			hs, live := s.sessions[held.session]
-			// HANDING IT OUT IS THE OTHER HALF OF THE WITHDRAWAL DECISION
-			// (nocx-ouru5.1.5, review round 2). From this line the session has a
-			// caller that knows its id, so the spawn that made it may no longer
-			// end it — and because the mark and the withdrawal are decided under
-			// THIS mutex, the two can never both win: a retry either marks the
-			// session here and keeps a live shell, or finds it withdrawn (below)
-			// and forks.
-			if live && !hs.withdrawn {
-				hs.handedOut = true
+			// A HAND-OVER IS AN ANSWER STILL TO BE WRITTEN, not a delivery
+			// (nocx-ouru5.1.9). The retry is about to be given the id, but until
+			// its own answer is on the wire somebody has still not been told —
+			// so the session owes one more answer, and it is the set of them
+			// that decides whether the session may end.
+			if live && !hs.withdrawn && !held.closing {
+				hs.answers++
 				s.mu.Unlock()
 				return nil, hs, nil
 			}
-			// A CLAIM THAT NAMES A SESSION BEING ENDED IS A CLAIM ON NOTHING: the row
-			// is gone, or the spawn that made it has decided to end it because its
-			// own answer reached nobody. Answering with it would hand a caller a
-			// shell that is about to die, so the claim is released and the caller
-			// forks its own — which is also what the unreachable arm below does for
-			// a claim pointing at no row at all.
+			if held.closing {
+				// THE SHELL IS STILL GOING, so the key is not free yet. Waiting
+				// here — outside the lock — is what keeps one key from having
+				// two live shells: the retry forks only once the process this
+				// claim named has ended (nocx-ouru5.1.9).
+				closed := held.closed
+				s.mu.Unlock()
+				select {
+				case <-closed:
+				case <-ctx.Done():
+					return nil, nil, ctx.Err()
+				}
+				continue
+			}
+			// A CLAIM THAT NAMES A SESSION NOBODY MAY HAVE IS A CLAIM ON
+			// NOTHING: the row is gone, or the spawn that made it has decided to
+			// end it because its own answer reached nobody. Answering with it
+			// would hand a caller a shell that is about to die, so the claim is
+			// released and the caller forks its own — which is also what the
+			// arm below does for a claim pointing at no row at all.
 			if s.keys[key] == held {
 				delete(s.keys, key)
 			}
@@ -2374,7 +2416,7 @@ func (s *Service) ResponseWritten(_ context.Context, op string, result any, deli
 			return
 		}
 		if spawned, ok := result.(proto.SpawnResult); ok {
-			s.releaseUnheardSpawn(spawned.Entry.Session)
+			s.noteSpawnAnswer(spawned.Entry.Session, delivery)
 		}
 	}
 }

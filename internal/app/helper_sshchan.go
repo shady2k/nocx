@@ -592,6 +592,13 @@ func (r installLeaseRoutes) HelperInstallConn(ctx context.Context, host string, 
 	return r.viaLocal.HelperInstallConn(ctx, host, opts...)
 }
 
+// HelperInflate is the install's decompression seam (nocx-evj4b.1.3): one fixed
+// command — the host's own gzip — on a probe lease this machine's helper holds,
+// which is the same pooled connection the install's sftp channel rides.
+func (r installLeaseRoutes) HelperInflate(ctx context.Context, host, path string, opts ...ssh.ConnectOption) error {
+	return r.probes.HelperInflate(ctx, host, path, opts...)
+}
+
 // FSConn is the file panel's lease, and it is the helper's now (nocx-50w7p.12) —
 // the same `viaLocal` half HelperInstallConn and LaneConn use, because one value
 // answering for three leases of the same owner is one answer rather than three

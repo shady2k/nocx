@@ -63,6 +63,11 @@ type helperInstallProvider interface {
 	laneProvider
 	HelperInstallConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.HelperInstallConn, error)
 	DiscoveryConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.DiscoveryConn, error)
+	// HelperInflate runs one fixed command on the host — its own gzip, over the
+	// file the install just wrote — and is the install's ONE optimisation seam
+	// (nocx-evj4b.1.3). It reports every failure, including a host without
+	// gzip, and the install falls back to the plain upload on each.
+	HelperInflate(ctx context.Context, host, path string, opts ...ssh.ConnectOption) error
 }
 
 // farPaneToolSocketter is the far pane's tool surface as the helper registry
@@ -441,7 +446,23 @@ func installHelperAt(ctx context.Context, host string, opts []ssh.ConnectOption,
 	// than the work the person was watching. Both ends are deferred, so a
 	// failed or cancelled install takes its row with it.
 	defer endRow()
-	command, hash, err := deploy.Ensure(ctx, fsys, source, home, platform, progress)
+	// THE INSTALL'S ONE OPTIMISATION: the artifact's own gzip bytes crossing the
+	// link, and the host's gzip writing the file (nocx-evj4b.1.3). Every failure
+	// of this seam — no gzip there, an exec the server refuses — is answered by
+	// the plain upload inside Ensure, so nothing here is a requirement.
+	// AND THE TOOL IS CONFIRMED BEFORE ANYTHING IS SENT: one fixed command, so a
+	// host without gzip installs the plain way instead of paying the compressed
+	// upload first and the decompressed one after it (nocx-evj4b.1.3).
+	var installOpts []deploy.Option
+	if probeErr := lanes.HelperInflate(ctx, host, "", opts...); probeErr == nil {
+		inflate := func(ctx context.Context, path string) error {
+			return lanes.HelperInflate(ctx, host, path, opts...)
+		}
+		installOpts = append(installOpts, deploy.WithInflate(inflate))
+	} else {
+		log.From(ctx).Debug("helper install: the host cannot decompress, sending the artifact plain", "host", host, "error", probeErr)
+	}
+	command, hash, err := deploy.Ensure(ctx, fsys, source, home, platform, progress, installOpts...)
 	if err != nil {
 		return installedHelper{}, err
 	}
@@ -610,6 +631,8 @@ func (a installFS) Rename(s, d string) error                { return a.conn.Rena
 func (a installFS) Remove(p string) error                   { return a.conn.Remove(p) }
 func (a installFS) ReadDir(p string) ([]fs.FileInfo, error) { return a.conn.ReadDir(p) }
 func (a installFS) ReadFile(p string) ([]byte, error)       { return a.conn.ReadFile(p) }
+func (a installFS) Chmod(p string, m fs.FileMode) error     { return a.conn.Chmod(p, m) }
+func (a installFS) Sync(p string) error                     { return a.conn.Sync(p) }
 
 // helperRegistry owns the helper processes the composition root started:
 // one per session, shared by every binding that session opens. A session is

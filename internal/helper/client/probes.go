@@ -232,6 +232,17 @@ func (l *ProbeLease) Completion(ctx context.Context, cwd, line string, pos, limi
 	})
 }
 
+// Inflate decompresses one `.gz` file in place on the far host
+// (nocx-evj4b.1.3). A non-zero exit status is the host's answer — 127 is "no
+// gzip here" — and the CALLER decides what to do with it; this method only
+// reports it.
+func (l *ProbeLease) Inflate(ctx context.Context, path string) (*remoteprobe.Result, error) {
+	return l.run(ctx, proto.OpInflate, proto.InflateParams{
+		ProbeRunParams: proto.ProbeRunParams{Lease: l.id},
+		Path:           path,
+	})
+}
+
 // CommandNames runs one half of the PATH enumeration.
 func (l *ProbeLease) CommandNames(ctx context.Context, phase remoteprobe.CommandNamesPhase, nonce string) (*remoteprobe.Result, error) {
 	return l.run(ctx, proto.OpCommandNames, proto.CommandNamesParams{

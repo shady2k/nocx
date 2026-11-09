@@ -2972,8 +2972,20 @@ export class BlockManager {
     const rec = this._blocks.find((b) => b.el === block)
     if (rec === undefined || rec.storedUpTo === undefined) return rows
     if (this._liveContainer.parentElement !== block) return rows
-    if (rec.storedUpTo >= rows.lines.length) return rows
-    return { ...rows, lines: rows.lines.slice(0, Math.max(0, rec.storedUpTo)) }
+    return this._heldRows(rows, rec.storedUpTo)
+  }
+
+  /** The leading rows a hold allows, mapped through the artifact's OWN first
+   *  row. `from` counts from the block's first output row, so a record whose
+   *  head was lost (its first line is `from: 2`) starts two rows into the
+   *  block: slicing by the hold alone paints two rows past the painted
+   *  screen, and the body and the grid show the same lines (nocx-4y82c.1.1).
+   */
+  private _heldRows(rows: StoredBlockRows, limit: number): StoredBlockRows {
+    const first = rows.lines[0]?.from ?? 0
+    const count = Math.max(0, Math.min(rows.lines.length, limit - first))
+    if (count >= rows.lines.length) return rows
+    return { ...rows, lines: rows.lines.slice(0, count) }
   }
 
   /** The part of a block's stored rows its body may paint: all of them,
@@ -2983,8 +2995,8 @@ export class BlockManager {
     const rows = rec.storedRows
     if (rows === undefined) return null
     const limit = rec.el === this._liveContainer.parentElement ? rec.storedUpTo : undefined
-    if (limit === undefined || limit >= rows.lines.length) return rows
-    return { ...rows, lines: rows.lines.slice(0, Math.max(0, limit)) }
+    if (limit === undefined) return rows
+    return this._heldRows(rows, limit)
   }
 
   /** Release every held row: paint the running block's body whole.

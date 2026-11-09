@@ -5136,6 +5136,33 @@ describe('backend-owned block rows', () => {
     expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond')
   })
 
+  it("maps the hold through the artifact's own first row (nocx-4y82c.1.1)", () => {
+    // `from` counts from the block's first output row, but a record whose head
+    // was lost starts later: `from: 2` is the block's third row. Slicing by
+    // the hold alone paints two rows past the painted screen, and the body
+    // and the grid show the same lines — the overlap the gate's chromium run
+    // caught as GET-207, GET-208 twice.
+    const { manager } = newManager()
+    manager.startBlock('printf rows', '/repo', 0)
+    manager.bindAttempt('entry-stream')
+    const late = {
+      lines: [
+        { from: 2, row: row('third ') },
+        { from: 3, row: row('fourth') },
+        { from: 4, row: row('fifth ') },
+        { from: 5, row: row('sixth ') },
+      ],
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+    }
+    manager.applyStoredRows('entry-stream', late, 4)
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('third \nfourth')
+
+    expect(manager.holdStoredRows('entry-stream', 5)).toBe(true)
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('third \nfourth\nfifth ')
+  })
+
   it("keeps the body's order: its rows above the live region, on every growth (ADR-0091)", () => {
     // `paintStoredRows` replaces `.cmd-output` on each block.grew, so the rows
     // it appends land after the live region unless the seat is restored with

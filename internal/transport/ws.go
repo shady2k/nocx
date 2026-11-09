@@ -3164,6 +3164,16 @@ type openParams struct {
 	// and the workspace is then the default. Present but naming no pane is
 	// refused: the two are different facts.
 	PaneID string `json:"paneId,omitempty"`
+	// Cwd is the directory a LOCAL pane's program starts in (nocx-ouru5.1.4).
+	// Empty is the ordinary case and means the registry's own fallback; the
+	// one caller that sends it is the tab menu's Duplicate, copying the
+	// directory the source pane's own verified report named.
+	//
+	// It is refused on an ssh open by the validator: a far login shell starts
+	// where that host says, so accepting one here would be accepting a value
+	// nothing acts on — and the helpers' spawn-ssh refuses it too, one hop
+	// later and with a diagnostic nobody asked for.
+	Cwd string `json:"cwd,omitempty"`
 }
 
 // openParentParams is the claimed parent edge: the FULL identity of the

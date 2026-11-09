@@ -60,10 +60,20 @@ package coordinator
 // with their translation keys — `settings.describe` gained `sectionKey` and
 // `zeroLabelKey` — which is a surface change and therefore a bump.
 //
+// 20 (fix/nocx-ouru5-tabs, over main's 19): two surface changes in one branch,
+// both from beads about the tab strip. `open.params` gained `cwd` — the
+// directory a LOCAL pane's program starts in, which the tab menu's Duplicate
+// sends and the validator refuses on an ssh open (nocx-ouru5.1.1's Duplicate
+// sibling, nocx-ouru5.1.4) — and the embedded zsh integration moved: its
+// end-of-run fence is now written from its own precmd hook, forced to the
+// front of precmd_functions (nocx-ouru5.1.1). Either alone moves this
+// fingerprint, because contracts and the embedded scripts are both part of the
+// surface ADR-0104 declares.
+//
 // The number in a stage branch means only that ITS surface moved; this is the
 // number the integrated surface carries, and its golden is the one written by
 // the recipe over all four stages at once.
-const ProtocolVersion = 19
+const ProtocolVersion = 20
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

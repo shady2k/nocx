@@ -48,6 +48,10 @@ interface HeaderReading {
   readonly command: string
   /** The header's top edge, relative to the scroller's top edge. */
   readonly top: number
+  /** The header's own height: a long command wraps its header this tall. */
+  readonly height: number
+  /** Whether the controller says this header is the one held at the top. */
+  readonly stuck: boolean
   /** Whether this is the one-line running variance (ADR-3kqrem7v). */
   readonly running: boolean
 }
@@ -99,6 +103,8 @@ async function read(page: Page): Promise<Reading> {
               ? {
                   command: (text?.textContent ?? '').trim(),
                   top: round(hr.top - sr.top),
+                  height: round(hr.height),
+                  stuck: header.hasAttribute('data-stuck'),
                   running: header.dataset.variant === 'running',
                 }
               : null,
@@ -336,5 +342,156 @@ test.describe('a tall block keeps its own header at the top of the pane', () => 
       page.locator('.pane.active .scrollback-inner > .cmd-block.cmd-block-running'),
     ).toHaveCount(0, { timeout: 15_000 })
     await promptReady(page)
+  })
+
+  test('a header taller than a short pane does not pin, so its rows stay readable', async ({
+    page,
+  }) => {
+    // A 20-line script typed as one command wraps its own header past the
+    // scrollport. Pinned whole and opaque, that header covered the viewport and
+    // the rows passed behind it unreadable (nocx-4y82c.1.3, P2). A header that
+    // cannot be a compact part of the view does not pin at all: it scrolls away
+    // as it did before this feature, so the rows stay readable, and no row
+    // moves because nothing about the header's box changes.
+    await page.setViewportSize({ width: 460, height: 360 })
+    await page.goto('/')
+    await promptReady(page)
+    const units = Array.from({ length: 90 }, (_, i) => `unit-${String(i + 1).padStart(2, '0')}`)
+    const command = `printf "TALL-START\\n"; printf '%s\\n' ${units.join(' ')}`
+    await clickIntoEditor(page)
+    await page.locator('.pane.active .nocx-editor-input').fill(command)
+    await page.keyboard.press('Enter')
+    await expect
+      .poll(
+        async () =>
+          page.evaluate(() =>
+            (document.querySelector('.pane.active')?.textContent ?? '').includes('TALL-START'),
+          ),
+        { timeout: 30_000 },
+      )
+      .toBe(true)
+    await promptReady(page)
+    await expect
+      .poll(
+        async () =>
+          page.evaluate(() =>
+            (document.querySelector('.pane.active')?.textContent ?? '').includes('unit-90'),
+          ),
+        { timeout: 30_000 },
+      )
+      .toBe(true)
+
+    const rest = await read(page)
+    const block = blockOf(rest, command)
+    const header = block.header!
+    // THE CASE IS REAL: the header alone is taller than the scrollport, so it
+    // cannot be a compact part of any view.
+    expect(header.height, 'the wrapped header is taller than the scrollport').toBeGreaterThan(
+      rest.clientHeight,
+    )
+
+    // Scroll until the block's own top is above the scroller and the first
+    // output rows are where the header used to be.
+    const target = block.top + header.height + 10
+    await scrollTo(page, target)
+    await expect
+      .poll(async () => (await read(page)).scrollTop, { timeout: 5_000 })
+      .toBe(Math.round(target * 100) / 100)
+    // The decision is made on the scroller's next animation frame, so the wait
+    // is on its observable result: a header that does not pin leaves the top
+    // edge with its block.
+    await expect
+      .poll(async () => blockOf(await read(page), command).header?.top ?? null, {
+        timeout: 5_000,
+      })
+      .toBeLessThan(-100)
+    const scrolled = await read(page)
+    const scrolledBlock = blockOf(scrolled, command)
+
+    // NOT PINNED: its header went with the block, and no header is at the top.
+    expect(scrolledBlock.header!.top, 'the tall header scrolled away').toBeLessThan(-100)
+    expect(scrolled.pinned, 'no header is pinned over the view').toHaveLength(0)
+
+    // NO ROW MOVED (ADR-2yzsq8mk): the decision is a position change only, so
+    // every shared row holds its place in the scroller's content.
+    const restRows = new Map(block.rows.map((row) => [row.text, row.y]))
+    const shared = scrolledBlock.rows.filter((row) => restRows.has(row.text))
+    expect(shared.length, 'the output rows are still the rows being read').toBeGreaterThan(20)
+    for (const row of shared) {
+      expect(
+        Math.abs(row.y - restRows.get(row.text)!),
+        `row ${JSON.stringify(row.text)} kept its place in the content`,
+      ).toBeLessThanOrEqual(0.5)
+    }
+
+    // WHAT A PERSON SEES, at two scroll positions along the output: the top of
+    // the view is an output row itself, hit-testable and carrying its own text.
+    // The stored rows begin with the wrapped echo of the command, so the walk
+    // starts at the first row that is the command's own printed line.
+    const rowsNow = await read(page)
+    const unit = blockOf(rowsNow, command).rows.find((row) => /^unit-\d\d$/.test(row.text))
+    expect(unit, 'the command printed its numbered lines').toBeDefined()
+    for (const extra of [0, 260]) {
+      await scrollTo(page, Math.max(0, unit!.y - 10 + extra))
+      await expect
+        .poll(
+          async () =>
+            page.evaluate(() => {
+              const scroller = document.querySelector<HTMLElement>('.pane.active .scrollback-area')
+              return scroller === null ? null : scroller.scrollTop
+            }),
+          { timeout: 5_000 },
+        )
+        .toBe(Math.round(Math.max(0, unit!.y - 10 + extra) * 100) / 100)
+      await expect
+        .poll(async () => blockOf(await read(page), command).header?.top ?? null, {
+          timeout: 5_000,
+        })
+        .toBeLessThan(0)
+      const probe = await page.evaluate((marker) => {
+        const pane = document.querySelector<HTMLElement>('.pane.active')
+        if (!pane) throw new Error('no active pane')
+        const scroller = pane.querySelector<HTMLElement>('.scrollback-area')
+        if (!scroller) throw new Error('no scroller')
+        const sr = scroller.getBoundingClientRect()
+        // WHAT A PERSON CAN SEE: a short window can put the scroller's own top
+        // above the viewport; the visible box is the intersection.
+        const left = Math.max(sr.left, 0)
+        const right = Math.min(sr.right, window.innerWidth)
+        const top = Math.max(sr.top, 0)
+        const bottom = Math.min(sr.bottom, window.innerHeight)
+        const block = [
+          ...pane.querySelectorAll<HTMLElement>('.scrollback-inner > .cmd-block'),
+        ].find((candidate) =>
+          (candidate.querySelector('.cmd-header-text')?.textContent ?? '').includes(marker),
+        )
+        if (!block) throw new Error('the tall block is not in the scrollback')
+        const header = block.querySelector<HTMLElement>(':scope > .cmd-header')
+        if (!header) throw new Error('the tall block has no header')
+        // The first row the scroller shows, and what is actually at its point.
+        const row = [...block.querySelectorAll<HTMLElement>('.cmd-output .term-grid-row')].find(
+          (candidate) => {
+            const box = candidate.getBoundingClientRect()
+            // A LINE OF THE COMMAND'S OUTPUT, not the wrapped echo of the
+            // command itself, which the stored rows begin with.
+            const text = (candidate.textContent ?? '').trim()
+            return /^unit-\d\d$/.test(text) && box.top >= top - 0.5 && box.bottom <= bottom + 0.5
+          },
+        )
+        const x = left + Math.min(120, (right - left) / 2)
+        const rowTop = row ? Math.max(row.getBoundingClientRect().top, top) + 4 : top
+        const el = row ? document.elementFromPoint(x, rowTop) : null
+        return {
+          headerTop: Math.round((header.getBoundingClientRect().top - sr.top) * 100) / 100,
+          rowText: row ? (row.textContent ?? '').trim() : null,
+          rowIsTop: el !== null && row !== undefined && row.contains(el),
+        }
+      }, 'TALL-START')
+      expect(probe.headerTop, `the tall header stays away at +${extra}`).toBeLessThan(0)
+      expect(probe.rowText, `an output row is what the view shows at +${extra}`).toMatch(
+        /^unit-\d\d$/,
+      )
+      expect(probe.rowIsTop, `the row at the top is not covered at +${extra}`).toBe(true)
+    }
   })
 })

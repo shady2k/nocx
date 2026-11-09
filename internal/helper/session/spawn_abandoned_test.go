@@ -197,14 +197,16 @@ func TestAnAnswerAlreadyWrittenKeepsTheSession(t *testing.T) {
 }
 
 // TestASessionHandedToARetryIsNotEndedByItsOwnSpawn is the ownership rule
-// (review round 2): the retry is woken by the claim's resolution, takes the
-// session and is given its id — so when the first spawn's answer turns out to
-// have reached nobody, the session is the RETRY's shell and must survive.
+// (review round 2, refined by nocx-ouru5.1.9): a hand-over gives the retry an
+// id but not yet a delivered answer, so when the first spawn's answer turns out
+// to have reached nobody the session is not ended — the retry's own answer is
+// still to be written and may be the one that reaches somebody (see
+// spawn_races_test.go for both ends of that: delivered keeps it, lost ends it).
 //
-// The two facts are decided under one mutex, which is what makes this order
-// impossible to lose: either the retry marks the session handed out first and
-// the withdrawal is refused, or the withdrawal is decided first and the claim
-// is gone before the retry can read it.
+// The facts are decided under one mutex, which is what makes the order
+// impossible to lose: either the retry's hand-over is counted first and the
+// withdrawal finds an answer still owed, or the withdrawal is decided first and
+// the claim is gone before the retry can read it.
 func TestASessionHandedToARetryIsNotEndedByItsOwnSpawn(t *testing.T) {
 	for _, tc := range []struct {
 		name string

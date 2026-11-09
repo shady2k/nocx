@@ -165,19 +165,42 @@ describe('rows are full width, and the gutter lives in them (nocx-9bpeq.8)', () 
     expect(shipped('.scrollback-restore-boundary', 'padding-block')).toBe('var(--space-2)')
   })
 
-  it('the active body pays no padding at all, in either presentation', () => {
-    // ADR-3kqrem7v: while a command runs, the pane's row inset and the body
-    // padding are both zero — the running block, its committed rows and the
-    // live region are one edge-to-edge box, so switching the program's screen
-    // mode cannot move the grid. The frozen transcript keeps its gutter and
-    // its own body pads; those are asserted where they live
-    // (running-body-seam.test.ts, command-block.css).
+  it('the running block wears the row gutter, and its body adds no inset of its own', () => {
+    // ADR-2yzsq8mk: a normal command — running or finished — is one column
+    // with the transcript's gutter, so the running block states NO inline
+    // inset of its own and wears the stack's row rule exactly as the frozen
+    // block does. ADR-3kqrem7v zeroed it here; that zero is what moved apt's
+    // rows 24px sideways at the instant the card froze.
+    expect(shipped('.cmd-block.cmd-block-running', 'padding-inline')).toBeNull()
+    // Inside the block nothing adds a second inset: the body pays no padding
+    // at all (its shorthand, and the vertical rhythm arrives with the frozen
+    // card), and the live region pays none either. Either one would shift
+    // every column of the grid off the width the PTY was told.
     expect(shipped('.terminal-live-container.live-running', 'padding')).toBe('0')
     expect(shipped('.cmd-block.cmd-block-running > .cmd-output', 'padding')).toBe('0')
-    // The row inset the frozen rows wear is not paid by the active block: a
-    // placeholder there would run the grid against the transcript's gutter.
-    expect(shipped('.cmd-block.cmd-block-running', 'padding-inline')).toBe('0')
-    expect(shipped('.cmd-block.cmd-block-running > .cmd-output', 'padding-inline')).toBe('0')
+    expect(shipped('.cmd-block.cmd-block-running > .cmd-output', 'padding-inline')).toBeNull()
+  })
+
+  it('no text touches the pane’s top or bottom edge, and no program is pushed off it', () => {
+    // ADR-2yzsq8mk, the owner's edge pass: the margin is on the BOX the
+    // scroller sits in, so a scrolling transcript cannot carry it away with the
+    // content — in every mode, and cancelled for the program that owns the
+    // pane, which starts at the pane's own top edge.
+    expect(shipped('.scrollback-layout', 'padding-block')).toBe('var(--pane-inline-padding)')
+    expect(shipped('.scrollback-layout.inner-pane-program', 'padding-block')).toBe('0')
+  })
+
+  it('the full-screen program owns the width and keeps a row of bottom margin', () => {
+    // ADR-2yzsq8mk: the alternate screen pays no gutter — the program is
+    // fitted to the pane's own width — and reserves one row below its last row
+    // (`terminal-content` tells the program one row fewer, and the
+    // controller's box gives that row back).
+    expect(
+      shipped('.scrollback-inner > .terminal-live-container.live-fullscreen', 'padding-inline'),
+    ).toBe('0')
+    expect(
+      shipped('.scrollback-inner > .terminal-live-container.live-fullscreen', 'margin-bottom'),
+    ).toBe('var(--term-cell-height, 1.2em)')
   })
 
   it('the summon stack is full width and its answers wear the row inset', () => {
@@ -198,8 +221,12 @@ describe('rows are full width, and the gutter lives in them (nocx-9bpeq.8)', () 
     // deliberately narrower than the ledger's 24px row inset (the mockup's
     // own "10-12 px external gutter" for the card, not the row's).
     expect(shipped('.nocx-editor', 'padding')).toBeNull()
-    expect(shipped('.ui-composer-frame', 'margin')).toBe(
-      '0 var(--terminal-card-margin) var(--terminal-card-margin)',
+    // …and the card's TEXT starts on the ledger's column (ADR-2yzsq8mk): what
+    // is left of --pane-inline-padding after the card's own border and
+    // padding is the margin, so the first glyph lands on the gutter.
+    expect(shipped('.ui-composer-frame', 'margin')?.replace(/\s+/g, ' ')).toBe(
+      '0 calc(var(--pane-inline-padding) - var(--terminal-card-padding) - 1px) ' +
+        'var(--terminal-card-margin)',
     )
   })
 })

@@ -47,15 +47,31 @@ test('a pet arrives and stands on a finished command block', async ({ page }) =>
     .not.toContain('fall')
 
   // Its feet are on something the terminal drew, not floating in the middle
-  // of the pane. Every ledge is the top edge of a block or of the meta a
-  // block wears.
+  // of the pane.
   const feet = await page.locator(SPRITE).evaluate((el) => el.getBoundingClientRect().bottom)
-  const edges = await page
-    .locator(`${BLOCK}, .pane.active .cmd-block .ui-meta, .pane.active .scrollback-area`)
-    .evaluateAll((els) => els.map((e) => e.getBoundingClientRect()).map((r) => [r.top, r.bottom]))
-  const standsOnSomething = edges.some(
-    ([top, bottom]) => Math.abs(feet - top) < 2 || Math.abs(feet - bottom) < 2,
-  )
+  // THE SURFACES ARE THE ANIMAL'S OWN TERRAIN, not a subset that happens to
+  // line up. They are the ledges the overlay declares (pets/overlay.ts
+  // DEFAULT_LEDGES): the tab strip is stood UNDER — its underside is the
+  // shelf — and a block, the meta it wears and its where-line are stood ON.
+  //
+  // Measured 2026-11-08 (nocx-djx1u): the animal comes to rest on the tab
+  // strip's underside, at y 44, and this probe passed before only because the
+  // scrollback's own top edge was also at 44 — the pane's four-side margin
+  // moved that edge to 68 and took the coincidence with it. The pet's
+  // placement was right both times: it reads each ledge's live box on every
+  // sweep, so it followed the block's new column and margins without being
+  // told. What was wrong was the probe's idea of what counts as ground.
+  const surfaces = await page
+    .locator(
+      '.tabbar, .pane.active .cmd-block, .pane.active .cmd-block .ui-meta, .pane.active .cmd-block .ui-prompt-context',
+    )
+    .evaluateAll((els) =>
+      els.map((el) => {
+        const rect = el.getBoundingClientRect()
+        return el.classList.contains('tabbar') ? rect.bottom : rect.top
+      }),
+    )
+  const standsOnSomething = surfaces.some((edge) => Math.abs(feet - edge) < 2)
   expect(standsOnSomething).toBe(true)
 })
 

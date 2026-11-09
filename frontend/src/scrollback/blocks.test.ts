@@ -5223,6 +5223,33 @@ describe('backend-owned block rows', () => {
     expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond')
   })
 
+  it('a gapped artifact paints only the rows the screen passed (nocx-4y82c.1.1)', () => {
+    // A capped artifact keeps a head and a tail with a gap (from 0, 1, 900,
+    // 901). A pane that grew pulled 900-901 back onto the grid, so the hold is
+    // 900; slicing by array length painted all four and duplicated the tail
+    // over rows the grid was showing.
+    const { manager } = newManager()
+    manager.startBlock('printf rows', '/repo', 0)
+    manager.bindAttempt('entry-stream')
+    const gapped = {
+      lines: [
+        { from: 0, row: row('a') },
+        { from: 1, row: row('b') },
+        { from: 900, row: row('y') },
+        { from: 901, row: row('z') },
+      ],
+      droppedRows: 898,
+      lostRows: 0,
+      truncated: 'cap' as const,
+    }
+    manager.applyStoredRows('entry-stream', gapped, 900)
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('a\nb')
+
+    // The tail comes back as the screen departs it.
+    expect(manager.holdStoredRows('entry-stream', 901)).toBe(true)
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('a\nb\ny')
+  })
+
   it('places a block from the anchor row, which is already absolute (nocx-4y82c.1.10)', () => {
     // A session that had scrolled before the command: the backend's
     // `screenRowAnchorLocked` emits `Row = base + cursorRow`, so `row` is

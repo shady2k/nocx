@@ -3004,17 +3004,20 @@ export class BlockManager {
     return this._heldRows(rows, rec.storedUpTo, rec.outputStreamStart ?? 0)
   }
 
-  /** The leading rows a hold allows, mapped through the artifact's OWN first
-   *  row. `from` counts from the block's first output row, so a record whose
-   *  head was lost (its first line is `from: 2`) starts two rows into the
-   *  block: slicing by the hold alone paints two rows past the painted
-   *  screen, and the body and the grid show the same lines (nocx-4y82c.1.1).
+  /** The rows a hold allows, selected BY THEIR OWN `from` — never by array
+   *  length. `from` counts from the block's first output row, so a record
+   *  whose head was lost starts later than the hold assumes, and a CAPPED
+   *  artifact keeps a head and a tail with a gap between them
+   *  (`from: [0, 1, 900, 901]`): slicing the array by the hold paints the
+   *  tail rows a grown pane pulled back onto the grid, duplicating them above
+   *  it (nocx-4y82c.1.1). The body may paint exactly the lines whose `from`
+   *  is below the boundary the painted screen names.
    */
   private _heldRows(rows: StoredBlockRows, limit: number, streamStart = 0): StoredBlockRows {
-    const first = (rows.lines[0]?.from ?? streamStart) - streamStart
-    const count = Math.max(0, Math.min(rows.lines.length, limit - first))
-    if (count >= rows.lines.length) return rows
-    return { ...rows, lines: rows.lines.slice(0, count) }
+    const boundary = streamStart + Math.max(0, limit)
+    const lines = rows.lines.filter((line) => line.from >= streamStart && line.from < boundary)
+    if (lines.length === rows.lines.length) return rows
+    return { ...rows, lines }
   }
 
   /** The part of a block's stored rows its body may paint: all of them,

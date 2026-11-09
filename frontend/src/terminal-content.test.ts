@@ -3790,6 +3790,185 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
     }
   })
 
+  // REVIEW ROUND 10, FINDING 1 (P1): an OLD release chain must not resume into
+  // the replacement's queue. Hold A, start releasing it with its attempt RPC
+  // pending, reconnect, then hold B and C for the replacement. Its release
+  // starts B; when A settles the old loop resumed through the accessors — now
+  // pointing at the NEW bind — and submitted C while B was still pending, so
+  // C's fail-open write could precede B's. The loop must capture the bind it
+  // started on and stop when the current one is no longer that object.
+  it('a release chain from the lost bind never submits into its replacement (sequence 16)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const session = client._sessions[0]
+    const fireIntegration = integrationHandler(client, session)
+    const lifecycle = lifecycleHandler(client, session.sessionId)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    let releaseA!: (attempt: unknown) => void
+    const aAttempt = new Promise((resolve) => {
+      releaseA = resolve
+    })
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/bash' })
+      fireIntegration({ sessionId: session.sessionId, status: 'integrated', shell: '/bin/bash' })
+      session.intent.mockClear()
+      holdOne(editor, view, 'echo A')
+      const script = attemptScript(client, [() => aAttempt])
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      await vi.waitFor(() => expect(script.calls()).toBe(1))
+
+      // The session is lost and the pane reconnects while A's attempt is open.
+      const onExit = session.onExit.mock.calls[0]?.[0] as
+        ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
+      onExit!({ sessionId: session.sessionId, cause: 'interrupted' })
+      const replacement = makeSession({ awaitsIntegration: true })
+      client.openSession.mockResolvedValue(replacement)
+      client._sessions.push(replacement)
+      expect(await content.reconnect()).toBe(true)
+      replacement.intent.mockClear()
+
+      // The replacement takes two more lines, which its own settle releases.
+      holdOne(editor, view, 'echo B')
+      holdOne(editor, view, 'echo C')
+      let releaseB!: (attempt: unknown) => void
+      const bAttempt = new Promise((resolve) => {
+        releaseB = resolve
+      })
+      const bScript = attemptScript(client, [() => bAttempt, () => Promise.resolve({})])
+      // The replacement reaches its prompt, so its submits open app-owned
+      // attempts — the step this sequence gates. The pane re-subscribed on the
+      // rebind, so the fact goes through the LATEST subscription.
+      replacement.fireIntegrationChanged({
+        sessionId: replacement.sessionId,
+        instanceId: 'instance-1',
+        sessionEpoch: 1,
+        status: 'integrated',
+        shell: '/bin/bash',
+      })
+      const lifecycleHandlers = client.dispatcher.subscribe.mock.calls.filter(
+        (call: unknown[]) => call[0] === 'lifecycle.changed',
+      )
+      ;(lifecycleHandlers[lifecycleHandlers.length - 1][1] as (p: unknown) => void)({
+        sessionId: replacement.sessionId,
+        lane: 'lane-2',
+        lifecycle: 'prompt_ready',
+        domain: 'd2',
+        epoch: 1,
+      })
+      await vi.waitFor(() => expect(bScript.calls()).toBe(1))
+      // B is opening its attempt; C must still be queued behind it.
+      expect(replacement.intent).not.toHaveBeenCalled()
+
+      // A's attempt settles NOW. The old chain must not touch the new bind.
+      releaseA({
+        id: 'att-A',
+        domain: 'd1',
+        state: 'open',
+        command: 'echo A',
+        cwd: '',
+        host: '',
+        origin: 'app',
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(
+        replacement.intent.mock.calls.filter((call) => call[0] !== 'focus'),
+        'the lost bind’s release chain submitted into the replacement',
+      ).toEqual([])
+      expect(bScript.calls(), 'a second submission was started out of order').toBe(1)
+
+      // B settles, and only then does C go.
+      releaseB({
+        id: 'att-B',
+        domain: 'd2',
+        state: 'open',
+        command: 'echo B',
+        cwd: '',
+        host: '',
+        origin: 'app',
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+      await vi.waitFor(() =>
+        expect(
+          replacement.intent.mock.calls.filter((call) => call[0] !== 'focus').length,
+        ).toBeGreaterThanOrEqual(4),
+      )
+      expect(
+        replacement.intent.mock.calls.filter((call) => call[0] !== 'focus').map((call) => call[1]),
+      ).toEqual(['echo B', 'enter', 'echo C', 'enter'])
+    } finally {
+      teardown()
+    }
+  })
+
+  // REVIEW ROUND 10, FINDING 2 (P2): the editor's in-flight submit is per-bind
+  // state too. A reference resolution still pending when the session is lost
+  // left `_submitInFlight` true in the surviving editor, so the REPLACEMENT's
+  // first Enter was vetoed before it reached the new bind — and nothing retried
+  // it. The bind boundary invalidates it, and a stale callback cannot clear a
+  // newer submission's token.
+  it('a pending resolution from the lost bind does not veto the replacement’s Enter (sequence 17)', async () => {
+    const client = makeClient()
+    let releaseResolve!: () => void
+    const resolved = new Promise<void>((resolve) => {
+      releaseResolve = resolve
+    })
+    client.call.mockImplementation((method: string) => {
+      if (method === 'vault.resolveLine') {
+        return resolved.then(() => ({
+          line: 'echo secret-value',
+          refs: [{ name: 'x', resolved: true }],
+        }))
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const session = client._sessions[0]
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      editor.insertText('echo {{secret:x}}')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      // The verdict is in flight, and the session goes away inside it.
+      const onExit = session.onExit.mock.calls[0]?.[0] as
+        ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
+      onExit!({ sessionId: session.sessionId, cause: 'interrupted' })
+      const replacement = makeSession({ awaitsIntegration: false })
+      client.openSession.mockResolvedValue(replacement)
+      client._sessions.push(replacement)
+      expect(await content.reconnect()).toBe(true)
+      replacement.intent.mockClear()
+
+      // The person's next command, in the replacement, before the old
+      // resolution lands.
+      editor.clear()
+      editor.insertText('echo after-reconnect')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      await vi.waitFor(() => expect(replacement.intent).toHaveBeenCalled())
+      expect(
+        replacement.intent.mock.calls.filter((call) => call[0] !== 'focus').map((call) => call[1]),
+      ).toEqual(['echo after-reconnect', 'enter'])
+
+      // And the old verdict landing afterwards changes nothing.
+      releaseResolve()
+      for (let i = 0; i < 12; i++) await Promise.resolve()
+      expect(
+        replacement.intent.mock.calls.filter((call) => call[0] !== 'focus').map((call) => call[1]),
+      ).toEqual(['echo after-reconnect', 'enter'])
+    } finally {
+      teardown()
+    }
+  })
+
   // nocx-xn63t.6.27, CI run 38577867125: a command typed into the startup
   // composer of a reconnected ssh session reached the shell as
   // `echo after-the-reconnec`. The integration status reaches `integrated` a

@@ -3954,6 +3954,7 @@ export class TerminalContent extends BasePaneContent {
             // in whatever session is bound when they do, and a command belongs
             // to the one it was typed for.
             const origin = this._currentBind()
+            const bind = this._bind
             const sync = planSubmitSync(doc)
             if (sync) {
               // ADR-0024 §1 (the projection bead nocx-u7uh.7): the typed-ssh
@@ -3968,6 +3969,9 @@ export class TerminalContent extends BasePaneContent {
               return this.deferShellSubmissionUntilReady(sync, origin)
             }
             return planSubmit(doc, (line) => vault.resolveLine(line)).then((verdict) => {
+              // The verdict resolves in whatever bind is current; this line
+              // belongs to the one it was typed in (review round 10).
+              if (this._bind !== bind) return false
               if (isSubmitFailure(verdict)) {
                 this.reportSubmitFailure(verdict)
                 return false
@@ -3976,6 +3980,10 @@ export class TerminalContent extends BasePaneContent {
             })
           },
           submit: (doc: string, plan?: SubmitPlan) => this.submitFromComposer(doc, plan),
+          // The session a submit belongs to, for the editor's in-flight token
+          // (review round 10): a verdict that outlives its bind must not keep
+          // the replacement's first Enter out.
+          submitToken: () => this._bind,
           // A bare newline: the shell gets its keystroke and answers with a
           // fresh prompt. Deliberately not routed through the submit path —
           // no attempt is opened and no ledger record is written, because
@@ -5284,6 +5292,12 @@ export class TerminalContent extends BasePaneContent {
     // verdict, and the old object is unreachable. (Rounds 5 and 7 each reset a
     // field here; the object is why there is nothing left to remember.)
     this._bind = new BindState(this._bind.generation + 1)
+    // AND THE EDITOR'S OWN PER-SUBMIT STATE (review round 10, P2): a reference
+    // resolution still pending from the lost session left `_submitInFlight`
+    // true, so the replacement's first Enter was vetoed and nothing retried it.
+    // The token the editor holds for a submit is per bind; the new bind starts
+    // with none.
+    this.editor?.resetSubmitInFlight()
     // A bind is a new session (or the same one reattached): the previous
     // binding's resize receipt will never arrive for anything this pane sends
     // now, and the input it was holding belongs to a surface whose screen
@@ -7932,9 +7946,15 @@ export class TerminalContent extends BasePaneContent {
   }
 
   private _releaseDeferredShellSubmissions(): void {
-    if (this._releasingDeferredShellSubmissions) return
-    if (!this._startupCanHold()) return
-    void this._drainDeferredShellSubmissions()
+    // THE CHAIN OWNS THE BIND IT STARTED ON (review round 10). It is the
+    // object, not the accessors: an old chain that resumed after a rebind
+    // would otherwise drain the REPLACEMENT's queue, and its `finally` would
+    // clear the replacement's release flag (P1 of round 10 — reproduced with
+    // the replacement's writes arriving C then B).
+    const bind = this._bind
+    if (bind.releasing) return
+    if (!this._startupCanHold(bind)) return
+    void this._drainDeferredShellSubmissions(bind)
   }
 
   /**
@@ -7950,18 +7970,18 @@ export class TerminalContent extends BasePaneContent {
    * command held across such a session's rebind was held forever; the bind's
    * own completion is its release, and this is what says so.
    */
-  private _startupCanHold(): boolean {
+  private _startupCanHold(bind: BindState = this._bind): boolean {
     // AN OPENING BIND RELEASES NOTHING (review round 9). Its object's verdict
     // is UNKNOWN until the bind produces a session and installs that
     // session's own flags; the attach callback arrives before those flags are
     // in, so a check made from there must not read them at all.
-    if (this._bind.phase !== 'live') return false
+    if (bind.phase !== 'live') return false
     if (this.lifecycle.state.kind === 'prompt_ready') return true
-    if (isDegraded(this._bind.integration)) return true
+    if (isDegraded(bind.integration)) return true
     // No integration was ever requested for THIS session, so no verdict is
     // coming and no prompt mark will ever arrive. `awaitsIntegration` is this
     // bind's own ack field, never the session that went away.
-    return this._bind.integration === null && !this._bind.awaitsIntegration
+    return bind.integration === null && !bind.awaitsIntegration
   }
 
   /** Deliver the held lines ONE AT A TIME, in the order the person made them,
@@ -7973,16 +7993,19 @@ export class TerminalContent extends BasePaneContent {
    *  Submitting them in parallel let a slow attempt (A) and a refused one (B)
    *  write in B-then-A order, and the session's intent queue preserves that
    *  arrival order, so the shell ran the commands backwards. */
-  private async _drainDeferredShellSubmissions(): Promise<void> {
-    this._releasingDeferredShellSubmissions = true
+  private async _drainDeferredShellSubmissions(bind: BindState): Promise<void> {
+    bind.releasing = true
     try {
-      while (this._deferredShellSubmissions.length > 0) {
+      while (bind.held.length > 0) {
+        // The session this chain belongs to is gone: stop, and touch nothing
+        // — not the new bind's queue, not its flag.
+        if (this._bind !== bind) break
         if (this._attachment.kind !== 'attached') break
-        if (!this._startupCanHold()) break
+        if (!this._startupCanHold(bind)) break
         // Taken before it is submitted: a cancel that lands during the await
         // clears whatever is still queued, and this line's own outcome is the
         // attempt's business (the held window the submit arms).
-        const held = this._deferredShellSubmissions.shift()!
+        const held = bind.held.shift()!
         // A line held for a bind that is gone is dropped, never opened against
         // the one that replaced it (review round 4). The write fences itself
         // too — a loss inside the attempt round trip is the other half — but a
@@ -8016,7 +8039,9 @@ export class TerminalContent extends BasePaneContent {
         await settled
       }
     } finally {
-      this._releasingDeferredShellSubmissions = false
+      // THE FLAG BELONGS TO THIS OBJECT, and only this object is cleared: a
+      // chain that outlived its bind must not open the replacement's gate.
+      bind.releasing = false
     }
   }
 
@@ -8063,7 +8088,7 @@ export class TerminalContent extends BasePaneContent {
    *  lines go with it: there is no shell left to run them, and the pane they
    *  were typed into is gone. */
   private _cancelDeferredShellSubmissions(): void {
-    this._deferredShellSubmissions.length = 0
+    this._bind.held.length = 0
   }
 
   /** Show the waiting card and hide the terminal grid for exactly as long as
@@ -11118,6 +11143,11 @@ export class TerminalContent extends BasePaneContent {
     // THIS.session when it finally runs — so a session lost and replaced inside
     // that window would receive a command typed for its predecessor.
     const origin = opts.origin ?? this._currentBind()
+    // THE BIND THIS SUBMISSION STARTED ON (review round 10): every callback
+    // below — the attempt's settlement, the ledger binding, the write — acts
+    // on THIS object or does nothing at all. The origin names the same bind on
+    // the wire; this is the object itself.
+    const bind = this._bind
     // ONE delivery fact per submission, however many paths can end it.
     let delivered = false
     const settle = (): void => {
@@ -11172,7 +11202,7 @@ export class TerminalContent extends BasePaneContent {
         // reconnect fit in; the held queue checks it again at release, so a
         // line that outlived its session is not even opened against the new
         // one.
-        if (!this._bindIsCurrent(origin)) {
+        if (this._bind !== bind || !this._bindIsCurrent(origin)) {
           log.warn('nocx: a submitted command was dropped — its session is gone', {
             pane: this.pane.paneId,
             heldGeneration: origin.generation,
@@ -11323,7 +11353,7 @@ export class TerminalContent extends BasePaneContent {
           // round 6). A session replaced during the round trip must not have
           // its new attempt bound to the old session's ledger record; the
           // write below is fenced separately, so the bytes stay put either way.
-          if (ledgerId !== null && this._bindIsCurrent(origin)) {
+          if (ledgerId !== null && this._bind === bind && this._bindIsCurrent(origin)) {
             this.bindHistoryAttempt(attempt.id, ledgerId)
           }
           write()

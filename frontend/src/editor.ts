@@ -146,6 +146,15 @@ export interface EditorActions {
    * swallowed and an edit to the draft drops the stale plan.
    */
   beforeSubmit?: (doc: string) => SubmitPlan | Promise<SubmitPlan | false | 'held'> | false | 'held'
+  /**
+   * The session this editor's submissions belong to, asked at each Enter
+   * (review round 10). The host answers the pane's current bind, and a
+   * submission in flight remembers the answer: a verdict that lands after the
+   * session changed belongs to the session that is gone, and it may neither
+   * clear nor keep the NEXT session's in-flight state. `resetSubmitInFlight`
+   * is the other half — the host calls it when a bind starts.
+   */
+  submitToken?: () => unknown
   /** Fired when the user types `@` at a WORD START — the reference picker's
    *  trigger (the owner's decision). `triggerPos` is the caret position the
    *  '@' lands at: the picker's replacement range starts there. The '@'
@@ -863,10 +872,20 @@ export class CommandEditor {
     this.clearDoc()
   }
 
-  /** True while a beforeSubmit verdict is in flight: a second Enter in that
-   *  window must not start a second resolve (each would commit a duplicate
-   *  ledger record on success). Cleared when the verdict lands. */
-  private _submitInFlight = false
+  /** The token of the submit whose beforeSubmit verdict is in flight: a
+   *  second Enter in that window must not start a second resolve (each would
+   *  commit a duplicate ledger record on success), and a verdict that lands
+   *  after the SESSION changed must not clear a newer submit's token (review
+   *  round 10 — the bind boundary calls resetSubmitInFlight). */
+  private _submitToken: object | null = null
+
+  /** The session this editor submits into has changed: whatever verdict is
+   *  still in flight belongs to the old one and must not keep the new
+   *  session's first Enter out (review round 10, P2). Its own callback will
+   *  find its token gone and touch nothing. */
+  resetSubmitInFlight(): void {
+    this._submitToken = null
+  }
 
   /** Submit the current document, then hide and clear (ADR-0004 §2). Also
    *  the overlay's execution path: RecallOverlay calls this so Enter in the
@@ -911,7 +930,7 @@ export class CommandEditor {
       this.commit(doc)
       return
     }
-    if (this._submitInFlight) {
+    if (this._submitToken !== null) {
       this.noteSubmit('vetoed', doc)
       return
     }
@@ -940,7 +959,8 @@ export class CommandEditor {
       // The verdict is in flight (a line with references resolves over the
       // wire). A second Enter is swallowed; an edit to the draft drops the
       // stale plan — the user's new text is the draft.
-      this._submitInFlight = true
+      const token = { bind: this.actions.submitToken?.() ?? null }
+      this._submitToken = token
       void Promise.resolve(result as Promise<SubmitPlan | false | 'held'>)
         .then(
           (plan) => {
@@ -967,7 +987,9 @@ export class CommandEditor {
           // Fail-open: the draft stays.
         })
         .finally(() => {
-          this._submitInFlight = false
+          // ONLY THIS SUBMISSION'S TOKEN: a verdict that outlived its session
+          // must not unblock (or re-block) the replacement's first Enter.
+          if (this._submitToken === token) this._submitToken = null
         })
       return
     }

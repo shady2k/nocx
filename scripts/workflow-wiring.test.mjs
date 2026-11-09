@@ -166,6 +166,23 @@ test('ci-mac runs the derived macOS-only selection, and ci-linux excludes it', (
   assert.ok(mac.includes('make -s print-mac-pkgs'), 'the Mac package set is not asked of the Makefile')
   assert.ok(mac.includes('make -s print-mac-select'), 'the Mac test selection is not asked of the Makefile')
 
+  // The committed reachability selection is re-derived on the Mac before the
+  // tests, and it is the only place that derivation can run: the analysis needs
+  // a build that loads with the darwin files in it.
+  assert.ok(
+    workflow.includes('- name: The macOS-only selection is current'),
+    'ci-mac no longer verifies the committed macOS-only selection is current',
+  )
+  assert.match(
+    workflow.slice(workflow.indexOf('name: The macOS-only selection is current')).slice(0, 400),
+    /run: make mac-check/,
+    'the currency step does not run the derivation that owns the file',
+  )
+  assert.ok(
+    existsSync(join(ROOT, 'scripts/mac-only-tests.txt')),
+    'the committed reachability selection is missing',
+  )
+
   // The Mac runs it with -run, over the packages that hold at least one.
   const macTests = workflow.slice(workflow.indexOf('name: Test (the macOS-only tests'))
   const macTestStep = macTests.slice(0, macTests.indexOf('\n\n'))

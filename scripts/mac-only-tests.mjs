@@ -25,6 +25,18 @@
 //      workflow passes them as ONE anchored regexp, so a name shared with a
 //      Linux test would select the wrong test).
 //
+// AND THE THIRD SOURCE, WHICH THE FILE RULE CANNOT SEE (review round 2): a test
+// in an UNTAGGED file whose code under test is a darwin IMPLEMENTATION —
+// `mounts_darwin.go`, `pty_darwin.go`, the Keychain — reaches code that exists
+// only on a Mac, so it is the Mac's too. `cmd/mactests` derives that set (SSA +
+// CHA over the host build, plus the names the darwin build adds) and COMMITS it
+// at scripts/mac-only-tests.txt, because the analysis needs a build that loads
+// and only a Mac supplies the darwin files: ci-mac re-derives it (`make
+// mac-check`) and fails when the file is stale, and this script reads the file
+// so ci-linux can act on it without a Mac. The checks here are the file's own —
+// every entry exists, is not already derived, and is not a test the darwin build
+// does not compile.
+//
 // A test-name CONVENTION was the other candidate and is worse here: it would
 // rename existing tests to satisfy a selector, and it still says nothing about
 // the tests the compiler already knows are darwin's. The per-file rule costs
@@ -45,6 +57,21 @@ import { fileURLToPath } from 'node:url'
 import { dirname } from 'node:path'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
+
+/** The committed reachability selection `cmd/mactests --write` produces. */
+export const REACHED_FILE = join(ROOT, 'scripts/mac-only-tests.txt')
+
+/** The reachability entries, as `pkg<TAB>name` pairs. Comments are skipped. */
+export function reachedSelection(text = readFileSync(REACHED_FILE, 'utf8')) {
+  const out = []
+  for (const line of text.split('\n')) {
+    if (line === '' || line.startsWith('#')) continue
+    const at = line.indexOf('\t')
+    if (at <= 0) throw new Error(`mac-only-tests.txt: a line is not pkg<TAB>test: ${JSON.stringify(line)}`)
+    out.push({ pkg: line.slice(0, at), name: line.slice(at + 1) })
+  }
+  return out
+}
 
 /** Every GOOS token the compiler knows, as the build constraint spells them. */
 export const GOOS = [
@@ -178,7 +205,23 @@ export function macOnly(dirs) {
       for (const name of names) derived.push({ pkg: dir, name })
     }
   }
-  return { derived, listed: LISTED.filter((entry) => wanted.has(entry.pkg)), seen }
+  return {
+    derived,
+    listed: LISTED.filter((entry) => wanted.has(entry.pkg)),
+    reached: reachedSelection().filter((entry) => wanted.has(entry.pkg)),
+    seen,
+  }
+}
+
+/** The test functions a package directory declares, by name, and their file. */
+export function declaredTests(dir) {
+  const out = new Map()
+  for (const file of goFiles(dir)) {
+    if (!file.name.endsWith('_test.go')) continue
+    const text = readFileSync(join(ROOT, file.path), 'utf8')
+    for (const name of testNames(text)) out.set(name, { file: file.name, text })
+  }
+  return out
 }
 
 /** Everything `check` proves, as a list of failures (empty is a pass). */
@@ -187,9 +230,9 @@ export function checkPartition(dirs) {
   const failures = []
   if (dirs.length === 0) failures.push('no OS package directory was given')
 
-  const { derived, listed, seen } = macOnly(dirs)
+  const { derived, listed, reached, seen } = macOnly(dirs)
   const mac = new Map()
-  for (const entry of [...derived, ...listed]) {
+  for (const entry of [...derived, ...reached, ...listed]) {
     const key = `${entry.pkg} ${entry.name}`
     if (mac.has(key)) failures.push(`${key} is selected twice`)
     mac.set(key, entry)
@@ -233,6 +276,25 @@ export function checkPartition(dirs) {
     if (!wanted.has(entry.pkg)) failures.push(`LISTED names ${entry.pkg}, which is not in OS_PKG_DIRS`)
   }
 
+  // EVERY COMMITTED REACHABILITY ENTRY must be a test that exists, in a file the
+  // darwin build compiles, in a package this job runs. The tool that writes the
+  // file enforces the same three things where it can see the darwin build; this
+  // is the half a Linux box can check for itself.
+  for (const entry of reached) {
+    const declared = declaredTests(entry.pkg)
+    const hit = declared.get(entry.name)
+    if (!hit) {
+      failures.push(`mac-only-tests.txt names ${entry.pkg} ${entry.name}, which no test file declares`)
+      continue
+    }
+    if (darwinOnlyFile(hit.file, hit.text)) {
+      failures.push(`mac-only-tests.txt names ${entry.pkg} ${entry.name}, which its file already derives; drop the entry`)
+    }
+    if (hit.file.endsWith('_linux_test.go') || /^\/\/go:build[^\n]*\b(linux|!darwin)\b/.test(hit.text)) {
+      failures.push(`mac-only-tests.txt names ${entry.pkg} ${entry.name}, which the darwin build does not compile`)
+    }
+  }
+
   // ONE ANCHORED REGEXP SELECTS THEM ALL, so a name that also appears in a
   // Linux test of this set would run that test on the Mac — or skip it on
   // Linux. Names are therefore unique across the set.
@@ -248,15 +310,15 @@ export function checkPartition(dirs) {
 
 /** `./dir/...` for the packages that hold at least one mac-only test. */
 export function macPackages(dirs) {
-  const { derived, listed } = macOnly(dirs)
-  const pkgs = [...new Set([...derived, ...listed].map((entry) => entry.pkg))].sort()
+  const { derived, listed, reached } = macOnly(dirs)
+  const pkgs = [...new Set([...derived, ...reached, ...listed].map((entry) => entry.pkg))].sort()
   return pkgs.map((pkg) => `./${pkg}/...`)
 }
 
 /** The anchored selection both sides pass to `go test` (`-run` / `-skip`). */
 export function macSelector(dirs) {
-  const { derived, listed } = macOnly(dirs)
-  const names = [...new Set([...derived, ...listed].map((entry) => entry.name))].sort()
+  const { derived, listed, reached } = macOnly(dirs)
+  const names = [...new Set([...derived, ...reached, ...listed].map((entry) => entry.name))].sort()
   return names.length === 0 ? '' : `^(${names.join('|')})$`
 }
 
@@ -281,8 +343,13 @@ function main(argv) {
     case 'check': {
       const failures = checkPartition(dirs)
       if (failures.length === 0) {
-        const { derived, listed } = macOnly(dirs)
-        console.log(`ok — ${derived.length + listed.length} macOS-only test(s) in ${macPackages(dirs).length} package(s); every other test in the set runs on Linux`)
+        const { derived, listed, reached } = macOnly(dirs)
+        const total = derived.length + reached.length + listed.length
+        console.log(
+          `ok — ${total} macOS-only test(s) in ${macPackages(dirs).length} package(s) ` +
+            `(${derived.length} in darwin test files, ${reached.length} reaching a darwin implementation, ${listed.length} listed); ` +
+            'every other test in the set runs on Linux',
+        )
         return 0
       }
       for (const failure of failures) console.error(`FAIL: ${failure}`)

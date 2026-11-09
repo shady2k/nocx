@@ -208,6 +208,15 @@ run_variant() {
             # database knows — same fixture requirement as the hook image.
             groupadd --gid "$RUN_GID" nocx-sshtest 2>/dev/null || true
             useradd -M -u "$RUN_UID" -g "$RUN_GID" -s /bin/bash -d "$HOME" nocx-sshtest 2>/dev/null || true
+            # ...and sshd refuses to start without its privilege-separation
+            # directory. On a host with openssh-server installed /run/sshd is
+            # there, which is why the runner image never needs this line; in a
+            # nested container /run is a fresh tmpfs and the fixture dies with
+            # "Missing privilege separation directory: /run/sshd" — measured on
+            # the box that wrote this, where ten internal/app tests failed for
+            # nothing but that. A runner provision, like the two lines above: no
+            # product test is changed for it.
+            mkdir -p /run/sshd && chmod 0755 /run/sshd
             # THE WIDGET-WRAPPING ZSH PLUGINS (nocx-1ebrs.27). The shell-integration
             # composition test fails, not skips, when they are absent, and this
             # container runs the same package set the ci-backend job runs. Fetched

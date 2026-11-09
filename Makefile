@@ -3,7 +3,7 @@
         helpers helper-local helpers-this-machine \
         require-local-helper \
         print-os-pkgs print-portable-pkgs print-local-ssh-pkgs \
-        print-mac-pkgs print-mac-select print-darwin-pkgs \
+        print-mac-pkgs print-mac-select print-darwin-pkgs mac-only-tests mac-check \
         print-os-local-ssh-pkgs print-portable-local-ssh-pkgs \
         lint-ci test-ci build-ci root-ci frontend-ci test-alloc-budgets print-alloc-budget-pkgs
 
@@ -647,6 +647,24 @@ OS_PKGS := $(addprefix ./,$(addsuffix /...,$(OS_PKG_DIRS)))
 # every listed name exists and proves itself, and every selected name is unique
 # across the set so one anchored regexp cannot select somebody else's test).
 MAC_TESTS := node scripts/mac-only-tests.mjs
+# The reachability half (review round 2): the tests whose code under test is a
+# darwin IMPLEMENTATION, derived by cmd/mactests from the call graph and
+# committed, because only a Mac can build the darwin files it needs to see.
+MAC_REACHED := scripts/mac-only-tests.txt
+MAC_GO := $(GO) run ./cmd/mactests
+
+# Regenerate the committed reachability selection. Run it on a Mac and commit
+# the result; ci-mac's `make mac-check` fails when the file is stale and names
+# this command.
+mac-only-tests:
+	@$(MAC_GO) --write $(MAC_REACHED) $(OS_PKG_DIRS)
+	@$(MAC_TESTS) check $(OS_PKG_DIRS)
+
+# Is the committed selection still what the tree says? ci-mac runs this before
+# its tests: the analysis needs a build that loads (cgo on) and the darwin files,
+# so this job is the only place the answer can be checked.
+mac-check:
+	@$(MAC_GO) --check $(MAC_REACHED) $(OS_PKG_DIRS)
 
 print-mac-pkgs:
 	@$(MAC_TESTS) pkgs $(OS_PKG_DIRS)
@@ -1037,6 +1055,7 @@ ci-local-ssh-split:
 # lands inside it at all. The chmod stays as the belt to that braces.
 ci-mac:
 	@echo "=== ci-mac: the tests macOS alone can run, natively, in a disposable root ==="
+	@$(MAKE) -s mac-check
 	@set -eu; \
 	  tmpbase="$${TMPDIR:-/tmp}"; tmpbase="$${tmpbase%/}"; \
 	  case "$$tmpbase" in \

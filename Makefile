@@ -3,6 +3,7 @@
         helpers helper-local helpers-this-machine \
         require-local-helper \
         print-os-pkgs print-portable-pkgs print-local-ssh-pkgs \
+        print-mac-pkgs print-mac-select print-darwin-pkgs print-mac-tagged-pkgs print-mac-tagged-select mac-selection mac-check \
         print-os-local-ssh-pkgs print-portable-local-ssh-pkgs \
         lint-ci test-ci build-ci root-ci frontend-ci test-alloc-budgets print-alloc-budget-pkgs
 
@@ -515,10 +516,11 @@ ci: lint-ci test-ci build-ci root-ci frontend-ci
 #
 # ci-mac IS in this list now. It used to be excluded on the grounds that no CI
 # job corresponded to it — macos-latest ran the whole suite as `backend` — and
-# that is no longer true: ci.yml's ci-mac job is this target's package set, so
-# leaving it out would reopen exactly the hole nocx-aruz was about. The
-# keychain caveat stands and is stated by the target itself; it applied to
-# `make ci` all along, which has always run the Darwin suite.
+# that is no longer true: ci.yml's ci-mac job runs exactly this target's test
+# step (the macOS-only selection, nocx-ouru5.1.13), so leaving it out would
+# reopen exactly the hole nocx-aruz was about. The keychain caveat stands and is
+# stated by the target itself; it applied to `make ci` all along, which has
+# always run the Darwin suite.
 #
 # `ci` stays here for ci.yml's ci-mac job MINUS its test step: gofumpt,
 # golangci-lint and the build, which must run on Darwin to see the
@@ -618,6 +620,108 @@ OS_PKG_RE := ($(subst $(os_pkg_space),|,$(strip $(OS_PKG_DIRS))))
 CLAUDE_CONFORMANCE_PKG := internal/claudeconformance
 PORTABLE_EXEMPT_RE := (internal/claudeconformance)
 OS_PKGS := $(addprefix ./,$(addsuffix /...,$(OS_PKG_DIRS)))
+
+# --- the tests macOS ALONE can run (nocx-ouru5.1.13) -------------------------
+#
+# THE OWNER'S RULE, 2026-11-09: "the macOS CI job holds ONLY the tests that
+# cannot run without a Mac". The split above is per PACKAGE, so every package
+# with one platform file ran its whole test set on the Mac as well as on Linux —
+# internal/app, internal/coordinator, internal/helper/session and the rest,
+# 502 s of tests plus 545 s of the tagged pass plus 278 s of lint on run
+# 42580971662, for a job that is 31 minutes long.
+#
+# THE SELECTION IS PER TEST, AND IT IS DERIVED. scripts/mac-only-tests.mjs
+# classifies every test file in OS_PKG_DIRS from its build constraint: a file
+# behind `//go:build darwin` (or named `_darwin_test.go`) is the Mac's, and one
+# explicit list in that script names the few tests whose subject is macOS while
+# their file compiles on both — each one checked to declare itself, with a
+# `runtime.GOOS != "darwin"` guard and a skip. Everything else in the set is
+# Linux's, where it already runs: ci-linux's package set IS OS_PKG_DIRS, so
+# nothing had to be moved to the Linux side for the OS packages, only named
+# there (`-skip`) and handed over for the one pass that was Mac-only (the
+# release-tag one, below).
+#
+# WHAT THE MAC RUNS, AND WHAT LINUX KEEPS. print-mac-select is what ci-mac
+# passes to `-run`. The Linux job passes NO selection at all: it runs the whole
+# OS set, because a test that reaches a platform seam exercises the LINUX
+# implementation there — and Linux ships too — so skipping it would lose the
+# linux half of the very code the seam exists for. What Linux cannot run is the
+# darwin-only TEST files, which the compiler already excludes.
+#
+# `make ci-os-split` still proves the selection is honest: every darwin-only
+# test file in the tree is inside OS_PKG_DIRS, every selected test is
+# darwin-only, reachability-selected (the committed file, re-derived by ci-mac)
+# or listed, every listed name exists and proves itself, and every selected name
+# is unique across the set so one anchored regexp cannot select somebody else's
+# test.
+MAC_TESTS := node scripts/mac-only-tests.mjs
+# The reachability half (review round 2): the tests whose code under test is a
+# darwin IMPLEMENTATION, derived by cmd/mactests from the call graph and
+# committed, because only a Mac can build the darwin files it needs to see.
+# THE SELECTION IS DERIVED WHERE IT IS USED (review of PR #776, round 4). It used
+# to be committed, and the macOS job re-derived it and compared: the two differed,
+# because the graph is the HOST build's (this VM's linux one here), and nothing on
+# this box can produce a native darwin answer to compare with. Two CI rounds died
+# on that comparison before it could be diagnosed from a log that printed no
+# difference. So the Mac DERIVES what it runs, in the job, and the file is build
+# output (gitignored), never a committed copy of a platform's answer.
+MAC_REACHED := build/mac-only-tests.txt
+# THE TAGGED HALF, derived by its own analysis (review of PR #776): nocx_local_ssh
+# decides which files exist, so a tagged test can reach a darwin implementation
+# that an untagged test cannot — and the tagged pass on the Mac is where such a
+# test runs. Its own committed file, its own two tags, its own package set.
+MAC_REACHED_TAGGED := build/mac-only-tests-tagged.txt
+MAC_TAGGED_TAGS := gtk3,nocx_local_ssh,nocx_framecheck
+MAC_GO := $(GO) run ./cmd/mactests
+
+# DERIVE WHAT THE MAC RUNS, IN THE JOB THAT RUNS IT (review of PR #776, round
+# 4). Two files, untagged and tagged, under build/ — build output, not a
+# committed copy: the analysis is the host build's, and only a Mac's host build
+# answers for a Mac. ci-mac runs this before its tests; `make ci-os-split` then
+# validates what it produced.
+# THE TWO COMMANDS, AS TEXT, so `ci-mac` can run the same derivation without
+# recursing into make: a recipe line that mentions $(MAKE) is treated as
+# RECURSIVE and RUN even under `-n`, which is how a dry run once built a
+# container image (see PORTABLE_PKGS_CMD's own note). `make -n ci-mac` must stay
+# a dry run.
+MAC_SELECTION_CMD = mkdir -p $(dir $(MAC_REACHED)) && $(MAC_GO) --write $(MAC_REACHED) $(OS_PKG_DIRS) && $(MAC_GO) --tags $(MAC_TAGGED_TAGS) --write $(MAC_REACHED_TAGGED) $(LOCAL_SSH_PKG_DIRS)
+MAC_CHECK_CMD = $(MAC_GO) --check $(MAC_REACHED) $(OS_PKG_DIRS) && $(MAC_GO) --tags $(MAC_TAGGED_TAGS) --check $(MAC_REACHED_TAGGED) $(LOCAL_SSH_PKG_DIRS)
+
+mac-selection:
+	@$(MAC_SELECTION_CMD)
+
+# DOES THE FILE THE TESTS WILL READ MATCH A FRESH DERIVATION? It is never a
+# comparison against another machine's answer — the derivation happens in the job
+# — but build/ PERSISTS between runs on a workstation, so a file from a previous
+# tree revision, or one edited by hand, is a real hazard. This re-derives and
+# names every test it would add and remove (`cmd/mactests --check`). ci-mac runs
+# it immediately after `mac-selection`, exactly as the job does: generate, then
+# verify, never the other way round.
+mac-check:
+	@$(MAC_CHECK_CMD)
+
+print-mac-pkgs:
+	@$(MAC_TESTS) pkgs $(OS_PKG_DIRS)
+
+print-mac-select:
+	@$(MAC_TESTS) select $(OS_PKG_DIRS)
+
+# The tagged pass's own two answers: the packages holding a tagged macOS-only
+# test, and the anchored selection over them. `$^` when there are none, because
+# an empty `-run` matches every test in the set.
+print-mac-tagged-pkgs:
+	@$(MAC_TESTS) tagged-pkgs $(OS_PKG_DIRS) --tagged $(LOCAL_SSH_PKG_DIRS)
+
+print-mac-tagged-select:
+	@$(MAC_TESTS) tagged-select $(OS_PKG_DIRS) --tagged $(LOCAL_SSH_PKG_DIRS)
+
+# The mac LINT's set (nacx-ouru5.1.13): every package carrying a darwin file,
+# and only those. golangci-lint analyses packages, so a package in this list is
+# read whole — but the files the Linux lint cannot see are exactly the darwin
+# ones, and every other package is linted on Linux, where it is cheaper.
+print-darwin-pkgs:
+	@$(MAC_TESTS) darwin-pkgs
+
 
 # --- the tests that exist only under nocx_local_ssh (nocx-xk1di) -------------
 #
@@ -907,6 +1011,7 @@ ci-os-split:
 	  echo "FAIL: names a GOOS but is not in OS_PKG_DIRS:$$missing"; rc=1; fi; \
 	if [ -n "$$extra" ]; then \
 	  echo "FAIL: in OS_PKG_DIRS, names no GOOS, and is not in OS_EXEMPT:$$extra"; rc=1; fi; \
+	$(MAC_TESTS) check $(OS_PKG_DIRS) || rc=1; \
 	if [ $$rc = 0 ]; then echo "ok"; fi; \
 	exit $$rc
 
@@ -991,7 +1096,9 @@ ci-local-ssh-split:
 # are not what a disposable root exists to protect — so nothing read-only
 # lands inside it at all. The chmod stays as the belt to that braces.
 ci-mac:
-	@echo "=== ci-mac: the OS-specific packages, natively, in a disposable root ==="
+	@echo "=== ci-mac: the tests macOS alone can run, natively, in a disposable root ==="
+	@$(MAC_SELECTION_CMD)
+	@$(MAC_CHECK_CMD)
 	@set -eu; \
 	  tmpbase="$${TMPDIR:-/tmp}"; tmpbase="$${tmpbase%/}"; \
 	  case "$$tmpbase" in \
@@ -1014,13 +1121,13 @@ ci-mac:
 	    esac; \
 	  }; \
 	  trap cleanup EXIT INT TERM; \
+	  MAC_TEST_SELECT="$$($(MAC_TESTS) select $(OS_PKG_DIRS))" \
+	  MAC_TEST_PKGS="$$($(MAC_TESTS) pkgs $(OS_PKG_DIRS))" \
 	  NOCX_TEST_APP_DIR="$$root/profile" HOME="$$root/home" TMPDIR="$$root/tmp" \
 	  GOMODCACHE="$$gomodcache" GOCACHE="$$gocache" \
 	  sh -c 'mkdir -p "$$NOCX_TEST_APP_DIR" "$$HOME" "$$TMPDIR" && \
-	         $(GO) test -race -count=1 -p $(GO_TEST_P) $(OS_PKGS) && \
-	         echo "" && \
-	         echo "=== the shipped profile directory (-tags release) ===" && \
-	         $(GO) test -race -count=1 -p $(GO_TEST_P) -tags release ./internal/storage/...'
+	         $(GO) test -race -count=1 -p $(GO_TEST_P) -tags gtk3,nocx_framecheck \
+	           -run "$$MAC_TEST_SELECT" $$MAC_TEST_PKGS'
 	@echo ""
 	@echo "=== ci-mac green — NOTE: the login keychain is shared with your Mac"
 	@echo "    and is the one thing a disposable root cannot isolate. ==="

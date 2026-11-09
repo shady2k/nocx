@@ -659,12 +659,15 @@ test('gate manifests come from each actual workflow job and matrix choice', () =
     Object.keys(manifests),
     ciJobNames(readFileSync('.github/workflows/ci.yml', 'utf8'), { gated: true }),
   )
+  // The macOS job holds only the tests that cannot run without a Mac
+  // (nocx-ouru5.1.13): its OS step runs the untagged selection, its tagged step
+  // runs the tagged one (review of PR #776 — a tagged test can reach a darwin
+  // implementation too), and the release-tag pass moved to ci-linux.
   assert.deepEqual(manifests['ci-mac'], [
     'go-mac-zsh-plugins',
     'go-mac-fish',
     'go-mac-os',
     'go-mac-local-ssh',
-    'go-mac-release-tag',
     'e2e-macos-first-command',
   ])
   for (const keyring of ['with-secret-service', 'no-secret-service']) {
@@ -677,6 +680,7 @@ test('gate manifests come from each actual workflow job and matrix choice', () =
       'go-linux-fish',
       'go-linux',
       'go-linux-local-ssh',
+      ...(keyring === 'no-secret-service' ? ['go-linux-release-tag'] : []),
     ])
   }
   for (const project of ['chromium', 'webkit']) {

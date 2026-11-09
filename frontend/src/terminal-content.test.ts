@@ -3665,6 +3665,130 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
     }
   })
 
+  // REVIEW ROUND 9, FINDING 1 (P1): an ACCEPTED command still queued when the
+  // person presses Ctrl-C during a pending reconnect. `reconnect` clears
+  // `this.session`, and sendIntent returned on that before it dropped the held
+  // queue — the command was already accepted (the draft empty), so nothing
+  // else could withdraw it, and the replacement ran it.
+  it('a cancel during a reconnect drops a command already held for it (sequence 14)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const session = client._sessions[0]
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    let openNew!: () => void
+    const newOpen = new Promise<void>((resolve) => {
+      openNew = resolve
+    })
+    try {
+      const onExit = session.onExit.mock.calls[0]?.[0] as
+        ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
+      onExit!({ sessionId: session.sessionId, cause: 'interrupted' })
+      const replacement = makeSession({ awaitsIntegration: false })
+      client.openSession.mockImplementation(async () => {
+        await newOpen
+        client._sessions.push(replacement)
+        return replacement
+      })
+      const reopening = content.reconnect()
+
+      // Accepted while the replacement open is pending: the line leaves the
+      // composer for the held queue.
+      editor.insertText('echo cancelled-during-reconnect')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      expect(editor.getDoc()).toBe('')
+
+      // And withdrawn with the same keystroke every other cancel uses.
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true, cancelable: true }),
+      )
+
+      replacement.intent.mockClear()
+      replacement.send.mockClear()
+      openNew()
+      expect(await reopening).toBe(true)
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(replacement.intent).not.toHaveBeenCalled()
+      expect(replacement.send).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  // REVIEW ROUND 9, FINDING 2 (P2): the replacement's startup gating read the
+  // PREVIOUS session's integration verdict. A conventional session's verdict
+  // was still in `_integration` while the replacement was opening, so the held
+  // command was released at bind completion — before the replacement had said
+  // anything — and, with the lifecycle still native, ran with no app-owned
+  // attempt. A new bind starts with an UNKNOWN verdict.
+  it('a command held across a reconnect waits for the NEW session’s verdict (sequence 15)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const session = client._sessions[0]
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    const fireIntegration = integrationHandler(client, session)
+    let openNew!: () => void
+    const newOpen = new Promise<void>((resolve) => {
+      openNew = resolve
+    })
+    try {
+      // The session that is about to be lost has ANSWERED: conventional.
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      const onExit = session.onExit.mock.calls[0]?.[0] as
+        ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
+      onExit!({ sessionId: session.sessionId, cause: 'interrupted' })
+      const replacement = makeSession({ awaitsIntegration: true })
+      client.openSession.mockImplementation(async () => {
+        await newOpen
+        client._sessions.push(replacement)
+        return replacement
+      })
+      const reopening = content.reconnect()
+
+      editor.insertText('echo waits-for-the-new-verdict')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+
+      replacement.intent.mockClear()
+      replacement.send.mockClear()
+      openNew()
+      expect(await reopening).toBe(true)
+      await Promise.resolve()
+      await Promise.resolve()
+      // The replacement has said nothing yet. The old verdict must not stand
+      // in for its own, so the command is still held.
+      expect(replacement.intent).not.toHaveBeenCalled()
+
+      // The replacement answers in its own time.
+      integrationHandler(client)({
+        sessionId: replacement.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      await vi.waitFor(() =>
+        expect(replacement.intent.mock.calls.filter((call) => call[0] !== 'focus')).toHaveLength(2),
+      )
+      expect(
+        replacement.intent.mock.calls.filter((call) => call[0] !== 'focus').map((call) => call[1]),
+      ).toEqual(['echo waits-for-the-new-verdict', 'enter'])
+    } finally {
+      teardown()
+    }
+  })
+
   // nocx-xn63t.6.27, CI run 38577867125: a command typed into the startup
   // composer of a reconnected ssh session reached the shell as
   // `echo after-the-reconnec`. The integration status reaches `integrated` a

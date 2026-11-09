@@ -689,12 +689,90 @@ interface HeldRange {
  * reconnect was queued — and run — in its replacement. A command belongs to the
  * session it was typed for, and that is a fact only the Enter can answer.
  */
+/** One command held for a session that is still proving itself: the resolved
+ *  plan, the input target it was typed for, and the bind it was typed for. */
+interface HeldSubmission {
+  readonly plan: SubmitPlan
+  readonly target: InputTarget
+  readonly origin: BindIdentity
+}
+
 interface BindIdentity {
   /** The pane's monotonic bind token — the identity every check compares. */
   readonly generation: number
   /** The session it was bound to, for a log line that names which one; the
    *  rebind window makes it unusable as a key (see _bindIsCurrent). */
   readonly sessionId: string
+}
+
+/**
+ * EVERYTHING THE COMPOSER'S SUBMIT PATH KEEPS FOR ONE BIND.
+ *
+ * Nine review rounds each found one more field that outlived the session that
+ * owned it: a held queue, a held raw window, a startup flag, an integration
+ * verdict, a pending attempt, a bind generation. Each was fixed where it
+ * showed. This is the shape that stops the class (review round 9): all of it
+ * lives HERE, one object per bind, created when a bind starts and REPLACED —
+ * never mutated across — when the next one starts. Release, write and cancel
+ * consult only the current object, so nothing a previous session held can be
+ * read, released or delivered by the next.
+ *
+ * A new object starts with an UNKNOWN integration verdict (`integration` null,
+ * `awaitsIntegration` false) in the phase `opening`: nothing is released on the
+ * strength of the session that just went away, and nothing is written into a
+ * handle that does not exist yet.
+ */
+class BindState {
+  constructor(readonly generation: number) {}
+  /** `opening` until _finishBind says the bind produced (or gave up on) its
+   *  session; only `live` may release held submissions. */
+  phase: 'opening' | 'live' = 'opening'
+  /** The session id this bind produced, once it has one. */
+  sessionId = ''
+  /** Human shell submits taken while the session is proving its shell's
+   *  integration state, in the order the person made them (nocx-evj4b.1.6).
+   *  Each entry carries the TARGET it was typed for and the BIND it was typed
+   *  for, so a release cannot hand it to another target or another session. */
+  readonly held: HeldSubmission[] = []
+  /** True while the queue is being delivered: one chain, never two (round 1,
+   *  sequence 2). */
+  releasing = false
+  /** Keys typed while a submit's bytes are on their way (the window
+   *  holdRawUntilSubmitted arms), and whether a Ctrl-C cancelled it. */
+  heldRaw: HeldWindow | null = null
+  /** A submitted command is on the pty queue and its running fact has not been
+   *  applied yet (nocx-atpw5.1.20). */
+  submittedAwaitingStart = false
+  /** The session's integration status as the backend revises it (nocx-dvql).
+   *  null in a NEW bind means "unknown", which is not the same as the previous
+   *  session's answer. */
+  integration: SessionIntegrationChanged | null = null
+  /** The ack's own field (nocx-ui8q6.6, nocx-ty0hc): whether THIS session
+   *  entered the axis `starting`, read while `integration` is still null. */
+  awaitsIntegration = false
+  /** Whether THIS bind entered the axis at `starting` (the ack said so, or a
+   *  `starting` fact arrived) — what lets a proved-but-not-yet-prompted
+   *  session keep the composer (nocx-xn63t.6.27). */
+  enteredIntegrationStartup = false
+  /** Agent-run waits minted at submit, parked under the submit token until the
+   *  authenticated start opens the block (nocx-2v80t.3.2). */
+  readonly pendingAgentRuns = new Map<
+    string,
+    {
+      ledgerId: number
+      stopped: boolean
+      resolve: (run: AgentRunCompletion) => void
+      reject: (reason: unknown) => void
+    }
+  >()
+  /** The store's entry id for an agent run's record, keyed by the renderer's
+   *  own record id (nocx-9sqii). */
+  readonly runEntryIds = new Map<
+    number,
+    { entryId: string | null; waiting: ((entryId: string) => void) | null }
+  >()
+  /** Intents and signals already queued against this bind's handle. */
+  readonly callQueue: PendingSessionCall[] = []
 }
 
 interface HeldWindow {
@@ -1081,7 +1159,9 @@ export class TerminalContent extends BasePaneContent {
   /** Session control calls stay in user order. Adjacent committed-text intents
    *  coalesce while queued, so fast typing does not flood the bounded executor;
    *  keys, mouse events and signals remain ordering fences. */
-  private _sessionCallQueue: PendingSessionCall[] = []
+  private get _sessionCallQueue(): PendingSessionCall[] {
+    return this._bind.callQueue
+  }
   private _sessionCallSending = false
   private editor: CommandEditor | null = null
   private shellTarget: ShellInputTarget | null = null
@@ -1301,24 +1381,17 @@ export class TerminalContent extends BasePaneContent {
    *  attempt (nocx-2v80t.3.2): the submit opens no card, so the waiter is
    *  parked under the submit token and transfers to the block when the
    *  authenticated start opens it (_openAuthenticatedBlock). */
-  private readonly pendingAgentRuns = new Map<
-    string,
-    {
-      ledgerId: number
-      stopped: boolean
-      resolve: (run: AgentRunCompletion) => void
-      reject: (reason: unknown) => void
-    }
-  >()
+  private get pendingAgentRuns() {
+    return this._bind.pendingAgentRuns
+  }
   /** The store's entry id for an agent run's record, keyed by the renderer's
    *  own record id: opened at submit (only a run needs one), filled by the
    *  history.recorded receipt, and removed when the run resolves. `entryId`
    *  is null until the store has answered; '' is the store's answer that it
    *  wrote no row (nocx-9sqii). */
-  private readonly runEntryIds = new Map<
-    number,
-    { entryId: string | null; waiting: ((entryId: string) => void) | null }
-  >()
+  private get runEntryIds() {
+    return this._bind.runEntryIds
+  }
   /** Renderer record ids awaiting the backend-owned history.recorded receipt. */
   private readonly attemptEntryIds = new Map<string, number>()
   /** Receipts can precede the lifecycle.submitAttempt response. */
@@ -1642,17 +1715,18 @@ export class TerminalContent extends BasePaneContent {
     sessionId: string
     episodeId: string
   } | null = null
+  /** THE ONE PER-BIND OBJECT (review round 9): everything the composer's
+   *  submit path keeps for one session. A new bind REPLACES it — never mutates
+   *  it across — so release, write and cancel can only ever consult the
+   *  session that is current. See BindState for the fields and why they are
+   *  one object. */
+  private _bind: BindState = new BindState(0)
   /** Monotonic identity for the pane's current session bind. Async
    *  acknowledgements from an old shell may settle after reconnect, but they
    *  must never mutate the new shell's episode. */
-  private _bindGeneration = 0
-  /** True from the moment a bind starts until it has a session or has given
-   *  up. The composer stays on screen through a rebind, so a person's Enter can
-   *  land here: the line belongs to the session the bind is producing, and it
-   *  is HELD rather than written into the handle this pane is about to replace
-   *  (CI run 42658168728, e2e/ssh-reconnect.spec.ts — a command typed after
-   *  "Reconnect" ran into the dead shell and produced no block). */
-  private _bindInFlight = false
+  private get _bindGeneration(): number {
+    return this._bind.generation
+  }
   /** The disposable projections (ADR-0024 §5–§7, bead nocx-u7uh.7): the
    *  ledger, history and the block model, driven by this kernel. */
   private _projections: LifecycleProjections | null = null
@@ -1818,7 +1892,13 @@ export class TerminalContent extends BasePaneContent {
    *  arrive after the ack: a handshake that expires ten seconds in, and a
    *  channel lost mid-session. null means the session never asked for
    *  integration and there is nothing to say about it. */
-  private _integration: SessionIntegrationChanged | null = null
+  private get _integration(): SessionIntegrationChanged | null {
+    return this._bind.integration
+  }
+
+  private set _integration(fact: SessionIntegrationChanged | null) {
+    this._bind.integration = fact
+  }
   /** The session handle's own `awaitsIntegration` — the open ack's field
    *  (nocx-ui8q6.6) for a session this pane opened, or the attach ack's same
    *  field (nocx-ty0hc) for one it reclaimed or reattached to. Either way it
@@ -1831,7 +1911,13 @@ export class TerminalContent extends BasePaneContent {
    *  once a fact exists this is ignored; and it is set fresh on every
    *  `_bindSession` call — first bind and rebind alike — so a reconnect's new
    *  session is never judged by the old one's answer. */
-  private _awaitsIntegration = false
+  private get _awaitsIntegration(): boolean {
+    return this._bind.awaitsIntegration
+  }
+
+  private set _awaitsIntegration(value: boolean) {
+    this._bind.awaitsIntegration = value
+  }
   /** Human shell submits taken while the session is proving its shell's
    *  integration state, in the order the person made them (nocx-evj4b.1.6).
    *  Each held Enter accepted its line — the editor emptied its draft — so
@@ -1842,25 +1928,31 @@ export class TerminalContent extends BasePaneContent {
    *  happens to be active at release: a shell command does not become an
    *  assistant question because the person opened the Ask composer while the
    *  shell was still proving itself. */
-  private readonly _deferredShellSubmissions: Array<{
-    readonly plan: SubmitPlan
-    readonly target: InputTarget
-    /** The bind this line was TYPED for (review rounds 4 and 6), captured at
-     *  the Enter and carried through resolution: a reconnect moves
-     *  `_bindGeneration`, and a line typed for the shell that is gone is
-     *  dropped at release rather than opened against its replacement. */
-    readonly origin: BindIdentity
-  }> = []
+  private get _deferredShellSubmissions(): HeldSubmission[] {
+    return this._bind.held
+  }
   /** True while the queue is being delivered. The release is one CHAIN, not a
    *  loop of independent submissions: no later fact may start a second chain
    *  beside it, or two lines could be in flight at once (sequence 2). */
-  private _releasingDeferredShellSubmissions = false
+  private get _releasingDeferredShellSubmissions(): boolean {
+    return this._bind.releasing
+  }
+
+  private set _releasingDeferredShellSubmissions(value: boolean) {
+    this._bind.releasing = value
+  }
   /** Whether THIS session entered the integration axis at `starting` — the ack
    *  said so, or a `starting` fact arrived. Set fresh on every bind. It is what
    *  lets `_awaitsFirstPrompt` tell a session that has just proved itself and
    *  not yet published its first prompt from one that is integrated and merely
    *  replaying its status on a reattach. */
-  private _enteredIntegrationStartup = false
+  private get _enteredIntegrationStartup(): boolean {
+    return this._bind.enteredIntegrationStartup
+  }
+
+  private set _enteredIntegrationStartup(value: boolean) {
+    this._bind.enteredIntegrationStartup = value
+  }
   /** The subscription to that status, dropped on dispose. */
   private _integrationUnsub: (() => void) | null = null
   /** Backend block-row notification subscriptions for the current pane. */
@@ -5183,13 +5275,15 @@ export class TerminalContent extends BasePaneContent {
     // to tell its own bind apart from a later one. Advancing it here has no
     // local reader any more — the establishment-acknowledgement closures
     // that used to capture it were removed with the mechanism (ADR-0062).
-    ++this._bindGeneration
-    this._bindInFlight = true
-    // NOTHING THE PREVIOUS SESSION HELD MAY BE CONSUMED BY THIS ONE (review
-    // round 5). Every piece of per-session INPUT state is dropped here, at the
-    // one place a bind changes hands; the fields and what each one is are in
-    // _resetSessionInputState's own comment.
-    this._resetSessionInputState()
+    // A NEW BIND IS A NEW OBJECT (review round 9). Everything the submit path
+    // keeps per session — the held queue, the held raw window, the integration
+    // verdict and the startup flags read beside it, the pending attempts, the
+    // queued intents, the release chain — lives in BindState, and this call
+    // REPLACES it. Nothing a previous session left can be read, released or
+    // delivered by this one: the new object starts `opening`, with an UNKNOWN
+    // verdict, and the old object is unreachable. (Rounds 5 and 7 each reset a
+    // field here; the object is why there is nothing left to remember.)
+    this._bind = new BindState(this._bind.generation + 1)
     // A bind is a new session (or the same one reattached): the previous
     // binding's resize receipt will never arrive for anything this pane sends
     // now, and the input it was holding belongs to a surface whose screen
@@ -5447,6 +5541,7 @@ export class TerminalContent extends BasePaneContent {
     this._publishNoticeDismissed = false
     this.snapshotStore.reset()
     this.session = session
+    this._bind.sessionId = session.sessionId
     // The question that was open is answered; the card's retry no longer has
     // anything to re-ask (nocx-3an1s.1.5).
     this._pendingAdoption = false
@@ -7799,7 +7894,7 @@ export class TerminalContent extends BasePaneContent {
     // dead shell the pane is about to replace — the command would be accepted
     // and produce no block. The line belongs to the session this bind is
     // producing: hold it, and _finishBind offers it when that session is here.
-    if (this._bindInFlight) {
+    if (this._bind.phase === 'opening') {
       this._deferredShellSubmissions.push({ plan, target, origin })
       return 'held'
     }
@@ -7856,11 +7951,17 @@ export class TerminalContent extends BasePaneContent {
    * own completion is its release, and this is what says so.
    */
   private _startupCanHold(): boolean {
+    // AN OPENING BIND RELEASES NOTHING (review round 9). Its object's verdict
+    // is UNKNOWN until the bind produces a session and installs that
+    // session's own flags; the attach callback arrives before those flags are
+    // in, so a check made from there must not read them at all.
+    if (this._bind.phase !== 'live') return false
     if (this.lifecycle.state.kind === 'prompt_ready') return true
-    if (isDegraded(this._integration)) return true
-    // No integration was ever requested for this session, so no verdict is
-    // coming and no prompt mark will ever arrive.
-    return this._integration === null && !this._awaitsIntegration
+    if (isDegraded(this._bind.integration)) return true
+    // No integration was ever requested for THIS session, so no verdict is
+    // coming and no prompt mark will ever arrive. `awaitsIntegration` is this
+    // bind's own ack field, never the session that went away.
+    return this._bind.integration === null && !this._bind.awaitsIntegration
   }
 
   /** Deliver the held lines ONE AT A TIME, in the order the person made them,
@@ -7943,44 +8044,6 @@ export class TerminalContent extends BasePaneContent {
     return this._bindGeneration === origin.generation
   }
 
-  /** EVERY PIECE OF PER-SESSION INPUT STATE BELONGS TO THE SESSION THAT MADE
-   *  IT (review round 5), and this is the one point a bind changes hands.
-   *  Nothing here is merely tidy — each field can otherwise be consumed by the
-   *  NEXT session:
-   *
-   *  - `_deferredShellSubmissions`, the held shell queue: a line typed for a
-   *    shell that is gone would be opened against its replacement (round 4
-   *    fences the write; the queue must not even get that far).
-   *  - `_heldRaw`, the window a submit arms for keys typed while its bytes are
-   *    on their way: left alive it is TAKEN by the next submit, which flushes
-   *    the dead session's keystrokes into the new shell — or, when a Ctrl-C
-   *    cancelled it, suppresses that submit instead.
-   *  - `_submittedAwaitingStart`, the interval between a write and the running
-   *    fact: its fact belonged to the old session and is never coming, so the
-   *    pane would keep believing a command of its own is still starting.
-   *  - `_sessionCallQueue`, intents and signals already queued against the old
-   *    handle: each names its session, and a dead handle must not be written
-   *    to at all.
-   *  - `pendingAgentRuns` and `runEntryIds`, the waits minted at submit for a
-   *    run that opens with the authenticated start: that start was the old
-   *    session's, and a stale slot could be bound by a later attempt.
-   *  - `_departure`, the composer's post-submit window: the command it was
-   *    measuring ran in the session that is gone.
-   *
-   * Deliberately NOT reset: the draft, the scrollback, the ledger and the
-   * block model. Those are the person's work and the pane's history; a
-   * reconnect must not throw them away — only the state that STEERS input
-   * into a session does. */
-  private _resetSessionInputState(): void {
-    this._cancelDeferredShellSubmissions()
-    this._heldRaw = null
-    this._submittedAwaitingStart = false
-    this._sessionCallQueue.length = 0
-    this.pendingAgentRuns.clear()
-    this.runEntryIds.clear()
-    this._endDeparture()
-  }
-
   /** End a bind: the composer's submits stop being held for a session that
    *  is now here, and the ones this bind accepted are offered to it (they go
    *  out only if it is already at a prompt; otherwise its own settle does).
@@ -7989,8 +8052,10 @@ export class TerminalContent extends BasePaneContent {
    *  them clears the flag, so a failed rebind cannot leave the composer
    *  holding lines forever. */
   private _finishBind<T extends 'bound' | 'uncertain' | 'aborted'>(outcome: T): T {
-    this._bindInFlight = false
-    this._releaseDeferredShellSubmissions()
+    if (this._bind.phase === 'opening') {
+      this._bind.phase = 'live'
+      this._releaseDeferredShellSubmissions()
+    }
     return outcome
   }
 
@@ -9998,7 +10063,13 @@ export class TerminalContent extends BasePaneContent {
    *  Since nocx-xn63t.6.12 it also carries whether a Ctrl-C arrived in the
    *  window, which cancels the submission rather than flushing the interrupt
    *  behind it (see HeldWindow, and onSessionIntent, which arms this). */
-  private _heldRaw: HeldWindow | null = null
+  private get _heldRaw(): HeldWindow | null {
+    return this._bind.heldRaw
+  }
+
+  private set _heldRaw(window: HeldWindow | null) {
+    this._bind.heldRaw = window
+  }
 
   /** A person's submitted command has been handed to the pty queue and its
    *  running fact has not been applied yet (nocx-atpw5.1.20).
@@ -10014,7 +10085,13 @@ export class TerminalContent extends BasePaneContent {
    *  kept, so the program reading stdin is answered with an empty line. This
    *  is the statement that interval needs, and it is cleared at the fact that
    *  makes the command the running owner. */
-  private _submittedAwaitingStart = false
+  private get _submittedAwaitingStart(): boolean {
+    return this._bind.submittedAwaitingStart
+  }
+
+  private set _submittedAwaitingStart(value: boolean) {
+    this._bind.submittedAwaitingStart = value
+  }
 
   /** The submitted command's departure (ADR-tqjt5rkk): armed by the person's
    *  shell submit and settled by the command's completion, by the grace's own
@@ -10157,20 +10234,22 @@ export class TerminalContent extends BasePaneContent {
    *  swallowed: a keystroke that reached nobody is a fact the person is owed,
    *  and printing it to a console would be the silent version of it. */
   private sendIntent(intent: SessionIntent): boolean {
-    if (this._attachment.kind !== 'attached') return false
-    const session = this.session
-    if (!session) return false
-    // AN INTERRUPT FLUSHES THE HELD COMMANDS (review, round 2). A real tty
-    // discards type-ahead on SIGINT, and every Ctrl-C the person makes passes
-    // THIS function, whichever surface produced it: the grid's key arrives
-    // through onSessionIntent, the composer's through its cancel action, and
-    // both end here. So the rule lives here once — no caller carries it — and
-    // it holds even while the shell is still proving itself, when the key
-    // itself is refused before it reaches the pty. The SIGNAL form of the same
-    // gesture (the block's Stop/Interrupt) is signalActiveCommand's.
+    // AN INTERRUPT FLUSHES THE HELD COMMANDS (review rounds 2 and 9). A real
+    // tty discards type-ahead on SIGINT, and every Ctrl-C the person makes
+    // passes THIS function, whichever surface produced it: the grid's key
+    // arrives through onSessionIntent, the composer's through its cancel
+    // action. The rule is asked FIRST — before the attachment and session
+    // checks — because a reconnect has no session at all, and returning there
+    // left an already-accepted command queued to run in the replacement (the
+    // P1 of review round 9): with no session the key is not sent, but the
+    // queue is still dropped. The SIGNAL form of the gesture (the block's
+    // Stop/Interrupt) is signalActiveCommand's.
     if (intent.kind === 'key' && intent.payload === INTERRUPT_KEY) {
       this._cancelDeferredShellSubmissions()
     }
+    if (this._attachment.kind !== 'attached') return false
+    const session = this.session
+    if (!session) return false
     const tail = this._sessionCallQueue[this._sessionCallQueue.length - 1]
     if (
       intent.kind === 'text' &&

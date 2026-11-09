@@ -129,6 +129,7 @@ test('a slow open states its wait in the pane, cancels, and draws no cursor with
   let second: SshdFixture | null = null
   let profileId: string | null = null
   let secondProfileId: string | null = null
+  let thirdProfileId: string | null = null
   let endpoint: BackendEndpoint | null = null
   const profileName = `e2e-open-wait-${Date.now()}`
 
@@ -254,22 +255,99 @@ test('a slow open states its wait in the pane, cancels, and draws no cursor with
         intervals: [200],
       })
       .toBe(true)
-    // Each open's own duration, by the request it names — and NOT the whole
-    // line: an open whose first prompt lands between the two reads gains
-    // `first_prompt=` after the fact, which is the record doing its job.
-    const durations = (lines: string[]): string[] =>
-      lines
-        .filter((line) => line.includes('duration='))
-        .map(
-          (line) =>
-            `${/request=[^ ]+/.exec(line)?.[0] ?? ''} ${/duration=[^ ]+/.exec(line)?.[0] ?? ''}`,
-        )
-    const before = await readOpens()
-    await page.waitForTimeout(2_000)
-    const after = await readOpens()
-    // The same opens, the same durations: the clock moved two seconds on and
-    // no finished record grew by it.
-    expect(durations(after)).toEqual(durations(before))
+
+    /**
+     * A FINISHED open, by the request it names: `4/open#38 -> 3570ms`.
+     *
+     * The key is the request id and the value is the duration, because that is
+     * the claim — a record that already carries a `duration=` never grows it.
+     * `first_prompt=` is deliberately not part of it: an open whose first
+     * prompt lands after the record was written GAINS that field, which is the
+     * record doing its job rather than growing (nocx-q9od5).
+     *
+     * ONLY the records finished at the first read are compared (nocx-evj4b.1.7).
+     * The first version compared the whole list twice around a fixed two-second
+     * sleep, so an open that finished in between appeared as an extra line and
+     * the spec failed under load — the CANCELLED open here lands two records,
+     * and which of them has been written by a given moment is the open's
+     * business, not this assertion's.
+     */
+    const finishedOpens = (lines: string[]): Array<[string, string]> => {
+      const out: Array<[string, string]> = []
+      for (const line of lines) {
+        const request = /request=([^ ]+)/.exec(line)?.[1]
+        const duration = /duration=([^ ]+)/.exec(line)?.[1]
+        if (request !== undefined && duration !== undefined) out.push([request, duration])
+      }
+      return out
+    }
+    const before = finishedOpens(await readOpens())
+    expect(
+      before.length,
+      'no open has finished, so there is no record to hold still',
+    ).toBeGreaterThan(0)
+    const beforeDurations = new Map(before)
+
+    // A LATER OPEN IS THE CLOCK (nocx-evj4b.1.7). The claim is about a record
+    // that has already finished, so the second read must happen after
+    // something observable — not after a sleep. A third profile on the same
+    // full-speed host opens a NEW connection (a different pool key, so it
+    // cannot adopt the second one's helper), and its own finished record is
+    // the evidence that the process moved on.
+    const thirdName = `${profileName}-later`
+    const thirdProfile = await rpc<{ id?: string }>(page, endpoint, 'profiles.create', {
+      type: 'ssh',
+      name: thirdName,
+      options: {
+        host: second.host,
+        port: second.port,
+        user: 'e2e-later',
+        keyPath: second.userKey,
+        desiredMode: 'script',
+      },
+    })
+    thirdProfileId = thirdProfile.id ?? null
+    await openProfile(page, thirdName)
+    await expect
+      .poll(
+        async () =>
+          finishedOpens(await readOpens()).filter(([request]) => !beforeDurations.has(request)),
+        { timeout: 60_000, intervals: [200] },
+      )
+      .not.toEqual([])
+
+    const afterDurations = new Map(finishedOpens(await readOpens()))
+    // The same opens, the same durations. A record that finished before the
+    // first read is still exactly as long now, however much has happened
+    // since; a record that finishes later is simply not in the set.
+    //
+    // AND A RECORD CAN LEAVE THE SET BY BEING EVICTED, not only by growing:
+    // the finished records live in a ring of 32 (internal/diagnostics,
+    // recentOpenCap), and a stand that has served a dozen opens drops the
+    // oldest. Eviction is not the defect under test, so the comparison covers
+    // the records still present — and the NEWEST one read the first time must
+    // be among them, or nothing was really checked.
+    const newest = before[before.length - 1]
+    expect(
+      afterDurations.has(newest[0]),
+      `the newest finished record (${newest[0]}) was evicted from the ring before the second ` +
+        'read, so this run cannot say anything about it',
+    ).toBe(true)
+    let compared = 0
+    for (const [request, duration] of before) {
+      const later = afterDurations.get(request)
+      if (later === undefined) continue
+      compared++
+      expect(
+        later,
+        `the record for ${request} read ${JSON.stringify(duration)} first and ` +
+          `${JSON.stringify(later)} later`,
+      ).toBe(duration)
+    }
+    expect(
+      compared,
+      'no record from the first read was still in the ring to compare',
+    ).toBeGreaterThan(0)
   } finally {
     if (fixture !== null) {
       fixture.proc.kill()
@@ -278,7 +356,7 @@ test('a slow open states its wait in the pane, cancels, and draws no cursor with
         else fixture?.proc.once('exit', () => resolve())
       })
     }
-    for (const id of [profileId, secondProfileId]) {
+    for (const id of [profileId, secondProfileId, thirdProfileId]) {
       if (endpoint !== null && id !== null) {
         await rpc(page, endpoint, 'profiles.delete', { id }).catch(() => {})
       }

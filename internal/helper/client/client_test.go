@@ -496,6 +496,42 @@ func TestCallWhoseFrameCannotBeWrittenIsATransportLoss(t *testing.T) {
 	}
 }
 
+// TestAClientWhoseTransportIsLostEndsItsLane (nocx-ouru5.1.8): a client whose
+// transport is lost has no use for its lane, and until this the lane outlived
+// it. Done closing used to mean the CARRIER had already ended, so every caller
+// that answered it by forgetting the client forgot a lane that was dead
+// anyway; a frame that could not be written broke that, because the write is
+// now a loss's observer while the lane's read side is still perfectly alive.
+//
+// The lane here fails writes on demand and keeps its read side open, so the
+// loss has exactly one observer — and the peer at the other end must still be
+// ended by the client that dropped the wire, or the process behind a lane
+// nobody owns serves a connection nobody will ever ask anything of again.
+func TestAClientWhoseTransportIsLostEndsItsLane(t *testing.T) {
+	lane := &writeFails{lane: newFakeConn(helloOKPeer("testhash", ""))}
+	c, err := client.Dial(context.Background(), client.Config{
+		Exec: lane, Command: "/opt/nocx-helper", ExpectHash: "testhash", SentinelTTL: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	lane.breakWrites()
+
+	if err := c.Call(context.Background(), "stub", "ping", pingParams{Msg: "x"}, nil); !errors.Is(err, client.ErrLost) {
+		t.Fatalf("a frame that could not be written is a lost transport, got %v", err)
+	}
+	// A BOUND ON A HANG, not a duration the assertion depends on: the client
+	// closes the lane before Call returns, and the peer's exit is the event
+	// this waits for.
+	select {
+	case <-lane.lane.exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the lane a lost client rode never ended: its peer is still serving a connection no caller can reach")
+	}
+}
+
 // blockUntilCancelledService blocks its one op until the request context is
 // cancelled, so a test can observe that a cancel frame reached the host and
 // was honoured — the remote half of D10.

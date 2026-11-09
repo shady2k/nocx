@@ -1098,6 +1098,27 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 	if outcome.State != "" {
 		return transport.HostedSessionOpen{}, true, errors.New(outcome.Message)
 	}
+	// THE CHANNEL THIS OPEN DIALED IS THE OPEN'S UNTIL THE PANE IS THE
+	// REGISTRY'S (nocx-ouru5.1.8). Every return below used to remember its own
+	// `_ = c.Close()` — four of them — and a helper channel is the one thing on
+	// this path that outlives a failed open: the client is not in `hosts` yet,
+	// so no teardown closes it, and what stays behind is a lane nobody can
+	// reach, a helper on somebody else's machine serving a pane that never
+	// came, and (in a stand) the fake process behind that lane still running
+	// after every test ended. That is the leak ci-linux reported, and the
+	// client it named was dialled exactly here (hostHelper.connectLocked, from
+	// this function, from a `session.open` over the socket). One defer, armed
+	// by the dial and disarmed by the registration that makes the registry the
+	// owner, is that rule stated once instead of remembered at each return.
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		h.mu.Lock()
+		h.closeLocked()
+		h.mu.Unlock()
+	}()
 	var subscriberRaw [16]byte
 	if _, randErr := rand.Read(subscriberRaw[:]); randErr != nil {
 		return transport.HostedSessionOpen{}, true, randErr
@@ -1151,7 +1172,6 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 		if lifecycleErr != nil {
 			_ = peerConn.Close()
 			stopDownlink()
-			_ = c.Close()
 			return transport.HostedSessionOpen{}, true, lifecycleErr
 		}
 		lifecyclePeer = peerConn
@@ -1250,7 +1270,6 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 	if err != nil {
 		endSpawn(err)
 		endLifecycleLeg("open-rollback:spawn")
-		_ = c.Close()
 		return transport.HostedSessionOpen{}, true, farHelperAnswerError("spawn", err)
 	}
 	// THE SPAWN NAMED THE FAR SESSION: everything the kernel accepted while
@@ -1282,7 +1301,6 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 		if !errors.Is(err, context.DeadlineExceeded) {
 			_ = c.CloseSession(ctx, entry.HostSessionID)
 		}
-		_ = c.Close()
 		return transport.HostedSessionOpen{}, true, farHelperAnswerError("attach", err)
 	}
 	sid := session.ID(entry.HostSessionID.Session)
@@ -1321,7 +1339,6 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 		_ = attached.Close()
 		endLifecycleLeg("open-rollback:adopt")
 		_ = c.CloseSession(ctx, entry.HostSessionID)
-		_ = c.Close()
 		return transport.HostedSessionOpen{}, true, err
 	}
 	bindBlockEndToSession(sess, attached, r.blockRows, sid, stopBlockRows)
@@ -1365,6 +1382,11 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 	r.mu.Lock()
 	r.hosts[sid] = h
 	r.mu.Unlock()
+	// THE REGISTRY IS THE OWNER FROM HERE, and the open's own defer above stands
+	// down: closing the channel now is the stand's end, the helper's retire or
+	// the session's own end — the three things that already close every entry
+	// in this map.
+	committed = true
 	// THE LISTENER IS OPENED NOW, with the session id the FAR helper minted, and
 	// it is registered against that session so its end is not this process's to
 	// remember (nocx-e2bws). The interval, both ends named: it opens here, after

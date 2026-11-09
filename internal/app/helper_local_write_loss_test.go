@@ -23,6 +23,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/host"
@@ -91,5 +92,19 @@ func TestAFrameThatCannotBeWrittenIsRetriedByTheLocalHelperOpen(t *testing.T) {
 	wrapped := fmt.Errorf("open a pane on this machine's helper: %w", callErr)
 	if !retryableLocalHelperOpen(wrapped) {
 		t.Fatalf("a frame that could not be written must be retried by the local open, got %v", callErr)
+	}
+
+	// AND THE LANE THE LOST CLIENT RODE IS ENDED BY THE CLIENT ITSELF
+	// (nocx-ouru5.1.8). The retry above dials a fresh connection and this
+	// stand's client is dropped, exactly as the opener drops it
+	// (`dropIfLost`, hostHelper.invalidate) — a lost client is never reused.
+	// What must not survive that is the lane: this stand's peer IS the helper
+	// process, so a lane nobody closed is a helper still serving after every
+	// test has ended, which is the leak ci-linux reported against this very
+	// test. The bound is on a hang, not on the assertion.
+	select {
+	case <-lane.lane.exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the lane a lost client rode never ended: its peer is still serving a connection the open has already given up on")
 	}
 }

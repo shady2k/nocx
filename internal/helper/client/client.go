@@ -313,7 +313,34 @@ func (c *Client) Cancel(id uint64) {
 // helper's stdin reaches EOF and the helper exits — and the lane releases
 // its pooled reference. Requests still in flight fail with ErrLost; the
 // registry drains its use-guards before closing, so no caller sees that.
+//
+// THE LANE IS THIS CLIENT'S, so it ends when the client ends however that
+// happens: this call, or the loss (endLane, which lose reaches). The two are
+// one act and one once — a caller's Close after a loss closes nothing twice.
 func (c *Client) Close() error {
+	c.endLane()
+	return nil
+}
+
+// endLane ends the lane this client rides, once, whichever of the two ends
+// arrives first: this side's Close, or the transport's loss.
+//
+// WHY THE LOSS ENDS IT (nocx-ouru5.1.8). Done used to close only when the
+// CARRIER had already ended — a read that came back EOF, a lane's own Done —
+// so every caller that answered it by forgetting the client was forgetting
+// something whose lane was dead anyway. A frame that could not be written
+// made that false: the write is now the loss's observer (Call's own note),
+// the transport is gone for every pane riding it, and the lane may be all
+// too alive — a socket whose peer has not closed its half yet, or a lane
+// whose reads stay open. The opener and the registry answer what they always
+// answered — a lost client is dropped, never reused (internal/app's
+// dropIfLost, hostHelper.invalidate) — and a dropped client with an open lane
+// is a lane nobody owns, a read pump parked in it, and the loss watcher
+// Dial started still waiting on a Done that will never close. That is what
+// ci-linux's stand leak caught: the fake helper process behind the lane was
+// still serving after every test had ended, because nothing ever closed the
+// lane the test's lost client rode.
+func (c *Client) endLane() {
 	c.closeOnce.Do(func() {
 		// Closing ends the connection, which is the end of every reverse
 		// handler's lifetime too (reverse.go). Cancelled here as well as in
@@ -330,7 +357,6 @@ func (c *Client) Close() error {
 		c.stopLossWatch()
 		_ = c.conn.Close()
 	})
-	return nil
 }
 
 // stopLossWatch ends the goroutine Dial started to watch this lane's loss. It
@@ -422,6 +448,13 @@ func (c *Client) lose(reason error) {
 		// whose transport is this one, so a consumer watching Done must learn
 		// here rather than at its next probe, which may be minutes away.
 		c.endLeases(reason)
+		// AND THE LANE GOES WITH THE TRANSPORT. Everything above was told
+		// that the connection is over; this is the last party that has to be
+		// — the lane itself, which is this client's (endLane's own note says
+		// what a lane left open behind a lost client costs). LAST, so a
+		// reader released above cannot meet a carrier that is already closed
+		// and read that as a second, unexplained end.
+		c.endLane()
 	})
 }
 

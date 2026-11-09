@@ -241,6 +241,66 @@ describe('files tree store', () => {
     expect(store.phase()).toBe('ready')
   })
 
+  it('a listing answered after the scope moved still clears the row it made busy', async () => {
+    // THE BUSY FLAG BELONGS TO THE REQUEST THAT SET IT (nocx-4y82c.1.6). A row
+    // spun for the whole of a person's 30 s wait on CI: the directory asked
+    // for its listing, the panel re-scoped to the same session under a new
+    // paneId (a viewer tab, design §5.4 — the binding and the tree STAY), and
+    // the answer then arrived for a scope that was no longer current. The
+    // store drops such an answer's CONTENT, which is right, and used to drop
+    // its SETTLEMENT with it, leaving the row busy forever. Nothing else ever
+    // clears that flag, so the row was stuck for as long as the panel lived.
+    const listing = deferred<FilesListResult>()
+    const list = vi
+      .fn()
+      .mockResolvedValueOnce(listOk('C:/', [entry({ name: 'docs', path: '/docs', kind: 'dir' })]))
+      .mockReturnValueOnce(listing.promise)
+    const store = shownStore(makeServices({ list }))
+    store.rescope(LOCAL_A)
+    await settle()
+
+    const docs = nodeRows(store, 'docs')
+    store.toggle(docs)
+    await settle()
+    expect(nodeRows(store, 'docs').busy, 'the directory is enumerating').toBe(true)
+
+    // Same session, same binding, same tree — a DIFFERENT pane: the viewer
+    // tab opened from this one answers its source session (design §5.4).
+    store.rescope({ ...LOCAL_A, paneId: 99 })
+    await settle()
+
+    listing.resolve(listOk('C:/docs', [entry({ name: 'a.txt', path: '/docs/a.txt' })]))
+    await settle()
+
+    expect(nodeRows(store, 'docs').busy, 'the settled listing left the row busy').toBe(false)
+  })
+
+  it('a listing that FAILS after the scope moved still clears the row it made busy', async () => {
+    // The rejection half of the same rule (nocx-4y82c.1.6): an error path may
+    // legitimately refuse to render another scope's failure, and it may never
+    // leave the flag it took standing.
+    const listing = deferred<FilesListResult>()
+    const list = vi
+      .fn()
+      .mockResolvedValueOnce(listOk('C:/', [entry({ name: 'docs', path: '/docs', kind: 'dir' })]))
+      .mockReturnValueOnce(listing.promise)
+    const store = shownStore(makeServices({ list }))
+    store.rescope(LOCAL_A)
+    await settle()
+
+    store.toggle(nodeRows(store, 'docs'))
+    await settle()
+    expect(nodeRows(store, 'docs').busy).toBe(true)
+
+    store.rescope({ ...LOCAL_A, paneId: 99 })
+    await settle()
+
+    listing.reject(new Error('the far side went away'))
+    await settle()
+
+    expect(nodeRows(store, 'docs').busy, 'the failed listing left the row busy').toBe(false)
+  })
+
   it('expanding a directory reaches files.list and commits its entries', async () => {
     const list = vi
       .fn()

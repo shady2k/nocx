@@ -63,6 +63,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -119,6 +120,18 @@ type pendingIntent struct {
 	admittedID sessionruntime.IntentID
 }
 
+// CommandStarted is the runtime telling the owner that the program has begun a
+// command (OSC 133 C): it is no longer at a prompt, so the next paste waits for
+// the next one rather than being framed by the mode the previous prompt
+// announced (nocx-evj4b.1.2, review).
+//
+// It runs inside the runtime's ingest, on this owner's own goroutine, and it
+// touches only the flag advance() reads.
+func (o *sessionOwner) CommandStarted() error {
+	o.atPrompt = false
+	return nil
+}
+
 // awaitsTheProgramsPrompt reports whether this intent must wait for the
 // program to announce a prompt before it can be encoded (nocx-evj4b.1.2).
 //
@@ -145,7 +158,7 @@ func (pi *pendingIntent) awaitsTheProgramsPrompt(o *sessionOwner) bool {
 	if !pi.Interactive || pi.Intent.Kind != sessionruntime.IntentKindPaste {
 		return false
 	}
-	return !o.promptSeen && o.marksPrompts()
+	return !o.atPrompt && o.marksPrompts()
 }
 
 // The interactive lane relaxes draining only for truly unconditional input.
@@ -380,13 +393,14 @@ type sessionOwner struct {
 	writerBusy bool
 	inFlight   *inFlightItem
 	eofSeen    bool
-	// promptSeen is whether the program has announced a PROMPT — the
-	// runtime's own parse of OSC 133 B, delivered here through
-	// PromptBoundary — since this session began. A paste waits for it (see
-	// awaitsTheProgramsPrompt) because a paste is for a program sitting at a
-	// prompt, and that is the moment the program's announcements are in
-	// (nocx-evj4b.1.2).
-	promptSeen bool
+	// atPrompt is whether the program is sitting at a prompt RIGHT NOW: set by
+	// the prompt boundary it marked (OSC 133 B, delivered here through
+	// PromptBoundary) and cleared when it starts a command (133 C, through
+	// CommandStarted). A paste waits for it (awaitsTheProgramsPrompt): the
+	// announcement a paste is framed by belongs to the prompt it is typed at,
+	// and the next prompt's announcement can still be unread when the shell
+	// returns from a command (nocx-evj4b.1.2).
+	atPrompt   bool
 	replyBytes int
 	nextFence  sessionruntime.Fence
 	// readableCh is where the readiness goroutine reports back, for a
@@ -946,11 +960,71 @@ func (o *sessionOwner) advance() {
 			// intent's deadline still bounds a program that never marks one
 			// (refuseExpiredIntent, above), and a pane whose shell was never
 			// integrated is never held at all (marksPrompts).
+			//
+			// AN INTERRUPT IS NOT HELD BEHIND IT. A held paste has written
+			// nothing and cannot write yet — that is what holding means — so
+			// leaving Ctrl-C behind it would hold the one key that gets a person
+			// out of a pane that is stuck behind a submit which is itself stuck,
+			// and the interrupt would expire with it. See
+			// interruptBehindHeldPaste for why nothing else overtakes.
+			if idx := o.interruptBehindHeldPaste(); idx >= 0 {
+				interrupt := o.pending[idx]
+				o.pending = append(o.pending[:idx], o.pending[idx+1:]...)
+				o.processHead(interrupt)
+				continue
+			}
 			return
 		}
 		o.pending = o.pending[1:]
 		o.processHead(it)
 	}
+}
+
+// interruptKey is the one key whose meaning is "stop", not "type": written into
+// a program it is SIGINT (0x03). It is spelled as the wire spells key names
+// (sessionruntime's own table), and it is the entire overtake set — a decision
+// rather than a first member of a list.
+const interruptKey = "ctrl+c"
+
+// isInterrupt reports whether this keystroke is the interrupt.
+func (pi *pendingIntent) isInterrupt() bool {
+	if !pi.Interactive || pi.Intent.Kind != sessionruntime.IntentKindKey {
+		return false
+	}
+	return strings.EqualFold(string(pi.Intent.Payload), interruptKey)
+}
+
+// interruptBehindHeldPaste answers the queue index of an interrupt that is
+// waiting behind pastes held for the program's prompt, or -1.
+//
+// WHY AN OVERTAKE IS RIGHT HERE, AND ONLY HERE. The queue is the order a
+// person's input is written in, and reordering it changes what their input
+// means — which is why nothing else is allowed to. But the pastes in front of
+// an interrupt have written NOTHING and cannot write yet: they are waiting for
+// a prompt the program has not announced. An interrupt is not the continuation
+// of that text — it is the person saying "none of this" — and the cost of
+// getting it wrong is the one cost this product does not accept, a person with
+// no way to stop a stuck pane. So it is written now, and the pastes stay
+// queued, still waiting: an interrupt decides nothing about them.
+//
+// The scan stops at the first item that is neither an interrupt nor a held
+// paste, so the reorder can only ever lift an interrupt over items that wrote
+// nothing — a reply, a resize or any earlier intent still keeps everything
+// behind it.
+func (o *sessionOwner) interruptBehindHeldPaste() int {
+	for i := 1; i < len(o.pending); i++ {
+		pi := o.pending[i]
+		if pi.kind != itemIntent {
+			return -1
+		}
+		if pi.intent.isInterrupt() {
+			return i
+		}
+		if !pi.intent.awaitsTheProgramsPrompt(o) {
+			return -1
+		}
+	}
+	return -1
 }
 
 // expirePending also runs when admission keeps refilling incoming or the
@@ -1334,7 +1408,7 @@ func (o *sessionOwner) PromptBoundary(effect sessionruntime.Effect) error {
 	// The program is at a prompt: whatever it announced for this prompt is in
 	// the emulator now, so a paste the owner is holding can be framed (advance,
 	// awaitsTheProgramsPrompt).
-	o.promptSeen = true
+	o.atPrompt = true
 	dropped, err := o.win.markPromptBoundary(effect)
 	if err != nil {
 		o.log.Warn("prompt boundary could not be ordered with session output", "stream_offset", effect.StreamOffset, "error", err)

@@ -20,8 +20,12 @@
  *
  *   - `bash` here is readline-enabled and announces `ESC[?2004h` with its
  *     prompt, so EVERY submit must arrive framed — including the first, which
- *     is the one the race used to strip;
- *   - `sh` (dash) announces nothing, so every submit must arrive bare.
+ *     is the one the race used to strip, and every one after it, which arrives
+ *     after a COMMAND ran: a shell leaves its prompt when a command starts
+ *     (133 C) and its next prompt carries a fresh announcement that can still
+ *     be unread when the next submit lands (nocx-evj4b.1.2, review);
+ *   - the same integrated bash with readline asked for no bracketed paste
+ *     (`~/.inputrc`) announces nothing, so every submit must arrive bare.
  *
  * # Nothing is waited out
  *
@@ -41,7 +45,9 @@ const EDITOR = `${PANE} .nocx-editor-input`
 const BLOCKS = `${PANE} .scrollback-inner > .cmd-block[data-block-kind="command"]`
 /** A command block's settled form, written by the one owner that settles one. */
 const SETTLE_MS = 120_000
-/** How many submits in a row: the report's alternation was within one session. */
+/** How many submits in a row: the report's alternation was within one session,
+ *  and every one after the first arrives with a command between it and its
+ *  predecessor — the sequence the per-prompt fence exists for. */
 const SUBMITS = 5
 
 /** One fixture and one open ssh pane, with the far side's input log found. */

@@ -522,6 +522,17 @@ type PromptBoundarySink interface {
 	PromptBoundary(Effect) error
 }
 
+// CommandStartSink lets the same owner learn that the program has started a
+// command (OSC 133 C), which is the other half of "is the program at a
+// prompt": a shell leaves its prompt when the command starts and returns to
+// one when the next B mark arrives (nocx-evj4b.1.2).
+//
+// It carries no lifecycle authority — ADR-0024 decision 1 is unchanged — and
+// what the owner does with it is its own bookkeeping, not an interval.
+type CommandStartSink interface {
+	CommandStarted() error
+}
+
 // The bounds. Each is a NUMBER rather than a policy statement, so that
 // "bounded" is a claim somebody can check, and each belongs to the runtime
 // rather than to the emulator it feeds — the emulator's own bounds are the

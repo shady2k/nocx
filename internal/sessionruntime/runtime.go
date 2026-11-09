@@ -1423,6 +1423,15 @@ func (s *Session) Ingest(b []byte) error {
 				// THE COMMAND'S OUTPUT HAS BEGUN: from here until the fence, a
 				// title report is the RUN's (nocx-ouru5.1.1).
 				s.runOutputSeen = true
+				// AND THE PROGRAM IS NO LONGER AT ITS PROMPT (nocx-evj4b.1.2):
+				// the owner keeps that as the state a paste waits for, so a
+				// submit after a command waits for the NEXT prompt mark rather
+				// than trusting one it saw before the command started.
+				if sink, ok := s.replies.(CommandStartSink); ok {
+					if err := sink.CommandStarted(); err != nil {
+						return err
+					}
+				}
 				continue
 			}
 			if e.Kind == emulator.EffectEraseDisplay {

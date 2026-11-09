@@ -948,6 +948,10 @@ sleep 5
 // (nocx-evj4b.1.2)
 // ---------------------------------------------------------------------------
 
+// promptAndMode is what a readline shell writes in one chunk when it returns
+// to its prompt having asked for bracketed paste; the stand's own bytes.
+const promptAndMode = "\x1b[?2004h\x1b]133;B\a"
+
 // pasteIntent is one person's paste, as the owner receives it.
 func pasteIntent(rt *sessionruntime.Session, ctrl sessionruntime.Control, text string) *pendingIntent {
 	return &pendingIntent{
@@ -962,16 +966,43 @@ func pasteIntent(rt *sessionruntime.Session, ctrl sessionruntime.Control, text s
 	}
 }
 
+// interactiveKey is one keystroke, as the owner receives it.
+func interactiveKey(rt *sessionruntime.Session, ctrl sessionruntime.Control, key string) *pendingIntent {
+	return &pendingIntent{
+		Intent:      keyIntent(rt, ctrl, key),
+		Interactive: true, Canonical: canonicalIntent{
+			Kind: sessionruntime.IntentKindKey, Payload: []byte(key), AccessEpoch: uint64(ctrl.Epoch),
+		},
+	}
+}
+
+// submitAndWait submits one intent and answers its result channel.
+func submitAndWait(t *testing.T, o *sessionOwner, pi *pendingIntent) <-chan ownerResult {
+	t.Helper()
+	done, err := o.submit(ownerItem{kind: itemIntent, intent: pi})
+	if err != nil {
+		t.Fatalf("submit the intent: %v", err)
+	}
+	return done
+}
+
+// waitRefusedWithoutAnswering gives a held intent a moment to show itself, and
+// fails if it was decided at all. The window is not the assertion: everything
+// after it is on an event.
+func waitHeld(t *testing.T, done <-chan ownerResult, what string) {
+	t.Helper()
+	select {
+	case res := <-done:
+		t.Fatalf("%s was decided before the program announced a prompt: state=%v err=%v", what, res.State, res.Err)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 // TestAPasteWaitsForTheProgramsPromptAndIsFramedByWhatItAnnouncedThere is the
 // ssh path's missing read barrier, expressed as the fact the owner can
 // actually observe: a paste is framed by the mode the program announced FOR THE
 // PROMPT it is sitting at, so on a shell that marks its prompts the paste is
 // not encoded before that prompt has been ingested.
-//
-// Without this, a submit that raced the far shell's first prompt was encoded
-// against a belief cut before the prompt's `\x1b[?2004h` was ingested —
-// measured on the ssh stand as the first of five submits bare and the next four
-// framed, in one session and with one program.
 func TestAPasteWaitsForTheProgramsPromptAndIsFramedByWhatItAnnouncedThere(t *testing.T) {
 	proc := newOwnerFakeProcess()
 	proc.setMarksPrompts(true)
@@ -980,21 +1011,10 @@ func TestAPasteWaitsForTheProgramsPromptAndIsFramedByWhatItAnnouncedThere(t *tes
 	t.Cleanup(func() { owner.stop(true, time.Time{}) })
 	ctrl := grantAgent(t, rt)
 
-	done, err := owner.submit(ownerItem{kind: itemIntent, intent: pasteIntent(rt, ctrl, "make test")})
-	if err != nil {
-		t.Fatalf("submit the paste: %v", err)
-	}
-	select {
-	case res := <-done:
-		t.Fatalf("the paste was decided before the program announced a prompt: state=%v err=%v", res.State, res.Err)
-	case <-time.After(200 * time.Millisecond):
-		// Expected: held. The 200ms window only gives an unfenced owner a
-		// chance to show itself; the assertions after it are on events.
-	}
+	done := submitAndWait(t, owner, pasteIntent(rt, ctrl, "make test"))
+	waitHeld(t, done, "the paste")
 
-	// The program announces its prompt, and the mode it wants with it — the
-	// same two things a readline shell writes in one chunk.
-	proc.produce([]byte("\x1b[?2004h\x1b]133;B\a"))
+	proc.produce([]byte(promptAndMode))
 	select {
 	case res := <-done:
 		if res.State != sessionruntime.IntentStateExecuted {
@@ -1007,31 +1027,76 @@ func TestAPasteWaitsForTheProgramsPromptAndIsFramedByWhatItAnnouncedThere(t *tes
 	if len(written) != 1 {
 		t.Fatalf("the owner wrote %d payloads, want the one paste: %q", len(written), written)
 	}
-	// AND THE FRAMING IS WHAT THE PROGRAM ASKED FOR — its own announcement, in
-	// the chunk the wait was for, not a default and not a guess.
 	if want := "\x1b[200~make test\x1b[201~"; string(written[0]) != want {
 		t.Fatalf("the paste reached the program as %q, want %q", written[0], want)
 	}
 }
 
-// TestAPasteIntoSuchAProgramIsBareWhenItAnnouncedNoMode is the same submit
-// against a shell that has no bracketed paste (`bash --noediting`, a readline
-// with it switched off): the program marked its prompt and announced nothing,
-// so the text goes as it is. This is the half a default-on framing breaks —
-// the escape would run as text.
-func TestAPasteIntoSuchAProgramIsBareWhenItAnnouncedNoMode(t *testing.T) {
+// TestAPasteAfterACommandWaitsForTheNextPrompt is the per-prompt half
+// (nocx-evj4b.1.2, review): a prompt seen once does not license the rest of the
+// session. A shell leaves its prompt when a command starts (133 C) and draws a
+// new one with the next mark, and between those two the announcement for the
+// new prompt can still be unread — so a submit there must wait for the mark, not
+// be encoded against the mode the PREVIOUS prompt announced.
+func TestAPasteAfterACommandWaitsForTheNextPrompt(t *testing.T) {
 	proc := newOwnerFakeProcess()
+	proc.setMarksPrompts(true)
 	owner, rt := newTestOwner(t, proc)
 	go owner.run()
 	t.Cleanup(func() { owner.stop(true, time.Time{}) })
 	ctrl := grantAgent(t, rt)
 
-	proc.setMarksPrompts(true)
-	proc.produce([]byte("$ \x1b]133;B\a"))
-	done, err := owner.submit(ownerItem{kind: itemIntent, intent: pasteIntent(rt, ctrl, "make test")})
-	if err != nil {
-		t.Fatalf("submit the paste: %v", err)
+	// The first prompt, and a first paste that is framed by it.
+	proc.produce([]byte(promptAndMode))
+	first := submitAndWait(t, owner, pasteIntent(rt, ctrl, "one"))
+	select {
+	case res := <-first:
+		if res.State != sessionruntime.IntentStateExecuted {
+			t.Fatalf("the first paste: state=%v err=%v", res.State, res.Err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first paste was never committed")
 	}
+
+	// The command starts: readline turns bracketed paste OFF, and the shell is
+	// no longer at a prompt.
+	proc.produce([]byte("\x1b[?2004l\x1b]133;C\a"))
+	second := submitAndWait(t, owner, pasteIntent(rt, ctrl, "two"))
+	waitHeld(t, second, "the paste after the command started")
+
+	// The next prompt arrives with its own announcement, and only then is the
+	// second paste written — framed by THAT prompt.
+	proc.produce([]byte(promptAndMode))
+	select {
+	case res := <-second:
+		if res.State != sessionruntime.IntentStateExecuted {
+			t.Fatalf("the second paste: state=%v err=%v", res.State, res.Err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the paste after a command was never committed at the next prompt")
+	}
+	written := proc.writtenPayloads()
+	if len(written) != 2 {
+		t.Fatalf("the owner wrote %d payloads, want two: %q", len(written), written)
+	}
+	if want := "\x1b[200~two\x1b[201~"; string(written[1]) != want {
+		t.Fatalf("the paste after a command reached the program as %q, want %q", written[1], want)
+	}
+}
+
+// TestAPasteIntoSuchAProgramIsBareWhenItAnnouncedNoMode is the same submit
+// against a shell that has no bracketed paste: the program marked its prompt
+// and announced nothing, so the text goes as it is.
+func TestAPasteIntoSuchAProgramIsBareWhenItAnnouncedNoMode(t *testing.T) {
+	proc := newOwnerFakeProcess()
+	proc.setMarksPrompts(true)
+	owner, rt := newTestOwner(t, proc)
+	go owner.run()
+	t.Cleanup(func() { owner.stop(true, time.Time{}) })
+	ctrl := grantAgent(t, rt)
+
+	proc.produce([]byte("$ \x1b]133;B\a"))
+	done := submitAndWait(t, owner, pasteIntent(rt, ctrl, "make test"))
 	select {
 	case res := <-done:
 		if res.State != sessionruntime.IntentStateExecuted {
@@ -1046,9 +1111,8 @@ func TestAPasteIntoSuchAProgramIsBareWhenItAnnouncedNoMode(t *testing.T) {
 }
 
 // TestAPasteIsNotHeldOnAShellThatMarksNoPrompts is the regression guard: a pane
-// whose far shell was never integrated (a raw pane, a declined launcher) marks
-// nothing, so waiting for a prompt would refuse every paste it is given. The
-// fence asks the process, and a process that marks nothing is written at once.
+// whose far shell was never integrated marks nothing, so waiting for a prompt
+// would refuse every paste it is given.
 func TestAPasteIsNotHeldOnAShellThatMarksNoPrompts(t *testing.T) {
 	proc := newOwnerFakeProcess()
 	proc.setMarksPrompts(false)
@@ -1057,10 +1121,7 @@ func TestAPasteIsNotHeldOnAShellThatMarksNoPrompts(t *testing.T) {
 	t.Cleanup(func() { owner.stop(true, time.Time{}) })
 	ctrl := grantAgent(t, rt)
 
-	done, err := owner.submit(ownerItem{kind: itemIntent, intent: pasteIntent(rt, ctrl, "make test")})
-	if err != nil {
-		t.Fatalf("submit the paste: %v", err)
-	}
+	done := submitAndWait(t, owner, pasteIntent(rt, ctrl, "make test"))
 	select {
 	case res := <-done:
 		if res.State != sessionruntime.IntentStateExecuted {
@@ -1074,27 +1135,102 @@ func TestAPasteIsNotHeldOnAShellThatMarksNoPrompts(t *testing.T) {
 	}
 }
 
-// TestAKeystrokeIsNotHeldForTheProgramsPrompt is what the fence deliberately
-// does NOT cover: a key is written at once even before the program has drawn
-// anything, because a TUI that has not painted yet must still take the
-// keystroke that starts it.
-func TestAKeystrokeIsNotHeldForTheProgramsPrompt(t *testing.T) {
+// TestAnInterruptIsWrittenWhileAPasteIsStillHeld is the escape a person has
+// (nocx-evj4b.1.2, review): the held paste has not been written and cannot be,
+// so leaving Ctrl-C behind it would hold the one key that gets a person out of a
+// pane that is stuck behind a submit that is itself stuck.
+func TestAnInterruptIsWrittenWhileAPasteIsStillHeld(t *testing.T) {
 	proc := newOwnerFakeProcess()
+	proc.setMarksPrompts(true)
 	owner, rt := newTestOwner(t, proc)
 	go owner.run()
 	t.Cleanup(func() { owner.stop(true, time.Time{}) })
 	ctrl := grantAgent(t, rt)
 
-	done, err := owner.submit(ownerItem{kind: itemIntent, intent: &pendingIntent{
-		Intent:      keyIntent(rt, ctrl, "Enter"),
-		Interactive: true,
-		Canonical: canonicalIntent{
-			Kind: sessionruntime.IntentKindKey, Payload: []byte("Enter"), AccessEpoch: uint64(ctrl.Epoch),
-		},
-	}})
-	if err != nil {
-		t.Fatalf("submit the key: %v", err)
+	held := submitAndWait(t, owner, pasteIntent(rt, ctrl, "make test"))
+	waitHeld(t, held, "the paste")
+
+	interrupt := submitAndWait(t, owner, interactiveKey(rt, ctrl, "ctrl+c"))
+	select {
+	case res := <-interrupt:
+		if res.State != sessionruntime.IntentStateExecuted {
+			t.Fatalf("the interrupt: state=%v err=%v, want executed", res.State, res.Err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("an interrupt submitted after a held paste waited for the paste")
 	}
+	written := proc.writtenPayloads()
+	if len(written) != 1 || string(written[0]) != "\x03" {
+		t.Fatalf("the program read %q, want the interrupt alone (%q)", written, "\x03")
+	}
+	// AND THE PASTE IS STILL THERE, still held: an interrupt is the person
+	// leaving, not a decision about the text in front of it.
+	select {
+	case res := <-held:
+		t.Fatalf("the held paste was decided by the interrupt: state=%v err=%v", res.State, res.Err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	proc.produce([]byte(promptAndMode))
+	select {
+	case res := <-held:
+		if res.State != sessionruntime.IntentStateExecuted {
+			t.Fatalf("the paste after the interrupt: state=%v err=%v", res.State, res.Err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the held paste was never committed after its prompt arrived")
+	}
+}
+
+// TestAnOrdinaryKeyStaysBehindAPaste is the other half of that decision: the
+// bytes of a submission are the text and THEN its Enter, so an Enter that
+// overtook a held paste would run an empty line and leave the text at the next
+// prompt — which is not what the person typed.
+func TestAnOrdinaryKeyStaysBehindAPaste(t *testing.T) {
+	proc := newOwnerFakeProcess()
+	proc.setMarksPrompts(true)
+	owner, rt := newTestOwner(t, proc)
+	go owner.run()
+	t.Cleanup(func() { owner.stop(true, time.Time{}) })
+	ctrl := grantAgent(t, rt)
+
+	held := submitAndWait(t, owner, pasteIntent(rt, ctrl, "make test"))
+	waitHeld(t, held, "the paste")
+	enter := submitAndWait(t, owner, interactiveKey(rt, ctrl, "Enter"))
+	select {
+	case res := <-enter:
+		t.Fatalf("the Enter overtook the paste in front of it: state=%v err=%v", res.State, res.Err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	proc.produce([]byte(promptAndMode))
+	for _, done := range []<-chan ownerResult{held, enter} {
+		select {
+		case res := <-done:
+			if res.State != sessionruntime.IntentStateExecuted {
+				t.Fatalf("a held item: state=%v err=%v, want executed", res.State, res.Err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("a held item was never committed")
+		}
+	}
+	written := proc.writtenPayloads()
+	if len(written) != 2 || string(written[0]) != "\x1b[200~make test\x1b[201~" || string(written[1]) != "\r" {
+		t.Fatalf("the program read %q, want the framed text and then the Enter", written)
+	}
+}
+
+// TestAKeystrokeIsNotHeldForTheProgramsPrompt is what the fence deliberately
+// does NOT cover: a key is written at once even before the program has drawn
+// anything.
+func TestAKeystrokeIsNotHeldForTheProgramsPrompt(t *testing.T) {
+	proc := newOwnerFakeProcess()
+	proc.setMarksPrompts(true)
+	owner, rt := newTestOwner(t, proc)
+	go owner.run()
+	t.Cleanup(func() { owner.stop(true, time.Time{}) })
+	ctrl := grantAgent(t, rt)
+
+	done := submitAndWait(t, owner, interactiveKey(rt, ctrl, "Enter"))
 	select {
 	case res := <-done:
 		if res.State != sessionruntime.IntentStateExecuted {
@@ -1110,18 +1246,15 @@ func TestAKeystrokeIsNotHeldForTheProgramsPrompt(t *testing.T) {
 // commit_deadline, so the pane answers instead of swallowing the submit.
 func TestAPasteIsRefusedAtItsDeadlineWhenThePromptNeverArrives(t *testing.T) {
 	proc := newOwnerFakeProcess()
+	proc.setMarksPrompts(true)
 	owner, rt := newTestOwner(t, proc)
 	go owner.run()
 	t.Cleanup(func() { owner.stop(true, time.Time{}) })
 	ctrl := grantAgent(t, rt)
 
-	proc.setMarksPrompts(true)
 	pi := pasteIntent(rt, ctrl, "make test")
 	pi.CommitBy = owner.nowMono() + int64(100*time.Millisecond)
-	done, err := owner.submit(ownerItem{kind: itemIntent, intent: pi})
-	if err != nil {
-		t.Fatalf("submit the paste: %v", err)
-	}
+	done := submitAndWait(t, owner, pi)
 	select {
 	case res := <-done:
 		if !errors.Is(res.Err, errCommitDeadline) {

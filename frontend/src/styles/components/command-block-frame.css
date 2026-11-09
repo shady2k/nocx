@@ -22,6 +22,15 @@
   align-items: start;
 
   padding: var(--space-3) 0 var(--space-2);
+  /* IT PAINTS OVER ITS OWN BLOCK'S ROWS WHILE IT IS PINNED (nocx-4y82c.1.3),
+     so it needs a ground of its own: the pane's own ground under the block's
+     tint -- the same composite the block paints behind the rows, so the two
+     cannot disagree and a hover or selection tint has no hole behind the
+     header. The tint is the surface's, on the block; the fallback is for the
+     alternate screen's header, which is not inside a block (ADR-3kqrem7v). */
+  background:
+    linear-gradient(var(--cmd-block-ground, transparent), var(--cmd-block-ground, transparent)),
+    var(--terminal-background);
   /* Keep the header controls above the later live-grid sibling so their
      visible hit targets remain clickable while a command is running. */
   position: relative;

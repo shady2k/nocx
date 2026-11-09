@@ -17,7 +17,13 @@
   margin: 0;
   border: 0;
   border-radius: 0;
-  background: transparent;
+  /* THE BLOCK'S OWN GROUND, NAMED ONCE (nocx-4y82c.1.3). The header is the one
+     part of a block painted OVER the block's own rows while the block owns the
+     top of the pane, so it has to paint the ground the block paints behind
+     those rows -- hover and selection tints included. One variable, two
+     painters: a tint cannot become a hole behind the header. */
+  --cmd-block-ground: transparent;
+  background: var(--cmd-block-ground);
   /* `content-visibility: auto` with an intrinsic-size guess is gone. Off-screen
      blocks reported the GUESS — 48px — from `getBoundingClientRect()`, so the
      scroll target computed for "put this block at the top" was built on a
@@ -57,13 +63,48 @@
 }
 
 .cmd-block:hover {
-  background: color-mix(in srgb, var(--color-text), transparent 97%);
+  --cmd-block-ground: color-mix(in srgb, var(--color-text), transparent 97%);
 }
 
 .cmd-block.cmd-block-selected {
-  background: color-mix(in srgb, var(--color-accent), transparent 94%);
+  --cmd-block-ground: color-mix(in srgb, var(--color-accent), transparent 94%);
 }
 
 .cmd-block.cmd-block-selected:hover {
-  background: color-mix(in srgb, var(--color-accent), transparent 91%);
+  --cmd-block-ground: color-mix(in srgb, var(--color-accent), transparent 91%);
+}
+
+/* THE BLOCK'S OWN HEADER STAYS AT THE TOP OF THE PANE (nocx-4y82c.1.3).
+
+   The owner, from Warp: when a block's output is taller than the pane, its
+   header stays pinned while the output scrolls under it, so the person always
+   sees which command they are reading and can stop it. It is the block's OWN
+   header -- the same CommandBlockFrame the alternate screen keeps above its
+   grid (ADR-3kqrem7v), not a copy with its own look -- and `position: sticky`
+   is what gives the one pinned header the owner asked for: a header sticks
+   only while its own block covers the top of the scrollport, so the block the
+   top of the view is in is the one whose header is at the top, and the next
+   block's header takes over the moment that block reaches it.
+
+   THE SELECTOR IS THE TOP-LEVEL SEAT, and both halves are the point. A block
+   nested inside a turn must not pin: its turn's header is the one that says
+   what is being read, and a second sticky header inside it would sit on the
+   same top edge. The alternate screen's header is not inside a block at all --
+   the controller seats the SAME node as a direct child of the stack
+   (controller._seatLive) -- so it is untouched here and keeps the place it
+   already had (ADR-3kqrem7v).
+
+   `top: 0` is the scroller's own top edge. The layout's vertical margin
+   (ADR-2yzsq8mk decision 5) is on the box OUTSIDE the scroller, so the pinned
+   header starts exactly where every visible row starts and no text touches the
+   pane's edge. The header's background comes from CommandBlockFrame's own
+   stylesheet, which is where its paint belongs; this file only says where the
+   component goes.
+
+   NO ROW MOVES (ADR-2yzsq8mk, PR #752): the header keeps its place in the
+   block's flow and overlays the rows that scroll under it, so pinning and
+   unpinning change no offset, height or painted row position. */
+.scrollback-inner > .cmd-block > .cmd-header {
+  position: sticky;
+  top: 0;
 }

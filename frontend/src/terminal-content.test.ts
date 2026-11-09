@@ -31,6 +31,7 @@ const FRAME_STYLE_ENTRY = resolve(srcDir, 'frame/display.css')
 // header's grid lives here now, not in styles/surfaces/command-block.css —
 // see the "SSH block header" describe block below.
 const COMMAND_BLOCK_FRAME_STYLE_ENTRY = resolve(srcDir, 'styles/components/command-block-frame.css')
+const COMMAND_BLOCK_SURFACE_STYLE_ENTRY = resolve(srcDir, 'styles/surfaces/command-block.css')
 const COMPOSER_STYLE = resolve(srcDir, 'styles/surfaces/composer.css')
 
 import type { PaneIdentity, PaneScreenReading } from './terminal-content'
@@ -4082,6 +4083,33 @@ describe('the SSH block header keeps its where-meta left and the right group rig
     expect(header).toMatch(/display\s*:\s*grid/)
     expect(metaRow).not.toMatch(/justify-content\s*:\s*(space-between|space-around|space-evenly)/)
     expect(right).toMatch(/grid-column\s*:\s*2/)
+  })
+})
+
+// A TALL BLOCK'S HEADER IS PINNED AT THE TOP OF THE PANE (nocx-4y82c.1.3).
+// jsdom lays nothing out, so what this can hold is the two stylesheet facts the
+// e2e measures in a browser: the ledger's own header is the sticky thing (the
+// block's own node, not a copy), and it paints on the pane's ground so the rows
+// scrolling under it cannot show through. The selector is asserted exactly
+// because both halves are the point: only a block seated directly in the
+// transcript pins — a child of a turn must not add a second pinned header — and
+// the alternate-screen seat (a direct child of the stack) is not a block.
+describe('a tall block keeps its own header at the top of the pane (nocx-4y82c.1.3)', () => {
+  it("pins the block's own header with sticky positioning, only for a ledger-level block", () => {
+    const css = stripComments(readFileSync(COMMAND_BLOCK_SURFACE_STYLE_ENTRY, 'utf8'))
+    const body =
+      css.match(/\.scrollback-inner\s*>\s*\.cmd-block\s*>\s*\.cmd-header\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(body, 'the ledger-level header rule exists').not.toBe('')
+    expect(body).toMatch(/position\s*:\s*sticky/)
+    expect(body).toMatch(/(^|;)\s*top\s*:\s*0/)
+  })
+
+  it("paints the header on an opaque ground and keeps the block's own tint", () => {
+    const frame = stripComments(readFileSync(COMMAND_BLOCK_FRAME_STYLE_ENTRY, 'utf8'))
+    const header = stripComments(extractRuleBlock(frame, 'cmd-header') ?? '')
+    expect(header).not.toBe('')
+    expect(header).toMatch(/--cmd-block-ground/)
+    expect(header).toMatch(/var\(--terminal-background\)/)
   })
 })
 

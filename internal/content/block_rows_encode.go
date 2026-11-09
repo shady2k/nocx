@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -45,12 +46,20 @@ type blockRowsLine struct {
 // blockRow is one physical line of the screen, in the text+marks+runs shape
 // contracts/ledger.blockRows.schema.json declares. Marks and runs are
 // omitted (nil, dropped by omitempty) when the row needs neither.
+//
+// RUNS IS PRE-ENCODED JSON, exactly as sessionruntime's frameRow carries it
+// (nocx-4y82c.1.5): the shape it used to hold — [][2]any, two interface
+// values per run — costs two extra allocations per style run under Go 1.27's
+// encoding/json/v2, which makes each interface value addressable before
+// marshalling it. This encoder is the frame encoder's declared mirror, so it
+// takes the same shape; TestBlockRowsEncoder_MatchesTheFrameEncoderOnTheSameRows
+// is what keeps the two byte-identical.
 type blockRow struct {
-	Text         string   `json:"text"`
-	Marks        [][3]int `json:"marks,omitempty"`
-	Runs         [][2]any `json:"runs,omitempty"`
-	Wrap         bool     `json:"wrap,omitempty"`
-	Continuation bool     `json:"continuation,omitempty"`
+	Text         string          `json:"text"`
+	Marks        [][3]int        `json:"marks,omitempty"`
+	Runs         json.RawMessage `json:"runs,omitempty"`
+	Wrap         bool            `json:"wrap,omitempty"`
+	Continuation bool            `json:"continuation,omitempty"`
 }
 
 // encodeBlockRowsLine renders one departed row as one stored line, newline
@@ -62,16 +71,28 @@ func encodeBlockRowsLine(from uint64, row emulator.Row) ([]byte, error) {
 	cells := trimStoredTrailingCells(row.Cells)
 	var text strings.Builder
 	var marks [][3]int
-	var runs [][2]any
+	// A stack buffer for the runs array: a row with a couple of runs never
+	// reaches the heap, and one that does grows the same way any append does.
+	var runsBuf [128]byte
+	runs := runsBuf[:0]
+	runCount := 0
+	firstRunIsDefault := false
 	var runStyle emulator.Style
 	var runLength int
 	flush := func() {
 		if runLength == 0 {
 			return
 		}
-		runs = append(runs, [2]any{encodeBlockStyleValue(runStyle), runLength})
+		if runCount > 0 {
+			runs = append(runs, ',')
+		} else {
+			firstRunIsDefault = runStyle == (emulator.Style{})
+		}
+		runs = appendBlockStyleRun(runs, runStyle, runLength)
+		runCount++
 		runLength = 0
 	}
+	runs = append(runs, '[')
 	pos := 0
 	for _, cell := range cells {
 		if runLength > 0 && cell.Style == runStyle {
@@ -103,8 +124,9 @@ func encodeBlockRowsLine(from uint64, row emulator.Row) ([]byte, error) {
 		Wrap:         row.Wrap,
 		Continuation: row.Continuation,
 	}}
-	if !isImplicitDefaultBlockRuns(runs) {
-		line.Row.Runs = runs
+	if runCount > 0 && !(runCount == 1 && firstRunIsDefault) {
+		runs = append(runs, ']')
+		line.Row.Runs = json.RawMessage(runs)
 	}
 	raw, err := json.Marshal(line)
 	if err != nil {
@@ -113,15 +135,31 @@ func encodeBlockRowsLine(from uint64, row emulator.Row) ([]byte, error) {
 	return append(raw, '\n'), nil
 }
 
-// isImplicitDefaultBlockRuns mirrors sessionruntime's isImplicitDefaultRuns:
-// true when runs is exactly the one a reader assumes when `runs` is absent
-// — a single run of the default style.
-func isImplicitDefaultBlockRuns(runs [][2]any) bool {
-	if len(runs) != 1 {
-		return false
+// appendBlockStyleRun writes one `[style, columns]` run in the bytes the
+// encoder used to produce for [][2]any{style, length}: the bare integer 0 for
+// the default style, or the five style numbers in one array. It mirrors
+// sessionruntime's appendStyleRun, and the cross-encoder test is what keeps
+// the two producing the same bytes.
+func appendBlockStyleRun(runs []byte, style emulator.Style, length int) []byte {
+	runs = append(runs, '[')
+	if style == (emulator.Style{}) {
+		runs = append(runs, '0')
+	} else {
+		runs = append(runs, '[')
+		runs = strconv.AppendInt(runs, int64(encodeBlockColorValue(style.Foreground)), 10)
+		runs = append(runs, ',')
+		runs = strconv.AppendInt(runs, int64(encodeBlockColorValue(style.Background)), 10)
+		runs = append(runs, ',')
+		runs = strconv.AppendInt(runs, int64(encodeBlockColorValue(style.UnderlineColor)), 10)
+		runs = append(runs, ',')
+		runs = strconv.AppendInt(runs, int64(style.Attributes), 10)
+		runs = append(runs, ',')
+		runs = strconv.AppendInt(runs, int64(style.Underline), 10)
+		runs = append(runs, ']')
 	}
-	style, ok := runs[0][0].(int)
-	return ok && style == 0
+	runs = append(runs, ',')
+	runs = strconv.AppendInt(runs, int64(length), 10)
+	return append(runs, ']')
 }
 
 // BlockRowsText turns a stored rows artifact into the plain text a block
@@ -261,21 +299,6 @@ func isDefaultBlankCell(cell emulator.Cell) bool {
 		!cell.HasText &&
 		cell.Width == emulator.WidthNarrow &&
 		cell.Style == (emulator.Style{})
-}
-
-// encodeBlockStyleValue mirrors sessionruntime's encodeStyleValue: the bare
-// integer 0 for the all-default style, or the 5-element tuple otherwise.
-func encodeBlockStyleValue(style emulator.Style) any {
-	if style == (emulator.Style{}) {
-		return 0
-	}
-	return [5]int{
-		encodeBlockColorValue(style.Foreground),
-		encodeBlockColorValue(style.Background),
-		encodeBlockColorValue(style.UnderlineColor),
-		int(style.Attributes),
-		int(style.Underline),
-	}
 }
 
 // encodeBlockColorValue mirrors sessionruntime's encodeColorValue: 0

@@ -94,10 +94,9 @@ func TestLiveSshd_WithNothingPublishedTheSessionStillReachesAPrompt(t *testing.T
 	ch, out := fx.connect(t, kernel, ssh.ShellBash)
 
 	// The prompt arrives without a domain: this session is conventional.
+	probe := &shellProbe{ch: ch, line: "printf 'NO_BUNDLE%s\\n' _OK\n"}
 	waittest.WaitForTimeout(t, "a usable prompt with nothing installed", 20*time.Second, func() bool {
-		if _, err := ch.Write([]byte("printf 'NO_BUNDLE%s\\n' _OK\n")); err != nil {
-			return false
-		}
+		probe.write()
 		return strings.Contains(out.String(), "NO_BUNDLE_OK")
 	})
 	kernel.mu.Lock()
@@ -142,10 +141,9 @@ func TestLiveSshd_InputIsRefusedUntilTheTerminalOutcome(t *testing.T) {
 
 	// The refused keystroke was DROPPED, not queued: it must not appear
 	// later, and the session must still work.
+	probe := &shellProbe{ch: ch, line: "printf 'AFTER%s\\n' _OUTCOME\n"}
 	waittest.WaitForTimeout(t, "a usable prompt after the outcome", 20*time.Second, func() bool {
-		if _, err := ch.Write([]byte("printf 'AFTER%s\\n' _OUTCOME\n")); err != nil {
-			return false
-		}
+		probe.write()
 		return strings.Contains(out.String(), "AFTER_OUTCOME")
 	})
 	if strings.Contains(out.String(), "QUARANTINE_BREACH") {
@@ -169,10 +167,9 @@ func TestLiveSshd_ForwardingRefusedStillReachesAConventionalPrompt(t *testing.T)
 	kernel := newRecordingKernel()
 	ch, out := fx.connect(t, kernel, ssh.ShellBash, installer)
 
+	probe := &shellProbe{ch: ch, line: "printf 'CONVENTIONAL%s\\n' _OK\n"}
 	waittest.WaitForTimeout(t, "a usable conventional terminal", 30*time.Second, func() bool {
-		if _, err := ch.Write([]byte("printf 'CONVENTIONAL%s\\n' _OK\n")); err != nil {
-			return false
-		}
+		probe.write()
 		s := out.String()
 		return strings.Contains(s, "NATIVE_PROMPT>") && strings.Contains(s, "CONVENTIONAL_OK")
 	})
@@ -234,6 +231,34 @@ func TestLiveSshd_ConnectionLossRevokesTheBootstrappedDomain(t *testing.T) {
 	})
 }
 
+// shellProbe writes ONE line into the far shell, and retries only while the
+// write is REFUSED (nocx-evj4b.1.5).
+//
+// Writing the probe on every poll iteration is what mangled the far shell's
+// line on macOS: the writes succeed and queue, so a probe can arrive while
+// readline is still editing the previous one and JOIN it. The ci-mac transcript
+// shows the result — `bash: prinprin…init: command not found`, then a prompt —
+// and on Linux two runs in twenty left the shell in a PS2 continuation
+// (`printf 'CONVENTIONAL%` with its quote unclosed), where the `exit` and then
+// the sentinel landed inside the continuation and produced nothing.
+//
+// One line in flight at a time is the rule: the write is the gesture, and the
+// marker in the output is the confirmation that the shell read it.
+type shellProbe struct {
+	ch   ssh.Channel
+	line string
+	sent bool
+}
+
+func (p *shellProbe) write() {
+	if p.sent {
+		return
+	}
+	if _, err := p.ch.Write([]byte(p.line)); err == nil {
+		p.sent = true
+	}
+}
+
 // endTheSession ends the far shell and waits for it to be gone.
 //
 // The wait is what keeps the fixture's disposable home out of a race with the
@@ -259,24 +284,42 @@ func TestLiveSshd_ConnectionLossRevokesTheBootstrappedDomain(t *testing.T) {
 //
 // On macOS the channel's close came more than 20 s after the shell's exit on
 // this path and the stand failed on a signal that is not the fact it means
-// (ci-mac, PR #752). The product's share of that is fixed where it belongs —
-// the integration's snapshot job no longer inherits the terminal — and this
-// wait no longer depends on which of the two arrives first: the shell is gone
-// when its stream is, and the failure below quotes the terminal so a machine
-// that disagrees says so in its own words rather than as a bare timeout.
+// (ci-mac, PR #752). This wait no longer depends on which of the two arrives
+// first: the shell is gone when its stream is, and the failure quotes the
+// terminal so a machine that disagrees says so in its own words rather than as
+// a bare timeout.
+//
+// THE SHELL HAS TO ANSWER BEFORE IT IS ASKED TO LEAVE (nocx-evj4b.1.5, second
+// ci-mac round). The terminal tail from that round shows what a blind `exit`
+// costs: the stand's own prompt probes are written in a loop while the far
+// shell echoes and executes them as they arrive, so a line written while
+// readline is mid-line JOINS that line. `exit` was one such line — the shell ran
+// `prinprin…init` as a command ("bash: …: command not found"), printed its
+// prompt, and settled down to wait for input that never came; the stand waited
+// 20 s for a session nothing was going to end. So the stand now asks the shell
+// a question first and waits for its ANSWER: the leading ^C abandons any line
+// being edited (a person's gesture at a shell, and what leaves a PS2
+// continuation), and the sentinel's marker appears only in the command's
+// OUTPUT — the echoed line spells it split (`'SESS”_END_…'`) — so its arrival
+// proves the shell consumed everything before it and is at a fresh prompt.
+// Only then is `exit` written, and it is a line of its own by construction.
 func endTheSession(t *testing.T, ch ssh.Channel, out *sessionOutput) {
 	t.Helper()
+	detail := func() string {
+		return fmt.Sprintf("channel done: %t, %s", doneClosed(ch), terminalTail(out, terminalTailBytes))
+	}
+	nonce := fmt.Sprintf("%x", time.Now().UnixNano())
+	marker := "SESS_END_" + nonce
+	if _, err := ch.Write([]byte("\x03\nprintf 'SESS''_END_" + nonce + "\\n'\n")); err != nil {
+		t.Fatalf("write the sentinel: %v", err)
+	}
+	waittest.WaitForTimeoutDetail(t, "the shell answered the sentinel, so its line is its own",
+		20*time.Second, detail, func() bool { return strings.Contains(out.String(), marker) })
 	if _, err := ch.Write([]byte("exit\n")); err != nil {
 		t.Fatalf("write exit: %v", err)
 	}
-	waittest.WaitForTimeoutDetail(t, "session end after exit", 20*time.Second,
-		func() string {
-			return fmt.Sprintf("channel done: %t, %s",
-				doneClosed(ch), terminalTail(out, terminalTailBytes))
-		},
-		func() bool {
-			return doneClosed(ch) || out.Ended()
-		})
+	waittest.WaitForTimeoutDetail(t, "session end after exit", 20*time.Second, detail,
+		func() bool { return doneClosed(ch) || out.Ended() })
 }
 
 // doneClosed reports whether a channel has reported its end, without blocking.

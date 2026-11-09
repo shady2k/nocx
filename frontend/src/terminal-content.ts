@@ -3873,12 +3873,10 @@ export class TerminalContent extends BasePaneContent {
               }
               return true
             }
-            // A CANCEL TAKES THE HELD COMMANDS WITH IT (sequence 1). The
-            // composer is empty by then — each held Enter accepted its line —
-            // so the interrupt is aimed at exactly what is still queued for
-            // this shell, and the person pressing Ctrl-C means it. Without
-            // this the withdrawn commands ran anyway when the session settled.
-            this._cancelDeferredShellSubmissions()
+            // The held commands go with the interrupt, but the rule lives at
+            // the two places a Ctrl-C really passes — signalActiveCommand for
+            // the signal a running command receives, and onSessionIntent for
+            // the key at a prompt — never here, at a caller.
             // Ctrl-C at a prompt is a key intent to the SHELL — its line
             // editor discards the line and prints a fresh prompt. The runtime
             // owns its encoding. Over a RUNNING command the same key is an
@@ -9444,6 +9442,15 @@ export class TerminalContent extends BasePaneContent {
    *  between the gesture and the call. Every other answer is said out loud —
    *  a Stop that quietly did nothing is worse than one that failed. */
   private signalActiveCommand(signal: SessionSignal['signal']): void {
+    // AN INTERRUPT FLUSHES THE HELD COMMANDS (review, round 2). A real tty
+    // discards type-ahead on SIGINT, and this gesture is the person saying
+    // "not that" — so every command still held for this shell goes with it,
+    // whether the gesture came from the block's Stop/Interrupt, the composer,
+    // or the grid's Ctrl-C. It is here, at the one owner of interrupt
+    // SIGNALS, and not at the callers: a caller that forgot it would leave a
+    // withdrawn command runnable at the next prompt (the P1 this fixes).
+    // The raw-key form of the same gesture is owned by onSessionIntent.
+    this._cancelDeferredShellSubmissions()
     const session = this.session
     // A command is running if EITHER owner says so, and the union is the
     // point: the block manager draws the running block, the lifecycle kernel
@@ -9867,6 +9874,14 @@ export class TerminalContent extends BasePaneContent {
    *  own. That was the point of the tail, and it is preserved by construction. */
   private onSessionIntent(intent: SessionIntent): boolean {
     if (this._attachment.kind !== 'attached') return false
+    // The GRID's way in, and the one that must survive the refusal below: while
+    // the shell is proving itself this function drops every keystroke, and a
+    // Ctrl-C must still flush what the person typed ahead (see sendIntent for
+    // the same rule at the other entry, and signalActiveCommand for the signal
+    // form).
+    if (intent.kind === 'key' && intent.payload === INTERRUPT_KEY) {
+      this._cancelDeferredShellSubmissions()
+    }
     if (isAwaitingIntegration(this._integration, this._awaitsIntegration)) return false
     // THE FIRST KEY HANDS A BORROWED GRID BACK (nocx-djx1u; ADR-2yzsq8mk
     // decision 4). In a session with an authenticated prompt that job belongs
@@ -9956,6 +9971,17 @@ export class TerminalContent extends BasePaneContent {
     if (this._attachment.kind !== 'attached') return false
     const session = this.session
     if (!session) return false
+    // AN INTERRUPT FLUSHES THE HELD COMMANDS (review, round 2). A real tty
+    // discards type-ahead on SIGINT, and every Ctrl-C the person makes passes
+    // THIS function, whichever surface produced it: the grid's key arrives
+    // through onSessionIntent, the composer's through its cancel action, and
+    // both end here. So the rule lives here once — no caller carries it — and
+    // it holds even while the shell is still proving itself, when the key
+    // itself is refused before it reaches the pty. The SIGNAL form of the same
+    // gesture (the block's Stop/Interrupt) is signalActiveCommand's.
+    if (intent.kind === 'key' && intent.payload === INTERRUPT_KEY) {
+      this._cancelDeferredShellSubmissions()
+    }
     const tail = this._sessionCallQueue[this._sessionCallQueue.length - 1]
     if (
       intent.kind === 'text' &&

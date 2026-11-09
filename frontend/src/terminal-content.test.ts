@@ -3133,6 +3133,123 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
     }
   })
 
+  // REVIEW ROUND 2, FINDING 1 (P1): the interrupt that arrives while a
+  // released command is still being delivered. The first held line is out or
+  // on its way, the second is still queued; Ctrl-C from the GRID is not the
+  // composer's cancel, so the queue was left alone and the withdrawn line ran
+  // at the next prompt. A real tty flushes type-ahead on SIGINT; so must every
+  // interrupt of the pane.
+  it('a grid Ctrl-C drops the commands still held behind a delivery (sequence 6)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const lifecycle = lifecycleHandler(client, session.sessionId)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    let releaseA!: (attempt: unknown) => void
+    const aAttempt = new Promise((resolve) => {
+      releaseA = resolve
+    })
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/bash' })
+      session.intent.mockClear()
+      session.send.mockClear()
+      holdOne(editor, view, 'sleep 60')
+      holdOne(editor, view, 'echo unwanted')
+      const script = attemptScript(client, [() => aAttempt])
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      await vi.waitFor(() => expect(script.calls()).toBe(1))
+      // A is opening its attempt; B has not been submitted — the queue still
+      // holds it, which is the state the interrupt must flush.
+      expect(session.intent).not.toHaveBeenCalled()
+
+      // The GRID's Ctrl-C: a key intent, not the composer's cancel.
+      typeIntoPane(content, '\x03')
+
+      releaseA({
+        id: 'att-A',
+        domain: 'd1',
+        state: 'open',
+        command: 'sleep 60',
+        cwd: '',
+        host: '',
+        origin: 'app',
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls.filter((call) => call[0] === 'paste')).toEqual([
+          ['paste', 'sleep 60'],
+        ]),
+      )
+      // The next prompt releases nothing: the withdrawn line went with the
+      // keystroke.
+      session.intent.mockClear()
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd2', epoch: 2 })
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(session.intent).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  // The same rule for the SIGNAL form of the gesture — the block's Stop or
+  // Interrupt, which never passes through the composer. One owner
+  // (signalActiveCommand) drops the queue whatever else the signal does.
+  it('a block Stop drops the commands still held behind a delivery (sequence 7)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const lifecycle = lifecycleHandler(client, session.sessionId)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    let releaseA!: (attempt: unknown) => void
+    const aAttempt = new Promise((resolve) => {
+      releaseA = resolve
+    })
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/bash' })
+      session.intent.mockClear()
+      session.send.mockClear()
+      holdOne(editor, view, 'sleep 60')
+      holdOne(editor, view, 'echo unwanted')
+      const script = attemptScript(client, [() => aAttempt])
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      await vi.waitFor(() => expect(script.calls()).toBe(1))
+
+      ;(content as unknown as { signalActiveCommand(s: string): void }).signalActiveCommand('stop')
+
+      releaseA({
+        id: 'att-A',
+        domain: 'd1',
+        state: 'open',
+        command: 'sleep 60',
+        cwd: '',
+        host: '',
+        origin: 'app',
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls.filter((call) => call[0] === 'paste')).toEqual([
+          ['paste', 'sleep 60'],
+        ]),
+      )
+      session.intent.mockClear()
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd2', epoch: 2 })
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(session.intent).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
   // nocx-xn63t.6.27, CI run 38577867125: a command typed into the startup
   // composer of a reconnected ssh session reached the shell as
   // `echo after-the-reconnec`. The integration status reaches `integrated` a

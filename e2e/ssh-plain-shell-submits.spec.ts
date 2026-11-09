@@ -27,15 +27,17 @@
  * So a reading of the log with fewer than five Enters — or with two lines
  * joined — is the bug, not a slow machine.
  *
- * # The startup interval is HELD, not raced
+ * # The startup interval is HELD at the shell, not raced
  *
- * The fixture is started with `-shell-hold-until`: it does not run the pane's
- * shell until the spec creates that file. While it is held the far side says
- * nothing, so no refusal can settle the session's integration axis early and
- * the composer cannot disappear under the five submits — the interval is the
- * fixture's to end. The spec submits, asserts the interval is still open, and
- * only then releases the shell; the refusal that follows is what settles the
- * session conventional and releases the held lines.
+ * The host's account shell is a wrapper that waits for a file and then becomes
+ * `/bin/sh`. The loader, stage-1, the capability frame and the launcher all run
+ * at full speed inside the bootstrap's own deadlines (review round 2: holding
+ * the command start, or the client's bytes, put a three-second bootstrap
+ * timer in front of the test). Only the prompt waits — the far side reaches no
+ * verdict until the spec releases it — so the interval lasts exactly as long as
+ * the spec needs, and nothing in it turns on how long the browser took. The
+ * spec submits, asserts the interval is still open, then releases the shell;
+ * the settle that follows releases the held lines into a running shell.
  *
  * # Nothing else is waited out
  *
@@ -60,7 +62,8 @@ const NOTICE = `${PANE} .nocx-integration-notice`
 const SUBMITS = 5
 
 /**
- * Where the launcher's own bootstrap frames end.
+ * Where the launcher's own bootstrap frames end, or null while they are still
+ * arriving.
  *
  * The frame protocol (internal/shellintegration/carrier.go) is a fixed 17-byte
  * header — `NOCX1`, space, sequence digit, space, eight columns of right-
@@ -68,34 +71,34 @@ const SUBMITS = 5
  * sends frame 1 (stage-1) and then frame 2 (the capability or its refusal),
  * and the far side reads both off this same pty before the plain shell runs.
  * Anything after them is what a person's submits put there.
+ *
+ * Null is "not yet", never "wrong": the frames reach the fixture only after
+ * the spec releases its input hold, so a reader that treated an incomplete log
+ * as a failure would race the release it just made.
  */
-function bootstrapFramesEnd(bytes: Buffer): number {
+function bootstrapFramesEnd(bytes: Buffer): number | null {
   let offset = 0
   for (const seq of [1, 2]) {
     const header = bytes.subarray(offset, offset + 17).toString('latin1')
     const m = /^NOCX1 (\d) (.{8})\n$/.exec(header)
-    expect(
-      m,
-      `the open's bootstrap frame ${seq} header read ${JSON.stringify(header)} at byte ${offset}, ` +
-        "which is not the frame protocol's 17-byte header",
-    ).not.toBeNull()
-    const length = Number(m![2].trim())
-    expect(length, `bootstrap frame ${seq} declares a length outside 1..32768`).toBeGreaterThan(0)
-    expect(length, `bootstrap frame ${seq} declares a length outside 1..32768`).toBeLessThanOrEqual(
-      32768,
-    )
+    if (m === null) return null
+    const length = Number(m[2].trim())
+    if (!Number.isFinite(length) || length <= 0 || length > 32768) {
+      throw new Error(`bootstrap frame ${seq} declares a length outside 1..32768: ${length}`)
+    }
     offset += 17 + length
   }
-  expect(offset, 'the open wrote fewer bytes than its two bootstrap frames').toBeLessThanOrEqual(
-    bytes.length,
-  )
-  return offset
+  return offset <= bytes.length ? offset : null
 }
 
-/** The bytes the far program read after the open's own bootstrap frames. */
-function submitsIn(logPath: string): string[] {
+/** The bytes the far program read after the open's own bootstrap frames, or
+ *  null while the frames are still arriving (and the reason it is strict about
+ *  what follows: a submit is one typed line and its own Enter). */
+function submitsIn(logPath: string): string[] | null {
   const all = readFileSync(logPath)
-  return all.subarray(bootstrapFramesEnd(all)).toString('utf8').split('\r')
+  const framesEnd = bootstrapFramesEnd(all)
+  if (framesEnd === null) return null
+  return all.subarray(framesEnd).toString('utf8').split('\r')
 }
 
 test('an ssh pane on a non-integrated sh runs five composer submits, each its own line', async ({
@@ -110,15 +113,28 @@ test('an ssh pane on a non-integrated sh runs five composer submits, each its ow
   // shell that sourced the local rc hooks and come up integrated, and this
   // spec's whole premise is a shell that never integrates (shell-mode.spec.ts
   // records the same hazard).
-  // THE HOLD: the pane's shell does not start until this file exists, so the
-  // startup interval below lasts exactly as long as this spec needs and never
-  // races a far-side refusal (review of nocx-evj4b.1.6). The file's absence is
-  // the hold; creating it is the release.
+  // THE HOLD, AT THE SHELL ITSELF (review, round 2). The account shell the
+  // launcher execs is a wrapper that waits for a file and then becomes
+  // /bin/sh. Everything before it — the loader's LOADER_READY, stage-1's
+  // STAGE_READY, the capability frame, the launcher's own dispatch — runs at
+  // full speed inside the bootstrap's own deadlines, so no far-side timer is
+  // racing the spec. What waits is the prompt: the session reaches no verdict
+  // until the spec releases it, and the only clock left is the product's
+  // startup bound, which is what this feature IS.
   const holdPath = path.join(hostRoot, 'release-shell')
+  const holdBin = path.join(hostRoot, 'bin', 'sh')
+  mkdirSync(path.dirname(holdBin), { recursive: true })
+  writeFileSync(
+    holdBin,
+    `#!/bin/sh\nwhile [ ! -e '${holdPath}' ]; do sleep 0.01; done\nexec /bin/sh -l\n`,
+    { mode: 0o755 },
+  )
   const fixture: SshdFixture = await startSshd({
     home: remoteHome,
     cwd: remoteHome,
-    args: ['-input-log', logRoot, '-shell', 'sh', '-shell-hold-until', holdPath],
+    // basename `sh`, so the launcher dispatches exactly as it does for the
+    // account shell of a host whose shell is /bin/sh.
+    args: ['-input-log', logRoot, '-shell', holdBin],
   })
   let profileId: string | null = null
   try {
@@ -186,11 +202,12 @@ test('an ssh pane on a non-integrated sh runs five composer submits, each its ow
       await expect(checking).toBeVisible({ timeout: 0 })
     }
 
-    // Release the shell: the far side refuses integration now, the session
-    // settles conventional, and every held line is released in order.
+    // Release the shell: it becomes /bin/sh, the session settles conventional
+    // (no prompt mark ever comes), and every held line is released in order
+    // into a running shell.
     writeFileSync(holdPath, '')
     // The far program's own record of what arrived, announced by the fixture
-    // as soon as the shell it was holding starts.
+    // as soon as the channel it records starts.
     await expect
       .poll(() => fixture.lines().find((line) => line.startsWith('INPUTLOG=')) ?? '', {
         timeout: 60_000,
@@ -207,8 +224,9 @@ test('an ssh pane on a non-integrated sh runs five composer submits, each its ow
       .poll(() => submitsIn(logPath), {
         timeout: 60_000,
         message:
-          `the plain sh received ${JSON.stringify(submitsIn(logPath).join('|'))} for ` +
-          `${JSON.stringify(lines)}, want each line and its own Enter`,
+          `the plain sh has not received the five lines after the bootstrap frames: ` +
+          `${JSON.stringify(submitsIn(logPath))} for ${JSON.stringify(lines)}, ` +
+          'want each line and its own Enter',
       })
       .toEqual([...lines, ''])
   } finally {

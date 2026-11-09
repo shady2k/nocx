@@ -329,15 +329,15 @@ setInterval(() => {
                 const cell = parseFloat(
                   getComputedStyle(inner).getPropertyValue('--term-cell-width'),
                 )
-                // ADR-3kqrem7v: the active rows are edge to edge in both
-                // buffers, so the fit is the scroller's own width. Read the
-                // live row's inset instead of assuming one.
-                const live = document.querySelector<HTMLElement>(
-                  '.pane.active .terminal-live-container',
-                )!
-                const cs = getComputedStyle(live)
-                const inset = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight)
-                return ptyCols === Math.floor((area.clientWidth - inset) / cell)
+                // ADR-2yzsq8mk: a normal command is fitted INSIDE the
+                // transcript's gutter, which `usableViewport` reads from the
+                // stylesheet's own token. Read that same number here rather
+                // than the live row's padding: the running live region sits
+                // inside the block, so its own padding is 0 while the block
+                // pays the gutter.
+                const gutter =
+                  parseFloat(getComputedStyle(area).getPropertyValue('--pane-inline-padding')) || 0
+                return ptyCols === Math.floor((area.clientWidth - 2 * gutter) / cell)
               }, cols)
             })
             .toBe(true)
@@ -456,13 +456,14 @@ setInterval(() => {
           `the early input reaches the session (socket saw: ${shape})`,
         ).toBeGreaterThanOrEqual(0)
         if (timing === 'before') {
-          // The pane was resized and the program confirmed the wide PTY before
-          // the switch, so the size is already applied: the switch must not
-          // send another one.
+          // ADR-2yzsq8mk: a switch to the alternate screen changes the column
+          // count — the program is told the pane's whole width, where a normal
+          // command is in the transcript's column — so the switch sends exactly
+          // one resize, and it is the first thing the pane sends for it.
           expect(
             firstResize,
-            `accepting the switch sent a resize for a size already applied (socket saw: ${shape})`,
-          ).toBe(-1)
+            `accepting the switch sends one resize to the full width (socket saw: ${shape})`,
+          ).toBe(0)
         }
         // The ordering a REAL resize owes — the person's key behind the
         // receipt that applied it — is asserted by the unit suite

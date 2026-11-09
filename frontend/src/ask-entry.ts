@@ -268,10 +268,13 @@ export class TargetIndicator {
       },
     })
     const previous = this.button
-    // Inserted as the FIRST child, ahead of CM6's `.ui-composer-frame__editor`
-    // slot and the submit slot after it — which is what places it in the
-    // field grid's leading column (composer-frame.css), by DOM order alone.
-    this.host.insertBefore(button, this.host.firstElementChild)
+    // INSERTED AFTER CM6, BEFORE THE SUBMIT SLOT (ADR-2yzsq8mk). The typed
+    // command is the field grid's FIRST column now, so its text starts on the
+    // ledger's column — the x a block's header and its output start on — and
+    // the switch that says where Enter goes follows it as the row's own
+    // control (composer-frame.css places the columns by DOM order alone).
+    const submit = this.host.querySelector<HTMLElement>('.ui-composer-frame__submit')
+    this.host.insertBefore(button, submit)
     previous?.remove()
     this.button = button
   }

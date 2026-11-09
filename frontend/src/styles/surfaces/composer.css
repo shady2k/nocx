@@ -124,7 +124,11 @@
   font-size: var(--font-size-terminal);
   line-height: var(--terminal-ui-line-height);
   resize: none;
-  padding: 2px 8px 4px;
+  /* NO INLINE PADDING (ADR-2yzsq8mk): the composer's first glyph starts on the
+     ledger's column, and the card's own border and padding are what place it
+     there — an 8px inset here put the typed command eight pixels past every
+     block's text. */
+  padding: 2px 0 4px;
   white-space: pre-wrap;
   overflow-wrap: break-word;
   word-break: break-word;
@@ -194,7 +198,10 @@
 
 .nocx-editor .cm-content,
 .nocx-editor-departure .cm-content {
-  padding: 2px 8px 4px;
+  /* NO INLINE PADDING (ADR-2yzsq8mk): the card's own border and padding place
+     the first glyph on the ledger's column, and an 8px inset here put every
+     typed command eight pixels past the text of the block it becomes. */
+  padding: 2px 0 4px;
 }
 
 /* THE GHOST MAY NOT CHANGE THE HEIGHT OF THE LINE IT SITS ON.

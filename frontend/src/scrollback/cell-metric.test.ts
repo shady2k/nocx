@@ -7,6 +7,7 @@
 // real browser can confirm the pixel geometry (see the task report).
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  gridRows,
   measureNaturalAdvance,
   publishCellMetric,
   publishRowPitch,
@@ -130,5 +131,33 @@ describe('publishRowPitch', () => {
     expect(publishRowPitch(container, Number.NaN)).toBeNull()
     expect(publishRowPitch(container, Number.POSITIVE_INFINITY)).toBeNull()
     expect(container.style.getPropertyValue('--term-cell-height')).toBe('')
+  })
+})
+
+describe('gridRows (independent read, 2026-11-08)', () => {
+  it('counts the rows a box holds even when the division lands a hair short', () => {
+    // The owner's numbers: a 26-device-pixel cell at DPR 1.5 is a
+    // 17.333333333333332px pitch, and 31 of them are a box of
+    // 537.3333333333334px. The quotient is 30.999999999999996 in IEEE double
+    // arithmetic for the pair below, so `Math.floor` alone gives the program 30
+    // rows while the alternate screen, reading the same box as a raw height,
+    // gives it 31 — and the switch back sends a resize.
+    const pitch = 26 / 1.5
+    const box = 31 * pitch
+    expect(box).toBeCloseTo(537.3333333333334, 10)
+    expect(Math.floor(537.3333333333334 / 17.333333333333336)).toBe(30)
+    expect(gridRows(537.3333333333334, 17.333333333333336)).toBe(31)
+    // The derived pair, which is the one the pane actually produces.
+    expect(gridRows(box, pitch)).toBe(31)
+    // And the box derived from the count divides back to the same count, so
+    // `fitUsableViewport` cannot lose the row it was handed.
+    expect(gridRows(gridRows(box, pitch) * pitch, pitch)).toBe(31)
+  })
+
+  it('keeps a whole remainder below one row, and answers zero for no box', () => {
+    expect(gridRows(3 * 16, 16)).toBe(3)
+    expect(gridRows(3 * 16 - 1, 16)).toBe(2)
+    expect(gridRows(0, 16)).toBe(0)
+    expect(gridRows(100, 0)).toBe(0)
   })
 })

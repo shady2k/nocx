@@ -5,7 +5,13 @@
   /* The field below reshapes by the card's own width, not the viewport's: a
      pane beside an open sidebar can be narrower than any viewport query. */
   container-type: inline-size;
-  margin: 0 var(--terminal-card-margin) var(--terminal-card-margin);
+  /* THE CARD'S TEXT IS THE LEDGER'S COLUMN (ADR-2yzsq8mk, the owner's Warp
+     pass): a block's header and its output start at --pane-inline-padding, and
+     the command a person is typing must start on that same x. The margin is
+     what is left of the column after the card's own border and padding, so the
+     first glyph lands on the gutter instead of eight pixels past it. */
+  margin: 0 calc(var(--pane-inline-padding) - var(--terminal-card-padding) - 1px)
+    var(--terminal-card-margin);
   padding: var(--terminal-card-padding);
   border: 1px solid var(--color-divider);
   border-radius: var(--control-radius-lg);
@@ -15,7 +21,10 @@
   position: relative;
   box-sizing: border-box;
   display: grid;
-  grid-template-columns: minmax(var(--terminal-mode-segment-width), max-content) minmax(0, 1fr) auto;
+  /* The editor's text is the first thing in the row (ADR-2yzsq8mk): the target
+     switch follows it, so no leading control pushes the typed command off the
+     ledger's column. */
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: var(--space-3);
   align-items: start;
   min-height: var(--terminal-composer-control-size);
@@ -76,7 +85,7 @@
    pushed the submit button outside the card. */
 @container (max-width: 240px) {
   .ui-composer-frame__field {
-    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) auto;
     gap: var(--space-1);
   }
   .ui-composer-frame__submit {

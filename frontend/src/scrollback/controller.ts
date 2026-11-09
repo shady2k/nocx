@@ -1090,34 +1090,74 @@ export class ScrollbackController {
     if (isAtTail(area)) return null
     const clip = area.getBoundingClientRect()
     // ONLY THE BLOCK THE VIEWPORT'S TOP IS IN, not the whole transcript: a
-    // restored pane can hold thousands of rows, and a freeze must not read
-    // every one of them to name the row a person is on.
+    // restored pane can hold thousands of rows, and a settle must not touch
+    // every one of them.
     for (const block of this.scrollbackInner.querySelectorAll<HTMLElement>(':scope > .cmd-block')) {
       const box = block.getBoundingClientRect()
       if (box.bottom <= clip.top) continue
       if (box.top >= clip.bottom) break
-      // EVERY COMMAND'S ROWS UNDER THIS BLOCK, not only its own body: a
-      // command inside a turn lives under `.cmd-children` (ADR-0040), and a
-      // reader scrolled into that output was left with the numeric fallback —
-      // so the freeze of a nested command moved their rows (nocx-3wmve).
-      for (const row of block.querySelectorAll<HTMLElement>('.cmd-output > .term-grid-row')) {
-        const cell = row.getBoundingClientRect()
-        if (cell.height <= 0) continue
-        // The first row that starts inside the viewport: the top of what the
-        // person is reading, and the least ambiguous witness (a row clipped by
-        // the top edge has no stable offset).
-        if (cell.top < clip.top - 0.5) continue
-        if (cell.top >= clip.bottom - 0.5) break
-        const blockId = row.dataset.blockId
-        const logicalLine = row.dataset.logicalLine
-        if (blockId === undefined || logicalLine === undefined) continue
-        return { blockId, logicalLine, offset: cell.top - clip.top, top: area.scrollTop }
-      }
+      const found = this._readerRowIn(block, clip)
+      if (found === null) continue
+      const cell = found.getBoundingClientRect()
+      const blockId = found.dataset.blockId
+      const logicalLine = found.dataset.logicalLine
+      if (blockId === undefined || logicalLine === undefined) continue
+      return { blockId, logicalLine, offset: cell.top - clip.top, top: area.scrollTop }
     }
     // Nothing painted in the viewport is a row this can name (the live grid
     // above the fold, an empty body). The scroller's own position still
     // survives a shrink that is paid back in the same task.
     return { blockId: null, logicalLine: null, offset: 0, top: area.scrollTop }
+  }
+
+  /** THE FIRST ROW OF `block` THAT STARTS INSIDE THE VIEWPORT (nocx-3wmve).
+   *
+   * Rows are in document order and laid out one under the next, so their top
+   * edges are non-decreasing and the first visible one is a bisection: a
+   * handful of measurements instead of one per row. Measured on a 50 000-row
+   * command, reading near its fortieth thousand: the linear walk took 39 984
+   * row measurements on EVERY settle — and a settle is every stored-rows
+   * delivery, every freeze, every header change — while the bisection takes
+   * 17. `document.elementFromPoint` would answer in one call and is not
+   * acceptable: a modal, a menu or the composer over the scroller would name
+   * their element instead of the row.
+   *
+   * EVERY COMMAND'S ROWS UNDER THE BLOCK, not only its own body: a command
+   * inside a turn lives under `.cmd-children` (ADR-0040), and a reader
+   * scrolled into that output was left with the numeric fallback, so the
+   * freeze of a nested command moved their rows. */
+  private _readerRowIn(
+    block: HTMLElement,
+    clip: { top: number; bottom: number },
+  ): HTMLElement | null {
+    const rows = block.querySelectorAll<HTMLElement>('.cmd-output > .term-grid-row')
+    if (rows.length === 0) return null
+    const inView = (index: number): number => rows[index].getBoundingClientRect().top
+    let low = 0
+    let high = rows.length - 1
+    let found = -1
+    while (low <= high) {
+      const mid = (low + high) >> 1
+      if (inView(mid) < clip.top - 0.5) low = mid + 1
+      else {
+        found = mid
+        high = mid - 1
+      }
+    }
+    if (found < 0) return null
+    // A row can be inside the block and still above the fold's top edge only
+    // by rounding; walking forward from the bisection's answer is bounded by
+    // the number of rows that start within one row of the edge, and it keeps
+    // the contract the linear walk had (a row that STARTS in the viewport).
+    for (let index = found; index < rows.length; index += 1) {
+      const row = rows[index]
+      const cell = row.getBoundingClientRect()
+      if (cell.height <= 0) continue
+      if (cell.top < clip.top - 0.5) continue
+      if (cell.top >= clip.bottom - 0.5) return null
+      return row
+    }
+    return null
   }
 
   private _restoreReaderPlace(place: ReaderPlace): void {

@@ -247,12 +247,24 @@ test('a command ending does not move a reader scrolled into its own output', asy
   await wheelIntoHistory(page, /FAST-1\d\d/)
   const before = await readerPlace(page)
   const topBefore = await scrollerTop(page)
-  // THE BASELINE IS THE RUNNING CARD'S, and this is the line that says so: the
-  // block is still running when it is read.
-  await expect(page.locator('.pane.active .cmd-block-running')).toHaveCount(1)
+  // THE BASELINE IS THE RUNNING CARD'S, and these are the lines that say so:
+  // the block is still running when it is read, and its identity is taken here
+  // so the after-measurement can wait for THAT card to freeze.
+  const running = page.locator('.pane.active .cmd-block-running')
+  await expect(running).toHaveCount(1)
+  const entryId = await running.getAttribute('data-entry-id')
+  expect(entryId, 'the running block carries no entry id to wait on').not.toBeNull()
 
   writeFileSync(release, 'go')
+  // NOT promptReady ALONE (nocx-3wmve): the composer returns when the prompt
+  // is ready, and the VISUAL swap waits for the backend's block.closed, which
+  // can land later — measuring then would read the running card's own rows and
+  // call a freeze observed that nobody had seen. The frozen element is the
+  // command's own block without `cmd-block-running`.
   await promptReady(page)
+  await expect(
+    page.locator(`.pane.active .cmd-block[data-entry-id="${entryId}"]:not(.cmd-block-running)`),
+  ).toHaveCount(1)
   const after = await readerPlace(page)
   const topAfter = await scrollerTop(page)
 

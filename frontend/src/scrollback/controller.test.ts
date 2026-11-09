@@ -1776,6 +1776,42 @@ describe("the reader's anchor (nocx-3wmve)", () => {
     expect(area.scrollTop).toBe(1040)
   })
 
+  it("finds the reader's row in a long block without reading every row (nocx-3wmve)", () => {
+    const { controller } = makeController()
+    stopFollowing(controller)
+    const area = laidOut(controller)
+    // A block the size of a long command: rows laid out one under the next,
+    // each with a measured top the way the browser answers. The reader is near
+    // row 800 of 1 000; every measurement is counted, because that count is the
+    // cost a settle pays on every delivery.
+    const block = document.createElement('div')
+    block.className = 'cmd-block'
+    const body = document.createElement('div')
+    body.className = 'cmd-output'
+    let reads = 0
+    for (let index = 0; index < 1000; index += 1) {
+      const row = document.createElement('div')
+      row.className = 'term-grid-row'
+      row.dataset.blockId = 'att-long'
+      row.dataset.logicalLine = String(index)
+      const top = index * 17 - 800 * 17
+      row.getBoundingClientRect = () => {
+        reads += 1
+        return rect(top, 17)
+      }
+      body.appendChild(row)
+    }
+    block.appendChild(body)
+    controller.scrollbackInner.appendChild(block)
+    block.getBoundingClientRect = () => rect(-800 * 17, 1000 * 17)
+
+    controller.holdReaderPlace(() => {})
+
+    // The row nearest the top edge is row 800 — a linear walk from the block's
+    // first row reads ~800 of them; a bisection reads a handful.
+    expect(reads, `row measurements for one capture: ${reads}`).toBeLessThanOrEqual(40)
+  })
+
   it('holds a reader who is not following across any content change (settleAround)', () => {
     const { controller } = makeController()
     stopFollowing(controller)

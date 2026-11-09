@@ -191,6 +191,44 @@ __nocx_lc_resolve_probe() {
     return 1
 }
 
+# THE INTERRUPT HAS A SECOND WITNESS, and it does not depend on any trap
+# (nocx-ouru5.1.11). It lives here, above the first wait that calls it,
+# because a shell can wait while it is still sourcing this file (the grant a
+# nested activation reads is one) and a call to a function defined further
+# down is a `command not found` in the pane.
+#
+# A cancel window's wait is a loop of short blocking children — the `sleep 1`
+# between probes, the `dd` that reads a frame — and the window's INT trap arms
+# for exactly that time. That trap is the first witness, and it is not a
+# promise. bash runs a trap for a foreground child only once that child exits,
+# and CI captured the case where the trap's own run was LOST outright: the pane
+# printed
+#
+#   bash: interrupt trap: line 2: unexpected EOF while looking for matching `)'
+#
+# and went on waiting — `^C` echoed, then nothing — for as long as the test
+# watched: ten rounds of the loop with the cancel fact still unset. The
+# open-question wait has no deadline by design, so nothing else could end it:
+# the launch the person cancelled sat inside the wrapper for ever.
+#
+# The second witness is the wait child itself. bash reports a child killed by
+# SIGINT as 130 (131 for SIGQUIT), and the shell observes that status whether
+# or not any trap ever ran. Recording it makes the cancel independent of the
+# trap's fate, which is where it belonged: the interrupt did reach the pane,
+# and the pane must say so.
+__nocx_agent_note_int() {
+    case "${1:-0}" in
+        130|131) : ;;
+        *) return 0 ;;
+    esac
+    # Only a window reads a child's death as this cancel: outside one, a Ctrl+C
+    # at the prompt is the prompt's business.
+    (( ${__nocx_agent_cancel_armed:-0} )) || return 0
+    __nocx_agent_cancelled=1
+    __nocx_agent_launch_cancelled=1
+    return 0
+}
+
 # Succeeds iff a byte is available on the channel right now. Consumes
 # nothing, blocks never — both arms are non-blocking by construction.
 #
@@ -244,13 +282,19 @@ __nocx_lc_wait_readable() {
     # the last sleep: a frame that arrived during the sleep is seen, and a
     # 1-second bound is one sleep plus the probes around it — not a probe,
     # a sleep, and a premature give-up.
-    local __t="${1:-$__nocx_lc_timeout_s}" __round=0
+    local __t="${1:-$__nocx_lc_timeout_s}" __round=0 __probe_rc
     while :; do
-        if __nocx_lc_probe_readable; then
+        __probe_rc=0
+        __nocx_lc_probe_readable || __probe_rc=$?
+        if (( __probe_rc == 0 )); then
             return 0 # data is available; the caller reads it
         fi
+        # A probe interrupted by the interrupt reports 130 too: the window's
+        # second witness, recorded before any sleep is even started.
+        __nocx_agent_note_int "$__probe_rc"
         (( __round >= __t )) && return 1 # the bound expired: fail open
         sleep 1
+        __nocx_agent_note_int $?
         __round=$(( __round + 1 ))
     done
 }
@@ -268,6 +312,9 @@ __nocx_lc_read_frame() {
     (( __len > 0 && __len <= __nocx_lc_max_frame )) || return 1
     __nocx_lc_wait_readable "${__t:-$__nocx_lc_timeout_s}" || return 1
     __nocx_lc_frame="$(dd bs=1 count="$__len" 2>/dev/null <&"$__nocx_lc_fd")"
+    # A frame whose bytes stopped short because dd died of the interrupt is the
+    # interrupt, not a dead channel (nocx-ouru5.1.11): a window records it.
+    __nocx_agent_note_int $?
     (( ${#__nocx_lc_frame} == __len )) || return 1
     return 0
 }
@@ -689,6 +736,9 @@ __nocx_agent_n=0
 __nocx_agent_enrolled=0
 __nocx_agent_pending=0
 __nocx_agent_cancelled=0
+# 1 while a cancel window's trap is armed: what lets __nocx_agent_note_int read
+# a wait child's death as that window's cancel, and nothing else's.
+__nocx_agent_cancel_armed=0
 __nocx_agent_rid=
 __nocx_agent_reason=
 __nocx_agent_helper_path="${NOCX_AGENT_HELPER_PATH:-nocx-helper}"
@@ -724,6 +774,7 @@ __nocx_lc_read_agent_answer() {
         [[ "$__wait" == wait ]] && (( __nocx_agent_cancelled )) && return 130
         if ! __nocx_lc_probe_readable; then
             sleep 1
+            __nocx_agent_note_int $?
             __t=$(( __t + 1 ))
             continue
         fi
@@ -930,7 +981,7 @@ __nocx_agent_restore_traps() {
 # The INT trap that was there before is put back, and __nocx_agent_cancelled is
 # cleared, whichever way the wait ends.
 __nocx_agent_cancel_on_int() {
-    local __old_int __rc __monitor=0
+    local __old_int __rc __monitor=0 __armed_outer="${__nocx_agent_cancel_armed:-0}"
     __old_int="$(trap -p INT 2>/dev/null)" || __old_int=
     __nocx_agent_cancelled=0
     [[ $- == *m* ]] && __monitor=1
@@ -940,8 +991,12 @@ __nocx_agent_cancel_on_int() {
     # an interrupt that lands between two windows still cancels the launch
     # instead of being forgotten by the next arm.
     trap '__nocx_agent_cancelled=1; __nocx_agent_launch_cancelled=1' INT
+    # From here to the restore, a wait child's death of SIGINT IS this cancel
+    # (__nocx_agent_note_int): the trap is not the only door.
+    __nocx_agent_cancel_armed=1
     "$@"
     __rc=$?
+    __nocx_agent_cancel_armed="$__armed_outer"
     trap - INT
     (( __monitor )) && set -m
     [[ -z "$__old_int" ]] || eval "$__old_int"
@@ -1113,6 +1168,7 @@ __nocx_agent_launch_read_answer() {
         (( __nocx_agent_cancelled )) && return 130
         if ! __nocx_agent_launch_readable; then
             sleep 1
+            __nocx_agent_note_int $?
             __t=$(( __t + 1 ))
             continue
         fi

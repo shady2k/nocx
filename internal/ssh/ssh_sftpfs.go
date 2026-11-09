@@ -137,6 +137,27 @@ func (f *SFTPFS) ReadFile(path string) ([]byte, error) {
 // SFTP is what gives that file the install's 0700 (nocx-evj4b.1.3).
 func (f *SFTPFS) Chmod(p string, mode os.FileMode) error { return f.client.Chmod(p, mode) }
 
+// Sync makes an existing file's bytes durable on the far side, opening it
+// without truncation and asking for fsync@openssh.com (pkg/sftp's File.Sync).
+// A server without the extension answers ERR_OP_UNSUPPORTED, which is the same
+// tolerance SyncDir states for transports that cannot fsync: the install keeps
+// its ordering (bytes, then rename, then marker) and the durability scope is
+// the transport's, stated rather than assumed (nocx-evj4b.1.3).
+func (f *SFTPFS) Sync(p string) error {
+	fh, err := f.client.OpenFile(p, os.O_WRONLY|os.O_APPEND)
+	if err != nil {
+		return err
+	}
+	err = fh.Sync()
+	if err != nil && errors.Is(err, sftp.ErrSSHFxOpUnsupported) {
+		err = nil
+	}
+	if cerr := fh.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
 func (f *SFTPFS) RealPath(path string) (string, error) { return f.client.RealPath(path) }
 
 // sftpFile adapts *sftp.File to the File boundary.

@@ -134,6 +134,15 @@ type RemoteFS interface {
 	// what it writes carries the umask rather than the install's 0700
 	// (nocx-evj4b.1.3).
 	Chmod(path string, mode os.FileMode) error
+	// Sync makes an EXISTING file's bytes durable. It exists for the same file
+	// Chmod does: the install's own temporary is synced through the File it
+	// created (writePlain), but the host's gzip wrote this one, and a rename of
+	// a name whose bytes are still in the host's page cache would let a power
+	// cut leave .install-complete beside a truncated helper — the marker's whole
+	// meaning is that the binary beside it is on disk (D7, reviewed on
+	// nocx-evj4b.1.3). Transports without fsync may no-op, the same carve-out
+	// SyncDir states.
+	Sync(path string) error
 }
 
 // File is a handle returned by RemoteFS.Create: Write, Sync and Close are
@@ -400,6 +409,14 @@ func writeInflated(ctx context.Context, fs RemoteFS, tmp string, compressed []by
 	gz := tmp + ".gz"
 	f, err := fs.Create(gz, markerMode)
 	if err != nil {
+		// CREATE CAN HAVE MADE THE FILE ANYWAY: the adapters create and then
+		// chmod (ssh_sftpfs.go), so a Create that failed on its second step has
+		// already left a file on the host. The plain fallback below writes tmp
+		// and the install is then marked complete, so a name nobody reads would
+		// sit inside a directory that says it is whole, for as long as the
+		// install lives. Removing it is what makes the fallback leave nothing
+		// (nocx-evj4b.1.3, review).
+		_ = fs.Remove(gz)
 		return false
 	}
 	total := int64(len(compressed))
@@ -445,8 +462,24 @@ func writeInflated(ctx context.Context, fs RemoteFS, tmp string, compressed []by
 		_ = fs.Remove(tmp)
 		return false
 	}
+	// THE FILE THE HOST WROTE IS SYNCED HERE, BEFORE IT HAS A NAME THAT MEANS
+	// ANYTHING. The install's own temporary is synced through the File it
+	// created; this one was written by the host's gzip, and the rename below is
+	// the moment the marker's promise — the binary beside it is whole — starts
+	// to apply. Syncing after the rename would leave a window a power cut can
+	// land in: .install-complete present, the bytes it vouches for still in the
+	// page cache (D7; nocx-evj4b.1.3, review).
+	if err := fs.Sync(tmp); err != nil {
+		_ = fs.Remove(gz)
+		_ = fs.Remove(tmp)
+		return false
+	}
 	// gzip wrote the file with the umask, not with the install's 0700.
 	if err := fs.Chmod(tmp, binaryMode); err != nil {
+		// The .gz is already consumed by a gzip -d that succeeded, so this is a
+		// best-effort sweep of a name that should be gone — the same rule as
+		// every other failure here: the fallback never inherits a leftover.
+		_ = fs.Remove(gz)
 		_ = fs.Remove(tmp)
 		return false
 	}

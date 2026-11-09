@@ -350,6 +350,14 @@ type fakeFS struct {
 	// total written so far. It is how a test puts a cancellation in the
 	// middle of an upload instead of before it.
 	afterWrite func(written int)
+	// createLeavesFile, when set, is the create-then-chmod shape of the real
+	// adapters: Create has already made the file when it fails. One call only.
+	createLeavesFile error
+	// events is the ordered log of the boundaries the install crossed
+	// ("create:<path>", "syncpath:<path>", "rename:<src>-><dst>", …), which is
+	// how a test asserts that a step happened BEFORE another rather than
+	// merely that it happened.
+	events []string
 }
 
 func newFakeFS() *fakeFS {
@@ -492,6 +500,13 @@ func (f *fakeFS) Create(path string, mode os.FileMode) (deploy.File, error) {
 	if !f.dirs[filepath.Dir(path)] {
 		return nil, fs.ErrNotExist
 	}
+	if err := f.createLeavesFile; err != nil {
+		f.createLeavesFile = nil
+		f.files[path] = []byte{}
+		f.modes[path] = mode
+		f.events = append(f.events, "create:"+path+":failed")
+		return nil, err
+	}
 	op := "create"
 	if filepath.Base(path) == ".install-complete" {
 		op = "createmarker"
@@ -500,6 +515,7 @@ func (f *fakeFS) Create(path string, mode os.FileMode) (deploy.File, error) {
 		return nil, err
 	}
 	f.creates++
+	f.events = append(f.events, "create:"+path)
 	if filepath.Base(path) != ".install-complete" {
 		f.binaryCreates++
 	}
@@ -515,12 +531,29 @@ func (f *fakeFS) SyncDir(string) error {
 	return f.takeLocked("syncdir")
 }
 
+// Sync is the RemoteFS.Sync boundary, named "syncpath" so a test can break the
+// sync of the file the HOST wrote without touching the File.Sync the install
+// does on its own temporary ("sync").
+func (f *fakeFS) Sync(p string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.takeLocked("syncpath"); err != nil {
+		return err
+	}
+	f.events = append(f.events, "syncpath:"+p)
+	if _, ok := f.files[p]; !ok {
+		return fs.ErrNotExist
+	}
+	return nil
+}
+
 func (f *fakeFS) Rename(src, dst string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.takeLocked("rename"); err != nil {
 		return err
 	}
+	f.events = append(f.events, "rename:"+src+"->"+dst)
 	if data, ok := f.files[src]; ok {
 		delete(f.files, src)
 		f.files[dst] = data

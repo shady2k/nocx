@@ -57,6 +57,10 @@ type HelperInstallConn interface {
 	// helper, and what it writes carries the umask rather than the install's
 	// 0700 (nocx-evj4b.1.3).
 	Chmod(path string, mode os.FileMode) error
+	// Sync makes that same file's bytes durable before the install renames it
+	// into place: the bytes are the host's gzip's, not a File this package
+	// wrote and synced itself (nocx-evj4b.1.3).
+	Sync(path string) error
 	// Home resolves the remote account's home directory, SFTP-native: the
 	// server canonicalises "." — the SFTP session's starting directory is
 	// the remote account's home — so no `echo $HOME` over exec is needed

@@ -136,18 +136,160 @@ func TestAHostWithoutGzipFallsBackToThePlainUpload(t *testing.T) {
 
 func TestAHostWhoseDecompressionWritesNothingIsNotTrusted(t *testing.T) {
 	// A seam that reports success without producing the file is a host answer
-	// the install cannot verify from the seam: the write it thinks it made is
-	// missing, and the rename that follows fails rather than committing an
-	// empty helper.
+	// the install cannot commit: the sync of the file it thinks it made is what
+	// catches it, and the answer is the plain upload — complete and correct —
+	// rather than a rename of a name that does not exist.
 	fs := newFakeFS()
 	inflate := func(_ context.Context, gz string) error {
 		// gzip "succeeded" but wrote nothing: model it by removing the .gz.
 		delete(fs.files, gz)
 		return nil
 	}
-	_, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u",
+	binary, hash, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u",
 		deploy.Platform{GOOS: "linux", GOARCH: "amd64"}, nil, deploy.WithInflate(inflate))
-	if err == nil {
-		t.Fatal("an install whose decompression produced no file was accepted")
+	if err != nil {
+		t.Fatalf("Ensure should fall back to the plain upload: %v", err)
+	}
+	if hash != syntheticHash {
+		t.Fatalf("hash = %q, want %q", hash, syntheticHash)
+	}
+	if got := fs.files[binary]; !bytes.Equal(got, syntheticPayload) {
+		t.Fatalf("the installed binary is %d bytes, want the %d-byte payload", len(got), len(syntheticPayload))
+	}
+	if !fs.hasMarker(path.Dir(binary)) {
+		t.Fatal("the fallback install is not marked complete")
+	}
+}
+
+// THE COMMIT'S ORDER IS THE MARKER'S MEANING (nocx-evj4b.1.3, review). The
+// install's own temporary is synced through the File it created; the file the
+// HOST's gzip wrote has no such File, so it is synced through the seam — and it
+// must be, BEFORE the rename that starts the marker's promise: a rename of a
+// name whose bytes are still in the host's page cache is a commit a power cut
+// can undo into .install-complete beside a truncated helper.
+func TestTheInflatedFileIsSyncedBeforeItIsCommitted(t *testing.T) {
+	fs := newFakeFS()
+	inflate := func(_ context.Context, gz string) error { return inflatedTo(t, fs, gz) }
+	binary, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u",
+		deploy.Platform{GOOS: "linux", GOARCH: "amd64"}, nil, deploy.WithInflate(inflate))
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	tmp := ""
+	for _, e := range fs.events {
+		if strings.HasPrefix(e, "syncpath:") {
+			tmp = strings.TrimPrefix(e, "syncpath:")
+			break
+		}
+	}
+	if tmp == "" {
+		t.Fatal("the file the host's gzip wrote was renamed without being synced")
+	}
+	if strings.HasSuffix(tmp, ".gz") {
+		t.Fatalf("the file synced is %q, want the decompressed helper", tmp)
+	}
+	renameAt := -1
+	syncAt := -1
+	for i, e := range fs.events {
+		switch {
+		case e == "syncpath:"+tmp:
+			syncAt = i
+		case strings.HasPrefix(e, "rename:") && strings.HasSuffix(e, "->"+binary):
+			renameAt = i
+		}
+	}
+	if syncAt < 0 || renameAt < 0 || syncAt > renameAt {
+		t.Fatalf("sync at %d, rename at %d in %v: the bytes must be durable before the name is", syncAt, renameAt, fs.events)
+	}
+}
+
+// A SYNC THAT FAILS IS THE FAST PATH FAILING, like every other seam answer: the
+// file is never committed over, and the plain upload — which syncs its own
+// temporary before renaming it — ends the install complete.
+func TestAHostWhoseInflatedFileCannotBeSyncedFallsBackToThePlainUpload(t *testing.T) {
+	fs := newFakeFS()
+	fs.failNext("syncpath", errors.New("fakefs: fsync failed"))
+	inflate := func(_ context.Context, gz string) error { return inflatedTo(t, fs, gz) }
+	binary, hash, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u",
+		deploy.Platform{GOOS: "linux", GOARCH: "amd64"}, nil, deploy.WithInflate(inflate))
+	if err != nil {
+		t.Fatalf("Ensure should fall back to the plain upload: %v", err)
+	}
+	if hash != syntheticHash {
+		t.Fatalf("hash = %q, want %q", hash, syntheticHash)
+	}
+	if got := fs.files[binary]; !bytes.Equal(got, syntheticPayload) {
+		t.Fatalf("the installed binary is %d bytes, want the %d-byte payload", len(got), len(syntheticPayload))
+	}
+	if !fs.hasMarker(path.Dir(binary)) {
+		t.Fatal("the fallback install is not marked complete")
+	}
+	// AND IT IS THE PLAIN PATH THAT FINISHED IT: a create of the uncompressed
+	// temporary is the upload, and it is the only way past a sync that failed.
+	plain := false
+	for _, e := range fs.events {
+		name, ok := strings.CutPrefix(e, "create:")
+		if !ok || strings.HasSuffix(name, ".gz") || strings.HasSuffix(name, ".install-complete") {
+			continue
+		}
+		plain = true
+	}
+	if !plain {
+		t.Fatalf("no plain upload followed the failed sync: %v", fs.events)
+	}
+}
+
+// A CREATE THAT FAILED CAN STILL HAVE MADE THE FILE: the real adapters create
+// and then chmod (ssh_sftpfs.go), so the compressed temporary exists when the
+// error comes back, the plain fallback succeeds, and the install is marked
+// complete — and the .gz must not sit inside a directory that says it is whole
+// for as long as the install lives (nocx-evj4b.1.3, review).
+func TestAnInstallWhoseCompressedFileCannotBePreparedLeavesNothingBehind(t *testing.T) {
+	fs := newFakeFS()
+	fs.createLeavesFile = errors.New("fakefs: chmod of the created file failed")
+	inflate := func(_ context.Context, gz string) error {
+		t.Fatalf("the host was asked to decompress %q after the create failed", gz)
+		return nil
+	}
+	binary, hash, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u",
+		deploy.Platform{GOOS: "linux", GOARCH: "amd64"}, nil, deploy.WithInflate(inflate))
+	if err != nil {
+		t.Fatalf("Ensure should fall back to the plain upload: %v", err)
+	}
+	if hash != syntheticHash {
+		t.Fatalf("hash = %q, want %q", hash, syntheticHash)
+	}
+	if !fs.hasMarker(path.Dir(binary)) {
+		t.Fatal("the fallback install is not marked complete")
+	}
+	for name := range fs.files {
+		if strings.HasSuffix(name, ".gz") {
+			t.Fatalf("%q was left behind by the failed attempt", name)
+		}
+	}
+}
+
+// THE MODE IS SET BY A CHMOD WHOSE FAILURE IS A FAILURE: the file exists and is
+// the helper, but at the host's umask, so it is not committed and the plain
+// upload ends the install — with nothing of the failed attempt left behind.
+func TestAHostWhoseInflatedFileCannotBeMadeTheInstallsModeIsNotCommitted(t *testing.T) {
+	fs := newFakeFS()
+	inflate := func(_ context.Context, gz string) error { return inflatedTo(t, fs, gz) }
+	fs.failNext("chmod", errors.New("fakefs: chmod failed"))
+	binary, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u",
+		deploy.Platform{GOOS: "linux", GOARCH: "amd64"}, nil, deploy.WithInflate(inflate))
+	if err != nil {
+		t.Fatalf("Ensure should fall back to the plain upload: %v", err)
+	}
+	if mode := fs.modes[binary]; mode != 0o700 {
+		t.Fatalf("the installed binary is %o, want 0700", mode)
+	}
+	if !fs.hasMarker(path.Dir(binary)) {
+		t.Fatal("the fallback install is not marked complete")
+	}
+	for name := range fs.files {
+		if strings.HasSuffix(name, ".gz") {
+			t.Fatalf("%q was left behind by the failed attempt", name)
+		}
 	}
 }

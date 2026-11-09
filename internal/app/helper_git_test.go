@@ -605,6 +605,15 @@ func (f *fakeInstallConn) ReadDir(dir string) ([]iofs.FileInfo, error) {
 	return out, nil
 }
 
+func (f *fakeInstallConn) Sync(p string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.files[p]; !ok {
+		return iofs.ErrNotExist
+	}
+	return nil
+}
+
 func (f *fakeInstallConn) Chmod(p string, mode iofs.FileMode) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

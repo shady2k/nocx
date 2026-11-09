@@ -454,13 +454,13 @@ func installHelperAt(ctx context.Context, host string, opts []ssh.ConnectOption,
 	// host without gzip installs the plain way instead of paying the compressed
 	// upload first and the decompressed one after it (nocx-evj4b.1.3).
 	var installOpts []deploy.Option
-	if err := lanes.HelperInflate(ctx, host, "", opts...); err == nil {
+	if probeErr := lanes.HelperInflate(ctx, host, "", opts...); probeErr == nil {
 		inflate := func(ctx context.Context, path string) error {
 			return lanes.HelperInflate(ctx, host, path, opts...)
 		}
 		installOpts = append(installOpts, deploy.WithInflate(inflate))
 	} else {
-		log.From(ctx).Debug("helper install: the host cannot decompress, sending the artifact plain", "host", host, "error", err)
+		log.From(ctx).Debug("helper install: the host cannot decompress, sending the artifact plain", "host", host, "error", probeErr)
 	}
 	command, hash, err := deploy.Ensure(ctx, fsys, source, home, platform, progress, installOpts...)
 	if err != nil {
@@ -632,6 +632,7 @@ func (a installFS) Remove(p string) error                   { return a.conn.Remo
 func (a installFS) ReadDir(p string) ([]fs.FileInfo, error) { return a.conn.ReadDir(p) }
 func (a installFS) ReadFile(p string) ([]byte, error)       { return a.conn.ReadFile(p) }
 func (a installFS) Chmod(p string, m fs.FileMode) error     { return a.conn.Chmod(p, m) }
+func (a installFS) Sync(p string) error                     { return a.conn.Sync(p) }
 
 // helperRegistry owns the helper processes the composition root started:
 // one per session, shared by every binding that session opens. A session is

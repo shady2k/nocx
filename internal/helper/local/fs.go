@@ -90,6 +90,20 @@ func (FS) Remove(p string) error { return os.Remove(p) }
 // (nocx-evj4b.1.3).
 func (FS) Chmod(p string, mode fs.FileMode) error { return os.Chmod(p, mode) }
 
+// Sync makes an existing file's bytes durable — the file a host's own gzip
+// wrote, which no File this package created can sync (nocx-evj4b.1.3).
+func (FS) Sync(p string) error {
+	f, err := os.OpenFile(p, os.O_WRONLY|os.O_APPEND, 0) // #nosec G304 — the installer's own content-addressed path
+	if err != nil {
+		return err
+	}
+	err = f.Sync()
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
 func (FS) ReadDir(p string) ([]fs.FileInfo, error) {
 	entries, err := os.ReadDir(p)
 	if err != nil {

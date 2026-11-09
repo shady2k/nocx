@@ -1,7 +1,9 @@
 // Passive DOM command editor (ADR-0004 §3, ADR-0010). Holds text + selection
 // only; a registered action decides where a submit goes. Keyboard routing
-// to/from the PTY is by FOCUS: while shown the editor captures keys; while
-// hidden the terminal input surface has focus and key intents flow to the session.
+// to/from the PTY is by FOCUS: while the editor owns the keyboard it captures
+// keys; once it has given them up — which a submit does at once, ADR-tqjt5rkk —
+// the terminal input surface has focus and key intents flow to the session.
+// The box may still be DRAWN for the submit grace while it owns nothing.
 //
 // The input surface is a CodeMirror 6 EditorView mounted inside the
 // `.nocx-editor` card (ADR-0010 §1), which since the mockup pass
@@ -160,15 +162,16 @@ export interface EditorActions {
    */
   onSave?: (shift: boolean) => boolean
   /**
-   * Whether a commit performs the SHELL handoff (ADR-0004 §2 step 1: hide
-   * the DOM editor before anything is sent). The target declares what it
-   * is (routesToShell) and the composition root wires this accessor to
-   * InputTargetRegistry.active() — one authority reads it, never a mode
-   * boolean, never a per-call parameter. Absent (or true): the editor's
-   * original contract, every submit is a shell submit and hides. The
-   * agent target's question is not a handoff — nothing is pasted into a
-   * pty, the grid is not given the keys, and the editor stays on screen
-   * for the next question (nocx-wmy4).
+   * Whether a commit performs the SHELL handoff (ADR-0004 §2 step 1, as
+   * ADR-tqjt5rkk amends it: the DOM editor gives up the KEYBOARD before
+   * anything is sent, and its paint waits for the submit grace). The target
+   * declares what it is (routesToShell) and the composition root wires this
+   * accessor to InputTargetRegistry.active() — one authority reads it, never
+   * a mode boolean, never a per-call parameter. Absent (or true): the
+   * editor's original contract, every submit is a shell submit and is handed
+   * off. The agent target's question is not a handoff — nothing is pasted
+   * into a pty, the grid is not given the keys, and the editor stays on
+   * screen for the next question (nocx-wmy4).
    */
   handoffToShell?: () => boolean
   /** Wrap a transition that changes the editor's own box, so the host can
@@ -973,18 +976,23 @@ export class CommandEditor {
     log.info('nocx: submit', { path, chars: doc.length })
   }
 
-  /** The atomic handoff (ADR-0004 §2): clear + release input BEFORE sending,
-   *  so the committed command is painted once by the shell, not echoed twice.
+  /** The atomic handoff (ADR-0004 §2, as ADR-tqjt5rkk amends its step 1):
+   *  release the keyboard BEFORE sending, so the committed command is painted
+   *  once by the shell, not echoed twice, and no keystroke lands in a draft
+   *  that is already on its way to the pty.
    *  `plan` is present only after a beforeSubmit planner succeeded:
    *  the resolved sendLine goes to the PTY, the reference-intact recordLine
    *  to the ledger.
    *
-   *  The hide is the handoff's step 1 and belongs to it alone: a commit
-   *  whose destination is not the shell (the agent target — routesToShell
-   *  false, read through the handoffToShell seam) hides nothing, because
-   *  there is nothing to hand off — the question stays in the editor for
-   *  the next one (nocx-wmy4). The clear is unconditional: a submitted
-   *  question, like a submitted command, leaves the editor empty. */
+   *  What the step does NOT do any more is take the box off the screen: the
+   *  hand-off gives up ownership here, and what is SHOWN waits for the submit
+   *  grace the host runs (ADR-tqjt5rkk), so a command that comes back inside
+   *  it never flickers the composer. A commit whose destination is not the
+   *  shell (the agent target — routesToShell false, read through the
+   *  handoffToShell seam) is not a hand-off at all: nothing is released and
+   *  the question stays in the editor for the next one (nocx-wmy4). The clear
+   *  is unconditional: a submitted question, like a submitted command, leaves
+   *  the editor empty. */
   private commit(sendLine: string, plan?: SubmitPlan): void {
     // The plan is present only after a beforeSubmit planner succeeded; the
     // plain path keeps the exact one-argument call (no resolution happened,
@@ -994,21 +1002,23 @@ export class CommandEditor {
       else this.actions.submit(sendLine)
     }
     if (this.actions.handoffToShell?.() ?? true) {
-      // ONE TRANSITION, ONE SETTLE. Emptying the draft, giving up the
-      // composer's box and opening the running block all move the scrollback,
-      // they all run in this task with no paint between them, and to a person
-      // they are a single movement: the block takes the composer's place. Each
+      // ONE TRANSITION, ONE SETTLE. Emptying the draft and opening the running
+      // block both move the scrollback, they all run in this task with no
+      // paint between them, so to a person they are a single movement. Each
       // used to be animated separately, and the block's own glide then
       // cancelled the composer's mid-flight — which is what the jitter was.
+      // The box's own departure is no longer part of this transition: it
+      // happens at the grace's deadline, or not at all, and the host settles
+      // it there (ADR-tqjt5rkk). Absent a host that can settle, the mutations
+      // simply happen.
       //
-      // The handoff is unchanged and still atomic: hide() runs before
-      // submit(), so the grid is writable before a byte can flow
-      // (nocx-u7uh.23). What the wrapper adds is only how the displacement is
-      // PAINTED. Absent a host that can settle, the mutations simply happen.
+      // The handoff is still atomic where it matters: releaseInput() runs
+      // before submit(), so the grid is writable and no keystroke can reach
+      // the draft before a byte can flow (nocx-u7uh.23).
       const settle = this.actions.settleAround ?? ((m: () => void) => m())
       settle(() => {
         this.clearDoc()
-        this.hide()
+        this.releaseInput()
         submit()
       })
       return
@@ -1476,6 +1486,24 @@ export class CommandEditor {
     return spans.some((s) => s.to > s.from)
   }
   /**
+   * Give the keyboard up and keep the box on screen (ADR-tqjt5rkk).
+   *
+   * ADR-0004 §2 step 1 hid the DOM editor before sending anything, and what
+   * the hand-off needs from that step is OWNERSHIP: once the line is out, no
+   * keystroke may reach the draft and no character of it may be painted twice.
+   * So the box stops being an input surface here — blurred, `inert`, and no
+   * longer `isVisible`, which is the one meaning that word has ever carried —
+   * while its paint waits for the submit grace the host runs. `inert` is the
+   * containment: a click during the wait cannot put the caret back into a
+   * draft that is already on its way to the pty (nocx-j9v81).
+   */
+  private releaseInput(): void {
+    this._inputActive = false
+    this.view.contentDOM.blur()
+    this.root.setAttribute('inert', '')
+  }
+
+  /**
    * Remove the composer from presentation entirely — its box with it.
    *
    * The one way the composer leaves, and it leaves whole. It used to have a
@@ -1486,9 +1514,10 @@ export class CommandEditor {
    * on the normal buffer four rows of pane while `htop` on the alternate
    * buffer got all of them (nocx-g6hnk, reversing part of nocx-i4h04).
    *
-   * The caller that changes layout owns the settle — see `commit`, where
-   * emptying the draft, this call and opening the block are one glided
-   * transition.
+   * The caller that changes layout owns the settle. After a submit that
+   * caller is the host's submit grace (ADR-tqjt5rkk): the box leaves at its
+   * deadline, inside the host's own settle, and only when the shell was not
+   * back at its prompt inside the grace.
    */
   hide(): void {
     this._inputActive = false
@@ -1504,6 +1533,13 @@ export class CommandEditor {
     this.root.style.display = 'none'
   }
 
+  /** Whether the box OWNS THE KEYBOARD, which is not the same question as
+   *  whether it is on screen: a submit gives the keyboard up at once and the
+   *  box may stay drawn for the submit grace (ADR-tqjt5rkk), so a drawn box
+   *  that has already handed the keys over answers false here. Every routing
+   *  decision that asks "does the composer get this key" reads this, and must
+   *  go on doing so — asking `display` instead is what would type the next
+   *  command into a program that is already listening. */
   get isVisible(): boolean {
     return (
       this._inputActive &&

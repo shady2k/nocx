@@ -3310,6 +3310,96 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
     }
   })
 
+  // REVIEW ROUND 5, FINDING 1 (P1): the input state a lost session left behind.
+  // A released command's write is fenced now, but the window it armed
+  // (`_heldRaw`) outlives it: keys typed into the grid while the write was
+  // pending stay held, and the NEXT submit — in the replacement session —
+  // takes that window and flushes the dead session's keystrokes into the new
+  // shell. A cancelled window would instead suppress the new submit. The
+  // class: every piece of per-session input state is reset at the bind
+  // boundary.
+  it('state held for a lost session is not replayed into its replacement (sequence 9)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const session = client._sessions[0]
+    const fireIntegration = integrationHandler(client, session)
+    const lifecycle = lifecycleHandler(client, session.sessionId)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    let releaseA!: (attempt: unknown) => void
+    const aAttempt = new Promise((resolve) => {
+      releaseA = resolve
+    })
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/bash' })
+      // INTEGRATED, then the prompt: the grid is live from here (while
+      // `starting` it refuses every key, which is not the state under test).
+      fireIntegration({ sessionId: session.sessionId, status: 'integrated', shell: '/bin/bash' })
+      session.intent.mockClear()
+      holdOne(editor, view, 'echo A')
+      const script = attemptScript(client, [() => aAttempt])
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      await vi.waitFor(() => expect(script.calls()).toBe(1))
+
+      // A's bytes are still on their way, so the pane holds what the person
+      // types next for AFTER them.
+      typeIntoPane(content, 'x', 'y')
+      expect(session.intent).not.toHaveBeenCalled()
+
+      // The session is lost and the pane reconnects to a REPLACEMENT.
+      const onExit = session.onExit.mock.calls[0]?.[0] as
+        ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
+      onExit!({ sessionId: session.sessionId, cause: 'interrupted' })
+      expect(await content.reconnect()).toBe(true)
+      const replacement = client._sessions[client._sessions.length - 1]
+      replacement.intent.mockClear()
+      replacement.send.mockClear()
+
+      // The old attempt settles: its write is dropped (round 4), and the
+      // window it armed must go with the session that armed it.
+      releaseA({
+        id: 'att-A',
+        domain: 'd1',
+        state: 'open',
+        command: 'echo A',
+        cwd: '',
+        host: '',
+        origin: 'app',
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(replacement.intent).not.toHaveBeenCalled()
+
+      // The person submits again, in the replacement — a fresh session, still
+      // proving itself, so this one is held the same way A was. Nothing from
+      // the dead session may ride along when it is released.
+      editor.insertText('echo B')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      await vi.waitFor(() =>
+        expect(replacement.intent.mock.calls.filter((call) => call[0] !== 'focus')).toHaveLength(2),
+      )
+      // The command's own bytes are out; anything the dead session held would
+      // be flushed behind them here, or would have been consumed by this
+      // submit's window instead.
+      await Promise.resolve()
+      await Promise.resolve()
+      const intents = replacement.intent.mock.calls
+        .filter((call) => call[0] !== 'focus')
+        .map((call) => call[1])
+      expect(intents, 'the replacement must receive only the new command and its Enter').toEqual([
+        'echo B',
+        'enter',
+      ])
+    } finally {
+      teardown()
+    }
+  })
+
   // nocx-xn63t.6.27, CI run 38577867125: a command typed into the startup
   // composer of a reconnected ssh session reached the shell as
   // `echo after-the-reconnec`. The integration status reaches `integrated` a

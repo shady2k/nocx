@@ -5144,6 +5144,11 @@ export class TerminalContent extends BasePaneContent {
     // local reader any more — the establishment-acknowledgement closures
     // that used to capture it were removed with the mechanism (ADR-0062).
     ++this._bindGeneration
+    // NOTHING THE PREVIOUS SESSION HELD MAY BE CONSUMED BY THIS ONE (review
+    // round 5). Every piece of per-session INPUT state is dropped here, at the
+    // one place a bind changes hands; the fields and what each one is are in
+    // _resetSessionInputState's own comment.
+    this._resetSessionInputState()
     // A bind is a new session (or the same one reattached): the previous
     // binding's resize receipt will never arrive for anything this pane sends
     // now, and the input it was holding belongs to a surface whose screen
@@ -7829,6 +7834,44 @@ export class TerminalContent extends BasePaneContent {
     } finally {
       this._releasingDeferredShellSubmissions = false
     }
+  }
+
+  /** EVERY PIECE OF PER-SESSION INPUT STATE BELONGS TO THE SESSION THAT MADE
+   *  IT (review round 5), and this is the one point a bind changes hands.
+   *  Nothing here is merely tidy — each field can otherwise be consumed by the
+   *  NEXT session:
+   *
+   *  - `_deferredShellSubmissions`, the held shell queue: a line typed for a
+   *    shell that is gone would be opened against its replacement (round 4
+   *    fences the write; the queue must not even get that far).
+   *  - `_heldRaw`, the window a submit arms for keys typed while its bytes are
+   *    on their way: left alive it is TAKEN by the next submit, which flushes
+   *    the dead session's keystrokes into the new shell — or, when a Ctrl-C
+   *    cancelled it, suppresses that submit instead.
+   *  - `_submittedAwaitingStart`, the interval between a write and the running
+   *    fact: its fact belonged to the old session and is never coming, so the
+   *    pane would keep believing a command of its own is still starting.
+   *  - `_sessionCallQueue`, intents and signals already queued against the old
+   *    handle: each names its session, and a dead handle must not be written
+   *    to at all.
+   *  - `pendingAgentRuns` and `runEntryIds`, the waits minted at submit for a
+   *    run that opens with the authenticated start: that start was the old
+   *    session's, and a stale slot could be bound by a later attempt.
+   *  - `_departure`, the composer's post-submit window: the command it was
+   *    measuring ran in the session that is gone.
+   *
+   * Deliberately NOT reset: the draft, the scrollback, the ledger and the
+   * block model. Those are the person's work and the pane's history; a
+   * reconnect must not throw them away — only the state that STEERS input
+   * into a session does. */
+  private _resetSessionInputState(): void {
+    this._cancelDeferredShellSubmissions()
+    this._heldRaw = null
+    this._submittedAwaitingStart = false
+    this._sessionCallQueue.length = 0
+    this.pendingAgentRuns.clear()
+    this.runEntryIds.clear()
+    this._endDeparture()
   }
 
   /** A closed or replaced session cannot authorize a delayed command. The

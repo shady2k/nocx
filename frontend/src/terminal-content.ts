@@ -690,7 +690,10 @@ interface HeldRange {
  * session it was typed for, and that is a fact only the Enter can answer.
  */
 interface BindIdentity {
+  /** The pane's monotonic bind token — the identity every check compares. */
   readonly generation: number
+  /** The session it was bound to, for a log line that names which one; the
+   *  rebind window makes it unusable as a key (see _bindIsCurrent). */
   readonly sessionId: string
 }
 
@@ -1643,6 +1646,13 @@ export class TerminalContent extends BasePaneContent {
    *  acknowledgements from an old shell may settle after reconnect, but they
    *  must never mutate the new shell's episode. */
   private _bindGeneration = 0
+  /** True from the moment a bind starts until it has a session or has given
+   *  up. The composer stays on screen through a rebind, so a person's Enter can
+   *  land here: the line belongs to the session the bind is producing, and it
+   *  is HELD rather than written into the handle this pane is about to replace
+   *  (CI run 42658168728, e2e/ssh-reconnect.spec.ts — a command typed after
+   *  "Reconnect" ran into the dead shell and produced no block). */
+  private _bindInFlight = false
   /** The disposable projections (ADR-0024 §5–§7, bead nocx-u7uh.7): the
    *  ledger, history and the block model, driven by this kernel. */
   private _projections: LifecycleProjections | null = null
@@ -5166,6 +5176,7 @@ export class TerminalContent extends BasePaneContent {
     // local reader any more — the establishment-acknowledgement closures
     // that used to capture it were removed with the mechanism (ADR-0062).
     ++this._bindGeneration
+    this._bindInFlight = true
     // NOTHING THE PREVIOUS SESSION HELD MAY BE CONSUMED BY THIS ONE (review
     // round 5). Every piece of per-session INPUT state is dropped here, at the
     // one place a bind changes hands; the fields and what each one is are in
@@ -5209,7 +5220,7 @@ export class TerminalContent extends BasePaneContent {
     const target = this._paneTarget
     const host = this.host
     if (target === null || host === null || this.editor === null || this.scrollback === null) {
-      return 'aborted'
+      return this._finishBind('aborted')
     }
     const editor = this.editor
     const scrollback = this.scrollback
@@ -5386,7 +5397,7 @@ export class TerminalContent extends BasePaneContent {
           this._readyResolve(false)
           host.requestClose()
         }
-        return 'aborted'
+        return this._finishBind('aborted')
       }
       if (!(err instanceof LiveSessionUncertainError)) throw err
       // THE SHELL IS NOT PROVEN GONE, SO NO REPLACEMENT IS OPENED
@@ -5401,7 +5412,7 @@ export class TerminalContent extends BasePaneContent {
         pane: this.pane.paneId,
         error: err.message,
       })
-      return 'uncertain'
+      return this._finishBind('uncertain')
     }
 
     if (signal.aborted) {
@@ -5417,7 +5428,7 @@ export class TerminalContent extends BasePaneContent {
         scrollback.dispose()
         this._readyResolve(false)
       }
-      return 'aborted'
+      return this._finishBind('aborted')
     }
 
     // The previous binding's delivery fact is not the new one's: a rebind is a
@@ -5965,7 +5976,7 @@ export class TerminalContent extends BasePaneContent {
       this._projections?.reset()
       this.lifecycle.reset()
     })
-    return 'bound'
+    return this._finishBind('bound')
   }
 
   // ── Live-region sizing ────────────────────────────────────────────────
@@ -7766,6 +7777,15 @@ export class TerminalContent extends BasePaneContent {
     // its replacement. Checked first, before the settle answers below, because
     // those answers are about the session that is bound NOW.
     if (!this._bindIsCurrent(origin)) return false
+    // A REBIND IS IN FLIGHT (CI run 42658168728). The generation already moved
+    // and the new handle does not exist yet, so writing now would go into the
+    // dead shell the pane is about to replace — the command would be accepted
+    // and produce no block. The line belongs to the session this bind is
+    // producing: hold it, and _finishBind offers it when that session is here.
+    if (this._bindInFlight) {
+      this._deferredShellSubmissions.push({ plan, target, origin })
+      return 'held'
+    }
     if (!this._awaitsFirstPrompt()) return plan
     if (this.lifecycle.state.kind === 'prompt_ready' || isDegraded(this._integration)) return plan
     // THE DRAFT MAY HAVE MOVED WHILE A REFERENCE RESOLVED OVER THE WIRE
@@ -7874,16 +7894,21 @@ export class TerminalContent extends BasePaneContent {
     return { generation: this._bindGeneration, sessionId: this.session?.sessionId ?? '' }
   }
 
-  /** Whether this is still the session that bind names. The generation alone
-   *  would do on a rebind (it moves on every `_bindSession`) and the id alone
-   *  names a session that a reattach can re-bind under a new incarnation; the
-   *  pair is the answer the rest of this file already uses for exactly that
-   *  question (_ackRecovery's claim). */
+  /** Whether this is still the session that bind names.
+   *
+   *  THE GENERATION ALONE, and that is a correction CI bought (run 42658168728,
+   *  e2e/ssh-reconnect.spec.ts). `_bindSession` bumps the generation at its
+   *  START and assigns `this.session` much later, after the open answers — and
+   *  the composer stays on screen through the whole rebind, so a person's
+   *  Enter lands in that window and `_currentBind()` read a NEW generation with
+   *  the OLD id. Every later check called that pair stale and dropped a
+   *  command typed after the reconnect: a person who reconnects cannot run
+   *  anything. The id in the struct is the session the bind was for, worth
+   *  naming in a log line, never a comparison key; the generation is the
+   *  bind's identity and it moves on every `_bindSession`, including the
+   *  reattach of the same id under a new incarnation. */
   private _bindIsCurrent(origin: BindIdentity): boolean {
-    return (
-      this._bindGeneration === origin.generation &&
-      (this.session?.sessionId ?? '') === origin.sessionId
-    )
+    return this._bindGeneration === origin.generation
   }
 
   /** EVERY PIECE OF PER-SESSION INPUT STATE BELONGS TO THE SESSION THAT MADE
@@ -7922,6 +7947,19 @@ export class TerminalContent extends BasePaneContent {
     this.pendingAgentRuns.clear()
     this.runEntryIds.clear()
     this._endDeparture()
+  }
+
+  /** End a bind: the composer's submits stop being held for a session that
+   *  is now here, and the ones this bind accepted are offered to it (they go
+   *  out only if it is already at a prompt; otherwise its own settle does).
+   *
+   *  ONE exit per bind — 'bound', 'uncertain', 'aborted' — and every one of
+   *  them clears the flag, so a failed rebind cannot leave the composer
+   *  holding lines forever. */
+  private _finishBind<T extends 'bound' | 'uncertain' | 'aborted'>(outcome: T): T {
+    this._bindInFlight = false
+    this._releaseDeferredShellSubmissions()
+    return outcome
   }
 
   /** A closed or replaced session cannot authorize a delayed command. The

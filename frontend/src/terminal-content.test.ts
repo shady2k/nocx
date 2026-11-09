@@ -3482,6 +3482,67 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
     }
   })
 
+  // CI run 42658168728, e2e/ssh-reconnect.spec.ts: a person who reconnects and
+  // types a command gets no block. The editor is on screen THROUGH the rebind,
+  // so a submit can land after `_bindGeneration` moved and before
+  // `this.session` became the new one: the origin recorded there mixed the new
+  // generation with the old session id, and every later check called it stale.
+  // Anything typed after the rebind must run in the session it produced.
+  it('a command typed while the rebind is in flight runs in the new session (sequence 11)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const session = client._sessions[0]
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    let openNew!: () => void
+    const newOpen = new Promise<void>((resolve) => {
+      openNew = resolve
+    })
+    try {
+      // The session is lost, and the reconnect's open is still in flight.
+      const onExit = session.onExit.mock.calls[0]?.[0] as
+        ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
+      onExit!({ sessionId: session.sessionId, cause: 'interrupted' })
+      const defaultOpen = client.openSession.getMockImplementation()
+      client.openSession.mockImplementation(async (size, anchor) => {
+        await newOpen
+        return defaultOpen!(size, anchor)
+      })
+      const reopening = content.reconnect()
+
+      // The person types into the composer that never left the screen. This is
+      // after the generation moved and before the new handle exists.
+      editor.insertText('echo after-the-reconnect')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+
+      openNew()
+      expect(await reopening).toBe(true)
+      const replacement = client._sessions[client._sessions.length - 1]
+      expect(replacement.sessionId).not.toBe(session.sessionId)
+      replacement.intent.mockClear()
+
+      // The new shell settles (or is already live); either way the line the
+      // person typed must reach it.
+      integrationHandler(client)({
+        sessionId: replacement.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      await vi.waitFor(() =>
+        expect(replacement.intent.mock.calls.filter((call) => call[0] !== 'focus')).toHaveLength(2),
+      )
+      expect(
+        replacement.intent.mock.calls.filter((call) => call[0] !== 'focus').map((call) => call[1]),
+      ).toEqual(['echo after-the-reconnect', 'enter'])
+    } finally {
+      teardown()
+    }
+  })
+
   // nocx-xn63t.6.27, CI run 38577867125: a command typed into the startup
   // composer of a reconnected ssh session reached the shell as
   // `echo after-the-reconnec`. The integration status reaches `integrated` a

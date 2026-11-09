@@ -264,7 +264,7 @@ func TestLiveSshd_ConnectionLossRevokesTheBootstrappedDomain(t *testing.T) {
 // wait no longer depends on which of the two arrives first: the shell is gone
 // when its stream is, and the failure below quotes the terminal so a machine
 // that disagrees says so in its own words rather than as a bare timeout.
-func endTheSession(t *testing.T, ch ssh.Channel, out *outputBuffer) {
+func endTheSession(t *testing.T, ch ssh.Channel, out *sessionOutput) {
 	t.Helper()
 	if _, err := ch.Write([]byte("exit\n")); err != nil {
 		t.Fatalf("write exit: %v", err)

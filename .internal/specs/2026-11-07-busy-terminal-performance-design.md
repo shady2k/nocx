@@ -330,15 +330,29 @@ included as a required-check correction, retaining that task's separate
 `v0-8-2` parent. It changes neither P1–P5's contracts nor the former root's
 acceptance boundary.
 
-The subsequent macOS-required check repairs (`nocx-nqmjq.4–.6`) change fixtures,
+The initial macOS-required check repairs (`nocx-nqmjq.4–.6`) changed fixtures,
 not production behavior or the accepted latency bound. Fragmented reads are
 judged against the operation's deadline rather than a scheduler-dependent
 elapsed ceiling; a reading subscriber actually drains bounded batches; and
 the wire-latency comparison proves that B scrolls in both phases and waits for
-screen delivery. They make existing checks meaningful, not a new performance
-claim or admission into `v0-8-2`. The published-tracker gate still flags the
-new repair leaves under the retained `v0-9` root; no charter or exemption is
-silently changed to resolve that separate boundary.
+screen delivery. The subsequent full run confirmed the deadline and subscriber
+repairs but still failed three of twenty cross-tab latency repetitions.
+
+The follow-on `nocx-nqmjq.6` repair therefore changes the existing production
+row-persistence owner. Admission must not wait on storage in the shared helper
+reader; the existing bounded flush owns persistence and confirms only durable
+rows for the current attachment. Pending and in-flight rows share the same
+budgets. Replacement waits for the previous admitted owner before reading its
+durable cursor, and cancellation and shutdown retain their existing bounds.
+The helper-end owner must drain admitted rows before detach/seal; a failed
+predecessor close must settle before successor rows are written; a duplicate
+suffix must not acknowledge past a recovered head whose prepend is unfinished.
+These obligations preserve history while removing cross-pane blocking. They
+neither implement P5 paging nor establish a new paired CPU/RAM measurement.
+
+The published-tracker gate still flags the new repair leaves under the retained
+`v0-9` root. No charter, milestone, budget or exemption is silently changed to
+resolve that separate admission boundary.
 
 ## DONE WHEN
 

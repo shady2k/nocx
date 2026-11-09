@@ -544,3 +544,68 @@ leaves as off-milestone: their retained root is `v0-9`, while the shared current
 milestone is `v0-8-2`. Malformed multi-revision submission headers were corrected;
 no milestone, charter, budget or exemption was changed to silence admission.
 That queue decision remains separate from the technical repair evidence.
+
+### Shared helper-reader blocking
+
+The next full run,
+[42526194926](https://github.com/shady2k/nocx/actions/runs/42526194926), tested
+merge `84e8fa95010a811187bcc33ef9ec8366e8e0777e` (PR head `fb9a33c1e` plus
+main `81569f30d`). Twelve of thirteen jobs succeeded. The deadline and subscriber
+packages passed twenty macOS repetitions, but cross-tab latency failed three
+of twenty: command-to-screen ratios 10.75× and 10.44×, and a keystroke-to-screen
+ratio 13.14×, against the unchanged 10× bound. Both measured phases proved
+scrolling. The later release-tag and native macOS checks were skipped, not passed.
+
+Profiling with CI's actual `gtk3,nocx_framecheck` tags and the race detector
+found 0.33 s blocked below `sharedClient.pump` through row admission into
+`AppendBlockRows` and the content writer. A controlled held-store regression
+then prevented another pane's frame from reaching the real WebSocket.
+Persistence was running on the shared reader, so changing a fixture alone
+could not remove that coupling.
+
+The asynchronous candidate reuses the existing bounded, ordered flush owner,
+durable confirmation callback and recorder shutdown join. It does not enlarge
+the row budget, acknowledge admission as durability, or add production paging.
+Twenty local actual-tag race repetitions measured command-to-screen ratios
+0.88–1.09× and keystroke-to-screen ratios 0.93–1.15×. These are Linux wire-check
+results, not native CPU/RAM savings or macOS acceptance.
+
+The initial integrated candidate `39bfb3d71` also passed a native six-producer
+smoke: all hidden producers advanced, the seventh tab rendered a new command,
+each final row survived, and closing the six completed tabs left a usable,
+visibly painted survivor. Its isolated processes and profile were retired.
+Nevertheless, independent transport review rejected that candidate. Three
+deterministic regressions reproduced early helper-end sealing with an empty
+tail, successor rows written under a failed predecessor close, and a duplicate
+suffix acknowledged before its recovered head became durable. A successful
+latency check and ordinary native smoke did not prove these durability paths.
+
+The corrected delivery `eb86eb31b` (`8edcb9dc0` in this branch) also reproduces
+and repairs the adopted-head and retiring-flush variants, for five observed
+failing-before schedules. An outstanding recovered head remains an explicit
+durability obligation across queuing, adoption and failed writes. A close
+claims exclusive ownership under the same lock that removes its boundary;
+an obsolete drain cannot take a newer flush's end. Independent review of the
+delivered production blob found no remaining issues.
+
+The corrected durability/context cases passed twenty actual-tag race
+repetitions (30 s), the row-owner neighborhood passed (17 s), and twenty
+real-app wire repetitions passed (88 s): command ratios 0.82–1.16× and
+keystroke ratios 0.93–1.28×. The 10× criterion is unchanged. These local
+measurements remain distinct from the required Darwin result.
+
+Main's later test-only changes from PRs #759 and #762 are integrated at
+`c74f2046577146a0a19edb3c1c6b4b5e5164cbb0`. They correct e2e command-sample
+ownership and its producer-liveness premise, and wait for a live SSH session
+to end before deleting its home. Normal integration hooks passed (69 s).
+A fresh native release-mode build (20 s) then proved six active scrolling
+producers, hidden progress, live reactivation, all final rows and a usable
+survivor after six closes. Both interaction markers were absent from the
+typed command and visibly painted in completed output cards. The private
+process set was empty after retirement, and the disposable profile was removed.
+This is final-product-tree functional evidence, not a new paired CPU/RAM cohort.
+The complete merged-tree transport package also passes with CI's actual tags
+and the race detector (306 s, within its unchanged 312 s historical command
+bound). Required Darwin and whole-PR results remain tied to the exact head in
+[PR #743's checks](https://github.com/shady2k/nocx/pull/743/checks), not inferred
+from these Linux measurements.

@@ -54,7 +54,10 @@ func (o *sessionOwner) interactiveGate(it ownerItem) bool {
 		o.resolve(it, ownerResult{State: sessionruntime.IntentStateRefused, Err: errAccessRevoked})
 		return true
 	}
-	if it.intent.CommitBy != 0 && o.nowMono() > it.intent.CommitBy {
+	// A DEGRADED PASTE IS PAST ITS DEADLINE ON PURPOSE — the deadline released
+	// it instead of refusing it (owner.go's advance), so it must not be refused
+	// here either (nocx-evj4b.1.2).
+	if !it.intent.degraded && it.intent.CommitBy != 0 && o.nowMono() > it.intent.CommitBy {
 		o.resolve(it, ownerResult{State: sessionruntime.IntentStateRefused, Err: errCommitDeadline})
 		return true
 	}

@@ -117,6 +117,11 @@ type pendingIntent struct {
 	Canonical   canonicalIntent
 	CommitBy    int64
 
+	// degraded is set when a paste's wait for its prompt announcement ran past
+	// the intent's own deadline: it is then written with the mode in force
+	// rather than refused (advance, nocx-evj4b.1.2).
+	degraded bool
+
 	admittedID sessionruntime.IntentID
 }
 
@@ -128,6 +133,17 @@ type pendingIntent struct {
 // It runs inside the runtime's ingest, on this owner's own goroutine, and it
 // touches only the flag advance() reads.
 func (o *sessionOwner) CommandStarted() error {
+	o.atPrompt = false
+	o.commandRunning = true
+	return nil
+}
+
+// CommandEnded is the shell's own end-of-command boundary (the fence) telling
+// the owner the command is over: the program no longer owns the terminal, and
+// the next prompt — whose announcement a submit is framed by — is on its way
+// (nocx-evj4b.1.2).
+func (o *sessionOwner) CommandEnded() error {
+	o.commandRunning = false
 	o.atPrompt = false
 	return nil
 }
@@ -158,7 +174,10 @@ func (pi *pendingIntent) awaitsTheProgramsPrompt(o *sessionOwner) bool {
 	if !pi.Interactive || pi.Intent.Kind != sessionruntime.IntentKindPaste {
 		return false
 	}
-	return !o.atPrompt && o.marksPrompts()
+	if pi.degraded {
+		return false
+	}
+	return !o.atPrompt && !o.commandRunning && o.marksPrompts()
 }
 
 // The interactive lane relaxes draining only for truly unconditional input.
@@ -395,14 +414,21 @@ type sessionOwner struct {
 	eofSeen    bool
 	// atPrompt is whether the program is sitting at a prompt RIGHT NOW: set by
 	// the prompt boundary it marked (OSC 133 B, delivered here through
-	// PromptBoundary) and cleared when it starts a command (133 C, through
-	// CommandStarted). A paste waits for it (awaitsTheProgramsPrompt): the
-	// announcement a paste is framed by belongs to the prompt it is typed at,
-	// and the next prompt's announcement can still be unread when the shell
-	// returns from a command (nocx-evj4b.1.2).
-	atPrompt   bool
-	replyBytes int
-	nextFence  sessionruntime.Fence
+	// PromptBoundary) and cleared when a command starts or ends.
+	//
+	// commandRunning is whether a command OWNS the terminal: between its start
+	// (133 C) and the shell's own end-of-command fence. A paste is held in
+	// exactly ONE window — after a command ends and before the next prompt
+	// mark, where the announcement a submit must be framed by is still on its
+	// way — and never while a command runs: a tool that reads the terminal
+	// itself (`read -r value`, a REPL, an agent's prompt) never lets the shell
+	// draw the prompt a fence would wait for, so holding there refused the
+	// submission outright, which is worse than any framing
+	// (nocx-evj4b.1.2, review).
+	atPrompt       bool
+	commandRunning bool
+	replyBytes     int
+	nextFence      sessionruntime.Fence
 	// readableCh is where the readiness goroutine reports back, for a
 	// rawReader Process only (run creates it, and starts runReadiness, only
 	// then); nil otherwise, which makes the read on it in run's own select
@@ -932,6 +958,20 @@ func (o *sessionOwner) finishRead(err error) {
 func (o *sessionOwner) advance() {
 	for !o.writerBusy && len(o.pending) > 0 {
 		it := o.pending[0]
+		// A HELD PASTE DEGRADES AT ITS DEADLINE INSTEAD OF BEING REFUSED
+		// (nocx-evj4b.1.2, review). The hold exists to make the framing the
+		// program's own; it does not exist to lose the submission. So when the
+		// prompt a paste is waiting for has not come by the intent's own
+		// deadline, the paste goes out with the mode in force — the same answer
+		// this code would have given before the fence existed — and the
+		// degradation is logged, because a framing nobody could prove is worth
+		// a line in the record. This is checked BEFORE the expiry refusal, which
+		// is what every other intent still gets.
+		if it.kind == itemIntent && it.intent.awaitsTheProgramsPrompt(o) && it.intent.pastDeadline(o) {
+			o.log.Warn("session: a paste waited out its deadline for a prompt announcement; sending it with the mode in force",
+				"bytes", len(it.intent.Intent.Payload))
+			it.intent.degraded = true
+		}
 		if it.kind == itemIntent && o.refuseExpiredIntent(it) {
 			o.pending = o.pending[1:]
 			continue
@@ -1034,6 +1074,15 @@ func (o *sessionOwner) expirePending() {
 	// no bytes, so removing expired items does not reorder surviving input.
 	kept := o.pending[:0]
 	for _, it := range o.pending {
+		// A HELD PASTE IS NOT EXPIRED HERE, it is DEGRADED (advance): the hold
+		// is for the framing, and the intent's own deadline is the point where
+		// the framing stops being worth the submission. Refusing it here would
+		// resolve it before advance ever sees the deadline
+		// (nocx-evj4b.1.2, review).
+		if it.kind == itemIntent && it.intent.awaitsTheProgramsPrompt(o) {
+			kept = append(kept, it)
+			continue
+		}
 		if it.kind != itemIntent || !o.refuseExpiredIntent(it) {
 			kept = append(kept, it)
 		}
@@ -1092,8 +1141,24 @@ func (o *sessionOwner) armPendingDeadline() {
 // refuseExpiredIntent runs between read quanta, never against the screen.
 // Caller cancellation deliberately does not cancel an admitted wire intent
 // (intent_ops.go, D11); shutdown and access bumps retain their existing paths.
+// pastDeadline reports whether this intent's own deadline has passed. It is
+// refuseExpiredIntent's condition without the refusal: a held paste asks it to
+// know when to stop waiting (advance).
+func (pi *pendingIntent) pastDeadline(o *sessionOwner) bool {
+	if pi.degraded {
+		// A degraded paste is past its deadline by decision, not by accident.
+		return false
+	}
+	return pi.CommitBy != 0 && o.nowMono() > pi.CommitBy
+}
+
 func (o *sessionOwner) refuseExpiredIntent(it ownerItem) bool {
 	pi := it.intent
+	if pi.degraded {
+		// Released by its own deadline rather than refused (advance): the
+		// deadline has already done its work (nocx-evj4b.1.2).
+		return false
+	}
 	var err error
 	if pi.CommitBy != 0 && o.nowMono() > pi.CommitBy {
 		err = errCommitDeadline
@@ -1168,7 +1233,10 @@ func (o *sessionOwner) commitIntent(it ownerItem) {
 		o.resolve(it, ownerResult{State: sessionruntime.IntentStateRefused, Err: errAccessRevoked})
 		return
 	}
-	if pi.Interactive && pi.CommitBy != 0 && o.nowMono() > pi.CommitBy {
+	// A DEGRADED PASTE IS PAST ITS DEADLINE ON PURPOSE: it was released by the
+	// deadline rather than refused (advance), so the deadline itself must not
+	// refuse it here (nocx-evj4b.1.2).
+	if pi.Interactive && !pi.degraded && pi.CommitBy != 0 && o.nowMono() > pi.CommitBy {
 		o.resolve(it, ownerResult{State: sessionruntime.IntentStateRefused, Err: errCommitDeadline})
 		return
 	}
@@ -1409,6 +1477,7 @@ func (o *sessionOwner) PromptBoundary(effect sessionruntime.Effect) error {
 	// the emulator now, so a paste the owner is holding can be framed (advance,
 	// awaitsTheProgramsPrompt).
 	o.atPrompt = true
+	o.commandRunning = false
 	dropped, err := o.win.markPromptBoundary(effect)
 	if err != nil {
 		o.log.Warn("prompt boundary could not be ordered with session output", "stream_offset", effect.StreamOffset, "error", err)

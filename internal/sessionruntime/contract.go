@@ -533,6 +533,18 @@ type CommandStartSink interface {
 	CommandStarted() error
 }
 
+// CommandEndSink is its other end: the shell's own end-of-command boundary
+// (the fence, 1337 NOCX_FENCE), which is the moment the program stops owning
+// the terminal and the next prompt is on its way (nocx-evj4b.1.2).
+//
+// The interval between them is the one that matters to a paste: while a
+// command runs, the program owns the input and whatever mode it announced is
+// current; once it ends, the shell is about to draw a prompt whose
+// announcement (again `?2004h`) is the one a submit has to be framed by.
+type CommandEndSink interface {
+	CommandEnded() error
+}
+
 // The bounds. Each is a NUMBER rather than a policy statement, so that
 // "bounded" is a claim somebody can check, and each belongs to the runtime
 // rather than to the emulator it feeds — the emulator's own bounds are the

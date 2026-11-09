@@ -1411,6 +1411,16 @@ func (s *Session) Ingest(b []byte) error {
 				// stream as the title reports around it, so this is the moment
 				// a title the program set stops being the tab's.
 				s.commandRunEndedLocked()
+				// AND THE PROGRAM GIVES THE TERMINAL BACK (nocx-evj4b.1.2):
+				// from here until the shell draws its next prompt the
+				// announcement a submit must be framed by is on its way, so the
+				// owner holds pastes for it rather than encoding against the
+				// mode the finished command left behind.
+				if sink, ok := s.replies.(CommandEndSink); ok {
+					if err := sink.CommandEnded(); err != nil {
+						return err
+					}
+				}
 				continue
 			}
 			if e.Kind == emulator.EffectOutputMark {

@@ -612,6 +612,12 @@ func quotedForReport(s string) string {
 type outputBuffer struct {
 	mu sync.Mutex
 	b  []byte
+	// ended is closed when the session's output stream ends — io.Copy's
+	// return — which is the far side's terminal closing, a fact both
+	// operating systems produce for a shell that has exited (see
+	// endTheSession: it is not the same moment as the channel's close).
+	ended   chan struct{}
+	endOnce sync.Once
 }
 
 func (o *outputBuffer) Write(p []byte) (int, error) {
@@ -619,6 +625,22 @@ func (o *outputBuffer) Write(p []byte) (int, error) {
 	defer o.mu.Unlock()
 	o.b = append(o.b, p...)
 	return len(p), nil
+}
+
+// end records that the session's output stream is over. Idempotent, so the
+// fixture may call it from the copier and from a cleanup.
+func (o *outputBuffer) end() {
+	o.endOnce.Do(func() { close(o.ended) })
+}
+
+// Ended reports whether the session's output stream has ended.
+func (o *outputBuffer) Ended() bool {
+	select {
+	case <-o.ended:
+		return true
+	default:
+		return false
+	}
 }
 
 func (o *outputBuffer) String() string {

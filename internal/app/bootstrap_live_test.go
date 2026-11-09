@@ -75,7 +75,7 @@ func TestLiveSshd_CarrierBootstrapReachesAcceptedDomain(t *testing.T) {
 		t.Error("the per-epoch capability appeared in the session's own output")
 	}
 
-	endTheSession(t, ch)
+	endTheSession(t, ch, out)
 	// Nothing installed beyond the bundle, and no file on the far host
 	// holds the capability — including the temp root, which the bootstrap
 	// wrote to and unlinked before writing a byte.
@@ -109,7 +109,7 @@ func TestLiveSshd_WithNothingPublishedTheSessionStillReachesAPrompt(t *testing.T
 		// domain reaching Established with no shell behind it.
 		t.Logf("minted %d domains (the channel is established at connect; the shell never joined it)", minted)
 	}
-	endTheSession(t, ch)
+	endTheSession(t, ch, out)
 }
 
 // TestLiveSshd_InputIsRefusedUntilTheTerminalOutcome watches the quarantine on
@@ -151,7 +151,7 @@ func TestLiveSshd_InputIsRefusedUntilTheTerminalOutcome(t *testing.T) {
 	if strings.Contains(out.String(), "QUARANTINE_BREACH") {
 		t.Error("a keystroke refused during the bootstrap was delivered later")
 	}
-	endTheSession(t, ch)
+	endTheSession(t, ch, out)
 }
 
 // The other two live-sshd rows, reproduced with an installer wired. They
@@ -182,7 +182,7 @@ func TestLiveSshd_ForwardingRefusedStillReachesAConventionalPrompt(t *testing.T)
 	if minted != 0 {
 		t.Errorf("refused forwarding still minted %d domain(s)", minted)
 	}
-	endTheSession(t, ch)
+	endTheSession(t, ch, out)
 }
 
 // TestLiveSshd_ConnectionLossRevokesTheBootstrappedDomain mirrors
@@ -234,7 +234,7 @@ func TestLiveSshd_ConnectionLossRevokesTheBootstrappedDomain(t *testing.T) {
 	})
 }
 
-// endTheSession ends the far shell and waits for the session to be over.
+// endTheSession ends the far shell and waits for it to be gone.
 //
 // The wait is what keeps the fixture's disposable home out of a race with the
 // shell's own exit (nocx-evj4b.1.4). A session that falls back to a native
@@ -243,21 +243,48 @@ func TestLiveSshd_ConnectionLossRevokesTheBootstrappedDomain(t *testing.T) {
 // planted there, and on its way out it writes $HOME/.bash_history. A stand
 // that returns while that exit is still in flight has the write land beside
 // t.TempDir's RemoveAll: RemoveAll has already read the directory's names, the
-// file appears before its rmdir, and the removal fails ENOTEMPTY. Before the
-// stand's cleanup closes the channel, ch.Done() closes only when the remote
-// session has ended — which is after the shell has exited and flushed its
-// history.
-func endTheSession(t *testing.T, ch ssh.Channel) {
+// file appears before its rmdir, and the removal fails ENOTEMPTY.
+//
+// TWO SIGNALS, AND THE WAIT TAKES EITHER (nocx-evj4b.1.5). `exit` ends the
+// SHELL at once, but the two observations a client has of it are not the same
+// moment:
+//
+//   - the session's output stream ending — io.Copy returning, the far side's
+//     terminal closed. This is the shell's exit as the pane sees it, and both
+//     operating systems produce it for a shell that has exited;
+//   - `ch.Done()`, which is the SSH session CHANNEL closing: x/crypto/ssh's
+//     Session.Wait needs the exit-status message and the channel's close, and
+//     a pty session's channel is sshd's to close only once the pty has drained
+//     — every process that inherited it having gone.
+//
+// On macOS the channel's close came more than 20 s after the shell's exit on
+// this path and the stand failed on a signal that is not the fact it means
+// (ci-mac, PR #752). The product's share of that is fixed where it belongs —
+// the integration's snapshot job no longer inherits the terminal — and this
+// wait no longer depends on which of the two arrives first: the shell is gone
+// when its stream is, and the failure below quotes the terminal so a machine
+// that disagrees says so in its own words rather than as a bare timeout.
+func endTheSession(t *testing.T, ch ssh.Channel, out *outputBuffer) {
 	t.Helper()
 	if _, err := ch.Write([]byte("exit\n")); err != nil {
 		t.Fatalf("write exit: %v", err)
 	}
-	waittest.WaitForTimeout(t, "session end after exit", 20*time.Second, func() bool {
-		select {
-		case <-ch.Done():
-			return true
-		default:
-			return false
-		}
-	})
+	waittest.WaitForTimeoutDetail(t, "session end after exit", 20*time.Second,
+		func() string {
+			return fmt.Sprintf("channel done: %t, %s",
+				doneClosed(ch), terminalTail(out, terminalTailBytes))
+		},
+		func() bool {
+			return doneClosed(ch) || out.Ended()
+		})
+}
+
+// doneClosed reports whether a channel has reported its end, without blocking.
+func doneClosed(ch ssh.Channel) bool {
+	select {
+	case <-ch.Done():
+		return true
+	default:
+		return false
+	}
 }

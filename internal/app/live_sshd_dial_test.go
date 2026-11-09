@@ -204,8 +204,14 @@ func (fx *liveSshd) connect(t *testing.T, kernel *recordingKernel, shell ssh.She
 		t.Fatalf("connect to %s: %v", fx.addr, err)
 	}
 	t.Cleanup(func() { _ = ch.Close() })
-	out := &outputBuffer{}
-	go func() { _, _ = io.Copy(out, ch) }()
+	out := &outputBuffer{ended: make(chan struct{})}
+	go func() {
+		_, _ = io.Copy(out, ch)
+		// The far side's terminal is over. Recorded before anything the
+		// fixture's cleanup does, so a stand can wait on the one fact its
+		// session-end wait is about (see endTheSession).
+		out.end()
+	}()
 	return ch, out
 }
 

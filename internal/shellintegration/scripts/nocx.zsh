@@ -2058,7 +2058,14 @@ if (( __nocx_snapshot_announce )); then
         # disown zsh announces the finished job at the next prompt — "[1]  +
         # done ..." followed by the job's own implementation — in the middle
         # of the user's output. bash spells this `& ; disown`.
-        __nocx_snapshot_write &!
+        #
+        # IT GIVES THE TERMINAL BACK FIRST (nocx-evj4b.1.5): a background job
+        # inherits the shell's descriptors, the pty among them, and a job that
+        # still holds it after the shell exits keeps the SESSION alive — sshd
+        # ends a pty session by draining the pty. The function writes its
+        # snapshot to a file and reads nothing, so /dev/null for all three is
+        # exact rather than merely safe.
+        __nocx_snapshot_write </dev/null >/dev/null 2>&1 &!
         __nocx_snap_job=$!
         __nocx_snap_lstart="$(ps -o lstart= -p "$__nocx_snap_job" 2>/dev/null | tr -s ' ')"
     fi

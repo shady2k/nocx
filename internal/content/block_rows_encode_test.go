@@ -231,7 +231,7 @@ func TestBlockRowsEncoder_TrimsDefaultTrailingCellsButKeepsStyledBlank(t *testin
 	if err != nil {
 		t.Fatalf("encode plain tail: %v", err)
 	}
-	var parsed blockRowsLine
+	var parsed decodedStoredLine
 	if decodeErr := json.Unmarshal(line, &parsed); decodeErr != nil {
 		t.Fatalf("decode plain tail: %v", decodeErr)
 	}
@@ -261,7 +261,7 @@ func TestBlockRowsEncoder_TrimsDefaultTrailingCellsButKeepsStyledBlank(t *testin
 	if err != nil {
 		t.Fatalf("encode styled tail: %v", err)
 	}
-	parsed = blockRowsLine{}
+	parsed = decodedStoredLine{}
 	if decodeErr := json.Unmarshal(line, &parsed); decodeErr != nil {
 		t.Fatalf("decode styled tail: %v", decodeErr)
 	}
@@ -277,19 +277,14 @@ func TestBlockRowsEncoder_TrimsDefaultTrailingCellsButKeepsStyledBlank(t *testin
 	if len(parsed.Row.Runs) != 2 {
 		t.Fatalf("styled row runs = %v, want 2 (the default stretch, then the styled cell)", parsed.Row.Runs)
 	}
-	if got := parsed.Row.Runs[len(parsed.Row.Runs)-1][1]; got != float64(1) {
-		t.Fatalf("styled trailing run length = %v, want 1", got)
+	var lastLength float64
+	if decodeErr := json.Unmarshal(parsed.Row.Runs[len(parsed.Row.Runs)-1][1], &lastLength); decodeErr != nil {
+		t.Fatalf("decode styled trailing run length: %v", decodeErr)
 	}
-
-	var styledWire struct {
-		Row struct {
-			Runs [][2]json.RawMessage `json:"runs"`
-		} `json:"row"`
+	if lastLength != 1 {
+		t.Fatalf("styled trailing run length = %v, want 1", lastLength)
 	}
-	if decodeErr := json.Unmarshal(line, &styledWire); decodeErr != nil {
-		t.Fatalf("decode styled runs: %v", decodeErr)
-	}
-	lastStyle := styledWire.Row.Runs[len(styledWire.Row.Runs)-1][0]
+	lastStyle := parsed.Row.Runs[len(parsed.Row.Runs)-1][0]
 	var tuple [5]int
 	if decodeErr := json.Unmarshal(lastStyle, &tuple); decodeErr != nil {
 		t.Fatalf("styled trailing run style is not a 5-tuple: %v (%s)", decodeErr, lastStyle)
@@ -307,7 +302,7 @@ func TestBlockRowsEncoder_TrimsDefaultTrailingCellsButKeepsStyledBlank(t *testin
 	if err != nil {
 		t.Fatalf("encode all-blank row: %v", err)
 	}
-	parsed = blockRowsLine{}
+	parsed = decodedStoredLine{}
 	if decodeErr := json.Unmarshal(line, &parsed); decodeErr != nil {
 		t.Fatalf("decode all-blank row: %v", decodeErr)
 	}
@@ -322,13 +317,29 @@ func TestBlockRowsEncoder_TrimsDefaultTrailingCellsButKeepsStyledBlank(t *testin
 	if err != nil {
 		t.Fatalf("encode empty row: %v", err)
 	}
-	parsed = blockRowsLine{}
+	parsed = decodedStoredLine{}
 	if decodeErr := json.Unmarshal(line, &parsed); decodeErr != nil {
 		t.Fatalf("decode empty row: %v", decodeErr)
 	}
 	if parsed.Row.Text != "" {
 		t.Fatalf("empty row text = %q, want empty", parsed.Row.Text)
 	}
+}
+
+// decodedStoredLine is one stored line as a READER sees it — the same wire
+// shape blockRowsLine declares, with `runs` decoded into its parts rather than
+// held as the raw JSON the encoder now writes (nocx-4y82c.1.5). A reader
+// (internal/helper/client/rows.go, frontend/src/scrollback/block-rows.ts)
+// decodes the array; nothing reads the bytes.
+type decodedStoredLine struct {
+	From uint64 `json:"from"`
+	Row  struct {
+		Text         string               `json:"text"`
+		Marks        [][3]int             `json:"marks"`
+		Runs         [][2]json.RawMessage `json:"runs"`
+		Wrap         bool                 `json:"wrap"`
+		Continuation bool                 `json:"continuation"`
+	} `json:"row"`
 }
 
 func aTextRowForEncoder(text string) emulator.Row {

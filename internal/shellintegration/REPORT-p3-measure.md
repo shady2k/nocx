@@ -143,3 +143,18 @@ background job inherits the shell's descriptors, the pty among them, and a job
 still holding it after the shell exits keeps the SESSION alive, because sshd
 ends a pty session by draining that pty. No file is added, removed or written
 twice: the call count is unchanged.
+The 2026-11-09 measurement on branch `fix/nocx-ouru5.1.11-ctrlc`, on a tree that
+already carries the snapshot job's handback above, is **614 bytes above** that
+93,216-byte figure, at **93,830**, and keeps the **63**-call maximum. The growth
+is the interrupt's second witness (nocx-ouru5.1.11): a cancel window's wait no
+longer trusts the INT trap to have run. bash defers a
+trapped interrupt while a foreground child runs, and CI captured the trap's own
+run being LOST — `bash: interrupt trap: line 2: unexpected EOF while looking for
+matching ')'` — after which the launch's open-question wait, which has no
+deadline, never ended: the pane showed `^C` and nothing else for as long as the
+test watched. The wait's children now report the interrupt themselves (a child
+killed by SIGINT is 130, recorded by `__nocx_agent_note_int` after every
+`sleep 1`, after the probe, and after the frame read). `nocx.bash` moved by the
+helper, its three call sites and the flag that scopes them; `nocx.zsh` did not
+(its wait polls with the `zselect` builtin and starts no child whose death could
+be read), `nocx.posix` has no launch window, and the worst path is unchanged.

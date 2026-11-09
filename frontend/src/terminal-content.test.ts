@@ -2785,9 +2785,9 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
 
-      // Enter during startup keeps the draft intact; neither a paste nor a
-      // newline may reach the shell before prompt_ready.
-      expect(view.state.doc.toString()).toBe('sleep 20')
+      // Enter during startup takes the line out of the composer and holds it;
+      // neither a paste nor a newline may reach the shell before prompt_ready.
+      expect(view.state.doc.toString()).toBe('')
       expect(session.intent).not.toHaveBeenCalled()
       expect(session.send).not.toHaveBeenCalled()
       expect(client.dispatcher.call).not.toHaveBeenCalled()
@@ -2838,6 +2838,61 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
     }
   })
 
+  // nocx-evj4b.1.6: a plain sh never reaches prompt_ready, so the startup
+  // composer is the only place its first commands can be typed, and every
+  // Enter there was its own command. The draft used to survive each held
+  // Enter, so the last Enter's plan carried all of them concatenated and
+  // exactly one line ran; every submit after the first was swallowed as a
+  // duplicate of the one in flight. Five submits during startup must be five
+  // lines, in the order the person made them, when the shell settles.
+  it('every submit made while startup is held runs on its own when the shell settles conventional', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      session.intent.mockClear()
+      session.send.mockClear()
+      client.dispatcher.call.mockClear()
+
+      const lines = Array.from({ length: 5 }, (_, i) => `echo probe-${i}`)
+      for (const line of lines) {
+        editor.insertText(line)
+        view.contentDOM.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+        )
+        // Taken, not vetoed: the line left the composer for the host's queue,
+        // so the next Enter is a new command rather than the same draft again.
+        expect(view.state.doc.toString()).toBe('')
+      }
+      // Nothing may reach the pty while the shell is still proving itself.
+      expect(session.intent).not.toHaveBeenCalled()
+      expect(session.send).not.toHaveBeenCalled()
+
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual(
+          lines.flatMap((line) => [
+            ['paste', line],
+            ['key', 'enter'],
+          ]),
+        ),
+      )
+    } finally {
+      teardown()
+    }
+  })
+
   // nocx-xn63t.6.27, CI run 38577867125: a command typed into the startup
   // composer of a reconnected ssh session reached the shell as
   // `echo after-the-reconnec`. The integration status reaches `integrated` a
@@ -2874,15 +2929,21 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       session.send.mockClear()
       client.dispatcher.call.mockClear()
 
-      // The next key the person types lands in the draft they are typing.
+      // The next key the person types lands in the composer they are typing
+      // into — not <body>.
       expect(editor.isVisible).toBe(true)
       expect(editorHasFocus()).toBe(true)
       editor.insertText('t')
       view.contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
-      // Enter before the prompt is held exactly as it is while `starting`.
-      expect(view.state.doc.toString()).toBe('echo after-the-reconnect')
+      // Enter before the prompt is held exactly as it is while `starting`:
+      // the whole line — the `t` the person typed into the composer included
+      // — is taken for the host's queue, and the draft empties (an Enter is a
+      // command: nocx-evj4b.1.6). What xn63t.6.27 asserts survives: the
+      // composer kept the keyboard across integrated-before-prompt_ready, so
+      // no keystroke went to <body>.
+      expect(view.state.doc.toString()).toBe('')
       expect(session.intent).not.toHaveBeenCalled()
 
       lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
@@ -2922,7 +2983,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       view.contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
-      expect(view.state.doc.toString()).toBe('echo conventional')
+      expect(view.state.doc.toString()).toBe('')
       expect(session.intent).not.toHaveBeenCalled()
 
       fireIntegration({

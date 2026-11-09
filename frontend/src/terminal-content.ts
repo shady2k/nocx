@@ -1800,10 +1800,12 @@ export class TerminalContent extends BasePaneContent {
    *  `_bindSession` call — first bind and rebind alike — so a reconnect's new
    *  session is never judged by the old one's answer. */
   private _awaitsIntegration = false
-  /** Human shell submits remain in the editor until startup yields a live prompt
-   *  or settles as conventional. The promise owns the editor draft; this set
-   *  only releases those submits when one of those facts arrives. */
-  private readonly _deferredShellSubmissionWaiters = new Set<(resume: boolean) => void>()
+  /** Human shell submits taken while the session is proving its shell's
+   *  integration state, in the order the person made them (nocx-evj4b.1.6).
+   *  Each held Enter accepted its line — the editor emptied its draft — so
+   *  five submits during startup are five lines; they are delivered one by one
+   *  when startup settles (a live prompt, or a conventional/lost outcome). */
+  private readonly _deferredShellSubmissions: SubmitPlan[] = []
   /** Whether THIS session entered the integration axis at `starting` — the ack
    *  said so, or a `starting` fact arrived. Set fresh on every bind. It is what
    *  lets `_awaitsFirstPrompt` tell a session that has just proved itself and
@@ -3799,80 +3801,7 @@ export class TerminalContent extends BasePaneContent {
               return this.deferShellSubmissionUntilReady(verdict)
             })
           },
-          submit: (doc: string, plan?: SubmitPlan) => {
-            // Routing, ADR-0004 §3: the registry decides where the document
-            // goes. A QUESTION is not a command — the shell orchestration
-            // below (keyboard handoff, ledger record, running block,
-            // lifecycle attempt) belongs to the shell target only. The
-            // agent target owns its whole flow (frame mint, ask, answer
-            // block), so the handoff never runs for it: the grid keeps its
-            // keys, the flow gains no phantom running block, and no
-            // attempt is opened for prose (nocx-x8s2.2).
-            const active = this.inputTargets!.active()
-            // The per-target corpus (nocx-4ff.7): every submission is
-            // recorded under the ACTIVE target's id, so the shell's
-            // commands and the agent's questions never interleave. The
-            // shell's recall reads the store, not this; the agent's (and
-            // any future target's) recall serves from it. The id is the
-            // registry's own — the same seam that routed the submit.
-            this.targetState.record(active.id, {
-              doc,
-              cwd: this._cwd,
-              host: this._host,
-              at: Date.now(),
-            })
-            if (!active.routesToShell) {
-              // The target surfaces its own refusal (onRefusal → the
-              // toast); the rethrow is for programmatic callers, so the
-              // fire-and-forget path swallows it.
-              void active
-                .submit(doc, { targetId: active.id })
-                .then(() => this.clearGrants())
-                .catch(() => {})
-              return
-            }
-            // The atomic handoff transfers input ownership to the grid at
-            // the moment the editor gives it up — not when the running fact
-            // lands (an RPC round trip later). The editor already released the
-            // keys in commit; a grid that is not yet the keyboard's owner
-            // drops keys typed into the gap, so a program waiting on stdin
-            // (read, ssh, less) starves with no editor and no input surface
-            // (nocx-u7uh.23, nocx-yb5y).
-            // _syncLifecycleOwnership reconciles this on every fact.
-            //
-            // THE BOX KEEPS ITS PLACE UNTIL THE COMMAND'S OWN LENGTH SAYS
-            // OTHERWISE (ADR-tqjt5rkk). Armed HERE, on the person's own shell
-            // submit and nowhere else: this is the only call that took the
-            // composer off the screen, and the only one that has a composer to
-            // take down. The bound covers a command that never reports its
-            // completion at all — no attempt, or no prompt — so the box cannot
-            // wait forever on a fact that is not coming.
-            this._armDeparture('measuring', SUBMIT_GRACE_MS)
-            //
-            // Both lines, always in this order and never one without the
-            // other: the keyboard changes hands HERE, and from here until
-            // the command's own bytes have gone out the grid's bytes queue
-            // behind them (holdRawUntilSubmitted). Handing the keyboard over
-            // without the queue is what turned a dropped keystroke into a
-            // reordered one — measured, the letters of the next input
-            // arriving at the pty ahead of the command that was going to
-            // read them.
-            // The ONE shell submit orchestration (submitShellCommand):
-            // the keyboard handoff (a person's submit takes the grid; the
-            // agent's never does — ADR-0020 decision 1), the ledger record
-            // and the lifecycle attempt all run in one place, and this call
-            // differs from the agent's by exactly the author, the handoff
-            // and the byte route (nocx-tjppv). Neither opens a card: the
-            // block is the projection of the runtime's authenticated start
-            // (nocx-2v80t.3.2).
-            this.submitShellCommand({
-              doc,
-              recordLine: plan?.recordLine ?? doc,
-              author: active.author,
-              takeKeys: true,
-              sendLine: (d) => void active.submit(d, { targetId: active.id }),
-            })
-          },
+          submit: (doc: string, plan?: SubmitPlan) => this.submitFromComposer(doc, plan),
           // A bare newline: the shell gets its keystroke and answers with a
           // fresh prompt. Deliberately not routed through the submit path —
           // no attempt is opened and no ledger record is written, because
@@ -7307,32 +7236,26 @@ export class TerminalContent extends BasePaneContent {
     this.scheduleLiveResize()
   }
 
-  /** Keep a human shell submit in the editor while the shell is still proving
-   *  its integration state. Once a live prompt exists, the normal submit path
+  /** Take a human shell submit while the shell is still proving its
+   *  integration state. Once a live prompt exists, the normal submit path
    *  opens the app-owned attempt before it writes paste+Enter. A settled
-   *  conventional/lost outcome releases the same draft through the ordinary
-   *  raw terminal path instead. */
-  private deferShellSubmissionUntilReady(
-    plan: SubmitPlan,
-  ): SubmitPlan | Promise<SubmitPlan | false> {
-    if (this._attachment.kind !== 'attached') return Promise.resolve(false)
+   *  conventional/lost outcome releases every held line, in order, through the
+   *  ordinary raw terminal path instead.
+   *
+   *  'held', not a promise over the draft: an Enter is one command. Holding
+   *  the draft across the whole startup interval meant a second Enter was
+   *  swallowed as a duplicate of the first submission still in flight, and the
+   *  third, fourth and fifth became more text in the same draft — so a shell
+   *  that never integrates (a plain sh) ran ONE concatenated line at the
+   *  degrade and never saw the rest (nocx-evj4b.1.6). The line is taken, the
+   *  composer empties, and the next Enter is a new command. */
+  private deferShellSubmissionUntilReady(plan: SubmitPlan): SubmitPlan | false | 'held' {
+    if (this._attachment.kind !== 'attached') return false
     if (this.inputTargets?.active().routesToShell !== true) return plan
     if (!this._awaitsFirstPrompt()) return plan
     if (this.lifecycle.state.kind === 'prompt_ready' || isDegraded(this._integration)) return plan
-
-    return new Promise<SubmitPlan | false>((resolve) => {
-      let settled = false
-      const finish = (resume: boolean): void => {
-        if (settled) return
-        settled = true
-        this._deferredShellSubmissionWaiters.delete(finish)
-        resolve(resume ? plan : false)
-      }
-      this._deferredShellSubmissionWaiters.add(finish)
-      // Close the check/register gap if a fact is applied in the same turn
-      // between the guard above and the waiter being installed.
-      this._releaseDeferredShellSubmissions()
-    })
+    this._deferredShellSubmissions.push(plan)
+    return 'held'
   }
 
   /** The startup interval the composer belongs to: from the session entering
@@ -7364,13 +7287,19 @@ export class TerminalContent extends BasePaneContent {
 
   private _releaseDeferredShellSubmissions(): void {
     if (this.lifecycle.state.kind !== 'prompt_ready' && !isDegraded(this._integration)) return
-    for (const finish of [...this._deferredShellSubmissionWaiters]) finish(true)
+    // One line at a time, in the order the person pressed Enter: the same seam
+    // a committed line takes, so the ledger record, the keyboard handoff and
+    // the byte route are the submit's own (submitFromComposer).
+    for (const plan of this._deferredShellSubmissions.splice(0)) {
+      this.submitFromComposer(plan.sendLine, plan)
+    }
   }
 
-  /** A closed or replaced session cannot authorize a delayed command. Resolve
-   *  false so the editor keeps its draft for the person to decide what to do. */
+  /** A closed or replaced session cannot authorize a delayed command. The
+   *  lines go with it: there is no shell left to run them, and the pane they
+   *  were typed into is gone. */
   private _cancelDeferredShellSubmissions(): void {
-    for (const finish of [...this._deferredShellSubmissionWaiters]) finish(false)
+    this._deferredShellSubmissions.length = 0
   }
 
   /** Show the waiting card and hide the terminal grid for exactly as long as
@@ -10183,6 +10112,87 @@ export class TerminalContent extends BasePaneContent {
     if (!pane) return
     pane.removeAttribute('data-file-drop-target')
     pane.removeAttribute('data-session-id')
+  }
+
+  /** The person's shell submit, from the composer or from a line the startup
+   *  composer took while the shell was still proving itself (nocx-evj4b.1.6).
+   *  ONE owner for both: a released line must arrive exactly as a pressed
+   *  Enter's line does — the ledger record, the keyboard handoff, the
+   *  running block and the byte route are the submit's, not the surface's.
+   */
+  private submitFromComposer(doc: string, plan?: SubmitPlan): void {
+    // Routing, ADR-0004 §3: the registry decides where the document
+    // goes. A QUESTION is not a command — the shell orchestration
+    // below (keyboard handoff, ledger record, running block,
+    // lifecycle attempt) belongs to the shell target only. The
+    // agent target owns its whole flow (frame mint, ask, answer
+    // block), so the handoff never runs for it: the grid keeps its
+    // keys, the flow gains no phantom running block, and no
+    // attempt is opened for prose (nocx-x8s2.2).
+    const active = this.inputTargets!.active()
+    // The per-target corpus (nocx-4ff.7): every submission is
+    // recorded under the ACTIVE target's id, so the shell's
+    // commands and the agent's questions never interleave. The
+    // shell's recall reads the store, not this; the agent's (and
+    // any future target's) recall serves from it. The id is the
+    // registry's own — the same seam that routed the submit.
+    this.targetState.record(active.id, {
+      doc,
+      cwd: this._cwd,
+      host: this._host,
+      at: Date.now(),
+    })
+    if (!active.routesToShell) {
+      // The target surfaces its own refusal (onRefusal → the
+      // toast); the rethrow is for programmatic callers, so the
+      // fire-and-forget path swallows it.
+      void active
+        .submit(doc, { targetId: active.id })
+        .then(() => this.clearGrants())
+        .catch(() => {})
+      return
+    }
+    // The atomic handoff transfers input ownership to the grid at
+    // the moment the editor gives it up — not when the running fact
+    // lands (an RPC round trip later). The editor already released the
+    // keys in commit; a grid that is not yet the keyboard's owner
+    // drops keys typed into the gap, so a program waiting on stdin
+    // (read, ssh, less) starves with no editor and no input surface
+    // (nocx-u7uh.23, nocx-yb5y).
+    // _syncLifecycleOwnership reconciles this on every fact.
+    //
+    // THE BOX KEEPS ITS PLACE UNTIL THE COMMAND'S OWN LENGTH SAYS
+    // OTHERWISE (ADR-tqjt5rkk). Armed HERE, on the person's own shell
+    // submit and nowhere else: this is the only call that took the
+    // composer off the screen, and the only one that has a composer to
+    // take down. The bound covers a command that never reports its
+    // completion at all — no attempt, or no prompt — so the box cannot
+    // wait forever on a fact that is not coming.
+    this._armDeparture('measuring', SUBMIT_GRACE_MS)
+    //
+    // Both lines, always in this order and never one without the
+    // other: the keyboard changes hands HERE, and from here until
+    // the command's own bytes have gone out the grid's bytes queue
+    // behind them (holdRawUntilSubmitted). Handing the keyboard over
+    // without the queue is what turned a dropped keystroke into a
+    // reordered one — measured, the letters of the next input
+    // arriving at the pty ahead of the command that was going to
+    // read them.
+    // The ONE shell submit orchestration (submitShellCommand):
+    // the keyboard handoff (a person's submit takes the grid; the
+    // agent's never does — ADR-0020 decision 1), the ledger record
+    // and the lifecycle attempt all run in one place, and this call
+    // differs from the agent's by exactly the author, the handoff
+    // and the byte route (nocx-tjppv). Neither opens a card: the
+    // block is the projection of the runtime's authenticated start
+    // (nocx-2v80t.3.2).
+    this.submitShellCommand({
+      doc,
+      recordLine: plan?.recordLine ?? doc,
+      author: active.author,
+      takeKeys: true,
+      sendLine: (d) => void active.submit(d, { targetId: active.id }),
+    })
   }
 
   // ── the shell submit orchestration (nocx-tjppv) ────────────────────────

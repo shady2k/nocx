@@ -3343,28 +3343,26 @@ export class BlockManager {
     location = this._location,
   ): void {
     rec.endLine = endLine
-    // THE REGION LEAVES BEFORE THE ELEMENT DOES. `freezeBlock` builds a frozen
-    // element and swaps it in, and a child of the element it replaces would
-    // leave the document with it — the terminal would vanish at the freeze
-    // (ADR-3kqrem7v). The region goes back to the stack, right after the block it
-    // has just stopped being the body of.
-    this.releaseLiveRegion()
-
-    // block.closed can finish independently of controller reconciliation.
-    // Reclaim its borrowed header before replacing the old block so no
-    // running chrome survives outside the frozen record (ADR-3kqrem7v).
-    if (rec.header && rec.header.parentElement !== rec.el) rec.el.prepend(rec.header)
-    rec.header = undefined
-    // THE SWAP, AS ONE PIECE (nocx-3wmve). Two things are true of it that a
-    // reader scrolled into the output must not feel. The frozen card is not
-    // the running card's shape — its header takes the transcript's vertical
-    // padding and its body the rhythm the live one leaves to the box — so the
-    // rows under it sit 30px lower the moment it arrives; and the card is
-    // built with an empty body, whose rows the paint then fills in. Either
-    // one moves the rows a person is reading, so the whole replacement is
-    // handed to the controller, which knows whether the person is following
-    // the tail and holds their place when they are not.
+    // EVERY DOM CHANGE OF THE FREEZE IS INSIDE THE ONE HELD MUTATION
+    // (nocx-3wmve). The region leaving its block, the borrowed header going
+    // back, the element swap and the body's paint are one change to the
+    // transcript, and a reader scrolled into the output must not feel any of
+    // them. They used to be split: `releaseLiveRegion()` ran BEFORE the hold, so
+    // a nested command's live region moving out of its turn displaced the prose
+    // the person was reading with the anchor taken afterwards — the one shape
+    // the wrapper exists to stop.
     const swap = (): void => {
+      // The region leaves before the element does: `freezeBlock` builds a frozen
+      // element and swaps it in, and a child of the element it replaces would
+      // leave the document with it — the terminal would vanish at the freeze
+      // (ADR-3kqrem7v). The region goes back to the stack, right after the block
+      // it has just stopped being the body of.
+      this.releaseLiveRegion()
+      // block.closed can finish independently of controller reconciliation.
+      // Reclaim its borrowed header before replacing the old block so no
+      // running chrome survives outside the frozen record (ADR-3kqrem7v).
+      if (rec.header && rec.header.parentElement !== rec.el) rec.el.prepend(rec.header)
+      rec.header = undefined
       const newEl = freezeBlock(
         rec.el,
         rec.id,

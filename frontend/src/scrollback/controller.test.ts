@@ -1866,6 +1866,38 @@ describe("the reader's anchor (nocx-3wmve)", () => {
     expect(area.scrollTop).toBe(1040)
   })
 
+  it('anchors the tall unit that covers the top edge from above (nocx-3wmve)', () => {
+    const { controller } = makeController()
+    stopFollowing(controller)
+    const area = laidOut(controller)
+    // One unit taller than the viewport, its own top 100px above the edge: a
+    // code fence, a table, a wrapped paragraph. The person is reading it, and
+    // nothing in the viewport STARTS inside it.
+    const block = document.createElement('div')
+    block.className = 'cmd-block'
+    block.dataset.entryId = 'att-tall'
+    const body = document.createElement('div')
+    body.className = 'cmd-output'
+    const tall = document.createElement('div')
+    tall.className = 'cmd-output-code'
+    let top = -100
+    tall.getBoundingClientRect = () => rect(top, 400)
+    body.appendChild(tall)
+    block.appendChild(body)
+    controller.scrollbackInner.appendChild(block)
+    block.getBoundingClientRect = () => rect(-2000, 4000)
+
+    controller.holdReaderPlace(() => {
+      // something above it grew: the unit moves DOWN inside the viewport
+      top += 40
+      Object.defineProperty(area, 'scrollHeight', { value: 4040, configurable: true })
+    })
+
+    // The unit that covers the edge keeps its (negative) offset: the view
+    // follows the change above it.
+    expect(area.scrollTop).toBe(1040)
+  })
+
   it('puts a FOLLOWER back at the bottom edge when a change grows the transcript (nocx-3wmve)', () => {
     const { controller } = makeController()
     const area = laidOut(controller)

@@ -1196,27 +1196,33 @@ export class ScrollbackController {
     const units = block.querySelectorAll<HTMLElement>('.cmd-output > *')
     if (units.length === 0) return null
     const topOf = (index: number): number => units[index].getBoundingClientRect().top
+    // THE LAST UNIT WHOSE TOP IS AT OR ABOVE THE VIEWPORT'S TOP EDGE, found by
+    // bisection: units are in document order and laid out one under the next,
+    // so their top edges are non-decreasing.
     let low = 0
     let high = units.length - 1
-    let found = -1
+    let above = -1
     while (low <= high) {
       const mid = (low + high) >> 1
-      if (topOf(mid) < clip.top - 0.5) low = mid + 1
-      else {
-        found = mid
+      if (topOf(mid) <= clip.top) {
+        above = mid
+        low = mid + 1
+      } else {
         high = mid - 1
       }
     }
-    if (found < 0) return null
-    // A unit can be inside the block and still above the fold's top edge only
-    // by rounding; walking forward from the bisection's answer is bounded by
-    // the units that start within one row of the edge, and it keeps the
-    // contract the linear walk had (a unit that STARTS in the viewport).
-    for (let index = found; index < units.length; index += 1) {
+    // A TALL UNIT COVERS THE EDGE FROM ABOVE (nocx-3wmve): a code fence, a
+    // table, a wrapped paragraph, a long row — the person is reading it even
+    // though it STARTS off-screen, and its offset is negative. Anchoring only
+    // units that start inside the viewport left exactly those readers on the
+    // numeric fallback. From that unit forward, the first one that meets the
+    // viewport at all is the answer: wholly above the edge is skipped, wholly
+    // below it ends the search.
+    for (let index = Math.max(0, above); index < units.length; index += 1) {
       const unit = units[index]
       const cell = unit.getBoundingClientRect()
       if (cell.height <= 0) continue
-      if (cell.top < clip.top - 0.5) continue
+      if (cell.bottom <= clip.top + 0.5) continue
       if (cell.top >= clip.bottom - 0.5) return null
       return { unit, index }
     }

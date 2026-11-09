@@ -4907,6 +4907,47 @@ describe('backend-owned block rows', () => {
     }
   })
 
+  it('enters the reader hold before any DOM change of the freeze (nocx-3wmve)', () => {
+    const inner = document.createElement('div')
+    const liveContainer = document.createElement('div')
+    inner.appendChild(liveContainer)
+    document.body.appendChild(inner)
+    const order: string[] = []
+    const manager = new BlockManager(inner, liveContainer, {
+      snapshotStore: freshStore(),
+      paintStoredRows: (block, rows) =>
+        paintStoredRows(block, rows, { metric: null, palette: DEFAULT_SNAPSHOT }),
+      holdReaderPlace: (mutate) => {
+        order.push('hold')
+        mutate()
+      },
+    })
+    const insert = inner.insertBefore.bind(inner)
+    inner.insertBefore = ((node: Node, child: Node | null) => {
+      order.push('dom')
+      return insert(node, child)
+    }) as typeof inner.insertBefore
+    const replace = inner.replaceChild.bind(inner)
+    inner.replaceChild = ((node: Node, old: Node) => {
+      order.push('dom')
+      return replace(node, old)
+    }) as typeof inner.replaceChild
+    try {
+      manager.startBlock('printf rows', '~', 0)
+      manager.bindAttempt('entry-order')
+      order.length = 0
+      closeRunningBlock(manager)
+      // The region leaving its block, the header going back and the element
+      // swap are ONE change: every DOM move of the freeze happens inside the
+      // hold, so the anchor is taken before the first of them.
+      expect(order[0]).toBe('hold')
+      expect(order).toContain('dom')
+    } finally {
+      inner.remove()
+      manager.dispose()
+    }
+  })
+
   it('freezes a block whole: the element that arrives already carries its rows', () => {
     const { manager, inner } = newManager()
     manager.startBlock('printf rows', '~', 0)

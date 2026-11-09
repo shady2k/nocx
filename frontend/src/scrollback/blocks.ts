@@ -776,6 +776,11 @@ export interface BlockRecord {
   outputAnchorScreen?: number
   /** Backend-owned screen anchor; cursor position is never a substitute. */
   outputAnchor?: BlockOutputStart
+  /** The block's first output row in the ordered rows stream — the
+   *  coordinate a stored row's `from` uses. The body's hold is mapped
+   *  through it, so a record whose head is lost or late still stops where
+   *  the painted screen stops (nocx-4y82c.1.10). */
+  outputStreamStart?: number
   /** Offset from the accepted frame base row when its identity matches the anchor. */
   outputAnchorOffset?: number
   /** Observed input-span text immediately before the accepted output anchor. */
@@ -2720,6 +2725,7 @@ export class BlockManager {
     rec.outputAnchor = Object.freeze({ ...anchor })
     rec.outputAnchorScreen = screen
     rec.outputStart = undefined
+    rec.outputStreamStart = anchor.fromRow
     rec.outputScreen = undefined
     rec.outputAnchorOffset = undefined
     rec.outputAnchorText = undefined
@@ -2756,13 +2762,20 @@ export class BlockManager {
       // release the shift through the echo check. A block not yet placed
       // takes the estimate whole: its echo check still guards it.
       if (snapshot.geometry.cols !== anchor.cols && rec.outputAnchorOffset !== undefined) {
-        const index = anchor.row - snapshot.state.baseRow
+        const index = anchor.fromRow + anchor.row - snapshot.state.baseRow
         rec.outputAnchorOffset = Math.max(0, Math.min(index, snapshot.geometry.rows - 1))
         continue
       }
-      rec.outputStart = anchor.row
+      // THE ONE COORDINATE (nocx-4y82c.1.10). The first output row is
+      // `fromRow` in the ordered rows stream — the coordinate a stored row's
+      // `from` uses — and `row` is that row's screen position at the mark, so
+      // the absolute row is their sum. Before this, the screen row alone was
+      // taken as absolute, which is only true for a block that opened at the
+      // top of the screen; a session that had scrolled before the command
+      // put the block that many rows too low in the body's hold.
+      rec.outputStart = anchor.fromRow + anchor.row
       rec.outputScreen = rec.outputAnchorScreen
-      const index = anchor.row - snapshot.state.baseRow
+      const index = rec.outputStart - snapshot.state.baseRow
       if (index <= 0) {
         // The anchor names the first output row. Its preceding echo row is
         // already above the visible screen (or absent), so there is no shift.
@@ -2972,7 +2985,7 @@ export class BlockManager {
     const rec = this._blocks.find((b) => b.el === block)
     if (rec === undefined || rec.storedUpTo === undefined) return rows
     if (this._liveContainer.parentElement !== block) return rows
-    return this._heldRows(rows, rec.storedUpTo)
+    return this._heldRows(rows, rec.storedUpTo, rec.outputStreamStart ?? 0)
   }
 
   /** The leading rows a hold allows, mapped through the artifact's OWN first
@@ -2981,8 +2994,8 @@ export class BlockManager {
    *  block: slicing by the hold alone paints two rows past the painted
    *  screen, and the body and the grid show the same lines (nocx-4y82c.1.1).
    */
-  private _heldRows(rows: StoredBlockRows, limit: number): StoredBlockRows {
-    const first = rows.lines[0]?.from ?? 0
+  private _heldRows(rows: StoredBlockRows, limit: number, streamStart = 0): StoredBlockRows {
+    const first = (rows.lines[0]?.from ?? streamStart) - streamStart
     const count = Math.max(0, Math.min(rows.lines.length, limit - first))
     if (count >= rows.lines.length) return rows
     return { ...rows, lines: rows.lines.slice(0, count) }
@@ -2996,7 +3009,7 @@ export class BlockManager {
     if (rows === undefined) return null
     const limit = rec.el === this._liveContainer.parentElement ? rec.storedUpTo : undefined
     if (limit === undefined) return rows
-    return this._heldRows(rows, limit)
+    return this._heldRows(rows, limit, rec.outputStreamStart ?? 0)
   }
 
   /** Release every held row: paint the running block's body whole.

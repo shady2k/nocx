@@ -5163,6 +5163,42 @@ describe('backend-owned block rows', () => {
     expect(blockOutputText(manager.runningBlock!.el)).toBe('third \nfourth\nfifth ')
   })
 
+  it('places the hold in the stream coordinate the record uses (nocx-4y82c.1.10)', () => {
+    // The block's first output row is `fromRow` in the ordered rows stream —
+    // the coordinate a stored row's `from` uses — so a record numbered from a
+    // later stream row must not be sliced as if it started at zero, and one
+    // whose head was lost must still stop where the painted screen stops.
+    const { manager } = newManager()
+    manager.startBlock('printf rows', '/repo', 0)
+    manager.bindAttempt('entry-stream')
+    manager.setOutputStartAnchor(
+      'entry-stream',
+      {
+        entryId: 'entry-stream',
+        row: 2,
+        fromRow: 5,
+        screenRevision: 1,
+        bufferKind: 'normal',
+        bufferInstance: '1',
+        cols: 80,
+        rows: 24,
+      },
+      0,
+    )
+    const rows = (from: number, texts: string[]) => ({
+      lines: texts.map((text, i) => ({ from: from + i, row: row(text) })),
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+    })
+    manager.applyStoredRows('entry-stream', rows(5, ['a', 'b', 'c', 'd', 'e']), 4)
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('a\nb\nc\nd')
+
+    // The head was lost: the record starts at stream row 7, two block rows on.
+    manager.applyStoredRows('entry-stream', rows(7, ['c', 'd', 'e']), 4)
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('c\nd')
+  })
+
   it("keeps the body's order: its rows above the live region, on every growth (ADR-0091)", () => {
     // `paintStoredRows` replaces `.cmd-output` on each block.grew, so the rows
     // it appends land after the live region unless the seat is restored with

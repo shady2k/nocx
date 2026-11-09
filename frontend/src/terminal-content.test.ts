@@ -5839,6 +5839,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       client._fireBlockOutputStart({
         entryId: 'att-hold',
         row: 12,
+        fromRow: 0,
         screenRevision: 5,
         bufferKind: 'normal',
         bufferInstance: '1',
@@ -8053,6 +8054,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
     const anchor = {
       entryId: 'att-anchor',
       row: 12,
+      fromRow: 0,
       screenRevision: 5,
       bufferKind: 'normal' as const,
       bufferInstance: '1',
@@ -8152,6 +8154,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
     const anchor = {
       entryId: 'att-rows',
       row: 12,
+      fromRow: 0,
       screenRevision: 5,
       bufferKind: 'normal' as const,
       bufferInstance: '1',
@@ -8262,6 +8265,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       client._fireBlockOutputStart({
         entryId: 'att-lag',
         row: 102,
+        fromRow: 0,
         screenRevision: 16,
         bufferKind: 'normal',
         bufferInstance: '1',
@@ -8352,6 +8356,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
         client._fireBlockOutputStart({
           entryId: 'att-wrapped-echo',
           row: 3,
+          fromRow: 0,
           screenRevision: 1,
           bufferKind: 'normal',
           bufferInstance: '1',
@@ -8395,6 +8400,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
     const anchor = {
       entryId: 'att-short-output',
       row: 1,
+      fromRow: 0,
       screenRevision: 5,
       bufferKind: 'normal' as const,
       bufferInstance: '1',
@@ -14173,6 +14179,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         kept: false,
         screenAnchor: {
           row: 307,
+          fromRow: 0,
           screenRevision: 3,
           bufferKind: 'normal',
           bufferInstance: '9',

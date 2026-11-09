@@ -58,6 +58,7 @@ import (
 	"flag"
 	"fmt"
 	"go/ast"
+	"go/constant"
 	"go/parser"
 	"go/token"
 	"go/types"
@@ -548,7 +549,12 @@ func deriveDir(dir string, tags []string) ([]entry, error) {
 		return false
 	}
 
-	var out []entry
+	// EVERY TEST THIS PACKAGE RUNS, and the ones the file rule already owns. A
+	// test declared in a darwin-only file is the derived selection (on a Mac it
+	// loads and calls the darwin implementation directly), a linux-only one does
+	// not exist on the Mac, and neither may be listed here.
+	tests := map[string]*ssa.Function{}
+	owned := map[string]bool{}
 	for _, pkg := range ssaPkgs {
 		if dirOf(pkg) != dir {
 			continue
@@ -558,57 +564,90 @@ func deriveDir(dir string, tags []string) ([]entry, error) {
 				continue
 			}
 			test, ok := member.(*ssa.Function)
-			if !ok || test == nil || test.Blocks == nil {
+			if !ok || test == nil || test.Blocks == nil || !test.Pos().IsValid() {
 				continue
 			}
-			if !test.Pos().IsValid() {
-				continue
-			}
-			if sets.darwinTestNames[name] || sets.linuxTestNames[name] {
-				// The file rule already owns this test: a darwin-only test file
-				// IS the derived selection (and on a Mac its test loads, runs and
-				// calls the darwin implementation directly), and a linux-only one
-				// cannot exist on the Mac at all.
-				continue
-			}
+			tests[name] = test
 			file := filepath.Base(prog.Fset.Position(test.Pos()).Filename)
-			if sets.linuxTests[file] {
-				// Declared in a test file the darwin build does not compile: it
-				// cannot run on the Mac, and selecting it would remove it from
-				// Linux as well.
+			if sets.darwinTestNames[name] || sets.linuxTestNames[name] || sets.linuxTests[file] || sets.darwinTests[file] {
+				owned[name] = true
+			}
+		}
+	}
+	runnable := map[string]bool{}
+	for name := range tests {
+		if !owned[name] {
+			runnable[name] = true
+		}
+	}
+
+	// ONE TEST'S ANSWER, WITH ITS CHILDREN'S (round 6). A test that re-executes
+	// this binary for another test of the package reaches whatever THAT test
+	// reaches; the recursion is over named children, and the memo makes a cycle
+	// terminate (a test that names itself, as the child helper does).
+	memo := map[string]bool{}
+	visiting := map[string]bool{}
+	var selected func(name string) bool
+	selected = func(name string) bool {
+		if answer, ok := memo[name]; ok {
+			return answer
+		}
+		if visiting[name] {
+			return false
+		}
+		test, ok := tests[name]
+		if !ok {
+			return false
+		}
+		visiting[name] = true
+		hit, children := walk(graph, test, dir, dirOf, darwinName, names, runnable)
+		answer := hit
+		for _, child := range children {
+			if child == name || answer {
 				continue
 			}
-			if sets.darwinTests[file] {
-				// Declared in a test file only the darwin build compiles: its
-				// tests are the DERIVED selection already (macOS-only by their
-				// file), and listing them here would make the committed file
-				// disagree with the list the file rule derives on any platform.
-				continue
-			}
-			if reachesDarwin(graph, test, dir, dirOf, darwinName, names) {
-				out = append(out, entry{pkg: dir, test: name})
-			}
+			answer = selected(child)
+		}
+		visiting[name] = false
+		memo[name] = answer
+		return answer
+	}
+
+	var out []entry
+	for name := range runnable {
+		if selected(name) {
+			out = append(out, entry{pkg: dir, test: name})
 		}
 	}
 	return out, nil
 }
 
-// reachesDarwin walks the call graph from one test and answers whether it
-// arrives at a name the darwin-only files declare. The walk never leaves dir:
-// that is the boundary the command's doc explains.
-func reachesDarwin(
+// walk is ONE test's reachability before the tests it re-executes are counted:
+// whether its in-package closure arrives at a darwin name or variable, and which
+// other tests of this package it names as a CHILD to run.
+//
+// THE CHILD CASE (review of PR #776, round 6). Some tests run the test binary
+// again — `exec.Command(os.Args[0], "-test.run=^TestChild$")`, or a shell line
+// built the same way — and do their real work in the child. The parent reaches
+// darwin code only through the child's body, and the child on its own measures
+// nothing a person asked for, so neither is selected by edges alone. The names
+// are read off a string constant: the `-test.run=` argument, or a constant that
+// IS a test's name (a helper that passes it as a separate argv entry).
+func walk(
 	graph *callgraph.Graph,
 	test *ssa.Function,
 	dir string,
 	dirOf func(*ssa.Package) string,
 	darwinName func(*ssa.Function) bool,
 	names map[string]bool,
-) bool {
+	tests map[string]bool,
+) (hit bool, children []string) {
 	root := graph.Nodes[test]
 	if root == nil {
-		return false
+		return false, nil
 	}
 	seen := map[*callgraph.Node]bool{root: true}
+	seenChild := map[string]bool{}
 	queue := []*callgraph.Node{root}
 	// enqueue follows a FUNCTION VALUE the test hands to something else — a
 	// t.Run callback, a goroutine body — which no call edge reaches: the callee
@@ -636,7 +675,7 @@ func reachesDarwin(
 			continue
 		}
 		if darwinName(node.Func) || referencesDarwinVar(node.Func, names) {
-			return true
+			hit = true
 		}
 		for _, block := range node.Func.Blocks {
 			for _, instr := range block.Instrs {
@@ -652,6 +691,11 @@ func reachesDarwin(
 					case *ssa.MakeClosure:
 						if fn, ok := value.Fn.(*ssa.Function); ok && dirOf(fn.Pkg) == dir {
 							enqueue(fn)
+						}
+					case *ssa.Const:
+						if child, ok := reexecutedTest(value, tests); ok && !seenChild[child] {
+							seenChild[child] = true
+							children = append(children, child)
 						}
 					}
 				}
@@ -671,7 +715,36 @@ func reachesDarwin(
 			queue = append(queue, callee)
 		}
 	}
-	return false
+	return hit, children
+}
+
+// reexecutedTest reads the test a re-exec names: `-test.run=<pattern>` with the
+// anchors trimmed, or a constant that IS a test's name (a helper passing it as a
+// separate argv entry). Anything else — a name in a message, a pattern that is
+// not one test — names nothing.
+func reexecutedTest(c *ssa.Const, tests map[string]bool) (string, bool) {
+	if c == nil || c.Value == nil {
+		return "", false
+	}
+	if c.Value.Kind() != constant.String {
+		return "", false
+	}
+	text := constant.StringVal(c.Value)
+	if at := strings.Index(text, "-test.run="); at >= 0 {
+		pattern := text[at+len("-test.run="):]
+		if end := strings.IndexAny(pattern, " \t\n'\"&|;"); end >= 0 {
+			pattern = pattern[:end]
+		}
+		pattern = strings.TrimPrefix(pattern, "^")
+		pattern = strings.TrimSuffix(pattern, "$")
+		if tests[pattern] {
+			return pattern, true
+		}
+	}
+	if tests[text] {
+		return text, true
+	}
+	return "", false
 }
 
 // referencesDarwinVar reports a read or write of a package-level variable the

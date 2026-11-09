@@ -100,3 +100,30 @@ func TestSubtestCallbacksAreFollowed(t *testing.T) {
 		}
 	}
 }
+
+// A RE-EXECUTED CHILD IS THE PARENT'S COVERAGE (review of PR #776, round 6). Some
+// tests run the test BINARY again, under `-test.run=<another test of this
+// package>`, and do their real work in the child: internal/helper/fishchannel's
+// TestReceiveFragmentedHeaderAndBody and TestReceiveBoundedFailureAndNoOutput
+// spawn their own binary with `-test.run=^TestFishChannelChildProcess$`. The
+// parent then reaches darwin code only THROUGH the child, and the child on its
+// own measures nothing — so neither was selected, and the darwin path they exist
+// for went untested on the Mac.
+func TestAReExecutedChildCountsForItsParent(t *testing.T) {
+	got, err := deriveDir("internal/helper/fishchannel", splitTags(defaultTags))
+	if err != nil {
+		t.Fatalf("deriveDir internal/helper/fishchannel: %v", err)
+	}
+	selected := map[string]bool{}
+	for _, entry := range got {
+		selected[entry.test] = true
+	}
+	for _, want := range []string{
+		"TestReceiveFragmentedHeaderAndBody",
+		"TestReceiveBoundedFailureAndNoOutput",
+	} {
+		if !selected[want] {
+			t.Errorf("%s is not selected: it re-executes this test binary with -test.run=^TestFishChannelChildProcess$, whose body reaches the darwin socket write, and the walk did not follow the child", want)
+		}
+	}
+}

@@ -485,6 +485,60 @@ describe('ScrollbackController render-fence rendezvous (nocx-u7uh.8)', () => {
     expect(controller.mode).toBe('idle')
   })
 
+  it('re-judges the header after block.closed swaps in the tall frozen one (nocx-4y82c.1.3, P2)', () => {
+    const { renderer } = rendererWithFence()
+    const pane = document.createElement('div')
+    const controller = new ScrollbackController({
+      pane,
+      liveContentHeight: () => renderer.liveContentHeight(),
+      cellMetrics: () => ({ cellWidth: renderer.cellWidth, cellHeight: renderer.cellHeight }),
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    controller.scrollbackArea.scrollTo = vi.fn()
+    Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
+      value: 300,
+      configurable: true,
+    })
+    controller.scrollbackArea.getBoundingClientRect = () =>
+      ({ top: 0, bottom: 300, left: 0, right: 800, width: 800, height: 300 }) as DOMRect
+
+    // THE REPLACEMENT'S OWN TRIGGER, WITHOUT A SCROLL OR A RESIZE. Frames are
+    // queued rather than run, because the geometry the decision reads belongs
+    // to the frozen header, which does not exist until block.closed lands.
+    const queue: FrameRequestCallback[] = []
+    const raf = globalThis.requestAnimationFrame
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      queue.push(cb)
+      return queue.length
+    }
+    try {
+      controller.blockManager.startBlock('make', '~', 0)
+      controller.blockManager.bindAttempt('att-1')
+      controller.setRunning()
+      // The completion is in and the visual boundary waits for block.closed.
+      expect(controller.freezeFromAttempt(completedAttempt(FENCE), 2)).toBe(false)
+      controller.blockManager.blockClosed('att-1')
+
+      const block = controller.blockManager.blockForAttempt('att-1')
+      expect(block).not.toBeNull()
+      const el = block!.el
+      const header = el.querySelector<HTMLElement>(':scope > .cmd-header')
+      expect(header).not.toBeNull()
+      // The frozen header is now a tall one: more than a third of the scroller.
+      el.getBoundingClientRect = () =>
+        ({ top: 0, bottom: 400, left: 0, right: 800, width: 800, height: 400 }) as DOMRect
+      header!.getBoundingClientRect = () =>
+        ({ top: 0, bottom: 400, left: 0, right: 800, width: 800, height: 400 }) as DOMRect
+      Object.defineProperty(header!, 'offsetHeight', { value: 400, configurable: true })
+
+      while (queue.length > 0) queue.shift()!(0)
+      expect(header!.getAttribute('data-pinnable')).toBe('false')
+    } finally {
+      globalThis.requestAnimationFrame = raf
+      controller.blockManager.clearAll()
+    }
+  })
+
   it('a command that ends while a full-screen program owns the pane still closes on block.closed', () => {
     const { renderer } = rendererWithFence()
     const pane = document.createElement('div')

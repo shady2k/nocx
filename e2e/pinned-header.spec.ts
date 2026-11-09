@@ -164,6 +164,34 @@ async function runCommand(page: Page, command: string, marker: string): Promise<
   await promptReady(page)
 }
 
+/** Wait until the block whose header names `command` has painted `marker` in
+ *  its OUTPUT body. The markers these specs use also appear inside the command
+ *  text, so the header is not evidence that the output rows arrived: the browser
+ *  can match the command a frame after Enter, before the block has any rows
+ *  (nocx-4y82c.1.3, P2). */
+async function outputReady(page: Page, command: string, marker: string): Promise<void> {
+  await expect
+    .poll(
+      async () =>
+        page.evaluate(
+          ({ command: text, wanted }) => {
+            const block = [
+              ...document.querySelectorAll<HTMLElement>(
+                '.pane.active .scrollback-inner > .cmd-block',
+              ),
+            ].find(
+              (candidate) =>
+                (candidate.querySelector('.cmd-header-text')?.textContent ?? '').trim() === text,
+            )
+            return (block?.querySelector('.cmd-output')?.textContent ?? '').includes(wanted)
+          },
+          { command, wanted: marker },
+        ),
+      { timeout: 30_000 },
+    )
+    .toBe(true)
+}
+
 /** The one block whose header shows `command`. */
 function blockOf(reading: Reading, command: string): BlockReading {
   const block = reading.blocks.find((candidate) => candidate.command === command)
@@ -364,25 +392,8 @@ test.describe('a tall block keeps its own header at the top of the pane', () => 
     await clickIntoEditor(page)
     await page.locator('.pane.active .nocx-editor-input').fill(command)
     await page.keyboard.press('Enter')
-    await expect
-      .poll(
-        async () =>
-          page.evaluate(() =>
-            (document.querySelector('.pane.active')?.textContent ?? '').includes('TALL-START'),
-          ),
-        { timeout: 30_000 },
-      )
-      .toBe(true)
     await promptReady(page)
-    await expect
-      .poll(
-        async () =>
-          page.evaluate(() =>
-            (document.querySelector('.pane.active')?.textContent ?? '').includes('unit-90'),
-          ),
-        { timeout: 30_000 },
-      )
-      .toBe(true)
+    await outputReady(page, command, 'unit-90')
 
     const rest = await read(page)
     const block = blockOf(rest, command)
@@ -513,16 +524,8 @@ test.describe('a tall block keeps its own header at the top of the pane', () => 
     await clickIntoEditor(page)
     await page.locator('.pane.active .nocx-editor-input').fill(command)
     await page.keyboard.press('Enter')
-    await expect
-      .poll(
-        async () =>
-          page.evaluate(() =>
-            (document.querySelector('.pane.active')?.textContent ?? '').includes('word-50'),
-          ),
-        { timeout: 30_000 },
-      )
-      .toBe(true)
     await promptReady(page)
+    await outputReady(page, command, 'word-50')
 
     const rest = await read(page)
     const block = blockOf(rest, command)
@@ -600,5 +603,90 @@ test.describe('a tall block keeps its own header at the top of the pane', () => 
         `row ${JSON.stringify(row.text)} kept its place in the content`,
       ).toBeLessThanOrEqual(0.5)
     }
+  })
+
+  test('a tall frozen header that replaces a pinned running one is judged at once', async ({
+    page,
+  }) => {
+    // P2 from the third review: the oversized-header check ran on scroll and
+    // resize only. When a running block finished, block.closed replaced its
+    // 32px one-line header with the tall frozen one -- after the composer's
+    // resize had settled -- so the new header's size was never judged and it
+    // stayed sticky over the output. The replacement itself must schedule the
+    // same check, with no scroll and no resize to lean on.
+    await page.setViewportSize({ width: 900, height: 720 })
+    await page.goto('/')
+    await promptReady(page)
+    const words = Array.from({ length: 120 }, (_, i) => `late-${String(i + 1).padStart(3, '0')}`)
+    const command = `printf "LATE-START\\n"; printf '%s\\n' ${words.join(' ')}; sleep 6`
+    await clickIntoEditor(page)
+    await page.locator('.pane.active .nocx-editor-input').fill(command)
+    await page.keyboard.press('Enter')
+    const running = page.locator('.pane.active .scrollback-inner > .cmd-block.cmd-block-running')
+    await expect(running).toHaveCount(1, { timeout: 30_000 })
+    // COMMITTED ROWS, WHILE IT RUNS. The last printed line is still in the
+    // live grid, and the command text already carries every marker, so the
+    // wait is on rows the block has committed to its own output.
+    await expect
+      .poll(
+        async () =>
+          page.evaluate(() => {
+            const block = document.querySelector<HTMLElement>(
+              '.pane.active .scrollback-inner > .cmd-block.cmd-block-running',
+            )
+            return block?.querySelectorAll('.cmd-output .term-grid-row').length ?? 0
+          }),
+        { timeout: 30_000 },
+      )
+      .toBeGreaterThan(30)
+
+    const rest = await read(page)
+    const block = blockOf(rest, command)
+    await scrollTo(page, block.top + 100)
+    await expect
+      .poll(async () => blockOf(await read(page), command).header?.top ?? null, { timeout: 5_000 })
+      .toBeCloseTo(0, 0)
+    const pinned = await read(page)
+    expect(blockOf(pinned, command).running, 'the block is still running here').toBe(true)
+    expect(blockOf(pinned, command).header!.pinnable, 'the running header pins at this size').toBe(
+      true,
+    )
+
+    // The command ends by itself; the freeze swaps in the tall header. Wait on
+    // the swap, and on the new header being more than a third of the scroller.
+    await expect
+      .poll(
+        async () => {
+          const reading = await read(page)
+          const candidate = blockOf(reading, command)
+          if (candidate.running) return false
+          return (candidate.header?.height ?? 0) > reading.clientHeight / 3
+        },
+        { timeout: 30_000 },
+      )
+      .toBe(true)
+
+    // THE CONTRACT: a header taller than a third of the scroller is never the
+    // pinned one. On the engine that keeps the person's scroll position that
+    // means this header left the top; on the one that lands the frozen block
+    // at its own top the header is simply not pinned. Both satisfy the rule
+    // the fix exists for, and neither is allowed to leave an oversized header
+    // holding the top edge.
+    await expect
+      .poll(async () => blockOf(await read(page), command).rows.length, { timeout: 10_000 })
+      .toBeGreaterThan(30)
+    await expect
+      .poll(
+        async () => {
+          const reading = await read(page)
+          return reading.pinned.filter((header) => header.height > reading.clientHeight / 3).length
+        },
+        { timeout: 5_000 },
+      )
+      .toBe(0)
+    const after = await read(page)
+    expect(after.pinned, 'no header is pinned over the output').toHaveLength(0)
+    // The command's rows are still there, below where the header sits.
+    expect(blockOf(after, command).rows.length).toBeGreaterThan(30)
   })
 })

@@ -599,30 +599,23 @@ test.describe('a tall block keeps its own header at the top of the pane', () => 
     const before = await read(page)
 
     // THE WINDOW SHRINKS UNDER THE MODAL, so the same header is now more than
-    // a third of the scroller and may no longer pin. The backdrop stays up
-    // until the new size has landed and the observer has had its frame: that
-    // is the state the person is in -- the modal is open across the resize --
-    // and the state in which hit testing cannot answer.
-    const beforeClientHeight = await page.evaluate(
-      () => document.querySelector<HTMLElement>('.pane.active .scrollback-area')!.clientHeight,
-    )
+    // a third of the scroller and may no longer pin. THE DECISION IS WAITED ON
+    // WITH THE VEIL STILL MOUNTED -- that is the state the person is in, and
+    // the state in which the judgement must not need a pixel. Waiting on a
+    // frame count instead would let the observer's timing stand in for the
+    // answer.
     await page.setViewportSize({ width: 1280, height: 300 })
     await expect
       .poll(
-        async () =>
-          page.evaluate(
-            () =>
-              document.querySelector<HTMLElement>('.pane.active .scrollback-area')!.clientHeight,
-          ),
+        async () => {
+          const reading = await read(page)
+          const header = blockOf(reading, command).header!
+          return header.pinnable === false && header.height > reading.clientHeight / 3
+        },
         { timeout: 5_000 },
       )
-      .toBeLessThan(beforeClientHeight)
-    await page.evaluate(
-      () =>
-        new Promise<void>((resolve) => {
-          requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
-        }),
-    )
+      .toBe(true)
+    // Only now does the modal close. Nothing below may need it to.
     await page.evaluate(() => document.getElementById('w27-modal-veil')?.remove())
 
     // Nothing scrolls and nothing else changes when the modal closes. The only

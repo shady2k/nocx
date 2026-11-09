@@ -59,6 +59,17 @@ describe('stored block rows', () => {
     expect(row.dataset.logicalLine).toBe('12')
   })
 
+  it("writes the artifact's own sealed state onto the block", () => {
+    const block = document.createElement('article')
+    const opts = { metric: null, palette: DEFAULT_SNAPSHOT }
+    paintStoredRows(block, { ...stored, sealed: true }, opts)
+    expect(block.dataset.rowsSealed).toBe('true')
+    paintStoredRows(block, { ...stored, sealed: false }, opts)
+    expect(block.dataset.rowsSealed).toBe('false')
+    paintStoredRows(block, { ...stored, sealed: undefined }, opts)
+    expect(block.dataset.rowsSealed).toBeUndefined()
+  })
+
   it('repaints loaded output without moving the live region or losing a read-failure notice', () => {
     const container = document.createElement('div')
     const block = document.createElement('article')

@@ -315,6 +315,13 @@ export function paintStoredRows(
       ':scope > [data-output-incomplete], :scope > [data-output-empty], :scope > [data-output-unreadable]',
     )
     .forEach((el) => el.remove())
+  // THE ARTIFACT'S OWN STATE, ON THE BLOCK (nocx-4y82c.1.3). A sealed artifact
+  // holds every row the command will ever have, and `open` means more are
+  // coming; a reader that measures the body can wait for `true` instead of
+  // guessing from a row count. One attribute, written where the paint is, so
+  // it cannot describe a different artifact than the rows beside it.
+  if (stored.sealed === undefined) delete block.dataset.rowsSealed
+  else block.dataset.rowsSealed = stored.sealed ? 'true' : 'false'
   // The eviction sentence says a body is not here, and a rows read IS that
   // body. A restored command answers `body: null` whenever its rows artifact
   // exists (restore-client.ts), so every one of them starts with the

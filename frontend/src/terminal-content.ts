@@ -678,6 +678,22 @@ interface HeldRange {
  *  holds no keys — the interrupt discards the line it interrupted, and every
  *  key in here belongs to that line. Read as one take (takeHeldWindow) for
  *  the same reason. */
+/**
+ * The session a person's line was TYPED FOR (review round 6): the pane's bind
+ * generation and the session id, taken at the moment of the Enter — before the
+ * vault resolves a reference, before an attempt RPC, before anything can wait.
+ *
+ * Every async step between that Enter and the write carried the identity of
+ * "the pane's session" instead, which is whatever is bound when the step
+ * finishes: a reference line submitted in one session and resolved after a
+ * reconnect was queued — and run — in its replacement. A command belongs to the
+ * session it was typed for, and that is a fact only the Enter can answer.
+ */
+interface BindIdentity {
+  readonly generation: number
+  readonly sessionId: string
+}
+
 interface HeldWindow {
   /** The intents, in the order they were produced. A cancelled window holds
    *  none. */
@@ -1819,11 +1835,11 @@ export class TerminalContent extends BasePaneContent {
   private readonly _deferredShellSubmissions: Array<{
     readonly plan: SubmitPlan
     readonly target: InputTarget
-    /** The bind this line was held for (review round 4). A reconnect moves
+    /** The bind this line was TYPED for (review rounds 4 and 6), captured at
+     *  the Enter and carried through resolution: a reconnect moves
      *  `_bindGeneration`, and a line typed for the shell that is gone is
      *  dropped at release rather than opened against its replacement. */
-    readonly bindGeneration: number
-    readonly sessionId: string
+    readonly origin: BindIdentity
   }> = []
   /** True while the queue is being delivered. The release is one CHAIN, not a
    *  loop of independent submissions: no later fact may start a second chain
@@ -3822,6 +3838,12 @@ export class TerminalContent extends BasePaneContent {
           beforeSubmit: (doc) => {
             if (this._attachment.kind !== 'attached') return false
             if (this.promptVault?.openResolution()) return false
+            // THE ENTER DECIDES WHOSE LINE THIS IS (review round 6). Taken
+            // here, synchronously, before any step that can wait — the vault's
+            // resolution, the attempt round trip — because those steps finish
+            // in whatever session is bound when they do, and a command belongs
+            // to the one it was typed for.
+            const origin = this._currentBind()
             const sync = planSubmitSync(doc)
             if (sync) {
               // ADR-0024 §1 (the projection bead nocx-u7uh.7): the typed-ssh
@@ -3833,14 +3855,14 @@ export class TerminalContent extends BasePaneContent {
               // shell.launcherCommand RPC was deleted with the marker
               // latch (nocx-u7uh.1), so the line goes out unchanged —
               // fail-open — until a rewrite input exists.
-              return this.deferShellSubmissionUntilReady(sync)
+              return this.deferShellSubmissionUntilReady(sync, origin)
             }
             return planSubmit(doc, (line) => vault.resolveLine(line)).then((verdict) => {
               if (isSubmitFailure(verdict)) {
                 this.reportSubmitFailure(verdict)
                 return false
               }
-              return this.deferShellSubmissionUntilReady(verdict)
+              return this.deferShellSubmissionUntilReady(verdict, origin)
             })
           },
           submit: (doc: string, plan?: SubmitPlan) => this.submitFromComposer(doc, plan),
@@ -7729,10 +7751,21 @@ export class TerminalContent extends BasePaneContent {
    *  that never integrates (a plain sh) ran ONE concatenated line at the
    *  degrade and never saw the rest (nocx-evj4b.1.6). The line is taken, the
    *  composer empties, and the next Enter is a new command. */
-  private deferShellSubmissionUntilReady(plan: SubmitPlan): SubmitPlan | false | 'held' {
+  private deferShellSubmissionUntilReady(
+    plan: SubmitPlan,
+    /** The bind this line was typed for, captured at the Enter (review round
+     *  6). Every path below judges against THIS, never against whatever is
+     *  bound now. */
+    origin: BindIdentity,
+  ): SubmitPlan | false | 'held' {
     if (this._attachment.kind !== 'attached') return false
     const target = this.inputTargets?.active()
     if (target === undefined || target.routesToShell !== true) return plan
+    // THE BIND MOVED WHILE THE VERDICT WAS IN FLIGHT: the line belongs to the
+    // session that is gone, so the verdict is dropped rather than delivered to
+    // its replacement. Checked first, before the settle answers below, because
+    // those answers are about the session that is bound NOW.
+    if (!this._bindIsCurrent(origin)) return false
     if (!this._awaitsFirstPrompt()) return plan
     if (this.lifecycle.state.kind === 'prompt_ready' || isDegraded(this._integration)) return plan
     // THE DRAFT MAY HAVE MOVED WHILE A REFERENCE RESOLVED OVER THE WIRE
@@ -7741,12 +7774,7 @@ export class TerminalContent extends BasePaneContent {
     // is no longer the submitted one is the person's own withdrawal — the
     // editor's stale-plan rule for every other verdict — so it is not queued.
     if (this.editor !== null && this.editor.getDoc() !== plan.recordLine) return false
-    this._deferredShellSubmissions.push({
-      plan,
-      target,
-      bindGeneration: this._bindGeneration,
-      sessionId: this.session?.sessionId ?? '',
-    })
+    this._deferredShellSubmissions.push({ plan, target, origin })
     return 'held'
   }
 
@@ -7807,13 +7835,10 @@ export class TerminalContent extends BasePaneContent {
         // too — a loss inside the attempt round trip is the other half — but a
         // stale line should not even open a ledger record or an attempt on a
         // shell nobody typed it for.
-        if (
-          held.bindGeneration !== this._bindGeneration ||
-          held.sessionId !== (this.session?.sessionId ?? '')
-        ) {
+        if (!this._bindIsCurrent(held.origin)) {
           log.warn('nocx: a held command was dropped — its session is gone', {
             pane: this.pane.paneId,
-            heldGeneration: held.bindGeneration,
+            heldGeneration: held.origin.generation,
             generation: this._bindGeneration,
           })
           continue
@@ -7823,7 +7848,13 @@ export class TerminalContent extends BasePaneContent {
           delivered = resolve
         })
         try {
-          this.submitFromComposer(held.plan.sendLine, held.plan, held.target, delivered)
+          this.submitFromComposer(
+            held.plan.sendLine,
+            held.plan,
+            held.target,
+            delivered,
+            held.origin,
+          )
         } catch {
           // A submit that cannot start is not a delivery, and the session it
           // would have gone to is gone: stop, do not spin.
@@ -7834,6 +7865,25 @@ export class TerminalContent extends BasePaneContent {
     } finally {
       this._releasingDeferredShellSubmissions = false
     }
+  }
+
+  /** The bind as it is right now: the generation `_bindSession` bumps and the
+   *  session id it bound. Taken at the Enter, to judge every later step of that
+   *  command against the session it was typed for (review round 6). */
+  private _currentBind(): BindIdentity {
+    return { generation: this._bindGeneration, sessionId: this.session?.sessionId ?? '' }
+  }
+
+  /** Whether this is still the session that bind names. The generation alone
+   *  would do on a rebind (it moves on every `_bindSession`) and the id alone
+   *  names a session that a reattach can re-bind under a new incarnation; the
+   *  pair is the answer the rest of this file already uses for exactly that
+   *  question (_ackRecovery's claim). */
+  private _bindIsCurrent(origin: BindIdentity): boolean {
+    return (
+      this._bindGeneration === origin.generation &&
+      (this.session?.sessionId ?? '') === origin.sessionId
+    )
   }
 
   /** EVERY PIECE OF PER-SESSION INPUT STATE BELONGS TO THE SESSION THAT MADE
@@ -10784,6 +10834,10 @@ export class TerminalContent extends BasePaneContent {
      *  written, or its write withdrawn. The held queue waits on it so the
      *  next line cannot overtake this one (sequence 2). */
     onDelivered?: () => void,
+    /** The bind this line was typed for. A pressed Enter leaves it out and it
+     *  is taken NOW, which is the same instant; a released held line passes
+     *  the one its entry recorded (review round 6). */
+    origin: BindIdentity = this._currentBind(),
   ): void {
     // Routing, ADR-0004 §3: the registry decides where the document
     // goes. A QUESTION is not a command — the shell orchestration
@@ -10858,6 +10912,7 @@ export class TerminalContent extends BasePaneContent {
       takeKeys: true,
       sendLine: (d) => void active.submit(d, { targetId: active.id }),
       onDelivered,
+      origin,
     })
   }
 
@@ -10898,26 +10953,42 @@ export class TerminalContent extends BasePaneContent {
      *  ends without writing fires it too — the held queue's next line waits on
      *  it, and a withdrawal must not stall the chain (sequence 2). */
     onDelivered?: () => void
+    /** The bind this command was typed for (review round 6). Every step below
+     *  — the ledger record, the attempt RPC, the write — is judged against it
+     *  and not against the session bound when the step happens to run. Absent
+     *  means the caller submitted synchronously, so now IS the moment. */
+    origin?: BindIdentity
   }): { ledgerId: number | null; submitId: string | null } {
     if (this._attachment.kind !== 'attached') {
       throw new Error('Session is not attached. Retry attachment before submitting a command.')
     }
     const { doc, recordLine, author, takeKeys, sendLine, beforeWrite } = opts
-    // THE SESSION THIS WRITE BELONGS TO (review round 4). The write happens
-    // after the attempt round trip, and the byte route reads THIS.session when
-    // it finally runs — so a session lost and replaced inside that window would
-    // receive a command typed for its predecessor. The bind generation is the
-    // pane's own monotonic identity for the current bind (it moves on every
-    // `_bindSession`), so it is the one value that answers "is this the session
-    // this command was for" without a second notion of identity.
-    const writeGeneration = this._bindGeneration
-    const writeSession = this.session
+    // THE SESSION THIS COMMAND BELONGS TO (review rounds 4 and 6): the bind
+    // captured at the Enter, never the one bound when a step happens to run.
+    // The write happens after the attempt round trip, and the byte route reads
+    // THIS.session when it finally runs — so a session lost and replaced inside
+    // that window would receive a command typed for its predecessor.
+    const origin = opts.origin ?? this._currentBind()
     // ONE delivery fact per submission, however many paths can end it.
     let delivered = false
     const settle = (): void => {
       if (delivered) return
       delivered = true
       opts.onDelivered?.()
+    }
+    // THE BIND MOVED BEFORE ANY STEP OF THIS COMMAND COULD RUN (review round
+    // 6). Nothing below belongs to the session that is bound now — not the
+    // prompt prediction, not the keyboard handoff, not the ledger record, not
+    // the attempt — so none of it runs. Settled, so a waiting held queue moves
+    // on rather than stalling behind a command that will never go out.
+    if (!this._bindIsCurrent(origin)) {
+      log.warn('nocx: a submitted command was dropped — its session is gone', {
+        pane: this.pane.paneId,
+        heldGeneration: origin.generation,
+        generation: this._bindGeneration,
+      })
+      settle()
+      return { ledgerId: null, submitId: null }
     }
     // The pending prompt prediction flushes HERE (nocx-2v80t.3.55): the
     // last moment that is both synchronous with the person's Enter and
@@ -10947,14 +11018,15 @@ export class TerminalContent extends BasePaneContent {
     const write = (): void => {
       try {
         // A COMMAND HELD FOR A SESSION THAT IS GONE IS DROPPED, never delivered
-        // elsewhere (review round 4). Checked at the write itself, because the
-        // round trip above is exactly the window a loss and reconnect fit in;
-        // the held queue checks it again at release, so a line that outlived
-        // its session is not even opened against the new one.
-        if (this._bindGeneration !== writeGeneration || this.session !== writeSession) {
+        // elsewhere (review rounds 4 and 6). Checked at the write itself,
+        // because the round trip above is exactly the window a loss and
+        // reconnect fit in; the held queue checks it again at release, so a
+        // line that outlived its session is not even opened against the new
+        // one.
+        if (!this._bindIsCurrent(origin)) {
           log.warn('nocx: a submitted command was dropped — its session is gone', {
             pane: this.pane.paneId,
-            heldGeneration: writeGeneration,
+            heldGeneration: origin.generation,
             generation: this._bindGeneration,
           })
           return
@@ -11098,7 +11170,13 @@ export class TerminalContent extends BasePaneContent {
       })
       .then(
         (attempt) => {
-          if (ledgerId !== null) this.bindHistoryAttempt(attempt.id, ledgerId)
+          // The attempt belongs to the bind this command was typed for (review
+          // round 6). A session replaced during the round trip must not have
+          // its new attempt bound to the old session's ledger record; the
+          // write below is fenced separately, so the bytes stay put either way.
+          if (ledgerId !== null && this._bindIsCurrent(origin)) {
+            this.bindHistoryAttempt(attempt.id, ledgerId)
+          }
           write()
         },
         (err: unknown) => {

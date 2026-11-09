@@ -3400,6 +3400,88 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
     }
   })
 
+  // REVIEW ROUND 6, FINDING 1 (P1): the bind is captured at ENTER, not after
+  // the verdict resolves. A reference line resolves over the wire; if the
+  // session is lost and the pane reconnects inside that round trip, the queue
+  // entry took the REPLACEMENT's identity and the command ran in a shell it
+  // was never typed for.
+  it('a reference line submitted in one session is not run in its replacement (sequence 10)', async () => {
+    const client = makeClient()
+    let releaseResolve!: () => void
+    const resolved = new Promise<void>((resolve) => {
+      releaseResolve = resolve
+    })
+    client.call.mockImplementation((method: string) => {
+      if (method === 'vault.resolveLine') {
+        return resolved.then(() => ({
+          line: 'echo secret-value',
+          refs: [{ name: 'x', resolved: true }],
+        }))
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const session = client._sessions[0]
+    const fireIntegration = integrationHandler(client, session)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/bash' })
+      fireIntegration({ sessionId: session.sessionId, status: 'integrated', shell: '/bin/bash' })
+      session.intent.mockClear()
+      editor.insertText('echo {{secret:x}}')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+
+      // The verdict is in flight; the session is lost and the pane reconnects.
+      const onExit = session.onExit.mock.calls[0]?.[0] as
+        ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
+      onExit!({ sessionId: session.sessionId, cause: 'interrupted' })
+      expect(await content.reconnect()).toBe(true)
+      const replacement = client._sessions[client._sessions.length - 1]
+      replacement.intent.mockClear()
+      replacement.send.mockClear()
+
+      // The resolution lands NOW — after the bind moved. The line belonged to
+      // the session that is gone, so nothing may be queued for, or run in,
+      // the replacement.
+      releaseResolve()
+      for (let i = 0; i < 12; i++) await Promise.resolve()
+      integrationHandler(client)({
+        sessionId: replacement.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(replacement.intent).not.toHaveBeenCalled()
+      expect(replacement.send).not.toHaveBeenCalled()
+
+      // And the replacement still takes its own commands. (The withdrawn
+      // line's draft is still the person's — a veto never clears it — so the
+      // test clears it before typing, exactly as a person would.)
+      editor.clear()
+      editor.insertText('echo B')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      await vi.waitFor(() =>
+        expect(
+          replacement.intent.mock.calls.filter((call) => call[0] !== 'focus').length,
+        ).toBeGreaterThanOrEqual(2),
+      )
+      const intents = replacement.intent.mock.calls
+        .filter((call) => call[0] !== 'focus')
+        .map((call) => call[1])
+      expect(intents).toEqual(['echo B', 'enter'])
+    } finally {
+      teardown()
+    }
+  })
+
   // nocx-xn63t.6.27, CI run 38577867125: a command typed into the startup
   // composer of a reconnected ssh session reached the shell as
   // `echo after-the-reconnec`. The integration status reaches `integrated` a

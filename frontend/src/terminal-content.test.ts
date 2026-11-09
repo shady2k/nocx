@@ -2893,6 +2893,246 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
     }
   })
 
+  /** Type one line into the composer and press Enter; the line leaves for the
+   *  host's queue, so the draft must be empty afterwards. */
+  const holdOne = (editor: CommandEditor, view: EditorView, line: string): void => {
+    editor.insertText(line)
+    view.contentDOM.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+    )
+    expect(view.state.doc.toString()).toBe('')
+  }
+
+  /** The dispatcher's lifecycle.submitAttempt seam, programmed per call: the
+   *  release has to survive one attempt landing late while the next is refused
+   *  (sequence 2 of the review). */
+  function attemptScript(
+    client: ClientFake,
+    answers: Array<() => Promise<unknown>>,
+  ): { calls: () => number } {
+    let n = 0
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method !== 'lifecycle.submitAttempt') {
+        return Promise.reject(new RpcError('no store wired (fake)', -32601))
+      }
+      const answer = answers[Math.min(n, answers.length - 1)]
+      n += 1
+      return answer()
+    })
+    return { calls: () => n }
+  }
+
+  // REVIEW FINDING 1 (P1): a Ctrl-C while startup is held must take the held
+  // commands with it. The cancel handler sent the key but left the queue, so
+  // the line the person withdrew ran anyway when the session settled.
+  it('a cancel while startup is held drops every held command (sequence 1)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const lifecycle = lifecycleHandler(client, session.sessionId)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      session.intent.mockClear()
+      session.send.mockClear()
+      holdOne(editor, view, 'echo one')
+      holdOne(editor, view, 'echo two')
+      expect(session.intent).not.toHaveBeenCalled()
+
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true, cancelable: true }),
+      )
+      // The key still reaches the shell — the person interrupted it — and the
+      // commands held for that shell are withdrawn with the same gesture.
+      expect(session.intent.mock.calls).toEqual([['key', 'Ctrl+c']])
+
+      session.intent.mockClear()
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(session.intent).not.toHaveBeenCalled()
+      expect(session.send).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  // REVIEW FINDING 2 (P1): the release started both submissions at once. A's
+  // attempt opened and waited; B's was refused because the lane was running,
+  // and the refusal wrote B immediately — ahead of A, which then wrote second.
+  // The next held command must not be submitted until the previous one's
+  // delivery has resolved.
+  it('the release submits the next held command only after the previous delivery resolved (sequence 2)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const lifecycle = lifecycleHandler(client, session.sessionId)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    let releaseA!: (attempt: unknown) => void
+    const aAttempt = new Promise((resolve) => {
+      releaseA = resolve
+    })
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/bash' })
+      session.intent.mockClear()
+      session.send.mockClear()
+      holdOne(editor, view, 'echo A')
+      holdOne(editor, view, 'echo B')
+
+      const script = attemptScript(client, [
+        () => aAttempt,
+        () => Promise.reject(new Error('the lane is already running')),
+      ])
+
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      await vi.waitFor(() => expect(script.calls()).toBe(1))
+      // A's delivery has not resolved, so B has not even been asked for.
+      expect(session.intent).not.toHaveBeenCalled()
+
+      releaseA({
+        id: 'att-A',
+        domain: 'd1',
+        state: 'open',
+        command: 'echo A',
+        cwd: '',
+        host: '',
+        origin: 'app',
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([
+          ['paste', 'echo A'],
+          ['key', 'enter'],
+          ['paste', 'echo B'],
+          ['key', 'enter'],
+        ]),
+      )
+      expect(script.calls()).toBe(2)
+    } finally {
+      teardown()
+    }
+  })
+
+  // REVIEW FINDING 3 (P2): the release read the CURRENTLY active target. A
+  // shell command held during startup, with the person switching to Ask before
+  // the settle, became an assistant question and never reached the shell.
+  it('a held command is delivered to the shell target it was typed for (sequence 3)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      session.intent.mockClear()
+      session.send.mockClear()
+      client.dispatcher.call.mockClear()
+      holdOne(editor, view, 'echo for-the-shell')
+      // The person reaches for the assistant while the shell is still proving
+      // itself.
+      ;(
+        content as unknown as { inputTargets: { setActive(id: string): void } }
+      ).inputTargets.setActive('agent')
+
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([
+          ['paste', 'echo for-the-shell'],
+          ['key', 'enter'],
+        ]),
+      )
+      // and nothing became a question for the assistant
+      expect(client.dispatcher.call.mock.calls.filter((c) => String(c[0]) === 'agent.ask')).toEqual(
+        [],
+      )
+    } finally {
+      teardown()
+    }
+  })
+
+  // REVIEW FINDING 4 (P2): a line carrying a reference resolves over the wire,
+  // and the host queued the resolved original at the moment the verdict
+  // arrived — even when the person had edited the draft while it resolved. The
+  // stale command then ran at the settle.
+  it('an edit during reference resolution keeps the command out of the queue (sequence 4)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    let releaseResolve!: () => void
+    const resolved = new Promise<void>((resolve) => {
+      releaseResolve = resolve
+    })
+    client.call.mockImplementation((method: string) => {
+      if (method === 'vault.resolveLine') {
+        return resolved.then(() => ({
+          line: 'echo resolved',
+          refs: [{ name: 'x', resolved: true }],
+        }))
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      session.intent.mockClear()
+      session.send.mockClear()
+      editor.insertText('echo {{secret:x}}')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      // The verdict is in flight; the person's newer text is the draft.
+      editor.insertText(' !')
+      expect(editor.getDoc()).toBe('echo {{secret:x}} !')
+      releaseResolve()
+      // Drain the verdict chain (vault promise -> planSubmit -> the host's
+      // decision): microtasks only, no I/O, so a handful of awaits settles it.
+      for (let i = 0; i < 10; i++) await Promise.resolve()
+      expect(client.call).toHaveBeenCalledWith('vault.resolveLine', {
+        line: 'echo {{secret:x}}',
+      })
+      expect(editor.getDoc()).toBe('echo {{secret:x}} !')
+
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(session.intent).not.toHaveBeenCalled()
+      expect(session.send).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
   // nocx-xn63t.6.27, CI run 38577867125: a command typed into the startup
   // composer of a reconnected ssh session reached the shell as
   // `echo after-the-reconnec`. The integration status reaches `integrated` a

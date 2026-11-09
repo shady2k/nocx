@@ -28,6 +28,12 @@
 //	                   without it the server is public-key-only. A wrong
 //	                   password (or a mismatched <pass> on a second fixture)
 //	                   is the journey's authentication-failure host.
+//	-shell-hold-until <path>
+//	                   hold the pane's shell (every PTY exec channel) until
+//	                   <path> exists. The far side says nothing meanwhile, so
+//	                   a spec keeps a session's startup interval open and
+//	                   releases it on its own terms instead of racing the
+//	                   integration outcome (nocx-evj4b.1.6).
 //
 // Output:
 //
@@ -114,6 +120,20 @@ var fixtureLoginShell string
 // Empty disables it, which is every caller that does not set the flag.
 var inputLogDir string
 
+// shellHoldUntil is the file -shell-hold-until waits for before it starts the
+// pane's shell. While it is set and the file does not exist, every PTY exec
+// channel — which is the interactive shell a pane opens, and not the pty-less
+// exec lanes the publishes and home probes use — waits in the fixture.
+//
+// It exists so a spec can HOLD THE STARTUP INTERVAL OPEN deterministically: the
+// far side says nothing while it is held, so nothing but the product's own
+// startup bound can settle the session's integration axis, and the spec
+// releases the shell when its submits are done. Racing a natural refusal is
+// exactly what a spec about held submits must not do (nocx-evj4b.1.6, review).
+//
+// Empty disables it, which is every caller that does not set the flag.
+var shellHoldUntil string
+
 // inputLogSeq names each shell channel's file. Taken under inputLogMu so two
 // channels never share a name, and never reused so a spec that opens a second
 // shell reads a second file.
@@ -172,6 +192,7 @@ func run() error {
 	legacyIntegration := flag.Bool("legacy-integration", false, "plant an installer-era loader with retired accept semantics and production rc gates")
 	flag.StringVar(&sftpSlowUntil, "sftp-slow-until", "", "while this path does not exist, SFTP uploads are read at -sftp-upload-bps: a link slow enough for a spec to watch a helper install for as long as it needs, ended by creating the file")
 	flag.StringVar(&inputLogDir, "input-log", "", "record the bytes each shell channel receives into <dir>/shell-<n>.bytes, announced as INPUTLOG=<path>: the far program's own account of what arrived")
+	flag.StringVar(&shellHoldUntil, "shell-hold-until", "", "hold the pane's shell — every pty exec channel — until this path exists: the stand's deterministic way to keep a startup interval open, so a spec's submits cannot race the integration outcome")
 	flag.IntVar(&sftpUploadBps, "sftp-upload-bps", 0, "bytes per second SFTP uploads are read at while -sftp-slow-until is absent; 0 disables pacing")
 	flag.Parse()
 	if fixtureLoginShell != "" {
@@ -844,7 +865,7 @@ func handleSession(ch gossh.Channel, reqs <-chan *gossh.Request) {
 				}
 				_ = req.Reply(true, nil)
 				if st.sawPtyReq() {
-					startCommand(ch, st, e.Command, "exec")
+					startPtyCommandWhenReleased(ch, st, e.Command, "exec")
 				} else {
 					// A pty-less exec is the helper's own lane: internal/helper's
 					// client frames its protocol over stdin/stdout of a channel
@@ -1036,6 +1057,30 @@ func sftpUploadRate() int {
 		return 0
 	}
 	return sftpUploadBps
+}
+
+// startPtyCommandWhenReleased runs a PTY exec channel's command now, or — when
+// -shell-hold-until is set and its file does not exist — as soon as the spec
+// creates it.
+//
+// The wait is a goroutine so the channel's own request loop keeps answering:
+// a held channel must still take window-change and the rest while it waits, or
+// the client's write of the bootstrap frames would sit behind a request the
+// fixture never reads.
+func startPtyCommandWhenReleased(ch gossh.Channel, st *sessionState, command, kind string) {
+	if shellHoldUntil == "" {
+		startCommand(ch, st, command, kind)
+		return
+	}
+	go func() {
+		for {
+			if _, err := os.Stat(shellHoldUntil); err == nil {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		startCommand(ch, st, command, kind)
+	}()
 }
 
 func startCommand(ch gossh.Channel, st *sessionState, command, kind string) {

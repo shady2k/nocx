@@ -25,7 +25,12 @@ import type { FsComplete } from './generated/fs.complete'
 import type { ShellComplete } from './generated/shell.complete'
 import { CommandSnapshotStore } from './command-snapshot'
 import type { ShellCommandNames } from './generated/shell.commandNames'
-import { ShellInputTarget, createRegistry, type InputTargetRegistry } from './input-target'
+import {
+  ShellInputTarget,
+  createRegistry,
+  type InputTarget,
+  type InputTargetRegistry,
+} from './input-target'
 import { IntentInput, type SessionIntent } from './intent-input'
 import { insideLiveRegion } from './live-region'
 import { AgentInputTarget } from './agent-ask'
@@ -1805,8 +1810,20 @@ export class TerminalContent extends BasePaneContent {
    *  integration state, in the order the person made them (nocx-evj4b.1.6).
    *  Each held Enter accepted its line — the editor emptied its draft — so
    *  five submits during startup are five lines; they are delivered one by one
-   *  when startup settles (a live prompt, or a conventional/lost outcome). */
-  private readonly _deferredShellSubmissions: SubmitPlan[] = []
+   *  when startup settles (a live prompt, or a conventional/lost outcome).
+   *
+   *  Each entry carries the TARGET it was typed for, not the target that
+   *  happens to be active at release: a shell command does not become an
+   *  assistant question because the person opened the Ask composer while the
+   *  shell was still proving itself. */
+  private readonly _deferredShellSubmissions: Array<{
+    readonly plan: SubmitPlan
+    readonly target: InputTarget
+  }> = []
+  /** True while the queue is being delivered. The release is one CHAIN, not a
+   *  loop of independent submissions: no later fact may start a second chain
+   *  beside it, or two lines could be in flight at once (sequence 2). */
+  private _releasingDeferredShellSubmissions = false
   /** Whether THIS session entered the integration axis at `starting` — the ack
    *  said so, or a `starting` fact arrived. Set fresh on every bind. It is what
    *  lets `_awaitsFirstPrompt` tell a session that has just proved itself and
@@ -3856,6 +3873,12 @@ export class TerminalContent extends BasePaneContent {
               }
               return true
             }
+            // A CANCEL TAKES THE HELD COMMANDS WITH IT (sequence 1). The
+            // composer is empty by then — each held Enter accepted its line —
+            // so the interrupt is aimed at exactly what is still queued for
+            // this shell, and the person pressing Ctrl-C means it. Without
+            // this the withdrawn commands ran anyway when the session settled.
+            this._cancelDeferredShellSubmissions()
             // Ctrl-C at a prompt is a key intent to the SHELL — its line
             // editor discards the line and prints a fresh prompt. The runtime
             // owns its encoding. Over a RUNNING command the same key is an
@@ -7700,10 +7723,17 @@ export class TerminalContent extends BasePaneContent {
    *  composer empties, and the next Enter is a new command. */
   private deferShellSubmissionUntilReady(plan: SubmitPlan): SubmitPlan | false | 'held' {
     if (this._attachment.kind !== 'attached') return false
-    if (this.inputTargets?.active().routesToShell !== true) return plan
+    const target = this.inputTargets?.active()
+    if (target === undefined || target.routesToShell !== true) return plan
     if (!this._awaitsFirstPrompt()) return plan
     if (this.lifecycle.state.kind === 'prompt_ready' || isDegraded(this._integration)) return plan
-    this._deferredShellSubmissions.push(plan)
+    // THE DRAFT MAY HAVE MOVED WHILE A REFERENCE RESOLVED OVER THE WIRE
+    // (sequence 4): the verdict the host is handed results from a round trip,
+    // and the person can edit or clear the draft inside it. A line whose draft
+    // is no longer the submitted one is the person's own withdrawal — the
+    // editor's stale-plan rule for every other verdict — so it is not queued.
+    if (this.editor !== null && this.editor.getDoc() !== plan.recordLine) return false
+    this._deferredShellSubmissions.push({ plan, target })
     return 'held'
   }
 
@@ -7735,12 +7765,45 @@ export class TerminalContent extends BasePaneContent {
   }
 
   private _releaseDeferredShellSubmissions(): void {
+    if (this._releasingDeferredShellSubmissions) return
     if (this.lifecycle.state.kind !== 'prompt_ready' && !isDegraded(this._integration)) return
-    // One line at a time, in the order the person pressed Enter: the same seam
-    // a committed line takes, so the ledger record, the keyboard handoff and
-    // the byte route are the submit's own (submitFromComposer).
-    for (const plan of this._deferredShellSubmissions.splice(0)) {
-      this.submitFromComposer(plan.sendLine, plan)
+    void this._drainDeferredShellSubmissions()
+  }
+
+  /** Deliver the held lines ONE AT A TIME, in the order the person made them,
+   *  through the same seam a committed line takes (submitFromComposer).
+   *
+   *  STRICTLY SEQUENTIAL, and that is the fix for the reorder (sequence 2):
+   *  the next line is submitted only once the previous one's delivery has
+   *  RESOLVED — written, or refused and written anyway on its fail-open path.
+   *  Submitting them in parallel let a slow attempt (A) and a refused one (B)
+   *  write in B-then-A order, and the session's intent queue preserves that
+   *  arrival order, so the shell ran the commands backwards. */
+  private async _drainDeferredShellSubmissions(): Promise<void> {
+    this._releasingDeferredShellSubmissions = true
+    try {
+      while (this._deferredShellSubmissions.length > 0) {
+        if (this._attachment.kind !== 'attached') break
+        if (this.lifecycle.state.kind !== 'prompt_ready' && !isDegraded(this._integration)) break
+        // Taken before it is submitted: a cancel that lands during the await
+        // clears whatever is still queued, and this line's own outcome is the
+        // attempt's business (the held window the submit arms).
+        const held = this._deferredShellSubmissions.shift()!
+        let delivered!: () => void
+        const settled = new Promise<void>((resolve) => {
+          delivered = resolve
+        })
+        try {
+          this.submitFromComposer(held.plan.sendLine, held.plan, held.target, delivered)
+        } catch {
+          // A submit that cannot start is not a delivery, and the session it
+          // would have gone to is gone: stop, do not spin.
+          break
+        }
+        await settled
+      }
+    } finally {
+      this._releasingDeferredShellSubmissions = false
     }
   }
 
@@ -10615,7 +10678,18 @@ export class TerminalContent extends BasePaneContent {
    *  Enter's line does — the ledger record, the keyboard handoff, the
    *  running block and the byte route are the submit's, not the surface's.
    */
-  private submitFromComposer(doc: string, plan?: SubmitPlan): void {
+  private submitFromComposer(
+    doc: string,
+    plan?: SubmitPlan,
+    /** The target this line was TYPED for. A released held line carries the
+     *  one it was held by, never whatever target is active at release
+     *  (sequence 3); a pressed Enter leaves this out and the registry answers. */
+    typedFor?: InputTarget,
+    /** Called exactly once when this submission has RESOLVED — its bytes
+     *  written, or its write withdrawn. The held queue waits on it so the
+     *  next line cannot overtake this one (sequence 2). */
+    onDelivered?: () => void,
+  ): void {
     // Routing, ADR-0004 §3: the registry decides where the document
     // goes. A QUESTION is not a command — the shell orchestration
     // below (keyboard handoff, ledger record, running block,
@@ -10624,7 +10698,7 @@ export class TerminalContent extends BasePaneContent {
     // block), so the handoff never runs for it: the grid keeps its
     // keys, the flow gains no phantom running block, and no
     // attempt is opened for prose (nocx-x8s2.2).
-    const active = this.inputTargets!.active()
+    const active = typedFor ?? this.inputTargets!.active()
     // The per-target corpus (nocx-4ff.7): every submission is
     // recorded under the ACTIVE target's id, so the shell's
     // commands and the agent's questions never interleave. The
@@ -10645,6 +10719,7 @@ export class TerminalContent extends BasePaneContent {
         .submit(doc, { targetId: active.id })
         .then(() => this.clearGrants())
         .catch(() => {})
+        .finally(() => onDelivered?.())
       return
     }
     // The atomic handoff transfers input ownership to the grid at
@@ -10687,6 +10762,7 @@ export class TerminalContent extends BasePaneContent {
       author: active.author,
       takeKeys: true,
       sendLine: (d) => void active.submit(d, { targetId: active.id }),
+      onDelivered,
     })
   }
 
@@ -10722,11 +10798,23 @@ export class TerminalContent extends BasePaneContent {
      *  is in flight. The write gate is checked after that round trip and
      *  immediately before the bytes are handed to the renderer. */
     beforeWrite?: () => boolean
+    /** Fired exactly once, when the submission has RESOLVED: the bytes are on
+     *  the pane's intent queue, or the write was withdrawn. Every path that
+     *  ends without writing fires it too — the held queue's next line waits on
+     *  it, and a withdrawal must not stall the chain (sequence 2). */
+    onDelivered?: () => void
   }): { ledgerId: number | null; submitId: string | null } {
     if (this._attachment.kind !== 'attached') {
       throw new Error('Session is not attached. Retry attachment before submitting a command.')
     }
     const { doc, recordLine, author, takeKeys, sendLine, beforeWrite } = opts
+    // ONE delivery fact per submission, however many paths can end it.
+    let delivered = false
+    const settle = (): void => {
+      if (delivered) return
+      delivered = true
+      opts.onDelivered?.()
+    }
     // The pending prompt prediction flushes HERE (nocx-2v80t.3.55): the
     // last moment that is both synchronous with the person's Enter and
     // before any byte of this command can move. The handoff has already
@@ -10753,62 +10841,68 @@ export class TerminalContent extends BasePaneContent {
     // shell still gets its newline — a conventional terminal stays
     // conventional.
     const write = (): void => {
-      // This is deliberately after lifecycle.submitAttempt resolved: the
-      // broker can withdraw the request during that round trip, and a
-      // check at submit entry would miss the only unsafe window.
-      if (beforeWrite && !beforeWrite()) return
-      // Detach the queue BEFORE the command goes out, flush it after.
-      //
-      // Both halves matter and the order is the whole point. Close the held
-      // window before submitting so the command's paste and Enter enter the
-      // session-intent queue first; then replay keys captured during the
-      // attempt RPC. The serial queue keeps those later intents behind the
-      // command, rather than allowing Enter to bypass its paste.
-      const taken = this.takeHeldWindow()
       try {
-        // A Ctrl-C that arrived while this submission was in flight
-        // (nocx-xn63t.6.12): the line is not to run. Nor is it "run and then
-        // interrupt" — the interrupt came first, and writing the command
-        // would put it at the pty with the shell's line editor already told
-        // to discard the line. So the command is not written AT ALL, and
-        // there is nothing at the pty for an 0x03 to mean: no interrupt is
-        // written for it either.
+        // This is deliberately after lifecycle.submitAttempt resolved: the
+        // broker can withdraw the request during that round trip, and a
+        // check at submit entry would miss the only unsafe window.
+        if (beforeWrite && !beforeWrite()) return
+        // Detach the queue BEFORE the command goes out, flush it after.
         //
-        // Read from the window THIS submission armed. Taking the queue tells
-        // us what the pane last held, which after another submission has
-        // taken it is not this window — and reading the cancellation from
-        // there would resurrect exactly the line the person withdrew.
-        if (heldWindow?.cancelled === true) {
-          // No card to withdraw (nocx-2v80t.3.2): the submit opened none,
-          // and the bytes below were never written. The ledger record stays
-          // unbound and running, persisting nothing — the same residue the
-          // agent lane's withdrawal leaves.
-          return
+        // Both halves matter and the order is the whole point. Close the held
+        // window before submitting so the command's paste and Enter enter the
+        // session-intent queue first; then replay keys captured during the
+        // attempt RPC. The serial queue keeps those later intents behind the
+        // command, rather than allowing Enter to bypass its paste.
+        const taken = this.takeHeldWindow()
+        try {
+          // A Ctrl-C that arrived while this submission was in flight
+          // (nocx-xn63t.6.12): the line is not to run. Nor is it "run and then
+          // interrupt" — the interrupt came first, and writing the command
+          // would put it at the pty with the shell's line editor already told
+          // to discard the line. So the command is not written AT ALL, and
+          // there is nothing at the pty for an 0x03 to mean: no interrupt is
+          // written for it either.
+          //
+          // Read from the window THIS submission armed. Taking the queue tells
+          // us what the pane last held, which after another submission has
+          // taken it is not this window — and reading the cancellation from
+          // there would resurrect exactly the line the person withdrew.
+          if (heldWindow?.cancelled === true) {
+            // No card to withdraw (nocx-2v80t.3.2): the submit opened none,
+            // and the bytes below were never written. The ledger record stays
+            // unbound and running, persisting nothing — the same residue the
+            // agent lane's withdrawal leaves.
+            return
+          }
+          submitCommand(doc, {
+            // The deferred half of the handoff to the grid: the synchronous call
+            // above already took the keyboard at commit, and this one only
+            // repairs it if the round trip left it on nobody
+            // (takeKeyboardToGridAfterSubmit).
+            focusGrid: () => this.takeKeyboardToGridAfterSubmit(),
+            sendDoc: sendLine,
+          })
+          // The command is on the pane's intent queue, ahead of any key that
+          // follows it, and the running fact has not been applied yet. That is
+          // not the held window and not the running command: it is the
+          // interval an unclaimed keyboard must still be read in
+          // (nocx-atpw5.1.20).
+          if (takeKeys) this._submittedAwaitingStart = true
+        } finally {
+          // In a `finally`, and fail-open: a write that threw sent nothing,
+          // and holding the keys anyway would swallow them for the rest of
+          // the session. Late at a prompt is a line the user can see and
+          // erase; silently gone is not.
+          //
+          // A cancelled window holds no keys — the interrupt discarded them —
+          // so this is empty on the withdrawal path by construction, never by
+          // a second rule about which keys a cancelled submission may carry.
+          for (const intent of taken?.keys ?? []) this.sendIntent(intent)
         }
-        submitCommand(doc, {
-          // The deferred half of the handoff to the grid: the synchronous call
-          // above already took the keyboard at commit, and this one only
-          // repairs it if the round trip left it on nobody
-          // (takeKeyboardToGridAfterSubmit).
-          focusGrid: () => this.takeKeyboardToGridAfterSubmit(),
-          sendDoc: sendLine,
-        })
-        // The command is on the pane's intent queue, ahead of any key that
-        // follows it, and the running fact has not been applied yet. That is
-        // not the held window and not the running command: it is the
-        // interval an unclaimed keyboard must still be read in
-        // (nocx-atpw5.1.20).
-        if (takeKeys) this._submittedAwaitingStart = true
       } finally {
-        // In a `finally`, and fail-open: a write that threw sent nothing,
-        // and holding the keys anyway would swallow them for the rest of
-        // the session. Late at a prompt is a line the user can see and
-        // erase; silently gone is not.
-        //
-        // A cancelled window holds no keys — the interrupt discarded them —
-        // so this is empty on the withdrawal path by construction, never by
-        // a second rule about which keys a cancelled submission may carry.
-        for (const intent of taken?.keys ?? []) this.sendIntent(intent)
+        // Written, or withdrawn — either way this submission has RESOLVED,
+        // and whoever is waiting for its delivery may go on.
+        settle()
       }
     }
     if (recordLine === '') {

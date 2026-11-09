@@ -27,11 +27,21 @@
  * So a reading of the log with fewer than five Enters — or with two lines
  * joined — is the bug, not a slow machine.
  *
- * # Nothing is waited out
+ * # The startup interval is HELD, not raced
  *
- * The waits are on product state: the composer the startup interval shows,
- * the empty draft an accepted Enter leaves behind, and the settled
- * conventional notice that releases the held lines.
+ * The fixture is started with `-shell-hold-until`: it does not run the pane's
+ * shell until the spec creates that file. While it is held the far side says
+ * nothing, so no refusal can settle the session's integration axis early and
+ * the composer cannot disappear under the five submits — the interval is the
+ * fixture's to end. The spec submits, asserts the interval is still open, and
+ * only then releases the shell; the refusal that follows is what settles the
+ * session conventional and releases the held lines.
+ *
+ * # Nothing else is waited out
+ *
+ * The waits are on product state — the composer the startup interval shows,
+ * the empty draft an accepted Enter leaves behind, the settled-conventional
+ * notice — and on the fixture's own announcement of its input log.
  */
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -100,10 +110,15 @@ test('an ssh pane on a non-integrated sh runs five composer submits, each its ow
   // shell that sourced the local rc hooks and come up integrated, and this
   // spec's whole premise is a shell that never integrates (shell-mode.spec.ts
   // records the same hazard).
+  // THE HOLD: the pane's shell does not start until this file exists, so the
+  // startup interval below lasts exactly as long as this spec needs and never
+  // races a far-side refusal (review of nocx-evj4b.1.6). The file's absence is
+  // the hold; creating it is the release.
+  const holdPath = path.join(hostRoot, 'release-shell')
   const fixture: SshdFixture = await startSshd({
     home: remoteHome,
     cwd: remoteHome,
-    args: ['-input-log', logRoot, '-shell', 'sh'],
+    args: ['-input-log', logRoot, '-shell', 'sh', '-shell-hold-until', holdPath],
   })
   let profileId: string | null = null
   try {
@@ -145,13 +160,14 @@ test('an ssh pane on a non-integrated sh runs five composer submits, each its ow
 
     // The startup composer coming up is the product's statement that the
     // shell has not proved itself yet — precisely the interval this spec is
-    // about (the pane hides it when the session settles).
+    // about (the pane hides it when the session settles). The shell is held,
+    // so this interval does not end until the release below.
     const editor = page.locator(EDITOR)
+    // The waiting card the startup interval shows: while it is up the shell has
+    // not proved itself, which is the state these submits are made in.
+    const checking = page.getByRole('status', { name: 'Checking this shell…' })
     await expect(editor).toBeVisible({ timeout: 180_000 })
-
-    const logLine = fixture.lines().find((line) => line.startsWith('INPUTLOG='))
-    expect(logLine, 'the fixture never announced an input log for the ssh pane').toBeDefined()
-    const logPath = logLine!.slice('INPUTLOG='.length).split(' ')[0]
+    await expect(checking).toBeVisible({ timeout: 30_000 })
 
     const lines = Array.from({ length: SUBMITS }, (_, i) => `echo plain-${i}`)
     for (const line of lines) {
@@ -163,10 +179,29 @@ test('an ssh pane on a non-integrated sh runs five composer submits, each its ow
       // and the next Enter must be a new command rather than more text
       // appended to this one.
       await expect(editor).toHaveText('')
+      // The interval was open for this submit, and the check we are about to
+      // end says so: if the product had settled it mid-way, this submit would
+      // have gone nowhere and the empty-draft assertion above would have said
+      // which one.
+      await expect(checking).toBeVisible({ timeout: 0 })
     }
 
-    // The session settles conventional and releases every held line, in the
-    // order the person made them.
+    // Release the shell: the far side refuses integration now, the session
+    // settles conventional, and every held line is released in order.
+    writeFileSync(holdPath, '')
+    // The far program's own record of what arrived, announced by the fixture
+    // as soon as the shell it was holding starts.
+    await expect
+      .poll(() => fixture.lines().find((line) => line.startsWith('INPUTLOG=')) ?? '', {
+        timeout: 60_000,
+        message: 'the fixture never announced an input log for the ssh pane',
+      })
+      .not.toBe('')
+    const logPath = fixture
+      .lines()
+      .find((line) => line.startsWith('INPUTLOG='))!
+      .slice('INPUTLOG='.length)
+      .split(' ')[0]
     await expect(page.locator(NOTICE)).toBeVisible({ timeout: 60_000 })
     await expect
       .poll(() => submitsIn(logPath), {

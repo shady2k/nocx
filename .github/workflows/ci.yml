@@ -285,21 +285,16 @@ jobs:
 
       - name: Install golangci-lint
         run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
-      - name: Lint
-        run: golangci-lint run ./...
-
-      # THE TAGGED HALF, as a SECOND pass rather than a tag on the one above:
-      # nocx_local_ssh selects which files EXIST, so adding it would drop
-      # cmd/nocx-helper's `!nocx_local_ssh` pair — the assertion that the
-      # artifact written to a host nobody here controls registers no ssh
-      # service — out of the type-checker instead of adding anything to it.
-      # Scoped to the packages that carry a tagged file, because the tag can
-      # change no other package's compilation. Every one of those files was
-      # unlinted by every job in this workflow until nocx-xk1di, and the list is
-      # the Makefile's (`make ci-local-ssh-split` derives and checks it) for the
-      # same reason the package sets below are.
-      - name: Lint (the local helper's ssh client, nocx_local_ssh)
-        run: golangci-lint run --build-tags=nocx_local_ssh $(make -s print-local-ssh-pkgs)
+      # THE DARWIN FILES, AND ONLY THE FILES THIS PLATFORM ADDS (nocx-ouru5.1.13).
+      # The whole-tree pass that stood here — every package, 278 s of a
+      # 31-minute job spent re-checking what a Linux runner checks as well,
+      # because until this change no Linux job linted at all. ci-linux now runs
+      # that pass (`--build-tags=gtk3`, and the tagged one beside it), so what is
+      # left for the Mac is the packages carrying a darwin build constraint —
+      # the only files a Linux lint cannot see. The set is derived from the
+      # constraints by scripts/mac-only-tests.mjs, not remembered here.
+      - name: Lint (the darwin files, which the Linux lint cannot see)
+        run: golangci-lint run $(make -s print-darwin-pkgs)
 
       - name: Build
         run: go build -tags gtk3 ./...
@@ -334,18 +329,44 @@ jobs:
       # the keystore binding, the socketpair — and nothing else. The header
       # explains why internal/shellintegration is not on that list even though
       # it is the package about macOS's bash.
-      - name: Resolve the OS-specific package set
-        id: pkgs
-        run: echo "list=$(make -s print-os-pkgs)" >> "$GITHUB_OUTPUT"
+      # THE SELECTION IS DERIVED HERE, IN THE JOB THAT RUNS IT (nocx-ouru5.1.13,
+      # review round 4). It used to be committed and re-derived for comparison,
+      # and the two disagreed: the graph is the HOST build's, so a Linux-hosted
+      # analysis is not a Mac's answer, and the comparison could not be diagnosed
+      # from a log that named no difference. Deriving it in the job removes the
+      # comparison — and the drift — by construction: what runs below is what this
+      # build just selected. The two files are build output under build/, never
+      # committed; `make ci-os-split` validates what they hold.
+      - name: Derive the macOS-only test selection
+        run: make mac-selection
 
-      # THE TAGGED SET (nocx-xk1di), resolved the same way and for the same
-      # reason: one owner, asked over `make -s`, so the list this job runs is the
-      # list the Makefile derived from the build constraints. This job's half is
-      # the tagged packages that live in the OS set — internal/app and
-      # internal/helper/session; ci-backend carries the portable half.
-      - name: Resolve the tagged nocx_local_ssh package set
-        id: localssh
-        run: echo "list=$(make -s print-os-local-ssh-pkgs)" >> "$GITHUB_OUTPUT"
+      # DOES the file the tests will read match a fresh derivation? `build/`
+      # persists, so a file from a previous revision — or one edited by hand — is
+      # the one hazard left after generating here, and this names every test it
+      # would add or remove. Generate, then verify; never the other way round.
+      - name: The macOS-only selection is current
+        run: make mac-check
+
+      # THE MACOS-ONLY TESTS, RESOLVED FROM THE SOURCE (nocx-ouru5.1.13).
+      # This job needs neither the OS package set nor the tagged one any more:
+      # the Tagged set's packages are internal/app and internal/helper/session,
+      # whose tagged tests are the ssh client's and run in ci-linux. This
+      # job holds only tests that cannot run without a Mac, and the set is
+      # per TEST rather than per package: `pkgs` is the OS packages that hold at
+      # least one, `run` is the anchored name selection. Both come from
+      # scripts/mac-only-tests.mjs, which derives them from the build
+      # constraints and the committed reachability file; `make ci-os-split`
+      # proves every selected test is darwin-only, reachability-selected or
+      # listed, and no test name is written in this file. The Linux job runs the
+      # whole OS set — a test that reaches a platform seam exercises the LINUX
+      # implementation there, and Linux ships too.
+      - name: Resolve the macOS-only test selection
+        id: mac
+        run: |
+          echo "pkgs=$(make -s print-mac-pkgs)" >> "$GITHUB_OUTPUT"
+          echo "run=$(make -s print-mac-select)" >> "$GITHUB_OUTPUT"
+          echo "tagged_pkgs=$(make -s print-mac-tagged-pkgs)" >> "$GITHUB_OUTPUT"
+          echo "tagged_run=$(make -s print-mac-tagged-select)" >> "$GITHUB_OUTPUT"
 
       - name: The OS split has not drifted
         run: make ci-os-split
@@ -401,56 +422,67 @@ jobs:
           NOCX_REQUIRE_NATIVE_FISH: '1'
         run: scripts/ci-run-logged.sh go-mac-fish go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_framecheck -count=1 -v -run 'TestNativeFish|TestFishComment' ./internal/shellintegration/
 
-      - name: Test (the OS-specific packages, per-test timings)
+      # THE TESTS THIS PLATFORM ALONE CAN RUN (nocx-ouru5.1.13). It used to run
+      # every test of every OS package — internal/app, internal/coordinator,
+      # internal/helper/session and the rest — 502 s of them on run 42580971662,
+      # of which only the darwin-constrained files needed a Mac. Everything else
+      # in this set runs in ci-linux, whose package set is the same list, so the
+      # tests did not move; the selection did.
+      - name: Test (the macOS-only tests, per-test timings)
         env:
-          PKGS: ${{ steps.pkgs.outputs.list }}
+          PKGS: ${{ steps.mac.outputs.pkgs }}
+          RUN: ${{ steps.mac.outputs.run }}
         # Keep go test's JSON stream in the log and summarize test-level pass/fail
         # events per package. Save the raw JSON before summarizing it, so the
         # gate can prove package/test completion and the summarizer cannot hide
         # the runner's exit status or strip its structured evidence.
         run: |
           scripts/ci-run-logged.sh go-mac-os \
-            go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_framecheck -count=1 $PKGS
+            go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_framecheck -count=1 -run "$RUN" $PKGS
           node scripts/summarize-go-test-json.mjs < "$NOCX_TEST_LOG_DIR/go-mac-os.log"
 
-      # THE SECOND PASS. A package whose Go files all carry nocx_local_ssh does
-      # not appear in `go list ./...` at all, so it was not merely failing to be
-      # tested — it was outside every package set this job resolved — and this
-      # machine's helper, the variant with the ssh client linked in, is that
-      # shape. The tag is an ADDITION here rather than added to the run above,
-      # which would stop compiling the untagged build and take the shipped
-      # artifact's own assertion with it.
-      - name: Test (the local helper's ssh client, nocx_local_ssh)
+      # THE TAGGED HALF, AND ONLY ITS OWN TESTS (nocx-ouru5.1.13, review of PR
+      # #776). This used to run every test of internal/app and
+      # internal/helper/session with nocx_local_ssh — 545 s — because the tag is
+      # a second build and the job owned those packages. It runs the TAGGED
+      # selection now: the tests the tagged analysis finds reaching a darwin
+      # implementation (scripts/mac-only-tests-tagged.txt, re-derived by
+      # `make mac-check`), minus the ones the pass above already ran. Nothing is
+      # dropped: the rest of those packages' tagged tests run in ci-linux's
+      # tagged pass, and the tests this one keeps cannot run anywhere else — the
+      # tag is what makes them exist, and on Linux they exercise the linux
+      # bodies. `$^` is printed for an empty selection, which matches nothing; an
+      # empty `-run` would match everything.
+      - name: Test (the macOS-only tests, nocx_local_ssh)
         env:
-          PKGS: ${{ steps.localssh.outputs.list }}
-        run: scripts/ci-run-logged.sh go-mac-local-ssh go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $PKGS
+          PKGS: ${{ steps.mac.outputs.tagged_pkgs }}
+          RUN: ${{ steps.mac.outputs.tagged_run }}
+        run: |
+          if [ -z "$PKGS" ] || [ "$RUN" = '$^' ]; then
+            scripts/ci-run-logged.sh go-mac-local-ssh sh -c 'echo "no macOS-only test needs nocx_local_ssh"'
+            exit 0
+          fi
+          scripts/ci-run-logged.sh go-mac-local-ssh \
+            go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 -run "$RUN" $PKGS
 
       # THE TESTS THIS PULL REQUEST ADDS OR CHANGES, REPEATED (nocx-1ebrs.66.1.37).
       #
-      # The third Go job, because "the changed tests" includes the six
-      # `//go:build darwin` test files no Linux job can compile: ci-backend and
-      # ci-linux partition ./... on Linux, and a change confined to one of
-      # those files would otherwise be repeated nowhere. This job's own OS set
-      # is the filter, exactly as on the other two, so a portable test costs it
-      # nothing. Same 20 runs and the same two passes; no keyring wrapper,
-      # because a Mac has its own keystore and no session bus.
+      # The third Go job, because "the changed tests" includes the darwin test
+      # files no Linux job can compile: a change confined to one of those would
+      # otherwise be repeated nowhere. `--only` is the SAME selection the step
+      # above runs — the repeat follows the job's rule (nocx-ouru5.1.13), so a
+      # changed Linux test is repeated by the job that owns it and not here.
+      # Same 20 runs, one pass; no keyring wrapper, because a Mac has its own
+      # keystore and no session bus.
       - name: Repeat the Go tests this pull request adds or changes
         if: github.event_name == 'pull_request' && needs.changes.outputs.go_tests != ''
         env:
           GO_TESTS: ${{ needs.changes.outputs.go_tests }}
-          PKGS: ${{ steps.pkgs.outputs.list }}
-          LOCAL_SSH_PKGS: ${{ steps.localssh.outputs.list }}
+          PKGS: ${{ steps.mac.outputs.pkgs }}
+          RUN: ${{ steps.mac.outputs.run }}
         run: |
           set -euo pipefail
-          node scripts/changed-tests.mjs run --plan "$GO_TESTS" --packages "$PKGS" --tags gtk3,nocx_framecheck --count 20 --race
-          node scripts/changed-tests.mjs run --plan "$GO_TESTS" --packages "$LOCAL_SSH_PKGS" --tags gtk3,nocx_local_ssh,nocx_framecheck --count 20 --race
-
-      # The shipped profile directory lives behind `-tags release`
-      # (internal/storage/appdir.go), so the ordinary run never compiles it. One
-      # package, one assertion — but without it a typo there ships an app that
-      # cannot find any existing installation's documents.
-      - name: Test (release build tag)
-        run: scripts/ci-run-logged.sh go-mac-release-tag go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -count=1 -tags release ./internal/storage/...
+          node scripts/changed-tests.mjs run --plan "$GO_TESTS" --packages "$PKGS" --tags gtk3,nocx_framecheck --count 20 --race --only "$RUN"
 
       # THE FIRST COMMAND'S BLOCK, ON THE OS IT FAILED ON (nocx-ruf5o). A
       # 0.6.1 build on macOS never settled a fresh tab's first command — the
@@ -517,7 +549,7 @@ jobs:
       - name: Quarantined failures decide this job
         if: always()
         env:
-          NOCX_EXPECTED_STEPS: go-mac-zsh-plugins go-mac-fish go-mac-os go-mac-local-ssh go-mac-release-tag e2e-macos-first-command
+          NOCX_EXPECTED_STEPS: go-mac-zsh-plugins go-mac-fish go-mac-os go-mac-local-ssh e2e-macos-first-command
           NOCX_QUARANTINE_JOB: ci-mac
           NOCX_QUARANTINE_PULL: ${{ github.event.pull_request.number }}
         run: node scripts/quarantine-gate.mjs
@@ -949,6 +981,33 @@ jobs:
       - name: Build
         run: go build -tags gtk3 ./...
 
+      # THE WHOLE-TREE LINT, ON THE PLATFORM THAT CAN DO IT CHEAPLY
+      # (nocx-ouru5.1.13). It ran in ci-mac and nowhere else until this change,
+      # because a Mac was the only job that linted at all — 278 s of a
+      # 31-minute job. The owner's rule is that the Mac holds only what needs a
+      # Mac, so the whole-tree pass moves here (`--build-tags=gtk3`: the Wails
+      # module compiles cgo against WebKitGTK 4.1, and the tag selects that
+      # surface on this runner) and ci-mac keeps the packages carrying a darwin
+      # constraint, the only files this run cannot see.
+      #
+      # ONE MATRIX LEG, for the reason the dead-code ratchet gives below: static
+      # analysis cannot depend on whether a keyring is running.
+      - name: Install golangci-lint
+        if: matrix.keyring == 'no-secret-service'
+        run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
+      - name: Lint
+        if: matrix.keyring == 'no-secret-service'
+        run: golangci-lint run --build-tags=gtk3 ./...
+
+      # THE TAGGED HALF, as a second pass, for the reason ci-mac used to give
+      # for it: nocx_local_ssh selects which files EXIST, so adding it would
+      # drop cmd/nocx-helper's `!nocx_local_ssh` pair out of the type-checker
+      # instead of adding anything to it. The package list is the Makefile's
+      # (`make ci-local-ssh-split` derives and checks it).
+      - name: Lint (the local helper's ssh client, nocx_local_ssh)
+        if: matrix.keyring == 'no-secret-service'
+        run: golangci-lint run --build-tags=gtk3,nocx_local_ssh $(make -s print-local-ssh-pkgs)
+
       # THE DEAD-CODE RATCHET, linux half — the darwin half is in ci-mac, and
       # the comment there carries the argument for why there are two.
       #
@@ -1015,6 +1074,20 @@ jobs:
           echo "=== Running the local helper's ssh tests (nocx_local_ssh) ==="
           scripts/ci-run-logged.sh go-linux-local-ssh go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
 
+      # THE SHIPPED PROFILE DIRECTORY'S OWN PASS, MOVED HERE FROM ci-mac
+      # (nocx-ouru5.1.13). internal/storage lives behind `-tags release`
+      # (appdir.go), so the ordinary run above never compiles it, and ci-mac was
+      # the only job that ran the tagged one — for a reason that is not the
+      # platform's: the release tag is a build dimension, not a macOS one. The
+      # package is in the OS set, so this job already owns its ordinary tests;
+      # this is the one pass it was missing.
+      #
+      # ONE MATRIX LEG, like the ratchet and the lint above: the tagged build
+      # reads no keystore, so the two legs would compute one answer twice.
+      - name: Test (release build tag)
+        if: matrix.keyring == 'no-secret-service'
+        run: scripts/ci-run-logged.sh go-linux-release-tag go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -count=1 -tags release ./internal/storage/...
+
       # THE TESTS THIS PULL REQUEST ADDS OR CHANGES, REPEATED (nocx-1ebrs.66.1.37).
       #
       # ci-backend's twin, on this job's half of ./...: same 20 runs, same two
@@ -1046,7 +1119,7 @@ jobs:
       - name: Quarantined failures decide this job
         if: always()
         env:
-          NOCX_EXPECTED_STEPS: go-linux-fish go-linux go-linux-local-ssh
+          NOCX_EXPECTED_STEPS: ${{ matrix.keyring == 'no-secret-service' && 'go-linux-fish go-linux go-linux-local-ssh go-linux-release-tag' || 'go-linux-fish go-linux go-linux-local-ssh' }}
           NOCX_QUARANTINE_JOB: 'ci-linux (${{ matrix.keyring }})'
           NOCX_QUARANTINE_PULL: ${{ github.event.pull_request.number }}
         run: node scripts/quarantine-gate.mjs

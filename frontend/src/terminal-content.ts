@@ -6522,17 +6522,25 @@ export class TerminalContent extends BasePaneContent {
     if (!sb || !sb.isBorrowedGrid() || this._gridIsBorrowed()) return
     const area = sb.scrollbackArea
     const content = this.liveContentHeight(snapshot)
-    // THE BOX IS THE ONE THE FIT READ, TO THE FRACTION (independent read,
-    // 2026-11-09). `clientHeight` is rounded to a whole CSS pixel and the fit
-    // is not: at a 429.34375px scroller, a 24px margin and 26-device-pixel
-    // cells at DPR 1.5, the release asked 22 rows (381.333px) and this test
-    // measured it against 429 − 48 = 381 — 381.333 > 381, so the frame that
-    // proved the rows fit could never pass, the paint after it failed the same
-    // way, and `inner-borrowed-grid` (with it, the missing margins) stayed for
-    // the rest of the session. One height on both sides, read the same way.
+    // THE QUESTION IS WHOLE ROWS, NOT TWO FLOAT HEIGHTS (independent reads,
+    // 2026-11-09 and round 5). The release asks for rows; the shell redraws
+    // that many; so "does the returning frame fit" is `rows(content) <=
+    // rows(box − margins)`, counted by `gridRows` — the one row computation
+    // with its one epsilon. Comparing pixel heights instead is what failed
+    // twice: `clientHeight` is rounded to a whole CSS pixel while the fit is
+    // fractional (a 429.34375px scroller answered 429, the release asked 22
+    // rows = 381.333px, and 381.333 <= 429 − 48 = 381 was false), and even two
+    // unrounded floats disagree at a row boundary (552px of box, 24px margins,
+    // 28-device-pixel cells at DPR 1.5: 27 rows is 504.00000000000006 against
+    // an available 504). Either way the proof failed on every full-height
+    // frame, so `inner-borrowed-grid` and its missing margins stayed for the
+    // rest of the session. Rows cannot disagree with the fit: it asked for
+    // rows too.
+    const metrics = this.liveCellMetrics()
     const box = this._borrowedBoxPx(area, this._latestViewport)
-    if (content === null || box <= 0) return
-    if (content <= box - 2 * this._paneMarginPx(area)) {
+    if (content === null || metrics === null || box <= 0) return
+    const available = box - 2 * this._paneMarginPx(area)
+    if (gridRows(content, metrics.cellHeight) <= gridRows(available, metrics.cellHeight)) {
       this._borrowedReleased = false
       sb.setBorrowedGrid(false)
     }

@@ -149,7 +149,12 @@ two cases separated, which is what the two earlier records conflated.
   and at a 429.34375px scroller with 26-device-pixel cells at DPR 1.5 the paint
   that proves 22 rows fit compared 381.333 against `429 − 48 = 381` and never
   passed, so the borrowed layout and the missing margins stayed for the rest of
-  the session — the hand-back has to measure its box the way the fit did.
+  the session — the hand-back has to measure its box the way the fit did. And
+  the question is asked in WHOLE ROWS, because two unrounded heights also
+  disagree at a row boundary: 552px of box with 28-device-pixel cells at
+  DPR 1.5 makes 27 rows `504.00000000000006` against an available 504. Both
+  sides are counted with the fit's own `gridRows`, so a frame that fits its
+  rows fits, whatever the floats say.
 - A command that borrowed the alternate screen is drawn in the transcript's
   column from the moment it steps out, at the width its pty still has. Its rows
   are therefore as wide as the pane and the column cuts their right edge — a

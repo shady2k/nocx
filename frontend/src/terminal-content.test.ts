@@ -21446,6 +21446,160 @@ describe('a handed-back grid is measured with one floor (nocx-djx1u)', () => {
       vi.useRealTimers()
     }
   })
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // One box on both sides of the hand-back (nocx-djx1u)
+  // ═══════════════════════════════════════════════════════════════════════════
+  // `clientHeight` is rounded to a whole CSS pixel and the fit is not. The paint
+  // that decides the rows fit inside the margin measured one against the other,
+  // so at a fractional box the frame that proved the fit could never pass — and
+  // every later screenful failed the same way, leaving the borrowed layout and
+  // its missing margins on for the rest of the session. The third independent
+  // read's numbers: a 429.34375px scroller, 24px margins, 26-device-pixel cells
+  // at DPR 1.5 (17.333px). The release asked 22 rows = 381.333px, and
+  // 381.333 <= 429 − 48 = 381 is false.
+  describe('the hand-back measures its box once, to the fraction (nocx-djx1u)', () => {
+    /** The scroller as the browser lays it out, and as it reports it rounded. */
+    const BOX = 429.34375
+    const ROUNDED = 429
+    const MARGIN = 24
+    const DPR = 1.5
+    const CELL = { cellWidthPx: 12, cellHeightPx: 26 }
+    /** What the pane holds with its margin: floor((429.34375 − 48) / 17.333…). */
+    const PANE_ROWS = 22
+    const PANE_COLS = 94
+
+    async function fractionalPane() {
+      const client = makeClient()
+      const mounted = await mountTerminal(makeClipboard(), { attachToDocument: true }, client)
+      const { content, tab } = mounted
+      const raf = globalThis.requestAnimationFrame
+      let queued: FrameRequestCallback[] = []
+      globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+        queued.push(cb)
+        return queued.length
+      }
+      const flushFrames = (): void => {
+        for (let pass = 0; pass < 50 && queued.length > 0; pass++) {
+          const frame = queued
+          queued = []
+          for (const cb of frame) cb(0)
+        }
+      }
+      const teardown = (): void => {
+        queued = []
+        globalThis.requestAnimationFrame = raf
+        mounted.teardown()
+      }
+      try {
+        vi.stubGlobal('devicePixelRatio', DPR)
+        tab.setActive(true)
+        const session = sessionOf(content)
+        const scrollback = scrollbackFor(content)
+        const area = scrollback.scrollbackArea
+        area.style.setProperty('--pane-inline-padding', `${MARGIN}px`)
+        const measured = (): boolean =>
+          scrollback.scrollbackLayout.classList.contains('inner-borrowed-grid')
+        // THE BOX A BROWSER LAYS OUT AND THE BOX IT REPORTS (the one thing jsdom
+        // does not do). `getBoundingClientRect` is fractional and is what the fit
+        // reads; `clientHeight` is the same box rounded, as Chromium and WebKit
+        // both answer it. With the borrowed class on, the layout's padding is
+        // zero and the scroller IS the pane; with it off, the margin is back.
+        Object.defineProperty(area, 'clientWidth', { configurable: true, value: 800 })
+        Object.defineProperty(area, 'clientHeight', {
+          configurable: true,
+          get: () => (measured() ? ROUNDED : ROUNDED - 2 * MARGIN),
+        })
+        Object.defineProperty(area, 'getBoundingClientRect', {
+          configurable: true,
+          value: () => {
+            const height = measured() ? BOX : BOX - 2 * MARGIN
+            return {
+              x: 0,
+              y: 0,
+              top: 0,
+              left: 0,
+              right: 800,
+              bottom: height,
+              width: 800,
+              height,
+              toJSON: () => ({}),
+            } as DOMRect
+          },
+        })
+        content.viewportChanged({ width: 800, height: BOX })
+        scrollback.setUnstructured()
+        session.fireScreenFrame(screenFrame(1, ['$ vim'], CELL))
+        flushFrames()
+        return { content, session, scrollback, flushFrames, teardown }
+      } catch (err) {
+        teardown()
+        vi.unstubAllGlobals()
+        throw err
+      }
+    }
+
+    it('returns the margins on the frame the fractional box proves', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      const { content, session, scrollback, flushFrames, teardown } = await fractionalPane()
+      try {
+        // Setup's own fit is the shell's; its report is not this test's subject.
+        vi.advanceTimersByTime(80)
+        session.sendResize.mockClear()
+
+        const alternate = screenFrame(2, ['ALT-READY'], CELL)
+        alternate.state.bufferKind = 'alternate'
+        session.fireScreenFrame(alternate)
+        flushFrames()
+        expect(scrollback.mode).toBe('fullscreen')
+        session.fireScreenFrame(screenFrame(3, ['$'], CELL))
+        flushFrames()
+        expect(scrollback.scrollbackLayout.classList.contains('inner-borrowed-grid')).toBe(true)
+
+        // The key the finding drives: the release asks for the pane's own grid.
+        session.sendResize.mockClear()
+        typeIntoPane(content, 'x')
+        vi.advanceTimersByTime(80)
+        expect(session.sendResize).toHaveBeenCalledTimes(1)
+        expect(session.sendResize.mock.calls[0][0]).toMatchObject({
+          cols: PANE_COLS,
+          rows: PANE_ROWS,
+        })
+
+        // The shell redraws at that size — a screenful, so the margin waits for
+        // the resize — and this paint is the proof. Its content is
+        // 22 × 17.333 = 381.333px against a box of 429.34375 − 48 = 381.34375:
+        // it fits, and the rounded 429 that `clientHeight` answers does not say
+        // so.
+        session.fireScreenFrame(
+          screenFrame(
+            4,
+            Array.from({ length: PANE_ROWS }, (_, row) => `EXITROW-${row + 1}`),
+            { ...CELL, cols: PANE_COLS, rows: PANE_ROWS },
+          ),
+        )
+        flushFrames()
+        expect(scrollback.scrollbackLayout.classList.contains('inner-borrowed-grid')).toBe(false)
+
+        // …and the ordinary fit that follows asks for the same size, so the
+        // hand-back stays one resize: the shell's redraw may report through the
+        // frame-geometry path too, and that report is the size the pane already
+        // sent, which the wire drops as identical. A second, DIFFERENT size is
+        // the extra resize.
+        vi.advanceTimersByTime(80)
+        const asked = session.sendResize.mock.calls.map((call) => {
+          const size = call[0] as { cols: number; rows: number }
+          return `${size.cols}x${size.rows}`
+        })
+        expect(asked.length).toBeGreaterThan(0)
+        expect(new Set(asked)).toEqual(new Set([`${PANE_COLS}x${PANE_ROWS}`]))
+      } finally {
+        teardown()
+        vi.unstubAllGlobals()
+        vi.useRealTimers()
+      }
+    })
+  })
 })
 
 // ═══════════════════════════════════════════════════════════════════════════

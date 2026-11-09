@@ -144,6 +144,12 @@ two cases separated, which is what the two earlier records conflated.
   so subtracting from it asked a 422px pane with 17px cells for 21 rows where
   it holds 22 — the returning frame then fitted 22, the margin came back, and
   the ordinary fit asked for 22 again, a second resize with no pane change.
+  And the box both sides of that round trip measure is ONE number, the
+  fractional one the fit reads: `clientHeight` is rounded to a whole CSS pixel,
+  and at a 429.34375px scroller with 26-device-pixel cells at DPR 1.5 the paint
+  that proves 22 rows fit compared 381.333 against `429 − 48 = 381` and never
+  passed, so the borrowed layout and the missing margins stayed for the rest of
+  the session — the hand-back has to measure its box the way the fit did.
 - A command that borrowed the alternate screen is drawn in the transcript's
   column from the moment it steps out, at the width its pty still has. Its rows
   are therefore as wide as the pane and the column cuts their right edge — a

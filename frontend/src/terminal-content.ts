@@ -6522,8 +6522,17 @@ export class TerminalContent extends BasePaneContent {
     if (!sb || !sb.isBorrowedGrid() || this._gridIsBorrowed()) return
     const area = sb.scrollbackArea
     const content = this.liveContentHeight(snapshot)
-    if (content === null || area.clientHeight <= 0) return
-    if (content <= area.clientHeight - 2 * this._paneMarginPx(area)) {
+    // THE BOX IS THE ONE THE FIT READ, TO THE FRACTION (independent read,
+    // 2026-11-09). `clientHeight` is rounded to a whole CSS pixel and the fit
+    // is not: at a 429.34375px scroller, a 24px margin and 26-device-pixel
+    // cells at DPR 1.5, the release asked 22 rows (381.333px) and this test
+    // measured it against 429 − 48 = 381 — 381.333 > 381, so the frame that
+    // proved the rows fit could never pass, the paint after it failed the same
+    // way, and `inner-borrowed-grid` (with it, the missing margins) stayed for
+    // the rest of the session. One height on both sides, read the same way.
+    const box = this._borrowedBoxPx(area, this._latestViewport)
+    if (content === null || box <= 0) return
+    if (content <= box - 2 * this._paneMarginPx(area)) {
       this._borrowedReleased = false
       sb.setBorrowedGrid(false)
     }
@@ -6902,12 +6911,29 @@ export class TerminalContent extends BasePaneContent {
    * no pane change. One floor, on the raw box.
    */
   private _releasedFitHeight(area: HTMLElement, viewport: ContentViewport): number {
-    const box = this.scrollback?.paneBoxHeight ?? 0
-    const raw =
-      box > 0 ? box : this._areaHeightPx(area) > 0 ? this._areaHeightPx(area) : viewport.height
-    const height = Math.max(0, raw - 2 * this._paneMarginPx(area))
+    const height = Math.max(0, this._borrowedBoxPx(area, viewport) - 2 * this._paneMarginPx(area))
     const cell = this.liveCellMetrics()?.cellHeight ?? 0
     return cell > 0 ? gridRows(height, cell) * cell : height
+  }
+
+  /**
+   * THE BOX THE HAND-BACK IS MEASURED AGAINST, on BOTH sides of it
+   * (nocx-djx1u). The fit that gives the margin back reads it, and the paint
+   * that decides the rows now fit inside the margin reads it — one expression,
+   * because `clientHeight` is a rounded number and the fit is not: a 429.34375
+   * px scroller answered `429`, the release asked 22 rows (381.333px), and the
+   * frame proving them asked `381.333 <= 429 − 48`, which is false, forever.
+   *
+   * It is the controller's `paneBoxHeight` — the fractional, unrounded box the
+   * live region is sized from — with the two fallbacks the fit has always had:
+   * a measured scroller, then the delivered viewport.
+   */
+  private _borrowedBoxPx(area: HTMLElement, viewport: ContentViewport | null): number {
+    const box = this.scrollback?.paneBoxHeight ?? 0
+    if (box > 0) return box
+    const measured = this._areaHeightPx(area)
+    if (measured > 0) return measured
+    return viewport?.height ?? 0
   }
 
   private usableViewport(viewport: ContentViewport): ContentViewport {

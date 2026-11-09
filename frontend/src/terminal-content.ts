@@ -6286,15 +6286,23 @@ export class TerminalContent extends BasePaneContent {
    * number would only take them away again.
    */
   private _rowsTheScreenPassed(rec: BlockRecord | null): number | null {
-    if (rec === null || rec.outputStart === undefined) return null
+    // THE BLOCK'S FIRST OUTPUT ROW, before and after the frame places it. The
+    // anchor's `row` is already absolute in the shared screen coordinate
+    // (screenRowAnchorLocked emits base + cursorRow), so a delivery that lands
+    // before the frame that places the anchor can still be held against the
+    // painted screen (nocx-4y82c.1.1).
+    const start = rec?.outputStart ?? rec?.outputAnchor?.row
+    if (rec === null || start === undefined) return null
     if (this._attachment.kind !== 'attached' || this._sessionExited) return null
-    if (rec.outputScreen !== this._screenGeneration) return null
+    // The generation the anchor ARRIVED in is the one its row belongs to; the
+    // placed frame's generation is the same one once it lands.
+    if ((rec.outputScreen ?? rec.outputAnchorScreen) !== this._screenGeneration) return null
     const snapshot = this._cellModel?.current()
     if (snapshot === null || snapshot === undefined) return null
     // THE PAINTED SCREEN'S ROW, not the model's: a frame can be accepted and
     // not painted yet, and the body must stop where the grid it is joined to
     // stops. Falls back to the model only before the first paint.
-    const passed = (this._lastPaintedBaseRow ?? snapshot.state.baseRow) - rec.outputStart
+    const passed = (this._lastPaintedBaseRow ?? snapshot.state.baseRow) - start
     // A LIVE SCREEN THAT HAS NOT REACHED THE BLOCK'S ROWS HAS PASSED NONE OF
     // THEM, and zero is the answer: the block opened on a row the screen has
     // not scrolled past yet (the anchor is at or below the base), so every
@@ -10939,6 +10947,12 @@ export class TerminalContent extends BasePaneContent {
       startAnchor ?? undefined,
     )
     this.scrollback.blockManager.bindAttempt(attempt.id)
+    // THE HOLD THE PARKED ROWS CAME WITHOUT (nocx-4y82c.1.1). A stored-rows
+    // response that arrived before this binding was parked without an `upTo`,
+    // and the binding drains it with the whole artifact; sizing the body to the
+    // painted frame in the same task replaces that paint before a frame shows
+    // it, and a quiet command never widens on its own.
+    this._widenRunningRowsToScreen()
     const opened = this.scrollback.blockManager.runningBlock
     if (!opened) return
     // Place the block on the frame it opened on (nocx-zg3k3.32): a command

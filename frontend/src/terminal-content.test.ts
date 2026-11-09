@@ -5502,6 +5502,90 @@ describe('the projections consume the kernel through the composition root (ADR-0
     }
   })
 
+  it('a response that lands before the binding drains under the painted frame hold (nocx-4y82c.1.1)', async () => {
+    // The production path codex found: the rows arrive before the running
+    // fact, so `_refreshBlockRows` parks them without an `upTo` (the running
+    // block does not exist yet), and the binding drains the whole artifact.
+    // The binding now sizes the body to the painted frame in the same task, so
+    // a quiet command does not keep the overlap. The screen has scrolled five
+    // rows; the anchor's absolute row is 3, so two rows have passed.
+    const client = makeClient()
+    client.call.mockImplementation((method: string) => {
+      if (method === 'ledger.get') {
+        return Promise.resolve({
+          entry: {},
+          edges: [],
+          artifacts: [{ id: 'art-late', mediaType: 'application/x-nocx-rows' }],
+        })
+      }
+      if (method === 'ledger.artifact') {
+        const line = (from: number, text: string): string =>
+          `${JSON.stringify({ from, row: wireRowOf([[text, 1, true] as CellSpec]) })}\n`
+        const body = line(0, 'a') + line(1, 'b') + line(2, 'c') + line(3, 'd')
+        return Promise.resolve({
+          id: 'art-late',
+          mediaType: 'application/x-nocx-rows',
+          body,
+          truncated: null,
+          byteLen: body.length,
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      const scrolled = screenFrame(1, ['', '', ''])
+      scrolled.state.baseRow = 5
+      sessionOf(content).fireScreenFrame(scrolled)
+      await flushDisplayFrame()
+
+      // The anchor and the rows both arrive before the block exists.
+      client._fireBlockOutputStart({
+        entryId: 'att-late',
+        row: 3,
+        fromRow: 0,
+        screenRevision: 1,
+        bufferKind: 'normal',
+        bufferInstance: '1',
+        cols: SCREEN_COLS,
+        rows: SCREEN_ROWS,
+      })
+      const blockGrew = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'block.grew',
+      )?.[1] as ((params: unknown) => void) | undefined
+      expect(blockGrew).toBeDefined()
+      blockGrew?.({ entryId: 'att-late' })
+      await vi.waitFor(() =>
+        expect(
+          client.call.mock.calls.filter(([method]) => method === 'ledger.artifact').length,
+        ).toBeGreaterThan(0),
+      )
+      await flushDisplayFrame()
+
+      // The running fact binds the block and drains the parked rows.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-late', state: 'open', origin: 'shell', command: 'ls' },
+      })
+      const block = withScrollback.scrollback.blockManager.runningBlock
+      expect(block).not.toBeNull()
+      expect(block!.el.querySelectorAll(':scope > .cmd-output .term-grid-row').length).toBe(2)
+    } finally {
+      teardown()
+    }
+  })
+
   it('repaints a frozen block with the rows its close made final, so a settled block is whole (nocx-atpw5.1.19)', async () => {
     // THE WINDOW THE CI FAILURE FELL IN. block.closed freezes the card at once
     // and paints it from the rows the last OPEN read returned; the sealed read

@@ -353,7 +353,13 @@ var (
 // shell's own title as the program's and cleared it when the command ended
 // (nocx-ouru5.1.1). Every installed copy must be rewritten: a shell still
 // sourcing 69 loses the title its prompt draws on every command.
-const version = "70"
+// 71: the bash cancel wait reads the interrupt from its own children as well as
+// from the INT trap (nocx-ouru5.1.11). The trap is deferred while a foreground
+// child runs, and CI captured its run being lost outright — the pane printed
+// `interrupt trap: line 2: unexpected EOF while looking for matching ')'` and
+// the open-question wait, which has no deadline, never ended: ^C echoed, then
+// nothing. A shell still sourcing 70 can be left inside a cancelled launch.
+const version = "71"
 
 // ScriptVersion is the integration script version other packages may read.
 // Command discovery puts it in its cache key (internal/commandnames): the

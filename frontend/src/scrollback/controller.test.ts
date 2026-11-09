@@ -1619,3 +1619,99 @@ describe('the scroller box keeps the tail (nocx-1ebrs.40)', () => {
     }
   })
 })
+
+/** jsdom lays nothing out, so a test that is about where rows sit on the glass
+ *  names the rectangles itself: the scroller's box, each row's height, and the
+ *  top edge that moves when something above the reader changes. */
+function rect(top: number, height: number, width = 800): DOMRect {
+  return {
+    top,
+    bottom: top + height,
+    height,
+    left: 0,
+    right: width,
+    width,
+    x: 0,
+    y: top,
+    toJSON: () => ({}),
+  }
+}
+
+/** A transcript the anchor can be taken from: a block with its own body, and —
+ *  when `nested` — a command inside a turn's children, which is where a
+ *  command's rows live when an agent turn owns them (ADR-0040). */
+function transcript(
+  controller: ScrollbackController,
+  options: { nested: boolean },
+): { row: HTMLElement; outer: HTMLElement; move: (by: number) => void } {
+  const outer = document.createElement('div')
+  outer.className = 'cmd-block'
+  const body = document.createElement('div')
+  body.className = 'cmd-output'
+  const row = document.createElement('div')
+  row.className = 'term-grid-row'
+  row.dataset.blockId = 'att-row'
+  row.dataset.logicalLine = '7'
+  let top = 120
+  row.getBoundingClientRect = () => rect(top, 17)
+  if (options.nested) {
+    const children = document.createElement('div')
+    children.className = 'cmd-children'
+    const nestedBlock = document.createElement('div')
+    nestedBlock.className = 'cmd-block cmd-block-running'
+    const nestedBody = document.createElement('div')
+    nestedBody.className = 'cmd-output'
+    nestedBody.appendChild(row)
+    nestedBlock.appendChild(nestedBody)
+    children.appendChild(nestedBlock)
+    outer.appendChild(children)
+    nestedBlock.getBoundingClientRect = () => rect(0, 2000)
+  } else {
+    body.appendChild(row)
+    outer.appendChild(body)
+  }
+  controller.scrollbackInner.appendChild(outer)
+  outer.getBoundingClientRect = () => rect(0, 2000)
+  return { row, outer, move: (by: number) => (top += by) }
+}
+
+/** The scroller, laid out: 1000px into a 4000px transcript whose box is 600px
+ *  tall — a reader away from both ends, which is the state every case here is
+ *  about. */
+function laidOut(controller: ScrollbackController): HTMLElement {
+  const area = controller.scrollbackArea
+  area.getBoundingClientRect = () => rect(0, 600)
+  Object.defineProperty(area, 'scrollHeight', { value: 4000, configurable: true })
+  area.scrollTop = 1000
+  return area
+}
+
+describe("the reader's anchor (nocx-3wmve)", () => {
+  it('names a row inside a nested command, not only a top-level body', () => {
+    const { controller } = makeController()
+    stopFollowing(controller)
+    const area = laidOut(controller)
+    const { move } = transcript(controller, { nested: true })
+
+    controller.holdReaderPlace(() => {
+      move(40)
+      Object.defineProperty(area, 'scrollHeight', { value: 4040, configurable: true })
+    })
+
+    expect(area.scrollTop).toBe(1040)
+  })
+
+  it('holds a reader who is not following across any content change (settleAround)', () => {
+    const { controller } = makeController()
+    stopFollowing(controller)
+    const area = laidOut(controller)
+    const { move } = transcript(controller, { nested: false })
+
+    controller.settleAround(() => {
+      move(60)
+      Object.defineProperty(area, 'scrollHeight', { value: 4060, configurable: true })
+    })
+
+    expect(area.scrollTop).toBe(1060)
+  })
+})

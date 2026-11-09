@@ -1047,9 +1047,11 @@ export class ScrollbackController {
       const box = block.getBoundingClientRect()
       if (box.bottom <= clip.top) continue
       if (box.top >= clip.bottom) break
-      for (const row of block.querySelectorAll<HTMLElement>(
-        ':scope > .cmd-output > .term-grid-row',
-      )) {
+      // EVERY COMMAND'S ROWS UNDER THIS BLOCK, not only its own body: a
+      // command inside a turn lives under `.cmd-children` (ADR-0040), and a
+      // reader scrolled into that output was left with the numeric fallback —
+      // so the freeze of a nested command moved their rows (nocx-3wmve).
+      for (const row of block.querySelectorAll<HTMLElement>('.cmd-output > .term-grid-row')) {
         const cell = row.getBoundingClientRect()
         if (cell.height <= 0) continue
         // The first row that starts inside the viewport: the top of what the
@@ -1116,6 +1118,12 @@ export class ScrollbackController {
    * measured.
    */
   private settleAtTail(mutate: () => void, followIntent = this._followIntent()): void {
+    // A FOLLOWER IS MOVED BY THE END; EVERYBODY ELSE IS MOVED BY THEIR ROWS
+    // (nocx-3wmve). This is the one door every structural change comes through
+    // — a stored-rows delivery growing an earlier block, a nested command
+    // freezing, a header changing — and only the follower branch had an anchor,
+    // so any height that changed above a reader who had scrolled up moved them.
+    const place = followIntent ? null : this._captureReaderPlace()
     mutate()
     // The live box follows the mutation IN THIS TASK. The composer returning
     // takes 130px back from the scroller and the cap is read from that box; a
@@ -1131,7 +1139,10 @@ export class ScrollbackController {
     // `_lastLiveHeightPx` is the height the last paint computed, which is the
     // only one the rows on screen agree with.
     this.setLiveHeight(this._lastLiveHeightPx ?? this._liveContentHeight())
-    if (!followIntent) return
+    if (!followIntent) {
+      if (place !== null) this._restoreReaderPlace(place)
+      return
+    }
     // The observer can report the old sentinel position after this mutation
     // has grown the scroller. The decision is the pre-mutation one.
     this._tail.follow()

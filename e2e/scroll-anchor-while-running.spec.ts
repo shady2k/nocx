@@ -227,14 +227,31 @@ test('a command ending does not move a reader scrolled into its own output', asy
   // A long command: the person reads the middle of ITS output, and then it
   // ends. The last lines arriving and the card freezing are output arriving —
   // nothing about them is the person asking to be moved.
-  await page.keyboard.type('for i in $(seq -f "%03g" 1 300); do echo FAST-$i; done; sleep 3')
+  //
+  // THE END IS THE TEST'S TO RELEASE, NOT A WINDOW'S (nocx-3wmve). A command
+  // that ends on a timer can finish before this test has wheeled and captured
+  // its baseline — and then the baseline is already the frozen card, the wait
+  // below returns at once, and unchanged rows pass without a freeze ever being
+  // observed. The producer blocks on a file this test writes after it has the
+  // running-state baseline, so the sequence is the assertion's, not a race's.
+  const release = path.join(mkdtempSync(path.join(tmpdir(), 'nocx-release-')), 'go')
+  const file = producer('release', [
+    'for i in $(seq -f "%03g" 1 300); do echo FAST-$i; done',
+    `while [ ! -f ${release} ]; do sleep 0.05; done`,
+    'echo FAST-DONE',
+  ])
+  await page.keyboard.type(`bash ${file}`)
   await page.keyboard.press('Enter')
   await waitForText(page, 'FAST-250')
 
   await wheelIntoHistory(page, /FAST-1\d\d/)
   const before = await readerPlace(page)
   const topBefore = await scrollerTop(page)
+  // THE BASELINE IS THE RUNNING CARD'S, and this is the line that says so: the
+  // block is still running when it is read.
+  await expect(page.locator('.pane.active .cmd-block-running')).toHaveCount(1)
 
+  writeFileSync(release, 'go')
   await promptReady(page)
   const after = await readerPlace(page)
   const topAfter = await scrollerTop(page)

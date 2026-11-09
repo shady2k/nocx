@@ -22,15 +22,35 @@ import { windowPet } from '../pets/window-pet'
 import { isAtTail, TailFollow } from './tail-follow'
 export type LiveRegionMode = 'idle' | 'running' | 'fullscreen' | 'unstructured'
 
-/** A reader's place in the transcript, named the way the painted rows are
- *  (nocx-3wmve): the block that holds them and the row's own line in it, with
- *  where that row sat from the scroller's top edge. `blockId`/`logicalLine` are
- *  null when nothing painted in the viewport could be named, and then only the
- *  scroller's own `top` is held. */
+/** WHERE THE PERSON'S EYES ARE (nocx-3wmve): the first element the transcript
+ *  renders whose box starts inside the viewport, named so it can be found again
+ *  after a change.
+ *
+ *  THE IDENTITY IS TWO SCHEMES, because the transcript renders two kinds of
+ *  thing and only one of them carries an identity of its own. A painted output
+ *  row has the record's absolute line (`data-logical-line`, with the block's
+ *  `data-entry-id`): it is the backend's own numbering and does not move while
+ *  a block grows. Everything else — answer prose, a table, a code block, a
+ *  header — has no such mark, and giving every painted node one would be a new
+ *  attribute on every element for one reader's benefit. What IS true of those
+ *  is that a block's flow only ever grows at its end (a stream appends; a
+ *  freeze repaints the same content in order), so an element's ordinal among
+ *  the block's rendered units is stable, and its class signature makes the
+ *  lookup safe when a neighbour is inserted or removed nearby. */
 interface ReaderPlace {
+  /** The block's durable identity (`data-entry-id`), null when it has none. */
   blockId: string | null
-  logicalLine: string | null
+  kind: 'row' | 'unit'
+  /** The record's absolute line, for a row. */
+  line: string | null
+  /** The unit's ordinal among the block's rendered units, for anything else. */
+  index: number
+  /** The unit's class signature, so an ordinal that moved one neighbour can be
+   *  corrected. */
+  signature: string
+  /** Where the element sat, measured from the scroller's top edge. */
   offset: number
+  /** The scroller's own position, for the case no element can be named. */
   top: number
 }
 
@@ -153,6 +173,9 @@ export class ScrollbackController {
    *  `tail-follow.ts`, which owns the same concept for the summoned answer
    *  list — one predicate, one memory, two scrollers. */
   private readonly _tail = new TailFollow()
+  /** A settle is running: a height write inside it is that settle's, not a
+   *  second one. */
+  private _settling = 0
   private _paintWatch = 0
   private _painting = false
   private _followObserver: IntersectionObserver | null = null
@@ -394,9 +417,13 @@ export class ScrollbackController {
     this._idleRequested = false
     this._mode = 'idle'
     // Both inline heights have to go: running content height and its clip
-    // otherwise outrank the idle/fullscreen mode classes.
-    this.terminalLiveContainer.style.height = ''
-    this.terminalLiveViewport.style.height = ''
+    // otherwise outrank the idle/fullscreen mode classes. THE BOX IS PART OF
+    // THE TRANSCRIPT'S HEIGHT (nocx-3wmve): a reader scrolled up keeps their
+    // place across the collapse, and a follower is put back at the end.
+    this._settleHeight(() => {
+      this.terminalLiveContainer.style.height = ''
+      this.terminalLiveViewport.style.height = ''
+    })
     this._setFilledPane(false)
     this.terminalLiveContainer.className =
       'terminal-live-container terminal-live-container live-idle'
@@ -416,8 +443,10 @@ export class ScrollbackController {
     const entering = this._mode !== 'running'
     this._mode = 'running'
     if (entering) {
-      this.terminalLiveContainer.style.height = ''
-      this.terminalLiveViewport.style.height = ''
+      this._settleHeight(() => {
+        this.terminalLiveContainer.style.height = ''
+        this.terminalLiveViewport.style.height = ''
+      })
     }
     this._setFilledPane(false)
     this.terminalLiveContainer.className =
@@ -575,6 +604,7 @@ export class ScrollbackController {
     // of the painted content alone, so releasing the shift cannot move it.
     this._applyShift(px - content)
     const box = `${content + pad}px`
+    const inner = `${content}px`
     // Keep the block's bottom at the bottom of the view — but only on the
     // frames where the box actually CHANGED SIZE. This runs on every chunk of
     // output, and a program that repaints in place changes nothing about the
@@ -582,11 +612,11 @@ export class ScrollbackController {
     // the scroll each time for no reason, which is unpleasant if you are
     // reading. The comparison below is the whole guard.
     if (this.terminalLiveContainer.style.height !== box) {
-      this.terminalLiveContainer.style.height = box
-      if (this._tail.following) this._scrollToBottom()
-    }
-    const inner = `${content}px`
-    if (this.terminalLiveViewport.style.height !== inner) {
+      this._settleHeight(() => {
+        this.terminalLiveContainer.style.height = box
+        this.terminalLiveViewport.style.height = inner
+      })
+    } else if (this.terminalLiveViewport.style.height !== inner) {
       this.terminalLiveViewport.style.height = inner
     }
   }
@@ -1086,7 +1116,7 @@ export class ScrollbackController {
     // intent: a wheel that has not reached the observer yet already moved
     // them, and the intent's own staleness is what the observer exists to
     // absorb. A reader at the live end is the tail rule's, and it is not this
-    // one's business.
+    // one's business (the caller's settle re-pins them).
     if (isAtTail(area)) return null
     const clip = area.getBoundingClientRect()
     // ONLY THE BLOCK THE VIEWPORT'S TOP IS IN, not the whole transcript: a
@@ -1096,66 +1126,99 @@ export class ScrollbackController {
       const box = block.getBoundingClientRect()
       if (box.bottom <= clip.top) continue
       if (box.top >= clip.bottom) break
-      const found = this._readerRowIn(block, clip)
+      const found = this._unitAtViewportTop(block, clip)
       if (found === null) continue
-      const cell = found.getBoundingClientRect()
-      const blockId = found.dataset.blockId
-      const logicalLine = found.dataset.logicalLine
-      if (blockId === undefined || logicalLine === undefined) continue
-      return { blockId, logicalLine, offset: cell.top - clip.top, top: area.scrollTop }
+      const { unit, index } = found
+      const element = unit.getBoundingClientRect()
+      const blockId = block.dataset.entryId ?? null
+      if (unit.classList.contains('term-grid-row') && unit.dataset.logicalLine !== undefined) {
+        return {
+          blockId,
+          kind: 'row',
+          line: unit.dataset.logicalLine,
+          index,
+          signature: '',
+          offset: element.top - clip.top,
+          top: area.scrollTop,
+        }
+      }
+      return {
+        blockId,
+        kind: 'unit',
+        line: null,
+        index,
+        signature: unit.className,
+        offset: element.top - clip.top,
+        top: area.scrollTop,
+      }
     }
-    // Nothing painted in the viewport is a row this can name (the live grid
-    // above the fold, an empty body). The scroller's own position still
-    // survives a shrink that is paid back in the same task.
-    return { blockId: null, logicalLine: null, offset: 0, top: area.scrollTop }
+    // Nothing painted in the viewport can be named (the live grid above the
+    // fold, an empty body). The scroller's own position still survives a
+    // shrink that is paid back in the same task.
+    return {
+      blockId: null,
+      kind: 'unit',
+      line: null,
+      index: -1,
+      signature: '',
+      offset: 0,
+      top: area.scrollTop,
+    }
   }
 
-  /** THE FIRST ROW OF `block` THAT STARTS INSIDE THE VIEWPORT (nocx-3wmve).
+  /** THE FIRST RENDERED UNIT OF `block` THAT STARTS INSIDE THE VIEWPORT
+   *  (nocx-3wmve).
    *
-   * Rows are in document order and laid out one under the next, so their top
+   * A UNIT IS ANYTHING THE TRANSCRIPT RENDERS INSIDE A BODY — a painted row, a
+   * paragraph of answer prose, a table, a code block — because the person reads
+   * whatever is there, and an anchor that only knows rows falls back to the
+   * numeric position over a body made of prose, which is exactly where an
+   * earlier block's freeze then moves them.
+   *
+   * Units are in document order and laid out one under the next, so their top
    * edges are non-decreasing and the first visible one is a bisection: a
    * handful of measurements instead of one per row. Measured on a 50 000-row
    * command, reading near its fortieth thousand: the linear walk took 39 984
    * row measurements on EVERY settle — and a settle is every stored-rows
-   * delivery, every freeze, every header change — while the bisection takes
-   * 17. `document.elementFromPoint` would answer in one call and is not
-   * acceptable: a modal, a menu or the composer over the scroller would name
-   * their element instead of the row.
+   * delivery, every freeze, every header change — while the bisection takes 17.
+   * `document.elementFromPoint` would answer in one call and is not acceptable:
+   * a modal, a menu or the composer over the scroller would name their element
+   * instead of the unit.
    *
-   * EVERY COMMAND'S ROWS UNDER THE BLOCK, not only its own body: a command
-   * inside a turn lives under `.cmd-children` (ADR-0040), and a reader
-   * scrolled into that output was left with the numeric fallback, so the
-   * freeze of a nested command moved their rows. */
-  private _readerRowIn(
+   * EVERY BODY UNDER THE BLOCK, not only a top-level block's own: a command
+   * inside a turn lives under `.cmd-children` (ADR-0040), and a reader scrolled
+   * into that output was left with the numeric fallback, so the freeze of a
+   * nested command moved their rows. */
+  private _unitAtViewportTop(
     block: HTMLElement,
     clip: { top: number; bottom: number },
-  ): HTMLElement | null {
-    const rows = block.querySelectorAll<HTMLElement>('.cmd-output > .term-grid-row')
-    if (rows.length === 0) return null
-    const inView = (index: number): number => rows[index].getBoundingClientRect().top
+  ): { unit: HTMLElement; index: number } | null {
+    const units = block.querySelectorAll<HTMLElement>('.cmd-output > *')
+    if (units.length === 0) return null
+    const topOf = (index: number): number => units[index].getBoundingClientRect().top
     let low = 0
-    let high = rows.length - 1
+    let high = units.length - 1
     let found = -1
     while (low <= high) {
       const mid = (low + high) >> 1
-      if (inView(mid) < clip.top - 0.5) low = mid + 1
+      if (topOf(mid) < clip.top - 0.5) low = mid + 1
       else {
         found = mid
         high = mid - 1
       }
     }
     if (found < 0) return null
-    // A row can be inside the block and still above the fold's top edge only
+    // A unit can be inside the block and still above the fold's top edge only
     // by rounding; walking forward from the bisection's answer is bounded by
-    // the number of rows that start within one row of the edge, and it keeps
-    // the contract the linear walk had (a row that STARTS in the viewport).
-    for (let index = found; index < rows.length; index += 1) {
-      const row = rows[index]
-      const cell = row.getBoundingClientRect()
+    // the units that start within one row of the edge, and it keeps the
+    // contract the linear walk had (a unit that STARTS in the viewport).
+    for (let index = found; index < units.length; index += 1) {
+      const unit = units[index]
+      const cell = unit.getBoundingClientRect()
       if (cell.height <= 0) continue
       if (cell.top < clip.top - 0.5) continue
       if (cell.top >= clip.bottom - 0.5) return null
-      return row
+      return { unit, index }
     }
     return null
   }
@@ -1164,37 +1227,68 @@ export class ScrollbackController {
     const area = this.scrollbackArea
     const max = Math.max(0, area.scrollHeight - area.clientHeight)
     // FIRST THE POSITION THEY CHOSE, as far as the content allows: across a
-    // program's excursion the rows above the reader are the same rows, and
+    // program's excursion the elements above the reader are the same ones, and
     // the scroller was only clamped because the transcript left the flow.
     const top = Math.min(place.top, max)
     if (area.scrollTop !== top) area.scrollTop = top
-    // THEN THE ROW ITSELF, for the case the position alone cannot answer: a
-    // card that changed shape above the reader keeps its row at the same
-    // distance from the top edge.
-    if (place.blockId === null || place.logicalLine === null) return
-    const row = area.querySelector<HTMLElement>(
-      `.cmd-block .cmd-output .term-grid-row[data-block-id="${place.blockId}"]` +
-        `[data-logical-line="${place.logicalLine}"]`,
-    )
-    if (row === null) return
-    const shift = row.getBoundingClientRect().top - area.getBoundingClientRect().top - place.offset
+    // THEN THE ELEMENT ITSELF, for the case the position alone cannot answer: a
+    // card that changed shape above the reader keeps what they were reading at
+    // the same distance from the top edge.
+    const unit = this._findReaderUnit(place)
+    if (unit === null) return
+    const shift = unit.getBoundingClientRect().top - area.getBoundingClientRect().top - place.offset
     if (Math.abs(shift) >= 0.5) area.scrollTop = Math.max(0, area.scrollTop + shift)
   }
 
-  /** Run `mutate` and leave a reader who has scrolled away exactly where they
-   *  were.
+  /** The element a place names, found again in the transcript as it is now. */
+  private _findReaderUnit(place: ReaderPlace): HTMLElement | null {
+    const area = this.scrollbackArea
+    if (place.kind === 'row') {
+      if (place.line === null) return null
+      const selector =
+        place.blockId === null
+          ? `.cmd-output .term-grid-row[data-logical-line="${place.line}"]`
+          : `.cmd-block[data-entry-id="${place.blockId}"] .cmd-output` +
+            ` .term-grid-row[data-logical-line="${place.line}"]`
+      return area.querySelector<HTMLElement>(selector)
+    }
+    if (place.blockId === null || place.index < 0) return null
+    const block = area.querySelector<HTMLElement>(`.cmd-block[data-entry-id="${place.blockId}"]`)
+    if (block === null) return null
+    const units = block.querySelectorAll<HTMLElement>('.cmd-output > *')
+    const matches = (index: number): boolean =>
+      units[index] !== undefined && units[index].className === place.signature
+    if (matches(place.index)) return units[place.index]
+    // THE ORDINAL MOVED BY A NEIGHBOUR (a row removed above, the working dots
+    // taken away): the nearest unit with the same signature is the same thing,
+    // and the search is bounded because a body that shifted by more than this
+    // is a different body.
+    for (let step = 1; step <= 64; step += 1) {
+      if (matches(place.index - step)) return units[place.index - step]
+      if (matches(place.index + step)) return units[place.index + step]
+    }
+    return null
+  }
+
+  /** THE ONE DOOR A CONTENT CHANGE GOES THROUGH (nocx-3wmve).
+   *
+   * Every mutation that can change the transcript's height ends in exactly one
+   * of two settles, and this is the only place that chooses: a reader who is
+   * following is put back at the bottom edge, and a reader who has scrolled up
+   * keeps the element they were reading at the same distance from the top.
+   * There is no third outcome — and no caller that can skip both, which was the
+   * defect: the freeze's swap went through an anchor-only door, so a deferred
+   * freeze landing while the person followed another command grew the
+   * transcript, found no anchor to take at the live end, and left the follower
+   * off it with nothing to re-pin them.
    *
    * The transcript changes shape for reasons that are nobody's gesture: a
    * command ends and its card takes the frozen rhythm, a block is rebuilt, a
-   * body is re-painted. None of that is the person asking to be moved, and the
-   * scroller owns its position (`overflow-anchor: none` is deliberate — one
-   * controller, nocx-6w4z), so the compensation is here rather than left to
-   * the engine. A follower is untouched: their end is the bottom edge, and the
-   * callers that move them (`settleAtTail`) are the ones that own it. */
+   * body is re-painted. The scroller owns its position (`overflow-anchor: none`
+   * is deliberate — one controller, nocx-6w4z), so the settle is here rather
+   * than left to the engine. */
   holdReaderPlace(mutate: () => void): void {
-    const place = this._captureReaderPlace()
-    mutate()
-    if (place !== null) this._restoreReaderPlace(place)
+    this.settleAtTail(mutate)
   }
 
   /**
@@ -1206,7 +1300,39 @@ export class ScrollbackController {
    * scheduled, and no second pass can grow a box this one has already
    * measured.
    */
+  /** A HEIGHT THE TRANSCRIPT WEARS IS A CONTENT CHANGE (nocx-3wmve): the live
+   *  box is hundreds of pixels of the transcript's own height, so writing it
+   *  moves a reader exactly as a block growing does. It goes through the same
+   *  two outcomes as everything else — the bottom edge for a follower, the
+   *  anchor for a reader who is away — but it cannot call `settleAtTail`,
+   *  because `settleAtTail` writes the height itself; inside a settle the outer
+   *  one owns the outcome (`_settling`). */
+  private _settleHeight(write: () => void): void {
+    if (this._settling > 0) {
+      write()
+      return
+    }
+    const following = this._followIntent()
+    const place = following ? null : this._captureReaderPlace()
+    write()
+    if (following) {
+      this._tail.follow()
+      this._scrollToBottom()
+    } else if (place !== null) {
+      this._restoreReaderPlace(place)
+    }
+  }
+
   private settleAtTail(mutate: () => void, followIntent = this._followIntent()): void {
+    this._settling += 1
+    try {
+      this._settleTail(mutate, followIntent)
+    } finally {
+      this._settling -= 1
+    }
+  }
+
+  private _settleTail(mutate: () => void, followIntent: boolean): void {
     // A FOLLOWER IS MOVED BY THE END; EVERYBODY ELSE IS MOVED BY THEIR ROWS
     // (nocx-3wmve). This is the one door every structural change comes through
     // — a stored-rows delivery growing an earlier block, a nested command

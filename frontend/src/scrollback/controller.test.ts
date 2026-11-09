@@ -1779,7 +1779,7 @@ describe("the reader's anchor (nocx-3wmve)", () => {
   it("finds the reader's row in a long block without reading every row (nocx-3wmve)", () => {
     const { controller } = makeController()
     stopFollowing(controller)
-    const area = laidOut(controller)
+    laidOut(controller)
     // A block the size of a long command: rows laid out one under the next,
     // each with a measured top the way the browser answers. The reader is near
     // row 800 of 1 000; every measurement is counted, because that count is the
@@ -1810,6 +1810,82 @@ describe("the reader's anchor (nocx-3wmve)", () => {
     // The row nearest the top edge is row 800 — a linear walk from the block's
     // first row reads ~800 of them; a bisection reads a handful.
     expect(reads, `row measurements for one capture: ${reads}`).toBeLessThanOrEqual(40)
+  })
+
+  /** A body of answer prose: what an agent's turn renders, and nothing a row
+   *  identity can name. The stream appends at the end, so a paragraph's ordinal
+   *  among the body's units is stable while it grows. */
+  function prose(controller: ScrollbackController): {
+    units: HTMLElement[]
+    move: (by: number) => void
+  } {
+    const block = document.createElement('div')
+    block.className = 'cmd-block'
+    block.dataset.entryId = 'att-prose'
+    const body = document.createElement('div')
+    body.className = 'cmd-output'
+    const tops = [0, 40, 80, 120, 160]
+    const units = tops.map((start) => {
+      const line = document.createElement('span')
+      line.className = 'term-line'
+      line.textContent = `paragraph at ${start}`
+      line.getBoundingClientRect = () => rect(start, 40)
+      body.appendChild(line)
+      return line
+    })
+    block.appendChild(body)
+    controller.scrollbackInner.appendChild(block)
+    block.getBoundingClientRect = () => rect(0, 2000)
+    return {
+      units,
+      move: (by: number) => {
+        for (const unit of units) {
+          const previous = unit.getBoundingClientRect.bind(unit)
+          unit.getBoundingClientRect = () => {
+            const box = previous()
+            return rect(box.top + by, box.height)
+          }
+        }
+      },
+    }
+  }
+
+  it('anchors a body of answer prose, which carries no row identity (nocx-3wmve)', () => {
+    const { controller } = makeController()
+    stopFollowing(controller)
+    const area = laidOut(controller)
+    const { move } = prose(controller)
+
+    controller.holdReaderPlace(() => {
+      move(40)
+      Object.defineProperty(area, 'scrollHeight', { value: 4040, configurable: true })
+    })
+
+    // The prose unit nearest the top edge stays where it was read; falling
+    // back to the numeric position leaves it 40px lower on the glass.
+    expect(area.scrollTop).toBe(1040)
+  })
+
+  it('puts a FOLLOWER back at the bottom edge when a change grows the transcript (nocx-3wmve)', () => {
+    const { controller } = makeController()
+    const area = laidOut(controller)
+    area.scrollTop = 4000 - area.clientHeight // at the live end, following
+    // jsdom implements no scrolling: the controller's own `scrollTo` is the
+    // browser's here, exactly as the other tests in this file stand in for it.
+    area.scrollTo = ((options: ScrollToOptions | number) => {
+      const asked = typeof options === 'object' ? Number(options.top) : Number(options)
+      // the browser clamps to what exists; jsdom lays nothing out and does not
+      area.scrollTop = Math.min(asked, area.scrollHeight - area.clientHeight)
+    }) as typeof area.scrollTo
+
+    controller.holdReaderPlace(() => {
+      Object.defineProperty(area, 'scrollHeight', { value: 4100, configurable: true })
+    })
+
+    // One settle, two outcomes: a follower is put back at the end. The freeze's
+    // swap used to be anchor-only, so a deferred freeze under a follower grew
+    // the transcript and left them off the end with nothing to re-pin them.
+    expect(area.scrollTop).toBe(4100 - area.clientHeight)
   })
 
   it('holds a reader who is not following across any content change (settleAround)', () => {

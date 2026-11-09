@@ -1893,6 +1893,11 @@ export class TerminalContent extends BasePaneContent {
    *  revision, never an intermediate one nobody could have seen. */
   private _pendingPaint: ScreenSnapshot | null = null
   private _paintFrameHandle = 0
+  /** The `baseRow` of the frame the grid was last painted from. The body's
+   *  hold is taken against it, never against a fresher model: a frame that
+   *  has been accepted but not painted is not on screen, and a hold taken
+   *  from it paints rows the grid still shows (nocx-4y82c.1.1). */
+  private _lastPaintedBaseRow: number | undefined
   /** The live tier's scrollback surface (nocx-zg3k3.10.4): the rows above
    *  the live rectangle in a session with no shell integration. Created at
    *  mount beside the painter it shares its painter and its measuring
@@ -6209,6 +6214,7 @@ export class TerminalContent extends BasePaneContent {
     // PREVIOUS layout's width, which is the defect. By the time this runs,
     // the fit is the one the pane will actually show (nocx-1ebrs.10).
     this._painter?.apply(this._presentedSnapshot(pending))
+    this._lastPaintedBaseRow = pending.state.baseRow
     // THE BOX AND THE ROWS IT SHOWS ARE ONE PAINT (owner, 2026-11-08: "the
     // room for the new rows is made a frame before the rows are drawn"). The
     // live region's height is derived from the frame being painted — its last
@@ -6285,7 +6291,10 @@ export class TerminalContent extends BasePaneContent {
     if (rec.outputScreen !== this._screenGeneration) return null
     const snapshot = this._cellModel?.current()
     if (snapshot === null || snapshot === undefined) return null
-    const passed = snapshot.state.baseRow - rec.outputStart
+    // THE PAINTED SCREEN'S ROW, not the model's: a frame can be accepted and
+    // not painted yet, and the body must stop where the grid it is joined to
+    // stops. Falls back to the model only before the first paint.
+    const passed = (this._lastPaintedBaseRow ?? snapshot.state.baseRow) - rec.outputStart
     // A LIVE SCREEN THAT HAS NOT REACHED THE BLOCK'S ROWS HAS PASSED NONE OF
     // THEM, and zero is the answer: the block opened on a row the screen has
     // not scrolled past yet (the anchor is at or below the base), so every

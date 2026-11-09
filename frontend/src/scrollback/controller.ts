@@ -133,12 +133,6 @@ export class ScrollbackController {
    *  `tail-follow.ts`, which owns the same concept for the summoned answer
    *  list — one predicate, one memory, two scrollers. */
   private readonly _tail = new TailFollow()
-  /** A reader's place, kept while a full-screen program owns the pane
-   *  (nocx-3wmve): the transcript is out of the flow then, so the position the
-   *  person chose has nothing to hold it until the pane comes back. */
-  private _readerPlaceInProgram: ReaderPlace | null = null
-  /** The follow intent the person had when a program took the pane. */
-  private _tailIntentInProgram: boolean | null = null
   private _paintWatch = 0
   private _painting = false
   private _followObserver: IntersectionObserver | null = null
@@ -298,26 +292,9 @@ export class ScrollbackController {
     if (typeof IntersectionObserver === 'undefined') return
     this._followObserver = new IntersectionObserver(
       (entries) => {
-        // A FULL-SCREEN PROGRAM OWNS THE PANE (nocx-3wmve). The transcript is
-        // out of the flow while it does, so the sentinel's intersection is a
-        // fact about the program's box rather than about where the person is
-        // reading — and for a reader scrolled up it reports "at the live end",
-        // which re-engages following and throws them to the bottom the moment
-        // the pane comes back. The intent is theirs and is kept as it was;
-        // `exitFullscreen` puts their place back.
-        if (this._mode === 'fullscreen') return
         for (const e of entries) {
           const was = this._tail.following
-          // A POSITIVE DELIVERY IS CONFIRMED BY THE GEOMETRY (nocx-3wmve). The
-          // observer answers a frame behind the layout it described, and a
-          // delivery computed while a full-screen program held the pane arrives
-          // after the program has given it back — a stale "the live end is on
-          // screen" for a reader sitting in history. The scroller's own numbers
-          // at delivery time settle it, and they also say whether there is an
-          // end to be at.
-          const area = this.scrollbackArea
-          const atEnd = area.scrollHeight > area.clientHeight && isAtTail(area)
-          this._tail.observe(area, e.isIntersecting && atEnd)
+          this._tail.observe(this.scrollbackArea, e.isIntersecting)
           // The flip, not the delivery: the reader left the live end or
           // returned to it. The live tier's surface drops a stale past and
           // re-arms its paging on the return (nocx-zg3k3.10.4).
@@ -383,15 +360,8 @@ export class ScrollbackController {
     this._announceMode()
   }
 
-  /** Show live output below the running block.
-   *
-   *  `toTail` is the COMMAND-START landing: a block has just opened and the
-   *  person is about to watch it. A layout that merely re-enters this mode is
-   *  not a start — leaving the alternate screen restores the running layout
-   *  with no command beginning — and it must not move a reader who is reading
-   *  history, which is exactly what threw a scrolled-up reader to the end of
-   *  the transcript when a full-screen program left (nocx-3wmve). */
-  setRunning(toTail = true): void {
+  /** Show live output below the running block. */
+  setRunning(): void {
     this._idleRequested = false
     if (this._mode === 'fullscreen') return
     const entering = this._mode !== 'running'
@@ -416,7 +386,7 @@ export class ScrollbackController {
     // Both layers change in the same layout pass: a transition here can still
     // be half-open when a fast command freezes, creating an extra jump.
     this.setLiveHeight(this._liveContentHeight())
-    if (toTail) this._scrollToBottom()
+    this._scrollToBottom()
   }
 
   /** Fill the pane with the live region — for sessions with no shell
@@ -787,18 +757,6 @@ export class ScrollbackController {
    * (ADR-3kqrem7v), preserving the actual header node and its controls. */
   enterFullscreen(): void {
     this._idleRequested = false
-    // THE TRANSCRIPT IS ABOUT TO LEAVE THE FLOW (nocx-3wmve). A full-screen
-    // program takes the pane and every row of the person's history goes to
-    // `display: none`, so the scroller holds nothing to be at and the browser
-    // clamps its position to the top — the reader's place is not restored by
-    // anything when the program hands the pane back. It is read here, while
-    // the rows still have a box, and given back in `exitFullscreen`.
-    this._readerPlaceInProgram = this._captureReaderPlace()
-    // AND THE INTENT THEY HAD (nocx-3wmve): the observer is not listening while
-    // the program owns the pane, and a delivery it computed there must not
-    // decide for them afterwards. The answer they had is given back with
-    // their place.
-    this._tailIntentInProgram = this._tail.following
     this._mode = 'fullscreen'
     this.terminalLiveViewport.style.height = ''
     this.terminalLiveContainer.className =
@@ -899,25 +857,6 @@ export class ScrollbackController {
     this._updateSeparator()
     this._seatLive()
     this._announceMode()
-    // THE ROWS ARE THE PERSON'S AGAIN (nocx-3wmve): the program gave the pane
-    // back, so the place read when it took the pane is put back — the rows
-    // they were reading, at the same distance from the top edge. NEXT FRAME,
-    // not here: the pane's layout settles one pass after this one (the live
-    // box is re-sized by the layout's own pass, and the rows the program's
-    // screen held are committed by later deliveries), and a position put back
-    // into a transcript that is still short of its rows is clamped to what
-    // exists — measured at scrollTop 1062 asked for and 897 landed, the row
-    // 195px below where it was.
-    const place = this._readerPlaceInProgram
-    this._readerPlaceInProgram = null
-    const intent = this._tailIntentInProgram
-    this._tailIntentInProgram = null
-    if (place !== null || intent !== null) {
-      window.requestAnimationFrame(() => {
-        if (intent !== null) this._tail.restore(intent)
-        if (place !== null) this._restoreReaderPlace(place)
-      })
-    }
   }
 
   // ── Command cycle ─────────────────────────────────────────────────────
@@ -1002,13 +941,6 @@ export class ScrollbackController {
    *  that has no layout box — the observer can briefly lose its target during
    *  a layout change. */
   private _followIntent(): boolean {
-    // A PROGRAM THAT OWNS THE PANE IS NOT A READER AT THE LIVE END
-    // (nocx-3wmve). Its transcript is out of the flow, so the scroller holds
-    // only the program's box: "the content fits" is true for a scroller with
-    // nothing to scroll in it, and a settle that trusted that reading re-pins a
-    // person who was scrolled up into history, which is the bottom edge they
-    // get thrown to when the program hands the pane back.
-    if (this._mode === 'fullscreen') return false
     return this._tail.intent(this.scrollbackArea)
   }
 

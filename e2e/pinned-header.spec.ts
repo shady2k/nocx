@@ -32,8 +32,12 @@
  * waits for the marker line the command ended with rather than for a
  * duration.
  */
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import type { Page } from '@playwright/test'
-import { test, expect, promptReady, clickIntoEditor } from './harness'
+import { test, expect, promptReady, clickIntoEditor, resolveBackend } from './harness'
+import { rpc } from './sshd-fixture'
 
 /** Sub-pixel layout and a fractional scrollTop. */
 const TOLERANCE = 1
@@ -618,7 +622,13 @@ test.describe('a tall block keeps its own header at the top of the pane', () => 
     await page.goto('/')
     await promptReady(page)
     const words = Array.from({ length: 120 }, (_, i) => `late-${String(i + 1).padStart(3, '0')}`)
-    const command = `printf "LATE-START\\n"; printf '%s\\n' ${words.join(' ')}; sleep 6`
+    // HELD UNTIL THE TEST RELEASES IT. A sleep is a duration: a slow run would
+    // finish the command before the test has scrolled in and asserted it is
+    // still running. The command spins on a file the test creates, so the
+    // freeze happens at the test's own observable moment.
+    const holdDir = mkdtempSync(path.join(tmpdir(), 'w27-hold-'))
+    const release = path.join(holdDir, 'release')
+    const command = `printf "LATE-START\\n"; printf '%s\\n' ${words.join(' ')}; while [ ! -f '${release}' ]; do sleep 0.05; done`
     await clickIntoEditor(page)
     await page.locator('.pane.active .nocx-editor-input').fill(command)
     await page.keyboard.press('Enter')
@@ -652,8 +662,11 @@ test.describe('a tall block keeps its own header at the top of the pane', () => 
       true,
     )
 
-    // The command ends by itself; the freeze swaps in the tall header. Wait on
-    // the swap, and on the new header being more than a third of the scroller.
+    // RELEASE THE COMMAND: the freeze follows from this, at the test's own
+    // moment, not from a clock.
+    writeFileSync(release, '')
+    // The freeze swaps in the tall header. Wait on the swap, and on the new
+    // header being more than a third of the scroller.
     await expect
       .poll(
         async () => {
@@ -688,5 +701,80 @@ test.describe('a tall block keeps its own header at the top of the pane', () => 
     expect(after.pinned, 'no header is pinned over the output').toHaveLength(0)
     // The command's rows are still there, below where the header sits.
     expect(blockOf(after, command).rows.length).toBeGreaterThan(30)
+    rmSync(holdDir, { recursive: true, force: true })
+  })
+
+  test('a font change re-judges a pinned header without a scroll or a resize', async ({ page }) => {
+    // P2 from the fourth review, and the class it shows: a font change from
+    // Settings re-wraps the header, and the header's own box is the only thing
+    // that changed -- no scroll, no scroller resize. A per-trigger check had
+    // no path here, so an oversized header stayed pinned (and a newly compact
+    // one stayed unpinned). The decision has to follow the header's own size.
+    await page.setViewportSize({ width: 900, height: 720 })
+    await page.goto('/')
+    await promptReady(page)
+    const words = Array.from({ length: 40 }, (_, i) => `word-${String(i + 1).padStart(2, '0')}`)
+    const command = `printf "FONT-START\\n"; printf '%s\\n' ${words.join(' ')}`
+    await clickIntoEditor(page)
+    await page.locator('.pane.active .nocx-editor-input').fill(command)
+    await page.keyboard.press('Enter')
+    await promptReady(page)
+    await outputReady(page, command, 'word-40')
+
+    const rest = await read(page)
+    const block = blockOf(rest, command)
+    // THE PREMISE: at the shipped font this header is compact and it pins.
+    expect(block.header!.height, 'the header is compact at the shipped font').toBeLessThanOrEqual(
+      rest.clientHeight / 3,
+    )
+    await scrollTo(page, block.top + 20)
+    await expect
+      .poll(async () => blockOf(await read(page), command).header?.top ?? null, { timeout: 5_000 })
+      .toBeCloseTo(0, 0)
+    const before = await read(page)
+    const beforeHeader = blockOf(before, command).header!
+    expect(beforeHeader.pinnable, 'it pins at this size').toBe(true)
+    const shipped = await page.evaluate(
+      () => document.documentElement.dataset.terminalFont ?? 'system',
+    )
+
+    try {
+      // THE SETTING, AS SETTINGS WRITES IT. Nordwand Mono is wider: the same
+      // command's header goes from 160px to 180px against a 166px third here.
+      const info = await resolveBackend(page)
+      await rpc(page, info, 'settings.set', {
+        key: 'terminal.fontFamily',
+        value: 'nordwand-mono',
+      })
+      // The re-wrap is the observable state: the header's own height moved.
+      await expect
+        .poll(async () => blockOf(await read(page), command).header?.height ?? null, {
+          timeout: 10_000,
+        })
+        .not.toBe(beforeHeader.height)
+      // AND THE VERDICT FOLLOWS THE NEW SIZE. Before the header observer there
+      // was no trigger here at all, so the attribute was whatever the last
+      // scroll left and the now-oversized header stayed pinned.
+      await expect
+        .poll(
+          async () => {
+            const reading = await read(page)
+            const header = blockOf(reading, command).header!
+            return header.pinnable === header.height <= reading.clientHeight / 3
+          },
+          { timeout: 5_000 },
+        )
+        .toBe(true)
+      const after = await read(page)
+      const afterBlock = blockOf(after, command)
+      // The font change made it oversized, so it may not be the pinned one.
+      expect(afterBlock.header!.height).toBeGreaterThan(after.clientHeight / 3)
+      expect(afterBlock.header!.pinnable, 'the new size is judged, not the old one').toBe(false)
+      expect(after.pinned, 'no oversized header holds the top').toHaveLength(0)
+    } finally {
+      // The stand is shared by every spec in the shard: put the font back.
+      const info = await resolveBackend(page)
+      await rpc(page, info, 'settings.set', { key: 'terminal.fontFamily', value: shipped })
+    }
   })
 })

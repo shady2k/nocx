@@ -485,57 +485,74 @@ describe('ScrollbackController render-fence rendezvous (nocx-u7uh.8)', () => {
     expect(controller.mode).toBe('idle')
   })
 
-  it('re-judges the header after block.closed swaps in the tall frozen one (nocx-4y82c.1.3, P2)', () => {
-    const { renderer } = rendererWithFence()
-    const pane = document.createElement('div')
-    const controller = new ScrollbackController({
-      pane,
-      liveContentHeight: () => renderer.liveContentHeight(),
-      cellMetrics: () => ({ cellWidth: renderer.cellWidth, cellHeight: renderer.cellHeight }),
-      snapshotStore: new CommandSnapshotStore(),
-    })
-    controller.scrollbackArea.scrollTo = vi.fn()
-    Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
-      value: 300,
-      configurable: true,
-    })
-    controller.scrollbackArea.getBoundingClientRect = () =>
-      ({ top: 0, bottom: 300, left: 0, right: 800, width: 800, height: 300 }) as DOMRect
-
-    // THE REPLACEMENT'S OWN TRIGGER, WITHOUT A SCROLL OR A RESIZE. Frames are
-    // queued rather than run, because the geometry the decision reads belongs
-    // to the frozen header, which does not exist until block.closed lands.
-    const queue: FrameRequestCallback[] = []
-    const raf = globalThis.requestAnimationFrame
-    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
-      queue.push(cb)
-      return queue.length
+  it('re-judges a header from its own box, with no scroll and no resize (nocx-4y82c.1.3)', async () => {
+    // ONE MECHANISM: the size observer watches each ledger-level header and
+    // the scroller. A header whose own box changes is judged from that change
+    // alone -- a freeze swapping the element in, a font re-wrapping it, a
+    // newly compact one -- so there is no per-trigger path to miss.
+    class FakeSizeObserver {
+      static latest: FakeSizeObserver | null = null
+      readonly observed = new Set<Element>()
+      private readonly cb: ResizeObserverCallback
+      constructor(cb: ResizeObserverCallback) {
+        this.cb = cb
+        FakeSizeObserver.latest = this
+      }
+      observe(el: Element): void {
+        this.observed.add(el)
+      }
+      unobserve(el: Element): void {
+        this.observed.delete(el)
+      }
+      disconnect(): void {
+        this.observed.clear()
+      }
+      deliver(): void {
+        this.cb([], this)
+      }
     }
+    vi.stubGlobal('ResizeObserver', FakeSizeObserver)
+    const pane = document.createElement('div')
     try {
+      const { renderer } = rendererWithFence()
+      // The judge skips a header that is not in the document; a real pane is.
+      document.body.appendChild(pane)
+      const controller = new ScrollbackController({
+        pane,
+        liveContentHeight: () => renderer.liveContentHeight(),
+        cellMetrics: () => ({ cellWidth: renderer.cellWidth, cellHeight: renderer.cellHeight }),
+        snapshotStore: new CommandSnapshotStore(),
+      })
+      controller.scrollbackArea.scrollTo = vi.fn()
+      Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
+        value: 300,
+        configurable: true,
+      })
+
+      // A running block opens, then block.closed swaps in the frozen one.
       controller.blockManager.startBlock('make', '~', 0)
       controller.blockManager.bindAttempt('att-1')
       controller.setRunning()
-      // The completion is in and the visual boundary waits for block.closed.
       expect(controller.freezeFromAttempt(completedAttempt(FENCE), 2)).toBe(false)
       controller.blockManager.blockClosed('att-1')
-
+      // The stack's childList changed: the mutation observer registers the
+      // header that replaced the running one, and the size observer judges it.
+      await new Promise((resolve) => setTimeout(resolve, 0))
       const block = controller.blockManager.blockForAttempt('att-1')
-      expect(block).not.toBeNull()
-      const el = block!.el
-      const header = el.querySelector<HTMLElement>(':scope > .cmd-header')
-      expect(header).not.toBeNull()
-      // The frozen header is now a tall one: more than a third of the scroller.
-      el.getBoundingClientRect = () =>
-        ({ top: 0, bottom: 400, left: 0, right: 800, width: 800, height: 400 }) as DOMRect
-      header!.getBoundingClientRect = () =>
-        ({ top: 0, bottom: 400, left: 0, right: 800, width: 800, height: 400 }) as DOMRect
-      Object.defineProperty(header!, 'offsetHeight', { value: 400, configurable: true })
+      const header = block!.el.querySelector<HTMLElement>(':scope > .cmd-header')!
+      expect(FakeSizeObserver.latest!.observed.has(header), 'the new header is watched').toBe(true)
+      Object.defineProperty(header, 'offsetHeight', { value: 400, configurable: true })
+      FakeSizeObserver.latest!.deliver()
+      expect(header.getAttribute('data-pinnable'), 'a third of 300 cannot hold 400').toBe('false')
 
-      while (queue.length > 0) queue.shift()!(0)
-      expect(header!.getAttribute('data-pinnable')).toBe('false')
+      // AND THE OTHER DIRECTION: a header that becomes compact is pinnable
+      // again without a scroll, a resize or a freeze.
+      Object.defineProperty(header, 'offsetHeight', { value: 80, configurable: true })
+      FakeSizeObserver.latest!.deliver()
+      expect(header.getAttribute('data-pinnable')).toBeNull()
     } finally {
-      globalThis.requestAnimationFrame = raf
-      controller.blockManager.clearAll()
+      vi.unstubAllGlobals()
+      pane.remove()
     }
   })
 
@@ -1633,14 +1650,18 @@ describe('the scroller box keeps the tail (nocx-1ebrs.40)', () => {
       // The composer's box animated away, the process bar swapped in: the
       // scroller's box changed and no block mutation ran. Following, the
       // live end stays pinned — nothing accumulates below the fold for a
-      // later pin to land as a jump.
-      FakeBoxResizeObserver.latest!.deliver()
+      // later pin to land as a jump. Deliver on the BOX observer: the
+      // pinnability observer is constructed after it and is a different
+      // instance of the same stand-in.
+      const box = (controller as unknown as { _boxResizeObserver: FakeBoxResizeObserver | null })
+        ._boxResizeObserver!
+      box.deliver()
       expect(scrollTo).toHaveBeenCalledWith({ top: 1400, behavior: 'instant' })
 
       // Not following: the box is not the reader's movement to answer.
       scrollTo.mockClear()
       stopFollowing(controller)
-      FakeBoxResizeObserver.latest!.deliver()
+      box.deliver()
       expect(scrollTo).not.toHaveBeenCalled()
     } finally {
       vi.unstubAllGlobals()

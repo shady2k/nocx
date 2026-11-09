@@ -144,12 +144,18 @@ export class ScrollbackController {
   private _paintWatch = 0
   private _painting = false
   private _followObserver: IntersectionObserver | null = null
-  /** The frame that re-decides which header may pin, and the listener that
-   *  asks for it (nocx-4y82c.1.3). */
-  private _pinnableFrame: number | null = null
-  private readonly _onScrollPinnable = (): void => {
-    this._schedulePinnableHeader()
-  }
+  /** ONE MECHANISM for "may this header pin" (nocx-4y82c.1.3): the observer
+   *  watches every ledger-level header's own box and the scroller's, and a
+   *  header's verdict is its own height against a third of the view. There is
+   *  no scroll, freeze or window trigger to add for the next path that re-wraps
+   *  a header -- a font, a theme, a rename, a width change -- because the
+   *  header's own size is what all of them change. */
+  private _sizeObserver: ResizeObserver | null = null
+  private readonly _observedHeaders = new Set<HTMLElement>()
+  /** Keeps the watched set in step with blocks being created, replaced and
+   *  removed. It judges nothing; it only registers the headers the one
+   *  observer watches. */
+  private _headerSetObserver: MutationObserver | null = null
   /** Watches the scroller's own box, so a box the mutation paths know
    *  nothing about still keeps the tail — see the constructor. */
   private _boxResizeObserver: ResizeObserver | null = null
@@ -272,10 +278,6 @@ export class ScrollbackController {
     // box that caused it. Guarded like the observer below: jsdom has none.
     if (typeof ResizeObserver === 'function') {
       this._boxResizeObserver = new ResizeObserver(() => {
-        // A BOX THAT MOVES CAN CHANGE WHAT IS TOO TALL TO PIN: the header's
-        // share is its height against the scroller's own. Re-decide it in the
-        // same observer, before the box's paint.
-        this._schedulePinnableHeader()
         // A SCROLLER THAT CHANGED SIZE RESIZES THE LIVE BOX IN THE SAME TASK
         // (owner, 2026-11-08: "the composer is back, the live grid is cut
         // short mid-row, and a blank band lies between them"). The composer
@@ -291,18 +293,22 @@ export class ScrollbackController {
       this._boxResizeObserver.observe(this.scrollbackArea)
     }
 
-    // A HEADER THAT IS TOO TALL TO BE COMPACT DOES NOT PIN (nocx-4y82c.1.3, P2).
-    // The decision needs the header's own height against the scroller's, which
-    // no WebKit-supported scroll-state query can answer (scroll-state(stuck)
-    // is not in WebKit), so one scroll-driven frame asks it for the block the
-    // top of the view is in. It is one measurement per frame, and the answer
-    // changes an attribute only -- never a box.
-    this.scrollbackArea.addEventListener('scroll', this._onScrollPinnable, { passive: true })
-    // THE WINDOW ITSELF, because a resize while a dialog is open is the case
-    // that failed: the scroller's observer is the usual trigger, and this makes
-    // the re-judgement independent of whether the box's own observer happened
-    // to deliver while the modal was up.
-    window.addEventListener('resize', this._onScrollPinnable, { passive: true })
+    // A HEADER THAT IS TOO TALL TO BE COMPACT DOES NOT PIN (nocx-4y82c.1.3).
+    // ONE MECHANISM: a ResizeObserver watches every ledger-level header and the
+    // scroller, so any path that changes a header's own box is covered -- a
+    // font or theme change re-wraps it, a freeze replaces it, a pane resize
+    // shrinks the view, an expand/collapse changes it. The judge reads the
+    // header's height against a third of the scroller and writes one attribute;
+    // there is no scroll, freeze or window trigger left to miss the next path.
+    if (typeof ResizeObserver === 'function') {
+      this._sizeObserver = new ResizeObserver(() => this._judgeHeaderSizes())
+      this._sizeObserver.observe(this.scrollbackArea)
+    }
+    if (typeof MutationObserver === 'function') {
+      this._headerSetObserver = new MutationObserver(() => this._syncObservedHeaders())
+      this._headerSetObserver.observe(this.scrollbackInner, { childList: true })
+    }
+    this._syncObservedHeaders()
 
     // Whether the end of the live output is on screen. Not "did the last scroll
     // look like a human" — that question has no answer: the `scroll` event does
@@ -1124,15 +1130,6 @@ export class ScrollbackController {
     this.settleAtTail(() => {
       this._applyEchoShift()
     }, followIntent)
-    // THE HEADER WAS REPLACED, SO ITS SIZE IS NEW (nocx-4y82c.1.3, P2). A
-    // running block's 32px one-line header becomes the frozen block's
-    // two-line header, and a long command's wraps taller -- after the
-    // composer's own resize has already settled, so neither a scroll nor the
-    // scroller's ResizeObserver would ask again, and the oversized header
-    // stayed sticky over the rows. The replacement schedules the same check;
-    // there is no second judge, only this trigger for a layout change the
-    // scroll and resize paths cannot see.
-    this._schedulePinnableHeader()
   }
 
   private _updateSeparator(): void {
@@ -1198,73 +1195,50 @@ export class ScrollbackController {
     return false
   }
 
-  /** One frame per scroll: find the block the top of the view is in and decide
-   *  whether its header may pin (nocx-4y82c.1.3). */
-  private _schedulePinnableHeader(): void {
-    if (this._pinnableFrame !== null) return
-    if (typeof requestAnimationFrame !== 'function') return
-    this._pinnableFrame = requestAnimationFrame(() => {
-      this._pinnableFrame = null
-      this._markPinnableHeader()
-    })
+  /** Register the headers the one size observer watches: every block seated
+   *  directly in the transcript contributes its own header. Called whenever
+   *  the stack's children change, so a block created, replaced (a freeze swaps
+   *  the element) or removed is watched from that moment. It does not decide
+   *  anything; `_judgeHeaderSizes` does. */
+  private _syncObservedHeaders(): void {
+    const observer = this._sizeObserver
+    if (observer === null) return
+    const current = new Set(
+      this.scrollbackInner.querySelectorAll<HTMLElement>(':scope > .cmd-block > .cmd-header'),
+    )
+    for (const header of this._observedHeaders) {
+      if (current.has(header)) continue
+      observer.unobserve(header)
+      this._observedHeaders.delete(header)
+    }
+    for (const header of current) {
+      if (this._observedHeaders.has(header)) continue
+      observer.observe(header)
+      this._observedHeaders.add(header)
+    }
+    this._judgeHeaderSizes()
   }
 
-  /** Mark the header at the top as pinnable or not, from its measured share of
-   *  the scroller. An attribute, never a box: the header keeps its place in the
-   *  block's flow whatever the answer, so deciding it moves no row. */
-  private _markPinnableHeader(): void {
-    const header = this._headerAtTheTop()
-    if (header === null) return
-    const fits = headerFitsPinned(header.offsetHeight, this.scrollbackArea.clientHeight)
-    if (fits) header.removeAttribute('data-pinnable')
-    else header.setAttribute('data-pinnable', 'false')
-  }
-
-  /** The header of the ledger-level block the top of the view is in, if one
-   *  owns it. GEOMETRY ONLY, never hit testing (nocx-4y82c.1.3, P2): a modal's
-   *  backdrop is over the pixels while a dialog is open, and `elementFromPoint`
-   *  there answered "no block" -- which is how an oversized header stayed
-   *  pinned through the very resize that should have released it. The ledger's
-   *  own rows are in document order, so their tops are monotonic in one layout
-   *  and a binary search finds the last block at or above the visible top edge
-   *  in O(log n) measurements, whatever is painted on top of the pane. */
-  private _headerAtTheTop(): HTMLElement | null {
-    const area = this.scrollbackArea
-    const sr = area.getBoundingClientRect()
-    // WHAT A PERSON CAN SEE, not the box's declared edges: a window shorter
-    // than the app puts the scroller's own top above the viewport (measured at
-    // a 360px window: `top` -64).
-    const top = Math.max(sr.top, 0)
-    const bottom = Math.min(sr.bottom, window.innerHeight)
-    if (bottom - top < 1) return null
-    const blocks: HTMLElement[] = []
-    for (const child of this.scrollbackInner.children) {
-      if (child instanceof HTMLElement && child.classList.contains('cmd-block')) blocks.push(child)
+  /** Each watched header's verdict: its own height against a third of the
+   *  scroller. Independent of which block owns the top -- the sticky rule
+   *  already gives one pinned header -- so a scroll cannot make it stale, and
+   *  a header that changes size is re-judged by its own observer. The answer
+   *  is one attribute; no box changes. */
+  private _judgeHeaderSizes(): void {
+    const heightPx = this.scrollbackArea.clientHeight
+    for (const header of this._observedHeaders) {
+      if (!header.isConnected) continue
+      if (headerFitsPinned(header.offsetHeight, heightPx)) header.removeAttribute('data-pinnable')
+      else header.setAttribute('data-pinnable', 'false')
     }
-    let low = 0
-    let high = blocks.length - 1
-    let candidate: HTMLElement | null = null
-    while (low <= high) {
-      const mid = (low + high) >> 1
-      if (blocks[mid].getBoundingClientRect().top <= top + 0.5) {
-        candidate = blocks[mid]
-        low = mid + 1
-      } else {
-        high = mid - 1
-      }
-    }
-    // Above the first block there is no transcript row, so no header owns the
-    // top; a block that has scrolled past entirely owns nothing either.
-    if (candidate === null) return null
-    if (candidate.getBoundingClientRect().bottom <= top + 0.5) return null
-    return candidate.querySelector<HTMLElement>(':scope > .cmd-header')
   }
 
   dispose(): void {
-    this.scrollbackArea.removeEventListener('scroll', this._onScrollPinnable)
-    window.removeEventListener('resize', this._onScrollPinnable)
-    if (this._pinnableFrame !== null) cancelAnimationFrame(this._pinnableFrame)
-    this._pinnableFrame = null
+    this._sizeObserver?.disconnect()
+    this._sizeObserver = null
+    this._headerSetObserver?.disconnect()
+    this._headerSetObserver = null
+    this._observedHeaders.clear()
     this._followObserver?.disconnect()
     this._followObserver = null
     this._boxResizeObserver?.disconnect()

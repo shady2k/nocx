@@ -23,16 +23,9 @@ import { test, expect, promptReady } from './harness'
 // saw: the same codepoint drawn with the fallback in the chain against the same
 // codepoint drawn without it is a glyph against the .notdef box.
 
-interface PaneScreenReading {
-  revision: number | null
-  rows: string[]
-}
-
-declare global {
-  interface Window {
-    __nocxPaneScreen?: () => PaneScreenReading | null
-  }
-}
+// window.__nocxPaneScreen is declared ONCE for the e2e project, in
+// e2e/pane-screen.ts (PaneScreenReading); this spec reads the same seam and
+// declares nothing of its own (nocx-15b13).
 
 /** Powerline separator — U+E0B0, three UTF-8 bytes, carried by the fallback. */
 const POWERLINE = '\ue0b0'

@@ -13,26 +13,10 @@
 // Every wait is on the model's revision or rows, never on a duration.
 
 import { test, expect, promptReady } from './harness'
-
-interface PaneGeometry {
-  cols: number
-  rows: number
-  cellWidthPx: number
-  cellHeightPx: number
-}
-
-interface PaneScreenReading {
-  revision: number | null
-  rows: string[]
-  geometry: PaneGeometry | null
-  reported: { cols: number; rows: number; xpixel: number; ypixel: number } | null
-}
-
-declare global {
-  interface Window {
-    __nocxPaneScreen?: () => PaneScreenReading | null
-  }
-}
+// The reading and the one `declare global` for this seam live in
+// e2e/pane-screen.ts (PaneScreenReading): a second declaration of the same
+// window property is a collision across the whole program, not a local
+// override, and it is what broke this suite's typecheck (nocx-15b13).
 
 const nonce = Date.now().toString(36)
 /** The output string only a frame the model installed can carry. */

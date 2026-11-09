@@ -32,6 +32,43 @@
   font-display: swap;
 }
 
+/* Nerd Fonts Symbols, Mono variant, v3.5.1, MIT (nocx-15b13).
+   Unmodified glyphs: the released TTF converted to woff2 with fonttools and
+   committed as that; source and license:
+   public/fonts/nerd-symbols/LICENSE-FONT.txt.
+
+   WHY A FALLBACK AT ALL. A tool that draws its prompt and status line with Nerd
+   Font private-use codepoints — the local omp did, its ssh twin did not — asks
+   for glyphs no text font has, and a terminal that does not carry them draws the
+   empty box the owner reported. Ghostty and other terminals ship these symbols
+   as a built-in fallback for the same reason.
+
+   THE unicode-range IS THE PRIVATE USE AREA AND NOTHING ELSE, so this face is
+   only ever consulted for a codepoint the ledger's own font cannot have: no
+   Latin, no box drawing, no emoji is taken from it, and a private-use codepoint
+   the face does not carry falls through to the families after it. The Mono
+   variant is the one whose glyphs are single-advance, which is what a cell grid
+   wants; the painter normalizes the advance to the cell anyway (run-geometry). */
+@font-face {
+  font-family: 'Nerd Symbols Mono';
+  src: url('/fonts/nerd-symbols/SymbolsNerdFontMono-Regular.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  unicode-range: U+E000-F8FF, U+F0000-FFFFD;
+}
+
+/* THE TERMINAL'S OWN CHAIN, ONE OWNER (nocx-15b13). What a cell is drawn with
+   is the app's mono stack and then the private-use fallback above; nothing is
+   repeated per theme, because the theme owns the mono stack and this composes
+   it. `var()` here resolves against the winning theme's value on the same
+   element, so a theme that names its own family still gets the fallback after
+   it. The measuring probe reads the same token, so a cell is measured by the
+   chain that will paint it. */
+:root {
+  --font-family-terminal: var(--font-family-mono), 'Nerd Symbols Mono';
+}
+
 /* Loaded after themes so an explicit choice overrides their default stack.
    Removing the attribute restores that stack without copying it here. */
 :root[data-terminal-font='nordwand-mono'] {

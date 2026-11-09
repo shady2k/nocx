@@ -298,6 +298,11 @@ export class ScrollbackController {
     // top of the view is in. It is one measurement per frame, and the answer
     // changes an attribute only -- never a box.
     this.scrollbackArea.addEventListener('scroll', this._onScrollPinnable, { passive: true })
+    // THE WINDOW ITSELF, because a resize while a dialog is open is the case
+    // that failed: the scroller's observer is the usual trigger, and this makes
+    // the re-judgement independent of whether the box's own observer happened
+    // to deliver while the modal was up.
+    window.addEventListener('resize', this._onScrollPinnable, { passive: true })
 
     // Whether the end of the live output is on screen. Not "did the last scroll
     // look like a human" — that question has no answer: the `scroll` event does
@@ -1207,34 +1212,48 @@ export class ScrollbackController {
   }
 
   /** The header of the ledger-level block the top of the view is in, if one
-   *  owns it. `elementFromPoint` answers in one hit what a scan of every block
-   *  would answer in hundreds: a pinned header takes the point when it is
-   *  holding the top, a row of its block takes it when it is not. */
+   *  owns it. GEOMETRY ONLY, never hit testing (nocx-4y82c.1.3, P2): a modal's
+   *  backdrop is over the pixels while a dialog is open, and `elementFromPoint`
+   *  there answered "no block" -- which is how an oversized header stayed
+   *  pinned through the very resize that should have released it. The ledger's
+   *  own rows are in document order, so their tops are monotonic in one layout
+   *  and a binary search finds the last block at or above the visible top edge
+   *  in O(log n) measurements, whatever is painted on top of the pane. */
   private _headerAtTheTop(): HTMLElement | null {
-    if (typeof document.elementFromPoint !== 'function') return null
     const area = this.scrollbackArea
     const sr = area.getBoundingClientRect()
     // WHAT A PERSON CAN SEE, not the box's declared edges: a window shorter
     // than the app puts the scroller's own top above the viewport (measured at
-    // a 360px window: `top` -64), and a point outside the window hits nothing.
-    const left = Math.max(sr.left, 0)
+    // a 360px window: `top` -64).
     const top = Math.max(sr.top, 0)
-    const right = Math.min(sr.right, window.innerWidth)
     const bottom = Math.min(sr.bottom, window.innerHeight)
-    if (right - left < 1 || bottom - top < 1) return null
-    // A few pixels inside the row gutter: inside the scroller, outside the
-    // header's own border box, so the point belongs to the block either way.
-    const hit = document.elementFromPoint(left + Math.min(8, (right - left) / 2), top + 1)
-    if (!(hit instanceof Element)) return null
-    let block = hit.closest<HTMLElement>('.cmd-block')
-    while (block !== null && block.parentElement !== this.scrollbackInner) {
-      block = block.parentElement?.closest<HTMLElement>('.cmd-block') ?? null
+    if (bottom - top < 1) return null
+    const blocks: HTMLElement[] = []
+    for (const child of this.scrollbackInner.children) {
+      if (child instanceof HTMLElement && child.classList.contains('cmd-block')) blocks.push(child)
     }
-    return block?.querySelector<HTMLElement>(':scope > .cmd-header') ?? null
+    let low = 0
+    let high = blocks.length - 1
+    let candidate: HTMLElement | null = null
+    while (low <= high) {
+      const mid = (low + high) >> 1
+      if (blocks[mid].getBoundingClientRect().top <= top + 0.5) {
+        candidate = blocks[mid]
+        low = mid + 1
+      } else {
+        high = mid - 1
+      }
+    }
+    // Above the first block there is no transcript row, so no header owns the
+    // top; a block that has scrolled past entirely owns nothing either.
+    if (candidate === null) return null
+    if (candidate.getBoundingClientRect().bottom <= top + 0.5) return null
+    return candidate.querySelector<HTMLElement>(':scope > .cmd-header')
   }
 
   dispose(): void {
     this.scrollbackArea.removeEventListener('scroll', this._onScrollPinnable)
+    window.removeEventListener('resize', this._onScrollPinnable)
     if (this._pinnableFrame !== null) cancelAnimationFrame(this._pinnableFrame)
     this._pinnableFrame = null
     this._followObserver?.disconnect()

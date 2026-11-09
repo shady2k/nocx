@@ -2899,8 +2899,10 @@ export class BlockManager {
    *  `_rowsTheScreenPassed`), and null is the caller saying there is no such
    *  screen any more: the body then takes every row the record holds, and the
    *  hold is forgotten rather than kept for a frame that will not come
-   *  (nocx-djx1u). A number only ever widens the bound — a smaller one
-   *  arriving later must not un-paint rows that are already on screen. */
+   *  (nocx-djx1u). The count is the painted screen's own, so it may also
+   *  FALL: a pane that GROWS pulls rows back out of history onto the top of
+   *  the screen, and the body must stop painting them again or the joint
+   *  shows the same line twice (nocx-4y82c.1.1). */
   applyStoredRows(entryId: string, rows: StoredBlockRows, upTo?: number | null): void {
     const cursor = rows.lines.length > 0 ? rows.lines[rows.lines.length - 1].from : -1
     const seen = this._storedRowsCursor.get(entryId) ?? -1
@@ -2922,16 +2924,18 @@ export class BlockManager {
     }
     rec.storedRows = rows
     rec.rowsUnreadable = undefined
-    // The bound only ever WIDENS. A delivery read before the block was bound
-    // paints everything it holds (`bindAttempt`), so a smaller count arriving
-    // afterwards must not un-paint rows that are already on screen — the
-    // paint's own diff removes what the slice omits. What keeps it from
-    // latching is the caller: the count is offered only while the screen that
-    // supplied the block's row space is still the live one, so a pane whose
-    // screen is over holds nothing and the body takes every row the record
-    // has (nocx-djx1u).
+    // THE COUNT FOLLOWS THE SCREEN, BOTH WAYS. It used to only ever widen,
+    // because a delivery that leads the painted frame must not un-paint rows
+    // the frame still shows — but the screen itself can move the other way:
+    // a pane that grows pulls rows back out of history onto its top, the
+    // painted screen has passed two fewer rows, and a bound that refused to
+    // fall kept the body painting them while the grid showed them again
+    // (measured on webkit under load: `GET-207, GET-208` in the body and the
+    // same two rows at the top of the grid, nocx-4y82c.1.1). The caller is
+    // what makes the smaller count safe: it is offered only from the painted
+    // screen, and the paint's own diff removes what the slice omits.
     if (upTo === null) rec.storedUpTo = undefined
-    else if (upTo !== undefined) rec.storedUpTo = Math.max(rec.storedUpTo ?? 0, upTo)
+    else if (upTo !== undefined) rec.storedUpTo = upTo
     const painted = this._paintedLines(rec)
     if (painted !== null) this.paintStoredRows(rec.el, painted)
   }
@@ -2974,7 +2978,13 @@ export class BlockManager {
    *  screen's generation ends (nocx-djx1u). Answers whether anything was
    *  painted, so the caller holds the tail in the same task. A no-op for a
    *  block that is not running: a frozen body has no live grid to stay
-   *  disjoint from. */
+   *  disjoint from.
+   *
+   *  THE COUNT IS SET, NOT MERGED. This is the painted screen's own answer,
+   *  so a smaller one is the screen taking rows back onto its top (a pane
+   *  that grew) and the body must stop painting them; a merge that only ever
+   *  widened left the same two lines in both bodies for a frame
+   *  (nocx-4y82c.1.1). */
   holdStoredRows(entryId: string, upTo: number | null): boolean {
     const rec = this.blockForAttempt(entryId)
     if (rec === null || rec !== this._runningBlock) return false
@@ -2983,7 +2993,7 @@ export class BlockManager {
       if (rec.storedUpTo === undefined) return false
       rec.storedUpTo = undefined
     } else {
-      if (upTo <= (rec.storedUpTo ?? 0)) return false
+      if (upTo === rec.storedUpTo) return false
       rec.storedUpTo = upTo
     }
     const painted = this._paintedLines(rec)

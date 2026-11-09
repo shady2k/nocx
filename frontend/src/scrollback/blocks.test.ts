@@ -5070,6 +5070,43 @@ describe('backend-owned block rows', () => {
     expect(blockOutputText(frozen.el)).toBe('first \nsecond')
   })
 
+  it('a screen that grows takes its rows back out of the body (nocx-4y82c.1.1)', () => {
+    // A pane that GROWS pulls rows back out of history onto the top of the
+    // screen, so the painted screen has passed two fewer rows of the block.
+    // The body must stop painting them — the grid shows them again, and a
+    // hold that only ever widened left the same two lines in both bodies for
+    // a frame (measured on webkit under load: `GET-207, GET-208` in the body
+    // and the same two rows at the top of the grid).
+    const { manager } = newManager()
+    manager.startBlock('printf rows', '/repo', 0)
+    manager.bindAttempt('entry-stream')
+    const four = {
+      lines: [
+        { from: 0, row: row('first ') },
+        { from: 1, row: row('second') },
+        { from: 2, row: row('third ') },
+        { from: 3, row: row('fourth') },
+      ],
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+    }
+    manager.applyStoredRows('entry-stream', four, 4)
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond\nthird \nfourth')
+
+    // The screen grew by two rows: two rows are back on it, and the body is
+    // one continuous run again only if it stops at the row the screen's top
+    // now names.
+    expect(manager.holdStoredRows('entry-stream', 2)).toBe(true)
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond')
+
+    // And the screen departing them again paints them back in the same task.
+    expect(manager.holdStoredRows('entry-stream', 4)).toBe(true)
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond\nthird \nfourth')
+    // A count that did not move is not a paint.
+    expect(manager.holdStoredRows('entry-stream', 4)).toBe(false)
+  })
+
   it("keeps the body's order: its rows above the live region, on every growth (ADR-0091)", () => {
     // `paintStoredRows` replaces `.cmd-output` on each block.grew, so the rows
     // it appends land after the live region unless the seat is restored with

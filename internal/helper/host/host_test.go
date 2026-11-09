@@ -1380,3 +1380,119 @@ func TestACancelAfterTheAnswerIsWrittenIsNotAWithdrawal(t *testing.T) {
 		t.Fatal("the host never reported what became of the answer")
 	}
 }
+
+// failAfter is a wire that accepts every frame until it is told not to. It
+// stands for a transport that dies between the arbitration and the write — a
+// case no caller can see and only the writer can report.
+type failAfter struct {
+	inner io.Writer
+	mu    sync.Mutex
+	fail  bool
+}
+
+func (w *failAfter) Write(b []byte) (int, error) {
+	w.mu.Lock()
+	fail := w.fail
+	w.mu.Unlock()
+	if fail {
+		return 0, errors.New("broken pipe")
+	}
+	return w.inner.Write(b)
+}
+
+func (w *failAfter) setFail(v bool) {
+	w.mu.Lock()
+	w.fail = v
+	w.mu.Unlock()
+}
+
+// TestAnAnswerWhoseFrameCouldNotBeWrittenIsReportedWithdrawn is the second of
+// the review's findings (nocx-ouru5.1.9): the arbitration decided the answer was
+// delivered, the wire then refused the frame, and the verdict went to the
+// service unchanged — so a session whose id reached nobody was kept for the life
+// of the daemon. "Delivered" means the frame reached the wire; a write that
+// failed reached nobody, and the verdict has to say so.
+func TestAnAnswerWhoseFrameCouldNotBeWrittenIsReportedWithdrawn(t *testing.T) {
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	wire := &failAfter{inner: outW}
+	h := host.New(inR, wire, "hash", "inst", discardLogger())
+	reported := make(chan host.AnswerDelivery, 1)
+	h.Register(&fakeService{
+		name: "test",
+		ops:  map[string]any{"read": struct{}{}},
+		callFn: func(ctx context.Context, op string, params json.RawMessage) (any, error) {
+			return map[string]any{"op": op}, nil
+		},
+		written: func(op string, delivery host.AnswerDelivery) { reported <- delivery },
+	})
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- h.Serve(context.Background()) }()
+	t.Cleanup(func() {
+		_ = inW.Close()
+		<-serveDone
+	})
+
+	// THE HANDSHAKE COMPLETES FIRST, read off the wire, so the failure below is
+	// the ANSWER's and nobody else's.
+	writeFrame(t, inW, proto.TypeHello, mustJSON(proto.Hello{Version: proto.Version, Nonce: "n"}))
+	readSentinel(t, outR)
+	outCh := startReader(t, outR)
+	if f := readFrame(t, outCh); f.ty != proto.TypeHelloOK {
+		t.Fatalf("want HelloOK, got %v", f.ty)
+	}
+	// THE WIRE DIES BEFORE THE ANSWER: from here nothing reaches the peer.
+	wire.setFail(true)
+	writeFrame(t, inW, proto.TypeRequest, mustJSON(proto.Request{ID: 11, Service: "test", Op: "read"}))
+
+	select {
+	case delivery := <-reported:
+		if !delivery.Withdrawn {
+			t.Fatal("an answer whose frame could not be written was reported as delivered to somebody")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the host never reported what became of the answer")
+	}
+}
+
+// TestAnAnswerOnAWireThatHeldIsReportedDelivered is the control: the same
+// request, the same service, a wire that works. The verdict must not be a
+// constant.
+func TestAnAnswerOnAWireThatHeldIsReportedDelivered(t *testing.T) {
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	wire := &failAfter{inner: outW}
+	h := host.New(inR, wire, "hash", "inst", discardLogger())
+	reported := make(chan host.AnswerDelivery, 1)
+	h.Register(&fakeService{
+		name: "test",
+		ops:  map[string]any{"read": struct{}{}},
+		callFn: func(ctx context.Context, op string, params json.RawMessage) (any, error) {
+			return map[string]any{"op": op}, nil
+		},
+		written: func(op string, delivery host.AnswerDelivery) { reported <- delivery },
+	})
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- h.Serve(context.Background()) }()
+	t.Cleanup(func() {
+		_ = inW.Close()
+		<-serveDone
+	})
+
+	writeFrame(t, inW, proto.TypeHello, mustJSON(proto.Hello{Version: proto.Version, Nonce: "n"}))
+	readSentinel(t, outR)
+	outCh := startReader(t, outR)
+	if f := readFrame(t, outCh); f.ty != proto.TypeHelloOK {
+		t.Fatalf("want HelloOK, got %v", f.ty)
+	}
+	writeFrame(t, inW, proto.TypeRequest, mustJSON(proto.Request{ID: 12, Service: "test", Op: "read"}))
+
+	select {
+	case delivery := <-reported:
+		if delivery.Withdrawn {
+			t.Fatal("an answer on a working wire was reported as delivered to nobody")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the host never reported what became of the answer")
+	}
+}

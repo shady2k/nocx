@@ -58,29 +58,45 @@
 //   node scripts/mac-only-tests.mjs darwin-pkgs       ./dir/... for every
 //                                                    package with a darwin file
 //                                                    (the mac lint's set)
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { join, posix, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { dirname } from 'node:path'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
-/** The committed reachability selection `cmd/mactests --write` produces. */
-export const REACHED_FILE = join(ROOT, 'scripts/mac-only-tests.txt')
+/**
+ * The reachability selection `cmd/mactests --write` produces, under build/ — it
+ * is BUILD OUTPUT, not a committed copy (review of PR #776, round 4): the
+ * analysis is the host build's, so only a Mac's own run answers for a Mac, and
+ * ci-mac derives what it runs instead of comparing against another platform's
+ * answer. Absent here (Linux, or a Mac before its derivation) means "no
+ * reachability part", and the checks over it are skipped rather than failed.
+ */
+export const REACHED_FILE = join(ROOT, 'build/mac-only-tests.txt')
 
 /** The same for the TAGGED pass: the analysis differs, because nocx_local_ssh
  * adds files. A tagged test can reach a darwin implementation just as an
  * untagged one can, and the tagged pass on the Mac is where it runs. */
-export const REACHED_TAGGED_FILE = join(ROOT, 'scripts/mac-only-tests-tagged.txt')
+export const REACHED_TAGGED_FILE = join(ROOT, 'build/mac-only-tests-tagged.txt')
 
-/** The reachability entries, as `pkg<TAB>name` pairs. Comments are skipped. */
-export function reachedSelection(text = readFileSync(REACHED_FILE, 'utf8')) {
+/** The reachability entries, as `pkg<TAB>name` pairs. Comments are skipped; a
+ * file that does not exist is an empty selection, not an error. */
+export function reachedSelection(text = readSelectionFile(REACHED_FILE)) {
   return parseReached(text)
 }
 
 /** The TAGGED pass's reachability entries, same shape. */
-export function reachedTaggedSelection(text = readFileSync(REACHED_TAGGED_FILE, 'utf8')) {
+export function reachedTaggedSelection(text = readSelectionFile(REACHED_TAGGED_FILE)) {
   return parseReached(text)
+}
+
+function readSelectionFile(path) {
+  try {
+    return readFileSync(path, 'utf8')
+  } catch {
+    return ''
+  }
 }
 
 function parseReached(text) {
@@ -88,7 +104,8 @@ function parseReached(text) {
   for (const line of text.split('\n')) {
     if (line === '' || line.startsWith('#')) continue
     const at = line.indexOf('\t')
-    if (at <= 0) throw new Error(`mac-only-tests.txt: a line is not pkg<TAB>test: ${JSON.stringify(line)}`)
+    if (at <= 0)
+      throw new Error(`mac-only-tests.txt: a line is not pkg<TAB>test: ${JSON.stringify(line)}`)
     out.push({ pkg: line.slice(0, at), name: line.slice(at + 1) })
   }
   return out
@@ -96,8 +113,22 @@ function parseReached(text) {
 
 /** Every GOOS token the compiler knows, as the build constraint spells them. */
 export const GOOS = [
-  'aix', 'android', 'darwin', 'dragonfly', 'freebsd', 'hurd', 'illumos', 'ios',
-  'js', 'linux', 'netbsd', 'openbsd', 'plan9', 'solaris', 'wasip1', 'windows',
+  'aix',
+  'android',
+  'darwin',
+  'dragonfly',
+  'freebsd',
+  'hurd',
+  'illumos',
+  'ios',
+  'js',
+  'linux',
+  'netbsd',
+  'openbsd',
+  'plan9',
+  'solaris',
+  'wasip1',
+  'windows',
   // Not a GOOS, and the reason it is here: `unix` is satisfied by linux too, so
   // a test behind `//go:build unix` must never be called macOS-only.
   'unix',
@@ -125,7 +156,9 @@ export function buildConstraint(text) {
 /** The test functions a file declares, in source order, TestMain excluded. */
 export function testNames(text) {
   const out = []
-  for (const match of text.matchAll(/^func (Test[A-Za-z0-9_]*|Example[A-Za-z0-9_]*|Fuzz[A-Za-z0-9_]*|Benchmark[A-Za-z0-9_]*)\(/gm)) {
+  for (const match of text.matchAll(
+    /^func (Test[A-Za-z0-9_]*|Example[A-Za-z0-9_]*|Fuzz[A-Za-z0-9_]*|Benchmark[A-Za-z0-9_]*)\(/gm,
+  )) {
     if (match[1] !== 'TestMain') out.push(match[1])
   }
   return out
@@ -174,7 +207,10 @@ export function testBodies(text) {
   const out = new Map()
   const parts = text.split(/^(?=func )/m)
   for (const part of parts) {
-    const match = /^func (Test[A-Za-z0-9_]*|Example[A-Za-z0-9_]*|Fuzz[A-Za-z0-9_]*|Benchmark[A-Za-z0-9_]*)\(/.exec(part)
+    const match =
+      /^func (Test[A-Za-z0-9_]*|Example[A-Za-z0-9_]*|Fuzz[A-Za-z0-9_]*|Benchmark[A-Za-z0-9_]*)\(/.exec(
+        part,
+      )
     if (match && match[1] !== 'TestMain') out.set(match[1], part)
   }
   return out
@@ -290,7 +326,8 @@ export function checkPartition(dirs, taggedDirs = []) {
       const text = readFileSync(join(ROOT, file.path), 'utf8')
       if (!darwinOnlyFile(file.name, text)) continue
       if (testNames(text).length === 0) continue
-      if (!wanted.has(dir)) failures.push(`${file.path} is darwin-only and ${dir} is not in OS_PKG_DIRS`)
+      if (!wanted.has(dir))
+        failures.push(`${file.path} is darwin-only and ${dir} is not in OS_PKG_DIRS`)
     }
   }
 
@@ -298,25 +335,34 @@ export function checkPartition(dirs, taggedDirs = []) {
   // must not be behind the other build tag this repository partitions by.
   for (const entry of LISTED) {
     const files = goFiles(entry.pkg).filter((file) => file.name.endsWith('_test.go'))
-    const hit = files.find((file) => testBodies(readFileSync(join(ROOT, file.path), 'utf8')).has(entry.name))
+    const hit = files.find((file) =>
+      testBodies(readFileSync(join(ROOT, file.path), 'utf8')).has(entry.name),
+    )
     if (!hit) {
       failures.push(`LISTED names ${entry.pkg} ${entry.name}, which no test file declares`)
       continue
     }
     const text = readFileSync(join(ROOT, hit.path), 'utf8')
     if (darwinOnlyFile(hit.name, text)) {
-      failures.push(`LISTED names ${entry.pkg} ${entry.name}, which its file already derives; drop the entry`)
+      failures.push(
+        `LISTED names ${entry.pkg} ${entry.name}, which its file already derives; drop the entry`,
+      )
     }
     if (/nocx_local_ssh/.test(buildConstraint(text) ?? '')) {
       failures.push(`LISTED names ${entry.pkg} ${entry.name}, which lives behind nocx_local_ssh`)
     }
     if (linuxOnlyFile(hit.name, text)) {
-      failures.push(`LISTED names ${entry.pkg} ${entry.name}, which the darwin build does not compile`)
+      failures.push(
+        `LISTED names ${entry.pkg} ${entry.name}, which the darwin build does not compile`,
+      )
     }
     if (!selfDeclaredDarwin(testBodies(text).get(entry.name))) {
-      failures.push(`LISTED names ${entry.pkg} ${entry.name}, whose body does not guard on GOOS != "darwin" with a skip`)
+      failures.push(
+        `LISTED names ${entry.pkg} ${entry.name}, whose body does not guard on GOOS != "darwin" with a skip`,
+      )
     }
-    if (!wanted.has(entry.pkg)) failures.push(`LISTED names ${entry.pkg}, which is not in OS_PKG_DIRS`)
+    if (!wanted.has(entry.pkg))
+      failures.push(`LISTED names ${entry.pkg}, which is not in OS_PKG_DIRS`)
   }
 
   // EVERY COMMITTED TAGGED ENTRY obeys the same rules, against the tagged
@@ -327,11 +373,15 @@ export function checkPartition(dirs, taggedDirs = []) {
     const declared = declaredTests(entry.pkg)
     const hit = declared.get(entry.name)
     if (!hit) {
-      failures.push(`mac-only-tests-tagged.txt names ${entry.pkg} ${entry.name}, which no test file declares`)
+      failures.push(
+        `mac-only-tests-tagged.txt names ${entry.pkg} ${entry.name}, which no test file declares`,
+      )
       continue
     }
     if (darwinOnlyFile(hit.file, hit.text) || linuxOnlyFile(hit.file, hit.text)) {
-      failures.push(`mac-only-tests-tagged.txt names ${entry.pkg} ${entry.name}, which the file rule already owns`)
+      failures.push(
+        `mac-only-tests-tagged.txt names ${entry.pkg} ${entry.name}, which the file rule already owns`,
+      )
     }
   }
 
@@ -343,14 +393,20 @@ export function checkPartition(dirs, taggedDirs = []) {
     const declared = declaredTests(entry.pkg)
     const hit = declared.get(entry.name)
     if (!hit) {
-      failures.push(`mac-only-tests.txt names ${entry.pkg} ${entry.name}, which no test file declares`)
+      failures.push(
+        `mac-only-tests.txt names ${entry.pkg} ${entry.name}, which no test file declares`,
+      )
       continue
     }
     if (darwinOnlyFile(hit.file, hit.text)) {
-      failures.push(`mac-only-tests.txt names ${entry.pkg} ${entry.name}, which its file already derives; drop the entry`)
+      failures.push(
+        `mac-only-tests.txt names ${entry.pkg} ${entry.name}, which its file already derives; drop the entry`,
+      )
     }
     if (linuxOnlyFile(hit.file, hit.text)) {
-      failures.push(`mac-only-tests.txt names ${entry.pkg} ${entry.name}, which the darwin build does not compile`)
+      failures.push(
+        `mac-only-tests.txt names ${entry.pkg} ${entry.name}, which the darwin build does not compile`,
+      )
     }
   }
 
@@ -360,7 +416,9 @@ export function checkPartition(dirs, taggedDirs = []) {
   for (const entry of mac.values()) {
     const where = seen.get(entry.name) ?? []
     if (where.length > 1) {
-      failures.push(`${entry.name} is selected as macOS-only but is declared by ${where.join(', ')}`)
+      failures.push(
+        `${entry.name} is selected as macOS-only but is declared by ${where.join(', ')}`,
+      )
     }
   }
 
@@ -388,7 +446,11 @@ export function macSelector(dirs) {
  * code, under nocx_local_ssh: the Mac runs those with the tag, and only those.
  */
 export function macTaggedOnly(osDirs, taggedDirs) {
-  const untagged = new Set(macOnly(osDirs).derived.concat(macOnly(osDirs).reached).map((entry) => entry.name))
+  const untagged = new Set(
+    macOnly(osDirs)
+      .derived.concat(macOnly(osDirs).reached)
+      .map((entry) => entry.name),
+  )
   const reached = reachedTaggedSelection().filter((entry) => taggedDirs.includes(entry.pkg))
   return reached.filter((entry) => !untagged.has(entry.name))
 }
@@ -430,7 +492,9 @@ function main(argv) {
     argv = argv.slice(0, at)
   }
   const [command, ...rest] = argv
-  const dirs = rest.map((dir) => relative(ROOT, join(ROOT, dir.replace(/^\.\//, ''))).replaceAll('\\', '/')).filter(Boolean)
+  const dirs = rest
+    .map((dir) => relative(ROOT, join(ROOT, dir.replace(/^\.\//, ''))).replaceAll('\\', '/'))
+    .filter(Boolean)
   switch (command) {
     case 'check': {
       const failures = checkPartition(dirs, taggedDirs)

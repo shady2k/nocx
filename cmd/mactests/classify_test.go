@@ -72,3 +72,31 @@ func TestADarwinOnlyFileSTestsAreDerivedNotReached(t *testing.T) {
 		t.Errorf("the darwin-only test file's other test is not named either")
 	}
 }
+
+// SUBTEST CALLBACKS ARE PART OF THE TEST (review of PR #776, round 4). A t.Run
+// callback is not a call edge the graph has: its callee is testing.T.Run, whose
+// body is a dependency's and is not part of this analysis, and the callback
+// arm6 reaches the darwin implementation directly. internal/pty's
+// TestClose_EndsAnInteractiveShell and TestRunCancellationWakesActualReadAndInput
+// are both of that shape — their callbacks call NewLocal and the wake pipe — and
+// both were missing from the selection. The walk follows function values passed
+// as arguments (and goroutine bodies, which arrive the same way) for that
+// reason.
+func TestSubtestCallbacksAreFollowed(t *testing.T) {
+	for _, want := range []struct{ dir, test string }{
+		{"internal/pty", "TestClose_EndsAnInteractiveShell"},
+		{"internal/helper/fishchannel", "TestRunCancellationWakesActualReadAndInput"},
+	} {
+		got, err := deriveDir(want.dir, splitTags(defaultTags))
+		if err != nil {
+			t.Fatalf("deriveDir %s: %v", want.dir, err)
+		}
+		selected := map[string]bool{}
+		for _, entry := range got {
+			selected[entry.test] = true
+		}
+		if !selected[want.test] {
+			t.Errorf("%s %s is not selected: its t.Run callback reaches a darwin implementation (the pty master and wake pipe), and the walk did not follow the callback", want.dir, want.test)
+		}
+	}
+}

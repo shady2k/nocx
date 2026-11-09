@@ -131,14 +131,56 @@ func main() {
 		}
 		fmt.Fprintf(os.Stderr, "mactests: wrote %d test(s) to %s\n", len(selection), *write)
 	case *check != "":
+		// AND IT SAYS WHAT WOULD CHANGE, by name, because "not current" with no
+		// difference is a report nobody can act on (measured: the first macOS run
+		// of this check said exactly that, and the fix took a second round).
 		current, err := os.ReadFile(*check)
 		if err != nil {
+			if os.IsNotExist(err) {
+				fmt.Fprintf(os.Stderr, "mactests: %s does not exist; `make mac-selection` writes it\n", *check)
+				os.Exit(1)
+			}
 			fmt.Fprintf(os.Stderr, "mactests: %v\n", err)
 			os.Exit(1)
 		}
-		if string(current) != rendered {
-			fmt.Fprintf(os.Stderr,
-				"mactests: %s is not the current selection.\nRegenerate it and commit it:\n\n    make mac-only-tests\n\n", *check)
+		have := map[entry]bool{}
+		for _, line := range strings.Split(string(current), "\n") {
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			pkg, test, ok := strings.Cut(line, "\t")
+			if !ok {
+				fmt.Fprintf(os.Stderr, "mactests: %s holds a line that is not pkg<TAB>test: %q\n", *check, line)
+				os.Exit(1)
+			}
+			have[entry{pkg: pkg, test: test}] = true
+		}
+		want := map[entry]bool{}
+		for _, e := range selection {
+			want[e] = true
+		}
+		var added, removed []entry
+		for e := range want {
+			if !have[e] {
+				added = append(added, e)
+			}
+		}
+		for e := range have {
+			if !want[e] {
+				removed = append(removed, e)
+			}
+		}
+		if len(added)+len(removed) > 0 {
+			sort.Slice(added, func(i, j int) bool { return lessEntry(added[i], added[j]) })
+			sort.Slice(removed, func(i, j int) bool { return lessEntry(removed[i], removed[j]) })
+			fmt.Fprintf(os.Stderr, "mactests: %s differs from this build's derivation (%d to add, %d to remove):\n", *check, len(added), len(removed))
+			for _, e := range added {
+				fmt.Fprintf(os.Stderr, "+ %s\t%s\n", e.pkg, e.test)
+			}
+			for _, e := range removed {
+				fmt.Fprintf(os.Stderr, "- %s\t%s\n", e.pkg, e.test)
+			}
+			fmt.Fprintf(os.Stderr, "\n`make mac-selection` rewrites it from this build.\n")
 			os.Exit(1)
 		}
 		fmt.Fprintf(os.Stderr, "mactests: %s is current (%d test(s))\n", *check, len(selection))
@@ -168,6 +210,14 @@ func splitTags(tags string) []string {
 type entry struct {
 	pkg  string
 	test string
+}
+
+// lessEntry orders a selection the way every file here is ordered.
+func lessEntry(a, b entry) bool {
+	if a.pkg != b.pkg {
+		return a.pkg < b.pkg
+	}
+	return a.test < b.test
 }
 
 func render(selection []entry, tags string) string {
@@ -251,7 +301,7 @@ func classify(dir string, tags []string) (fileSets, error) {
 	}
 	for _, name := range darwinRegular {
 		if !onLinux[name] {
-			sets.darwinImpl = append(sets.darwinImpl, filepath.Join(dir, name))
+			sets.darwinImpl = append(sets.darwinImpl, filepath.Join(repoRoot, dir, name))
 		}
 	}
 	for _, name := range darwinTests {
@@ -419,12 +469,7 @@ func derive(dirs []string, tags string) ([]entry, error) {
 	for e := range selected {
 		out = append(out, e)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].pkg != out[j].pkg {
-			return out[i].pkg < out[j].pkg
-		}
-		return out[i].test < out[j].test
-	})
+	sort.Slice(out, func(i, j int) bool { return lessEntry(out[i], out[j]) })
 	return out, nil
 }
 
@@ -565,6 +610,25 @@ func reachesDarwin(
 	}
 	seen := map[*callgraph.Node]bool{root: true}
 	queue := []*callgraph.Node{root}
+	// enqueue follows a FUNCTION VALUE the test hands to something else — a
+	// t.Run callback, a goroutine body — which no call edge reaches: the callee
+	// of that call is testing.T.Run (a dependency, whose body this analysis does
+	// not have), and the callback is only an argument. Without this, a test whose
+	// whole subject lives in its subtests is invisible to the walk — measured on
+	// internal/pty's TestClose_EndsAnInteractiveShell and
+	// TestRunCancellationWakesActualReadAndInput, whose callbacks call NewLocal
+	// and the wake pipe, and which the selector therefore dropped.
+	enqueue := func(fn *ssa.Function) {
+		if fn == nil {
+			return
+		}
+		node := graph.Nodes[fn]
+		if node == nil || seen[node] {
+			return
+		}
+		seen[node] = true
+		queue = append(queue, node)
+	}
 	for len(queue) > 0 {
 		node := queue[0]
 		queue = queue[1:]
@@ -573,6 +637,25 @@ func reachesDarwin(
 		}
 		if darwinName(node.Func) || referencesDarwinVar(node.Func, names) {
 			return true
+		}
+		for _, block := range node.Func.Blocks {
+			for _, instr := range block.Instrs {
+				for _, operand := range instr.Operands(nil) {
+					if operand == nil {
+						continue
+					}
+					switch value := (*operand).(type) {
+					case *ssa.Function:
+						if dirOf(value.Pkg) == dir {
+							enqueue(value)
+						}
+					case *ssa.MakeClosure:
+						if fn, ok := value.Fn.(*ssa.Function); ok && dirOf(fn.Pkg) == dir {
+							enqueue(fn)
+						}
+					}
+				}
+			}
 		}
 		for _, edge := range node.Out {
 			callee := edge.Callee

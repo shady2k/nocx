@@ -3,7 +3,7 @@
         helpers helper-local helpers-this-machine \
         require-local-helper \
         print-os-pkgs print-portable-pkgs print-local-ssh-pkgs \
-        print-mac-pkgs print-mac-select print-darwin-pkgs print-mac-tagged-pkgs print-mac-tagged-select mac-only-tests mac-check \
+        print-mac-pkgs print-mac-select print-darwin-pkgs print-mac-tagged-pkgs print-mac-tagged-select mac-selection mac-check \
         print-os-local-ssh-pkgs print-portable-local-ssh-pkgs \
         lint-ci test-ci build-ci root-ci frontend-ci test-alloc-budgets print-alloc-budget-pkgs
 
@@ -658,26 +658,35 @@ MAC_TESTS := node scripts/mac-only-tests.mjs
 # The reachability half (review round 2): the tests whose code under test is a
 # darwin IMPLEMENTATION, derived by cmd/mactests from the call graph and
 # committed, because only a Mac can build the darwin files it needs to see.
-MAC_REACHED := scripts/mac-only-tests.txt
+# THE SELECTION IS DERIVED WHERE IT IS USED (review of PR #776, round 4). It used
+# to be committed, and the macOS job re-derived it and compared: the two differed,
+# because the graph is the HOST build's (this VM's linux one here), and nothing on
+# this box can produce a native darwin answer to compare with. Two CI rounds died
+# on that comparison before it could be diagnosed from a log that printed no
+# difference. So the Mac DERIVES what it runs, in the job, and the file is build
+# output (gitignored), never a committed copy of a platform's answer.
+MAC_REACHED := build/mac-only-tests.txt
 # THE TAGGED HALF, derived by its own analysis (review of PR #776): nocx_local_ssh
 # decides which files exist, so a tagged test can reach a darwin implementation
 # that an untagged test cannot — and the tagged pass on the Mac is where such a
 # test runs. Its own committed file, its own two tags, its own package set.
-MAC_REACHED_TAGGED := scripts/mac-only-tests-tagged.txt
+MAC_REACHED_TAGGED := build/mac-only-tests-tagged.txt
 MAC_TAGGED_TAGS := gtk3,nocx_local_ssh,nocx_framecheck
 MAC_GO := $(GO) run ./cmd/mactests
 
-# Regenerate the committed reachability selection. Run it on a Mac and commit
-# the result; ci-mac's `make mac-check` fails when the file is stale and names
-# this command.
-mac-only-tests:
+# DERIVE WHAT THE MAC RUNS, IN THE JOB THAT RUNS IT (review of PR #776, round
+# 4). Two files, untagged and tagged, under build/ — build output, not a
+# committed copy: the analysis is the host build's, and only a Mac's host build
+# answers for a Mac. ci-mac runs this before its tests; `make ci-os-split` then
+# validates what it produced.
+mac-selection:
+	@mkdir -p $(dir $(MAC_REACHED))
 	@$(MAC_GO) --write $(MAC_REACHED) $(OS_PKG_DIRS)
 	@$(MAC_GO) --tags $(MAC_TAGGED_TAGS) --write $(MAC_REACHED_TAGGED) $(LOCAL_SSH_PKG_DIRS)
-	@$(MAC_TESTS) check $(OS_PKG_DIRS) --tagged $(LOCAL_SSH_PKG_DIRS)
 
-# Is the committed selection still what the tree says? ci-mac runs this before
-# its tests: the analysis needs a build that loads (cgo on) and the darwin files,
-# so this job is the only place the answer can be checked.
+# Does a SAVED copy still match this build's derivation? Not a CI gate — nothing
+# is committed to compare against — but the diagnostic that names every test that
+# would be added or removed, which is what a mismatch needs to be actionable.
 mac-check:
 	@$(MAC_GO) --check $(MAC_REACHED) $(OS_PKG_DIRS)
 	@$(MAC_GO) --tags $(MAC_TAGGED_TAGS) --check $(MAC_REACHED_TAGGED) $(LOCAL_SSH_PKG_DIRS)

@@ -329,15 +329,16 @@ jobs:
       # the keystore binding, the socketpair — and nothing else. The header
       # explains why internal/shellintegration is not on that list even though
       # it is the package about macOS's bash.
-      # THE COMMITTED SELECTION IS CURRENT (nocx-ouru5.1.13, review round 2). The
-      # tests whose code under test is a darwin IMPLEMENTATION cannot be derived
-      # from the source alone: that needs a call graph over a build that loads —
-      # cgo on — with the darwin files in it, which is this job and no other. So
-      # the set is committed (scripts/mac-only-tests.txt, `make mac-only-tests`)
-      # and re-derived here; a stale file fails with the command that writes it,
-      # and ci-linux reads the same file so it never needs a Mac to know it.
-      - name: The macOS-only selection is current
-        run: make mac-check
+      # THE SELECTION IS DERIVED HERE, IN THE JOB THAT RUNS IT (nocx-ouru5.1.13,
+      # review round 4). It used to be committed and re-derived for comparison,
+      # and the two disagreed: the graph is the HOST build's, so a Linux-hosted
+      # analysis is not a Mac's answer, and the comparison could not be diagnosed
+      # from a log that named no difference. Deriving it in the job removes the
+      # comparison — and the drift — by construction: what runs below is what this
+      # build just selected. The two files are build output under build/, never
+      # committed; `make ci-os-split` validates what they hold.
+      - name: Derive the macOS-only test selection
+        run: make mac-selection
 
       # THE MACOS-ONLY TESTS, RESOLVED FROM THE SOURCE (nocx-ouru5.1.13).
       # This job needs neither the OS package set nor the tagged one any more:

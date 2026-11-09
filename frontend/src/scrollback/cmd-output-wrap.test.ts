@@ -284,13 +284,14 @@ describe('the Ask token is a field-grid segment, not text in the input (nocx-ex6
     // The token moved out of `.cm-content` because a control inside the
     // element carrying role="textbox" becomes part of the line's text —
     // that invariant survives the round-2 rework. What it moved INTO
-    // changed: a per-line CM6 gutter (one cell per row, dressed as a rail)
-    // became ComposerFrame's field grid — one leading COLUMN the whole
-    // editor sits beside, never a gutter CM6 itself draws.
+    // changed twice: a per-line CM6 gutter became ComposerFrame's field
+    // grid column, and ADR-2yzsq8mk moved that column AFTER the editor, so
+    // the typed command is the row's first column and starts on the
+    // ledger's own x. Never a gutter CM6 itself draws, either way.
     const field = RULES.find((r) => r.selectors.includes('.ui-composer-frame__field'))
     expect(field).toBeDefined()
     expect(field!.body).toMatch(/display\s*:\s*grid/)
-    expect(field!.body).toMatch(/grid-template-columns\s*:[^;]*--terminal-mode-segment-width/)
+    expect(field!.body).toMatch(/grid-template-columns\s*:\s*minmax\(0,\s*1fr\)\s+auto\s+auto/)
     // The CM6 gutter this replaced is gone, not merely unused — no rule
     // anywhere in the cascade still dresses one, which would be the old
     // mechanism creeping back in beside the new one.

@@ -152,12 +152,15 @@ describe('a running block whose body outgrew its screen (nocx-zg3k3.14.26, ADR-3
     expect(declared('.cmd-block', 'padding-bottom')).toBe('var(--terminal-block-trailing-space)')
   })
 
-  it('gives the whole active body one edge-to-edge box, with no inline inset of its own', () => {
-    // The gutter is the transcript's (ADR-3kqrem7v keeps it on frozen rows
-    // only). Any rule reaching the nested live region — or the running block
-    // and its committed rows — must state an inline inset of 0; a second
-    // nonzero inset inside the block would shift every column of the grid off
-    // the width the PTY was told.
+  it('gives the whole active body the transcript’s column, with no second inset of its own', () => {
+    // ONE COLUMN (ADR-2yzsq8mk): the running block wears the frozen block's
+    // gutter through the stack's row rule and states no inline inset of its
+    // own — that zero (ADR-3kqrem7v) is what moved a command's rows sideways
+    // when its card froze. What survives is the guard against a SECOND inset:
+    // any rule reaching the nested live region, or the running block and its
+    // committed rows, may only declare padding of 0. A nonzero one would shift
+    // every column of the grid off the width the PTY was told.
+    expect(declared('.cmd-block.cmd-block-running', 'padding-inline')).toBeNull()
     for (const rule of RULES) {
       for (const selector of rule.selectors) {
         const active =

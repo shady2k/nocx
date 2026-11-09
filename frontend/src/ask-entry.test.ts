@@ -289,7 +289,7 @@ describe('TargetIndicator mounts beside CM6, not in a CM6 gutter (spec 2026-09-1
     return { field, editorSlot, submitSlot }
   }
 
-  it('mounts as the field’s leading child, ahead of CM6’s own editor slot', () => {
+  it('mounts after CM6’s slot and before the submit slot, so the typed text is the row’s first column', () => {
     const { field, editorSlot, submitSlot } = fieldStand()
     const indicator = new TargetIndicator(() => {})
     const view = new EditorView({
@@ -297,11 +297,13 @@ describe('TargetIndicator mounts beside CM6, not in a CM6 gutter (spec 2026-09-1
       parent: editorSlot,
     })
 
-    const button = field.firstElementChild as HTMLButtonElement
-    expect(button.classList.contains('ui-mode-indicator')).toBe(true)
+    const button = field.querySelector('.ui-mode-indicator') as HTMLButtonElement
+    expect(button).not.toBeNull()
     expect(button.dataset.variant).toBe('field')
     expect(button.textContent).toBe('Run')
-    expect([...field.children]).toEqual([button, editorSlot, submitSlot])
+    // ADR-2yzsq8mk: the composer's text starts on the ledger's column, so
+    // nothing precedes CM6 in the field's first grid column.
+    expect([...field.children]).toEqual([editorSlot, button, submitSlot])
 
     view.destroy()
     field.remove()
@@ -320,7 +322,7 @@ describe('TargetIndicator mounts beside CM6, not in a CM6 gutter (spec 2026-09-1
     field.remove()
   })
 
-  it('set() repaints the SAME leading position — no duplicate, no reorder', () => {
+  it('set() repaints the SAME position — no duplicate, no reorder', () => {
     const { field, editorSlot, submitSlot } = fieldStand()
     const indicator = new TargetIndicator(() => {})
     const view = new EditorView({
@@ -330,10 +332,10 @@ describe('TargetIndicator mounts beside CM6, not in a CM6 gutter (spec 2026-09-1
 
     indicator.set('agent', 'Agent')
     expect(field.children.length).toBe(3)
-    const button = field.firstElementChild as HTMLButtonElement
+    const button = field.querySelector('.ui-mode-indicator') as HTMLButtonElement
     expect(button.textContent).toBe('Ask')
     expect(button.dataset.target).toBe('agent')
-    expect([...field.children]).toEqual([button, editorSlot, submitSlot])
+    expect([...field.children]).toEqual([editorSlot, button, submitSlot])
 
     view.destroy()
     field.remove()
@@ -347,7 +349,9 @@ describe('TargetIndicator mounts beside CM6, not in a CM6 gutter (spec 2026-09-1
       state: EditorState.create({ extensions: [indicator.extension()] }),
       parent: editorSlot,
     })
-    const button = editorSlot.parentElement!.firstElementChild as HTMLButtonElement
+    const button = editorSlot.parentElement!.querySelector(
+      '.ui-mode-indicator',
+    ) as HTMLButtonElement
     button.click()
     const ask = [...document.querySelectorAll('[role="menuitem"]')].find(
       (i) => i.textContent === 'Ask',

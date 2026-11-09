@@ -1,0 +1,163 @@
+# ADR-2yzsq8mk — A normal command is one column; a full-screen program owns the width
+
+- **Status:** Accepted (owner decision, 2026-11-08, `nocx-djx1u`; confirmed after
+  it was restated: "a normal command, running or finished: one column with the
+  same left gutter, so nothing moves when it ends. A full-screen program
+  (alternate screen: top, vim, htop): the whole width, NO left gutter, and a
+  bottom margin of about one row so its last row does not touch the window's
+  bottom edge, as Warp does. Entering the alternate screen changes the column
+  count and sends one resize — that is accepted.")
+- **Date:** 2026-11-08
+- **Supersedes, in part:** [ADR-3kqrem7v](3kqrem7v-a-running-program-keeps-one-header-and-one-grid-across-screen-modes.md)'s
+  "Active grid inline gutter 0px" for the PRIMARY running grid, and its rule
+  that a presentation change never sends a resize. Supersedes
+  [ADR-v26axn1t](v26axn1t-the-live-row-and-the-frozen-row-are-one-column-and-the-pane-never-animates.md)
+  §1 for the ALTERNATE screen only: the one column stays, and the program is
+  outside it. Neither record is edited; the index carries the supersession.
+- **Related:** [ADR-0009](0009-dom-scrollback-with-explicit-cell-geometry.md)
+  (the frozen block's geometry), `e2e/row-gutter.spec.ts`,
+  `e2e/grid-width.spec.ts`, `e2e/alt-screen-switch.spec.ts`,
+  `e2e/restored-tui-refit.spec.ts`, `e2e/output-jitter.spec.ts`.
+
+## Context
+
+ADR-3kqrem7v made the active grid edge-to-edge in both buffers so that a screen
+switch could not change the program's size. ADR-v26axn1t then made the running
+row wear the frozen column's gutter, because a command's output jumped 24px
+right at the instant its card froze — the owner's own report — and that record
+could not hold with the first one: the live row cannot both fill the pane and
+sit in the transcript's column. The owner has now decided the layout with the
+two cases separated, which is what the two earlier records conflated.
+
+## Decision
+
+1. **A normal command — running or finished — is one column with the
+   transcript's gutter.** The prompt, the running body and the frozen body all
+   wear `--pane-inline-padding`, and the grid is fitted inside it. Nothing moves
+   when a command ends: the shape, the column count and the position are the
+   same before the freeze and after it.
+2. **A full-screen program owns the whole width.** Under an alternate-screen
+   program the live region pays no inline gutter, the grid is fitted to the
+   pane's own content width, and the box keeps **one row of bottom margin** so
+   the program's last row does not touch the window's edge. The margin is the
+   fit's as well as the box's: the program is told the rows that fit above it,
+   and the box gives that row back, so the box and its margin are the pane.
+3. **Entering the alternate screen changes the column count and sends exactly
+   one resize.** That is accepted, not a defect: a program that takes the pane
+   should be told the pane's width, and it is told once per entry.
+4. **Leaving it does not resize the program, and it does return it to the
+   column.** The pty keeps the grid the program was given until that command
+   ends — a resize there is the SIGWINCH that starts the next borrow — but the
+   rows come back to the ledger's column at the moment the program leaves the
+   alternate screen, because where a row is DRAWN and what size the program was
+   TOLD are two different things and only the second costs a SIGWINCH. They are
+   drawn as written, so a row wider than the column is cut by the column until
+   the command ends; nothing jumps when the card freezes, and the prompt is
+   where the pty is told about the narrower grid.
+5. **No text touches the pane's edge.** In a normal command — the prompt, a
+   running command, the frozen card — and in a markerless session (a plain ssh
+   shell with no OSC 133 yet) every painted row keeps the ledger's margin on
+   all four sides: `--pane-inline-padding` on the left and on the right, so the
+   last column stops short of the pane's right edge, and the same token as the
+   vertical margin of the box the scroller sits in, so the first row never
+   touches the top edge and the last never the bottom. The margin is on that
+   box rather than on the rows because a transcript scrolls: a padding inside
+   the scroller would travel with the content and the next line would be at the
+   edge again. The fit reads the same box, so nothing is clipped to pay for it.
+   **A markerless session keeps the left gutter.** It has no blocks to align
+   with, and that is not a reason to let its text touch the pane: text against
+   the edge is the thing this record exists to stop. Only a full-screen program
+   takes the whole width — flush left, no gutter, one row of bottom margin —
+   and it alone.
+6. **A block's header, its output and the composer's text are one column.**
+   The composer's first glyph starts on `--pane-inline-padding` too — the x the
+   directory, the time and the command start on — so the line a person types is
+   the block it will become, before it runs. The target switch that says where
+   Enter goes follows the editor in that row instead of preceding it.
+
+## Consequences
+
+- A switch to `top`, `vim` or `htop` sends one resize to the full width; the
+  specs that used to forbid it now assert it.
+- A command's output no longer moves sideways when it finishes, and the earlier
+  records' oscillation — a resize at every switch caused by a gutter that
+  depended on presentation — is replaced by one deliberate resize per entry.
+- **The exit is where the loop would be.** A program that borrows the alternate
+  screen to redraw is borrowing it because the pane resized, and a resize sent
+  at its exit would be the SIGWINCH that makes it borrow again — measured at
+  four entries, three exits and eight resizes for one pane resize. Decision 4
+  is what makes that impossible rather than merely rare. The price, stated: a
+  command that borrowed the alternate screen keeps its flush, one-row-shorter
+  presentation until it ends, and the transcript's column returns at the prompt
+  — so for that one command a 24px shift remains at the freeze. That is the
+  cost of joining a full-width program to a guttered ledger, and it is paid
+  once per command that borrows the screen rather than once per keystroke.
+- The bottom margin costs a full-screen program one row of height. It is the
+  owner's Warp parity, and the fit subtracts it so no row is clipped for it.
+- The four-side margin costs a normal command three rows of pane at the default
+  size (one top, one bottom, and the remainder of the gutter's 48px inline) and
+  a markerless session the same, and it is the one thing every mode but the
+  alternate screen now shares. The composer reaches its column by giving up its
+  own inline padding, not by moving its card: the card's margin is what is left
+  of `--pane-inline-padding` after its border and padding.
+- **A borrowed grid keeps the box it was given, where nothing can hand it back.**
+  Decision 4's release is the prompt, and a plain ssh shell has no marker to
+  announce one: the grid a full-screen program left behind stays the pane's
+  (`_ownedGrid`), and the ledger's four-side margin is two rows shorter than the
+  box the program had — one top and one bottom, against the alternate screen's
+  one bottom. The borrowed grid was drawn past the pane's bottom edge and the
+  rows it lost were the newest ones, the prompt included (nocx-djx1u, measured
+  at a 400 px pane: a 24-row grid in 22 rows of box). So in the UNSTRUCTURED
+  layout, and only there, the vertical margin gives way while a borrowed grid is
+  on screen: the pane is the program's own box — its top edge, its one row of
+  bottom margin — with the ledger's column for its width, every row it holds is
+  visible, and no resize is sent. A structured session is unchanged: the block
+  owns those rows and scrolls them, and the margin returns with the column at
+  the prompt.
+  **A markerless session's hand-back is the person's first key.** That session
+  has no prompt marker, and the exit itself must not resize (decision 4), so the
+  moment is the one the session can actually observe: the first key, committed
+  text or paste the person sends after the program left the alternate screen. A
+  program still drawing the pane would not be reading their typing, and the
+  shell is what reads it — so that key is the prompt this session has. At it the
+  ledger's column and the four margins come back together, in ONE resize: never
+  one the program's own exit caused, and never a second (a timer armed before the
+  exit is dropped at the wire, so the hand-back cannot send twice).
+  The price, stated: until that key — not until the shell integrates and not
+  until the tab closes — the shell's screen starts at the pane's top edge, which
+  is the exception decision 5 already makes for a program that owns the pane.
+  The owner's rule for the margins is untouched: a plain ssh session keeps its
+  four sides, and the only interval it gives up is the one before the person has
+  typed anything into the shell that now owns the pane.
+  **The hand-back is asked for where the margin was given up, and it rounds
+  once.** Three ways the first cut of that rule was wrong (independent read,
+  2026-11-08), each found by a test that failed before its fix. A structured
+  session never gave the margin up: the block owns the rows and the margin is
+  on the box the fit reads, so its release owes the ledger's column and ONE
+  report, never a second subtraction — that flag could only be cleared by a
+  borrowed layout, so every later fit stayed two rows short until another
+  alternate exit. A program that enters the alternate screen again owns the
+  pane again, so the retained grid is retired at that entry: the person's next
+  key is the program's key, not a prompt, and releasing it there resized a pty
+  under a running full-screen program. And the margin comes off the box BEFORE
+  the row count is floored: the fit's height is already a whole number of rows,
+  so subtracting from it asked a 422px pane with 17px cells for 21 rows where
+  it holds 22 — the returning frame then fitted 22, the margin came back, and
+  the ordinary fit asked for 22 again, a second resize with no pane change.
+  And the box both sides of that round trip measure is ONE number, the
+  fractional one the fit reads: `clientHeight` is rounded to a whole CSS pixel,
+  and at a 429.34375px scroller with 26-device-pixel cells at DPR 1.5 the paint
+  that proves 22 rows fit compared 381.333 against `429 − 48 = 381` and never
+  passed, so the borrowed layout and the missing margins stayed for the rest of
+  the session — the hand-back has to measure its box the way the fit did. And
+  the question is asked in WHOLE ROWS, because two unrounded heights also
+  disagree at a row boundary: 552px of box with 28-device-pixel cells at
+  DPR 1.5 makes 27 rows `504.00000000000006` against an available 504. Both
+  sides are counted with the fit's own `gridRows`, so a frame that fits its
+  rows fits, whatever the floats say.
+- A command that borrowed the alternate screen is drawn in the transcript's
+  column from the moment it steps out, at the width its pty still has. Its rows
+  are therefore as wide as the pane and the column cuts their right edge — a
+  few columns of a program's own repaint, for the rest of that command, in
+  exchange for a pty that is not resized by a presentation change and a card
+  that does not jump when it freezes. The next command is told the column.

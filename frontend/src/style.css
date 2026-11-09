@@ -350,6 +350,16 @@
   flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
+  /* NO TEXT TOUCHES THE PANE'S TOP OR BOTTOM EDGE (ADR-2yzsq8mk, the owner's
+     edge pass). The margin is on the BOX the scroller sits in, not on the rows:
+     a transcript scrolls, so a padding inside the scroller would scroll away
+     with the content and the row at the top edge would be a row at the top
+     edge again on the next line. Here the scroller itself is the pane less one
+     margin top and bottom, in every mode, which is also what the fit reads
+     (`_areaHeightPx`) — no row is clipped to pay for it. The alternate screen
+     is the one exception: a program that owns the pane starts at its top edge
+     (`.inner-pane-program`, set with the mode). */
+  padding-block: var(--pane-inline-padding);
   /* The terminal screen's one ground (spec §7), not the canvas: history rows
      and the live region paint `transparent` and composite to what sits behind
      them. That is `.pane`'s --color-canvas — the one theme where it differs from
@@ -664,10 +674,14 @@
   min-height: auto;
 }
 
-/* ADR-3kqrem7v: alternate and primary live grids both fill the pane width.
-   Transcript rows retain their own gutter; it never determines PTY columns. */
+/* ADR-2yzsq8mk: a full-screen program owns the whole width — no ledger gutter —
+   and keeps one row of margin below its last row, the way Warp does. The margin
+   is the fit's too (`_gridHeight` gives the program one row less than the pane
+   holds, and the controller's box gives that row back), so the box never clips
+   the row it made room for. */
 .scrollback-inner > .terminal-live-container.live-fullscreen {
   padding-inline: 0;
+  margin-bottom: var(--term-cell-height, 1.2em);
 }
 
 /* ADR-3kqrem7v: alternate mode hides transcript content, while keeping the
@@ -694,6 +708,26 @@
    The live container is excluded rather than the whole stack being hidden from
    an ancestor: `display: none` on `.scrollback-inner` would take fixed
    descendants with it (P0-2). */
+/* A PROGRAM THAT OWNS THE PANE STARTS AT ITS TOP EDGE: the layout's vertical
+   margin is the ledger's, and the alternate screen is not in the ledger
+   (ADR-2yzsq8mk — it keeps its own one row of bottom margin, in
+   `.live-fullscreen`). */
+.scrollback-layout.inner-pane-program {
+  padding-block: 0;
+}
+
+/* AND SO DOES THE GRID A PROGRAM LEFT BEHIND (nocx-djx1u). A markerless shell
+   has no prompt marker, so the rows a full-screen program was given stay the
+   pane's after it leaves (ADR-2yzsq8mk decision 4) — and the ledger's two-row
+   vertical margin is two rows those rows do not have. While the borrowed grid
+   is on screen the layout gives the margin up, which is the same box the
+   program had: no top edge, one row of margin below (the box's own height is
+   the grid's, from `paneFillHeight`). Every painted row is inside the pane
+   again, which is the one thing decision 5 does not let the exit cost. */
+.scrollback-layout.inner-borrowed-grid {
+  padding-block: 0;
+}
+
 .scrollback-inner.inner-fullscreen-mode
   > :not(
     .terminal-live-container,
@@ -1414,13 +1448,14 @@
 
 /* ADR-3kqrem7v: running geometry is a pane property, never a buffer-mode
    property. Frozen rows retain the ordinary transcript gutter and rhythm. */
-.cmd-block.cmd-block-running,
-.scrollback-inner > .terminal-live-container.live-idle,
-.scrollback-inner > .terminal-live-container.live-unstructured,
-.cmd-block.cmd-block-running > .cmd-output,
-.cmd-block.cmd-block-running > .terminal-live-container.live-running {
-  padding-inline: 0;
-}
+/* ONE COLUMN FOR A NORMAL COMMAND, WHOLE WIDTH FOR A PROGRAM (ADR-2yzsq8mk).
+   A normal command — running or finished, at the prompt or under an
+   unstructured session — wears the transcript's gutter exactly as the frozen
+   rows do, so nothing moves when a command ends. Only the alternate screen is
+   flush, and it pays a bottom margin of one row so its last row does not touch
+   the window's edge. The running body keeps `padding-block: 0`: only the
+   inline shape is one column, and the body's vertical rhythm arrives with the
+   frozen card. */
 .cmd-block.cmd-block-running > .cmd-output {
   padding-block: 0;
 }

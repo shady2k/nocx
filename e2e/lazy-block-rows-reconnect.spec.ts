@@ -242,6 +242,25 @@ test.describe('a reconnect over a long transcript stays lazy', () => {
       await expect(page.locator(CONNECTION)).toBeHidden({ timeout: 30_000 })
       expect(backend.logTail(1 << 20)).not.toContain('connection outbound stalled')
 
+      // THE RESET IS AN OBSERVABLE, not a race: the large block gives its body
+      // back after every attachment has settled, and the reservation is only
+      // meaningful once that has happened.
+      await expect
+        .poll(
+          () =>
+            page.evaluate(() => {
+              const first = document.querySelector<HTMLElement>(
+                '.pane.active .cmd-block:not(.cmd-block-running)',
+              )
+              return first?.dataset.rowsReset === 'true'
+            }),
+          {
+            timeout: 60_000,
+            message: 'the large block never gave its body back after reconnecting',
+          },
+        )
+        .toBe(true)
+
       // WHAT IS ON SCREEN PAINTED FIRST. The bottom block is the newest of the
       // 500 short ones; its rows are back.
       await expect

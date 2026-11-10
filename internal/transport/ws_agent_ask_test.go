@@ -125,7 +125,32 @@ func newAskHarness(t *testing.T, client assistant.Client) *askHarness {
 // newAskHarnessWithOpts is newAskHarness with additional WSServerOptions —
 // for tests that need a seam named at construction (the policy tests wire
 // WithAgentPolicy here, so the control plane registers the methods wired).
+// askHarnessParallel asks for this test to run beside its siblings, ONCE per
+// test: a test that builds two harnesses calls the constructor twice, and
+// t.Parallel twice is a panic. The marker is the test itself.
+//
+// EVERY TEST THAT USES THIS HARNESS MAY RUN BESIDE THE OTHERS
+// (nocx-ouru5.1.16). Each one builds its own temporary directory, vault,
+// content store, profile store and WSServer, so they share nothing — and this
+// family is the transport package's slowest: 115 call sites at one to three
+// seconds each under -race, which is most of why the package's single test
+// binary needs the whole default ten-minute go test timeout. (The gated run
+// that found this took 599 s of test time against a 600 s bound, and the
+// goroutine dump showed no test blocked — the suite simply fills the bound.)
+// Asking here rather than at each caller is one decision in one place, and it
+// is what keeps the suite inside the bound without moving the bound.
+func askHarnessParallel(t *testing.T) {
+	t.Helper()
+	if _, seen := askHarnessParallelised.LoadOrStore(t, struct{}{}); seen {
+		return
+	}
+	t.Parallel()
+}
+
+var askHarnessParallelised sync.Map
+
 func newAskHarnessWithOpts(t *testing.T, client assistant.Client, extra ...WSServerOption) *askHarness {
+	askHarnessParallel(t)
 	dir := t.TempDir()
 	docStore := storage.NewDocumentStore(dir)
 	reg, err := vault.NewRegistry(file.New(docStore, "vault-blob.json"))

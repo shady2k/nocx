@@ -1585,21 +1585,30 @@ function main(): void {
   // ── The panel follows the tab in front (ADR-x7cvh8e1) ────────────────
   //
   // Every activation applies the panel the tab remembers. The ONE exception
-  // is the first activation of this page load: the window opens on a tab and
-  // shows its tools there, so a tab that has never opened a panel is seeded
-  // with the app's default (the first registered view) and that choice is
-  // RECORDED against the tab. A tab the person opens afterwards has no panel
-  // and shows the rail collapsed — which is the point of a per-tab panel, and
-  // why this runs once per page rather than per tab.
+  // is the tab this page load OPENED WITH: the window shows its tools there,
+  // so that tab, when it has never opened a panel, is seeded with the app's
+  // default (the first registered view) and the choice is RECORDED against
+  // it. Every tab the person opens afterwards has no panel and shows the rail
+  // collapsed — which is the point of a per-tab panel, and why the seed
+  // belongs to that one tab rather than to "whichever activation came first".
   //
   // The seed is what keeps the documented cold start ("the panel is open on
   // Files", e2e/files.spec.ts and the file-manager design §7) true while the
   // panel itself becomes the tab's.
   let panelSeeded = false
+  /** The pane the window opened with, by element identity (see the seed). */
+  let openingPane: HTMLElement | null = null
   applyActiveTabPanel = () => {
-    if (!sidebar) return
-    const first = !panelSeeded
-    panelSeeded = true
+    // WHICH TAB THE WINDOW OPENED WITH, by identity. It is what the seed
+    // below belongs to, and it is not "the first call that happened to find a
+    // sidebar mounted": the first activation can beat the sidebar's mount,
+    // and then a LATER tab — one the person opened — would be seeded with
+    // Files and would open with a panel it never asked for. That is exactly
+    // what the first gate of this feature caught, once, under load.
+    const paneEl = tm.activePaneElement()
+    if (openingPane === null) openingPane = paneEl
+    const opening = paneEl !== null && paneEl === openingPane
+
     let panel = tm.activeTabPanel()
     if (panel === null) {
       // A pane in NO CHAIN — Settings, a diff, a file viewer. Settings is the
@@ -1608,14 +1617,19 @@ function main(): void {
       // was opened FROM the panel (a diff out of the Git view, a file out of
       // Files), so the panel stays exactly where it is — collapsing it would
       // take away the list the person is working through.
-      if (tm.activeSurfaceType() === SURFACE_SETTINGS) sidebar.showPanel(null)
+      if (tm.activeSurfaceType() === SURFACE_SETTINGS) sidebar?.showPanel(null)
       return
     }
-    if (first && panel.view === '') {
+    if (!panelSeeded && opening && panel.view === '') {
+      // THE WINDOW OPENS ON A TAB AND SHOWS ITS TOOLS THERE. Recorded against
+      // the tab rather than painted here, so it holds whether or not the
+      // sidebar has mounted yet — the mount reads `activeTabPanel()`, and a
+      // recorded choice survives a sidebar that came up late.
+      panelSeeded = true
       panel = { view: FILES_VIEW_ID, collapsed: false }
       tm.setActiveTabPanel(panel)
     }
-    sidebar.showPanel(panel)
+    sidebar?.showPanel(panel)
   }
   const mountConnectedSidebar = (): void => {
     // The sidebar is connection-scoped: its panel clients must disappear with

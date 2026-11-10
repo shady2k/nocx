@@ -644,11 +644,11 @@ func TestTabRemembersItsPanel(t *testing.T) {
 
 	// "" is a real value — a tab whose panel shows nothing — and an empty
 	// view with the rail expanded is a tab that has never opened one.
-	if _, err := layout.SetTabPanel(ctx, "tab-2", "", false); err != nil {
+	if _, err = layout.SetTabPanel(ctx, "tab-2", "", false); err != nil {
 		t.Fatalf("SetTabPanel empty: %v", err)
 	}
 
-	if err := db.Close(); err != nil {
+	if err = db.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	again, err := reopenStore(t, path)

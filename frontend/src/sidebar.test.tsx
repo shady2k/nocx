@@ -155,57 +155,85 @@ describe('sidebar', () => {
     expect(panel.classList.contains('collapsed')).toBe(false)
   })
 
-  it('persists the collapsed state and restores it on the next mount', () => {
-    // The persistence seam is the UI-state document (ADR-0048), not
-    // localStorage. The fake stands in for the round trip: whatever the
-    // first mount saved is what the second one boots from.
-    const saved = { collapsed: false, activeViewId: '' }
-    const persistence = {
-      get collapsed() {
-        return saved.collapsed
-      },
-      get activeViewId() {
-        return saved.activeViewId
-      },
-      save: (next: { collapsed: boolean; activeViewId: string }) => {
-        saved.collapsed = next.collapsed
-        saved.activeViewId = next.activeViewId
-      },
-    }
-
-    const first = mount()
-    mountSidebar(first.bar, first.panel, TWO_VIEWS, [SETTINGS_ACTION], persistence)
-    viewBtn(first.bar, 'alpha').click() // collapse
-    expect(saved.collapsed).toBe(true)
-
-    document.body.replaceChildren()
-    const second = mount()
-    mountSidebar(second.bar, second.panel, TWO_VIEWS, [SETTINGS_ACTION], persistence)
-
-    expect(second.panel.classList.contains('collapsed')).toBe(true)
-    expect(viewBtn(second.bar, 'alpha').getAttribute('aria-selected')).toBeNull()
-  })
-
-  it('restores the view that was on screen, and falls back when it is gone', () => {
+  it('starts on the panel the front tab remembers, and writes nothing back for it', () => {
+    // The panel is the TAB's (nocx-ouru5.1.18): the composition root hands
+    // the front tab's remembered panel in, and the sidebar shows it. What
+    // arrives from a tab is not a person's edit, so nothing is saved.
+    const saved: Array<{ view: string; collapsed: boolean }> = []
     const { bar, panel } = mount()
     mountSidebar(bar, panel, TWO_VIEWS, [SETTINGS_ACTION], {
-      collapsed: false,
-      activeViewId: 'beta',
-      save: () => {},
+      panel: { view: 'beta', collapsed: false },
+      save: (next) => saved.push(next),
     })
     expect(panelTitle(panel)).toBe('Beta')
     expect(panel.classList.contains('collapsed')).toBe(false)
+    expect(saved).toEqual([])
+  })
 
-    // A view id this build no longer registers is repaired, not obeyed: the
-    // panel opens on the first view rather than on nothing.
-    document.body.replaceChildren()
-    const next = mount()
-    mountSidebar(next.bar, next.panel, TWO_VIEWS, [SETTINGS_ACTION], {
-      collapsed: false,
-      activeViewId: 'a-view-that-was-renamed',
+  it('restores a collapsed tab on the view it reopens on', () => {
+    // A collapsed rail keeps the view it will reopen on — the activity bar's
+    // toggle has always behaved that way, and per-tab state must not lose it.
+    const saved: Array<{ view: string; collapsed: boolean }> = []
+    const { bar, panel } = mount()
+    mountSidebar(bar, panel, TWO_VIEWS, [SETTINGS_ACTION], {
+      panel: { view: 'beta', collapsed: true },
+      save: (next) => saved.push(next),
+    })
+    expect(panel.classList.contains('collapsed')).toBe(true)
+
+    // Clicking the view it is collapsed on reopens it THERE.
+    viewBtn(bar, 'beta').click()
+    expect(panel.classList.contains('collapsed')).toBe(false)
+    expect(panelTitle(panel)).toBe('Beta')
+    expect(saved).toEqual([{ view: 'beta', collapsed: false }])
+  })
+
+  it('starts collapsed when the front tab has no panel at all', () => {
+    // Null is a tab in no chain (Settings) or a tab that has never opened a
+    // panel: there is nothing to show, and no "last panel" to fall back on.
+    const { bar, panel } = mount()
+    mountSidebar(bar, panel, TWO_VIEWS, [SETTINGS_ACTION], {
+      panel: null,
       save: () => {},
     })
-    expect(panelTitle(next.panel)).toBe('Alpha')
+    expect(panel.classList.contains('collapsed')).toBe(true)
+    expect(panelTitle(panel)).toBeNull()
+  })
+
+  it('repairs a view id this build no longer registers to the first view', () => {
+    const { bar, panel } = mount()
+    mountSidebar(bar, panel, TWO_VIEWS, [SETTINGS_ACTION], {
+      panel: { view: 'a-view-that-was-renamed', collapsed: false },
+      save: () => {},
+    })
+    expect(panelTitle(panel)).toBe('Alpha')
+    expect(panel.classList.contains('collapsed')).toBe(false)
+  })
+
+  it("applies a tab's panel on a switch without writing it, and writes the person's change", () => {
+    // showPanel is the tab's state ARRIVING (a tab switch); a click is the
+    // person's edit. Only the second is a fact the app must record.
+    const saved: Array<{ view: string; collapsed: boolean }> = []
+    const { bar, panel } = mount()
+    const handle = mountSidebar(bar, panel, TWO_VIEWS, [SETTINGS_ACTION], {
+      panel: { view: 'alpha', collapsed: false },
+      save: (next) => saved.push(next),
+    })
+    expect(panelTitle(panel)).toBe('Alpha')
+
+    handle.showPanel({ view: 'beta', collapsed: true })
+    expect(panel.classList.contains('collapsed')).toBe(true)
+    expect(saved).toEqual([])
+
+    viewBtn(bar, 'beta').click()
+    expect(panel.classList.contains('collapsed')).toBe(false)
+    expect(panelTitle(panel)).toBe('Beta')
+    expect(saved).toEqual([{ view: 'beta', collapsed: false }])
+
+    // And a tab with no panel applies as the rail collapsed, silently.
+    handle.showPanel(null)
+    expect(panel.classList.contains('collapsed')).toBe(true)
+    expect(saved).toEqual([{ view: 'beta', collapsed: false }])
   })
 
   it('remembers nothing, and starts open, when there is no persistence', () => {
@@ -599,163 +627,147 @@ describe('sidebar — revealView and view props (nocx-wzc4.7)', () => {
 // pre-Settings state, and neither the width nor the collapsed preference is
 // persisted by the visit.
 
-describe('sidebar — Settings tab transient collapse (nocx-3e3b)', () => {
+describe('the panel follows the tab in front (nocx-ouru5.1.18)', () => {
   afterEach(() => {
     document.body.replaceChildren()
   })
 
-  /** Mount with a settings-mode accessor the test can flip mid-flight.
-   *  The accessor must read a SIGNAL: Solid's on() subscribes to reactive
-   *  reads only, so a plain closure variable would never re-fire the
-   *  settings-mode effect. */
-  function mountWithSettings(): {
+  /** Mount with a persistence seam the test can watch. The panel the front
+   *  tab remembers arrives through `showPanel`, exactly as the composition
+   *  root applies it on every activation. */
+  function mountWithPanel(panel0: { view: string; collapsed: boolean } | null): {
     bar: HTMLElement
     panel: HTMLElement
     handle: SidebarHandle
-    setSettings: (v: boolean) => void
+    writes: Array<{ view: string; collapsed: boolean }>
   } {
-    const [isSettings, setIsSettings] = createSignal(false)
     const { bar, panel } = mount()
+    const writes: Array<{ view: string; collapsed: boolean }> = []
+    const handle = mountSidebar(bar, panel, TWO_VIEWS, [SETTINGS_ACTION], {
+      panel: panel0,
+      save: (next) => writes.push(next),
+    })
+    return { bar, panel, handle, writes }
+  }
+
+  it("collapses on a Settings tab and restores the tab's panel on return", () => {
+    // A Settings pane is in no chain, so it has no panel: null. Leaving
+    // applies whatever the next tab remembers — here, Alpha open.
+    const { bar, panel, handle } = mountWithPanel({ view: 'alpha', collapsed: false })
+    expect(panel.classList.contains('collapsed')).toBe(false)
+
+    handle.showPanel(null)
+    expect(panel.classList.contains('collapsed')).toBe(true)
+
+    handle.showPanel({ view: 'alpha', collapsed: false })
+    expect(panel.classList.contains('collapsed')).toBe(false)
+    expect(panelTitle(panel)).toBe('Alpha')
+    expect(viewBtn(bar, 'alpha').getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('a sidebar opened on a Settings tab stays open until the user closes it', () => {
+    const { bar, panel } = mountWithPanel(null)
+    expect(panel.classList.contains('collapsed')).toBe(true)
+
+    viewBtn(bar, 'beta').click() // the user opens the panel while on Settings
+    expect(panel.classList.contains('collapsed')).toBe(false)
+    expect(panelTitle(panel)).toBe('Beta')
+
+    // Nothing fights the user afterwards: the panel only changes when a tab
+    // in front does.
+    expect(panel.classList.contains('collapsed')).toBe(false)
+  })
+
+  it('restores a deliberately closed tab after a Settings round trip', () => {
+    // The tab in front was left with its rail closed; a Settings detour must
+    // not reopen it. Someone who keeps the rail closed must not find it open.
+    const { bar, panel, handle } = mountWithPanel({ view: 'alpha', collapsed: true })
+    expect(panel.classList.contains('collapsed')).toBe(true)
+
+    handle.showPanel(null) // arrive on Settings
+    viewBtn(bar, 'alpha').click() // opened while on Settings…
+    expect(panel.classList.contains('collapsed')).toBe(false)
+
+    handle.showPanel({ view: 'alpha', collapsed: true }) // …and back to the tab
+    expect(panel.classList.contains('collapsed')).toBe(true)
+  })
+
+  it("applying a tab's panel never touches the chosen width", () => {
+    const { bar, panel } = mount()
+    const persist = vi.fn()
+    const ctrl = createSidebarWidthController(panel, 400, persist) // non-default width
     const handle = mountSidebar(
       bar,
       panel,
       TWO_VIEWS,
       [SETTINGS_ACTION],
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      /* eslint-disable-next-line solid/reactivity -- mountSidebar consumes
-       this accessor reactively (settings-mode effect, nocx-3e3b); the gate
-       cannot see across the function boundary — same justification as the
-       main.tsx disable. */
-      () => isSettings(),
-    )
-    return { bar, panel, handle, setSettings: setIsSettings }
-  }
-
-  it('collapses on arrival at a Settings tab and restores on return, view retained', async () => {
-    const { bar, panel, setSettings } = mountWithSettings()
-    expect(panel.classList.contains('collapsed')).toBe(false)
-
-    setSettings(true)
-    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(true))
-
-    setSettings(false)
-    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(false))
-    // The active view is untouched by the round trip.
-    expect(panelTitle(panel)).toBe('Alpha')
-    expect(viewBtn(bar, 'alpha').getAttribute('aria-selected')).toBe('true')
-  })
-
-  it('a sidebar opened while on a Settings tab stays open until the user closes it', async () => {
-    const { bar, panel, setSettings } = mountWithSettings()
-    setSettings(true)
-    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(true))
-
-    viewBtn(bar, 'beta').click() // user opens the panel while on Settings
-    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(false))
-    expect(panelTitle(panel)).toBe('Beta')
-
-    // The rule fired on arrival only; nothing fights the user afterwards.
-    expect(panel.classList.contains('collapsed')).toBe(false)
-  })
-
-  it('restores a deliberately closed sidebar after a Settings round trip', async () => {
-    const { bar, panel, setSettings } = mountWithSettings()
-    viewBtn(bar, 'alpha').click() // deliberately closed — the user's state
-    expect(panel.classList.contains('collapsed')).toBe(true)
-
-    setSettings(true)
-    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(true))
-
-    viewBtn(bar, 'alpha').click() // opened while on Settings…
-    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(false))
-
-    setSettings(false)
-    // …and the departure restores the user's closed state, not the detour:
-    // someone who keeps the rail closed must not find it open.
-    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(true))
-  })
-
-  it('the chosen width survives a Settings round trip and is never persisted by it', async () => {
-    const [isSettings, setIsSettings] = createSignal(false)
-    const { bar, panel } = mount()
-    const persist = vi.fn()
-    const ctrl = createSidebarWidthController(panel, 400, persist) // user's non-default width
-    mountSidebar(
-      bar,
-      panel,
-      TWO_VIEWS,
-      [SETTINGS_ACTION],
-      undefined,
+      { panel: { view: 'alpha', collapsed: false }, save: () => {} },
       undefined,
       undefined,
       ctrl,
-      /* eslint-disable-next-line solid/reactivity -- mountSidebar consumes
-       this accessor reactively (settings-mode effect, nocx-3e3b); the gate
-       cannot see across the function boundary — same justification as the
-       main.tsx disable. */
-      () => isSettings(),
     )
     expect(panel.style.getPropertyValue('--sidebar-width')).toBe('400px')
 
-    setIsSettings(true)
-    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(true))
-    setIsSettings(false)
-    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(false))
+    handle.showPanel(null)
+    handle.showPanel({ view: 'alpha', collapsed: false })
 
-    // The width the user chose is untouched — and no write went to the seam.
     expect(panel.style.getPropertyValue('--sidebar-width')).toBe('400px')
     expect(persist).not.toHaveBeenCalled()
   })
 
-  it('a Settings visit does not persist the transient collapse as a preference', async () => {
-    const [isSettings, setIsSettings] = createSignal(false)
-    const { bar, panel } = mount()
-    const writes: boolean[] = []
-    const persistence = {
-      collapsed: false,
-      activeViewId: '',
-      save: (next: { collapsed: boolean; activeViewId: string }) => {
-        writes.push(next.collapsed)
-      },
-    }
-    mountSidebar(
-      bar,
-      panel,
-      TWO_VIEWS,
-      [SETTINGS_ACTION],
-      persistence,
-      undefined,
-      undefined,
-      undefined,
-      /* eslint-disable-next-line solid/reactivity -- mountSidebar consumes
-       this accessor reactively (settings-mode effect, nocx-3e3b); the gate
-       cannot see across the function boundary — same justification as the
-       main.tsx disable. */
-      () => isSettings(),
-    )
-    // The open state is what was written.
-    await vi.waitFor(() => expect(writes[writes.length - 1]).toBe(false))
+  it('a Settings visit writes nothing to the tab it came from', () => {
+    // The transient collapse is not a preference: applying a null panel must
+    // not be recorded as one, or the next visit would find the rail closed.
+    const { handle: sidebarHandle, writes } = mountWithPanel({ view: 'alpha', collapsed: false })
 
-    setIsSettings(true)
-    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(true))
-    // The transient collapse must not have rewritten the remembered state.
-    expect(writes.every((collapsed) => collapsed === false)).toBe(true)
+    sidebarHandle.showPanel(null)
+    sidebarHandle.showPanel({ view: 'alpha', collapsed: false })
 
-    setIsSettings(false)
-    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(false))
-    expect(writes.every((collapsed) => collapsed === false)).toBe(true)
+    expect(writes).toEqual([])
   })
 
-  it('revealView (the Ctrl/Cmd+Shift+O path) still expands the panel from a Settings tab', async () => {
-    const { panel, handle, setSettings } = mountWithSettings()
-    setSettings(true)
-    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(true))
+  it('a tab switch that collapses the panel does not take the keyboard', () => {
+    // The focus-return rule belongs to an ICON CLICK. A tab switch can
+    // collapse the rail too (that tab was left closed), and pulling the
+    // keyboard out of the terminal the switch just focused is what the first
+    // e2e gate caught on webkit (nocx-ouru5.1.18).
+    const { bar, panel, handle } = mountWithPanel({ view: 'alpha', collapsed: false })
+    viewBtn(bar, 'alpha').click() // collapse by click: the button takes the keyboard
+    expect(document.activeElement).toBe(viewBtn(bar, 'alpha'))
+
+    viewBtn(bar, 'alpha').click() // reopen — the click anchor is set again
+    const target = document.createElement('div')
+    target.tabIndex = 0
+    document.body.append(target)
+    target.focus()
+
+    handle.showPanel({ view: 'beta', collapsed: true })
+    expect(panel.classList.contains('collapsed')).toBe(true)
+    expect(document.activeElement).toBe(target)
+  })
+
+  it('Ctrl/Cmd+B on a tab with no remembered view opens the default view', () => {
+    // A tab with no panel is {view:'', collapsed:true}; toggling collapsed
+    // alone would leave it showing nothing, so the panel could never open
+    // (codex P2 on ADR-x7cvh8e1). Expanding picks the first registered view.
+    const { panel } = mountWithPanel(null)
+    expect(panel.classList.contains('collapsed')).toBe(true)
+
+    pressToggleKey()
+    expect(panel.classList.contains('collapsed')).toBe(false)
+    expect(panelTitle(panel)).toBe('Alpha')
+
+    // And the next toggle closes it again.
+    pressToggleKey()
+    expect(panel.classList.contains('collapsed')).toBe(true)
+  })
+
+  it('revealView (the Ctrl/Cmd+Shift+O path) still expands the panel from a Settings tab', () => {
+    const { panel, handle } = mountWithPanel(null)
+    expect(panel.classList.contains('collapsed')).toBe(true)
 
     handle.revealView('alpha')
-    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(false))
+    expect(panel.classList.contains('collapsed')).toBe(false)
     expect(panelTitle(panel)).toBe('Alpha')
   })
 })

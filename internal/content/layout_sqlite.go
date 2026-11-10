@@ -808,7 +808,8 @@ func (s *sqliteContent) Tabs(ctx context.Context, workspaceID string) ([]Tab, er
 		return nil, ErrClosed
 	}
 	rows, err := s.conn(ctx).QueryContext(ctx,
-		`SELECT id, workspace_id, parent_id, name, colour, position, pinned, layout, seen_at
+		`SELECT id, workspace_id, parent_id, name, colour, position, pinned, layout, seen_at,
+		        panel_view, panel_collapsed
 		   FROM tabs WHERE workspace_id = ? AND closed_at IS NULL
 		  ORDER BY position, id`, workspaceID)
 	if err != nil {
@@ -818,16 +819,17 @@ func (s *sqliteContent) Tabs(ctx context.Context, workspaceID string) ([]Tab, er
 	out := []Tab{}
 	for rows.Next() {
 		var (
-			t      Tab
-			parent sql.NullString
-			name   sql.NullString
-			colour sql.NullString
-			pinned int
-			layout string
-			seenAt sql.NullInt64
+			t        Tab
+			parent   sql.NullString
+			name     sql.NullString
+			colour   sql.NullString
+			pinned   int
+			layout   string
+			seenAt   sql.NullInt64
+			collapse int
 		)
 		if err := rows.Scan(&t.ID, &t.WorkspaceID, &parent, &name, &colour,
-			&t.Position, &pinned, &layout, &seenAt); err != nil {
+			&t.Position, &pinned, &layout, &seenAt, &t.PanelView, &collapse); err != nil {
 			return nil, err
 		}
 		t.ParentID = nullableString(parent)
@@ -835,6 +837,7 @@ func (s *sqliteContent) Tabs(ctx context.Context, workspaceID string) ([]Tab, er
 		t.Colour = nullableString(colour)
 		t.Pinned = pinned != 0
 		t.Layout = TabLayout(layout)
+		t.PanelCollapsed = collapse != 0
 		if seenAt.Valid {
 			v := seenAt.Int64
 			t.SeenAt = &v
@@ -1215,6 +1218,15 @@ func (s *sqliteContent) PinTab(ctx context.Context, id string, pinned bool) (Tab
 	return s.setTabColumn(ctx, id, `UPDATE tabs SET pinned = ? WHERE id = ? AND closed_at IS NULL`, boolToInt(pinned))
 }
 
+// SetTabPanel records the sidebar panel this tab shows (nocx-ouru5.1.18).
+// The view is "" for a tab whose panel shows nothing; the store judges
+// neither value, because the registry of views is the renderer's.
+func (s *sqliteContent) SetTabPanel(ctx context.Context, id, view string, collapsed bool) (Tab, error) {
+	return s.setTabColumns(ctx, id,
+		`UPDATE tabs SET panel_view = ?, panel_collapsed = ? WHERE id = ? AND closed_at IS NULL`,
+		view, boolToInt(collapsed))
+}
+
 // setTabColumn writes one column and reads the row back inside the same
 // transaction: what the caller is answered with is what the store holds, not
 // what the caller asked for.
@@ -1231,10 +1243,18 @@ func (s *sqliteContent) PinTab(ctx context.Context, id string, pinned bool) (Tab
 // workspace_id (the workspace was deleted under it), and the wire says a
 // tab's workspaceId is never empty.
 func (s *sqliteContent) setTabColumn(ctx context.Context, id, stmt string, value any) (Tab, error) {
+	return s.setTabColumns(ctx, id, stmt, value)
+}
+
+// setTabColumns is setTabColumn's general form: one statement, its bound
+// values in order, and the id last. A panel is two columns written together
+// (a collapsed panel remembers its view), so the shape had to stop assuming
+// one value.
+func (s *sqliteContent) setTabColumns(ctx context.Context, id, stmt string, values ...any) (Tab, error) {
 	var out Tab
 	err := s.run(ctx, func(ctx context.Context) error {
 		return s.inTx(ctx, func(tx *sql.Tx) error {
-			res, err := tx.ExecContext(ctx, stmt, value, id)
+			res, err := tx.ExecContext(ctx, stmt, append(append([]any{}, values...), id)...)
 			if err != nil {
 				return err
 			}
@@ -1419,13 +1439,15 @@ func tabByID(ctx context.Context, q rowQuerier, id string) (tabRow, error) {
 		pinned    int
 		layout    string
 		seenAt    sql.NullInt64
+		collapse  int
 		closedAt  sql.NullInt64
 	)
 	err := q.QueryRowContext(ctx,
-		`SELECT id, workspace_id, parent_id, name, colour, position, pinned, layout, seen_at, closed_at, digest
+		`SELECT id, workspace_id, parent_id, name, colour, position, pinned, layout, seen_at,
+		        panel_view, panel_collapsed, closed_at, digest
 		   FROM tabs WHERE id = ?`, id,
 	).Scan(&row.ID, &workspace, &parent, &name, &colour, &row.Position,
-		&pinned, &layout, &seenAt, &closedAt, &row.digest)
+		&pinned, &layout, &seenAt, &row.PanelView, &collapse, &closedAt, &row.digest)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return tabRow{}, fmt.Errorf("%w: %s", ErrNoSuchTab, id)
@@ -1445,6 +1467,7 @@ func tabByID(ctx context.Context, q rowQuerier, id string) (tabRow, error) {
 	row.Colour = nullableString(colour)
 	row.Pinned = pinned != 0
 	row.Layout = TabLayout(layout)
+	row.PanelCollapsed = collapse != 0
 	if seenAt.Valid {
 		v := seenAt.Int64
 		row.SeenAt = &v

@@ -741,6 +741,19 @@ function insertionIndex(from: number, to: number, before: boolean): number {
 export const LOCAL_BACKEND_ID = 'local'
 
 /**
+ * The sidebar panel a tab remembers (ADR-x7cvh8e1, `nocx-ouru5.1.18`): the
+ * view it shows ("" for none) and whether its rail is collapsed.
+ *
+ * The panel is the TAB's, not the window's, so switching tabs restores the
+ * panel each one left behind. Only WHICH view is remembered — never the state
+ * inside it, which belongs to the view.
+ */
+export interface TabPanel {
+  readonly view: string
+  readonly collapsed: boolean
+}
+
+/**
  * WHERE A TAB THE PERSON POINTED AT GOES (nocx-ouru5.1.4).
  *
  * A create's ordinary seat is "beside the tab in front, in the workspace the
@@ -831,6 +844,25 @@ export class PaneManager {
    * a pane can be MOVED to another tab).
    */
   private readonly tabIdOfCreatedPane = new Map<string, string>()
+
+  /** Panels this window has chosen and the tab's row has not confirmed yet
+   *  (ADR-x7cvh8e1). See `setActiveTabPanel`: a write is a round trip and a
+   *  person can switch tabs inside it.
+   *
+   *  Each entry carries the SEQUENCE of the write that put it there, so a
+   *  completion or a refusal clears only its own entry: two choices on one
+   *  tab before the first answer lands must leave the SECOND one pending,
+   *  or the first answer would undo a click the person just made. */
+  private readonly unconfirmedPanels = new Map<string, { panel: TabPanel; seq: number }>()
+  /** Panel choices whose tab row does not exist yet — a create is in flight.
+   *  The tab shows the choice now (through `unconfirmedPanels`); the WRITE
+   *  waits for the row, and `flushPanelsAwaitingRow` sends it when the chain
+   *  carries it. Keyed by tab id, which the renderer minted. */
+  private readonly panelsAwaitingRow = new Map<string, { panel: TabPanel; seq: number }>()
+  /** One counter for every panel write, so a completion knows which entry is
+   *  its own. Monotonic for the window's lifetime; it never wraps in any
+   *  reachable number of clicks. */
+  private panelWriteSeq = 0
   /**
    * THE SAVED CONNECTIONS, read once before the chain is drawn.
    *
@@ -978,8 +1010,22 @@ export class PaneManager {
   /** Called when the active pane changes — the seam for chrome that must
    *  re-scope to the tab in front. The sidebar's ports view follows the
    *  active pane through this (nocx-wzc4.7); wired by main.tsx to a Solid
-   *  signal. */
+   *  signal.
+   *
+   *  It fires AFTER the pane's content has started, because the content is
+   *  what answers "which machine/ports/origin is this". Chrome that follows
+   *  the TAB and not its content — the panel (ADR-x7cvh8e1) — must not wait
+   *  for a connection, so it uses `onActiveTabChange` below. */
   onActivePaneChange?: () => void
+  /** Called the moment a tab comes to the FRONT: `activePane` and the strip
+   *  have moved, and `pane.start()` has not been awaited yet.
+   *
+   *  The panel belongs to the tab, and a person who switches to a tab that
+   *  is still connecting is already in that tab: applying its panel here is
+   *  what stops the previous tab's panel staying on screen (and a
+   *  Ctrl/Cmd+B during the connect writing the old view onto the new tab).
+   *  Wired by main.tsx. */
+  onActiveTabChange?: () => void
   /** Listeners for `onPanesChanged` — see the method for why this is a
    *  subscription and not a single slot like the callbacks above. */
   private readonly paneSetListeners = new Set<() => void>()
@@ -1057,6 +1103,12 @@ export class PaneManager {
     // remembering to re-render — which is how two of them end up disagreeing
     // about what "after a close" looks like.
     this.layout.onChange(() => this.renderFromLayout())
+
+    // PANEL CHOICES WAITING FOR THEIR TAB'S ROW (see setActiveTabPanel). A
+    // create's answer arrives as a layout change, and this is where a write
+    // that had nowhere to go yet is sent. One subscription for the window's
+    // lifetime; the map is empty except while a create is in flight.
+    this.layout.onChange(() => this.flushPanelsAwaitingRow())
 
     // A session this window was holding has been taken by another client
     // (nocx-oevq4, the nocx-server design D8). The pane is still on the strip
@@ -2875,6 +2927,10 @@ export class PaneManager {
 
     this.removeFromRecent(pane.id)
     this.tabStrip.setActive(pane.id)
+    // THE TAB IS IN FRONT NOW, before its content has started: chrome that
+    // follows the tab (the panel) must not wait for a connection, or the
+    // previous tab's panel stays on screen while this one connects.
+    this.onActiveTabChange?.()
     // Remember it, so the next launch opens here. Recorded BEFORE the content
     // is started and awaited: what was in front is true from the moment the
     // tab comes forward, and a start that never finishes must not be able to
@@ -3140,6 +3196,102 @@ export class PaneManager {
    *  Null when no tab is active yet. */
   activeSurfaceType(): SurfaceType | null {
     return this.activePane?.descriptor.surfaceType ?? null
+  }
+
+  /**
+   * The panel the ACTIVE tab remembers (ADR-x7cvh8e1, `nocx-ouru5.1.18`): the sidebar view
+   * it shows and whether its rail is collapsed. Null when the pane is in no
+   * chain — Settings and the file viewer are view panes — because there is
+   * no row to hold a panel and nothing to remember.
+   *
+   * Read from the chain, never from a copy: the panel is the tab's, so the
+   * row IS the answer, exactly as it is for the tab's colour. The one
+   * exception is a panel this window has just chosen and the row has not
+   * confirmed yet — see `unconfirmedPanels`.
+   */
+  activeTabPanel(): TabPanel | null {
+    const pane = this.activePane
+    if (!pane) return null
+    const tabId = this.tabIdOfPane(pane)
+    if (!tabId) return null
+    const pending = this.unconfirmedPanels.get(tabId)
+    if (pending) return pending.panel
+    const tab = this.layout.tab(tabId)
+    if (!tab) {
+      // THE ROW IS STILL BEING WRITTEN: this is a create in flight, not a pane
+      // in no chain (that has no tab id at all — `tabIdOfPane` answered with
+      // the id the renderer minted). The tab has no panel yet, and the panel
+      // must not go on showing the previous tab's while it connects.
+      return { view: '', collapsed: false }
+    }
+    return { view: tab.panelView, collapsed: tab.panelCollapsed }
+  }
+
+  /**
+   * Record a panel against the tab in front (ADR-x7cvh8e1, `nocx-ouru5.1.18`).
+   *
+   * Fire-and-forget, and silent on failure, like every other fact the app
+   * writes without being asked: nothing on screen promises it landed, and a
+   * failed write costs the next visit its panel, never this one. A pane in
+   * no chain (Settings) has no row to write, which is the same no-op.
+   */
+  setActiveTabPanel(panel: TabPanel): void {
+    const pane = this.activePane
+    if (!pane) return
+    const tabId = this.tabIdOfPane(pane)
+    if (!tabId) return
+    // THE WRITE IS A ROUND TRIP, and a person can switch away and back inside
+    // it. Until the chain confirms, the panel they chose is what the tab
+    // shows — otherwise the row as it was a moment ago would undo a click the
+    // person just made. The entry is dropped as soon as the answer agrees
+    // (the store folds it in from the answer), and on a refusal, so it is a
+    // log of unconfirmed writes rather than a second copy of the state.
+    const seq = ++this.panelWriteSeq
+    this.unconfirmedPanels.set(tabId, { panel, seq })
+    // A CHOICE MADE BEFORE THE ROW EXISTS IS KEPT, NOT DROPPED. A tab that
+    // was just opened has an id but no row yet (its create is in flight), and
+    // a Ctrl/Cmd+B in that window is still the person's choice for THAT tab.
+    // The write goes out when the chain carries the row.
+    if (!this.layout.tab(tabId)) {
+      this.panelsAwaitingRow.set(tabId, { panel, seq })
+      return
+    }
+    this.sendPanelWrite(tabId, panel, seq)
+  }
+
+  /** Send one panel write and clear its pending entry when the answer agrees
+   *  (or the write is refused) — but only while that write still owns it. */
+  private sendPanelWrite(tabId: string, panel: TabPanel, seq: number): void {
+    const stillMine = (): boolean => this.unconfirmedPanels.get(tabId)?.seq === seq
+    void this.layout
+      .setTabPanel(tabId, panel.view, panel.collapsed)
+      .then(() => {
+        // A NEWER write owns the entry now: its answer decides, not this one.
+        if (!stillMine()) return
+        const stored = this.layout.tab(tabId)
+        if (
+          stored &&
+          stored.panelView === panel.view &&
+          stored.panelCollapsed === panel.collapsed
+        ) {
+          this.unconfirmedPanels.delete(tabId)
+        }
+      })
+      .catch(() => {
+        if (stillMine()) this.unconfirmedPanels.delete(tabId)
+      })
+  }
+
+  /** Send the panel choices whose tab row has just arrived. Called from the
+   *  chain's own change notification, so the write leaves only once the row
+   *  it names exists. */
+  private flushPanelsAwaitingRow(): void {
+    if (this.panelsAwaitingRow.size === 0) return
+    for (const [tabId, entry] of [...this.panelsAwaitingRow]) {
+      if (!this.layout.tab(tabId)) continue
+      this.panelsAwaitingRow.delete(tabId)
+      this.sendPanelWrite(tabId, entry.panel, entry.seq)
+    }
   }
 
   /**

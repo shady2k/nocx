@@ -3194,6 +3194,94 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
     }
   })
 
+  it('a vetoed reference draft is visible even when focus has moved (nocx-evj4b.1.8)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    let releaseResolve!: () => void
+    const resolved = new Promise<void>((resolve) => {
+      releaseResolve = resolve
+    })
+    client.call.mockImplementation((method: string) => {
+      if (method === 'vault.resolveLine') {
+        return resolved.then(() => ({
+          line: 'curl -H "Authorization: Bearer s3cr3t"',
+          refs: [{ name: 'token', resolved: true }],
+        }))
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      editor.insertText('curl {{secret:token}}')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      // FOCUS MOVES WHILE THE VERDICT IS IN FLIGHT — the window this rule is
+      // for: the line is the person's, but the keyboard is not in the editor.
+      ;(document.activeElement as HTMLElement | null)?.blur()
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      releaseResolve()
+      for (let i = 0; i < 10; i++) await Promise.resolve()
+
+      expect(editor.getDoc()).toBe('curl {{secret:token}}')
+      expect(editor.isVisible, 'the vetoed line is on screen, not in a hidden draft').toBe(true)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a shell draft restored while Ask was active is visible once the shell is shown (nocx-evj4b.1.8)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    const inputTargets = (content as unknown as { inputTargets: { setActive(id: string): void } })
+      .inputTargets
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      holdOne(editor, view, 'echo shell-line')
+      inputTargets.setActive('agent')
+      editor.insertText('what did that print?')
+
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(editor.getDoc()).toBe('what did that print?')
+
+      // BACK TO THE SHELL: the draft is loaded AND the composer comes back
+      // with it. One rule, whichever path restored the draft.
+      inputTargets.setActive('shell')
+      await vi.waitFor(() => expect(editor.getDoc()).toBe('echo shell-line'))
+      expect(editor.isVisible, 'the restored shell draft is on screen').toBe(true)
+    } finally {
+      teardown()
+    }
+  })
+
   it('a restored draft keeps the composer on screen until it is submitted or cleared (nocx-evj4b.1.8)', async () => {
     const session = makeSession({ awaitsIntegration: true })
     const client = makeClient()

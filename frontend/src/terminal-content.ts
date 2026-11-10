@@ -1201,13 +1201,17 @@ export class TerminalContent extends BasePaneContent {
    *  of a switch, tracked here because the registry's change notification
    *  names only the incoming target. */
   private activeTargetId: string | null = null
-  /** Whether the draft on screen is a line this pane handed BACK to the
-   *  person (nocx-evj4b.1.8, P2). The ownership projection hides the composer
-   *  at a non-ready fact unless it holds a typed, focused line, so a restored
-   *  draft shown without focus was hidden in the same update — the person's
-   *  text vanished into an invisible box. A restored draft keeps the composer
-   *  visible until the person submits or clears it (the draft empties). */
-  private _restoredDraft = false
+  /** THE DRAFTS THIS PANE HANDED BACK TO THE PERSON, by target id
+   *  (nocx-evj4b.1.8, P2). One rule for every path that restores a line — a
+   *  settle returning the held ones, a verdict vetoed after its startup
+   *  settled, a shell draft written while Ask was active — set at the one
+   *  place they all pass through (`_keepRestoredShellDraft`). The ownership
+   *  projection hides the composer at a non-ready fact unless the line is
+   *  typed AND focused, so a restored draft shown without focus was hidden in
+   *  the same update and the person's text vanished into an invisible box. A
+   *  restored draft keeps the composer of ITS OWN target visible whenever that
+   *  target is the one shown, until the person submits or clears it. */
+  private readonly _restoredDrafts = new Set<string>()
   private agentTarget: AgentInputTarget | null = null
   /** The editor is SUMMONED: the person asked for it over a command that is
    *  still running (nocx-92gfl).
@@ -3773,6 +3777,14 @@ export class TerminalContent extends BasePaneContent {
           this.restoreScrollbackRange(held)
         }
         this.activeTargetId = target.id
+        // THE TARGET THAT WAS SWITCHED TO MAY OWE THE PERSON A DRAFT
+        // (nocx-evj4b.1.8, P2). A restored shell draft stored while Ask was
+        // active is loaded by the swap above into a hidden editor. The rule
+        // is the one predicate the ownership projection reads; this is its
+        // other half — the target is on screen NOW, and the draft with it.
+        if (this._restoredShellDraft() && this.editor !== null && !this.editor.isVisible) {
+          this.editor.show({ focus: false })
+        }
         // The line-start indicator renders the registry's active target
         // and nothing else repaints it: this notification IS its refresh
         // signal (ask-entry.ts). The indicator derives its own WORD from
@@ -8049,7 +8061,7 @@ export class TerminalContent extends BasePaneContent {
       !this._awaitsFirstPrompt() &&
       this.lifecycle.state.kind !== 'prompt_ready'
     ) {
-      this._restoredDraft = true
+      this._keepRestoredShellDraft()
       return false
     }
     if (!this._awaitsFirstPrompt()) return plan
@@ -8266,43 +8278,11 @@ export class TerminalContent extends BasePaneContent {
     // of the person and, on the next Enter, into ledger history: a secret in
     // clear, twice. `recordLine` is the text they typed, references intact.
     const lines = held.map((entry) => entry.plan.recordLine)
-    // AND INTO THE TARGET THAT HELD THEM (P2). The person may have switched
-    // to Ask while the shell was starting; the editor is showing the
-    // question's draft now, and writing their shell line into it would put a
-    // command in a question. The line belongs to the shell's draft.
-    const targetId = held[0].target.id
     held.length = 0
-    const editor = this.editor
-    const active = this.activeTargetId === targetId
-    // THE HELD LINES COME FIRST, THEN THE DRAFT THAT IS THERE NOW (P2). The
-    // person may have typed a newer line while the startup was settling;
-    // `insertText` at the caret put the earlier line into the middle of it
-    // ("echo Becho A"), or over a selection. Restoring the whole document is
-    // the only shape that cannot interleave two drafts.
-    const current = active
-      ? (editor?.getDoc() ?? '')
-      : (this.targetState.draft(targetId)?.text ?? '')
-    const next = [...lines, ...(current.trim() === '' ? [] : [current])].join('\n')
-    if (!active) {
-      const draft = this.targetState.draft(targetId)
-      this.targetState.saveDraft(targetId, {
-        text: next,
-        from: next.length,
-        to: next.length,
-        scrollTop: draft?.scrollTop ?? 0,
-      })
-      return
-    }
-    if (editor === null) return
-    // A DRAFT THE PERSON CANNOT SEE IS NOT THEIRS. The startup composer hid
-    // when the session settled conventional; the line it now holds is the
-    // person's, so the composer stays on screen with it — their next Enter is
-    // the submit, at the prompt they can see.
-    if (!editor.isVisible) editor.show({ focus: false })
-    editor.replaceDoc(next)
-    // AND IT STAYS ON SCREEN (P2): the projection that hid this composer hides
-    // it again unless the draft is kept, so the keep is part of the restore.
-    this._restoredDraft = true
+    // AND INTO THE TARGET THAT HELD THEM, through the one restore rule
+    // (P2): the person may have switched to Ask while the shell was starting,
+    // and the line belongs to the shell's draft, never to the question's.
+    this._restoreShellDraft(lines)
   }
 
   /** Show the waiting card and hide the terminal grid for exactly as long as
@@ -8326,17 +8306,67 @@ export class TerminalContent extends BasePaneContent {
    *  on both calls, and this method is never asked to hide anything — the
    *  terminal is live from its first frame, which is what "absence is
    *  conventional by design" requires. */
-  /** Whether a draft this pane restored is still the person's text on screen.
-   *  Cleared by the same read that answers it: a submit or a clear empties
-   *  the editor, and with it the keep (nocx-evj4b.1.8, P2). */
-  private _restoredDraftKept(): boolean {
-    if (!this._restoredDraft) return false
+  /** The shell target's id — the target whose drafts this pane restores. */
+  private _shellTargetId(): string {
+    return this.shellTarget?.id ?? 'shell'
+  }
+
+  /** WHETHER A RESTORED SHELL DRAFT IS THE TEXT ON SCREEN (nocx-evj4b.1.8,
+   *  P2). One rule, read by the ownership projection: the draft exists (the
+   *  editor's, when the shell is the target shown; the stored draft, when it
+   *  is not), it is not empty, and the shell is the target being shown. Cleared
+   *  by the same read that answers it — a submit or a clear empties the
+   *  editor, and with it the keep. */
+  private _restoredShellDraft(): boolean {
     const editor = this.editor
-    if (editor === null || editor.getDoc().trim() === '') {
-      this._restoredDraft = false
+    if (editor === null) return false
+    const id = this._shellTargetId()
+    if (!this._restoredDrafts.has(id)) return false
+    if (this.activeTargetId !== id) return false
+    if (editor.getDoc().trim() === '') {
+      this._restoredDrafts.delete(id)
       return false
     }
     return true
+  }
+
+  /** THE ONE PLACE A HANDED-BACK DRAFT IS RECORDED (nocx-evj4b.1.8, P2).
+   *  Every path that returns a line to the person passes through here, so the
+   *  visibility rule is one rule rather than a fix per path, and the composer
+   *  of the target that owns the draft is shown with it when that target is
+   *  the one on screen. */
+  private _keepRestoredShellDraft(): void {
+    const id = this._shellTargetId()
+    this._restoredDrafts.add(id)
+    if (this.activeTargetId !== id) return
+    const editor = this.editor
+    // A DRAFT THE PERSON CANNOT SEE IS NOT THEIRS. The startup composer hid
+    // when the session settled; the line it now holds is the person's, so the
+    // composer comes back with it — and the projection above keeps it there.
+    if (editor !== null && !editor.isVisible) editor.show({ focus: false })
+  }
+
+  /** HAND A LINE BACK TO THE SHELL DRAFT (nocx-evj4b.1.8). The held lines come
+   *  first, then the draft that is there now — the person may have typed a
+   *  newer line while the startup was settling, and `insertText` at the caret
+   *  put the earlier line into the middle of it ("echo Becho A") or over a
+   *  selection. The document is replaced whole. */
+  private _restoreShellDraft(lines: string[]): void {
+    const id = this._shellTargetId()
+    const editor = this.editor
+    const active = this.activeTargetId === id
+    const current = active ? (editor?.getDoc() ?? '') : (this.targetState.draft(id)?.text ?? '')
+    const next = [...lines, ...(current.trim() === '' ? [] : [current])].join('\n')
+    const stored = this.targetState.draft(id)
+    this.targetState.saveDraft(id, {
+      text: next,
+      from: next.length,
+      to: next.length,
+      scrollTop: stored?.scrollTop ?? 0,
+    })
+    this._keepRestoredShellDraft()
+    if (!active || editor === null) return
+    editor.replaceDoc(next)
   }
 
   private _syncIntegrationWaiting(): void {
@@ -10728,7 +10758,7 @@ export class TerminalContent extends BasePaneContent {
       (shouldShowEditor(this.lifecycle.state) ||
         summoned ||
         startupComposer ||
-        this._restoredDraftKept()) &&
+        this._restoredShellDraft()) &&
       (summoned || this.lifecycle.buffer === 'normal') &&
       !this.nativeMode
     // The one case in which an authenticated prompt still shows no editor is

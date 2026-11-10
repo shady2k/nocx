@@ -374,11 +374,13 @@ describe('the live region follows the pane it fills (nocx-liveheight)', () => {
 
   it('re-measures an alt-screen program when the scroller shrinks', () => {
     const { controller } = makeController()
+    // A markerless session: no running block, no reserved header, the terminal
+    // is the pane (ADR-92zzg2y2).
+    controller.setUnstructured()
     controller.enterFullscreen()
-    // ONE ROW LESS THAN THE PANE (ADR-2yzsq8mk): 352px of pane is 22 rows of a
-    // 16px cell, and the program's box gives one of them back to the stylesheet's
-    // bottom margin so its last row never touches the window's edge.
-    expect(controller.terminalLiveContainer.style.height).toBe('336px')
+    // THE SAME BOX AS EVERY OTHER MODE (ADR-92zzg2y2): 352px of pane is 22
+    // rows of a 16px cell, and a full-screen program is no exception.
+    expect(controller.terminalLiveContainer.style.height).toBe('352px')
 
     Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
       value: 200,
@@ -386,8 +388,8 @@ describe('the live region follows the pane it fills (nocx-liveheight)', () => {
     })
     controller.setLiveHeight(null)
 
-    // 200px is 12.5 rows of 16: floored to 12, less the margin row.
-    expect(controller.terminalLiveContainer.style.height).toBe('176px')
+    // 200px is 12.5 rows of 16: floored to 12.
+    expect(controller.terminalLiveContainer.style.height).toBe('192px')
   })
 
   it('the region answers the shared live-region identity, in every mode (ADR-0091)', () => {
@@ -880,9 +882,9 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     const header = block.el.querySelector('.cmd-header')!
     expect(controller.terminalLiveContainer.style.height).toBe('320px')
     controller.enterFullscreen()
-    // The full-screen box is the pane less the one row of bottom margin
-    // (ADR-2yzsq8mk): same header, same capacity, one row given back to it.
-    expect(controller.terminalLiveContainer.style.height).toBe('304px')
+    // The same header and the same capacity on both sides of the switch
+    // (ADR-92zzg2y2): a presentation change is not a geometry change.
+    expect(controller.terminalLiveContainer.style.height).toBe('320px')
     expect(controller.scrollbackArea.contains(header)).toBe(true)
     controller.exitFullscreen()
     controller.setRunning()

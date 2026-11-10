@@ -117,11 +117,19 @@ const INLINE = [
 ]
 
 describe('rows are full width, and the gutter lives in them (nocx-9bpeq.8)', () => {
-  it('the gutter is one token on the spacing scale', () => {
-    // var(--space-4) (16px) until the terminal-screen mockup decision
-    // record's §3 shared contract raised it to var(--space-6) (24px,
-    // nocx-9bpeq.23) — still one token, still declared once.
-    expect(shipped(':root', '--pane-inline-padding')).toBe('var(--space-6)')
+  it('the gutter is one terminal cell, and it scales with the font', () => {
+    // ADR-92zzg2y2: one cell wide on the sides, half a row top and bottom.
+    // The renderer publishes the cell metric on `.pane`
+    // (controller.cellMetricsChanged), so the token is declared there — a
+    // `:root` declaration could not see the published value, because a custom
+    // property's `var()` is resolved where it is declared.
+    expect(shipped('.pane', '--pane-inline-padding')).toBe('var(--term-cell-width, 1ch)')
+    expect(shipped('.pane', '--pane-block-padding')).toBe(
+      'calc(var(--term-cell-height, 1.2em) / 2)',
+    )
+    // …and nowhere else, so there is no second owner of the number.
+    expect(shipped(':root', '--pane-inline-padding')).toBeNull()
+    expect(shipped(':root', '--pane-block-padding')).toBeNull()
   })
 
   it('the pane insets nothing, so the scroller and its scrollbar reach the pane edge', () => {
@@ -181,26 +189,24 @@ describe('rows are full width, and the gutter lives in them (nocx-9bpeq.8)', () 
     expect(shipped('.cmd-block.cmd-block-running > .cmd-output', 'padding-inline')).toBeNull()
   })
 
-  it('no text touches the pane’s top or bottom edge, and no program is pushed off it', () => {
-    // ADR-2yzsq8mk, the owner's edge pass: the margin is on the BOX the
-    // scroller sits in, so a scrolling transcript cannot carry it away with the
-    // content — in every mode, and cancelled for the program that owns the
-    // pane, which starts at the pane's own top edge.
-    expect(shipped('.scrollback-layout', 'padding-block')).toBe('var(--pane-inline-padding)')
-    expect(shipped('.scrollback-layout.inner-pane-program', 'padding-block')).toBe('0')
+  it('no text touches the pane’s top or bottom edge, in any mode', () => {
+    // ADR-92zzg2y2: the margin is on the BOX the scroller sits in, so a
+    // scrolling transcript cannot carry it away with the content — and there
+    // is no mode exception left to cancel it.
+    expect(shipped('.scrollback-layout', 'padding-block')).toBe('var(--pane-block-padding)')
+    expect(shipped('.scrollback-layout.inner-pane-program', 'padding-block')).toBeNull()
   })
 
-  it('the full-screen program owns the width and keeps a row of bottom margin', () => {
-    // ADR-2yzsq8mk: the alternate screen pays no gutter — the program is
-    // fitted to the pane's own width — and reserves one row below its last row
-    // (`terminal-content` tells the program one row fewer, and the
-    // controller's box gives that row back).
+  it('a full-screen program wears the same gutter and no extra bottom margin', () => {
+    // ADR-92zzg2y2: the alternate screen is not an exception. The row rule
+    // above gives its live container the same one-cell gutter, and nothing
+    // adds a margin the fit would have to pay for.
     expect(
       shipped('.scrollback-inner > .terminal-live-container.live-fullscreen', 'padding-inline'),
-    ).toBe('0')
+    ).toBeNull()
     expect(
       shipped('.scrollback-inner > .terminal-live-container.live-fullscreen', 'margin-bottom'),
-    ).toBe('var(--term-cell-height, 1.2em)')
+    ).toBeNull()
   })
 
   it('the summon stack is full width and its answers wear the row inset', () => {
@@ -221,12 +227,16 @@ describe('rows are full width, and the gutter lives in them (nocx-9bpeq.8)', () 
     // deliberately narrower than the ledger's 24px row inset (the mockup's
     // own "10-12 px external gutter" for the card, not the row's).
     expect(shipped('.nocx-editor', 'padding')).toBeNull()
-    // …and the card's TEXT starts on the ledger's column (ADR-2yzsq8mk): what
-    // is left of --pane-inline-padding after the card's own border and
-    // padding is the margin, so the first glyph lands on the gutter.
+    // …and the card's TEXT starts on the ledger's column (ADR-92zzg2y2): the
+    // gutter is narrower than the card's border plus its
+    // old 12px padding, so the card spans the pane and pays the gutter as its
+    // inline padding — the first glyph lands on the column, and the card is
+    // never pushed outside the pane to reach it.
     expect(shipped('.ui-composer-frame', 'margin')?.replace(/\s+/g, ' ')).toBe(
-      '0 calc(var(--pane-inline-padding) - var(--terminal-card-padding) - 1px) ' +
-        'var(--terminal-card-margin)',
+      '0 0 var(--terminal-card-margin)',
+    )
+    expect(shipped('.ui-composer-frame', 'padding')?.replace(/\s+/g, ' ')).toBe(
+      'var(--terminal-card-padding) calc(var(--pane-inline-padding) - 1px)',
     )
   })
 })

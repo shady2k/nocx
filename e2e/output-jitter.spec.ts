@@ -69,6 +69,7 @@ const LINE = /GET-(\d{3})\b/
 const DONE = 'APT-END-DONE'
 
 interface VisibleRow {
+  source: 'stored' | 'live'
   /** Distance from the scroller's top edge, in CSS pixels. */
   y: number
   text: string
@@ -133,7 +134,11 @@ async function framesOf(page: Page, doneText: string): Promise<Frame[]> {
             const box = row.getBoundingClientRect()
             if (box.height <= 0) continue
             if (box.bottom <= sr.top + 0.5 || box.top >= sr.bottom - 0.5) continue
-            rows.push({ y: round(box.top - sr.top), text: (row.textContent ?? '').trimEnd() })
+            rows.push({
+              y: round(box.top - sr.top),
+              text: (row.textContent ?? '').trimEnd(),
+              source: row.closest('.cmd-output') ? 'stored' : 'live',
+            })
           }
           const frameBox = block.getBoundingClientRect()
           const liveBox = pane.querySelector<HTMLElement>('.terminal-live-container')
@@ -192,21 +197,27 @@ function judge(frames: readonly Frame[], pitch: number): Jitter {
     // output, and two rows with the same text say nothing about which one
     // moved. A line that appears twice in one frame is the out-of-order
     // assertion's, below.
-    const keyed = (frame: Frame): Map<string, number> => {
+    const keyed = (frame: Frame): Map<string, VisibleRow> => {
       const counts = new Map<string, number>()
       for (const row of frame.rows) counts.set(row.text, (counts.get(row.text) ?? 0) + 1)
-      const map = new Map<string, number>()
+      const map = new Map<string, VisibleRow>()
       for (const row of frame.rows) {
         if (counts.get(row.text) !== 1 || LINE.exec(row.text) === null) continue
-        map.set(row.text, row.y)
+        map.set(row.text, row)
       }
       return map
     }
     const before = keyed(previous)
-    for (const [text, y] of keyed(frame)) {
+    for (const [text, row] of keyed(frame)) {
       const was = before.get(text)
       if (was === undefined) continue
-      const dy = y - was
+      // THE JOINT IS NOT A MOVE (ADR-92zzg2y2). A row handed from the live
+      // grid to the running block's stored body is painted on the other
+      // surface at the seam; its y is the seam's question, and
+      // e2e/running-block-body-seam.spec.ts asserts it. This invariant is
+      // about a row moving on the surface it is already on.
+      if (was.source !== row.source) continue
+      const dy = row.y - was.y
       if (dy <= 0.05) continue
       worstDownPx = Math.max(worstDownPx, dy)
       if (dy < pitch / 2) {
@@ -522,7 +533,7 @@ test('a burst of rows arrives whole, in the block it will keep', async ({ page }
   const spoken = `shape: ${JSON.stringify(running.slice(-3))}`
   expect(running.length, spoken).toBeGreaterThan(20)
 
-  // ONE SHAPE (ADR-2yzsq8mk): a normal command, running or finished, sits in the
+  // ONE SHAPE (ADR-92zzg2y2): a normal command, running or finished, sits in the
   // transcript's column, so a running row starts where the frozen one does —
   // and that column is inset, not the pane's own edge.
   const frozenX = frames.filter((f) => f.frozenRowX === f.frozenRowX).map((f) => f.frozenRowX)
@@ -553,7 +564,7 @@ test('a burst of rows arrives whole, in the block it will keep', async ({ page }
   ).toEqual([])
 })
 
-test('a full-screen program keeps one row of margin below its last row', async ({ page }) => {
+test('a full-screen program keeps the half-row bottom gutter', async ({ page }) => {
   test.setTimeout(120_000)
   await page.goto('/')
   await promptReady(page)
@@ -569,17 +580,19 @@ test('a full-screen program keeps one row of margin below its last row', async (
       const inner = pane?.querySelector<HTMLElement>('.scrollback-inner')
       if (!area || !live || !grid || !inner) return { settled: false }
       const sr = area.getBoundingClientRect()
-      const lr = live.getBoundingClientRect()
+      const pr = pane!.getBoundingClientRect()
       const rows = [...grid.querySelectorAll<HTMLElement>('.term-grid-row')]
       const painted = rows.filter((row) => (row.textContent ?? '').trim() !== '')
       const last = painted[painted.length - 1]
       const pitch = parseFloat(getComputedStyle(inner).getPropertyValue('--term-cell-height')) || 0
       const lastBottom = last ? last.getBoundingClientRect().bottom : NaN
       return {
-        // The box's own bottom edge sits one row above the pane's.
-        boxMargin: Math.round((sr.bottom - lr.bottom) * 100) / 100,
-        // And the program's last painted row is inside the box, not on its edge.
-        rowMargin: Math.round((sr.bottom - lastBottom) * 100) / 100,
+        // The box ends inside the scroller by the integer remainder only: no
+        // extra row of margin is reserved for a full-screen program.
+        boxMargin: Math.round((sr.bottom - lastBottom) * 100) / 100,
+        // The gutter between the last painted row and the pane's own bottom
+        // edge: half a row plus that remainder.
+        paneMargin: Math.round((pr.bottom - lastBottom) * 100) / 100,
         pitch: Math.round(pitch * 100) / 100,
         fullscreen: live.classList.contains('live-fullscreen'),
         settled: live.classList.contains('live-fullscreen') && pitch > 0 && painted.length > 5,
@@ -587,9 +600,11 @@ test('a full-screen program keeps one row of margin below its last row', async (
     })
   await expect.poll(async () => (await geometry()).settled, { timeout: 20_000 }).toBe(true)
   const g = await geometry()
-  const said = `full-screen bottom margin: ${JSON.stringify(g)}`
-  // ONE ROW OF MARGIN, inside a row's tolerance: the owner's Warp parity, so a
-  // program's last row never touches the window's bottom edge.
-  expect(Math.abs(g.boxMargin! - g.pitch!), said).toBeLessThanOrEqual(1)
-  expect(g.rowMargin!, said).toBeGreaterThan(g.pitch! - 1)
+  const said = `full-screen bottom gutter: ${JSON.stringify(g)}`
+  // HALF A ROW, PLUS THE INTEGER REMAINDER (ADR-92zzg2y2): the same gutter a
+  // normal command wears, so a program's last row never touches the window's
+  // bottom edge and no extra row is taken from it.
+  expect(g.boxMargin!, said).toBeLessThan(g.pitch! + 1)
+  expect(g.paneMargin!, said).toBeGreaterThanOrEqual(g.pitch! / 2 - 1)
+  expect(g.paneMargin!, said).toBeLessThan(g.pitch! * 1.5 + 1)
 })

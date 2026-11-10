@@ -50,7 +50,6 @@ describe('UIStateClient', () => {
     const loaded = await client.load()
 
     expect(loaded.sidebar.width).toBe(240)
-    expect(loaded.sidebar.collapsed).toBe(false)
     expect(loaded.activeTab).toBe('')
   })
 

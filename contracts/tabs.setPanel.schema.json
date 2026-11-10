@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tabs.setPanel.schema.json",
+  "title": "TabsSetPanelResult",
+  "description": "Result of the tabs.setPanel JSON-RPC method: the tab as stored after the change, read back rather than echoed. The panel a tab shows is a fact about the tab, stored beside its colour and pinning (nocx-ouru5.1.18), so switching tabs restores the panel each one left behind.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tab"],
+  "properties": {
+    "tab": {
+      "$ref": "tabs.create.schema.json#/$defs/tab"
+    }
+  }
+}

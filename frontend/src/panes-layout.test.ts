@@ -726,6 +726,63 @@ describe('each tab remembers its own right-hand panel', () => {
     })
   })
 
+  it('applies the tab that comes to the front before its content starts', async () => {
+    // Activation sets the tab in front and then awaits pane.start(), which
+    // for a chain tab waits for its row. The chrome must follow the TAB, not
+    // the content: while the create is unanswered the person is already in
+    // the new tab, and a Ctrl/Cmd+B must reach THAT tab (codex P2 round 2).
+    const layout = makeLayoutStore()
+    const { manager, backend, bar } = await mountPaneManager(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      layout,
+    )
+    await vi.waitFor(() => expect(bar.querySelectorAll('.nocx-tab')).toHaveLength(1))
+
+    const seen: Array<{ view: string; collapsed: boolean } | null> = []
+    manager.onActiveTabChange = () => seen.push(manager.activeTabPanel())
+
+    const holding = backend.holdCreates()
+    manager.newPane()
+    await vi.waitFor(() => expect(seen).toHaveLength(1))
+    expect(seen[0]).toEqual({ view: '', collapsed: false })
+    // The row really is absent: the tab is in front with nothing stored yet.
+    expect(backend.rows().tabs).toHaveLength(1)
+    holding.release()
+  })
+
+  it('keeps a panel chosen before the tab row arrives, and sends it when it does', async () => {
+    // A choice made while the create is in flight must not be dropped: the
+    // tab is showing it, and the write goes out once the chain carries the
+    // row (codex P2 round 2).
+    const layout = makeLayoutStore()
+    const { manager, backend, bar } = await mountPaneManager(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      layout,
+    )
+    await vi.waitFor(() => expect(bar.querySelectorAll('.nocx-tab')).toHaveLength(1))
+
+    const holding = backend.holdCreates()
+    manager.newPane()
+    // The strip carries the new row at once; the CHAIN does not (held).
+    await vi.waitFor(() => expect(bar.querySelectorAll('.nocx-tab')).toHaveLength(2))
+    expect(backend.rows().tabs).toHaveLength(1)
+
+    expect(manager.activeTabPanel()).toEqual({ view: '', collapsed: false })
+    manager.setActiveTabPanel({ view: 'ports', collapsed: false })
+    expect(manager.activeTabPanel()).toEqual({ view: 'ports', collapsed: false })
+
+    holding.release()
+    await vi.waitFor(() => {
+      expect(backend.rows().tabs.some((t) => t.panelView === 'ports')).toBe(true)
+    })
+  })
+
   it('a pane in no chain has no panel to read or write', async () => {
     const backend = await seededBackend({ decorate: false })
     const { manager } = await mountPaneManager(undefined, undefined, undefined, undefined, {

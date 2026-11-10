@@ -844,12 +844,16 @@ function main(): void {
   // sidebar exists, because the sidebar is connection-scoped and is rebuilt
   // on every connection generation; the callback reads it at call time.
   let applyActiveTabPanel: () => void = () => {}
+  // The panel follows the TAB, not the content: applied the moment the tab
+  // comes to the front, before its shell starts (ADR-x7cvh8e1; codex P2
+  // round 2 — a tab that is still connecting is already the tab the person
+  // is in).
+  tm.onActiveTabChange = () => applyActiveTabPanel()
   tm.onActivePaneChange = () => {
     setPortsTargetId(tm.portsTargetId())
     setPortsUnavailable(tm.portsUnavailableReason())
     setActiveOrigin(tm.activeOrigin())
     rescopeFiles()
-    applyActiveTabPanel()
   }
   // ── Files panel (fm-w10) and its viewer (fm-w7) ──────────────────────
   // The panel's backend surface, wrapped so the composition root owns the

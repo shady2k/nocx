@@ -452,6 +452,10 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		},
 		"uistate.set": {
 			[]byte(`{"sidebar":{"width":240},"activeTab":"tab-1"}`),
+			// The panel's view and collapse are the TAB's (ADR-x7cvh8e1):
+			// the document carries the width, and a sidebar with no width is
+			// still an ordinary document (the backend clamps 0 to the default).
+			[]byte(`{"sidebar":{},"activeTab":""}`),
 		},
 		"uistate.window.get": {
 			[]byte(`{}`),
@@ -890,6 +894,17 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		}
 		schema := loadSchema(t, name)
 		probes := invalid
+		// Fields the decoder REFUSES must be refused by the contract too, or
+		// the schema promises a shape no build accepts (codex P2 round 2):
+		// uistate.set carries the panel's WIDTH and nothing else
+		// (ADR-x7cvh8e1), and a renderer still sending the old window-wide
+		// pair must be turned away by both.
+		if method == "uistate.set" {
+			probes = append(probes,
+				[]byte(`{"sidebar":{"width":240,"collapsed":false},"activeTab":""}`),
+				[]byte(`{"sidebar":{"width":240,"activeViewId":"ports"},"activeTab":""}`),
+			)
+		}
 		switch method {
 		case "secrets.detect", "vault.resolveLine":
 			// These methods intentionally accept an empty object and use a

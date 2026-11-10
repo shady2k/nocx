@@ -12,8 +12,6 @@ const tab = (id: string, over: Partial<Tab> = {}): Tab => ({
   pinned: false,
   layout: 'row',
   seenAt: null,
-  panelView: '',
-  panelCollapsed: false,
   ...over,
 })
 

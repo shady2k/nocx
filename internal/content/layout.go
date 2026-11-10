@@ -177,21 +177,6 @@ type Tab struct {
 	// unseen tab is still unseen after a restart is §12's second open
 	// question, and a mark rather than a verdict leaves it open.
 	SeenAt *int64
-	// PanelView is the sidebar view this tab shows, or "" for a tab that has
-	// never opened one. The panel belongs to the TAB (ADR-x7cvh8e1), not to
-	// the window: switching tabs restores the panel each one left behind.
-	// Only WHICH view is stored — the state inside it (a Files tree's
-	// expansion, a port filter) belongs to the view and is not a fact about
-	// the tab. The store keeps a string and judges none of it, exactly as it
-	// does for Colour: the renderer owns the registry of views, so a value a
-	// newer renderer understands is carried rather than refused.
-	PanelView string
-	// PanelCollapsed is whether this tab's panel is collapsed to the activity
-	// bar. Beside the view rather than folded into it, because a collapsed
-	// panel remembers the view it reopens on — the behaviour the activity
-	// bar's toggle has always had. A tab with no view is collapsed whatever
-	// this says: there is nothing to show.
-	PanelCollapsed bool
 }
 
 // Pane is the durable identity, and everything else about it follows from
@@ -433,11 +418,6 @@ type LayoutRepository interface {
 	RecolourTab(ctx context.Context, id string, colour *string) (Tab, error)
 	// PinTab keeps a tab at the head of the strip, or stops doing so.
 	PinTab(ctx context.Context, id string, pinned bool) (Tab, error)
-	// SetTabPanel records which sidebar panel this tab shows and whether it
-	// is collapsed (nocx-ouru5.1.18). The pair travels together because a
-	// collapsed panel keeps the view it reopens on; view is "" for a tab
-	// whose panel shows nothing, and the store judges neither value.
-	SetTabPanel(ctx context.Context, id, view string, collapsed bool) (Tab, error)
 	// ReorderTabs takes the whole strip order for ONE workspace. ids must be
 	// a permutation of that workspace's tabs — a tab belonging to another
 	// workspace is not a member, so naming one is ErrNotAPermutation and not

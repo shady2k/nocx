@@ -2,14 +2,11 @@ package sessionruntime
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"reflect"
 	"strings"
 	"testing"
-
-	"github.com/shady2k/nocx/internal/emulator"
 )
 
 // The real runtime, judged on the six cases this bead's acceptance names
@@ -205,12 +202,19 @@ func TestAMouseEventIsInputOnlyWhenTheProgramAskedForIt(t *testing.T) {
 	ctrl := sessionControl(t, s)
 
 	// No tracking mode: the emulator declines, nothing is written, and the
-	// intent is refused rather than delivered as bytes nobody asked for.
-	if _, state, err := admittedThenExecuted(t, s, ctrl, IntentKindMouse, []byte("press left 2 3")); !errors.Is(err, emulator.ErrUnsupported) || state != IntentStateRefused {
-		t.Fatalf("a mouse event with no tracking mode: state=%s err=%v, want refused and %v", intentStateName(state), err, emulator.ErrUnsupported)
+	// intent is executed with no bytes rather than refused — nothing is owed to
+	// a program that did not ask (encode's ErrUnsupported rule, nocx-evj4b.1.12;
+	// a refusal would keep the renderer's queue retrying an event that can never
+	// be delivered).
+	if _, state, err := admittedThenExecuted(t, s, ctrl, IntentKindMouse, []byte("press left 2 3")); err != nil || state != IntentStateExecuted {
+		t.Fatalf("a mouse event with no tracking mode: state=%s err=%v, want executed with no bytes", intentStateName(state), err)
 	}
-	if got := term.Written(); len(got) != 0 {
-		t.Fatalf("a mouse event no program asked for wrote %q to the PTY", got)
+	// No BYTES — the harness records the runtime's write call, and an executed
+	// intent with nothing to say still records one of zero length.
+	for _, wrote := range term.Written() {
+		if len(wrote) != 0 {
+			t.Fatalf("a mouse event no program asked for wrote %q to the PTY", wrote)
+		}
 	}
 
 	// The program asks for SGR mouse reporting, and the same event now reaches
@@ -221,7 +225,14 @@ func TestAMouseEventIsInputOnlyWhenTheProgramAskedForIt(t *testing.T) {
 	if _, state, err := admittedThenExecuted(t, s, ctrl, IntentKindMouse, []byte("press left 2 3")); err != nil || state != IntentStateExecuted {
 		t.Fatalf("a mouse event the program asked for: state=%s err=%v, want executed", intentStateName(state), err)
 	}
-	written := term.Written()
+	// The empty write the ignored press recorded is not bytes; what reached the
+	// program is the one sequence after it.
+	var written [][]byte
+	for _, wrote := range term.Written() {
+		if len(wrote) != 0 {
+			written = append(written, wrote)
+		}
+	}
 	if len(written) != 1 || string(written[0]) != "\x1b[<0;3;4M" {
 		t.Fatalf("the press at cell (2,3) reached the program as %q, want %q", written, "\x1b[<0;3;4M")
 	}

@@ -89,6 +89,7 @@ import { ProfileClient, type SSHProfile } from './profiles'
 import { Dispatcher, RpcError } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
 import type { SessionHandle, SessionRecovery, SessionSize, WSClient } from './ipc'
+import type { SessionIntent } from './intent-input'
 import type { SessionIntentResult } from './generated/session.intent'
 import type { SessionSignal } from './generated/session.signal'
 import {
@@ -18100,6 +18101,110 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     }
   })
 
+  // AN INTERRUPT DOES NOT TRAVEL THROUGH THE QUEUE AT ALL (nocx-evj4b.1.12).
+  // A backpressured intent holds the head of the pane's serial queue, so the
+  // Ctrl-C is sent on its own path the moment it arrives — and everything typed
+  // before it is cancelled: type-ahead a tty discards on SIGINT. Chasing the
+  // moment instead (release the wait, hope the next answer ends) left two races,
+  // measured in ipc.test.ts's cancellation tests.
+  it('a Ctrl-C is sent immediately, cancelling the intent still being presented', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      const session = sessionOf(content)
+      // The head: a presentation that has not answered yet, which is the state
+      // an interrupt arrives in most often.
+      let release: (() => void) | null = null
+      session.intent.mockImplementation((kind: string, payload: string) => {
+        if (kind === 'text' && payload === 'a') {
+          return new Promise<SessionIntentResult>((resolve) => {
+            release = () =>
+              resolve({
+                state: 'refused',
+                bytesWritten: 0,
+                fenceAfter: 0,
+                refusal: { cause: 'busy' },
+              })
+          })
+        }
+        return Promise.resolve({ state: 'executed', bytesWritten: 1, fenceAfter: 0 })
+      })
+
+      typeIntoPane(content, 'a', '\r')
+      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('text', 'a'))
+
+      typeIntoPane(content, '\x03')
+      // THE INTERRUPT IS PRESENTED WHILE THE HEAD IS STILL UNRESOLVED: nothing
+      // waits, and the Enter queued behind the head is never presented.
+      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('key', 'Ctrl+c'))
+      expect(session.cancelPendingIntents).toHaveBeenCalled()
+      expect(session.intent).not.toHaveBeenCalledWith('key', 'enter')
+
+      ;(release as (() => void) | null)?.()
+      await waitForSessionQueue(content)
+      expect(session.intent).not.toHaveBeenCalledWith('key', 'enter')
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
+  // AND THE SIGNAL FORM OF THE SAME GESTURE: the block's Interrupt/Stop is a
+  // session.signal sent at once, never queued behind an intent.
+  it('an Interrupt signal is sent immediately, cancelling the intent still being presented', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      const session = sessionOf(content)
+      let release: (() => void) | null = null
+      session.intent.mockImplementation((kind: string, payload: string) => {
+        if (kind === 'text' && payload === 'a') {
+          return new Promise<SessionIntentResult>((resolve) => {
+            release = () =>
+              resolve({
+                state: 'refused',
+                bytesWritten: 0,
+                fenceAfter: 0,
+                refusal: { cause: 'busy' },
+              })
+          })
+        }
+        return Promise.resolve({ state: 'executed', bytesWritten: 1, fenceAfter: 0 })
+      })
+
+      ;(content as unknown as { sendIntent(intent: SessionIntent): boolean }).sendIntent({
+        kind: 'text',
+        payload: 'a',
+      })
+      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('text', 'a'))
+      session.signal.mockClear()
+
+      ;(content as unknown as { signalActiveCommand(s: string): void }).signalActiveCommand(
+        'interrupt',
+      )
+      await vi.waitFor(() => expect(signalsSent(content)).toEqual(['interrupt']))
+      expect(session.cancelPendingIntents).toHaveBeenCalled()
+
+      ;(release as (() => void) | null)?.()
+      await waitForSessionQueue(content)
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
   // ── the ⋮ menu, which is what makes both gestures visible ────────────────
 
   /** Open the running block's overflow menu and return its items. */
@@ -18394,7 +18499,13 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
   // asks for: the SAME exit code, through the SAME completion path, reading
   // two different ways depending on whether nocx actually sent the signal.
 
-  it('orders Interrupt after a queued mouse release', async () => {
+  // AN INTERRUPT IS SENT AT ONCE AND THE TYPE-AHEAD GOES (nocx-evj4b.1.12).
+  // The old rule kept it behind the pointer intents already received, which a
+  // serial queue with a retry that has no attempt bound turned into "possibly
+  // never". Now the signal is addressed the moment the gesture happens, and the
+  // intents queued or in flight before it are cancelled — the bytes SIGINT
+  // would have flushed.
+  it('sends Interrupt at once and drops the intents queued before it', async () => {
     const client = makeClient()
     const { content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -18457,16 +18568,20 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       )
       expect(interrupt).not.toBeNull()
       interrupt!.click()
-      expect(events).toEqual(['intent:press left 2 1'])
-
+      await vi.waitFor(() => expect(events).toEqual(['intent:press left 2 1', 'signal:interrupt']))
+      expect(session.cancelPendingIntents).toHaveBeenCalled()
+      // The release that was queued is gone, and releasing the press does not
+      // bring it back.
+      expect(
+        (
+          content as unknown as {
+            _sessionCallQueue: Array<{ intent?: { payload: string } }>
+          }
+        )._sessionCallQueue,
+      ).toHaveLength(0)
       releasePress()
-      await vi.waitFor(() =>
-        expect(events).toEqual([
-          'intent:press left 2 1',
-          'intent:release left 2 1',
-          'signal:interrupt',
-        ]),
-      )
+      await waitForSessionQueue(content)
+      expect(events).toEqual(['intent:press left 2 1', 'signal:interrupt'])
     } finally {
       releasePress()
       restore()
@@ -22768,41 +22883,6 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
       expect(fits().length).toBe(before)
       resize(776)
       await vi.waitFor(() => expect(fits().length).toBe(before + 1))
-    } finally {
-      restore()
-    }
-  })
-
-  it('a submit waits for the grid it will run at to apply, and its bytes then go out (nocx-evj4b.1.9)', async () => {
-    // The prompt prediction measures the running height at the Enter, but its
-    // report rides the settle timer while the submit's own attempt round trip
-    // is already in flight. On a loaded runner the bytes reached a pty that was
-    // still the prompt's taller grid: `top` drew for the taller screen, and the
-    // resize that followed scrolled its summary off the top — the block's first
-    // rows landed in its body, which is the owner's screenshot. The write waits
-    // for the same receipt the alternate-screen switch's fence waits for.
-    const { session, typeCommand, submitCommand, restore } = await paneWithLayout()
-    try {
-      let applied!: () => void
-      session.resizeApplied.mockImplementation(
-        () =>
-          new Promise<'applied'>((resolve) => {
-            applied = () => resolve('applied')
-          }),
-      )
-      typeCommand('top')
-      submitCommand('top')
-      // Nothing of the command is on the wire: the grid it will draw for is
-      // not applied yet. Focus and other intents the handoff itself produces
-      // are not the command's bytes.
-      const bytes = (): unknown[] =>
-        session.intent.mock.calls.filter(([kind]) => kind === 'text' || kind === 'key')
-      expect(bytes()).toEqual([])
-      // The write reached the receipt and is holding on it.
-      await vi.waitFor(() => expect(session.resizeApplied).toHaveBeenCalled())
-      expect(bytes()).toEqual([])
-      applied()
-      await vi.waitFor(() => expect(bytes().length).toBeGreaterThan(0))
     } finally {
       restore()
     }

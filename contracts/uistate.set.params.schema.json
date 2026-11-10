@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/uistate.set.params.schema.json",
   "title": "UistateSetParams",
-  "description": "Params for uistate.set. The sidebar carries its WIDTH and nothing else: which panel a tab shows, and whether its rail is collapsed, are facts about the TAB and live on its layout row (ADR-x7cvh8e1). The decoder refuses the old window-wide `collapsed`/`activeViewId` pair, so this schema must refuse them too — a contract that allowed them would promise a shape no build accepts.",
+  "description": "Params for uistate.set.",
   "type": "object",
   "additionalProperties": false,
   "required": ["sidebar", "activeTab"],
@@ -11,8 +11,14 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "collapsed": {
+          "type": "boolean"
+        },
+        "activeViewId": {
+          "type": "string",
+          "maxLength": 256
+        },
         "width": {
-          "description": "The panel's width in CSS pixels; the store clamps it to the declared bounds, and 0 means \"no width was recorded\".",
           "type": "integer"
         }
       },

@@ -287,78 +287,6 @@ func TestLayoutRefusesAMalformedIDBeforeWriting(t *testing.T) {
 	}
 }
 
-// ── the panel is the tab's (nocx-ouru5.1.18) ─────────────────────────────
-
-// The round trip a reloaded renderer relies on: a tab's panel is written over
-// the wire, read back with the OTHER tab unchanged, and survives the read the
-// renderer draws itself from.
-func TestLayoutTabPanelRoundTripsOverTheWire(t *testing.T) {
-	ws, db := newLayoutWSServer(t)
-	conn := connectWS(t, ws)
-	seedWire(t, conn)
-	// A second tab, so "the panel moved with the tab" has something to be
-	// wrong about.
-	mustLayoutCall(t, conn, "tabs.create", map[string]any{
-		"id": tabID2, "workspaceId": wsID1, "position": 1, "layout": "row",
-		"firstPane": firstPane(paneID2, "/var"),
-	}, 800)
-
-	var answer struct {
-		Tab struct {
-			ID             string `json:"id"`
-			PanelView      string `json:"panelView"`
-			PanelCollapsed bool   `json:"panelCollapsed"`
-		} `json:"tab"`
-	}
-	if err := json.Unmarshal(mustLayoutCall(t, conn, "tabs.setPanel",
-		map[string]any{"id": tabID1, "view": "ports", "collapsed": true}, 1), &answer); err != nil {
-		t.Fatalf("decode setPanel: %v", err)
-	}
-	if answer.Tab.PanelView != "ports" || !answer.Tab.PanelCollapsed {
-		t.Fatalf("setPanel answered %q/%v, want ports/collapsed", answer.Tab.PanelView, answer.Tab.PanelCollapsed)
-	}
-
-	// The read a reloaded renderer performs carries it, and only for that tab.
-	var snapshot struct {
-		Tabs []struct {
-			ID             string `json:"id"`
-			PanelView      string `json:"panelView"`
-			PanelCollapsed bool   `json:"panelCollapsed"`
-		} `json:"tabs"`
-	}
-	if err := json.Unmarshal(mustLayoutCall(t, conn, "layout.read", map[string]any{}, 2), &snapshot); err != nil {
-		t.Fatalf("decode layout.read: %v", err)
-	}
-	seen := map[string]string{}
-	for _, tab := range snapshot.Tabs {
-		seen[tab.ID] = fmt.Sprintf("%s/%v", tab.PanelView, tab.PanelCollapsed)
-	}
-	if got := seen[tabID1]; got != "ports/true" {
-		t.Fatalf("tab 1 panel after read = %q, want ports/true", got)
-	}
-	if got := seen[tabID2]; got != "/false" {
-		t.Fatalf("tab 2 panel after read = %q, want the empty default", got)
-	}
-
-	// And the store holds it, not merely the answer.
-	tabs, err := db.Layout().Tabs(context.Background(), wsID1)
-	if err != nil {
-		t.Fatalf("Tabs: %v", err)
-	}
-	for _, tab := range tabs {
-		if tab.ID == tabID1 && (tab.PanelView != "ports" || !tab.PanelCollapsed) {
-			t.Fatalf("stored tab = %+v, want the panel it was given", tab)
-		}
-	}
-
-	// A view id this build does not know is carried, not refused: the
-	// renderer owns the registry, exactly as it owns the palette.
-	if _, rpcErr := layoutCall(t, conn, "tabs.setPanel",
-		map[string]any{"id": tabID1, "view": "a-view-from-a-newer-build", "collapsed": false}, 3); rpcErr != nil {
-		t.Fatalf("tabs.setPanel with an unknown view = %+v, want it carried", rpcErr)
-	}
-}
-
 // ── decoration, order and the move ───────────────────────────────────────
 
 func TestLayoutDecorationRoundTripsOverTheWire(t *testing.T) {
@@ -634,7 +562,6 @@ func TestLayoutRefusesRowsThatDoNotExist(t *testing.T) {
 		"rename a tab that is not there":       {"tabs.rename", map[string]any{"id": tabID2, "name": "x"}},
 		"recolour a tab that is not there":     {"tabs.recolour", map[string]any{"id": tabID2, "colour": "#fff"}},
 		"pin a tab that is not there":          {"tabs.pin", map[string]any{"id": tabID2, "pinned": true}},
-		"set the panel of a tab that is not there": {"tabs.setPanel", map[string]any{"id": tabID2, "view": "ports", "collapsed": false}},
 		"tab in a workspace that is not there": {"tabs.create", map[string]any{"id": tabID2, "workspaceId": wsID2, "position": 0, "layout": "row", "firstPane": firstPane(paneID2, "/var")}},
 		"pane in a tab that is not there":      {"panes.create", map[string]any{"id": paneID2, "tabId": tabID2, "cwd": "/", "kind": "local", "sizeShare": 1}},
 		"create with no first tab":             {"workspaces.create", map[string]any{"id": wsID2, "name": "x", "position": 0, "firstPane": firstPane(paneID2, "/var")}},

@@ -12,11 +12,19 @@ package transport
 // keeps exactly the artifact it has today.
 
 import (
+	"context"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/emulator"
 	"github.com/shady2k/nocx/internal/lifecycle"
+	"github.com/shady2k/nocx/internal/lifecyclecommit"
 	"github.com/shady2k/nocx/internal/session"
 )
 
@@ -283,5 +291,176 @@ func TestTheHoldBoundCoversRowsThatArriveDuringTheOpen(t *testing.T) {
 	e.ws.blockStream.mu.Unlock()
 	if held != 0 || armed {
 		t.Fatalf("hold after the open = %d rows, armed %v, want the bound to have released it", held, armed)
+	}
+}
+
+// ── Round 2 of the review (nocx-4y82c.1.11) ───────────────────────────────
+//
+// Two sequences survived round 1: the bound's own release was not one
+// critical section with sealing, and a close's flush lost the lifecycle
+// frame's context (and told the helper before the frame committed).
+
+// The 256-row bound starts a release too, so it must be the same critical
+// section as a mark's: the extraction and the delivery cannot be interleaved
+// with a session end's seal.
+func TestASessionEndWaitsForABoundTriggeredRelease(t *testing.T) {
+	e, pub, lane, h, sidStr, db := newLifecycleLedgerEnv(t, true)
+	sid := session.ID(sidStr)
+	store := newBlockingAppendStore(db.Ledger())
+	e.ws.blockRowsStore = store
+	e.ws.AttachBlockRows(sid)
+	e.ws.BlockOutputStartPlaneAttached(sid)
+	attempt := startsACommand(t, e, pub, lane, h, 2, "yes")
+
+	held := make([]emulator.Row, maxHeldBeforeOutputStartRows)
+	for i := range held {
+		held[i] = aStreamRow("held")
+	}
+	if up, confirm := e.ws.BlockRowsArrived(sid, 0, 0, held, ""); confirm || up != 0 {
+		t.Fatalf("rows up to the bound = (%d, %v), want held", up, confirm)
+	}
+
+	// The row past the bound starts the release, which parks in the store.
+	boundDone := make(chan struct{})
+	go func() {
+		defer close(boundDone)
+		e.ws.BlockRowsArrived(sid, maxHeldBeforeOutputStartRows, 0, []emulator.Row{aStreamRow("overflowing")}, "")
+	}()
+	select {
+	case <-store.entered:
+	case <-time.After(wantWithin):
+		t.Fatal("the bound's release never reached the store")
+	}
+
+	endDone := make(chan struct{})
+	go func() {
+		defer close(endDone)
+		e.ws.HelperSessionEnded(sid)
+	}()
+	select {
+	case <-store.sealed:
+	case <-endDone:
+	case <-time.After(holdReleaseProbe):
+	}
+
+	close(store.release)
+	select {
+	case <-boundDone:
+	case <-time.After(wantWithin):
+		t.Fatal("the bound's release did not finish")
+	}
+	select {
+	case <-endDone:
+	case <-time.After(wantWithin):
+		t.Fatal("the session end did not finish")
+	}
+
+	rows := streamRows(t, db, attempt)
+	if len(rows) != maxHeldBeforeOutputStartRows+1 {
+		t.Fatalf("artifact holds %d rows, want all %d the release had extracted", len(rows), maxHeldBeforeOutputStartRows+1)
+	}
+	assertBlockSealed(t, db, attempt)
+}
+
+// ctxRecordingStore records the context every append carries, so a test can
+// say which caller's context a flush ran under.
+type ctxRecordingStore struct {
+	closeFailureBlockStore
+	mu   sync.Mutex
+	ctxs []context.Context
+}
+
+func (s *ctxRecordingStore) AppendBlockRows(ctx context.Context, in content.AppendBlockRows) error {
+	s.mu.Lock()
+	s.ctxs = append(s.ctxs, ctx)
+	s.mu.Unlock()
+	return s.closeFailureBlockStore.AppendBlockRows(ctx, in)
+}
+
+type frameMarkerKey struct{}
+
+// A close's flush runs on the caller's context — the lifecycle frame's, in
+// production — and tells the helper nothing before that frame commits
+// (nocx-4y82c.1.11 review 2). A background context here is a defect: under
+// -tags nocx_framecheck the store refuses the append, and in a shipped build
+// the append waits for the frame's hold bound and lands outside its
+// transaction.
+func TestACloseFlushesTheHoldOnTheCallersContextAndDefersItsConfirmation(t *testing.T) {
+	e, pub, lane, h, sidStr, db := newLifecycleLedgerEnv(t, true)
+	sid := session.ID(sidStr)
+	var confirmed []uint64
+	e.ws.AttachBlockRowsWithConfirmation(sid, func(upTo uint64) { confirmed = append(confirmed, upTo) })
+	e.ws.BlockOutputStartPlaneAttached(sid)
+	attempt := startsACommand(t, e, pub, lane, h, 2, "make")
+
+	if up, confirm := e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{
+		aStreamRow("kept-1"), aStreamRow("kept-2"),
+	}, ""); confirm || up != 0 {
+		t.Fatalf("rows before the close = (%d, %v), want held", up, confirm)
+	}
+
+	store := &ctxRecordingStore{closeFailureBlockStore: closeFailureBlockStore{ledger: db.Ledger()}}
+	e.ws.blockRowsStore = store
+
+	// The shape abandonAttempt runs in: the close inside a lifecycle frame,
+	// whose context carries the frame's post-commit queue.
+	fctx, queue := lifecyclecommit.Begin(context.WithValue(context.Background(), frameMarkerKey{}, true))
+	e.ws.closeBlockRows(fctx, sid, attempt, 2, nil, "frame-close", false)
+
+	store.mu.Lock()
+	carried := append([]context.Context(nil), store.ctxs...)
+	store.mu.Unlock()
+	if len(carried) == 0 {
+		t.Fatal("the flush made no append")
+	}
+	for _, got := range carried {
+		if got.Value(frameMarkerKey{}) == nil {
+			t.Fatalf("the flush appended on a context that is not the caller's: %v", got)
+		}
+	}
+	if len(confirmed) != 0 {
+		t.Fatalf("the flush confirmed %v inside the frame, before it committed", confirmed)
+	}
+
+	queue.End(true)
+	if len(confirmed) == 0 || confirmed[len(confirmed)-1] != 2 {
+		t.Fatalf("confirmations after the commit = %v, want the two rows settled once the frame committed", confirmed)
+	}
+	rows := streamRows(t, db, attempt)
+	if len(rows) != 2 || rows[0].Text != "kept-1" || rows[1].Text != "kept-2" {
+		t.Fatalf("artifact holds %+v, want the held prefix stored by the flush", rows)
+	}
+}
+
+// The hold is emptied by ONE function: releaseHold. Anything else that
+// clears it splits the extraction from the delivery the seal must wait for,
+// which is the defect both rounds of the review found.
+func TestTheHoldIsEmptiedByOneFunction(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(thisFile), "ws_block_rows.go"))
+	if err != nil {
+		t.Fatalf("read ws_block_rows.go: %v", err)
+	}
+	lines := strings.Split(string(data), "\n")
+	emptiedIn := map[string]int{}
+	fn := ""
+	for _, ln := range lines {
+		if strings.HasPrefix(ln, "func ") {
+			fn = ln
+		}
+		if strings.Contains(ln, "preOutputStart = nil") {
+			emptiedIn[fn]++
+		}
+	}
+	if len(emptiedIn) != 1 {
+		t.Fatalf("the hold is emptied in %d functions, want exactly one (releaseHold): %v", len(emptiedIn), emptiedIn)
+	}
+	for name := range emptiedIn {
+		if !strings.Contains(name, "releaseHold(") {
+			t.Fatalf("the hold is emptied in %q, want only releaseHold", name)
+		}
 	}
 }

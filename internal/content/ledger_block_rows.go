@@ -580,9 +580,13 @@ func (s *sqliteContent) RecordBlockRowsOutputStart(ctx context.Context, in Recor
 		if err != nil {
 			return err
 		}
-		if state.sealed || state.payload.OutputStartRow != nil {
-			// Sealed: nothing to delimit. Already recorded: the first mark
-			// wins, so a second one — another command's — changes nothing.
+		if state.payload.OutputStartRow != nil {
+			// The first mark wins, so a second one — another command's —
+			// changes nothing. A SEALED artifact still takes it: the seal can
+			// land before the mark reaches the coordinator (the end marker and
+			// the seal travel on different carriers), and where the output
+			// begins is metadata beside the sealed span, not part of it
+			// (nocx-4y82c.1.11 review 5).
 			return txEnd.commit()
 		}
 		row := in.Row

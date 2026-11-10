@@ -93,3 +93,57 @@ func TestTheRecordedOutputStartIsWrittenOnceAndSurvivesTheSeal(t *testing.T) {
 		t.Fatalf("recorded start after a mark past the seal = %v, want 1", got)
 	}
 }
+
+func TestTheRecordedOutputStartAppliesToASealedArtifact(t *testing.T) {
+	// A seal can land before the mark reaches the coordinator (the end marker
+	// and the mark travel on the rows plane, the seal on the lifecycle one).
+	// Recording N is METADATA, not part of the sealed span, so it still
+	// applies — idempotently, the first value winning — instead of being
+	// ordered against the seal (nocx-4y82c.1.11 review 5).
+	ctx := context.Background()
+	_, led := newLedger(t)
+	entryID := recordOne(t, led, "printf output")
+	artifact := "00000000-0000-7000-8000-0000000000fc"
+	if _, err := led.OpenBlockOutput(ctx, content.OpenBlockOutput{EntryID: entryID, ArtifactID: artifact}); err != nil {
+		t.Fatalf("OpenBlockOutput: %v", err)
+	}
+	if err := led.AppendBlockRows(ctx, content.AppendBlockRows{
+		EntryID: entryID, ArtifactID: artifact, FromRow: 0, Rows: []emulator.Row{aTextRow("$ printf output"), aTextRow("output")},
+	}); err != nil {
+		t.Fatalf("delivery: %v", err)
+	}
+	if _, err := led.CloseBlockRows(ctx, content.CloseBlockRows{EntryID: entryID, ArtifactID: artifact}); err != nil {
+		t.Fatalf("CloseBlockRows: %v", err)
+	}
+	if got := blockPayloadOutputStart(t, led, artifact); got != nil {
+		t.Fatalf("recorded start before the mark = %v, want none", got)
+	}
+	if err := led.RecordBlockRowsOutputStart(ctx, content.RecordBlockRowsOutputStart{
+		EntryID: entryID, ArtifactID: artifact, Row: 1,
+	}); err != nil {
+		t.Fatalf("RecordBlockRowsOutputStart after the seal: %v", err)
+	}
+	if got := blockPayloadOutputStart(t, led, artifact); got == nil || *got != 1 {
+		t.Fatalf("recorded start after the seal = %v, want 1", got)
+	}
+	// A later mark does not overwrite it, sealed or not.
+	if err := led.RecordBlockRowsOutputStart(ctx, content.RecordBlockRowsOutputStart{
+		EntryID: entryID, ArtifactID: artifact, Row: 9,
+	}); err != nil {
+		t.Fatalf("second RecordBlockRowsOutputStart: %v", err)
+	}
+	if got := blockPayloadOutputStart(t, led, artifact); got == nil || *got != 1 {
+		t.Fatalf("recorded start after a second mark = %v, want the first, 1", got)
+	}
+	art, err := led.Artifact(ctx, artifact)
+	if err != nil || art == nil {
+		t.Fatalf("read artifact: %v (%v)", err, art)
+	}
+	body, err := content.BlockRowsTextAfter(art.Chunks, content.BlockRowsOutputStart(art.Payload))
+	if err != nil {
+		t.Fatalf("BlockRowsTextAfter: %v", err)
+	}
+	if body != "output" {
+		t.Fatalf("body read = %q, want the output only", body)
+	}
+}

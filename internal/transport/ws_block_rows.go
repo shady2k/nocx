@@ -3370,11 +3370,13 @@ func (bs *blockStream) openAttemptFor(ctx context.Context, s *WSServer, sid sess
 	// An existing current block owns those rows; only a no-current open uses
 	// waiting to hold them for the block being created.
 	if !hasCurrent {
-		// A mark observed before this authenticated reservation may belong to
-		// the prompt or a prior command. Only a mark arriving during this
-		// open, or after it installs, refines this block's expected first row.
-		delete(bs.outputStartKnown, sid)
-		delete(bs.outputStartMarks, sid)
+		// A mark observed before this authenticated reservation is KEPT
+		// (nocx-4y82c.1.11 review 5): the shell writes one per command, in
+		// order, so it is this command's unless it names a row this block
+		// cannot start at — and the install decides that by comparing it
+		// with the block's own first row (closedThrough), not by discarding
+		// it here. Discarding it lost the echo of a command whose preexec
+		// hook beat its lifecycle start to this stream.
 		bs.waiting[sid] = attempt
 	}
 	bs.opening[sid] = attempt
@@ -3526,11 +3528,13 @@ func (bs *blockStream) performOpen(ctx context.Context, s *WSServer, sid session
 	b.outputStartKnown = true
 	b.expectedFirstRow = bs.closedThrough[sid]
 	b.outputStartRow = b.expectedFirstRow
+	markApplied := false
 	if bs.outputStartKnown[sid] {
 		b.outputStartMarked = true
 		if mark := bs.outputStartMarks[sid]; mark > b.expectedFirstRow {
 			b.expectedFirstRow = mark
 			b.outputStartRow = mark
+			markApplied = true
 		}
 	}
 	delete(bs.outputStartKnown, sid)
@@ -3558,6 +3562,11 @@ func (bs *blockStream) performOpen(ctx context.Context, s *WSServer, sid session
 	confirm := bs.confirmers[sid]
 	next, kind, nextGen := bs.dequeueNextOpenLocked(sid, "")
 	bs.mu.Unlock()
+	if markApplied {
+		// The mark that beat this open is this block's output start, and a
+		// reader needs it recorded like any other (review 5).
+		s.recordBlockOutputStart(ctx, sid, b.entry, b.artifactID, b.outputStartRow)
+	}
 	if len(pending) > 0 {
 		bs.flushPendingRows(ctx, s, sid, b, pending, confirm)
 	}

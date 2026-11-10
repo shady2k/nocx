@@ -33,7 +33,11 @@ func TestAnIncompleteMarkerEndsTheBlockInFlightIncomplete(t *testing.T) {
 			e, pub, lane, h, sidStr, db := newLifecycleLedgerEnv(t, true)
 			sid := session.ID(sidStr)
 			e.ws.AttachBlockRows(sid)
-			e.ws.BlockOutputStartPlaneAttached(sid)
+			// No BlockOutputStartPlaneAttached: this fixture's source emits
+			// no output marks, so no block holds rows before one — the hold
+			// exists only for a source that states it writes them
+			// (nocx-4y82c.1.11). The overflow this test is about is
+			// independent of that.
 
 			// A: running when the helper's buffer overflows.
 			a := startsACommand(t, e, pub, lane, h, 2, "make a")

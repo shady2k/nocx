@@ -1,12 +1,19 @@
 import { expect, test, promptReady, clickIntoEditor } from './harness'
 
 /**
- * nocx-4y82c.1.11 — the command echo must appear once in a frozen block's body.
+ * nocx-4y82c.1.11 — a frozen block's body is its OUTPUT, never the echo of the
+ * command that wrote it.
  *
- * The command has exactly two `printf` tokens, so a body that echoes it once
- * carries two; a duplicate carries four. Two runs — one that finishes inside
- * the composer's grace and one that outlives it — separate the tty's echo from
- * a redraw that follows the composer hiding.
+ * The rows before a block's output start are the typed command's echo, and
+ * whatever the terminal's reflow leaves behind when the composer hides: the
+ * screen's own rendering of a line that is already in the block's header. The
+ * artifact begins at the helper's ordered output mark, so a command that
+ * finishes before that mark lands and one that outlives it carry the SAME
+ * body — this spec asserts both, with the same numbers, which is the rule.
+ *
+ * The command has exactly two `printf` tokens, so a body that still held the
+ * echo would carry two and one that held a redraw of it four. The body must
+ * carry neither: the count is zero, and the rows are the command's own output.
  */
 async function countEcho(
   page: import('@playwright/test').Page,
@@ -71,25 +78,30 @@ const WORDS = Array.from({ length: 40 }, (_, i) => `w-${String(i + 1).padStart(2
 test('a command that outruns its output-start mark does not store its own echo', async ({
   page,
 }) => {
-  // The command has exactly two `printf` tokens. A body that echoes the typed
-  // line once carries two; the block below carries FOUR, because the rows
-  // artifact starts at the interval start (the prompt row) when the command
-  // finishes before the backend's output-start mark lands. The same command
-  // with a trailing sleep -- which gives the mark time -- carries two; that is
-  // the control in the next test.
+  // The command finishes inside the composer's grace, so its echo has already
+  // left the screen, and a reflow redraws its head, before the backend's
+  // output-start mark lands. All of that is screen, not output: the artifact
+  // begins at the mark.
   await page.setViewportSize({ width: 460, height: 360 })
   await page.goto('/')
   await promptReady(page)
   const command = `printf "ECHO-ONCE\\n"; printf '%s\\n' ${WORDS.join(' ')}`
   const counts = await countEcho(page, command, 'w-40')
   console.log('FAST ' + JSON.stringify(counts))
-  expect(counts.printfs, 'the command echo is not stored as output').toBe(2)
+  expect(counts.printfs, 'the command echo is not stored as output').toBe(0)
+  expect(counts.rows, 'the body is the command output, one row per line').toBe(41)
 })
 
-test('echo count: a command that outlives it (composer hides)', async ({ page }) => {
+test('the same command that outlives the grace carries the same body', async ({ page }) => {
+  // The control: the trailing sleep gives the mark all the time it needs. The
+  // body must be the same one — a frozen block is its output, not a record of
+  // how the echo got there.
   await page.setViewportSize({ width: 460, height: 360 })
   await page.goto('/')
   await promptReady(page)
   const command = `printf "ECHO-ONCE\\n"; printf '%s\\n' ${WORDS.join(' ')}; sleep 1; true`
-  console.log('SLOW ' + JSON.stringify(await countEcho(page, command, 'w-40')))
+  const counts = await countEcho(page, command, 'w-40')
+  console.log('SLOW ' + JSON.stringify(counts))
+  expect(counts.printfs, 'the command echo is not stored as output').toBe(0)
+  expect(counts.rows, 'the body is the command output, one row per line').toBe(41)
 })

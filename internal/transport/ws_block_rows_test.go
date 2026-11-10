@@ -247,28 +247,32 @@ func TestBlockRowsArrived_AppendsToTheAuthenticatedCommand(t *testing.T) {
 }
 
 func TestOutputStartMarkDoesNotChangeFreshAuthenticatedStart(t *testing.T) {
-	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
-	e.ws.BlockOutputStartPlaneAttached(session.ID(sid))
+	e, pub, lane, h, sidStr, db := newLifecycleLedgerEnv(t, true)
+	sid := session.ID(sidStr)
+	e.ws.AttachBlockRows(sid)
+	e.ws.BlockOutputStartPlaneAttached(sid)
 	// A position mark can arrive before the authenticated start on the rows
 	// plane. It must not change a fresh block's ordinary row-zero boundary.
-	e.ws.BlockOutputStartRow(session.ID(sid), 2)
+	e.ws.BlockOutputStartRow(sid, 2)
 	attempt := startsACommand(t, e, pub, lane, h, 2, "printf output")
-	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{
+	// That mark belongs to no block this one opens, so the rows wait for
+	// this block's OWN mark (nocx-4y82c.1.11).
+	if up, confirm := e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{
 		aStreamRow("prompt"), aStreamRow("prior"), aStreamRow("output"),
-	}, ""); !confirm || up != 3 {
-		t.Fatalf("marked rows ack = (%d, %v), want 3", up, confirm)
+	}, ""); confirm || up != 0 {
+		t.Fatalf("marked rows ack = (%d, %v), want them held for the block's own mark", up, confirm)
 	}
+	if rows := streamRows(t, db, attempt); len(rows) != 0 {
+		t.Fatalf("fresh block stored rows before its own mark: %+v", rows)
+	}
+	// No mark of its own ever arrives: the close stores the row-zero stream
+	// the block always stored, closing screen last.
+	fence := lifecycleFence(0x84)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence)))
+	e.ws.BlockIntervalEnded(sid, fence, 3, []emulator.Row{aStreamRow("$ ")}, false)
 	rows := streamRows(t, db, attempt)
-	if len(rows) != 3 || rows[0].Text != "prompt" || rows[0].From != 0 || rows[2].Text != "output" {
-		t.Fatalf("fresh block rows = %+v, want the full row-zero stream", rows)
-	}
-	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 3, 0, []emulator.Row{aStreamRow("tail")}, ""); !confirm || up != 4 {
-		t.Fatalf("post-mark ack = (%d, %v), want 4 confirmed", up, confirm)
-	}
-	rows = streamRows(t, db, attempt)
-	if len(rows) != 4 || rows[3].Text != "tail" || rows[3].From != 3 {
-		t.Fatalf("final rows = %+v", rows)
+	if len(rows) != 4 || rows[0].From != 0 || rows[0].Text != "prompt" || rows[2].Text != "output" || rows[3].Text != "$ " {
+		t.Fatalf("fresh block rows = %+v, want the full row-zero stream and its closing screen", rows)
 	}
 }
 
@@ -330,20 +334,6 @@ func TestRecoveredOutputMarkDoesNotSkipPastEmptyDurableCursor(t *testing.T) {
 	}
 }
 
-func TestAuthenticatedStartKeepsTheRowZeroPathWhenNoOutputMarkExists(t *testing.T) {
-	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	e.ws.AttachBlockRows(session.ID(sid))
-	e.ws.BlockOutputStartPlaneAttached(session.ID(sid))
-	attempt := startsACommand(t, e, pub, lane, h, 2, "printf without shell integration")
-	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("ordinary output")}, ""); !confirm || up != 1 {
-		t.Fatalf("ordinary no-mark row = (%d, %v), want row 1 confirmed", up, confirm)
-	}
-	rows := streamRows(t, db, attempt)
-	if len(rows) != 1 || rows[0].From != 0 || rows[0].Text != "ordinary output" {
-		t.Fatalf("ordinary no-mark rows = %+v, want output at authenticated row-zero boundary", rows)
-	}
-}
-
 func TestOutputStartMarkDoesNotAuthorizeABlockAndCanPrecedeStart(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
 	e.ws.AttachBlockRows(session.ID(sid))
@@ -353,14 +343,20 @@ func TestOutputStartMarkDoesNotAuthorizeABlockAndCanPrecedeStart(t *testing.T) {
 		t.Fatalf("rows before authenticated Start = (%d, %v), want rejected", up, confirm)
 	}
 	attempt := startsACommand(t, e, pub, lane, h, 2, "printf output")
+	// The mark that preceded the start names no block this one opens, so the
+	// resend waits for this block's own mark (nocx-4y82c.1.11) — and, with
+	// none coming, the close stores the row-zero stream unchanged.
 	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{
 		aStreamRow("prompt"), aStreamRow("prior"), aStreamRow("output"),
-	}, ""); !confirm || up != 3 {
-		t.Fatalf("resend ack = (%d, %v), want 3", up, confirm)
+	}, ""); confirm || up != 0 {
+		t.Fatalf("resend ack = (%d, %v), want the rows held", up, confirm)
 	}
+	fence := lifecycleFence(0x85)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence)))
+	e.ws.BlockIntervalEnded(session.ID(sid), fence, 3, []emulator.Row{aStreamRow("$ ")}, false)
 	rows := streamRows(t, db, attempt)
-	if len(rows) != 3 || rows[0].Text != "prompt" || rows[0].From != 0 || rows[2].Text != "output" {
-		t.Fatalf("fresh authenticated rows = %+v, want full row-zero stream", rows)
+	if len(rows) != 4 || rows[0].From != 0 || rows[0].Text != "prompt" || rows[2].Text != "output" || rows[3].Text != "$ " {
+		t.Fatalf("fresh authenticated rows = %+v, want the full row-zero stream and its closing screen", rows)
 	}
 }
 

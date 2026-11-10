@@ -1898,6 +1898,78 @@ describe("the reader's anchor (nocx-3wmve)", () => {
     expect(area.scrollTop).toBe(1040)
   })
 
+  it('names a prose unit inside its own body, not across the whole turn (nocx-3wmve)', () => {
+    const { controller } = makeController()
+    stopFollowing(controller)
+    const area = laidOut(controller)
+    // A TURN holds two commands, each with its own body: A above the viewport,
+    // and B — the prose the person is reading, from its tenth line. A late row
+    // committed to A shifts every unit's ordinal ACROSS the turn, which is how
+    // the restore used to land three lines away in B.
+    const turn = document.createElement('div')
+    turn.className = 'cmd-block'
+    turn.dataset.entryId = 'att-turn'
+    const children = document.createElement('div')
+    children.className = 'cmd-children'
+    const command = (id: string, units: HTMLElement[]): HTMLElement => {
+      const block = document.createElement('div')
+      block.className = 'cmd-block'
+      block.dataset.entryId = id
+      const body = document.createElement('div')
+      body.className = 'cmd-output'
+      for (const unit of units) body.appendChild(unit)
+      block.appendChild(body)
+      block.getBoundingClientRect = () => rect(-4000, 8000)
+      return block
+    }
+    const rowTops = [-200, -183, -166, -149, -132]
+    const rows = rowTops.map((top, index) => {
+      const row = document.createElement('div')
+      row.className = 'term-grid-row'
+      row.dataset.logicalLine = String(index)
+      row.getBoundingClientRect = () => rect(top, 17)
+      return row
+    })
+    const proseTops = Array.from({ length: 12 }, (_, index) => (index - 9) * 17)
+    const lines = proseTops.map((top, index) => {
+      const line = document.createElement('span')
+      line.className = 'term-line'
+      line.textContent = `line ${index}`
+      line.getBoundingClientRect = () => rect(top, 17)
+      return line
+    })
+    const a = command('att-a', rows)
+    const b = command('att-b', lines)
+    children.appendChild(a)
+    children.appendChild(b)
+    turn.appendChild(children)
+    controller.scrollbackInner.appendChild(turn)
+    turn.getBoundingClientRect = () => rect(-4000, 8000)
+
+    controller.holdReaderPlace(() => {
+      // A commits three rows at the START of its own body: the turn's global
+      // ordinal moves by three, B's own ordinal does not, and everything below
+      // A moves down by three rows.
+      const body = a.querySelector(':scope > .cmd-output')!
+      for (let added = 0; added < 3; added += 1) {
+        const row = document.createElement('div')
+        row.className = 'term-grid-row'
+        row.dataset.logicalLine = String(100 + added)
+        row.getBoundingClientRect = () => rect(-260 + added * 17, 17)
+        body.insertBefore(row, body.firstChild)
+      }
+      for (const [index, line] of lines.entries()) {
+        const top = proseTops[index] + 3 * 17
+        line.getBoundingClientRect = () => rect(top, 17)
+      }
+      Object.defineProperty(area, 'scrollHeight', { value: 4051, configurable: true })
+    })
+
+    // B's tenth line was the anchor; it is three rows lower in the transcript
+    // now, so the view follows it by exactly those three rows.
+    expect(area.scrollTop).toBe(1051)
+  })
+
   it('puts a FOLLOWER back at the bottom edge when a change grows the transcript (nocx-3wmve)', () => {
     const { controller } = makeController()
     const area = laidOut(controller)

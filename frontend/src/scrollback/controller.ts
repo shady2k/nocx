@@ -1128,9 +1128,18 @@ export class ScrollbackController {
       if (box.top >= clip.bottom) break
       const found = this._unitAtViewportTop(block, clip)
       if (found === null) continue
-      const { unit, index } = found
+      const { unit } = found
       const element = unit.getBoundingClientRect()
-      const blockId = block.dataset.entryId ?? null
+      // THE NEAREST BLOCK THAT OWNS THE UNIT, and an ordinal LOCAL TO ITS OWN
+      // BODY (nocx-3wmve). A turn holds several commands, each with its own
+      // body: an ordinal across every body under the turn shifts the moment an
+      // EARLIER command commits a row, and the restore then lands the reader on
+      // a different paragraph a few lines away. Nothing above a body can move
+      // an ordinal inside it.
+      const body = unit.parentElement
+      const owner = body?.closest<HTMLElement>('.cmd-block') ?? block
+      const blockId = owner.dataset.entryId ?? block.dataset.entryId ?? null
+      const index = body === null ? -1 : Array.prototype.indexOf.call(body.children, unit)
       if (unit.classList.contains('term-grid-row') && unit.dataset.logicalLine !== undefined) {
         return {
           blockId,
@@ -1261,7 +1270,10 @@ export class ScrollbackController {
     if (place.blockId === null || place.index < 0) return null
     const block = area.querySelector<HTMLElement>(`.cmd-block[data-entry-id="${place.blockId}"]`)
     if (block === null) return null
-    const units = block.querySelectorAll<HTMLElement>('.cmd-output > *')
+    // THE UNIT'S OWN BODY, the same one the ordinal was taken in.
+    const body = block.querySelector<HTMLElement>(':scope > .cmd-output')
+    if (body === null) return null
+    const units = Array.from(body.children) as HTMLElement[]
     const matches = (index: number): boolean =>
       units[index] !== undefined && units[index].className === place.signature
     if (matches(place.index)) return units[place.index]

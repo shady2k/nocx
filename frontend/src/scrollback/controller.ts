@@ -160,11 +160,18 @@ export class ScrollbackController {
   private _blockManager: BlockManager
   private readonly _liveContentHeight: () => number | null
   private readonly _cellMetrics: () => { cellWidth: number; cellHeight: number } | null
+  private readonly _pane: HTMLElement
   private _mode: LiveRegionMode = 'idle'
-  /** The grid on screen is the one a full-screen program was given, kept after
-   *  it left the alternate screen and not yet handed back (ADR-2yzsq8mk
-   *  decision 4; nocx-djx1u). Only the unstructured layout reacts to it. */
-  private _borrowedGrid = false
+  /** Whether this session has a structured layout at all. It is the one fact
+   *  the reserved-header question needs, and it must outlive a screen switch:
+   *  a full-screen program inherits the header the running block had, and a
+   *  markerless shell has none in either buffer (ADR-92zzg2y2). */
+  private _structured = true
+  /** How many whole screen rows the live grid is translated above its box.
+   *  The stored body above the box must paint those rows too, or the row that
+   *  leaves the screen top appears one row lower when it moves from the grid
+   *  to the body (the owner's "output moves down" frame). */
+  private _hiddenScreenRows = 0
   /** A ready prompt asked for the idle layout while a completed block was
    *  still waiting for its block.closed; applied when the close lands, and
    *  dropped the moment a command owns the live region again. */
@@ -220,6 +227,7 @@ export class ScrollbackController {
     this._onClear = opts.onClear
     this._onModeChanged = opts.onModeChanged
     this._onTailFollow = opts.onTailFollow
+    this._pane = opts.pane
     this.snapshotStore = opts.snapshotStore
     const now = opts.now ?? (() => performance.now())
 
@@ -473,6 +481,8 @@ export class ScrollbackController {
     }
     this._idleRequested = false
     this._mode = 'idle'
+    this._structured = true
+    this._hiddenScreenRows = 0
     // Both inline heights have to go: running content height and its clip
     // otherwise outrank the idle/fullscreen mode classes. THE BOX IS PART OF
     // THE TRANSCRIPT'S HEIGHT (nocx-3wmve): a reader scrolled up keeps their
@@ -503,6 +513,7 @@ export class ScrollbackController {
     if (this._mode === 'fullscreen') return
     const entering = this._mode !== 'running'
     this._mode = 'running'
+    this._structured = true
     if (entering) {
       this._settleHeight(() => {
         this.terminalLiveContainer.style.height = ''
@@ -538,6 +549,8 @@ export class ScrollbackController {
   setUnstructured(): void {
     if (this._mode === 'fullscreen') return
     this._mode = 'unstructured'
+    this._structured = false
+    this._hiddenScreenRows = 0
     this.terminalLiveViewport.style.height = ''
     this.terminalLiveContainer.className =
       'terminal-live-container terminal-live-container live-unstructured'
@@ -636,6 +649,7 @@ export class ScrollbackController {
     // every caller has to remember to call (the version that had to be
     // remembered was called exactly twice, at the two mode entries).
     if (this._mode === 'unstructured' || this._mode === 'fullscreen') {
+      this._hiddenScreenRows = 0
       this._fillPane()
       return
     }
@@ -679,7 +693,10 @@ export class ScrollbackController {
     // the box grew by only three, and every visible row moved DOWN a line.
     // Derived this way a row's place is `bottom + row·cell - px`: a function
     // of the painted content alone, so releasing the shift cannot move it.
-    this._applyShift(height - content)
+    const shift = height - content
+    this._applyShift(shift)
+    const cell = this._cellMetrics()?.cellHeight ?? 0
+    this._hiddenScreenRows = cell > 0 ? gridRows(shift, cell) : 0
     const box = `${content + pad}px`
     const inner = `${content}px`
     // Keep the block's bottom at the bottom of the view — but only on the
@@ -831,8 +848,17 @@ export class ScrollbackController {
   cellMetricsChanged(): void {
     const metric = this._cellMetrics()
     if (metric === null) return
+    // THE GUTTER IS THE CELL (ADR-92zzg2y2). The frozen rows read the metric
+    // on the stack, and the pane's own `--pane-inline-padding` /
+    // `--pane-block-padding` read the same two numbers one level up, because a
+    // custom property's `var()` is resolved where it is declared and `.pane`
+    // is where the stylesheet declares the gutter. Publishing on the stack
+    // alone left the pane's gutter on its `1ch` fallback — the UI font's
+    // advance, not the terminal's.
     publishCellMetric(this.scrollbackInner, metric.cellWidth)
     publishRowPitch(this.scrollbackInner, metric.cellHeight)
+    this._pane.style.setProperty('--term-cell-width', `${metric.cellWidth}px`)
+    this._pane.style.setProperty('--term-cell-height', `${metric.cellHeight}px`)
   }
 
   /**
@@ -872,41 +898,11 @@ export class ScrollbackController {
     this.scrollbackInner.classList.toggle('inner-fullscreen-mode', on)
   }
 
-  /** The layout's vertical margin is the ledger's — a markerless session keeps
-   *  it too (ADR-2yzsq8mk) — and only the alternate screen starts at the pane's
-   *  own top edge, one row of margin at its bottom instead. Every mode change
-   *  announces itself through here, so the class cannot lag the mode. */
+  /** Every mode change announces itself through here. There is no layout
+   *  exception left to carry: one gutter is the pane's in every mode
+   *  (ADR-92zzg2y2). */
   private _announceMode(): void {
-    this.scrollbackLayout.classList.toggle('inner-pane-program', this._mode === 'fullscreen')
-    // A BORROWED GRID IS THE PANE'S OWN GEOMETRY (nocx-djx1u). A markerless
-    // session has no prompt marker to hand a borrowed grid back, so the rows a
-    // full-screen program left behind are the pane's for as long as it holds
-    // them — and the four-side margin is two rows it cannot show. In the
-    // unstructured mode, and only there, the layout gives the margin up and the
-    // program's own box (no top edge, one row at the bottom) is the pane. The
-    // structured modes keep it: there the block owns the rows and scrolls.
-    this.scrollbackLayout.classList.toggle(
-      'inner-borrowed-grid',
-      this._borrowedGrid && this._mode === 'unstructured',
-    )
     this._onModeChanged?.(this._mode)
-  }
-
-  /**
-   * Say whether the grid on screen is one a program borrowed — the rows a
-   * full-screen program was given, kept after it left the alternate screen
-   * (ADR-2yzsq8mk decision 4) — so the unstructured layout can size the pane
-   * for them instead of for the ledger's margin (nocx-djx1u).
-   */
-  setBorrowedGrid(borrowed: boolean): void {
-    if (this._borrowedGrid === borrowed) return
-    this._borrowedGrid = borrowed
-    this._announceMode()
-  }
-
-  /** Whether the layout is holding the margin back for a borrowed grid. */
-  isBorrowedGrid(): boolean {
-    return this._borrowedGrid && this._mode === 'unstructured'
   }
 
   /** Show the alternate grid beneath the same one-line running header
@@ -914,6 +910,7 @@ export class ScrollbackController {
   enterFullscreen(): void {
     this._idleRequested = false
     this._mode = 'fullscreen'
+    this._hiddenScreenRows = 0
     this.terminalLiveViewport.style.height = ''
     this.terminalLiveContainer.className =
       'terminal-live-container terminal-live-container live-fullscreen'
@@ -954,9 +951,8 @@ export class ScrollbackController {
   private _fillPane(): void {
     const grid = this.paneFillHeight
     if (grid <= 0) return
-    // The box IS the grid: a markerless session's four-side margin is the
-    // stack's padding, not this box's (ADR-2yzsq8mk), and `paneFillHeight`
-    // already took it out of the rows this box may show.
+    // The box IS the grid. The gutter is on the layout and the rows
+    // (ADR-92zzg2y2), so `paneFillHeight` is the same number the fit reports.
     this.terminalLiveContainer.style.height = `${grid}px`
   }
 
@@ -964,43 +960,55 @@ export class ScrollbackController {
    * THE HEIGHT OF THE BOX THAT FILLS THE PANE, AND OF THE GRID THAT FILLS IT.
    *
    * One owner, read by two callers: `_fillPane` writes it to the live box, and
-   * `terminal-content`'s `_gridHeight` returns it as the desired grid height
-   * while the program owns the pane. Two expressions — one box that ends on a
-   * row boundary, one grid the PTY is told — is how a markerless session's
-   * full-screen program (vim or top over a plain ssh shell, where there is no
-   * running block to give `_gridHeight` the structured branch) came to be told
-   * the whole scroller while its box showed one row less, and lost its last
-   * row to the clip.
+   * `terminal-content`'s `_gridHeight` returns it as the desired grid height.
+   * One expression, so the box and the grid the PTY is told cannot disagree —
+   * and it is the same in the primary and the alternate screen
+   * (ADR-92zzg2y2): a switch changes presentation, never geometry.
    *
    * Floored to whole rows for the reason `runningLiveCap` is: a box that ends
-   * inside a row shows a sliced one. The alternate screen then gives one of
-   * those rows back — the margin ADR-2yzsq8mk keeps below a program's last row,
-   * which the stylesheet declares as `margin-bottom` — so the box and its
-   * margin together are the pane and no row is clipped for the margin.
+   * inside a row shows a sliced one.
    */
   get paneFillHeight(): number {
     const max = this.paneBoxHeight
     if (max <= 0) return 0
     const cell = this._cellMetrics()?.cellHeight ?? 0
-    const height = cell > 0 && max > cell ? gridRows(max, cell) * cell : max
-    return this._mode === 'fullscreen' && cell > 0 ? Math.max(0, height - cell) : height
+    return cell > 0 && max > cell ? gridRows(max, cell) * cell : max
   }
 
-  /** THE SAME BOX, BEFORE ITS ROWS ARE COUNTED (nocx-djx1u). `paneFillHeight`
-   *  answers in whole rows, which is what a box and a pty are told; the one
-   *  fit that must SUBTRACT a margin from it has to subtract before that
-   *  rounding, or it rounds twice — floor((422 − 48)/17) = 22 rows against
-   *  floor((408 − 48)/17) = 21 — and asks the shell for a grid the pane does
-   *  not have. So the unrounded expression is the one owner, and the floored
-   *  one is derived from it. */
+  /** How many whole rows the live grid is translated above its box. The
+   *  stored body above the box paints them too, so a row leaves the grid and
+   *  enters the body at the same y (ADR-92zzg2y2). */
+  get hiddenScreenRows(): number {
+    return this._hiddenScreenRows
+  }
+
+  /** THE SAME BOX, BEFORE ITS ROWS ARE COUNTED. `paneFillHeight` answers in
+   *  whole rows, which is what a box and a pty are told; anything that has to
+   *  subtract from it must subtract before that rounding. */
   get paneBoxHeight(): number {
-    const max = this._areaHeightPx() - (this._fullscreenHeader ? this.runningHeaderHeightPx : 0)
-    return Math.max(0, max)
+    return Math.max(0, this._areaHeightPx() - this.reservedHeaderHeightPx)
+  }
+
+  /**
+   * THE HEADER THE FIT RESERVES, and the one number that decides whether the
+   * pane has one at all.
+   *
+   * A structured session reserves it at the prompt too, so a command's submit
+   * cannot resize the program after its bytes are delivered (ADR-3kqrem7v).
+   * A markerless session has no running block and no header: reserving one
+   * there would leave a band the terminal cannot paint. In the alternate
+   * screen the header is the running block's own, seated above the grid, so
+   * the same answer holds on both sides of a switch — which is what makes the
+   * terminal's size mode-independent (ADR-92zzg2y2).
+   */
+  get reservedHeaderHeightPx(): number {
+    return this._structured ? this.runningHeaderHeightPx : 0
   }
 
   /** Exit alt-screen: restore normal layout. */
   exitFullscreen(): void {
     this._mode = 'idle'
+    this._hiddenScreenRows = 0
     this.terminalLiveContainer.style.height = ''
     this.terminalLiveViewport.style.height = ''
     this._setFilledPane(false)

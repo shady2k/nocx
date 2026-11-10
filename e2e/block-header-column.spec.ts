@@ -3,15 +3,15 @@
  *
  * The owner, on nightly v0.8.1-nightly.202611091128 (main 313866933, after
  * PR #752): a running local command showed its output on the transcript's left
- * gutter while the running header's chevron and command started about 24 CSS px
+ * gutter while the running header's chevron and command started about one cell
  * further right. "The output now looks right; the command is what moved."
  *
- * WHICH EDGE IS THE RULE, decided from the frozen card and ADR-2yzsq8mk: the
+ * WHICH EDGE IS THE RULE, decided from the frozen card and ADR-92zzg2y2: the
  * column's left edge is `--pane-inline-padding` from the pane, and the frozen
  * card puts three things on it — the header's chevron, the body's first output
  * column, and (at the prompt) the composer's first glyph. The command TEXT
  * begins one chevron-and-gap after that edge, in the frozen card and in the
- * running one alike; it is not itself the column. ADR-2yzsq8mk decision 6 says
+ * running one alike; it is not itself the column. ADR-92zzg2y2 decision 6 says
  * the header, its output and the composer's text are one column, and decision 1
  * says the running body and the frozen body both wear `--pane-inline-padding`.
  * So the rule asserted here is: chevron == output's first column == the gutter,

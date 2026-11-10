@@ -121,8 +121,13 @@ async function openPane(page: Page, shell: string, inputrc: string | null): Prom
       'interactive shell, so it needs exactly one',
   ).toHaveLength(1)
   const logPath = announced[0].slice('INPUTLOG='.length).split(' ')[0]
-  // The open's own bootstrap frames are the shell's first input; everything
-  // after them is what a person's submits put there.
+  // THE BASELINE IS TAKEN AT THE PROMPT, NOT AT THE ANNOUNCEMENT (nocx-evj4b.1.2,
+  // review round 3). The fixture announces its input log as soon as the channel
+  // starts, and the shell's own bootstrap input keeps arriving after that: a
+  // baseline sampled there left those bytes to be read as the first submit's
+  // input. The prompt is the last thing the open writes before a person can
+  // type, so it is where the person's bytes begin.
+  await promptReady(page)
   return { fixture, profileId: created.id, logPath, openOffset: readFileSync(logPath).length }
 }
 

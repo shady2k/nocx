@@ -126,6 +126,18 @@ async function framesOf(page: Page, doneText: string): Promise<Frame[]> {
             return
           }
           const sr = scroller.getBoundingClientRect()
+          // A ROW THE GRID'S CLIP HIDES IS NOT A ROW ANYBODY SEES
+          // (ADR-92zzg2y2). The live grid is translated up by the rows its box
+          // does not show, and `.terminal-live-container` and
+          // `.terminal-live-viewport` are both `overflow: hidden` without a
+          // transform — so those rows sit above the container's own top edge
+          // and cannot be painted. The stored body paints exactly them, which
+          // is the point of the one-gutter joint; a probe that counts the
+          // clipped copies as well finds the same line twice and calls the
+          // joint a tear (measured: body `GET-051` at y 30, the same text
+          // clipped at y 13, then "moved down 17px").
+          const clip = pane.querySelector<HTMLElement>('.terminal-live-container')
+          const clipBox = clip?.getBoundingClientRect() ?? null
           const rows: VisibleRow[] = []
           for (const row of block.querySelectorAll<HTMLElement>(
             '.cmd-output .term-grid-row, .terminal-live-grid .term-grid-row',
@@ -133,7 +145,17 @@ async function framesOf(page: Page, doneText: string): Promise<Frame[]> {
             const box = row.getBoundingClientRect()
             if (box.height <= 0) continue
             if (box.bottom <= sr.top + 0.5 || box.top >= sr.bottom - 0.5) continue
-            rows.push({ y: round(box.top - sr.top), text: (row.textContent ?? '').trimEnd() })
+            if (
+              clipBox !== null &&
+              row.closest<HTMLElement>('.terminal-live-grid') !== null &&
+              (box.bottom <= clipBox.top + 0.5 || box.top >= clipBox.bottom - 0.5)
+            ) {
+              continue
+            }
+            rows.push({
+              y: round(box.top - sr.top),
+              text: (row.textContent ?? '').trimEnd(),
+            })
           }
           const frameBox = block.getBoundingClientRect()
           const liveBox = pane.querySelector<HTMLElement>('.terminal-live-container')
@@ -522,7 +544,7 @@ test('a burst of rows arrives whole, in the block it will keep', async ({ page }
   const spoken = `shape: ${JSON.stringify(running.slice(-3))}`
   expect(running.length, spoken).toBeGreaterThan(20)
 
-  // ONE SHAPE (ADR-2yzsq8mk): a normal command, running or finished, sits in the
+  // ONE SHAPE (ADR-92zzg2y2): a normal command, running or finished, sits in the
   // transcript's column, so a running row starts where the frozen one does —
   // and that column is inset, not the pane's own edge.
   const frozenX = frames.filter((f) => f.frozenRowX === f.frozenRowX).map((f) => f.frozenRowX)
@@ -553,7 +575,7 @@ test('a burst of rows arrives whole, in the block it will keep', async ({ page }
   ).toEqual([])
 })
 
-test('a full-screen program keeps one row of margin below its last row', async ({ page }) => {
+test('a full-screen program keeps the half-row bottom gutter', async ({ page }) => {
   test.setTimeout(120_000)
   await page.goto('/')
   await promptReady(page)
@@ -569,17 +591,19 @@ test('a full-screen program keeps one row of margin below its last row', async (
       const inner = pane?.querySelector<HTMLElement>('.scrollback-inner')
       if (!area || !live || !grid || !inner) return { settled: false }
       const sr = area.getBoundingClientRect()
-      const lr = live.getBoundingClientRect()
+      const pr = pane!.getBoundingClientRect()
       const rows = [...grid.querySelectorAll<HTMLElement>('.term-grid-row')]
       const painted = rows.filter((row) => (row.textContent ?? '').trim() !== '')
       const last = painted[painted.length - 1]
       const pitch = parseFloat(getComputedStyle(inner).getPropertyValue('--term-cell-height')) || 0
       const lastBottom = last ? last.getBoundingClientRect().bottom : NaN
       return {
-        // The box's own bottom edge sits one row above the pane's.
-        boxMargin: Math.round((sr.bottom - lr.bottom) * 100) / 100,
-        // And the program's last painted row is inside the box, not on its edge.
-        rowMargin: Math.round((sr.bottom - lastBottom) * 100) / 100,
+        // The box ends inside the scroller by the integer remainder only: no
+        // extra row of margin is reserved for a full-screen program.
+        boxMargin: Math.round((sr.bottom - lastBottom) * 100) / 100,
+        // The gutter between the last painted row and the pane's own bottom
+        // edge: half a row plus that remainder.
+        paneMargin: Math.round((pr.bottom - lastBottom) * 100) / 100,
         pitch: Math.round(pitch * 100) / 100,
         fullscreen: live.classList.contains('live-fullscreen'),
         settled: live.classList.contains('live-fullscreen') && pitch > 0 && painted.length > 5,
@@ -587,9 +611,11 @@ test('a full-screen program keeps one row of margin below its last row', async (
     })
   await expect.poll(async () => (await geometry()).settled, { timeout: 20_000 }).toBe(true)
   const g = await geometry()
-  const said = `full-screen bottom margin: ${JSON.stringify(g)}`
-  // ONE ROW OF MARGIN, inside a row's tolerance: the owner's Warp parity, so a
-  // program's last row never touches the window's bottom edge.
-  expect(Math.abs(g.boxMargin! - g.pitch!), said).toBeLessThanOrEqual(1)
-  expect(g.rowMargin!, said).toBeGreaterThan(g.pitch! - 1)
+  const said = `full-screen bottom gutter: ${JSON.stringify(g)}`
+  // HALF A ROW, PLUS THE INTEGER REMAINDER (ADR-92zzg2y2): the same gutter a
+  // normal command wears, so a program's last row never touches the window's
+  // bottom edge and no extra row is taken from it.
+  expect(g.boxMargin!, said).toBeLessThan(g.pitch! + 1)
+  expect(g.paneMargin!, said).toBeGreaterThanOrEqual(g.pitch! / 2 - 1)
+  expect(g.paneMargin!, said).toBeLessThan(g.pitch! * 1.5 + 1)
 })

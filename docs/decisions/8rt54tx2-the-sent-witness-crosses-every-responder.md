@@ -42,7 +42,13 @@ could land on another spacer instead of the rows the person was reading.
    row it starts at. The reader's anchor treats a spacer as a row and restores by that
    line; when a page replaces the spacer with painted rows, the same line is the row the
    reader keeps.
-4. **Reconnect revalidates restored blocks, and refresh reads fresh geometry first.**
+4. **An open artifact's metadata carries its geometry.** `executionsFor` enriches a rows
+   artifact that has no retained ranges — an open block, or a payload written before the
+   fields existed — by reading its chunks and putting `retainedRanges`, `endRow`,
+   `firstRow` and `rowCount` into the payload `ledger.get` returns. A reader therefore
+   reserves an open block's real runs from the first metadata read, and the first page
+   cannot reveal an evicted middle that the reservation had invented as kept.
+5. **Reconnect revalidates restored blocks, and refresh reads fresh geometry first.**
    `_restoredRows` is a reconnect source alongside the live block records; a restored
    block's refresh paints through its own element, never through `applyStoredRows` (which
    parks rows in a queue only a live block flushes). The geometry read by revalidation is

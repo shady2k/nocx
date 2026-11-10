@@ -302,23 +302,52 @@ describe('session.intent', () => {
     await expect(pending).resolves.toMatchObject({ state: 'executed', bytesWritten: 1 })
   })
 
-  // AND IT ENDS. A session that stays busy past every doubled wait is one the
-  // person is owed a sentence about — never a silent drop, and never a spin.
-  it('gives up on a session that stays busy, and says so', async () => {
+  // AND IT DOES NOT END WHILE THE SESSION LIVES (nocx-evj4b.1.12). No attempt
+  // bound: the queue awaits this call, so the keystroke stays at the head and
+  // every later key waits behind it. The wait doubles and then caps, so a
+  // permanently backpressured session costs a handful of round trips a second.
+  it('keeps presenting a busy keystroke while the session lives, and never drops it', async () => {
     const { session, ws } = await connectedSession()
     const pending = session.intent('text', 'h')
     const attempts = (): ReturnType<typeof ws.requests> =>
       ws.requests().filter((candidate) => candidate.method === 'session.intent')
-    for (let n = 0; n < 5; n += 1) {
+    for (let n = 0; n < 8; n += 1) {
       ws.deliverText({
         jsonrpc: '2.0',
         id: attempts()[n].id,
         result: { state: 'refused', bytesWritten: 0, fenceAfter: 4, refusal: { cause: 'busy' } },
       })
-      if (n < 4) await expect.poll(() => attempts().length, { timeout: 2_000 }).toBe(n + 2)
+      await expect.poll(() => attempts().length, { timeout: 3_000 }).toBe(n + 2)
     }
-    await expect(pending).resolves.toMatchObject({ state: 'refused' })
-    expect(attempts()).toHaveLength(5)
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: attempts()[8].id,
+      result: { state: 'executed', bytesWritten: 1, fenceAfter: 5, accessEpoch: 3 },
+    })
+    await expect(pending).resolves.toMatchObject({ state: 'executed', bytesWritten: 1 })
+    expect(attempts()).toHaveLength(9)
+  })
+
+  // AND IT ENDS WITH THE SESSION. The queued input belongs to the session that
+  // is gone; the next presentation rejects, and the queue's caller drops that
+  // input with the session — which is not a silent loss of a keystroke while
+  // somebody could still take it.
+  it('stops presenting when the session ends, so its input dies with it', async () => {
+    const { session, ws } = await connectedSession()
+    const attempts = (): ReturnType<typeof ws.requests> =>
+      ws.requests().filter((candidate) => candidate.method === 'session.intent')
+    const pending = session.intent('text', 'h')
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: attempts()[0].id,
+      result: { state: 'refused', bytesWritten: 0, fenceAfter: 4, refusal: { cause: 'busy' } },
+    })
+    await expect.poll(() => attempts().length, { timeout: 2_000 }).toBe(2)
+    ws.serverHangsUp()
+    await expect(pending).rejects.toBeTruthy()
+    const seen = attempts().length
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(attempts().length).toBe(seen)
   })
 
   // AND NOT THE ONES THAT CANNOT CHANGE THEIR ANSWER. `closing` means this

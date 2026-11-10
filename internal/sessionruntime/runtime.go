@@ -1121,7 +1121,21 @@ func (s *Session) encode(i Intent) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		return s.emulator.Focus(gained)
+		// A PROGRAM THAT DID NOT ASK IS NOT TOLD, AND NOT TOLD IS NOT REFUSED
+		// (nocx-evj4b.1.12). DEC private mode 1004 is the whole content of a
+		// focus report (emulator.go's Focus), so the port answers an
+		// unrequested report with ErrUnsupported and no bytes. That answer
+		// left this method as an error, and the renderer's input path read it
+		// as "this keystroke was refused" — a focus change is not a keystroke,
+		// and nothing is owed to the program. Encoding to no bytes is how every
+		// other input the program ignores travels; the record reports executed.
+		// A program that DID ask still gets its report: the error is the port's
+		// statement about the MODE, not about the intent.
+		out, err := s.emulator.Focus(gained)
+		if errors.Is(err, emulator.ErrUnsupported) {
+			return nil, nil
+		}
+		return out, err
 	default:
 		return nil, fmt.Errorf("%w: intent kind %d", ErrIntentUnsupported, i.Kind)
 	}

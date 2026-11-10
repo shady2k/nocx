@@ -52,19 +52,24 @@ const RETRY_HOPELESS_REFUSALS = new Set([
   'token_spent',
 ])
 
-/** A BACKPRESSURED SESSION IS NOT AN ANSWER ABOUT THE CHARACTER
- *  (nocx-evj4b.1.12). `busy` says the helper's own intent queue is full and no
- *  other state; `commit_deadline` says this presentation sat in that queue past
- *  the budget the TRANSPORT stamped on it — a fresh presentation gets a fresh
- *  budget. Both are the queue catching up, and the person's keystroke is still
- *  theirs to make: presenting it again after the queue has had a moment is the
- *  first write, not a second one. The attempt bound and the backoff are the
- *  livelock guard the one-retry rule was written for — a burst cannot spin the
- *  control plane, and a session that stays busy for longer than this many
- *  doubled waits is one the person is owed a sentence about, not silence. */
-const RETRY_BACKPRESSURE_CAUSES = new Set(['busy', 'commit_deadline'])
-const RETRY_BACKPRESSURE_ATTEMPTS = 5
+/** A REFUSAL THAT WROTE NOTHING IS NOT AN ANSWER ABOUT THE CHARACTER
+ *  (nocx-evj4b.1.12). Every refusal in that class says "not now" — `busy` is a
+ *  full helper queue, `commit_deadline` is one presentation whose transport
+ *  budget ran out while it waited, and an unnamed cause is one the helper has
+ *  no sentinel for. None of them is the program saying it did not want the
+ *  input, and the person's keystroke is still theirs to make: presenting it
+ *  again is the first write, not a second one.
+ *
+ *  There is NO attempt bound. The renderer's queue awaits this call, so the
+ *  keystroke stays at the head of the queue and every key typed after it waits
+ *  behind it — order is preserved by the one thing that already owned it. What
+ *  ends the wait is the session's own life: a closed socket rejects the next
+ *  presentation, and the queued input is dropped with the session, which is
+ *  not a silent loss. A tight spin is still refused: the wait doubles from 8 ms
+ *  to 250 ms, so a backpressured session costs a handful of round trips a
+ *  second and cannot livelock the control plane. */
 const RETRY_BACKPRESSURE_FIRST_MS = 8
+const RETRY_BACKPRESSURE_MAX_MS = 250
 import { isDriverState, isPaneProgress, readPaneChildren } from './pane-observation'
 import type { SessionSignal } from './generated/session.signal'
 import type { SecretsPaneClosed } from './generated/secrets.paneClosed'
@@ -740,31 +745,24 @@ export class SessionHandle {
     if (result.state === 'refused' && result.bytesWritten === 0) {
       const cause = result.refusal?.cause ?? 'unknown'
       if (cause !== 'access_revoked' && !RETRY_HOPELESS_REFUSALS.has(cause)) {
-        // BACKPRESSURE GETS A WAIT, NOT A DROP (nocx-evj4b.1.12): a busy queue
-        // answers again once it drains, and the character is still the
-        // person's. Everything else keeps the one-retry rule.
-        const backpressure = RETRY_BACKPRESSURE_CAUSES.has(cause)
-        const delays = backpressure ? RETRY_BACKPRESSURE_ATTEMPTS : 1
-        if (attempt >= delays) {
-          log.warn('nocx: a keystroke was refused with nothing written and is not delivered', {
-            sid: this.sessionId,
-            kind,
-            cause,
-            attempts: attempt,
-          })
-          return result
-        }
-        if (backpressure) {
-          await new Promise<void>((resolve) => {
-            setTimeout(resolve, RETRY_BACKPRESSURE_FIRST_MS * 2 ** (attempt - 1))
-          })
-        } else {
-          log.warn('nocx: a keystroke was refused with nothing written; presenting it once more', {
+        // NO GIVE-UP WHILE THE SESSION LIVES (nocx-evj4b.1.12). What ends this
+        // is the session: a closed socket rejects the presentation, and the
+        // queue's caller drops the input with the session — never a silent
+        // loss of a character while there is still somebody to deliver it to.
+        if (attempt === 1) {
+          log.warn('nocx: a keystroke was refused with nothing written; presenting it again', {
             sid: this.sessionId,
             kind,
             cause,
           })
         }
+        const wait = Math.min(
+          RETRY_BACKPRESSURE_FIRST_MS * 2 ** (attempt - 1),
+          RETRY_BACKPRESSURE_MAX_MS,
+        )
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, wait)
+        })
         return this._intent(kind, payload, false, attempt + 1)
       }
     }

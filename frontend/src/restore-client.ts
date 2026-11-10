@@ -370,6 +370,12 @@ export interface BlockRowsWindow {
   readonly rowLimit?: number
 }
 
+function blockRowsKey(entryId: string, window?: BlockRowsWindow): string {
+  return window?.fromRow === undefined && window?.rowLimit === undefined
+    ? entryId
+    : `${entryId}@${window?.fromRow ?? ''}:${window?.rowLimit ?? ''}`
+}
+
 export function blockRowsForEntry(
   client: WSClient,
   entryId: string,
@@ -379,12 +385,23 @@ export function blockRowsForEntry(
   // A page and a whole body are different reads, so they must not coalesce:
   // sharing one promise would hand a page to a caller that asked for the
   // block. The key carries the page when there is one.
-  const key =
-    window?.fromRow === undefined && window?.rowLimit === undefined
-      ? entryId
-      : `${entryId}@${window?.fromRow ?? ''}:${window?.rowLimit ?? ''}`
-  return blockRowQueueFor(client).submit(key, priority, () =>
+  return blockRowQueueFor(client).submit(blockRowsKey(entryId, window), priority, () =>
     readBlockRowsForEntry(client, entryId, window),
+  )
+}
+
+/** A refresh whose geometry is already in hand. It goes through the SAME
+ *  priority queue as a page, so a `-32014` refusal waits and retries instead
+ *  of rejecting a refresh and leaving the new rows absent (ADR-8rt54tx2). */
+export function blockRowsForEntryWithMetadata(
+  client: WSClient,
+  entryId: string,
+  metadata: BlockRowsMetadata,
+  window?: BlockRowsWindow,
+  priority: () => number = () => 0,
+): Promise<BlockRowsRead> {
+  return blockRowQueueFor(client).submit(blockRowsKey(entryId, window), priority, () =>
+    readBlockRowsWithMetadata(client, metadata, window),
   )
 }
 
@@ -413,7 +430,7 @@ async function readBlockRowsForEntry(
 /** The page half of a stored-rows read, from an artifact metadata object a
  *  caller already holds. A reconnect's geometry read uses this so a fresh
  *  window costs one ledger.get, not two (ADR-8rt54tx2). */
-export async function readBlockRowsWithMetadata(
+async function readBlockRowsWithMetadata(
   client: WSClient,
   metadata: BlockRowsMetadata,
   window?: BlockRowsWindow,

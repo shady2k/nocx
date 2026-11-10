@@ -6828,10 +6828,15 @@ describe('the projections consume the kernel through the composition root (ADR-0
           sealed: false,
         },
       )
+      const settle = vi.spyOn(
+        (content as unknown as { scrollback: ScrollbackController }).scrollback,
+        'settleAround',
+      )
       client._fireReconnect()
       await vi.waitFor(() => {
         expect(el.querySelector('.cmd-output')?.textContent).toContain('grown')
       })
+      expect(settle).toHaveBeenCalled()
       expect(artifactParams).toHaveLength(1)
       expect(artifactParams[0].fromRow).toBe(100)
       expect(artifactParams[0].rowLimit).toBe(400)

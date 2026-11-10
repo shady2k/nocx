@@ -159,9 +159,9 @@ import {
   answerTextForTurn,
   arrangedByCause,
   blockRowsForEntry,
+  blockRowsForEntryWithMetadata,
   blockRowsMetadataForEntry,
   blocksForPane,
-  readBlockRowsWithMetadata,
   BLOCK_ROWS_PAGE,
   LAZY_BLOCK_ROWS,
   restoredBody,
@@ -11765,7 +11765,11 @@ export class TerminalContent extends BasePaneContent {
       }
     }
     const window = this._refreshWindow(entryId, metadata?.geometry ?? undefined)
-    if (metadata !== undefined) return readBlockRowsWithMetadata(this.client, metadata, window)
+    if (metadata !== undefined) {
+      return blockRowsForEntryWithMetadata(this.client, entryId, metadata, window, () =>
+        this._rowReadPriority(entryId),
+      )
+    }
     return blockRowsForEntry(this.client, entryId, window, () => this._rowReadPriority(entryId))
   }
 
@@ -11791,8 +11795,14 @@ export class TerminalContent extends BasePaneContent {
     }
     const el = this._blockElement(entryId)
     if (!el) return
-    this._restoredRows.set(entryId, rows)
-    sb.blockManager.paintStoredRows(el, rows)
+    // EVERY PAINT GOES THROUGH THE ONE SETTLE (ADR-8rt54tx2, #779). A
+    // revalidation landing above a scrolled-up reader must move neither their
+    // row nor their scroll position; the live-record branch has always done
+    // this, and a restored element is content in the same transcript.
+    sb.settleAround(() => {
+      this._restoredRows.set(entryId, rows)
+      sb.blockManager.paintStoredRows(el, rows)
+    })
   }
 
   /** Ask for one page of a restored or live block's rows, around the visible

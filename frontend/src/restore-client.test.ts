@@ -17,7 +17,9 @@ import {
   answerTextForTurn,
   arrangedByCause,
   blockRowsForEntry,
+  blockRowsForEntryWithMetadata,
   blocksForPane,
+  type BlockRowsMetadata,
   bodyForBlock,
   restoredBody,
   type RestorableBlock,
@@ -173,6 +175,61 @@ describe("restore-client — a block's stored rows say whether they were read", 
     const read = await blockRowsForEntry(client, 'entry-retry', { fromRow: 0, rowLimit: 10 })
     expect(read.kind).toBe('rows')
     expect(artifactCalls).toBe(2)
+  })
+
+  it('sends a metadata-backed refresh through the queue so a refusal is retried', async () => {
+    let calls = 0
+    const line = JSON.stringify({ from: 0, row: { text: 'after-refusal' } })
+    const client = {
+      call: vi.fn(() => {
+        calls++
+        if (calls === 1) {
+          return Promise.reject(new RpcError('busy', -32014, { retryAfterMs: 5 }))
+        }
+        return Promise.resolve({
+          id: 'art-rows',
+          mediaType: 'application/x-nocx-rows',
+          body: `${line}\n`,
+          truncated: null,
+          byteLen: line.length,
+          firstRow: 0,
+          lastRow: 0,
+          endRow: 1,
+          rowCount: 1,
+          retainedRanges: [{ from: 0, to: 1 }],
+          rangeStart: 0,
+          rangeCount: 1,
+          hasMoreBefore: false,
+          hasMoreAfter: false,
+        })
+      }),
+    } as unknown as WSClient
+    const read = await blockRowsForEntryWithMetadata(
+      client,
+      'entry-refresh',
+      {
+        artifactId: 'art-rows',
+        version: 'art-rows',
+        geometry: {
+          firstRow: 0,
+          lastRow: 0,
+          endRow: 1,
+          rowCount: 1,
+          retainedRanges: [{ from: 0, to: 1 }],
+          rangeStart: null,
+          rangeCount: 0,
+          hasMoreBefore: false,
+          hasMoreAfter: false,
+        },
+        artifact: {
+          id: 'art-rows',
+          mediaType: 'application/x-nocx-rows',
+        } as BlockRowsMetadata['artifact'],
+      },
+      { fromRow: 0, rowLimit: 10 },
+    )
+    expect(read.kind).toBe('rows')
+    expect(calls).toBe(2)
   })
 
   it('retries a page that came back short of the retained rows it asked for', async () => {

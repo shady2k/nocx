@@ -126,6 +126,18 @@ async function framesOf(page: Page, doneText: string): Promise<Frame[]> {
             return
           }
           const sr = scroller.getBoundingClientRect()
+          // A ROW THE GRID'S CLIP HIDES IS NOT A ROW ANYBODY SEES
+          // (ADR-92zzg2y2). The live grid is translated up by the rows its box
+          // does not show, and `.terminal-live-container` and
+          // `.terminal-live-viewport` are both `overflow: hidden` without a
+          // transform — so those rows sit above the container's own top edge
+          // and cannot be painted. The stored body paints exactly them, which
+          // is the point of the one-gutter joint; a probe that counts the
+          // clipped copies as well finds the same line twice and calls the
+          // joint a tear (measured: body `GET-051` at y 30, the same text
+          // clipped at y 13, then "moved down 17px").
+          const clip = pane.querySelector<HTMLElement>('.terminal-live-container')
+          const clipBox = clip?.getBoundingClientRect() ?? null
           const rows: VisibleRow[] = []
           for (const row of block.querySelectorAll<HTMLElement>(
             '.cmd-output .term-grid-row, .terminal-live-grid .term-grid-row',
@@ -133,6 +145,13 @@ async function framesOf(page: Page, doneText: string): Promise<Frame[]> {
             const box = row.getBoundingClientRect()
             if (box.height <= 0) continue
             if (box.bottom <= sr.top + 0.5 || box.top >= sr.bottom - 0.5) continue
+            if (
+              clipBox !== null &&
+              row.closest<HTMLElement>('.terminal-live-grid') !== null &&
+              (box.bottom <= clipBox.top + 0.5 || box.top >= clipBox.bottom - 0.5)
+            ) {
+              continue
+            }
             rows.push({
               y: round(box.top - sr.top),
               text: (row.textContent ?? '').trimEnd(),

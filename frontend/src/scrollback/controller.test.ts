@@ -2176,6 +2176,49 @@ describe("the reader's anchor (nocx-3wmve)", () => {
     expect(area.scrollTop).toBe(1040)
   })
 
+  it('anchors a tool header that carries no id, by its element (nocx-3wmve)', () => {
+    const { pane, controller } = makeController()
+    // An element reference is the anchor, so the pane has to be IN the document
+    // for `isConnected` to mean what it means in the product.
+    document.body.appendChild(pane)
+    stopFollowing(controller)
+    const area = laidOut(controller)
+    // A TURN whose own header is pinned at the edge, and inside it a live tool
+    // block — addAnswerBlock's toolCall — with NO data-entry-id. The person is
+    // reading the tool's header. Named by identity it becomes the turn's, whose
+    // header is the pinned one; the element the person is on is the tool's.
+    const turn = document.createElement('div')
+    turn.className = 'cmd-block'
+    turn.dataset.entryId = 'att-turn'
+    const turnHeader = document.createElement('div')
+    turnHeader.className = 'cmd-header'
+    turnHeader.style.position = 'sticky'
+    turnHeader.getBoundingClientRect = () => rect(0, 32)
+    const children = document.createElement('div')
+    children.className = 'cmd-children'
+    const tool = document.createElement('div')
+    tool.className = 'cmd-block'
+    const toolHeader = document.createElement('div')
+    toolHeader.className = 'cmd-header'
+    let top = 100
+    toolHeader.getBoundingClientRect = () => rect(top, 40)
+    tool.appendChild(toolHeader)
+    tool.getBoundingClientRect = () => rect(60, 2000)
+    children.appendChild(tool)
+    turn.appendChild(turnHeader)
+    turn.appendChild(children)
+    controller.scrollbackInner.appendChild(turn)
+    turn.getBoundingClientRect = () => rect(-3000, 6000)
+
+    controller.holdReaderPlace(() => {
+      top += 40
+      Object.defineProperty(area, 'scrollHeight', { value: 4040, configurable: true })
+    })
+
+    expect(area.scrollTop).toBe(1040)
+    document.body.removeChild(pane)
+  })
+
   it('puts a FOLLOWER back at the bottom edge when a change grows the transcript (nocx-3wmve)', () => {
     const { controller } = makeController()
     const area = laidOut(controller)

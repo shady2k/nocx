@@ -38,6 +38,14 @@ export type LiveRegionMode = 'idle' | 'running' | 'fullscreen' | 'unstructured'
  *  the block's rendered units is stable, and its class signature makes the
  *  lookup safe when a neighbour is inserted or removed nearby. */
 interface ReaderPlace {
+  /** THE ELEMENT ITSELF, when it is still the thing under the person's eyes
+   *  (nocx-3wmve). A live tool block carries no `data-entry-id`, so an identity
+   *  scheme names it by its turn — and restores against the turn's header,
+   *  which is a different element. The reference is the anchor; the identity
+   *  below is only the fallback for a mutation that REPLACED the element (the
+   *  freeze swap), where a reference cannot survive. Held for one settle (or a
+   *  program's excursion), never longer. */
+  element: HTMLElement | null
   /** The block's durable identity (`data-entry-id`), null when it has none. */
   blockId: string | null
   kind: 'row' | 'unit' | 'header'
@@ -1151,6 +1159,7 @@ export class ScrollbackController {
       if (unit.classList.contains('cmd-header')) {
         const owner = unit.closest<HTMLElement>('.cmd-block') ?? block
         return {
+          element: unit,
           blockId: owner.dataset.entryId ?? block.dataset.entryId ?? null,
           kind: 'header',
           line: null,
@@ -1178,6 +1187,7 @@ export class ScrollbackController {
       const index = isRow || body === null ? -1 : Array.prototype.indexOf.call(body.children, unit)
       if (isRow) {
         return {
+          element: unit,
           blockId,
           kind: 'row',
           line: unit.dataset.logicalLine ?? null,
@@ -1188,6 +1198,7 @@ export class ScrollbackController {
         }
       }
       return {
+        element: unit,
         blockId,
         kind: 'unit',
         line: null,
@@ -1201,6 +1212,7 @@ export class ScrollbackController {
     // fold, an empty body). The scroller's own position still survives a
     // shrink that is paid back in the same task.
     return {
+      element: null,
       blockId: null,
       kind: 'unit',
       line: null,
@@ -1298,7 +1310,12 @@ export class ScrollbackController {
     // THEN THE ELEMENT ITSELF, for the case the position alone cannot answer: a
     // card that changed shape above the reader keeps what they were reading at
     // the same distance from the top edge.
-    const unit = this._findReaderUnit(place)
+    // THE ELEMENT ITSELF FIRST: it is the thing that was under the person's
+    // eyes, whatever identity its block does or does not carry.
+    const unit =
+      place.element !== null && place.element.isConnected
+        ? place.element
+        : this._findReaderUnit(place)
     if (unit === null) return
     const shift = unit.getBoundingClientRect().top - area.getBoundingClientRect().top - place.offset
     if (Math.abs(shift) >= 0.5) area.scrollTop = Math.max(0, area.scrollTop + shift)

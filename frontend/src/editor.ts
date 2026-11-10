@@ -137,11 +137,24 @@ export interface EditorActions {
    * Optional async planning seam, run BEFORE the atomic handoff. The host
    * resolves references (vault.resolveLine) and vetoes masked history rows
    * here: return a plan to submit the RESOLVED line while recording the
-   * reference-intact one, or false to keep the draft (the host has already
-   * reported why). While the verdict is in flight a second Enter is swallowed
-   * and an edit to the draft drops the stale plan.
+   * reference-intact one, false to keep the draft (the host has already
+   * reported why), or 'held' when the host has TAKEN the line and will
+   * deliver it later (nocx-evj4b.1.6: a submit held while an ssh session
+   * proves its shell's integration). 'held' empties the draft — the line left
+   * the person's hands — so the next Enter is a second command rather than
+   * more of the first. While a plan's verdict is in flight a second Enter is
+   * swallowed and an edit to the draft drops the stale plan.
    */
-  beforeSubmit?: (doc: string) => SubmitPlan | Promise<SubmitPlan | false> | false
+  beforeSubmit?: (doc: string) => SubmitPlan | Promise<SubmitPlan | false | 'held'> | false | 'held'
+  /**
+   * The session this editor's submissions belong to, asked at each Enter
+   * (review round 10). The host answers the pane's current bind, and a
+   * submission in flight remembers the answer: a verdict that lands after the
+   * session changed belongs to the session that is gone, and it may neither
+   * clear nor keep the NEXT session's in-flight state. `resetSubmitInFlight`
+   * is the other half — the host calls it when a bind starts.
+   */
+  submitToken?: () => unknown
   /** Fired when the user types `@` at a WORD START — the reference picker's
    *  trigger (the owner's decision). `triggerPos` is the caret position the
    *  '@' lands at: the picker's replacement range starts there. The '@'
@@ -859,10 +872,20 @@ export class CommandEditor {
     this.clearDoc()
   }
 
-  /** True while a beforeSubmit verdict is in flight: a second Enter in that
-   *  window must not start a second resolve (each would commit a duplicate
-   *  ledger record on success). Cleared when the verdict lands. */
-  private _submitInFlight = false
+  /** The token of the submit whose beforeSubmit verdict is in flight: a
+   *  second Enter in that window must not start a second resolve (each would
+   *  commit a duplicate ledger record on success), and a verdict that lands
+   *  after the SESSION changed must not clear a newer submit's token (review
+   *  round 10 — the bind boundary calls resetSubmitInFlight). */
+  private _submitToken: object | null = null
+
+  /** The session this editor submits into has changed: whatever verdict is
+   *  still in flight belongs to the old one and must not keep the new
+   *  session's first Enter out (review round 10, P2). Its own callback will
+   *  find its token gone and touch nothing. */
+  resetSubmitInFlight(): void {
+    this._submitToken = null
+  }
 
   /** Submit the current document, then hide and clear (ADR-0004 §2). Also
    *  the overlay's execution path: RecallOverlay calls this so Enter in the
@@ -907,11 +930,11 @@ export class CommandEditor {
       this.commit(doc)
       return
     }
-    if (this._submitInFlight) {
+    if (this._submitToken !== null) {
       this.noteSubmit('vetoed', doc)
       return
     }
-    let result: SubmitPlan | Promise<SubmitPlan | false> | false
+    let result: SubmitPlan | Promise<SubmitPlan | false | 'held'> | false | 'held'
     try {
       result = hook(doc)
     } catch {
@@ -923,14 +946,31 @@ export class CommandEditor {
       this.noteSubmit('vetoed', doc)
       return
     }
+    if (result === 'held') {
+      // The host has the line and will deliver it when the session can take
+      // it. The draft goes with it: an Enter is a command, and a person who
+      // presses Enter five times during startup has made five commands, not
+      // one draft with four stray newlines swallowed out of it.
+      this.clearDoc()
+      this.noteSubmit('held', doc)
+      return
+    }
     if (typeof (result as Promise<SubmitPlan | false>).then === 'function') {
       // The verdict is in flight (a line with references resolves over the
       // wire). A second Enter is swallowed; an edit to the draft drops the
       // stale plan — the user's new text is the draft.
-      this._submitInFlight = true
-      void Promise.resolve(result as Promise<SubmitPlan | false>)
+      const token = { bind: this.actions.submitToken?.() ?? null }
+      this._submitToken = token
+      void Promise.resolve(result as Promise<SubmitPlan | false | 'held'>)
         .then(
           (plan) => {
+            if (plan === 'held') {
+              // The host took the RESOLVED line for a later delivery. Only the
+              // line it took leaves; a person's newer text is their draft.
+              if (this.view.state.doc.toString() === doc) this.clearDoc()
+              this.noteSubmit('held', doc)
+              return
+            }
             if (plan !== false && this.view.state.doc.toString() === doc) {
               this.noteSubmit('command', doc)
               this.commit(plan.sendLine, plan)
@@ -947,7 +987,9 @@ export class CommandEditor {
           // Fail-open: the draft stays.
         })
         .finally(() => {
-          this._submitInFlight = false
+          // ONLY THIS SUBMISSION'S TOKEN: a verdict that outlived its session
+          // must not unblock (or re-block) the replacement's first Enter.
+          if (this._submitToken === token) this._submitToken = null
         })
       return
     }
@@ -968,11 +1010,12 @@ export class CommandEditor {
    *  before it stays on screen and nothing else happens. The failure context
    *  this suite prints carries the console, so this one line is what tells the
    *  next red run whether the Enter met an empty document (`empty`), was
-   *  declined before any state moved (`vetoed`), or produced a command that
+   *  declined before any state moved (`vetoed`), was taken by the host for a
+   *  later delivery (`held`), or produced a command that
    *  then went missing further down (`command`). The count is the whole of
    *  what is knowable here and the whole of what may be written down: what a
    *  person typed is theirs, and AGENTS.md keeps it out of logs. */
-  private noteSubmit(path: 'command' | 'empty' | 'vetoed', doc: string): void {
+  private noteSubmit(path: 'command' | 'empty' | 'vetoed' | 'held', doc: string): void {
     log.info('nocx: submit', { path, chars: doc.length })
   }
 

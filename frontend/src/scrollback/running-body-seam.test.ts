@@ -167,6 +167,13 @@ describe('a running block whose body outgrew its screen (nocx-zg3k3.14.26, ADR-3
           /\.cmd-block[^ ,>]*\.cmd-block-running\b/.test(selector) ||
           /\.cmd-block[^ ,>]*\s*>\s*\.terminal-live-container/.test(selector)
         if (!active) continue
+        // THE ONE SEAT THAT PAYS IT ITSELF (nocx-4y82c.1.13). A running command
+        // nested in a turn is widened to the pane by the controller, which
+        // cancels the turn's insets, so nothing else can pay the gutter there;
+        // its own content box is the column the fit draws into. That rule is
+        // asserted on its own below, and it is the only nonzero inset any
+        // running rule may declare.
+        if (selector.includes('.cmd-children')) continue
         for (const m of rule.body.matchAll(
           /(?:^|;)\s*(padding(?:-inline)?(?:-left|-right)?)\s*:\s*([^;]+)/g,
         ))
@@ -176,5 +183,24 @@ describe('a running block whose body outgrew its screen (nocx-zg3k3.14.26, ADR-3
     expect(declared('.scrollback-inner > :not(.cell-metric-probe)', 'padding-inline')).toBe(
       'var(--pane-inline-padding)',
     )
+    // …and the nested seat pays that same token, once, on the content of each
+    // part of the active body — never on the boxes themselves, which the
+    // controller keeps at the pane's width (ADR-3kqrem7v's placement).
+    for (const part of ['.cmd-header', '.cmd-output', '.terminal-live-container']) {
+      expect(
+        declared(`.cmd-children > .cmd-block.cmd-block-running > ${part}`, 'padding-inline'),
+        part,
+      ).toBe('var(--pane-inline-padding)')
+    }
+  })
+
+  it('seats the running header on that one column, not one gutter right of it', () => {
+    // THE HEADER IS A ROW OF THE SAME COLUMN (nocx-4y82c.1.13). The stack's row
+    // rule pays the gutter once, on the block, and the header sits inside that
+    // content box; an inline padding of its own pays it twice. Measured on the
+    // owner's nightly: the running chevron at 48px and its own output's first
+    // column at 24px, while the frozen card put both on 24. Nothing inside a
+    // running block may declare an inline inset — the header included.
+    expect(declared(".ui-command-block-frame[data-variant='running']", 'padding')).toBe('0')
   })
 })

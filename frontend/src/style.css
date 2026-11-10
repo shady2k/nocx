@@ -1459,6 +1459,27 @@
 .cmd-block.cmd-block-running > .cmd-output {
   padding-block: 0;
 }
+/* A RUNNING COMMAND NESTED IN A TURN PAYS THE GUTTER ON ITS BODY
+   (nocx-4y82c.1.13). An assistant's `run` call opens an ordinary command block
+   inside the turn's `.cmd-children`, and while it runs the controller widens
+   that block to the pane (`_sizeRunningSeat`, ADR-3kqrem7v: placement only,
+   never the desired PTY size) so the active box spans the pane. The widening
+   cancels the turn's insets, and the block is not a direct child of
+   `.scrollback-inner`, so nothing else pays the gutter there: the body's rows
+   touched the pane's left edge and the header stood on an edge they did not.
+
+   The boxes stay where the controller placed them — the block and the live
+   region still span the pane, so the active rectangle still extends through
+   the ancestors' insets — and their CONTENT pays the gutter, which is exactly
+   the column the grid is fitted into (`usableViewport` subtracts
+   `--pane-inline-padding` from the scroller's width). The header's half of
+   this is its own appearance and lives in command-block-frame.css; the same
+   token puts the chevron and the output's first column on one edge, both clear
+   of the pane, and the painted cells still occupy the width the PTY was told. */
+.cmd-children > .cmd-block.cmd-block-running > .cmd-output,
+.cmd-children > .cmd-block.cmd-block-running > .terminal-live-container {
+  padding-inline: var(--pane-inline-padding);
+}
 .scrollback-inner > .cmd-header[data-variant='running'] {
   flex: none;
 }

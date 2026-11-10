@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/ledger.artifact.params.schema.json",
   "title": "LedgerArtifactParams",
-  "description": "Params for ledger.artifact.",
+  "description": "Params for ledger.artifact. `id` alone reads the whole body, as every caller did before storage grew large. Either range field names a PAGE of a stored-rows artifact (nocx-t7xhe): the read returns only rows at or after `fromRow`, at most `rowLimit` of them, with the artifact's own coordinates. A range on any other media type is refused, because a row index means nothing for text or an SGR grid.",
   "type": "object",
   "additionalProperties": false,
   "required": ["id"],
@@ -11,6 +11,17 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 128
+    },
+    "fromRow": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Absolute index of the first stored row the caller wants; absent means the artifact's first row."
+    },
+    "rowLimit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10000,
+      "description": "Most rows to return; absent means to the artifact's last stored row."
     }
   }
 }

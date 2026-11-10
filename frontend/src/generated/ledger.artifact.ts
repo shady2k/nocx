@@ -10,7 +10,7 @@
  */
 
 /**
- * Result of the ledger.artifact JSON-RPC method (nocx-m3fqk, design §6) — ONE artifact's body, joined from its chunks in seq order. It is a separate method from ledger.get on purpose: the recall read must not haul bytes (ADR-0019 §6), so the page and the detail carry metadata and whoever actually wants a body asks for it one at a time. This is what a restored block's output is drawn from.
+ * Result of the ledger.artifact JSON-RPC method (nocx-m3fqk, design §6) — ONE artifact's body, joined from its chunks in seq order. It is a separate method from ledger.get on purpose: the recall read must not haul bytes (ADR-0019 §6), so the page and the detail carry metadata and whoever actually wants a body asks for it one at a time. This is what a restored block's output is drawn from. A read that names a row range returns ONE PAGE of a stored-rows artifact and the artifact's own coordinates (nocx-t7xhe): `firstRow`, `lastRow` and `rowCount` describe the whole block, and `rangeStart`, `rangeCount`, `hasMoreBefore` and `hasMoreAfter` describe the page. Those coordinates are null (and the counts zero) for a body that is not stored rows, because a row index has no meaning there.
  */
 export interface LedgerArtifact {
   /**
@@ -33,4 +33,32 @@ export interface LedgerArtifact {
    * The logical content bytes the store holds for this artifact — the retention budget's unit, and what a reader can check its join against.
    */
   byteLen: number
+  /**
+   * Absolute index of the artifact's first stored row, or null when the body is not stored rows or holds no row.
+   */
+  firstRow: number | null
+  /**
+   * Absolute index of the artifact's last stored row, or null as above.
+   */
+  lastRow: number | null
+  /**
+   * How many stored rows the artifact holds — the block's height, which a reader reserves before any page of it arrives. 0 for a body that is not stored rows.
+   */
+  rowCount: number
+  /**
+   * Absolute index of this page's first row; null for a body that is not stored rows. A page past the end answers one past the artifact's last row, so 'nothing here' is distinguishable from row zero.
+   */
+  rangeStart: number | null
+  /**
+   * Rows in this page. 0 for a body that is not stored rows.
+   */
+  rangeCount: number
+  /**
+   * Whether stored rows exist before this page. Always false for a body that is not stored rows.
+   */
+  hasMoreBefore: boolean
+  /**
+   * Whether stored rows exist after this page. Always false for a body that is not stored rows.
+   */
+  hasMoreAfter: boolean
 }

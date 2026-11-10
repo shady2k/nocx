@@ -14,6 +14,7 @@ package content
 // RTA calls every method here reflection-reachable.
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -1424,7 +1425,130 @@ func (s *sqliteContent) Artifact(ctx context.Context, id string) (*Artifact, err
 		}
 		a.Chunks = append(a.Chunks, body)
 	}
-	return a, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if a.MediaType == MediaBlockRows {
+		if err := readRowCoordinates(a.Chunks, &a.RowCount, &a.FirstRow, &a.LastRow); err != nil {
+			return nil, fmt.Errorf("content: block rows: read the coordinates of %s: %w", id, err)
+		}
+	}
+	return a, nil
+}
+
+// readRowCoordinates fills a rows artifact's own coordinates from its chunks:
+// how many stored lines there are, and the absolute indices of the first and
+// last. The walk is the same one ArtifactRange makes, and it is the only place
+// a line's `from` is read on a full body.
+func readRowCoordinates(chunks [][]byte, count *int, first, last *uint64) error {
+	have := false
+	for _, chunk := range chunks {
+		for _, line := range bytes.Split(chunk, []byte{'\n'}) {
+			if len(line) == 0 {
+				continue
+			}
+			var meta struct {
+				From uint64 `json:"from"`
+			}
+			if err := json.Unmarshal(line, &meta); err != nil {
+				return err
+			}
+			if !have {
+				*first = meta.From
+				have = true
+			}
+			*last = meta.From
+			*count = *count + 1
+		}
+	}
+	return nil
+}
+
+// ArtifactRange returns one page of a stored-rows artifact. The page is
+// selected by the rows' own absolute `from` index, and the whole artifact's
+// coordinates ride with it: a reader that must reserve a block's height before
+// any of its rows arrive has nowhere else to ask (nocx-t7xhe).
+//
+// The chunks are scanned once, in seq order, because the count and the page
+// come from the same walk. That walk is the store's own cost — the response is
+// the page, and the page is what the outbound queue carries.
+func (s *sqliteContent) ArtifactRange(ctx context.Context, id string, fromRow uint64, rowLimit int) (*ArtifactRange, error) {
+	a, err := s.artifactByID(ctx, id)
+	if err != nil || a == nil {
+		return nil, err
+	}
+	if a.MediaType != MediaBlockRows {
+		return nil, ErrArtifactNotRows
+	}
+	rows, err := s.conn(ctx).QueryContext(ctx,
+		`SELECT body FROM artifact_chunks WHERE artifact_id = ? ORDER BY seq`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := &ArtifactRange{Artifact: a}
+	var page bytes.Buffer
+	var firstFrom, lastFrom, pageFirst, pageLast uint64
+	haveAny, havePage := false, false
+	for rows.Next() {
+		var body []byte
+		if err := rows.Scan(&body); err != nil {
+			return nil, err
+		}
+		for _, line := range bytes.Split(body, []byte{'\n'}) {
+			if len(line) == 0 {
+				continue
+			}
+			var meta struct {
+				From uint64 `json:"from"`
+			}
+			if err := json.Unmarshal(line, &meta); err != nil {
+				return nil, fmt.Errorf("content: block rows: read a stored line of %s: %w", id, err)
+			}
+			if !haveAny {
+				firstFrom = meta.From
+				haveAny = true
+			}
+			lastFrom = meta.From
+			out.RowCount++
+			if meta.From < fromRow {
+				continue
+			}
+			if rowLimit > 0 && out.RangeCount >= rowLimit {
+				continue
+			}
+			if !havePage {
+				pageFirst = meta.From
+				havePage = true
+			}
+			pageLast = meta.From
+			out.RangeCount++
+			page.Write(line)
+			page.WriteByte('\n')
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if haveAny {
+		out.FirstRow, out.LastRow = firstFrom, lastFrom
+	}
+	if havePage {
+		out.RangeStart = pageFirst
+		out.HasMoreBefore = pageFirst > firstFrom
+		out.HasMoreAfter = pageLast < lastFrom
+	} else {
+		out.RangeStart = lastFrom + 1
+		if !haveAny {
+			out.RangeStart = 0
+		}
+		out.HasMoreBefore = haveAny
+	}
+	if page.Len() > 0 {
+		a.Chunks = [][]byte{page.Bytes()}
+	}
+	return out, nil
 }
 
 // artifactByID reads one artifact row plus its chunk count, without bodies.

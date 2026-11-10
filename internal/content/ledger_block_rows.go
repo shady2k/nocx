@@ -68,6 +68,10 @@ type blockRowsPayload struct {
 	UnavailableRows uint64 `json:"unavailableRows,omitempty"`
 	// DroppedRows is written once, at close, derived from the chunks.
 	DroppedRows uint64 `json:"droppedRows,omitempty"`
+	// RowCount is written once, at close: how many stored lines the artifact
+	// holds. It is the block's height in rows, and it is what lets a reader
+	// reserve that height before any page of the block arrives (nocx-t7xhe).
+	RowCount uint64 `json:"rowCount,omitempty"`
 	// Appended is the total bytes ever appended, BEFORE any eviction. It is
 	// the stream offset the next delivery begins at, and it is what makes
 	// the eviction walk honest after a previous eviction: the surviving
@@ -479,7 +483,7 @@ func (s *sqliteContent) CloseBlockRows(ctx context.Context, in CloseBlockRows) (
 		// [firstFrom, nextRow), the rows the emulator pruned are subtracted
 		// first (a jump the caller accounted for is loss, not eviction),
 		// and what the chunks hold is what survived the cap.
-		dropped, err := deriveBlockRowsDropped(ctx, tx, in.ArtifactID, state.payload.NextRow, state.payload.LostRows)
+		dropped, stored, err := deriveBlockRowsDropped(ctx, tx, in.ArtifactID, state.payload.NextRow, state.payload.LostRows)
 		if err != nil {
 			return err
 		}
@@ -493,9 +497,17 @@ func (s *sqliteContent) CloseBlockRows(ctx context.Context, in CloseBlockRows) (
 		log.From(ctx).Debug("block rows close: sealing",
 			"entry", in.EntryID, "artifact", in.ArtifactID, "cursor", state.payload.NextRow,
 			"dropped", dropped, "lost", state.payload.LostRows,
-			"unavailable", state.payload.UnavailableRows)
+			"unavailable", state.payload.UnavailableRows, "rows", stored)
 
-		final := blockRowsPayload{DroppedRows: dropped, LostRows: state.payload.LostRows, UnavailableRows: state.payload.UnavailableRows}
+		final := blockRowsPayload{
+			DroppedRows: dropped, LostRows: state.payload.LostRows,
+			UnavailableRows: state.payload.UnavailableRows,
+			// FirstRow and RowCount survive the seal because a reader that
+			// has not fetched a page yet still has to know where the block
+			// begins and how tall it is (nocx-t7xhe). Every other writer
+			// field is the open block's own bookkeeping and is dropped.
+			FirstRow: state.payload.FirstRow, RowCount: stored,
+		}
 		// The PRIMARY reason, one of them: the cap names rows it dropped by
 		// count, so it wins over a gap it would otherwise hide inside.
 		var truncated any
@@ -797,11 +809,11 @@ func evictBlockRowsToCap(ctx context.Context, tx *sql.Tx, artifactID string, cap
 // drop — recomputed from the bytes on the one write that seals it. Loss and
 // eviction are different facts, and a block that reports its loss as a cap
 // verdict sends a user to raise a limit that took nothing.
-func deriveBlockRowsDropped(ctx context.Context, tx *sql.Tx, artifactID string, nextRow, lost uint64) (uint64, error) {
+func deriveBlockRowsDropped(ctx context.Context, tx *sql.Tx, artifactID string, nextRow, lost uint64) (uint64, uint64, error) {
 	rows, err := tx.QueryContext(ctx,
 		`SELECT body FROM artifact_chunks WHERE artifact_id = ? ORDER BY seq`, artifactID)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer func() { _ = rows.Close() }()
 	var stored uint64
@@ -809,7 +821,7 @@ func deriveBlockRowsDropped(ctx context.Context, tx *sql.Tx, artifactID string, 
 	for rows.Next() {
 		var body []byte
 		if err := rows.Scan(&body); err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 		stored += uint64(bytes.Count(body, []byte{'\n'})) //nolint:gosec // line counts, not byte counts
 		if firstLine == nil {
@@ -819,15 +831,15 @@ func deriveBlockRowsDropped(ctx context.Context, tx *sql.Tx, artifactID string, 
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if firstLine == nil {
 		// Nothing was ever appended: the block is empty, not dropped.
-		return 0, nil
+		return 0, 0, nil
 	}
 	var line blockRowsLine
 	if err := json.Unmarshal(firstLine, &line); err != nil {
-		return 0, fmt.Errorf("content: block rows: read the first stored line of %s: %w", artifactID, err)
+		return 0, 0, fmt.Errorf("content: block rows: read the first stored line of %s: %w", artifactID, err)
 	}
 	span := nextRow - line.From
 	if lost > span {
@@ -847,7 +859,7 @@ func deriveBlockRowsDropped(ctx context.Context, tx *sql.Tx, artifactID string, 
 		// stage review nocx-2v80t.3.15 finding 10) — so a shortfall this
 		// block's own numbers cannot account for is reported as zero
 		// rather than as a lie.
-		return 0, nil
+		return 0, stored, nil
 	}
-	return expected - stored, nil
+	return expected - stored, stored, nil
 }

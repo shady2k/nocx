@@ -64,6 +64,12 @@ type LedgerService interface {
 	// carries the id — a body retention has evicted, which the caller must
 	// render as a hole rather than as silence (ADR-0019 §7).
 	Artifact(ctx context.Context, id string) (*content.Artifact, error)
+	// ArtifactRange serves a paged ledger.artifact read of stored rows: one
+	// page plus the artifact's own coordinates, which is how a block reserves
+	// its height and paints what is on screen before the rest arrives
+	// (nocx-t7xhe). Nil when no artifact carries the id; a non-rows artifact
+	// is content.ErrArtifactNotRows.
+	ArtifactRange(ctx context.Context, id string, fromRow uint64, rowLimit int) (*content.ArtifactRange, error)
 	// CaptureOutput stores an assistant/tool-result body against the entry's
 	// execution. The bool is whether the body is kept — false when output
 	// retention is off or the entry is sensitive, which is an answer and not
@@ -162,6 +168,13 @@ func (s *ledgerService) Artifact(ctx context.Context, id string) (*content.Artif
 		return nil, err
 	}
 	return s.ledger.Artifact(ctx, id)
+}
+
+func (s *ledgerService) ArtifactRange(ctx context.Context, id string, fromRow uint64, rowLimit int) (*content.ArtifactRange, error) {
+	if err := s.guard.check(); err != nil {
+		return nil, err
+	}
+	return s.ledger.ArtifactRange(ctx, id, fromRow, rowLimit)
 }
 
 func (s *ledgerService) CaptureOutput(ctx context.Context, in content.CaptureOutput) (bool, error) {

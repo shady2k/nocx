@@ -70,6 +70,16 @@ function methodEntry(name, resultFiles, operation, mutating) {
       'x-nocx-errorSchema': ref('mutation.replayed.schema.json'),
     })
   }
+  // A paged stored-rows read may be answered at once with a retry hint rather
+  // than queued behind the connection's four response slots (ADR-y45sp41c). It is
+  // an internal answer: the renderer retries, and the person sees nothing.
+  if (name === 'ledger.artifact') {
+    entry.errors.push({
+      code: -32014,
+      message: 'The stored rows are busy; retry',
+      'x-nocx-errorSchema': ref('row.readDeferred.schema.json'),
+    })
+  }
   // The declaration is attached in full, not by reference, because the
   // manifest is the one method-level index: a reader asking what a method's
   // lifetime is must not have to join two files, and a test compares the

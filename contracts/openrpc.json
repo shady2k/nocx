@@ -11611,6 +11611,13 @@
           "x-nocx-errorSchema": {
             "$ref": "https://nocx.local/contracts/operation.expired.schema.json"
           }
+        },
+        {
+          "code": -32014,
+          "message": "The stored rows are busy; retry",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/row.readDeferred.schema.json"
+          }
         }
       ],
       "x-nocx-agent-disposition": "operation-owned",
@@ -27435,6 +27442,9 @@
     },
     {
       "$ref": "https://nocx.local/contracts/roles.list.schema.json"
+    },
+    {
+      "$ref": "https://nocx.local/contracts/row.readDeferred.schema.json"
     },
     {
       "$ref": "https://nocx.local/contracts/secrets.captureDismiss.schema.json"

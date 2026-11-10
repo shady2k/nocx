@@ -94,6 +94,12 @@ var stallNotice = Frame{
 type Frame struct {
 	MsgType int
 	Data    []byte
+	// after runs exactly once when this frame has left the queue: written
+	// to the socket, or dropped because the connection closed first. It is
+	// how a handler that owns a capacity slot releases it at the moment the
+	// owner's decision names — the RESPONSE leaving, never the handler
+	// returning (ADR-y45sp41c). Nil for every ordinary frame.
+	after func()
 }
 
 // Socket is the write seam the pump writes through. *websocket.Conn
@@ -363,12 +369,32 @@ func (c *Conn) TryEnqueueResponseFrame(msgType int, data []byte) error {
 	return c.TryEnqueueCriticalFrame(msgType, data)
 }
 
+// TryEnqueueResponseFrameSent is TryEnqueueResponseFrame with a completion
+// witness: after is called exactly once, when the frame has left the queue —
+// written, or dropped by Close before the pump reached it. It is what a
+// handler holding a stored-row slot waits on, since the slot must cover the
+// response while it sits in the queue or in the socket write (ADR-y45sp41c).
+//
+// A frame that cannot be queued calls after itself: the response will never
+// be written, so a slot held for it must not be kept.
+func (c *Conn) TryEnqueueResponseFrameSent(msgType int, data []byte, after func()) error {
+	err := c.tryEnqueueCriticalFrame(msgType, data, after)
+	if err != nil && after != nil {
+		after()
+	}
+	return err
+}
+
 // TryEnqueueCriticalFrame queues a non-refreshable frame on reserved capacity
 // shared with responses and data-plane carriers. Broker request notifications
 // belong here: dropping one makes the backend fail before the renderer can
 // perform the requested effect. Refreshable state and PTY output must continue
 // to use TryEnqueue.
 func (c *Conn) TryEnqueueCriticalFrame(msgType int, data []byte) error {
+	return c.tryEnqueueCriticalFrame(msgType, data, nil)
+}
+
+func (c *Conn) tryEnqueueCriticalFrame(msgType int, data []byte, after func()) error {
 	select {
 	case <-c.closed:
 		return ErrConnClosed
@@ -380,7 +406,7 @@ func (c *Conn) TryEnqueueCriticalFrame(msgType int, data []byte) error {
 		return ErrStalled
 	}
 	select {
-	case c.criticalQueue <- Frame{MsgType: msgType, Data: data}:
+	case c.criticalQueue <- Frame{MsgType: msgType, Data: data, after: after}:
 		return nil
 	default:
 		if c.budget != nil {
@@ -513,19 +539,26 @@ func (c *Conn) StallCount() uint64 { return c.stallCount.Load() }
 func (c *Conn) Close() {
 	c.closeOnce.Do(func() {
 		close(c.closed)
-		if c.budget != nil {
-			for {
-				select {
-				case f := <-c.queue:
+		// Every queued frame is now undeliverable, and every completion
+		// witness on one must run: a frame dropped by Close is as final as
+		// one written, and a slot held for it would never come back.
+		for {
+			select {
+			case f := <-c.queue:
+				if c.budget != nil {
 					c.budget.release(int64(len(f.Data)))
-				case f := <-c.criticalQueue:
-					c.budget.release(int64(len(f.Data)))
-				default:
-					goto drained
 				}
+				c.finish(f)
+			case f := <-c.criticalQueue:
+				if c.budget != nil {
+					c.budget.release(int64(len(f.Data)))
+				}
+				c.finish(f)
+			default:
+				goto drained
 			}
-		drained:
 		}
+	drained:
 		_ = c.sock.Close()
 		c.pingRoom()
 	})
@@ -560,7 +593,9 @@ func (c *Conn) pump(writeDeadline time.Duration) {
 			if c.budget != nil {
 				c.budget.release(int64(len(f.Data)))
 			}
-			if c.write(deadline, f) != nil {
+			err := c.write(deadline, f)
+			c.finish(f)
+			if err != nil {
 				return
 			}
 			continue
@@ -577,7 +612,9 @@ func (c *Conn) pump(writeDeadline time.Duration) {
 			if c.budget != nil {
 				c.budget.release(int64(len(f.Data)))
 			}
-			if c.write(deadline, f) != nil {
+			err := c.write(deadline, f)
+			c.finish(f)
+			if err != nil {
 				return
 			}
 		case f := <-c.queue:
@@ -591,6 +628,14 @@ func (c *Conn) pump(writeDeadline time.Duration) {
 			}
 			c.pingRoom()
 		}
+	}
+}
+
+// finish runs a frame's completion witness, exactly once. A frame without
+// one is the ordinary case and costs nothing.
+func (c *Conn) finish(f Frame) {
+	if f.after != nil {
+		f.after()
 	}
 }
 

@@ -5070,6 +5070,229 @@ describe('backend-owned block rows', () => {
     expect(blockOutputText(frozen.el)).toBe('first \nsecond')
   })
 
+  it('a screen that grows takes its rows back out of the body (nocx-4y82c.1.1)', () => {
+    // A pane that GROWS pulls rows back out of history onto the top of the
+    // screen, so the painted screen has passed two fewer rows of the block.
+    // The body must stop painting them — the grid shows them again, and a
+    // hold that only ever widened left the same two lines in both bodies for
+    // a frame (measured on webkit under load: `GET-207, GET-208` in the body
+    // and the same two rows at the top of the grid).
+    const { manager } = newManager()
+    manager.startBlock('printf rows', '/repo', 0)
+    manager.bindAttempt('entry-stream')
+    const four = {
+      lines: [
+        { from: 0, row: row('first ') },
+        { from: 1, row: row('second') },
+        { from: 2, row: row('third ') },
+        { from: 3, row: row('fourth') },
+      ],
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+    }
+    manager.applyStoredRows('entry-stream', four, 4)
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond\nthird \nfourth')
+
+    // The screen grew by two rows: two rows are back on it, and the body is
+    // one continuous run again only if it stops at the row the screen's top
+    // now names.
+    expect(manager.holdStoredRows('entry-stream', 2)).toBe(true)
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond')
+
+    // And the screen departing them again paints them back in the same task.
+    expect(manager.holdStoredRows('entry-stream', 4)).toBe(true)
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond\nthird \nfourth')
+    // A count that did not move is not a paint.
+    expect(manager.holdStoredRows('entry-stream', 4)).toBe(false)
+  })
+
+  it('a paint handed the whole artifact shows only what the screen passed (nocx-4y82c.1.1)', () => {
+    // The binding and the deferred-visibility flush both arrive at the one
+    // paint door with the whole artifact — not the slice a delivery carries —
+    // and a running block may show only the rows the painted screen has
+    // passed. Measured on webkit under load: a late binding painted the full
+    // 208 rows while the hold said 207, and the body showed the two rows the
+    // grid still had.
+    const { manager } = newManager()
+    manager.startBlock('printf rows', '/repo', 0)
+    manager.bindAttempt('entry-stream')
+    const four = {
+      lines: [
+        { from: 0, row: row('first ') },
+        { from: 1, row: row('second') },
+        { from: 2, row: row('third ') },
+        { from: 3, row: row('fourth') },
+      ],
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+    }
+    manager.applyStoredRows('entry-stream', four, 4)
+    expect(manager.holdStoredRows('entry-stream', 2)).toBe(true)
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond')
+
+    manager.paintStoredRows(manager.runningBlock!.el, four)
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond')
+  })
+
+  it("maps the hold through the artifact's own first row (nocx-4y82c.1.1)", () => {
+    // `from` counts from the block's first output row, but a record whose head
+    // was lost starts later: `from: 2` is the block's third row. Slicing by
+    // the hold alone paints two rows past the painted screen, and the body
+    // and the grid show the same lines — the overlap the gate's chromium run
+    // caught as GET-207, GET-208 twice.
+    const { manager } = newManager()
+    manager.startBlock('printf rows', '/repo', 0)
+    manager.bindAttempt('entry-stream')
+    const late = {
+      lines: [
+        { from: 2, row: row('third ') },
+        { from: 3, row: row('fourth') },
+        { from: 4, row: row('fifth ') },
+        { from: 5, row: row('sixth ') },
+      ],
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+    }
+    manager.applyStoredRows('entry-stream', late, 4)
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('third \nfourth')
+
+    expect(manager.holdStoredRows('entry-stream', 5)).toBe(true)
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('third \nfourth\nfifth ')
+  })
+
+  it('places the hold in the stream coordinate the record uses (nocx-4y82c.1.10)', () => {
+    // The block's first output row is `fromRow` in the ordered rows stream —
+    // the coordinate a stored row's `from` uses — so a record numbered from a
+    // later stream row must not be sliced as if it started at zero, and one
+    // whose head was lost must still stop where the painted screen stops.
+    const { manager } = newManager()
+    manager.startBlock('printf rows', '/repo', 0)
+    manager.bindAttempt('entry-stream')
+    manager.setOutputStartAnchor(
+      'entry-stream',
+      {
+        entryId: 'entry-stream',
+        row: 2,
+        fromRow: 5,
+        screenRevision: 1,
+        bufferKind: 'normal',
+        bufferInstance: '1',
+        cols: 80,
+        rows: 24,
+      },
+      0,
+    )
+    const rows = (from: number, texts: string[]) => ({
+      lines: texts.map((text, i) => ({ from: from + i, row: row(text) })),
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+    })
+    manager.applyStoredRows('entry-stream', rows(5, ['a', 'b', 'c', 'd', 'e']), 4)
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('a\nb\nc\nd')
+
+    // The head was lost: the record starts at stream row 7, two block rows on.
+    manager.applyStoredRows('entry-stream', rows(7, ['c', 'd', 'e']), 4)
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('c\nd')
+  })
+
+  it('a response parked before the binding keeps its hold (nocx-4y82c.1.1)', () => {
+    // The delivery arrives before the attempt is bound: `blockForAttempt`
+    // finds nothing, so the rows are parked — with the hold the painted frame
+    // gave them. Draining the parking without it painted the whole artifact
+    // over rows the grid still showed, and a quiet command kept the overlap
+    // until its next frame, because binding never widens the hold.
+    const { manager } = newManager()
+    manager.startBlock('printf rows', '/repo', 0)
+    const four = {
+      lines: [
+        { from: 0, row: row('first ') },
+        { from: 1, row: row('second') },
+        { from: 2, row: row('third ') },
+        { from: 3, row: row('fourth') },
+      ],
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+    }
+    manager.applyStoredRows('entry-stream', four, 2)
+    manager.bindAttempt('entry-stream')
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond')
+  })
+
+  it('a gapped artifact paints only the rows the screen passed (nocx-4y82c.1.1)', () => {
+    // A capped artifact keeps a head and a tail with a gap (from 0, 1, 900,
+    // 901). A pane that grew pulled 900-901 back onto the grid, so the hold is
+    // 900; slicing by array length painted all four and duplicated the tail
+    // over rows the grid was showing.
+    const { manager } = newManager()
+    manager.startBlock('printf rows', '/repo', 0)
+    manager.bindAttempt('entry-stream')
+    const gapped = {
+      lines: [
+        { from: 0, row: row('a') },
+        { from: 1, row: row('b') },
+        { from: 900, row: row('y') },
+        { from: 901, row: row('z') },
+      ],
+      droppedRows: 898,
+      lostRows: 0,
+      truncated: 'cap' as const,
+    }
+    manager.applyStoredRows('entry-stream', gapped, 900)
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('a\nb')
+
+    // The tail comes back as the screen departs it.
+    expect(manager.holdStoredRows('entry-stream', 901)).toBe(true)
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('a\nb\ny')
+  })
+
+  it('places a block from the anchor row, which is already absolute (nocx-4y82c.1.10)', () => {
+    // A session that had scrolled before the command: the backend's
+    // `screenRowAnchorLocked` emits `Row = base + cursorRow`, so `row` is
+    // already absolute in the shared screen coordinate and adding the stream
+    // counter (`fromRow`) again would place the block 80 rows too low.
+    const { manager } = newManager()
+    manager.startBlock('printf rows', '/repo', 0)
+    manager.bindAttempt('entry-stream')
+    manager.setOutputStartAnchor(
+      'entry-stream',
+      {
+        entryId: 'entry-stream',
+        row: 105,
+        fromRow: 80,
+        screenRevision: 5,
+        bufferKind: 'normal',
+        bufferInstance: '1',
+        cols: 80,
+        rows: 24,
+      },
+      0,
+    )
+    const emptyRow = { cells: [], wrap: false }
+    const snapshot = {
+      revision: 10,
+      geometry: { cols: 80, rows: 24, cellWidthPx: 8, cellHeightPx: 17, revision: 10 },
+      state: {
+        bufferKind: 'normal',
+        bufferInstance: '1',
+        baseRow: 100,
+        bracketedPaste: false,
+        mouseTracking: false,
+        pointerShape: null,
+        title: null,
+        cwd: null,
+      },
+      rows: [],
+      rowAt: () => emptyRow,
+    } as unknown as Parameters<typeof manager.acceptOutputStartFrame>[0]
+    manager.acceptOutputStartFrame(snapshot)
+    expect(manager.runningBlock!.outputStart).toBe(105)
+  })
+
   it("keeps the body's order: its rows above the live region, on every growth (ADR-0091)", () => {
     // `paintStoredRows` replaces `.cmd-output` on each block.grew, so the rows
     // it appends land after the live region unless the seat is restored with

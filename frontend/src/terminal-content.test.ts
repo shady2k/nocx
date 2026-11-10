@@ -6561,6 +6561,101 @@ describe('the projections consume the kernel through the composition root (ADR-0
     }
   })
 
+  it('re-validates a small block whose durable rows grew while disconnected', async () => {
+    const client = makeClient()
+    const oldLine = JSON.stringify({ from: 0, row: wireRowOf([['old', 1, true]] as CellSpec[]) })
+    const newLine = JSON.stringify({ from: 1, row: wireRowOf([['grown', 1, true]] as CellSpec[]) })
+    let reads = 0
+    client.call.mockImplementation((method: string) => {
+      if (method === 'ledger.get') {
+        reads++
+        return Promise.resolve({
+          entry: {},
+          edges: [],
+          artifacts: [
+            {
+              id: 'art-rows',
+              mediaType: 'application/x-nocx-rows',
+              payload: { rowCount: 2, endRow: 2, retainedRanges: [{ from: 0, to: 2 }] },
+            },
+          ],
+        })
+      }
+      if (method === 'ledger.artifact') {
+        return Promise.resolve({
+          id: 'art-rows',
+          mediaType: 'application/x-nocx-rows',
+          body: `${oldLine}\n${newLine}\n`,
+          truncated: null,
+          byteLen: oldLine.length + newLine.length,
+          firstRow: 0,
+          lastRow: 1,
+          endRow: 2,
+          rowCount: 2,
+          retainedRanges: [{ from: 0, to: 2 }],
+          rangeStart: 0,
+          rangeCount: 2,
+          hasMoreBefore: false,
+          hasMoreAfter: false,
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('make')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'make',
+        },
+      })
+      // The cached body is the pre-outage one row. No notification replays.
+      withScrollback.scrollback.blockManager.applyStoredRows('att-1', {
+        lines: [{ from: 0, row: wireRowOf([['old', 1, true]] as CellSpec[]) }],
+        artifactVersion: 'art-rows',
+        droppedRows: 0,
+        lostRows: 0,
+        truncated: null,
+        firstRow: 0,
+        lastRow: 0,
+        endRow: 1,
+        rowCount: 1,
+        retainedRanges: [{ from: 0, to: 1 }],
+        sealed: false,
+      })
+      client._fireReconnect()
+      await vi.waitFor(() => {
+        const text =
+          withScrollback.scrollback.scrollbackInner.querySelector('.cmd-output')?.textContent
+        expect(text).toContain('grown')
+      })
+      // One metadata read for the comparison, then the body pair for the
+      // block that changed.
+      expect(reads).toBe(2)
+    } finally {
+      teardown()
+    }
+  })
+
   it('follows the tail when a block.grew delivery grows a block after the scroller already settled (nocx-2v80t.3.19)', async () => {
     // block.grew/block.closed only NAME the entry; the rows are a further
     // fetch (ledger.get then ledger.artifact) that resolves well after the

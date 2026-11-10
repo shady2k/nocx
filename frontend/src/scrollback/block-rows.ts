@@ -9,6 +9,12 @@ import type { TerminalSnapshot } from './serializer'
 import { BlockNotice } from '../ui/block-notice'
 import { tPlural } from '../i18n/locale-model'
 
+export interface StoredRowRange {
+  readonly from: number
+  /** Exclusive. */
+  readonly to: number
+}
+
 export interface StoredBlockRows {
   readonly lines: readonly LedgerBlockRowsLine[]
   /** Immutable artifact identity pinned by the ledger read. */
@@ -27,20 +33,28 @@ export interface StoredBlockRows {
    *  been streamed yet. Optional only so hand-built fixtures need not carry
    *  it; a read from the wire always sets it (the artifact's own state). */
   readonly sealed?: boolean
-  /** The absolute index of the artifact's first stored row, last stored row
-   *  and their count, carried with a paged read (contracts/ledger.artifact).
-   *  They are what lets a block reserve its height before its first page
-   *  arrives, so no row moves when rows fill it in (ADR-y45sp41c). */
+  /** The geometry of the WHOLE block (ADR-y45sp41c): firstRow..endRow is the
+   *  stream span it ever held, retainedRanges names the runs the store keeps,
+   *  and rowCount is how many retained rows that is. Height is reserved from
+   *  this geometry once; a page arriving later never changes it. */
   readonly firstRow?: number
   readonly lastRow?: number
+  readonly endRow?: number
   readonly rowCount?: number
+  readonly retainedRanges?: readonly StoredRowRange[]
+  /** False for the LIVE block: its rows are still arriving, and reserving a
+   *  stored span it may not paint yet is the "room first, rows later" frame
+   *  output-jitter exists to catch. Frozen and restored blocks reserve. */
+  readonly reserve?: boolean
 }
 
-/** The artifact's own coordinates, when the read was paged. */
+/** The artifact's own geometry, as a read reports it. */
 export interface StoredBlocksRange {
   readonly firstRow: number
   readonly lastRow: number
+  readonly endRow: number
   readonly rowCount: number
+  readonly retainedRanges: readonly StoredRowRange[]
   readonly rangeStart: number | null
   readonly rangeCount: number
   readonly hasMoreBefore: boolean
@@ -82,6 +96,153 @@ function rowLine(value: unknown): LedgerBlockRowsLine {
   }
 }
 
+/** The runs of stream rows a set of loaded lines covers, ascending. A page
+ *  around the viewport and the tail as it grows are two runs with an interior
+ *  hole between them; coverage is a question about these, never about the
+ *  first and last loaded row alone (ADR-y45sp41c). */
+export function loadedRowRanges(
+  lines: readonly Pick<LedgerBlockRowsLine, 'from'>[],
+): StoredRowRange[] {
+  const ranges: { from: number; to: number }[] = []
+  for (const line of lines) {
+    const from = line.from
+    const last = ranges[ranges.length - 1]
+    if (last !== undefined && from === last.to) last.to = from + 1
+    else if (last !== undefined && from < last.to) continue
+    else ranges.push({ from, to: from + 1 })
+  }
+  return ranges
+}
+
+/** The rows a block still has to fetch: retained runs minus the loaded ones,
+ *  ascending. An interior hole is a missing range like any other — that is
+ *  why coverage cannot be a first/last-row test (ADR-y45sp41c). */
+export function missingRowRanges(
+  retained: readonly StoredRowRange[],
+  loaded: readonly StoredRowRange[],
+): StoredRowRange[] {
+  const out: StoredRowRange[] = []
+  let at = 0
+  for (const range of retained) {
+    let cursor = range.from
+    while (cursor < range.to) {
+      while (at < loaded.length && loaded[at].to <= cursor) at++
+      const hit = at < loaded.length ? loaded[at] : undefined
+      if (hit !== undefined && hit.from <= cursor) {
+        cursor = Math.min(range.to, hit.to)
+        continue
+      }
+      const stop = hit !== undefined && hit.from < range.to ? hit.from : range.to
+      out.push({ from: cursor, to: stop })
+      cursor = stop
+    }
+  }
+  return out
+}
+
+/** The page to fetch for a visible stream row, or null when that row is
+ *  already loaded or lies in a gap the store does not hold. The decision uses
+ *  the missing RANGES, so an interior hole is fetched when the reader reaches
+ *  it even if the tail is loaded (ADR-y45sp41c). */
+export function nextPageForRows(
+  retained: readonly StoredRowRange[],
+  loaded: readonly StoredRowRange[],
+  target: number,
+  pageSize: number,
+): { fromRow: number; rowLimit: number } | null {
+  const missing = missingRowRanges(retained, loaded).find(
+    (range) => target >= range.from && target < range.to,
+  )
+  if (missing === undefined) return null
+  const from = Math.max(missing.from, Math.min(missing.to - 1, target - Math.floor(pageSize / 4)))
+  return { fromRow: from, rowLimit: Math.max(1, Math.min(pageSize, missing.to - from)) }
+}
+
+/** A geometry range list, validated. Anything malformed is no geometry at
+ *  all: a client that invented runs from a broken payload would reserve a
+ *  height nobody can correct. */
+export function storedRowRanges(value: unknown): StoredRowRange[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const out: StoredRowRange[] = []
+  let previousTo = -1
+  for (const item of value) {
+    if (typeof item !== 'object' || item === null) return undefined
+    const raw = item as { from?: unknown; to?: unknown }
+    const from = raw.from
+    const to = raw.to
+    if (
+      typeof from !== 'number' ||
+      typeof to !== 'number' ||
+      !Number.isInteger(from) ||
+      !Number.isInteger(to) ||
+      from < 0 ||
+      to <= from ||
+      from < previousTo
+    ) {
+      return undefined
+    }
+    out.push({ from, to })
+    previousTo = to
+  }
+  return out
+}
+
+function geometryOf(
+  payload: Record<string, unknown>,
+  range: StoredBlocksRange | undefined,
+  lines: readonly LedgerBlockRowsLine[],
+): Pick<StoredBlockRows, 'firstRow' | 'lastRow' | 'endRow' | 'rowCount' | 'retainedRanges'> {
+  const carried =
+    range?.retainedRanges ??
+    storedRowRanges(payload.retainedRanges) ??
+    (range === undefined
+      ? storedRowRanges(payload.ranges)
+      : (payload.retainedRanges as StoredRowRange[] | undefined))
+  let retained =
+    carried !== undefined && carried.length > 0
+      ? [...carried]
+      : (range?.rowCount ?? nonNegativeInteger(payload.rowCount)) > 0
+        ? [
+            {
+              from: range?.firstRow ?? nonNegativeInteger(payload.firstRow),
+              to:
+                (range?.firstRow ?? nonNegativeInteger(payload.firstRow)) +
+                (range?.rowCount ?? nonNegativeInteger(payload.rowCount)),
+            },
+          ]
+        : loadedRowRanges(lines)
+  if (retained.length === 0) {
+    const first = range?.firstRow ?? nonNegativeInteger(payload.firstRow)
+    const count = range?.rowCount ?? nonNegativeInteger(payload.rowCount)
+    if (count > 0) retained = [{ from: first, to: first + count }]
+  }
+  // Loaded rows are always inside the geometry. A legacy payload with no
+  // ranges is made to cover them rather than dropping the rows it cannot
+  // place.
+  for (const line of lines) {
+    if (retained.some((rr) => line.from >= rr.from && line.from < rr.to)) continue
+    retained.push({ from: line.from, to: line.from + 1 })
+  }
+  retained.sort((a, b) => a.from - b.from)
+  const merged: StoredRowRange[] = []
+  for (const rr of retained) {
+    const last = merged[merged.length - 1]
+    if (last !== undefined && rr.from <= last.to)
+      merged[merged.length - 1] = { from: last.from, to: Math.max(last.to, rr.to) }
+    else merged.push(rr)
+  }
+  const firstRow = merged[0]?.from ?? range?.firstRow ?? nonNegativeInteger(payload.firstRow)
+  const lastRow = merged.length > 0 ? merged[merged.length - 1].to - 1 : firstRow
+  const rowCount = merged.reduce((total, rr) => total + (rr.to - rr.from), 0)
+  const endRow = Math.max(
+    range?.endRow ?? nonNegativeInteger(payload.endRow),
+    merged.length > 0 ? merged[merged.length - 1].to : 0,
+    range?.lastRow !== undefined ? range.lastRow + 1 : 0,
+    lines.length > 0 ? lines[lines.length - 1].from + 1 : 0,
+  )
+  return { firstRow, lastRow, endRow, rowCount, retainedRanges: merged }
+}
+
 export function parseStoredBlockRows(
   body: string,
   metadata: RowsArtifactMetadata,
@@ -104,10 +265,6 @@ export function parseStoredBlockRows(
     typeof metadata.payload === 'object' && metadata.payload !== null
       ? (metadata.payload as Record<string, unknown>)
       : {}
-  const firstRow = range?.firstRow ?? nonNegativeInteger(payload.firstRow ?? lines[0]?.from ?? 0)
-  const lastRow =
-    range?.lastRow ?? nonNegativeInteger(payload.lastRow ?? lines[lines.length - 1]?.from ?? 0)
-  const rowCount = range?.rowCount ?? nonNegativeInteger(payload.rowCount ?? lines.length)
   return {
     lines,
     ...(artifactVersion === undefined ? {} : { artifactVersion }),
@@ -116,17 +273,15 @@ export function parseStoredBlockRows(
     unavailableRows: nonNegativeInteger(payload.unavailableRows),
     truncated: metadata.truncated,
     sealed: metadata.state === 'sealed',
-    firstRow,
-    lastRow,
-    rowCount,
+    ...geometryOf(payload, range, lines),
+    reserve: true,
   }
 }
 
 /** Two reads of one artifact, joined by the row index each line carries.
- *  Pages arrive around the viewport and the tail arrives as the block grows;
- *  neither is a whole body, and replacing one with the other would blank the
- *  rows the page before it painted. `next` owns the coordinates and the
- *  artifact state — it is the newer read — while the lines are the union. */
+ *  `next` owns the geometry and artifact state — it is the newer read — while
+ *  the lines are the union, so a page of the tail cannot blank the pages
+ *  above it. */
 export function mergeStoredBlockRows(
   previous: StoredBlockRows | undefined,
   next: StoredBlockRows,
@@ -142,8 +297,24 @@ export function mergeStoredBlockRows(
   for (const line of previous.lines) byFrom.set(line.from, line)
   for (const line of next.lines) byFrom.set(line.from, line)
   const lines = [...byFrom.values()].sort((a, b) => a.from - b.from)
-  if (lines.length === next.lines.length) return next
-  return { ...next, lines }
+  if (next.retainedRanges !== undefined && next.retainedRanges.length > 0) {
+    return { ...next, lines }
+  }
+  if (previous.retainedRanges === undefined || previous.retainedRanges.length === 0) {
+    return { ...next, lines }
+  }
+  // A legacy read that carried no geometry takes the one already known; the
+  // lines it brought are still added, so a whole-body refresh cannot blank a
+  // page that is already painted.
+  return {
+    ...next,
+    lines,
+    firstRow: previous.firstRow,
+    lastRow: previous.lastRow,
+    endRow: Math.max(next.endRow ?? 0, previous.endRow ?? 0),
+    rowCount: previous.rowCount,
+    retainedRanges: previous.retainedRanges,
+  }
 }
 
 /** A block whose rows have not been fetched yet, with the height it must
@@ -242,6 +413,9 @@ export function storedBlockRowsForSelection(
 export interface StoredBlockPaintOptions {
   readonly metric: RunMetric | null
   readonly palette: TerminalSnapshot
+  /** Whether the block reserves its whole stored geometry. A live block
+   *  paints false: its rows are arriving and its body grows with them. */
+  readonly reserve?: boolean
   /** Cell-fit's batch write, run once for all rows being repainted before
    *  any of them paints (nocx-2v80t.3.18): cell-fit.ts's own rule is "every
    *  write, then every read" — one forced layout for their candidates, so
@@ -288,7 +462,8 @@ const MISSING_ROW_CAUSES: readonly RowsMissingCause[] = [
     // person scrolls to it, instead of a summary under the whole block that
     // is on screen whenever its end is. With no rows there is no cut to
     // point at, and this is the only place left for the fact.
-    present: (s) => s.lines.length === 0 && (s.droppedRows > 0 || s.truncated === 'cap'),
+    present: (s) =>
+      (s.rowCount ?? s.lines.length) === 0 && (s.droppedRows > 0 || s.truncated === 'cap'),
     count: (s) => (s.droppedRows > 0 ? s.droppedRows : null),
     sentence: (n) =>
       n === null
@@ -408,11 +583,7 @@ export function paintStoredRows(
     })
     notice.root.dataset.outputIncomplete = 'true'
     notice.mount(block)
-  } else if (
-    stored.lines.length === 0 &&
-    stored.sealed === true &&
-    !(stored.rowCount !== undefined && stored.rowCount > 0)
-  ) {
+  } else if (stored.lines.length === 0 && (stored.rowCount ?? 0) === 0 && stored.sealed === true) {
     // A sealed block that holds no rows and lost none: the command printed
     // nothing, which is a real answer and gets its own words. An OPEN block
     // with nothing yet stays silent — its output may still arrive, and the
@@ -452,57 +623,9 @@ type PaintMetric = Pick<
   readonly hasBox: boolean
 }
 
-interface StoredPaintState {
-  readonly output: HTMLElement
-  readonly rows: Map<number, PaintedStoredRow>
-  /** The quiet line at each cut, keyed by the kept row it follows. Held so a
-   *  repaint that only appends rows keeps the line where it is. */
-  readonly cuts: Map<number, HTMLElement>
-  /** The space a page does not fill, above and below it: the block's reserved
-   *  height is the whole artifact's, so a page arriving later changes what is
-   *  painted inside that height and never the height itself (ADR-y45sp41c). */
-  readonly topSpacer: HTMLElement | null
-  readonly bottomSpacer: HTMLElement | null
-  readonly columns: number
-  readonly metric: PaintMetric | null
-  readonly palette: TerminalSnapshot
-}
-
-/** One block-height spacer. A row's height is the renderer's published cell
- *  height, so the reservation is exact without measuring anything, including
- *  before the first row has ever been painted. */
-function spacerOf(rows: number): HTMLElement {
-  const el = document.createElement('div')
-  el.className = 'cmd-output-spacer'
-  el.dataset.rows = String(rows)
-  el.setAttribute('aria-hidden', 'true')
-  el.style.height = `calc(var(--term-cell-height, 1.2em) * ${rows})`
-  return el
-}
-
-/** Reuse a spacer when its row count has not changed, so a repaint does not
- *  detach a node the browser is already laying out. */
-function reserveSpacer(
-  output: HTMLElement,
-  previous: HTMLElement | null | undefined,
-  rows: number,
-  atStart: boolean,
-): HTMLElement | null {
-  if (rows <= 0) {
-    previous?.remove()
-    return null
-  }
-  if (previous && previous.dataset.rows === String(rows)) return previous
-  const el = spacerOf(rows)
-  previous?.remove()
-  if (atStart) output.insertBefore(el, output.firstChild)
-  else output.appendChild(el)
-  return el
-}
-
 /** Only the currently retained rows, weakly owned by their block. Compact
- * comparison snapshots are not another decoded model or selection source:
- * the existing cell model still decodes and selectionRows still owns copy. */
+ *  comparison snapshots are not another decoded model or selection source:
+ *  the existing cell model still decodes and selectionRows still owns copy. */
 const paintedRows = new WeakMap<HTMLElement, StoredPaintState>()
 
 function sameRow(a: LedgerBlockRowsLine['row'], b: LedgerBlockRowsLine['row']): boolean {
@@ -544,9 +667,6 @@ function samePaintOptions(previous: StoredPaintState, opts: StoredBlockPaintOpti
   ) {
     return false
   }
-  // metricOf/fromITheme may return fresh wrappers on every read. The fit
-  // signature, not closure identity, names its measurement epoch; explicit
-  // font repaint also forces invalidation when no signature is available.
   const palette = previous.palette
   return (
     palette.defaultFg === opts.palette.defaultFg &&
@@ -555,37 +675,105 @@ function samePaintOptions(previous: StoredPaintState, opts: StoredBlockPaintOpti
   )
 }
 
-/** One stretch of a block's own history the store no longer holds: the rows
- *  between two kept rows, read from their absolute row numbers. A stored row
- *  names where it sits in the session's stream (`from`), so a jump between
- *  neighbours is the ONLY place in the product that says where output was
- *  cut — the card this replaced (recovery-notice.tsx, removed on the owner's
- *  decision of 2026-11-08) stated a session-level total above the pane, a
- *  number nobody could scroll to. */
-interface StoredRowCut {
-  /** The kept row the missing stretch follows; also the cut's identity, so a
-   *  repaint reuses the same line instead of replacing it. */
-  readonly after: number
-  /** How many rows departed between the two kept rows. */
-  readonly rows: number
+type Segment =
+  | { readonly kind: 'row'; readonly from: number; readonly key: string }
+  | { readonly kind: 'spacer'; readonly from: number; readonly rows: number; readonly key: string }
+  | { readonly kind: 'notice'; readonly from: number; readonly rows: number; readonly key: string }
+
+interface StoredPaintState {
+  readonly output: HTMLElement
+  readonly rows: Map<number, PaintedStoredRow>
+  readonly segments: Segment[]
+  readonly elements: Map<string, HTMLElement>
+  readonly columns: number
+  readonly reserve: boolean
+  readonly metric: PaintMetric | null
+  readonly palette: TerminalSnapshot
 }
 
-function storedRowCuts(stored: StoredBlockRows): StoredRowCut[] {
-  const cuts: StoredRowCut[] = []
-  for (let index = 1; index < stored.lines.length; index++) {
-    const before = stored.lines[index - 1].from
-    const after = stored.lines[index].from
-    if (after > before + 1) cuts.push({ after: before, rows: after - before - 1 })
+/** One block-height spacer. A row's height is the renderer's published cell
+ *  height, so the reservation is exact without measuring anything, including
+ *  before the first row of it has ever been painted. */
+function spacerOf(rows: number): HTMLElement {
+  const el = document.createElement('div')
+  el.className = 'cmd-output-spacer'
+  el.dataset.rows = String(rows)
+  el.setAttribute('aria-hidden', 'true')
+  el.style.height = `calc(var(--term-cell-height, 1.2em) * ${rows})`
+  return el
+}
+
+/** The DOM order of a block's body, decided from its GEOMETRY: every retained
+ *  run is either loaded rows, one spacer for what is not fetched, or a single
+ *  notice where the store keeps no rows at all (ADR-y45sp41c). The height of
+ *  this sequence is a fact about the artifact, never about what happened to
+ *  load, so a page arriving only swaps a spacer for rows of the same height.
+ *
+ *  A LIVE block reserves nothing beyond what it may paint (reserve:false): its
+ *  rows are still arriving and its held body must grow with them. */
+function buildSegments(stored: StoredBlockRows): Segment[] {
+  const loaded = [...stored.lines].sort((a, b) => a.from - b.from)
+  if (stored.reserve === false) {
+    const out: Segment[] = []
+    let previous: number | null = null
+    for (const line of loaded) {
+      if (previous !== null && line.from > previous + 1) {
+        out.push({
+          kind: 'notice',
+          from: previous,
+          rows: line.from - previous - 1,
+          key: `n:${previous}`,
+        })
+      }
+      out.push({ kind: 'row', from: line.from, key: `r:${line.from}` })
+      previous = line.from
+    }
+    return out
   }
-  return cuts
+  const ranges =
+    stored.retainedRanges !== undefined && stored.retainedRanges.length > 0
+      ? [...stored.retainedRanges].sort((a, b) => a.from - b.from)
+      : (stored.rowCount ?? 0) > 0
+        ? [
+            {
+              from: stored.firstRow ?? 0,
+              to: stored.endRow ?? (stored.lastRow ?? stored.firstRow ?? 0) + 1,
+            },
+          ]
+        : loadedRowRanges(loaded)
+  if (ranges.length === 0) return []
+  const endRow = Math.max(stored.endRow ?? 0, ranges[ranges.length - 1].to)
+  const out: Segment[] = []
+  let loadedAt = 0
+  let previousEnd: number | null = null
+  for (const range of ranges) {
+    if (previousEnd !== null && range.from > previousEnd) {
+      const rows = range.from - previousEnd
+      out.push({ kind: 'notice', from: previousEnd, rows, key: `n:${previousEnd}` })
+    }
+    let cursor = range.from
+    while (cursor < range.to) {
+      while (loadedAt < loaded.length && loaded[loadedAt].from < cursor) loadedAt++
+      const next = loadedAt < loaded.length ? loaded[loadedAt].from : null
+      if (next === cursor) {
+        out.push({ kind: 'row', from: cursor, key: `r:${cursor}` })
+        cursor++
+        continue
+      }
+      const stop = next !== null && next < range.to ? next : range.to
+      const rows = stop - cursor
+      out.push({ kind: 'spacer', from: cursor, rows, key: `s:${cursor}:${rows}` })
+      cursor = stop
+    }
+    previousEnd = range.to
+  }
+  if (endRow > previousEnd!) {
+    const rows = endRow - previousEnd!
+    out.push({ kind: 'notice', from: previousEnd!, rows, key: `n:${previousEnd!}` })
+  }
+  return out
 }
 
-/** What one cut says. The count is the rows absent AT THIS PLACE, so the
- *  sentence stays true whatever else the store reports about the block; the
- *  only cause it names is the size limit, and only when the store's own
- *  verdict names the per-command cap as the one that took rows. A verdict
- *  that has not arrived yet (the artifact is open while its command runs)
- *  says that rows are not kept and nothing more. */
 function cutSentence(stored: StoredBlockRows, rows: number): string {
   if (stored.truncated === 'cap') {
     return tPlural(
@@ -595,6 +783,35 @@ function cutSentence(stored: StoredBlockRows, rows: number): string {
     )
   }
   return tPlural('scrollback.cut.rows', rows, '{count} rows of earlier output were not kept here.')
+}
+
+/** Reconcile the output's children with the desired segment sequence. The
+ *  elements are owned by their keys: a page that fills an interior hole swaps
+ *  one spacer for its rows and leaves every other node where it was. */
+function layoutSegments(
+  output: HTMLElement,
+  segments: Segment[],
+  elements: Map<string, HTMLElement>,
+): void {
+  const desired: HTMLElement[] = segments.map((segment) => {
+    const element = elements.get(segment.key)
+    if (element !== undefined) return element
+    throw new Error(`no element for segment ${segment.key}`)
+  })
+  let cursor = output.firstChild
+  const keep = new Set<Node>(desired)
+  for (const element of desired) {
+    if (element === cursor) {
+      cursor = cursor.nextSibling
+      continue
+    }
+    output.insertBefore(element, cursor)
+  }
+  while (cursor !== null) {
+    const next = cursor.nextSibling
+    if (!keep.has(cursor)) output.removeChild(cursor)
+    cursor = next
+  }
 }
 
 function paintOutput(
@@ -609,149 +826,113 @@ function paintOutput(
     previous?.output ??
     block.querySelector<HTMLElement>(':scope > .cmd-output') ??
     document.createElement('div')
-  const next = new Map<number, PaintedStoredRow>()
-  const changed: LedgerBlockRowsLine[] = []
-  const changedWidths = new Map<number, number>()
-  let columns = 0
-  for (const line of stored.lines) {
-    const old = previous?.rows.get(line.from)
-    if (old && old.element.parentElement === output && sameRow(old.row, line.row)) {
-      next.set(line.from, old)
-      columns = Math.max(columns, old.columns)
-    } else {
-      const width = rowColumnsOf(line.row)
-      columns = Math.max(columns, width)
-      changedWidths.set(line.from, width)
-      changed.push(line)
-    }
+  const lines = [...stored.lines].sort((a, b) => a.from - b.from)
+  const reserve =
+    opts.reserve ?? (stored.reserve !== undefined ? stored.reserve : (previous?.reserve ?? true))
+  const segments = buildSegments({ ...stored, lines, reserve })
+  if (segments.length === 0 && lines.length === 0) {
+    output.remove()
+    paintedRows.delete(block)
+    return
   }
+  let columns = 0
+  for (const line of lines) columns = Math.max(columns, rowColumnsOf(line.row))
   const all =
     force || !previous || previous.columns !== columns || !samePaintOptions(previous, opts)
-  const toPaint = all ? stored.lines : changed
-  const snapshot = toPaint.length > 0 ? snapshotAtColumns(toPaint, columns) : null
+  const changed = all
+    ? lines
+    : lines.filter((line) => {
+        const old = previous?.rows.get(line.from)
+        return (
+          old === undefined || old.element.parentElement !== output || !sameRow(old.row, line.row)
+        )
+      })
+  const changedWidths = new Map<number, number>()
+  for (const line of changed) changedWidths.set(line.from, rowColumnsOf(line.row))
+  const toPaint = changed
+  const snapshot = toPaint.length > 0 && columns > 0 ? snapshotAtColumns(toPaint, columns) : null
   if (toPaint.length > 0 && snapshot === null) {
     output.remove()
     paintedRows.delete(block)
     return
   }
-  // THE HEIGHT IS THE WHOLE ARTIFACT'S, from the first page (ADR-y45sp41c). A
-  // page that does not reach the block's first or last stored row gets a
-  // spacer for the rows it omits, so the block's outer height is the same
-  // whether one row of it is loaded or all of them.
-  const firstRow = stored.firstRow ?? stored.lines[0]?.from ?? 0
-  const lastRow = stored.lastRow ?? stored.lines[stored.lines.length - 1]?.from ?? firstRow
-  const extent =
-    stored.rowCount !== undefined && stored.rowCount > 0
-      ? Math.max(stored.rowCount, lastRow - firstRow + 1)
-      : stored.lines.length
-  const topRows =
-    stored.lines.length > 0 ? Math.max(0, (stored.lines[0].from ?? firstRow) - firstRow) : 0
-  const bottomRows =
-    stored.lines.length > 0
-      ? Math.max(0, lastRow - (stored.lines[stored.lines.length - 1].from ?? lastRow))
-      : extent
-  if (stored.lines.length === 0 && topRows === 0 && bottomRows === 0 && columns === 0) {
-    output.remove()
-    paintedRows.delete(block)
-    return
+  const nextRows = new Map<number, PaintedStoredRow>()
+  for (const line of lines) {
+    const old = all ? undefined : previous?.rows.get(line.from)
+    if (old !== undefined && old.element.parentElement === output && !changed.includes(line)) {
+      nextRows.set(line.from, old)
+    }
   }
-  if (snapshot) {
+  if (snapshot !== null) {
     opts.warm?.(fitCandidatesOf(snapshot.rows))
     for (let index = 0; index < toPaint.length; index++) {
       const line = toPaint[index]
       const element = paintRow(snapshot.rows[index], opts)
       decorateLinks(element)
-      next.set(line.from, {
-        // Copy compact fields only when a row changes. This also detects a
-        // caller updating a row in place without retaining older artifacts.
+      nextRows.set(line.from, {
         row: {
           ...line.row,
           marks: line.row.marks?.map((mark) => [...mark]),
           runs: line.row.runs?.map(([style, length]) => [style === 0 ? 0 : [...style], length]),
         },
-        columns: changedWidths.get(line.from) ?? next.get(line.from)!.columns,
+        columns: changedWidths.get(line.from) ?? 0,
         element,
       })
     }
   }
-  if (previous) {
-    for (const [from, old] of previous.rows) {
-      if (next.get(from)?.element !== old.element) old.element.remove()
-    }
-  } else {
-    output.replaceChildren()
-  }
-  const topSpacer = reserveSpacer(output, previous?.topSpacer, topRows, true)
-  const bottomSpacer = reserveSpacer(output, previous?.bottomSpacer, bottomRows, false)
-  // THE CUTS, PLACED WHERE THEY ARE. One line per stretch of rows that
-  // departed but that this artifact does not hold, between the kept rows
-  // either side of it — the place a person scrolls to when they ask what
-  // happened to the output. A cut replaced by a later read's whole body is
-  // dropped with the rows it described.
-  const cuts = new Map(storedRowCuts(stored).map((cut) => [cut.after, cut]))
-  const cutLines = new Map<number, HTMLElement>()
-  const cutLine = (after: number, rows: number): HTMLElement => {
-    const existing = previous?.cuts.get(after)
-    const element = existing ?? document.createElement('div')
-    // The grid's own type context, so the line occupies one terminal row in
-    // the block's body rather than a DOM box of its own.
-    element.className = 'term-line cmd-output-gap'
-    const text = cutSentence(stored, rows)
-    if (element.textContent !== text) element.textContent = text
-    return element
-  }
-  let cursor = topSpacer?.nextSibling ?? output.firstChild
-  let previousFrom: number | null = null
-  for (const line of stored.lines) {
-    const element = next.get(line.from)!.element
-    const blockId = block.dataset.entryId ?? ''
-    if (element.dataset.blockId !== blockId) element.dataset.blockId = blockId
-    if (element.dataset.artifactVersion !== stored.artifactVersion) {
-      if (stored.artifactVersion === undefined) delete element.dataset.artifactVersion
-      else element.dataset.artifactVersion = stored.artifactVersion
-    }
-    const logicalLine = String(line.from)
-    if (element.dataset.logicalLine !== logicalLine) element.dataset.logicalLine = logicalLine
-    const cut = previousFrom === null ? undefined : cuts.get(previousFrom)
-    if (cut !== undefined) {
-      const gap = cutLine(cut.after, cut.rows)
-      cutLines.set(cut.after, gap)
-      // `cursor` is always a child of the output or null, which the row
-      // element being placed is not yet on a first paint: the line goes
-      // before the same node the row is about to go before.
-      if (gap.parentElement !== output || gap.nextSibling !== cursor) {
-        output.insertBefore(gap, cursor)
+  const elements = new Map<string, HTMLElement>()
+  for (const segment of segments) {
+    if (segment.kind === 'row') {
+      const painted = nextRows.get(segment.from)
+      if (painted === undefined) continue
+      const element = painted.element
+      const blockId = block.dataset.entryId ?? ''
+      if (element.dataset.blockId !== blockId) element.dataset.blockId = blockId
+      if (element.dataset.artifactVersion !== stored.artifactVersion) {
+        if (stored.artifactVersion === undefined) delete element.dataset.artifactVersion
+        else element.dataset.artifactVersion = stored.artifactVersion
       }
-      cursor = gap.nextSibling
+      const logicalLine = String(segment.from)
+      if (element.dataset.logicalLine !== logicalLine) element.dataset.logicalLine = logicalLine
+      elements.set(segment.key, element)
+      continue
     }
-    // The common append/evict path never detaches an unchanged row, keeping
-    // its selected text and decorated links in place.
-    if (element !== cursor) output.insertBefore(element, cursor)
-    cursor = element.nextSibling
-    previousFrom = line.from
-  }
-  if (previous) {
-    for (const [after, gap] of previous.cuts) {
-      if (!cutLines.has(after)) gap.remove()
+    const old = previous?.elements.get(segment.key)
+    if (segment.kind === 'spacer') {
+      const element =
+        old !== undefined &&
+        old.classList.contains('cmd-output-spacer') &&
+        old.dataset.rows === String(segment.rows)
+          ? old
+          : spacerOf(segment.rows)
+      elements.set(segment.key, element)
+      continue
     }
+    const element =
+      old !== undefined && old.classList.contains('cmd-output-gap')
+        ? old
+        : document.createElement('div')
+    element.className = 'term-line cmd-output-gap'
+    const text = cutSentence(stored, segment.rows)
+    if (element.textContent !== text) element.textContent = text
+    elements.set(segment.key, element)
   }
-  if (bottomSpacer && bottomSpacer.parentElement !== output) output.appendChild(bottomSpacer)
+  layoutSegments(output, segments, elements)
   output.className = 'cmd-output'
-  // WHAT THE BODY HOLDS, stated rather than measured from the DOM: a paged
-  // read and a whole one differ here, and this is the one place that knows.
-  output.dataset.rowsFirst = String(firstRow)
-  output.dataset.rowsLast = String(lastRow)
-  output.dataset.rowsCount = String(stored.rowCount ?? stored.lines.length)
-  output.dataset.rowsLoaded = String(stored.lines.length)
+  output.dataset.rowsFirst = String(stored.firstRow ?? 0)
+  output.dataset.rowsLast = String(stored.lastRow ?? 0)
+  output.dataset.rowsEnd = String(stored.endRow ?? 0)
+  output.dataset.rowsCount = String(stored.rowCount ?? lines.length)
+  output.dataset.rowsLoaded = String(lines.length)
   if (output.parentElement !== block) block.appendChild(output)
   const metric = opts.metric
   paintedRows.set(block, {
     output,
-    rows: next,
-    cuts: cutLines,
-    topSpacer,
-    bottomSpacer,
+    rows: nextRows,
+    segments,
+    elements,
     columns,
+    reserve,
     metric:
       metric === null
         ? null

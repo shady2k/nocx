@@ -159,6 +159,7 @@ import {
   answerTextForTurn,
   arrangedByCause,
   blockRowsForEntry,
+  blockRowsMetadataForEntry,
   blocksForPane,
   BLOCK_ROWS_PAGE,
   LAZY_BLOCK_ROWS,
@@ -168,7 +169,10 @@ import {
 import { restoredBlock, restoredTurn } from './scrollback/restored-block'
 import {
   blockColumnsOf,
+  loadedRowRanges,
   mergeStoredBlockRows,
+  missingRowRanges,
+  nextPageForRows,
   paintStoredRows,
   repaintStoredRows,
   storedBlockRowsText,
@@ -3384,11 +3388,12 @@ export class TerminalContent extends BasePaneContent {
           this.clearGrants()
         },
         onBlockFrozen: (rec) => this._onBlockFrozen(rec),
-        paintStoredRows: (block, rows) => {
+        paintStoredRows: (block, rows, reserve) => {
           const fit = this._cellFit
           const metric = fit !== null && fit.begin() ? metricOf(fit) : null
           paintStoredRows(block, rows, {
             metric,
+            reserve,
             palette: fromITheme(getCurrentTheme()),
             // cell-fit's batch write (nocx-2v80t.3.18): warmed here, once
             // for the whole block, so `boxOf` inside `paintRow` above is a
@@ -4543,6 +4548,7 @@ export class TerminalContent extends BasePaneContent {
             void this._refreshBlockRows(entryId)
           }
         }
+        void this._revalidateMountedBlockRows(entryIds)
         this._loadVisibleBlockRows()
       })
       // A returning socket may be a returning BACKEND, whose endpoints and
@@ -11692,18 +11698,21 @@ export class TerminalContent extends BasePaneContent {
     if (rows === undefined || rowCount === undefined || rowCount <= LAZY_BLOCK_ROWS) {
       return undefined
     }
+    const end = rows.endRow ?? (rows.lastRow ?? rows.firstRow ?? 0) + 1
     if (rows.lines.length > 0) {
       // A LIVE block must not skip rows between coalesced growth reads: ask
-      // from the row after the last one painted to the end. The server caps
-      // one page at 10 000 rows, above any per-command capture the product
-      // allows at its default setting.
-      return { fromRow: rows.lines[rows.lines.length - 1].from + 1, rowLimit: 10_000 }
+      // from the row after the last retained row painted to the end. The
+      // server caps one page at 10 000 rows, above any per-command capture
+      // the product allows at its default setting.
+      const from = rows.lines[rows.lines.length - 1].from + 1
+      return { fromRow: from, rowLimit: Math.max(1, Math.min(10_000, end - from)) }
     }
     // No body in hand: the reconnect gave it back, or the restore has not
-    // asked yet. Take the newest page, which is what is on screen at the
-    // tail; scrolling asks for whatever lies above it.
-    const first = rows.firstRow ?? 0
-    const last = rows.lastRow ?? first
+    // asked yet. Take the newest page of the LAST retained run — a capped
+    // block's tail run, not the count-derived end of a head-only guess.
+    const lastRange = rows.retainedRanges?.[rows.retainedRanges.length - 1]
+    const first = lastRange?.from ?? rows.firstRow ?? 0
+    const last = (lastRange?.to ?? end) - 1
     const from = Math.max(first, last - BLOCK_ROWS_PAGE + 1)
     return { fromRow: from, rowLimit: Math.max(1, Math.min(BLOCK_ROWS_PAGE, last - from + 1)) }
   }
@@ -11714,6 +11723,13 @@ export class TerminalContent extends BasePaneContent {
     const sb = this.scrollback
     if (!sb || this._disposed) return
     const rec = sb.blockManager.blockForAttempt(entryId)
+    const marker = rec?.el ?? this._blockElement(entryId)
+    if (marker !== null && marker !== undefined) {
+      // The e2e waits on this: a reconnect's give-back is a state a test can
+      // observe before it measures the reservation it just created.
+      if (reset) marker.dataset.rowsReset = 'true'
+      else delete marker.dataset.rowsReset
+    }
     if (rec) {
       sb.settleAround(() => {
         sb.blockManager.applyStoredRows(entryId, rows, undefined, reset)
@@ -11752,6 +11768,75 @@ export class TerminalContent extends BasePaneContent {
       .finally(() => this._blockRowsPageInFlight.delete(entryId))
   }
 
+  /** The geometry a loaded block claims, comparable with the metadata a
+   *  reconnect reads. A block whose stored rows grew while disconnected has a
+   *  different key even when it is small (ADR-y45sp41c). */
+  private _rowsGeometryKey(rows: StoredBlockRows | undefined, version?: string): string | null {
+    if (rows === undefined || rows.rowCount === undefined) return null
+    const ranges = (rows.retainedRanges ?? []).map((rr) => `${rr.from}-${rr.to}`).join(',')
+    return [
+      version ?? rows.artifactVersion ?? '',
+      rows.firstRow ?? 0,
+      rows.lastRow ?? 0,
+      rows.endRow ?? 0,
+      rows.rowCount,
+      ranges,
+    ].join('|')
+  }
+
+  /** One entry's metadata geometry in the same spelling. */
+  private _rangeGeometryKey(
+    version: string,
+    range: {
+      firstRow: number
+      lastRow: number
+      endRow: number
+      rowCount: number
+      retainedRanges: readonly { from: number; to: number }[]
+    } | null,
+  ): string | null {
+    if (range === null) return null
+    return [
+      version,
+      range.firstRow,
+      range.lastRow,
+      range.endRow,
+      range.rowCount,
+      range.retainedRanges.map((rr) => `${rr.from}-${rr.to}`).join(','),
+    ].join('|')
+  }
+
+  /** Every mounted block is re-validated against its durable metadata after a
+   *  reconnect, small blocks included. Notifications are not replayed, so a
+   *  command that grew while the socket was down would otherwise keep its
+   *  cached rows and look complete (ADR-y45sp41c). Metadata is read one block
+   *  at a time: small answers still must not become five hundred frames. */
+  private async _revalidateMountedBlockRows(entryIds: string[]): Promise<void> {
+    const ordered = [...entryIds].sort(
+      (a, b) => this._rowReadPriority(a) - this._rowReadPriority(b),
+    )
+    for (const entryId of ordered) {
+      if (this._disposed || !this._active) return
+      // A block with no cached rows is already being read by the reconnect's
+      // own refresh; there is no geometry to compare it with.
+      if (this._storedRowsOf(entryId) === undefined) continue
+      let meta
+      try {
+        meta = await blockRowsMetadataForEntry(this.client, entryId)
+      } catch (err) {
+        log.warn("nocx: a block's durable geometry could not be read", {
+          entry: entryId,
+          error: String(err),
+        })
+        continue
+      }
+      if (meta === null) continue
+      const current = this._rowsGeometryKey(this._storedRowsOf(entryId), meta.version)
+      const durable = this._rangeGeometryKey(meta.version, meta.geometry)
+      if (current !== durable) void this._refreshBlockRows(entryId)
+    }
+  }
+
   /** Fill what the person can see: a block near the viewport whose page has
    *  not arrived asks for the rows around the visible line. Every block
    *  already reserves its height from the metadata, so this paints into space
@@ -11767,7 +11852,20 @@ export class TerminalContent extends BasePaneContent {
     }
     for (const entryId of ids) {
       const rows = this._storedRowsOf(entryId)
-      if (rows?.rowCount === undefined || rows.lines.length >= rows.rowCount) continue
+      if (rows === undefined || rows.rowCount === undefined) continue
+      const retained =
+        rows.retainedRanges !== undefined && rows.retainedRanges.length > 0
+          ? rows.retainedRanges
+          : rows.rowCount > 0
+            ? [
+                {
+                  from: rows.firstRow ?? 0,
+                  to: rows.endRow ?? (rows.lastRow ?? rows.firstRow ?? 0) + 1,
+                },
+              ]
+            : []
+      const missing = missingRowRanges(retained, loadedRowRanges(rows.lines))
+      if (missing.length === 0) continue
       const el = this._blockElement(entryId)
       if (!el) continue
       const rect = el.getBoundingClientRect()
@@ -11780,24 +11878,15 @@ export class TerminalContent extends BasePaneContent {
       if (!output) continue
       const stated = Number.parseFloat(getComputedStyle(el).getPropertyValue('--term-cell-height'))
       const pitch = Number.isFinite(stated) && stated > 0 ? stated : 18
-      const first = rows.firstRow ?? rows.lines[0]?.from ?? 0
-      const last = rows.lastRow ?? first
+      const first = retained[0]?.from ?? rows.firstRow ?? 0
+      const last = (retained[retained.length - 1]?.to ?? first + 1) - 1
       const outRect = output.getBoundingClientRect()
       const visibleRow = Math.floor((areaRect.top - outRect.top) / pitch)
       const target = Math.max(first, Math.min(last, first + Math.max(0, visibleRow)))
-      const loadedFirst = rows.lines[0]?.from
-      const loadedLast = rows.lines[rows.lines.length - 1]?.from
-      if (
-        loadedFirst !== undefined &&
-        loadedLast !== undefined &&
-        target >= loadedFirst &&
-        target <= loadedLast
-      ) {
-        continue
-      }
-      const from = Math.max(first, target - Math.floor(BLOCK_ROWS_PAGE / 4))
-      const rowLimit = Math.max(1, Math.min(BLOCK_ROWS_PAGE, last - from + 1))
-      this._requestBlockRowsPage(entryId, from, rowLimit)
+      // WHAT IS MISSING, not what is between the first and last loaded row.
+      const page = nextPageForRows(retained, loadedRowRanges(rows.lines), target, BLOCK_ROWS_PAGE)
+      if (page === null) continue
+      this._requestBlockRowsPage(entryId, page.fromRow, page.rowLimit)
     }
   }
 

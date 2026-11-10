@@ -7,7 +7,7 @@ import type { CommandSnapshotStore } from '../command-snapshot'
 import type { BlockOutputStart } from '../generated/block.outputStart'
 import type { ScreenSnapshot } from '../cell-model'
 import type { BlockClosed } from '../generated/block.closed'
-import { paintUnreadableRows, type StoredBlockRows } from './block-rows'
+import { loadedRowRanges, paintUnreadableRows, type StoredBlockRows } from './block-rows'
 import { wordRangeIn } from '../word-selection'
 import { insideLiveRegion } from '../live-region'
 import { createSecretChipUnresolved } from '../ui/secret-chip'
@@ -2092,7 +2092,7 @@ export interface BlockManagerOpts {
    *  that slot and an observer here never race. */
   onBlockFrozen?: (rec: BlockRecord) => void
   /** Paints rows read from the backend's block artifact. */
-  paintStoredRows?: (block: HTMLElement, rows: StoredBlockRows) => void
+  paintStoredRows?: (block: HTMLElement, rows: StoredBlockRows, reserve?: boolean) => void
   /** Runs a mutation that changes the transcript's shape — the freeze swaps a
    *  block's whole element — and leaves a reader who has scrolled away exactly
    *  where they were (nocx-3wmve). The scroller and the reader's place are the
@@ -2172,7 +2172,7 @@ export class BlockManager {
   private _selectedBlockId: number | null = null
   private _snapshotStore: CommandSnapshotStore
   private _onDeferredFreeze?: (rec: BlockRecord) => void
-  private _paintStoredRows?: (block: HTMLElement, rows: StoredBlockRows) => void
+  private _paintStoredRows?: (block: HTMLElement, rows: StoredBlockRows, reserve?: boolean) => void
   private _holdReaderPlace?: (mutate: () => void) => void
   private _visible = true
   /** Hidden paints belong to their DOM owner, not a second block registry.
@@ -2943,7 +2943,8 @@ export class BlockManager {
     // full 208 rows while the hold said 207, and the body showed the two rows
     // the grid still had.
     const painted = this._paintableRows(block, rows)
-    this._paintStoredRows?.(block, painted)
+    const live = this._liveContainer.parentElement === block
+    this._paintStoredRows?.(block, painted, live ? false : undefined)
     this._keepLiveBodyLast(block)
   }
 
@@ -3023,8 +3024,9 @@ export class BlockManager {
    *  that was handed the full rows cannot paint them. */
   private _paintableRows(block: HTMLElement, rows: StoredBlockRows): StoredBlockRows {
     const rec = this._blocks.find((b) => b.el === block)
+    const live = this._liveContainer.parentElement === block
     if (rec === undefined || rec.storedUpTo === undefined) return rows
-    if (this._liveContainer.parentElement !== block) return rows
+    if (!live) return rows
     return this._heldRows(rows, rec.storedUpTo, rec.outputStreamStart ?? 0)
   }
 
@@ -3052,7 +3054,10 @@ export class BlockManager {
       lines,
       firstRow: lines[0]?.from ?? rows.firstRow,
       lastRow: lines[lines.length - 1]?.from ?? rows.lastRow,
+      endRow: (lines[lines.length - 1]?.from ?? rows.firstRow ?? 0) + 1,
       rowCount: lines.length,
+      retainedRanges: loadedRowRanges(lines),
+      reserve: false,
     }
   }
 

@@ -12,7 +12,7 @@
 // merges.
 import type { WSClient } from './ipc'
 import { RpcError } from './dispatcher'
-import { RowReadQueue } from './scrollback/row-read-queue'
+import { RowReadQueue, RowReadShortError, rowReadRetryAfter } from './scrollback/row-read-queue'
 import type { LedgerQuery } from './generated/ledger.query'
 import type { UnreconciledCause } from './unreconciled-notice'
 import type { LedgerArtifact } from './generated/ledger.artifact'
@@ -20,6 +20,7 @@ import type { Caused, LedgerGet } from './generated/ledger.get'
 import {
   describeStoredBlockRows,
   parseStoredBlockRows,
+  storedRowRanges,
   type StoredBlockRows,
   type StoredBlocksRange,
 } from './scrollback/block-rows'
@@ -52,12 +53,29 @@ function storedRowsCoordinates(payload: unknown): StoredBlocksRange | null {
   const nonNegative = (value: unknown): number | null =>
     typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null
   const first = nonNegative(raw.firstRow) ?? 0
+  const carried = storedRowRanges(raw.retainedRanges)
   const rowCount = nonNegative(raw.rowCount)
+  if (carried !== undefined && carried.length > 0) {
+    return {
+      firstRow: carried[0].from,
+      lastRow: carried[carried.length - 1].to - 1,
+      endRow: Math.max(nonNegative(raw.endRow) ?? 0, carried[carried.length - 1].to),
+      rowCount: carried.reduce((total, rr) => total + (rr.to - rr.from), 0),
+      retainedRanges: carried,
+      rangeStart: null,
+      rangeCount: 0,
+      hasMoreBefore: false,
+      hasMoreAfter: false,
+    }
+  }
   if (rowCount !== null) {
+    const ranges = rowCount > 0 ? [{ from: first, to: first + rowCount }] : []
     return {
       firstRow: first,
       lastRow: first + Math.max(0, rowCount - 1),
+      endRow: first + rowCount,
       rowCount,
+      retainedRanges: ranges,
       rangeStart: null,
       rangeCount: 0,
       hasMoreBefore: false,
@@ -72,11 +90,42 @@ function storedRowsCoordinates(payload: unknown): StoredBlocksRange | null {
   return {
     firstRow: first,
     lastRow: first + count - 1,
+    endRow: next,
     rowCount: count,
+    retainedRanges: [{ from: first, to: first + count }],
     rangeStart: null,
     rangeCount: 0,
     hasMoreBefore: false,
     hasMoreAfter: false,
+  }
+}
+
+/** The current durable geometry of one entry's rows artifact, without a
+ *  body. A reconnect compares this with what is loaded; small blocks included
+ *  (ADR-y45sp41c). Null means the entry keeps no rows artifact at all. */
+export interface BlockRowsMetadata {
+  readonly artifactId: string
+  readonly version: string
+  readonly geometry: StoredBlocksRange | null
+}
+
+export async function blockRowsMetadataForEntry(
+  client: WSClient,
+  entryId: string,
+): Promise<BlockRowsMetadata | null> {
+  let entry: LedgerGet
+  try {
+    entry = await client.call<LedgerGet>('ledger.get', { id: entryId })
+  } catch (err) {
+    if (storeKeepsNothing(err)) return null
+    throw err
+  }
+  const metadata = entry.artifacts.find((a) => a.mediaType === 'application/x-nocx-rows')
+  if (!metadata) return null
+  return {
+    artifactId: metadata.id,
+    version: metadata.id,
+    geometry: storedRowsCoordinates(metadata.payload),
   }
 }
 
@@ -89,7 +138,9 @@ function rangeOfArtifact(artifact: LedgerArtifact): StoredBlocksRange | undefine
   return {
     firstRow: artifact.firstRow,
     lastRow: artifact.lastRow,
+    endRow: artifact.endRow ?? artifact.lastRow + 1,
     rowCount: artifact.rowCount,
+    retainedRanges: (artifact.retainedRanges ?? []).map((rr) => ({ from: rr.from, to: rr.to })),
     rangeStart: artifact.rangeStart,
     rangeCount: artifact.rangeCount,
     hasMoreBefore: artifact.hasMoreBefore,
@@ -352,11 +403,27 @@ async function readBlockRowsForEntry(
     if (window?.fromRow !== undefined) params.fromRow = window.fromRow
     if (window?.rowLimit !== undefined) params.rowLimit = window.rowLimit
     const read = await client.call<LedgerArtifact>('ledger.artifact', params)
-    return {
-      kind: 'rows',
-      rows: parseStoredBlockRows(read.body, metadata, metadata.id, rangeOfArtifact(read)),
+    const range = rangeOfArtifact(read)
+    const parsed = parseStoredBlockRows(read.body, metadata, metadata.id, range)
+    // A SHORT PAGE IS NOT DONE. The server selects whole lines and can come
+    // back short when the artifact is open or a page is still being written;
+    // the queue waits and asks again rather than painting the hole as a loss
+    // (ADR-y45sp41c). A page that reached the retained end is complete.
+    if (window?.rowLimit !== undefined && window.fromRow !== undefined && range !== undefined) {
+      const available = range.retainedRanges.reduce(
+        (total, rr) => total + Math.max(0, rr.to - Math.max(rr.from, window.fromRow!)),
+        0,
+      )
+      const expected = Math.min(window.rowLimit, available)
+      if (read.rangeCount < expected && read.hasMoreAfter) {
+        throw new RowReadShortError(
+          `stored rows page ${window.fromRow}+${window.rowLimit} returned ${read.rangeCount}`,
+        )
+      }
     }
+    return { kind: 'rows', rows: parsed }
   } catch (err) {
+    if (rowReadRetryAfter(err) !== null) throw err
     return { kind: 'unreadable', reason: `the stored rows could not be read: ${reasonOf(err)}` }
   }
 }

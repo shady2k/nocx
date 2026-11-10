@@ -106,7 +106,7 @@ export interface ScrollbackControllerOpts {
    *  output window from the frozen block). */
   onBlockFrozen?: (rec: BlockRecord) => void
   /** Paints backend-owned rows through the shared row painter. */
-  paintStoredRows?: (block: HTMLElement, rows: StoredBlockRows) => void
+  paintStoredRows?: (block: HTMLElement, rows: StoredBlockRows, reserve?: boolean) => void
   /** What a session is called to a person — passed straight to the block
    *  manager, which hands it to every tool-call line it draws (nocx-vnzek).
    *  This controller neither derives nor caches it. */

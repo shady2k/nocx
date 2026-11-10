@@ -135,6 +135,88 @@ describe("restore-client — a block's stored rows say whether they were read", 
     expect(read.kind === 'rows' ? read.rows.lines.map((l) => l.from) : null).toEqual([3])
   })
 
+  it('lets a capacity refusal reach the queue and retries it', async () => {
+    let artifactCalls = 0
+    const line = JSON.stringify({ from: 0, row: { text: 'retried' } })
+    const client = {
+      call: vi.fn((method: string) => {
+        if (method === 'ledger.get') {
+          return Promise.resolve({
+            entry: { kind: 'shell' },
+            artifacts: [{ id: 'art-rows', mediaType: 'application/x-nocx-rows' }],
+            caused: [],
+            proseEvicted: false,
+          })
+        }
+        artifactCalls++
+        if (artifactCalls === 1) {
+          return Promise.reject(new RpcError('busy', -32014, { retryAfterMs: 5 }))
+        }
+        return Promise.resolve({
+          id: 'art-rows',
+          mediaType: 'application/x-nocx-rows',
+          body: `${line}\n`,
+          truncated: null,
+          byteLen: line.length,
+          firstRow: 0,
+          lastRow: 0,
+          endRow: 1,
+          rowCount: 1,
+          retainedRanges: [{ from: 0, to: 1 }],
+          rangeStart: 0,
+          rangeCount: 1,
+          hasMoreBefore: false,
+          hasMoreAfter: false,
+        })
+      }),
+    } as unknown as WSClient
+    const read = await blockRowsForEntry(client, 'entry-retry', { fromRow: 0, rowLimit: 10 })
+    expect(read.kind).toBe('rows')
+    expect(artifactCalls).toBe(2)
+  })
+
+  it('retries a page that came back short of the retained rows it asked for', async () => {
+    let artifactCalls = 0
+    const a = JSON.stringify({ from: 0, row: { text: 'a' } })
+    const b = JSON.stringify({ from: 1, row: { text: 'b' } })
+    const page = (body: string, count: number, more: boolean) => ({
+      id: 'art-rows',
+      mediaType: 'application/x-nocx-rows',
+      body,
+      truncated: null,
+      byteLen: body.length,
+      firstRow: 0,
+      lastRow: 1,
+      endRow: 2,
+      rowCount: 2,
+      retainedRanges: [{ from: 0, to: 2 }],
+      rangeStart: 0,
+      rangeCount: count,
+      hasMoreBefore: false,
+      hasMoreAfter: more,
+    })
+    const client = {
+      call: vi.fn((method: string) => {
+        if (method === 'ledger.get') {
+          return Promise.resolve({
+            entry: { kind: 'shell' },
+            artifacts: [{ id: 'art-rows', mediaType: 'application/x-nocx-rows' }],
+            caused: [],
+            proseEvicted: false,
+          })
+        }
+        artifactCalls++
+        return Promise.resolve(
+          artifactCalls === 1 ? page(`${a}\n`, 1, true) : page(`${a}\n${b}\n`, 2, false),
+        )
+      }),
+    } as unknown as WSClient
+    const read = await blockRowsForEntry(client, 'entry-short', { fromRow: 0, rowLimit: 2 })
+    expect(read.kind).toBe('rows')
+    expect(read.kind === 'rows' ? read.rows.lines.map((l) => l.from) : []).toEqual([0, 1])
+    expect(artifactCalls).toBe(2)
+  })
+
   it('answers absent when the entry keeps no rows artifact at all', async () => {
     const { client } = fakeLedger([BOTH[0]])
     expect(await blockRowsForEntry(client, 'entry-1')).toEqual({ kind: 'absent' })

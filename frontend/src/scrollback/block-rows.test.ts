@@ -8,6 +8,9 @@ import { DEFAULT_SNAPSHOT, type TerminalSnapshot } from './serializer'
 import { restoredBlock } from './restored-block'
 import {
   blockColumnsOf,
+  loadedRowRanges,
+  missingRowRanges,
+  nextPageForRows,
   paintStoredRows,
   repaintStoredRows,
   paintUnreadableRows,
@@ -115,7 +118,9 @@ describe('stored block rows', () => {
       {
         firstRow: 0,
         lastRow: 24,
+        endRow: 25,
         rowCount: 25,
+        retainedRanges: [{ from: 0, to: 25 }],
         rangeStart: 10,
         rangeCount: 2,
         hasMoreBefore: true,
@@ -180,6 +185,91 @@ describe('stored block rows', () => {
     // An unloaded block printed nothing is a different fact from a block
     // whose page has not arrived; the second must not say the first.
     expect(block.querySelector('[data-output-empty]')).toBeNull()
+  })
+
+  it('tracks loaded rows as ranges, so an interior hole is still missing', () => {
+    const loaded = loadedRowRanges([{ from: 0 }, { from: 1 }, { from: 4800 }, { from: 4801 }])
+    expect(loaded).toEqual([
+      { from: 0, to: 2 },
+      { from: 4800, to: 4802 },
+    ])
+    expect(missingRowRanges([{ from: 0, to: 5000 }], loaded)).toEqual([
+      { from: 2, to: 4800 },
+      { from: 4802, to: 5000 },
+    ])
+  })
+
+  it('fetches an interior hole when the reader reaches it, not because a tail is loaded', () => {
+    const retained = [{ from: 0, to: 5000 }]
+    const loaded = [
+      { from: 0, to: 200 },
+      { from: 4800, to: 5000 },
+    ]
+    expect(nextPageForRows(retained, loaded, 4800, 200)).toBeNull()
+    const page = nextPageForRows(retained, loaded, 2500, 200)!
+    expect(page.fromRow).toBeGreaterThanOrEqual(200)
+    expect(page.fromRow + page.rowLimit).toBeLessThanOrEqual(4800)
+    expect(page.rowLimit).toBe(200)
+  })
+
+  it('reserves a disjoint page set at the artifact height, not at the pages between them', () => {
+    const block = document.createElement('article')
+    block.dataset.entryId = 'disjoint'
+    paintStoredRows(
+      block,
+      {
+        ...stored,
+        lines: [
+          { from: 0, row: wireRowOf(okRow) },
+          { from: 1, row: wireRowOf(abcRow) },
+          { from: 4800, row: wireRowOf(okRow) },
+          { from: 4801, row: wireRowOf(abcRow) },
+        ],
+        artifactVersion: 'artifact-disjoint',
+        firstRow: 0,
+        lastRow: 4999,
+        endRow: 5000,
+        rowCount: 5000,
+        retainedRanges: [{ from: 0, to: 5000 }],
+        sealed: true,
+      },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+    expect(block.querySelectorAll('.term-grid-row')).toHaveLength(4)
+    expect(block.querySelectorAll('.cmd-output-gap')).toHaveLength(0)
+    const spacer = block.querySelector<HTMLElement>('.cmd-output-spacer')!
+    expect(spacer.dataset.rows).toBe('4798')
+    expect(block.querySelector<HTMLElement>('.cmd-output')!.dataset.rowsLoaded).toBe('4')
+  })
+
+  it('reserves a capped block from its retained runs, one notice on the hole', () => {
+    const block = document.createElement('article')
+    block.dataset.entryId = 'capped'
+    paintStoredRows(
+      block,
+      {
+        ...stored,
+        lines: [],
+        artifactVersion: 'artifact-capped',
+        firstRow: 0,
+        lastRow: 4999,
+        endRow: 5000,
+        rowCount: 600,
+        retainedRanges: [
+          { from: 0, to: 300 },
+          { from: 4700, to: 5000 },
+        ],
+        sealed: true,
+        truncated: 'cap',
+        droppedRows: 4400,
+      },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+    const spacers = [...block.querySelectorAll<HTMLElement>('.cmd-output-spacer')]
+    expect(spacers.map((el) => el.dataset.rows)).toEqual(['300', '300'])
+    expect(block.querySelectorAll('.cmd-output-gap')).toHaveLength(1)
+    expect(block.querySelector('[data-output-empty]')).toBeNull()
+    expect(block.querySelector<HTMLElement>('.cmd-output')!.dataset.rowsCount).toBe('600')
   })
 
   it('paints backend rows through the shared row painter', () => {

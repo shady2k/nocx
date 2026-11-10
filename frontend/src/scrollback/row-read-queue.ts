@@ -11,9 +11,25 @@
 import { RpcError } from '../dispatcher'
 import type { RowReadDeferred } from '../generated/row.readDeferred'
 
-/** The server's retryAfterMs, when err is its internal refusal. Null means
- *  the error is not one this queue owns and must reach the caller. */
+const ROW_READ_SHORT_RETRY_MS = 20
+
+/** A page that came back shorter than the retained rows it asked for, while
+ *  the artifact says more follow. The queue retries it; a short page is not
+ *  "done" and the caller must not paint the hole as a loss (ADR-y45sp41c). */
+export class RowReadShortError extends Error {
+  readonly retryAfterMs = ROW_READ_SHORT_RETRY_MS
+
+  constructor(message: string) {
+    super(message)
+    this.name = 'RowReadShortError'
+  }
+}
+
+/** The server's retryAfterMs, when err is its internal refusal, or the short
+ *  page's own retry hint. Null means the error is not one this queue owns and
+ *  must reach the caller. */
 export function rowReadRetryAfter(err: unknown): number | null {
+  if (err instanceof RowReadShortError) return err.retryAfterMs
   if (!(err instanceof RpcError) || err.code !== -32014) return null
   const data = err.data as Partial<RowReadDeferred> | null | undefined
   const ms = data?.retryAfterMs

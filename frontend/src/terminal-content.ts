@@ -5499,8 +5499,21 @@ export class TerminalContent extends BasePaneContent {
             ? params.screenAnchor
             : null,
       }
-      if (closed.kept) void this._refreshBlockRows(closed.entryId, true)
-      this.scrollback?.blockManager.blockClosed(closed.entryId, closed.screenAnchor)
+      const close = (): void => {
+        this.scrollback?.blockManager.blockClosed(closed.entryId, closed.screenAnchor)
+      }
+      if (closed.kept) {
+        // THE RUNNING PRESENTATION STAYS UNTIL THE FINAL ROWS ARE IN HAND
+        // (nocx-3wmve). The swap paints the frozen card from the rows the last
+        // OPEN read returned; the sealed read is two round trips behind, so a
+        // command's closing rows — which exist only in the live grid at this
+        // moment — would vanish until it lands, and a reader anchored on one of
+        // them had nothing to restore. Nothing is swapped until the read
+        // answers; then the one held swap runs, whole.
+        void this._refreshBlockRows(closed.entryId, true).then(close, close)
+        return
+      }
+      close()
     }
     const onBlockCleared = (params: unknown): void => {
       // BlockCleared (contracts/block.cleared.schema.json, nocx-2v80t.3.17):

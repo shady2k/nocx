@@ -61,7 +61,7 @@ const RETRY_HOPELESS_REFUSALS = new Set([
  *  first write, not a second one. There is no attempt bound: the wait doubles
  *  from 8 ms to 250 ms, so a backpressured session costs a handful of round
  *  trips a second, and what ends it is the session's own life (a closed socket
- *  rejects the next presentation) or the person's interrupt (abandonPendingRetry).
+ *  rejects the next presentation) or the person's interrupt (cancelPendingIntents).
  *
  *  EVERY OTHER CAUSE ENDS THE WAIT AT ONCE, and says so in the log. The
  *  generic `refused` — the closed set's catch-all for an error the helper has
@@ -420,11 +420,19 @@ export class SessionHandle {
    *  second field nobody assigns. */
   recovered: SessionRecovery | null
 
+  /** The epoch every presentation is stamped with (nocx-evj4b.1.12).
+   *  cancelPendingIntents bumps it, and an intent presented under an older
+   *  epoch ends at its next decision: no retry, whatever the answer. That is
+   *  type-ahead a tty discards on SIGINT, and it is a COMPARISON rather than a
+   *  one-shot hook, so it cannot miss the moment between an answer arriving and
+   *  a retry being decided — the race a release-the-wait hook had. */
+  private intentEpoch = 0
+
   /** The wait a backpressure retry is holding right now, if any
    *  (nocx-evj4b.1.12). One per handle because at most one intent per handle is
    *  being presented: the queue that awaits it is serial. See
-   *  abandonPendingRetry. */
-  private retryHold: { abandon: () => void } | null = null
+   *  cancelPendingIntents. */
+  private retryHold: { release: () => void } | null = null
 
   constructor(
     private client: WSClient,
@@ -717,6 +725,7 @@ export class SessionHandle {
     payload: string,
     mayRepresent: boolean,
     attempt = 1,
+    epoch = this.intentEpoch,
   ): Promise<SessionIntentResult> {
     const presented = this.accessEpoch
     const result = await this.client.sessionIntent(
@@ -727,6 +736,15 @@ export class SessionHandle {
     )
     if (typeof result.accessEpoch === 'number' && result.accessEpoch > 0) {
       this.accessEpoch = result.accessEpoch
+    }
+    // THE INTERRUPT CANCELLED WHAT CAME BEFORE IT (nocx-evj4b.1.12). This is
+    // checked where the ANSWER arrives, not only where a retry waits: a
+    // presentation in flight when the person pressed Ctrl-C answers `busy`
+    // later, and with a one-shot release-the-wait hook that busy answer went
+    // straight into another retry, with the interrupt behind it again. Nothing
+    // after this point re-presents or re-seats a cancelled intent.
+    if (epoch < this.intentEpoch) {
+      return result
     }
     if (
       mayRepresent &&
@@ -765,9 +783,8 @@ export class SessionHandle {
         )
         if (await this._holdForRetry(wait)) {
           // THE PERSON'S INTERRUPT ENDED THE WAIT (nocx-evj4b.1.12). The
-          // keystroke is not re-presented: the interrupt that released it is
-          // the next thing the queue sends, and a tty flushes the type-ahead it
-          // has not read, which this keystroke never was.
+          // keystroke is not re-presented: it is the type-ahead a tty discards
+          // when SIGINT arrives, and this keystroke never left the renderer.
           log.warn('nocx: a backpressured keystroke was abandoned for the interrupt behind it', {
             sid: this.sessionId,
             kind,
@@ -776,7 +793,8 @@ export class SessionHandle {
           })
           return result
         }
-        return this._intent(kind, payload, false, attempt + 1)
+        if (epoch !== this.intentEpoch) return result
+        return this._intent(kind, payload, false, attempt + 1, epoch)
       }
       if (cause !== 'access_revoked') {
         log.warn('nocx: a keystroke was refused with nothing written and is not retried', {
@@ -790,25 +808,25 @@ export class SessionHandle {
     return result
   }
 
-  /** Release a backpressure retry that is waiting, so the input queued behind
-   *  it — the person's Ctrl-C or Interrupt — is sent now (nocx-evj4b.1.12).
+  /** Mark every intent presented before this moment as cancelled, so it ends at
+   *  its next decision and is never re-presented (nocx-evj4b.1.12).
    *
-   *  A RETRY WAITS AT THE HEAD OF THE PANE'S QUEUE, which is what keeps a
-   *  keystroke ordered and lossless, and it is right for the keys typed after
-   *  it. It is wrong for an interrupt, which is not one more keystroke but the
-   *  person ending what is running: the queue is serial, so with no attempt
-   *  bound the interrupt would wait behind the retry indefinitely. This ends
-   *  the WAIT and nothing else — the intent returns the refusal it already had,
-   *  the queue advances, and the interrupt is the next call. A tty discards the
-   *  input it has not read when SIGINT arrives, and this keystroke never left
-   *  the renderer. */
-  abandonPendingRetry(): void {
-    this.retryHold?.abandon()
+   *  AN INTERRUPT IS NOT ONE MORE KEYSTROKE. It does not travel through the
+   *  pane's queue at all (TerminalContent sends it on its own path), and the
+   *  input before it is type-ahead a tty discards when SIGINT arrives: the
+   *  person asked for the line to end, not to be completed. Dropping it is the
+   *  right semantics, and it is also the only shape that has no race — every
+   *  intent carries the epoch it was presented under, checks it when the answer
+   *  arrives and before every retry, and a stale epoch ends the call. There is
+   *  no window between "the answer is in" and "retry or stop" for an interrupt
+   *  to fall into. */
+  cancelPendingIntents(): void {
+    this.intentEpoch += 1
+    this.retryHold?.release()
   }
 
-  /** Wait out one backpressure retry, or until abandonPendingRetry releases
-   *  it. True means the wait was abandoned: the caller must NOT re-present,
-   *  because the interrupt that released it is next in the queue. */
+  /** Wait out one backpressure retry, or until cancelPendingIntents releases
+   *  it. True means the wait was released: the caller must NOT re-present. */
   private _holdForRetry(ms: number): Promise<boolean> {
     return new Promise((resolve) => {
       const timer: ReturnType<typeof setTimeout> = setTimeout(() => {
@@ -816,7 +834,7 @@ export class SessionHandle {
         resolve(false)
       }, ms)
       this.retryHold = {
-        abandon: () => {
+        release: () => {
           clearTimeout(timer)
           this.retryHold = null
           resolve(true)

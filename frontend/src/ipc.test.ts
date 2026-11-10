@@ -393,10 +393,10 @@ describe('session.intent', () => {
     expect(attempts()).toHaveLength(1)
   })
 
-  // AND THE PERSON'S INTERRUPT ENDS THE WAIT (nocx-evj4b.1.12). The retry has no
-  // attempt bound, so it must be releasable: the queue is serial, and a Ctrl-C
-  // behind it is the defect that bound most needed to prevent.
-  it('abandons a waiting retry when the person interrupts, and does not re-present it', async () => {
+  // AND THE PERSON'S INTERRUPT ENDS A WAIT IN PROGRESS (nocx-evj4b.1.12). The
+  // retry has no attempt bound, so it must be releasable: the queue is serial,
+  // and an intent waiting behind it is the defect the cancellation prevents.
+  it('ends a waiting retry when the person interrupts, and does not re-present it', async () => {
     const { session, ws } = await connectedSession()
     const attempts = (): ReturnType<typeof ws.requests> =>
       ws.requests().filter((candidate) => candidate.method === 'session.intent')
@@ -417,10 +417,59 @@ describe('session.intent', () => {
       result: { state: 'refused', bytesWritten: 0, fenceAfter: 5, refusal: { cause: 'busy' } },
     })
     await new Promise((resolve) => setTimeout(resolve, 25))
-    session.abandonPendingRetry()
+    session.cancelPendingIntents()
     await expect(pending).resolves.toMatchObject({ state: 'refused' })
     await new Promise((resolve) => setTimeout(resolve, 400))
     expect(attempts()).toHaveLength(9)
+  })
+
+  // RACE ONE (nocx-evj4b.1.12): the interrupt lands while the presentation is
+  // IN FLIGHT — no wait is being held yet — and the busy answer arrives after
+  // it. The answer must end the intent, not start a retry the interrupt is
+  // behind.
+  it('ends an intent the interrupt cancelled while its presentation was in flight', async () => {
+    const { session, ws } = await connectedSession()
+    const attempts = (): ReturnType<typeof ws.requests> =>
+      ws.requests().filter((candidate) => candidate.method === 'session.intent')
+    const pending = session.intent('text', 'h')
+    session.cancelPendingIntents()
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: attempts()[0].id,
+      result: { state: 'refused', bytesWritten: 0, fenceAfter: 4, refusal: { cause: 'busy' } },
+    })
+    await expect(pending).resolves.toMatchObject({ state: 'refused' })
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    expect(attempts()).toHaveLength(1)
+  })
+
+  // RACE TWO (nocx-evj4b.1.12): a second intent was already presented when the
+  // interrupt arrived (the pane's queue can have one call in flight while
+  // another was presented at the handle), and its own busy answer must end it
+  // for the same reason — the interrupt is not to be held behind a retry of
+  // either, and releasing A is not what cancels B.
+  it('ends a second presented intent the interrupt cancelled, when its own busy answer arrives', async () => {
+    const { session, ws } = await connectedSession()
+    const attempts = (): ReturnType<typeof ws.requests> =>
+      ws.requests().filter((candidate) => candidate.method === 'session.intent')
+    const first = session.intent('text', 'a')
+    const second = session.intent('text', 'b')
+    await expect.poll(() => attempts().length, { timeout: 2_000 }).toBe(2)
+    session.cancelPendingIntents()
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: attempts()[0].id,
+      result: { state: 'refused', bytesWritten: 0, fenceAfter: 4, refusal: { cause: 'busy' } },
+    })
+    await expect(first).resolves.toMatchObject({ state: 'refused' })
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: attempts()[1].id,
+      result: { state: 'refused', bytesWritten: 0, fenceAfter: 5, refusal: { cause: 'busy' } },
+    })
+    await expect(second).resolves.toMatchObject({ state: 'refused' })
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    expect(attempts()).toHaveLength(2)
   })
 
   // AND NOT THE ONES THAT CANNOT CHANGE THEIR ANSWER. `closing` means this

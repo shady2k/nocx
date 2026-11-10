@@ -107,6 +107,9 @@ export interface BlockRowsMetadata {
   readonly artifactId: string
   readonly version: string
   readonly geometry: StoredBlocksRange | null
+  /** The artifact's own ledger.get metadata, so a refresh that already read
+   *  the geometry can fetch its page without a second lookup. */
+  readonly artifact: LedgerGet['artifacts'][number]
 }
 
 export async function blockRowsMetadataForEntry(
@@ -126,6 +129,7 @@ export async function blockRowsMetadataForEntry(
     artifactId: metadata.id,
     version: metadata.id,
     geometry: storedRowsCoordinates(metadata.payload),
+    artifact: metadata,
   }
 }
 
@@ -399,33 +403,57 @@ async function readBlockRowsForEntry(
     }
     const metadata = entry.artifacts.find((a) => a.mediaType === 'application/x-nocx-rows')
     if (!metadata) return { kind: 'absent' }
-    const params: Record<string, unknown> = { id: metadata.id }
-    if (window?.fromRow !== undefined) params.fromRow = window.fromRow
-    if (window?.rowLimit !== undefined) params.rowLimit = window.rowLimit
-    const read = await client.call<LedgerArtifact>('ledger.artifact', params)
-    const range = rangeOfArtifact(read)
-    const parsed = parseStoredBlockRows(read.body, metadata, metadata.id, range)
-    // A SHORT PAGE IS NOT DONE. The server selects whole lines and can come
-    // back short when the artifact is open or a page is still being written;
-    // the queue waits and asks again rather than painting the hole as a loss
-    // (ADR-y45sp41c). A page that reached the retained end is complete.
-    if (window?.rowLimit !== undefined && window.fromRow !== undefined && range !== undefined) {
-      const available = range.retainedRanges.reduce(
-        (total, rr) => total + Math.max(0, rr.to - Math.max(rr.from, window.fromRow!)),
-        0,
-      )
-      const expected = Math.min(window.rowLimit, available)
-      if (read.rangeCount < expected && read.hasMoreAfter) {
-        throw new RowReadShortError(
-          `stored rows page ${window.fromRow}+${window.rowLimit} returned ${read.rangeCount}`,
-        )
-      }
-    }
-    return { kind: 'rows', rows: parsed }
+    return await readRowsFromMetadata(client, metadata, window)
   } catch (err) {
     if (rowReadRetryAfter(err) !== null) throw err
     return { kind: 'unreadable', reason: `the stored rows could not be read: ${reasonOf(err)}` }
   }
+}
+
+/** The page half of a stored-rows read, from an artifact metadata object a
+ *  caller already holds. A reconnect's geometry read uses this so a fresh
+ *  window costs one ledger.get, not two (ADR-8rt54tx2). */
+export async function readBlockRowsWithMetadata(
+  client: WSClient,
+  metadata: BlockRowsMetadata,
+  window?: BlockRowsWindow,
+): Promise<BlockRowsRead> {
+  try {
+    return await readRowsFromMetadata(client, metadata.artifact, window)
+  } catch (err) {
+    if (rowReadRetryAfter(err) !== null) throw err
+    return { kind: 'unreadable', reason: `the stored rows could not be read: ${reasonOf(err)}` }
+  }
+}
+
+async function readRowsFromMetadata(
+  client: WSClient,
+  metadata: LedgerGet['artifacts'][number],
+  window?: BlockRowsWindow,
+): Promise<BlockRowsRead> {
+  const params: Record<string, unknown> = { id: metadata.id }
+  if (window?.fromRow !== undefined) params.fromRow = window.fromRow
+  if (window?.rowLimit !== undefined) params.rowLimit = window.rowLimit
+  const read = await client.call<LedgerArtifact>('ledger.artifact', params)
+  const range = rangeOfArtifact(read)
+  const parsed = parseStoredBlockRows(read.body, metadata, metadata.id, range)
+  // A SHORT PAGE IS NOT DONE. The server selects whole lines and can come
+  // back short when the artifact is open or a page is still being written;
+  // the queue waits and asks again rather than painting the hole as a loss
+  // (ADR-y45sp41c). A page that reached the retained end is complete.
+  if (window?.rowLimit !== undefined && window.fromRow !== undefined && range !== undefined) {
+    const available = range.retainedRanges.reduce(
+      (total, rr) => total + Math.max(0, rr.to - Math.max(rr.from, window.fromRow!)),
+      0,
+    )
+    const expected = Math.min(window.rowLimit, available)
+    if (read.rangeCount < expected && read.hasMoreAfter) {
+      throw new RowReadShortError(
+        `stored rows page ${window.fromRow}+${window.rowLimit} returned ${read.rangeCount}`,
+      )
+    }
+  }
+  return { kind: 'rows', rows: parsed }
 }
 
 /**

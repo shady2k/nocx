@@ -99,7 +99,7 @@ import {
   type BlockRecord,
   type RunningBlockActions,
 } from './scrollback/blocks'
-import { storedBlockRowsForSelection } from './scrollback/block-rows'
+import { storedBlockRowsForSelection, type StoredBlockRows } from './scrollback/block-rows'
 import type { AgentRunCompletion } from './run-command'
 import { CommandSnapshotStore } from './command-snapshot'
 import type { ActionFacts, DesiredMode } from './capability'
@@ -6751,6 +6751,95 @@ describe('the projections consume the kernel through the composition root (ADR-0
     }
   })
 
+  it('re-validates a restored block and pages when it crossed the lazy threshold', async () => {
+    const client = makeClient()
+    const artifactParams: Array<{ fromRow?: number; rowLimit?: number }> = []
+    const grown = Array.from({ length: 400 }, (_, i) =>
+      JSON.stringify({
+        from: 100 + i,
+        row: wireRowOf([[`grown-${100 + i}`, 1, true]] as CellSpec[]),
+      }),
+    ).join('\n')
+    client.call.mockImplementation((method: string, params: unknown) => {
+      if (method === 'ledger.get') {
+        return Promise.resolve({
+          entry: {},
+          edges: [],
+          artifacts: [
+            {
+              id: 'art-restored',
+              mediaType: 'application/x-nocx-rows',
+              payload: { rowCount: 500, endRow: 500, retainedRanges: [{ from: 0, to: 500 }] },
+            },
+          ],
+        })
+      }
+      if (method === 'ledger.artifact') {
+        artifactParams.push(params as { fromRow?: number; rowLimit?: number })
+        return Promise.resolve({
+          id: 'art-restored',
+          mediaType: 'application/x-nocx-rows',
+          body: `${grown}\n`,
+          truncated: null,
+          byteLen: grown.length,
+          firstRow: 0,
+          lastRow: 499,
+          endRow: 500,
+          rowCount: 500,
+          retainedRanges: [{ from: 0, to: 500 }],
+          rangeStart: 100,
+          rangeCount: 400,
+          hasMoreBefore: true,
+          hasMoreAfter: true,
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const inner = (content as unknown as { scrollback: { scrollbackInner: HTMLElement } })
+      .scrollback.scrollbackInner
+    try {
+      content.setVisible(true)
+      const el = document.createElement('article')
+      el.className = 'cmd-block'
+      el.dataset.entryId = 'entry-restored'
+      inner.appendChild(el)
+      const old = Array.from({ length: 100 }, (_, i) => ({
+        from: i,
+        row: wireRowOf([[`old-${i}`, 1, true]] as CellSpec[]),
+      }))
+      ;(content as unknown as { _restoredRows: Map<string, StoredBlockRows> })._restoredRows.set(
+        'entry-restored',
+        {
+          lines: old,
+          artifactVersion: 'art-restored',
+          droppedRows: 0,
+          lostRows: 0,
+          truncated: null,
+          firstRow: 0,
+          lastRow: 99,
+          endRow: 100,
+          rowCount: 100,
+          retainedRanges: [{ from: 0, to: 100 }],
+          sealed: false,
+        },
+      )
+      client._fireReconnect()
+      await vi.waitFor(() => {
+        expect(el.querySelector('.cmd-output')?.textContent).toContain('grown')
+      })
+      expect(artifactParams).toHaveLength(1)
+      expect(artifactParams[0].fromRow).toBe(100)
+      expect(artifactParams[0].rowLimit).toBe(400)
+    } finally {
+      teardown()
+    }
+  })
+
   it('re-validates a small block whose durable rows grew while disconnected', async () => {
     const client = makeClient()
     const oldLine = JSON.stringify({ from: 0, row: wireRowOf([['old', 1, true]] as CellSpec[]) })
@@ -6838,9 +6927,9 @@ describe('the projections consume the kernel through the composition root (ADR-0
           withScrollback.scrollback.scrollbackInner.querySelector('.cmd-output')?.textContent
         expect(text).toContain('grown')
       })
-      // One metadata read for the comparison, then the body pair for the
-      // block that changed.
-      expect(reads).toBe(2)
+      // One metadata read for the comparison; its artifact metadata is
+      // reused for the page, so the refresh does not ask ledger.get again.
+      expect(reads).toBe(1)
     } finally {
       teardown()
     }

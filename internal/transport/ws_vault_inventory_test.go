@@ -37,7 +37,7 @@ func newInventoryHarness(t *testing.T, extra ...WSServerOption) *inventoryHarnes
 		t.Fatalf("NewRegistry: %v", err)
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	v, err := vault.New(docStore, reg, logger)
+	v, err := vault.New(docStore, reg, logger, testCheapKDF())
 	if err != nil {
 		t.Fatalf("vault.New: %v", err)
 	}
@@ -476,7 +476,7 @@ func TestVaultInventory_SecretSurvivesRestart(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewRegistry: %v", err)
 		}
-		v, err := vault.New(docStore, reg, logger)
+		v, err := vault.New(docStore, reg, logger, testCheapKDF())
 		if err != nil {
 			t.Fatalf("vault.New: %v", err)
 		}

@@ -155,6 +155,12 @@ type Vault struct {
 	// either way, so the flag says only that the cancellation was not an
 	// answer.
 	unlockAttemptAbandoned bool
+	// kdf is the cost this vault wraps NEW passphrase envelopes with. It is a
+	// field rather than a package variable so nothing outside can change it for
+	// the whole process (nocx-ouru5.1.16); New sets DefaultKDFParams, and the
+	// constructor's optional argument — which no production caller passes —
+	// replaces it.
+	kdf KDFParams
 	// detachWindow is how long the client count must STAY zero before the
 	// detach is read as a departure (presence.go). New sets it to
 	// DefaultDetachWindow; SetDetachWindow replaces it, and zero means
@@ -176,10 +182,17 @@ type Vault struct {
 }
 
 // New loads the vault document, decides the initial state, and runs
-// Reconcile once before returning. A vault that starts serving without
+// Reconcile once before returning.
+//
+// kdf is the passphrase cost this vault wraps NEW envelopes with, and it is
+// VARIADIC so the production path says nothing: a shipped vault is built with
+// DefaultKDFParams and there is no argument a composition root passes, no
+// package variable anybody can set, and no global a later call can change for
+// everybody (nocx-ouru5.1.16). A test binary that stands up a vault per test
+// passes its own cost here — the one decision it is entitled to make. A vault that starts serving without
 // reconciling can hand out a reference the journal was about to retire.
 // Reconciliation failures are logged but do not block construction.
-func New(docs storage.DocumentStore, reg *Registry, logger *slog.Logger) (*Vault, error) {
+func New(docs storage.DocumentStore, reg *Registry, logger *slog.Logger, kdf ...KDFParams) (*Vault, error) {
 	doc, found, err := loadDocument(docs)
 	if err != nil {
 		return nil, err
@@ -194,6 +207,10 @@ func New(docs storage.DocumentStore, reg *Registry, logger *slog.Logger) (*Vault
 		autoSealDurationFn:   defaultAutoSealDuration,
 		autoSealTimerFactory: newAutoSealTimer,
 		detachWindow:         DefaultDetachWindow,
+		kdf:                  DefaultKDFParams(),
+	}
+	if len(kdf) > 0 {
+		v.kdf = kdf[0]
 	}
 	v.promptCtx, v.promptCancel = context.WithCancel(context.Background())
 	if found {
@@ -361,7 +378,7 @@ func (v *Vault) Setup(ctx context.Context, req SetupRequest) (SetupResult, error
 	// recovery envelope. Both, always: the recovery code is the only thing
 	// that survives a forgotten passphrase, and the passphrase is the only
 	// thing that survives a lost recovery code.
-	e, err := wrapWithPassphrase(root, req.Passphrase)
+	e, err := wrapWithPassphrase(root, req.Passphrase, v.kdf)
 	if err != nil {
 		for i := range len(root) {
 			root[i] = 0
@@ -386,7 +403,7 @@ func (v *Vault) Setup(ctx context.Context, req SetupRequest) (SetupResult, error
 		return SetupResult{}, fmt.Errorf("generate recovery code: %w", rerr)
 	}
 	code := crockfordEncode(raw[:])
-	recEnv, err := wrapWithPassphrase(root, code)
+	recEnv, err := wrapWithPassphrase(root, code, v.kdf)
 	if err != nil {
 		for i := range len(root) {
 			root[i] = 0
@@ -935,7 +952,7 @@ func (v *Vault) ChangePassphrase(ctx context.Context, req ChangePassphraseReques
 	}()
 
 	// Auth passed — wrap the root key with the new passphrase.
-	newEnv, err := wrapWithPassphrase(root, req.NewPassphrase)
+	newEnv, err := wrapWithPassphrase(root, req.NewPassphrase, v.kdf)
 	if err != nil {
 		return fmt.Errorf("wrap new passphrase: %w", err)
 	}
@@ -1007,7 +1024,7 @@ func (v *Vault) RegenerateRecovery(ctx context.Context, req RegenerateRequest) (
 	}
 	code := crockfordEncode(raw[:])
 
-	env, err := wrapWithPassphrase(root, code)
+	env, err := wrapWithPassphrase(root, code, v.kdf)
 	if err != nil {
 		return "", fmt.Errorf("wrap recovery: %w", err)
 	}

@@ -22,27 +22,6 @@ func MintReferenceForTest(p ProviderID) (credential.SecretID, error) {
 	return mintID(p)
 }
 
-// UseCheapKDFForTest lowers THIS PROCESS's passphrase key derivation to the
-// floor the KDF accepts, for test binaries that build a vault per test.
-//
-// Production code never calls this. The real parameters (64 MiB, three passes,
-// four threads) are a deliberate cost paid once when a person sets a
-// passphrase; a test package that stands up a vault for every one of its tests
-// pays it a hundred times, and in internal/transport that was 27% of the
-// package's CPU — most of why its single test binary needs the whole default
-// ten-minute go test timeout (nocx-ouru5.1.16).
-//
-// IT IS PROCESS-WIDE AND NEVER RESTORED, deliberately. The parameters are
-// package vars read on every derive, so a test that lowered them and restored
-// them on its way out would race a parallel test deriving in between. A test
-// binary that wants the production cost is the KDF's own test, and that
-// package sets exactly what it needs (keys_test.go).
-func UseCheapKDFForTest() {
-	argon2Memory = 1 // KiB; the floor the parameters accept
-	argon2Time = 1
-	argon2Threads = 1
-}
-
 // ResolveRowForTest resolves a renderer-addressable row handle back to its
 // SecretID, for tests that must observe the material behind a wire-driven
 // operation.

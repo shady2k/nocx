@@ -11,16 +11,31 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
-// Production argon2id parameters as package-level variables so a test can
-// lower them without weakening the build (no env var, no build tag). They are
-// read at every call site, never from a constant inside the KDF path — that
-// is what lets the Envelope carry its own params and what lets a future
-// version raise the cost without invalidating stored envelopes.
-var (
-	argon2Memory  uint32 = 64 * 1024 // KiB → 64 MiB
-	argon2Time    uint32 = 3
-	argon2Threads uint8  = 4
-)
+// KDFParams is the cost of deriving a passphrase key: the argon2id parameters
+// a NEW envelope is wrapped with.
+//
+// A PARAMETER, NOT A PACKAGE VARIABLE (nocx-ouru5.1.16, review). The cost used
+// to be three mutable package vars a test could lower; that made it possible
+// for any code in the process to weaken every envelope this vault went on to
+// write, and the envelopes persist the parameters they were made with. It
+// travels through the constructor now: the production field is
+// DefaultKDFParams, the composition root passes nothing, and a test that
+// cannot afford 64 MiB per vault says so in its own call. Nothing global can be
+// changed at all.
+//
+// The parameters a STORED envelope carries are the ones it was wrapped with —
+// unwrapWithPassphrase reads them from the envelope (keys.go), so raising this
+// cost later never invalidates what is already persisted (§5.1).
+type KDFParams struct {
+	MemoryKiB uint32
+	Time      uint32
+	Threads   uint8
+}
+
+// DefaultKDFParams is the production cost: 64 MiB, three passes, four threads.
+func DefaultKDFParams() KDFParams {
+	return KDFParams{MemoryKiB: 64 * 1024, Time: 3, Threads: 4}
+}
 
 const (
 	argon2SaltLen  = 16
@@ -53,12 +68,12 @@ func newRootKey() ([]byte, error) {
 	return k, nil
 }
 
-// wrapWithPassphrase derives a KEK from pass via argon2id using the current
-// package-level cost parameters, then encrypts root with AES-256-GCM. The
+// wrapWithPassphrase derives a KEK from pass via argon2id using kdf, then
+// encrypts root with AES-256-GCM. The
 // KDF parameters are bound as AAD so a stored-envelope tamper that alters
 // Memory/Time/Threads makes decryption fail.
-func wrapWithPassphrase(root []byte, pass string) (Envelope, error) {
-	mem, tm, thr := argon2Memory, argon2Time, argon2Threads
+func wrapWithPassphrase(root []byte, pass string, kdf KDFParams) (Envelope, error) {
+	mem, tm, thr := kdf.MemoryKiB, kdf.Time, kdf.Threads
 
 	salt := make([]byte, argon2SaltLen)
 	if _, err := rand.Read(salt); err != nil {
@@ -128,7 +143,7 @@ func unwrapWithPassphrase(e Envelope, pass string) ([]byte, error) {
 // newRecoveryCode generates a fresh recovery code, wraps a freshly minted
 // root key with it, and returns both. The plaintext code is returned exactly
 // once and is never stored — only the Envelope persists.
-func newRecoveryCode() (code string, e Envelope, err error) {
+func newRecoveryCode(kdf KDFParams) (code string, e Envelope, err error) {
 	var raw [16]byte // 128 bits
 	if _, rerr := rand.Read(raw[:]); rerr != nil {
 		return "", Envelope{}, fmt.Errorf("new recovery code: %w", rerr)
@@ -140,7 +155,7 @@ func newRecoveryCode() (code string, e Envelope, err error) {
 		return "", Envelope{}, err
 	}
 
-	e, err = wrapWithPassphrase(root, code)
+	e, err = wrapWithPassphrase(root, code, kdf)
 	if err != nil {
 		return "", Envelope{}, err
 	}

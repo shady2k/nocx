@@ -1131,11 +1131,97 @@ describe('BlockManager', () => {
     expect(liveContainer.parentElement).toBe(rec.el)
   })
 
-  it('finalizes orphaned running block on next start', () => {
+  it('settles a block the next start displaces, instead of leaving it running forever (nocx-evj4b.1.9)', () => {
+    // There is ONE running block. A start that arrives while another block is
+    // still running displaces it — the state a split leaves behind, and the
+    // state the owner met as two blocks at once. The displaced block used to
+    // keep `cmd-block-running` and a stopped ticker, and its own block.closed
+    // was then dropped (the record no longer read `running`), so nothing could
+    // ever settle it. It is not the command that just ended: its completion is
+    // not this start's to carry, so it freezes as unknown, with no exit status.
     const first = manager.startBlock('cmd1', '~', 0)
+    manager.bindAttempt('att-first')
     const second = manager.startBlock('cmd2', '~', 5)
-    expect(first.status).toBe('failure')
+    manager.bindAttempt('att-second')
+
     expect(manager.runningBlock).toBe(second)
+    expect(inner.querySelectorAll('.cmd-block-running')).toHaveLength(1)
+    expect(second.el.classList.contains('cmd-block-running')).toBe(true)
+    expect(first.el.classList.contains('cmd-block-running')).toBe(false)
+    expect(first.status).toBe('unknown')
+    expect(first.exitCode).toBeNull()
+    expect(first.el.dataset.outcome).toBeUndefined()
+    // Its own close still reaches it, and the card is already the frozen one
+    // the transport's row refresh will fill.
+    manager.blockClosed('att-first')
+    expect(first.el.classList.contains('cmd-block-running')).toBe(false)
+    expect(first.el.querySelector('.cmd-header-text')?.textContent).toBe('cmd1')
+  })
+
+  it('a displaced block takes its own later completion — outcome, code and length — and the running block keeps its own (nocx-evj4b.1.9)', () => {
+    // The two carriers are independent (ADR-0074): the next command's start
+    // can outrun the displaced one's completion. The displaced card froze as
+    // unknown ONLY for want of those facts; when its authenticated completion
+    // arrives it belongs to that card, and nothing may reach the new one.
+    const domain = mintDomain({
+      lane: 'test-lane',
+      lifecycle: 'prompt_ready',
+      domain: 'd-top',
+      epoch: 1,
+    }) as IntegrationDomain
+    const first = manager.startBlock('top', '~', 0)
+    manager.bindAttempt('att-top')
+    const second = manager.startBlock('htop', '~', 4)
+    manager.bindAttempt('att-htop')
+    expect(first.status).toBe('unknown')
+    expect(first.el.dataset.outcome).toBeUndefined()
+
+    manager.freezeFromAttempt(
+      {
+        id: 'att-top',
+        domain,
+        state: 'completed',
+        exitCode: 0,
+        fence: 'f'.repeat(64),
+        startedAt: '2026-11-10T10:00:00.000Z',
+        completedAt: '2026-11-10T10:00:03.400Z',
+      },
+      2,
+    )
+
+    expect(first.status).toBe('success')
+    expect(first.exitCode).toBe(0)
+    expect(first.durationMs).toBe(3400)
+    expect(first.el.dataset.outcome).toBe('success')
+    expect(first.el.textContent).toContain('3.4s')
+    // The command that displaced it is untouched: still running, still the
+    // running slot, with no exit code and no outcome of its own.
+    expect(second.status).toBe('running')
+    expect(second.exitCode).toBeNull()
+    expect(second.el.dataset.outcome).toBeUndefined()
+    expect(manager.runningBlock).toBe(second)
+    expect(second.el.classList.contains('cmd-block-running')).toBe(true)
+  })
+
+  it('a new start reclaims a header the alternate seat borrowed from the displaced block (nocx-evj4b.1.9)', () => {
+    const first = manager.startBlock('top', '~', 0)
+    manager.bindAttempt('att-top')
+    const header = first.el.querySelector<HTMLElement>('.cmd-header')!
+    inner.prepend(header)
+
+    manager.startBlock('top', '~', 3)
+
+    // The displaced block keeps its own header — headless is the owner's
+    // "frozen with its header rows gone" — and the new block gets its own,
+    // never the old command's.
+    // The displaced block's card carries its own header again, and nothing
+    // is left seated outside a block for the new one to inherit.
+    expect(header.isConnected).toBe(false)
+    expect(inner.querySelectorAll(':scope > .cmd-header')).toHaveLength(0)
+    const frozenCard = inner.querySelector<HTMLElement>('.cmd-block:not(.cmd-block-running)')
+    expect(frozenCard?.querySelector<HTMLElement>(':scope > .cmd-header')).not.toBeNull()
+    expect(frozenCard?.querySelector('.cmd-header-text')?.textContent).toBe('top')
+    expect(manager.runningBlock?.el.querySelector('.cmd-header-text')?.textContent).toBe('top')
   })
 
   it('opening a block keeps the keyboard in the live grid it seats as its body (nocx-askcb)', () => {
@@ -4901,6 +4987,129 @@ describe('backend-owned block rows', () => {
           .map((line) => line.trimEnd()),
       ).toEqual(['earlier', 'latest'])
       expect(old.querySelector('.cmd-output')).toBeNull()
+    } finally {
+      manager.dispose()
+      inner.remove()
+    }
+  })
+
+  it("releases the live region only when it is the freezing block's own (nocx-3wmve)", () => {
+    const inner = document.createElement('div')
+    const liveContainer = document.createElement('div')
+    inner.appendChild(liveContainer)
+    document.body.appendChild(inner)
+    const manager = new BlockManager(inner, liveContainer, {
+      snapshotStore: freshStore(),
+      paintStoredRows: (block, rows) =>
+        paintStoredRows(block, rows, { metric: null, palette: DEFAULT_SNAPSHOT }),
+    })
+    const completed = {
+      id: 'att-a',
+      domain: mintDomain({
+        lane: 'test-lane',
+        lifecycle: 'prompt_ready',
+        domain: 'test-domain',
+        epoch: 1,
+      }) as IntegrationDomain,
+      state: 'completed' as const,
+      exitCode: 0,
+      fence: 'a'.repeat(64),
+    }
+    try {
+      // A runs, completes, and waits for its block.closed (the sealed rows are
+      // still on the wire, which is what the freeze now waits for).
+      manager.startBlock('printf a', '~', 0)
+      manager.bindAttempt('att-a')
+      manager.freezeFromAttempt(completed, 0)
+      // B starts and the live region becomes B's body.
+      const b = manager.startBlock('printf b', '~', 0)
+      manager.bindAttempt('att-b')
+      expect(liveContainer.parentElement).toBe(b.el)
+
+      // A's close lands while B owns the grid. It may not take B's region.
+      manager.blockClosed('att-a')
+
+      expect(liveContainer.parentElement).toBe(b.el)
+      expect(b.el.contains(liveContainer)).toBe(true)
+    } finally {
+      inner.remove()
+      manager.dispose()
+    }
+  })
+
+  it('enters the reader hold before any DOM change of the freeze (nocx-3wmve)', () => {
+    const inner = document.createElement('div')
+    const liveContainer = document.createElement('div')
+    inner.appendChild(liveContainer)
+    document.body.appendChild(inner)
+    const order: string[] = []
+    const manager = new BlockManager(inner, liveContainer, {
+      snapshotStore: freshStore(),
+      paintStoredRows: (block, rows) =>
+        paintStoredRows(block, rows, { metric: null, palette: DEFAULT_SNAPSHOT }),
+      holdReaderPlace: (mutate) => {
+        order.push('hold')
+        mutate()
+      },
+    })
+    const insert = inner.insertBefore.bind(inner)
+    inner.insertBefore = ((node: Node, child: Node | null) => {
+      order.push('dom')
+      return insert(node, child)
+    }) as typeof inner.insertBefore
+    const replace = inner.replaceChild.bind(inner)
+    inner.replaceChild = ((node: Node, old: Node) => {
+      order.push('dom')
+      return replace(node, old)
+    }) as typeof inner.replaceChild
+    try {
+      manager.startBlock('printf rows', '~', 0)
+      manager.bindAttempt('entry-order')
+      order.length = 0
+      closeRunningBlock(manager)
+      // The region leaving its block, the header going back and the element
+      // swap are ONE change: every DOM move of the freeze happens inside the
+      // hold, so the anchor is taken before the first of them.
+      expect(order[0]).toBe('hold')
+      expect(order).toContain('dom')
+    } finally {
+      inner.remove()
+      manager.dispose()
+    }
+  })
+
+  it('freezes a block whole: the element that arrives already carries its rows', () => {
+    const { manager, inner } = newManager()
+    manager.startBlock('printf rows', '~', 0)
+    manager.bindAttempt('entry-whole')
+    manager.applyStoredRows('entry-whole', {
+      lines: [
+        { from: 0, row: row('first line') },
+        { from: 1, row: row('second line') },
+      ],
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+    })
+    try {
+      // THE NODE THE SWAP HANDS OVER, AS IT ARRIVED. A reader scrolled into a
+      // running command's output is reading rows of exactly this block, so a
+      // block that arrives bodyless takes their place in the transcript away
+      // for as long as the paint takes — and the first layout read in that
+      // window clamps them to the top of the history (nocx-3wmve; measured in
+      // e2e/scroll-anchor-while-running.spec.ts at scrollTop 5956 -> 2672).
+      const arrived: Array<{ node: HTMLElement; body: boolean }> = []
+      const replaceChild = inner.replaceChild.bind(inner)
+      inner.replaceChild = ((node: Node, old: Node) => {
+        if (node instanceof HTMLElement) {
+          arrived.push({ node, body: node.querySelector('.cmd-output') !== null })
+        }
+        return replaceChild(node, old)
+      }) as typeof inner.replaceChild
+      closeRunningBlock(manager)
+      expect(arrived).toHaveLength(1)
+      expect(arrived[0].body, 'the frozen block arrived without its rows').toBe(true)
+      expect(blockOutputText(arrived[0].node)).toContain('second line')
     } finally {
       manager.dispose()
       inner.remove()

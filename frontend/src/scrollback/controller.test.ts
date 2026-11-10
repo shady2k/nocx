@@ -629,6 +629,43 @@ describe('ScrollbackController render-fence rendezvous (nocx-u7uh.8)', () => {
     expect(controller.mode).toBe('running')
     controller.blockManager.clearAll()
   })
+
+  it('a new start reclaims the fullscreen seat’s header, and the seat forgets it (nocx-evj4b.1.9)', () => {
+    // While a program owns the alternate screen the running header is SEATED
+    // out of its block and the controller holds that reference. A block
+    // displaced in that state must take its header back THROUGH the seat: a
+    // reparent by hand leaves the controller pointing at it, and the next
+    // fullscreen exit prepends it into whatever block is running then — the
+    // displaced command's header on the new command's card.
+    const { renderer } = rendererWithFence()
+    const pane = document.createElement('div')
+    const controller = new ScrollbackController({
+      pane,
+      liveContentHeight: () => renderer.liveContentHeight(),
+      cellMetrics: () => ({ cellWidth: renderer.cellWidth, cellHeight: renderer.cellHeight }),
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    controller.scrollbackArea.scrollTo = vi.fn()
+    controller.beginBlock('top', '~', 0)
+    controller.blockManager.bindAttempt('att-1')
+    controller.enterFullscreen()
+    expect(controller.scrollbackInner.querySelectorAll(':scope > .cmd-header')).toHaveLength(1)
+
+    controller.beginBlock('htop', '~', 3)
+    controller.blockManager.bindAttempt('att-2')
+    controller.exitFullscreen()
+
+    const running = controller.blockManager.runningBlock!
+    expect(running.el.querySelectorAll(':scope > .cmd-header')).toHaveLength(1)
+    expect(running.el.querySelector(':scope > .cmd-header .cmd-header-text')?.textContent).toBe(
+      'htop',
+    )
+    expect(controller.scrollbackInner.querySelectorAll(':scope > .cmd-header')).toHaveLength(0)
+    const displaced = controller.blockManager.blockForAttempt('att-1')!
+    expect(displaced.el.querySelectorAll(':scope > .cmd-header')).toHaveLength(1)
+    expect(displaced.el.querySelector('.cmd-header-text')?.textContent).toBe('top')
+    controller.blockManager.clearAll()
+  })
 })
 
 describe('the echoed command line leaves the live region too (nocx-w1n4)', () => {
@@ -1822,6 +1859,581 @@ describe('the scroller box keeps the tail (nocx-1ebrs.40)', () => {
     } finally {
       vi.unstubAllGlobals()
     }
+  })
+})
+
+/** jsdom lays nothing out, so a test that is about where rows sit on the glass
+ *  names the rectangles itself: the scroller's box, each row's height, and the
+ *  top edge that moves when something above the reader changes. */
+function rect(top: number, height: number, width = 800): DOMRect {
+  return {
+    top,
+    bottom: top + height,
+    height,
+    left: 0,
+    right: width,
+    width,
+    x: 0,
+    y: top,
+    toJSON: () => ({}),
+  }
+}
+
+/** A transcript the anchor can be taken from: a block with its own body, and —
+ *  when `nested` — a command inside a turn's children, which is where a
+ *  command's rows live when an agent turn owns them (ADR-0040). */
+function transcript(
+  controller: ScrollbackController,
+  options: { nested: boolean },
+): { row: HTMLElement; outer: HTMLElement; move: (by: number) => void } {
+  const outer = document.createElement('div')
+  outer.className = 'cmd-block'
+  const body = document.createElement('div')
+  body.className = 'cmd-output'
+  const row = document.createElement('div')
+  row.className = 'term-grid-row'
+  row.dataset.blockId = 'att-row'
+  row.dataset.logicalLine = '7'
+  let top = 120
+  row.getBoundingClientRect = () => rect(top, 17)
+  if (options.nested) {
+    const children = document.createElement('div')
+    children.className = 'cmd-children'
+    const nestedBlock = document.createElement('div')
+    nestedBlock.className = 'cmd-block cmd-block-running'
+    const nestedBody = document.createElement('div')
+    nestedBody.className = 'cmd-output'
+    nestedBody.appendChild(row)
+    nestedBlock.appendChild(nestedBody)
+    children.appendChild(nestedBlock)
+    outer.appendChild(children)
+    nestedBlock.getBoundingClientRect = () => rect(0, 2000)
+  } else {
+    body.appendChild(row)
+    outer.appendChild(body)
+  }
+  controller.scrollbackInner.appendChild(outer)
+  outer.getBoundingClientRect = () => rect(0, 2000)
+  return { row, outer, move: (by: number) => (top += by) }
+}
+
+/** The scroller, laid out: 1000px into a 4000px transcript whose box is 600px
+ *  tall — a reader away from both ends, which is the state every case here is
+ *  about. */
+function laidOut(controller: ScrollbackController): HTMLElement {
+  const area = controller.scrollbackArea
+  area.getBoundingClientRect = () => rect(0, 600)
+  Object.defineProperty(area, 'scrollHeight', { value: 4000, configurable: true })
+  area.scrollTop = 1000
+  return area
+}
+
+describe("the reader's anchor (nocx-3wmve)", () => {
+  it('names a row inside a nested command, not only a top-level body', () => {
+    const { controller } = makeController()
+    stopFollowing(controller)
+    const area = laidOut(controller)
+    const { move } = transcript(controller, { nested: true })
+
+    controller.holdReaderPlace(() => {
+      move(40)
+      Object.defineProperty(area, 'scrollHeight', { value: 4040, configurable: true })
+    })
+
+    expect(area.scrollTop).toBe(1040)
+  })
+
+  it("finds the reader's row in a long block without reading every row (nocx-3wmve)", () => {
+    const { controller } = makeController()
+    stopFollowing(controller)
+    laidOut(controller)
+    // A block the size of a long command: rows laid out one under the next,
+    // each with a measured top the way the browser answers. The reader is near
+    // row 800 of 1 000; every measurement is counted, because that count is the
+    // cost a settle pays on every delivery.
+    const block = document.createElement('div')
+    block.className = 'cmd-block'
+    const body = document.createElement('div')
+    body.className = 'cmd-output'
+    let reads = 0
+    for (let index = 0; index < 1000; index += 1) {
+      const row = document.createElement('div')
+      row.className = 'term-grid-row'
+      row.dataset.blockId = 'att-long'
+      row.dataset.logicalLine = String(index)
+      const top = index * 17 - 800 * 17
+      row.getBoundingClientRect = () => {
+        reads += 1
+        return rect(top, 17)
+      }
+      body.appendChild(row)
+    }
+    block.appendChild(body)
+    controller.scrollbackInner.appendChild(block)
+    block.getBoundingClientRect = () => rect(-800 * 17, 1000 * 17)
+
+    // THE ORDINAL WALK IS COUNTED TOO: a row restores by its block and its
+    // logical line, so counting its position among the body's children would
+    // walk every sibling on every settle for a number nothing reads.
+    const bodyEl = block.querySelector('.cmd-output') as HTMLElement
+    const indexOf = Array.prototype.indexOf
+    let walks = 0
+    Array.prototype.indexOf = function (this: unknown, ...args: unknown[]) {
+      if (this === bodyEl.children) walks += 1
+      return indexOf.apply(this as never, args as never)
+    } as typeof Array.prototype.indexOf
+    // THE COLLECTION IS NOT MATERIALIZED EITHER: `Array.from(children)` copies
+    // every row on every settle, whether or not it reads them.
+    const from = Array.from
+    let allocations = 0
+    Array.from = function (this: unknown, ...args: unknown[]) {
+      if (args[0] === bodyEl.children) allocations += 1
+      return from.apply(this as never, args as never)
+    } as typeof Array.from
+    try {
+      controller.holdReaderPlace(() => {})
+    } finally {
+      Array.prototype.indexOf = indexOf
+      Array.from = from
+    }
+    expect(walks, 'the capture walked the body for an ordinal a row does not need').toBe(0)
+    expect(allocations, 'the capture copied every row to reach one of them').toBe(0)
+
+    // The row nearest the top edge is row 800 — a linear walk from the block's
+    // first row reads ~800 of them; a bisection reads a handful.
+    expect(reads, `row measurements for one capture: ${reads}`).toBeLessThanOrEqual(40)
+  })
+
+  /** A body of answer prose: what an agent's turn renders, and nothing a row
+   *  identity can name. The stream appends at the end, so a paragraph's ordinal
+   *  among the body's units is stable while it grows. */
+  function prose(controller: ScrollbackController): {
+    units: HTMLElement[]
+    move: (by: number) => void
+  } {
+    const block = document.createElement('div')
+    block.className = 'cmd-block'
+    block.dataset.entryId = 'att-prose'
+    const body = document.createElement('div')
+    body.className = 'cmd-output'
+    const tops = [0, 40, 80, 120, 160]
+    const units = tops.map((start) => {
+      const line = document.createElement('span')
+      line.className = 'term-line'
+      line.textContent = `paragraph at ${start}`
+      line.getBoundingClientRect = () => rect(start, 40)
+      body.appendChild(line)
+      return line
+    })
+    block.appendChild(body)
+    controller.scrollbackInner.appendChild(block)
+    block.getBoundingClientRect = () => rect(0, 2000)
+    return {
+      units,
+      move: (by: number) => {
+        for (const unit of units) {
+          const previous = unit.getBoundingClientRect.bind(unit)
+          unit.getBoundingClientRect = () => {
+            const box = previous()
+            return rect(box.top + by, box.height)
+          }
+        }
+      },
+    }
+  }
+
+  it('anchors a body of answer prose, which carries no row identity (nocx-3wmve)', () => {
+    const { controller } = makeController()
+    stopFollowing(controller)
+    const area = laidOut(controller)
+    const { move } = prose(controller)
+
+    controller.holdReaderPlace(() => {
+      move(40)
+      Object.defineProperty(area, 'scrollHeight', { value: 4040, configurable: true })
+    })
+
+    // The prose unit nearest the top edge stays where it was read; falling
+    // back to the numeric position leaves it 40px lower on the glass.
+    expect(area.scrollTop).toBe(1040)
+  })
+
+  it('anchors the tall unit that covers the top edge from above (nocx-3wmve)', () => {
+    const { controller } = makeController()
+    stopFollowing(controller)
+    const area = laidOut(controller)
+    // One unit taller than the viewport, its own top 100px above the edge: a
+    // code fence, a table, a wrapped paragraph. The person is reading it, and
+    // nothing in the viewport STARTS inside it.
+    const block = document.createElement('div')
+    block.className = 'cmd-block'
+    block.dataset.entryId = 'att-tall'
+    const body = document.createElement('div')
+    body.className = 'cmd-output'
+    const tall = document.createElement('div')
+    tall.className = 'cmd-output-code'
+    let top = -100
+    tall.getBoundingClientRect = () => rect(top, 400)
+    body.appendChild(tall)
+    block.appendChild(body)
+    controller.scrollbackInner.appendChild(block)
+    block.getBoundingClientRect = () => rect(-2000, 4000)
+
+    controller.holdReaderPlace(() => {
+      // something above it grew: the unit moves DOWN inside the viewport
+      top += 40
+      Object.defineProperty(area, 'scrollHeight', { value: 4040, configurable: true })
+    })
+
+    // The unit that covers the edge keeps its (negative) offset: the view
+    // follows the change above it.
+    expect(area.scrollTop).toBe(1040)
+  })
+
+  it('names a prose unit inside its own body, not across the whole turn (nocx-3wmve)', () => {
+    const { controller } = makeController()
+    stopFollowing(controller)
+    const area = laidOut(controller)
+    // A TURN holds two commands, each with its own body: A above the viewport,
+    // and B — the prose the person is reading, from its tenth line. A late row
+    // committed to A shifts every unit's ordinal ACROSS the turn, which is how
+    // the restore used to land three lines away in B.
+    const turn = document.createElement('div')
+    turn.className = 'cmd-block'
+    turn.dataset.entryId = 'att-turn'
+    const children = document.createElement('div')
+    children.className = 'cmd-children'
+    const command = (id: string, units: HTMLElement[]): HTMLElement => {
+      const block = document.createElement('div')
+      block.className = 'cmd-block'
+      block.dataset.entryId = id
+      const body = document.createElement('div')
+      body.className = 'cmd-output'
+      for (const unit of units) body.appendChild(unit)
+      block.appendChild(body)
+      block.getBoundingClientRect = () => rect(-4000, 8000)
+      return block
+    }
+    const rowTops = [-200, -183, -166, -149, -132]
+    const rows = rowTops.map((top, index) => {
+      const row = document.createElement('div')
+      row.className = 'term-grid-row'
+      row.dataset.logicalLine = String(index)
+      row.getBoundingClientRect = () => rect(top, 17)
+      return row
+    })
+    const proseTops = Array.from({ length: 12 }, (_, index) => (index - 9) * 17)
+    const lines = proseTops.map((top, index) => {
+      const line = document.createElement('span')
+      line.className = 'term-line'
+      line.textContent = `line ${index}`
+      line.getBoundingClientRect = () => rect(top, 17)
+      return line
+    })
+    const a = command('att-a', rows)
+    const b = command('att-b', lines)
+    children.appendChild(a)
+    children.appendChild(b)
+    turn.appendChild(children)
+    controller.scrollbackInner.appendChild(turn)
+    turn.getBoundingClientRect = () => rect(-4000, 8000)
+
+    controller.holdReaderPlace(() => {
+      // A commits three rows at the START of its own body: the turn's global
+      // ordinal moves by three, B's own ordinal does not, and everything below
+      // A moves down by three rows.
+      const body = a.querySelector(':scope > .cmd-output')!
+      for (let added = 0; added < 3; added += 1) {
+        const row = document.createElement('div')
+        row.className = 'term-grid-row'
+        row.dataset.logicalLine = String(100 + added)
+        row.getBoundingClientRect = () => rect(-260 + added * 17, 17)
+        body.insertBefore(row, body.firstChild)
+      }
+      for (const [index, line] of lines.entries()) {
+        const top = proseTops[index] + 3 * 17
+        line.getBoundingClientRect = () => rect(top, 17)
+      }
+      Object.defineProperty(area, 'scrollHeight', { value: 4051, configurable: true })
+    })
+
+    // B's tenth line was the anchor; it is three rows lower in the transcript
+    // now, so the view follows it by exactly those three rows.
+    expect(area.scrollTop).toBe(1051)
+  })
+
+  it('anchors a long wrapped header that fills the viewport (nocx-3wmve)', () => {
+    const { controller } = makeController()
+    stopFollowing(controller)
+    const area = laidOut(controller)
+    // A command whose header wraps over more than a screen, and nothing of its
+    // body in view: the header is the only thing the person can be reading, and
+    // a search over body units alone left them on the numeric fallback.
+    const block = document.createElement('div')
+    block.className = 'cmd-block'
+    block.dataset.entryId = 'att-header'
+    const header = document.createElement('div')
+    header.className = 'cmd-header'
+    let top = -100
+    header.getBoundingClientRect = () => rect(top, 400)
+    block.appendChild(header)
+    controller.scrollbackInner.appendChild(block)
+    block.getBoundingClientRect = () => rect(-3000, 6000)
+
+    controller.holdReaderPlace(() => {
+      // a block above it grew: the header moves down inside the viewport
+      top += 40
+      Object.defineProperty(area, 'scrollHeight', { value: 4040, configurable: true })
+    })
+
+    expect(area.scrollTop).toBe(1040)
+  })
+
+  it('never anchors on a header that is pinned at the edge (nocx-3wmve)', () => {
+    const { controller } = makeController()
+    stopFollowing(controller)
+    const area = laidOut(controller)
+    // A long block whose header is STICKY and stuck at the viewport's top edge,
+    // with the row the person is reading underneath it. The pinned header stays
+    // at y=0 whatever the rows do, so anchoring on it reports no displacement
+    // and the restore moves nobody.
+    const block = document.createElement('div')
+    block.className = 'cmd-block'
+    block.dataset.entryId = 'att-sticky'
+    const header = document.createElement('div')
+    header.className = 'cmd-header'
+    header.style.position = 'sticky'
+    header.getBoundingClientRect = () => rect(0, 40)
+    const body = document.createElement('div')
+    body.className = 'cmd-output'
+    const row = document.createElement('div')
+    row.className = 'term-grid-row'
+    row.dataset.logicalLine = '12'
+    let top = 40
+    row.getBoundingClientRect = () => rect(top, 17)
+    body.appendChild(row)
+    block.appendChild(header)
+    block.appendChild(body)
+    controller.scrollbackInner.appendChild(block)
+    block.getBoundingClientRect = () => rect(-4000, 8000)
+
+    controller.holdReaderPlace(() => {
+      top += 40
+      Object.defineProperty(area, 'scrollHeight', { value: 4040, configurable: true })
+    })
+
+    expect(area.scrollTop).toBe(1040)
+  })
+
+  it('applies the idle class inside the held mutation, so its height cannot move a reader (nocx-3wmve)', () => {
+    const { controller } = makeController()
+    const area = laidOut(controller)
+    stopFollowing(controller)
+    const block = document.createElement('div')
+    block.className = 'cmd-block'
+    const body = document.createElement('div')
+    body.className = 'cmd-output'
+    const row = document.createElement('div')
+    row.className = 'term-grid-row'
+    row.dataset.logicalLine = '7'
+    // `live-idle` carries the idle box's own height: the transcript above moves
+    // by 140 when the class lands.
+    const container = controller.terminalLiveContainer
+    controller.setRunning()
+    row.getBoundingClientRect = () => rect(container.className.includes('live-idle') ? 140 : 0, 40)
+    body.appendChild(row)
+    block.appendChild(body)
+    controller.scrollbackInner.appendChild(block)
+    block.getBoundingClientRect = () => rect(0, 2000)
+
+    controller.setIdle()
+
+    expect(area.scrollTop, 'the idle class moved the transcript after the restore').toBe(1140)
+  })
+
+  it('does not follow a live-grid row when the freeze re-seats the live region (nocx-3wmve)', () => {
+    const { pane, controller } = makeController()
+    document.body.appendChild(pane)
+    const area = laidOut(controller)
+    stopFollowing(controller)
+    const block = document.createElement('div')
+    block.className = 'cmd-block'
+    block.dataset.entryId = 'att-run'
+    const container = controller.terminalLiveContainer
+    const rows: HTMLElement[] = []
+    for (let index = 0; index < 50; index += 1) {
+      const row = document.createElement('div')
+      row.className = 'term-grid-row'
+      const top = index * 40 - 1000
+      row.getBoundingClientRect = () => rect(top, 40)
+      container.appendChild(row)
+      rows.push(row)
+    }
+    container.getBoundingClientRect = () => rect(-1000, 2000)
+    block.appendChild(container)
+    controller.scrollbackInner.appendChild(block)
+    block.getBoundingClientRect = () => rect(-1000, 2000)
+
+    controller.holdReaderPlace(() => {
+      // THE FREEZE: the frozen card's body is built inside the block, and the
+      // live region is re-seated below it — the same elements, a new place.
+      const body = document.createElement('div')
+      body.className = 'cmd-output'
+      block.appendChild(body)
+      controller.scrollbackInner.insertBefore(container, block.nextSibling)
+      for (let index = 0; index < rows.length; index += 1) {
+        rows[index].getBoundingClientRect = () => rect(index * 40 - 400, 40)
+      }
+    })
+
+    expect(area.scrollTop, 'the restore followed the live copy of the row').toBe(1000)
+    document.body.removeChild(pane)
+  })
+
+  it('anchors a reader inside an expanded reasoning note, whatever its class (nocx-3wmve)', () => {
+    const { controller } = makeController()
+    stopFollowing(controller)
+    const area = laidOut(controller)
+    // A TURN'S EXPANDED REASONING is appended straight to `.cmd-children`, with
+    // no `.cmd-output` above it (blocks.ts). It is not a row, a paragraph or a
+    // header, so every kind the anchor used to enumerate missed it.
+    const block = document.createElement('div')
+    block.className = 'cmd-block'
+    block.dataset.entryId = 'att-turn'
+    const children = document.createElement('div')
+    children.className = 'cmd-children'
+    const note = document.createElement('div')
+    note.className = 'reasoning'
+    const tops: number[] = []
+    for (let index = 0; index < 50; index += 1) {
+      const line = document.createElement('div')
+      line.className = 'reasoning-line'
+      line.textContent = `thought ${index}`
+      const top = index * 40 - 1000
+      tops.push(top)
+      line.getBoundingClientRect = () => rect(top, 40)
+      note.appendChild(line)
+    }
+    note.getBoundingClientRect = () => rect(-1000, 2000)
+    children.appendChild(note)
+    block.appendChild(children)
+    controller.scrollbackInner.appendChild(block)
+    block.getBoundingClientRect = () => rect(-1000, 2000)
+
+    controller.holdReaderPlace(() => {
+      // Something above the note grew by 40: the card it sits under, a row
+      // committed earlier — either way the note moves down.
+      const lines = Array.from(note.children) as HTMLElement[]
+      for (let index = 0; index < lines.length; index += 1) {
+        lines[index].getBoundingClientRect = () => rect(tops[index] + 40, 40)
+      }
+      note.getBoundingClientRect = () => rect(-960, 2000)
+      block.getBoundingClientRect = () => rect(-960, 2000)
+    })
+
+    expect(area.scrollTop, 'the reader inside the note fell back to their old position').toBe(1040)
+  })
+
+  it('anchors a tool header that carries no id, by its element (nocx-3wmve)', () => {
+    const { pane, controller } = makeController()
+    // An element reference is the anchor, so the pane has to be IN the document
+    // for `isConnected` to mean what it means in the product.
+    document.body.appendChild(pane)
+    stopFollowing(controller)
+    const area = laidOut(controller)
+    // A TURN whose own header is pinned at the edge, and inside it a live tool
+    // block — addAnswerBlock's toolCall — with NO data-entry-id. The person is
+    // reading the tool's header. Named by identity it becomes the turn's, whose
+    // header is the pinned one; the element the person is on is the tool's.
+    const turn = document.createElement('div')
+    turn.className = 'cmd-block'
+    turn.dataset.entryId = 'att-turn'
+    const turnHeader = document.createElement('div')
+    turnHeader.className = 'cmd-header'
+    turnHeader.style.position = 'sticky'
+    turnHeader.getBoundingClientRect = () => rect(0, 32)
+    const children = document.createElement('div')
+    children.className = 'cmd-children'
+    const tool = document.createElement('div')
+    tool.className = 'cmd-block'
+    const toolHeader = document.createElement('div')
+    toolHeader.className = 'cmd-header'
+    let top = 100
+    toolHeader.getBoundingClientRect = () => rect(top, 40)
+    tool.appendChild(toolHeader)
+    tool.getBoundingClientRect = () => rect(60, 2000)
+    children.appendChild(tool)
+    turn.appendChild(turnHeader)
+    turn.appendChild(children)
+    controller.scrollbackInner.appendChild(turn)
+    turn.getBoundingClientRect = () => rect(-3000, 6000)
+
+    controller.holdReaderPlace(() => {
+      top += 40
+      Object.defineProperty(area, 'scrollHeight', { value: 4040, configurable: true })
+    })
+
+    expect(area.scrollTop).toBe(1040)
+    document.body.removeChild(pane)
+  })
+
+  it('a scroll-up ends following at the gesture, not when the watcher catches up (nocx-3wmve)', () => {
+    const { controller } = makeController()
+    const area = laidOut(controller)
+    area.scrollTo = ((options: ScrollToOptions | number) => {
+      const asked = typeof options === 'object' ? Number(options.top) : Number(options)
+      area.scrollTop = Math.min(asked, area.scrollHeight - area.clientHeight)
+    }) as typeof area.scrollTo
+    area.scrollTop = area.scrollHeight - area.clientHeight // the live end, following
+    const tail = (controller as unknown as { _tail: { following: boolean } })._tail
+    expect(tail.following).toBe(true)
+
+    // THE PERSON'S OWN WHEEL-UP, and the position it produced. The follow
+    // sentinel has not delivered yet — that is a frame behind.
+    area.dispatchEvent(new WheelEvent('wheel', { deltaY: -120, bubbles: true }))
+    area.scrollTop = 800
+
+    // A settle lands in the same frame: a freeze, a stored-rows delivery.
+    controller.holdReaderPlace(() => {})
+
+    expect(area.scrollTop, 'the settle put a just-scrolled-up reader back at the bottom').toBe(800)
+    expect(tail.following, 'the gesture did not end following at the gesture').toBe(false)
+  })
+
+  it('puts a FOLLOWER back at the bottom edge when a change grows the transcript (nocx-3wmve)', () => {
+    const { controller } = makeController()
+    const area = laidOut(controller)
+    area.scrollTop = 4000 - area.clientHeight // at the live end, following
+    // jsdom implements no scrolling: the controller's own `scrollTo` is the
+    // browser's here, exactly as the other tests in this file stand in for it.
+    area.scrollTo = ((options: ScrollToOptions | number) => {
+      const asked = typeof options === 'object' ? Number(options.top) : Number(options)
+      // the browser clamps to what exists; jsdom lays nothing out and does not
+      area.scrollTop = Math.min(asked, area.scrollHeight - area.clientHeight)
+    }) as typeof area.scrollTo
+
+    controller.holdReaderPlace(() => {
+      Object.defineProperty(area, 'scrollHeight', { value: 4100, configurable: true })
+    })
+
+    // One settle, two outcomes: a follower is put back at the end. The freeze's
+    // swap used to be anchor-only, so a deferred freeze under a follower grew
+    // the transcript and left them off the end with nothing to re-pin them.
+    expect(area.scrollTop).toBe(4100 - area.clientHeight)
+  })
+
+  it('holds a reader who is not following across any content change (settleAround)', () => {
+    const { controller } = makeController()
+    stopFollowing(controller)
+    const area = laidOut(controller)
+    const { move } = transcript(controller, { nested: false })
+
+    controller.settleAround(() => {
+      move(60)
+      Object.defineProperty(area, 'scrollHeight', { value: 4060, configurable: true })
+    })
+
+    expect(area.scrollTop).toBe(1060)
   })
 })
 

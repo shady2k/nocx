@@ -6822,13 +6822,14 @@ describe('the projections consume the kernel through the composition root (ADR-0
   })
 
   it('repaints a frozen block with the rows its close made final, so a settled block is whole (nocx-atpw5.1.19)', async () => {
-    // THE WINDOW THE CI FAILURE FELL IN. block.closed freezes the card at once
-    // and paints it from the rows the last OPEN read returned; the sealed read
-    // that close starts is two RPC round trips behind and repaints. A census
+    // THE WINDOW THE CI FAILURE FELL IN. block.closed used to freeze the card
+    // at once and paint it from the rows the last OPEN read returned; the
+    // sealed read that close starts is two RPC round trips behind, and a census
     // taken between the two read 64 rows painted for 100 stored — the last
-    // block of a 500-block transcript on webkit. What this pins is the other
-    // half, which the census now waits for: the sealed read lands on the frozen
-    // card and the block ends holding every row it stores.
+    // block of a 500-block transcript on webkit. The freeze now WAITS for that
+    // read (nocx-3wmve), so the window is closed rather than repainted: the
+    // card is swapped once, from the rows the close made final, and the block
+    // ends holding every row it stores.
     const row = (grapheme: string, from: number): string =>
       `${JSON.stringify({ from, row: wireRowOf([[grapheme, 1, true] as CellSpec]) })}\n`
     const bodies = [row('a', 0), `${row('a', 0)}${row('b', 1)}`]
@@ -6922,6 +6923,19 @@ describe('the projections consume the kernel through the composition root (ADR-0
       })
       blockClosed?.({ entryId: 'att-1', kept: true })
       await vi.waitFor(() => expect(releases).toHaveLength(2))
+      // KEPT RUNNING UNTIL THE SEALED ROWS ARE IN HAND (nocx-3wmve): the card
+      // is not swapped on the open read's rows, so the rows the close made
+      // final cannot vanish while their read is out.
+      expect(
+        withScrollback.scrollback.blockManager
+          .blockForAttempt('att-1')!
+          .el.classList.contains('cmd-block-running'),
+      ).toBe(true)
+      expect(paintedRows()).toBe(1)
+
+      // The rows the close made final land, and the one held swap paints the
+      // frozen card from all of them: a settled block is whole.
+      releases[1]()
       await vi.waitFor(() =>
         expect(
           withScrollback.scrollback.blockManager
@@ -6929,17 +6943,108 @@ describe('the projections consume the kernel through the composition root (ADR-0
             .el.classList.contains('cmd-block-running'),
         ).toBe(false),
       )
-      // Frozen on the rows it already had: the sealed read has not landed.
-      expect(paintedRows()).toBe(1)
+      expect(paintedRows()).toBe(2)
+    } finally {
+      teardown()
+    }
+  })
 
-      // The rows the close made final land on the frozen card.
+  it('keeps the running card until the sealed rows are in hand (nocx-3wmve)', async () => {
+    // THE SWAP PAINTS WHAT THE LAST OPEN READ RETURNED (nocx-3wmve). A command's
+    // closing rows exist only in the live grid at block.closed; swapping then
+    // makes them vanish until the sealed read lands, and a reader anchored on
+    // one of them has nothing to restore. The running card — grid and all —
+    // stays until the read answers, and then the one held swap runs.
+    const line = (from: number, text: string): string =>
+      `${JSON.stringify({ from, row: wireRowOf([[text, 1, true] as CellSpec]) })}\n`
+    const openBody = line(0, 'a') + line(1, 'b')
+    const sealedBody = openBody + line(2, 'c') + line(3, 'd')
+    const releases: Array<() => void> = []
+    const client = makeClient()
+    client.call.mockImplementation((method: string) => {
+      if (method === 'ledger.get') {
+        return Promise.resolve({
+          entry: {},
+          edges: [],
+          artifacts: [{ id: 'art-sealed', mediaType: 'application/x-nocx-rows' }],
+        })
+      }
+      if (method === 'ledger.artifact') {
+        const body = releases.length === 0 ? openBody : sealedBody
+        return new Promise((resolve) => {
+          releases.push(() =>
+            resolve({
+              id: 'art-sealed',
+              mediaType: 'application/x-nocx-rows',
+              body,
+              truncated: null,
+              byteLen: body.length,
+            }),
+          )
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('make')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-sealed',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'make',
+        },
+      })
+      const blockGrew = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'block.grew',
+      )?.[1] as ((params: unknown) => void) | undefined
+      const blockClosed = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'block.closed',
+      )?.[1] as ((params: unknown) => void) | undefined
+      expect(blockGrew).toBeDefined()
+      expect(blockClosed).toBeDefined()
+      blockGrew?.({ entryId: 'att-sealed' })
+      await vi.waitFor(() => expect(releases).toHaveLength(1))
+      releases[0]()
+      await flushDisplayFrame()
+      const rec = withScrollback.scrollback.blockManager.blockForAttempt('att-sealed')!
+      const running = rec.el
+      expect(running.classList.contains('cmd-block-running')).toBe(true)
+
+      // The command completes, then the close arrives; the sealed read it
+      // starts is held.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-sealed', state: 'completed', exitCode: 0, fence: 'a'.repeat(64) },
+      })
+      blockClosed?.({ entryId: 'att-sealed', kept: true })
+      await vi.waitFor(() => expect(releases).toHaveLength(2))
+      await flushDisplayFrame()
+      expect(rec.el, 'the card was swapped before its sealed rows landed').toBe(running)
+      expect(running.classList.contains('cmd-block-running')).toBe(true)
+
       releases[1]()
-      await vi.waitFor(() => expect(paintedRows()).toBe(2))
-      expect(
-        withScrollback.scrollback.blockManager
-          .blockForAttempt('att-1')!
-          .el.classList.contains('cmd-block-running'),
-      ).toBe(false)
+      await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
     } finally {
       teardown()
     }
@@ -22231,6 +22336,41 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
       expect(fits().length).toBe(before)
       resize(776)
       await vi.waitFor(() => expect(fits().length).toBe(before + 1))
+    } finally {
+      restore()
+    }
+  })
+
+  it('a submit waits for the grid it will run at to apply, and its bytes then go out (nocx-evj4b.1.9)', async () => {
+    // The prompt prediction measures the running height at the Enter, but its
+    // report rides the settle timer while the submit's own attempt round trip
+    // is already in flight. On a loaded runner the bytes reached a pty that was
+    // still the prompt's taller grid: `top` drew for the taller screen, and the
+    // resize that followed scrolled its summary off the top — the block's first
+    // rows landed in its body, which is the owner's screenshot. The write waits
+    // for the same receipt the alternate-screen switch's fence waits for.
+    const { session, typeCommand, submitCommand, restore } = await paneWithLayout()
+    try {
+      let applied!: () => void
+      session.resizeApplied.mockImplementation(
+        () =>
+          new Promise<'applied'>((resolve) => {
+            applied = () => resolve('applied')
+          }),
+      )
+      typeCommand('top')
+      submitCommand('top')
+      // Nothing of the command is on the wire: the grid it will draw for is
+      // not applied yet. Focus and other intents the handoff itself produces
+      // are not the command's bytes.
+      const bytes = (): unknown[] =>
+        session.intent.mock.calls.filter(([kind]) => kind === 'text' || kind === 'key')
+      expect(bytes()).toEqual([])
+      // The write reached the receipt and is holding on it.
+      await vi.waitFor(() => expect(session.resizeApplied).toHaveBeenCalled())
+      expect(bytes()).toEqual([])
+      applied()
+      await vi.waitFor(() => expect(bytes().length).toBeGreaterThan(0))
     } finally {
       restore()
     }

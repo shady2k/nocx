@@ -3158,7 +3158,7 @@ export class BlockManager {
     startAnchor?: BlockScreenAnchor,
   ): BlockRecord {
     if (this._runningBlock) {
-      this._finalizeRunningUnsafe()
+      this._settleDisplacedRunning()
     }
 
     const id = this._nextId++
@@ -4068,18 +4068,38 @@ export class BlockManager {
     }
   }
 
-  private _finalizeRunningUnsafe(): void {
-    // Note: a block awaiting its block.closed is an ALREADY logically frozen
-    // one, never the running block this finalizes — its close settles it
-    // independently, guarded by the running slot.
-    this._stopTicker()
-    this._clearCommandIndicator()
-    if (!this._runningBlock) return
-    this._runningBlock.status = 'failure'
-    this._runningBlock.exitCode = null
-    this._runningBlock = null
-    this._cmdStartTime = null
+  /**
+   * A block the next start displaces (nocx-evj4b.1.9).
+   *
+   * There is exactly one running block, so a start that arrives while one is
+   * still on screen has to settle it. Leaving it alone — which this used to
+   * do, with a hidden `failure` and no DOM at all — kept the displaced card
+   * wearing `cmd-block-running` and its frozen ticker forever: its own
+   * `block.closed` then found a record whose status was no longer `running`
+   * and returned without closing it, so the pane showed TWO running cards
+   * and no event could ever settle the older one. A person reading the pane
+   * could not tell which command was still going.
+   *
+   * The displaced block is NOT the command that just ended: its attempt is
+   * still open and its own completion is not news this start may carry, so it
+   * freezes as `unknown` — never as a success it never received — and its
+   * stored rows still arrive with its `block.closed`, because the card is
+   * built with its attempt's entry and the transport's close refreshes it.
+   * A header the alternate seat borrowed comes home first: the next block
+   * must not open wearing the displaced command's header while the displaced
+   * one is left headless.
+   */
+  private _settleDisplacedRunning(): void {
+    const rec = this._runningBlock
+    if (!rec) {
+      this._stopTicker()
+      this._clearCommandIndicator()
+      return
+    }
+    const status = this._logicalFreeze(rec, null, 'unknown')
+    if (rec.header && rec.header.parentElement !== rec.el) rec.el.prepend(rec.header)
     this._attemptId = null
+    this._freezeCard(rec, rec.endLine, status)
   }
 
   dispose(): void {

@@ -1131,11 +1131,52 @@ describe('BlockManager', () => {
     expect(liveContainer.parentElement).toBe(rec.el)
   })
 
-  it('finalizes orphaned running block on next start', () => {
+  it('settles a block the next start displaces, instead of leaving it running forever (nocx-evj4b.1.9)', () => {
+    // There is ONE running block. A start that arrives while another block is
+    // still running displaces it — the state a split leaves behind, and the
+    // state the owner met as two blocks at once. The displaced block used to
+    // keep `cmd-block-running` and a stopped ticker, and its own block.closed
+    // was then dropped (the record no longer read `running`), so nothing could
+    // ever settle it. It is not the command that just ended: its completion is
+    // not this start's to carry, so it freezes as unknown, with no exit status.
     const first = manager.startBlock('cmd1', '~', 0)
+    manager.bindAttempt('att-first')
     const second = manager.startBlock('cmd2', '~', 5)
-    expect(first.status).toBe('failure')
+    manager.bindAttempt('att-second')
+
     expect(manager.runningBlock).toBe(second)
+    expect(inner.querySelectorAll('.cmd-block-running')).toHaveLength(1)
+    expect(second.el.classList.contains('cmd-block-running')).toBe(true)
+    expect(first.el.classList.contains('cmd-block-running')).toBe(false)
+    expect(first.status).toBe('unknown')
+    expect(first.exitCode).toBeNull()
+    expect(first.el.dataset.outcome).toBeUndefined()
+    // Its own close still reaches it, and the card is already the frozen one
+    // the transport's row refresh will fill.
+    manager.blockClosed('att-first')
+    expect(first.el.classList.contains('cmd-block-running')).toBe(false)
+    expect(first.el.querySelector('.cmd-header-text')?.textContent).toBe('cmd1')
+  })
+
+  it('a new start reclaims a header the alternate seat borrowed from the displaced block (nocx-evj4b.1.9)', () => {
+    const first = manager.startBlock('top', '~', 0)
+    manager.bindAttempt('att-top')
+    const header = first.el.querySelector<HTMLElement>('.cmd-header')!
+    inner.prepend(header)
+
+    manager.startBlock('top', '~', 3)
+
+    // The displaced block keeps its own header — headless is the owner's
+    // "frozen with its header rows gone" — and the new block gets its own,
+    // never the old command's.
+    // The displaced block's card carries its own header again, and nothing
+    // is left seated outside a block for the new one to inherit.
+    expect(header.isConnected).toBe(false)
+    expect(inner.querySelectorAll(':scope > .cmd-header')).toHaveLength(0)
+    const frozenCard = inner.querySelector<HTMLElement>('.cmd-block:not(.cmd-block-running)')
+    expect(frozenCard?.querySelector<HTMLElement>(':scope > .cmd-header')).not.toBeNull()
+    expect(frozenCard?.querySelector('.cmd-header-text')?.textContent).toBe('top')
+    expect(manager.runningBlock?.el.querySelector('.cmd-header-text')?.textContent).toBe('top')
   })
 
   it('opening a block keeps the keyboard in the live grid it seats as its body (nocx-askcb)', () => {

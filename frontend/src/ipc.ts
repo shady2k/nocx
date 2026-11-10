@@ -52,22 +52,27 @@ const RETRY_HOPELESS_REFUSALS = new Set([
   'token_spent',
 ])
 
-/** A REFUSAL THAT WROTE NOTHING IS NOT AN ANSWER ABOUT THE CHARACTER
- *  (nocx-evj4b.1.12). Every refusal in that class says "not now" — `busy` is a
- *  full helper queue, `commit_deadline` is one presentation whose transport
- *  budget ran out while it waited, and an unnamed cause is one the helper has
- *  no sentinel for. None of them is the program saying it did not want the
- *  input, and the person's keystroke is still theirs to make: presenting it
- *  again is the first write, not a second one.
+/** ONLY BACKPRESSURE IS WORTH WAITING FOR, AND ONLY BACKPRESSURE MAY WAIT
+ *  WITHOUT A BOUND (nocx-evj4b.1.12). The two causes here are the helper
+ *  saying "not now" about its own capacity: `busy` is a full intent queue, and
+ *  `commit_deadline` is one presentation whose transport budget ran out while
+ *  it waited. Both change their answer on their own, no byte was written, and
+ *  the person's keystroke is still theirs to make — presenting it again is the
+ *  first write, not a second one. There is no attempt bound: the wait doubles
+ *  from 8 ms to 250 ms, so a backpressured session costs a handful of round
+ *  trips a second, and what ends it is the session's own life (a closed socket
+ *  rejects the next presentation) or the person's interrupt (abandonPendingRetry).
  *
- *  There is NO attempt bound. The renderer's queue awaits this call, so the
- *  keystroke stays at the head of the queue and every key typed after it waits
- *  behind it — order is preserved by the one thing that already owned it. What
- *  ends the wait is the session's own life: a closed socket rejects the next
- *  presentation, and the queued input is dropped with the session, which is
- *  not a silent loss. A tight spin is still refused: the wait doubles from 8 ms
- *  to 250 ms, so a backpressured session costs a handful of round trips a
- *  second and cannot livelock the control plane. */
+ *  EVERY OTHER CAUSE ENDS THE WAIT AT ONCE, and says so in the log. The
+ *  generic `refused` — the closed set's catch-all for an error the helper has
+ *  no sentinel for — and any cause this layer does not know are not evidence
+ *  that the cause will change; retrying them is what turned one undeliverable
+ *  event (a mouse motion the program's modes do not report, answered
+ *  ErrUnsupported and mapped to `refused`) into a queue that never moved again,
+ *  with every later key and the person's Ctrl-C behind it. The fix for that
+ *  class is upstream (the helper reports such an event as executed with no
+ *  bytes), but the renderer must not be able to livelock on the next one. */
+const RETRY_BACKPRESSURE_CAUSES = new Set(['busy', 'commit_deadline'])
 const RETRY_BACKPRESSURE_FIRST_MS = 8
 const RETRY_BACKPRESSURE_MAX_MS = 250
 import { isDriverState, isPaneProgress, readPaneChildren } from './pane-observation'
@@ -415,6 +420,12 @@ export class SessionHandle {
    *  second field nobody assigns. */
   recovered: SessionRecovery | null
 
+  /** The wait a backpressure retry is holding right now, if any
+   *  (nocx-evj4b.1.12). One per handle because at most one intent per handle is
+   *  being presented: the queue that awaits it is serial. See
+   *  abandonPendingRetry. */
+  private retryHold: { abandon: () => void } | null = null
+
   constructor(
     private client: WSClient,
     readonly sessionId: string,
@@ -726,31 +737,23 @@ export class SessionHandle {
     ) {
       return this._intent(kind, payload, false)
     }
-    // THE SAME RULE, FOR EVERY OTHER REFUSAL THAT WROTE NOTHING
-    // (nocx-atpw5.1.38). The wire's contract is that `refused` wrote nothing
+    // A REFUSAL THAT WROTE NOTHING, AND THE CAUSE IT NAMED (nocx-atpw5.1.38,
+    // nocx-evj4b.1.12). The wire's contract is that `refused` wrote nothing
     // (design §6.5), so a refusal is the intent still being the person's to
-    // make; presenting it once more is a round trip, not a keystroke lost. The
-    // causes that cannot change their answer for this incarnation are left
-    // alone — a second attempt there costs a round trip and buys nothing — and
+    // make — for the causes that will change their answer on their own. Those
+    // are backpressure and nothing else (`busy`, `commit_deadline`): they are
+    // waited out with no attempt bound. Everything else — the helper's
+    // catch-all `refused`, a cause this layer does not know, a cause that
+    // cannot change for this incarnation — ends the wait at once and is logged
+    // with the cause, so the next failure block says which event reached a
+    // person's key rather than showing a queue that never moved.
     // access_revoked keeps its own rule above, which is about re-seating the
     // epoch rather than retrying.
-    //
-    // WHAT THIS DOES NOT DO. It does not say why the session refused. A run of
-    // `refused` answers with the closed set's own catch-all cause ("refused",
-    // an error the helper has no sentinel for) was observed in a loaded
-    // chromium run's failure context, and the keystrokes were simply dropped;
-    // the cause is a helper-side fact this layer cannot name. The warning below
-    // is that fact reaching a log, so the next failure block says which cause
-    // reached a person's key rather than printing nothing.
     if (result.state === 'refused' && result.bytesWritten === 0) {
       const cause = result.refusal?.cause ?? 'unknown'
-      if (cause !== 'access_revoked' && !RETRY_HOPELESS_REFUSALS.has(cause)) {
-        // NO GIVE-UP WHILE THE SESSION LIVES (nocx-evj4b.1.12). What ends this
-        // is the session: a closed socket rejects the presentation, and the
-        // queue's caller drops the input with the session — never a silent
-        // loss of a character while there is still somebody to deliver it to.
+      if (RETRY_BACKPRESSURE_CAUSES.has(cause)) {
         if (attempt === 1) {
-          log.warn('nocx: a keystroke was refused with nothing written; presenting it again', {
+          log.warn('nocx: a keystroke was refused while the session is backpressured; waiting', {
             sid: this.sessionId,
             kind,
             cause,
@@ -760,13 +763,66 @@ export class SessionHandle {
           RETRY_BACKPRESSURE_FIRST_MS * 2 ** (attempt - 1),
           RETRY_BACKPRESSURE_MAX_MS,
         )
-        await new Promise<void>((resolve) => {
-          setTimeout(resolve, wait)
-        })
+        if (await this._holdForRetry(wait)) {
+          // THE PERSON'S INTERRUPT ENDED THE WAIT (nocx-evj4b.1.12). The
+          // keystroke is not re-presented: the interrupt that released it is
+          // the next thing the queue sends, and a tty flushes the type-ahead it
+          // has not read, which this keystroke never was.
+          log.warn('nocx: a backpressured keystroke was abandoned for the interrupt behind it', {
+            sid: this.sessionId,
+            kind,
+            cause,
+            attempts: attempt,
+          })
+          return result
+        }
         return this._intent(kind, payload, false, attempt + 1)
+      }
+      if (cause !== 'access_revoked') {
+        log.warn('nocx: a keystroke was refused with nothing written and is not retried', {
+          sid: this.sessionId,
+          kind,
+          cause,
+          hopeless: RETRY_HOPELESS_REFUSALS.has(cause),
+        })
       }
     }
     return result
+  }
+
+  /** Release a backpressure retry that is waiting, so the input queued behind
+   *  it — the person's Ctrl-C or Interrupt — is sent now (nocx-evj4b.1.12).
+   *
+   *  A RETRY WAITS AT THE HEAD OF THE PANE'S QUEUE, which is what keeps a
+   *  keystroke ordered and lossless, and it is right for the keys typed after
+   *  it. It is wrong for an interrupt, which is not one more keystroke but the
+   *  person ending what is running: the queue is serial, so with no attempt
+   *  bound the interrupt would wait behind the retry indefinitely. This ends
+   *  the WAIT and nothing else — the intent returns the refusal it already had,
+   *  the queue advances, and the interrupt is the next call. A tty discards the
+   *  input it has not read when SIGINT arrives, and this keystroke never left
+   *  the renderer. */
+  abandonPendingRetry(): void {
+    this.retryHold?.abandon()
+  }
+
+  /** Wait out one backpressure retry, or until abandonPendingRetry releases
+   *  it. True means the wait was abandoned: the caller must NOT re-present,
+   *  because the interrupt that released it is next in the queue. */
+  private _holdForRetry(ms: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const timer: ReturnType<typeof setTimeout> = setTimeout(() => {
+        this.retryHold = null
+        resolve(false)
+      }, ms)
+      this.retryHold = {
+        abandon: () => {
+          clearTimeout(timer)
+          this.retryHold = null
+          resolve(true)
+        },
+      }
+    })
   }
 
   /** Registers a callback for one live-history page's rows: the parsed

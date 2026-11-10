@@ -89,6 +89,7 @@ import { ProfileClient, type SSHProfile } from './profiles'
 import { Dispatcher, RpcError } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
 import type { SessionHandle, SessionRecovery, SessionSize, WSClient } from './ipc'
+import type { SessionIntent } from './intent-input'
 import type { SessionIntentResult } from './generated/session.intent'
 import type { SessionSignal } from './generated/session.signal'
 import {
@@ -17662,6 +17663,111 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       )
       await vi.waitFor(() => expect(session.intent.mock.calls).toEqual([['key', 'Ctrl+c']]))
       expect(session.send).not.toHaveBeenCalled()
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
+  // A RETRY HAS NO ATTEMPT BOUND, SO NOTHING MAY WAIT BEHIND IT FOREVER
+  // (nocx-evj4b.1.12). A backpressured intent holds the head of the pane's
+  // serial queue; that is what makes an ordinary keystroke ordered and
+  // lossless, and it is the wrong place for the person's Ctrl-C. The wait ends
+  // when it arrives, and the key is the next call.
+  it('a Ctrl-C is sent even when an earlier intent is being retried', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      const session = sessionOf(content)
+      // The model of a running retry: the held key's presentation has not
+      // answered, and it answers only when the wait is abandoned — which is
+      // exactly what the handle does with a refused presentation it is waiting
+      // out.
+      let release: (() => void) | null = null
+      session.intent.mockImplementation((kind: string, payload: string) => {
+        if (kind === 'text' && payload === 'x') {
+          return new Promise<SessionIntentResult>((resolve) => {
+            release = () =>
+              resolve({
+                state: 'refused',
+                bytesWritten: 0,
+                fenceAfter: 0,
+                refusal: { cause: 'busy' },
+              })
+          })
+        }
+        return Promise.resolve({ state: 'executed', bytesWritten: 1, fenceAfter: 0 })
+      })
+      session.abandonPendingRetry = vi.fn(() => {
+        release?.()
+      })
+
+      typeIntoPane(content, 'x')
+      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('text', 'x'))
+
+      typeIntoPane(content, '\x03')
+      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('key', 'Ctrl+c'))
+      expect(session.abandonPendingRetry).toHaveBeenCalled()
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
+  // AND THE SIGNAL FORM OF THE SAME GESTURE. The block's Interrupt is a
+  // session.signal, queued behind what this pane already received — and never
+  // behind a retry with no attempt bound.
+  it('an Interrupt signal is sent even when an earlier intent is being retried', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      const session = sessionOf(content)
+      let release: (() => void) | null = null
+      session.intent.mockImplementation((kind: string, payload: string) => {
+        if (kind === 'text' && payload === 'x') {
+          return new Promise<SessionIntentResult>((resolve) => {
+            release = () =>
+              resolve({
+                state: 'refused',
+                bytesWritten: 0,
+                fenceAfter: 0,
+                refusal: { cause: 'busy' },
+              })
+          })
+        }
+        return Promise.resolve({ state: 'executed', bytesWritten: 1, fenceAfter: 0 })
+      })
+      session.abandonPendingRetry = vi.fn(() => {
+        release?.()
+      })
+
+      // The held intent, placed through the pane's own entry (the one
+      // onSessionIntent hands a key to): a presentation the helper answered
+      // `busy`, still holding the head of the queue.
+      ;(content as unknown as { sendIntent(intent: SessionIntent): boolean }).sendIntent({
+        kind: 'text',
+        payload: 'x',
+      })
+      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('text', 'x'))
+      session.signal.mockClear()
+
+      ;(content as unknown as { signalActiveCommand(s: string): void }).signalActiveCommand(
+        'interrupt',
+      )
+      await vi.waitFor(() => expect(signalsSent(content)).toEqual(['interrupt']))
+      expect(session.abandonPendingRetry).toHaveBeenCalled()
     } finally {
       restore()
       teardown()

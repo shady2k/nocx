@@ -241,6 +241,11 @@ export interface SessionFake {
    *  case a test that is not about a refusal wants, and the same default
    *  `signal` uses. */
   intent: Mock<(kind: SessionIntentKind, payload: string) => Promise<SessionIntentResult>>
+  /** Release a backpressure retry the handle is waiting out
+   *  (SessionHandle.abandonPendingRetry, nocx-evj4b.1.12). A fake has no retry
+   *  of its own; a test that models one — a presentation held until the
+   *  interrupt arrives — overrides this mock. */
+  abandonPendingRetry: Mock<() => void>
   /** Address a signal to the command running in this session (nocx-23rph).
    *  Resolves `delivered` by default — the case a test that is not about
    *  the refusal wants; a test that IS overrides the mock. */
@@ -343,6 +348,7 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
     intent: vi.fn<(kind: SessionIntentKind, payload: string) => Promise<SessionIntentResult>>(() =>
       Promise.resolve({ state: 'executed', bytesWritten: 1, fenceAfter: 0 }),
     ),
+    abandonPendingRetry: vi.fn(),
     // The signal is ECHOED back, exactly as the wire echoes it: a fixture
     // that always answered 'interrupt' would let a caller that asked for
     // 'stop' pass unnoticed.

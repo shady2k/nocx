@@ -10374,6 +10374,11 @@ export class TerminalContent extends BasePaneContent {
     // Stop/Interrupt) is signalActiveCommand's.
     if (intent.kind === 'key' && intent.payload === INTERRUPT_KEY) {
       this._cancelDeferredShellSubmissions()
+      // AND IT NEVER WAITS BEHIND A RETRY (nocx-evj4b.1.12): the queue is
+      // serial, so a backpressured intent at its head with no attempt bound
+      // would hold this Ctrl-C indefinitely. The wait ends, the abandoned
+      // keystroke is type-ahead, and this key is the next call.
+      this.session?.abandonPendingRetry()
     }
     if (this._attachment.kind !== 'attached') return false
     const session = this.session
@@ -10399,11 +10404,19 @@ export class TerminalContent extends BasePaneContent {
 
   /** Keep Interrupt behind pointer intents already received by this pane. If
    *  SIGINT ends the foreground program first, its queued mouse release can
-   *  become input to the shell that resumes. */
+   *  become input to the shell that resumes.
+   *
+   *  AND NEVER BEHIND A RETRYING ONE (nocx-evj4b.1.12). A backpressured intent
+   *  waits at the head of this queue with no attempt bound, which is right for
+   *  the keystrokes after it and wrong for a signal: the person ending what is
+   *  running is not one more keystroke to deliver in order. Releasing the wait
+   *  lets the queue advance to this signal now; what the abandoned intent did
+   *  not write is type-ahead a tty would flush on SIGINT anyway. */
   private queueSessionSignal(
     session: SessionHandle,
     signal: SessionSignal['signal'],
   ): Promise<Awaited<ReturnType<SessionHandle['signal']>>> {
+    session.abandonPendingRetry()
     return new Promise((resolve, reject) => {
       this._sessionCallQueue.push({ type: 'signal', session, signal, resolve, reject })
       void this.drainSessionCallQueue()

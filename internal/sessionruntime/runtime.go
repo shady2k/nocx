@@ -1099,6 +1099,31 @@ func (s *Session) ReportOutcome(id IntentID, writeErr error) {
 // one sequence and a program that did not gets another, with nothing in the
 // caller's intent saying which (ADR-0066, AD-1 as amended).
 func (s *Session) encode(i Intent) ([]byte, error) {
+	out, err := s.encodeForModes(i)
+	// AN EVENT THE PROGRAM'S OWN MODES DO NOT CARRY IS NOTHING TO THE PROGRAM
+	// (nocx-evj4b.1.12) — ONE RULE, FOR EVERY KIND. The port answers an event
+	// the modes do not report with ErrUnsupported and no bytes: focus reporting
+	// off and a focus change ("mode 1004: not carried by this port"), mouse
+	// tracking off and a click, button-event tracking (DEC 1000/1002) and a
+	// button-less motion ("mouse action 2 button 0: not carried by this port"),
+	// a key identity the port has no sequence for. That is a statement about
+	// the MODES, and every one of them means the same thing here: nothing is
+	// owed, no bytes go to the program, and the record reports executed. It is
+	// NOT a refusal — a refusal is the vocabulary's word for input the program
+	// is owed and did not get, and the renderer rightly keeps a refusal in its
+	// queue; a queue held by a motion nobody asked for is a queue that never
+	// moves again, with every later keystroke and the person's Ctrl-C behind
+	// it. A program that DID set the mode still gets its bytes, which is why
+	// the rule is on the port's answer and not on the intent's kind.
+	if errors.Is(err, emulator.ErrUnsupported) {
+		return nil, nil
+	}
+	return out, err
+}
+
+// encodeForModes is what the program's current modes make of one intent. Only
+// encode interprets the answer; see its rule about ErrUnsupported.
+func (s *Session) encodeForModes(i Intent) ([]byte, error) {
 	switch i.Kind {
 	case IntentKindKey:
 		ev, err := keyEvent(i.Payload)
@@ -1121,21 +1146,7 @@ func (s *Session) encode(i Intent) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		// A PROGRAM THAT DID NOT ASK IS NOT TOLD, AND NOT TOLD IS NOT REFUSED
-		// (nocx-evj4b.1.12). DEC private mode 1004 is the whole content of a
-		// focus report (emulator.go's Focus), so the port answers an
-		// unrequested report with ErrUnsupported and no bytes. That answer
-		// left this method as an error, and the renderer's input path read it
-		// as "this keystroke was refused" — a focus change is not a keystroke,
-		// and nothing is owed to the program. Encoding to no bytes is how every
-		// other input the program ignores travels; the record reports executed.
-		// A program that DID ask still gets its report: the error is the port's
-		// statement about the MODE, not about the intent.
-		out, err := s.emulator.Focus(gained)
-		if errors.Is(err, emulator.ErrUnsupported) {
-			return nil, nil
-		}
-		return out, err
+		return s.emulator.Focus(gained)
 	default:
 		return nil, fmt.Errorf("%w: intent kind %d", ErrIntentUnsupported, i.Kind)
 	}

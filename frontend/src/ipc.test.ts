@@ -350,6 +350,79 @@ describe('session.intent', () => {
     expect(attempts().length).toBe(seen)
   })
 
+  // ONLY BACKPRESSURE IS WAITED FOR (nocx-evj4b.1.12). The generic `refused` —
+  // the helper's catch-all for an error it has no sentinel for, which is what
+  // a mouse motion the program's modes do not report used to become — is not
+  // evidence that a second presentation would land. It ends at once, and the
+  // log names it, so the next failure block says which event reached a
+  // person's key.
+  it('does not present a refusal whose cause is not backpressure, and never loops on it', async () => {
+    const { session, ws } = await connectedSession()
+    const attempts = (): ReturnType<typeof ws.requests> =>
+      ws.requests().filter((candidate) => candidate.method === 'session.intent')
+    const pending = session.intent('mouse', 'motion none 4 5')
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: attempts()[0].id,
+      result: {
+        state: 'refused',
+        bytesWritten: 0,
+        fenceAfter: 4,
+        refusal: { cause: 'refused' },
+      },
+    })
+    await expect(pending).resolves.toMatchObject({ state: 'refused' })
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    expect(attempts()).toHaveLength(1)
+  })
+
+  // AND NEITHER IS A CAUSE THIS LAYER DOES NOT KNOW. A refusal that names
+  // nothing is not a promise that the answer would change on a second ask.
+  it('does not present a refusal with no cause named at all', async () => {
+    const { session, ws } = await connectedSession()
+    const attempts = (): ReturnType<typeof ws.requests> =>
+      ws.requests().filter((candidate) => candidate.method === 'session.intent')
+    const pending = session.intent('key', 'a')
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: attempts()[0].id,
+      result: { state: 'refused', bytesWritten: 0, fenceAfter: 4 },
+    })
+    await expect(pending).resolves.toMatchObject({ state: 'refused' })
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    expect(attempts()).toHaveLength(1)
+  })
+
+  // AND THE PERSON'S INTERRUPT ENDS THE WAIT (nocx-evj4b.1.12). The retry has no
+  // attempt bound, so it must be releasable: the queue is serial, and a Ctrl-C
+  // behind it is the defect that bound most needed to prevent.
+  it('abandons a waiting retry when the person interrupts, and does not re-present it', async () => {
+    const { session, ws } = await connectedSession()
+    const attempts = (): ReturnType<typeof ws.requests> =>
+      ws.requests().filter((candidate) => candidate.method === 'session.intent')
+    const pending = session.intent('text', 'h')
+    // Drive the wait to its 250 ms cap, so the release is a fact the test can
+    // see rather than a coincidence of scheduling.
+    for (let n = 0; n < 8; n += 1) {
+      ws.deliverText({
+        jsonrpc: '2.0',
+        id: attempts()[n].id,
+        result: { state: 'refused', bytesWritten: 0, fenceAfter: 4, refusal: { cause: 'busy' } },
+      })
+      await expect.poll(() => attempts().length, { timeout: 3_000 }).toBe(n + 2)
+    }
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: attempts()[8].id,
+      result: { state: 'refused', bytesWritten: 0, fenceAfter: 5, refusal: { cause: 'busy' } },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    session.abandonPendingRetry()
+    await expect(pending).resolves.toMatchObject({ state: 'refused' })
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    expect(attempts()).toHaveLength(9)
+  })
+
   // AND NOT THE ONES THAT CANNOT CHANGE THEIR ANSWER. `closing` means this
   // incarnation is going away; a second attempt costs a round trip and is
   // refused for the same reason.

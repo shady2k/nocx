@@ -1,8 +1,6 @@
 // Package uistate owns the state the app must remember WITHOUT being asked:
-// window geometry, the sidebar's width, and which tab is in front. Which
-// PANEL a tab shows is not here — it belongs to the tab, on its layout row
-// (ADR-x7cvh8e1, nocx-ouru5.1.18) — and neither is the rail's collapse, which
-// is that same per-tab fact. It is deliberately not the settings registry — see
+// window geometry, the sidebar's collapse/view/width, and which tab is in
+// front. It is deliberately not the settings registry — see
 // docs/decisions/0048-ui-state-is-a-document-not-a-setting.md, which draws the
 // line: a setting is something a user deliberately chooses; UI state is a side
 // effect of using the app.
@@ -66,13 +64,10 @@ type Window struct {
 // Sidebar is the app-shell panel's remembered state. Width is a WHOLE number
 // of CSS pixels: nothing about a panel edge is meaningful to seven decimal
 // places, and a fractional one is what put 206.3828125 px on a Settings page.
-//
-// WIDTH IS ALL THERE IS (ADR-x7cvh8e1, nocx-ouru5.1.18). The panel a tab shows, and whether
-// its rail is collapsed, are facts about THAT TAB and live on its layout row;
-// keeping a window-wide copy here would be a second owner of the same fact,
-// and the two would disagree the first time a person switched tabs.
 type Sidebar struct {
-	Width int `json:"width"`
+	Collapsed    bool   `json:"collapsed"`
+	ActiveViewID string `json:"activeViewId"`
+	Width        int    `json:"width"`
 }
 
 // Layout is the renderer's half of the document: everything the webview knows
@@ -278,8 +273,8 @@ func ClampSidebarWidth(width int) int {
 }
 
 // sanitise repairs a document field by field. It never rejects the whole
-// document, because one unusable field must not also throw away window
-// geometry that was perfectly good (ADR-0048 §4).
+// document, because one unknown sidebar view id must not also throw away
+// window geometry that was perfectly good (ADR-0048 §4).
 func sanitise(d Document) Document {
 	d.SchemaVersion = int(schemaVersion)
 	d.Sidebar.Width = ClampSidebarWidth(d.Sidebar.Width)

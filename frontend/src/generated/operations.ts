@@ -2025,16 +2025,6 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
     maxMs: 30000,
     answerMs: null,
   },
-  'tabs.setPanel': {
-    waiting: 'Changing the tab layout',
-    row: 'past-wait',
-    expired: 'outcome-unknown',
-    merge: 'none',
-    domain: 'content',
-    turnMs: 30000,
-    maxMs: 30000,
-    answerMs: null,
-  },
   'transport.credit': {
     waiting: 'Reading the credit window',
     row: 'never',

@@ -1,8 +1,8 @@
 /**
  * uistate-client — the renderer's end of the UI-state document (ADR-0048).
  *
- * UI state is what the app must remember WITHOUT being asked: the panel's
- * width and which tab was in front. It is not
+ * UI state is what the app must remember WITHOUT being asked: the sidebar's
+ * collapse, its active view, its width, and which tab was in front. It is not
  * a setting — a setting is something a user deliberately chooses — so it does
  * not go through the settings pipeline, does not appear on a Settings page and
  * never marks a section Modified. And it does not go into `localStorage`
@@ -39,7 +39,7 @@ export interface UIStatePatch {
  *  defaults; the Go side is authoritative and overwrites these the moment it
  *  replies. */
 const DEFAULT_UI_STATE: UIState = {
-  sidebar: { width: 240 },
+  sidebar: { collapsed: false, activeViewId: '', width: 240 },
   activeTab: '',
 }
 

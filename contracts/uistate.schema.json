@@ -17,11 +17,18 @@
   },
   "$defs": {
     "sidebar": {
-      "description": "The panel's WIDTH and nothing else. Which view a tab shows, and whether its rail is collapsed, are facts about that TAB and live on its layout row (nocx-ouru5.1.18); a window-wide copy here would be a second owner of the same fact, and the two would disagree the first time a person switched tabs.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["width"],
+      "required": ["collapsed", "activeViewId", "width"],
       "properties": {
+        "collapsed": {
+          "description": "Whether the panel is collapsed to the activity bar.",
+          "type": "boolean"
+        },
+        "activeViewId": {
+          "description": "The sidebar view that was on screen, or \"\" when none was. A view id the build no longer registers falls back to the first view.",
+          "type": "string"
+        },
         "width": {
           "description": "The panel's width as a WHOLE number of CSS pixels, clamped by the backend to the declared bounds. Whole pixels because nothing about a panel edge is meaningful to seven decimal places \u2014 a fractional one is what put '206.3828125 px' on a Settings page.",
           "type": "integer"

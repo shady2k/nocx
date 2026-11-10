@@ -774,6 +774,39 @@ function buildSegments(stored: StoredBlockRows): Segment[] {
   return out
 }
 
+/** The ONE mapping from a visual row offset inside a block's body to the
+ *  stream row drawn there. It walks the same segments the painter lays out, so
+ *  a gap compressed to one notice maps to the first row of the run after it,
+ *  not to its visual offset — the loader must ask for the capped tail, not for
+ *  a row the store evicted (ADR-ywzcpbqe). */
+export function streamRowAtVisualOffset(stored: StoredBlockRows, visualRow: number): number {
+  const segments = buildSegments(stored)
+  if (segments.length === 0) return stored.firstRow ?? 0
+  const target = Math.max(0, visualRow)
+  let cursor = 0
+  for (const segment of segments) {
+    if (segment.kind === 'row') {
+      if (target === cursor) return segment.from
+      cursor += 1
+      continue
+    }
+    if (segment.kind === 'spacer') {
+      if (target < cursor + segment.rows) return segment.from + (target - cursor)
+      cursor += segment.rows
+      continue
+    }
+    if (target === cursor) return segment.from + segment.rows
+    cursor += 1
+  }
+  return stored.lastRow ?? (stored.endRow ?? 1) - 1
+}
+
+function blankRowElement(): HTMLElement {
+  const el = document.createElement('div')
+  el.className = 'term-grid-row'
+  return el
+}
+
 function cutSentence(stored: StoredBlockRows, rows: number): string {
   if (stored.truncated === 'cap') {
     return tPlural(
@@ -851,11 +884,6 @@ function paintOutput(
   for (const line of changed) changedWidths.set(line.from, rowColumnsOf(line.row))
   const toPaint = changed
   const snapshot = toPaint.length > 0 && columns > 0 ? snapshotAtColumns(toPaint, columns) : null
-  if (toPaint.length > 0 && snapshot === null) {
-    output.remove()
-    paintedRows.delete(block)
-    return
-  }
   const nextRows = new Map<number, PaintedStoredRow>()
   for (const line of lines) {
     const old = all ? undefined : previous?.rows.get(line.from)
@@ -863,22 +891,28 @@ function paintOutput(
       nextRows.set(line.from, old)
     }
   }
-  if (snapshot !== null) {
-    opts.warm?.(fitCandidatesOf(snapshot.rows))
-    for (let index = 0; index < toPaint.length; index++) {
-      const line = toPaint[index]
-      const element = paintRow(snapshot.rows[index], opts)
-      decorateLinks(element)
-      nextRows.set(line.from, {
-        row: {
-          ...line.row,
-          marks: line.row.marks?.map((mark) => [...mark]),
-          runs: line.row.runs?.map(([style, length]) => [style === 0 ? 0 : [...style], length]),
-        },
-        columns: changedWidths.get(line.from) ?? 0,
-        element,
-      })
-    }
+  if (snapshot !== null) opts.warm?.(fitCandidatesOf(snapshot.rows))
+  for (let index = 0; index < toPaint.length; index++) {
+    const line = toPaint[index]
+    // A BLANK PAGE IS STILL ROWS (ADR-ywzcpbqe). No snapshot means no ink,
+    // not no height: a row element keeps the cell height, so the page swaps a
+    // spacer for rows of the same size and the reservation survives.
+    const element =
+      snapshot !== null
+        ? paintRow(snapshot.rows[index], opts)
+        : columns === 0
+          ? blankRowElement()
+          : spacerOf(1)
+    if (snapshot !== null) decorateLinks(element)
+    nextRows.set(line.from, {
+      row: {
+        ...line.row,
+        marks: line.row.marks?.map((mark) => [...mark]),
+        runs: line.row.runs?.map(([style, length]) => [style === 0 ? 0 : [...style], length]),
+      },
+      columns: changedWidths.get(line.from) ?? 0,
+      element,
+    })
   }
   const elements = new Map<string, HTMLElement>()
   for (const segment of segments) {

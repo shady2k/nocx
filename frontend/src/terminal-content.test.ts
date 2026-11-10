@@ -38,6 +38,7 @@ import type { PaneIdentity, PaneScreenReading } from './terminal-content'
 import { notifyAiConfigChanged } from './ai-config'
 import type { SessionEffect } from './generated/session.effect'
 import type { Row, SessionFrame } from './generated/session.frame'
+import type { LedgerBlockRowsLine } from './generated/ledger.blockRows'
 import { frameOf, styleOf, wireRowOf, type CellSpec } from './painter/fixtures'
 import type { CellPainter } from './painter/painter'
 import type { CellModel, ScreenSnapshot } from './cell-model'
@@ -6556,6 +6557,108 @@ describe('the projections consume the kernel through the composition root (ADR-0
         ).toContain('recovered')
       })
       expect(client.call.mock.calls.filter(([method]) => method === 'ledger.get')).toHaveLength(1)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('asks a growth read up to the end the metadata reports now, not the cached end', async () => {
+    const client = makeClient()
+    const oldRows = Array.from({ length: 500 }, (_, i) =>
+      JSON.stringify({ from: i, row: wireRowOf([[`old-${i}`, 1, true]] as CellSpec[]) }),
+    )
+    const newRows = Array.from({ length: 500 }, (_, i) =>
+      JSON.stringify({
+        from: 500 + i,
+        row: wireRowOf([[`new-${500 + i}`, 1, true]] as CellSpec[]),
+      }),
+    )
+    const artifactParams: Array<{ fromRow?: number; rowLimit?: number }> = []
+    client.call.mockImplementation((method: string, params: unknown) => {
+      if (method === 'ledger.get') {
+        return Promise.resolve({
+          entry: {},
+          edges: [],
+          artifacts: [
+            {
+              id: 'art-rows',
+              mediaType: 'application/x-nocx-rows',
+              payload: { rowCount: 1000, endRow: 1000, retainedRanges: [{ from: 0, to: 1000 }] },
+            },
+          ],
+        })
+      }
+      if (method === 'ledger.artifact') {
+        artifactParams.push(params as { fromRow?: number; rowLimit?: number })
+        return Promise.resolve({
+          id: 'art-rows',
+          mediaType: 'application/x-nocx-rows',
+          body: `${newRows.join('\n')}\n`,
+          truncated: null,
+          byteLen: 1,
+          firstRow: 0,
+          lastRow: 999,
+          endRow: 1000,
+          rowCount: 1000,
+          retainedRanges: [{ from: 0, to: 1000 }],
+          rangeStart: 500,
+          rangeCount: 500,
+          hasMoreBefore: true,
+          hasMoreAfter: false,
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('make')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'make',
+        },
+      })
+      withScrollback.scrollback.blockManager.applyStoredRows('att-1', {
+        lines: oldRows.map((body) => {
+          const parsed = JSON.parse(body) as { from: number; row: LedgerBlockRowsLine['row'] }
+          return { from: parsed.from, row: parsed.row }
+        }),
+        artifactVersion: 'art-rows',
+        droppedRows: 0,
+        lostRows: 0,
+        truncated: null,
+        firstRow: 0,
+        lastRow: 499,
+        endRow: 500,
+        rowCount: 500,
+        retainedRanges: [{ from: 0, to: 500 }],
+        sealed: false,
+      })
+      const refresh = (
+        content as unknown as { _refreshBlockRows(id: string): Promise<void> }
+      )._refreshBlockRows('att-1')
+      await refresh
+      expect(artifactParams).toHaveLength(1)
+      expect(artifactParams[0].fromRow).toBe(500)
+      expect(artifactParams[0].rowLimit).toBe(500)
     } finally {
       teardown()
     }

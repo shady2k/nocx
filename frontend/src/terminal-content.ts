@@ -165,6 +165,7 @@ import {
   LAZY_BLOCK_ROWS,
   restoredBody,
   toolResultForEntry,
+  type BlockRowsRead,
 } from './restore-client'
 import { restoredBlock, restoredTurn } from './scrollback/restored-block'
 import {
@@ -174,9 +175,11 @@ import {
   missingRowRanges,
   nextPageForRows,
   paintStoredRows,
+  streamRowAtVisualOffset,
   repaintStoredRows,
   storedBlockRowsText,
   type StoredBlockRows,
+  type StoredBlocksRange,
 } from './scrollback/block-rows'
 import { recordStoredBlock } from './scrollback/cell-drift'
 import { toolCallTitle } from './scrollback/tool-call-title'
@@ -1997,6 +2000,9 @@ export class TerminalContent extends BasePaneContent {
   /** At most one page read per entry is outstanding; a scroll that fires
    *  every frame must not turn one visible block into a stream of requests. */
   private readonly _blockRowsPageInFlight = new Set<string>()
+  /** A request arrived while a page was in flight. It is demand, never a
+   *  reason to skip: the completion recomputes from the viewport. */
+  private readonly _blockRowsPagePending = new Set<string>()
   /** The scroll listener that fills lazy rows in as they become visible. */
   private _lazyScrollUnsub: (() => void) | null = null
   private _lazyScrollRaf: number | null = null
@@ -11783,29 +11789,61 @@ export class TerminalContent extends BasePaneContent {
    *  to read whole. A grown block asks for its newest rows; the same page
    *  slides as the command prints, so a 5000-row command never re-reads its
    *  whole body on every growth notification. */
-  private _refreshWindow(entryId: string): { fromRow: number; rowLimit: number } | undefined {
+  private _refreshWindow(
+    entryId: string,
+    geometry?: StoredBlocksRange,
+  ): { fromRow: number; rowLimit: number } | undefined {
     const rows = this._storedRowsOf(entryId)
-    const rowCount = rows?.rowCount
+    const rowCount = geometry?.rowCount ?? rows?.rowCount
     if (rows === undefined || rowCount === undefined || rowCount <= LAZY_BLOCK_ROWS) {
       return undefined
     }
-    const end = rows.endRow ?? (rows.lastRow ?? rows.firstRow ?? 0) + 1
+    const end = geometry?.endRow ?? rows.endRow ?? (rows.lastRow ?? rows.firstRow ?? 0) + 1
+    const retained = geometry?.retainedRanges ?? rows.retainedRanges
     if (rows.lines.length > 0) {
       // A LIVE block must not skip rows between coalesced growth reads: ask
-      // from the row after the last retained row painted to the end. The
-      // server caps one page at 10 000 rows, above any per-command capture
-      // the product allows at its default setting.
+      // from the row after the last retained row painted up to the end the
+      // metadata reports NOW. With no fresher geometry, ask to the server's
+      // page limit and let the completion's own demand loop continue.
       const from = rows.lines[rows.lines.length - 1].from + 1
-      return { fromRow: from, rowLimit: Math.max(1, Math.min(10_000, end - from)) }
+      const limit = geometry?.endRow !== undefined ? Math.min(10_000, end - from) : 10_000
+      return { fromRow: from, rowLimit: Math.max(1, limit) }
     }
     // No body in hand: the reconnect gave it back, or the restore has not
     // asked yet. Take the newest page of the LAST retained run — a capped
     // block's tail run, not the count-derived end of a head-only guess.
-    const lastRange = rows.retainedRanges?.[rows.retainedRanges.length - 1]
+    const lastRange = retained?.[retained.length - 1]
     const first = lastRange?.from ?? rows.firstRow ?? 0
     const last = (lastRange?.to ?? end) - 1
     const from = Math.max(first, last - BLOCK_ROWS_PAGE + 1)
     return { fromRow: from, rowLimit: Math.max(1, Math.min(BLOCK_ROWS_PAGE, last - from + 1)) }
+  }
+
+  /** Read a refresh with the growth rule: an open large block's page limit
+   *  comes from the end its metadata reports now, never from the cached
+   *  end (ADR-ywzcpbqe). A frozen/small block needs no metadata first. */
+  private async _readBlockRowsForRefresh(
+    entryId: string,
+    current: StoredBlockRows | undefined,
+  ): Promise<BlockRowsRead> {
+    let window = this._refreshWindow(entryId)
+    if (
+      current !== undefined &&
+      current.sealed === false &&
+      (current.rowCount ?? 0) > LAZY_BLOCK_ROWS
+    ) {
+      try {
+        const meta = await blockRowsMetadataForEntry(this.client, entryId)
+        if (this._disposed) return blockRowsForEntry(this.client, entryId, window)
+        window = this._refreshWindow(entryId, meta?.geometry ?? undefined)
+      } catch (err) {
+        log.warn("nocx: a block's growth geometry could not be read", {
+          entry: entryId,
+          error: String(err),
+        })
+      }
+    }
+    return blockRowsForEntry(this.client, entryId, window, () => this._rowReadPriority(entryId))
   }
 
   /** Paint a read into whichever owner holds the block: a BlockRecord when
@@ -11837,8 +11875,14 @@ export class TerminalContent extends BasePaneContent {
   /** Ask for one page of a restored or live block's rows, around the visible
    *  stretch (ADR-y45sp41c). One page per entry is outstanding at a time. */
   private _requestBlockRowsPage(entryId: string, fromRow: number, rowLimit: number): void {
-    if (this._blockRowsPageInFlight.has(entryId)) return
+    if (this._blockRowsPageInFlight.has(entryId)) {
+      // Demand is recorded, not discarded. The completion below re-reads the
+      // viewport rather than merely clearing a flag (ADR-ywzcpbqe).
+      this._blockRowsPagePending.add(entryId)
+      return
+    }
     this._blockRowsPageInFlight.add(entryId)
+    let painted = false
     void blockRowsForEntry(this.client, entryId, { fromRow, rowLimit }, () =>
       this._rowReadPriority(entryId),
     )
@@ -11849,6 +11893,7 @@ export class TerminalContent extends BasePaneContent {
             entryId,
             mergeStoredBlockRows(this._storedRowsOf(entryId), read.rows),
           )
+          painted = true
         } else if (read.kind === 'unreadable') {
           log.warn("nocx: a block's stored rows could not be read", {
             entry: entryId,
@@ -11856,7 +11901,14 @@ export class TerminalContent extends BasePaneContent {
           })
         }
       })
-      .finally(() => this._blockRowsPageInFlight.delete(entryId))
+      .finally(() => {
+        this._blockRowsPageInFlight.delete(entryId)
+        const demanded = this._blockRowsPagePending.delete(entryId)
+        if (this._disposed || !this._active) return
+        // ONE DEMAND LOOP: every completion recomputes. A page that filled
+        // the old viewport may leave the new one still missing.
+        if (painted || demanded) this._loadVisibleBlockRows()
+      })
   }
 
   /** The geometry a loaded block claims, comparable with the metadata a
@@ -11972,10 +12024,29 @@ export class TerminalContent extends BasePaneContent {
       const first = retained[0]?.from ?? rows.firstRow ?? 0
       const last = (retained[retained.length - 1]?.to ?? first + 1) - 1
       const outRect = output.getBoundingClientRect()
-      const visibleRow = Math.floor((areaRect.top - outRect.top) / pitch)
-      const target = Math.max(first, Math.min(last, first + Math.max(0, visibleRow)))
+      const topOffset = Math.max(0, Math.floor((areaRect.top - outRect.top) / pitch))
+      const bottomOffset = Math.max(0, Math.floor((areaRect.bottom - outRect.top) / pitch))
+      // ONE MAPPING between visual position and stream index, the one the
+      // painter lays rows out with: a compressed cap gap maps to the first
+      // row of the tail, not to its visual offset (ADR-ywzcpbqe).
+      const topRow = streamRowAtVisualOffset(rows, topOffset)
+      const bottomRow = streamRowAtVisualOffset(rows, bottomOffset)
+      const loaded = loadedRowRanges(rows.lines)
+      const visibleMissing = missing.find((range) => range.to > topRow && range.from <= bottomRow)
+      const target = Math.max(first, Math.min(last, topRow))
+      if (
+        visibleMissing !== undefined &&
+        (target < visibleMissing.from || target >= visibleMissing.to)
+      ) {
+        // The top of the viewport is over a loaded row but the missing range
+        // below it is what the person can see; ask at its near edge.
+        const page = nextPageForRows(retained, loaded, visibleMissing.from, BLOCK_ROWS_PAGE)
+        if (page === null) continue
+        this._requestBlockRowsPage(entryId, page.fromRow, page.rowLimit)
+        continue
+      }
       // WHAT IS MISSING, not what is between the first and last loaded row.
-      const page = nextPageForRows(retained, loadedRowRanges(rows.lines), target, BLOCK_ROWS_PAGE)
+      const page = nextPageForRows(retained, loaded, target, BLOCK_ROWS_PAGE)
       if (page === null) continue
       this._requestBlockRowsPage(entryId, page.fromRow, page.rowLimit)
     }
@@ -12036,10 +12107,7 @@ export class TerminalContent extends BasePaneContent {
 
     this._blockRowsRefreshPending.delete(entryId)
     const current = this._storedRowsOf(entryId)
-    const window = this._refreshWindow(entryId)
-    const fetch: Promise<void> = blockRowsForEntry(this.client, entryId, window, () =>
-      this._rowReadPriority(entryId),
-    ).then((read) => {
+    const fetch: Promise<void> = this._readBlockRowsForRefresh(entryId, current).then((read) => {
       if (this._disposed) return
       const sb = this.scrollback
       if (!sb) return
@@ -12122,6 +12190,10 @@ export class TerminalContent extends BasePaneContent {
           sb.scrollToBottomIfFollowing()
         })
       }
+      // ONE DEMAND LOOP: a growth read that brought only part of the new
+      // rows does not wait for another notification. The viewport decides
+      // what is still missing (ADR-ywzcpbqe).
+      this._loadVisibleBlockRows()
     })
     const tracked = fetch.finally(() => {
       if (this._blockRowsInFlight.get(entryId) !== tracked) return

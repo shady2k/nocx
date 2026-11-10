@@ -11,6 +11,7 @@ import {
   loadedRowRanges,
   missingRowRanges,
   nextPageForRows,
+  streamRowAtVisualOffset,
   paintStoredRows,
   repaintStoredRows,
   paintUnreadableRows,
@@ -240,6 +241,63 @@ describe('stored block rows', () => {
     const spacer = block.querySelector<HTMLElement>('.cmd-output-spacer')!
     expect(spacer.dataset.rows).toBe('4798')
     expect(block.querySelector<HTMLElement>('.cmd-output')!.dataset.rowsLoaded).toBe('4')
+  })
+
+  it('keeps the reservation and the rows when a page is entirely blank', () => {
+    const block = document.createElement('article')
+    block.dataset.entryId = 'blank-page'
+    const body = Array.from({ length: 200 }, (_, i) =>
+      JSON.stringify({ from: i, row: { text: '' } }),
+    ).join('\n')
+    const parsed = parseStoredBlockRows(
+      body,
+      {
+        truncated: null,
+        payload: { rowCount: 5000, endRow: 5000, retainedRanges: [{ from: 0, to: 5000 }] },
+        state: 'sealed',
+      },
+      'artifact-blank',
+      {
+        firstRow: 0,
+        lastRow: 4999,
+        endRow: 5000,
+        rowCount: 5000,
+        retainedRanges: [{ from: 0, to: 5000 }],
+        rangeStart: 0,
+        rangeCount: 200,
+        hasMoreBefore: false,
+        hasMoreAfter: true,
+      },
+    )
+    paintStoredRows(block, parsed, { metric: null, palette: DEFAULT_SNAPSHOT })
+    const output = block.querySelector<HTMLElement>('.cmd-output')
+    expect(output).not.toBeNull()
+    expect(output!.querySelectorAll('.term-grid-row')).toHaveLength(200)
+    expect(output!.querySelector<HTMLElement>('.cmd-output-spacer')!.dataset.rows).toBe('4800')
+  })
+
+  it('maps a compressed capped gap to the first row of the tail, not to its visual offset', () => {
+    const rows: StoredBlockRows = {
+      lines: [],
+      droppedRows: 4400,
+      lostRows: 0,
+      truncated: 'cap',
+      sealed: true,
+      firstRow: 0,
+      lastRow: 4999,
+      endRow: 5000,
+      rowCount: 600,
+      retainedRanges: [
+        { from: 0, to: 300 },
+        { from: 4700, to: 5000 },
+      ],
+      reserve: true,
+    }
+    expect(streamRowAtVisualOffset(rows, 0)).toBe(0)
+    expect(streamRowAtVisualOffset(rows, 299)).toBe(299)
+    expect(streamRowAtVisualOffset(rows, 300)).toBe(4700)
+    expect(streamRowAtVisualOffset(rows, 301)).toBe(4700)
+    expect(streamRowAtVisualOffset(rows, 600)).toBe(4999)
   })
 
   it('reserves a capped block from its retained runs, one notice on the hole', () => {
@@ -564,7 +622,11 @@ describe('stored block rows', () => {
       expect(rowsOf(block)[0].textContent).toBe('abc')
       expect(block.querySelector('[data-output-empty], [data-output-unreadable]')).toBeNull()
       paintStoredRows(block, artifact([{ from: 1, row: { text: 'abc', runs: [[0, 1]] } }]), options)
-      expect(block.querySelector('.cmd-output')).toBeNull()
+      // A malformed row paints no rectangle, but the body and its height stay:
+      // removing the output element collapsed the reservation under the reader
+      // (ADR-ywzcpbqe).
+      expect(block.querySelector('.cmd-output')).not.toBeNull()
+      expect(block.querySelectorAll('.term-grid-row')).toHaveLength(0)
       paintStoredRows(block, artifact([line(1, 'abc')]), options)
       expect(rowsOf(block)[0].textContent).toBe('abc')
     })

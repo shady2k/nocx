@@ -271,6 +271,20 @@ type blockStream struct {
 	// presence alone cannot tell the two attachments apart. Reclaimed by
 	// detach (nocx-2v80t.3.53); attachSeq keeps the next stamp unique.
 	attachGen map[session.ID]uint64
+	// releasing names the session whose held prefix is being delivered right
+	// now (nocx-4y82c.1.11 review): its rows have left the hold and are not
+	// yet in the artifact, so a close must not seal under them. It guards
+	// drainPendingCloses — a close drained from inside a release would seal
+	// the block at a cursor the release is still advancing — and the
+	// release's own tail drains what parked. Guarded by mu.
+	releasing map[session.ID]bool
+	// releaseMu is the settle side of that ordering: a hold's extraction and
+	// delivery, a close's unchanged flush of the hold, and a helper-reported
+	// session end's flush-and-seal run one at a time. A session end waits on
+	// it rather than sealing between an extraction and its delivery; a close
+	// takes it for its own flush, so either the close flushes the hold or the
+	// release delivers it, and the cursor the close reads is read after both.
+	releaseMu sync.Mutex
 	// orphanSeals are the rows a discarded open's own cleanup CloseBlockRows
 	// failed to seal (nocx-2v80t.3.51): the attempt is already fully
 	// forgotten everywhere else in this stream's bookkeeping and the
@@ -446,20 +460,40 @@ func (s *WSServer) holdLocked(sid session.ID, fromRow uint64, rows []emulator.Ro
 	return false
 }
 
-// holdRoomLocked is the BYTE half of THE HOLD's bound (nocx-4y82c.1.11):
-// whether the session's buffer can take these rows besides what it holds
-// now. A hold that cannot is released and its rows stored, never answered
-// the way holdLocked answers — holdLocked's refusal declares the stream
-// unrecorded, which is right for a replay whose rows the helper already
-// dropped and wrong for a block whose rows are all still here to store.
-func (s *WSServer) holdRoomLocked(sid session.ID, rows []emulator.Row) bool {
+// pendingRowsCount is how many rows a batch of deliveries holds — the row
+// half of THE HOLD's bound, for a batch that enters the hold as one move.
+func pendingRowsCount(pending []pendingRows) uint64 {
+	var n uint64
+	for _, d := range pending {
+		n += uint64(len(d.rows))
+	}
+	return n
+}
+
+// holdFitsLocked answers whether THE HOLD may take this many rows: it is
+// armed, its row count stays within maxHeldBeforeOutputStartRows, and the
+// session's buffer can carry them. This is the ONE statement of the bound, so
+// every point rows enter the hold — a live delivery, the rows that
+// accumulated while an open was in flight, the rows a promoted block brings
+// with it — is bounded the same way (nocx-4y82c.1.11 review). A hold that
+// cannot take them is released and its rows stored, never answered the way
+// holdLocked answers: holdLocked's refusal declares the stream unrecorded,
+// which is right for a replay whose rows the helper already dropped and wrong
+// for a block whose rows are all still here to store.
+func (s *WSServer) holdFitsLocked(sid session.ID, block *openBlock, rows uint64, bytes int64) bool {
+	if block == nil || !block.holdBeforeOutputStart {
+		return false
+	}
 	bs := s.blockStream
-	return bs.heldBytesLocked(sid)+heldRowsBytes(rows) <= bs.budgets[sid]
+	return block.heldBeforeStartRows+rows <= maxHeldBeforeOutputStartRows &&
+		bs.heldBytesLocked(sid)+bytes <= bs.budgets[sid]
 }
 
 // flushHeldRowsBeforeSettle flushes every open block's pre-output-start hold
 // unchanged, for a session whose end is about to seal them: the block keeps
 // what departed (nocx-4y82c.1.11). A block with nothing held is left alone.
+// The caller holds releaseMu — HelperSessionEnded keeps its flush and its
+// detach in one critical section with a release.
 func (s *WSServer) flushHeldRowsBeforeSettle(sid session.ID) {
 	bs := s.blockStream
 	bs.mu.Lock()
@@ -471,27 +505,64 @@ func (s *WSServer) flushHeldRowsBeforeSettle(sid session.ID) {
 	}
 	bs.mu.Unlock()
 	for _, attempt := range attempts {
-		block, held, confirm := bs.takeHeldRowsForClose(sid, attempt)
-		if len(held) == 0 {
-			continue
-		}
-		s.releaseOutputStartHold(sid, block, held, 0, confirm)
+		s.flushHeldForClose(sid, attempt)
 	}
 }
 
-// takeHeldRowsForClose is the close's half of THE HOLD: the block an end
-// names, whatever it still held before its output start, and the session's
-// confirmation hook, with the hold disarmed in the same lock hold. An empty
-// hold answers nothing to flush.
-func (bs *blockStream) takeHeldRowsForClose(sid session.ID, attempt string) (*openBlock, []pendingRows, func(uint64)) {
+// flushHeldForClose delivers one block's hold unchanged, through the ordinary
+// delivery path: the block closes (or its session ends) without a mark, and
+// what it holds is what the stream held before the hold existed. The caller
+// holds releaseMu. Nothing is held for a block whose hold is empty.
+func (s *WSServer) flushHeldForClose(sid session.ID, attempt string) {
+	bs := s.blockStream
 	bs.mu.Lock()
-	defer bs.mu.Unlock()
 	block := bs.open[sid][attempt]
-	if block == nil || len(block.preOutputStart) == 0 {
-		return nil, nil, nil
+	var held []pendingRows
+	var confirm func(uint64)
+	if block != nil && len(block.preOutputStart) > 0 {
+		held, confirm = bs.takeOutputStartHoldLocked(sid, block)
 	}
-	held, confirm := bs.takeOutputStartHoldLocked(sid, block)
-	return block, held, confirm
+	bs.mu.Unlock()
+	if len(held) == 0 {
+		return
+	}
+	s.releaseOutputStartHold(sid, block, held, 0, confirm)
+}
+
+// releaseHeldPrefix delivers the rows a block held before its output start,
+// as ONE critical section with respect to sealing (nocx-4y82c.1.11 review).
+// The rows leave the hold and are not in the artifact until they are
+// delivered, so a settle that ran between those two moments would seal the
+// block short and forget them: a helper-reported session end waits on
+// releaseMu, and a close parks behind releasing. The release's own tail drains
+// what parked, at the cursor this delivery advanced to.
+func (s *WSServer) releaseHeldPrefix(sid session.ID, attempt string, start uint64) {
+	bs := s.blockStream
+	bs.releaseMu.Lock()
+	bs.mu.Lock()
+	block := bs.open[sid][attempt]
+	var held []pendingRows
+	var confirm func(uint64)
+	if block != nil {
+		held, confirm = bs.takeOutputStartHoldLocked(sid, block)
+	}
+	if len(held) > 0 {
+		bs.releasing[sid] = true
+	}
+	bs.mu.Unlock()
+	if len(held) > 0 {
+		s.releaseOutputStartHold(sid, block, held, start, confirm)
+		bs.mu.Lock()
+		delete(bs.releasing, sid)
+		bs.mu.Unlock()
+	}
+	bs.releaseMu.Unlock()
+	// Outside the mutex and after releasing is clear: a close that parked on
+	// the flag runs now, over the rows this release stored.
+	// Owner: this stream, on behalf of the session whose hold was just
+	// released. Closing event: this drain's return — the closes it runs are
+	// the last writes it causes.
+	bs.drainPendingCloses(log.WithLogger(context.Background(), s.log), s, sid)
 }
 
 // takeOutputStartHoldLocked ends THE HOLD for one block and answers what it
@@ -1097,6 +1168,9 @@ func (bs *blockStream) attach(sid session.ID, confirm func(uint64), budget int64
 	if bs.flushing == nil {
 		bs.flushing = make(map[session.ID]bool)
 	}
+	if bs.releasing == nil {
+		bs.releasing = make(map[session.ID]bool)
+	}
 	if bs.pendingCloses == nil {
 		bs.pendingCloses = make(map[session.ID][]pendingEnd)
 	}
@@ -1194,8 +1268,15 @@ func (s *WSServer) HelperSessionEnded(sid session.ID) {
 	// A session that ends with a block's hold still full keeps today's
 	// artifact (nocx-4y82c.1.11): what the block held is flushed unchanged
 	// before the seal, so the block holds every row that departed, not less.
+	// The flush and the sealing detach are one critical section with a mark's
+	// release (review): a release that has taken rows out of the hold is
+	// delivering them, and this waits for it rather than sealing under them.
+	bs := s.blockStream
+	bs.releaseMu.Lock()
 	s.flushHeldRowsBeforeSettle(sid)
-	for _, closed := range s.blockStream.detach(ctx, s.blockStore(), sid) {
+	closed := bs.detach(ctx, s.blockStore(), sid)
+	bs.releaseMu.Unlock()
+	for _, closed := range closed {
 		s.notifyBlockSubscriber(ctx, sid, "block.closed", closed)
 	}
 	// The settle can run before the re-adopting stream has installed the
@@ -1307,6 +1388,7 @@ func (bs *blockStream) detachCoordinator(sid session.ID) {
 	delete(bs.waiting, sid)
 	delete(bs.pending, sid)
 	delete(bs.flushing, sid)
+	delete(bs.releasing, sid)
 	delete(bs.opening, sid)
 	delete(bs.outputStartMarks, sid)
 	delete(bs.outputStartKnown, sid)
@@ -1367,6 +1449,7 @@ func (bs *blockStream) detach(ctx context.Context, store blockOutputStore, sid s
 	delete(bs.waiting, sid)
 	delete(bs.pending, sid)
 	delete(bs.flushing, sid)
+	delete(bs.releasing, sid)
 	delete(bs.opening, sid)
 	delete(bs.pendingCloses, sid)
 	delete(bs.closing, sid)
@@ -1554,11 +1637,12 @@ func (s *WSServer) BlockOutputStartRow(sid session.ID, fromRow uint64) {
 			// artifact must not keep — the command that outran its mark used
 			// to store it twice. The artifact's span begins at this row, and
 			// expectedFirstRow is that row, so the store's continuity check
-			// and the helper's watermark both agree with it.
+			// and the helper's watermark both agree with it. The release is
+			// one critical section with a sealing settle (review).
 			startRow := block.outputStartRow
-			held, confirm := bs.takeOutputStartHoldLocked(sid, block)
+			attempt := block.attempt
 			bs.mu.Unlock()
-			s.releaseOutputStartHold(sid, block, held, startRow, confirm)
+			s.releaseHeldPrefix(sid, attempt, startRow)
 			return
 		} else if fromRow > block.outputStartRow {
 			// A SECOND mark after this block's own is the next command's
@@ -1585,9 +1669,9 @@ func (s *WSServer) BlockOutputStartRow(sid session.ID, fromRow uint64) {
 		if startRow > block.rows {
 			startRow = block.rows
 		}
-		held, confirm := bs.takeOutputStartHoldLocked(sid, block)
+		attempt := block.attempt
 		bs.mu.Unlock()
-		s.releaseOutputStartHold(sid, block, held, startRow, confirm)
+		s.releaseHeldPrefix(sid, attempt, startRow)
 		return
 	}
 	if block.outputStartKnown && block.outputStartMarked {
@@ -1614,9 +1698,9 @@ func (s *WSServer) BlockOutputStartRow(sid session.ID, fromRow uint64) {
 		// Replaying from the cursor avoids dropping the still-owed gap.
 		startRow = block.rows
 	}
-	held, confirm := bs.takeOutputStartHoldLocked(sid, block)
+	attempt := block.attempt
 	bs.mu.Unlock()
-	s.releaseOutputStartHold(sid, block, held, startRow, confirm)
+	s.releaseHeldPrefix(sid, attempt, startRow)
 }
 
 func pendingAfterOutputStart(in []pendingRows, start uint64) []pendingRows {
@@ -1651,7 +1735,9 @@ func (s *WSServer) releaseOutputStartHold(sid session.ID, block *openBlock, held
 			}
 			continue
 		}
-		up, ok := s.BlockRowsArrived(sid, from, lost, rows, p.cause)
+		// settledBeforeOverflow: these rows were received before any overflow
+		// marker, so the unrecorded gate does not apply to them (review).
+		up, ok := s.blockRowsArrived(sid, from, lost, rows, p.cause, true)
 		if ok && confirm != nil {
 			confirm(up)
 		}
@@ -1676,6 +1762,17 @@ func outputRowsAfterStart(p pendingRows, start uint64) ([]emulator.Row, uint64, 
 }
 
 func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows []emulator.Row, lostCause string) (writtenUpTo uint64, confirm bool) {
+	return s.blockRowsArrived(sid, fromRow, lost, rows, lostCause, false)
+}
+
+// blockRowsArrived is BlockRowsArrived's body. settledBeforeOverflow is true
+// for rows the coordinator received BEFORE the helper's overflow marker and
+// is now releasing from the hold (nocx-4y82c.1.11 review): they are stored,
+// not dropped with the rows that arrive after the marker. The unrecorded gate
+// below guards the latter — a row the helper sent after its buffer overflowed
+// names a span the helper no longer holds whole — and the held prefix is the
+// opposite: it was received in full.
+func (s *WSServer) blockRowsArrived(sid session.ID, fromRow, lost uint64, rows []emulator.Row, lostCause string, settledBeforeOverflow bool) (writtenUpTo uint64, confirm bool) {
 	if len(rows) == 0 && lost == 0 {
 		return 0, false
 	}
@@ -1686,7 +1783,7 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 	bs := s.blockStream
 	bs.mu.Lock()
 	_, sourced := bs.sources[sid]
-	if _, unrecorded := bs.unrecorded[sid]; sourced && unrecorded {
+	if _, unrecorded := bs.unrecorded[sid]; sourced && unrecorded && !settledBeforeOverflow {
 		// Not recorded until the next command (BlockOutputIncomplete): what
 		// arrives now is not kept, and the helper's mark must not claim it
 		// -- the acknowledgement means STORED, so a refused span stays
@@ -1712,7 +1809,7 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 		// first, unchanged and in order, and the delivery that crossed the
 		// bound follows through the ordinary path below; the hold is off, so
 		// this branch cannot run twice for the same block.
-		if block.heldBeforeStartRows+uint64(len(rows)) > maxHeldBeforeOutputStartRows || !s.holdRoomLocked(sid, rows) {
+		if !s.holdFitsLocked(sid, block, uint64(len(rows)), heldRowsBytes(rows)) {
 			held, confirm := bs.takeOutputStartHoldLocked(sid, block)
 			bs.mu.Unlock()
 			s.log.Debug("output start hold released at its bound; the block's rows are stored as they stream",
@@ -2749,9 +2846,12 @@ func (s *WSServer) closeBlockRows(ctx context.Context, sid session.ID, attempt s
 	// placed. The flush goes through the ordinary delivery path, which is
 	// what parks this close behind it when the store is busy, and what makes
 	// the closing screen follow the rows rather than the other way round.
-	if block, held, confirm := bs.takeHeldRowsForClose(sid, attempt); len(held) > 0 {
-		s.releaseOutputStartHold(sid, block, held, 0, confirm)
-	}
+	// releaseMu makes the flush one critical section with a mark's release
+	// (review): either this close flushes the hold, or the release delivers
+	// it, and the cursor below is read after both.
+	bs.releaseMu.Lock()
+	s.flushHeldForClose(sid, attempt)
+	bs.releaseMu.Unlock()
 	bs.mu.Lock()
 	var screenAnchor *proto.OutputStartScreenAnchor
 	if len(anchors) > 0 && anchors[0] != nil {
@@ -2798,8 +2898,17 @@ func (s *WSServer) closeBlockRows(ctx context.Context, sid session.ID, attempt s
 		// beyond that interval, so settle the recovered predecessor at its
 		// stored cursor as a gap. Its promotion drains this queued end.
 		if prior.recoveredOutputInterval {
-			priorEndRow := prior.rows
 			priorAttempt := prior.attempt
+			bs.mu.Unlock()
+			// The predecessor may still hold rows before its output start; a
+			// gap seal must not close over them (review). Flushed before the
+			// closing flag is set, so the deliveries are stored rather than
+			// queued behind this close.
+			bs.releaseMu.Lock()
+			s.flushHeldForClose(sid, priorAttempt)
+			bs.releaseMu.Unlock()
+			bs.mu.Lock()
+			priorEndRow := prior.rows
 			bs.closing[sid] = true
 			bs.mu.Unlock()
 			s.closeBlockRowsNow(ctx, sid, priorAttempt, priorEndRow, nil, "", true, false, nil)
@@ -3455,16 +3564,24 @@ func (bs *blockStream) openAttemptFor(ctx context.Context, s *WSServer, sid sess
 		}
 		if existing.holdBeforeOutputStart && len(bs.pending[sid]) > 0 {
 			// Its rows are its own head and departed before its mark like
-			// any other: they wait in the hold, not in the store.
-			existing.preOutputStart = append(existing.preOutputStart, bs.pending[sid]...)
-			for _, d := range bs.pending[sid] {
-				existing.heldBeforeStartRows += uint64(len(d.rows))
+			// any other: they wait in the hold, not in the store — when the
+			// hold can take them. The bound is stated where rows enter the
+			// hold, and this is one of those points (review).
+			if s.holdFitsLocked(sid, existing, pendingRowsCount(bs.pending[sid]), pendingRowsBytes(bs.pending[sid])) {
+				existing.preOutputStart = append(existing.preOutputStart, bs.pending[sid]...)
+				for _, d := range bs.pending[sid] {
+					existing.heldBeforeStartRows += uint64(len(d.rows))
+				}
+				delete(bs.pending, sid)
+				next, kind, gen := bs.dequeueNextOpenLocked(sid, "")
+				bs.mu.Unlock()
+				bs.continueQueuedOpen(ctx, s, sid, next, kind, gen)
+				return
 			}
-			delete(bs.pending, sid)
-			next, kind, gen := bs.dequeueNextOpenLocked(sid, "")
-			bs.mu.Unlock()
-			bs.continueQueuedOpen(ctx, s, sid, next, kind, gen)
-			return
+			// The bound released the hold; the pending rows are stored
+			// unchanged below, through the ordinary flush.
+			existing.holdBeforeOutputStart = false
+			existing.heldBeforeStartRows = 0
 		}
 		pending := bs.takeForFlushLocked(sid, takeAllPendingRows)
 		if len(pending) > 0 {
@@ -3674,16 +3791,27 @@ func (bs *blockStream) performOpen(ctx context.Context, s *WSServer, sid session
 		bs.queued[sid] = attempt
 	}
 	var pending []pendingRows
-	if !hadCurrent && b.holdBeforeOutputStart {
+	if !hadCurrent && b.holdBeforeOutputStart &&
+		s.holdFitsLocked(sid, b, pendingRowsCount(bs.pending[sid]), pendingRowsBytes(bs.pending[sid])) {
 		// Rows that arrived while this open was in flight are this block's
 		// own head, and they departed before the mark like any other: they
-		// join the hold rather than the store.
+		// join the hold rather than the store — unless the hold cannot take
+		// them, in which case the bound releases it and they are stored
+		// unchanged (review). This is one of the points rows ENTER the hold.
 		b.preOutputStart = append(b.preOutputStart, bs.pending[sid]...)
 		for _, d := range bs.pending[sid] {
 			b.heldBeforeStartRows += uint64(len(d.rows))
 		}
 		delete(bs.pending, sid)
 	} else if !hadCurrent {
+		if b.holdBeforeOutputStart {
+			// The bound released the hold: this block's head is stored as it
+			// streamed, exactly as it was before the hold existed.
+			b.holdBeforeOutputStart = false
+			b.heldBeforeStartRows = 0
+			s.log.Debug("output start hold released at its bound; the block's rows are stored as they stream",
+				"session", sid, "entry", b.entry, "heldRows", pendingRowsCount(bs.pending[sid]), "bound", maxHeldBeforeOutputStartRows)
+		}
 		pending = bs.takeForFlushLocked(sid, takeAllPendingRows)
 		if b.awaitingOutputReplay {
 			b.preOutputStart = append(b.preOutputStart, pending...)
@@ -3830,6 +3958,15 @@ func (bs *blockStream) flushPendingRows(ctx context.Context, s *WSServer, sid se
 }
 
 func (bs *blockStream) drainPendingCloses(ctx context.Context, s *WSServer, sid session.ID) {
+	bs.mu.Lock()
+	if bs.releasing[sid] {
+		// A release is delivering the held prefix: the cursor a close would
+		// read is still moving, and a seal here would cut the block short
+		// (review). The release's own tail drains what parked.
+		bs.mu.Unlock()
+		return
+	}
+	bs.mu.Unlock()
 	for {
 		bs.mu.Lock()
 		closes := bs.pendingCloses[sid]

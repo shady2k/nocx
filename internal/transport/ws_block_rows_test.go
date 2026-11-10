@@ -81,10 +81,16 @@ type blockingAppendStore struct {
 	ledger  content.LedgerRepository
 	entered chan struct{}
 	release chan struct{}
+	// sealed signals each CloseBlockRows call, so a test can wait for the
+	// seal it is about instead of for a duration (nocx-4y82c.1.11 review).
+	sealed chan struct{}
 }
 
 func newBlockingAppendStore(ledger content.LedgerRepository) *blockingAppendStore {
-	return &blockingAppendStore{ledger: ledger, entered: make(chan struct{}, 64), release: make(chan struct{})}
+	return &blockingAppendStore{
+		ledger: ledger, entered: make(chan struct{}, 64),
+		release: make(chan struct{}), sealed: make(chan struct{}, 64),
+	}
 }
 
 func (s *blockingAppendStore) OpenBlockRowsForSession(ctx context.Context, sessionID string) (content.OpenBlockRowsEntry, error) {
@@ -106,6 +112,7 @@ func (s *blockingAppendStore) AppendBlockRows(ctx context.Context, in content.Ap
 }
 
 func (s *blockingAppendStore) CloseBlockRows(ctx context.Context, in content.CloseBlockRows) (content.BlockRowsSummary, error) {
+	s.sealed <- struct{}{}
 	return s.ledger.CloseBlockRows(ctx, in)
 }
 

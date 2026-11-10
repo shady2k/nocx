@@ -278,10 +278,10 @@ export function parseStoredBlockRows(
   }
 }
 
-/** Two reads of one artifact, joined by the row index each line carries.
- *  `next` owns the geometry and artifact state — it is the newer read — while
- *  the lines are the union, so a page of the tail cannot blank the pages
- *  above it. */
+/** Two accepted reads of one artifact, joined by each line's row index.
+ *  The caller owns freshness: `next` owns the geometry and artifact state.
+ *  Keep loaded pages only within its retained ranges, so a tail page cannot
+ *  blank retained pages above it or keep rows the store has evicted. */
 export function mergeStoredBlockRows(
   previous: StoredBlockRows | undefined,
   next: StoredBlockRows,
@@ -296,8 +296,18 @@ export function mergeStoredBlockRows(
   const byFrom = new Map<number, StoredBlockRows['lines'][number]>()
   for (const line of previous.lines) byFrom.set(line.from, line)
   for (const line of next.lines) byFrom.set(line.from, line)
-  const lines = [...byFrom.values()].sort((a, b) => a.from - b.from)
-  if (next.retainedRanges !== undefined && next.retainedRanges.length > 0) {
+  const merged = [...byFrom.values()].sort((a, b) => a.from - b.from)
+  const retained = next.retainedRanges
+  let rangeAt = 0
+  const lines =
+    retained === undefined
+      ? merged
+      : merged.filter((line) => {
+          while (rangeAt < retained.length && retained[rangeAt].to <= line.from) rangeAt++
+          return rangeAt < retained.length && retained[rangeAt].from <= line.from
+        })
+  // An explicitly empty range set is full eviction, not missing geometry.
+  if (retained !== undefined) {
     return { ...next, lines }
   }
   if (previous.retainedRanges === undefined || previous.retainedRanges.length === 0) {

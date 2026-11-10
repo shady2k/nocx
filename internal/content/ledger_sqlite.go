@@ -1429,18 +1429,28 @@ func (s *sqliteContent) Artifact(ctx context.Context, id string) (*Artifact, err
 		return nil, err
 	}
 	if a.MediaType == MediaBlockRows {
-		if err := readRowCoordinates(a.Chunks, &a.RowCount, &a.FirstRow, &a.LastRow); err != nil {
-			return nil, fmt.Errorf("content: block rows: read the coordinates of %s: %w", id, err)
+		count, first, last, ranges, err := readRowGeometry(a.Chunks)
+		if err != nil {
+			return nil, fmt.Errorf("content: block rows: read the geometry of %s: %w", id, err)
+		}
+		a.RowCount, a.FirstRow, a.LastRow, a.RetainedRanges = count, first, last, ranges
+		if count > 0 {
+			a.EndRow = last + 1
+		}
+		// A sealed block's payload fixes the whole span; a page must never
+		// widen it (ADR-y45sp41c).
+		if sealed := decodeBlockRowsPayload(a.Payload); sealed.EndRow > a.EndRow {
+			a.EndRow = sealed.EndRow
 		}
 	}
 	return a, nil
 }
 
-// readRowCoordinates fills a rows artifact's own coordinates from its chunks:
-// how many stored lines there are, and the absolute indices of the first and
-// last. The walk is the same one ArtifactRange makes, and it is the only place
-// a line's `from` is read on a full body.
-func readRowCoordinates(chunks [][]byte, count *int, first, last *uint64) error {
+// readRowGeometry fills a rows artifact's geometry from its chunks: how many
+// stored lines there are, their first and last stream indices, and the runs
+// between holes. The walk is the same one ArtifactRange makes, and it is the
+// only place a line's `from` is read on a full body.
+func readRowGeometry(chunks [][]byte) (count int, first, last uint64, ranges []RowRange, err error) {
 	have := false
 	for _, chunk := range chunks {
 		for _, line := range bytes.Split(chunk, []byte{'\n'}) {
@@ -1451,17 +1461,22 @@ func readRowCoordinates(chunks [][]byte, count *int, first, last *uint64) error 
 				From uint64 `json:"from"`
 			}
 			if err := json.Unmarshal(line, &meta); err != nil {
-				return err
+				return 0, 0, 0, nil, err
 			}
 			if !have {
-				*first = meta.From
+				first = meta.From
 				have = true
 			}
-			*last = meta.From
-			*count = *count + 1
+			last = meta.From
+			count++
+			if n := len(ranges); n > 0 && meta.From == ranges[n-1].To {
+				ranges[n-1].To = meta.From + 1
+			} else {
+				ranges = append(ranges, RowRange{From: meta.From, To: meta.From + 1})
+			}
 		}
 	}
-	return nil
+	return count, first, last, ranges, nil
 }
 
 // ArtifactRange returns one page of a stored-rows artifact. The page is
@@ -1490,6 +1505,7 @@ func (s *sqliteContent) ArtifactRange(ctx context.Context, id string, fromRow ui
 	out := &ArtifactRange{Artifact: a}
 	var page bytes.Buffer
 	var firstFrom, lastFrom, pageFirst, pageLast uint64
+	var ranges []RowRange
 	haveAny, havePage := false, false
 	for rows.Next() {
 		var body []byte
@@ -1512,6 +1528,11 @@ func (s *sqliteContent) ArtifactRange(ctx context.Context, id string, fromRow ui
 			}
 			lastFrom = meta.From
 			out.RowCount++
+			if n := len(ranges); n > 0 && meta.From == ranges[n-1].To {
+				ranges[n-1].To = meta.From + 1
+			} else {
+				ranges = append(ranges, RowRange{From: meta.From, To: meta.From + 1})
+			}
 			if meta.From < fromRow {
 				continue
 			}
@@ -1531,18 +1552,20 @@ func (s *sqliteContent) ArtifactRange(ctx context.Context, id string, fromRow ui
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	out.RetainedRanges = ranges
 	if haveAny {
 		out.FirstRow, out.LastRow = firstFrom, lastFrom
+		out.EndRow = lastFrom + 1
+	}
+	if sealed := decodeBlockRowsPayload(a.Payload); sealed.EndRow > out.EndRow {
+		out.EndRow = sealed.EndRow
 	}
 	if havePage {
 		out.RangeStart = pageFirst
 		out.HasMoreBefore = pageFirst > firstFrom
 		out.HasMoreAfter = pageLast < lastFrom
 	} else {
-		out.RangeStart = lastFrom + 1
-		if !haveAny {
-			out.RangeStart = 0
-		}
+		out.RangeStart = out.EndRow
 		out.HasMoreBefore = haveAny
 	}
 	if page.Len() > 0 {

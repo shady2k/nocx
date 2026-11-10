@@ -655,6 +655,26 @@ func TestAppendBlockRows_TheCapDropsTheMiddleAndCountsIt(t *testing.T) {
 	if dropped := total - len(kept); uint64(dropped) != summary.DroppedRows { //nolint:gosec // a row count, not a byte count
 		t.Fatalf("the body is short %d rows but the block records %d — the count and the chunks disagree", dropped, summary.DroppedRows)
 	}
+	// THE GEOMETRY IS THE WHOLE BLOCK, not the rows that survived: the stream
+	// ran 0..400, and the retained rows are the head run and the tail run with
+	// one hole between them. A reader reserves the 400-row span and spends one
+	// notice on the hole; a page can never widen it (ADR-y45sp41c).
+	if art.EndRow != total {
+		t.Fatalf("EndRow = %d, want %d", art.EndRow, total)
+	}
+	if len(art.RetainedRanges) < 2 {
+		t.Fatalf("retained ranges = %+v, want the cap's head and tail as separate runs", art.RetainedRanges)
+	}
+	if art.RetainedRanges[0].From != 0 || art.RetainedRanges[len(art.RetainedRanges)-1].To != total {
+		t.Fatalf("retained ranges = %+v, want the first run from 0 and the last to %d", art.RetainedRanges, total)
+	}
+	var covered uint64
+	for _, rr := range art.RetainedRanges {
+		covered += rr.To - rr.From
+	}
+	if covered != uint64(len(kept)) { //nolint:gosec // a row count, not a byte count
+		t.Fatalf("retained ranges cover %d rows, the chunks hold %d", covered, len(kept))
+	}
 	// The middle is what is gone: the survivors are the head run and the
 	// tail run, and a row from between them is in neither.
 	for _, r := range kept {

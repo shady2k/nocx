@@ -216,7 +216,9 @@ was left alone.
 | 02kc8c1j | 2026-11-09 | [The withdrawal is decided where the answer is written, and a session already handed over is nobody else's to end](02kc8c1j-the-withdrawal-is-decided-where-the-answer-is-written-and-a-handover-is-final.md) | Superseded by ADR-4snvrwxd (was accepted 2026-11-09, with the review of `nocx-ouru5.1.5` in PR #764; supersedes the mechanism of ADR-5h9s0skm — the host arbitrates the withdrawal at the write, and the claim's hand-over is final) |
 | 4snvrwxd | 2026-11-09 | [Ownership is the set of answers that name a session, and an answer counts only if its frame reached the wire](4snvrwxd-ownership-is-the-set-of-answers-and-a-frame-that-failed-reached-nobody.md) | Accepted (2026-11-09, with the fix for `nocx-ouru5.1.9`, the review of PR #764; supersedes ADR-02kc8c1j's `handedOut` mark and its delivery verdict) |
 
-| y45sp41c | 2026-11-10 | [A stored-row read is a page with a slot, and the renderer reads what is on screen first](y45sp41c-a-stored-row-read-is-a-page-with-a-slot.md) | Accepted (owner decision, 2026-11-10, `nocx-large-block-read-response-queue-overflow-t7xhe`; refines ADR-8eej3e66 §7 for one internal retry — the refusal never reaches a person) |
+| y45sp41c | 2026-11-10 | [A stored-row read is a page with a slot, and the renderer reads what is on screen first](y45sp41c-a-stored-row-read-is-a-page-with-a-slot.md) | Accepted (owner decision, 2026-11-10, `nocx-large-block-read-response-queue-overflow-t7xhe`; refines ADR-8eej3e66 §7 for one internal retry — the refusal never reaches a person); refined by ADR-ywzcpbqe |
+
+| ywzcpbqe | 2026-11-10 | [A block's rows are a set of ranges, and its height is its geometry](ywzcpbqe-a-blocks-rows-are-a-set-of-ranges.md) | Accepted (owner review of PR #789, 2026-11-10, `nocx-4y82c.1.18`; refines ADR-y45sp41c decisions 1 and 3) |
 
 ## Adding one
 

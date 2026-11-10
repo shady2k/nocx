@@ -475,13 +475,25 @@ type ledgerArtifactResponse struct {
 	// artifact; RowCount and RangeCount are 0 there. A reader reserves a
 	// block's height from RowCount before any page of it arrives, and pages
 	// with HasMoreBefore/HasMoreAfter.
-	FirstRow      *uint64 `json:"firstRow"`
-	LastRow       *uint64 `json:"lastRow"`
-	RowCount      int     `json:"rowCount"`
-	RangeStart    *uint64 `json:"rangeStart"`
-	RangeCount    int     `json:"rangeCount"`
-	HasMoreBefore bool    `json:"hasMoreBefore"`
-	HasMoreAfter  bool    `json:"hasMoreAfter"`
+	FirstRow *uint64 `json:"firstRow"`
+	LastRow  *uint64 `json:"lastRow"`
+	EndRow   *uint64 `json:"endRow"`
+	RowCount int     `json:"rowCount"`
+	// RetainedRanges is the whole artifact's geometry: the runs of stream rows
+	// the store holds, each [from, to). A reader reserves the FirstRow..EndRow
+	// span once and spends one notice on each gap between these runs, so a page
+	// arriving later never moves the block (ADR-y45sp41c).
+	RetainedRanges []ledgerRowRangeWire `json:"retainedRanges"`
+	RangeStart     *uint64              `json:"rangeStart"`
+	RangeCount     int                  `json:"rangeCount"`
+	HasMoreBefore  bool                 `json:"hasMoreBefore"`
+	HasMoreAfter   bool                 `json:"hasMoreAfter"`
+}
+
+// ledgerRowRangeWire is one retained run on the wire. To is exclusive.
+type ledgerRowRangeWire struct {
+	From uint64 `json:"from"`
+	To   uint64 `json:"to"`
 }
 
 // maxArtifactRowLimit bounds one page of a stored-rows read. It is larger than
@@ -609,8 +621,9 @@ func (h ledgerReadHandlers) readArtifact(ctx context.Context, p ledgerArtifactPa
 				missing = true
 				return nil
 			}
-			out = ledgerArtifactResponseOf(page.Artifact, page.FirstRow, page.LastRow,
-				page.RowCount, page.RangeStart, page.RangeCount, page.HasMoreBefore, page.HasMoreAfter, page.RowCount > 0)
+			out = ledgerArtifactResponseOf(page.Artifact, page.FirstRow, page.LastRow, page.EndRow,
+				page.RowCount, page.RetainedRanges, page.RangeStart, page.RangeCount,
+				page.HasMoreBefore, page.HasMoreAfter, page.RowCount > 0)
 			return nil
 		}
 		art, err := svc.Artifact(ctx, p.ID)
@@ -621,8 +634,8 @@ func (h ledgerReadHandlers) readArtifact(ctx context.Context, p ledgerArtifactPa
 			missing = true
 			return nil
 		}
-		out = ledgerArtifactResponseOf(art, art.FirstRow, art.LastRow, art.RowCount,
-			art.FirstRow, art.RowCount, false, false, art.RowCount > 0)
+		out = ledgerArtifactResponseOf(art, art.FirstRow, art.LastRow, art.EndRow, art.RowCount,
+			art.RetainedRanges, art.FirstRow, art.RowCount, false, false, art.RowCount > 0)
 		return nil
 	})
 	return out, missing, notRows, err
@@ -632,8 +645,8 @@ func (h ledgerReadHandlers) readArtifact(ctx context.Context, p ledgerArtifactPa
 // coordinates) to the wire. A body that is not stored rows carries null
 // coordinates and zero counts; saying anything else would make one field mean
 // two things.
-func ledgerArtifactResponseOf(art *content.Artifact, first, last uint64, rowCount int,
-	rangeStart uint64, rangeCount int, moreBefore, moreAfter, rows bool,
+func ledgerArtifactResponseOf(art *content.Artifact, first, last, end uint64, rowCount int,
+	retained []content.RowRange, rangeStart uint64, rangeCount int, moreBefore, moreAfter, rows bool,
 ) ledgerArtifactResponse {
 	var sb strings.Builder
 	for _, c := range art.Chunks {
@@ -647,11 +660,16 @@ func ledgerArtifactResponseOf(art *content.Artifact, first, last uint64, rowCoun
 	out := ledgerArtifactResponse{
 		ID: art.ID, MediaType: string(art.MediaType), Body: sb.String(),
 		Truncated: truncated, ByteLen: art.ByteLen,
-		HasMoreBefore: moreBefore, HasMoreAfter: moreAfter,
+		RetainedRanges: []ledgerRowRangeWire{},
+		HasMoreBefore:  moreBefore, HasMoreAfter: moreAfter,
 	}
 	if rows {
-		out.FirstRow, out.LastRow = &first, &last
+		out.FirstRow, out.LastRow, out.EndRow = &first, &last, &end
 		out.RowCount = rowCount
+		out.RetainedRanges = make([]ledgerRowRangeWire, 0, len(retained))
+		for _, rr := range retained {
+			out.RetainedRanges = append(out.RetainedRanges, ledgerRowRangeWire{From: rr.From, To: rr.To})
+		}
 		out.RangeStart, out.RangeCount = &rangeStart, rangeCount
 	}
 	return out

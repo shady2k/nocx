@@ -240,18 +240,59 @@ func seedStoredRows(t *testing.T, db content.ContentDB, count int) (entryID, art
 }
 
 type artifactWireReply struct {
-	ID            string  `json:"id"`
-	MediaType     string  `json:"mediaType"`
-	Body          string  `json:"body"`
-	Truncated     *string `json:"truncated"`
-	ByteLen       int64   `json:"byteLen"`
-	FirstRow      *uint64 `json:"firstRow"`
-	LastRow       *uint64 `json:"lastRow"`
-	RowCount      int     `json:"rowCount"`
+	ID             string  `json:"id"`
+	MediaType      string  `json:"mediaType"`
+	Body           string  `json:"body"`
+	Truncated      *string `json:"truncated"`
+	ByteLen        int64   `json:"byteLen"`
+	FirstRow       *uint64 `json:"firstRow"`
+	LastRow        *uint64 `json:"lastRow"`
+	EndRow         *uint64 `json:"endRow"`
+	RowCount       int     `json:"rowCount"`
+	RetainedRanges []struct {
+		From uint64 `json:"from"`
+		To   uint64 `json:"to"`
+	} `json:"retainedRanges"`
 	RangeStart    *uint64 `json:"rangeStart"`
 	RangeCount    int     `json:"rangeCount"`
 	HasMoreBefore bool    `json:"hasMoreBefore"`
 	HasMoreAfter  bool    `json:"hasMoreAfter"`
+}
+
+func TestLedgerArtifactPageReportsCappedGeometryOverTheWire(t *testing.T) {
+	policy := content.NewPolicy()
+	policy.SetOutputCapBytes(4 << 10)
+	db := newLedgerStoreWithPolicy(t, policy)
+	ws, stop := newLedgerWSServer(t, log.NewSlogAdapter(nil), db)
+	defer stop()
+	conn := connectWS(t, ws)
+	_, artifactID := seedStoredRows(t, db, 2000)
+
+	resp := vaultCall(t, conn, "ledger.artifact", map[string]any{
+		"id": artifactID, "fromRow": 0, "rowLimit": 1000,
+	}, 2)
+	if resp.Error != nil {
+		t.Fatalf("ledger.artifact: %+v", resp.Error)
+	}
+	if err := validateJSONErr(loadSchema(t, "ledger.artifact.schema.json"), resp.Result); err != nil {
+		t.Fatalf("capped result does not conform: %v\nraw: %s", err, resp.Result)
+	}
+	var got artifactWireReply
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.EndRow == nil || *got.EndRow != 2000 {
+		t.Fatalf("endRow = %v, want the whole block's 2000", got.EndRow)
+	}
+	if len(got.RetainedRanges) < 2 {
+		t.Fatalf("retainedRanges = %+v, want the cap's head and tail runs", got.RetainedRanges)
+	}
+	if got.RetainedRanges[0].From != 0 || got.RetainedRanges[len(got.RetainedRanges)-1].To != 2000 {
+		t.Fatalf("retainedRanges = %+v, want the first from 0 and the last to 2000", got.RetainedRanges)
+	}
+	if got.RowCount >= 2000 {
+		t.Fatalf("rowCount = %d, want the cap to have taken some of 2000", got.RowCount)
+	}
 }
 
 func TestLedgerArtifactPageOverTheWireConformsAndCarriesCoordinates(t *testing.T) {
@@ -276,6 +317,12 @@ func TestLedgerArtifactPageOverTheWireConformsAndCarriesCoordinates(t *testing.T
 	}
 	if got.RowCount != 25 || got.FirstRow == nil || *got.FirstRow != 0 || got.LastRow == nil || *got.LastRow != 24 {
 		t.Fatalf("whole-artifact coordinates = %+v", got)
+	}
+	if got.EndRow == nil || *got.EndRow != 25 {
+		t.Fatalf("endRow = %v, want 25", got.EndRow)
+	}
+	if len(got.RetainedRanges) != 1 || got.RetainedRanges[0].From != 0 || got.RetainedRanges[0].To != 25 {
+		t.Fatalf("retainedRanges = %+v, want one run [0,25)", got.RetainedRanges)
 	}
 	if got.RangeStart == nil || *got.RangeStart != 10 || got.RangeCount != 5 {
 		t.Fatalf("page coordinates = %+v", got)

@@ -90,9 +90,12 @@ func TestArtifactRangeReturnsOnePageWithItsCoordinates(t *testing.T) {
 	if got == nil {
 		t.Fatal("ArtifactRange = nil")
 	}
-	if got.RowCount != 25 || got.FirstRow != 0 || got.LastRow != 24 {
-		t.Fatalf("whole-artifact coordinates = count %d first %d last %d, want 25/0/24",
-			got.RowCount, got.FirstRow, got.LastRow)
+	if got.RowCount != 25 || got.FirstRow != 0 || got.LastRow != 24 || got.EndRow != 25 {
+		t.Fatalf("whole-artifact coordinates = count %d first %d last %d end %d, want 25/0/24/25",
+			got.RowCount, got.FirstRow, got.LastRow, got.EndRow)
+	}
+	if len(got.RetainedRanges) != 1 || got.RetainedRanges[0] != (content.RowRange{From: 0, To: 25}) {
+		t.Fatalf("retained ranges = %+v, want one run [0,25)", got.RetainedRanges)
 	}
 	if got.RangeStart != 10 || got.RangeCount != 5 {
 		t.Fatalf("range = start %d count %d, want 10/5", got.RangeStart, got.RangeCount)

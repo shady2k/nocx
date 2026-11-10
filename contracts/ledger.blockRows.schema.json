@@ -47,6 +47,18 @@
           "type": "integer",
           "minimum": 0,
           "description": "The absolute row index the block's stored span begins at, kept at close so a paged read can place its first page. Absent is row zero."
+        },
+        "endRow": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "One past the block's whole stream span, written once at close. The cap's eviction and the emulator's losses are inside this span; retainedRanges says which parts of it the chunks hold. A reader reserves firstRow..endRow before any page arrives (ADR-y45sp41c)."
+        },
+        "retainedRanges": {
+          "type": "array",
+          "description": "The runs of stream rows the chunks hold, ascending, each [from, to) with to exclusive, written once at close. A cap eviction leaves the head and tail runs apart; a loss can split one. The gap between two runs is one fixed notice, so a block's reserved height cannot change when a page arrives.",
+          "items": {
+            "$ref": "#/$defs/retainedRange"
+          }
         }
       }
     },
@@ -165,6 +177,21 @@
       "type": "integer",
       "minimum": 0,
       "description": "One style colour, packed into a single integer (emulator.Color) rather than a named-field object \u2014 the distinction between a palette index, an exact RGB value and the terminal's own default is load-bearing (a palette index repaints when the theme changes, RGB does not), but at a run per style change spelling it as three ranges of one integer costs nothing a receiver cannot undo cheaply. 0 is the terminal's own default colour for the role (emulator.ColorDefault, the zero value an unstyled style holds). 1 through 256 is a palette index plus one (emulator.ColorPalette, the index is the value minus one) \u2014 shifted up because 0 is taken by default. 257 and above is an exact colour (emulator.ColorRGB): subtract 257 and read the low 24 bits as r<<16 | g<<8 | b, one byte per channel."
+    },
+    "retainedRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to"],
+      "properties": {
+        "from": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "to": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
     }
   }
 }

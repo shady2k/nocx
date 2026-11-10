@@ -10,7 +10,7 @@
  */
 
 /**
- * Result of the ledger.artifact JSON-RPC method (nocx-m3fqk, design §6) — ONE artifact's body, joined from its chunks in seq order. It is a separate method from ledger.get on purpose: the recall read must not haul bytes (ADR-0019 §6), so the page and the detail carry metadata and whoever actually wants a body asks for it one at a time. This is what a restored block's output is drawn from. A read that names a row range returns ONE PAGE of a stored-rows artifact and the artifact's own coordinates (nocx-t7xhe): `firstRow`, `lastRow` and `rowCount` describe the whole block, and `rangeStart`, `rangeCount`, `hasMoreBefore` and `hasMoreAfter` describe the page. Those coordinates are null (and the counts zero) for a body that is not stored rows, because a row index has no meaning there.
+ * Result of the ledger.artifact JSON-RPC method (nocx-m3fqk, design §6) — ONE artifact's body, joined from its chunks in seq order. It is a separate method from ledger.get on purpose: the recall read must not haul bytes (ADR-0019 §6), so the page and the detail carry metadata and whoever actually wants a body asks for it one at a time. This is what a restored block's output is drawn from. A read that names a row range returns ONE PAGE of a stored-rows artifact and the artifact's own coordinates (nocx-t7xhe): `firstRow`, `lastRow` and `rowCount` describe the whole block, and `rangeStart`, `rangeCount`, `hasMoreBefore` and `hasMoreAfter` describe the page. Those coordinates are null (and the counts zero) for a body that is not stored rows, because a row index has no meaning there. The block's whole geometry rides with every page (nocx-t7xhe, ADR-y45sp41c): `firstRow`..`endRow` is the stream span the block ever held, and `retainedRanges` names the runs the store keeps inside it. A reader reserves that span once, spends one fixed notice on each gap between runs, and never lets a page change the height.
  */
 export interface LedgerArtifact {
   /**
@@ -61,4 +61,15 @@ export interface LedgerArtifact {
    * Whether stored rows exist after this page. Always false for a body that is not stored rows.
    */
   hasMoreAfter: boolean
+  /**
+   * One past the block's whole stream span. Null for a body that is not stored rows. Fixed at close: a page can never widen it, so the rows a reader reserved do not move when a page arrives.
+   */
+  endRow: number | null
+  /**
+   * The runs of stream rows the artifact holds, ascending, each [from, to) with to exclusive. A cap eviction leaves a head run and a tail run; an emulator loss can split a run. The gap between two runs is ONE fixed-size notice, whatever its row count, so the block's height is decided by this geometry and not by what happened to load. Empty for a body that is not stored rows.
+   */
+  retainedRanges: {
+    from: number
+    to: number
+  }[]
 }

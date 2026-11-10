@@ -1158,6 +1158,51 @@ describe('BlockManager', () => {
     expect(first.el.querySelector('.cmd-header-text')?.textContent).toBe('cmd1')
   })
 
+  it('a displaced block takes its own later completion — outcome, code and length — and the running block keeps its own (nocx-evj4b.1.9)', () => {
+    // The two carriers are independent (ADR-0074): the next command's start
+    // can outrun the displaced one's completion. The displaced card froze as
+    // unknown ONLY for want of those facts; when its authenticated completion
+    // arrives it belongs to that card, and nothing may reach the new one.
+    const domain = mintDomain({
+      lane: 'test-lane',
+      lifecycle: 'prompt_ready',
+      domain: 'd-top',
+      epoch: 1,
+    }) as IntegrationDomain
+    const first = manager.startBlock('top', '~', 0)
+    manager.bindAttempt('att-top')
+    const second = manager.startBlock('htop', '~', 4)
+    manager.bindAttempt('att-htop')
+    expect(first.status).toBe('unknown')
+    expect(first.el.dataset.outcome).toBeUndefined()
+
+    manager.freezeFromAttempt(
+      {
+        id: 'att-top',
+        domain,
+        state: 'completed',
+        exitCode: 0,
+        fence: 'f'.repeat(64),
+        startedAt: '2026-11-10T10:00:00.000Z',
+        completedAt: '2026-11-10T10:00:03.400Z',
+      },
+      2,
+    )
+
+    expect(first.status).toBe('success')
+    expect(first.exitCode).toBe(0)
+    expect(first.durationMs).toBe(3400)
+    expect(first.el.dataset.outcome).toBe('success')
+    expect(first.el.textContent).toContain('3.4s')
+    // The command that displaced it is untouched: still running, still the
+    // running slot, with no exit code and no outcome of its own.
+    expect(second.status).toBe('running')
+    expect(second.exitCode).toBeNull()
+    expect(second.el.dataset.outcome).toBeUndefined()
+    expect(manager.runningBlock).toBe(second)
+    expect(second.el.classList.contains('cmd-block-running')).toBe(true)
+  })
+
   it('a new start reclaims a header the alternate seat borrowed from the displaced block (nocx-evj4b.1.9)', () => {
     const first = manager.startBlock('top', '~', 0)
     manager.bindAttempt('att-top')

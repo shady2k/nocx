@@ -14,11 +14,13 @@
  *
  * WHAT IS ASSERTED, and why each half matters:
  *
- *  1. ONE running block for the whole run, sampled every 100 ms. A repaint is
- *     a screen the program drew, never a command boundary: a second block at
- *     any point is the split the owner met. The samples also count distinct
- *     clock readings in the program's own header, so "at least three
- *     refreshes" is the program's fact and not a duration this spec chose.
+ *  1. ONE running block, checked on every animation frame the app paints
+ *     while the program repaints. A repaint is a screen the program drew,
+ *     never a command boundary: a second block at any point is the split the
+ *     owner met. The same frames count distinct clock readings in the
+ *     program's own header — the wait for the third one is bounded — so "at
+ *     least three refreshes" is the program's fact and not a duration this
+ *     spec chose.
  *  2. After `q` (typed into the grid, as a person quits top) exactly one
  *     block remains: not running, outcome `success` (top exits 0 on quit),
  *     and its stored rows carry the program's screen — the summary lines and
@@ -38,41 +40,82 @@ import { test, expect, promptReady, clickIntoEditor, resolveBackend } from './ha
 import { startSshd, rpc, type SshdFixture } from './sshd-fixture'
 import { readStand } from './stand'
 
-/** Intervals the program is given before it is quit: `-d 1` and a run of
- *  more than three seconds is at least three repaints. */
+/** The program's interval, and the bound on waiting for its third repaint. A
+ *  clock reading in its header changes once per interval, so three distinct
+ *  readings are three refreshes — the program's own fact, not a duration this
+ *  spec chose. */
 const REFRESH_MS = 1000
-const RUN_MS = REFRESH_MS * 3 + 1500
+const THREE_REFRESHES_MS = 20_000
 
 interface Frame {
   /** Blocks on the pane, and how many of them claim to be running. */
   total: number
   running: number
-  /** What the live grid says, or '' when there is none. */
-  grid: string
   /** The clock reading in the program's own header, when it has one. */
   clock: string | null
 }
 
-/** One sample of the pane, taken in an animation frame the app has painted. */
-async function frame(page: Page): Promise<Frame> {
-  return page.evaluate(async () => {
-    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
-    const pane = document.querySelector<HTMLElement>('.pane.active')
-    if (!pane) return { total: 0, running: 0, grid: '', clock: null }
-    const blocks = [...pane.querySelectorAll<HTMLElement>('.cmd-block')]
-    const grid = pane.querySelector<HTMLElement>('.terminal-live-grid')?.textContent ?? ''
-    const clock = /\b\d{2}:\d{2}:\d{2}\b/.exec(grid)?.[0] ?? null
-    return {
-      total: blocks.length,
-      running: blocks.filter((b) => b.classList.contains('cmd-block-running')).length,
-      grid: grid.replace(/\s+/g, ' ').trim(),
-      clock,
+/**
+ * Sample the pane in the app's own animation frames, from the page.
+ *
+ * Recorded here rather than by polling from the driver because every sample
+ * the waiting assertion reads must also be one the one-block invariant is
+ * checked on: a driver-side poll sees whichever frames it happens to catch,
+ * and the split this spec is about can exist between two of them.
+ */
+async function startSampling(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const host = window as unknown as {
+      __topSplitSamples?: Frame[]
+      __topSplitStop?: () => void
     }
+    host.__topSplitSamples = []
+    let stopped = false
+    host.__topSplitStop = () => {
+      stopped = true
+    }
+    const pane = document.querySelector<HTMLElement>('.pane.active')
+    if (pane === null) return
+    const tick = (): void => {
+      if (stopped) return
+      const blocks = [...pane.querySelectorAll<HTMLElement>('.cmd-block')]
+      const grid = pane.querySelector<HTMLElement>('.terminal-live-grid')?.textContent ?? ''
+      host.__topSplitSamples!.push({
+        total: blocks.length,
+        running: blocks.filter((b) => b.classList.contains('cmd-block-running')).length,
+        clock: /\b\d{2}:\d{2}:\d{2}\b/.exec(grid)?.[0] ?? null,
+      })
+      requestAnimationFrame(tick)
+    }
+    requestAnimationFrame(tick)
   })
 }
 
-/** Run the repainting program and assert the one-block invariant for the whole
- *  run, then quit it with a key and assert the one frozen block. */
+async function readSamples(page: Page): Promise<Frame[]> {
+  return page.evaluate(
+    () => (window as unknown as { __topSplitSamples?: Frame[] }).__topSplitSamples?.slice() ?? [],
+  )
+}
+
+async function stopSampling(page: Page): Promise<Frame[]> {
+  const frames = await page.evaluate(() => {
+    const host = window as unknown as { __topSplitSamples?: Frame[]; __topSplitStop?: () => void }
+    host.__topSplitStop?.()
+    return host.__topSplitSamples?.slice() ?? []
+  })
+  return frames
+}
+
+/** One running block cannot become two, so every recorded frame is checked;
+ *  a split makes the assertion that is waiting on the clocks fail with the
+ *  frames that show it. */
+function framesSplitting(frames: Frame[]): Frame[] {
+  return frames.filter((f) => f.running !== 1 || f.total !== 1)
+}
+
+/** Run the repainting program, wait (bounded) for its third repaint while
+ *  checking the one-block invariant on every sample, then quit it with a key
+ *  and assert the one frozen block. */
 async function expectOneBlockAcrossRepaints(page: Page): Promise<void> {
   await clickIntoEditor(page)
   await page.keyboard.type(`top -d ${REFRESH_MS / 1000}`)
@@ -81,32 +124,35 @@ async function expectOneBlockAcrossRepaints(page: Page): Promise<void> {
   const running = page.locator('.pane.active .cmd-block.cmd-block-running')
   await expect(running).toHaveCount(1, { timeout: 20_000 })
   await expect(page.locator('.pane.active .cmd-block')).toHaveCount(1, { timeout: 20_000 })
+  // ITS FIRST SCREEN, before anything is sampled: a frame drawn before the
+  // program painted is not evidence about a repaint.
+  await expect(page.locator('.pane.active .terminal-live-grid')).toContainText('load average', {
+    timeout: 20_000,
+  })
 
-  const clocks = new Set<string>()
-  const deadlines = Date.now() + RUN_MS
-  const samples: Frame[] = []
-  while (Date.now() < deadlines) {
-    const f = await frame(page)
-    samples.push(f)
-    if (f.clock !== null) clocks.add(f.clock)
-    await page.waitForTimeout(100)
-  }
-  const said = `frames: ${JSON.stringify(samples.filter((s) => s.running !== 1 || s.total !== 1))}`
-  // ONE running block, the whole run — never two cards, and never a frozen
-  // one beside a live one.
-  expect(
-    samples.every((s) => s.running === 1),
-    said,
-  ).toBe(true)
-  expect(
-    samples.every((s) => s.total === 1),
-    said,
-  ).toBe(true)
-  // The program's own clock advanced, so the repaints happened: at least three
-  // distinct readings of its header line, at one-second intervals.
-  expect(clocks.size, `${said} clocks=${[...clocks].join(',')}`).toBeGreaterThanOrEqual(3)
-  // And the live grid is the program's screen, not an empty box.
-  expect(samples.at(-1)!.grid).toContain('load average')
+  await startSampling(page)
+  await expect
+    .poll(
+      async () => {
+        const frames = await readSamples(page)
+        const split = framesSplitting(frames)
+        // The invariant is checked on EVERY sample, not only the last one: a
+        // second block that appeared and went again between two driver polls
+        // is still a split.
+        if (split.length > 0) {
+          throw new Error(`the block split: ${JSON.stringify(split.slice(0, 3))}`)
+        }
+        const clocks = new Set(frames.map((f) => f.clock).filter((c) => c !== null))
+        return clocks.size
+      },
+      { timeout: THREE_REFRESHES_MS, intervals: [100] },
+    )
+    .toBeGreaterThanOrEqual(3)
+
+  const frames = await stopSampling(page)
+  const said = `split frames: ${JSON.stringify(framesSplitting(frames).slice(0, 3))}`
+  expect(frames.length, said).toBeGreaterThan(0)
+  expect(framesSplitting(frames), said).toEqual([])
 
   // QUIT IT THE WAY A PERSON DOES: the program owns the keys while it runs.
   await page.locator('.pane.active .terminal-live-container').click()

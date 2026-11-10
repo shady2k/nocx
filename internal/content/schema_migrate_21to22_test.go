@@ -102,7 +102,7 @@ func assertSchema22Coverage(t *testing.T, db ContentDB) {
 	}
 }
 
-func assertSchema22CatalogMatchesFreshDDL(t *testing.T, path string) {
+func assertSchemaCatalogMatchesFreshDDL(t *testing.T, path string) {
 	t.Helper()
 	ctx := context.Background()
 	wantDigest, wantObjects, err := shapeOfDDL(ctx, schemaV1)
@@ -130,13 +130,13 @@ func TestSchema21IndexMigrationPreservesDataCoverageAndReopens(t *testing.T) {
 
 	first := openStore(t, path)
 	assertSchema22Coverage(t, first)
-	if got := rawUserVersion(t, path); got != 22 {
-		t.Fatalf("schema stamp = %d, want 22", got)
+	if got := rawUserVersion(t, path); got != schemaVersion {
+		t.Fatalf("schema stamp = %d, want the current %d", got, schemaVersion)
 	}
 	if got := rawCount(t, path, `SELECT count(*) FROM sqlite_master WHERE type='index' AND name='entries_by_ended_at'`); got != 1 {
 		t.Fatalf("entries_by_ended_at count = %d, want 1", got)
 	}
-	assertSchema22CatalogMatchesFreshDDL(t, path)
+	assertSchemaCatalogMatchesFreshDDL(t, path)
 	assertSchema21Contents(t, path)
 	if err := first.Close(); err != nil {
 		t.Fatalf("close first migrated store: %v", err)
@@ -144,8 +144,8 @@ func TestSchema21IndexMigrationPreservesDataCoverageAndReopens(t *testing.T) {
 
 	second := openStore(t, path)
 	assertSchema22Coverage(t, second)
-	if got := rawUserVersion(t, path); got != 22 {
-		t.Fatalf("schema stamp after reopen = %d, want 22", got)
+	if got := rawUserVersion(t, path); got != schemaVersion {
+		t.Fatalf("schema stamp after reopen = %d, want the current %d", got, schemaVersion)
 	}
 	assertSchema21Contents(t, path)
 }
@@ -198,8 +198,8 @@ func TestSchema21IndexMigrationRollsBackFailureAndCancellationThenRetries(t *tes
 			// Ordinary Open retries the same edge and commits its index and stamp.
 			retry := openStore(t, path)
 			assertSchema22Coverage(t, retry)
-			if got := rawUserVersion(t, path); got != 22 {
-				t.Errorf("schema stamp after retry = %d, want 22", got)
+			if got := rawUserVersion(t, path); got != schemaVersion {
+				t.Errorf("schema stamp after retry = %d, want the current %d", got, schemaVersion)
 			}
 			if got := rawCount(t, path, `SELECT count(*) FROM sqlite_master WHERE type='index' AND name='entries_by_ended_at'`); got != 1 {
 				t.Errorf("entries_by_ended_at count after retry = %d, want 1", got)
@@ -216,7 +216,7 @@ func TestMalformedSchema21AndFutureSchemaRefuseWithoutMutation(t *testing.T) {
 		setup string
 	}{
 		{name: "malformed-21", stamp: 21, setup: `DROP INDEX clear_boundaries_by_pane`},
-		{name: "future-23", stamp: 23},
+		{name: "future-24", stamp: schemaVersion + 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "content.db")

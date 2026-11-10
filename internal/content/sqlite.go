@@ -499,9 +499,10 @@ func closeUnanchoredEntries(ctx context.Context, conn *sql.Conn, logger log.Logg
 // added the worker_checkouts table, the durable half of the checkouts
 // workers.spawn's worktree ask creates (nocx-xn63t.1.4).
 // 20 widened artifacts.media_type for row blocks, 21 added clear_boundaries,
-// and 22 adds entries_by_ended_at for the exact no-evictions history horizon
-// (ADR-0085).
-const schemaVersion = 22
+// 22 added entries_by_ended_at for the exact no-evictions history horizon
+// (ADR-0085), and 23 adds the panel a tab shows to the tabs row
+// (nocx-ouru5.1.18) — the right-hand panel is the tab's, not the window's.
+const schemaVersion = 23
 
 // schema22EntriesByEndedAtIndexDDL is the one index definition introduced by
 // the 21→22 edge. Keep it immutable: a future schema gets its own DDL and rung
@@ -639,6 +640,9 @@ CREATE TABLE IF NOT EXISTS tabs (
   seen_at      INTEGER,                    -- the seen-mark; NULL = never seen
   closed_at    INTEGER,                    -- NULL: in the window
   digest       TEXT NOT NULL DEFAULT '',   -- the create key's content binding
+  panel_view   TEXT NOT NULL DEFAULT '',   -- the sidebar panel this tab shows ('' = none)
+  panel_collapsed INTEGER NOT NULL DEFAULT 0 CHECK (panel_collapsed IN (0,1)),
+                                           -- its rail is collapsed, remembering panel_view
   CHECK (closed_at IS NOT NULL OR workspace_id IS NOT NULL)
 ) STRICT;
 

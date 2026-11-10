@@ -846,9 +846,18 @@ export class PaneManager {
   private readonly tabIdOfCreatedPane = new Map<string, string>()
 
   /** Panels this window has chosen and the tab's row has not confirmed yet
-   *  (nocx-ouru5.1.18). See `setActiveTabPanel`: a write is a round trip and
-   *  a person can switch tabs inside it. */
-  private readonly unconfirmedPanels = new Map<string, TabPanel>()
+   *  (ADR-x7cvh8e1). See `setActiveTabPanel`: a write is a round trip and a
+   *  person can switch tabs inside it.
+   *
+   *  Each entry carries the SEQUENCE of the write that put it there, so a
+   *  completion or a refusal clears only its own entry: two choices on one
+   *  tab before the first answer lands must leave the SECOND one pending,
+   *  or the first answer would undo a click the person just made. */
+  private readonly unconfirmedPanels = new Map<string, { panel: TabPanel; seq: number }>()
+  /** One counter for every panel write, so a completion knows which entry is
+   *  its own. Monotonic for the window's lifetime; it never wraps in any
+   *  reachable number of clicks. */
+  private panelWriteSeq = 0
   /**
    * THE SAVED CONNECTIONS, read once before the chain is drawn.
    *
@@ -3177,7 +3186,7 @@ export class PaneManager {
     const tabId = this.tabIdOfPane(pane)
     if (!tabId) return null
     const pending = this.unconfirmedPanels.get(tabId)
-    if (pending) return pending
+    if (pending) return pending.panel
     const tab = this.layout.tab(tabId)
     return tab ? { view: tab.panelView, collapsed: tab.panelCollapsed } : null
   }
@@ -3206,10 +3215,14 @@ export class PaneManager {
     // person just made. The entry is dropped as soon as the answer agrees
     // (the store folds it in from the answer), and on a refusal, so it is a
     // log of unconfirmed writes rather than a second copy of the state.
-    this.unconfirmedPanels.set(tabId, panel)
+    const seq = ++this.panelWriteSeq
+    this.unconfirmedPanels.set(tabId, { panel, seq })
+    const stillMine = (): boolean => this.unconfirmedPanels.get(tabId)?.seq === seq
     void this.layout
       .setTabPanel(tabId, panel.view, panel.collapsed)
       .then(() => {
+        // A NEWER write owns the entry now: its answer decides, not this one.
+        if (!stillMine()) return
         const stored = this.layout.tab(tabId)
         if (
           stored &&
@@ -3220,7 +3233,7 @@ export class PaneManager {
         }
       })
       .catch(() => {
-        this.unconfirmedPanels.delete(tabId)
+        if (stillMine()) this.unconfirmedPanels.delete(tabId)
       })
   }
 

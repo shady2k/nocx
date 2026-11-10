@@ -72,7 +72,7 @@ Two consequences are decided here because the code has to answer them:
   afterwards starts with no panel.
 - **A pane in no chain has no row.** Settings still collapses the rail
   (nocx-3e3b's rule, unchanged); any other view pane — a diff, a file viewer —
-  keeps the panel where it is, because it was opened *from* the panel and
+  keeps the panel where it is, because it was opened _from_ the panel and
   collapsing it would take away the list the person is working through.
 
 ## Why this rather than the obvious alternatives

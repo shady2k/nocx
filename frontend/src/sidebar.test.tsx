@@ -746,6 +746,22 @@ describe('the panel follows the tab in front (nocx-ouru5.1.18)', () => {
     expect(document.activeElement).toBe(target)
   })
 
+  it('Ctrl/Cmd+B on a tab with no remembered view opens the default view', () => {
+    // A tab with no panel is {view:'', collapsed:true}; toggling collapsed
+    // alone would leave it showing nothing, so the panel could never open
+    // (codex P2 on ADR-x7cvh8e1). Expanding picks the first registered view.
+    const { panel } = mountWithPanel(null)
+    expect(panel.classList.contains('collapsed')).toBe(true)
+
+    pressToggleKey()
+    expect(panel.classList.contains('collapsed')).toBe(false)
+    expect(panelTitle(panel)).toBe('Alpha')
+
+    // And the next toggle closes it again.
+    pressToggleKey()
+    expect(panel.classList.contains('collapsed')).toBe(true)
+  })
+
   it('revealView (the Ctrl/Cmd+Shift+O path) still expands the panel from a Settings tab', () => {
     const { panel, handle } = mountWithPanel(null)
     expect(panel.classList.contains('collapsed')).toBe(true)

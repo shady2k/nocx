@@ -416,11 +416,28 @@ function SidebarSolid(props: SidebarSolidProps) {
   })
 
   // ── Keyboard shortcut: Ctrl/Cmd+B toggles sidebar ──────────────────────
+  //
+  // EXPANDING A TAB WITH NO REMEMBERED VIEW PICKS THE DEFAULT ONE. A tab that
+  // has never opened a panel is `{view: '', collapsed: true}`; toggling the
+  // collapse alone would leave it showing nothing, so the panel would never
+  // open (ADR-x7cvh8e1; codex P2). The registry is the component's, which is
+  // why this rule lives here and not in the store's transition.
+  const togglePanel = (): void => {
+    if (!props.state.sidebar.collapsed) {
+      props.storeActions.toggleSidebar()
+      return
+    }
+    const remembered = props.state.sidebar.activeViewId ?? ''
+    const view = props.views.some((v) => v.id === remembered)
+      ? remembered
+      : (props.views[0]?.id ?? '')
+    props.storeActions.setPanel(view, false)
+  }
   createEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key === 'b') {
         e.preventDefault()
-        props.storeActions.toggleSidebar()
+        togglePanel()
       }
     }
     document.addEventListener('keydown', handler)

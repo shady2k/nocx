@@ -12,6 +12,7 @@ import {
   makeUIStateBackend,
 } from './test-support/panes-fixtures'
 import type { SSHProfile } from './profiles'
+import type { Tab as LayoutTab } from './generated/layout.read'
 // The palette itself, not a stand-in for it: the regression below opens a
 // connection the way a person does (nocx-xhm9e).
 import { SSHQuickConnectProvider } from './quick-connect'
@@ -671,6 +672,57 @@ describe('each tab remembers its own right-hand panel', () => {
     manager.activateByIndex(0)
     await vi.waitFor(() => {
       expect(manager.activeTabPanel()).toEqual({ view: 'ports', collapsed: false })
+    })
+  })
+
+  it('a write that completes clears only its own pending entry', async () => {
+    // Two choices on one tab, the first answer landing after the second was
+    // made (codex P2 on ADR-x7cvh8e1): Ports' completion must not delete the
+    // pending Git entry, or a switch away and back would show Ports again.
+    const backend = await seededBackend({ decorate: false })
+    const answers: Array<{ view: string; resolve: () => void }> = []
+    const controlled = {
+      ...backend,
+      setTabPanel: (id: string, view: string, collapsed: boolean) =>
+        new Promise<{ tab: LayoutTab }>((resolve) => {
+          answers.push({
+            view,
+            resolve: () => {
+              // The fake's own row first, so a later read agrees with it.
+              void backend.setTabPanel(id, view, collapsed)
+              resolve({ tab: backend.rows().tabs.find((t) => t.id === id)! })
+            },
+          })
+        }),
+    }
+    const store = new LayoutStore(controlled)
+    const { manager } = await mountPaneManager(undefined, undefined, undefined, undefined, {
+      store,
+      backend,
+    })
+
+    manager.setActiveTabPanel({ view: 'ports', collapsed: false })
+    manager.setActiveTabPanel({ view: 'git', collapsed: false })
+    expect(answers.map((a) => a.view)).toEqual(['ports', 'git'])
+
+    answers[0].resolve() // Ports answers first; Git has not.
+    await vi.waitFor(() => expect(store.tab('tab-a')?.panelView).toBe('ports'))
+
+    manager.activateByIndex(1)
+    await vi.waitFor(() => {
+      expect(manager.activeTabPanel()).toEqual({ view: '', collapsed: false })
+    })
+    manager.activateByIndex(0)
+    await vi.waitFor(() => {
+      expect(manager.activeTabPanel()).toEqual({ view: 'git', collapsed: false })
+    })
+
+    answers[1].resolve()
+    await vi.waitFor(() => expect(store.tab('tab-a')?.panelView).toBe('git'))
+    manager.activateByIndex(1)
+    manager.activateByIndex(0)
+    await vi.waitFor(() => {
+      expect(manager.activeTabPanel()).toEqual({ view: 'git', collapsed: false })
     })
   })
 

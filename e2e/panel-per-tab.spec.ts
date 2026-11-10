@@ -82,6 +82,15 @@ test.describe('each tab remembers its own right-hand panel (nocx-ouru5.1.18)', (
     await expect(page.locator(TAB).nth(1)).toHaveAttribute('aria-selected', 'true')
     await expect(page.locator(SIDEBAR)).toHaveClass(/collapsed/)
 
+    // Ctrl/Cmd+B on a tab with NO panel OPENS the default view: "collapsed"
+    // and "showing nothing" are different states, and a toggle that left the
+    // panel empty would never open it (codex P2 on ADR-x7cvh8e1).
+    await page.keyboard.press('Control+b')
+    await expect(page.locator(SIDEBAR)).not.toHaveClass(/collapsed/)
+    await expect(page.locator(PANEL_TITLE)).toHaveText('Files')
+    await page.keyboard.press('Control+b')
+    await expect(page.locator(SIDEBAR)).toHaveClass(/collapsed/)
+
     // Ports on tab 2.
     await page.locator(PORTS_BTN).click()
     await expect(page.locator(SIDEBAR)).not.toHaveClass(/collapsed/)

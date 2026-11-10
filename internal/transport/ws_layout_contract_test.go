@@ -52,7 +52,6 @@ func TestLayoutTabDTOsConformToContract(t *testing.T) {
 	renamed := loadSchema(t, "tabs.rename.schema.json")
 	recoloured := loadSchema(t, "tabs.recolour.schema.json")
 	pinned := loadSchema(t, "tabs.pin.schema.json")
-	panel := loadSchema(t, "tabs.setPanel.schema.json")
 	reordered := loadSchema(t, "tabs.reorder.schema.json")
 	closed := loadSchema(t, "tabs.close.schema.json")
 
@@ -65,7 +64,6 @@ func TestLayoutTabDTOsConformToContract(t *testing.T) {
 	full := wireTab(content.Tab{
 		ID: tabID1, WorkspaceID: wsID1, ParentID: &parent, Name: &name, Colour: &colour,
 		Position: 2, Pinned: true, Layout: content.LayoutColumn, SeenAt: &seen,
-		PanelView: "ports", PanelCollapsed: true,
 	})
 	pane := wirePane(content.Pane{ID: paneID1, TabID: tabID1, Cwd: "/srv", Kind: content.PaneLocal, SizeShare: 1})
 	for what, tab := range map[string]tabWire{"bare": bare, "full": full} {
@@ -73,7 +71,6 @@ func TestLayoutTabDTOsConformToContract(t *testing.T) {
 		validateJSON(t, renamed, mustMarshal(tabResponse{Tab: tab}), "tabs.rename DTO ("+what+")")
 		validateJSON(t, recoloured, mustMarshal(tabResponse{Tab: tab}), "tabs.recolour DTO ("+what+")")
 		validateJSON(t, pinned, mustMarshal(tabResponse{Tab: tab}), "tabs.pin DTO ("+what+")")
-		validateJSON(t, panel, mustMarshal(tabResponse{Tab: tab}), "tabs.setPanel DTO ("+what+")")
 	}
 	validateJSON(t, reordered, mustMarshal(tabListResponse{Tabs: []tabWire{bare, full}}), "tabs.reorder DTO")
 	validateJSON(t, reordered, mustMarshal(tabListResponse{Tabs: wireTabs(nil)}), "tabs.reorder DTO (empty)")
@@ -198,10 +195,6 @@ func TestLayoutOverTheWireConformsToContract(t *testing.T) {
 	validateJSON(t, loadSchema(t, "tabs.pin.schema.json"),
 		mustLayoutCall(t, conn, "tabs.pin", map[string]any{"id": tabID1, "pinned": true}, 10),
 		"tabs.pin result")
-	validateJSON(t, loadSchema(t, "tabs.setPanel.schema.json"),
-		mustLayoutCall(t, conn, "tabs.setPanel",
-			map[string]any{"id": tabID1, "view": "ports", "collapsed": true}, 12),
-		"tabs.setPanel result")
 	validateJSON(t, loadSchema(t, "tabs.reorder.schema.json"),
 		mustLayoutCall(t, conn, "tabs.reorder",
 			map[string]any{"workspaceId": wsID1, "ids": []string{tabID3, tabID1}}, 11),

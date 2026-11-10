@@ -164,7 +164,6 @@ var schemaLadder = []migrationStep{
 	{from: 19, to: 20, apply: migrateBlockRowsMediaTypes19to20, schemaDigest: "149d516a467ac06f2dabb4222634c668024edb9a672300def32f480631dd2dea"},
 	{from: 20, to: 21, apply: migrateAddClearBoundaries20to21, schemaDigest: "15fb847b32570357ccac15333107a761c38b3d8cc08481e2998de8f07577d4bc"},
 	{from: 21, to: 22, apply: migrateAddEntriesByEndedAt21to22, schemaDigest: "2187c4e3d03e421e2f9b305dd6fcea7d1cb559ce49caffe04118c0a7c4a7f27d"},
-	{from: 22, to: 23, apply: migrateAddTabPanel22to23, schemaDigest: "e14a246a0a8c98ff7f818f4081305a653111bc3adf0c10cfd7abda64b3b243db"},
 }
 
 // validateLadder validates the shipped ladder against the current schema.
@@ -337,11 +336,6 @@ var schemaShapeDigests = map[int]string{
 	// f28f066623773b8d207cc4303e5ded83d09f0d17, frozen as testdata/schema_v21.sql.
 	// Schema 22 adds the entries_by_ended_at index on top of this released shape.
 	21: "2dea93020d4274a210e4ba2cce5f5b7c19d5ece098daf7f09fc766c6c28b148b",
-	// 22 is pinned in the commit that dethrones it: the exact schemaV1 at
-	// 621ab34a7, frozen as testdata/schema_v22.sql. Schema 23 adds the two
-	// panel columns on the tabs row on top of this released shape
-	// (nocx-ouru5.1.18).
-	22: "bc3c77308360bf9ae7f9730ca4eac068a54350a95d61de39ad794c86c13bb7ce",
 }
 
 var historicalSchemaObjectNames = map[int]map[string]struct{}{
@@ -353,7 +347,6 @@ var historicalSchemaObjectNames = map[int]map[string]struct{}{
 	19: schema19ObjectNames(),
 	20: schema20ObjectNames(),
 	21: schema21ObjectNames(),
-	22: schema22ObjectNames(),
 }
 
 func schema14ObjectNames() map[string]struct{} {
@@ -465,15 +458,6 @@ func schema21ObjectNames() map[string]struct{} {
 	result["table:clear_boundaries"] = struct{}{}
 	result["index:sqlite_autoindex_clear_boundaries_1"] = struct{}{}
 	result["index:clear_boundaries_by_pane"] = struct{}{}
-	return result
-}
-
-// schema22ObjectNames is schema21's set plus the entries_by_ended_at index.
-// Schema 23 adds columns to tabs and no object at all, so its input shape is
-// pinned by the same set.
-func schema22ObjectNames() map[string]struct{} {
-	result := schema21ObjectNames()
-	result["index:entries_by_ended_at"] = struct{}{}
 	return result
 }
 
@@ -960,23 +944,6 @@ func migrateAddClearBoundaries20to21(ctx context.Context, tx *sql.Tx) error {
 		`CREATE INDEX IF NOT EXISTS clear_boundaries_by_pane ON clear_boundaries(pane_id, ingest_seq DESC) WHERE pane_id IS NOT NULL`,
 	); err != nil {
 		return fmt.Errorf("add clear_boundaries_by_pane index: %w", err)
-	}
-	return nil
-}
-
-// migrateAddTabPanel22to23 adds the two columns that hold the sidebar panel a
-// tab shows (nocx-ouru5.1.18): which view, and whether its rail is collapsed.
-// Fresh databases carry them at the end of the tabs column list in schemaV1,
-// and SQLite's ADD COLUMN puts them there too, so a migrated file's normalised
-// DDL equals a fresh one's — which is what the shape comparison requires.
-func migrateAddTabPanel22to23(ctx context.Context, tx *sql.Tx) error {
-	for _, stmt := range []string{
-		`ALTER TABLE tabs ADD COLUMN panel_view TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE tabs ADD COLUMN panel_collapsed INTEGER NOT NULL DEFAULT 0 CHECK (panel_collapsed IN (0,1))`,
-	} {
-		if _, err := tx.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("add a tab panel column: %w", err)
-		}
 	}
 	return nil
 }

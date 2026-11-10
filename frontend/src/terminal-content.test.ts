@@ -5502,6 +5502,189 @@ describe('the projections consume the kernel through the composition root (ADR-0
     }
   })
 
+  it('a response that lands before the binding drains under the painted frame hold (nocx-4y82c.1.1)', async () => {
+    // The production path codex found: the rows arrive before the running
+    // fact, so `_refreshBlockRows` parks them without an `upTo` (the running
+    // block does not exist yet), and the binding drains the whole artifact.
+    // The binding now sizes the body to the painted frame in the same task, so
+    // a quiet command does not keep the overlap. The screen has scrolled five
+    // rows; the anchor's absolute row is 3, so two rows have passed.
+    const client = makeClient()
+    client.call.mockImplementation((method: string) => {
+      if (method === 'ledger.get') {
+        return Promise.resolve({
+          entry: {},
+          edges: [],
+          artifacts: [{ id: 'art-late', mediaType: 'application/x-nocx-rows' }],
+        })
+      }
+      if (method === 'ledger.artifact') {
+        const line = (from: number, text: string): string =>
+          `${JSON.stringify({ from, row: wireRowOf([[text, 1, true] as CellSpec]) })}\n`
+        const body = line(0, 'a') + line(1, 'b') + line(2, 'c') + line(3, 'd')
+        return Promise.resolve({
+          id: 'art-late',
+          mediaType: 'application/x-nocx-rows',
+          body,
+          truncated: null,
+          byteLen: body.length,
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      const scrolled = screenFrame(1, ['', '', ''])
+      scrolled.state.baseRow = 5
+      sessionOf(content).fireScreenFrame(scrolled)
+      await flushDisplayFrame()
+
+      // The anchor and the rows both arrive before the block exists.
+      client._fireBlockOutputStart({
+        entryId: 'att-late',
+        row: 3,
+        fromRow: 0,
+        screenRevision: 1,
+        bufferKind: 'normal',
+        bufferInstance: '1',
+        cols: SCREEN_COLS,
+        rows: SCREEN_ROWS,
+      })
+      const blockGrew = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'block.grew',
+      )?.[1] as ((params: unknown) => void) | undefined
+      expect(blockGrew).toBeDefined()
+      blockGrew?.({ entryId: 'att-late' })
+      await vi.waitFor(() =>
+        expect(
+          client.call.mock.calls.filter(([method]) => method === 'ledger.artifact').length,
+        ).toBeGreaterThan(0),
+      )
+      await flushDisplayFrame()
+
+      // The running fact binds the block and drains the parked rows.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-late', state: 'open', origin: 'shell', command: 'ls' },
+      })
+      const block = withScrollback.scrollback.blockManager.runningBlock
+      expect(block).not.toBeNull()
+      expect(block!.el.querySelectorAll(':scope > .cmd-output .term-grid-row').length).toBe(2)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a completion before block.closed keeps the hold for an outstanding response (nocx-4y82c.1.1)', async () => {
+    // THE LOCAL CASE'S OVERLAP (nocx-4y82c.1.12). Artifact A-D, body painted
+    // A-B, grid showing C-D. The completion arrives before block.closed: the
+    // logical freeze used to clear the hold and the running slot, so an
+    // outstanding artifact response then painted A-D over rows the grid still
+    // showed, duplicating C-D above it until the visual freeze. The hold
+    // belongs to the block joined to the grid and lasts until the grid leaves
+    // it (the visual freeze).
+    const line = (from: number, text: string): string =>
+      `${JSON.stringify({ from, row: wireRowOf([[text, 1, true] as CellSpec]) })}\n`
+    const body = line(0, 'a') + line(1, 'b') + line(2, 'c') + line(3, 'd')
+    const client = makeClient()
+    client.call.mockImplementation((method: string) => {
+      if (method === 'ledger.get') {
+        return Promise.resolve({
+          entry: {},
+          edges: [],
+          artifacts: [{ id: 'art-hold', mediaType: 'application/x-nocx-rows' }],
+        })
+      }
+      if (method === 'ledger.artifact') {
+        return Promise.resolve({
+          id: 'art-hold',
+          mediaType: 'application/x-nocx-rows',
+          body,
+          truncated: null,
+          byteLen: body.length,
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      // The screen has scrolled five rows; the block's first output row is
+      // absolute row 3, so two rows have passed (A-B are the body's).
+      const scrolled = screenFrame(1, ['', '', ''])
+      scrolled.state.baseRow = 5
+      sessionOf(content).fireScreenFrame(scrolled)
+      await flushDisplayFrame()
+      client._fireBlockOutputStart({
+        entryId: 'att-hold',
+        row: 3,
+        fromRow: 0,
+        screenRevision: 1,
+        bufferKind: 'normal',
+        bufferInstance: '1',
+        cols: SCREEN_COLS,
+        rows: SCREEN_ROWS,
+      })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-hold', state: 'open', origin: 'shell', command: 'ls' },
+      })
+      const blockGrew = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'block.grew',
+      )?.[1] as ((params: unknown) => void) | undefined
+      expect(blockGrew).toBeDefined()
+      blockGrew?.({ entryId: 'att-hold' })
+      await vi.waitFor(() =>
+        expect(
+          client.call.mock.calls.filter(([method]) => method === 'ledger.artifact').length,
+        ).toBe(1),
+      )
+      const block = withScrollback.scrollback.blockManager.runningBlock!
+      expect(block.el.querySelectorAll(':scope > .cmd-output .term-grid-row').length).toBe(2)
+
+      // The command completes; the visual freeze waits for block.closed.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-hold', state: 'completed', exitCode: 0, fence: 'a'.repeat(64) },
+      })
+      // An outstanding artifact response lands in that window.
+      blockGrew?.({ entryId: 'att-hold' })
+      await vi.waitFor(() =>
+        expect(
+          client.call.mock.calls.filter(([method]) => method === 'ledger.artifact').length,
+        ).toBeGreaterThanOrEqual(2),
+      )
+      await flushDisplayFrame()
+      expect(block.el.querySelectorAll(':scope > .cmd-output .term-grid-row').length).toBe(2)
+    } finally {
+      teardown()
+    }
+  })
+
   it('repaints a frozen block with the rows its close made final, so a settled block is whole (nocx-atpw5.1.19)', async () => {
     // THE WINDOW THE CI FAILURE FELL IN. block.closed freezes the card at once
     // and paints it from the rows the last OPEN read returned; the sealed read
@@ -5893,6 +6076,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       client._fireBlockOutputStart({
         entryId: 'att-hold',
         row: 12,
+        fromRow: 0,
         screenRevision: 5,
         bufferKind: 'normal',
         bufferInstance: '1',
@@ -8107,6 +8291,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
     const anchor = {
       entryId: 'att-anchor',
       row: 12,
+      fromRow: 0,
       screenRevision: 5,
       bufferKind: 'normal' as const,
       bufferInstance: '1',
@@ -8206,6 +8391,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
     const anchor = {
       entryId: 'att-rows',
       row: 12,
+      fromRow: 0,
       screenRevision: 5,
       bufferKind: 'normal' as const,
       bufferInstance: '1',
@@ -8316,6 +8502,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       client._fireBlockOutputStart({
         entryId: 'att-lag',
         row: 102,
+        fromRow: 0,
         screenRevision: 16,
         bufferKind: 'normal',
         bufferInstance: '1',
@@ -8406,6 +8593,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
         client._fireBlockOutputStart({
           entryId: 'att-wrapped-echo',
           row: 3,
+          fromRow: 0,
           screenRevision: 1,
           bufferKind: 'normal',
           bufferInstance: '1',
@@ -8449,6 +8637,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
     const anchor = {
       entryId: 'att-short-output',
       row: 1,
+      fromRow: 0,
       screenRevision: 5,
       bufferKind: 'normal' as const,
       bufferInstance: '1',
@@ -14227,6 +14416,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         kept: false,
         screenAnchor: {
           row: 307,
+          fromRow: 0,
           screenRevision: 3,
           bufferKind: 'normal',
           bufferInstance: '9',

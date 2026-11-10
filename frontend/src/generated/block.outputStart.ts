@@ -10,11 +10,12 @@
  */
 
 /**
- * Params of the session-scoped block.outputStart notification. The row is the anchor's screen row, not the ordered output rows stream coordinate.
+ * Params of the session-scoped block.outputStart notification. `row` is the anchor's screen row; `fromRow` is the block's first output row in the ordered rows stream — the coordinate `from` uses in ledger.blockRows, and the one the renderer places the block in.
  */
 export interface BlockOutputStart {
   entryId: string
   row: number
+  fromRow: number
   screenRevision: number
   bufferKind: 'normal' | 'alternate'
   bufferInstance: string

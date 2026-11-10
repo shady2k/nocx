@@ -81,10 +81,18 @@ package coordinator
 // are part of the surface ADR-0104 declares, and a published byte of them
 // moving is a bump.
 //
+// 24 (fix/nocx-4y82c-1-11-echo-twice, over main's 23): the stored block rows
+// summary carries WHERE A BLOCK'S OUTPUT BEGINS. The `summary` definition of
+// contracts/ledger.blockRows.schema.json declares `outputStartRow`
+// (nocx-4y82c.1.11) — an optional integer beside the dropped and lost counts,
+// so a reader can drop the command's echo — and a declared field is a surface
+// change even when it is optional and its absence means "no mark", which is
+// why this moves rather than sliding in under 23.
+//
 // The number in a stage branch means only that ITS surface moved; this is the
 // number the integrated surface carries, and its golden is the one written by
 // the recipe over all four stages at once.
-const ProtocolVersion = 23
+const ProtocolVersion = 24
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

@@ -2125,6 +2125,42 @@ describe("the reader's anchor (nocx-3wmve)", () => {
     expect(area.scrollTop).toBe(1040)
   })
 
+  it('never anchors on a header that is pinned at the edge (nocx-3wmve)', () => {
+    const { controller } = makeController()
+    stopFollowing(controller)
+    const area = laidOut(controller)
+    // A long block whose header is STICKY and stuck at the viewport's top edge,
+    // with the row the person is reading underneath it. The pinned header stays
+    // at y=0 whatever the rows do, so anchoring on it reports no displacement
+    // and the restore moves nobody.
+    const block = document.createElement('div')
+    block.className = 'cmd-block'
+    block.dataset.entryId = 'att-sticky'
+    const header = document.createElement('div')
+    header.className = 'cmd-header'
+    header.style.position = 'sticky'
+    header.getBoundingClientRect = () => rect(0, 40)
+    const body = document.createElement('div')
+    body.className = 'cmd-output'
+    const row = document.createElement('div')
+    row.className = 'term-grid-row'
+    row.dataset.logicalLine = '12'
+    let top = 40
+    row.getBoundingClientRect = () => rect(top, 17)
+    body.appendChild(row)
+    block.appendChild(header)
+    block.appendChild(body)
+    controller.scrollbackInner.appendChild(block)
+    block.getBoundingClientRect = () => rect(-4000, 8000)
+
+    controller.holdReaderPlace(() => {
+      top += 40
+      Object.defineProperty(area, 'scrollHeight', { value: 4040, configurable: true })
+    })
+
+    expect(area.scrollTop).toBe(1040)
+  })
+
   it('puts a FOLLOWER back at the bottom edge when a change grows the transcript (nocx-3wmve)', () => {
     const { controller } = makeController()
     const area = laidOut(controller)

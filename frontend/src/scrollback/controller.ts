@@ -1265,6 +1265,17 @@ export class ScrollbackController {
       if (cell.height <= 0) continue
       if (cell.bottom <= clip.top + 0.5) continue
       if (cell.top >= clip.bottom - 0.5) return null
+      // A PINNED HEADER IS OUT OF THE FLOW (nocx-3wmve). A sticky header that
+      // is currently stuck sits at the viewport's top edge whatever the rows
+      // under it do, so an anchor taken on it reports zero displacement while
+      // the person's row moves — measured: a row moved 92 -> 122 with the
+      // restore computing nothing. The next unit in normal flow is the thing
+      // they are reading; a header that is NOT stuck is still in flow and stays
+      // a legitimate anchor.
+      if (unit.classList.contains('cmd-header')) {
+        const style = getComputedStyle(unit)
+        if (style.position === 'sticky' && cell.top <= clip.top + 1) continue
+      }
       return { unit, index }
     }
     return null

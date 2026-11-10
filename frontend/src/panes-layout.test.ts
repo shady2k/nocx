@@ -2,6 +2,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { NameColourDraft } from './name-colour-dialog'
 import { applyRestoreOnStartup } from './restore-setting'
+import { LayoutStore } from './layout/layout-store'
 import {
   resetSessionCounter,
   mountPaneManager,
@@ -606,6 +607,93 @@ describe('the window reopens on the tab that was in front', () => {
 
     expect(stripTabs(bar)).toHaveLength(2)
     expect(activeTabIndex(bar)).toBe(0)
+  })
+})
+
+// ── the panel is the tab's (nocx-ouru5.1.18) ─────────────────────────────
+
+describe('each tab remembers its own right-hand panel', () => {
+  beforeEach(() => {
+    resetSessionCounter()
+    vi.clearAllMocks()
+  })
+
+  it('reads the panel from the tab in front and writes it to that tab, not the window', async () => {
+    const backend = await seededBackend({ decorate: false })
+    const { manager, backend: chain } = await mountPaneManager(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { store: makeLayoutStore(backend).store, backend },
+    )
+
+    // A tab that has never opened a panel says so; nothing is inferred.
+    expect(manager.activeTabPanel()).toEqual({ view: '', collapsed: false })
+
+    manager.setActiveTabPanel({ view: 'ports', collapsed: false })
+    await vi.waitFor(() => {
+      expect(chain.rows().tabs.find((t) => t.id === 'tab-a')?.panelView).toBe('ports')
+    })
+    expect(manager.activeTabPanel()).toEqual({ view: 'ports', collapsed: false })
+
+    // The OTHER tab keeps its own (empty) answer.
+    manager.activateByIndex(1)
+    await vi.waitFor(() => {
+      expect(manager.activeTabPanel()).toEqual({ view: '', collapsed: false })
+    })
+
+    // And what tab B chose does not move tab A's row.
+    manager.setActiveTabPanel({ view: 'git', collapsed: true })
+    await vi.waitFor(() => {
+      expect(chain.rows().tabs.find((t) => t.id === 'tab-b')?.panelView).toBe('git')
+    })
+    expect(chain.rows().tabs.find((t) => t.id === 'tab-a')?.panelView).toBe('ports')
+    expect(chain.rows().tabs.find((t) => t.id === 'tab-b')?.panelCollapsed).toBe(true)
+  })
+
+  it('a panel chosen but not yet confirmed is what the tab shows', async () => {
+    // The write is a round trip and a person can switch tabs inside it. The
+    // row still says "no panel" here; the tab must show the one just chosen.
+    const backend = await seededBackend({ decorate: false })
+    const slow = { ...backend, setTabPanel: () => new Promise<never>(() => {}) }
+    const { manager } = await mountPaneManager(undefined, undefined, undefined, undefined, {
+      store: new LayoutStore(slow),
+      backend,
+    })
+    manager.setActiveTabPanel({ view: 'ports', collapsed: false })
+    expect(backend.rows().tabs.find((t) => t.id === 'tab-a')?.panelView).toBe('')
+
+    manager.activateByIndex(1)
+    await vi.waitFor(() => {
+      expect(manager.activeTabPanel()).toEqual({ view: '', collapsed: false })
+    })
+    manager.activateByIndex(0)
+    await vi.waitFor(() => {
+      expect(manager.activeTabPanel()).toEqual({ view: 'ports', collapsed: false })
+    })
+  })
+
+  it('a pane in no chain has no panel to read or write', async () => {
+    const backend = await seededBackend({ decorate: false })
+    const { manager } = await mountPaneManager(undefined, undefined, undefined, undefined, {
+      store: makeLayoutStore(backend).store,
+      backend,
+    })
+    // Settings is a view pane: it is in no workspace and has no tab row, so
+    // there is nothing to remember and nothing to write (it must not throw).
+    manager.openPane(new ViewContent(), {
+      surfaceType: 'nocx.settings' as ContentDescriptor['surfaceType'],
+      singletonKey: null,
+      restoreDescriptor: null,
+      supportsAttention: false,
+      defaultTitle: 'Settings',
+    })
+    await vi.waitFor(() => {
+      expect(manager.activeSurfaceType()).toBe('nocx.settings')
+    })
+    expect(manager.activeTabPanel()).toBeNull()
+    expect(() => manager.setActiveTabPanel({ view: 'ports', collapsed: false })).not.toThrow()
   })
 })
 

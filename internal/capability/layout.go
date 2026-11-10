@@ -50,6 +50,10 @@ type LayoutService interface {
 	RenameTab(ctx context.Context, id string, name *string) (content.Tab, error)
 	RecolourTab(ctx context.Context, id string, colour *string) (content.Tab, error)
 	PinTab(ctx context.Context, id string, pinned bool) (content.Tab, error)
+	// SetTabPanel records the sidebar panel a tab shows and whether its rail
+	// is collapsed (nocx-ouru5.1.18). The pair travels together because a
+	// collapsed panel keeps the view it reopens on.
+	SetTabPanel(ctx context.Context, id, view string, collapsed bool) (content.Tab, error)
 	ReorderTabs(ctx context.Context, workspaceID string, ids []string) ([]content.Tab, error)
 	DeleteTab(ctx context.Context, id string, next content.Replacement) error
 
@@ -155,6 +159,13 @@ func (s *layoutService) PinTab(ctx context.Context, id string, pinned bool) (con
 		return content.Tab{}, err
 	}
 	return s.layout.PinTab(ctx, id, pinned)
+}
+
+func (s *layoutService) SetTabPanel(ctx context.Context, id, view string, collapsed bool) (content.Tab, error) {
+	if err := s.guard.check(); err != nil {
+		return content.Tab{}, err
+	}
+	return s.layout.SetTabPanel(ctx, id, view, collapsed)
 }
 
 func (s *layoutService) ReorderTabs(ctx context.Context, workspaceID string, ids []string) ([]content.Tab, error) {

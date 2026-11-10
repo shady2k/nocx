@@ -451,7 +451,7 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 			[]byte(`{}`),
 		},
 		"uistate.set": {
-			[]byte(`{"sidebar":{"activeViewId":"home","width":240},"activeTab":"tab-1"}`),
+			[]byte(`{"sidebar":{"width":240},"activeTab":"tab-1"}`),
 		},
 		"uistate.window.get": {
 			[]byte(`{}`),
@@ -747,6 +747,10 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		},
 		"tabs.pin": {
 			[]byte(`{"id":"0198f2b0-0000-7000-8000-00000000c004"}`),
+		},
+		"tabs.setPanel": {
+			[]byte(`{"id":"0198f2b0-0000-7000-8000-00000000c004","view":"ports","collapsed":false}`),
+			[]byte(`{"id":"0198f2b0-0000-7000-8000-00000000c004","view":"","collapsed":true}`),
 		},
 		"tabs.reorder": {
 			[]byte(`{"workspaceId":"workspace:default","ids":["0198f2b0-0000-7000-8000-00000000c004"]}`),

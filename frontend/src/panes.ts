@@ -741,6 +741,19 @@ function insertionIndex(from: number, to: number, before: boolean): number {
 export const LOCAL_BACKEND_ID = 'local'
 
 /**
+ * The sidebar panel a tab remembers (ADR-x7cvh8e1, `nocx-ouru5.1.18`): the
+ * view it shows ("" for none) and whether its rail is collapsed.
+ *
+ * The panel is the TAB's, not the window's, so switching tabs restores the
+ * panel each one left behind. Only WHICH view is remembered — never the state
+ * inside it, which belongs to the view.
+ */
+export interface TabPanel {
+  readonly view: string
+  readonly collapsed: boolean
+}
+
+/**
  * WHERE A TAB THE PERSON POINTED AT GOES (nocx-ouru5.1.4).
  *
  * A create's ordinary seat is "beside the tab in front, in the workspace the
@@ -831,6 +844,11 @@ export class PaneManager {
    * a pane can be MOVED to another tab).
    */
   private readonly tabIdOfCreatedPane = new Map<string, string>()
+
+  /** Panels this window has chosen and the tab's row has not confirmed yet
+   *  (nocx-ouru5.1.18). See `setActiveTabPanel`: a write is a round trip and
+   *  a person can switch tabs inside it. */
+  private readonly unconfirmedPanels = new Map<string, TabPanel>()
   /**
    * THE SAVED CONNECTIONS, read once before the chain is drawn.
    *
@@ -3140,6 +3158,70 @@ export class PaneManager {
    *  Null when no tab is active yet. */
   activeSurfaceType(): SurfaceType | null {
     return this.activePane?.descriptor.surfaceType ?? null
+  }
+
+  /**
+   * The panel the ACTIVE tab remembers (ADR-x7cvh8e1, `nocx-ouru5.1.18`): the sidebar view
+   * it shows and whether its rail is collapsed. Null when the pane is in no
+   * chain — Settings and the file viewer are view panes — because there is
+   * no row to hold a panel and nothing to remember.
+   *
+   * Read from the chain, never from a copy: the panel is the tab's, so the
+   * row IS the answer, exactly as it is for the tab's colour. The one
+   * exception is a panel this window has just chosen and the row has not
+   * confirmed yet — see `unconfirmedPanels`.
+   */
+  activeTabPanel(): TabPanel | null {
+    const pane = this.activePane
+    if (!pane) return null
+    const tabId = this.tabIdOfPane(pane)
+    if (!tabId) return null
+    const pending = this.unconfirmedPanels.get(tabId)
+    if (pending) return pending
+    const tab = this.layout.tab(tabId)
+    return tab ? { view: tab.panelView, collapsed: tab.panelCollapsed } : null
+  }
+
+  /**
+   * Record a panel against the tab in front (ADR-x7cvh8e1, `nocx-ouru5.1.18`).
+   *
+   * Fire-and-forget, and silent on failure, like every other fact the app
+   * writes without being asked: nothing on screen promises it landed, and a
+   * failed write costs the next visit its panel, never this one. A pane in
+   * no chain (Settings) has no row to write, which is the same no-op.
+   */
+  setActiveTabPanel(panel: TabPanel): void {
+    const pane = this.activePane
+    if (!pane) return
+    const tabId = this.tabIdOfPane(pane)
+    if (!tabId) return
+    // The row is in the cache by the time a pane is activated: a pane's start
+    // waits for its create to be registered (buildLocalPane), and activation
+    // follows the start. A tab the cache does not hold is therefore a view
+    // pane, which has no row at all.
+    if (!this.layout.tab(tabId)) return
+    // THE WRITE IS A ROUND TRIP, and a person can switch away and back inside
+    // it. Until the chain confirms, the panel they chose is what the tab
+    // shows — otherwise the row as it was a moment ago would undo a click the
+    // person just made. The entry is dropped as soon as the answer agrees
+    // (the store folds it in from the answer), and on a refusal, so it is a
+    // log of unconfirmed writes rather than a second copy of the state.
+    this.unconfirmedPanels.set(tabId, panel)
+    void this.layout
+      .setTabPanel(tabId, panel.view, panel.collapsed)
+      .then(() => {
+        const stored = this.layout.tab(tabId)
+        if (
+          stored &&
+          stored.panelView === panel.view &&
+          stored.panelCollapsed === panel.collapsed
+        ) {
+          this.unconfirmedPanels.delete(tabId)
+        }
+      })
+      .catch(() => {
+        this.unconfirmedPanels.delete(tabId)
+      })
   }
 
   /**

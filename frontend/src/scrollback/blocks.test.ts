@@ -4948,6 +4948,129 @@ describe('backend-owned block rows', () => {
     }
   })
 
+  it("releases the live region only when it is the freezing block's own (nocx-3wmve)", () => {
+    const inner = document.createElement('div')
+    const liveContainer = document.createElement('div')
+    inner.appendChild(liveContainer)
+    document.body.appendChild(inner)
+    const manager = new BlockManager(inner, liveContainer, {
+      snapshotStore: freshStore(),
+      paintStoredRows: (block, rows) =>
+        paintStoredRows(block, rows, { metric: null, palette: DEFAULT_SNAPSHOT }),
+    })
+    const completed = {
+      id: 'att-a',
+      domain: mintDomain({
+        lane: 'test-lane',
+        lifecycle: 'prompt_ready',
+        domain: 'test-domain',
+        epoch: 1,
+      }) as IntegrationDomain,
+      state: 'completed' as const,
+      exitCode: 0,
+      fence: 'a'.repeat(64),
+    }
+    try {
+      // A runs, completes, and waits for its block.closed (the sealed rows are
+      // still on the wire, which is what the freeze now waits for).
+      manager.startBlock('printf a', '~', 0)
+      manager.bindAttempt('att-a')
+      manager.freezeFromAttempt(completed, 0)
+      // B starts and the live region becomes B's body.
+      const b = manager.startBlock('printf b', '~', 0)
+      manager.bindAttempt('att-b')
+      expect(liveContainer.parentElement).toBe(b.el)
+
+      // A's close lands while B owns the grid. It may not take B's region.
+      manager.blockClosed('att-a')
+
+      expect(liveContainer.parentElement).toBe(b.el)
+      expect(b.el.contains(liveContainer)).toBe(true)
+    } finally {
+      inner.remove()
+      manager.dispose()
+    }
+  })
+
+  it('enters the reader hold before any DOM change of the freeze (nocx-3wmve)', () => {
+    const inner = document.createElement('div')
+    const liveContainer = document.createElement('div')
+    inner.appendChild(liveContainer)
+    document.body.appendChild(inner)
+    const order: string[] = []
+    const manager = new BlockManager(inner, liveContainer, {
+      snapshotStore: freshStore(),
+      paintStoredRows: (block, rows) =>
+        paintStoredRows(block, rows, { metric: null, palette: DEFAULT_SNAPSHOT }),
+      holdReaderPlace: (mutate) => {
+        order.push('hold')
+        mutate()
+      },
+    })
+    const insert = inner.insertBefore.bind(inner)
+    inner.insertBefore = ((node: Node, child: Node | null) => {
+      order.push('dom')
+      return insert(node, child)
+    }) as typeof inner.insertBefore
+    const replace = inner.replaceChild.bind(inner)
+    inner.replaceChild = ((node: Node, old: Node) => {
+      order.push('dom')
+      return replace(node, old)
+    }) as typeof inner.replaceChild
+    try {
+      manager.startBlock('printf rows', '~', 0)
+      manager.bindAttempt('entry-order')
+      order.length = 0
+      closeRunningBlock(manager)
+      // The region leaving its block, the header going back and the element
+      // swap are ONE change: every DOM move of the freeze happens inside the
+      // hold, so the anchor is taken before the first of them.
+      expect(order[0]).toBe('hold')
+      expect(order).toContain('dom')
+    } finally {
+      inner.remove()
+      manager.dispose()
+    }
+  })
+
+  it('freezes a block whole: the element that arrives already carries its rows', () => {
+    const { manager, inner } = newManager()
+    manager.startBlock('printf rows', '~', 0)
+    manager.bindAttempt('entry-whole')
+    manager.applyStoredRows('entry-whole', {
+      lines: [
+        { from: 0, row: row('first line') },
+        { from: 1, row: row('second line') },
+      ],
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+    })
+    try {
+      // THE NODE THE SWAP HANDS OVER, AS IT ARRIVED. A reader scrolled into a
+      // running command's output is reading rows of exactly this block, so a
+      // block that arrives bodyless takes their place in the transcript away
+      // for as long as the paint takes — and the first layout read in that
+      // window clamps them to the top of the history (nocx-3wmve; measured in
+      // e2e/scroll-anchor-while-running.spec.ts at scrollTop 5956 -> 2672).
+      const arrived: Array<{ node: HTMLElement; body: boolean }> = []
+      const replaceChild = inner.replaceChild.bind(inner)
+      inner.replaceChild = ((node: Node, old: Node) => {
+        if (node instanceof HTMLElement) {
+          arrived.push({ node, body: node.querySelector('.cmd-output') !== null })
+        }
+        return replaceChild(node, old)
+      }) as typeof inner.replaceChild
+      closeRunningBlock(manager)
+      expect(arrived).toHaveLength(1)
+      expect(arrived[0].body, 'the frozen block arrived without its rows').toBe(true)
+      expect(blockOutputText(arrived[0].node)).toContain('second line')
+    } finally {
+      manager.dispose()
+      inner.remove()
+    }
+  })
+
   it('forgets hidden output after clear and disposal but keeps the clear-boundary owner', () => {
     const { manager, inner } = newManager()
     const rows = {

@@ -1188,6 +1188,13 @@ export class TerminalContent extends BasePaneContent {
    *  of a switch, tracked here because the registry's change notification
    *  names only the incoming target. */
   private activeTargetId: string | null = null
+  /** Whether the draft on screen is a line this pane handed BACK to the
+   *  person (nocx-evj4b.1.8, P2). The ownership projection hides the composer
+   *  at a non-ready fact unless it holds a typed, focused line, so a restored
+   *  draft shown without focus was hidden in the same update — the person's
+   *  text vanished into an invisible box. A restored draft keeps the composer
+   *  visible until the person submits or clears it (the draft empties). */
+  private _restoredDraft = false
   private agentTarget: AgentInputTarget | null = null
   /** The editor is SUMMONED: the person asked for it over a command that is
    *  still running (nocx-92gfl).
@@ -3964,6 +3971,12 @@ export class TerminalContent extends BasePaneContent {
             // to the one it was typed for.
             const origin = this._currentBind()
             const bind = this._bind
+            // THE STARTUP THIS LINE WAS TYPED INTO (nocx-evj4b.1.8, P1). A
+            // reference resolves over the wire, and by the time its verdict
+            // lands the startup may have settled — so the decision must
+            // remember what the composer WAS at the Enter, not read what the
+            // session is now. Captured here, synchronously, like the origin.
+            const startupAtEnter = this._bind.phase !== 'live' || this._awaitsFirstPrompt()
             const sync = planSubmitSync(doc)
             if (sync) {
               // ADR-0024 §1 (the projection bead nocx-u7uh.7): the typed-ssh
@@ -3975,7 +3988,7 @@ export class TerminalContent extends BasePaneContent {
               // shell.launcherCommand RPC was deleted with the marker
               // latch (nocx-u7uh.1), so the line goes out unchanged —
               // fail-open — until a rewrite input exists.
-              return this.deferShellSubmissionUntilReady(sync, origin)
+              return this.deferShellSubmissionUntilReady(sync, origin, startupAtEnter)
             }
             return planSubmit(doc, (line) => vault.resolveLine(line)).then((verdict) => {
               // The verdict resolves in whatever bind is current; this line
@@ -3985,7 +3998,7 @@ export class TerminalContent extends BasePaneContent {
                 this.reportSubmitFailure(verdict)
                 return false
               }
-              return this.deferShellSubmissionUntilReady(verdict, origin)
+              return this.deferShellSubmissionUntilReady(verdict, origin, startupAtEnter)
             })
           },
           submit: (doc: string, plan?: SubmitPlan) => this.submitFromComposer(doc, plan),
@@ -7930,6 +7943,10 @@ export class TerminalContent extends BasePaneContent {
      *  6). Every path below judges against THIS, never against whatever is
      *  bound now. */
     origin: BindIdentity,
+    /** Whether the composer WAS the startup composer at the Enter
+     *  (nocx-evj4b.1.8, P1): a line typed there is not yet the host's, and a
+     *  startup that settles while its reference resolves cannot send it. */
+    startupAtEnter = false,
   ): SubmitPlan | false | 'held' {
     if (this._attachment.kind !== 'attached') return false
     const target = this.inputTargets?.active()
@@ -7956,6 +7973,21 @@ export class TerminalContent extends BasePaneContent {
     if (this._bind.phase === 'opening') {
       this._deferredShellSubmissions.push({ plan, target, origin })
       return 'held'
+    }
+    // THE STARTUP ENDED WITHOUT A PROMPT WHILE THIS LINE RESOLVED (P1). The
+    // line was typed into the startup composer, so no queue ever took it: it
+    // is still the editor's draft. Delivering it now would write into a pty
+    // that no prompt has proved ready (the .1.1 finding) — and the reference
+    // resolution that just finished is not a readiness signal. The veto keeps
+    // the person's text where they left it, reference intact, and the
+    // composer on screen with it.
+    if (
+      startupAtEnter &&
+      !this._awaitsFirstPrompt() &&
+      this.lifecycle.state.kind !== 'prompt_ready'
+    ) {
+      this._restoredDraft = true
+      return false
     }
     if (!this._awaitsFirstPrompt()) return plan
     if (this.lifecycle.state.kind === 'prompt_ready') return plan
@@ -8205,6 +8237,9 @@ export class TerminalContent extends BasePaneContent {
     // the submit, at the prompt they can see.
     if (!editor.isVisible) editor.show({ focus: false })
     editor.replaceDoc(next)
+    // AND IT STAYS ON SCREEN (P2): the projection that hid this composer hides
+    // it again unless the draft is kept, so the keep is part of the restore.
+    this._restoredDraft = true
   }
 
   /** Show the waiting card and hide the terminal grid for exactly as long as
@@ -8228,6 +8263,19 @@ export class TerminalContent extends BasePaneContent {
    *  on both calls, and this method is never asked to hide anything — the
    *  terminal is live from its first frame, which is what "absence is
    *  conventional by design" requires. */
+  /** Whether a draft this pane restored is still the person's text on screen.
+   *  Cleared by the same read that answers it: a submit or a clear empties
+   *  the editor, and with it the keep (nocx-evj4b.1.8, P2). */
+  private _restoredDraftKept(): boolean {
+    if (!this._restoredDraft) return false
+    const editor = this.editor
+    if (editor === null || editor.getDoc().trim() === '') {
+      this._restoredDraft = false
+      return false
+    }
+    return true
+  }
+
   private _syncIntegrationWaiting(): void {
     const waiting = isAwaitingIntegration(this._integration, this._awaitsIntegration)
     if (waiting) {
@@ -10614,7 +10662,10 @@ export class TerminalContent extends BasePaneContent {
     // (see _awaitsFirstPrompt).
     const startupComposer = this.lifecycle.state.kind === 'native' && this._awaitsFirstPrompt()
     const show =
-      (shouldShowEditor(this.lifecycle.state) || summoned || startupComposer) &&
+      (shouldShowEditor(this.lifecycle.state) ||
+        summoned ||
+        startupComposer ||
+        this._restoredDraftKept()) &&
       (summoned || this.lifecycle.buffer === 'normal') &&
       !this.nativeMode
     // The one case in which an authenticated prompt still shows no editor is

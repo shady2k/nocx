@@ -3143,6 +3143,107 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
     }
   })
 
+  it('a submit whose secret resolves after the startup settled stays in the composer (nocx-evj4b.1.8)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    let releaseResolve!: () => void
+    const resolved = new Promise<void>((resolve) => {
+      releaseResolve = resolve
+    })
+    client.call.mockImplementation((method: string) => {
+      if (method === 'vault.resolveLine') {
+        return resolved.then(() => ({
+          line: 'curl -H "Authorization: Bearer s3cr3t"',
+          refs: [{ name: 'token', resolved: true }],
+        }))
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      session.intent.mockClear()
+      session.send.mockClear()
+      editor.insertText('curl {{secret:token}}')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      // The verdict is in flight and the startup settles without a prompt.
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      releaseResolve()
+      for (let i = 0; i < 10; i++) await Promise.resolve()
+
+      // THE PERSON'S TEXT, STILL THEIRS: the verdict that resolved after the
+      // startup ended is not a licence to write into a pty nobody proved.
+      expect(editor.getDoc()).toBe('curl {{secret:token}}')
+      expect(editor.getDoc()).not.toContain('s3cr3t')
+      expect(session.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([])
+      expect(session.send).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a restored draft keeps the composer on screen until it is submitted or cleared (nocx-evj4b.1.8)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/bash' })
+      holdOne(editor, view, 'echo stays')
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/bash',
+      })
+      await vi.waitFor(() => expect(editor.getDoc()).toBe('echo stays'))
+      // THE PROJECTION THAT HID THE COMPOSER IS THE ONE THAT MUST KEEP IT: a
+      // draft restored without focus was hidden in the same update, and the
+      // person's line vanished into an invisible box.
+      expect(editor.isVisible, 'the restored draft is on screen').toBe(true)
+
+      // A later non-ready fact does not take it away either.
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/bash',
+      })
+      await Promise.resolve()
+      expect(editor.isVisible).toBe(true)
+
+      // The person's own submit empties the draft, and the composer's keep
+      // ends with it.
+      editor.clear()
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/bash',
+      })
+      await Promise.resolve()
+      expect(editor.isVisible).toBe(false)
+    } finally {
+      teardown()
+    }
+  })
+
   it('restores the held lines ahead of a newer draft, as one draft (nocx-evj4b.1.8)', async () => {
     const session = makeSession({ awaitsIntegration: true })
     const client = makeClient()

@@ -298,6 +298,12 @@ export class ScrollbackController {
       // move by 30px as it arrives. A reader scrolled into that output is
       // reading those rows (nocx-3wmve).
       holdReaderPlace: (mutate) => this.holdReaderPlace(mutate),
+      // A block displaced by a new start takes a header the alternate seat
+      // borrowed back THROUGH this seat (nocx-evj4b.1.9): the controller is
+      // what holds that reference, so it is what drops it — a reparent by
+      // hand would leave the seat pointing at a header it no longer owns,
+      // and the next fullscreen exit would prepend it into the new block.
+      reclaimSeatedHeader: () => this._restoreRunningHeader(),
       // A DEFERRED freeze landed inside the manager (the backend's
       // block.closed met the completion): settle the block the way a direct
       // freeze does — the pet

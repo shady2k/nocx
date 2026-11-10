@@ -629,6 +629,43 @@ describe('ScrollbackController render-fence rendezvous (nocx-u7uh.8)', () => {
     expect(controller.mode).toBe('running')
     controller.blockManager.clearAll()
   })
+
+  it('a new start reclaims the fullscreen seat’s header, and the seat forgets it (nocx-evj4b.1.9)', () => {
+    // While a program owns the alternate screen the running header is SEATED
+    // out of its block and the controller holds that reference. A block
+    // displaced in that state must take its header back THROUGH the seat: a
+    // reparent by hand leaves the controller pointing at it, and the next
+    // fullscreen exit prepends it into whatever block is running then — the
+    // displaced command's header on the new command's card.
+    const { renderer } = rendererWithFence()
+    const pane = document.createElement('div')
+    const controller = new ScrollbackController({
+      pane,
+      liveContentHeight: () => renderer.liveContentHeight(),
+      cellMetrics: () => ({ cellWidth: renderer.cellWidth, cellHeight: renderer.cellHeight }),
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    controller.scrollbackArea.scrollTo = vi.fn()
+    controller.beginBlock('top', '~', 0)
+    controller.blockManager.bindAttempt('att-1')
+    controller.enterFullscreen()
+    expect(controller.scrollbackInner.querySelectorAll(':scope > .cmd-header')).toHaveLength(1)
+
+    controller.beginBlock('htop', '~', 3)
+    controller.blockManager.bindAttempt('att-2')
+    controller.exitFullscreen()
+
+    const running = controller.blockManager.runningBlock!
+    expect(running.el.querySelectorAll(':scope > .cmd-header')).toHaveLength(1)
+    expect(running.el.querySelector(':scope > .cmd-header .cmd-header-text')?.textContent).toBe(
+      'htop',
+    )
+    expect(controller.scrollbackInner.querySelectorAll(':scope > .cmd-header')).toHaveLength(0)
+    const displaced = controller.blockManager.blockForAttempt('att-1')!
+    expect(displaced.el.querySelectorAll(':scope > .cmd-header')).toHaveLength(1)
+    expect(displaced.el.querySelector('.cmd-header-text')?.textContent).toBe('top')
+    controller.blockManager.clearAll()
+  })
 })
 
 describe('the echoed command line leaves the live region too (nocx-w1n4)', () => {

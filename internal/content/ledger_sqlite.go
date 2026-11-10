@@ -1954,7 +1954,64 @@ func (s *sqliteContent) artifactsFor(ctx context.Context, executionID int64) ([]
 		if err != nil {
 			return nil, err
 		}
+		if a.MediaType == MediaBlockRows {
+			if err := s.enrichBlockRowsGeometry(ctx, a); err != nil {
+				return nil, err
+			}
+		}
 		out = append(out, *a)
 	}
 	return out, nil
+}
+
+// enrichBlockRowsGeometry puts a rows artifact's retained runs and stream end
+// into the payload a metadata read carries. A sealed artifact already wrote
+// them at close; an OPEN one did not, and a reader that invents one contiguous
+// span for it reserves the evicted middle as if it were kept, then collapses
+// when the first page reports the real split (ADR-8rt54tx2). The scan is this
+// read's cost and the response is still metadata: one open block at a time.
+func (s *sqliteContent) enrichBlockRowsGeometry(ctx context.Context, a *Artifact) error {
+	payload := decodeBlockRowsPayload(a.Payload)
+	if len(payload.RetainedRanges) > 0 && payload.EndRow > 0 {
+		return nil
+	}
+	rows, err := s.conn(ctx).QueryContext(ctx,
+		`SELECT body FROM artifact_chunks WHERE artifact_id = ? ORDER BY seq`, a.ID)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	var chunks [][]byte
+	for rows.Next() {
+		var body []byte
+		if scanErr := rows.Scan(&body); scanErr != nil {
+			return scanErr
+		}
+		chunks = append(chunks, body)
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return rowsErr
+	}
+	count, first, last, ranges, err := readRowGeometry(chunks)
+	if err != nil {
+		return err
+	}
+	if len(payload.RetainedRanges) == 0 {
+		payload.RetainedRanges = ranges
+	}
+	if payload.RowCount == 0 && count > 0 {
+		payload.RowCount = uint64(count) //nolint:gosec // a row count, not a byte count
+	}
+	if payload.FirstRow == 0 && count > 0 {
+		payload.FirstRow = first
+	}
+	end := payload.NextRow
+	if end == 0 && count > 0 {
+		end = last + 1
+	}
+	if end > payload.EndRow {
+		payload.EndRow = end
+	}
+	a.Payload = payload.json()
+	return nil
 }

@@ -684,6 +684,64 @@ func TestAppendBlockRows_TheCapDropsTheMiddleAndCountsIt(t *testing.T) {
 	}
 }
 
+// An OPEN block's metadata reports the runs it holds. The payload is written
+// at close, but a reader that reconnects while the command still runs needs the
+// geometry now; a contiguous invented span would reserve the evicted middle and
+// collapse when the first page shows the split (ADR-8rt54tx2).
+func TestOpenBlockMetadataCarriesRetainedRanges(t *testing.T) {
+	ctx := context.Background()
+	policy := content.NewPolicy()
+	policy.SetOutputCapBytes(4 << 10)
+	_, led := newLedgerWithPolicy(t, policy)
+	entryID := recordOne(t, led, "yes | head")
+	if _, err := led.OpenBlockOutput(ctx, content.OpenBlockOutput{EntryID: entryID, ArtifactID: keptArtifact}); err != nil {
+		t.Fatalf("OpenBlockOutput: %v", err)
+	}
+	const total = 2000
+	rows := make([]emulator.Row, 0, total)
+	for i := 0; i < total; i++ {
+		rows = append(rows, aTextRow(strings.Repeat("y", 64)+fmt.Sprintf(" row %04d", i)))
+	}
+	if err := led.AppendBlockRows(ctx, content.AppendBlockRows{
+		EntryID: entryID, ArtifactID: keptArtifact, FromRow: 0, Rows: rows,
+	}); err != nil {
+		t.Fatalf("AppendBlockRows: %v", err)
+	}
+
+	entry, err := led.Entry(ctx, entryID)
+	if err != nil || entry == nil {
+		t.Fatalf("Entry = %+v, %v", entry, err)
+	}
+	var art *content.Artifact
+	for _, ex := range entry.Executions {
+		for i := range ex.Artifacts {
+			if ex.Artifacts[i].MediaType == content.MediaBlockRows {
+				art = &ex.Artifacts[i]
+			}
+		}
+	}
+	if art == nil {
+		t.Fatal("no open rows artifact on the entry")
+	}
+	var payload struct {
+		EndRow         *uint64            `json:"endRow"`
+		RowCount       *uint64            `json:"rowCount"`
+		RetainedRanges []content.RowRange `json:"retainedRanges"`
+	}
+	if err := json.Unmarshal([]byte(art.Payload), &payload); err != nil {
+		t.Fatalf("payload: %v", err)
+	}
+	if payload.EndRow == nil || *payload.EndRow != total {
+		t.Fatalf("endRow = %v, want %d", payload.EndRow, total)
+	}
+	if len(payload.RetainedRanges) < 2 {
+		t.Fatalf("retainedRanges = %+v, want the cap's head and tail while OPEN", payload.RetainedRanges)
+	}
+	if payload.RowCount == nil || *payload.RowCount >= total {
+		t.Fatalf("rowCount = %v, want fewer than %d retained rows", payload.RowCount, total)
+	}
+}
+
 // The cap holds ACROSS appends: a second delivery landing after the first
 // already evicted must not let the walk's arithmetic mistake a tail chunk
 // for head — the ends are roles of surviving seq order, and this is the

@@ -41,7 +41,7 @@
         "rowCount": {
           "type": "integer",
           "minimum": 0,
-          "description": "How many stored lines the artifact holds, written once at close. It is the block's height in rows: a reader reserves that height before any page of the block arrives (nocx-t7xhe)."
+          "description": "How many stored lines the artifact holds. A metadata read reports it for a sealed block (written once at close) and for an open block (read from the chunks it already has), so a reader reserves the block's height before any page arrives (nocx-t7xhe, ADR-8rt54tx2)."
         },
         "firstRow": {
           "type": "integer",
@@ -51,11 +51,11 @@
         "endRow": {
           "type": "integer",
           "minimum": 0,
-          "description": "One past the block's whole stream span, written once at close. The cap's eviction and the emulator's losses are inside this span; retainedRanges says which parts of it the chunks hold. A reader reserves firstRow..endRow before any page arrives (ADR-y45sp41c)."
+          "description": "One past the block's whole stream span. A metadata read reports it for a sealed block (written at close) and for an open block (from its cursor and chunks). The cap's eviction and the emulator's losses are inside this span; retainedRanges says which parts of it the chunks hold. A reader reserves firstRow..endRow before any page arrives (ADR-y45sp41c, ADR-8rt54tx2)."
         },
         "retainedRanges": {
           "type": "array",
-          "description": "The runs of stream rows the chunks hold, ascending, each [from, to) with to exclusive, written once at close. A cap eviction leaves the head and tail runs apart; a loss can split one. The gap between two runs is one fixed notice, so a block's reserved height cannot change when a page arrives.",
+          "description": "The runs of stream rows the chunks hold, ascending, each [from, to) with to exclusive. A metadata read reports them for a sealed block (written at close) and for an open block (read from its chunks), so the geometry is known before the first page even while the command runs. A cap eviction leaves the head and tail runs apart; a loss can split one. The gap between two runs is one fixed notice, so a block's reserved height cannot change when a page arrives.",
           "items": {
             "$ref": "#/$defs/retainedRange"
           }

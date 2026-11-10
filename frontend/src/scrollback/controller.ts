@@ -477,15 +477,19 @@ export class ScrollbackController {
     // otherwise outrank the idle/fullscreen mode classes. THE BOX IS PART OF
     // THE TRANSCRIPT'S HEIGHT (nocx-3wmve): a reader scrolled up keeps their
     // place across the collapse, and a follower is put back at the end.
+    // THE CLASS IS PART OF THE SAME BOX (nocx-3wmve): `live-idle` carries the
+    // idle box's own height, so changing it outside the held mutation moved
+    // the transcript a second time — after the restore had already measured —
+    // and the reader lost the collapse's 140px. It goes in with the heights.
     this._settleHeight(() => {
       this.terminalLiveContainer.style.height = ''
       this.terminalLiveViewport.style.height = ''
+      this.terminalLiveContainer.className =
+        'terminal-live-container terminal-live-container live-idle'
+      this.terminalLiveInner.className = 'terminal-live-inner terminal-live-inner'
+      this.scrollbackInner.classList.remove('inner-unstructured')
     })
     this._setFilledPane(false)
-    this.terminalLiveContainer.className =
-      'terminal-live-container terminal-live-container live-idle'
-    this.terminalLiveInner.className = 'terminal-live-inner terminal-live-inner'
-    this.scrollbackInner.classList.remove('inner-unstructured')
     // The echo shift is a running-mode property: clear it with the region.
     this._applyEchoShift()
     this._updateSeparator()
@@ -1217,6 +1221,24 @@ export class ScrollbackController {
       const element = unit.getBoundingClientRect()
       // A HEADER IS ITS BLOCK'S OWN, and there is exactly one: its identity is
       // the block that carries it, with no ordinal to shift.
+      // THE LIVE REGION IS NOT DURABLE CONTENT (nocx-3wmve). At a freeze it is
+      // re-seated below the frozen card and its rows keep their identity, so an
+      // element reference taken on one would follow the LIVE COPY of the row
+      // the person is reading instead of the frozen rows that replaced it —
+      // measured as a jump of the card's height. Nothing in the region can be
+      // named for after the freeze, and the position is the honest answer.
+      if (unit.closest('.terminal-live-container') !== null) {
+        return {
+          element: null,
+          blockId: null,
+          kind: 'unit',
+          line: null,
+          path: [],
+          signature: '',
+          offset: 0,
+          top: area.scrollTop,
+        }
+      }
       if (unit.classList.contains('cmd-header')) {
         const owner = unit.closest<HTMLElement>('.cmd-block') ?? block
         return {
@@ -1358,9 +1380,13 @@ export class ScrollbackController {
     node: HTMLElement,
     clip: { top: number; bottom: number },
   ): HTMLElement | null {
-    const children = Array.from(node.children) as HTMLElement[]
+    // THE COLLECTION IS INDEXED, NEVER MATERIALIZED (nocx-3wmve): a body holds
+    // tens of thousands of rows, and `Array.from` allocated a copy of every one
+    // of them on every settle — the measurement test now counts it.
+    const children = node.children
     if (children.length === 0) return null
-    const topOf = (index: number): number => children[index].getBoundingClientRect().top
+    const topOf = (index: number): number =>
+      (children[index] as HTMLElement).getBoundingClientRect().top
     // THE LAST CHILD WHOSE TOP IS AT OR ABOVE THE VIEWPORT'S TOP EDGE, found by
     // bisection: children are in document order and laid out one under the
     // next, so their top edges are non-decreasing.
@@ -1377,7 +1403,7 @@ export class ScrollbackController {
       }
     }
     for (let index = Math.max(0, above); index < children.length; index += 1) {
-      const child = children[index]
+      const child = children[index] as HTMLElement
       const cell = child.getBoundingClientRect()
       // A CHILD WITH NO BOX IS A PASS-THROUGH, not a thing to read: `display:
       // contents` and an unpainted container have no rect of their own, and
@@ -1448,18 +1474,18 @@ export class ScrollbackController {
       if (child === undefined) return null
       node = child
     }
-    const siblings = Array.from(node.children) as HTMLElement[]
+    const siblings = node.children
     const wanted = place.path[place.path.length - 1]
     const matches = (index: number): boolean =>
       siblings[index] !== undefined && siblings[index].className === place.signature
-    if (matches(wanted)) return siblings[wanted]
+    if (matches(wanted)) return siblings[wanted] as HTMLElement
     // THE ROUTE SHIFTED BY A NEIGHBOUR (a row removed above, the working dots
     // taken away): the nearest unit with the same signature is the same thing,
     // and the search is bounded because a body that shifted by more than this
     // is a different body.
     for (let step = 1; step <= 64; step += 1) {
-      if (matches(wanted - step)) return siblings[wanted - step]
-      if (matches(wanted + step)) return siblings[wanted + step]
+      if (matches(wanted - step)) return siblings[wanted - step] as HTMLElement
+      if (matches(wanted + step)) return siblings[wanted + step] as HTMLElement
     }
     return null
   }

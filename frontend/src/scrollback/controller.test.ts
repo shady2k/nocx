@@ -1943,12 +1943,22 @@ describe("the reader's anchor (nocx-3wmve)", () => {
       if (this === bodyEl.children) walks += 1
       return indexOf.apply(this as never, args as never)
     } as typeof Array.prototype.indexOf
+    // THE COLLECTION IS NOT MATERIALIZED EITHER: `Array.from(children)` copies
+    // every row on every settle, whether or not it reads them.
+    const from = Array.from
+    let allocations = 0
+    Array.from = function (this: unknown, ...args: unknown[]) {
+      if (args[0] === bodyEl.children) allocations += 1
+      return from.apply(this as never, args as never)
+    } as typeof Array.from
     try {
       controller.holdReaderPlace(() => {})
     } finally {
       Array.prototype.indexOf = indexOf
+      Array.from = from
     }
     expect(walks, 'the capture walked the body for an ordinal a row does not need').toBe(0)
+    expect(allocations, 'the capture copied every row to reach one of them').toBe(0)
 
     // The row nearest the top edge is row 800 — a linear walk from the block's
     // first row reads ~800 of them; a bisection reads a handful.
@@ -2174,6 +2184,71 @@ describe("the reader's anchor (nocx-3wmve)", () => {
     })
 
     expect(area.scrollTop).toBe(1040)
+  })
+
+  it('applies the idle class inside the held mutation, so its height cannot move a reader (nocx-3wmve)', () => {
+    const { controller } = makeController()
+    const area = laidOut(controller)
+    stopFollowing(controller)
+    const block = document.createElement('div')
+    block.className = 'cmd-block'
+    const body = document.createElement('div')
+    body.className = 'cmd-output'
+    const row = document.createElement('div')
+    row.className = 'term-grid-row'
+    row.dataset.logicalLine = '7'
+    // `live-idle` carries the idle box's own height: the transcript above moves
+    // by 140 when the class lands.
+    const container = controller.terminalLiveContainer
+    controller.setRunning()
+    row.getBoundingClientRect = () => rect(container.className.includes('live-idle') ? 140 : 0, 40)
+    body.appendChild(row)
+    block.appendChild(body)
+    controller.scrollbackInner.appendChild(block)
+    block.getBoundingClientRect = () => rect(0, 2000)
+
+    controller.setIdle()
+
+    expect(area.scrollTop, 'the idle class moved the transcript after the restore').toBe(1140)
+  })
+
+  it('does not follow a live-grid row when the freeze re-seats the live region (nocx-3wmve)', () => {
+    const { pane, controller } = makeController()
+    document.body.appendChild(pane)
+    const area = laidOut(controller)
+    stopFollowing(controller)
+    const block = document.createElement('div')
+    block.className = 'cmd-block'
+    block.dataset.entryId = 'att-run'
+    const container = controller.terminalLiveContainer
+    const rows: HTMLElement[] = []
+    for (let index = 0; index < 50; index += 1) {
+      const row = document.createElement('div')
+      row.className = 'term-grid-row'
+      const top = index * 40 - 1000
+      row.getBoundingClientRect = () => rect(top, 40)
+      container.appendChild(row)
+      rows.push(row)
+    }
+    container.getBoundingClientRect = () => rect(-1000, 2000)
+    block.appendChild(container)
+    controller.scrollbackInner.appendChild(block)
+    block.getBoundingClientRect = () => rect(-1000, 2000)
+
+    controller.holdReaderPlace(() => {
+      // THE FREEZE: the frozen card's body is built inside the block, and the
+      // live region is re-seated below it — the same elements, a new place.
+      const body = document.createElement('div')
+      body.className = 'cmd-output'
+      block.appendChild(body)
+      controller.scrollbackInner.insertBefore(container, block.nextSibling)
+      for (let index = 0; index < rows.length; index += 1) {
+        rows[index].getBoundingClientRect = () => rect(index * 40 - 400, 40)
+      }
+    })
+
+    expect(area.scrollTop, 'the restore followed the live copy of the row').toBe(1000)
+    document.body.removeChild(pane)
   })
 
   it('anchors a reader inside an expanded reasoning note, whatever its class (nocx-3wmve)', () => {

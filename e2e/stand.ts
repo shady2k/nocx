@@ -348,7 +348,12 @@ export async function startStand(): Promise<StandManifest> {
   // that happens in a spec is a build CI does not do until that spec runs, and
   // the failure then lands in whichever file drew the short straw.
   const server = path.join(root, 'nocx-server')
-  execFileSync('go', ['build', '-o', server, './cmd/nocx-server'], {
+  // `nocx_dev_bind` IS THE STAND'S OWN TAG (internal/transport/dev_bind_dev.go):
+  // a build saying "something here may be told stand-only numbers". It gives
+  // the stand the WS port variable and — for the one spec that needs it — a
+  // longer integration startup bound, scoped to sessions whose opening user is
+  // the marker below. No release build reads either name.
+  execFileSync('go', ['build', '-tags', 'nocx_dev_bind', '-o', server, './cmd/nocx-server'], {
     cwd: repoRoot,
     stdio: 'inherit',
   })
@@ -381,7 +386,15 @@ export async function startStand(): Promise<StandManifest> {
   // reaches the backend except through this manifest.
   backend = spawn(server, [], {
     cwd: repoRoot,
-    env: isolation.env,
+    // THE STAND'S SESSION-SCOPED STARTUP BOUND (dev_bind_dev.go). A spec that
+    // needs to type inside the "Checking this shell…" interval says so by
+    // opening with this account name; every other session keeps the product's
+    // ten-second default, and the specs that assert that default are untouched.
+    env: {
+      ...isolation.env,
+      NOCX_DEV_INTEGRATION_STARTUP_BOUND: '120s',
+      NOCX_DEV_INTEGRATION_BOUND_USER: 'nocx-e2e-long-bound',
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   const onBackendOutput = (b: Buffer): void => {

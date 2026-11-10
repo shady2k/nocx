@@ -79,11 +79,19 @@ async function startSampling(page: Page): Promise<void> {
     const tick = (): void => {
       if (stopped) return
       const blocks = [...pane.querySelectorAll<HTMLElement>('.cmd-block')]
-      const grid = pane.querySelector<HTMLElement>('.terminal-live-grid')?.textContent ?? ''
+      // THE BLOCK'S WHOLE BODY, not only the live grid (ADR-92zzg2y2,
+      // ADR-0091): with the one gutter the running body is the block's stored
+      // rows above the live grid, and the program's header can sit in either
+      // half. A person reads the block; the clock is wherever the body put it.
+      const grid =
+        pane.querySelector<HTMLElement>('.cmd-block.cmd-block-running')?.textContent ?? ''
       host.__topSplitSamples!.push({
         total: blocks.length,
         running: blocks.filter((b) => b.classList.contains('cmd-block-running')).length,
-        clock: /\b\d{2}:\d{2}:\d{2}\b/.exec(grid)?.[0] ?? null,
+        // The LAST clock in the body is the program's current header: the
+        // block's stored rows carry the screens already handed over, and the
+        // live grid carries the newest one.
+        clock: [...grid.matchAll(/\b\d{2}:\d{2}:\d{2}\b/g)].map((m) => m[0]).at(-1) ?? null,
       })
       requestAnimationFrame(tick)
     }
@@ -126,9 +134,10 @@ async function expectOneBlockAcrossRepaints(page: Page): Promise<void> {
   await expect(page.locator('.pane.active .cmd-block')).toHaveCount(1, { timeout: 20_000 })
   // ITS FIRST SCREEN, before anything is sampled: a frame drawn before the
   // program painted is not evidence about a repaint.
-  await expect(page.locator('.pane.active .terminal-live-grid')).toContainText('load average', {
-    timeout: 20_000,
-  })
+  await expect(page.locator('.pane.active .cmd-block.cmd-block-running')).toContainText(
+    'load average',
+    { timeout: 20_000 },
+  )
 
   await startSampling(page)
   await expect

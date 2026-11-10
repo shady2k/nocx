@@ -403,6 +403,12 @@ func (s *ledgerStub) RecordBlockRowsFence(_ context.Context, in RecordBlockRowsF
 	return ErrNotImplemented
 }
 
+func (s *ledgerStub) RecordBlockRowsOutputStart(_ context.Context, in RecordBlockRowsOutputStart) error {
+	s.log.Info("content stub: LedgerRepository.RecordBlockRowsOutputStart",
+		"entry", in.EntryID, "artifact", in.ArtifactID, "row", in.Row)
+	return ErrNotImplemented
+}
+
 func (s *ledgerStub) OpenBlockRowsForSession(_ context.Context, sessionID string) (OpenBlockRowsEntry, error) {
 	s.log.Info("content stub: LedgerRepository.OpenBlockRowsForSession", "session", sessionID)
 	// No database behind the stub holds an open block, so the honest

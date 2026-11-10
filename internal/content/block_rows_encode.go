@@ -168,6 +168,31 @@ func appendBlockStyleRun(runs []byte, style emulator.Style, length int) []byte {
 // both already read as blank once hasText is false), and continuation rows
 // belong to the logical line above.
 func BlockRowsText(chunks [][]byte) (string, error) {
+	return BlockRowsTextAfter(chunks, 0)
+}
+
+// BlockRowsOutputStart reads a block rows artifact's recorded output start
+// (nocx-4y82c.1.11) out of its payload: the absolute row a stored line's
+// `from` counts from. Zero means no mark was ever recorded, and then every
+// stored row belongs to the block's body.
+func BlockRowsOutputStart(payload string) uint64 {
+	var p struct {
+		OutputStartRow *uint64 `json:"outputStartRow"`
+	}
+	if strings.TrimSpace(payload) == "" {
+		return 0
+	}
+	if err := json.Unmarshal([]byte(payload), &p); err != nil || p.OutputStartRow == nil {
+		return 0
+	}
+	return *p.OutputStartRow
+}
+
+// BlockRowsTextAfter is BlockRowsText for a block whose output begins at
+// startRow (the artifact payload's outputStartRow, nocx-4y82c.1.11): the
+// lines below it are the command's own echo and redraw, which no reader
+// shows. startRow 0 is every line, the unchanged read.
+func BlockRowsTextAfter(chunks [][]byte, startRow uint64) (string, error) {
 	var body bytes.Buffer
 	for _, chunk := range chunks {
 		_, _ = body.Write(chunk)
@@ -177,7 +202,8 @@ func BlockRowsText(chunks [][]byte) (string, error) {
 	decoder := json.NewDecoder(&body)
 	for {
 		var line struct {
-			Row struct {
+			From uint64 `json:"from"`
+			Row  struct {
 				Text         string     `json:"text"`
 				Marks        [][3]int64 `json:"marks"`
 				Continuation bool       `json:"continuation"`
@@ -188,6 +214,9 @@ func BlockRowsText(chunks [][]byte) (string, error) {
 				break
 			}
 			return "", fmt.Errorf("content: block rows: decode stored line: %w", err)
+		}
+		if line.From < startRow {
+			continue
 		}
 		rowText, err := blockRowPlainText(line.Row.Text, line.Row.Marks)
 		if err != nil {

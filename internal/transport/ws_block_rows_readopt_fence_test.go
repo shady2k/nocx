@@ -103,10 +103,6 @@ func TestRecoveredOpenBlockWithoutResentEndSettlesAsGapBeforeLaterEnd(t *testing
 	e.ws.BlockOutputStartPlaneAttached(sid)
 
 	first := startsACommand(t, e, pub, lane, h, 2, "printf recovered")
-	// The source states it emits ordered output marks, so the block waits for
-	// its first one before it stores anything (nocx-4y82c.1.11); this
-	// command's mark is row zero.
-	e.ws.BlockOutputStartRow(sid, 0)
 	if _, confirm := e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("recovered")}, ""); !confirm {
 		t.Fatal("the recovered block row was not confirmed")
 	}
@@ -151,10 +147,6 @@ func TestRecoveredBlockEndClosesWhileRowsAwaitOutputReplay(t *testing.T) {
 	e.ws.BlockOutputStartPlaneAttached(sid)
 
 	attempt := startsACommand(t, e, pub, lane, h, 2, "printf recovered")
-	// The source states it emits ordered output marks, so the block waits for
-	// its first one before it stores anything (nocx-4y82c.1.11); this
-	// command's mark is row zero.
-	e.ws.BlockOutputStartRow(sid, 0)
 	if _, confirm := e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("stored")}, ""); !confirm {
 		t.Fatal("the stored row was not confirmed")
 	}

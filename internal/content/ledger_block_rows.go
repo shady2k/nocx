@@ -79,6 +79,14 @@ type blockRowsPayload struct {
 	// before the end marker seals the block (RecordBlockRowsFence). Every
 	// append carries it forward; the seal drops it with the rest.
 	Fence string `json:"fence,omitempty"`
+	// OutputStartRow is where the block's OUTPUT begins in the same absolute
+	// row coordinate every stored line's `from` uses (nocx-4y82c.1.11). It is
+	// written once, when the helper's ordered output mark applies, and never
+	// again: the rows below it are the command's own echo and redraw — the
+	// screen's rendering of a line the block's header already carries — and a
+	// reader skips them. Nil means no mark ever arrived (a shell with no
+	// integration), and then every stored row is the block's own.
+	OutputStartRow *uint64 `json:"outputStartRow,omitempty"`
 }
 
 func (s *sqliteContent) OpenBlockOutput(ctx context.Context, in OpenBlockOutput) (string, error) {
@@ -495,7 +503,13 @@ func (s *sqliteContent) CloseBlockRows(ctx context.Context, in CloseBlockRows) (
 			"dropped", dropped, "lost", state.payload.LostRows,
 			"unavailable", state.payload.UnavailableRows)
 
-		final := blockRowsPayload{DroppedRows: dropped, LostRows: state.payload.LostRows, UnavailableRows: state.payload.UnavailableRows}
+		// The seal keeps WHERE THE OUTPUT BEGINS (nocx-4y82c.1.11): a reader
+		// of the frozen block needs the same coordinate the open one had, and
+		// the payload is rewritten here rather than extended in place.
+		final := blockRowsPayload{
+			DroppedRows: dropped, LostRows: state.payload.LostRows, UnavailableRows: state.payload.UnavailableRows,
+			OutputStartRow: state.payload.OutputStartRow,
+		}
 		// The PRIMARY reason, one of them: the cap names rows it dropped by
 		// count, so it wins over a gap it would otherwise hide inside.
 		var truncated any
@@ -537,6 +551,42 @@ func (s *sqliteContent) RecordBlockRowsFence(ctx context.Context, in RecordBlock
 			return txEnd.commit()
 		}
 		state.payload.Fence = in.Fence
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE artifacts SET payload = ? WHERE id = ?`,
+			state.payload.json(), in.ArtifactID); err != nil {
+			return err
+		}
+		return txEnd.commit()
+	})
+}
+
+// RecordBlockRowsOutputStart records where a block's output begins
+// (nocx-4y82c.1.11): the helper's ordered output mark, in the same absolute
+// row coordinate a stored line's `from` uses. It is ONE idempotent write —
+// the first mark wins, a later one is another command's — and a block already
+// sealed has nothing left to delimit, so a mark that arrives after the seal
+// changes nothing.
+func (s *sqliteContent) RecordBlockRowsOutputStart(ctx context.Context, in RecordBlockRowsOutputStart) error {
+	if in.EntryID == "" || in.ArtifactID == "" {
+		return errors.New("content: block rows: entry id and artifact id are required")
+	}
+	return s.run(ctx, func(ctx context.Context) error {
+		tx, txEnd, err := s.beginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+		if err != nil {
+			return err
+		}
+		defer txEnd.rollback()
+		state, err := blockRowsArtifactFor(ctx, tx, in.EntryID, in.ArtifactID)
+		if err != nil {
+			return err
+		}
+		if state.sealed || state.payload.OutputStartRow != nil {
+			// Sealed: nothing to delimit. Already recorded: the first mark
+			// wins, so a second one — another command's — changes nothing.
+			return txEnd.commit()
+		}
+		row := in.Row
+		state.payload.OutputStartRow = &row
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE artifacts SET payload = ? WHERE id = ?`,
 			state.payload.json(), in.ArtifactID); err != nil {

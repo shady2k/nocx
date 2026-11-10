@@ -776,6 +776,11 @@ export interface BlockRecord {
   outputAnchorScreen?: number
   /** Backend-owned screen anchor; cursor position is never a substitute. */
   outputAnchor?: BlockOutputStart
+  /** The block's first output row in the ordered rows stream — the
+   *  coordinate a stored row's `from` uses. The body's hold is mapped
+   *  through it, so a record whose head is lost or late still stops where
+   *  the painted screen stops (nocx-4y82c.1.10). */
+  outputStreamStart?: number
   /** Offset from the accepted frame base row when its identity matches the anchor. */
   outputAnchorOffset?: number
   /** Observed input-span text immediately before the accepted output anchor. */
@@ -2176,7 +2181,12 @@ export class BlockManager {
     HTMLElement,
     { rows?: StoredBlockRows; unreadable?: boolean }
   >()
-  private _pendingStoredRows = new Map<string, StoredBlockRows>()
+  /** Rows parked for an entry the binding has not named yet, with the hold
+   *  the delivery carried. The hold is computed from the painted frame at
+   *  delivery time and must survive the parking: draining it without the
+   *  hold paints the whole artifact, and a quiet command never widens it
+   *  (nocx-4y82c.1.1). */
+  private _pendingStoredRows = new Map<string, { rows: StoredBlockRows; upTo?: number | null }>()
   /** The highest row cursor `applyStoredRows` has accepted per entry — the
    *  last stored line's `from` (block.grew.schema.json: absolute row index,
    *  strictly increasing across deliveries, and never lower after a close,
@@ -2707,9 +2717,16 @@ export class BlockManager {
       this._runningBlock.el.dataset.entryId = attemptId
       const pending = this._pendingStoredRows.get(attemptId)
       if (pending) {
-        this._runningBlock.storedRows = pending
         this._pendingStoredRows.delete(attemptId)
-        this.paintStoredRows(this._runningBlock.el, pending)
+        this._runningBlock.storedRows = pending.rows
+        // THE HOLD THE PARKED RESPONSE CARRIED (nocx-4y82c.1.1). It was
+        // computed from the painted frame before the binding existed; dropping
+        // it here drained the whole artifact over rows the grid still showed,
+        // and a quiet command kept the overlap until its next frame.
+        if (pending.upTo === null) this._runningBlock.storedUpTo = undefined
+        else if (pending.upTo !== undefined) this._runningBlock.storedUpTo = pending.upTo
+        const painted = this._paintedLines(this._runningBlock)
+        if (painted !== null) this.paintStoredRows(this._runningBlock.el, painted)
       }
     }
   }
@@ -2735,6 +2752,7 @@ export class BlockManager {
     rec.outputAnchor = Object.freeze({ ...anchor })
     rec.outputAnchorScreen = screen
     rec.outputStart = undefined
+    rec.outputStreamStart = anchor.fromRow
     rec.outputScreen = undefined
     rec.outputAnchorOffset = undefined
     rec.outputAnchorText = undefined
@@ -2775,9 +2793,20 @@ export class BlockManager {
         rec.outputAnchorOffset = Math.max(0, Math.min(index, snapshot.geometry.rows - 1))
         continue
       }
+      // THE TWO NUMBERS, AND WHAT EACH ONE MEANS (nocx-4y82c.1.10). `row` is
+      // the block's first output row in the SHARED SCREEN coordinate and is
+      // ALREADY ABSOLUTE: the backend's screenRowAnchorLocked emits
+      // `Row = base + cursorRow` (internal/sessionruntime/screen_capture.go),
+      // and a frame's `state.baseRow` is that same coordinate. So the echo
+      // shift — the row's position on the screen now — is `row - baseRow`,
+      // and the hold — the rows the screen has passed since that first output
+      // row — is `baseRow - row`. `fromRow` is the same row in a DIFFERENT
+      // coordinate: the ordered rows stream, the index a stored row's `from`
+      // carries, so it is what the body's slice maps through and it is never
+      // added to `row`.
       rec.outputStart = anchor.row
       rec.outputScreen = rec.outputAnchorScreen
-      const index = anchor.row - snapshot.state.baseRow
+      const index = rec.outputStart - snapshot.state.baseRow
       if (index <= 0) {
         // The anchor names the first output row. Its preceding echo row is
         // already above the visible screen (or absent), so there is no shift.
@@ -2852,6 +2881,22 @@ export class BlockManager {
     rec.startOffset = index <= 0 ? 0 : Math.min(index, snapshot.geometry.rows - 1)
   }
 
+  /** The block whose body is still joined to the live grid: the one that
+   *  holds `_liveContainer` as its child. It is the running block until the
+   *  visual freeze moves the region out, and it stays this block across the
+   *  LOGICAL freeze — the step that clears `runningBlock` while the card is
+   *  still the running presentation and the grid below still shows the
+   *  command's screen. The body's hold is needed for exactly as long as the
+   *  two are joined (nocx-4y82c.1.1). */
+  get liveBlock(): BlockRecord | null {
+    const host = this._liveContainer.parentElement
+    if (host !== null) {
+      const joined = this._blocks.find((b) => b.el === host)
+      if (joined !== undefined) return joined
+    }
+    return this._runningBlock
+  }
+
   /** The block bound to an attempt id — running or frozen. */
   blockForAttempt(attemptId: string): BlockRecord | null {
     return this._blocks.find((b) => b.attemptId === attemptId) ?? null
@@ -2890,7 +2935,15 @@ export class BlockManager {
       return
     }
     this._deferredStoredPaint.delete(block)
-    this._paintStoredRows?.(block, rows)
+    // EVERY DOOR RESPECTS THE HOLD (nocx-4y82c.1.1). The rows this door is
+    // handed are the whole artifact; a running block may paint only the part
+    // the painted screen has passed, whichever caller arrived here — a
+    // binding that drained rows stashed before it, a hidden pane flushing
+    // what it deferred, or a delivery. Measured: a late binding painted the
+    // full 208 rows while the hold said 207, and the body showed the two rows
+    // the grid still had.
+    const painted = this._paintableRows(block, rows)
+    this._paintStoredRows?.(block, painted)
     this._keepLiveBodyLast(block)
   }
 
@@ -2914,8 +2967,10 @@ export class BlockManager {
    *  `_rowsTheScreenPassed`), and null is the caller saying there is no such
    *  screen any more: the body then takes every row the record holds, and the
    *  hold is forgotten rather than kept for a frame that will not come
-   *  (nocx-djx1u). A number only ever widens the bound — a smaller one
-   *  arriving later must not un-paint rows that are already on screen. */
+   *  (nocx-djx1u). The count is the painted screen's own, so it may also
+   *  FALL: a pane that GROWS pulls rows back out of history onto the top of
+   *  the screen, and the body must stop painting them again or the joint
+   *  shows the same line twice (nocx-4y82c.1.1). */
   applyStoredRows(entryId: string, rows: StoredBlockRows, upTo?: number | null): void {
     const cursor = rows.lines.length > 0 ? rows.lines[rows.lines.length - 1].from : -1
     const seen = this._storedRowsCursor.get(entryId) ?? -1
@@ -2932,23 +2987,52 @@ export class BlockManager {
         const oldest = this._pendingStoredRows.keys().next().value
         if (oldest !== undefined) this._pendingStoredRows.delete(oldest)
       }
-      this._pendingStoredRows.set(entryId, rows)
+      this._pendingStoredRows.set(entryId, { rows, upTo })
       return
     }
     rec.storedRows = rows
     rec.rowsUnreadable = undefined
-    // The bound only ever WIDENS. A delivery read before the block was bound
-    // paints everything it holds (`bindAttempt`), so a smaller count arriving
-    // afterwards must not un-paint rows that are already on screen — the
-    // paint's own diff removes what the slice omits. What keeps it from
-    // latching is the caller: the count is offered only while the screen that
-    // supplied the block's row space is still the live one, so a pane whose
-    // screen is over holds nothing and the body takes every row the record
-    // has (nocx-djx1u).
+    // THE COUNT FOLLOWS THE SCREEN, BOTH WAYS. It used to only ever widen,
+    // because a delivery that leads the painted frame must not un-paint rows
+    // the frame still shows — but the screen itself can move the other way:
+    // a pane that grows pulls rows back out of history onto its top, the
+    // painted screen has passed two fewer rows, and a bound that refused to
+    // fall kept the body painting them while the grid showed them again
+    // (measured on webkit under load: `GET-207, GET-208` in the body and the
+    // same two rows at the top of the grid, nocx-4y82c.1.1). The caller is
+    // what makes the smaller count safe: it is offered only from the painted
+    // screen, and the paint's own diff removes what the slice omits.
     if (upTo === null) rec.storedUpTo = undefined
-    else if (upTo !== undefined) rec.storedUpTo = Math.max(rec.storedUpTo ?? 0, upTo)
+    else if (upTo !== undefined) rec.storedUpTo = upTo
     const painted = this._paintedLines(rec)
     if (painted !== null) this.paintStoredRows(rec.el, painted)
+  }
+
+  /** The rows one paint may show, for the block it is painting: the whole
+   *  artifact for every block but the running one, which stops where the
+   *  painted screen has stopped. The one place the hold is applied, so a door
+   *  that was handed the full rows cannot paint them. */
+  private _paintableRows(block: HTMLElement, rows: StoredBlockRows): StoredBlockRows {
+    const rec = this._blocks.find((b) => b.el === block)
+    if (rec === undefined || rec.storedUpTo === undefined) return rows
+    if (this._liveContainer.parentElement !== block) return rows
+    return this._heldRows(rows, rec.storedUpTo, rec.outputStreamStart ?? 0)
+  }
+
+  /** The rows a hold allows, selected BY THEIR OWN `from` — never by array
+   *  length. `from` counts from the block's first output row, so a record
+   *  whose head was lost starts later than the hold assumes, and a CAPPED
+   *  artifact keeps a head and a tail with a gap between them
+   *  (`from: [0, 1, 900, 901]`): slicing the array by the hold paints the
+   *  tail rows a grown pane pulled back onto the grid, duplicating them above
+   *  it (nocx-4y82c.1.1). The body may paint exactly the lines whose `from`
+   *  is below the boundary the painted screen names.
+   */
+  private _heldRows(rows: StoredBlockRows, limit: number, streamStart = 0): StoredBlockRows {
+    const boundary = streamStart + Math.max(0, limit)
+    const lines = rows.lines.filter((line) => line.from >= streamStart && line.from < boundary)
+    if (lines.length === rows.lines.length) return rows
+    return { ...rows, lines }
   }
 
   /** The part of a block's stored rows its body may paint: all of them,
@@ -2957,9 +3041,9 @@ export class BlockManager {
   private _paintedLines(rec: BlockRecord): StoredBlockRows | null {
     const rows = rec.storedRows
     if (rows === undefined) return null
-    const limit = rec === this._runningBlock ? rec.storedUpTo : undefined
-    if (limit === undefined || limit >= rows.lines.length) return rows
-    return { ...rows, lines: rows.lines.slice(0, Math.max(0, limit)) }
+    const limit = rec.el === this._liveContainer.parentElement ? rec.storedUpTo : undefined
+    if (limit === undefined) return rows
+    return this._heldRows(rows, limit, rec.outputStreamStart ?? 0)
   }
 
   /** Release every held row: paint the running block's body whole.
@@ -2974,7 +3058,7 @@ export class BlockManager {
    *  stops, the transcript keeps the output (e2e/connection-overlay.spec.ts
    *  measured nine of forty-one rows kept for the rest of a command). */
   releaseHeldRows(): void {
-    const rec = this._runningBlock
+    const rec = this.liveBlock
     if (rec === null || rec.storedUpTo === undefined) return
     rec.storedUpTo = undefined
     const painted = this._paintedLines(rec)
@@ -2989,16 +3073,22 @@ export class BlockManager {
    *  screen's generation ends (nocx-djx1u). Answers whether anything was
    *  painted, so the caller holds the tail in the same task. A no-op for a
    *  block that is not running: a frozen body has no live grid to stay
-   *  disjoint from. */
+   *  disjoint from.
+   *
+   *  THE COUNT IS SET, NOT MERGED. This is the painted screen's own answer,
+   *  so a smaller one is the screen taking rows back onto its top (a pane
+   *  that grew) and the body must stop painting them; a merge that only ever
+   *  widened left the same two lines in both bodies for a frame
+   *  (nocx-4y82c.1.1). */
   holdStoredRows(entryId: string, upTo: number | null): boolean {
     const rec = this.blockForAttempt(entryId)
-    if (rec === null || rec !== this._runningBlock) return false
+    if (rec === null || rec.el !== this._liveContainer.parentElement) return false
     if (rec.storedRows === undefined) return false
     if (upTo === null) {
       if (rec.storedUpTo === undefined) return false
       rec.storedUpTo = undefined
     } else {
-      if (upTo <= (rec.storedUpTo ?? 0)) return false
+      if (upTo === rec.storedUpTo) return false
       rec.storedUpTo = upTo
     }
     const painted = this._paintedLines(rec)
@@ -3324,10 +3414,13 @@ export class BlockManager {
     this._cmdStartTime = null
     rec.exitCode = exitCode
     rec.status = status
-    // A FROZEN BODY HAS NO LIVE GRID TO STAY DISJOINT FROM: the hold that
-    // keeps a running block's rows from doubling the screen has nothing to
-    // hold against now, so the body takes everything the record holds.
-    rec.storedUpTo = undefined
+    // THE HOLD OUTLIVES THE LOGICAL FREEZE (nocx-4y82c.1.1). The card is
+    // still the running presentation and the live grid is still under it until
+    // the VISUAL freeze moves the region out, so an outstanding artifact
+    // response landing in that window must still stop where the grid stops —
+    // clearing it here painted the whole artifact over rows the screen still
+    // showed, duplicating them until block.closed. `_freezeCard` ends the hold
+    // when the grid leaves the block.
     this._runningBlock = null
     return status
   }
@@ -3358,6 +3451,11 @@ export class BlockManager {
       // (ADR-3kqrem7v). The region goes back to the stack, right after the block
       // it has just stopped being the body of.
       this.releaseLiveRegion()
+      // THE HOLD ENDS WHERE THE GRID LEAVES THE BLOCK (nocx-4y82c.1.1): the
+      // frozen card has no live screen under it, so it takes every row the
+      // record holds. Inside the mutation, because it decides what the swap
+      // paints.
+      rec.storedUpTo = undefined
       // block.closed can finish independently of controller reconciliation.
       // Reclaim its borrowed header before replacing the old block so no
       // running chrome survives outside the frozen record (ADR-3kqrem7v).

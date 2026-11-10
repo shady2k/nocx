@@ -1893,6 +1893,11 @@ export class TerminalContent extends BasePaneContent {
    *  revision, never an intermediate one nobody could have seen. */
   private _pendingPaint: ScreenSnapshot | null = null
   private _paintFrameHandle = 0
+  /** The `baseRow` of the frame the grid was last painted from. The body's
+   *  hold is taken against it, never against a fresher model: a frame that
+   *  has been accepted but not painted is not on screen, and a hold taken
+   *  from it paints rows the grid still shows (nocx-4y82c.1.1). */
+  private _lastPaintedBaseRow: number | undefined
   /** The live tier's scrollback surface (nocx-zg3k3.10.4): the rows above
    *  the live rectangle in a session with no shell integration. Created at
    *  mount beside the painter it shares its painter and its measuring
@@ -6209,6 +6214,7 @@ export class TerminalContent extends BasePaneContent {
     // PREVIOUS layout's width, which is the defect. By the time this runs,
     // the fit is the one the pane will actually show (nocx-1ebrs.10).
     this._painter?.apply(this._presentedSnapshot(pending))
+    this._lastPaintedBaseRow = pending.state.baseRow
     // THE BOX AND THE ROWS IT SHOWS ARE ONE PAINT (owner, 2026-11-08: "the
     // room for the new rows is made a frame before the rows are drawn"). The
     // live region's height is derived from the frame being painted — its last
@@ -6218,7 +6224,13 @@ export class TerminalContent extends BasePaneContent {
     // re-pinned to a height the frame before had not had; on a burst of ten
     // rows that was a step of 170px with the newest rows clipped until it
     // landed.
-    this.scrollback?.setLiveHeight(this.liveContentHeight(this._presentedSnapshot(pending)))
+    this.scrollback?.setLiveHeight(
+      this.liveContentHeight(this._presentedSnapshot(pending)),
+      // THE ONE DOOR THAT PAINTED THE ROWS. Every other sizing pass re-applies
+      // this height, so a box can never take a measurement the grid has not
+      // drawn (nocx-4y82c.1.1).
+      true,
+    )
     // AND THE MARGIN RETURNS WHEN THE PANE CAN HOLD THE ROWS WITH IT
     // (nocx-djx1u). A borrowed grid is given the pane's own box because the
     // four-side margin is two rows shorter than the box the program had; once
@@ -6274,12 +6286,23 @@ export class TerminalContent extends BasePaneContent {
    * number would only take them away again.
    */
   private _rowsTheScreenPassed(rec: BlockRecord | null): number | null {
-    if (rec === null || rec.outputStart === undefined) return null
+    // THE BLOCK'S FIRST OUTPUT ROW, before and after the frame places it. The
+    // anchor's `row` is already absolute in the shared screen coordinate
+    // (screenRowAnchorLocked emits base + cursorRow), so a delivery that lands
+    // before the frame that places the anchor can still be held against the
+    // painted screen (nocx-4y82c.1.1).
+    const start = rec?.outputStart ?? rec?.outputAnchor?.row
+    if (rec === null || start === undefined) return null
     if (this._attachment.kind !== 'attached' || this._sessionExited) return null
-    if (rec.outputScreen !== this._screenGeneration) return null
+    // The generation the anchor ARRIVED in is the one its row belongs to; the
+    // placed frame's generation is the same one once it lands.
+    if ((rec.outputScreen ?? rec.outputAnchorScreen) !== this._screenGeneration) return null
     const snapshot = this._cellModel?.current()
     if (snapshot === null || snapshot === undefined) return null
-    const passed = snapshot.state.baseRow - rec.outputStart
+    // THE PAINTED SCREEN'S ROW, not the model's: a frame can be accepted and
+    // not painted yet, and the body must stop where the grid it is joined to
+    // stops. Falls back to the model only before the first paint.
+    const passed = (this._lastPaintedBaseRow ?? snapshot.state.baseRow) - start
     // A LIVE SCREEN THAT HAS NOT REACHED THE BLOCK'S ROWS HAS PASSED NONE OF
     // THEM, and zero is the answer: the block opened on a row the screen has
     // not scrolled past yet (the anchor is at or below the base), so every
@@ -6297,7 +6320,11 @@ export class TerminalContent extends BasePaneContent {
    *  screen to wait for takes every row the record holds. */
   private _widenRunningRowsToScreen(): void {
     const sb = this.scrollback
-    const rec = sb?.blockManager.runningBlock ?? null
+    // THE BLOCK THE GRID IS JOINED TO, not the running slot: the logical
+    // freeze clears `runningBlock` while the card is still the running
+    // presentation, and the body's hold must follow the painted screen for
+    // as long as the two are one block (nocx-4y82c.1.1).
+    const rec = sb?.blockManager.liveBlock ?? null
     if (!sb || rec === null || rec.attemptId === undefined) return
     const upTo = this._rowsTheScreenPassed(rec)
     if (!sb.blockManager.holdStoredRows(rec.attemptId, upTo)) return
@@ -10920,6 +10947,12 @@ export class TerminalContent extends BasePaneContent {
       startAnchor ?? undefined,
     )
     this.scrollback.blockManager.bindAttempt(attempt.id)
+    // THE HOLD THE PARKED ROWS CAME WITHOUT (nocx-4y82c.1.1). A stored-rows
+    // response that arrived before this binding was parked without an `upTo`,
+    // and the binding drains it with the whole artifact; sizing the body to the
+    // painted frame in the same task replaces that paint before a frame shows
+    // it, and a quiet command never widens on its own.
+    this._widenRunningRowsToScreen()
     const opened = this.scrollback.blockManager.runningBlock
     if (!opened) return
     // Place the block on the frame it opened on (nocx-zg3k3.32): a command
@@ -11138,7 +11171,14 @@ export class TerminalContent extends BasePaneContent {
       // The pending frame is painted first and the rows past it are held
       // (BlockManager.applyStoredRows's `upTo`), which is what keeps the body
       // one continuous run of rows.
-      if (sb.blockManager.runningBlock?.attemptId === entryId) {
+      // ONE OWNER OF "WHICH BLOCK HOLDS THE GRID" (nocx-4y82c.1.1): liveBlock
+      // — the block the live container is inside — not the running slot. The
+      // logical freeze clears the slot while the card still owns the grid, and
+      // a delivery landing in that window must still be held against the
+      // painted screen (an unbound running block is that same block, before
+      // its attempt is named).
+      const live = sb.blockManager.liveBlock
+      if (live !== null && (live.attemptId === entryId || live.attemptId === undefined)) {
         // THE HOLD IS THIS DELIVERY'S ANSWER ABOUT THE LIVE SCREEN, asked
         // after the frame in flight has been painted, and null when there is
         // no live screen to answer for (`_rowsTheScreenPassed`) — in which
@@ -11148,7 +11188,7 @@ export class TerminalContent extends BasePaneContent {
         // the block kept the eight rows that screen had passed out of
         // forty-one for the rest of the command.
         this._flushPendingPaint()
-        const upTo = this._rowsTheScreenPassed(sb.blockManager.runningBlock)
+        const upTo = this._rowsTheScreenPassed(live)
         sb.settleAround(() => {
           sb.blockManager.applyStoredRows(entryId, rows, upTo)
           sb.scrollToBottomIfFollowing()

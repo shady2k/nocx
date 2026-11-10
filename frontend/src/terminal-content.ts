@@ -771,7 +771,8 @@ class BindState {
     number,
     { entryId: string | null; waiting: ((entryId: string) => void) | null }
   >()
-  /** Intents and signals already queued against this bind's handle. */
+  /** Intents already queued against this bind's handle. Signals are sent on
+   *  their own path and never wait here (nocx-evj4b.1.12). */
   readonly callQueue: PendingSessionCall[] = []
 }
 
@@ -1126,15 +1127,10 @@ function isBlockScreenAnchor(value: unknown): value is BlockScreenAnchor {
   )
 }
 
-type PendingSessionCall =
-  | { type: 'intent'; session: SessionHandle; intent: SessionIntent }
-  | {
-      type: 'signal'
-      session: SessionHandle
-      signal: SessionSignal['signal']
-      resolve: (result: Awaited<ReturnType<SessionHandle['signal']>>) => void
-      reject: (reason?: unknown) => void
-    }
+/** One intent waiting for its turn at the pane's serial queue. Signals are not
+ *  here: an interrupt goes on its own path, never behind anything
+ *  (nocx-evj4b.1.12). */
+type PendingSessionCall = { type: 'intent'; session: SessionHandle; intent: SessionIntent }
 
 /** The live surfaces' palette: the current theme as a snapshot, one object
  *  per theme, so the painter can tell a theme change from a repeat read by
@@ -1156,9 +1152,11 @@ export class TerminalContent extends BasePaneContent {
   private _metadataSessionId: string | null = null
   private _frameTitle: string | undefined
   private _frameCwdPath: string | undefined
-  /** Session control calls stay in user order. Adjacent committed-text intents
+  /** Session intents stay in user order. Adjacent committed-text intents
    *  coalesce while queued, so fast typing does not flood the bounded executor;
-   *  keys, mouse events and signals remain ordering fences. */
+   *  keys and mouse events remain ordering fences. An interrupt is not here at
+   *  all: it is sent immediately and cancels everything before it
+   *  (nocx-evj4b.1.12). */
   private get _sessionCallQueue(): PendingSessionCall[] {
     return this._bind.callQueue
   }
@@ -9799,7 +9797,7 @@ export class TerminalContent extends BasePaneContent {
     const revertStopRequested = (): void => {
       if (signal === 'stop' && targetBlock) targetBlock.stopRequested = false
     }
-    void this.queueSessionSignal(session, signal).then(
+    void this.sendSessionSignal(session, signal).then(
       (result) => {
         // A SWITCH, AND EXHAUSTIVE ON PURPOSE. The outcome set is closed by
         // the contract and this is the branch the person reads, so a word
@@ -10311,6 +10309,14 @@ export class TerminalContent extends BasePaneContent {
     // Stop/Interrupt) is signalActiveCommand's.
     if (intent.kind === 'key' && intent.payload === INTERRUPT_KEY) {
       this._cancelDeferredShellSubmissions()
+      // AND IT DOES NOT TRAVEL THROUGH THE QUEUE AT ALL (nocx-evj4b.1.12).
+      // Whatever the queue is doing — a presentation in flight, a retry
+      // waiting, a second intent queued behind the first — the person ending
+      // what is running is sent NOW, and everything they typed before it is
+      // marked cancelled and dropped: type-ahead a tty discards on SIGINT.
+      // Chasing the windows instead (release the wait, hope the next busy
+      // answer ends) left two races, so there is no window left to chase.
+      return this.sendInterrupt(intent)
     }
     if (this._attachment.kind !== 'attached') return false
     const session = this.session
@@ -10334,17 +10340,47 @@ export class TerminalContent extends BasePaneContent {
     return true
   }
 
-  /** Keep Interrupt behind pointer intents already received by this pane. If
-   *  SIGINT ends the foreground program first, its queued mouse release can
-   *  become input to the shell that resumes. */
-  private queueSessionSignal(
+  /** Send the person's interrupt on its own path, never through the intent
+   *  queue (nocx-evj4b.1.12).
+   *
+   *  Both halves are one act and happen together: every intent queued or in
+   *  flight before this moment is MARKED CANCELLED (the handle's epoch check
+   *  ends it at its next decision, and its next busy answer never retries), and
+   *  the key is presented at once. What is dropped is type-ahead a tty discards
+   *  when SIGINT arrives; what is not dropped is the interrupt, which is why it
+   *  cannot be held behind any wait. */
+  private sendInterrupt(intent: SessionIntent): boolean {
+    this._discardQueuedIntents()
+    const session = this.session
+    if (this._attachment.kind !== 'attached' || !session) return false
+    session.cancelPendingIntents()
+    void session.intent(intent.kind, intent.payload).catch((err: unknown) => {
+      log.warn('nocx: the interrupt did not reach the session', { error: String(err) })
+    })
+    return true
+  }
+
+  /** Address a signal to the running command on its own path: no queue, and
+   *  every intent queued or in flight before it is cancelled first
+   *  (nocx-evj4b.1.12). The old rule kept an interrupt behind the pointer
+   *  intents already received — and a serial queue with a retry that has no
+   *  attempt bound turned "behind" into "possibly never". A tty discards the
+   *  type-ahead SIGINT finds, and dropping it is the same semantics as the key
+   *  form. */
+  private sendSessionSignal(
     session: SessionHandle,
     signal: SessionSignal['signal'],
   ): Promise<Awaited<ReturnType<SessionHandle['signal']>>> {
-    return new Promise((resolve, reject) => {
-      this._sessionCallQueue.push({ type: 'signal', session, signal, resolve, reject })
-      void this.drainSessionCallQueue()
-    })
+    this._discardQueuedIntents()
+    session.cancelPendingIntents()
+    return session.signal(signal)
+  }
+
+  /** Drop every intent this pane queued but has not presented yet. The one in
+   *  flight is not in the queue — cancelPendingIntents stamps it, and it ends
+   *  when its answer arrives. */
+  private _discardQueuedIntents(): void {
+    this._sessionCallQueue.length = 0
   }
 
   private async drainSessionCallQueue(): Promise<void> {
@@ -10353,14 +10389,6 @@ export class TerminalContent extends BasePaneContent {
     try {
       while (this._sessionCallQueue.length > 0) {
         const call = this._sessionCallQueue.shift()!
-        if (call.type === 'signal') {
-          try {
-            void call.session.signal(call.signal).then(call.resolve, call.reject)
-          } catch (err: unknown) {
-            call.reject(err)
-          }
-          continue
-        }
         try {
           await call.session.intent(call.intent.kind, call.intent.payload)
         } catch (err: unknown) {

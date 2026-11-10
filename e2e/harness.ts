@@ -658,21 +658,17 @@ async function resetStand(): Promise<void> {
       })
     }
     // AND THE UI STATE, which is a second document and a second way for one
-    // spec to decide the next one's result. Since nocx-mqie.1 the sidebar's
-    // collapse and its ACTIVE VIEW are remembered across a renderer, so a
-    // spec that opened Git leaves Git open — and every view button is a
-    // TOGGLE, so the next spec's `click()` on that view closes the panel
-    // instead of opening it. That is why the git-panel specs alternated
-    // pass/fail down the file: the branch badge was in the DOM and `hidden`,
-    // which is what a toggled-shut panel looks like.
+    // spec to decide the next one's result. It carries the panel's WIDTH and
+    // the tab in front; which PANEL a tab shows is the tab's own, on its
+    // layout row (nocx-ouru5.1.18), and closing every pane above leaves a
+    // fresh replacement tab with no panel — which the next boot seeds with
+    // the declared default (the first registered view), exactly as a fresh
+    // profile starts.
     //
     // Written as the whole document, because `uistate.set` takes the whole
-    // renderer half (ADR-0048) — and to the DECLARED defaults rather than to
-    // "no view", because they are what a fresh profile has: the panel open on
-    // the first registered view. `activeViewId: ''` is repaired to that same
-    // first view on mount, so the two agree.
+    // renderer half (ADR-0048).
     await wire.call('uistate.set', {
-      sidebar: { collapsed: false, activeViewId: '', width: 240 },
+      sidebar: { width: 240 },
       activeTab: '',
     })
     // AND THE NOTES LIBRARY, which is the third durable document a spec can

@@ -426,6 +426,15 @@ export class LayoutStore {
   }
 
   /**
+   * Record the sidebar panel a tab shows (nocx-ouru5.1.18): which view, and
+   * whether its rail is collapsed. Written from the ANSWER like every other
+   * mutation here, so a refusal leaves the cache exactly as it was.
+   */
+  async setTabPanel(tabId: string, view: string, collapsed: boolean): Promise<void> {
+    this.replaceTab((await this.client.setTabPanel(tabId, view, collapsed)).tab)
+  }
+
+  /**
    * Reorder one workspace's strip.
    *
    * The cache is written from the ANSWER and never from the request, which is

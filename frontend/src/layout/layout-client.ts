@@ -15,6 +15,7 @@ import type { TabsCreateResult } from '../generated/tabs.create'
 import type { TabsRenameResult } from '../generated/tabs.rename'
 import type { TabsRecolourResult } from '../generated/tabs.recolour'
 import type { TabsPinResult } from '../generated/tabs.pin'
+import type { TabsSetPanelResult } from '../generated/tabs.setPanel'
 import type { TabsReorderResult } from '../generated/tabs.reorder'
 import type { TabsCloseResult } from '../generated/tabs.close'
 import type { PanesCreateResult } from '../generated/panes.create'
@@ -85,6 +86,7 @@ export interface LayoutClientLike {
   renameTab(id: string, name: string | null): Promise<TabsRenameResult>
   recolourTab(id: string, colour: string | null): Promise<TabsRecolourResult>
   pinTab(id: string, pinned: boolean): Promise<TabsPinResult>
+  setTabPanel(id: string, view: string, collapsed: boolean): Promise<TabsSetPanelResult>
   reorderTabs(workspaceId: string, ids: readonly string[]): Promise<TabsReorderResult>
   closeTab(id: string, replacement: Replacement): Promise<TabsCloseResult>
   closePane(id: string, replacement: Replacement): Promise<PanesCloseResult>
@@ -209,6 +211,13 @@ export class LayoutClient implements LayoutClientLike {
 
   pinTab(id: string, pinned: boolean): Promise<TabsPinResult> {
     return this.dispatcher.call<TabsPinResult>('tabs.pin', { id, pinned })
+  }
+
+  /** The sidebar panel this tab shows (nocx-ouru5.1.18). Two values and not
+   *  one: a collapsed panel remembers the view it reopens on. The view is a
+   *  string the store judges none of — the renderer owns the registry. */
+  setTabPanel(id: string, view: string, collapsed: boolean): Promise<TabsSetPanelResult> {
+    return this.dispatcher.call<TabsSetPanelResult>('tabs.setPanel', { id, view, collapsed })
   }
 
   /** The WHOLE strip order for one workspace, never a move of one member:

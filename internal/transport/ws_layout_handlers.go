@@ -98,6 +98,12 @@ type tabWire struct {
 	Pinned      bool    `json:"pinned"`
 	Layout      string  `json:"layout"`
 	SeenAt      *int64  `json:"seenAt"`
+	// PanelView is the sidebar view this tab shows, or "" for a tab that has
+	// never opened one (nocx-ouru5.1.18). PanelCollapsed is whether its rail
+	// is collapsed. Both are the TAB's, not the window's: switching tabs
+	// restores the panel each one left behind.
+	PanelView      string `json:"panelView"`
+	PanelCollapsed bool   `json:"panelCollapsed"`
 }
 
 type paneWire struct {
@@ -118,6 +124,7 @@ func wireTab(t content.Tab) tabWire {
 		ID: t.ID, WorkspaceID: t.WorkspaceID, ParentID: t.ParentID, Name: t.Name,
 		Colour: t.Colour, Position: t.Position, Pinned: t.Pinned,
 		Layout: string(t.Layout), SeenAt: t.SeenAt,
+		PanelView: t.PanelView, PanelCollapsed: t.PanelCollapsed,
 	}
 }
 
@@ -346,6 +353,12 @@ type tabRecolourParams struct {
 type tabPinParams struct {
 	ID     string `json:"id"`
 	Pinned bool   `json:"pinned"`
+}
+
+type tabSetPanelParams struct {
+	ID        string `json:"id"`
+	View      string `json:"view"`
+	Collapsed bool   `json:"collapsed"`
 }
 
 type tabReorderParams struct {
@@ -673,6 +686,28 @@ func validateTabPinRaw(raw json.RawMessage) string {
 	return layoutID("id", p.ID)
 }
 
+func validateTabSetPanelRaw(raw json.RawMessage) string {
+	var p tabSetPanelParams
+	if msg := decodeObject(raw, &p); msg != "" {
+		return msg
+	}
+	if msg := layoutID("id", p.ID); msg != "" {
+		return msg
+	}
+	// BOTH VALUES ARE REQUIRED, and the absence is not a zero: a missing
+	// `view` would decode as "" and erase the tab's remembered panel, and a
+	// missing `collapsed` would expand a collapsed one. The params schema
+	// requires them; the decoder must refuse exactly the same objects.
+	if msg := requireFields(raw, "view", "collapsed"); msg != "" {
+		return msg
+	}
+	// A view id is a NAME, not a document: bounded because it crosses into a
+	// stored column, and judged by nothing else — the renderer owns the
+	// registry, so an id this build does not know is carried, not refused
+	// (the same rule a tab's colour follows).
+	return boundedRunes("view", p.View, 64)
+}
+
 func validateTabReorderRaw(raw json.RawMessage) string {
 	var p tabReorderParams
 	if msg := decodeObject(raw, &p); msg != "" {
@@ -924,6 +959,13 @@ func (h layoutHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 			}
 			tab, err := svc.PinTab(ctx, p.ID, p.Pinned)
 			h.answer(req, err, func() any { return tabResponse{Tab: wireTab(tab)} })
+		case "tabs.setPanel":
+			var p tabSetPanelParams
+			if !h.decode(req, &p) {
+				return nil
+			}
+			tab, err := svc.SetTabPanel(ctx, p.ID, p.View, p.Collapsed)
+			h.answer(req, err, func() any { return tabResponse{Tab: wireTab(tab)} })
 		case "tabs.reorder":
 			var p tabReorderParams
 			if !h.decode(req, &p) {
@@ -1132,6 +1174,7 @@ func (s *WSServer) layoutSpecs(contentSub control.Submission, contentGate contro
 		{catalog.OpTabsRename, validateTabRenameRaw},
 		{catalog.OpTabsRecolour, validateTabRecolourRaw},
 		{catalog.OpTabsPin, validateTabPinRaw},
+		{catalog.OpTabsSetPanel, validateTabSetPanelRaw},
 		{catalog.OpTabsReorder, validateTabReorderRaw},
 		{catalog.OpTabsClose, validateLayoutCloseRaw},
 		{catalog.OpPanesCreate, validatePaneCreateRaw},

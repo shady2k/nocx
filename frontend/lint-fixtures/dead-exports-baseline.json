@@ -465,6 +465,11 @@
     },
     {
       "kind": "types",
+      "file": "src/generated/tabs.setPanel.ts",
+      "symbol": "Tab"
+    },
+    {
+      "kind": "types",
       "file": "src/generated/workers.tabCreated.ts",
       "symbol": "Pane"
     },

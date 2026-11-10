@@ -46,14 +46,10 @@ describe('sidebar actions', () => {
     })
   })
 
-  it('setPanel replaces the panel with the state a tab remembers', () => {
+  it('collapseSidebar collapses', () => {
     withStore(([state, actions]) => {
-      actions.setPanel('ports', true)
-      expect(state.sidebar.activeViewId).toBe('ports')
+      actions.collapseSidebar()
       expect(state.sidebar.collapsed).toBe(true)
-      actions.setPanel('files', false)
-      expect(state.sidebar.activeViewId).toBe('files')
-      expect(state.sidebar.collapsed).toBe(false)
     })
   })
 })

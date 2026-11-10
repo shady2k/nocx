@@ -57,14 +57,6 @@ export interface Tab {
    * When the user last looked at this tab, in Unix milliseconds, or null for a tab never seen. A MARK rather than a verdict: the unseen indicator is computed from it, and storing the verdict would be the duplication §4.5 refuses. The activity and attention indicators are absent for the same reason — attention arrives at a PANE, so a copy on the tab would give one fact two owners.
    */
   seenAt: number | null
-  /**
-   * The sidebar view this tab shows, or "" for a tab that has never opened one. A view id the build no longer registers is repaired to the first registered view by the renderer: the store keeps a string and judges none of it, exactly as it does for a tab's colour. The panel belongs to the TAB rather than the window (nocx-ouru5.1.18): switching tabs restores the panel each one left behind, and only WHICH view is remembered — never the state inside it, because a Files tree's expansion is the view's own and not a fact about the tab.
-   */
-  panelView: string
-  /**
-   * Whether this tab's panel is collapsed to the activity bar. Kept beside the view rather than folded into it, because a collapsed panel remembers the view it reopens on — the behaviour the activity bar's toggle has always had. A tab with no view is collapsed whatever this says: there is nothing to show.
-   */
-  panelCollapsed: boolean
 }
 /**
  * The pane this tab was created around, as stored, with the tabId the backend filled in.

@@ -376,7 +376,6 @@ export const REFUSAL_SURFACES: readonly RefusalSurface[] = [
       'tabs.pin',
       'tabs.recolour',
       'tabs.reorder',
-      'tabs.setPanel',
       'workspaces.create',
       'workspaces.close',
       'workspaces.rename',

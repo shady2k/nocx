@@ -114,7 +114,7 @@ import { createGitView } from './git/git-view'
 import { createGitPanelServices, type GitPanelServices } from './git/git-client'
 import { createGitStore } from './git/git-store'
 import { registerGitDiffSurface } from './git/git-diff/open-git-diff'
-import type { ActiveOrigin } from './pane-content'
+import type { ActiveOrigin, SurfaceType } from './pane-content'
 import {
   clampSidebarWidth,
   createSidebarWidthController,
@@ -630,6 +630,10 @@ function main(): void {
   // on the first online lifecycle event.
   let uiState = uiStateClient.state
   let sidebarWidth = clampSidebarWidth(uiState.sidebar.width)
+  let sidebarPersistenceState = {
+    collapsed: uiState.sidebar.collapsed,
+    activeViewId: uiState.sidebar.activeViewId,
+  }
   const [displayRevision, setDisplayRevision] = createSignal(0)
   const notifyDisplayChange = () => setDisplayRevision((revision) => revision + 1)
   const tabStrip = new HorizontalTabStrip() as HorizontalTabStrip | VerticalTabStrip
@@ -839,17 +843,12 @@ function main(): void {
   // PaneManager.activeOrigin() reads a plain field, so the accessor must be
   // this signal, never a direct call.
   const [activeOrigin, setActiveOrigin] = createSignal<ActiveOrigin | null>(tm.activeOrigin())
+  const [activeSurfaceType, setActiveSurfaceType] = createSignal<SurfaceType | null>(
+    tm.activeSurfaceType(),
+  )
   let rescopeFiles: () => void = () => {}
-  // The panel follows the TAB in front (nocx-ouru5.1.18). Assigned once the
-  // sidebar exists, because the sidebar is connection-scoped and is rebuilt
-  // on every connection generation; the callback reads it at call time.
-  let applyActiveTabPanel: () => void = () => {}
-  // The panel follows the TAB, not the content: applied the moment the tab
-  // comes to the front, before its shell starts (ADR-x7cvh8e1; codex P2
-  // round 2 — a tab that is still connecting is already the tab the person
-  // is in).
-  tm.onActiveTabChange = () => applyActiveTabPanel()
   tm.onActivePaneChange = () => {
+    setActiveSurfaceType(tm.activeSurfaceType())
     setPortsTargetId(tm.portsTargetId())
     setPortsUnavailable(tm.portsUnavailableReason())
     setActiveOrigin(tm.activeOrigin())
@@ -1582,41 +1581,6 @@ function main(): void {
     throw new Error('nocx: Files must be the first activity-bar view')
   }
   let sidebar: SidebarHandle | null = null
-  // ── The panel follows the tab in front (ADR-x7cvh8e1) ────────────────
-  //
-  // Every activation applies the panel the tab remembers. The ONE exception
-  // is the first activation of this page load: the window opens on a tab and
-  // shows its tools there, so a tab that has never opened a panel is seeded
-  // with the app's default (the first registered view) and that choice is
-  // RECORDED against the tab. A tab the person opens afterwards has no panel
-  // and shows the rail collapsed — which is the point of a per-tab panel, and
-  // why this runs once per page rather than per tab.
-  //
-  // The seed is what keeps the documented cold start ("the panel is open on
-  // Files", e2e/files.spec.ts and the file-manager design §7) true while the
-  // panel itself becomes the tab's.
-  let panelSeeded = false
-  applyActiveTabPanel = () => {
-    if (!sidebar) return
-    const first = !panelSeeded
-    panelSeeded = true
-    let panel = tm.activeTabPanel()
-    if (panel === null) {
-      // A pane in NO CHAIN — Settings, a diff, a file viewer. Settings is the
-      // one place the panel collapses for (nocx-3e3b): a Settings tab is not
-      // a place, so the panel has nothing to say there. Every other view pane
-      // was opened FROM the panel (a diff out of the Git view, a file out of
-      // Files), so the panel stays exactly where it is — collapsing it would
-      // take away the list the person is working through.
-      if (tm.activeSurfaceType() === SURFACE_SETTINGS) sidebar.showPanel(null)
-      return
-    }
-    if (first && panel.view === '') {
-      panel = { view: FILES_VIEW_ID, collapsed: false }
-      tm.setActiveTabPanel(panel)
-    }
-    sidebar.showPanel(panel)
-  }
   const mountConnectedSidebar = (): void => {
     // The sidebar is connection-scoped: its panel clients must disappear with
     // the socket so no stale "not connected" state survives an outage.
@@ -1636,13 +1600,13 @@ function main(): void {
           },
         },
       ],
-      // THE PANEL IS THE TAB'S (ADR-x7cvh8e1, nocx-ouru5.1.18). The sidebar shows whatever
-      // panel the tab in front remembers, and a change is written to that
-      // tab's layout row — never to a window-wide value, which would be a
-      // second owner of the same fact.
       {
-        panel: tm.activeTabPanel(),
-        save: (panel) => tm.setActiveTabPanel(panel),
+        collapsed: sidebarPersistenceState.collapsed,
+        activeViewId: sidebarPersistenceState.activeViewId,
+        save: (next) => {
+          sidebarPersistenceState = next
+          void uiStateClient.save({ sidebar: next }).catch(() => {})
+        },
       },
       /* eslint-disable solid/reactivity -- mountSidebar consumes these
          accessors reactively (SidebarViewProps.activeProfileId and
@@ -1653,6 +1617,7 @@ function main(): void {
       () => portsTargetId(),
       () => activeOrigin(),
       sidebarWidthCtrl,
+      () => activeSurfaceType() === SURFACE_SETTINGS,
       {
         title: () => t('app.update.available', 'Update available'),
         icon: ArrowDownIcon,
@@ -2188,6 +2153,10 @@ function main(): void {
       if (generation !== connectionGeneration || !dispatcher.connected) return
       uiState = uiStateClient.state
       sidebarWidth = clampSidebarWidth(uiState.sidebar.width)
+      sidebarPersistenceState = {
+        collapsed: uiState.sidebar.collapsed,
+        activeViewId: uiState.sidebar.activeViewId,
+      }
       sidebarWidthCtrl.apply(sidebarWidth)
 
       try {

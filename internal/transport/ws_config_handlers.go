@@ -161,28 +161,6 @@ func decodeObject(raw json.RawMessage, dst any, nonNullable ...string) string {
 	return ""
 }
 
-// requireFields returns "" when every named field is PRESENT in the params
-// object, else a message naming the first one missing.
-//
-// A JSON object's ABSENCE is not a zero value, and Go's decoder cannot tell
-// the two apart: `{"id":…}` decodes into a struct with every other field at
-// its zero, so a required `view` would arrive as "" and erase a tab's
-// remembered panel. The contracts' `required` lists are enforced here, beside
-// `additionalProperties: false` in decodeObject, so the schema and the decoder
-// accept exactly the same objects (codex P2 round 3).
-func requireFields(raw json.RawMessage, fields ...string) string {
-	var object map[string]json.RawMessage
-	if err := json.Unmarshal(bytes.TrimSpace(raw), &object); err != nil {
-		return "params must be a JSON object"
-	}
-	for _, field := range fields {
-		if _, ok := object[field]; !ok {
-			return field + " is required"
-		}
-	}
-	return ""
-}
-
 // boundedRunes returns "" when s is within bound, else a message naming the
 // field and the bound.
 func boundedRunes(field string, s string, bound int) string {

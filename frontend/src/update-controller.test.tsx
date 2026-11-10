@@ -28,6 +28,7 @@ function mountIndicator(controller: ReturnType<typeof createUpdateController>) {
     undefined,
     undefined,
     undefined,
+    undefined,
     {
       title: () => 'Update available',
       icon: () => <svg />,

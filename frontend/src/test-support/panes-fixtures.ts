@@ -241,6 +241,11 @@ export interface SessionFake {
    *  case a test that is not about a refusal wants, and the same default
    *  `signal` uses. */
   intent: Mock<(kind: SessionIntentKind, payload: string) => Promise<SessionIntentResult>>
+  /** Mark every intent presented before this moment as cancelled
+   *  (SessionHandle.cancelPendingIntents, nocx-evj4b.1.12). A fake has no retry
+   *  of its own; a test that models one — a presentation held until the
+   *  interrupt arrives — overrides this mock. */
+  cancelPendingIntents: Mock<() => void>
   /** Address a signal to the command running in this session (nocx-23rph).
    *  Resolves `delivered` by default — the case a test that is not about
    *  the refusal wants; a test that IS overrides the mock. */
@@ -343,6 +348,7 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
     intent: vi.fn<(kind: SessionIntentKind, payload: string) => Promise<SessionIntentResult>>(() =>
       Promise.resolve({ state: 'executed', bytesWritten: 1, fenceAfter: 0 }),
     ),
+    cancelPendingIntents: vi.fn(),
     // The signal is ECHOED back, exactly as the wire echoes it: a fixture
     // that always answered 'interrupt' would let a caller that asked for
     // 'stop' pass unnoticed.
@@ -901,8 +907,6 @@ export function makeLayoutBackend(): LayoutClientLike & {
     pinned: false,
     layout: 'row',
     seenAt: null,
-    panelView: '',
-    panelCollapsed: false,
     ...over,
   })
   const paneRow = (id: string, tabId: string, over: Partial<LayoutPane> = {}): LayoutPane => ({
@@ -1082,9 +1086,6 @@ export function makeLayoutBackend(): LayoutClientLike & {
       refuse<never>('recolourTab') ?? Promise.resolve({ tab: patch(id, { colour }) }),
     pinTab: (id, pinned) =>
       refuse<never>('pinTab') ?? Promise.resolve({ tab: patch(id, { pinned }) }),
-    setTabPanel: (id, view, collapsed) =>
-      refuse<never>('setTabPanel') ??
-      Promise.resolve({ tab: patch(id, { panelView: view, panelCollapsed: collapsed }) }),
 
     reorderTabs: (workspaceId, ids) => {
       const refused = refuse<never>('reorderTabs')
@@ -1152,7 +1153,7 @@ export function makeUIStateBackend(seed?: Partial<UIState>): {
   stored: () => UIState
 } {
   let doc: UIState = {
-    sidebar: { width: 240 },
+    sidebar: { collapsed: false, activeViewId: '', width: 240 },
     activeTab: '',
     ...seed,
   }

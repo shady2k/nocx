@@ -424,19 +424,6 @@ export const PROMPT_BACKSTOP_MS = 250
 const ALT_SCREEN_RECEIPT_DEADLINE_MS = 1_500
 
 /**
- * How long a submit waits for the grid it will run at to APPLY before its
- * bytes go out (nocx-evj4b.1.9).
- *
- * A stall guard, not a working budget: the receipt is one control-plane round
- * trip on a socket that is already open, and every observed one is far inside
- * this. It exists because the wait is a *submit*: a receipt that never came —
- * a backend that stopped answering, a frame lost in a reconnect — must not
- * leave a person unable to run a command. On expiry the bytes go out at the
- * size the pty has, which is what happened before the wait existed.
- */
-const SUBMIT_GRID_DEADLINE_MS = 1_000
-
-/**
  * How long output is treated as the shell's answer to a resize rather than as
  * unread activity.
  *
@@ -784,7 +771,8 @@ class BindState {
     number,
     { entryId: string | null; waiting: ((entryId: string) => void) | null }
   >()
-  /** Intents and signals already queued against this bind's handle. */
+  /** Intents already queued against this bind's handle. Signals are sent on
+   *  their own path and never wait here (nocx-evj4b.1.12). */
   readonly callQueue: PendingSessionCall[] = []
 }
 
@@ -1139,15 +1127,10 @@ function isBlockScreenAnchor(value: unknown): value is BlockScreenAnchor {
   )
 }
 
-type PendingSessionCall =
-  | { type: 'intent'; session: SessionHandle; intent: SessionIntent }
-  | {
-      type: 'signal'
-      session: SessionHandle
-      signal: SessionSignal['signal']
-      resolve: (result: Awaited<ReturnType<SessionHandle['signal']>>) => void
-      reject: (reason?: unknown) => void
-    }
+/** One intent waiting for its turn at the pane's serial queue. Signals are not
+ *  here: an interrupt goes on its own path, never behind anything
+ *  (nocx-evj4b.1.12). */
+type PendingSessionCall = { type: 'intent'; session: SessionHandle; intent: SessionIntent }
 
 /** The live surfaces' palette: the current theme as a snapshot, one object
  *  per theme, so the painter can tell a theme change from a repeat read by
@@ -1169,9 +1152,11 @@ export class TerminalContent extends BasePaneContent {
   private _metadataSessionId: string | null = null
   private _frameTitle: string | undefined
   private _frameCwdPath: string | undefined
-  /** Session control calls stay in user order. Adjacent committed-text intents
+  /** Session intents stay in user order. Adjacent committed-text intents
    *  coalesce while queued, so fast typing does not flood the bounded executor;
-   *  keys, mouse events and signals remain ordering fences. */
+   *  keys and mouse events remain ordering fences. An interrupt is not here at
+   *  all: it is sent immediately and cancels everything before it
+   *  (nocx-evj4b.1.12). */
   private get _sessionCallQueue(): PendingSessionCall[] {
     return this._bind.callQueue
   }
@@ -7054,56 +7039,6 @@ export class TerminalContent extends BasePaneContent {
     this._measurePromptPrediction(doc)
   }
 
-  /**
-   * The size a submitted command will run at, APPLIED before its bytes go out
-   * (nocx-evj4b.1.9).
-   *
-   * The prompt prediction measures that height at the Enter (nocx-2v80t.3.50),
-   * but its report rides the settle timer: the submit's own attempt round trip
-   * can put the bytes on the wire first. Then the command starts at the
-   * prompt's grid, which is a row or two taller — a full-screen program draws
-   * for it, and the resize that follows scrolls the program's first rows off
-   * the top of the screen. `top`'s summary left the live grid and landed in the
-   * block's body this way, on a loaded runner, in `e2e/top-split.spec.ts`.
-   *
-   * The receipt is the same one the alternate-screen switch's input fence
-   * waits for, and it is SHARED, not re-sent: an already-applied size answers
-   * at once, and an identical report still on its way answers when it lands.
-   * Both failures fail OPEN — a command swallowed because a size could not be
-   * confirmed is worse than one that runs at the size the pty already has.
-   */
-  private async awaitSubmitGeometry(): Promise<void> {
-    const session = this.session
-    if (session === null) return
-    // The switch's fence owns the report while a program changes the screen;
-    // a second ordering owner here would be the second owner this file refuses.
-    if (this._fence !== null) return
-    const receipt = session.resizeApplied(this._reportedSize())
-    let stalled: ReturnType<typeof setTimeout> | undefined
-    const deadline = new Promise<void>((resolve) => {
-      stalled = setTimeout(resolve, SUBMIT_GRID_DEADLINE_MS)
-    })
-    try {
-      const outcome = await Promise.race([receipt, deadline])
-      if (outcome !== 'applied') {
-        log.warn(
-          'nocx: the grid a submitted command will run at did not apply; its bytes go out at the pty size',
-          {
-            pane: this.pane.paneId,
-            outcome,
-          },
-        )
-      }
-    } catch (err) {
-      log.warn('nocx: the grid a submitted command will run at could not be confirmed', {
-        pane: this.pane.paneId,
-        error: err instanceof Error ? err.message : String(err),
-      })
-    } finally {
-      clearTimeout(stalled)
-    }
-  }
-
   /** Refit the pane rectangle once per delivered prompt measurement. Text
    * changes do not change chrome height (ADR-3kqrem7v). */
   private _measurePromptPrediction(text: string): void {
@@ -9862,7 +9797,7 @@ export class TerminalContent extends BasePaneContent {
     const revertStopRequested = (): void => {
       if (signal === 'stop' && targetBlock) targetBlock.stopRequested = false
     }
-    void this.queueSessionSignal(session, signal).then(
+    void this.sendSessionSignal(session, signal).then(
       (result) => {
         // A SWITCH, AND EXHAUSTIVE ON PURPOSE. The outcome set is closed by
         // the contract and this is the branch the person reads, so a word
@@ -10374,6 +10309,14 @@ export class TerminalContent extends BasePaneContent {
     // Stop/Interrupt) is signalActiveCommand's.
     if (intent.kind === 'key' && intent.payload === INTERRUPT_KEY) {
       this._cancelDeferredShellSubmissions()
+      // AND IT DOES NOT TRAVEL THROUGH THE QUEUE AT ALL (nocx-evj4b.1.12).
+      // Whatever the queue is doing — a presentation in flight, a retry
+      // waiting, a second intent queued behind the first — the person ending
+      // what is running is sent NOW, and everything they typed before it is
+      // marked cancelled and dropped: type-ahead a tty discards on SIGINT.
+      // Chasing the windows instead (release the wait, hope the next busy
+      // answer ends) left two races, so there is no window left to chase.
+      return this.sendInterrupt(intent)
     }
     if (this._attachment.kind !== 'attached') return false
     const session = this.session
@@ -10397,17 +10340,47 @@ export class TerminalContent extends BasePaneContent {
     return true
   }
 
-  /** Keep Interrupt behind pointer intents already received by this pane. If
-   *  SIGINT ends the foreground program first, its queued mouse release can
-   *  become input to the shell that resumes. */
-  private queueSessionSignal(
+  /** Send the person's interrupt on its own path, never through the intent
+   *  queue (nocx-evj4b.1.12).
+   *
+   *  Both halves are one act and happen together: every intent queued or in
+   *  flight before this moment is MARKED CANCELLED (the handle's epoch check
+   *  ends it at its next decision, and its next busy answer never retries), and
+   *  the key is presented at once. What is dropped is type-ahead a tty discards
+   *  when SIGINT arrives; what is not dropped is the interrupt, which is why it
+   *  cannot be held behind any wait. */
+  private sendInterrupt(intent: SessionIntent): boolean {
+    this._discardQueuedIntents()
+    const session = this.session
+    if (this._attachment.kind !== 'attached' || !session) return false
+    session.cancelPendingIntents()
+    void session.intent(intent.kind, intent.payload).catch((err: unknown) => {
+      log.warn('nocx: the interrupt did not reach the session', { error: String(err) })
+    })
+    return true
+  }
+
+  /** Address a signal to the running command on its own path: no queue, and
+   *  every intent queued or in flight before it is cancelled first
+   *  (nocx-evj4b.1.12). The old rule kept an interrupt behind the pointer
+   *  intents already received — and a serial queue with a retry that has no
+   *  attempt bound turned "behind" into "possibly never". A tty discards the
+   *  type-ahead SIGINT finds, and dropping it is the same semantics as the key
+   *  form. */
+  private sendSessionSignal(
     session: SessionHandle,
     signal: SessionSignal['signal'],
   ): Promise<Awaited<ReturnType<SessionHandle['signal']>>> {
-    return new Promise((resolve, reject) => {
-      this._sessionCallQueue.push({ type: 'signal', session, signal, resolve, reject })
-      void this.drainSessionCallQueue()
-    })
+    this._discardQueuedIntents()
+    session.cancelPendingIntents()
+    return session.signal(signal)
+  }
+
+  /** Drop every intent this pane queued but has not presented yet. The one in
+   *  flight is not in the queue — cancelPendingIntents stamps it, and it ends
+   *  when its answer arrives. */
+  private _discardQueuedIntents(): void {
+    this._sessionCallQueue.length = 0
   }
 
   private async drainSessionCallQueue(): Promise<void> {
@@ -10416,14 +10389,6 @@ export class TerminalContent extends BasePaneContent {
     try {
       while (this._sessionCallQueue.length > 0) {
         const call = this._sessionCallQueue.shift()!
-        if (call.type === 'signal') {
-          try {
-            void call.session.signal(call.signal).then(call.resolve, call.reject)
-          } catch (err: unknown) {
-            call.reject(err)
-          }
-          continue
-        }
         try {
           await call.session.intent(call.intent.kind, call.intent.payload)
         } catch (err: unknown) {
@@ -11297,56 +11262,7 @@ export class TerminalContent extends BasePaneContent {
     // record (CommandLedger.open refuses empty commands) and no block. The
     // shell still gets its newline — a conventional terminal stays
     // conventional.
-    /** The command's own bytes, and the held window's keys after them. */
-    const deliverCommand = (taken: HeldWindow | null): void => {
-      try {
-        // A Ctrl-C that arrived while this submission was in flight
-        // (nocx-xn63t.6.12): the line is not to run. Nor is it "run and then
-        // interrupt" — the interrupt came first, and writing the command
-        // would put it at the pty with the shell's line editor already told
-        // to discard the line. So the command is not written AT ALL, and
-        // there is nothing at the pty for an 0x03 to mean: no interrupt is
-        // written for it either.
-        //
-        // Read from the window THIS submission armed. Taking the queue tells
-        // us what the pane last held, which after another submission has
-        // taken it is not this window — and reading the cancellation from
-        // there would resurrect exactly the line the person withdrew.
-        if (heldWindow?.cancelled === true) {
-          // No card to withdraw (nocx-2v80t.3.2): the submit opened none,
-          // and the bytes below were never written. The ledger record stays
-          // unbound and running, persisting nothing — the same residue the
-          // agent lane's withdrawal leaves.
-          return
-        }
-        submitCommand(doc, {
-          // The deferred half of the handoff to the grid: the synchronous call
-          // above already took the keyboard at commit, and this one only
-          // repairs it if the round trip left it on nobody
-          // (takeKeyboardToGridAfterSubmit).
-          focusGrid: () => this.takeKeyboardToGridAfterSubmit(),
-          sendDoc: sendLine,
-        })
-        // The command is on the pane's intent queue, ahead of any key that
-        // follows it, and the running fact has not been applied yet. That is
-        // not the held window and not the running command: it is the
-        // interval an unclaimed keyboard must still be read in
-        // (nocx-atpw5.1.20).
-        if (takeKeys) this._submittedAwaitingStart = true
-      } finally {
-        // In a `finally`, and fail-open: a write that threw sent nothing,
-        // and holding the keys anyway would swallow them for the rest of the
-        // session. Late at a prompt is a line the user can see and erase;
-        // silently gone is not.
-        //
-        // A cancelled window holds no keys — the interrupt discarded them —
-        // so this is empty on the withdrawal path by construction, never by
-        // a second rule about which keys a cancelled submission may carry.
-        for (const intent of taken?.keys ?? []) this.sendIntent(intent)
-      }
-    }
     const write = (): void => {
-      let deferred = false
       try {
         // A COMMAND HELD FOR A SESSION THAT IS GONE IS DROPPED, never delivered
         // elsewhere (review rounds 4 and 6). Checked at the write itself,
@@ -11374,34 +11290,55 @@ export class TerminalContent extends BasePaneContent {
         // attempt RPC. The serial queue keeps those later intents behind the
         // command, rather than allowing Enter to bypass its paste.
         const taken = this.takeHeldWindow()
-        // THE GRID THE COMMAND RUNS AT IS APPLIED BEFORE ITS BYTES GO OUT
-        // (nocx-evj4b.1.9). The prompt prediction measures that height at the
-        // Enter, but its report rides the settle timer while the attempt's own
-        // round trip is already in flight. On a slow machine the bytes reached
-        // a pty that was still the prompt's taller grid: the program drew for
-        // the taller screen, and the resize that followed scrolled its first
-        // rows into the block's body — the owner's `top` losing its summary.
-        // Waiting for the receipt here is the ordering the alternate-screen
-        // switch already gives the person's keys; it costs one round trip
-        // already applied (the receipt is shared, not re-sent).
-        deferred = true
-        const deliver = (): void => {
-          try {
-            if (this._bind !== bind || !this._bindIsCurrent(origin)) return
-            deliverCommand(taken)
-          } finally {
-            // Written, or withdrawn — either way this submission has RESOLVED,
-            // and whoever is waiting for its delivery may go on.
-            settle()
+        try {
+          // A Ctrl-C that arrived while this submission was in flight
+          // (nocx-xn63t.6.12): the line is not to run. Nor is it "run and then
+          // interrupt" — the interrupt came first, and writing the command
+          // would put it at the pty with the shell's line editor already told
+          // to discard the line. So the command is not written AT ALL, and
+          // there is nothing at the pty for an 0x03 to mean: no interrupt is
+          // written for it either.
+          //
+          // Read from the window THIS submission armed. Taking the queue tells
+          // us what the pane last held, which after another submission has
+          // taken it is not this window — and reading the cancellation from
+          // there would resurrect exactly the line the person withdrew.
+          if (heldWindow?.cancelled === true) {
+            // No card to withdraw (nocx-2v80t.3.2): the submit opened none,
+            // and the bytes below were never written. The ledger record stays
+            // unbound and running, persisting nothing — the same residue the
+            // agent lane's withdrawal leaves.
+            return
           }
+          submitCommand(doc, {
+            // The deferred half of the handoff to the grid: the synchronous call
+            // above already took the keyboard at commit, and this one only
+            // repairs it if the round trip left it on nobody
+            // (takeKeyboardToGridAfterSubmit).
+            focusGrid: () => this.takeKeyboardToGridAfterSubmit(),
+            sendDoc: sendLine,
+          })
+          // The command is on the pane's intent queue, ahead of any key that
+          // follows it, and the running fact has not been applied yet. That is
+          // not the held window and not the running command: it is the
+          // interval an unclaimed keyboard must still be read in
+          // (nocx-atpw5.1.20).
+          if (takeKeys) this._submittedAwaitingStart = true
+        } finally {
+          // In a `finally`, and fail-open: a write that threw sent nothing,
+          // and holding the keys anyway would swallow them for the rest of
+          // the session. Late at a prompt is a line the user can see and
+          // erase; silently gone is not.
+          //
+          // A cancelled window holds no keys — the interrupt discarded them —
+          // so this is empty on the withdrawal path by construction, never by
+          // a second rule about which keys a cancelled submission may carry.
+          for (const intent of taken?.keys ?? []) this.sendIntent(intent)
         }
-        void this.awaitSubmitGeometry().then(deliver, deliver)
       } finally {
-        if (!deferred) {
-          // The early returns above wrote nothing: this submission has
-          // RESOLVED too, and whoever is waiting on it may go on.
-          settle()
-        }
+        // Written, or withdrawn — either way this submission has RESOLVED,
+        // and whoever is waiting for its delivery may go on.
+        settle()
       }
     }
     if (recordLine === '') {

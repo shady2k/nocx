@@ -893,18 +893,26 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 			continue
 		}
 		schema := loadSchema(t, name)
-		probes := invalid
-		// Fields the decoder REFUSES must be refused by the contract too, or
-		// the schema promises a shape no build accepts (codex P2 round 2):
-		// uistate.set carries the panel's WIDTH and nothing else
-		// (ADR-x7cvh8e1), and a renderer still sending the old window-wide
-		// pair must be turned away by both.
-		if method == "uistate.set" {
-			probes = append(probes,
+		probes := append([][]byte{}, invalid...)
+		// A field the contract REFUSES, or one it REQUIRES, must be judged the
+		// same way by the decoder: a schema that promised a shape no build
+		// accepts (or one that accepted a shape the schema forbids) is the
+		// defect these probes exist to catch (codex P2 rounds 2 and 3).
+		probes = append(probes, map[string][][]byte{
+			// uistate.set carries the panel's WIDTH and nothing else
+			// (ADR-x7cvh8e1): the old window-wide pair is refused.
+			"uistate.set": {
 				[]byte(`{"sidebar":{"width":240,"collapsed":false},"activeTab":""}`),
 				[]byte(`{"sidebar":{"width":240,"activeViewId":"ports"},"activeTab":""}`),
-			)
-		}
+			},
+			// tabs.setPanel's two values are REQUIRED, not defaulted: a missing
+			// `view` decodes as "" and would erase the tab's remembered panel,
+			// and a missing `collapsed` would expand a collapsed one.
+			"tabs.setPanel": {
+				[]byte(`{"id":"0198f2b0-0000-7000-8000-00000000c004","collapsed":true}`),
+				[]byte(`{"id":"0198f2b0-0000-7000-8000-00000000c004","view":"ports"}`),
+			},
+		}[method]...)
 		switch method {
 		case "secrets.detect", "vault.resolveLine":
 			// These methods intentionally accept an empty object and use a

@@ -694,6 +694,13 @@ func validateTabSetPanelRaw(raw json.RawMessage) string {
 	if msg := layoutID("id", p.ID); msg != "" {
 		return msg
 	}
+	// BOTH VALUES ARE REQUIRED, and the absence is not a zero: a missing
+	// `view` would decode as "" and erase the tab's remembered panel, and a
+	// missing `collapsed` would expand a collapsed one. The params schema
+	// requires them; the decoder must refuse exactly the same objects.
+	if msg := requireFields(raw, "view", "collapsed"); msg != "" {
+		return msg
+	}
 	// A view id is a NAME, not a document: bounded because it crosses into a
 	// stored column, and judged by nothing else — the renderer owns the
 	// registry, so an id this build does not know is carried, not refused

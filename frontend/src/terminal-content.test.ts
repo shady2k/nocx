@@ -31,6 +31,7 @@ const FRAME_STYLE_ENTRY = resolve(srcDir, 'frame/display.css')
 // header's grid lives here now, not in styles/surfaces/command-block.css —
 // see the "SSH block header" describe block below.
 const COMMAND_BLOCK_FRAME_STYLE_ENTRY = resolve(srcDir, 'styles/components/command-block-frame.css')
+const COMMAND_BLOCK_SURFACE_STYLE_ENTRY = resolve(srcDir, 'styles/surfaces/command-block.css')
 const COMPOSER_STYLE = resolve(srcDir, 'styles/surfaces/composer.css')
 
 import type { PaneIdentity, PaneScreenReading } from './terminal-content'
@@ -2785,9 +2786,9 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
 
-      // Enter during startup keeps the draft intact; neither a paste nor a
-      // newline may reach the shell before prompt_ready.
-      expect(view.state.doc.toString()).toBe('sleep 20')
+      // Enter during startup takes the line out of the composer and holds it;
+      // neither a paste nor a newline may reach the shell before prompt_ready.
+      expect(view.state.doc.toString()).toBe('')
       expect(session.intent).not.toHaveBeenCalled()
       expect(session.send).not.toHaveBeenCalled()
       expect(client.dispatcher.call).not.toHaveBeenCalled()
@@ -2838,6 +2839,1136 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
     }
   })
 
+  // nocx-evj4b.1.6: a plain sh never reaches prompt_ready, so the startup
+  // composer is the only place its first commands can be typed, and every
+  // Enter there was its own command. The draft used to survive each held
+  // Enter, so the last Enter's plan carried all of them concatenated and
+  // exactly one line ran; every submit after the first was swallowed as a
+  // duplicate of the one in flight. Five submits during startup must be five
+  // lines, in the order the person made them, when the shell settles.
+  it('every submit made while startup is held runs on its own when the shell settles conventional', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      session.intent.mockClear()
+      session.send.mockClear()
+      client.dispatcher.call.mockClear()
+
+      const lines = Array.from({ length: 5 }, (_, i) => `echo probe-${i}`)
+      for (const line of lines) {
+        editor.insertText(line)
+        view.contentDOM.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+        )
+        // Taken, not vetoed: the line left the composer for the host's queue,
+        // so the next Enter is a new command rather than the same draft again.
+        expect(view.state.doc.toString()).toBe('')
+      }
+      // Nothing may reach the pty while the shell is still proving itself.
+      expect(session.intent).not.toHaveBeenCalled()
+      expect(session.send).not.toHaveBeenCalled()
+
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual(
+          lines.flatMap((line) => [
+            ['paste', line],
+            ['key', 'enter'],
+          ]),
+        ),
+      )
+    } finally {
+      teardown()
+    }
+  })
+
+  /** Type one line into the composer and press Enter; the line leaves for the
+   *  host's queue, so the draft must be empty afterwards. */
+  const holdOne = (editor: CommandEditor, view: EditorView, line: string): void => {
+    editor.insertText(line)
+    view.contentDOM.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+    )
+    expect(view.state.doc.toString()).toBe('')
+  }
+
+  /** The dispatcher's lifecycle.submitAttempt seam, programmed per call: the
+   *  release has to survive one attempt landing late while the next is refused
+   *  (sequence 2 of the review). */
+  function attemptScript(
+    client: ClientFake,
+    answers: Array<() => Promise<unknown>>,
+  ): { calls: () => number } {
+    let n = 0
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method !== 'lifecycle.submitAttempt') {
+        return Promise.reject(new RpcError('no store wired (fake)', -32601))
+      }
+      const answer = answers[Math.min(n, answers.length - 1)]
+      n += 1
+      return answer()
+    })
+    return { calls: () => n }
+  }
+
+  // REVIEW FINDING 1 (P1): a Ctrl-C while startup is held must take the held
+  // commands with it. The cancel handler sent the key but left the queue, so
+  // the line the person withdrew ran anyway when the session settled.
+  it('a cancel while startup is held drops every held command (sequence 1)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const lifecycle = lifecycleHandler(client, session.sessionId)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      session.intent.mockClear()
+      session.send.mockClear()
+      holdOne(editor, view, 'echo one')
+      holdOne(editor, view, 'echo two')
+      expect(session.intent).not.toHaveBeenCalled()
+
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true, cancelable: true }),
+      )
+      // The key still reaches the shell — the person interrupted it — and the
+      // commands held for that shell are withdrawn with the same gesture.
+      expect(session.intent.mock.calls).toEqual([['key', 'Ctrl+c']])
+
+      session.intent.mockClear()
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(session.intent).not.toHaveBeenCalled()
+      expect(session.send).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  // REVIEW FINDING 2 (P1): the release started both submissions at once. A's
+  // attempt opened and waited; B's was refused because the lane was running,
+  // and the refusal wrote B immediately — ahead of A, which then wrote second.
+  // The next held command must not be submitted until the previous one's
+  // delivery has resolved.
+  it('the release submits the next held command only after the previous delivery resolved (sequence 2)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const lifecycle = lifecycleHandler(client, session.sessionId)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    let releaseA!: (attempt: unknown) => void
+    const aAttempt = new Promise((resolve) => {
+      releaseA = resolve
+    })
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/bash' })
+      session.intent.mockClear()
+      session.send.mockClear()
+      holdOne(editor, view, 'echo A')
+      holdOne(editor, view, 'echo B')
+
+      const script = attemptScript(client, [
+        () => aAttempt,
+        () => Promise.reject(new Error('the lane is already running')),
+      ])
+
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      await vi.waitFor(() => expect(script.calls()).toBe(1))
+      // A's delivery has not resolved, so B has not even been asked for.
+      expect(session.intent).not.toHaveBeenCalled()
+
+      releaseA({
+        id: 'att-A',
+        domain: 'd1',
+        state: 'open',
+        command: 'echo A',
+        cwd: '',
+        host: '',
+        origin: 'app',
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([
+          ['paste', 'echo A'],
+          ['key', 'enter'],
+          ['paste', 'echo B'],
+          ['key', 'enter'],
+        ]),
+      )
+      expect(script.calls()).toBe(2)
+    } finally {
+      teardown()
+    }
+  })
+
+  // REVIEW FINDING 3 (P2): the release read the CURRENTLY active target. A
+  // shell command held during startup, with the person switching to Ask before
+  // the settle, became an assistant question and never reached the shell.
+  it('a held command is delivered to the shell target it was typed for (sequence 3)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      session.intent.mockClear()
+      session.send.mockClear()
+      client.dispatcher.call.mockClear()
+      holdOne(editor, view, 'echo for-the-shell')
+      // The person reaches for the assistant while the shell is still proving
+      // itself.
+      ;(
+        content as unknown as { inputTargets: { setActive(id: string): void } }
+      ).inputTargets.setActive('agent')
+
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([
+          ['paste', 'echo for-the-shell'],
+          ['key', 'enter'],
+        ]),
+      )
+      // and nothing became a question for the assistant
+      expect(client.dispatcher.call.mock.calls.filter((c) => String(c[0]) === 'agent.ask')).toEqual(
+        [],
+      )
+    } finally {
+      teardown()
+    }
+  })
+
+  // REVIEW FINDING 4 (P2): a line carrying a reference resolves over the wire,
+  // and the host queued the resolved original at the moment the verdict
+  // arrived — even when the person had edited the draft while it resolved. The
+  // stale command then ran at the settle.
+  it('an edit during reference resolution keeps the command out of the queue (sequence 4)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    let releaseResolve!: () => void
+    const resolved = new Promise<void>((resolve) => {
+      releaseResolve = resolve
+    })
+    client.call.mockImplementation((method: string) => {
+      if (method === 'vault.resolveLine') {
+        return resolved.then(() => ({
+          line: 'echo resolved',
+          refs: [{ name: 'x', resolved: true }],
+        }))
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      session.intent.mockClear()
+      session.send.mockClear()
+      editor.insertText('echo {{secret:x}}')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      // The verdict is in flight; the person's newer text is the draft.
+      editor.insertText(' !')
+      expect(editor.getDoc()).toBe('echo {{secret:x}} !')
+      releaseResolve()
+      // Drain the verdict chain (vault promise -> planSubmit -> the host's
+      // decision): microtasks only, no I/O, so a handful of awaits settles it.
+      for (let i = 0; i < 10; i++) await Promise.resolve()
+      expect(client.call).toHaveBeenCalledWith('vault.resolveLine', {
+        line: 'echo {{secret:x}}',
+      })
+      expect(editor.getDoc()).toBe('echo {{secret:x}} !')
+
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(session.intent).not.toHaveBeenCalled()
+      expect(session.send).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  // REVIEW ROUND 2, FINDING 1 (P1): the interrupt that arrives while a
+  // released command is still being delivered. The first held line is out or
+  // on its way, the second is still queued; Ctrl-C from the GRID is not the
+  // composer's cancel, so the queue was left alone and the withdrawn line ran
+  // at the next prompt. A real tty flushes type-ahead on SIGINT; so must every
+  // interrupt of the pane.
+  it('a grid Ctrl-C drops the commands still held behind a delivery (sequence 6)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const lifecycle = lifecycleHandler(client, session.sessionId)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    let releaseA!: (attempt: unknown) => void
+    const aAttempt = new Promise((resolve) => {
+      releaseA = resolve
+    })
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/bash' })
+      session.intent.mockClear()
+      session.send.mockClear()
+      holdOne(editor, view, 'sleep 60')
+      holdOne(editor, view, 'echo unwanted')
+      const script = attemptScript(client, [() => aAttempt])
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      await vi.waitFor(() => expect(script.calls()).toBe(1))
+      // A is opening its attempt; B has not been submitted — the queue still
+      // holds it, which is the state the interrupt must flush.
+      expect(session.intent).not.toHaveBeenCalled()
+
+      // The GRID's Ctrl-C: a key intent, not the composer's cancel.
+      typeIntoPane(content, '\x03')
+
+      releaseA({
+        id: 'att-A',
+        domain: 'd1',
+        state: 'open',
+        command: 'sleep 60',
+        cwd: '',
+        host: '',
+        origin: 'app',
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls.filter((call) => call[0] === 'paste')).toEqual([
+          ['paste', 'sleep 60'],
+        ]),
+      )
+      // The next prompt releases nothing: the withdrawn line went with the
+      // keystroke.
+      session.intent.mockClear()
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd2', epoch: 2 })
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(session.intent).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  // The same rule for the SIGNAL form of the gesture — the block's Stop or
+  // Interrupt, which never passes through the composer. One owner
+  // (signalActiveCommand) drops the queue whatever else the signal does.
+  it('a block Stop drops the commands still held behind a delivery (sequence 7)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const lifecycle = lifecycleHandler(client, session.sessionId)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    let releaseA!: (attempt: unknown) => void
+    const aAttempt = new Promise((resolve) => {
+      releaseA = resolve
+    })
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/bash' })
+      session.intent.mockClear()
+      session.send.mockClear()
+      holdOne(editor, view, 'sleep 60')
+      holdOne(editor, view, 'echo unwanted')
+      const script = attemptScript(client, [() => aAttempt])
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      await vi.waitFor(() => expect(script.calls()).toBe(1))
+
+      ;(content as unknown as { signalActiveCommand(s: string): void }).signalActiveCommand('stop')
+
+      releaseA({
+        id: 'att-A',
+        domain: 'd1',
+        state: 'open',
+        command: 'sleep 60',
+        cwd: '',
+        host: '',
+        origin: 'app',
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls.filter((call) => call[0] === 'paste')).toEqual([
+          ['paste', 'sleep 60'],
+        ]),
+      )
+      session.intent.mockClear()
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd2', epoch: 2 })
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(session.intent).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  // REVIEW ROUND 4, FINDING 1 (P1): a command whose write is still in flight
+  // when its session is lost must never land in the socket's replacement. The
+  // write happens after the attempt round trip, and .sendIntent uses
+  // THIS.session — the new one — so an unfenced write reconnects a command into
+  // a shell nobody typed it for.
+  it('a released command whose session is replaced before its write is dropped (sequence 8)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const session = client._sessions[0]
+    const fireIntegration = integrationHandler(client, session)
+    const lifecycle = lifecycleHandler(client, session.sessionId)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    let releaseA!: (attempt: unknown) => void
+    const aAttempt = new Promise((resolve) => {
+      releaseA = resolve
+    })
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/bash' })
+      session.intent.mockClear()
+      session.send.mockClear()
+      holdOne(editor, view, 'echo for-the-old-shell')
+      const script = attemptScript(client, [() => aAttempt])
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      await vi.waitFor(() => expect(script.calls()).toBe(1))
+
+      // The session is lost and the pane reconnects to a REPLACEMENT.
+      const onExit = session.onExit.mock.calls[0]?.[0] as
+        ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
+      expect(onExit).toBeDefined()
+      onExit!({ sessionId: session.sessionId, cause: 'interrupted' })
+      expect(await content.reconnect()).toBe(true)
+      const replacement = client._sessions[client._sessions.length - 1]
+      expect(replacement.sessionId).not.toBe(session.sessionId)
+      replacement.intent.mockClear()
+      replacement.send.mockClear()
+
+      // The attempt the OLD session opened settles now. Its write must not go
+      // anywhere: the command was held for a session that is gone.
+      releaseA({
+        id: 'att-A',
+        domain: 'd1',
+        state: 'open',
+        command: 'echo for-the-old-shell',
+        cwd: '',
+        host: '',
+        origin: 'app',
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(replacement.intent).not.toHaveBeenCalled()
+      expect(replacement.send).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  // REVIEW ROUND 5, FINDING 1 (P1): the input state a lost session left behind.
+  // A released command's write is fenced now, but the window it armed
+  // (`_heldRaw`) outlives it: keys typed into the grid while the write was
+  // pending stay held, and the NEXT submit — in the replacement session —
+  // takes that window and flushes the dead session's keystrokes into the new
+  // shell. A cancelled window would instead suppress the new submit. The
+  // class: every piece of per-session input state is reset at the bind
+  // boundary.
+  it('state held for a lost session is not replayed into its replacement (sequence 9)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const session = client._sessions[0]
+    const fireIntegration = integrationHandler(client, session)
+    const lifecycle = lifecycleHandler(client, session.sessionId)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    let releaseA!: (attempt: unknown) => void
+    const aAttempt = new Promise((resolve) => {
+      releaseA = resolve
+    })
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/bash' })
+      // INTEGRATED, then the prompt: the grid is live from here (while
+      // `starting` it refuses every key, which is not the state under test).
+      fireIntegration({ sessionId: session.sessionId, status: 'integrated', shell: '/bin/bash' })
+      session.intent.mockClear()
+      holdOne(editor, view, 'echo A')
+      const script = attemptScript(client, [() => aAttempt])
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      await vi.waitFor(() => expect(script.calls()).toBe(1))
+
+      // A's bytes are still on their way, so the pane holds what the person
+      // types next for AFTER them.
+      typeIntoPane(content, 'x', 'y')
+      expect(session.intent).not.toHaveBeenCalled()
+
+      // The session is lost and the pane reconnects to a REPLACEMENT.
+      const onExit = session.onExit.mock.calls[0]?.[0] as
+        ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
+      onExit!({ sessionId: session.sessionId, cause: 'interrupted' })
+      expect(await content.reconnect()).toBe(true)
+      const replacement = client._sessions[client._sessions.length - 1]
+      replacement.intent.mockClear()
+      replacement.send.mockClear()
+
+      // The old attempt settles: its write is dropped (round 4), and the
+      // window it armed must go with the session that armed it.
+      releaseA({
+        id: 'att-A',
+        domain: 'd1',
+        state: 'open',
+        command: 'echo A',
+        cwd: '',
+        host: '',
+        origin: 'app',
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(replacement.intent).not.toHaveBeenCalled()
+
+      // The person submits again, in the replacement — a fresh session, still
+      // proving itself, so this one is held the same way A was. Nothing from
+      // the dead session may ride along when it is released.
+      editor.insertText('echo B')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      await vi.waitFor(() =>
+        expect(replacement.intent.mock.calls.filter((call) => call[0] !== 'focus')).toHaveLength(2),
+      )
+      // The command's own bytes are out; anything the dead session held would
+      // be flushed behind them here, or would have been consumed by this
+      // submit's window instead.
+      await Promise.resolve()
+      await Promise.resolve()
+      const intents = replacement.intent.mock.calls
+        .filter((call) => call[0] !== 'focus')
+        .map((call) => call[1])
+      expect(intents, 'the replacement must receive only the new command and its Enter').toEqual([
+        'echo B',
+        'enter',
+      ])
+    } finally {
+      teardown()
+    }
+  })
+
+  // REVIEW ROUND 6, FINDING 1 (P1): the bind is captured at ENTER, not after
+  // the verdict resolves. A reference line resolves over the wire; if the
+  // session is lost and the pane reconnects inside that round trip, the queue
+  // entry took the REPLACEMENT's identity and the command ran in a shell it
+  // was never typed for.
+  it('a reference line submitted in one session is not run in its replacement (sequence 10)', async () => {
+    const client = makeClient()
+    let releaseResolve!: () => void
+    const resolved = new Promise<void>((resolve) => {
+      releaseResolve = resolve
+    })
+    client.call.mockImplementation((method: string) => {
+      if (method === 'vault.resolveLine') {
+        return resolved.then(() => ({
+          line: 'echo secret-value',
+          refs: [{ name: 'x', resolved: true }],
+        }))
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const session = client._sessions[0]
+    const fireIntegration = integrationHandler(client, session)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/bash' })
+      fireIntegration({ sessionId: session.sessionId, status: 'integrated', shell: '/bin/bash' })
+      session.intent.mockClear()
+      editor.insertText('echo {{secret:x}}')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+
+      // The verdict is in flight; the session is lost and the pane reconnects.
+      const onExit = session.onExit.mock.calls[0]?.[0] as
+        ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
+      onExit!({ sessionId: session.sessionId, cause: 'interrupted' })
+      expect(await content.reconnect()).toBe(true)
+      const replacement = client._sessions[client._sessions.length - 1]
+      replacement.intent.mockClear()
+      replacement.send.mockClear()
+
+      // The resolution lands NOW — after the bind moved. The line belonged to
+      // the session that is gone, so nothing may be queued for, or run in,
+      // the replacement.
+      releaseResolve()
+      for (let i = 0; i < 12; i++) await Promise.resolve()
+      integrationHandler(client)({
+        sessionId: replacement.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(replacement.intent).not.toHaveBeenCalled()
+      expect(replacement.send).not.toHaveBeenCalled()
+
+      // And the replacement still takes its own commands. (The withdrawn
+      // line's draft is still the person's — a veto never clears it — so the
+      // test clears it before typing, exactly as a person would.)
+      editor.clear()
+      editor.insertText('echo B')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      await vi.waitFor(() =>
+        expect(
+          replacement.intent.mock.calls.filter((call) => call[0] !== 'focus').length,
+        ).toBeGreaterThanOrEqual(2),
+      )
+      const intents = replacement.intent.mock.calls
+        .filter((call) => call[0] !== 'focus')
+        .map((call) => call[1])
+      expect(intents).toEqual(['echo B', 'enter'])
+    } finally {
+      teardown()
+    }
+  })
+
+  // CI run 42658168728, e2e/ssh-reconnect.spec.ts: a person who reconnects and
+  // types a command gets no block. The editor is on screen THROUGH the rebind,
+  // so a submit can land after `_bindGeneration` moved and before
+  // `this.session` became the new one: the origin recorded there mixed the new
+  // generation with the old session id, and every later check called it stale.
+  // Anything typed after the rebind must run in the session it produced.
+  it('a command typed while the rebind is in flight runs in the new session (sequence 11)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const session = client._sessions[0]
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    let openNew!: () => void
+    const newOpen = new Promise<void>((resolve) => {
+      openNew = resolve
+    })
+    try {
+      // The session is lost, and the reconnect's open is still in flight.
+      const onExit = session.onExit.mock.calls[0]?.[0] as
+        ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
+      onExit!({ sessionId: session.sessionId, cause: 'interrupted' })
+      const replacement = makeSession({ awaitsIntegration: true })
+      client.openSession.mockImplementation(async () => {
+        await newOpen
+        client._sessions.push(replacement)
+        return replacement
+      })
+      const reopening = content.reconnect()
+
+      // The person types into the composer that never left the screen. This is
+      // after the generation moved and before the new handle exists.
+      editor.insertText('echo after-the-reconnect')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+
+      replacement.intent.mockClear()
+      openNew()
+      expect(await reopening).toBe(true)
+      expect(replacement.sessionId).not.toBe(session.sessionId)
+
+      // The new shell settles (or is already live); either way the line the
+      // person typed must reach it.
+      integrationHandler(client)({
+        sessionId: replacement.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      await vi.waitFor(() =>
+        expect(replacement.intent.mock.calls.filter((call) => call[0] !== 'focus')).toHaveLength(2),
+      )
+      expect(
+        replacement.intent.mock.calls.filter((call) => call[0] !== 'focus').map((call) => call[1]),
+      ).toEqual(['echo after-the-reconnect', 'enter'])
+    } finally {
+      teardown()
+    }
+  })
+
+  // REVIEW ROUND 7, FINDING 1 (P1): a reference command CANCELLED during a
+  // reconnect still ran in the replacement. The verdict resolves while the bind
+  // is in flight; the stale-draft check (the person's Ctrl-C emptied the
+  // editor) sat BELOW the bind-in-flight branch, so the withdrawn line was
+  // queued and the new shell ran it.
+  it('a reference command cancelled during a reconnect is not run in its replacement (sequence 12)', async () => {
+    const client = makeClient()
+    let releaseResolve!: () => void
+    const resolved = new Promise<void>((resolve) => {
+      releaseResolve = resolve
+    })
+    client.call.mockImplementation((method: string) => {
+      if (method === 'vault.resolveLine') {
+        return resolved.then(() => ({
+          line: 'echo secret-value',
+          refs: [{ name: 'x', resolved: true }],
+        }))
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const session = client._sessions[0]
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    let openNew!: () => void
+    const newOpen = new Promise<void>((resolve) => {
+      openNew = resolve
+    })
+    try {
+      const onExit = session.onExit.mock.calls[0]?.[0] as
+        ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
+      onExit!({ sessionId: session.sessionId, cause: 'interrupted' })
+      const defaultOpen = client.openSession.getMockImplementation()
+      client.openSession.mockImplementation(async (size, anchor) => {
+        await newOpen
+        return defaultOpen!(size, anchor)
+      })
+      const reopening = content.reconnect()
+
+      // A reference line typed while the rebind is in flight, then withdrawn.
+      editor.insertText('echo {{secret:x}}')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true, cancelable: true }),
+      )
+      expect(editor.getDoc()).toBe('')
+
+      // Resolution lands while the bind is still in flight.
+      releaseResolve()
+      for (let i = 0; i < 12; i++) await Promise.resolve()
+
+      openNew()
+      expect(await reopening).toBe(true)
+      const replacement = client._sessions[client._sessions.length - 1]
+      replacement.intent.mockClear()
+      replacement.send.mockClear()
+      integrationHandler(client)({
+        sessionId: replacement.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(replacement.intent).not.toHaveBeenCalled()
+      expect(replacement.send).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  // REVIEW ROUND 7, FINDING 2 (P2): a raw session never enters the integration
+  // axis, so nothing ever settles it — a command held across its rebind was
+  // held forever. The bind's own completion releases it when no prompt_ready
+  // will ever come.
+  it('a plain command typed during a raw session’s reconnect still runs (sequence 13)', async () => {
+    const client = makeClient()
+    const session = makeSession({ awaitsIntegration: false })
+    client.openSession.mockResolvedValue(session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    let openNew!: () => void
+    const newOpen = new Promise<void>((resolve) => {
+      openNew = resolve
+    })
+    try {
+      const onExit = session.onExit.mock.calls[0]?.[0] as
+        ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
+      onExit!({ sessionId: session.sessionId, cause: 'interrupted' })
+      const next = makeSession({ awaitsIntegration: false })
+      client.openSession.mockImplementation(async () => {
+        await newOpen
+        client._sessions.push(next)
+        return next
+      })
+      const reopening = content.reconnect()
+
+      // Typed while the rebind is in flight, into a session that will never
+      // report a prompt: no integration verdict is coming.
+      editor.insertText('echo raw-after-reconnect')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+
+      next.intent.mockClear()
+      next.send.mockClear()
+      openNew()
+      expect(await reopening).toBe(true)
+      await vi.waitFor(() => expect(next.intent).toHaveBeenCalled())
+      expect(
+        next.intent.mock.calls.filter((call) => call[0] !== 'focus').map((call) => call[1]),
+      ).toEqual(['echo raw-after-reconnect', 'enter'])
+    } finally {
+      teardown()
+    }
+  })
+
+  // REVIEW ROUND 9, FINDING 1 (P1): an ACCEPTED command still queued when the
+  // person presses Ctrl-C during a pending reconnect. `reconnect` clears
+  // `this.session`, and sendIntent returned on that before it dropped the held
+  // queue — the command was already accepted (the draft empty), so nothing
+  // else could withdraw it, and the replacement ran it.
+  it('a cancel during a reconnect drops a command already held for it (sequence 14)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const session = client._sessions[0]
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    let openNew!: () => void
+    const newOpen = new Promise<void>((resolve) => {
+      openNew = resolve
+    })
+    try {
+      const onExit = session.onExit.mock.calls[0]?.[0] as
+        ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
+      onExit!({ sessionId: session.sessionId, cause: 'interrupted' })
+      const replacement = makeSession({ awaitsIntegration: false })
+      client.openSession.mockImplementation(async () => {
+        await newOpen
+        client._sessions.push(replacement)
+        return replacement
+      })
+      const reopening = content.reconnect()
+
+      // Accepted while the replacement open is pending: the line leaves the
+      // composer for the held queue.
+      editor.insertText('echo cancelled-during-reconnect')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      expect(editor.getDoc()).toBe('')
+
+      // And withdrawn with the same keystroke every other cancel uses.
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true, cancelable: true }),
+      )
+
+      replacement.intent.mockClear()
+      replacement.send.mockClear()
+      openNew()
+      expect(await reopening).toBe(true)
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(replacement.intent).not.toHaveBeenCalled()
+      expect(replacement.send).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  // REVIEW ROUND 9, FINDING 2 (P2): the replacement's startup gating read the
+  // PREVIOUS session's integration verdict. A conventional session's verdict
+  // was still in `_integration` while the replacement was opening, so the held
+  // command was released at bind completion — before the replacement had said
+  // anything — and, with the lifecycle still native, ran with no app-owned
+  // attempt. A new bind starts with an UNKNOWN verdict.
+  it('a command held across a reconnect waits for the NEW session’s verdict (sequence 15)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const session = client._sessions[0]
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    const fireIntegration = integrationHandler(client, session)
+    let openNew!: () => void
+    const newOpen = new Promise<void>((resolve) => {
+      openNew = resolve
+    })
+    try {
+      // The session that is about to be lost has ANSWERED: conventional.
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      const onExit = session.onExit.mock.calls[0]?.[0] as
+        ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
+      onExit!({ sessionId: session.sessionId, cause: 'interrupted' })
+      const replacement = makeSession({ awaitsIntegration: true })
+      client.openSession.mockImplementation(async () => {
+        await newOpen
+        client._sessions.push(replacement)
+        return replacement
+      })
+      const reopening = content.reconnect()
+
+      editor.insertText('echo waits-for-the-new-verdict')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+
+      replacement.intent.mockClear()
+      replacement.send.mockClear()
+      openNew()
+      expect(await reopening).toBe(true)
+      await Promise.resolve()
+      await Promise.resolve()
+      // The replacement has said nothing yet. The old verdict must not stand
+      // in for its own, so the command is still held.
+      expect(replacement.intent).not.toHaveBeenCalled()
+
+      // The replacement answers in its own time.
+      integrationHandler(client)({
+        sessionId: replacement.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      await vi.waitFor(() =>
+        expect(replacement.intent.mock.calls.filter((call) => call[0] !== 'focus')).toHaveLength(2),
+      )
+      expect(
+        replacement.intent.mock.calls.filter((call) => call[0] !== 'focus').map((call) => call[1]),
+      ).toEqual(['echo waits-for-the-new-verdict', 'enter'])
+    } finally {
+      teardown()
+    }
+  })
+
+  // REVIEW ROUND 10, FINDING 1 (P1): an OLD release chain must not resume into
+  // the replacement's queue. Hold A, start releasing it with its attempt RPC
+  // pending, reconnect, then hold B and C for the replacement. Its release
+  // starts B; when A settles the old loop resumed through the accessors — now
+  // pointing at the NEW bind — and submitted C while B was still pending, so
+  // C's fail-open write could precede B's. The loop must capture the bind it
+  // started on and stop when the current one is no longer that object.
+  it('a release chain from the lost bind never submits into its replacement (sequence 16)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const session = client._sessions[0]
+    const fireIntegration = integrationHandler(client, session)
+    const lifecycle = lifecycleHandler(client, session.sessionId)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    let releaseA!: (attempt: unknown) => void
+    const aAttempt = new Promise((resolve) => {
+      releaseA = resolve
+    })
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/bash' })
+      fireIntegration({ sessionId: session.sessionId, status: 'integrated', shell: '/bin/bash' })
+      session.intent.mockClear()
+      holdOne(editor, view, 'echo A')
+      const script = attemptScript(client, [() => aAttempt])
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      await vi.waitFor(() => expect(script.calls()).toBe(1))
+
+      // The session is lost and the pane reconnects while A's attempt is open.
+      const onExit = session.onExit.mock.calls[0]?.[0] as
+        ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
+      onExit!({ sessionId: session.sessionId, cause: 'interrupted' })
+      const replacement = makeSession({ awaitsIntegration: true })
+      client.openSession.mockResolvedValue(replacement)
+      client._sessions.push(replacement)
+      expect(await content.reconnect()).toBe(true)
+      replacement.intent.mockClear()
+
+      // The replacement takes two more lines, which its own settle releases.
+      holdOne(editor, view, 'echo B')
+      holdOne(editor, view, 'echo C')
+      let releaseB!: (attempt: unknown) => void
+      const bAttempt = new Promise((resolve) => {
+        releaseB = resolve
+      })
+      const bScript = attemptScript(client, [() => bAttempt, () => Promise.resolve({})])
+      // The replacement reaches its prompt, so its submits open app-owned
+      // attempts — the step this sequence gates. The pane re-subscribed on the
+      // rebind, so the fact goes through the LATEST subscription.
+      replacement.fireIntegrationChanged({
+        sessionId: replacement.sessionId,
+        instanceId: 'instance-1',
+        sessionEpoch: 1,
+        status: 'integrated',
+        shell: '/bin/bash',
+      })
+      const lifecycleHandlers = client.dispatcher.subscribe.mock.calls.filter(
+        (call: unknown[]) => call[0] === 'lifecycle.changed',
+      )
+      ;(lifecycleHandlers[lifecycleHandlers.length - 1][1] as (p: unknown) => void)({
+        sessionId: replacement.sessionId,
+        lane: 'lane-2',
+        lifecycle: 'prompt_ready',
+        domain: 'd2',
+        epoch: 1,
+      })
+      await vi.waitFor(() => expect(bScript.calls()).toBe(1))
+      // B is opening its attempt; C must still be queued behind it.
+      expect(replacement.intent).not.toHaveBeenCalled()
+
+      // A's attempt settles NOW. The old chain must not touch the new bind.
+      releaseA({
+        id: 'att-A',
+        domain: 'd1',
+        state: 'open',
+        command: 'echo A',
+        cwd: '',
+        host: '',
+        origin: 'app',
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(
+        replacement.intent.mock.calls.filter((call) => call[0] !== 'focus'),
+        'the lost bind’s release chain submitted into the replacement',
+      ).toEqual([])
+      expect(bScript.calls(), 'a second submission was started out of order').toBe(1)
+
+      // B settles, and only then does C go.
+      releaseB({
+        id: 'att-B',
+        domain: 'd2',
+        state: 'open',
+        command: 'echo B',
+        cwd: '',
+        host: '',
+        origin: 'app',
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+      await vi.waitFor(() =>
+        expect(
+          replacement.intent.mock.calls.filter((call) => call[0] !== 'focus').length,
+        ).toBeGreaterThanOrEqual(4),
+      )
+      expect(
+        replacement.intent.mock.calls.filter((call) => call[0] !== 'focus').map((call) => call[1]),
+      ).toEqual(['echo B', 'enter', 'echo C', 'enter'])
+    } finally {
+      teardown()
+    }
+  })
+
+  // REVIEW ROUND 10, FINDING 2 (P2): the editor's in-flight submit is per-bind
+  // state too. A reference resolution still pending when the session is lost
+  // left `_submitInFlight` true in the surviving editor, so the REPLACEMENT's
+  // first Enter was vetoed before it reached the new bind — and nothing retried
+  // it. The bind boundary invalidates it, and a stale callback cannot clear a
+  // newer submission's token.
+  it('a pending resolution from the lost bind does not veto the replacement’s Enter (sequence 17)', async () => {
+    const client = makeClient()
+    let releaseResolve!: () => void
+    const resolved = new Promise<void>((resolve) => {
+      releaseResolve = resolve
+    })
+    client.call.mockImplementation((method: string) => {
+      if (method === 'vault.resolveLine') {
+        return resolved.then(() => ({
+          line: 'echo secret-value',
+          refs: [{ name: 'x', resolved: true }],
+        }))
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const session = client._sessions[0]
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      editor.insertText('echo {{secret:x}}')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      // The verdict is in flight, and the session goes away inside it.
+      const onExit = session.onExit.mock.calls[0]?.[0] as
+        ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
+      onExit!({ sessionId: session.sessionId, cause: 'interrupted' })
+      const replacement = makeSession({ awaitsIntegration: false })
+      client.openSession.mockResolvedValue(replacement)
+      client._sessions.push(replacement)
+      expect(await content.reconnect()).toBe(true)
+      replacement.intent.mockClear()
+
+      // The person's next command, in the replacement, before the old
+      // resolution lands.
+      editor.clear()
+      editor.insertText('echo after-reconnect')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      await vi.waitFor(() => expect(replacement.intent).toHaveBeenCalled())
+      expect(
+        replacement.intent.mock.calls.filter((call) => call[0] !== 'focus').map((call) => call[1]),
+      ).toEqual(['echo after-reconnect', 'enter'])
+
+      // And the old verdict landing afterwards changes nothing.
+      releaseResolve()
+      for (let i = 0; i < 12; i++) await Promise.resolve()
+      expect(
+        replacement.intent.mock.calls.filter((call) => call[0] !== 'focus').map((call) => call[1]),
+      ).toEqual(['echo after-reconnect', 'enter'])
+    } finally {
+      teardown()
+    }
+  })
+
   // nocx-xn63t.6.27, CI run 38577867125: a command typed into the startup
   // composer of a reconnected ssh session reached the shell as
   // `echo after-the-reconnec`. The integration status reaches `integrated` a
@@ -2874,15 +4005,21 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       session.send.mockClear()
       client.dispatcher.call.mockClear()
 
-      // The next key the person types lands in the draft they are typing.
+      // The next key the person types lands in the composer they are typing
+      // into — not <body>.
       expect(editor.isVisible).toBe(true)
       expect(editorHasFocus()).toBe(true)
       editor.insertText('t')
       view.contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
-      // Enter before the prompt is held exactly as it is while `starting`.
-      expect(view.state.doc.toString()).toBe('echo after-the-reconnect')
+      // Enter before the prompt is held exactly as it is while `starting`:
+      // the whole line — the `t` the person typed into the composer included
+      // — is taken for the host's queue, and the draft empties (an Enter is a
+      // command: nocx-evj4b.1.6). What xn63t.6.27 asserts survives: the
+      // composer kept the keyboard across integrated-before-prompt_ready, so
+      // no keystroke went to <body>.
+      expect(view.state.doc.toString()).toBe('')
       expect(session.intent).not.toHaveBeenCalled()
 
       lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
@@ -2922,7 +4059,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       view.contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
-      expect(view.state.doc.toString()).toBe('echo conventional')
+      expect(view.state.doc.toString()).toBe('')
       expect(session.intent).not.toHaveBeenCalled()
 
       fireIntegration({
@@ -4082,6 +5219,59 @@ describe('the SSH block header keeps its where-meta left and the right group rig
     expect(header).toMatch(/display\s*:\s*grid/)
     expect(metaRow).not.toMatch(/justify-content\s*:\s*(space-between|space-around|space-evenly)/)
     expect(right).toMatch(/grid-column\s*:\s*2/)
+  })
+})
+
+// A TALL BLOCK'S HEADER IS PINNED AT THE TOP OF THE PANE (nocx-4y82c.1.3).
+// jsdom lays nothing out, so what this can hold is the two stylesheet facts the
+// e2e measures in a browser: the ledger's own header is the sticky thing (the
+// block's own node, not a copy), and it paints on the pane's ground so the rows
+// scrolling under it cannot show through. The selector is asserted exactly
+// because both halves are the point: only a block seated directly in the
+// transcript pins — a child of a turn must not add a second pinned header — and
+// the alternate-screen seat (a direct child of the stack) is not a block.
+describe('a tall block keeps its own header at the top of the pane (nocx-4y82c.1.3)', () => {
+  it("pins the block's own header with sticky positioning, only for a ledger-level block", () => {
+    const css = stripComments(readFileSync(COMMAND_BLOCK_SURFACE_STYLE_ENTRY, 'utf8'))
+    const body =
+      css.match(/\.scrollback-inner\s*>\s*\.cmd-block\s*>\s*\.cmd-header\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(body, 'the ledger-level header rule exists').not.toBe('')
+    expect(body).toMatch(/position\s*:\s*sticky/)
+    expect(body).toMatch(/(^|;)\s*top\s*:\s*0/)
+  })
+
+  it('paints the ground only on the header that can pin, never on a nested one', () => {
+    // THE OPAQUE GROUND BELONGS TO THE PINNABLE SEAT (nocx-4y82c.1.3, P2). A
+    // nested block's header never leaves its turn's flow, so an opaque ground
+    // there masks the turn's own selection/hover tint as a rectangle per child
+    // header. Only the ledger-level header can find rows underneath it, and
+    // only it paints one.
+    const frame = stripComments(readFileSync(COMMAND_BLOCK_FRAME_STYLE_ENTRY, 'utf8'))
+    const base = stripComments(extractRuleBlock(frame, 'cmd-header') ?? '')
+    expect(base).not.toBe('')
+    expect(base, 'the base header paints no background').not.toMatch(/(^|;)\s*background/)
+    const seat =
+      frame.match(/\.scrollback-inner\s*>\s*\.cmd-block\s*>\s*\.cmd-header\s*\{([^}]*)\}/s)?.[1] ??
+      ''
+    expect(seat, 'the ledger-level header paints one').toMatch(/--cmd-block-ground/)
+    expect(seat).toMatch(/var\(--terminal-background\)/)
+  })
+
+  it('unpins a header too tall to be a compact part of the view', () => {
+    // THE BOUND IS THE VIEW, NOT THE HEADER (nocx-4y82c.1.3, P2). A multiline
+    // command can wrap its own header past the scrollport; pinned whole and
+    // opaque it hides every row. The stylesheet's answer is the position rule
+    // this test names, and the controller sets the attribute from the header's
+    // measured share of the scroller. Position only: the header's box is
+    // untouched, so no row moves when it stops pinning.
+    const css = stripComments(readFileSync(COMMAND_BLOCK_SURFACE_STYLE_ENTRY, 'utf8'))
+    const body =
+      css.match(
+        /\.scrollback-inner\s*>\s*\.cmd-block\s*>\s*\.cmd-header\[data-pinnable='false'\]\s*\{([^}]*)\}/,
+      )?.[1] ?? ''
+    expect(body, 'the tall-header rule exists').not.toBe('')
+    expect(body).toMatch(/position\s*:\s*relative/)
+    expect(body).toMatch(/(^|;)\s*top\s*:\s*auto/)
   })
 })
 
@@ -5448,6 +6638,189 @@ describe('the projections consume the kernel through the composition root (ADR-0
     }
   })
 
+  it('a response that lands before the binding drains under the painted frame hold (nocx-4y82c.1.1)', async () => {
+    // The production path codex found: the rows arrive before the running
+    // fact, so `_refreshBlockRows` parks them without an `upTo` (the running
+    // block does not exist yet), and the binding drains the whole artifact.
+    // The binding now sizes the body to the painted frame in the same task, so
+    // a quiet command does not keep the overlap. The screen has scrolled five
+    // rows; the anchor's absolute row is 3, so two rows have passed.
+    const client = makeClient()
+    client.call.mockImplementation((method: string) => {
+      if (method === 'ledger.get') {
+        return Promise.resolve({
+          entry: {},
+          edges: [],
+          artifacts: [{ id: 'art-late', mediaType: 'application/x-nocx-rows' }],
+        })
+      }
+      if (method === 'ledger.artifact') {
+        const line = (from: number, text: string): string =>
+          `${JSON.stringify({ from, row: wireRowOf([[text, 1, true] as CellSpec]) })}\n`
+        const body = line(0, 'a') + line(1, 'b') + line(2, 'c') + line(3, 'd')
+        return Promise.resolve({
+          id: 'art-late',
+          mediaType: 'application/x-nocx-rows',
+          body,
+          truncated: null,
+          byteLen: body.length,
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      const scrolled = screenFrame(1, ['', '', ''])
+      scrolled.state.baseRow = 5
+      sessionOf(content).fireScreenFrame(scrolled)
+      await flushDisplayFrame()
+
+      // The anchor and the rows both arrive before the block exists.
+      client._fireBlockOutputStart({
+        entryId: 'att-late',
+        row: 3,
+        fromRow: 0,
+        screenRevision: 1,
+        bufferKind: 'normal',
+        bufferInstance: '1',
+        cols: SCREEN_COLS,
+        rows: SCREEN_ROWS,
+      })
+      const blockGrew = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'block.grew',
+      )?.[1] as ((params: unknown) => void) | undefined
+      expect(blockGrew).toBeDefined()
+      blockGrew?.({ entryId: 'att-late' })
+      await vi.waitFor(() =>
+        expect(
+          client.call.mock.calls.filter(([method]) => method === 'ledger.artifact').length,
+        ).toBeGreaterThan(0),
+      )
+      await flushDisplayFrame()
+
+      // The running fact binds the block and drains the parked rows.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-late', state: 'open', origin: 'shell', command: 'ls' },
+      })
+      const block = withScrollback.scrollback.blockManager.runningBlock
+      expect(block).not.toBeNull()
+      expect(block!.el.querySelectorAll(':scope > .cmd-output .term-grid-row').length).toBe(2)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a completion before block.closed keeps the hold for an outstanding response (nocx-4y82c.1.1)', async () => {
+    // THE LOCAL CASE'S OVERLAP (nocx-4y82c.1.12). Artifact A-D, body painted
+    // A-B, grid showing C-D. The completion arrives before block.closed: the
+    // logical freeze used to clear the hold and the running slot, so an
+    // outstanding artifact response then painted A-D over rows the grid still
+    // showed, duplicating C-D above it until the visual freeze. The hold
+    // belongs to the block joined to the grid and lasts until the grid leaves
+    // it (the visual freeze).
+    const line = (from: number, text: string): string =>
+      `${JSON.stringify({ from, row: wireRowOf([[text, 1, true] as CellSpec]) })}\n`
+    const body = line(0, 'a') + line(1, 'b') + line(2, 'c') + line(3, 'd')
+    const client = makeClient()
+    client.call.mockImplementation((method: string) => {
+      if (method === 'ledger.get') {
+        return Promise.resolve({
+          entry: {},
+          edges: [],
+          artifacts: [{ id: 'art-hold', mediaType: 'application/x-nocx-rows' }],
+        })
+      }
+      if (method === 'ledger.artifact') {
+        return Promise.resolve({
+          id: 'art-hold',
+          mediaType: 'application/x-nocx-rows',
+          body,
+          truncated: null,
+          byteLen: body.length,
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      // The screen has scrolled five rows; the block's first output row is
+      // absolute row 3, so two rows have passed (A-B are the body's).
+      const scrolled = screenFrame(1, ['', '', ''])
+      scrolled.state.baseRow = 5
+      sessionOf(content).fireScreenFrame(scrolled)
+      await flushDisplayFrame()
+      client._fireBlockOutputStart({
+        entryId: 'att-hold',
+        row: 3,
+        fromRow: 0,
+        screenRevision: 1,
+        bufferKind: 'normal',
+        bufferInstance: '1',
+        cols: SCREEN_COLS,
+        rows: SCREEN_ROWS,
+      })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-hold', state: 'open', origin: 'shell', command: 'ls' },
+      })
+      const blockGrew = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'block.grew',
+      )?.[1] as ((params: unknown) => void) | undefined
+      expect(blockGrew).toBeDefined()
+      blockGrew?.({ entryId: 'att-hold' })
+      await vi.waitFor(() =>
+        expect(
+          client.call.mock.calls.filter(([method]) => method === 'ledger.artifact').length,
+        ).toBe(1),
+      )
+      const block = withScrollback.scrollback.blockManager.runningBlock!
+      expect(block.el.querySelectorAll(':scope > .cmd-output .term-grid-row').length).toBe(2)
+
+      // The command completes; the visual freeze waits for block.closed.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-hold', state: 'completed', exitCode: 0, fence: 'a'.repeat(64) },
+      })
+      // An outstanding artifact response lands in that window.
+      blockGrew?.({ entryId: 'att-hold' })
+      await vi.waitFor(() =>
+        expect(
+          client.call.mock.calls.filter(([method]) => method === 'ledger.artifact').length,
+        ).toBeGreaterThanOrEqual(2),
+      )
+      await flushDisplayFrame()
+      expect(block.el.querySelectorAll(':scope > .cmd-output .term-grid-row').length).toBe(2)
+    } finally {
+      teardown()
+    }
+  })
+
   it('repaints a frozen block with the rows its close made final, so a settled block is whole (nocx-atpw5.1.19)', async () => {
     // THE WINDOW THE CI FAILURE FELL IN. block.closed freezes the card at once
     // and paints it from the rows the last OPEN read returned; the sealed read
@@ -5839,6 +7212,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       client._fireBlockOutputStart({
         entryId: 'att-hold',
         row: 12,
+        fromRow: 0,
         screenRevision: 5,
         bufferKind: 'normal',
         bufferInstance: '1',
@@ -8053,6 +9427,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
     const anchor = {
       entryId: 'att-anchor',
       row: 12,
+      fromRow: 0,
       screenRevision: 5,
       bufferKind: 'normal' as const,
       bufferInstance: '1',
@@ -8152,6 +9527,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
     const anchor = {
       entryId: 'att-rows',
       row: 12,
+      fromRow: 0,
       screenRevision: 5,
       bufferKind: 'normal' as const,
       bufferInstance: '1',
@@ -8262,6 +9638,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       client._fireBlockOutputStart({
         entryId: 'att-lag',
         row: 102,
+        fromRow: 0,
         screenRevision: 16,
         bufferKind: 'normal',
         bufferInstance: '1',
@@ -8352,6 +9729,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
         client._fireBlockOutputStart({
           entryId: 'att-wrapped-echo',
           row: 3,
+          fromRow: 0,
           screenRevision: 1,
           bufferKind: 'normal',
           bufferInstance: '1',
@@ -8395,6 +9773,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
     const anchor = {
       entryId: 'att-short-output',
       row: 1,
+      fromRow: 0,
       screenRevision: 5,
       bufferKind: 'normal' as const,
       bufferInstance: '1',
@@ -14173,6 +15552,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         kept: false,
         screenAnchor: {
           row: 307,
+          fromRow: 0,
           screenRevision: 3,
           bufferKind: 'normal',
           bufferInstance: '9',

@@ -22,6 +22,26 @@ import { windowPet } from '../pets/window-pet'
 import { isAtTail, TailFollow } from './tail-follow'
 export type LiveRegionMode = 'idle' | 'running' | 'fullscreen' | 'unstructured'
 
+/**
+ * HOW MUCH OF THE VIEW A PINNED HEADER MAY COVER (nocx-4y82c.1.3, P2).
+ *
+ * A multiline command wraps its own header, and a header taller than the
+ * scrollport would cover every row when pinned. The owner's rule is that the
+ * pinned header is a COMPACT part of the view -- Warp's is one line -- so a
+ * header that is more than a third of the scrollport does not pin at all; it
+ * scrolls away the way it did before the feature. One third is the bound
+ * because it is a share of the thing being covered, not a font-size constant:
+ * a short pane clamps sooner, a tall pane is allowed a taller header, and the
+ * rows always keep the other two thirds.
+ */
+const PINNED_HEADER_MAX_SHARE = 1 / 3
+
+/** `true` when a header of `headerHeight` may be pinned in `viewportHeight`. */
+export function headerFitsPinned(headerHeight: number, viewportHeight: number): boolean {
+  if (!(viewportHeight > 0)) return false
+  return headerHeight <= viewportHeight * PINNED_HEADER_MAX_SHARE
+}
+
 export interface ScrollbackControllerOpts {
   /** The pane this controller owns the scrollback inside. */
   pane: HTMLElement
@@ -124,6 +144,18 @@ export class ScrollbackController {
   private _paintWatch = 0
   private _painting = false
   private _followObserver: IntersectionObserver | null = null
+  /** ONE MECHANISM for "may this header pin" (nocx-4y82c.1.3): the observer
+   *  watches every ledger-level header's own box and the scroller's, and a
+   *  header's verdict is its own height against a third of the view. There is
+   *  no scroll, freeze or window trigger to add for the next path that re-wraps
+   *  a header -- a font, a theme, a rename, a width change -- because the
+   *  header's own size is what all of them change. */
+  private _sizeObserver: ResizeObserver | null = null
+  private readonly _observedHeaders = new Set<HTMLElement>()
+  /** Keeps the watched set in step with blocks being created, replaced and
+   *  removed. It judges nothing; it only registers the headers the one
+   *  observer watches. */
+  private _headerSetObserver: MutationObserver | null = null
   /** Watches the scroller's own box, so a box the mutation paths know
    *  nothing about still keeps the tail — see the constructor. */
   private _boxResizeObserver: ResizeObserver | null = null
@@ -260,6 +292,23 @@ export class ScrollbackController {
       })
       this._boxResizeObserver.observe(this.scrollbackArea)
     }
+
+    // A HEADER THAT IS TOO TALL TO BE COMPACT DOES NOT PIN (nocx-4y82c.1.3).
+    // ONE MECHANISM: a ResizeObserver watches every ledger-level header and the
+    // scroller, so any path that changes a header's own box is covered -- a
+    // font or theme change re-wraps it, a freeze replaces it, a pane resize
+    // shrinks the view, an expand/collapse changes it. The judge reads the
+    // header's height against a third of the scroller and writes one attribute;
+    // there is no scroll, freeze or window trigger left to miss the next path.
+    if (typeof ResizeObserver === 'function') {
+      this._sizeObserver = new ResizeObserver(() => this._judgeHeaderSizes())
+      this._sizeObserver.observe(this.scrollbackArea)
+    }
+    if (typeof MutationObserver === 'function') {
+      this._headerSetObserver = new MutationObserver(() => this._syncObservedHeaders())
+      this._headerSetObserver.observe(this.scrollbackInner, { childList: true })
+    }
+    this._syncObservedHeaders()
 
     // Whether the end of the live output is on screen. Not "did the last scroll
     // look like a human" — that question has no answer: the `scroll` event does
@@ -454,9 +503,26 @@ export class ScrollbackController {
     this.setLiveHeight(this._lastLiveHeightPx ?? this._liveContentHeight())
   }
 
-  setLiveHeight(px: number | null): void {
+  /**
+   * Size the live box, from the height of the frame its rows were painted
+   * from.
+   *
+   * `painted` says the caller HAS just painted those rows and is handing in
+   * that frame's height; it is the only caller allowed to move the box. Every
+   * other door — the per-paint resize pass, a box change, a mode entry, a
+   * stored-rows delivery — re-applies the height the last paint recorded,
+   * because a box sized from a fresher model is a box the rows on screen do
+   * not agree with. With the block's bottom pinned, a row's place is
+   * `blockBottom - (px - row·cell)`: a box that takes two rows the grid has
+   * not painted moves every visible row down two rows while the box and the
+   * grid's translation stay exactly where they were (nocx-4y82c.1.1, the
+   * signature 9e7e2110a named for `settleAtTail`).
+   */
+  setLiveHeight(px: number | null, painted = false): void {
+    if (painted) this._lastLiveHeightPx = px
+    const height = painted ? px : (this._lastLiveHeightPx ?? px)
     // The two modes where the terminal owns the pane are re-measured from the
-    // scroller, and `px` — the running region's measured content — is not
+    // scroller, and `height` — the running region's measured content — is not
     // consulted there: the box is the pane, whatever the grid holds. This is
     // the seam terminal-content's scheduleLiveResize already calls on every
     // re-measure, which is why the fill belongs here rather than in a method
@@ -468,7 +534,6 @@ export class ScrollbackController {
     }
     if (this._mode !== 'running') return
     this._sizeRunningSeat()
-    this._lastLiveHeightPx = px
     // The backend anchor and its accepted frame decide the echo shift. Apply
     // it before height guards so a frame update can release the shift even
     // when the measured live box does not change.
@@ -480,9 +545,9 @@ export class ScrollbackController {
     // border-box-sized live region would clip it before the editor's next
     // layout pass. Once output retires the stand-in, zero may size the
     // region to the body's padding again.
-    if (px === null) return
+    if (height === null) return
     if (
-      px === 0 &&
+      height === 0 &&
       this.terminalLiveContainer.querySelector(':scope > .cmd-answer-typing') !== null
     ) {
       return
@@ -496,7 +561,7 @@ export class ScrollbackController {
     // so the flow box must not reserve it. The padding: the block body has
     // it, this region is that body while the command runs, and the cap is a
     // ceiling on the whole box rather than on the rows inside it.
-    const content = Math.min(Math.max(0, px - this._echoShiftPx()), Math.max(0, max - pad))
+    const content = Math.min(Math.max(0, height - this._echoShiftPx()), Math.max(0, max - pad))
     // ONE ARITHMETIC FOR THE BOX AND THE GRID (owner, 2026-11-08: "a row never
     // moves down by a line when the live box grows by one"). The grid is
     // translated by exactly what the box does NOT show — `px - content` —
@@ -507,7 +572,7 @@ export class ScrollbackController {
     // the box grew by only three, and every visible row moved DOWN a line.
     // Derived this way a row's place is `bottom + row·cell - px`: a function
     // of the painted content alone, so releasing the shift cannot move it.
-    this._applyShift(px - content)
+    this._applyShift(height - content)
     const box = `${content + pad}px`
     // Keep the block's bottom at the bottom of the view — but only on the
     // frames where the box actually CHANGED SIZE. This runs on every chunk of
@@ -1146,7 +1211,50 @@ export class ScrollbackController {
     return false
   }
 
+  /** Register the headers the one size observer watches: every block seated
+   *  directly in the transcript contributes its own header. Called whenever
+   *  the stack's children change, so a block created, replaced (a freeze swaps
+   *  the element) or removed is watched from that moment. It does not decide
+   *  anything; `_judgeHeaderSizes` does. */
+  private _syncObservedHeaders(): void {
+    const observer = this._sizeObserver
+    if (observer === null) return
+    const current = new Set(
+      this.scrollbackInner.querySelectorAll<HTMLElement>(':scope > .cmd-block > .cmd-header'),
+    )
+    for (const header of this._observedHeaders) {
+      if (current.has(header)) continue
+      observer.unobserve(header)
+      this._observedHeaders.delete(header)
+    }
+    for (const header of current) {
+      if (this._observedHeaders.has(header)) continue
+      observer.observe(header)
+      this._observedHeaders.add(header)
+    }
+    this._judgeHeaderSizes()
+  }
+
+  /** Each watched header's verdict: its own height against a third of the
+   *  scroller. Independent of which block owns the top -- the sticky rule
+   *  already gives one pinned header -- so a scroll cannot make it stale, and
+   *  a header that changes size is re-judged by its own observer. The answer
+   *  is one attribute; no box changes. */
+  private _judgeHeaderSizes(): void {
+    const heightPx = this.scrollbackArea.clientHeight
+    for (const header of this._observedHeaders) {
+      if (!header.isConnected) continue
+      if (headerFitsPinned(header.offsetHeight, heightPx)) header.removeAttribute('data-pinnable')
+      else header.setAttribute('data-pinnable', 'false')
+    }
+  }
+
   dispose(): void {
+    this._sizeObserver?.disconnect()
+    this._sizeObserver = null
+    this._headerSetObserver?.disconnect()
+    this._headerSetObserver = null
+    this._observedHeaders.clear()
     this._followObserver?.disconnect()
     this._followObserver = null
     this._boxResizeObserver?.disconnect()

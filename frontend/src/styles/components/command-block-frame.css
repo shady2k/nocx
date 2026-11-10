@@ -31,6 +31,21 @@
   user-select: none;
 }
 
+/* THE GROUND BELONGS TO THE HEADER THAT CAN PIN (nocx-4y82c.1.3, P2).
+
+   Only a block seated directly in the transcript pins, so only that header can
+   ever have rows scrolling underneath it -- and only that header paints an
+   opaque ground. A header nested in a turn never leaves its turn's flow, so an
+   opaque ground there would mask the turn's own selection/hover tint as a
+   differently coloured rectangle across every child header. The nested header
+   keeps the transparent stack it had; the tint is the surface's, on the block,
+   and the fallback keeps a hand-built fixture without the variable readable. */
+.scrollback-inner > .cmd-block > .cmd-header {
+  background:
+    linear-gradient(var(--cmd-block-ground, transparent), var(--cmd-block-ground, transparent)),
+    var(--terminal-background);
+}
+
 .cmd-header-meta {
   grid-column: 1;
   grid-row: 1;
@@ -179,7 +194,28 @@
   min-height: var(--control-height-md);
   max-height: var(--control-height-md);
   margin: 0;
-  padding: 0 var(--pane-inline-padding);
+  /* THE COLUMN IS THE STACK ROW'S, PAID ONCE (nocx-4y82c.1.13). Every direct
+     child of `.scrollback-inner` wears `--pane-inline-padding` (nocx-9bpeq.8),
+     and a running block is one of them, so the header already sits inside that
+     gutter. It kept an inline padding of its own from ADR-3kqrem7v, when the
+     running block cancelled the gutter; ADR-2yzsq8mk stopped that, so the
+     header paid the gutter twice and its chevron stood one gutter right of the
+     output it names — 48px against 24px, measured on the owner's nightly. The
+     block's header, its body and the composer are one column: the gutter is
+     the row's, and nothing inside the block pays it again. The vertical
+     padding stays zero — the 32px box is the header's whole height. */
+  padding: 0;
+}
+
+/* THE RUNNING HEADER'S COLUMN IN A TURN (nocx-4y82c.1.13). A running command
+   nested in a turn (an assistant's `run` call) is widened to the pane by the
+   controller, which cancels the turn's insets, so the header pays the
+   transcript's gutter itself — the same token its body pays in style.css, so
+   the chevron sits on the output's first column and neither touches the pane's
+   edge. A top-level running block wears the stack's row gutter on the block
+   instead, and this header pays nothing (the variant above). */
+.cmd-children > .cmd-block.cmd-block-running > .cmd-header {
+  padding-inline: var(--pane-inline-padding);
 }
 
 .ui-command-block-frame[data-variant='running'] > .cmd-header-meta {

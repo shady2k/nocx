@@ -361,7 +361,7 @@ func (v *Vault) Setup(ctx context.Context, req SetupRequest) (SetupResult, error
 	// recovery envelope. Both, always: the recovery code is the only thing
 	// that survives a forgotten passphrase, and the passphrase is the only
 	// thing that survives a lost recovery code.
-	e, err := wrapWithPassphrase(root, req.Passphrase)
+	e, err := wrapWithPassphrase(root, req.Passphrase, defaultKDFParams())
 	if err != nil {
 		for i := range len(root) {
 			root[i] = 0
@@ -386,7 +386,7 @@ func (v *Vault) Setup(ctx context.Context, req SetupRequest) (SetupResult, error
 		return SetupResult{}, fmt.Errorf("generate recovery code: %w", rerr)
 	}
 	code := crockfordEncode(raw[:])
-	recEnv, err := wrapWithPassphrase(root, code)
+	recEnv, err := wrapWithPassphrase(root, code, defaultKDFParams())
 	if err != nil {
 		for i := range len(root) {
 			root[i] = 0
@@ -935,7 +935,7 @@ func (v *Vault) ChangePassphrase(ctx context.Context, req ChangePassphraseReques
 	}()
 
 	// Auth passed — wrap the root key with the new passphrase.
-	newEnv, err := wrapWithPassphrase(root, req.NewPassphrase)
+	newEnv, err := wrapWithPassphrase(root, req.NewPassphrase, defaultKDFParams())
 	if err != nil {
 		return fmt.Errorf("wrap new passphrase: %w", err)
 	}
@@ -1007,7 +1007,7 @@ func (v *Vault) RegenerateRecovery(ctx context.Context, req RegenerateRequest) (
 	}
 	code := crockfordEncode(raw[:])
 
-	env, err := wrapWithPassphrase(root, code)
+	env, err := wrapWithPassphrase(root, code, defaultKDFParams())
 	if err != nil {
 		return "", fmt.Errorf("wrap recovery: %w", err)
 	}

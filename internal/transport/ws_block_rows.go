@@ -1359,8 +1359,12 @@ func (s *WSServer) BlockOutputStartPlaneAttached(sid session.ID) {
 
 // blockOutputStartParams is the screen anchor attached to the row-stream mark.
 type blockOutputStartParams struct {
-	EntryID        string `json:"entryId"`
+	EntryID string `json:"entryId"`
+	// Row is the anchor's screen row; FromRow is the block's first output row
+	// in the ordered rows stream — the coordinate a stored row's `from` uses.
+	// The renderer places the block in that one coordinate (nocx-4y82c.1.10).
 	Row            uint64 `json:"row"`
+	FromRow        uint64 `json:"fromRow"`
 	ScreenRevision uint64 `json:"screenRevision"`
 	BufferKind     string `json:"bufferKind"`
 	BufferInstance string `json:"bufferInstance"`
@@ -1392,7 +1396,7 @@ func (s *WSServer) BlockOutputStartRowWithAnchor(sid session.ID, fromRow uint64,
 	// The WSServer is this notification's owner; its closing event is the
 	// lifecycle-frame commit or the session subscriber closing.
 	s.notifyBlockSubscriber(context.Background(), sid, "block.outputStart", blockOutputStartParams{
-		EntryID: entry, Row: anchor.Row, ScreenRevision: anchor.ScreenRevision,
+		EntryID: entry, Row: anchor.Row, FromRow: fromRow, ScreenRevision: anchor.ScreenRevision,
 		BufferKind: anchor.BufferKind, BufferInstance: anchor.BufferInstance,
 		Cols: anchor.Cols, Rows: anchor.Rows,
 	})

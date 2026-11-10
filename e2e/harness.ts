@@ -235,6 +235,58 @@ export async function clickIntoEditor(
   await page.locator('.pane.active .nocx-editor-input').click({ button: opts.button ?? 'left' })
 }
 
+declare global {
+  interface Window {
+    __nocxToastMessages?: string[]
+  }
+}
+
+/**
+ * Remember every toast the product draws, from before the first application
+ * script runs.
+ *
+ * It observes the RENDERED element — the kit's own `.ui-toast__message`, the
+ * thing a person sees — and not the `notify.toast` frame, so a build that
+ * received the push and failed to present it is still a failure here.
+ *
+ * The memory is what makes a claim about a toast that AUTO-DISMISSES safe: a
+ * bare `toBeVisible` is a bet on looking before the four-second timer runs out
+ * (frontend/src/ui/toast.tsx), and a spec that loses that bet on a slow runner
+ * reports a missing toast that was drawn.
+ */
+export async function recordToasts(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    window.__nocxToastMessages = []
+    const harvest = (node: Node): void => {
+      if (!(node instanceof HTMLElement)) return
+      const toasts = node.matches('.ui-toast') ? [node] : [...node.querySelectorAll('.ui-toast')]
+      for (const el of toasts) {
+        window.__nocxToastMessages!.push(el.querySelector('.ui-toast__message')?.textContent ?? '')
+      }
+    }
+    const observe = (): void => {
+      new MutationObserver((records) => {
+        for (const record of records) record.addedNodes.forEach(harvest)
+      }).observe(document.documentElement, { childList: true, subtree: true })
+    }
+    if (document.documentElement) observe()
+    else document.addEventListener('DOMContentLoaded', observe)
+  })
+}
+
+/** Wait until the product has drawn a toast carrying `text`. The budget is a
+ *  hang detector, not a claim about how fast a shared runner is: this
+ *  predicate spans a real pty, the OSC parser, a round trip to the backend's
+ *  ingress, the router, the toast sink and a push back to the renderer. */
+export async function expectToast(page: Page, text: string): Promise<void> {
+  await baseExpect
+    .poll(async () => page.evaluate(() => window.__nocxToastMessages ?? []), {
+      timeout: 30_000,
+      message: `no toast ever carried ${JSON.stringify(text)}`,
+    })
+    .toContain(text)
+}
+
 // vite serves the page alone, so nothing installs the wails runtime — the
 // frontend reads window.go at startup and would find nothing. This supplies it,
 // pointed at the stand Playwright started.

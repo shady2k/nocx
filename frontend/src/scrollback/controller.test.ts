@@ -9,7 +9,7 @@ import {
   type Mock,
   type MockInstance,
 } from 'vitest'
-import { ScrollbackController } from './controller'
+import { headerFitsPinned, ScrollbackController } from './controller'
 import { LIVE_REGION_SELECTOR, insideLiveRegion } from '../live-region'
 import { CommandSnapshotStore } from '../command-snapshot'
 import type { LiveContentHeightSpy } from '../test-support/panes-fixtures'
@@ -483,6 +483,77 @@ describe('ScrollbackController render-fence rendezvous (nocx-u7uh.8)', () => {
     expect(block?.status).toBe('success')
     expect(block?.el.classList.contains('cmd-block-running')).toBe(false)
     expect(controller.mode).toBe('idle')
+  })
+
+  it('re-judges a header from its own box, with no scroll and no resize (nocx-4y82c.1.3)', async () => {
+    // ONE MECHANISM: the size observer watches each ledger-level header and
+    // the scroller. A header whose own box changes is judged from that change
+    // alone -- a freeze swapping the element in, a font re-wrapping it, a
+    // newly compact one -- so there is no per-trigger path to miss.
+    class FakeSizeObserver {
+      static latest: FakeSizeObserver | null = null
+      readonly observed = new Set<Element>()
+      private readonly cb: ResizeObserverCallback
+      constructor(cb: ResizeObserverCallback) {
+        this.cb = cb
+        FakeSizeObserver.latest = this
+      }
+      observe(el: Element): void {
+        this.observed.add(el)
+      }
+      unobserve(el: Element): void {
+        this.observed.delete(el)
+      }
+      disconnect(): void {
+        this.observed.clear()
+      }
+      deliver(): void {
+        this.cb([], this)
+      }
+    }
+    vi.stubGlobal('ResizeObserver', FakeSizeObserver)
+    const pane = document.createElement('div')
+    try {
+      const { renderer } = rendererWithFence()
+      // The judge skips a header that is not in the document; a real pane is.
+      document.body.appendChild(pane)
+      const controller = new ScrollbackController({
+        pane,
+        liveContentHeight: () => renderer.liveContentHeight(),
+        cellMetrics: () => ({ cellWidth: renderer.cellWidth, cellHeight: renderer.cellHeight }),
+        snapshotStore: new CommandSnapshotStore(),
+      })
+      controller.scrollbackArea.scrollTo = vi.fn()
+      Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
+        value: 300,
+        configurable: true,
+      })
+
+      // A running block opens, then block.closed swaps in the frozen one.
+      controller.blockManager.startBlock('make', '~', 0)
+      controller.blockManager.bindAttempt('att-1')
+      controller.setRunning()
+      expect(controller.freezeFromAttempt(completedAttempt(FENCE), 2)).toBe(false)
+      controller.blockManager.blockClosed('att-1')
+      // The stack's childList changed: the mutation observer registers the
+      // header that replaced the running one, and the size observer judges it.
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      const block = controller.blockManager.blockForAttempt('att-1')
+      const header = block!.el.querySelector<HTMLElement>(':scope > .cmd-header')!
+      expect(FakeSizeObserver.latest!.observed.has(header), 'the new header is watched').toBe(true)
+      Object.defineProperty(header, 'offsetHeight', { value: 400, configurable: true })
+      FakeSizeObserver.latest!.deliver()
+      expect(header.getAttribute('data-pinnable'), 'a third of 300 cannot hold 400').toBe('false')
+
+      // AND THE OTHER DIRECTION: a header that becomes compact is pinnable
+      // again without a scroll, a resize or a freeze.
+      Object.defineProperty(header, 'offsetHeight', { value: 80, configurable: true })
+      FakeSizeObserver.latest!.deliver()
+      expect(header.getAttribute('data-pinnable')).toBeNull()
+    } finally {
+      vi.unstubAllGlobals()
+      pane.remove()
+    }
   })
 
   it('a command that ends while a full-screen program owns the pane still closes on block.closed', () => {
@@ -977,7 +1048,7 @@ describe('a delivery sizes the box from what was painted (owner, 2026-11-08)', (
     const { controller } = runningController(content)
     try {
       // The paint that put three rows on screen.
-      controller.setLiveHeight(content.px)
+      controller.setLiveHeight(content.px, true)
       expect(controller.terminalLiveContainer.style.height).toBe('48px')
 
       // The delivery: the model has moved on (two rows of text, say), but no
@@ -987,8 +1058,136 @@ describe('a delivery sizes the box from what was painted (owner, 2026-11-08)', (
       expect(controller.terminalLiveContainer.style.height).toBe('48px')
 
       // The paint that does show them takes the measurement.
-      controller.setLiveHeight(content.px)
+      controller.setLiveHeight(content.px, true)
       expect(controller.terminalLiveContainer.style.height).toBe('32px')
+    } finally {
+      controller.blockManager.clearAll()
+      controller.scrollbackArea.remove()
+    }
+  })
+
+  it('a sizing pass before the paint cannot become the height a delivery trusts', () => {
+    // THE BEAD'S FRAME (nocx-4y82c.1.1): scrollTop 156 -> 173, the block
+    // -155+831 -> -172+848, the live box 629 both frames and the grid's
+    // translateY(-34px) both frames — and a visible row 34px DOWN. Nothing
+    // about the live region moved, so the box was sized from a frame the grid
+    // had not painted: the per-paint resize pass (`scheduleLiveResize`) wrote
+    // the box AND the remembered painted height from the model, and the
+    // stored-rows delivery that followed sized from that number. The grid
+    // showed the older frame, so every visible row moved down by the two rows
+    // the model was ahead.
+    const content = { px: 3 * 16 }
+    const { controller } = runningController(content)
+    try {
+      // The paint that put three rows on screen.
+      controller.setLiveHeight(content.px, true)
+      expect(controller.terminalLiveContainer.style.height).toBe('48px')
+
+      // The per-paint resize pass: the model has a frame two rows on, and no
+      // paint has drawn it.
+      content.px = 2 * 16
+      controller.setLiveHeight(content.px)
+      // A pass that did not paint re-applies the painted height.
+      expect(controller.terminalLiveContainer.style.height).toBe('48px')
+
+      // The delivery that lands next sizes from the same painted height, not
+      // from the number the pass left behind.
+      controller.settleAround(() => {})
+      expect(controller.terminalLiveContainer.style.height).toBe('48px')
+
+      // The paint that shows the newer frame is the one that moves the box.
+      controller.setLiveHeight(content.px, true)
+      expect(controller.terminalLiveContainer.style.height).toBe('32px')
+    } finally {
+      controller.blockManager.clearAll()
+      controller.scrollbackArea.remove()
+    }
+  })
+
+  it('a box change keeps the painted height, not the model at that instant', () => {
+    // The scroller's own box watcher is the same door: it fires between a
+    // frame's acceptance and its paint (the composer leaving, a pane resize),
+    // and it used to size the live box from the model it read at that moment.
+    class BoxObserver {
+      static latest: BoxObserver | null = null
+      readonly disconnect = vi.fn()
+      private readonly cb: ResizeObserverCallback
+      constructor(cb: ResizeObserverCallback) {
+        this.cb = cb
+        BoxObserver.latest = this
+      }
+      observe(): void {}
+      unobserve(): void {}
+      deliver(): void {
+        this.cb([], {} as ResizeObserver)
+      }
+    }
+    vi.stubGlobal('ResizeObserver', BoxObserver)
+    const content = { px: 3 * 16 }
+    try {
+      const pane = document.createElement('div')
+      const controller = new ScrollbackController({
+        pane,
+        liveContentHeight: () => content.px,
+        cellMetrics: () => ({ cellWidth: 8, cellHeight: 16 }),
+        snapshotStore: new CommandSnapshotStore(),
+      })
+      document.body.appendChild(controller.scrollbackArea)
+      Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
+        value: 360,
+        configurable: true,
+      })
+      Object.defineProperty(controller.scrollbackArea, 'scrollHeight', {
+        value: 360,
+        configurable: true,
+      })
+      controller.scrollbackArea.scrollTo = vi.fn()
+      controller.beginBlock('ls', '~', 0)
+      try {
+        controller.setLiveHeight(content.px, true)
+        expect(controller.terminalLiveContainer.style.height).toBe('48px')
+        content.px = 2 * 16
+        BoxObserver.latest!.deliver()
+        expect(controller.terminalLiveContainer.style.height).toBe('48px')
+      } finally {
+        controller.blockManager.clearAll()
+        controller.scrollbackArea.remove()
+      }
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('entering the running layout sizes from the frame the grid already shows', () => {
+    // The mode entry is the third door of the same kind. The grid is the
+    // painter's last frame — painted while the pane was idle — and the model
+    // may already hold a newer one; the box must take the painted height.
+    const content = { px: 2 * 16 }
+    const pane = document.createElement('div')
+    const controller = new ScrollbackController({
+      pane,
+      liveContentHeight: () => content.px,
+      cellMetrics: () => ({ cellWidth: 8, cellHeight: 16 }),
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    document.body.appendChild(controller.scrollbackArea)
+    Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
+      value: 360,
+      configurable: true,
+    })
+    Object.defineProperty(controller.scrollbackArea, 'scrollHeight', {
+      value: 360,
+      configurable: true,
+    })
+    controller.scrollbackArea.scrollTo = vi.fn()
+    try {
+      // The paint that put three rows on screen, at the prompt.
+      controller.setLiveHeight(3 * 16, true)
+      // A newer frame the painter has not drawn.
+      content.px = 2 * 16
+      controller.beginBlock('ls', '~', 0)
+      expect(controller.mode).toBe('running')
+      expect(controller.terminalLiveContainer.style.height).toBe('48px')
     } finally {
       controller.blockManager.clearAll()
       controller.scrollbackArea.remove()
@@ -1579,14 +1778,18 @@ describe('the scroller box keeps the tail (nocx-1ebrs.40)', () => {
       // The composer's box animated away, the process bar swapped in: the
       // scroller's box changed and no block mutation ran. Following, the
       // live end stays pinned — nothing accumulates below the fold for a
-      // later pin to land as a jump.
-      FakeBoxResizeObserver.latest!.deliver()
+      // later pin to land as a jump. Deliver on the BOX observer: the
+      // pinnability observer is constructed after it and is a different
+      // instance of the same stand-in.
+      const box = (controller as unknown as { _boxResizeObserver: FakeBoxResizeObserver | null })
+        ._boxResizeObserver!
+      box.deliver()
       expect(scrollTo).toHaveBeenCalledWith({ top: 1400, behavior: 'instant' })
 
       // Not following: the box is not the reader's movement to answer.
       scrollTo.mockClear()
       stopFollowing(controller)
-      FakeBoxResizeObserver.latest!.deliver()
+      box.deliver()
       expect(scrollTo).not.toHaveBeenCalled()
     } finally {
       vi.unstubAllGlobals()
@@ -1617,5 +1820,14 @@ describe('the scroller box keeps the tail (nocx-1ebrs.40)', () => {
     } finally {
       vi.unstubAllGlobals()
     }
+  })
+})
+
+describe('a pinned header is a compact part of the view (nocx-4y82c.1.3, P2)', () => {
+  it('allows at most a third of the scrollport, and nothing before layout', () => {
+    expect(headerFitsPinned(100, 300), 'a third exactly').toBe(true)
+    expect(headerFitsPinned(101, 300), 'one pixel over a third').toBe(false)
+    expect(headerFitsPinned(600, 300), 'a header taller than the view').toBe(false)
+    expect(headerFitsPinned(20, 0), 'no scrollport yet').toBe(false)
   })
 })

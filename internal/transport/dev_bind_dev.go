@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 )
 
 // THE DEV STAND'S HALF. `-tags nocx_dev_bind` is a build saying: something in
@@ -40,7 +41,46 @@ import (
 const (
 	devBindEnabled = true
 	devBindPortEnv = "NOCX_DEV_WS_PORT"
+
+	// THE SAME TAG TELLS THIS BUILD HOW LONG A SESSION MAY STAY `starting`.
+	// Every other deadline here is the product's own sentence; this one is the
+	// interval a spec must submit inside, and an e2e typing five commands on a
+	// loaded runner cannot be made to fit ten seconds by wishing it. The stand
+	// sets these two names and no release build reads either (see
+	// dev_bind_default.go).
+	//
+	// IT IS SCOPED BY SESSION, not by process. A long bound for the whole
+	// server would keep every other spec's "Checking this shell…" card up past
+	// that spec's timeout, and those specs are ABOUT the ten-second default.
+	// Only sessions whose OPENING USER is the marker get the number, so the
+	// spec that wants it says so in its own fixture's account name.
+	devStartupBoundEnv     = "NOCX_DEV_INTEGRATION_STARTUP_BOUND"
+	devStartupBoundUserEnv = "NOCX_DEV_INTEGRATION_BOUND_USER"
 )
+
+// devIntegrationStartupBound answers the bound the stand asks for, for the
+// session opened by `user`; zero means the product's own.
+//
+// IT IS A PURE READ OF THE ENVIRONMENT, on purpose (review round 4). The first
+// shape kept a map from the open that decided the bound to the timer that armed
+// from it, and two concurrent opens wrote and read it outside the lock — a real
+// data race. The bound belongs to the OPEN, so it travels as the argument that
+// registration already takes, and there is no shared state to guard.
+func devIntegrationStartupBound(user string) time.Duration {
+	raw, ok := os.LookupEnv(devStartupBoundEnv)
+	if !ok || raw == "" {
+		return 0
+	}
+	marker, ok := os.LookupEnv(devStartupBoundUserEnv)
+	if !ok || marker == "" || user != marker {
+		return 0
+	}
+	bound, err := time.ParseDuration(raw)
+	if err != nil || bound <= 0 {
+		return 0
+	}
+	return bound
+}
 
 // devBindPort is the port to ask the OS for; zero means "you pick", which is
 // what an unset variable answers.

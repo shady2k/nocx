@@ -630,17 +630,17 @@ func TestLayoutRefusesRowsThatDoNotExist(t *testing.T) {
 		method string
 		params map[string]any
 	}{
-		"rename a workspace that is not there": {"workspaces.rename", map[string]any{"id": wsID2, "name": "x"}},
-		"rename a tab that is not there":       {"tabs.rename", map[string]any{"id": tabID2, "name": "x"}},
-		"recolour a tab that is not there":     {"tabs.recolour", map[string]any{"id": tabID2, "colour": "#fff"}},
-		"pin a tab that is not there":          {"tabs.pin", map[string]any{"id": tabID2, "pinned": true}},
+		"rename a workspace that is not there":     {"workspaces.rename", map[string]any{"id": wsID2, "name": "x"}},
+		"rename a tab that is not there":           {"tabs.rename", map[string]any{"id": tabID2, "name": "x"}},
+		"recolour a tab that is not there":         {"tabs.recolour", map[string]any{"id": tabID2, "colour": "#fff"}},
+		"pin a tab that is not there":              {"tabs.pin", map[string]any{"id": tabID2, "pinned": true}},
 		"set the panel of a tab that is not there": {"tabs.setPanel", map[string]any{"id": tabID2, "view": "ports", "collapsed": false}},
-		"tab in a workspace that is not there": {"tabs.create", map[string]any{"id": tabID2, "workspaceId": wsID2, "position": 0, "layout": "row", "firstPane": firstPane(paneID2, "/var")}},
-		"pane in a tab that is not there":      {"panes.create", map[string]any{"id": paneID2, "tabId": tabID2, "cwd": "/", "kind": "local", "sizeShare": 1}},
-		"create with no first tab":             {"workspaces.create", map[string]any{"id": wsID2, "name": "x", "position": 0, "firstPane": firstPane(paneID2, "/var")}},
-		"create with no first pane":            {"tabs.create", map[string]any{"id": tabID2, "workspaceId": wsID1, "position": 0, "layout": "row"}},
-		"move a pane that is not there":        {"panes.move", map[string]any{"id": paneID2, "tabId": tabID1}},
-		"move into a tab that is not there":    {"panes.move", map[string]any{"id": paneID1, "tabId": tabID2}},
+		"tab in a workspace that is not there":     {"tabs.create", map[string]any{"id": tabID2, "workspaceId": wsID2, "position": 0, "layout": "row", "firstPane": firstPane(paneID2, "/var")}},
+		"pane in a tab that is not there":          {"panes.create", map[string]any{"id": paneID2, "tabId": tabID2, "cwd": "/", "kind": "local", "sizeShare": 1}},
+		"create with no first tab":                 {"workspaces.create", map[string]any{"id": wsID2, "name": "x", "position": 0, "firstPane": firstPane(paneID2, "/var")}},
+		"create with no first pane":                {"tabs.create", map[string]any{"id": tabID2, "workspaceId": wsID1, "position": 0, "layout": "row"}},
+		"move a pane that is not there":            {"panes.move", map[string]any{"id": paneID2, "tabId": tabID1}},
+		"move into a tab that is not there":        {"panes.move", map[string]any{"id": paneID1, "tabId": tabID2}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, rpcErr := layoutCall(t, conn, call.method, call.params, 1)

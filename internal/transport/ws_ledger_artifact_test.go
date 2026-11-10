@@ -149,7 +149,10 @@ func TestStoredRowSlotIsHeldUntilTheResponseHasLeft(t *testing.T) {
 	flow := newRowReadFlow(1)
 	op := &fakeLedgerOp{svc: &fakeLedgerService{page: pageOf(10)}}
 	rec := &artifactResponder{}
-	h := ledgerReadHandlers{op: op, r: rec, rows: flow}
+	// THROUGH THE PRODUCTION RESPONDER CHAIN: every handler is built with a
+	// sealedNormalizer, and the slot rule is only real if that wrapper forwards
+	// the sent witness.
+	h := ledgerReadHandlers{op: op, r: newSealedNormalizer(rec), rows: flow}
 
 	// First page: answered, and its slot is NOT released by the handler.
 	h.handleArtifact(context.Background(), artifactRequest(1, `,"fromRow":0,"rowLimit":5`))

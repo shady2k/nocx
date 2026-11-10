@@ -12,7 +12,7 @@ import (
 // production cost: 1 KiB, one pass, one thread. It is a VALUE now, not three
 // lowered package variables (nocx-ouru5.1.16) — the parameters travel to the
 // one function that reads them.
-func testKDF() KDFParams { return KDFParams{MemoryKiB: 1, Time: 1, Threads: 1} }
+func testKDF() kdfParams { return kdfParams{MemoryKiB: 1, Time: 1, Threads: 1} }
 
 // loweredCost is the old spelling, kept for the tests that called it only to
 // say "not the production cost".
@@ -125,13 +125,13 @@ func TestEnvelopeMixedParameters(t *testing.T) {
 	root, _ := newRootKey()
 
 	// Wrap with Memory=1 KiB
-	e1, err := wrapWithPassphrase(root, "pass", KDFParams{MemoryKiB: 1, Time: 1, Threads: 1})
+	e1, err := wrapWithPassphrase(root, "pass", kdfParams{MemoryKiB: 1, Time: 1, Threads: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Wrap the same root with Memory=2 KiB
-	e2, err := wrapWithPassphrase(root, "pass", KDFParams{MemoryKiB: 2, Time: 1, Threads: 1})
+	e2, err := wrapWithPassphrase(root, "pass", kdfParams{MemoryKiB: 2, Time: 1, Threads: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +280,7 @@ func TestProductionKeyCost(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := time.Now()
-	e, err := wrapWithPassphrase(root, "production-benchmark", DefaultKDFParams())
+	e, err := wrapWithPassphrase(root, "production-benchmark", defaultKDFParams())
 	cost := time.Since(start)
 	if err != nil {
 		t.Fatalf("wrapWithPassphrase (production): %v", err)
@@ -294,7 +294,7 @@ func TestProductionKeyCost(t *testing.T) {
 		t.Fatal("unwrapped key differs")
 	}
 
-	production := DefaultKDFParams()
+	production := defaultKDFParams()
 	t.Logf("production argon2id wrapWithPassphrase (m=%d KiB, t=%d, p=%d): %v",
 		production.MemoryKiB, production.Time, production.Threads, cost)
 

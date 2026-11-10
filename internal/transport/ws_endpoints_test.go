@@ -42,7 +42,7 @@ func newEndpointHarness(t *testing.T) *endpointHarness {
 		t.Fatalf("NewRegistry: %v", err)
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	v, err := vault.New(docStore, reg, logger, testCheapKDF())
+	v, err := vault.New(docStore, reg, logger)
 	if err != nil {
 		t.Fatalf("vault.New: %v", err)
 	}
@@ -402,7 +402,7 @@ func TestEndpointsDelete_ProviderFailureIsReconciledAtNextStart(t *testing.T) {
 		t.Fatalf("NewRegistry: %v", err)
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	v1, err := vault.New(docStore, reg, logger, testCheapKDF())
+	v1, err := vault.New(docStore, reg, logger)
 	if err != nil {
 		t.Fatalf("vault.New: %v", err)
 	}
@@ -471,7 +471,7 @@ func TestEndpointsDelete_ProviderFailureIsReconciledAtNextStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
-	v2, err := vault.New(docStore, healthyReg, logger, testCheapKDF())
+	v2, err := vault.New(docStore, healthyReg, logger)
 	if err != nil {
 		t.Fatalf("restart vault.New: %v", err)
 	}
@@ -534,7 +534,7 @@ func TestEndpoints_PersistAcrossRestart(t *testing.T) {
 		t.Fatalf("NewRegistry: %v", err)
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	v2, err := vault.New(docStore, reg, logger, testCheapKDF())
+	v2, err := vault.New(docStore, reg, logger)
 	if err != nil {
 		t.Fatalf("vault.New: %v", err)
 	}

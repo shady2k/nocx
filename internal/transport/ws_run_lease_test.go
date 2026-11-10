@@ -407,7 +407,7 @@ func newRunLeaseHarness(t *testing.T, leaseCfg RunLeaseConfig, extra ...WSServer
 		t.Fatalf("vault.NewRegistry: %v", err)
 	}
 	logger := slog.New(slog.NewTextHandler(nil, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	v, err := vault.New(docStore, reg, logger, testCheapKDF())
+	v, err := vault.New(docStore, reg, logger)
 	if err != nil {
 		t.Fatalf("vault.New: %v", err)
 	}

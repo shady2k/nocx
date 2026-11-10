@@ -11,30 +11,32 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
-// KDFParams is the cost of deriving a passphrase key: the argon2id parameters
+// kdfParams is the cost of deriving a passphrase key: the argon2id parameters
 // a NEW envelope is wrapped with.
 //
-// A PARAMETER, NOT A PACKAGE VARIABLE (nocx-ouru5.1.16, review). The cost used
-// to be three mutable package vars a test could lower; that made it possible
-// for any code in the process to weaken every envelope this vault went on to
-// write, and the envelopes persist the parameters they were made with. It
-// travels through the constructor now: the production field is
-// DefaultKDFParams, the composition root passes nothing, and a test that
-// cannot afford 64 MiB per vault says so in its own call. Nothing global can be
-// changed at all.
+// A VALUE WITH NO KNOB (nocx-ouru5.1.16, review rounds 1 and 2). The cost used
+// to be three mutable package vars a test could lower, so any code in the
+// process could weaken every envelope this vault went on to write — and the
+// envelopes PERSIST the parameters they were made with. A constructor argument
+// only moved that hole: a production caller could pass weak parameters just as
+// happily. So the cost is UNSETTABLE from outside this package: an unexported
+// type, one unexported function that answers it, and New takes no argument at
+// all. A test that cannot afford 64 MiB per vault does not get to lower it —
+// it avoids standing up a vault, or pays it (the transport package's ask
+// harness pays it, and its suite still fits: see nocx-ouru5.1.16).
 //
 // The parameters a STORED envelope carries are the ones it was wrapped with —
 // unwrapWithPassphrase reads them from the envelope (keys.go), so raising this
 // cost later never invalidates what is already persisted (§5.1).
-type KDFParams struct {
+type kdfParams struct {
 	MemoryKiB uint32
 	Time      uint32
 	Threads   uint8
 }
 
-// DefaultKDFParams is the production cost: 64 MiB, three passes, four threads.
-func DefaultKDFParams() KDFParams {
-	return KDFParams{MemoryKiB: 64 * 1024, Time: 3, Threads: 4}
+// defaultKDFParams is the production cost: 64 MiB, three passes, four threads.
+func defaultKDFParams() kdfParams {
+	return kdfParams{MemoryKiB: 64 * 1024, Time: 3, Threads: 4}
 }
 
 const (
@@ -72,7 +74,7 @@ func newRootKey() ([]byte, error) {
 // encrypts root with AES-256-GCM. The
 // KDF parameters are bound as AAD so a stored-envelope tamper that alters
 // Memory/Time/Threads makes decryption fail.
-func wrapWithPassphrase(root []byte, pass string, kdf KDFParams) (Envelope, error) {
+func wrapWithPassphrase(root []byte, pass string, kdf kdfParams) (Envelope, error) {
 	mem, tm, thr := kdf.MemoryKiB, kdf.Time, kdf.Threads
 
 	salt := make([]byte, argon2SaltLen)
@@ -143,7 +145,7 @@ func unwrapWithPassphrase(e Envelope, pass string) ([]byte, error) {
 // newRecoveryCode generates a fresh recovery code, wraps a freshly minted
 // root key with it, and returns both. The plaintext code is returned exactly
 // once and is never stored — only the Envelope persists.
-func newRecoveryCode(kdf KDFParams) (code string, e Envelope, err error) {
+func newRecoveryCode(kdf kdfParams) (code string, e Envelope, err error) {
 	var raw [16]byte // 128 bits
 	if _, rerr := rand.Read(raw[:]); rerr != nil {
 		return "", Envelope{}, fmt.Errorf("new recovery code: %w", rerr)

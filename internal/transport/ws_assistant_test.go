@@ -109,7 +109,7 @@ func newAssistantHarnessWith(t *testing.T, stub *stubAssistantClient, script *sc
 		t.Fatalf("NewRegistry: %v", err)
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	v, err := vault.New(docStore, reg, logger, testCheapKDF())
+	v, err := vault.New(docStore, reg, logger)
 	if err != nil {
 		t.Fatalf("vault.New: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestAgentStatus_Unwired(t *testing.T) {
 		t.Fatal(err)
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	v, err := vault.New(docStore, reg, logger, testCheapKDF())
+	v, err := vault.New(docStore, reg, logger)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -8164,16 +8164,47 @@ export class TerminalContent extends BasePaneContent {
   private _settleDeferredShellSubmissions(): void {
     const held = this._bind.held
     if (held.length === 0) return
-    const lines = held.map((entry) => entry.plan.sendLine)
+    // THE PERSON'S OWN TEXT, NEVER THE RESOLVED ONE (nocx-evj4b.1.8, P1). A
+    // place's `sendLine` carries the vault's resolved secret — that is the
+    // line the pty is owed, and the whole reason the plan keeps two. A draft
+    // restored from it put `curl -H "Authorization: Bearer …"` back in front
+    // of the person and, on the next Enter, into ledger history: a secret in
+    // clear, twice. `recordLine` is the text they typed, references intact.
+    const lines = held.map((entry) => entry.plan.recordLine)
+    // AND INTO THE TARGET THAT HELD THEM (P2). The person may have switched
+    // to Ask while the shell was starting; the editor is showing the
+    // question's draft now, and writing their shell line into it would put a
+    // command in a question. The line belongs to the shell's draft.
+    const targetId = held[0].target.id
     held.length = 0
     const editor = this.editor
+    const active = this.activeTargetId === targetId
+    // THE HELD LINES COME FIRST, THEN THE DRAFT THAT IS THERE NOW (P2). The
+    // person may have typed a newer line while the startup was settling;
+    // `insertText` at the caret put the earlier line into the middle of it
+    // ("echo Becho A"), or over a selection. Restoring the whole document is
+    // the only shape that cannot interleave two drafts.
+    const current = active
+      ? (editor?.getDoc() ?? '')
+      : (this.targetState.draft(targetId)?.text ?? '')
+    const next = [...lines, ...(current.trim() === '' ? [] : [current])].join('\n')
+    if (!active) {
+      const draft = this.targetState.draft(targetId)
+      this.targetState.saveDraft(targetId, {
+        text: next,
+        from: next.length,
+        to: next.length,
+        scrollTop: draft?.scrollTop ?? 0,
+      })
+      return
+    }
     if (editor === null) return
     // A DRAFT THE PERSON CANNOT SEE IS NOT THEIRS. The startup composer hid
     // when the session settled conventional; the line it now holds is the
     // person's, so the composer stays on screen with it — their next Enter is
     // the submit, at the prompt they can see.
     if (!editor.isVisible) editor.show({ focus: false })
-    editor.insertText(lines.join('\n'))
+    editor.replaceDoc(next)
   }
 
   /** Show the waiting card and hide the terminal grid for exactly as long as

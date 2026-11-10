@@ -3073,6 +3073,141 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
     }
   })
 
+  it('restores the reference-intact line, never the resolved secret (nocx-evj4b.1.8)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    client.call.mockImplementation((method: string) => {
+      if (method === 'vault.resolveLine') {
+        return Promise.resolve({
+          line: 'curl -H "Authorization: Bearer s3cr3t"',
+          refs: [{ name: 'token', resolved: true }],
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const lifecycle = lifecycleHandler(client, session.sessionId)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      editor.insertText('curl {{secret:token}}')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      for (let i = 0; i < 10; i++) await Promise.resolve()
+      expect(view.state.doc.toString()).toBe('')
+
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      // THE PERSON'S OWN TEXT. The resolved line is the pty's, never the
+      // draft's: 'curl {{secret:token}}' must come back with the reference
+      // intact, not with the token in clear.
+      await vi.waitFor(() => expect(editor.getDoc()).toBe('curl {{secret:token}}'))
+      expect(editor.getDoc()).not.toContain('s3cr3t')
+
+      // AND A RESUBMIT RECORDS THE SAME TEXT, never the secret.
+      const attempts: unknown[] = []
+      client.dispatcher.call.mockImplementation((method: string, params: unknown) => {
+        if (method !== 'lifecycle.submitAttempt') {
+          return Promise.reject(new Error('no store wired (fake)'))
+        }
+        attempts.push(params)
+        return Promise.resolve({
+          id: 'att-1',
+          domain: 'd1',
+          state: 'open',
+          command: '',
+          cwd: '',
+          host: '',
+          origin: 'app',
+          startedAt: '2026-08-08T12:00:00Z',
+        })
+      })
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      await vi.waitFor(() => expect(attempts).toHaveLength(1))
+      expect((attempts[0] as { command?: string }).command).toBe('curl {{secret:token}}')
+      expect(JSON.stringify(attempts[0])).not.toContain('s3cr3t')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('restores the held lines ahead of a newer draft, as one draft (nocx-evj4b.1.8)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      holdOne(editor, view, 'echo A')
+      // A NEWER DRAFT, typed while the startup was still settling.
+      editor.insertText('echo B')
+      expect(editor.getDoc()).toBe('echo B')
+
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      await vi.waitFor(() => expect(editor.getDoc()).toBe('echo A\necho B'))
+    } finally {
+      teardown()
+    }
+  })
+
+  it('restores a held shell line into the shell draft, not the question being typed (nocx-evj4b.1.8)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    const inputTargets = (content as unknown as { inputTargets: { setActive(id: string): void } })
+      .inputTargets
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      holdOne(editor, view, 'echo A')
+      // The person reached for the assistant while the shell was starting.
+      inputTargets.setActive('agent')
+      editor.insertText('what did that print?')
+      expect(editor.getDoc()).toBe('what did that print?')
+
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+      // The question's draft is untouched: the shell's line is not a question.
+      expect(editor.getDoc()).toBe('what did that print?')
+
+      inputTargets.setActive('shell')
+      await vi.waitFor(() => expect(editor.getDoc()).toBe('echo A'))
+    } finally {
+      teardown()
+    }
+  })
+
   // REVIEW FINDING 2 (P1): the release started both submissions at once. A's
   // attempt opened and waited; B's was refused because the lane was running,
   // and the refusal wrote B immediately — ahead of A, which then wrote second.
@@ -3165,6 +3300,15 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
         reason: 'unsupported-shell',
         shell: '/bin/sh',
       })
+      await Promise.resolve()
+      await Promise.resolve()
+      // THE SHELL'S LINE IS NOT A QUESTION (nocx-evj4b.1.8): with Ask active
+      // it goes into the SHELL's draft, not into the editor showing Ask. The
+      // comment's own claim — that a shell command never becomes a question —
+      // is now true of the draft as well as of the wire.
+      const inputTargets = (content as unknown as { inputTargets: { setActive(id: string): void } })
+        .inputTargets
+      inputTargets.setActive('shell')
       await vi.waitFor(() => expect(editor.getDoc()).toBe('echo for-the-shell'))
       expect(session.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([])
       // and nothing became a question for the assistant

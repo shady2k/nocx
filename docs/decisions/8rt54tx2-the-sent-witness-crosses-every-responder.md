@@ -48,7 +48,13 @@ could land on another spacer instead of the rows the person was reading.
    `firstRow` and `rowCount` into the payload `ledger.get` returns. A reader therefore
    reserves an open block's real runs from the first metadata read, and the first page
    cannot reveal an evicted middle that the reservation had invented as kept.
-5. **Reconnect revalidates restored blocks, and refresh reads fresh geometry first.**
+5. **One block index is the lookup every door uses.** A map from an entry id to its
+   element (and live record) is written where a block is bound to an attempt and where a
+   restored block is built — top-level or nested under a turn, with rows or still empty.
+   The loader, refresh, revalidation and settle look a block up there instead of walking
+   the transcript or a list of live records; a stale entry is dropped when its element is
+   no longer connected.
+6. **Reconnect revalidates restored blocks, and refresh reads fresh geometry first.**
    `_restoredRows` is a reconnect source alongside the live block records; a restored
    block's refresh paints through its own element, never through `applyStoredRows` (which
    parks rows in a queue only a live block flushes). The geometry read by revalidation is

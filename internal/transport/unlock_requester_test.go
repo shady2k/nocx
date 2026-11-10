@@ -14,7 +14,14 @@ import (
 func TestUnlockRequest_NotifiesConnectedClient(t *testing.T) {
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithVaultLifecycle(newFakeVaultLifecycle()))
-	ctx := context.Background()
+	// CANCELLABLE, AND CANCELLED (nocx-ouru5.1.16). This test is about the
+	// notification, not the answer, so it never resolves the ask — and with a
+	// background context the goroutine below waited on the broker for the rest
+	// of the package's run: the goroutine dump from the gated run still had it
+	// nine minutes in. Ending the context when the test ends is what lets it
+	// return.
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

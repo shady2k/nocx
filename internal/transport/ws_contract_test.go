@@ -2987,7 +2987,11 @@ func TestVaultUnlockRequest_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "vault.unlockRequest.schema.json")
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithVaultLifecycle(newFakeVaultLifecycle()))
-	ctx := context.Background()
+	// CANCELLABLE, AND CANCELLED (nocx-ouru5.1.16): this test reads the
+	// notification and never answers the ask, so the goroutine below would
+	// wait on it for the rest of the package's run.
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

@@ -117,10 +117,20 @@ test('a waiting call takes a row, and Cancel takes it away with the answer', asy
     // one of three sentences — and the call's own rejection carries it to
     // the surface that asked: the Connections panel's test toast. A row that
     // stayed behind to read it out was the entry a Cancel could not remove.
-    await expect(page.locator('.ui-toast__message')).toHaveText(
-      /It did not start|It finished|Checking what happened/,
-      { timeout: 30_000 },
-    )
+    //
+    // SCOPED TO THE ANSWER, not to "the" toast (nocx-ouru5.1.17). The stand is
+    // shared by every spec in the shard, and a toast the notification policy
+    // raises AFTER its own test ended — a burst's "2 more notifications",
+    // delivered when its eight-second window closes — is pushed to whichever
+    // page is connected then, which can be this one. An unscoped locator meets
+    // it in strict mode and reports two toasts where the product drew one of
+    // each. The spec that raises the burst now claims its own summary; this is
+    // the second fence, not the only one.
+    await expect(
+      page
+        .locator('.ui-toast__message')
+        .filter({ hasText: /It did not start|It finished|Checking what happened/ }),
+    ).toHaveText(/It did not start|It finished|Checking what happened/, { timeout: 30_000 })
   } finally {
     for (const socket of host.held) socket.destroy()
     await new Promise<void>((resolve) => host.server.close(() => resolve()))

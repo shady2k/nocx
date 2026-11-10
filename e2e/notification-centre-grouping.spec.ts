@@ -2,7 +2,15 @@ import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
-import { test, expect, promptReady, showSidebarView, resolveBackend } from './harness'
+import {
+  test,
+  expect,
+  expectToast,
+  promptReady,
+  recordToasts,
+  showSidebarView,
+  resolveBackend,
+} from './harness'
 import type { Page } from './harness'
 import { readStand } from './stand'
 
@@ -115,20 +123,30 @@ const rowsOfKind = (page: Page, kind: string) =>
  * holding only its own rows) that it never established, and tagging the
  * titles is what establishes it without inventing a "clear the feed" the
  * product does not offer.
+ *
+ * THE TAG CARRIES THE REPEAT TOO (nocx-ouru5.1.17). The same trap is one
+ * repetition deep: `--repeat-each` walks this file again in the same process
+ * against the same feed, and `notify.feed.read` marks rows read without
+ * emptying them, so an untagged title makes the previous repetition's row a
+ * second match for this one's. Measured with `--repeat-each=5`: repeats 2-5
+ * went red, `build three chromium ×3` resolving to 2, 3, 4 and 5 elements.
+ * That matters here because CI repeats every spec file a pull request changes
+ * ten times (`.github/workflows/ci.yml`, "Repeat the specs this pull request
+ * adds or changes"). `repeatEachIndex` is 0 in an ordinary run, so a shard's
+ * rows read exactly as they did before.
  */
-const runTitles = (project: string) =>
-  [`build one ${project}`, `build two ${project}`, `build three ${project}`] as const
+const runTitles = (tag: string) =>
+  [`build one ${tag}`, `build two ${tag}`, `build three ${tag}`] as const
 /** What the row reads as: the newest title and the count (notifications-panel.tsx). */
 const collapsedLabel = (titles: readonly string[]) =>
   `${titles[titles.length - 1]} ×${titles.length}`
-const remoteTitle = (project: string) => `deploy remote ${project}`
+const remoteTitle = (tag: string) => `deploy remote ${tag}`
 /** An ordinary command whose whole job is to put a command's ENDING in the feed
  *  before the announcements arrive — the reasoning is at its first use below.
  *  Tagged per PANE because two sessions settle separately (the collapse key
- *  names the session), and per PROJECT for the reason runTitles is: both
- *  browser projects share one feed and a `hasText` has to match. */
-const settlingCommand = (project: string, where: string) =>
-  `true settling the ${where} feed ${project}`
+ *  names the session), and per PROJECT and REPEAT for the reason runTitles is:
+ *  every run shares one feed and a `hasText` has to match. */
+const settlingCommand = (tag: string, where: string) => `true settling the ${where} feed ${tag}`
 
 // ── the second host ───────────────────────────────────────────────────────
 // The in-process SSH server, spawned and trusted exactly as shell-mode.spec.ts
@@ -325,10 +343,12 @@ test.use({ viewport: { width: 1280, height: 900 } })
 test('a run collapses into one row that opens, and narrowing the feed leaves the bell alone', async ({
   page,
 }, testInfo) => {
-  // Tagged per project so this test's rows are ITS OWN — see runTitles above.
-  const RUN_TITLES = runTitles(testInfo.project.name)
+  // Tagged per project and per repeat so this run's rows are ITS OWN — see
+  // runTitles above.
+  const tag = `${testInfo.project.name} r${testInfo.repeatEachIndex}`
+  const RUN_TITLES = runTitles(tag)
   const COLLAPSED = collapsedLabel(RUN_TITLES)
-  const REMOTE = remoteTitle(testInfo.project.name)
+  const REMOTE = remoteTitle(tag)
   // Well past the suite's 30 s ceiling, and for a reason the ceiling's comment
   // allows for: this spec builds a Go binary, completes a real SSH handshake
   // and drives two real ptys. Every WAIT inside it is still on an observable.
@@ -337,6 +357,10 @@ test('a run collapses into one row that opens, and narrowing the feed leaves the
   const fixture = startSshd()
   let profileId: string | null = null
   try {
+    // Before the first application script: the toast below is due eight
+    // seconds after the burst and may have auto-dismissed by the time this
+    // test looks for it.
+    await recordToasts(page)
     await fixture.ready
     expect(fixture.addr).not.toBe('')
     trustHostKey(fixture)
@@ -362,7 +386,7 @@ test('a run collapses into one row that opens, and narrowing the feed leaves the
     // arithmetic is what broke: it read 1 while the centre's only sources were
     // OSC and a session ending, and 2 the day a command's ending was wired,
     // with nothing about this test's own subject changed.
-    const localSettling = settlingCommand(testInfo.project.name, 'local')
+    const localSettling = settlingCommand(tag, 'local')
     await run(page, localSettling)
     await expect(page.locator(UNREAD_ROW).filter({ hasText: localSettling })).toHaveCount(1, {
       timeout: 30_000,
@@ -480,7 +504,7 @@ test('a run collapses into one row that opens, and narrowing the feed leaves the
     // are rows of their own however quiet the first pane is. Same command, same
     // reason, and waiting on its row is also what proves the remote shell has
     // finished a command before the next line is typed at it.
-    const remoteSettling = settlingCommand(testInfo.project.name, 'remote')
+    const remoteSettling = settlingCommand(tag, 'remote')
     await remoteEditor.pressSequentially(remoteSettling)
     await remoteEditor.press('Enter')
     await showSidebarView(page, 'notifications')
@@ -557,6 +581,24 @@ test('a run collapses into one row that opens, and narrowing the feed leaves the
     await expect(page.locator(ROW)).toHaveCount(total)
     await expect(page.getByTestId(SHOWN)).toHaveCount(0)
     await expect(badge).toHaveText(counted)
+
+    // THE BURST'S CLOSING SUMMARY IS THIS SPEC'S TO CARRY (nocx-ouru5.1.17).
+    // The toast policy is leading-edge with an eight-second window keyed on
+    // {session, kind} (internal/app/app.go, notifyDebounceWindow): the first
+    // announcement is toasted at once, the other two are held, and the window's
+    // close toasts "2 more notifications" eight seconds after the first — which
+    // is after this test's own assertions. Left unclaimed, that delivery is
+    // pushed to whatever page is connected when the window closes. In chromium
+    // shard 1 the next file is operations-waiting-call.spec.ts, and its answer
+    // toast then met a second one in strict mode (measured on main: two
+    // `.ui-toast__message` elements where the product had drawn one of each).
+    //
+    // So this page stays connected until the window closes: the delivery lands
+    // here, where it belongs, and no later spec inherits it. The recorder is
+    // what makes the wait independent of how long the assertions above took —
+    // the summary may already have auto-dismissed, and a bare `toBeVisible`
+    // would then wait for a toast that never comes again.
+    await expectToast(page, `2 more notifications — ${RUN_TITLES[2]} — step`)
   } finally {
     // Take the profile back out. The stand's home is shared by every spec in
     // the run AND by both browser projects, so a profile left here becomes the

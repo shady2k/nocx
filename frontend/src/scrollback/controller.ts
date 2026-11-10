@@ -187,6 +187,7 @@ export class ScrollbackController {
   private _paintWatch = 0
   private _painting = false
   private _followObserver: IntersectionObserver | null = null
+  private _offReaderGesture: () => void = () => {}
   /** ONE MECHANISM for "may this header pin" (nocx-4y82c.1.3): the observer
    *  watches every ledger-level header's own box and the scroller's, and a
    *  header's verdict is its own height against a third of the view. There is
@@ -336,7 +337,7 @@ export class ScrollbackController {
         // `runningLiveCap` is read from this box, so re-sizing here is the
         // only place the two agree in the frame the box moved.
         this.setLiveHeight(this._liveContentHeight())
-        if (this._tail.following) this._scrollToBottom()
+        if (this._followIntent()) this._scrollToBottom()
       })
       this._boxResizeObserver.observe(this.scrollbackArea)
     }
@@ -357,6 +358,26 @@ export class ScrollbackController {
       this._headerSetObserver.observe(this.scrollbackInner, { childList: true })
     }
     this._syncObservedHeaders()
+
+    // A PERSON'S OWN GESTURE ENDS FOLLOWING AT THE GESTURE (nocx-3wmve). The
+    // sentinel reports the live end a frame behind the scroll it is about, so a
+    // settle landing in that frame — a freeze, a stored-rows delivery — used to
+    // take a just-scrolled-up reader for a follower and pin them to the bottom.
+    // A gesture that moves away from the end is the answer itself, and the
+    // watcher re-engages following when the end is on screen again.
+    const onReaderGesture = (ev: Event): void => {
+      if (this._gestureLeavesTail(ev)) this._tail.leave()
+    }
+    this._offReaderGesture = () => {
+      this.scrollbackArea.removeEventListener('wheel', onReaderGesture)
+      this.scrollbackArea.removeEventListener('keydown', onReaderGesture, true)
+      this.scrollbackArea.removeEventListener('touchstart', onReaderGesture)
+      this.scrollbackArea.removeEventListener('pointerdown', onReaderGesture, true)
+    }
+    this.scrollbackArea.addEventListener('wheel', onReaderGesture, { passive: true })
+    this.scrollbackArea.addEventListener('keydown', onReaderGesture, true)
+    this.scrollbackArea.addEventListener('touchstart', onReaderGesture, { passive: true })
+    this.scrollbackArea.addEventListener('pointerdown', onReaderGesture, true)
 
     // Whether the end of the live output is on screen. Not "did the last scroll
     // look like a human" — that question has no answer: the `scroll` event does
@@ -384,6 +405,30 @@ export class ScrollbackController {
       { root: this.scrollbackArea, threshold: 0 },
     )
     this._followObserver.observe(this.followSentinel)
+  }
+
+  /** Whether a gesture of the person's own can only have moved them AWAY from
+   *  the live end. Wheel-up and the keys that page or step up are the direct
+   *  answer; a touch, or a grab on the scrollbar's gutter, may go either way —
+   *  and the watcher re-engages following when they arrive at the end. */
+  private _gestureLeavesTail(ev: Event): boolean {
+    switch (ev.type) {
+      case 'wheel':
+        return (ev as WheelEvent).deltaY < 0
+      case 'keydown': {
+        const key = (ev as KeyboardEvent).key
+        return key === 'PageUp' || key === 'Home' || key === 'ArrowUp'
+      }
+      case 'touchstart':
+        return true
+      case 'pointerdown': {
+        const area = this.scrollbackArea
+        const rect = area.getBoundingClientRect()
+        return (ev as PointerEvent).clientX - rect.left >= area.clientWidth
+      }
+      default:
+        return false
+    }
   }
 
   /** The painter surface mounts into this stable terminal-live-inner wrapper,
@@ -1047,6 +1092,20 @@ export class ScrollbackController {
     return this._tail.intent(this.scrollbackArea)
   }
 
+  /** THE SETTLE'S ANSWER, and it is the position's (nocx-3wmve). The watcher
+   *  reports the live end a frame behind the scroll it is about, so on its own
+   *  it cannot answer for a mutation landing in that frame: a person who has
+   *  just scrolled up still reads as a follower there. The gesture seam ends
+   *  following at the gesture (`_gestureLeavesTail`); this also asks where the
+   *  scroller actually is, so the follower branch cannot take a reader who is
+   *  demonstrably away. A scroller with no layout box answers nothing — then
+   *  the remembered intent stands, as it always has. */
+  private _followsNow(): boolean {
+    const area = this.scrollbackArea
+    if (area.clientHeight === 0 || area.scrollHeight === 0) return this._tail.following
+    return isAtTail(area)
+  }
+
   /** At the live end, WITH an end to be at. A scroller whose content fits has
    *  nothing to scroll and is therefore trivially "at its end" — which is
    *  exactly the state a seated answer passes through before its box grows,
@@ -1122,7 +1181,7 @@ export class ScrollbackController {
    * already decided not to play back.
    */
   scrollToBottomIfFollowing(): void {
-    if (this._tail.following) this._scrollToBottom()
+    if (this._followIntent()) this._scrollToBottom()
   }
 
   /** WHERE THE PERSON'S EYES ARE, so a mutation can give it back (nocx-3wmve).
@@ -1401,7 +1460,7 @@ export class ScrollbackController {
       write()
       return
     }
-    const following = this._followIntent()
+    const following = this._followsNow()
     const place = following ? null : this._captureReaderPlace()
     write()
     if (following) {
@@ -1412,7 +1471,7 @@ export class ScrollbackController {
     }
   }
 
-  private settleAtTail(mutate: () => void, followIntent = this._followIntent()): void {
+  private settleAtTail(mutate: () => void, followIntent = this._followsNow()): void {
     this._settling += 1
     try {
       this._settleTail(mutate, followIntent)
@@ -1474,7 +1533,7 @@ export class ScrollbackController {
    *  from the assistant's, and guessing which lane a finished block came
    *  from is exactly the kind of derivation the ledger exists to make
    *  unnecessary. */
-  private _finishFreeze(rec: BlockRecord, followIntent = this._followIntent()): void {
+  private _finishFreeze(rec: BlockRecord, followIntent = this._followsNow()): void {
     windowPet()?.reactTo(
       rec.status === 'success' || rec.status === 'failure' ? rec.status : 'unknown',
       rec.author,
@@ -1511,7 +1570,7 @@ export class ScrollbackController {
    *  settles it when it does, and on nothing else (nocx-2v80t.3.27). The
    *  authority check (kernel freezeBlock) is the caller's. */
   freezeFromAttempt(attempt: ExecutionAttempt, endLine: number): boolean {
-    const followIntent = this._followIntent()
+    const followIntent = this._followsNow()
     this._restoreRunningHeader()
     const rec = this._blockManager.freezeFromAttempt(attempt, endLine)
     if (rec) {
@@ -1524,7 +1583,7 @@ export class ScrollbackController {
   /** The attempt-driven abandonment: the attempt went `unknown`, the block
    *  freezes as abandoned — never successful (ADR-0024 §5). */
   abandonAttempt(attempt: ExecutionAttempt, endLine: number, sessionGone = false): boolean {
-    const followIntent = this._followIntent()
+    const followIntent = this._followsNow()
     this._restoreRunningHeader()
     const rec = this._blockManager.abandonAttempt(attempt, endLine, sessionGone)
     if (rec) {
@@ -1538,7 +1597,7 @@ export class ScrollbackController {
    *  ended before any start frame arrived, so nothing will ever complete it
    *  (nocx-mlyu). Unknown, never successful. */
   abandonUnbound(endLine: number): boolean {
-    const followIntent = this._followIntent()
+    const followIntent = this._followsNow()
     this._restoreRunningHeader()
     const rec = this._blockManager.abandonUnbound(endLine)
     if (rec) {
@@ -1552,7 +1611,7 @@ export class ScrollbackController {
    *  nested environment, so it ends here, painted as neither success nor
    *  failure, and the running slot is freed for the blocks that follow. */
   enterBlock(endLine: number): boolean {
-    const followIntent = this._followIntent()
+    const followIntent = this._followsNow()
     this._restoreRunningHeader()
     const rec = this._blockManager.freezeEntered(endLine)
     if (rec) {

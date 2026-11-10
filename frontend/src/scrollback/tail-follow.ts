@@ -67,6 +67,16 @@ export class TailFollow {
     else if (isMeasurable(el)) this._following = false
   }
 
+  /** THE PERSON'S OWN GESTURE ENDED IT, AT THE GESTURE (nocx-3wmve). The
+   *  watcher that reports the live end is a frame behind the scroll it is
+   *  about, so a settle landing in that frame used to read a scroll-up as
+   *  "still following" and put the reader back at the bottom. A gesture that
+   *  moves away from the end is the answer itself; the watcher re-engages it
+   *  when the end is on screen again. */
+  leave(): void {
+    this._following = false
+  }
+
   /** A deliberate move to the live end: it follows from here. */
   follow(): void {
     this._following = true

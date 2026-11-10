@@ -2219,6 +2219,29 @@ describe("the reader's anchor (nocx-3wmve)", () => {
     document.body.removeChild(pane)
   })
 
+  it('a scroll-up ends following at the gesture, not when the watcher catches up (nocx-3wmve)', () => {
+    const { controller } = makeController()
+    const area = laidOut(controller)
+    area.scrollTo = ((options: ScrollToOptions | number) => {
+      const asked = typeof options === 'object' ? Number(options.top) : Number(options)
+      area.scrollTop = Math.min(asked, area.scrollHeight - area.clientHeight)
+    }) as typeof area.scrollTo
+    area.scrollTop = area.scrollHeight - area.clientHeight // the live end, following
+    const tail = (controller as unknown as { _tail: { following: boolean } })._tail
+    expect(tail.following).toBe(true)
+
+    // THE PERSON'S OWN WHEEL-UP, and the position it produced. The follow
+    // sentinel has not delivered yet — that is a frame behind.
+    area.dispatchEvent(new WheelEvent('wheel', { deltaY: -120, bubbles: true }))
+    area.scrollTop = 800
+
+    // A settle lands in the same frame: a freeze, a stored-rows delivery.
+    controller.holdReaderPlace(() => {})
+
+    expect(area.scrollTop, 'the settle put a just-scrolled-up reader back at the bottom').toBe(800)
+    expect(tail.following, 'the gesture did not end following at the gesture').toBe(false)
+  })
+
   it('puts a FOLLOWER back at the bottom edge when a change grows the transcript (nocx-3wmve)', () => {
     const { controller } = makeController()
     const area = laidOut(controller)

@@ -1933,7 +1933,22 @@ describe("the reader's anchor (nocx-3wmve)", () => {
     controller.scrollbackInner.appendChild(block)
     block.getBoundingClientRect = () => rect(-800 * 17, 1000 * 17)
 
-    controller.holdReaderPlace(() => {})
+    // THE ORDINAL WALK IS COUNTED TOO: a row restores by its block and its
+    // logical line, so counting its position among the body's children would
+    // walk every sibling on every settle for a number nothing reads.
+    const bodyEl = block.querySelector('.cmd-output') as HTMLElement
+    const indexOf = Array.prototype.indexOf
+    let walks = 0
+    Array.prototype.indexOf = function (this: unknown, ...args: unknown[]) {
+      if (this === bodyEl.children) walks += 1
+      return indexOf.apply(this as never, args as never)
+    } as typeof Array.prototype.indexOf
+    try {
+      controller.holdReaderPlace(() => {})
+    } finally {
+      Array.prototype.indexOf = indexOf
+    }
+    expect(walks, 'the capture walked the body for an ordinal a row does not need').toBe(0)
 
     // The row nearest the top edge is row 800 — a linear walk from the block's
     // first row reads ~800 of them; a bisection reads a handful.

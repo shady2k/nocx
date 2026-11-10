@@ -3450,7 +3450,13 @@ export class BlockManager {
       // leave the document with it — the terminal would vanish at the freeze
       // (ADR-3kqrem7v). The region goes back to the stack, right after the block
       // it has just stopped being the body of.
-      this.releaseLiveRegion()
+      //
+      // AND ONLY IF IT IS THIS BLOCK'S (nocx-3wmve). The freeze now waits for
+      // its sealed rows, and by the time they land another command may own the
+      // live region: releasing it here would detach THAT block's grid — its
+      // later rows bypass the hold and duplicate, and its own freeze would find
+      // nothing to release.
+      if (this._liveContainer.parentElement === rec.el) this.releaseLiveRegion()
       // THE HOLD ENDS WHERE THE GRID LEAVES THE BLOCK (nocx-4y82c.1.1): the
       // frozen card has no live screen under it, so it takes every row the
       // record holds. Inside the mutation, because it decides what the swap

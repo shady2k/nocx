@@ -1169,12 +1169,18 @@ export class ScrollbackController {
       const body = unit.parentElement
       const owner = body?.closest<HTMLElement>('.cmd-block') ?? block
       const blockId = owner.dataset.entryId ?? block.dataset.entryId ?? null
-      const index = body === null ? -1 : Array.prototype.indexOf.call(body.children, unit)
-      if (unit.classList.contains('term-grid-row') && unit.dataset.logicalLine !== undefined) {
+      // AN ORDINAL IS ONLY FOR WHAT NEEDS ONE (nocx-3wmve). A row restores by
+      // its block and its logical line, so counting its position among the
+      // body's children would walk tens of thousands of siblings on every
+      // settle for a number nothing reads.
+      const isRow =
+        unit.classList.contains('term-grid-row') && unit.dataset.logicalLine !== undefined
+      const index = isRow || body === null ? -1 : Array.prototype.indexOf.call(body.children, unit)
+      if (isRow) {
         return {
           blockId,
           kind: 'row',
-          line: unit.dataset.logicalLine,
+          line: unit.dataset.logicalLine ?? null,
           index,
           signature: '',
           offset: element.top - clip.top,

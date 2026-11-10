@@ -4907,6 +4907,50 @@ describe('backend-owned block rows', () => {
     }
   })
 
+  it("releases the live region only when it is the freezing block's own (nocx-3wmve)", () => {
+    const inner = document.createElement('div')
+    const liveContainer = document.createElement('div')
+    inner.appendChild(liveContainer)
+    document.body.appendChild(inner)
+    const manager = new BlockManager(inner, liveContainer, {
+      snapshotStore: freshStore(),
+      paintStoredRows: (block, rows) =>
+        paintStoredRows(block, rows, { metric: null, palette: DEFAULT_SNAPSHOT }),
+    })
+    const completed = {
+      id: 'att-a',
+      domain: mintDomain({
+        lane: 'test-lane',
+        lifecycle: 'prompt_ready',
+        domain: 'test-domain',
+        epoch: 1,
+      }) as IntegrationDomain,
+      state: 'completed' as const,
+      exitCode: 0,
+      fence: 'a'.repeat(64),
+    }
+    try {
+      // A runs, completes, and waits for its block.closed (the sealed rows are
+      // still on the wire, which is what the freeze now waits for).
+      manager.startBlock('printf a', '~', 0)
+      manager.bindAttempt('att-a')
+      manager.freezeFromAttempt(completed, 0)
+      // B starts and the live region becomes B's body.
+      const b = manager.startBlock('printf b', '~', 0)
+      manager.bindAttempt('att-b')
+      expect(liveContainer.parentElement).toBe(b.el)
+
+      // A's close lands while B owns the grid. It may not take B's region.
+      manager.blockClosed('att-a')
+
+      expect(liveContainer.parentElement).toBe(b.el)
+      expect(b.el.contains(liveContainer)).toBe(true)
+    } finally {
+      inner.remove()
+      manager.dispose()
+    }
+  })
+
   it('enters the reader hold before any DOM change of the freeze (nocx-3wmve)', () => {
     const inner = document.createElement('div')
     const liveContainer = document.createElement('div')

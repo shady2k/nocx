@@ -1,6 +1,6 @@
 // sidebar-model — pure functions only, no jsdom, no Solid.
 import { describe, it, expect } from 'vitest'
-import { createSidebarState, toggleSidebar, setActiveView, collapseSidebar } from './sidebar-model'
+import { createSidebarState, toggleSidebar, setActiveView, setPanel } from './sidebar-model'
 
 // ── createSidebarState ─────────────────────────────────────────────────────
 
@@ -69,18 +69,18 @@ describe('setActiveView', () => {
   })
 })
 
-// ── collapseSidebar ────────────────────────────────────────────────────────
+// ── setPanel (nocx-ouru5.1.18) ─────────────────────────────────────────────
 
-describe('collapseSidebar', () => {
-  it('collapses an open sidebar', () => {
+describe('setPanel', () => {
+  it('replaces the view and the collapse together', () => {
     const s = createSidebarState('files')
-    const next = collapseSidebar(s)
-    expect(next.collapsed).toBe(true)
+    const next = setPanel(s, 'ports', true)
+    expect(next).toEqual({ activeViewId: 'ports', collapsed: true })
+    expect(s).toEqual({ activeViewId: 'files', collapsed: false })
   })
 
-  it('is a no-op when already collapsed', () => {
-    const s = { collapsed: true, activeViewId: 'files' }
-    const next = collapseSidebar(s)
-    expect(next).toBe(s)
+  it('is a no-op when the state already is that panel', () => {
+    const s = { collapsed: true, activeViewId: 'ports' }
+    expect(setPanel(s, 'ports', true)).toBe(s)
   })
 })

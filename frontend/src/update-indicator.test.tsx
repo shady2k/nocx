@@ -39,7 +39,6 @@ describe('activity bar update indicator', () => {
       undefined,
       undefined,
       undefined,
-      undefined,
       {
         title: () => 'Update available',
         icon: TestIcon,
@@ -73,7 +72,7 @@ describe('activity bar update indicator', () => {
     const controller = createUpdateController({ apply: vi.fn() })
     controller.showAvailable('2.0.0', 'https://example.com/releases/2.0.0')
     render(() => <ToastHost />)
-    mountSidebar(bar, panel, views, [settings], null, undefined, undefined, undefined, undefined, {
+    mountSidebar(bar, panel, views, [settings], null, undefined, undefined, undefined, {
       title: () => 'Update available',
       icon: TestIcon,
       level: () => 'neutral',

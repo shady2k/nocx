@@ -302,10 +302,17 @@ func TestTabStoresNoActivityNoAttentionAndNoLabel(t *testing.T) {
 	want := []string{
 		"id", "workspace_id", "parent_id", "name", "colour",
 		"position", "pinned", "layout", "seen_at", "closed_at", "digest",
+		"panel_view", "panel_collapsed",
 	}
 	if !equalStrings(got, want) {
 		t.Fatalf("tabs columns = %v, want exactly %v", got, want)
 	}
+	// panel_view and panel_collapsed ARE the tab's own (nocx-ouru5.1.18):
+	// the right-hand panel belongs to the tab, so switching tabs restores the
+	// panel each one left behind. They are not the activity/attention/label
+	// class above — nothing computes them from panes, and no other owner
+	// holds them.
+	//
 	// Named individually as well, because this is the assertion the bead is
 	// about and a reader of a failure should see the word that broke it.
 	for _, forbidden := range []string{
@@ -603,6 +610,80 @@ func TestCreateRefusesAnIDThatIsAlreadyTaken(t *testing.T) {
 	// And the original is untouched.
 	if spaces, err := layout.Workspaces(ctx); err != nil || len(spaces) != 1 || spaces[0].Name != "work" {
 		t.Fatalf("workspaces = %+v (err %v), want the original name", spaces, err)
+	}
+}
+
+// ── the panel is the tab's, not the window's (nocx-ouru5.1.18) ────────────
+
+// A tab remembers the sidebar panel it shows: which view, and whether its
+// rail is collapsed. The answer is READ BACK from the store rather than
+// echoed, and it survives a reopen — which is the half the renderer relies on
+// when a window comes back on the tab it left.
+func TestTabRemembersItsPanel(t *testing.T) {
+	db, layout, path := newLayoutAt(t)
+	ctx := context.Background()
+	seedChain(t, layout)
+
+	stored, err := layout.SetTabPanel(ctx, "tab-1", "ports", true)
+	if err != nil {
+		t.Fatalf("SetTabPanel: %v", err)
+	}
+	if stored.PanelView != "ports" || !stored.PanelCollapsed {
+		t.Fatalf("SetTabPanel answered %q/%v, want ports/collapsed", stored.PanelView, stored.PanelCollapsed)
+	}
+	// The OTHER tab is untouched: one row's panel is not the strip's.
+	other, err := layout.Tabs(ctx, "ws-1")
+	if err != nil {
+		t.Fatalf("Tabs: %v", err)
+	}
+	for _, tab := range other {
+		if tab.ID == "tab-2" && (tab.PanelView != "" || tab.PanelCollapsed) {
+			t.Fatalf("tab-2's panel moved with tab-1's: %+v", tab)
+		}
+	}
+
+	// "" is a real value — a tab whose panel shows nothing — and an empty
+	// view with the rail expanded is a tab that has never opened one.
+	if _, err := layout.SetTabPanel(ctx, "tab-2", "", false); err != nil {
+		t.Fatalf("SetTabPanel empty: %v", err)
+	}
+
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	again, err := reopenStore(t, path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = again.Close() })
+	back, err := again.Layout().Tabs(ctx, "ws-1")
+	if err != nil {
+		t.Fatalf("Tabs after reopen: %v", err)
+	}
+	byID := map[string]content.Tab{}
+	for _, tab := range back {
+		byID[tab.ID] = tab
+	}
+	if got := byID["tab-1"]; got.PanelView != "ports" || !got.PanelCollapsed {
+		t.Fatalf("tab-1 panel after reopen = %q/%v, want ports/collapsed", got.PanelView, got.PanelCollapsed)
+	}
+	if got := byID["tab-2"]; got.PanelView != "" || got.PanelCollapsed {
+		t.Fatalf("tab-2 panel after reopen = %q/%v, want empty/expanded", got.PanelView, got.PanelCollapsed)
+	}
+}
+
+// A tab that has left the window is refused, exactly as the decoration
+// methods refuse it: the wire says an open tab's workspaceId is never empty,
+// and a closed tab may have outlived its workspace.
+func TestSettingThePanelOfAClosedTabIsRefused(t *testing.T) {
+	_, layout := newLayout(t)
+	ctx := context.Background()
+	seedChain(t, layout)
+	if err := layout.DeleteTab(ctx, "tab-2", content.Replacement{TabID: "tab-r", PaneID: "pane-r", Cwd: "/"}); err != nil {
+		t.Fatalf("DeleteTab: %v", err)
+	}
+	if _, err := layout.SetTabPanel(ctx, "tab-2", "files", false); !errors.Is(err, content.ErrNoSuchTab) {
+		t.Fatalf("SetTabPanel on a closed tab: err = %v, want ErrNoSuchTab", err)
 	}
 }
 

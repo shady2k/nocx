@@ -221,6 +221,8 @@ was left alone.
 
 | ywzcpbqe | 2026-11-10 | [A block's rows are a set of ranges, and its height is its geometry](ywzcpbqe-a-blocks-rows-are-a-set-of-ranges.md) | Accepted (owner review of PR #789, 2026-11-10, `nocx-4y82c.1.18`; refines ADR-y45sp41c decisions 1 and 3) |
 
+| 8rt54tx2 | 2026-11-10 | [The sent witness crosses every responder, and a running block keeps its body](8rt54tx2-the-sent-witness-crosses-every-responder.md) | Accepted (owner review of PR #789, round 3, 2026-11-10, `nocx-4y82c.1.18`; refines ADR-y45sp41c and ADR-ywzcpbqe) |
+
 ## Adding one
 
 1. `node .githooks/adr-identifier.mjs` prints an identifier.

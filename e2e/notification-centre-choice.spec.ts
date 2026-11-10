@@ -267,6 +267,12 @@ test('a person can choose visible notification kinds without losing rows or read
     // two unread rows are the count that the visibility toggle must lower.
     await tabNamed(page, titleC).click()
     await expect(tabNamed(page, titleB)).toHaveAttribute('aria-selected', 'false')
+    // The panel is the TAB's (ADR-x7cvh8e1), and C has never opened one, so
+    // the switch collapsed the rail and took the rows off screen. A person
+    // clicks the bell again — which is what this does, on the tab they are
+    // now in. Without it the assertions below read an empty panel while the
+    // badge still counts the two unread rows.
+    await showSidebarView(page, 'notifications')
     fs.writeFileSync(gateB, '')
     await commandFinished(page, titleB)
     // The same wait the gateA moment uses, and for the same reason: the badge
@@ -327,6 +333,8 @@ test('a person can choose visible notification kinds without losing rows or read
     // command remains visible; its BEL is retained but hidden until re-enabled.
     await tabNamed(page, titleA).click()
     await expect(tabNamed(page, titleC)).toHaveAttribute('aria-selected', 'false')
+    // A has no panel of its own either: the same bell click, on this tab.
+    await showSidebarView(page, 'notifications')
     fs.writeFileSync(gateC, '')
     await commandFinished(page, titleC)
     // The same conjunction the two moments above wait on, and for the same

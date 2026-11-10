@@ -178,8 +178,16 @@ func gitRun(ctx context.Context, allow gitAllowance, acquire func(context.Contex
 		if timer != nil {
 			timer.Stop()
 		}
-		settle(werr)
+		// THE PERMIT IS BACK BEFORE THE OUTCOME IS PUBLISHED (nocx-ouru5.1.15).
+		// settle() hands the caller its answer, and the caller returns from
+		// gitRun the moment it has it — so publishing first let a caller see a
+		// finished call whose permit was still held by the worker's next
+		// statement. The two orderings differ by one scheduler decision, which
+		// is why this failed about once in twenty thousand runs rather than
+		// always. "The call is over" must mean the permit is back: settle after
+		// the give, never before.
 		h.give()
+		settle(werr)
 	}()
 
 	select {

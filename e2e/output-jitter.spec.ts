@@ -69,7 +69,6 @@ const LINE = /GET-(\d{3})\b/
 const DONE = 'APT-END-DONE'
 
 interface VisibleRow {
-  source: 'stored' | 'live'
   /** Distance from the scroller's top edge, in CSS pixels. */
   y: number
   text: string
@@ -137,7 +136,6 @@ async function framesOf(page: Page, doneText: string): Promise<Frame[]> {
             rows.push({
               y: round(box.top - sr.top),
               text: (row.textContent ?? '').trimEnd(),
-              source: row.closest('.cmd-output') ? 'stored' : 'live',
             })
           }
           const frameBox = block.getBoundingClientRect()
@@ -197,27 +195,21 @@ function judge(frames: readonly Frame[], pitch: number): Jitter {
     // output, and two rows with the same text say nothing about which one
     // moved. A line that appears twice in one frame is the out-of-order
     // assertion's, below.
-    const keyed = (frame: Frame): Map<string, VisibleRow> => {
+    const keyed = (frame: Frame): Map<string, number> => {
       const counts = new Map<string, number>()
       for (const row of frame.rows) counts.set(row.text, (counts.get(row.text) ?? 0) + 1)
-      const map = new Map<string, VisibleRow>()
+      const map = new Map<string, number>()
       for (const row of frame.rows) {
         if (counts.get(row.text) !== 1 || LINE.exec(row.text) === null) continue
-        map.set(row.text, row)
+        map.set(row.text, row.y)
       }
       return map
     }
     const before = keyed(previous)
-    for (const [text, row] of keyed(frame)) {
+    for (const [text, y] of keyed(frame)) {
       const was = before.get(text)
       if (was === undefined) continue
-      // THE JOINT IS NOT A MOVE (ADR-92zzg2y2). A row handed from the live
-      // grid to the running block's stored body is painted on the other
-      // surface at the seam; its y is the seam's question, and
-      // e2e/running-block-body-seam.spec.ts asserts it. This invariant is
-      // about a row moving on the surface it is already on.
-      if (was.source !== row.source) continue
-      const dy = row.y - was.y
+      const dy = y - was
       if (dy <= 0.05) continue
       worstDownPx = Math.max(worstDownPx, dy)
       if (dy < pitch / 2) {

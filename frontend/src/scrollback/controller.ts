@@ -123,6 +123,11 @@ export class ScrollbackController {
    *  a full-screen program inherits the header the running block had, and a
    *  markerless shell has none in either buffer (ADR-92zzg2y2). */
   private _structured = true
+  /** How many whole screen rows the live grid is translated above its box.
+   *  The stored body above the box must paint those rows too, or the row that
+   *  leaves the screen top appears one row lower when it moves from the grid
+   *  to the body (the owner's "output moves down" frame). */
+  private _hiddenScreenRows = 0
   /** A ready prompt asked for the idle layout while a completed block was
    *  still waiting for its block.closed; applied when the close lands, and
    *  dropped the moment a command owns the live region again. */
@@ -380,6 +385,7 @@ export class ScrollbackController {
     this._idleRequested = false
     this._mode = 'idle'
     this._structured = true
+    this._hiddenScreenRows = 0
     // Both inline heights have to go: running content height and its clip
     // otherwise outrank the idle/fullscreen mode classes.
     this.terminalLiveContainer.style.height = ''
@@ -437,6 +443,7 @@ export class ScrollbackController {
     if (this._mode === 'fullscreen') return
     this._mode = 'unstructured'
     this._structured = false
+    this._hiddenScreenRows = 0
     this.terminalLiveViewport.style.height = ''
     this.terminalLiveContainer.className =
       'terminal-live-container terminal-live-container live-unstructured'
@@ -535,6 +542,7 @@ export class ScrollbackController {
     // every caller has to remember to call (the version that had to be
     // remembered was called exactly twice, at the two mode entries).
     if (this._mode === 'unstructured' || this._mode === 'fullscreen') {
+      this._hiddenScreenRows = 0
       this._fillPane()
       return
     }
@@ -578,7 +586,10 @@ export class ScrollbackController {
     // the box grew by only three, and every visible row moved DOWN a line.
     // Derived this way a row's place is `bottom + row·cell - px`: a function
     // of the painted content alone, so releasing the shift cannot move it.
-    this._applyShift(height - content)
+    const shift = height - content
+    this._applyShift(shift)
+    const cell = this._cellMetrics()?.cellHeight ?? 0
+    this._hiddenScreenRows = cell > 0 ? gridRows(shift, cell) : 0
     const box = `${content + pad}px`
     // Keep the block's bottom at the bottom of the view — but only on the
     // frames where the box actually CHANGED SIZE. This runs on every chunk of
@@ -791,6 +802,7 @@ export class ScrollbackController {
   enterFullscreen(): void {
     this._idleRequested = false
     this._mode = 'fullscreen'
+    this._hiddenScreenRows = 0
     this.terminalLiveViewport.style.height = ''
     this.terminalLiveContainer.className =
       'terminal-live-container terminal-live-container live-fullscreen'
@@ -855,6 +867,13 @@ export class ScrollbackController {
     return cell > 0 && max > cell ? gridRows(max, cell) * cell : max
   }
 
+  /** How many whole rows the live grid is translated above its box. The
+   *  stored body above the box paints them too, so a row leaves the grid and
+   *  enters the body at the same y (ADR-92zzg2y2). */
+  get hiddenScreenRows(): number {
+    return this._hiddenScreenRows
+  }
+
   /** THE SAME BOX, BEFORE ITS ROWS ARE COUNTED. `paneFillHeight` answers in
    *  whole rows, which is what a box and a pty are told; anything that has to
    *  subtract from it must subtract before that rounding. */
@@ -881,6 +900,7 @@ export class ScrollbackController {
   /** Exit alt-screen: restore normal layout. */
   exitFullscreen(): void {
     this._mode = 'idle'
+    this._hiddenScreenRows = 0
     this.terminalLiveContainer.style.height = ''
     this.terminalLiveViewport.style.height = ''
     this._setFilledPane(false)

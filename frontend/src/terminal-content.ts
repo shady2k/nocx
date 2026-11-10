@@ -6231,14 +6231,19 @@ export class TerminalContent extends BasePaneContent {
     // THE PAINTED SCREEN'S ROW, not the model's: a frame can be accepted and
     // not painted yet, and the body must stop where the grid it is joined to
     // stops. Falls back to the model only before the first paint.
-    const passed = (this._lastPaintedBaseRow ?? snapshot.state.baseRow) - start
-    // A LIVE SCREEN THAT HAS NOT REACHED THE BLOCK'S ROWS HAS PASSED NONE OF
-    // THEM, and zero is the answer: the block opened on a row the screen has
-    // not scrolled past yet (the anchor is at or below the base), so every
-    // row the record holds is still on screen and all of it is held. That is
-    // the same bound the clamp below has always given; what makes it a hold
-    // now is the generation check above, not the sign of this number.
-    return Number.isSafeInteger(passed) ? Math.max(0, passed) : null
+    const base = (this._lastPaintedBaseRow ?? snapshot.state.baseRow) - start
+    // THE ROWS THE BOX HIDES AT THE TOP ARE PART OF THE BODY TOO
+    // (ADR-92zzg2y2). The live grid is translated by what its box does not
+    // show; the rows above the box are still screen rows, and the stored body
+    // above the box must paint them or a row that leaves the screen top is
+    // one row lower when it lands in the body than it was in the grid — the
+    // owner's "output moves down" frame. `hiddenScreenRows` is that
+    // translation in whole rows, taken from the frame the grid was painted
+    // from. Before the screen reaches the block's first output row the sum is
+    // negative and zero is the answer: nothing the record holds has left the
+    // screen yet.
+    const hidden = this.scrollback?.hiddenScreenRows ?? 0
+    return Number.isSafeInteger(base) ? Math.max(0, base + hidden) : null
   }
 
   /** Paint the running block's held rows as the painted screen passes them —

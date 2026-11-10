@@ -28,7 +28,9 @@ import { readStand } from './stand'
 
 const MARKER = 'LASTCOL'
 /** The markerless ssh line uses a marker with no capital C: a per-key ssh
- *  intent has dropped that character from a long typed line (measured). */
+ *  intent has dropped that character from a long typed line (measured).
+ *  `nocx-evj4b.1.12` owns the dropped-character defect; this spec works around
+ *  it until it is fixed. */
 const SSH_MARKER = 'MARK'
 /** `C` is the pty's own column count; the row is exactly `C` characters and
  *  ends with the marker, so its last glyph is the last column. */
@@ -287,6 +289,10 @@ async function openSshPane(page: Page): Promise<{ close: () => Promise<void> }> 
  * outruns a browser typing at full speed; the pace is what keeps every
  * character, and the shell's own echo is the proof the line arrived before
  * Enter. The wait is the echo, never a duration.
+ *
+ * The pace and the quote-free command are a workaround for `nocx-evj4b.1.12`
+ * (a per-key intent on a markerless ssh pane has dropped characters from a
+ * long line); the spec keeps them until that bead is fixed.
  */
 async function typeAtShell(page: Page, text: string): Promise<void> {
   await page.keyboard.type(text, { delay: 20 })

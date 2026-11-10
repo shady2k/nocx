@@ -51,8 +51,12 @@ interface ReaderPlace {
   kind: 'row' | 'unit' | 'header'
   /** The record's absolute line, for a row. */
   line: string | null
-  /** The unit's ordinal among the block's rendered units, for anything else. */
-  index: number
+  /** THE ROUTE FROM THE OWNING BLOCK TO THE UNIT, as child indices
+   *  (nocx-3wmve). A reasoning note sits beside a `.cmd-output`, a paragraph
+   *  inside an answer, a table cell in a table: naming the shape was what made
+   *  every new one fall back to the position. Empty for a row (its line names
+   *  it) and a header (its block names it). */
+  path: number[]
   /** The unit's class signature, so an ordinal that moved one neighbour can be
    *  corrected. */
   signature: string
@@ -1209,9 +1213,7 @@ export class ScrollbackController {
       const box = block.getBoundingClientRect()
       if (box.bottom <= clip.top) continue
       if (box.top >= clip.bottom) break
-      const found = this._unitAtViewportTop(block, clip)
-      if (found === null) continue
-      const { unit } = found
+      const unit = this._unitAtViewportTop(block, clip)
       const element = unit.getBoundingClientRect()
       // A HEADER IS ITS BLOCK'S OWN, and there is exactly one: its identity is
       // the block that carries it, with no ordinal to shift.
@@ -1222,46 +1224,53 @@ export class ScrollbackController {
           blockId: owner.dataset.entryId ?? block.dataset.entryId ?? null,
           kind: 'header',
           line: null,
-          index: -1,
+          path: [],
           signature: '',
           offset: element.top - clip.top,
           top: area.scrollTop,
         }
       }
-      // THE NEAREST BLOCK THAT OWNS THE UNIT, and an ordinal LOCAL TO ITS OWN
-      // BODY (nocx-3wmve). A turn holds several commands, each with its own
-      // body: an ordinal across every body under the turn shifts the moment an
+      // THE NEAREST BLOCK THAT OWNS THE UNIT, and a route from it that is the
+      // unit's own (nocx-3wmve). A turn holds several commands, each with its
+      // own body: a route across every body under the turn shifts the moment an
       // EARLIER command commits a row, and the restore then lands the reader on
-      // a different paragraph a few lines away. Nothing above a body can move
-      // an ordinal inside it.
-      const body = unit.parentElement
-      const owner = body?.closest<HTMLElement>('.cmd-block') ?? block
+      // a different paragraph a few lines away. Nothing above a body can move a
+      // route inside it.
+      const owner = unit.closest<HTMLElement>('.cmd-block') ?? block
       const blockId = owner.dataset.entryId ?? block.dataset.entryId ?? null
-      // AN ORDINAL IS ONLY FOR WHAT NEEDS ONE (nocx-3wmve). A row restores by
-      // its block and its logical line, so counting its position among the
-      // body's children would walk tens of thousands of siblings on every
-      // settle for a number nothing reads.
+      // A ROUTE IS ONLY FOR WHAT NEEDS ONE (nocx-3wmve). A row restores by its
+      // block and its logical line, so counting its position among the body's
+      // children would walk tens of thousands of siblings on every settle for a
+      // number nothing reads.
       const isRow =
         unit.classList.contains('term-grid-row') && unit.dataset.logicalLine !== undefined
-      const index = isRow || body === null ? -1 : Array.prototype.indexOf.call(body.children, unit)
       if (isRow) {
         return {
           element: unit,
           blockId,
           kind: 'row',
           line: unit.dataset.logicalLine ?? null,
-          index,
+          path: [],
           signature: '',
           offset: element.top - clip.top,
           top: area.scrollTop,
         }
+      }
+      const path: number[] = []
+      for (
+        let node: HTMLElement | null = unit;
+        node !== null && node !== owner;
+        node = node.parentElement
+      ) {
+        if (node.parentElement === null) break
+        path.unshift(Array.prototype.indexOf.call(node.parentElement.children, node))
       }
       return {
         element: unit,
         blockId,
         kind: 'unit',
         line: null,
-        index,
+        path,
         signature: unit.className,
         offset: element.top - clip.top,
         top: area.scrollTop,
@@ -1275,50 +1284,88 @@ export class ScrollbackController {
       blockId: null,
       kind: 'unit',
       line: null,
-      index: -1,
+      path: [],
       signature: '',
       offset: 0,
       top: area.scrollTop,
     }
   }
 
-  /** THE FIRST RENDERED UNIT OF `block` THAT STARTS INSIDE THE VIEWPORT
-   *  (nocx-3wmve).
+  /** THE DEEPEST THING THE READER IS LOOKING AT (nocx-3wmve).
    *
-   * A UNIT IS ANYTHING THE TRANSCRIPT RENDERS INSIDE A BODY — a painted row, a
-   * paragraph of answer prose, a table, a code block — because the person reads
-   * whatever is there, and an anchor that only knows rows falls back to the
-   * numeric position over a body made of prose, which is exactly where an
-   * earlier block's freeze then moves them.
+   * AN ANCHOR IS NOT A KIND OF THING. The transcript's flow holds painted rows,
+   * answer prose, code, tables — and a turn's expanded reasoning, appended
+   * straight to `.cmd-children` with no `.cmd-output` above it. Enumerating the
+   * shapes an anchor could take meant every new one silently fell back to the
+   * numeric position, where the next mutation above moves the reader: a long
+   * reasoning note was the third.
    *
-   * Units are in document order and laid out one under the next, so their top
-   * edges are non-decreasing and the first visible one is a bisection: a
-   * handful of measurements instead of one per row. Measured on a 50 000-row
-   * command, reading near its fortieth thousand: the linear walk took 39 984
-   * row measurements on EVERY settle — and a settle is every stored-rows
-   * delivery, every freeze, every header change — while the bisection takes 17.
+   * So the search does not name kinds. It walks down the transcript's flow —
+   * the block, then the child that meets the viewport's top edge, then that
+   * child's own child, to the deepest element that has a box — and whatever it
+   * lands on is the anchor, whatever its class. Two things end the walk because
+   * they are not flow containers: a painted row (its cells move with it, and
+   * its logical line is an identity a replaced element can be found by) and a
+   * header (its own parts are not a second thing to read).
+   *
+   * The walk is a bisection at every level because a flow's children are laid
+   * out one under the next, so their top edges are non-decreasing: a handful of
+   * measurements per level instead of one per row. Measured on a 50 000-row
+   * command, reading near its fortieth thousand: a linear walk took 39 984 row
+   * measurements on EVERY settle — and a settle is every stored-rows delivery,
+   * every freeze, every header change — while the bisection takes 17.
    * `document.elementFromPoint` would answer in one call and is not acceptable:
    * a modal, a menu or the composer over the scroller would name their element
-   * instead of the unit.
-   *
-   * EVERY BODY UNDER THE BLOCK, not only a top-level block's own: a command
-   * inside a turn lives under `.cmd-children` (ADR-0040), and a reader scrolled
-   * into that output was left with the numeric fallback, so the freeze of a
-   * nested command moved their rows. */
+   * instead of the unit. */
   private _unitAtViewportTop(
     block: HTMLElement,
     clip: { top: number; bottom: number },
-  ): { unit: HTMLElement; index: number } | null {
-    // HEADERS TOO: a long wrapped command's header can fill the viewport, and
-    // a reader on it had no anchor at all (the search only knew body units).
-    const units = block.querySelectorAll<HTMLElement>('.cmd-header, .cmd-output > *')
-    if (units.length === 0) return null
-    const topOf = (index: number): number => units[index].getBoundingClientRect().top
-    // THE LAST UNIT WHOSE TOP IS AT OR ABOVE THE VIEWPORT'S TOP EDGE, found by
-    // bisection: units are in document order and laid out one under the next,
-    // so their top edges are non-decreasing.
+  ): HTMLElement {
+    let node: HTMLElement = block
+    // THE LAST ELEMENT THAT ACTUALLY HAD A BOX. A container can be a pass-through
+    // (`display: contents`) or unpainted for the moment, and neither is a thing
+    // to anchor on; its children still are. The block itself was measured by the
+    // caller, so there is always an answer.
+    let found: HTMLElement = block
+    for (;;) {
+      const child = this._childAtViewportTop(node, clip)
+      if (child === null) return found
+      if (child.getBoundingClientRect().height > 0) found = child
+      if (child.classList.contains('term-grid-row') || child.classList.contains('cmd-header')) {
+        return child
+      }
+      if (child.children.length === 0) return found
+      node = child
+    }
+  }
+
+  /** The first in-flow child of `node` that meets the viewport's top edge.
+   *
+   * A TALL CHILD COVERS THE EDGE FROM ABOVE (nocx-3wmve): a code fence, a
+   * table, a wrapped paragraph, a long row — the person is reading it even
+   * though it STARTS off-screen, and its offset is negative. Anchoring only
+   * children that start inside the viewport left exactly those readers on the
+   * numeric fallback. The first child that meets the viewport at all is the
+   * answer: wholly above the edge is skipped, wholly below it ends the search.
+   *
+   * A PINNED HEADER IS OUT OF THE FLOW (nocx-3wmve). A sticky header that is
+   * currently stuck sits at the viewport's top edge whatever the rows under it
+   * do, so an anchor taken on it reports zero displacement while the person's
+   * row moves — measured: a row moved 92 -> 122 with the restore computing
+   * nothing. The next child in normal flow is the thing they are reading; a
+   * header that is NOT stuck is still in flow and stays a legitimate anchor. */
+  private _childAtViewportTop(
+    node: HTMLElement,
+    clip: { top: number; bottom: number },
+  ): HTMLElement | null {
+    const children = Array.from(node.children) as HTMLElement[]
+    if (children.length === 0) return null
+    const topOf = (index: number): number => children[index].getBoundingClientRect().top
+    // THE LAST CHILD WHOSE TOP IS AT OR ABOVE THE VIEWPORT'S TOP EDGE, found by
+    // bisection: children are in document order and laid out one under the
+    // next, so their top edges are non-decreasing.
     let low = 0
-    let high = units.length - 1
+    let high = children.length - 1
     let above = -1
     while (low <= high) {
       const mid = (low + high) >> 1
@@ -1329,31 +1376,23 @@ export class ScrollbackController {
         high = mid - 1
       }
     }
-    // A TALL UNIT COVERS THE EDGE FROM ABOVE (nocx-3wmve): a code fence, a
-    // table, a wrapped paragraph, a long row — the person is reading it even
-    // though it STARTS off-screen, and its offset is negative. Anchoring only
-    // units that start inside the viewport left exactly those readers on the
-    // numeric fallback. From that unit forward, the first one that meets the
-    // viewport at all is the answer: wholly above the edge is skipped, wholly
-    // below it ends the search.
-    for (let index = Math.max(0, above); index < units.length; index += 1) {
-      const unit = units[index]
-      const cell = unit.getBoundingClientRect()
-      if (cell.height <= 0) continue
+    for (let index = Math.max(0, above); index < children.length; index += 1) {
+      const child = children[index]
+      const cell = child.getBoundingClientRect()
+      // A CHILD WITH NO BOX IS A PASS-THROUGH, not a thing to read: `display:
+      // contents` and an unpainted container have no rect of their own, and
+      // their children are laid out as if they were the parent's. A leaf with no
+      // box is invisible and cannot be what the person is looking at.
+      if (cell.height <= 0) {
+        if (child.children.length > 0) return child
+        continue
+      }
       if (cell.bottom <= clip.top + 0.5) continue
       if (cell.top >= clip.bottom - 0.5) return null
-      // A PINNED HEADER IS OUT OF THE FLOW (nocx-3wmve). A sticky header that
-      // is currently stuck sits at the viewport's top edge whatever the rows
-      // under it do, so an anchor taken on it reports zero displacement while
-      // the person's row moves — measured: a row moved 92 -> 122 with the
-      // restore computing nothing. The next unit in normal flow is the thing
-      // they are reading; a header that is NOT stuck is still in flow and stays
-      // a legitimate anchor.
-      if (unit.classList.contains('cmd-header')) {
-        const style = getComputedStyle(unit)
-        if (style.position === 'sticky' && cell.top <= clip.top + 1) continue
-      }
-      return { unit, index }
+      const style = getComputedStyle(child)
+      if (style.position === 'absolute' || style.position === 'fixed') continue
+      if (style.position === 'sticky' && cell.top <= clip.top + 1) continue
+      return child
     }
     return null
   }
@@ -1397,23 +1436,30 @@ export class ScrollbackController {
       const owner = area.querySelector<HTMLElement>(`.cmd-block[data-entry-id="${place.blockId}"]`)
       return owner?.querySelector<HTMLElement>(':scope > .cmd-header') ?? null
     }
-    if (place.blockId === null || place.index < 0) return null
-    const block = area.querySelector<HTMLElement>(`.cmd-block[data-entry-id="${place.blockId}"]`)
-    if (block === null) return null
-    // THE UNIT'S OWN BODY, the same one the ordinal was taken in.
-    const body = block.querySelector<HTMLElement>(':scope > .cmd-output')
-    if (body === null) return null
-    const units = Array.from(body.children) as HTMLElement[]
+    if (place.blockId === null) return null
+    const owner = area.querySelector<HTMLElement>(`.cmd-block[data-entry-id="${place.blockId}"]`)
+    if (owner === null) return null
+    if (place.path.length === 0) return owner
+    // THE SAME ROUTE THROUGH THE REBUILT BLOCK (the freeze swap replaces it, so
+    // the element reference is gone but the shape is the same).
+    let node: HTMLElement = owner
+    for (let depth = 0; depth < place.path.length - 1; depth += 1) {
+      const child = node.children[place.path[depth]] as HTMLElement | undefined
+      if (child === undefined) return null
+      node = child
+    }
+    const siblings = Array.from(node.children) as HTMLElement[]
+    const wanted = place.path[place.path.length - 1]
     const matches = (index: number): boolean =>
-      units[index] !== undefined && units[index].className === place.signature
-    if (matches(place.index)) return units[place.index]
-    // THE ORDINAL MOVED BY A NEIGHBOUR (a row removed above, the working dots
+      siblings[index] !== undefined && siblings[index].className === place.signature
+    if (matches(wanted)) return siblings[wanted]
+    // THE ROUTE SHIFTED BY A NEIGHBOUR (a row removed above, the working dots
     // taken away): the nearest unit with the same signature is the same thing,
     // and the search is bounded because a body that shifted by more than this
     // is a different body.
     for (let step = 1; step <= 64; step += 1) {
-      if (matches(place.index - step)) return units[place.index - step]
-      if (matches(place.index + step)) return units[place.index + step]
+      if (matches(wanted - step)) return siblings[wanted - step]
+      if (matches(wanted + step)) return siblings[wanted + step]
     }
     return null
   }

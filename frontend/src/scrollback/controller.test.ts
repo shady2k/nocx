@@ -2176,6 +2176,50 @@ describe("the reader's anchor (nocx-3wmve)", () => {
     expect(area.scrollTop).toBe(1040)
   })
 
+  it('anchors a reader inside an expanded reasoning note, whatever its class (nocx-3wmve)', () => {
+    const { controller } = makeController()
+    stopFollowing(controller)
+    const area = laidOut(controller)
+    // A TURN'S EXPANDED REASONING is appended straight to `.cmd-children`, with
+    // no `.cmd-output` above it (blocks.ts). It is not a row, a paragraph or a
+    // header, so every kind the anchor used to enumerate missed it.
+    const block = document.createElement('div')
+    block.className = 'cmd-block'
+    block.dataset.entryId = 'att-turn'
+    const children = document.createElement('div')
+    children.className = 'cmd-children'
+    const note = document.createElement('div')
+    note.className = 'reasoning'
+    const tops: number[] = []
+    for (let index = 0; index < 50; index += 1) {
+      const line = document.createElement('div')
+      line.className = 'reasoning-line'
+      line.textContent = `thought ${index}`
+      const top = index * 40 - 1000
+      tops.push(top)
+      line.getBoundingClientRect = () => rect(top, 40)
+      note.appendChild(line)
+    }
+    note.getBoundingClientRect = () => rect(-1000, 2000)
+    children.appendChild(note)
+    block.appendChild(children)
+    controller.scrollbackInner.appendChild(block)
+    block.getBoundingClientRect = () => rect(-1000, 2000)
+
+    controller.holdReaderPlace(() => {
+      // Something above the note grew by 40: the card it sits under, a row
+      // committed earlier — either way the note moves down.
+      const lines = Array.from(note.children) as HTMLElement[]
+      for (let index = 0; index < lines.length; index += 1) {
+        lines[index].getBoundingClientRect = () => rect(tops[index] + 40, 40)
+      }
+      note.getBoundingClientRect = () => rect(-960, 2000)
+      block.getBoundingClientRect = () => rect(-960, 2000)
+    })
+
+    expect(area.scrollTop, 'the reader inside the note fell back to their old position').toBe(1040)
+  })
+
   it('anchors a tool header that carries no id, by its element (nocx-3wmve)', () => {
     const { pane, controller } = makeController()
     // An element reference is the anchor, so the pane has to be IN the document

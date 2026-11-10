@@ -1984,6 +1984,11 @@ export class TerminalContent extends BasePaneContent {
    *  They are also the record of which pages have arrived, so scrolling into
    *  an unloaded stretch asks only for what is missing (ADR-y45sp41c). */
   private readonly _restoredRows = new Map<string, StoredBlockRows>()
+  /** ONE index from a block's entry id to the element that carries it. A
+   *  restored command can be nested inside a turn's `.cmd-children`, and a
+   *  live record's element is replaced at freeze; every door that needs a
+   *  block — loader, refresh, revalidation, settle — asks here first. */
+  private readonly _blockIndex = new Map<string, { element: HTMLElement; record?: BlockRecord }>()
   /** At most one page read per entry is outstanding; a scroll that fires
    *  every frame must not turn one visible block into a stream of requests. */
   private readonly _blockRowsPageInFlight = new Set<string>()
@@ -4535,8 +4540,11 @@ export class TerminalContent extends BasePaneContent {
         // on it outward. A small block keeps what it has: one page would be
         // its whole body anyway.
         const entryIds = [
-          ...(this.scrollback?.blockManager.storedRowEntryIds() ?? []),
-          ...this._restoredRows.keys(),
+          ...new Set([
+            ...(this.scrollback?.blockManager.storedRowEntryIds() ?? []),
+            ...this._blockIndex.keys(),
+            ...this._restoredRows.keys(),
+          ]),
         ]
         for (const entryId of entryIds) {
           const rows = this._storedRowsOf(entryId)
@@ -7563,15 +7571,8 @@ export class TerminalContent extends BasePaneContent {
     const snapshotStore = this.scrollback.snapshotStore
     const paintRows = (el: HTMLElement, entryId: string): HTMLElement => {
       const rows = bodies.get(entryId)?.rows
-      if (rows) {
-        // A restored block keeps its rows here, outside any BlockRecord, and
-        // that record is also how the scroll listener knows which pages it
-        // still owes.
-        if (rows.rowCount !== undefined && rows.rowCount > rows.lines.length) {
-          this._restoredRows.set(entryId, rows)
-        }
-        this.scrollback!.blockManager.paintStoredRows(el, rows)
-      }
+      this._registerRestoredBlock(entryId, el, rows)
+      if (rows) this.scrollback!.blockManager.paintStoredRows(el, rows)
       return el
     }
     /** One page row as the facts a restored block is built from. */
@@ -10878,6 +10879,7 @@ export class TerminalContent extends BasePaneContent {
     this._blockRowsRefreshPending.clear()
     this._blockRowsFinalPending.clear()
     this._restoredRows.clear()
+    this._blockIndex.clear()
     this._blockRowsPageInFlight.clear()
     this._lazyScrollUnsub?.()
     this._lazyScrollUnsub = null
@@ -11552,6 +11554,8 @@ export class TerminalContent extends BasePaneContent {
       startAnchor ?? undefined,
     )
     this.scrollback.blockManager.bindAttempt(attempt.id)
+    const bound = this.scrollback.blockManager.blockForAttempt(attempt.id)
+    if (bound !== null) this._registerBlock(attempt.id, bound.el, bound)
     // THE HOLD THE PARKED ROWS CAME WITHOUT (nocx-4y82c.1.1). A stored-rows
     // response that arrived before this binding was parked without an `upTo`,
     // and the binding drains it with the whole artifact; sizing the body to the
@@ -11707,14 +11711,46 @@ export class TerminalContent extends BasePaneContent {
   private _blockElement(entryId: string): HTMLElement | null {
     const sb = this.scrollback
     if (!sb) return null
+    const indexed = this._blockIndex.get(entryId)
+    if (indexed !== undefined) {
+      if (indexed.element.isConnected) return indexed.element
+      this._blockIndex.delete(entryId)
+    }
     const live = sb.blockManager.blockForAttempt(entryId)
-    if (live) return live.el
+    if (live) {
+      this._blockIndex.set(entryId, { element: live.el, record: live })
+      return live.el
+    }
+    // Register a block that arrived without its creation door telling us —
+    // a restored element nested under a turn, a record whose element was
+    // replaced by a freeze. The walk is the repair, never the normal lookup.
     for (const el of sb.scrollbackInner.querySelectorAll<HTMLElement>(
-      ':scope > .cmd-block[data-entry-id]',
+      '.cmd-block[data-entry-id]',
     )) {
-      if (el.dataset.entryId === entryId) return el
+      if (el.dataset.entryId === entryId) {
+        this._blockIndex.set(entryId, { element: el })
+        return el
+      }
     }
     return null
+  }
+
+  /** Record where a block lives. Called where a block is created (a live
+   *  attempt binding) and where one is restored (top-level or nested). */
+  private _registerBlock(entryId: string, element: HTMLElement, record?: BlockRecord): void {
+    this._blockIndex.set(entryId, { element, record })
+  }
+
+  /** Register a restored block. A rows descriptor is kept even when it is
+   *  EMPTY: an open command with zero rows yet is exactly the one revalidation
+   *  must see grow (ADR-8rt54tx2). */
+  private _registerRestoredBlock(
+    entryId: string,
+    element: HTMLElement,
+    rows?: StoredBlockRows,
+  ): void {
+    this._registerBlock(entryId, element)
+    if (rows !== undefined) this._restoredRows.set(entryId, rows)
   }
 
   /** How urgent one entry's read is: what is on screen first (0), then the
@@ -11823,6 +11859,7 @@ export class TerminalContent extends BasePaneContent {
     }
     const el = this._blockElement(entryId)
     if (!el) return
+    this._registerBlock(entryId, el)
     // EVERY PAINT GOES THROUGH THE ONE SETTLE (ADR-8rt54tx2, #779). A
     // revalidation landing above a scrolled-up reader must move neither their
     // row nor their scroll position; the live-record branch has always done
@@ -11951,6 +11988,7 @@ export class TerminalContent extends BasePaneContent {
     const area = sb.scrollbackArea
     const areaRect = area.getBoundingClientRect()
     const ids = new Set<string>(this._restoredRows.keys())
+    for (const entryId of this._blockIndex.keys()) ids.add(entryId)
     for (const block of sb.blockManager.blocks) {
       if (block.attemptId) ids.add(block.attemptId)
     }

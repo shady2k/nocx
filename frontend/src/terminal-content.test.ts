@@ -6752,6 +6752,76 @@ describe('the projections consume the kernel through the composition root (ADR-0
     }
   })
 
+  it('registers a restored open block whose rows are still empty', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      const el = document.createElement('article')
+      el.className = 'cmd-block'
+      el.dataset.entryId = 'empty-open'
+      const emptyRows = {
+        lines: [],
+        artifactVersion: 'art-empty',
+        droppedRows: 0,
+        lostRows: 0,
+        truncated: null,
+        firstRow: 0,
+        lastRow: 0,
+        endRow: 0,
+        rowCount: 0,
+        retainedRanges: [],
+        sealed: false,
+      } as StoredBlockRows
+      ;(
+        content as unknown as {
+          _registerRestoredBlock(id: string, el: HTMLElement, rows?: StoredBlockRows): void
+          _restoredRows: Map<string, StoredBlockRows>
+        }
+      )._registerRestoredBlock('empty-open', el, emptyRows)
+      expect(
+        (content as unknown as { _restoredRows: Map<string, StoredBlockRows> })._restoredRows.has(
+          'empty-open',
+        ),
+      ).toBe(true)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('finds a restored command nested inside a turn through the block index', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const sb = (content as unknown as { scrollback: ScrollbackController }).scrollback
+    try {
+      const turn = document.createElement('div')
+      turn.className = 'cmd-block'
+      turn.dataset.entryId = 'turn-1'
+      const children = document.createElement('div')
+      children.className = 'cmd-children'
+      const nested = document.createElement('article')
+      nested.className = 'cmd-block'
+      nested.dataset.entryId = 'nested-command'
+      children.appendChild(nested)
+      turn.appendChild(children)
+      sb.scrollbackInner.appendChild(turn)
+
+      const found = (
+        content as unknown as { _blockElement(entryId: string): HTMLElement | null }
+      )._blockElement('nested-command')
+      expect(found).toBe(nested)
+    } finally {
+      teardown()
+    }
+  })
+
   it('re-validates a restored block and pages when it crossed the lazy threshold', async () => {
     const client = makeClient()
     const artifactParams: Array<{ fromRow?: number; rowLimit?: number }> = []

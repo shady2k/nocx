@@ -901,8 +901,6 @@ export function makeLayoutBackend(): LayoutClientLike & {
     pinned: false,
     layout: 'row',
     seenAt: null,
-    panelView: '',
-    panelCollapsed: false,
     ...over,
   })
   const paneRow = (id: string, tabId: string, over: Partial<LayoutPane> = {}): LayoutPane => ({
@@ -1082,9 +1080,6 @@ export function makeLayoutBackend(): LayoutClientLike & {
       refuse<never>('recolourTab') ?? Promise.resolve({ tab: patch(id, { colour }) }),
     pinTab: (id, pinned) =>
       refuse<never>('pinTab') ?? Promise.resolve({ tab: patch(id, { pinned }) }),
-    setTabPanel: (id, view, collapsed) =>
-      refuse<never>('setTabPanel') ??
-      Promise.resolve({ tab: patch(id, { panelView: view, panelCollapsed: collapsed }) }),
 
     reorderTabs: (workspaceId, ids) => {
       const refused = refuse<never>('reorderTabs')
@@ -1152,7 +1147,7 @@ export function makeUIStateBackend(seed?: Partial<UIState>): {
   stored: () => UIState
 } {
   let doc: UIState = {
-    sidebar: { width: 240 },
+    sidebar: { collapsed: false, activeViewId: '', width: 240 },
     activeTab: '',
     ...seed,
   }

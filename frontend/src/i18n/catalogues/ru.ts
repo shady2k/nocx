@@ -1976,7 +1976,6 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'operations.waiting.tabs.recolour': 'Меняем раскладку вкладок',
   'operations.waiting.tabs.rename': 'Меняем раскладку вкладок',
   'operations.waiting.tabs.reorder': 'Меняем раскладку вкладок',
-  'operations.waiting.tabs.setPanel': 'Меняем раскладку вкладок',
   'operations.waiting.transport.credit': 'Читаем окно кредита',
   'operations.waiting.transport.ping': 'Проверяем, что бэкенд отвечает',
   'operations.waiting.tunnel.open': 'Открываем туннель',

@@ -567,11 +567,6 @@ func (s *layoutStub) PinTab(_ context.Context, id string, pinned bool) (Tab, err
 	return Tab{}, ErrNotImplemented
 }
 
-func (s *layoutStub) SetTabPanel(_ context.Context, id, view string, collapsed bool) (Tab, error) {
-	s.log.Info("content stub: LayoutRepository.SetTabPanel", "id", id, "view", view, "collapsed", collapsed)
-	return Tab{}, ErrNotImplemented
-}
-
 func (s *layoutStub) ReorderTabs(_ context.Context, workspaceID string, ids []string) ([]Tab, error) {
 	s.log.Info("content stub: LayoutRepository.ReorderTabs", "workspace", workspaceID, "count", len(ids))
 	return nil, ErrNotImplemented

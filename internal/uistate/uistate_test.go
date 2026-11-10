@@ -307,7 +307,7 @@ func TestNewRepairsOneBadFieldWithoutDiscardingTheRest(t *testing.T) {
 	// A single unknown or absurd field must not cost the user their geometry.
 	dir := t.TempDir()
 	body := `{"schemaVersion":1,"window":{"width":1400,"height":900,"x":10,"y":20,` +
-		`"displays":"1:1440x900p"},"sidebar":{"width":99999},"activeTab":"pane-7"}`
+		`"displays":"1:1440x900p"},"sidebar":{"width":99999,"collapsed":true},"activeTab":"pane-7"}`
 	if err := os.WriteFile(filepath.Join(dir, DocumentName), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +321,7 @@ func TestNewRepairsOneBadFieldWithoutDiscardingTheRest(t *testing.T) {
 	if w := s.Window(); w.Width != 1400 || w.X != 10 {
 		t.Fatalf("window = %+v, want the geometry kept even though a sibling field was repaired", w)
 	}
-	if s.Layout().ActiveTab != "pane-7" {
+	if !s.Layout().Sidebar.Collapsed || s.Layout().ActiveTab != "pane-7" {
 		t.Fatalf("layout = %+v, want the good fields kept", s.Layout())
 	}
 }

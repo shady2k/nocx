@@ -2,6 +2,10 @@
 
 package transport
 
+import (
+	"time"
+)
+
 // THE SHIPPED HALF, and the default: the listener takes its port from the OS
 // and from nothing else.
 //
@@ -18,8 +22,18 @@ const (
 	// TestDevBindPortIsIgnoredWithoutTheTag sets this variable and requires
 	// the listener to land somewhere else.
 	devBindPortEnv = "NOCX_DEV_WS_PORT"
+
+	// The stand's startup-bound pair, named for the same reason: this build
+	// reads neither, so no environment can lengthen a session's `starting`
+	// interval in a shipped binary.
+	devStartupBoundEnv     = "NOCX_DEV_INTEGRATION_STARTUP_BOUND"
+	devStartupBoundUserEnv = "NOCX_DEV_INTEGRATION_BOUND_USER"
 )
 
 // devBindPort is the port to ask the OS for. Zero means "you pick", and it is
 // the only answer this build has.
 func devBindPort() (int, error) { return 0, nil }
+
+// devIntegrationStartupBound answers nothing: a shipped build has one startup
+// bound, and it is the product's own.
+func devIntegrationStartupBound(string) time.Duration { return 0 }

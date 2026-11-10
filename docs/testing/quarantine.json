@@ -66,8 +66,8 @@
       "bead": "nocx-atpw5.1.38"
     },
     {
-      "test": "e2e:e2e/output-jitter.spec.ts › a command printing at apt pace over ssh never moves its output backwards",
-      "bead": "nocx-4y82c.1.1"
+      "test": "e2e:e2e/load-no-busy.spec.ts › a person never sees busy under load",
+      "bead": "nocx-nqmjq.2"
     }
   ]
 }

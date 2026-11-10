@@ -2426,7 +2426,21 @@ func TestBlockOutputStart_OverTheWireConformsToContract(t *testing.T) {
 	if err := json.Unmarshal(params, &got); err != nil {
 		t.Fatalf("unmarshal params: %v", err)
 	}
-	if got.EntryID != entry || got.Row != 4 || got.ScreenRevision != 12 || got.BufferKind != "alternate" || got.BufferInstance != "2" || got.Cols != 80 || got.Rows != 24 {
-		t.Fatalf("anchor = %+v; must carry screen row 4 separately from stream row 900", got)
+	if got.EntryID != entry || got.Row != 4 || got.FromRow != 900 || got.ScreenRevision != 12 || got.BufferKind != "alternate" || got.BufferInstance != "2" || got.Cols != 80 || got.Rows != 24 {
+		t.Fatalf("anchor = %+v; must carry screen row 4 AND stream row 900", got)
+	}
+}
+
+func TestBlockOutputStart_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "block.outputStart.schema.json")
+	for _, p := range []blockOutputStartParams{
+		{EntryID: "e1", Row: 0, FromRow: 0, ScreenRevision: 0, BufferKind: "normal", BufferInstance: "1", Cols: 1, Rows: 1},
+		{EntryID: "e2", Row: 4, FromRow: 900, ScreenRevision: 12, BufferKind: "alternate", BufferInstance: "18446744073709551615", Cols: 80, Rows: 24},
+	} {
+		raw, err := json.Marshal(p)
+		if err != nil {
+			t.Fatalf("marshal %+v: %v", p, err)
+		}
+		validateJSON(t, schema, raw, "block.outputStart params (DTO)")
 	}
 }

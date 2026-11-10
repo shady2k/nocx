@@ -115,6 +115,49 @@ describe('CommandEditor.beforeSubmit', () => {
     expect(ed.getDoc()).toBe('')
   })
 
+  // nocx-evj4b.1.6: the host may TAKE a line and deliver it later (a submit
+  // held while an ssh session proves its shell's integration). That verdict is
+  // neither a veto (which keeps the draft for the person) nor a plan (which
+  // sends now): the line left the composer, so the draft empties and the next
+  // Enter starts a second line. Without it every Enter after the first was
+  // swallowed as a duplicate and only one concatenated line ever ran.
+  it('a held verdict empties the draft and lets the next Enter hold its own line', async () => {
+    const held: string[] = []
+    const beforeSubmit = vi.fn((doc: string) => {
+      held.push(doc)
+      return 'held' as const
+    })
+    const { ed, view, submit } = setup({ beforeSubmit })
+    ed.show()
+    ed.insertText('first')
+    enter(view)
+    await flush()
+    expect(held).toEqual(['first'])
+    expect(ed.getDoc()).toBe('')
+    expect(ed.isVisible).toBe(true)
+    expect(submit).not.toHaveBeenCalled()
+
+    ed.insertText('second')
+    enter(view)
+    await flush()
+    expect(held).toEqual(['first', 'second'])
+    expect(ed.getDoc()).toBe('')
+    expect(submit).not.toHaveBeenCalled()
+  })
+
+  it("an async plan's held verdict also empties the draft and submits nothing", async () => {
+    const beforeSubmit = vi.fn(() => Promise.resolve('held' as const))
+    const { ed, view, submit } = setup({ beforeSubmit })
+    ed.show()
+    ed.insertText('echo {{secret:x}}')
+    enter(view)
+    await flush()
+    expect(beforeSubmit).toHaveBeenCalledTimes(1)
+    expect(submit).not.toHaveBeenCalled()
+    expect(ed.isVisible).toBe(true)
+    expect(ed.getDoc()).toBe('')
+  })
+
   it('a second Enter while the verdict is in flight is swallowed', async () => {
     const g = gate()
     const beforeSubmit = vi.fn(async () => {

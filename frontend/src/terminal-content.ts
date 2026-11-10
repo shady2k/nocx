@@ -160,15 +160,19 @@ import {
   arrangedByCause,
   blockRowsForEntry,
   blocksForPane,
+  BLOCK_ROWS_PAGE,
+  LAZY_BLOCK_ROWS,
   restoredBody,
   toolResultForEntry,
 } from './restore-client'
 import { restoredBlock, restoredTurn } from './scrollback/restored-block'
 import {
   blockColumnsOf,
+  mergeStoredBlockRows,
   paintStoredRows,
   repaintStoredRows,
   storedBlockRowsText,
+  type StoredBlockRows,
 } from './scrollback/block-rows'
 import { recordStoredBlock } from './scrollback/cell-drift'
 import { toolCallTitle } from './scrollback/tool-call-title'
@@ -1969,6 +1973,16 @@ export class TerminalContent extends BasePaneContent {
   /** The promise that includes a queued final read, for `_ensureBlockRows` to
    *  await after block.closed. It points at the same chain as `_blockRowsInFlight`. */
   private readonly _blockRowsFinalPending = new Map<string, Promise<void>>()
+  /** The rows of a RESTORED block, which has no BlockRecord to hold them.
+   *  They are also the record of which pages have arrived, so scrolling into
+   *  an unloaded stretch asks only for what is missing (ADR-y45sp41c). */
+  private readonly _restoredRows = new Map<string, StoredBlockRows>()
+  /** At most one page read per entry is outstanding; a scroll that fires
+   *  every frame must not turn one visible block into a stream of requests. */
+  private readonly _blockRowsPageInFlight = new Set<string>()
+  /** The scroll listener that fills lazy rows in as they become visible. */
+  private _lazyScrollUnsub: (() => void) | null = null
+  private _lazyScrollRaf: number | null = null
 
   /** The held-Stop settlement subscription (nocx-zas0d). It exists because
    *  `held` is an ACCEPTANCE the request cannot follow up on: whatever happens
@@ -4502,9 +4516,34 @@ export class TerminalContent extends BasePaneContent {
         // Notifications are not replayed after a socket outage. Refresh every
         // mounted command block from its durable rows so output produced while
         // disconnected is painted even when restorePast has already run.
-        for (const entryId of this.scrollback?.blockManager.storedRowEntryIds() ?? []) {
-          void this._refreshBlockRows(entryId)
+        //
+        // A LARGE BLOCK GIVES ITS BODY BACK FIRST (ADR-y45sp41c). Its reserved
+        // height stays — that is the row count in its metadata — and the
+        // visible page is read next, so the reconnect does not queue five
+        // hundred whole bodies and the person's screen is filled from what is
+        // on it outward. A small block keeps what it has: one page would be
+        // its whole body anyway.
+        const entryIds = this.scrollback?.blockManager.storedRowEntryIds() ?? []
+        for (const entryId of entryIds) {
+          const rows = this._storedRowsOf(entryId)
+          if (rows?.rowCount !== undefined && rows.rowCount > LAZY_BLOCK_ROWS) {
+            // A LARGE block gives its body back: the coordinates and the
+            // reserved height stay, and what is on screen is read at the next
+            // step. A short block is one page already and keeps what it has —
+            // blanking five hundred small blocks would be a repaint the
+            // person did not ask for, and it is not what the memory bound
+            // needs.
+            this._paintBlockRows(entryId, { ...rows, lines: [] }, true)
+            continue
+          }
+          if (rows === undefined) {
+            // A block that never read its rows (the outage began while it
+            // was running) has no reservation to paint into. Its durable rows
+            // are what the person is owed, so it is read now.
+            void this._refreshBlockRows(entryId)
+          }
         }
+        this._loadVisibleBlockRows()
       })
       // A returning socket may be a returning BACKEND, whose endpoints and
       // roles are not the ones this pane last read. The report fires once
@@ -4909,6 +4948,7 @@ export class TerminalContent extends BasePaneContent {
       // ── Clickable paths and urls (nocx-8yg.8) ─────────────────────────
       const scrollbackArea = this.scrollback?.scrollbackArea
       if (scrollbackArea) {
+        this._installLazyRows()
         this._detachLinks = attachTerminalLinks(
           scrollbackArea,
           painterSurface,
@@ -7487,7 +7527,15 @@ export class TerminalContent extends BasePaneContent {
     const snapshotStore = this.scrollback.snapshotStore
     const paintRows = (el: HTMLElement, entryId: string): HTMLElement => {
       const rows = bodies.get(entryId)?.rows
-      if (rows) this.scrollback!.blockManager.paintStoredRows(el, rows)
+      if (rows) {
+        // A restored block keeps its rows here, outside any BlockRecord, and
+        // that record is also how the scroll listener knows which pages it
+        // still owes.
+        if (rows.rowCount !== undefined && rows.rowCount > rows.lines.length) {
+          this._restoredRows.set(entryId, rows)
+        }
+        this.scrollback!.blockManager.paintStoredRows(el, rows)
+      }
       return el
     }
     /** One page row as the facts a restored block is built from. */
@@ -7675,6 +7723,15 @@ export class TerminalContent extends BasePaneContent {
       previousSession: this.session === null || this.session.recovered === null,
     })
     this._pastRestoring = false
+    this._installLazyRows()
+    // The past is drawn at its reserve height with the ill-fitting pages
+    // empty; the one that is on screen is asked for at the next frame, not at
+    // restore time for every block (ADR-y45sp41c).
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => this._loadVisibleBlockRows())
+    } else {
+      this._loadVisibleBlockRows()
+    }
   }
 
   // ── Capability rail (nocx-4t37.2) ─────────────────────────────────────
@@ -10754,6 +10811,10 @@ export class TerminalContent extends BasePaneContent {
     this._blockRowsInFlight.clear()
     this._blockRowsRefreshPending.clear()
     this._blockRowsFinalPending.clear()
+    this._restoredRows.clear()
+    this._blockRowsPageInFlight.clear()
+    this._lazyScrollUnsub?.()
+    this._lazyScrollUnsub = null
     this._detachLinks?.detach()
     this._detachLinks = null
     this._homeUnsub?.()
@@ -11567,6 +11628,190 @@ export class TerminalContent extends BasePaneContent {
     return promise
   }
 
+  /** The rows this entry currently holds, whether it is a live record or a
+   *  restored element. This is the one place the two lives meet for paging. */
+  private _storedRowsOf(entryId: string): StoredBlockRows | undefined {
+    return (
+      this.scrollback?.blockManager.blockForAttempt(entryId)?.storedRows ??
+      this._restoredRows.get(entryId)
+    )
+  }
+
+  /** The mounted element for an entry, live or restored. */
+  private _blockElement(entryId: string): HTMLElement | null {
+    const sb = this.scrollback
+    if (!sb) return null
+    const live = sb.blockManager.blockForAttempt(entryId)
+    if (live) return live.el
+    for (const el of sb.scrollbackInner.querySelectorAll<HTMLElement>(
+      ':scope > .cmd-block[data-entry-id]',
+    )) {
+      if (el.dataset.entryId === entryId) return el
+    }
+    return null
+  }
+
+  /** How urgent one entry's read is: what is on screen first (0), then the
+   *  transcript newest to oldest. The queue re-reads this at every decision,
+   *  so a block that scrolls into view outranks one that has not. */
+  private _rowReadPriority(entryId: string): number {
+    const sb = this.scrollback
+    const el = this._blockElement(entryId)
+    if (!sb || !el) return Number.MAX_SAFE_INTEGER
+    const area = sb.scrollbackArea.getBoundingClientRect()
+    const rect = el.getBoundingClientRect()
+    if (rect.bottom > area.top && rect.top < area.bottom) return 0
+    const blocks = [...sb.scrollbackInner.querySelectorAll<HTMLElement>(':scope > .cmd-block')]
+    const index = blocks.indexOf(el)
+    if (index < 0) return Number.MAX_SAFE_INTEGER
+    // Lower is more urgent: the newest not-visible block goes before the one
+    // above it.
+    return 1 + (blocks.length - 1 - index)
+  }
+
+  /** The page a refresh should ask for, or undefined for a block small enough
+   *  to read whole. A grown block asks for its newest rows; the same page
+   *  slides as the command prints, so a 5000-row command never re-reads its
+   *  whole body on every growth notification. */
+  private _refreshWindow(entryId: string): { fromRow: number; rowLimit: number } | undefined {
+    const rows = this._storedRowsOf(entryId)
+    const rowCount = rows?.rowCount
+    if (rows === undefined || rowCount === undefined || rowCount <= LAZY_BLOCK_ROWS) {
+      return undefined
+    }
+    if (rows.lines.length > 0) {
+      // A LIVE block must not skip rows between coalesced growth reads: ask
+      // from the row after the last one painted to the end. The server caps
+      // one page at 10 000 rows, above any per-command capture the product
+      // allows at its default setting.
+      return { fromRow: rows.lines[rows.lines.length - 1].from + 1, rowLimit: 10_000 }
+    }
+    // No body in hand: the reconnect gave it back, or the restore has not
+    // asked yet. Take the newest page, which is what is on screen at the
+    // tail; scrolling asks for whatever lies above it.
+    const first = rows.firstRow ?? 0
+    const last = rows.lastRow ?? first
+    const from = Math.max(first, last - BLOCK_ROWS_PAGE + 1)
+    return { fromRow: from, rowLimit: Math.max(1, Math.min(BLOCK_ROWS_PAGE, last - from + 1)) }
+  }
+
+  /** Paint a read into whichever owner holds the block: a BlockRecord when
+   *  the block is live, the element itself when it is restored. */
+  private _paintBlockRows(entryId: string, rows: StoredBlockRows, reset = false): void {
+    const sb = this.scrollback
+    if (!sb || this._disposed) return
+    const rec = sb.blockManager.blockForAttempt(entryId)
+    if (rec) {
+      sb.settleAround(() => {
+        sb.blockManager.applyStoredRows(entryId, rows, undefined, reset)
+        sb.scrollToBottomIfFollowing()
+      })
+      return
+    }
+    const el = this._blockElement(entryId)
+    if (!el) return
+    this._restoredRows.set(entryId, rows)
+    sb.blockManager.paintStoredRows(el, rows)
+  }
+
+  /** Ask for one page of a restored or live block's rows, around the visible
+   *  stretch (ADR-y45sp41c). One page per entry is outstanding at a time. */
+  private _requestBlockRowsPage(entryId: string, fromRow: number, rowLimit: number): void {
+    if (this._blockRowsPageInFlight.has(entryId)) return
+    this._blockRowsPageInFlight.add(entryId)
+    void blockRowsForEntry(this.client, entryId, { fromRow, rowLimit }, () =>
+      this._rowReadPriority(entryId),
+    )
+      .then((read) => {
+        if (this._disposed || !this._active) return
+        if (read.kind === 'rows') {
+          this._paintBlockRows(
+            entryId,
+            mergeStoredBlockRows(this._storedRowsOf(entryId), read.rows),
+          )
+        } else if (read.kind === 'unreadable') {
+          log.warn("nocx: a block's stored rows could not be read", {
+            entry: entryId,
+            reason: read.reason,
+          })
+        }
+      })
+      .finally(() => this._blockRowsPageInFlight.delete(entryId))
+  }
+
+  /** Fill what the person can see: a block near the viewport whose page has
+   *  not arrived asks for the rows around the visible line. Every block
+   *  already reserves its height from the metadata, so this paints into space
+   *  that was there before the page was and nothing moves (ADR-y45sp41c). */
+  private _loadVisibleBlockRows(): void {
+    const sb = this.scrollback
+    if (!sb || this._disposed) return
+    const area = sb.scrollbackArea
+    const areaRect = area.getBoundingClientRect()
+    const ids = new Set<string>(this._restoredRows.keys())
+    for (const block of sb.blockManager.blocks) {
+      if (block.attemptId) ids.add(block.attemptId)
+    }
+    for (const entryId of ids) {
+      const rows = this._storedRowsOf(entryId)
+      if (rows?.rowCount === undefined || rows.lines.length >= rows.rowCount) continue
+      const el = this._blockElement(entryId)
+      if (!el) continue
+      const rect = el.getBoundingClientRect()
+      // One viewport of lookahead: a block the person is about to scroll to
+      // is worth one page, and no block further away competes with the
+      // visible one.
+      const margin = areaRect.height
+      if (rect.bottom < areaRect.top - margin || rect.top > areaRect.bottom + margin) continue
+      const output = el.querySelector<HTMLElement>(':scope > .cmd-output')
+      if (!output) continue
+      const stated = Number.parseFloat(getComputedStyle(el).getPropertyValue('--term-cell-height'))
+      const pitch = Number.isFinite(stated) && stated > 0 ? stated : 18
+      const first = rows.firstRow ?? rows.lines[0]?.from ?? 0
+      const last = rows.lastRow ?? first
+      const outRect = output.getBoundingClientRect()
+      const visibleRow = Math.floor((areaRect.top - outRect.top) / pitch)
+      const target = Math.max(first, Math.min(last, first + Math.max(0, visibleRow)))
+      const loadedFirst = rows.lines[0]?.from
+      const loadedLast = rows.lines[rows.lines.length - 1]?.from
+      if (
+        loadedFirst !== undefined &&
+        loadedLast !== undefined &&
+        target >= loadedFirst &&
+        target <= loadedLast
+      ) {
+        continue
+      }
+      const from = Math.max(first, target - Math.floor(BLOCK_ROWS_PAGE / 4))
+      const rowLimit = Math.max(1, Math.min(BLOCK_ROWS_PAGE, last - from + 1))
+      this._requestBlockRowsPage(entryId, from, rowLimit)
+    }
+  }
+
+  /** Watch the scroller: the transcript's pages follow the person's
+   *  position, so a page is fetched when its block comes near the viewport
+   *  rather than all of them at reconnect. */
+  private _installLazyRows(): void {
+    const area = this.scrollback?.scrollbackArea
+    if (!area) return
+    this._lazyScrollUnsub?.()
+    const onScroll = (): void => {
+      if (this._lazyScrollRaf !== null) return
+      this._lazyScrollRaf = requestAnimationFrame(() => {
+        this._lazyScrollRaf = null
+        this._loadVisibleBlockRows()
+      })
+    }
+    area.addEventListener('scroll', onScroll, { passive: true })
+    this._lazyScrollUnsub = () => {
+      area.removeEventListener('scroll', onScroll)
+      if (this._lazyScrollRaf !== null) {
+        cancelAnimationFrame(this._lazyScrollRaf)
+        this._lazyScrollRaf = null
+      }
+    }
+  }
+
   /** Fetch one entry's stored rows, paint them, and follow the tail —
    *  everything a block.grew/block.closed notification's delivery does.
    *  Repeated growth notifications share one in-flight read and set one
@@ -11597,7 +11842,11 @@ export class TerminalContent extends BasePaneContent {
     }
 
     this._blockRowsRefreshPending.delete(entryId)
-    const fetch: Promise<void> = blockRowsForEntry(this.client, entryId).then((read) => {
+    const current = this._storedRowsOf(entryId)
+    const window = this._refreshWindow(entryId)
+    const fetch: Promise<void> = blockRowsForEntry(this.client, entryId, window, () =>
+      this._rowReadPriority(entryId),
+    ).then((read) => {
       if (this._disposed) return
       const sb = this.scrollback
       if (!sb) return
@@ -11621,7 +11870,10 @@ export class TerminalContent extends BasePaneContent {
         }
         return
       }
-      const rows = read.rows
+      // A paged read is one WINDOW of the block, never the whole body: join
+      // it with what is already painted so a growth notification that names
+      // the newest rows cannot blank the pages above them (ADR-y45sp41c).
+      const rows = mergeStoredBlockRows(this._storedRowsOf(entryId) ?? current, read.rows)
       if (!this._active) {
         sb.blockManager.applyStoredRows(entryId, rows)
         return

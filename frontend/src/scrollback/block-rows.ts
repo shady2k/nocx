@@ -27,6 +27,24 @@ export interface StoredBlockRows {
    *  been streamed yet. Optional only so hand-built fixtures need not carry
    *  it; a read from the wire always sets it (the artifact's own state). */
   readonly sealed?: boolean
+  /** The absolute index of the artifact's first stored row, last stored row
+   *  and their count, carried with a paged read (contracts/ledger.artifact).
+   *  They are what lets a block reserve its height before its first page
+   *  arrives, so no row moves when rows fill it in (ADR-y45sp41c). */
+  readonly firstRow?: number
+  readonly lastRow?: number
+  readonly rowCount?: number
+}
+
+/** The artifact's own coordinates, when the read was paged. */
+export interface StoredBlocksRange {
+  readonly firstRow: number
+  readonly lastRow: number
+  readonly rowCount: number
+  readonly rangeStart: number | null
+  readonly rangeCount: number
+  readonly hasMoreBefore: boolean
+  readonly hasMoreAfter: boolean
 }
 
 interface RowsArtifactMetadata {
@@ -68,6 +86,7 @@ export function parseStoredBlockRows(
   body: string,
   metadata: RowsArtifactMetadata,
   artifactVersion?: string,
+  range?: StoredBlocksRange,
 ): StoredBlockRows {
   const lines = body
     .split('\n')
@@ -85,6 +104,10 @@ export function parseStoredBlockRows(
     typeof metadata.payload === 'object' && metadata.payload !== null
       ? (metadata.payload as Record<string, unknown>)
       : {}
+  const firstRow = range?.firstRow ?? nonNegativeInteger(payload.firstRow ?? lines[0]?.from ?? 0)
+  const lastRow =
+    range?.lastRow ?? nonNegativeInteger(payload.lastRow ?? lines[lines.length - 1]?.from ?? 0)
+  const rowCount = range?.rowCount ?? nonNegativeInteger(payload.rowCount ?? lines.length)
   return {
     lines,
     ...(artifactVersion === undefined ? {} : { artifactVersion }),
@@ -93,7 +116,45 @@ export function parseStoredBlockRows(
     unavailableRows: nonNegativeInteger(payload.unavailableRows),
     truncated: metadata.truncated,
     sealed: metadata.state === 'sealed',
+    firstRow,
+    lastRow,
+    rowCount,
   }
+}
+
+/** Two reads of one artifact, joined by the row index each line carries.
+ *  Pages arrive around the viewport and the tail arrives as the block grows;
+ *  neither is a whole body, and replacing one with the other would blank the
+ *  rows the page before it painted. `next` owns the coordinates and the
+ *  artifact state — it is the newer read — while the lines are the union. */
+export function mergeStoredBlockRows(
+  previous: StoredBlockRows | undefined,
+  next: StoredBlockRows,
+): StoredBlockRows {
+  if (
+    previous === undefined ||
+    previous.artifactVersion === undefined ||
+    previous.artifactVersion !== next.artifactVersion
+  ) {
+    return next
+  }
+  const byFrom = new Map<number, StoredBlockRows['lines'][number]>()
+  for (const line of previous.lines) byFrom.set(line.from, line)
+  for (const line of next.lines) byFrom.set(line.from, line)
+  const lines = [...byFrom.values()].sort((a, b) => a.from - b.from)
+  if (lines.length === next.lines.length) return next
+  return { ...next, lines }
+}
+
+/** A block whose rows have not been fetched yet, with the height it must
+ *  reserve. The body is empty on purpose: an unloaded block is not a block
+ *  that printed nothing, and `sealed` is only set when the store said so. */
+export function describeStoredBlockRows(
+  metadata: RowsArtifactMetadata,
+  artifactVersion: string | undefined,
+  range: StoredBlocksRange,
+): StoredBlockRows {
+  return parseStoredBlockRows('', metadata, artifactVersion, range)
 }
 
 /** The single column count every row in a stored block is padded to: the
@@ -347,11 +408,17 @@ export function paintStoredRows(
     })
     notice.root.dataset.outputIncomplete = 'true'
     notice.mount(block)
-  } else if (stored.lines.length === 0 && stored.sealed === true) {
+  } else if (
+    stored.lines.length === 0 &&
+    stored.sealed === true &&
+    !(stored.rowCount !== undefined && stored.rowCount > 0)
+  ) {
     // A sealed block that holds no rows and lost none: the command printed
     // nothing, which is a real answer and gets its own words. An OPEN block
     // with nothing yet stays silent — its output may still arrive, and the
-    // running header already says as much.
+    // running header already says as much. A block whose rows exist but have
+    // not been paged in yet is neither: it is reserving its height, and
+    // saying it printed nothing would be a lie until the page arrives.
     const empty = new BlockNotice({ text: EMPTY_OUTPUT_SENTENCE, tone: 'saved' })
     empty.root.dataset.outputEmpty = 'true'
     empty.mount(block)
@@ -391,9 +458,46 @@ interface StoredPaintState {
   /** The quiet line at each cut, keyed by the kept row it follows. Held so a
    *  repaint that only appends rows keeps the line where it is. */
   readonly cuts: Map<number, HTMLElement>
+  /** The space a page does not fill, above and below it: the block's reserved
+   *  height is the whole artifact's, so a page arriving later changes what is
+   *  painted inside that height and never the height itself (ADR-y45sp41c). */
+  readonly topSpacer: HTMLElement | null
+  readonly bottomSpacer: HTMLElement | null
   readonly columns: number
   readonly metric: PaintMetric | null
   readonly palette: TerminalSnapshot
+}
+
+/** One block-height spacer. A row's height is the renderer's published cell
+ *  height, so the reservation is exact without measuring anything, including
+ *  before the first row has ever been painted. */
+function spacerOf(rows: number): HTMLElement {
+  const el = document.createElement('div')
+  el.className = 'cmd-output-spacer'
+  el.dataset.rows = String(rows)
+  el.setAttribute('aria-hidden', 'true')
+  el.style.height = `calc(var(--term-cell-height, 1.2em) * ${rows})`
+  return el
+}
+
+/** Reuse a spacer when its row count has not changed, so a repaint does not
+ *  detach a node the browser is already laying out. */
+function reserveSpacer(
+  output: HTMLElement,
+  previous: HTMLElement | null | undefined,
+  rows: number,
+  atStart: boolean,
+): HTMLElement | null {
+  if (rows <= 0) {
+    previous?.remove()
+    return null
+  }
+  if (previous && previous.dataset.rows === String(rows)) return previous
+  const el = spacerOf(rows)
+  previous?.remove()
+  if (atStart) output.insertBefore(el, output.firstChild)
+  else output.appendChild(el)
+  return el
 }
 
 /** Only the currently retained rows, weakly owned by their block. Compact
@@ -525,7 +629,28 @@ function paintOutput(
     force || !previous || previous.columns !== columns || !samePaintOptions(previous, opts)
   const toPaint = all ? stored.lines : changed
   const snapshot = toPaint.length > 0 ? snapshotAtColumns(toPaint, columns) : null
-  if (columns === 0 || (toPaint.length > 0 && snapshot === null)) {
+  if (toPaint.length > 0 && snapshot === null) {
+    output.remove()
+    paintedRows.delete(block)
+    return
+  }
+  // THE HEIGHT IS THE WHOLE ARTIFACT'S, from the first page (ADR-y45sp41c). A
+  // page that does not reach the block's first or last stored row gets a
+  // spacer for the rows it omits, so the block's outer height is the same
+  // whether one row of it is loaded or all of them.
+  const firstRow = stored.firstRow ?? stored.lines[0]?.from ?? 0
+  const lastRow = stored.lastRow ?? stored.lines[stored.lines.length - 1]?.from ?? firstRow
+  const extent =
+    stored.rowCount !== undefined && stored.rowCount > 0
+      ? Math.max(stored.rowCount, lastRow - firstRow + 1)
+      : stored.lines.length
+  const topRows =
+    stored.lines.length > 0 ? Math.max(0, (stored.lines[0].from ?? firstRow) - firstRow) : 0
+  const bottomRows =
+    stored.lines.length > 0
+      ? Math.max(0, lastRow - (stored.lines[stored.lines.length - 1].from ?? lastRow))
+      : extent
+  if (stored.lines.length === 0 && topRows === 0 && bottomRows === 0 && columns === 0) {
     output.remove()
     paintedRows.delete(block)
     return
@@ -556,6 +681,8 @@ function paintOutput(
   } else {
     output.replaceChildren()
   }
+  const topSpacer = reserveSpacer(output, previous?.topSpacer, topRows, true)
+  const bottomSpacer = reserveSpacer(output, previous?.bottomSpacer, bottomRows, false)
   // THE CUTS, PLACED WHERE THEY ARE. One line per stretch of rows that
   // departed but that this artifact does not hold, between the kept rows
   // either side of it — the place a person scrolls to when they ask what
@@ -573,7 +700,7 @@ function paintOutput(
     if (element.textContent !== text) element.textContent = text
     return element
   }
-  let cursor = output.firstChild
+  let cursor = topSpacer?.nextSibling ?? output.firstChild
   let previousFrom: number | null = null
   for (const line of stored.lines) {
     const element = next.get(line.from)!.element
@@ -608,13 +735,22 @@ function paintOutput(
       if (!cutLines.has(after)) gap.remove()
     }
   }
+  if (bottomSpacer && bottomSpacer.parentElement !== output) output.appendChild(bottomSpacer)
   output.className = 'cmd-output'
+  // WHAT THE BODY HOLDS, stated rather than measured from the DOM: a paged
+  // read and a whole one differ here, and this is the one place that knows.
+  output.dataset.rowsFirst = String(firstRow)
+  output.dataset.rowsLast = String(lastRow)
+  output.dataset.rowsCount = String(stored.rowCount ?? stored.lines.length)
+  output.dataset.rowsLoaded = String(stored.lines.length)
   if (output.parentElement !== block) block.appendChild(output)
   const metric = opts.metric
   paintedRows.set(block, {
     output,
     rows: next,
     cuts: cutLines,
+    topSpacer,
+    bottomSpacer,
     columns,
     metric:
       metric === null

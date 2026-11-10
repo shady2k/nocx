@@ -103,6 +103,85 @@ describe('stored block rows', () => {
     expect(block.querySelector('[data-output-unreadable]')).toBe(notice)
   })
 
+  it('carries the whole artifact coordinates a page reports (nocx-t7xhe)', () => {
+    const body = [
+      JSON.stringify({ from: 10, row: wireRowOf(okRow) }),
+      JSON.stringify({ from: 11, row: wireRowOf(abcRow) }),
+    ].join('\n')
+    const parsed = parseStoredBlockRows(
+      body,
+      { truncated: null, payload: { rowCount: 25 }, state: 'sealed' },
+      'artifact-1',
+      {
+        firstRow: 0,
+        lastRow: 24,
+        rowCount: 25,
+        rangeStart: 10,
+        rangeCount: 2,
+        hasMoreBefore: true,
+        hasMoreAfter: true,
+      },
+    )
+    expect(parsed.firstRow).toBe(0)
+    expect(parsed.lastRow).toBe(24)
+    expect(parsed.rowCount).toBe(25)
+    expect(parsed.lines.map((line) => line.from)).toEqual([10, 11])
+  })
+
+  it('reserves the block height around a page before the rest of its rows arrive', () => {
+    const block = document.createElement('article')
+    block.dataset.entryId = 'block-page'
+    paintStoredRows(
+      block,
+      {
+        ...stored,
+        lines: [
+          { from: 10, row: wireRowOf(okRow) },
+          { from: 11, row: wireRowOf(abcRow) },
+        ],
+        artifactVersion: 'artifact-page',
+        firstRow: 0,
+        lastRow: 24,
+        rowCount: 25,
+      },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+    const spacers = [...block.querySelectorAll<HTMLElement>('.cmd-output-spacer')]
+    expect(spacers.map((el) => el.dataset.rows)).toEqual(['10', '13'])
+    expect(spacers[0].style.height).toContain('calc(var(--term-cell-height, 1.2em) * 10)')
+    expect(spacers[1].style.height).toContain('calc(var(--term-cell-height, 1.2em) * 13)')
+    expect(block.querySelectorAll('.term-grid-row')).toHaveLength(2)
+  })
+
+  it('reserves a block whose first page has not arrived at all', () => {
+    const block = document.createElement('article')
+    block.dataset.entryId = 'block-unloaded'
+    paintStoredRows(
+      block,
+      {
+        lines: [],
+        droppedRows: 0,
+        lostRows: 0,
+        truncated: null,
+        artifactVersion: 'artifact-unloaded',
+        firstRow: 0,
+        lastRow: 4999,
+        rowCount: 5000,
+        sealed: true,
+      },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+    const grid = block.querySelector<HTMLElement>('.cmd-output')!
+    expect(grid).not.toBeNull()
+    expect(grid.querySelectorAll('.term-grid-row')).toHaveLength(0)
+    const spacer = grid.querySelector<HTMLElement>('.cmd-output-spacer')!
+    expect(spacer.dataset.rows).toBe('5000')
+    expect(spacer.style.height).toContain('* 5000)')
+    // An unloaded block printed nothing is a different fact from a block
+    // whose page has not arrived; the second must not say the first.
+    expect(block.querySelector('[data-output-empty]')).toBeNull()
+  })
+
   it('paints backend rows through the shared row painter', () => {
     const block = document.createElement('article')
 

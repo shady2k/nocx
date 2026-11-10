@@ -2956,10 +2956,19 @@ export class BlockManager {
    *  FALL: a pane that GROWS pulls rows back out of history onto the top of
    *  the screen, and the body must stop painting them again or the joint
    *  shows the same line twice (nocx-4y82c.1.1). */
-  applyStoredRows(entryId: string, rows: StoredBlockRows, upTo?: number | null): void {
+  applyStoredRows(
+    entryId: string,
+    rows: StoredBlockRows,
+    upTo?: number | null,
+    reset = false,
+  ): void {
     const cursor = rows.lines.length > 0 ? rows.lines[rows.lines.length - 1].from : -1
     const seen = this._storedRowsCursor.get(entryId) ?? -1
-    if (cursor < seen) return
+    // `reset` is the reconnect's deliberate give-back (ADR-y45sp41c): the block
+    // keeps its coordinates and height and drops its rows so the visible page
+    // can be read first. It is not an older read, so the cursor does not
+    // reject it.
+    if (!reset && cursor < seen) return
     this._storedRowsCursor.set(entryId, cursor)
     const rec = this.blockForAttempt(entryId)
     if (!rec) {
@@ -3017,7 +3026,19 @@ export class BlockManager {
     const boundary = streamStart + Math.max(0, limit)
     const lines = rows.lines.filter((line) => line.from >= streamStart && line.from < boundary)
     if (lines.length === rows.lines.length) return rows
-    return { ...rows, lines }
+    // A HELD BODY RESERVES ONLY WHAT IT MAY PAINT (ADR-y45sp41c). The
+    // coordinates describe the whole artifact, but the rows past the hold are
+    // waiting for the screen — reserving their height here would grow the
+    // block before its rows arrive, which is the "room first, rows later"
+    // frame e2e/output-jitter.spec.ts exists to catch. The hold's rows are
+    // painted, and the block grows with them, exactly as it did before pages.
+    return {
+      ...rows,
+      lines,
+      firstRow: lines[0]?.from ?? rows.firstRow,
+      lastRow: lines[lines.length - 1]?.from ?? rows.lastRow,
+      rowCount: lines.length,
+    }
   }
 
   /** The part of a block's stored rows its body may paint: all of them,

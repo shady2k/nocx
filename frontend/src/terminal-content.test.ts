@@ -6664,6 +6664,93 @@ describe('the projections consume the kernel through the composition root (ADR-0
     }
   })
 
+  it("keeps a running block's body and reservation across a reconnect", async () => {
+    const client = makeClient()
+    const artifactCalls: unknown[] = []
+    client.call.mockImplementation((method: string) => {
+      if (method === 'ledger.get') {
+        return Promise.resolve({
+          entry: {},
+          edges: [],
+          artifacts: [
+            {
+              id: 'art-rows',
+              mediaType: 'application/x-nocx-rows',
+              payload: { rowCount: 500, endRow: 500, retainedRanges: [{ from: 0, to: 500 }] },
+            },
+          ],
+        })
+      }
+      if (method === 'ledger.artifact') {
+        artifactCalls.push({})
+        return Promise.reject(new Error('a running block must keep its body'))
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('make')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'make',
+        },
+      })
+      const lines = Array.from({ length: 500 }, (_, i) => ({
+        from: i,
+        row: wireRowOf([[`row-${i}`, 1, true]] as CellSpec[]),
+      }))
+      withScrollback.scrollback.blockManager.applyStoredRows('att-1', {
+        lines,
+        artifactVersion: 'art-rows',
+        droppedRows: 0,
+        lostRows: 0,
+        truncated: null,
+        firstRow: 0,
+        lastRow: 499,
+        endRow: 500,
+        rowCount: 500,
+        retainedRanges: [{ from: 0, to: 500 }],
+        sealed: false,
+      })
+      const before = withScrollback.scrollback.scrollbackInner.querySelector('.cmd-output')
+      expect(before?.querySelectorAll('.term-grid-row')).toHaveLength(500)
+
+      client._fireReconnect()
+      await vi.waitFor(() => {
+        expect(
+          withScrollback.scrollback.scrollbackInner
+            .querySelector('.cmd-block')
+            ?.getAttribute('data-rows-reset'),
+        ).not.toBe('true')
+      })
+      const after = withScrollback.scrollback.scrollbackInner.querySelector('.cmd-output')
+      expect(after).not.toBeNull()
+      expect(after?.querySelectorAll('.term-grid-row')).toHaveLength(500)
+      expect(artifactCalls).toHaveLength(0)
+    } finally {
+      teardown()
+    }
+  })
+
   it('re-validates a small block whose durable rows grew while disconnected', async () => {
     const client = makeClient()
     const oldLine = JSON.stringify({ from: 0, row: wireRowOf([['old', 1, true]] as CellSpec[]) })

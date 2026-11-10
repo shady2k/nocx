@@ -694,10 +694,14 @@ interface StoredPaintState {
 /** One block-height spacer. A row's height is the renderer's published cell
  *  height, so the reservation is exact without measuring anything, including
  *  before the first row of it has ever been painted. */
-function spacerOf(rows: number): HTMLElement {
+function spacerOf(rows: number, from: number): HTMLElement {
   const el = document.createElement('div')
   el.className = 'cmd-output-spacer'
   el.dataset.rows = String(rows)
+  // A spacer is a row too, for the reader's anchor: its logical line is the
+  // stream row it starts at, so replacing it with painted rows can be followed
+  // to the same row rather than to whichever spacer is its neighbour.
+  el.dataset.logicalLine = String(from)
   el.setAttribute('aria-hidden', 'true')
   el.style.height = `calc(var(--term-cell-height, 1.2em) * ${rows})`
   return el
@@ -864,6 +868,20 @@ function paintOutput(
     opts.reserve ?? (stored.reserve !== undefined ? stored.reserve : (previous?.reserve ?? true))
   const segments = buildSegments({ ...stored, lines, reserve })
   if (segments.length === 0 && lines.length === 0) {
+    // NEVER REMOVE A BODY THAT STILL HAS GEOMETRY (ADR-ywzcpbqe): a running
+    // block between a reconnect and its first page keeps its element, and the
+    // demand loop finds it. Only a block with nothing to reserve loses its
+    // empty body.
+    if ((stored.rowCount ?? 0) > 0 || (stored.retainedRanges?.length ?? 0) > 0) {
+      output.className = 'cmd-output'
+      output.dataset.rowsFirst = String(stored.firstRow ?? 0)
+      output.dataset.rowsLast = String(stored.lastRow ?? 0)
+      output.dataset.rowsEnd = String(stored.endRow ?? 0)
+      output.dataset.rowsCount = String(stored.rowCount ?? 0)
+      output.dataset.rowsLoaded = '0'
+      if (output.parentElement !== block) block.appendChild(output)
+      return
+    }
     output.remove()
     paintedRows.delete(block)
     return
@@ -902,7 +920,7 @@ function paintOutput(
         ? paintRow(snapshot.rows[index], opts)
         : columns === 0
           ? blankRowElement()
-          : spacerOf(1)
+          : spacerOf(1, line.from)
     if (snapshot !== null) decorateLinks(element)
     nextRows.set(line.from, {
       row: {
@@ -938,7 +956,7 @@ function paintOutput(
         old.classList.contains('cmd-output-spacer') &&
         old.dataset.rows === String(segment.rows)
           ? old
-          : spacerOf(segment.rows)
+          : spacerOf(segment.rows, segment.from)
       elements.set(segment.key, element)
       continue
     }

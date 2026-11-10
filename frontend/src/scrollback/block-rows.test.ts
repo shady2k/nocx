@@ -240,6 +240,7 @@ describe('stored block rows', () => {
     expect(block.querySelectorAll('.cmd-output-gap')).toHaveLength(0)
     const spacer = block.querySelector<HTMLElement>('.cmd-output-spacer')!
     expect(spacer.dataset.rows).toBe('4798')
+    expect(spacer.dataset.logicalLine).toBe('2')
     expect(block.querySelector<HTMLElement>('.cmd-output')!.dataset.rowsLoaded).toBe('4')
   })
 
@@ -325,9 +326,34 @@ describe('stored block rows', () => {
     )
     const spacers = [...block.querySelectorAll<HTMLElement>('.cmd-output-spacer')]
     expect(spacers.map((el) => el.dataset.rows)).toEqual(['300', '300'])
+    expect(spacers.map((el) => el.dataset.logicalLine)).toEqual(['0', '4700'])
     expect(block.querySelectorAll('.cmd-output-gap')).toHaveLength(1)
     expect(block.querySelector('[data-output-empty]')).toBeNull()
     expect(block.querySelector<HTMLElement>('.cmd-output')!.dataset.rowsCount).toBe('600')
+  })
+
+  it("keeps a running block's body element when it has geometry but no lines yet", () => {
+    const block = document.createElement('article')
+    paintStoredRows(
+      block,
+      {
+        lines: [],
+        droppedRows: 0,
+        lostRows: 0,
+        truncated: null,
+        sealed: false,
+        firstRow: 0,
+        lastRow: 4999,
+        endRow: 5000,
+        rowCount: 5000,
+        retainedRanges: [{ from: 0, to: 5000 }],
+        reserve: false,
+      },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+    const output = block.querySelector<HTMLElement>('.cmd-output')
+    expect(output).not.toBeNull()
+    expect(output!.dataset.rowsLoaded).toBe('0')
   })
 
   it('paints backend rows through the shared row painter', () => {

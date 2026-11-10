@@ -4550,7 +4550,15 @@ export class TerminalContent extends BasePaneContent {
         const entryIds = this.scrollback?.blockManager.storedRowEntryIds() ?? []
         for (const entryId of entryIds) {
           const rows = this._storedRowsOf(entryId)
-          if (rows?.rowCount !== undefined && rows.rowCount > LAZY_BLOCK_ROWS) {
+          if (
+            rows?.rowCount !== undefined &&
+            rows.rowCount > LAZY_BLOCK_ROWS &&
+            // A RUNNING block keeps its body and its reservation. Resetting it
+            // would leave the live painter with no lines, and its reserve:false
+            // body has no spacers to keep the height; the reconnect's
+            // revalidation refreshes what grew (ADR-ywzcpbqe).
+            rows.sealed !== false
+          ) {
             // A LARGE block gives its body back: the coordinates and the
             // reserved height stay, and what is on screen is read at the next
             // step. A short block is one page already and keeps what it has —
@@ -12017,13 +12025,15 @@ export class TerminalContent extends BasePaneContent {
       // visible one.
       const margin = areaRect.height
       if (rect.bottom < areaRect.top - margin || rect.top > areaRect.bottom + margin) continue
+      // The demand loop must not depend on an element the painter may have
+      // removed (ADR-ywzcpbqe). A block with geometry but no body yet still
+      // has a place in the transcript, and its first page is still missing.
       const output = el.querySelector<HTMLElement>(':scope > .cmd-output')
-      if (!output) continue
       const stated = Number.parseFloat(getComputedStyle(el).getPropertyValue('--term-cell-height'))
       const pitch = Number.isFinite(stated) && stated > 0 ? stated : 18
       const first = retained[0]?.from ?? rows.firstRow ?? 0
       const last = (retained[retained.length - 1]?.to ?? first + 1) - 1
-      const outRect = output.getBoundingClientRect()
+      const outRect = output?.getBoundingClientRect() ?? el.getBoundingClientRect()
       const topOffset = Math.max(0, Math.floor((areaRect.top - outRect.top) / pitch))
       const bottomOffset = Math.max(0, Math.floor((areaRect.bottom - outRect.top) / pitch))
       // ONE MAPPING between visual position and stream index, the one the

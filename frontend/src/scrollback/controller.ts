@@ -1270,8 +1270,14 @@ export class ScrollbackController {
       // block and its logical line, so counting its position among the body's
       // children would walk tens of thousands of siblings on every settle for a
       // number nothing reads.
+      // A SPACER IS A ROW FOR THE ANCHOR (ADR-ywzcpbqe). A page replaces it
+      // with painted rows; its logical line is the only identity that follows
+      // the reader to the same stream row instead of to a neighbouring unit
+      // with the same class.
       const isRow =
-        unit.classList.contains('term-grid-row') && unit.dataset.logicalLine !== undefined
+        (unit.classList.contains('term-grid-row') ||
+          unit.classList.contains('cmd-output-spacer')) &&
+        unit.dataset.logicalLine !== undefined
       if (isRow) {
         return {
           element: unit,
@@ -1458,9 +1464,9 @@ export class ScrollbackController {
       if (place.line === null) return null
       const selector =
         place.blockId === null
-          ? `.cmd-output .term-grid-row[data-logical-line="${place.line}"]`
+          ? `.cmd-output [data-logical-line="${place.line}"]`
           : `.cmd-block[data-entry-id="${place.blockId}"] .cmd-output` +
-            ` .term-grid-row[data-logical-line="${place.line}"]`
+            ` [data-logical-line="${place.line}"]`
       return area.querySelector<HTMLElement>(selector)
     }
     if (place.kind === 'header') {

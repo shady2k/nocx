@@ -2098,6 +2098,33 @@ describe("the reader's anchor (nocx-3wmve)", () => {
     expect(area.scrollTop).toBe(1051)
   })
 
+  it('anchors a long wrapped header that fills the viewport (nocx-3wmve)', () => {
+    const { controller } = makeController()
+    stopFollowing(controller)
+    const area = laidOut(controller)
+    // A command whose header wraps over more than a screen, and nothing of its
+    // body in view: the header is the only thing the person can be reading, and
+    // a search over body units alone left them on the numeric fallback.
+    const block = document.createElement('div')
+    block.className = 'cmd-block'
+    block.dataset.entryId = 'att-header'
+    const header = document.createElement('div')
+    header.className = 'cmd-header'
+    let top = -100
+    header.getBoundingClientRect = () => rect(top, 400)
+    block.appendChild(header)
+    controller.scrollbackInner.appendChild(block)
+    block.getBoundingClientRect = () => rect(-3000, 6000)
+
+    controller.holdReaderPlace(() => {
+      // a block above it grew: the header moves down inside the viewport
+      top += 40
+      Object.defineProperty(area, 'scrollHeight', { value: 4040, configurable: true })
+    })
+
+    expect(area.scrollTop).toBe(1040)
+  })
+
   it('puts a FOLLOWER back at the bottom edge when a change grows the transcript (nocx-3wmve)', () => {
     const { controller } = makeController()
     const area = laidOut(controller)

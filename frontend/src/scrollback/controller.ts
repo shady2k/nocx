@@ -40,7 +40,7 @@ export type LiveRegionMode = 'idle' | 'running' | 'fullscreen' | 'unstructured'
 interface ReaderPlace {
   /** The block's durable identity (`data-entry-id`), null when it has none. */
   blockId: string | null
-  kind: 'row' | 'unit'
+  kind: 'row' | 'unit' | 'header'
   /** The record's absolute line, for a row. */
   line: string | null
   /** The unit's ordinal among the block's rendered units, for anything else. */
@@ -1146,6 +1146,20 @@ export class ScrollbackController {
       if (found === null) continue
       const { unit } = found
       const element = unit.getBoundingClientRect()
+      // A HEADER IS ITS BLOCK'S OWN, and there is exactly one: its identity is
+      // the block that carries it, with no ordinal to shift.
+      if (unit.classList.contains('cmd-header')) {
+        const owner = unit.closest<HTMLElement>('.cmd-block') ?? block
+        return {
+          blockId: owner.dataset.entryId ?? block.dataset.entryId ?? null,
+          kind: 'header',
+          line: null,
+          index: -1,
+          signature: '',
+          offset: element.top - clip.top,
+          top: area.scrollTop,
+        }
+      }
       // THE NEAREST BLOCK THAT OWNS THE UNIT, and an ordinal LOCAL TO ITS OWN
       // BODY (nocx-3wmve). A turn holds several commands, each with its own
       // body: an ordinal across every body under the turn shifts the moment an
@@ -1218,7 +1232,9 @@ export class ScrollbackController {
     block: HTMLElement,
     clip: { top: number; bottom: number },
   ): { unit: HTMLElement; index: number } | null {
-    const units = block.querySelectorAll<HTMLElement>('.cmd-output > *')
+    // HEADERS TOO: a long wrapped command's header can fill the viewport, and
+    // a reader on it had no anchor at all (the search only knew body units).
+    const units = block.querySelectorAll<HTMLElement>('.cmd-header, .cmd-output > *')
     if (units.length === 0) return null
     const topOf = (index: number): number => units[index].getBoundingClientRect().top
     // THE LAST UNIT WHOSE TOP IS AT OR ABOVE THE VIEWPORT'S TOP EDGE, found by
@@ -1282,6 +1298,11 @@ export class ScrollbackController {
           : `.cmd-block[data-entry-id="${place.blockId}"] .cmd-output` +
             ` .term-grid-row[data-logical-line="${place.line}"]`
       return area.querySelector<HTMLElement>(selector)
+    }
+    if (place.kind === 'header') {
+      if (place.blockId === null) return null
+      const owner = area.querySelector<HTMLElement>(`.cmd-block[data-entry-id="${place.blockId}"]`)
+      return owner?.querySelector<HTMLElement>(':scope > .cmd-header') ?? null
     }
     if (place.blockId === null || place.index < 0) return null
     const block = area.querySelector<HTMLElement>(`.cmd-block[data-entry-id="${place.blockId}"]`)

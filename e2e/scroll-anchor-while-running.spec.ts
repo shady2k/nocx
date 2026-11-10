@@ -191,16 +191,31 @@ test('arriving output does not move a reader scrolled into history', async ({ pa
   await expect(page.locator('.pane.active .cmd-block-running')).toHaveCount(0, { timeout: 60_000 })
   await promptReady(page)
 
-  // The producer: still printing while the person reads.
-  await page.keyboard.type(
-    'for i in $(seq -f "%03g" 1 200); do echo LIVE-$i; sleep 0.1; done; echo LIVE-DONE',
-  )
+  // The producer: still printing while the person reads, AND HELD AT ITS NEXT
+  // OUTPUT UNTIL THE BASELINE IS TAKEN (nocx-3wmve). Without the gate the whole
+  // run can be over before the wheel and the capture finish, and the assertion
+  // then compares two readings of the same finished transcript — a pass that
+  // observed no arriving output at all.
+  const release = path.join(mkdtempSync(path.join(tmpdir(), 'nocx-live-')), 'go')
+  const file = producer('live', [
+    'for i in $(seq -f "%03g" 1 60); do echo LIVE-$i; sleep 0.1; done',
+    `while [ ! -f ${release} ]; do sleep 0.05; done`,
+    'for i in $(seq -f "%03g" 61 120); do echo LIVE-$i; sleep 0.1; done',
+    'echo LIVE-DONE',
+  ])
+  await page.keyboard.type(`bash ${file}`)
   await page.keyboard.press('Enter')
   await waitForText(page, 'LIVE-060')
 
   await wheelIntoHistory(page, /HIST-070/)
   const before = await readerPlace(page)
   const topBefore = await scrollerTop(page)
+  // THE PREMISE, STATED: the producer is still waiting, so the lines this case
+  // is about have not arrived yet.
+  expect(await page.evaluate(() => (document.body.textContent ?? '').includes('LIVE-120'))).toBe(
+    false,
+  )
+  writeFileSync(release, 'go')
 
   // Sixty more lines arrive; the person has not scrolled.
   await waitForText(page, 'LIVE-120')
@@ -283,18 +298,26 @@ test('an inline program redrawing its region does not move a reader in history',
   page,
 }) => {
   test.setTimeout(180_000)
+  // The redraws are HELD AFTER A SHORT FIRST REGION UNTIL THE BASELINE IS TAKEN
+  // (nocx-3wmve): sixty redraws at a fifth of a second can be over before the
+  // wheel and the capture finish, and the case would then compare two readings
+  // of a program that had stopped drawing — a pass that observed no redraw.
+  const release = path.join(mkdtempSync(path.join(tmpdir(), 'nocx-region-')), 'go')
   const file = producer('region', [
     'for i in $(seq -f "%03g" 1 120); do echo REGION-HIST-$i; done',
     'height=0',
-    'for i in $(seq 1 60); do',
+    'draw() {',
     '  if [ "$height" -gt 0 ]; then printf "\\033[${height}A\\033[J"; fi',
-    '  printf "REGION-HDR-%03d\\n" "$i"',
-    '  if [ $((i % 2)) -eq 0 ]; then rows=28; else rows=2; fi',
+    '  printf "REGION-HDR-%03d\\n" "$1"',
+    '  if [ $(( $1 % 2 )) -eq 0 ]; then rows=28; else rows=2; fi',
     '  r=1',
     '  while [ "$r" -lt "$rows" ]; do printf "region row %s\\n" "$r"; r=$((r + 1)); done',
     '  height=$rows',
-    '  sleep 0.2',
-    'done',
+    '}',
+    'draw 1; draw 2; draw 3',
+    'sleep 0.2',
+    `while [ ! -f ${release} ]; do sleep 0.05; done`,
+    'for i in $(seq 4 60); do draw "$i"; sleep 0.2; done',
     'echo REGION-DONE',
   ])
 
@@ -308,6 +331,12 @@ test('an inline program redrawing its region does not move a reader in history',
   await wheelIntoHistory(page, /REGION-HIST-\d{3}/, -300)
   const before = await readerPlace(page)
   const topBefore = await scrollerTop(page)
+  // THE PREMISE, STATED: the producer is still waiting, so the redraws this
+  // case is about have not happened yet.
+  expect(await page.evaluate(() => (document.body.textContent ?? '').includes('REGION-DONE'))).toBe(
+    false,
+  )
+  writeFileSync(release, 'go')
 
   // The program redraws its region sixty times; nothing the person does in
   // between may move them.

@@ -28,7 +28,7 @@ func TestUIStateGet_DTOConformsToContract(t *testing.T) {
 			ActiveTab: "",
 		},
 		"a used profile": {
-			Sidebar:   uiStateSidebar{Collapsed: true, ActiveViewID: "ports", Width: 320},
+			Sidebar:   uiStateSidebar{Width: 320},
 			ActiveTab: "pane-7",
 		},
 	}
@@ -46,7 +46,7 @@ func TestUIStateGet_DTOConformsToContract(t *testing.T) {
 func TestUIStateSet_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "uistate.schema.json")
 	raw, err := json.Marshal(uiStateLayout{
-		Sidebar:   uiStateSidebar{Collapsed: false, ActiveViewID: "files", Width: 206},
+		Sidebar:   uiStateSidebar{Width: 206},
 		ActiveTab: "pane-1",
 	})
 	if err != nil {
@@ -87,7 +87,7 @@ func TestUIStateSet_OverTheWireConformsToContract(t *testing.T) {
 	defer stop()
 
 	resp := snippetCall(t, connectWS(t, ws), "uistate.set", map[string]any{
-		"sidebar":   map[string]any{"collapsed": true, "activeViewId": "ports", "width": 320},
+		"sidebar":   map[string]any{"width": 320},
 		"activeTab": "pane-3",
 	}, 1)
 	if resp.Error != nil {
@@ -104,7 +104,7 @@ func TestUIStateSurvivesOverTheWire(t *testing.T) {
 	defer stop()
 
 	set := snippetCall(t, connectWS(t, ws), "uistate.set", map[string]any{
-		"sidebar":   map[string]any{"collapsed": true, "activeViewId": "ports", "width": 320},
+		"sidebar":   map[string]any{"width": 320},
 		"activeTab": "pane-3",
 	}, 1)
 	if set.Error != nil {
@@ -117,16 +117,14 @@ func TestUIStateSurvivesOverTheWire(t *testing.T) {
 	}
 	var layout struct {
 		Sidebar struct {
-			Collapsed    bool   `json:"collapsed"`
-			ActiveViewID string `json:"activeViewId"`
-			Width        int    `json:"width"`
+			Width int `json:"width"`
 		} `json:"sidebar"`
 		ActiveTab string `json:"activeTab"`
 	}
 	if err := json.Unmarshal(got.Result, &layout); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if !layout.Sidebar.Collapsed || layout.Sidebar.ActiveViewID != "ports" || layout.Sidebar.Width != 320 {
+	if layout.Sidebar.Width != 320 {
 		t.Fatalf("sidebar came back as %+v, want what was set", layout.Sidebar)
 	}
 	if layout.ActiveTab != "pane-3" {
@@ -142,7 +140,7 @@ func TestUIStateSetAnswersWithTheStoredWidth(t *testing.T) {
 	defer stop()
 
 	resp := snippetCall(t, connectWS(t, ws), "uistate.set", map[string]any{
-		"sidebar":   map[string]any{"collapsed": false, "activeViewId": "", "width": 99999},
+		"sidebar":   map[string]any{"width": 99999},
 		"activeTab": "",
 	}, 1)
 	if resp.Error != nil {

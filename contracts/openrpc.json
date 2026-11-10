@@ -23374,6 +23374,125 @@
       }
     },
     {
+      "name": "tabs.setPanel",
+      "params": [
+        {
+          "name": "params",
+          "required": false,
+          "schema": {
+            "$ref": "https://nocx.local/contracts/tabs.setPanel.params.schema.json"
+          }
+        }
+      ],
+      "errors": [
+        {
+          "code": -32601,
+          "message": "Method not found",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32603,
+          "message": "Internal error",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This call did not start, or its work reached its declared deadline",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/operation.expired.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This mutation already ran",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/mutation.replayed.schema.json"
+          }
+        }
+      ],
+      "x-nocx-agent-disposition": "operation-owned",
+      "x-nocx-operation": {
+        "id": "tabs.setPanel",
+        "kind": "method",
+        "owner": "request",
+        "phases": [
+          {
+            "name": "run",
+            "resources": [
+              {
+                "kind": "collection",
+                "name": "workspace-layout",
+                "mode": "key"
+              }
+            ],
+            "dependencies": [
+              "content"
+            ]
+          }
+        ],
+        "turn": {
+          "millis": 30000,
+          "basis": "read",
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
+        },
+        "max": {
+          "millis": 30000,
+          "basis": "read",
+          "note": "read: layout document write; no explicit bound today"
+        },
+        "silence": {
+          "kind": "none",
+          "millis": 0,
+          "basis": "",
+          "note": ""
+        },
+        "answer": {
+          "kind": "none",
+          "millis": 0,
+          "basis": "",
+          "note": ""
+        },
+        "recovery": {
+          "kind": "none",
+          "millis": 0,
+          "basis": "",
+          "note": ""
+        },
+        "merge": "none",
+        "waiting": "Changing the tab layout",
+        "row": "past-wait",
+        "expired": "outcome-unknown",
+        "resources": [
+          {
+            "kind": "collection",
+            "name": "workspace-layout",
+            "mode": "key"
+          }
+        ],
+        "dependencies": [
+          "content"
+        ],
+        "preempts": []
+      },
+      "result": {
+        "name": "tabs.setPanelResult",
+        "schema": {
+          "$ref": "https://nocx.local/contracts/tabs.setPanel.schema.json"
+        }
+      }
+    },
+    {
       "name": "transport.credit",
       "params": [
         {
@@ -27603,6 +27722,9 @@
     },
     {
       "$ref": "https://nocx.local/contracts/tabs.reorder.schema.json"
+    },
+    {
+      "$ref": "https://nocx.local/contracts/tabs.setPanel.schema.json"
     },
     {
       "$ref": "https://nocx.local/contracts/transport.credit.schema.json"

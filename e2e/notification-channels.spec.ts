@@ -7,7 +7,9 @@ import {
   standalone as base,
   VaultBackend,
   bindEndpoint,
+  expectToast,
   promptReady,
+  recordToasts,
   settingsReady,
   resolveBackend,
 } from './harness'
@@ -132,53 +134,6 @@ const settingKey = (channel: { id: string }) => `notifications.route.${KIND.id}.
 const nonce = Date.now().toString(36)
 const CONTROL = `control announcement ${nonce}`
 const ROUTED = `routed announcement ${nonce}`
-
-declare global {
-  interface Window {
-    __nocxToastMessages?: string[]
-  }
-}
-
-/**
- * Remember every toast the product draws, from before the first application
- * script runs.
- *
- * It observes the RENDERED element — the kit's own `.ui-toast__message`, the
- * thing a person sees — and not the `notify.toast` frame, so a build that
- * received the push and failed to present it is still a failure here.
- */
-async function recordToasts(page: Page): Promise<void> {
-  await page.addInitScript(() => {
-    window.__nocxToastMessages = []
-    const harvest = (node: Node): void => {
-      if (!(node instanceof HTMLElement)) return
-      const toasts = node.matches('.ui-toast') ? [node] : [...node.querySelectorAll('.ui-toast')]
-      for (const el of toasts) {
-        window.__nocxToastMessages!.push(el.querySelector('.ui-toast__message')?.textContent ?? '')
-      }
-    }
-    const observe = (): void => {
-      new MutationObserver((records) => {
-        for (const record of records) record.addedNodes.forEach(harvest)
-      }).observe(document.documentElement, { childList: true, subtree: true })
-    }
-    if (document.documentElement) observe()
-    else document.addEventListener('DOMContentLoaded', observe)
-  })
-}
-
-/** Wait until the product has drawn a toast carrying `text`. The budget is a
- *  hang detector, not a claim about how fast a shared runner is: this
- *  predicate spans a real pty, the OSC parser, a round trip to the backend's
- *  ingress, the router, the toast sink and a push back to the renderer. */
-async function expectToast(page: Page, text: string): Promise<void> {
-  await expect
-    .poll(async () => page.evaluate(() => window.__nocxToastMessages ?? []), {
-      timeout: 30_000,
-      message: `no toast ever carried ${JSON.stringify(text)}`,
-    })
-    .toContain(text)
-}
 
 /**
  * How many banner deliveries the backend attempted during the RUN.

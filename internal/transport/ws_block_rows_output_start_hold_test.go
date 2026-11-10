@@ -459,8 +459,201 @@ func TestTheHoldIsEmptiedByOneFunction(t *testing.T) {
 		t.Fatalf("the hold is emptied in %d functions, want exactly one (releaseHold): %v", len(emptiedIn), emptiedIn)
 	}
 	for name := range emptiedIn {
-		if !strings.Contains(name, "releaseHold(") {
-			t.Fatalf("the hold is emptied in %q, want only releaseHold", name)
+		if !strings.Contains(name, "releaseHoldStep(") {
+			t.Fatalf("the hold is emptied in %q, want only releaseHoldStep (releaseHold's own body)", name)
 		}
+	}
+}
+
+// ── Round 3 of the review (nocx-4y82c.1.11) ───────────────────────────────
+//
+// The shape, not another mutex: one ordered sequence per session owns the
+// hold, a settle is a later step in that sequence, and no store call is made
+// while holding a lock another store caller can need.
+
+// gateNthAppendStore passes the first n-1 appends and parks the rest, so a
+// test can put the delivery that follows a release in the store while it
+// starts a session end.
+type gateNthAppendStore struct {
+	closeFailureBlockStore
+	mu      sync.Mutex
+	calls   int
+	pass    int
+	entered chan struct{}
+	release chan struct{}
+}
+
+func newGateNthAppendStore(ledger content.LedgerRepository, pass int) *gateNthAppendStore {
+	return &gateNthAppendStore{
+		closeFailureBlockStore: closeFailureBlockStore{ledger: ledger},
+		pass:                   pass, entered: make(chan struct{}, 64), release: make(chan struct{}),
+	}
+}
+
+func (s *gateNthAppendStore) AppendBlockRows(ctx context.Context, in content.AppendBlockRows) error {
+	s.mu.Lock()
+	s.calls++
+	call := s.calls
+	s.mu.Unlock()
+	if call > s.pass {
+		s.entered <- struct{}{}
+		<-s.release
+	}
+	return s.closeFailureBlockStore.AppendBlockRows(ctx, in)
+}
+
+// The delivery that CROSSED the bound is part of the release's ordered span:
+// a session end cannot seal between the prefix and the row that triggered it.
+func TestASessionEndCannotSealBetweenABoundReleaseAndItsTriggeringRow(t *testing.T) {
+	e, pub, lane, h, sidStr, db := newLifecycleLedgerEnv(t, true)
+	sid := session.ID(sidStr)
+	// The prefix lands (call 1); the triggering row's append parks (call 2).
+	store := newGateNthAppendStore(db.Ledger(), 1)
+	e.ws.blockRowsStore = store
+	e.ws.AttachBlockRows(sid)
+	e.ws.BlockOutputStartPlaneAttached(sid)
+	attempt := startsACommand(t, e, pub, lane, h, 2, "yes")
+
+	held := make([]emulator.Row, maxHeldBeforeOutputStartRows)
+	for i := range held {
+		held[i] = aStreamRow("held")
+	}
+	if up, confirm := e.ws.BlockRowsArrived(sid, 0, 0, held, ""); confirm || up != 0 {
+		t.Fatalf("rows up to the bound = (%d, %v), want held", up, confirm)
+	}
+
+	boundDone := make(chan struct{})
+	go func() {
+		defer close(boundDone)
+		e.ws.BlockRowsArrived(sid, maxHeldBeforeOutputStartRows, 0, []emulator.Row{aStreamRow("overflowing")}, "")
+	}()
+	select {
+	case <-store.entered:
+	case <-time.After(wantWithin):
+		t.Fatal("the row that crossed the bound never reached the store")
+	}
+
+	// The session ends while that row is still in the store. It must be a
+	// later step than the delivery, not a seal over it.
+	e.ws.HelperSessionEnded(sid)
+
+	close(store.release)
+	select {
+	case <-boundDone:
+	case <-time.After(wantWithin):
+		t.Fatal("the bound's delivery did not finish")
+	}
+
+	rows := streamRows(t, db, attempt)
+	if len(rows) != maxHeldBeforeOutputStartRows+1 {
+		t.Fatalf("artifact holds %d rows, want all %d the release and its trigger had", len(rows), maxHeldBeforeOutputStartRows+1)
+	}
+	assertBlockSealed(t, db, attempt)
+}
+
+// A close does not wait for a release that is in the store: the release
+// holds the store's one connection, so a close that waited for it would hold
+// the connection's counterpart and stall until the frame's own bound expired.
+// The close is a later step in the session's sequence instead. Inside a
+// lifecycle frame that step rides the frame's post-commit queue, because a
+// seal of a frame that rolls back must not happen.
+func TestACloseDoesNotWaitForAnInFlightRelease(t *testing.T) {
+	e, pub, lane, h, sidStr, db := newLifecycleLedgerEnv(t, true)
+	sid := session.ID(sidStr)
+	store := newBlockingAppendStore(db.Ledger())
+	e.ws.blockRowsStore = store
+	e.ws.AttachBlockRows(sid)
+	e.ws.BlockOutputStartPlaneAttached(sid)
+	attempt := startsACommand(t, e, pub, lane, h, 2, "printf output")
+
+	if up, confirm := e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{
+		aStreamRow("kept-1"), aStreamRow("kept-2"),
+	}, ""); confirm || up != 0 {
+		t.Fatalf("rows before the mark = (%d, %v), want held", up, confirm)
+	}
+
+	// The mark starts the release, which parks in the store.
+	markDone := make(chan struct{})
+	go func() {
+		defer close(markDone)
+		e.ws.BlockOutputStartRow(sid, 0)
+	}()
+	select {
+	case <-store.entered:
+	case <-time.After(wantWithin):
+		t.Fatal("the release never reached the store")
+	}
+
+	// The close arrives while the release is parked. It must return without
+	// waiting for the store the release holds.
+	fctx, queue := lifecyclecommit.Begin(context.Background())
+	closeReturned := make(chan struct{})
+	go func() {
+		defer close(closeReturned)
+		e.ws.closeBlockRows(fctx, sid, attempt, 2, nil, "frame-close", false)
+	}()
+	select {
+	case <-closeReturned:
+	case <-time.After(holdReleaseProbe):
+		t.Fatal("the close waited for the in-flight release")
+	}
+	if art := blockArtifact(t, db, attempt); art.State == content.ArtifactSealed {
+		t.Fatal("the close sealed while its release was still in the store")
+	}
+
+	// The release finishes; the frame commits; the close runs as the next
+	// step and seals over the released rows.
+	close(store.release)
+	select {
+	case <-markDone:
+	case <-time.After(wantWithin):
+		t.Fatal("the release did not finish")
+	}
+	queue.End(true)
+	rows := streamRows(t, db, attempt)
+	if len(rows) != 2 || rows[0].Text != "kept-1" || rows[1].Text != "kept-2" {
+		t.Fatalf("artifact holds %+v, want the released rows before the close's seal", rows)
+	}
+	assertBlockSealed(t, db, attempt)
+}
+
+// The byte bound counts the rows that are already in the pending queue once:
+// heldBytesLocked owns that accounting, and a caller adds only bytes the
+// queue does not hold yet.
+func TestTheOpenHoldCheckCountsPendingRowsOnce(t *testing.T) {
+	e, _, _, _, sid, attempt, store, db := lateOpenSetup(t)
+	e.ws.SetBlockRowsBufferBytes(MinBlockRowsBufferBytes)
+	e.ws.blockStream.mu.Lock()
+	e.ws.blockStream.budgets[sid] = MinBlockRowsBufferBytes
+	e.ws.blockStream.mu.Unlock()
+	e.ws.BlockOutputStartPlaneAttached(sid)
+	release, done := heldReopen(t, e, sid, attempt, store)
+
+	// 200 wide rows: about three quarters of the 4 MiB floor, and far below
+	// the 256-row bound.
+	rows := make([]emulator.Row, 200)
+	for i := range rows {
+		rows[i] = aStreamRow(strings.Repeat("x", 400))
+	}
+	if up, confirm := e.ws.BlockRowsArrived(sid, 0, 0, rows, ""); confirm || up != 0 {
+		t.Fatalf("rows during the open = (%d, %v), want them held pending the block", up, confirm)
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(wantWithin):
+		t.Fatal("the open did not finish")
+	}
+
+	// Neither bound is exceeded, so the hold must still have them: the echo
+	// of the command is not stored before its mark.
+	if stored := streamRows(t, db, attempt); len(stored) != 0 {
+		t.Fatalf("artifact holds %d rows before any mark, want the hold to keep them", len(stored))
+	}
+	e.ws.blockStream.mu.Lock()
+	heldRows := len(e.ws.blockStream.current[sid].preOutputStart)
+	e.ws.blockStream.mu.Unlock()
+	if heldRows != 1 {
+		t.Fatalf("hold holds %d deliveries, want the open's head in one", heldRows)
 	}
 }

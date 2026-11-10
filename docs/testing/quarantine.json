@@ -64,6 +64,10 @@
     {
       "test": "e2e:e2e/enhanced-input.spec.ts › enhanced input raw routing › read command receives input after enhanced submit",
       "bead": "nocx-atpw5.1.38"
+    },
+    {
+      "test": "e2e:e2e/load-no-busy.spec.ts › a person never sees busy under load",
+      "bead": "nocx-nqmjq.2"
     }
   ]
 }

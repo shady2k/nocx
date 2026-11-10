@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tabs.setPanel.params.schema.json",
+  "title": "TabsSetPanelParams",
+  "description": "Params for recording which sidebar panel a tab shows, and whether it is collapsed. Two values and not one: a collapsed panel remembers the view it reopens on, which is the behaviour the activity bar's toggle has always had. The view is a string the store does not judge — the renderer owns the registry of views, exactly as it owns a tab's palette, so a value a newer renderer understands is carried rather than refused.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "view", "collapsed"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "view": {
+      "description": "The view id, or \"\" for a tab whose panel shows nothing. Bounded because it is a name, not a document: no view id in this build is longer than a handful of characters.",
+      "type": "string",
+      "maxLength": 64
+    },
+    "collapsed": { "type": "boolean" }
+  }
+}

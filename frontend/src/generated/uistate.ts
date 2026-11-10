@@ -19,15 +19,10 @@ export interface UIState {
    */
   activeTab: string
 }
+/**
+ * The panel's WIDTH and nothing else. Which view a tab shows, and whether its rail is collapsed, are facts about that TAB and live on its layout row (nocx-ouru5.1.18); a window-wide copy here would be a second owner of the same fact, and the two would disagree the first time a person switched tabs.
+ */
 export interface Sidebar {
-  /**
-   * Whether the panel is collapsed to the activity bar.
-   */
-  collapsed: boolean
-  /**
-   * The sidebar view that was on screen, or "" when none was. A view id the build no longer registers falls back to the first view.
-   */
-  activeViewId: string
   /**
    * The panel's width as a WHOLE number of CSS pixels, clamped by the backend to the declared bounds. Whole pixels because nothing about a panel edge is meaningful to seven decimal places — a fractional one is what put '206.3828125 px' on a Settings page.
    */

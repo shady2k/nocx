@@ -207,6 +207,17 @@
   padding: 0;
 }
 
+/* THE RUNNING HEADER'S COLUMN IN A TURN (nocx-4y82c.1.13). A running command
+   nested in a turn (an assistant's `run` call) is widened to the pane by the
+   controller, which cancels the turn's insets, so the header pays the
+   transcript's gutter itself — the same token its body pays in style.css, so
+   the chevron sits on the output's first column and neither touches the pane's
+   edge. A top-level running block wears the stack's row gutter on the block
+   instead, and this header pays nothing (the variant above). */
+.cmd-children > .cmd-block.cmd-block-running > .cmd-header {
+  padding-inline: var(--pane-inline-padding);
+}
+
 .ui-command-block-frame[data-variant='running'] > .cmd-header-meta {
   display: none;
 }

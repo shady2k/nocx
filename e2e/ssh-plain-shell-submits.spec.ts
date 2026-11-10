@@ -1,31 +1,32 @@
 /**
- * e2e: a plain sh with no shell integration takes every composer submit, not
- * just the first (nocx-evj4b.1.6).
+ * e2e: an ssh pane on a non-integrated sh writes none of its held submits
+ * before its prompt (nocx-evj4b.1.6, as amended by the owner 2026-11-10;
+ * nocx-evj4b.1.8).
  *
  * # The report
  *
- * Found by the nocx-evj4b.1.2 worker on this stand: an ssh pane whose far
- * shell is a non-integrated sh accepted the first composer submit and then
- * stopped taking composer submits. Plain ssh sessions without integration are
- * a supported case (owner), so the commands after the first must reach the
- * shell.
+ * Found by the nocx-evj4b.1.2 worker on this stand: an ssh pane whose far shell
+ * is a non-integrated sh accepted the first composer submit and then stopped
+ * taking composer submits. Plain ssh sessions without integration are a
+ * supported case (owner), so the commands after the first must reach the shell.
  *
  * # What this asserts, and where it reads it
  *
  * The pane opens on a host whose account shell is `sh` (dash) with
  * `desiredMode: 'script'`: the launcher runs, stage-1 finds no bash/zsh to
  * integrate, and the session settles `conventional` — there is no prompt mark
- * and there never will be one. During that startup interval the composer is
- * the person's input surface; FIVE submits are typed into it. Every one of
- * them must reach the far program as its own line: the fixture's own record
- * of what the pty accepted (`-input-log`) is read after the bootstrap frames,
- * and it must be exactly the five typed lines, each with its own Enter.
+ * and there never will be one. During that startup interval the composer is the
+ * person's input surface; FIVE submits are typed into it. Each Enter still
+ * takes its own line (the draft empties; nocx-evj4b.1.6), but the lines are
+ * held against a prompt that is never coming — so, per the owner's decision of
+ * 2026-11-10, they are NOT written into the pty: the far side is still cooked
+ * and its startup chain can read stdin. The fixture's own record of what the
+ * pty accepted (`-input-log`) is read after the bootstrap frames: it must hold
+ * NOTHING, and the composer must hold the five lines.
  *
- * The defect this guards: the composer held the draft across the whole
- * startup interval, swallowed every Enter after the first as a duplicate of
- * the submission in flight, and then released the concatenation as ONE line.
- * So a reading of the log with fewer than five Enters — or with two lines
- * joined — is the bug, not a slow machine.
+ * Only then does the person submit at the prompt they can see — the
+ * conventional pane's input surface is the grid — and every one of those five
+ * lines must reach the far program as its own line.
  *
  * # The startup interval is HELD at the shell, and its bound is the stand's
  *
@@ -35,9 +36,7 @@
  * the command start, or the client's bytes, put a three-second bootstrap
  * timer in front of the test). Only the prompt waits — the far side reaches no
  * verdict until the spec releases it — so the interval lasts exactly as long as
- * the spec needs, and nothing in it turns on how long the browser took. The
- * spec submits, asserts the interval is still open, then releases the shell;
- * the settle that follows releases the held lines into a running shell.
+ * the spec needs, and nothing in it turns on how long the browser took.
  *
  * The bound that ends that interval is the stand's too (review round 3): the
  * backend is built with its dev tag, and a session opened under the account
@@ -109,7 +108,7 @@ function submitsIn(logPath: string): string[] | null {
   return all.subarray(framesEnd).toString('utf8').split('\r')
 }
 
-test('an ssh pane on a non-integrated sh runs five composer submits, each its own line', async ({
+test('an ssh pane on a non-integrated sh writes none of its held submits before its prompt', async ({
   page,
 }) => {
   test.setTimeout(300_000)
@@ -214,9 +213,12 @@ test('an ssh pane on a non-integrated sh runs five composer submits, each its ow
       await expect(checking).toBeVisible({ timeout: 0 })
     }
 
-    // Release the shell: it becomes /bin/sh, the session settles conventional
-    // (no prompt mark ever comes), and every held line is released in order
-    // into a running shell.
+    // Release the shell: it becomes /bin/sh and the session settles
+    // conventional. THE QUEUE'S PROMISE CANNOT BE KEPT (owner, 2026-11-10;
+    // nocx-evj4b.1.8): no prompt mark is coming, so the lines are NOT written
+    // into the pty — they come back to the composer, where the person left
+    // them, and nothing reaches the far side until they submit at the prompt
+    // they can see.
     writeFileSync(holdPath, '')
     // The far program's own record of what arrived, announced by the fixture
     // as soon as the channel it records starts.
@@ -232,6 +234,26 @@ test('an ssh pane on a non-integrated sh runs five composer submits, each its ow
       .slice('INPUTLOG='.length)
       .split(' ')[0]
     await expect(page.locator(NOTICE)).toBeVisible({ timeout: 60_000 })
+    // The composer holds the lines the queue could not deliver — the whole
+    // draft, in the order the person made it.
+    await expect
+      .poll(() => editor.locator('.cm-line').allTextContents(), {
+        timeout: 10_000,
+        message: 'the composer does not hold the lines the queue could not deliver',
+      })
+      .toEqual([...lines])
+    // And the far shell read NOTHING after its own bootstrap frames.
+    expect(
+      submitsIn(logPath),
+      'the plain sh received bytes before its prompt — the cooked pty the ' +
+        'queue must not write into',
+    ).toEqual([''])
+
+    // THE PERSON SUBMITS AT THE PROMPT THEY CAN SEE — and the composer holds
+    // their draft again, so their Enter is the submit: their five lines run,
+    // each as its own line.
+    await editor.click()
+    await editor.press('Enter')
     await expect
       .poll(() => submitsIn(logPath), {
         timeout: 60_000,

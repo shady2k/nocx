@@ -7786,6 +7786,7 @@ export class TerminalContent extends BasePaneContent {
     this._updateCapability()
     this._syncIntegrationWaiting()
     this._releaseDeferredShellSubmissions()
+    if (isDegraded(fact)) this._settleDeferredShellSubmissions()
     this._syncLifecycleOwnership()
     if (!isDegraded(fact)) {
       // Recovered, or never failed. The card belongs to the state that
@@ -7953,7 +7954,14 @@ export class TerminalContent extends BasePaneContent {
       return 'held'
     }
     if (!this._awaitsFirstPrompt()) return plan
-    if (this.lifecycle.state.kind === 'prompt_ready' || isDegraded(this._integration)) return plan
+    if (this.lifecycle.state.kind === 'prompt_ready') return plan
+    // THE QUEUE IS A PROMISE (owner, 2026-11-10; nocx-evj4b.1.8). `held` says
+    // the line will be delivered when the prompt a live domain announces
+    // arrives; the release below keeps that promise and the settle returns it
+    // (into the editor) when the startup ends without one. A session that is
+    // not awaiting a prompt never reaches here: with no integration it sends
+    // through the ordinary path — there is no marker to wait for, and no
+    // composer on screen to queue from.
     this._deferredShellSubmissions.push({ plan, target, origin })
     return 'held'
   }
@@ -8016,12 +8024,14 @@ export class TerminalContent extends BasePaneContent {
     // session's own flags; the attach callback arrives before those flags are
     // in, so a check made from there must not read them at all.
     if (bind.phase !== 'live') return false
-    if (this.lifecycle.state.kind === 'prompt_ready') return true
-    if (isDegraded(bind.integration)) return true
-    // No integration was ever requested for THIS session, so no verdict is
-    // coming and no prompt mark will ever arrive. `awaitsIntegration` is this
-    // bind's own ack field, never the session that went away.
-    return bind.integration === null && !bind.awaitsIntegration
+    // THE QUEUE RELEASES AT THE PROMPT AND NOWHERE ELSE (owner, 2026-11-10;
+    // nocx-evj4b.1.8). A `conventional`/`lost` verdict used to release it —
+    // that is how a line reached a far pty that was still cooked, because the
+    // verdict is the launcher's word about the shell, not the shell's own
+    // readiness. A session that will never announce a prompt releases
+    // nothing; what it held goes back to the composer (see
+    // `_settleDeferredShellSubmissions`).
+    return this.lifecycle.state.kind === 'prompt_ready'
   }
 
   /** Deliver the held lines ONE AT A TIME, in the order the person made them,
@@ -8119,7 +8129,12 @@ export class TerminalContent extends BasePaneContent {
   private _finishBind<T extends 'bound' | 'uncertain' | 'aborted'>(outcome: T): T {
     if (this._bind.phase === 'opening') {
       this._bind.phase = 'live'
-      this._releaseDeferredShellSubmissions()
+      if (this._startupCanHold()) this._releaseDeferredShellSubmissions()
+      else if (this._bind.integration === null && !this._bind.awaitsIntegration) {
+        // THIS SESSION NEVER ASKED FOR A PROMPT MARK, so none is coming and
+        // the queue's promise cannot be kept.
+        this._settleDeferredShellSubmissions()
+      }
     }
     return outcome
   }
@@ -8129,6 +8144,25 @@ export class TerminalContent extends BasePaneContent {
    *  were typed into is gone. */
   private _cancelDeferredShellSubmissions(): void {
     this._bind.held.length = 0
+  }
+
+  /** THE STARTUP ENDED WITHOUT A PROMPT (owner, 2026-11-10; nocx-evj4b.1.8).
+   *
+   *  A line the -775 queue held was held against a promise: the prompt a live
+   *  domain will announce. When the startup settles some other way —
+   *  `conventional`/`lost`, or a bind that never asked for integration — that
+   *  prompt is not coming, and delivering the line would write into a pty
+   *  nobody has proved ready (the far side is still cooked and its startup
+   *  chain can read stdin). The line goes back to the person instead: the
+   *  editor's draft, where they left it. The composer is not forced on screen
+   *  — a conventional pane's input surface is the grid, and the person
+   *  submits there once they see the prompt. */
+  private _settleDeferredShellSubmissions(): void {
+    const held = this._bind.held
+    if (held.length === 0) return
+    const lines = held.map((entry) => entry.plan.sendLine)
+    held.length = 0
+    this.editor?.insertText(lines.join('\n'))
   }
 
   /** Show the waiting card and hide the terminal grid for exactly as long as

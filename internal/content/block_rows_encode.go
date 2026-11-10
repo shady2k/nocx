@@ -168,13 +168,14 @@ func appendBlockStyleRun(runs []byte, style emulator.Style, length int) []byte {
 // both already read as blank once hasText is false), and continuation rows
 // belong to the logical line above.
 func BlockRowsText(chunks [][]byte) (string, error) {
-	var body bytes.Buffer
-	for _, chunk := range chunks {
-		_, _ = body.Write(chunk)
+	readers := make([]io.Reader, len(chunks))
+	for i, chunk := range chunks {
+		readers[i] = bytes.NewReader(chunk)
 	}
 
-	var lines []string
-	decoder := json.NewDecoder(&body)
+	var out strings.Builder
+	hasRow := false
+	decoder := json.NewDecoder(io.MultiReader(readers...))
 	for {
 		var line struct {
 			Row struct {
@@ -193,18 +194,11 @@ func BlockRowsText(chunks [][]byte) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if line.Row.Continuation && len(lines) > 0 {
-			lines[len(lines)-1] += rowText
-		} else {
-			lines = append(lines, rowText)
-		}
-	}
-	var out bytes.Buffer
-	for i, line := range lines {
-		if i > 0 {
+		if hasRow && !line.Row.Continuation {
 			out.WriteByte('\n')
 		}
-		out.WriteString(line)
+		out.WriteString(rowText)
+		hasRow = true
 	}
 	return out.String(), nil
 }

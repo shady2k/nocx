@@ -700,10 +700,10 @@ func blockRowsForClose(ctx context.Context, tx *sql.Tx, in CloseBlockRows) (bloc
 }
 
 // evictBlockRowsToCap drops oldest middle chunks until the artifact fits or
-// only protected ends remain. It reads ordered chunk lengths once: removing
-// middle chunks cannot change the leading head or the newest half-cap tail.
-// Whole chunks can leave those protected ends over the cap; that is not an
-// error. SQL errors still abort the caller's append transaction.
+// only protected ends remain. The retained byte count lets the ordered walk
+// identify the newest half-cap tail without loading its descriptors: a chunk
+// is droppable only when at least that many bytes follow it. Whole chunks
+// can leave the protected ends over the cap; SQL errors abort the append.
 func evictBlockRowsToCap(ctx context.Context, tx *sql.Tx, artifactID string, capBytes int64) error {
 	var held int64
 	if err := tx.QueryRowContext(ctx,
@@ -729,60 +729,49 @@ func evictBlockRowsToCap(ctx context.Context, tx *sql.Tx, artifactID string, cap
 	if err != nil {
 		return err
 	}
-	type chunkRow struct {
-		seq  int
-		size int64
-	}
-	var survivors []chunkRow
+	var scanned, headCursor, victimBytes int64
+	var firstVictim, lastVictim int
+	haveVictim := false
 	for rows.Next() {
-		var c chunkRow
-		if err = rows.Scan(&c.seq, &c.size); err != nil {
+		var seq int
+		var size int64
+		if err = rows.Scan(&seq, &size); err != nil {
 			_ = rows.Close()
 			return err
 		}
-		survivors = append(survivors, c)
+		scanned += size
+		if headEnd >= 0 && headCursor < headEnd {
+			headCursor += size
+			continue
+		}
+		// The head reservation is fixed; the tail protects the newest
+		// whole chunks totalling at least half the current cap. Once a
+		// chunk reaches that tail, every later chunk is protected too.
+		if held-victimBytes <= capBytes || held-scanned < capBytes/2 || seq == 0 {
+			break
+		}
+		if !haveVictim {
+			firstVictim = seq
+			haveVictim = true
+		}
+		lastVictim = seq
+		victimBytes += size
 	}
 	if err = rows.Err(); err != nil {
 		_ = rows.Close()
 		return err
 	}
-	_ = rows.Close()
-	// The tail: the newest chunks totalling at least half the cap.
-	tailFrom := len(survivors)
-	var tailBytes int64
-	for tailFrom-1 >= 0 && tailBytes < capBytes/2 {
-		tailFrom--
-		tailBytes += survivors[tailFrom].size
+	if err = rows.Close(); err != nil {
+		return err
 	}
-	// The head: leading chunks while they still sit inside the reservation.
-	// A store without a reservation yet has no head.
-	headTo := 0
-	var headCursor int64
-	for headTo < len(survivors) && headEnd >= 0 && headCursor < headEnd {
-		headCursor += survivors[headTo].size
-		headTo++
-	}
-	// Each removal leaves both protected runs intact, so the next victim
-	// is the next original middle chunk, even with seq gaps or unequal
-	// sizes. Stop at the same byte threshold (or seq-zero sentinel) as an
-	// iterative survivor scan; never round a victim to a partial chunk.
-	victimTo := headTo
-	var victimBytes int64
-	for victimTo < tailFrom && held-victimBytes > capBytes {
-		if survivors[victimTo].seq == 0 {
-			break
-		}
-		victimBytes += survivors[victimTo].size
-		victimTo++
-	}
-	if victimTo == headTo {
+	if !haveVictim {
 		return nil
 	}
 	// The selected victims are a contiguous span in surviving seq order.
 	// Gaps contain no rows, and the transaction excludes another writer.
 	if _, err = tx.ExecContext(ctx,
 		`DELETE FROM artifact_chunks WHERE artifact_id = ? AND seq BETWEEN ? AND ?`,
-		artifactID, survivors[headTo].seq, survivors[victimTo-1].seq); err != nil {
+		artifactID, firstVictim, lastVictim); err != nil {
 		return err
 	}
 	_, err = tx.ExecContext(ctx,

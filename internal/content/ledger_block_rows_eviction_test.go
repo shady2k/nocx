@@ -15,7 +15,7 @@ import (
 
 const evictionArtifact = "00000000-0000-7000-8000-00000000e001"
 
-func newBlockRowsEvictionStore(t *testing.T) (*sqliteContent, string) {
+func newBlockRowsEvictionStore(t testing.TB) (*sqliteContent, string) {
 	t.Helper()
 	ctx, logger := logtest.New(t)
 	db, err := Open(ctx, Config{

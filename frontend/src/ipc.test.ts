@@ -248,9 +248,15 @@ describe('session.intent', () => {
         refusal: { cause: 'busy' },
       },
     })
-    await flushMicrotasks()
+    // A backpressured cause is presented again after a short wait, so the
+    // second request is polled for rather than assumed on the next microtask.
+    await expect
+      .poll(
+        () => ws.requests().filter((candidate) => candidate.method === 'session.intent').length,
+        { timeout: 2_000 },
+      )
+      .toBe(2)
     const resent = ws.requests().filter((candidate) => candidate.method === 'session.intent')
-    expect(resent).toHaveLength(2)
     // The epoch it already held: a busy session is not a re-seating, and the
     // intent is unchanged.
     expect(resent[1].params).toEqual({
@@ -267,29 +273,52 @@ describe('session.intent', () => {
     await expect(pending).resolves.toMatchObject({ state: 'executed', bytesWritten: 1 })
   })
 
-  // ONCE. A second refusal is the answer: retrying again would be a livelock
-  // around a control-plane call on every keystroke.
-  it('returns the second refusal rather than presenting a third time', async () => {
+  // A BUSY SESSION IS BACKPRESSURE, NOT AN ANSWER ABOUT THE CHARACTER
+  // (nocx-evj4b.1.12): the queue fills and drains, and the keystroke is still
+  // the person's to make. It is presented again after the queue has had a
+  // moment — bounded, so a burst cannot spin the control plane.
+  it('presents a keystroke again after a busy refusal, until the queue has drained', async () => {
     const { session, ws } = await connectedSession()
     const pending = session.intent('text', 'h')
-    const first = ws.requests().filter((candidate) => candidate.method === 'session.intent')[0]
+    const attempts = (): ReturnType<typeof ws.requests> =>
+      ws.requests().filter((candidate) => candidate.method === 'session.intent')
     ws.deliverText({
       jsonrpc: '2.0',
-      id: first.id,
+      id: attempts()[0].id,
       result: { state: 'refused', bytesWritten: 0, fenceAfter: 4, refusal: { cause: 'busy' } },
     })
-    await flushMicrotasks()
-    const resent = ws.requests().filter((candidate) => candidate.method === 'session.intent')
-    expect(resent).toHaveLength(2)
+    await expect.poll(() => attempts().length, { timeout: 2_000 }).toBe(2)
     ws.deliverText({
       jsonrpc: '2.0',
-      id: resent[1].id,
-      result: { state: 'refused', bytesWritten: 0, fenceAfter: 4, refusal: { cause: 'busy' } },
+      id: attempts()[1].id,
+      result: { state: 'refused', bytesWritten: 0, fenceAfter: 5, refusal: { cause: 'busy' } },
     })
+    await expect.poll(() => attempts().length, { timeout: 2_000 }).toBe(3)
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: attempts()[2].id,
+      result: { state: 'executed', bytesWritten: 1, fenceAfter: 6, accessEpoch: 3 },
+    })
+    await expect(pending).resolves.toMatchObject({ state: 'executed', bytesWritten: 1 })
+  })
+
+  // AND IT ENDS. A session that stays busy past every doubled wait is one the
+  // person is owed a sentence about — never a silent drop, and never a spin.
+  it('gives up on a session that stays busy, and says so', async () => {
+    const { session, ws } = await connectedSession()
+    const pending = session.intent('text', 'h')
+    const attempts = (): ReturnType<typeof ws.requests> =>
+      ws.requests().filter((candidate) => candidate.method === 'session.intent')
+    for (let n = 0; n < 5; n += 1) {
+      ws.deliverText({
+        jsonrpc: '2.0',
+        id: attempts()[n].id,
+        result: { state: 'refused', bytesWritten: 0, fenceAfter: 4, refusal: { cause: 'busy' } },
+      })
+      if (n < 4) await expect.poll(() => attempts().length, { timeout: 2_000 }).toBe(n + 2)
+    }
     await expect(pending).resolves.toMatchObject({ state: 'refused' })
-    expect(ws.requests().filter((candidate) => candidate.method === 'session.intent')).toHaveLength(
-      2,
-    )
+    expect(attempts()).toHaveLength(5)
   })
 
   // AND NOT THE ONES THAT CANNOT CHANGE THEIR ANSWER. `closing` means this

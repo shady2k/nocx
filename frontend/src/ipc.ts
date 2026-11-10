@@ -51,6 +51,20 @@ const RETRY_HOPELESS_REFUSALS = new Set([
   'forged',
   'token_spent',
 ])
+
+/** A BACKPRESSURED SESSION IS NOT AN ANSWER ABOUT THE CHARACTER
+ *  (nocx-evj4b.1.12). `busy` says the helper's own intent queue is full and no
+ *  other state; `commit_deadline` says this presentation sat in that queue past
+ *  the budget the TRANSPORT stamped on it — a fresh presentation gets a fresh
+ *  budget. Both are the queue catching up, and the person's keystroke is still
+ *  theirs to make: presenting it again after the queue has had a moment is the
+ *  first write, not a second one. The attempt bound and the backoff are the
+ *  livelock guard the one-retry rule was written for — a burst cannot spin the
+ *  control plane, and a session that stays busy for longer than this many
+ *  doubled waits is one the person is owed a sentence about, not silence. */
+const RETRY_BACKPRESSURE_CAUSES = new Set(['busy', 'commit_deadline'])
+const RETRY_BACKPRESSURE_ATTEMPTS = 5
+const RETRY_BACKPRESSURE_FIRST_MS = 8
 import { isDriverState, isPaneProgress, readPaneChildren } from './pane-observation'
 import type { SessionSignal } from './generated/session.signal'
 import type { SecretsPaneClosed } from './generated/secrets.paneClosed'
@@ -686,6 +700,7 @@ export class SessionHandle {
     kind: SessionIntentKind,
     payload: string,
     mayRepresent: boolean,
+    attempt = 1,
   ): Promise<SessionIntentResult> {
     const presented = this.accessEpoch
     const result = await this.client.sessionIntent(
@@ -722,15 +737,35 @@ export class SessionHandle {
     // the cause is a helper-side fact this layer cannot name. The warning below
     // is that fact reaching a log, so the next failure block says which cause
     // reached a person's key rather than printing nothing.
-    if (mayRepresent && result.state === 'refused' && result.bytesWritten === 0) {
+    if (result.state === 'refused' && result.bytesWritten === 0) {
       const cause = result.refusal?.cause ?? 'unknown'
       if (cause !== 'access_revoked' && !RETRY_HOPELESS_REFUSALS.has(cause)) {
-        log.warn('nocx: a keystroke was refused with nothing written; presenting it once more', {
-          sid: this.sessionId,
-          kind,
-          cause,
-        })
-        return this._intent(kind, payload, false)
+        // BACKPRESSURE GETS A WAIT, NOT A DROP (nocx-evj4b.1.12): a busy queue
+        // answers again once it drains, and the character is still the
+        // person's. Everything else keeps the one-retry rule.
+        const backpressure = RETRY_BACKPRESSURE_CAUSES.has(cause)
+        const delays = backpressure ? RETRY_BACKPRESSURE_ATTEMPTS : 1
+        if (attempt >= delays) {
+          log.warn('nocx: a keystroke was refused with nothing written and is not delivered', {
+            sid: this.sessionId,
+            kind,
+            cause,
+            attempts: attempt,
+          })
+          return result
+        }
+        if (backpressure) {
+          await new Promise<void>((resolve) => {
+            setTimeout(resolve, RETRY_BACKPRESSURE_FIRST_MS * 2 ** (attempt - 1))
+          })
+        } else {
+          log.warn('nocx: a keystroke was refused with nothing written; presenting it once more', {
+            sid: this.sessionId,
+            kind,
+            cause,
+          })
+        }
+        return this._intent(kind, payload, false, attempt + 1)
       }
     }
     return result

@@ -33,7 +33,7 @@ import {
   setProfileLists as updateProfileLists,
   type ProfileLists,
 } from './profiles-model'
-import { createSidebarState, setPanel, type SidebarState } from './sidebar-model'
+import { createSidebarState, type SidebarState } from './sidebar-model'
 
 // ── Application state tree ─────────────────────────────────────────────────
 
@@ -81,8 +81,8 @@ export function createAppStore(): [AppState, AppActions] {
         return { ...prev, activeViewId: viewId }
       })
     },
-    setPanel: (viewId: string, collapsed: boolean) => {
-      setState('sidebar', (prev) => setPanel(prev, viewId, collapsed))
+    collapseSidebar: () => {
+      setState('sidebar', (prev) => (prev.collapsed ? prev : { ...prev, collapsed: true }))
     },
 
     // ── Settings transitions ─────────────────────────────────────────────
@@ -145,8 +145,8 @@ export interface AppActions {
   toggleSidebar: () => void
   /** Set the active sidebar view (may toggle collapsed). */
   setActiveView: (viewId: string) => void
-  /** Replace the panel with the state a tab remembers (nocx-ouru5.1.18). */
-  setPanel: (viewId: string, collapsed: boolean) => void
+  /** Collapse the sidebar unconditionally. */
+  collapseSidebar: () => void
 
   /** Replace all settings values. */
   setSettingsValues: (values: Record<string, unknown>) => void

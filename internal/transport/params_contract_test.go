@@ -451,11 +451,7 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 			[]byte(`{}`),
 		},
 		"uistate.set": {
-			[]byte(`{"sidebar":{"width":240},"activeTab":"tab-1"}`),
-			// The panel's view and collapse are the TAB's (ADR-x7cvh8e1):
-			// the document carries the width, and a sidebar with no width is
-			// still an ordinary document (the backend clamps 0 to the default).
-			[]byte(`{"sidebar":{},"activeTab":""}`),
+			[]byte(`{"sidebar":{"activeViewId":"home","width":240},"activeTab":"tab-1"}`),
 		},
 		"uistate.window.get": {
 			[]byte(`{}`),
@@ -752,10 +748,6 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"tabs.pin": {
 			[]byte(`{"id":"0198f2b0-0000-7000-8000-00000000c004"}`),
 		},
-		"tabs.setPanel": {
-			[]byte(`{"id":"0198f2b0-0000-7000-8000-00000000c004","view":"ports","collapsed":false}`),
-			[]byte(`{"id":"0198f2b0-0000-7000-8000-00000000c004","view":"","collapsed":true}`),
-		},
 		"tabs.reorder": {
 			[]byte(`{"workspaceId":"workspace:default","ids":["0198f2b0-0000-7000-8000-00000000c004"]}`),
 		},
@@ -893,26 +885,7 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 			continue
 		}
 		schema := loadSchema(t, name)
-		probes := append([][]byte{}, invalid...)
-		// A field the contract REFUSES, or one it REQUIRES, must be judged the
-		// same way by the decoder: a schema that promised a shape no build
-		// accepts (or one that accepted a shape the schema forbids) is the
-		// defect these probes exist to catch (codex P2 rounds 2 and 3).
-		probes = append(probes, map[string][][]byte{
-			// uistate.set carries the panel's WIDTH and nothing else
-			// (ADR-x7cvh8e1): the old window-wide pair is refused.
-			"uistate.set": {
-				[]byte(`{"sidebar":{"width":240,"collapsed":false},"activeTab":""}`),
-				[]byte(`{"sidebar":{"width":240,"activeViewId":"ports"},"activeTab":""}`),
-			},
-			// tabs.setPanel's two values are REQUIRED, not defaulted: a missing
-			// `view` decodes as "" and would erase the tab's remembered panel,
-			// and a missing `collapsed` would expand a collapsed one.
-			"tabs.setPanel": {
-				[]byte(`{"id":"0198f2b0-0000-7000-8000-00000000c004","collapsed":true}`),
-				[]byte(`{"id":"0198f2b0-0000-7000-8000-00000000c004","view":"ports"}`),
-			},
-		}[method]...)
+		probes := invalid
 		switch method {
 		case "secrets.detect", "vault.resolveLine":
 			// These methods intentionally accept an empty object and use a

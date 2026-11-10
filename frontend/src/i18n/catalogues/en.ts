@@ -402,7 +402,6 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'operations.waiting.tabs.recolour': 'Changing the tab layout',
   'operations.waiting.tabs.rename': 'Changing the tab layout',
   'operations.waiting.tabs.reorder': 'Changing the tab layout',
-  'operations.waiting.tabs.setPanel': 'Changing the tab layout',
   'operations.waiting.transport.credit': 'Reading the credit window',
   'operations.waiting.transport.ping': 'Checking the backend is alive',
   'operations.waiting.tunnel.open': 'Opening the tunnel',

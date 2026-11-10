@@ -44,7 +44,11 @@ func (h uiStateHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 				return nil
 			}
 			svc.SetLayout(ctx, uistate.Layout{
-				Sidebar:   uistate.Sidebar{Width: p.Sidebar.Width},
+				Sidebar: uistate.Sidebar{
+					Collapsed:    p.Sidebar.Collapsed,
+					ActiveViewID: p.Sidebar.ActiveViewID,
+					Width:        p.Sidebar.Width,
+				},
 				ActiveTab: p.ActiveTab,
 			})
 			// The stored value, not the sent one: the width is clamped on the
@@ -88,10 +92,10 @@ type uiStateLayout struct {
 	ActiveTab string         `json:"activeTab"`
 }
 
-// uiStateSidebar carries the panel's WIDTH and nothing else: which panel a
-// tab shows is the tab's, on its layout row (nocx-ouru5.1.18).
 type uiStateSidebar struct {
-	Width int `json:"width"`
+	Collapsed    bool   `json:"collapsed"`
+	ActiveViewID string `json:"activeViewId"`
+	Width        int    `json:"width"`
 }
 
 type uiStateSetParams struct {
@@ -101,19 +105,27 @@ type uiStateSetParams struct {
 
 func wireLayout(l uistate.Layout) uiStateLayout {
 	return uiStateLayout{
-		Sidebar:   uiStateSidebar{Width: l.Sidebar.Width},
+		Sidebar: uiStateSidebar{
+			Collapsed:    l.Sidebar.Collapsed,
+			ActiveViewID: l.Sidebar.ActiveViewID,
+			Width:        l.Sidebar.Width,
+		},
 		ActiveTab: l.ActiveTab,
 	}
 }
 
-// maxUIStateIDRunes bounds the free-text field. It is a pane id minted by the
-// shell's tab manager, so this is generous for anything legitimate and exists
-// because the control plane may not carry an unbounded string.
+// maxUIStateIDRunes bounds the two free-text fields. Both are ids minted by
+// the shell — a view id from the sidebar registry, a pane id from the tab
+// manager — so this is generous for anything legitimate and exists because
+// the control plane may not carry an unbounded string.
 const maxUIStateIDRunes = 256
 
 func validateUIStateSetRaw(raw json.RawMessage) string {
 	var p uiStateSetParams
 	if msg := decodeObject(raw, &p); msg != "" {
+		return msg
+	}
+	if msg := boundedRunes("sidebar.activeViewId", p.Sidebar.ActiveViewID, maxUIStateIDRunes); msg != "" {
 		return msg
 	}
 	if msg := boundedRunes("activeTab", p.ActiveTab, maxUIStateIDRunes); msg != "" {

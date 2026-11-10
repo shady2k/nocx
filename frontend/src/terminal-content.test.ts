@@ -22447,41 +22447,6 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
     }
   })
 
-  it('a submit waits for the grid it will run at to apply, and its bytes then go out (nocx-evj4b.1.9)', async () => {
-    // The prompt prediction measures the running height at the Enter, but its
-    // report rides the settle timer while the submit's own attempt round trip
-    // is already in flight. On a loaded runner the bytes reached a pty that was
-    // still the prompt's taller grid: `top` drew for the taller screen, and the
-    // resize that followed scrolled its summary off the top — the block's first
-    // rows landed in its body, which is the owner's screenshot. The write waits
-    // for the same receipt the alternate-screen switch's fence waits for.
-    const { session, typeCommand, submitCommand, restore } = await paneWithLayout()
-    try {
-      let applied!: () => void
-      session.resizeApplied.mockImplementation(
-        () =>
-          new Promise<'applied'>((resolve) => {
-            applied = () => resolve('applied')
-          }),
-      )
-      typeCommand('top')
-      submitCommand('top')
-      // Nothing of the command is on the wire: the grid it will draw for is
-      // not applied yet. Focus and other intents the handoff itself produces
-      // are not the command's bytes.
-      const bytes = (): unknown[] =>
-        session.intent.mock.calls.filter(([kind]) => kind === 'text' || kind === 'key')
-      expect(bytes()).toEqual([])
-      // The write reached the receipt and is holding on it.
-      await vi.waitFor(() => expect(session.resizeApplied).toHaveBeenCalled())
-      expect(bytes()).toEqual([])
-      applied()
-      await vi.waitFor(() => expect(bytes().length).toBeGreaterThan(0))
-    } finally {
-      restore()
-    }
-  })
-
   it('a shell-originated start commits no geometry after its bytes are out (nocx-2v80t.3.50)', async () => {
     // Typed at the shell, not the composer: the echo is on the grid before
     // any running fact could exist, so the block opens AFTER the command

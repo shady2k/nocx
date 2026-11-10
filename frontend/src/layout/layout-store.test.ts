@@ -24,8 +24,6 @@ function tab(id: string, over: Partial<Tab> = {}): Tab {
     pinned: false,
     layout: 'row',
     seenAt: null,
-    panelView: '',
-    panelCollapsed: false,
     ...over,
   }
 }
@@ -82,10 +80,6 @@ function fakeClient(over: Partial<LayoutClientLike> = {}): LayoutClientLike & {
     pinTab: (id, pinned) => {
       calls.push(['tabs.pin', { id, pinned }])
       return Promise.resolve({ tab: tab(id, { pinned }) })
-    },
-    setTabPanel: (id, view, collapsed) => {
-      calls.push(['tabs.setPanel', { id, view, collapsed }])
-      return Promise.resolve({ tab: tab(id, { panelView: view, panelCollapsed: collapsed }) })
     },
     reorderTabs: (workspaceId, ids) => {
       calls.push(['tabs.reorder', { workspaceId, ids }])
@@ -481,39 +475,6 @@ describe('LayoutStore', () => {
 
     await store.recolour(opened.tabId, '#ff8800')
     expect(store.tab(opened.tabId)?.colour).toBe('#000000')
-  })
-
-  it("records a tab's panel from the answer, and a refusal leaves the row as it was", async () => {
-    const sent: Array<[string, unknown]> = []
-    const client = fakeClient({
-      // A backend that answers with something else: the cache holds the
-      // ANSWER, never an echo of the request.
-      setTabPanel: (id, view, collapsed) => {
-        sent.push(['tabs.setPanel', { id, view, collapsed }])
-        return Promise.resolve({ tab: tab(id, { panelView: 'git', panelCollapsed: false }) })
-      },
-    })
-    const store = new LayoutStore(client)
-    await store.load()
-    const opened = store.openTab({ kind: 'local', endpoint: null, cwd: '' })
-    await opened.created
-
-    await store.setTabPanel(opened.tabId, 'ports', true)
-    expect(sent).toEqual([['tabs.setPanel', { id: opened.tabId, view: 'ports', collapsed: true }]])
-    expect(store.tab(opened.tabId)).toMatchObject({ panelView: 'git', panelCollapsed: false })
-
-    const refusing = new LayoutStore(
-      fakeClient({
-        read: () => Promise.resolve(snapshot({ tabs: [tab('t1')] })),
-        setTabPanel: () => Promise.reject(new Error('no such tab')),
-      }),
-    )
-    await refusing.load()
-    const changes = vi.fn()
-    refusing.onChange(changes)
-    await expect(refusing.setTabPanel('t1', 'ports', true)).rejects.toThrow('no such tab')
-    expect(refusing.tab('t1')).toMatchObject({ panelView: '', panelCollapsed: false })
-    expect(changes).not.toHaveBeenCalled()
   })
 
   it('reorders from the answer, and a refusal leaves the strip exactly where it was', async () => {

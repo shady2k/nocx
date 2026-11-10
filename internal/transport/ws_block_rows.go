@@ -86,17 +86,24 @@ type blockOutputStore interface {
 // and redraw. Nothing is held: the rows still stream into the artifact as they
 // always have, and only the read is delimited. A block with no store, or one
 // whose artifact is already sealed, records nothing.
-func (s *WSServer) recordBlockOutputStart(ctx context.Context, sid session.ID, entry, artifactID string, row uint64) {
+// It answers whether the artifact now carries the start, which is what a
+// caller needs to decide whether a renderer that already read the block has
+// to be told again (nocx-4y82c.1.11 review 6).
+func (s *WSServer) recordBlockOutputStart(ctx context.Context, sid session.ID, entry, artifactID string, row uint64) bool {
 	store := s.blockStore()
 	if store == nil || entry == "" || artifactID == "" {
-		return
+		return false
 	}
 	if err := store.RecordBlockRowsOutputStart(ctx, content.RecordBlockRowsOutputStart{
 		EntryID: entry, ArtifactID: artifactID, Row: row,
-	}); err != nil && !frameFailed(err) {
-		log.From(ctx).Warn("block rows: the output start was not recorded; a reader cannot drop the command's echo",
-			"session", sid, "entry", entry, "artifact", artifactID, "row", row, "error", err)
+	}); err != nil {
+		if !frameFailed(err) {
+			log.From(ctx).Warn("block rows: the output start was not recorded; a reader cannot drop the command's echo",
+				"session", sid, "entry", entry, "artifact", artifactID, "row", row, "error", err)
+		}
+		return false
 	}
+	return true
 }
 
 // maxPendingEnds bounds the interval ends parked while their completion is
@@ -125,6 +132,9 @@ type blockStream struct {
 	// open are the session's open blocks by attempt id — kept ones carry a
 	// real block, refused ones only remember the refusal.
 	open map[session.ID]map[string]*openBlock
+	// lastClosed remembers each session's most recently closed block so a
+	// mark that arrives after its close can still be attributed to it.
+	lastClosed map[session.ID]closedBlockRef
 	// outputStartMarks holds a mark that arrived before the authenticated
 	// lifecycle start opened its block. It contains position only, never
 	// authority to open a block.
@@ -586,6 +596,36 @@ type openBlock struct {
 	// the artifact's cursor now, where a second copy would be ACCEPTED
 	// instead of refused by continuity (nocx-2v80t.3.9).
 	closingIn bool
+	// candidateMark is a mark that reached a recovered interval whose own
+	// mark was never sighted. A replacement reader replays only the LATEST
+	// mark, which is the NEXT command's once that command has started, and
+	// the two can only be told apart by where the interval ends
+	// (nocx-4y82c.1.11 review 6): the close decides, and a mark at or past
+	// its end is left cached for the interval that follows. Guarded by
+	// blockStream.mu.
+	candidateMark      uint64
+	candidateMarkKnown bool
+	// endRow is the interval's own end, set when its close starts. A mark
+	// that arrives while that close is in flight is inside this interval
+	// only below it. Guarded by blockStream.mu.
+	endRow   uint64
+	endKnown bool
+	// closedSent is whether block.closed has been said for this block. A
+	// mark recorded after it has to say it again, or the renderer keeps the
+	// rows it froze and never reads them (nocx-4y82c.1.11 review 6, P2).
+	// Guarded by blockStream.mu.
+	closedSent bool
+}
+
+// closedBlockRef is the last block a session closed, kept for one question: a
+// mark that arrives after its close and lies inside its interval belongs to
+// it, and recording it on the sealed artifact must tell the renderer to read
+// again (nocx-4y82c.1.11 review 6).
+type closedBlockRef struct {
+	entry      string
+	artifactID string
+	firstRow   uint64
+	endRow     uint64
 }
 
 type pendingRows struct {
@@ -870,11 +910,15 @@ func (bs *blockStream) adoptOpenBlock(sid session.ID, found content.OpenBlockRow
 			artifactID: found.ArtifactID, kept: true,
 		}
 		if bs.outputStartKnown[sid] {
+			// A mark seen before this adoption may be this interval's or the
+			// next one's — a replacement reader replays only the latest
+			// (nocx-4y82c.1.11 review 6) — so it is held as a candidate and
+			// the close decides by the interval's own end. The cached copy
+			// stays for the block that follows, where a mark below its first
+			// row is refused.
 			b.outputStartKnown = true
-			b.outputStartMarked = true
-			b.outputStartRow = bs.outputStartMarks[sid]
-			delete(bs.outputStartKnown, sid)
-			delete(bs.outputStartMarks, sid)
+			b.candidateMark = bs.outputStartMarks[sid]
+			b.candidateMarkKnown = true
 		} else {
 			// No mark has been observed for this recovered interval. Keep
 			// the authenticated row-zero boundary; a later mark may locate
@@ -1225,6 +1269,7 @@ func (bs *blockStream) detachCoordinator(sid session.ID) {
 	delete(bs.outputStartMarks, sid)
 	delete(bs.outputStartKnown, sid)
 	delete(bs.outputStartEnabled, sid)
+	delete(bs.lastClosed, sid)
 	delete(bs.pendingCloses, sid)
 	delete(bs.closing, sid)
 	delete(bs.closeTries, sid)
@@ -1310,6 +1355,18 @@ func (bs *blockStream) detach(ctx context.Context, store blockOutputStore, sid s
 		// Owner: the stream itself, on behalf of the detached session.
 		// Closing event: DetachBlockRows — the session's rows callbacks are
 		// gone and no later fact can name this session.
+		if b.candidateMarkKnown && b.candidateMark < b.rows && store != nil {
+			// No end will ever name this interval's boundary; the stored
+			// cursor is the best it has, and a mark below it is inside the
+			// interval, not the next one's (nocx-4y82c.1.11 review 6).
+			// Recorded before the seal so the sealed payload carries it.
+			if err := store.RecordBlockRowsOutputStart(ctx, content.RecordBlockRowsOutputStart{
+				EntryID: b.entry, ArtifactID: b.artifactID, Row: b.candidateMark,
+			}); err != nil && !frameFailed(err) {
+				log.From(ctx).Warn("block rows: the output start was not recorded at detach",
+					"session", sid, "entry", b.entry, "error", err)
+			}
+		}
 		owed = append(owed, blockClosedParams{EntryID: b.entry, Kept: sealAtDetach(ctx, store, sid, b)})
 	}
 	// The session's last chance: nothing after this detach will ever call
@@ -1437,6 +1494,20 @@ func (s *WSServer) BlockOutputStartRow(sid session.ID, fromRow uint64) {
 	bs := s.blockStream
 	bs.mu.Lock()
 	block := bs.current[sid]
+	if block == nil {
+		if last, ok := bs.lastClosed[sid]; ok && fromRow >= last.firstRow && fromRow < last.endRow {
+			// A mark that arrives after its interval's close still belongs
+			// to it (nocx-4y82c.1.11 review 6): the artifact is sealed and
+			// block.closed was already said, so the renderer froze the rows
+			// it read — recording the start has to say the close again, or
+			// the card keeps the echo it froze and never reads again (P2).
+			bs.mu.Unlock()
+			if s.recordBlockOutputStart(ctx, sid, last.entry, last.artifactID, fromRow) {
+				s.notifyBlockSubscriber(ctx, sid, "block.closed", blockClosedParams{EntryID: last.entry, Kept: true})
+			}
+			return
+		}
+	}
 	currentReplayMark := block != nil && block.recoveredOutputInterval && block.awaitingOutputReplay && (!block.outputStartMarked || fromRow == block.outputStartRow)
 	saveForNext := !currentReplayMark && (block == nil || bs.queued[sid] != "" || bs.opening[sid] != "")
 	if saveForNext {
@@ -1532,43 +1603,57 @@ func (s *WSServer) BlockOutputStartRow(sid session.ID, fromRow uint64) {
 		bs.mu.Unlock()
 		return
 	}
-	block.outputStartKnown = true
-	block.outputStartMarked = true
-	block.outputStartRow = fromRow
+	// A mark for a recovered interval whose own mark was never sighted may
+	// be this interval's or the next one's (nocx-4y82c.1.11 review 6): a
+	// replacement reader replays only the LATEST mark, and once the next
+	// command has started that is ITS mark. The interval's own end is the
+	// only thing that can tell them apart, so hold the mark as a candidate
+	// and let the close decide. It is stored for the next block too, where a
+	// mark below that block's first row is refused.
+	if block.sealing || block.settled {
+		// The close already read its candidate; the interval's end is known.
+		if block.endKnown && fromRow < block.endRow {
+			entry, artifact := block.entry, block.artifactID
+			said := block.closedSent
+			bs.mu.Unlock()
+			if s.recordBlockOutputStart(ctx, sid, entry, artifact, fromRow) && said {
+				s.notifyBlockSubscriber(ctx, sid, "block.closed", blockClosedParams{EntryID: entry, Kept: true})
+			}
+			return
+		}
+		bs.cacheOutputStartMarkLocked(sid, fromRow)
+		bs.mu.Unlock()
+		return
+	}
+	block.candidateMark = fromRow
+	block.candidateMarkKnown = true
+	bs.cacheOutputStartMarkLocked(sid, fromRow)
 	pending := block.preOutputStart
 	block.preOutputStart = nil
 	confirm := bs.confirmers[sid]
-	startRow := fromRow
-	if block.recoveredOutputInterval && startRow > block.rows {
-		// A delayed OSC mark can trail rows already durable in the artifact.
-		// Replaying from the cursor avoids dropping the still-owed gap.
-		startRow = block.rows
-	}
-	entry, artifact := block.entry, block.artifactID
 	bs.mu.Unlock()
-	// A recovered interval's start is recorded the same way (review 4): the
-	// artifact is durable and the reader needs the same coordinate. The mark's
-	// own row is the coordinate; startRow above may be lowered to the durable
-	// cursor for the REPLAY's sake, which is a different question.
-	s.recordBlockOutputStart(ctx, sid, entry, artifact, fromRow)
+	// The rows held before the mark are this interval's own until its end
+	// says otherwise, so they are stored whole — never trimmed by a mark
+	// that may belong to the interval after it.
 	for _, p := range pending {
-		rows, start, lost := outputRowsAfterStart(p, startRow)
-		if len(rows) == 0 && lost == 0 {
-			if confirm != nil {
-				// The output mark is only a position. Confirm no farther than
-				// the effective start proved by the durable cursor.
-				confirm(startRow)
-			}
-			continue
-		}
-		up, ok := s.BlockRowsArrived(sid, start, lost, rows, p.cause)
+		up, ok := s.BlockRowsArrived(sid, p.from, p.lost, p.rows, p.cause)
 		if ok && confirm != nil {
 			confirm(up)
 		}
 	}
-	bs.mu.Lock()
-	block.preOutputStart = nil
-	bs.mu.Unlock()
+}
+
+// cacheOutputStartMarkLocked stores a mark for the block that opens next.
+// The caller holds blockStream.mu.
+func (bs *blockStream) cacheOutputStartMarkLocked(sid session.ID, fromRow uint64) {
+	if bs.outputStartMarks == nil {
+		bs.outputStartMarks = make(map[session.ID]uint64)
+	}
+	if bs.outputStartKnown == nil {
+		bs.outputStartKnown = make(map[session.ID]bool)
+	}
+	bs.outputStartMarks[sid] = fromRow
+	bs.outputStartKnown[sid] = true
 }
 
 func pendingAfterOutputStart(in []pendingRows, start uint64) []pendingRows {
@@ -2715,8 +2800,13 @@ func (s *WSServer) closeBlockRowsNow(ctx context.Context, sid session.ID, attemp
 	queued := bs.queued[sid]
 	wasCurrent := current != nil && current.attempt == attempt
 	var cursor uint64
+	var candidate uint64
+	candidateKnown := false
 	if block != nil {
 		cursor = block.rows
+		block.endRow, block.endKnown = endRow, true
+		candidate, candidateKnown = block.candidateMark, block.candidateMarkKnown
+		block.candidateMarkKnown = false
 	}
 	bs.mu.Unlock()
 	// store and ctx are named before the closures below, so the retry path
@@ -3063,6 +3153,23 @@ func (s *WSServer) closeBlockRowsNow(ctx context.Context, sid session.ID, attemp
 			EntryID: block.entry, From: cursor, Count: uint64(len(closing)), //nolint:gosec // a row count, not a byte count
 		})
 	}
+	if candidateKnown {
+		// The candidate mark's interval is decided by where this interval
+		// ends (nocx-4y82c.1.11 review 6). INSIDE it — below the end — the
+		// mark is this block's, and it is recorded BEFORE the seal so the
+		// sealed payload carries it and the card the renderer freezes on
+		// block.closed is already the filtered one. AT or past the end it
+		// names no row of this interval: it belongs to the interval that
+		// follows, and stays cached for it.
+		if candidate < endRow {
+			bs.mu.Lock()
+			block.outputStartKnown = true
+			block.outputStartMarked = true
+			block.outputStartRow = candidate
+			bs.mu.Unlock()
+			s.recordBlockOutputStart(ctx, sid, block.entry, block.artifactID, candidate)
+		}
+	}
 	if !beginSeal() {
 		detachedSettle(false, false)
 		return true
@@ -3106,9 +3213,19 @@ func (s *WSServer) closeBlockRowsNow(ctx context.Context, sid session.ID, attemp
 	if endRow > bs.closedThrough[sid] {
 		bs.closedThrough[sid] = endRow
 	}
+	if bs.lastClosed == nil {
+		bs.lastClosed = make(map[session.ID]closedBlockRef)
+	}
+	bs.lastClosed[sid] = closedBlockRef{
+		entry: block.entry, artifactID: block.artifactID,
+		firstRow: block.expectedFirstRow, endRow: endRow,
+	}
 	bs.mu.Unlock()
 	finish()
 	if claim() {
+		bs.mu.Lock()
+		block.closedSent = true
+		bs.mu.Unlock()
 		s.notifyBlockSubscriber(ctx, sid, "block.closed", blockClosedParams{EntryID: block.entry, Kept: true, ScreenAnchor: screenAnchor})
 	}
 	promote()

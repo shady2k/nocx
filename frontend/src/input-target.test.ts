@@ -47,6 +47,26 @@ describe('ShellInputTarget', () => {
       [{ kind: 'key', payload: 'enter' }],
     ])
   })
+  it('a bare framing provider says so on the paste intent, and only then (nocx-evj4b.1.2)', async () => {
+    let framing: 'auto' | 'bare' = 'auto'
+    const sendIntent = vi.fn()
+    const t = new ShellInputTarget(sendIntent, [], () => framing)
+
+    await t.submit('echo hi')
+    expect(sendIntent.mock.calls).toEqual([
+      [{ kind: 'paste', payload: 'echo hi' }],
+      [{ kind: 'key', payload: 'enter' }],
+    ])
+
+    sendIntent.mockClear()
+    framing = 'bare'
+    await t.submit('echo hi')
+    expect(sendIntent.mock.calls).toEqual([
+      [{ kind: 'paste', payload: 'echo hi', framing: 'bare' }],
+      [{ kind: 'key', payload: 'enter' }],
+    ])
+  })
+
   it('preserves \n so every line executes as a command separator (nocx-4ff.14)', async () => {
     const sendIntent = vi.fn()
     const t = new ShellInputTarget(sendIntent)

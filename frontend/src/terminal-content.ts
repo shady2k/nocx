@@ -3686,6 +3686,10 @@ export class TerminalContent extends BasePaneContent {
         // seam: the shell highlighter and the completion surface — the two
         // that ARE about commands — on top of the shared document layer.
         [...shellExtensions(this.snapshotStore), ...this.completion.extensions(), ...documentLayer],
+        // HOW THIS PANE FRAMES A SUBMIT (owner, 2026-11-10; nocx-evj4b.1.2):
+        // asked per submit, because the answer is the pane's state at that
+        // instant — a program can start, and a prompt can come back.
+        () => this.submitPasteFraming(),
       )
       const vault = new VaultClient(this.client)
       this.vault = vault
@@ -8162,7 +8166,14 @@ export class TerminalContent extends BasePaneContent {
     if (held.length === 0) return
     const lines = held.map((entry) => entry.plan.sendLine)
     held.length = 0
-    this.editor?.insertText(lines.join('\n'))
+    const editor = this.editor
+    if (editor === null) return
+    // A DRAFT THE PERSON CANNOT SEE IS NOT THEIRS. The startup composer hid
+    // when the session settled conventional; the line it now holds is the
+    // person's, so the composer stays on screen with it — their next Enter is
+    // the submit, at the prompt they can see.
+    if (!editor.isVisible) editor.show({ focus: false })
+    editor.insertText(lines.join('\n'))
   }
 
   /** Show the waiting card and hide the terminal grid for exactly as long as
@@ -10396,7 +10407,14 @@ export class TerminalContent extends BasePaneContent {
           continue
         }
         try {
-          await call.session.intent(call.intent.kind, call.intent.payload)
+          // THE FRAMING RIDES ONLY WHERE IT WAS ASKED FOR (nocx-evj4b.1.2):
+          // a paste the pane marked bare, and nothing else — every other
+          // intent keeps the two-argument shape the wire has always had.
+          if (call.intent.kind === 'paste' && call.intent.framing === 'bare') {
+            await call.session.intent(call.intent.kind, call.intent.payload, 'bare')
+          } else {
+            await call.session.intent(call.intent.kind, call.intent.payload)
+          }
         } catch (err: unknown) {
           log.warn('nocx: session intent did not reach the session', {
             kind: call.intent.kind,
@@ -11071,6 +11089,26 @@ export class TerminalContent extends BasePaneContent {
    *  Enter's line does — the ledger record, the keyboard handoff, the
    *  running block and the byte route are the submit's, not the surface's.
    */
+  /** HOW A COMPOSER SUBMIT IS FRAMED (owner, 2026-11-10; nocx-evj4b.1.2).
+   *
+   *  With shell integration active — the pane's command blocks are the
+   *  transcript — and the shell at its prompt, a submit is NEVER bracketed:
+   *  the editor holds the whole line, so the markers protect nothing, and over
+   *  ssh a mode belief the terminal cannot prove (the far side's own
+   *  `ESC[?2004h` can be consumed before the parser sees it) made one
+   *  session's framing alternate — a far shell without bracketed paste ran
+   *  `\x1b[200~echo …` as text.
+   *
+   *  With no integration, and whenever a program is running inside a block (a
+   *  REPL, `read`, any foreground program), the composer's text goes to THAT
+   *  program, and its own announcement is the answer: the runtime frames by
+   *  the mode the program set at encode time.
+   */
+  private submitPasteFraming(): 'auto' | 'bare' {
+    if (this.hasRunningCommand()) return 'auto'
+    return this.lifecycle.state.kind === 'prompt_ready' ? 'bare' : 'auto'
+  }
+
   private submitFromComposer(
     doc: string,
     plan?: SubmitPlan,
@@ -11108,6 +11146,12 @@ export class TerminalContent extends BasePaneContent {
       host: this._host,
       at: Date.now(),
     })
+    // THE FRAMING IS THE GESTURE'S ANSWER (owner, 2026-11-10; nocx-evj4b.1.2):
+    // a submit is written after the attempt round trip, and by then the program
+    // it starts may already be running — asking the pane then would read the
+    // new program's state and, with integration live, lose the bare submit the
+    // prompt deserved.
+    const framing = this.submitPasteFraming()
     if (!active.routesToShell) {
       // The target surfaces its own refusal (onRefusal → the
       // toast); the rethrow is for programmatic callers, so the
@@ -11158,7 +11202,8 @@ export class TerminalContent extends BasePaneContent {
       recordLine: plan?.recordLine ?? doc,
       author: active.author,
       takeKeys: true,
-      sendLine: (d) => void active.submit(d, { targetId: active.id }),
+      framing,
+      sendLine: (d) => void active.submit(d, { targetId: active.id, framing }),
       onDelivered,
       origin,
     })
@@ -11189,6 +11234,9 @@ export class TerminalContent extends BasePaneContent {
     recordLine: string
     author: CommandAuthor
     takeKeys: boolean
+    /** The framing taken at the gesture (nocx-evj4b.1.2); absent lets the
+     *  target's own provider answer. */
+    framing?: 'auto' | 'bare'
     sendLine: (d: string) => void
     /** The broker request that caused this assistant submission. */
     requestId?: string

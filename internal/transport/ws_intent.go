@@ -30,6 +30,11 @@ type sessionIntentParams struct {
 	AccessEpoch uint64 `json:"accessEpoch"`
 	Kind        string `json:"kind"`
 	Payload     []byte `json:"payload"`
+	// Framing is the paste framing the caller asked for (nocx-evj4b.1.2):
+	// empty/auto lets the runtime frame by the program's own mode, bare says
+	// never bracket it. It is a request, not an encoding: the runtime still
+	// owns the bytes.
+	Framing string `json:"framing"`
 }
 
 type sessionIntentResult struct {
@@ -56,7 +61,7 @@ func validateSessionIntentRaw(raw json.RawMessage) string {
 	}
 	for name := range fields {
 		switch name {
-		case "sessionId", "accessEpoch", "kind", "payload":
+		case "sessionId", "accessEpoch", "kind", "payload", "framing":
 		default:
 			return "invalid session.intent params: unknown field " + name
 		}
@@ -65,6 +70,9 @@ func validateSessionIntentRaw(raw json.RawMessage) string {
 	// that has none yet sends none, and the session refuses the intent with
 	// the epoch in force rather than this layer inventing one. The refusal
 	// writes nothing, and the result names the epoch to present next.
+	if p.Framing != "" && p.Framing != "auto" && p.Framing != "bare" {
+		return "invalid session.intent params: invalid framing"
+	}
 	_, knownKind := sessionIntentKinds[p.Kind]
 	if p.SessionID == "" || !knownKind || len(p.Payload) > maxSessionIntentBytes {
 		return "invalid session.intent params"
@@ -103,6 +111,7 @@ func (h sessionIntentHandler) handle(ctx context.Context, req jsonrpcRequest) {
 		CommitBy:    int64(monoclock.Now()) + sessionIntentBudgetNanos,
 		Kind:        p.Kind,
 		Payload:     p.Payload,
+		Framing:     p.Framing,
 	})
 	if err != nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: fmt.Sprintf("session.intent: %v", err)})

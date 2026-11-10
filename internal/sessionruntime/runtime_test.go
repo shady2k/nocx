@@ -267,6 +267,51 @@ func TestAPasteIsFramedByTheProgramsBracketedPasteMode(t *testing.T) {
 	}
 }
 
+// A CALLER THAT KNOWS BETTER THAN THE MODE (nocx-evj4b.1.2). The composer's
+// submit is a whole line the editor held, so it asks for no framing; the same
+// intent with no framing keeps the mode's answer.
+func TestACallerCanAskForABarePaste(t *testing.T) {
+	s, term, _ := realRuntime(t)
+	ctrl := sessionControl(t, s)
+
+	if err := s.Ingest([]byte("\x1b[?2004h")); err != nil {
+		t.Fatalf("the program enables bracketed paste: %v", err)
+	}
+	// The mode frames an ordinary paste.
+	if _, state, err := admittedThenExecuted(t, s, ctrl, IntentKindPaste, []byte("make test")); err != nil || state != IntentStateExecuted {
+		t.Fatalf("a paste with the mode set: state=%s err=%v, want executed", intentStateName(state), err)
+	}
+	framed := term.Written()
+	if len(framed) != 1 || string(framed[0]) != "\x1b[200~make test\x1b[201~" {
+		t.Fatalf("the mode's paste reached the program as %q, want it framed", framed)
+	}
+
+	// The caller's bare request is not framed, and the newline it carries is
+	// the bare path's carriage return.
+	id, err := s.Admit(Intent{
+		At:      s.Incarnation(),
+		Under:   ctrl.Epoch,
+		By:      ctrl.Holder,
+		Kind:    IntentKindPaste,
+		Payload: []byte("echo a\necho b"),
+		Framing: PasteFramingBare,
+	})
+	if err != nil {
+		t.Fatalf("admit a bare paste: %v", err)
+	}
+	encoded, err := s.Commit(Intent{ID: id}, nil)
+	if err != nil {
+		t.Fatalf("commit a bare paste: %v", err)
+	}
+	if _, writeErr := s.Terminal().Write(encoded); writeErr != nil {
+		t.Fatalf("write a bare paste: %v", writeErr)
+	}
+	bare := term.Written()
+	if len(bare) != 2 || string(bare[1]) != "echo a\recho b" {
+		t.Fatalf("a bare paste reached the program as %q, want %q", bare[1:], "echo a\recho b")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 6. A reply the program asked for
 //

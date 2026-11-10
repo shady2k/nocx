@@ -662,8 +662,8 @@ export class SessionHandle {
    *  exactly the reason the refusal is: nothing was written, so the second
    *  attempt is the first write. A partial write (bytesWritten > 0) is never
    *  re-presented, because that one did reach the program. */
-  intent(kind: SessionIntentKind, payload: string): Promise<SessionIntentResult> {
-    return this._intent(kind, payload, true)
+  intent(kind: SessionIntentKind, payload: string, framing?: 'bare'): Promise<SessionIntentResult> {
+    return this._intent(kind, payload, true, framing)
   }
 
   /** The wire's own encoding of one intent payload, in the one place that
@@ -686,6 +686,7 @@ export class SessionHandle {
     kind: SessionIntentKind,
     payload: string,
     mayRepresent: boolean,
+    framing?: 'bare',
   ): Promise<SessionIntentResult> {
     const presented = this.accessEpoch
     const result = await this.client.sessionIntent(
@@ -693,6 +694,7 @@ export class SessionHandle {
       presented,
       kind,
       intentPayload(payload),
+      framing,
     )
     if (typeof result.accessEpoch === 'number' && result.accessEpoch > 0) {
       this.accessEpoch = result.accessEpoch
@@ -704,7 +706,7 @@ export class SessionHandle {
       result.bytesWritten === 0 &&
       this.accessEpoch !== presented
     ) {
-      return this._intent(kind, payload, false)
+      return this._intent(kind, payload, false, framing)
     }
     // THE SAME RULE, FOR EVERY OTHER REFUSAL THAT WROTE NOTHING
     // (nocx-atpw5.1.38). The wire's contract is that `refused` wrote nothing
@@ -730,7 +732,7 @@ export class SessionHandle {
           kind,
           cause,
         })
-        return this._intent(kind, payload, false)
+        return this._intent(kind, payload, false, framing)
       }
     }
     return result
@@ -1990,6 +1992,7 @@ export class WSClient {
     accessEpoch: number | null,
     kind: SessionIntentKind,
     payload: string,
+    framing?: 'bare',
   ): Promise<SessionIntentResult> {
     const error = this._sessionInputError(sessionId)
     if (error) return Promise.reject(error)
@@ -2001,6 +2004,7 @@ export class WSClient {
       sessionId,
       kind,
       payload,
+      ...(framing !== undefined ? { framing } : {}),
       ...(accessEpoch !== null && accessEpoch > 0 ? { accessEpoch } : {}),
     })
   }

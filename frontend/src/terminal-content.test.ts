@@ -2796,7 +2796,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
       await vi.waitFor(() =>
         expect(session.intent.mock.calls).toEqual([
-          ['paste', 'sleep 20'],
+          ['paste', 'sleep 20', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -2946,6 +2946,99 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       // The key still reaches the shell — the person interrupted it — and the
       // commands held for that shell are withdrawn with the same gesture.
       expect(session.intent.mock.calls).toEqual([['key', 'Ctrl+c']])
+
+      session.intent.mockClear()
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(session.intent).not.toHaveBeenCalled()
+      expect(session.send).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a submit at an integrated prompt is never bracketed pasted (nocx-evj4b.1.2)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const lifecycle = lifecycleHandler(client, session.sessionId)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    attemptScript(client, [
+      () =>
+        Promise.resolve({
+          id: 'att-1',
+          domain: 'd1',
+          state: 'open',
+          command: 'echo hi',
+          cwd: '',
+          host: '',
+          origin: 'app',
+          startedAt: '2026-08-08T12:00:00Z',
+        }),
+    ])
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'integrated', shell: '/bin/bash' })
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      session.intent.mockClear()
+      holdOne(editor, view, 'echo hi')
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls.filter((call) => call[0] === 'paste')).toEqual([
+          ['paste', 'echo hi', 'bare'],
+        ]),
+      )
+    } finally {
+      teardown()
+    }
+  })
+
+  it("a submit to a program inside a block is framed by that program's own mode (nocx-evj4b.1.2)", async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const lifecycle = lifecycleHandler(client, session.sessionId)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'integrated', shell: '/bin/bash' })
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      lifecycle({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-prog', state: 'open', origin: 'shell', command: 'python3', cwd: '' },
+      })
+      session.intent.mockClear()
+      session.send.mockClear()
+      holdOne(editor, view, 'print(1)')
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls.filter((call) => call[0] === 'paste')).toEqual([
+          ['paste', 'print(1)'],
+        ]),
+      )
+    } finally {
+      teardown()
+    }
+  })
+
+  // THE QUEUE IS A PROMISE (owner, 2026-11-10; nocx-evj4b.1.8). A line held
+  // against the prompt a live domain will announce is not delivered when the
+  // startup settles some other way — the far pty is still cooked and its
+  // startup chain can read stdin. It goes back to the person's draft.
   it('returns a held line to the composer when the startup settles conventional (nocx-evj4b.1.8)', async () => {
     const session = makeSession({ awaitsIntegration: true })
     const client = makeClient()
@@ -2970,7 +3063,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       })
       await Promise.resolve()
       await Promise.resolve()
-      expect(editor.getDoc(), 'the line the queue could not deliver is the person\'s draft').toBe(
+      expect(editor.getDoc(), "the line the queue could not deliver is the person's draft").toBe(
         'echo kept',
       )
       expect(session.intent).not.toHaveBeenCalled()
@@ -3028,9 +3121,9 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       })
       await vi.waitFor(() =>
         expect(session.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([
-          ['paste', 'echo A'],
+          ['paste', 'echo A', 'bare'],
           ['key', 'enter'],
-          ['paste', 'echo B'],
+          ['paste', 'echo B', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -3192,7 +3285,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       })
       await vi.waitFor(() =>
         expect(session.intent.mock.calls.filter((call) => call[0] === 'paste')).toEqual([
-          ['paste', 'sleep 60'],
+          ['paste', 'sleep 60', 'bare'],
         ]),
       )
       // The next prompt releases nothing: the withdrawn line went with the
@@ -3248,7 +3341,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       })
       await vi.waitFor(() =>
         expect(session.intent.mock.calls.filter((call) => call[0] === 'paste')).toEqual([
-          ['paste', 'sleep 60'],
+          ['paste', 'sleep 60', 'bare'],
         ]),
       )
       session.intent.mockClear()
@@ -4034,7 +4127,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       // the whole command, then Enter.
       await vi.waitFor(() =>
         expect(session.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([
-          ['paste', 'echo after-the-reconnect'],
+          ['paste', 'echo after-the-reconnect', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -8493,7 +8586,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // Paste and Enter reach the session in order through the intent queue.
       await vi.waitFor(() =>
         expect(sessionOf(content).intent.mock.calls.slice(-2)).toEqual([
-          ['paste', 'echo hello'],
+          ['paste', 'echo hello', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -8587,7 +8680,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       )
       await vi.waitFor(() =>
         expect(sessionOf(content).intent.mock.calls.slice(-2)).toEqual([
-          ['paste', 'echo again'],
+          ['paste', 'echo again', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -8896,7 +8989,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // had the keyboard never been dropped.
       await vi.waitFor(() =>
         expect(sent()).toEqual([
-          ['paste', 'read x'],
+          ['paste', 'read x', 'bare'],
           ['key', 'enter'],
           ['text', 'hi'],
           ['key', 'enter'],
@@ -8940,7 +9033,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       )
       await vi.waitFor(() =>
         expect(sent()).toEqual([
-          ['paste', 'read x'],
+          ['paste', 'read x', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -8977,7 +9070,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // it is the program being told the keyboard came back.
       await vi.waitFor(() =>
         expect(sent()).toEqual([
-          ['paste', 'read x'],
+          ['paste', 'read x', 'bare'],
           ['key', 'enter'],
           ['text', 'hi'],
           ['key', 'enter'],
@@ -9064,7 +9157,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // already ahead of every key in the queue.
       await vi.waitFor(() =>
         expect(sent()).toEqual([
-          ['paste', 'read x'],
+          ['paste', 'read x', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -9082,7 +9175,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
 
       await vi.waitFor(() =>
         expect(sent()).toEqual([
-          ['paste', 'read x'],
+          ['paste', 'read x', 'bare'],
           ['key', 'enter'],
           ['text', 'hi'],
           ['key', 'enter'],
@@ -9153,7 +9246,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // captured while submit was in flight. All four travel on one queue.
       await vi.waitFor(() =>
         expect(session.intent.mock.calls).toEqual([
-          ['paste', 'read x'],
+          ['paste', 'read x', 'bare'],
           ['key', 'enter'],
           ['text', 'hi'],
           ['key', 'enter'],
@@ -9338,7 +9431,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // Enter intents finish before there is no pending line left for ^C.
       await vi.waitFor(() =>
         expect(session.intent.mock.calls).toEqual([
-          ['paste', 'read x'],
+          ['paste', 'read x', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -9349,7 +9442,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // runtime's decision, never this client's (nocx-zg3k3.3.1).
       await vi.waitFor(() =>
         expect(session.intent.mock.calls).toEqual([
-          ['paste', 'read x'],
+          ['paste', 'read x', 'bare'],
           ['key', 'enter'],
           ['key', 'Ctrl+c'],
         ]),
@@ -10000,7 +10093,9 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       view.contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
-      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('paste', 'read reply'))
+      await vi.waitFor(() =>
+        expect(session.intent).toHaveBeenCalledWith('paste', 'read reply', 'bare'),
+      )
       handler({
         lane: 'lane-1',
         lifecycle: 'running',
@@ -10645,7 +10740,7 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       // Fail-open, unchanged: the refusal did not eat the command.
       await vi.waitFor(() =>
         expect(session.intent.mock.calls.slice(-2)).toEqual([
-          ['paste', 'make deploy'],
+          ['paste', 'make deploy', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -10765,7 +10860,7 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       })
       await vi.waitFor(() =>
         expect(session.intent.mock.calls.slice(-2)).toEqual([
-          ['paste', 'make deploy'],
+          ['paste', 'make deploy', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -10877,7 +10972,7 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       // intents travel on this same seam, so the wait names the paste rather
       // than the tail of the list.
       await vi.waitFor(() =>
-        expect(session.intent.mock.calls).toContainEqual(['paste', 'sleep 30']),
+        expect(session.intent.mock.calls).toContainEqual(['paste', 'sleep 30', 'bare']),
       )
       expect(document.activeElement).toBe(stop)
     } finally {
@@ -10901,7 +10996,7 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       ed.insertText('sleep 30')
       key(view, { key: 'Enter' })
       await vi.waitFor(() =>
-        expect(sessionOf(content).intent).toHaveBeenCalledWith('paste', 'sleep 30'),
+        expect(sessionOf(content).intent).toHaveBeenCalledWith('paste', 'sleep 30', 'bare'),
       )
       const attempt = {
         id: 'att-0',
@@ -11124,7 +11219,7 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       })
       await vi.waitFor(() =>
         expect(session.intent.mock.calls.slice(-2)).toEqual([
-          ['paste', 'make --token=SECRETVALUE'],
+          ['paste', 'make --token=SECRETVALUE', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -11227,7 +11322,7 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       // Enter, the attempt was refused — and the command still runs, whole.
       await vi.waitFor(() =>
         expect(session.intent.mock.calls.slice(-2)).toEqual([
-          ['paste', 'make deploy'],
+          ['paste', 'make deploy', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -24093,4 +24188,3 @@ describe('a slow open states what it is doing in the pane (nocx-q9od5)', () => {
     }
   })
 })
-

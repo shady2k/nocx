@@ -42,6 +42,13 @@ could land on another spacer instead of the rows the person was reading.
    row it starts at. The reader's anchor treats a spacer as a row and restores by that
    line; when a page replaces the spacer with painted rows, the same line is the row the
    reader keeps.
+4. **Reconnect revalidates restored blocks, and refresh reads fresh geometry first.**
+   `_restoredRows` is a reconnect source alongside the live block records; a restored
+   block's refresh paints through its own element, never through `applyStoredRows` (which
+   parks rows in a queue only a live block flushes). The geometry read by revalidation is
+   passed into the refresh, and an open block with no such geometry reads it before
+   choosing a window. A block cached below the lazy threshold that crossed it during the
+   outage is therefore fetched as a page, not as a whole body.
 
 ## Consequences
 
@@ -51,3 +58,6 @@ could land on another spacer instead of the rows the person was reading.
   geometry but no body is still a place in the transcript.
 - A spacer's `data-logical-line` is its first stream row, not a count, so a spacer split or
   replaced by rows keeps one identity.
+- Restored blocks and live block records are one reconnect set, but they have different
+  paint doors: a record goes through `applyStoredRows`, an element through
+  `paintStoredRows`.

@@ -96,6 +96,25 @@ const (
 	IntentKindFocus
 )
 
+// PasteFraming is how a paste's caller asked the runtime to frame it
+// (nocx-evj4b.1.2). The zero value keeps the runtime's own rule — bracketed
+// only when the program enabled mode 2004 — and PasteFramingBare says never
+// bracket it, because the caller's own surface (the composer, with the
+// editor holding the line) is the protection and a mode belief over ssh
+// cannot be trusted.
+//
+// It is a REQUEST about framing, never an encoding: the runtime still decides
+// the bytes (the byte stripping, the newline a bare paste turns into a
+// carriage return).
+type PasteFraming int
+
+const (
+	// PasteFramingAuto frames by the program's own mode.
+	PasteFramingAuto PasteFraming = iota
+	// PasteFramingBare never brackets the paste.
+	PasteFramingBare
+)
+
 // IntentID orders intents within one incarnation. It is assigned by the runtime
 // at admission, not by the client, so "the order they were admitted in" has one
 // owner.
@@ -164,6 +183,9 @@ type Intent struct {
 	// Payload is the intent's argument: the key, the text, the pasted body.
 	// Encoding it against the terminal's modes is the runtime's, at execution.
 	Payload []byte
+	// Framing is the paste framing the caller asked for, for Kind
+	// IntentKindPaste only; ignored for every other kind.
+	Framing PasteFraming
 	// Precondition, when set, is what the acting caller established before
 	// asking. It is REVALIDATED between admission and execution, which is
 	// ADR-0064's rule generalised: the identification that authorises a write

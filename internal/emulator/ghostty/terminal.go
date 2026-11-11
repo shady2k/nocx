@@ -1777,6 +1777,25 @@ func (t *terminal) Paste(text []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	return t.paste(text, bracketed)
+}
+
+// PasteBare encodes a paste with the bracketing OFF, whatever the program set
+// (nocx-evj4b.1.2). The bytes are the library's bare-path bytes — the same
+// stripping, the same newline-to-carriage-return — and nothing here reads a
+// mode: the caller has said the framing is not the program's to decide.
+func (t *terminal) PasteBare(text []byte) ([]byte, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.t == nil {
+		return nil, emulator.ErrClosed
+	}
+	return t.paste(text, false)
+}
+
+// paste is the one encoder both entry points share, so "bare" cannot drift
+// from the unbracketed path Paste already had.
+func (t *terminal) paste(text []byte, bracketed bool) ([]byte, error) {
 	if len(text) == 0 {
 		// AN EMPTY PASTE IS NOTHING TO SAY — UNLESS THE PROGRAM ASKED TO BE
 		// TOLD (nocx-1ebrs.14). Bracketed paste exists so a program can tell a

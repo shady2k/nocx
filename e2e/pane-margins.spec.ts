@@ -1,16 +1,16 @@
 /**
- * NO TEXT TOUCHES THE PANE'S EDGE (ADR-2yzsq8mk, the owner's edge pass).
+ * NO TEXT TOUCHES THE PANE'S EDGE (ADR-92zzg2y2, the owner's one-gutter rule).
  *
- * The owner, looking at a normal command and at a plain ssh shell: nothing the
- * terminal paints may touch the pane's left, right, top or bottom edge — every
- * side keeps a margin — and the composer's own text starts on the same column
- * a block's header and output start on, about 24px from the pane.
+ * Nothing the terminal paints may touch the pane's left, right, top or bottom
+ * edge — every side keeps a margin — and the composer's own text starts on the
+ * same column a block's header and output start on.
  *
- * One geometry, four sides, and the same two places in every mode that is not
- * the alternate screen: the ledger's gutter inline (`--pane-inline-padding`,
- * paid by the rows) and the same token as the vertical margin of the live box
- * (`runningLiveCap`, `paneFillHeight`). A full-screen program is the exception
- * the decision names: flush left, the whole width, one row of bottom margin.
+ * ONE GUTTER FOR EVERYTHING: one character cell wide on the left and on the
+ * right, half a row on top and on bottom, in every mode — ordinary output,
+ * blocks, a plain ssh shell and a full-screen program alike. It is read from
+ * the renderer's published cell metric, so it scales with the font. The
+ * measurement below checks both halves: the gutter equals the cell (and half
+ * the pitch), and the painted text stays inside the box that gutter leaves.
  *
  * The measurement is the UNION of every painted row, intersected with the
  * pane's own box, so a row the scroller clips contributes only what a person
@@ -24,8 +24,6 @@ import type { Page } from '@playwright/test'
 import { startSshd, rpc } from './sshd-fixture'
 import { readStand } from './stand'
 
-/** The ledger's inset, the token the stylesheet and the fit both read. */
-const MARGIN = 24
 /** Sub-pixel rounding and the remainder of an integer column count. */
 const TOLERANCE = 1.5
 
@@ -38,6 +36,11 @@ interface Edges {
   /** The first painted row's left edge, and the composer's first line's. */
   rowLeft: number | null
   composerTextLeft: number | null
+  /** The one gutter: one cell sideways, half a row vertically. */
+  gutterX: number
+  gutterY: number
+  cellWidth: number
+  cellHeight: number
   rows: number
 }
 
@@ -80,6 +83,9 @@ async function edges(page: Page): Promise<Edges> {
     const lr = layout ? layout.getBoundingClientRect() : pr
     const lcs = layout ? getComputedStyle(layout) : null
     const csr = scroller ? scroller.getBoundingClientRect() : pr
+    const pcs = getComputedStyle(pane)
+    const inner = pane.querySelector<HTMLElement>('.scrollback-inner')
+    const layoutEl = pane.querySelector<HTMLElement>('.scrollback-layout')
     return {
       layout: {
         top: r2(lr.top),
@@ -100,19 +106,45 @@ async function edges(page: Page): Promise<Edges> {
         : null,
       rowLeft: first ? r2(first.getBoundingClientRect().left) : null,
       composerTextLeft: line ? r2(line.getBoundingClientRect().left) : null,
+      gutterX: parseFloat(pcs.getPropertyValue('--pane-inline-padding')) || 0,
+      // A custom property holding `calc(...)` is not resolved by
+      // `getPropertyValue`; the real padding is.
+      gutterY: layoutEl ? parseFloat(getComputedStyle(layoutEl).paddingTop) || 0 : 0,
+      cellWidth:
+        parseFloat(inner ? getComputedStyle(inner).getPropertyValue('--term-cell-width') : '') || 0,
+      cellHeight:
+        parseFloat(inner ? getComputedStyle(inner).getPropertyValue('--term-cell-height') : '') ||
+        0,
       rows: rows.length,
     }
   })
 }
 
-/** Every side clear of the pane's own edge by the ledger's margin. */
+/**
+ * Every side clear of the pane's own edge by ONE gutter, and the gutter itself
+ * is one cell sideways and half a row vertically (ADR-92zzg2y2). The right and
+ * bottom gaps may be larger by the integer-column/row remainder and the
+ * scrollbar; the left and top are the declared number.
+ */
 function assertInside(e: Edges, spoken: string): void {
   expect(e.text, spoken).not.toBeNull()
+  expect(e.cellWidth, `${spoken} — a cell width is published`).toBeGreaterThan(0)
+  expect(e.cellHeight, `${spoken} — a row pitch is published`).toBeGreaterThan(0)
+  expect(
+    Math.abs(e.gutterX - e.cellWidth),
+    `${spoken} — the gutter is one cell`,
+  ).toBeLessThanOrEqual(TOLERANCE)
+  expect(
+    Math.abs(e.gutterY - e.cellHeight / 2),
+    `${spoken} — the gutter is half a row`,
+  ).toBeLessThanOrEqual(TOLERANCE)
   const t = e.text!
-  expect(t.left - e.pane.left, `${spoken} — left`).toBeGreaterThanOrEqual(MARGIN - TOLERANCE)
-  expect(e.pane.right - t.right, `${spoken} — right`).toBeGreaterThanOrEqual(MARGIN - TOLERANCE)
-  expect(t.top - e.pane.top, `${spoken} — top`).toBeGreaterThanOrEqual(MARGIN - TOLERANCE)
-  expect(e.pane.bottom - t.bottom, `${spoken} — bottom`).toBeGreaterThanOrEqual(MARGIN - TOLERANCE)
+  expect(t.left - e.pane.left, `${spoken} — left`).toBeGreaterThanOrEqual(e.gutterX - TOLERANCE)
+  expect(e.pane.right - t.right, `${spoken} — right`).toBeGreaterThanOrEqual(e.gutterX - TOLERANCE)
+  expect(t.top - e.pane.top, `${spoken} — top`).toBeGreaterThanOrEqual(e.gutterY - TOLERANCE)
+  expect(e.pane.bottom - t.bottom, `${spoken} — bottom`).toBeGreaterThanOrEqual(
+    e.gutterY - TOLERANCE,
+  )
 }
 
 test('a normal command keeps every edge, and its composer starts on the same column', async ({
@@ -133,14 +165,14 @@ test('a normal command keeps every edge, and its composer starts on the same col
   const e = await edges(page)
   const spoken = `frozen command: ${JSON.stringify(e)}`
   assertInside(e, spoken)
-  // THE COMPOSER'S TEXT IS THE LEDGER'S COLUMN (ADR-2yzsq8mk): the block's
+  // THE COMPOSER'S TEXT IS THE LEDGER'S COLUMN (ADR-92zzg2y2): the block's
   // first painted row and the line a person types start on one x.
   expect(e.composerTextLeft, spoken).not.toBeNull()
   expect(
     Math.abs(e.composerTextLeft! - e.rowLeft!),
     `the composer's text and the block's row start on one column: ${spoken}`,
   ).toBeLessThanOrEqual(TOLERANCE)
-  expect(e.rowLeft! - e.pane.left, spoken).toBeGreaterThanOrEqual(MARGIN - TOLERANCE)
+  expect(e.rowLeft! - e.pane.left, spoken).toBeGreaterThanOrEqual(e.gutterX - TOLERANCE)
 
   // AND WHILE IT RUNS: the composer is gone, so the live box's own bottom
   // margin is what keeps the last row off the pane's edge.
@@ -161,6 +193,64 @@ test('a normal command keeps every edge, and its composer starts on the same col
   const running = await edges(page)
   assertInside(running, `running command: ${JSON.stringify(running)}`)
   await page.keyboard.press('Control+C')
+})
+
+test('the gutter is one cell and half a row at two font scales', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 })
+  await page.goto('/')
+  await promptReady(page)
+  await clickIntoEditor(page)
+  await page.keyboard.type('printf "SCALE-PROBE\\n"')
+  await page.keyboard.press('Enter')
+  await expect(
+    page.locator('.pane.active .scrollback-inner > .cmd-block .term-grid-row').first(),
+  ).toContainText('SCALE-PROBE', { timeout: 30_000 })
+  await promptReady(page)
+
+  // THE GUTTER FOLLOWS THE PUBLISHED CELL METRIC (ADR-92zzg2y2). The renderer
+  // publishes `--term-cell-width` / `--term-cell-height` on `.pane`; two pairs
+  // stand in for two font scales, and both the computed gutter and the painted
+  // row's own inset must follow. Read in one evaluate, so a frame cannot
+  // republish between the write and the measurement.
+  const at = (cellWidth: number, cellHeight: number) =>
+    page.evaluate(
+      ({ cellWidth, cellHeight }) => {
+        const pane = document.querySelector<HTMLElement>('.pane.active')!
+        pane.style.setProperty('--term-cell-width', `${cellWidth}px`)
+        pane.style.setProperty('--term-cell-height', `${cellHeight}px`)
+        const cs = getComputedStyle(pane)
+        const layout = pane.querySelector<HTMLElement>('.scrollback-layout')!
+        const row = pane.querySelector<HTMLElement>(
+          '.scrollback-inner > .cmd-block .term-grid-row',
+        )!
+        const range = document.createRange()
+        range.selectNodeContents(row)
+        const p = pane.getBoundingClientRect()
+        return {
+          gutterX: parseFloat(cs.getPropertyValue('--pane-inline-padding')),
+          // The custom property holds `calc(...)`; its real padding resolves.
+          gutterY: parseFloat(getComputedStyle(layout).paddingTop),
+          rowInset: range.getBoundingClientRect().left - p.left,
+        }
+      },
+      { cellWidth, cellHeight },
+    )
+
+  for (const [spoken, cellWidth, cellHeight] of [
+    ['small', 8, 16],
+    ['large', 13, 26],
+  ] as const) {
+    const m = await at(cellWidth, cellHeight)
+    expect(m.gutterX, `${spoken}: one cell sideways`).toBeCloseTo(cellWidth, 1)
+    expect(m.gutterY, `${spoken}: half a row vertically`).toBeCloseTo(cellHeight / 2, 1)
+    expect(m.rowInset, `${spoken}: the painted row starts on the gutter`).toBeCloseTo(cellWidth, 1)
+  }
+
+  await page.evaluate(() => {
+    const pane = document.querySelector<HTMLElement>('.pane.active')!
+    pane.style.removeProperty('--term-cell-width')
+    pane.style.removeProperty('--term-cell-height')
+  })
 })
 
 test('a plain ssh shell keeps every edge too', async ({ page }) => {

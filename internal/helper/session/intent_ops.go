@@ -162,6 +162,7 @@ func (hs *hostSession) intent(ctx context.Context, p proto.IntentParams) (proto.
 			By:      ctrl.Holder,
 			Kind:    kind,
 			Payload: p.Payload,
+			Framing: pasteFramingFromWire(kind, p.Framing),
 		},
 		Check:     checkToken(tok),
 		Token:     tok,
@@ -194,6 +195,7 @@ func (hs *hostSession) interactiveIntent(ctx context.Context, p proto.IntentPara
 		Intent: sessionruntime.Intent{
 			At: hs.runtime.Incarnation(), Under: ctrl.Epoch, By: ctrl.Holder,
 			Kind: kind, Payload: p.Payload,
+			Framing: pasteFramingFromWire(kind, p.Framing),
 		},
 		Interactive: true,
 		Canonical:   canonicalIntent{Kind: kind, Payload: p.Payload, AccessEpoch: p.AccessEpoch},
@@ -244,6 +246,16 @@ func (hs *hostSession) ensureControl() (sessionruntime.Control, error) {
 // the commit point — the same "an unrecognised claim must never look
 // stronger than it is" rule client.completenessFromWire already states one
 // layer up, applied here on the way IN rather than out.
+// pasteFramingFromWire maps the controller's paste framing onto the runtime's
+// (nocx-evj4b.1.2). Only a paste has a framing; every other kind answers the
+// zero value and the runtime never reads it.
+func pasteFramingFromWire(kind sessionruntime.IntentKind, framing string) sessionruntime.PasteFraming {
+	if kind != sessionruntime.IntentKindPaste || framing != "bare" {
+		return sessionruntime.PasteFramingAuto
+	}
+	return sessionruntime.PasteFramingBare
+}
+
 func intentKindFromWire(s string) sessionruntime.IntentKind {
 	switch s {
 	case "key":

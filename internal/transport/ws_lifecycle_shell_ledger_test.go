@@ -244,9 +244,9 @@ func TestShellOriginatedEntry_OutputRetentionPair(t *testing.T) {
 		if art == nil {
 			t.Fatal("stored artifact is nil, want the body readable")
 		}
-		text, err := content.BlockRowsText(art.Chunks)
+		text, err := content.BlockRowsTextAfter(art.Chunks, 0)
 		if err != nil {
-			t.Fatalf("BlockRowsText: %v", err)
+			t.Fatalf("BlockRowsTextAfter: %v", err)
 		}
 		if text != "the output" {
 			t.Fatalf("stored artifact text = %q, want %q", text, "the output")

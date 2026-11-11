@@ -11165,7 +11165,15 @@ export class TerminalContent extends BasePaneContent {
   private _refreshBlockRows(entryId: string, final = false): Promise<void> {
     if (final) {
       const closing = this._blockRowsFinalPending.get(entryId)
-      if (closing) return closing
+      if (closing) {
+        // A SECOND close for one block means its stored rows changed after
+        // the read the first one asked for — a late output start written to
+        // an artifact that was already sealed (nocx-4y82c.1.11). The card
+        // must read again, or it keeps the echo it froze; the read in flight
+        // was asked for before that write.
+        this._blockRowsRefreshPending.add(entryId)
+        return closing
+      }
     }
 
     const active = this._blockRowsInFlight.get(entryId)

@@ -27,6 +27,13 @@ export interface StoredBlockRows {
    *  been streamed yet. Optional only so hand-built fixtures need not carry
    *  it; a read from the wire always sets it (the artifact's own state). */
   readonly sealed?: boolean
+  /** The absolute row the block's OUTPUT begins at, as the backend recorded
+   *  it from the helper's ordered output mark (nocx-4y82c.1.11). The rows
+   *  below it are the command's own echo and redraw — the screen's rendering
+   *  of a line the block's header already carries — and this read has
+   *  already dropped them. Absent means no mark was ever recorded (a shell
+   *  with no integration), and then every stored row is the block's own. */
+  readonly outputStartRow?: number
 }
 
 interface RowsArtifactMetadata {
@@ -85,9 +92,20 @@ export function parseStoredBlockRows(
     typeof metadata.payload === 'object' && metadata.payload !== null
       ? (metadata.payload as Record<string, unknown>)
       : {}
+  // WHERE THE BLOCK'S OUTPUT BEGINS (nocx-4y82c.1.11). The backend records
+  // the helper's ordered output mark on the artifact; every stored row below
+  // it is the command's own echo and redraw, which the block's header already
+  // shows. The read drops them HERE, once, so every consumer of a stored
+  // block — the frozen card, the running body's hold, selection and copy, a
+  // tool's body read — sees the block's output and nothing before it.
+  const outputStartRow =
+    payload.outputStartRow === undefined ? undefined : nonNegativeInteger(payload.outputStartRow)
+  const visible =
+    outputStartRow === undefined ? lines : lines.filter((line) => line.from >= outputStartRow)
   return {
-    lines,
+    lines: visible,
     ...(artifactVersion === undefined ? {} : { artifactVersion }),
+    ...(outputStartRow === undefined || outputStartRow === 0 ? {} : { outputStartRow }),
     droppedRows: nonNegativeInteger(payload.droppedRows),
     lostRows: nonNegativeInteger(payload.lostRows),
     unavailableRows: nonNegativeInteger(payload.unavailableRows),

@@ -2332,15 +2332,20 @@ export class BlockManager {
    *  never carries the leading rule, whether it is the stack's child or a
    *  running block's body (ADR-3kqrem7v), and a block nested inside a turn is not
    *  a TOP-LEVEL entry at all. */
+  private _firstEntry: HTMLElement | null = null
+
   private _refreshFirstEntry(): void {
-    const first = this._scrollbackInner.querySelector<HTMLElement>(
-      ':scope > .cmd-block, :scope > .scrollback-restore-boundary',
-    )
-    for (const marked of this._scrollbackInner.querySelectorAll<HTMLElement>(
-      ':scope > [data-first-entry]',
-    )) {
-      if (marked !== first) delete marked.dataset.firstEntry
+    let first = this._scrollbackInner.firstElementChild as HTMLElement | null
+    while (
+      first &&
+      !first.classList.contains('cmd-block') &&
+      !first.classList.contains('scrollback-restore-boundary')
+    ) {
+      first = first.nextElementSibling as HTMLElement | null
     }
+    if (this._firstEntry === first) return
+    if (this._firstEntry) delete this._firstEntry.dataset.firstEntry
+    this._firstEntry = first
     if (first) first.dataset.firstEntry = 'true'
   }
 
@@ -4127,6 +4132,7 @@ export class BlockManager {
     for (const rec of this._blocks) rec.header?.remove()
     for (const el of removed) el.remove()
     this._owned.clear()
+    this._refreshFirstEntry()
     this._onBlocksRemoved?.(removed)
     this._blocks = []
     this._answerBlocks = []
@@ -4198,6 +4204,7 @@ export class BlockManager {
       this._owned.delete(el)
       removed.push(el)
     }
+    this._refreshFirstEntry()
     this._onBlocksRemoved?.(removed)
     this._blocks = this._blocks.filter((b) => b.el === keep)
     this._answerBlocks = this._answerBlocks.filter((b) => b.el === keep)

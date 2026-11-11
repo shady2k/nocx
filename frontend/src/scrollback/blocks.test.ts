@@ -2423,6 +2423,26 @@ describe("the block's close: the completion and the backend's block.closed (nocx
     expect(closedOnScreen('att-1')).toBe(true)
   })
 
+  it('keeps the leading marker across freezes and moves it when the leading block is cleared', () => {
+    const first = manager.startBlock('first', '~', 0)
+    manager.bindAttempt('first')
+    expect(first.el.dataset.firstEntry).toBe('true')
+    manager.blockClosed('first')
+    manager.freezeFromAttempt(attempt({ id: 'first' }), 0)
+    expect(first.el.dataset.firstEntry).toBe('true')
+
+    const second = manager.startBlock('second', '~', 0)
+    manager.bindAttempt('second')
+    expect(second.el.dataset.firstEntry).toBeUndefined()
+    manager.applyClearBoundary('second')
+    expect(first.el.dataset.firstEntry).toBeUndefined()
+    expect(second.el.dataset.firstEntry).toBe('true')
+    manager.clearAll()
+    expect(second.el.dataset.firstEntry).toBeUndefined()
+    expect(manager.startBlock('third', '~', 0).el.dataset.firstEntry).toBe('true')
+    manager.dispose()
+  })
+
   it('a pasted burst keeps every early close until its authenticated completion', () => {
     vi.useFakeTimers()
     try {

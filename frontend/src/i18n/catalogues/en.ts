@@ -2181,6 +2181,9 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'tabs.duplicate': 'Duplicate',
   'tabs.pin': 'Pin',
   'tabs.unpin': 'Unpin',
+  'terminal.input.refused': 'Input was refused ({error}). Remaining queued input was discarded.',
+  'terminal.input.uncertain':
+    'Input may not have reached the shell. It will not be sent again. Remaining queued input was discarded; check the shell before submitting another command.',
   'terminal.output.aria': 'Terminal output',
   'update.downloading': 'Downloading nocx {version}…',
   'update.downloading.aria': 'Update download',

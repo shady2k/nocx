@@ -3382,6 +3382,63 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
     }
   })
 
+  it('a live-grid click cannot bypass the restored composer with raw typing', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      holdOne(editor, view, 'echo restored')
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      await vi.waitFor(() => expect(editor.getDoc()).toBe('echo restored'))
+      expect(editor.isVisible).toBe(true)
+      session.intent.mockClear()
+
+      const live = tab.pane.querySelector<HTMLElement>('.terminal-live-container')!
+      expect(live).not.toBeNull()
+      live.dispatchEvent(new MouseEvent('mousedown', { button: 0, bubbles: true }))
+      live.dispatchEvent(new MouseEvent('mouseup', { button: 0, bubbles: true }))
+      live.dispatchEvent(new MouseEvent('click', { button: 0, detail: 1, bubbles: true }))
+      // jsdom has no native character insertion. Deliver the input event only
+      // to the textarea if the real pointer route actually gave it focus.
+      const holder = document.activeElement as HTMLElement
+      holder.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'x', code: 'KeyX', bubbles: true, cancelable: true }),
+      )
+      if (holder instanceof HTMLTextAreaElement) {
+        holder.value = 'x'
+        holder.dispatchEvent(
+          new InputEvent('input', { data: 'x', inputType: 'insertText', bubbles: true }),
+        )
+      }
+      // Wait for the input queue to finish before making a negative assertion.
+      await vi.waitFor(() =>
+        expect((content as unknown as { _sessionCallSending: boolean })._sessionCallSending).toBe(
+          false,
+        ),
+      )
+      expect(editor.getDoc()).toBe('echo restored')
+      expect(session.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([])
+      expect(view.contentDOM.contains(document.activeElement)).toBe(true)
+    } finally {
+      teardown()
+    }
+  })
+
   it('a restored draft keeps the composer on screen until it is submitted or cleared (nocx-evj4b.1.8)', async () => {
     const session = makeSession({ awaitsIntegration: true })
     const client = makeClient()

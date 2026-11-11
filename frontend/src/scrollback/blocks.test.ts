@@ -2321,6 +2321,30 @@ describe("the block's close: the completion and the backend's block.closed (nocx
     expect(closedOnScreen('att-1')).toBe(true)
   })
 
+  it('a pasted burst keeps every early close until its authenticated completion', () => {
+    vi.useFakeTimers()
+    try {
+      const ids = Array.from({ length: 501 }, (_, i) => `burst-${i}`)
+      manager.startBlock(ids[0], '~', 0)
+      manager.bindAttempt(ids[0])
+      for (const id of ids) manager.blockClosed(id)
+      expect(manager.freezeFromAttempt(attempt({ id: ids[0] }), 0)).not.toBeNull()
+      expect(closedOnScreen(ids[0])).toBe(true)
+      for (const id of ids.slice(1)) {
+        manager.startBlock(id, '~', 0)
+        manager.bindAttempt(id)
+        manager.freezeFromAttempt(attempt({ id }), 0)
+        expect(manager.runningBlock).toBeNull()
+        expect(closedOnScreen(id), id).toBe(true)
+      }
+      expect(manager.blocks).toHaveLength(501)
+      expect(vi.getTimerCount(), 'completed commands leave no duration ticker').toBe(0)
+    } finally {
+      manager.dispose()
+      vi.useRealTimers()
+    }
+  })
+
   it('a block.closed for a block this pane does not hold, or one already closed, changes nothing', () => {
     manager.blockClosed('att-nobody')
     expect(manager.blocks).toHaveLength(0)

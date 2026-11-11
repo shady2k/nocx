@@ -366,7 +366,17 @@ export class ScrollbackController {
     // header's height against a third of the scroller and writes one attribute;
     // there is no scroll, freeze or window trigger left to miss the next path.
     if (typeof ResizeObserver === 'function') {
-      this._sizeObserver = new ResizeObserver(() => this._judgeHeaderSizes())
+      this._sizeObserver = new ResizeObserver((entries) => {
+        if (entries.some((entry) => entry.target === this.scrollbackArea)) {
+          this._judgeHeaderSizes()
+          return
+        }
+        this._judgeHeaderSizes(
+          entries
+            .map((entry) => entry.target as HTMLElement)
+            .filter((header) => this._observedHeaders.has(header)),
+        )
+      })
       this._sizeObserver.observe(this.scrollbackArea)
     }
     if (typeof MutationObserver === 'function') {
@@ -1740,9 +1750,9 @@ export class ScrollbackController {
    *  already gives one pinned header -- so a scroll cannot make it stale, and
    *  a header that changes size is re-judged by its own observer. The answer
    *  is one attribute; no box changes. */
-  private _judgeHeaderSizes(): void {
+  private _judgeHeaderSizes(headers: Iterable<HTMLElement> = this._observedHeaders): void {
     const heightPx = this.scrollbackArea.clientHeight
-    for (const header of this._observedHeaders) {
+    for (const header of headers) {
       if (!header.isConnected) continue
       if (headerFitsPinned(header.offsetHeight, heightPx)) header.removeAttribute('data-pinnable')
       else header.setAttribute('data-pinnable', 'false')

@@ -135,19 +135,13 @@ export function copyToClipboard(text: string): Promise<void> {
 // pane has let go of (`settleWithoutBackend` — the session that would say
 // it is gone).
 
-/** Upper bound on remembered block.closed notifications for blocks whose
- *  completion has not arrived yet (`_closedEarly`). Ordinarily one is
- *  consumed within a frame; the bound only keeps a notification for a
- *  block this pane never completes from being held forever. */
-const MAX_CLOSED_EARLY = 8
-
 /** Upper bound on rows held for an entry whose block has not bound yet
  *  (`_pendingStoredRows`). A block.grew/closed notification can arrive
  *  before `bindAttempt` names the block it belongs to, and the pending
  *  entry is ordinarily drained the moment binding happens — but binding
  *  never happens for an attempt whose running fact is refused, lost, or
  *  never reaches this pane, and nothing else ever visits the entry to
- *  remove it. A small ring, for the same reason as `_closedEarly`: a
+ *  remove it. A small ring bounds these unbound row pages: a
  *  session has few blocks racing their own binding at once, so bounding it
  *  costs nothing a real session would notice and stops an unbound entry
  *  from being held forever. */
@@ -2248,7 +2242,8 @@ export class BlockManager {
   >()
   /** block.closed notifications that arrived BEFORE their completion — the
    *  two cross the socket in either order. Consumed by the completion that
-   *  names the entry; bounded by MAX_CLOSED_EARLY. */
+   *  names the entry, or cleared when the session ends or scrollback clears.
+   *  Burst size cannot retire an entry whose completion is still in flight. */
   private _closedEarly = new Map<string, BlockScreenAnchor | null | undefined>()
   /** WHERE THE NEXT BLOCK THIS MANAGER OPENS BELONGS (ADR-0040).
    *
@@ -3633,10 +3628,6 @@ export class BlockManager {
     }
     const rec = this.blockForAttempt(entryId)
     if (rec !== null && rec.status !== 'running') return
-    if (!this._closedEarly.has(entryId) && this._closedEarly.size >= MAX_CLOSED_EARLY) {
-      const oldest = this._closedEarly.keys().next().value
-      if (oldest !== undefined) this._closedEarly.delete(oldest)
-    }
     this._closedEarly.set(entryId, screenAnchor)
   }
 

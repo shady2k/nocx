@@ -61,9 +61,36 @@ export async function appReadyForInput(page: Page): Promise<void> {
  *
  * Waiting on the active pane is also the more correct statement: readiness is a
  * property of the tab under test, not of whichever editor the DOM lists first.
+ * And focus alone is not enough: a session still in integration `starting`
+ * drops what is typed at it, so the waiting card must be gone too.
  */
 export async function promptReady(page: Page): Promise<void> {
   await appReadyForInput(page)
+  // A FOCUSED COMPOSER IS NOT A SESSION THAT CAN TAKE THE LINE (nocx-evj4b.1.9).
+  //
+  // The composer mounts with the pane, before the session's integration has
+  // answered, and while the integration axis is `starting` the renderer drops
+  // keystrokes at its one seam (terminal-content.ts) because the shell may be
+  // mid-bootstrap. `toBeFocused` passes through that interval and a spec that
+  // typed here would be measuring a line nobody sent: measured on the webkit
+  // e2e, a second tab opened under load reported prompt_ready 1.0 s after its
+  // open, and the announcement typed at 0.4 s never reached the shell.
+  //
+  // The waiting card is mounted for exactly the `starting` interval and is
+  // removed when the axis answers, so its absence is the observable the
+  // product publishes for "the session is past that interval".
+  // THE PANE'S SESSION EXISTS BEFORE ITS INTEGRATION IS ASKED ABOUT. The id is
+  // set with the open ack, and the waiting card is mounted synchronously from
+  // that same bind, so waiting for the id first makes the card's absence a
+  // fact about the session rather than about the moment this helper ran.
+  // Without it the absence is true of a pane whose session has not opened yet
+  // — the race this barrier exists to close.
+  await baseExpect(page.locator('.pane.active[data-session-id]')).toHaveCount(1, {
+    timeout: 30_000,
+  })
+  await baseExpect(page.locator('.pane.active .nocx-integration-waiting')).toHaveCount(0, {
+    timeout: 30_000,
+  })
   const input = page.locator('.pane.active .nocx-editor-input')
   await baseExpect(input).toBeVisible({ timeout: 10_000 })
   await baseExpect(input).toBeFocused({ timeout: 10_000 })

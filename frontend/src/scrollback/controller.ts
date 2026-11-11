@@ -407,7 +407,12 @@ export class ScrollbackController {
       (entries) => {
         for (const e of entries) {
           const was = this._tail.following
-          this._tail.observe(this.scrollbackArea, e.isIntersecting)
+          // A SENTINEL PUSHED OUT BY A ROW IS CONTENT, NOT A GESTURE
+          // (nocx-ouru5.1.18): the live end leaves the root the moment a row
+          // lands below the fold, and the delivery says "the reader cannot see
+          // the end" about a reader who never moved. It is honoured only once
+          // they have moved from where the last pin put them.
+          this._tail.observe(this.scrollbackArea, e.isIntersecting || this._stayedAtPin())
           // The flip, not the delivery: the reader left the live end or
           // returned to it. The live tier's surface drops a stale past and
           // re-arms its paging on the return (nocx-zg3k3.10.4).
@@ -1108,6 +1113,19 @@ export class ScrollbackController {
     return this._tail.intent(this.scrollbackArea)
   }
 
+  /** The scrollTop the last tail pin put the reader at (nocx-ouru5.1.18). */
+  private _pinnedTop: number | null = null
+
+  /** The reader is still standing where the last tail pin put them: nothing of
+   *  their own has moved them, so a gap between them and the end is content
+   *  arriving under a follower — a row committed, a box grown — and the answer
+   *  to "following?" has not changed (nocx-ouru5.1.18). */
+  private _stayedAtPin(): boolean {
+    return (
+      this._pinnedTop !== null && Math.abs(this.scrollbackArea.scrollTop - this._pinnedTop) <= 2
+    )
+  }
+
   /** THE SETTLE'S ANSWER, and it is the position's (nocx-3wmve). The watcher
    *  reports the live end a frame behind the scroll it is about, so on its own
    *  it cannot answer for a mutation landing in that frame: a person who has
@@ -1119,7 +1137,18 @@ export class ScrollbackController {
   private _followsNow(): boolean {
     const area = this.scrollbackArea
     if (area.clientHeight === 0 || area.scrollHeight === 0) return this._tail.following
-    return isAtTail(area)
+    if (isAtTail(area)) return true
+    // ROWS THAT LANDED SINCE THE PIN ARE NOT A GESTURE (nocx-ouru5.1.18). The
+    // program commits a row before anything pins it, so a mutation arriving in
+    // that gap asks "following?" of a scroller exactly one row short of the
+    // end — measured at output-jitter's apt pace over ssh, top 3652 / max 3662
+    // on a 10px pitch. Answering from that gap alone said "the reader scrolled
+    // away", took the place of the ROW at the viewport's top, and pinned it
+    // after the mutation: every visible row moved DOWN by one pitch, which is
+    // the backwards step the spec reports. The reader still stands where the
+    // last pin put them, so the gap is content they have not been moved by
+    // yet; only their own move changes that position.
+    return this._stayedAtPin()
   }
 
   /** At the live end, WITH an end to be at. A scroller whose content fits has
@@ -1155,6 +1184,15 @@ export class ScrollbackController {
       top: this.scrollbackArea.scrollHeight,
       behavior: 'instant',
     })
+    // Where the pin left the reader, for `_followsNow` (nocx-ouru5.1.18): the
+    // distance between it and their position now is theirs, not the content's.
+    // The END it asked for, not the position read back: a browser clamps to the
+    // same number, and a scroller that has not laid out yet must not record the
+    // place it was at as if it were the tail.
+    this._pinnedTop = Math.max(
+      0,
+      this.scrollbackArea.scrollHeight - this.scrollbackArea.clientHeight,
+    )
   }
 
   /**

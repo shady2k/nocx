@@ -68,6 +68,10 @@ func (s *closeFailureBlockStore) RecordBlockRowsFence(ctx context.Context, in co
 	return s.ledger.RecordBlockRowsFence(ctx, in)
 }
 
+func (s *closeFailureBlockStore) RecordBlockRowsOutputStart(ctx context.Context, in content.RecordBlockRowsOutputStart) error {
+	return s.ledger.RecordBlockRowsOutputStart(ctx, in)
+}
+
 func (s *closeFailureBlockStore) RecordClearBoundary(ctx context.Context, in content.RecordClearBoundary) (content.ClearBoundaryRecorded, error) {
 	return s.ledger.RecordClearBoundary(ctx, in)
 }
@@ -93,6 +97,10 @@ func (s *blockingAppendStore) OpenBlockRowsForSession(ctx context.Context, sessi
 
 func (s *blockingAppendStore) RecordBlockRowsFence(ctx context.Context, in content.RecordBlockRowsFence) error {
 	return s.ledger.RecordBlockRowsFence(ctx, in)
+}
+
+func (s *blockingAppendStore) RecordBlockRowsOutputStart(ctx context.Context, in content.RecordBlockRowsOutputStart) error {
+	return s.ledger.RecordBlockRowsOutputStart(ctx, in)
 }
 
 func (s *blockingAppendStore) OpenBlockOutput(ctx context.Context, in content.OpenBlockOutput) (string, error) {
@@ -246,28 +254,34 @@ func TestBlockRowsArrived_AppendsToTheAuthenticatedCommand(t *testing.T) {
 	}
 }
 
-func TestOutputStartMarkDoesNotChangeFreshAuthenticatedStart(t *testing.T) {
+func TestAnOutputStartMarkBeforeTheStartStillNamesTheBlocksStart(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
 	e.ws.AttachBlockRows(session.ID(sid))
 	e.ws.BlockOutputStartPlaneAttached(session.ID(sid))
-	// A position mark can arrive before the authenticated start on the rows
-	// plane. It must not change a fresh block's ordinary row-zero boundary.
+	// The shell's preexec mark can beat the lifecycle start to this stream.
+	// It is still THIS command's mark (the shell writes one per command, in
+	// order), so the block it belongs to takes it: the rows below it are the
+	// command's echo, and the artifact records where its output begins
+	// (nocx-4y82c.1.11 review 5).
 	e.ws.BlockOutputStartRow(session.ID(sid), 2)
 	attempt := startsACommand(t, e, pub, lane, h, 2, "printf output")
 	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{
 		aStreamRow("prompt"), aStreamRow("prior"), aStreamRow("output"),
 	}, ""); !confirm || up != 3 {
-		t.Fatalf("marked rows ack = (%d, %v), want 3", up, confirm)
+		t.Fatalf("marked rows ack = (%d, %v), want the stream settled through 3", up, confirm)
 	}
 	rows := streamRows(t, db, attempt)
-	if len(rows) != 3 || rows[0].Text != "prompt" || rows[0].From != 0 || rows[2].Text != "output" {
-		t.Fatalf("fresh block rows = %+v, want the full row-zero stream", rows)
+	if len(rows) != 1 || rows[0].Text != "output" || rows[0].From != 2 {
+		t.Fatalf("fresh block rows = %+v, want the output from row 2 and no echo", rows)
+	}
+	if got := recordedOutputStart(t, db, attempt); got == nil || *got != 2 {
+		t.Fatalf("recorded output start = %v, want 2", got)
 	}
 	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 3, 0, []emulator.Row{aStreamRow("tail")}, ""); !confirm || up != 4 {
 		t.Fatalf("post-mark ack = (%d, %v), want 4 confirmed", up, confirm)
 	}
 	rows = streamRows(t, db, attempt)
-	if len(rows) != 4 || rows[3].Text != "tail" || rows[3].From != 3 {
+	if len(rows) != 2 || rows[1].Text != "tail" || rows[1].From != 3 {
 		t.Fatalf("final rows = %+v", rows)
 	}
 }
@@ -344,23 +358,31 @@ func TestAuthenticatedStartKeepsTheRowZeroPathWhenNoOutputMarkExists(t *testing.
 	}
 }
 
-func TestOutputStartMarkDoesNotAuthorizeABlockAndCanPrecedeStart(t *testing.T) {
+func TestOutputStartMarkCannotOpenABlockButStillNamesItsStart(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
 	e.ws.AttachBlockRows(session.ID(sid))
 	e.ws.BlockOutputStartPlaneAttached(session.ID(sid))
+	// A mark on its own authorizes nothing: rows offered before the
+	// authenticated start belong to no block.
 	e.ws.BlockOutputStartRow(session.ID(sid), 2)
 	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 2, 0, []emulator.Row{aStreamRow("early")}, ""); confirm || up != 0 {
 		t.Fatalf("rows before authenticated Start = (%d, %v), want rejected", up, confirm)
 	}
 	attempt := startsACommand(t, e, pub, lane, h, 2, "printf output")
+	// The mark that preceded the start is kept and names where this block's
+	// output begins (nocx-4y82c.1.11 review 5): the rows below it are the
+	// command's echo.
 	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{
 		aStreamRow("prompt"), aStreamRow("prior"), aStreamRow("output"),
 	}, ""); !confirm || up != 3 {
-		t.Fatalf("resend ack = (%d, %v), want 3", up, confirm)
+		t.Fatalf("resend ack = (%d, %v), want the stream settled through 3", up, confirm)
 	}
 	rows := streamRows(t, db, attempt)
-	if len(rows) != 3 || rows[0].Text != "prompt" || rows[0].From != 0 || rows[2].Text != "output" {
-		t.Fatalf("fresh authenticated rows = %+v, want full row-zero stream", rows)
+	if len(rows) != 1 || rows[0].From != 2 || rows[0].Text != "output" {
+		t.Fatalf("fresh authenticated rows = %+v, want the output from row 2 and no echo", rows)
+	}
+	if got := recordedOutputStart(t, db, attempt); got == nil || *got != 2 {
+		t.Fatalf("recorded output start = %v, want 2", got)
 	}
 }
 

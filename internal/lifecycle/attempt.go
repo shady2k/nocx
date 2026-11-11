@@ -93,3 +93,16 @@ type ExecutionAttempt struct {
 	// fact about the attempt itself, and never crosses JSON-RPC.
 	racedPromptReady bool
 }
+
+// DurationMs returns the measured interval before serialization discards the
+// clock's monotonic reading. Unknown intervals have no duration.
+func (a ExecutionAttempt) DurationMs() *int64 {
+	if a.CompletedAt == nil || a.StartedAt.IsZero() {
+		return nil
+	}
+	elapsed := a.CompletedAt.Sub(a.StartedAt).Milliseconds()
+	if elapsed < 0 {
+		return nil
+	}
+	return &elapsed
+}

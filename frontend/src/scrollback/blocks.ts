@@ -22,9 +22,9 @@ import { commandFragment } from '../command-text'
 import { KIND_LABELS, type SecretKind } from '../secret-kind'
 import type { ExecutionAttempt } from '../lifecycle/state'
 
-/** The block's own length, in milliseconds, from the two backend timestamps its
- *  attempt carries (ADR-tqjt5rkk) — the interval the block's header prints and
- *  the figure the composer's departure is decided on.
+/** The block's own elapsed time, in milliseconds, from the backend's duration
+ *  or its timestamps when no duration was recorded (ADR-tqjt5rkk) — the interval
+ *  the header prints and the figure the composer's departure is decided on.
  *
  *  NOT the renderer's clock: a completion reaches the renderer well after the
  *  command ended, so `performance.now()` between two facts measures the wire,
@@ -34,6 +34,7 @@ import type { ExecutionAttempt } from '../lifecycle/state'
  *  long the command ran prints no duration, and the composer treats it as long
  *  (a composer the product has no evidence to keep must not be kept). */
 export function attemptBlockMs(attempt: ExecutionAttempt): number | null {
+  if (attempt.durationMs !== undefined) return attempt.durationMs
   if (attempt.startedAt === undefined || attempt.completedAt === undefined) return null
   const ms = Date.parse(attempt.completedAt) - Date.parse(attempt.startedAt)
   return Number.isFinite(ms) ? ms : null

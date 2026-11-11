@@ -2018,6 +2018,22 @@ describe('BlockManager attempt projections (ADR-0024 §5, §7 — bead nocx-u7uh
     rows = 24,
   ) => ({ row, screenRevision, bufferKind, bufferInstance, cols, rows })
 
+  it('uses the backend elapsed duration when UTC timestamps step backwards during a command', () => {
+    const rec = manager.startBlock('sleep 2', '~', 0)
+    manager.bindAttempt('att-1')
+    manager.blockClosed('att-1')
+    manager.freezeFromAttempt(
+      attempt({
+        startedAt: '2026-11-11T16:30:47.360Z',
+        completedAt: '2026-11-11T16:30:49.286Z',
+        durationMs: 2024,
+      }),
+      0,
+    )
+    expect(rec.durationMs).toBe(2024)
+    expect(rec.el.querySelector('[title="2024ms"]')).not.toBeNull()
+  })
+
   it('reclaims an alternate-seated header before a deferred visual freeze', () => {
     const rec = manager.startBlock('make', '~', 3)
     manager.bindAttempt('att-1')

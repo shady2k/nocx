@@ -381,14 +381,16 @@ func sessionHomeProcesses(home string) []string {
 		if err != nil || pid == own {
 			continue
 		}
-		dir := filepath.Join("/proc", entry.Name())
-		cmdline, _ := os.ReadFile(filepath.Join(dir, "cmdline"))
-		comm, _ := os.ReadFile(filepath.Join(dir, "comm"))
+		// The directory is named by the pid parsed above, never by the entry
+		// name, so the reads below take an integer and a fixed file name.
+		dir := filepath.Join("/proc", strconv.Itoa(pid))
+		cmdline, _ := os.ReadFile(filepath.Join(dir, "cmdline")) //nolint:gosec // G304: /proc/<pid> for the pid parsed above, plus a fixed name.
+		comm, _ := os.ReadFile(filepath.Join(dir, "comm"))       //nolint:gosec // G304: the same entry, read for its command name.
 		describe := fmt.Sprintf("pid %d %s %q", pid,
 			strings.TrimSpace(string(comm)),
 			strings.ReplaceAll(strings.TrimRight(string(cmdline), "\x00"), "\x00", " "))
 		matched := false
-		if env, err := os.ReadFile(filepath.Join(dir, "environ")); err == nil {
+		if env, err := os.ReadFile(filepath.Join(dir, "environ")); err == nil { //nolint:gosec // G304: /proc/<pid> for the pid parsed above, plus a fixed name.
 			for _, kv := range strings.Split(string(env), "\x00") {
 				if kv == "HOME="+home {
 					matched = true

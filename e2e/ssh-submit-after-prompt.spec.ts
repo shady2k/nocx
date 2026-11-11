@@ -266,16 +266,34 @@ test('a submit during a plain sh startup stays in the composer until the person 
       'the line reached the far pty before the person submitted after the prompt',
     ).toBe('')
 
-    // Now the person submits at the prompt they can see.
-    await page.locator(PANE).click()
-    await page.keyboard.type(LINE)
+    // The restored draft owns the keyboard even after a click on live output.
+    // Keep typing as a person would: the suffix must extend that draft, not
+    // bypass it into the shell or replace it during a late restoration.
+    const suffix = ' && echo continued'
+    await page.locator(`${PANE} .terminal-live-container`).click()
+    await page.keyboard.type(suffix)
+    await expect(editor).toHaveText(`${LINE}${suffix}`)
+    expect(readFileSync(logPath).subarray(framesEnd).toString('utf8')).toBe('')
     await page.keyboard.press('Enter')
     await expect
       .poll(() => readFileSync(logPath).subarray(framesEnd).toString('utf8'), {
         timeout: 60_000,
         intervals: [200],
       })
-      .toBe(`${LINE}\r`)
+      .toBe(`${LINE}${suffix}\r`)
+
+    // Once that draft is submitted, the conventional shell owns raw input.
+    await expect(editor).not.toBeVisible()
+    const rawLine = 'echo raw-after-draft'
+    await page.locator(`${PANE} .terminal-live-container`).click()
+    await page.keyboard.type(rawLine)
+    await page.keyboard.press('Enter')
+    await expect
+      .poll(() => readFileSync(logPath).subarray(framesEnd).toString('utf8'), {
+        timeout: 60_000,
+        intervals: [200],
+      })
+      .toBe(`${LINE}${suffix}\r${rawLine}\r`)
   } finally {
     try {
       if (profileId !== null) {

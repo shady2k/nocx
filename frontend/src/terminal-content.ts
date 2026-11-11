@@ -399,6 +399,20 @@ export const SUBMIT_GRACE_MS = 40
 export const PROMPT_BACKSTOP_MS = 250
 
 /**
+/**
+ * How long a submit waits for the grid it will run at to APPLY before its
+ * bytes go out (nocx-evj4b.1.9).
+ *
+ * A stall guard, not a working budget: the receipt is one control-plane round
+ * trip on a socket that is already open, and every observed one is far inside
+ * this. It exists because the wait is a *submit*: a receipt that never came —
+ * a backend that stopped answering, a frame lost in a reconnect — must not
+ * leave a person unable to run a command. On expiry the bytes go out at the
+ * size the pty has, which is what happened before the wait existed.
+ */
+const SUBMIT_GRID_DEADLINE_MS = 1_000
+
+/**
  * How long output is treated as the shell's answer to a resize rather than as
  * unread activity.
  *
@@ -1480,7 +1494,7 @@ export class TerminalContent extends BasePaneContent {
     if (
       active &&
       (this.editor.rootContains(active) ||
-        this.scrollback?.terminalLiveContainer.contains(active) ||
+        (this.scrollback?.terminalLiveContainer.contains(active) && !this._restoredShellDraft()) ||
         this.receipt?.root.contains(active) ||
         active.closest('[data-block-control]') ||
         // …AND THE MENU A RIGHT-CLICK OPENS, which is the one overlay created
@@ -6679,6 +6693,53 @@ export class TerminalContent extends BasePaneContent {
     this._measurePromptPrediction(doc)
   }
 
+  /**
+   * The size a submitted command will run at, APPLIED before its bytes go out
+   * (nocx-evj4b.1.9).
+   *
+   * The prompt prediction measures that height at the Enter (nocx-2v80t.3.50),
+   * but its report rides the settle timer: the submit's own attempt round trip
+   * can put the bytes on the wire first. Then the command starts at the
+   * prompt's grid, which is a row or two taller — a full-screen program draws
+   * for it, and the resize that follows scrolls the program's first rows off
+   * the top of the screen. `top`'s summary left the live grid and landed in the
+   * block's body this way, on a loaded runner, in `e2e/top-split.spec.ts`.
+   *
+   * The receipt is SHARED with the debounced report, not re-sent: a size the
+   * backend already applied answers at once, and an identical report still on
+   * its way answers when it lands. Both failures fail OPEN — a command
+   * swallowed because a size could not be confirmed is worse than one that
+   * runs at the size the pty already has.
+   */
+  private async awaitSubmitGeometry(): Promise<void> {
+    const session = this.session
+    if (session === null) return
+    const receipt = session.resizeApplied(this._reportedSize())
+    let stalled: ReturnType<typeof setTimeout> | undefined
+    const deadline = new Promise<void>((resolve) => {
+      stalled = setTimeout(resolve, SUBMIT_GRID_DEADLINE_MS)
+    })
+    try {
+      const outcome = await Promise.race([receipt, deadline])
+      if (outcome !== 'applied') {
+        log.warn(
+          'nocx: the grid a submitted command will run at did not apply; its bytes go out at the pty size',
+          {
+            pane: this.pane.paneId,
+            outcome,
+          },
+        )
+      }
+    } catch (err) {
+      log.warn('nocx: the grid a submitted command will run at could not be confirmed', {
+        pane: this.pane.paneId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    } finally {
+      clearTimeout(stalled)
+    }
+  }
+
   /** Refit the pane rectangle once per delivered prompt measurement. Text
    * changes do not change chrome height (ADR-3kqrem7v). */
   private _measurePromptPrediction(text: string): void {
@@ -9723,6 +9784,16 @@ export class TerminalContent extends BasePaneContent {
     if (intent.kind === 'key' && intent.payload === INTERRUPT_KEY) {
       this._cancelDeferredShellSubmissions()
     }
+    // A restored startup draft remains the shell input owner until it is
+    // submitted or cleared. A grid click must not bypass that draft.
+    if (
+      this.editor?.isVisible &&
+      this._restoredShellDraft() &&
+      (intent.kind === 'key' || intent.kind === 'text' || intent.kind === 'paste')
+    ) {
+      this.bounceFocusToEditor()
+      return false
+    }
     if (isAwaitingIntegration(this._integration, this._awaitsIntegration)) return false
     // INPUT ENDS A LIVE SELECTION (nocx-1ebrs.19). A key, committed text or a
     // paste is what makes a full-screen program redraw the screen the person
@@ -10121,13 +10192,8 @@ export class TerminalContent extends BasePaneContent {
         nativeMode: this.nativeMode,
       })
     }
-    // The grid's writability follows ownership, not the visibility
-    // transition: the editor hides ITSELF at submit (the atomic handoff),
-    // so by the time the running fact lands `editor.isVisible` is already
-    // false and a transition-gated setReadOnly(false) never runs — the grid
-    // stays read-only, typed input is dropped, and a program waiting on
-    // stdin (read, ssh, less) hangs with no editor and no input surface
-    // (nocx-u7uh.23). The invariant: editor shown ⟺ grid read-only.
+    // A restored draft keeps the composer as the shell input owner. Grid
+    // focus and input honor that same _restoredShellDraft decision.
     const answerInSummon = this._summoned && this._currentSummonedAnswer() !== null
     if (show) {
       // THE SHELL IS BACK INSIDE THE WAIT (ADR-tqjt5rkk). The box never left
@@ -10835,7 +10901,56 @@ export class TerminalContent extends BasePaneContent {
     // record (CommandLedger.open refuses empty commands) and no block. The
     // shell still gets its newline — a conventional terminal stays
     // conventional.
+    /** The command's own bytes, and the held window's keys after them. */
+    const deliverCommand = (taken: HeldWindow | null): void => {
+      try {
+        // A Ctrl-C that arrived while this submission was in flight
+        // (nocx-xn63t.6.12): the line is not to run. Nor is it "run and then
+        // interrupt" — the interrupt came first, and writing the command
+        // would put it at the pty with the shell's line editor already told
+        // to discard the line. So the command is not written AT ALL, and
+        // there is nothing at the pty for an 0x03 to mean: no interrupt is
+        // written for it either.
+        //
+        // Read from the window THIS submission armed. Taking the queue tells
+        // us what the pane last held, which after another submission has
+        // taken it is not this window — and reading the cancellation from
+        // there would resurrect exactly the line the person withdrew.
+        if (heldWindow?.cancelled === true) {
+          // No card to withdraw (nocx-2v80t.3.2): the submit opened none,
+          // and the bytes below were never written. The ledger record stays
+          // unbound and running, persisting nothing — the same residue the
+          // agent lane's withdrawal leaves.
+          return
+        }
+        submitCommand(doc, {
+          // The deferred half of the handoff to the grid: the synchronous call
+          // above already took the keyboard at commit, and this one only
+          // repairs it if the round trip left it on nobody
+          // (takeKeyboardToGridAfterSubmit).
+          focusGrid: () => this.takeKeyboardToGridAfterSubmit(),
+          sendDoc: sendLine,
+        })
+        // The command is on the pane's intent queue, ahead of any key that
+        // follows it, and the running fact has not been applied yet. That is
+        // not the held window and not the running command: it is the
+        // interval an unclaimed keyboard must still be read in
+        // (nocx-atpw5.1.20).
+        if (takeKeys) this._submittedAwaitingStart = true
+      } finally {
+        // In a `finally`, and fail-open: a write that threw sent nothing,
+        // and holding the keys anyway would swallow them for the rest of the
+        // session. Late at a prompt is a line the user can see and erase;
+        // silently gone is not.
+        //
+        // A cancelled window holds no keys — the interrupt discarded them —
+        // so this is empty on the withdrawal path by construction, never by
+        // a second rule about which keys a cancelled submission may carry.
+        for (const intent of taken?.keys ?? []) this.sendIntent(intent)
+      }
+    }
     const write = (): void => {
+      let deferred = false
       try {
         // A COMMAND HELD FOR A SESSION THAT IS GONE IS DROPPED, never delivered
         // elsewhere (review rounds 4 and 6). Checked at the write itself,
@@ -10851,67 +10966,39 @@ export class TerminalContent extends BasePaneContent {
           })
           return
         }
-        // This is deliberately after lifecycle.submitAttempt resolved: the
-        // broker can withdraw the request during that round trip, and a
-        // check at submit entry would miss the only unsafe window.
-        if (beforeWrite && !beforeWrite()) return
-        // Detach the queue BEFORE the command goes out, flush it after.
-        //
-        // Both halves matter and the order is the whole point. Close the held
-        // window before submitting so the command's paste and Enter enter the
-        // session-intent queue first; then replay keys captured during the
-        // attempt RPC. The serial queue keeps those later intents behind the
-        // command, rather than allowing Enter to bypass its paste.
-        const taken = this.takeHeldWindow()
-        try {
-          // A Ctrl-C that arrived while this submission was in flight
-          // (nocx-xn63t.6.12): the line is not to run. Nor is it "run and then
-          // interrupt" — the interrupt came first, and writing the command
-          // would put it at the pty with the shell's line editor already told
-          // to discard the line. So the command is not written AT ALL, and
-          // there is nothing at the pty for an 0x03 to mean: no interrupt is
-          // written for it either.
-          //
-          // Read from the window THIS submission armed. Taking the queue tells
-          // us what the pane last held, which after another submission has
-          // taken it is not this window — and reading the cancellation from
-          // there would resurrect exactly the line the person withdrew.
-          if (heldWindow?.cancelled === true) {
-            // No card to withdraw (nocx-2v80t.3.2): the submit opened none,
-            // and the bytes below were never written. The ledger record stays
-            // unbound and running, persisting nothing — the same residue the
-            // agent lane's withdrawal leaves.
-            return
+        // THE GRID THE COMMAND RUNS AT IS APPLIED BEFORE ITS BYTES GO OUT
+        // (nocx-evj4b.1.9). The prompt prediction measures that height at the
+        // Enter, but its report rides the settle timer while the attempt's own
+        // round trip is already in flight. On a slow machine the bytes reached
+        // a pty that was still the prompt's taller grid: the program drew for
+        // the taller screen, and the resize that followed scrolled its first
+        // rows into the block's body — the owner's `top` losing its summary.
+        // Waiting for the receipt here costs one round trip already applied
+        // (the receipt is shared with the debounced report, not re-sent).
+        deferred = true
+        const deliver = (): void => {
+          try {
+            if (this._bind !== bind || !this._bindIsCurrent(origin)) return
+            // The broker can withdraw during either the attempt or geometry
+            // round trip. This gate also marks its write started: run it once,
+            // only when the bytes can actually follow.
+            if (beforeWrite && !beforeWrite()) return
+            // Keep raw input held through the geometry receipt, then detach
+            // immediately before paste/Enter and replay it after the command.
+            deliverCommand(this.takeHeldWindow())
+          } finally {
+            // Written, or withdrawn — either way this submission has RESOLVED,
+            // and whoever is waiting for its delivery may go on.
+            settle()
           }
-          submitCommand(doc, {
-            // The deferred half of the handoff to the grid: the synchronous call
-            // above already took the keyboard at commit, and this one only
-            // repairs it if the round trip left it on nobody
-            // (takeKeyboardToGridAfterSubmit).
-            focusGrid: () => this.takeKeyboardToGridAfterSubmit(),
-            sendDoc: sendLine,
-          })
-          // The command is on the pane's intent queue, ahead of any key that
-          // follows it, and the running fact has not been applied yet. That is
-          // not the held window and not the running command: it is the
-          // interval an unclaimed keyboard must still be read in
-          // (nocx-atpw5.1.20).
-          if (takeKeys) this._submittedAwaitingStart = true
-        } finally {
-          // In a `finally`, and fail-open: a write that threw sent nothing,
-          // and holding the keys anyway would swallow them for the rest of
-          // the session. Late at a prompt is a line the user can see and
-          // erase; silently gone is not.
-          //
-          // A cancelled window holds no keys — the interrupt discarded them —
-          // so this is empty on the withdrawal path by construction, never by
-          // a second rule about which keys a cancelled submission may carry.
-          for (const intent of taken?.keys ?? []) this.sendIntent(intent)
         }
+        void this.awaitSubmitGeometry().then(deliver, deliver)
       } finally {
-        // Written, or withdrawn — either way this submission has RESOLVED,
-        // and whoever is waiting for its delivery may go on.
-        settle()
+        if (!deferred) {
+          // The early returns above wrote nothing: this submission has
+          // RESOLVED too, and whoever is waiting on it may go on.
+          settle()
+        }
       }
     }
     if (recordLine === '') {

@@ -1363,6 +1363,16 @@ type RecordBlockRowsFence struct {
 	Fence      string
 }
 
+// RecordBlockRowsOutputStart is where a block's output begins (nocx-4y82c.1.11):
+// the helper's ordered output mark, in the same absolute row coordinate a
+// stored line's `from` uses. One idempotent write — the first mark wins, and a
+// block already sealed has nothing left to delimit.
+type RecordBlockRowsOutputStart struct {
+	EntryID    string
+	ArtifactID string
+	Row        uint64
+}
+
 // LostCauseCoordinatorUnavailable is the lost-rows cause the resend names:
 // the coordinator was away while ghostty pruned what it had not confirmed.
 const LostCauseCoordinatorUnavailable = "coordinator-unavailable"
@@ -2163,6 +2173,9 @@ type LedgerRepository interface {
 	// OpenBlockRowsForSession answers it back. A block already sealed is
 	// left as it is: its end has come.
 	RecordBlockRowsFence(ctx context.Context, in RecordBlockRowsFence) error
+	// RecordBlockRowsOutputStart records where a block's output begins, once,
+	// when the helper's ordered output mark applies (nocx-4y82c.1.11).
+	RecordBlockRowsOutputStart(ctx context.Context, in RecordBlockRowsOutputStart) error
 	// RecordClearBoundary records one sighted erase-saved-lines as a cursor
 	// an ordinary read applies rather than a mark on every entry it hides
 	// (nocx-2v80t.3.17, nocx-zg3k3.10.3's decision). Idempotent on nothing:

@@ -61,6 +61,10 @@ func (s *failFirstAppendStore) RecordBlockRowsFence(ctx context.Context, in cont
 	return s.blocking.RecordBlockRowsFence(ctx, in)
 }
 
+func (s *failFirstAppendStore) RecordBlockRowsOutputStart(ctx context.Context, in content.RecordBlockRowsOutputStart) error {
+	return s.blocking.RecordBlockRowsOutputStart(ctx, in)
+}
+
 func TestBlockRowsArrived_AutoFlushCountsTheBatchAgainstTheBound(t *testing.T) {
 	db := newLedgerStore(t)
 	e, pub, lane, h, sid, _ := newLifecycleLedgerEnvWithStore(t, db)

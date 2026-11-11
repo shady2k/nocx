@@ -91,10 +91,20 @@ package coordinator
 // because session.intent's validator is a closed set (internal/transport/
 // ws_intent.go); the two versions do not pair.
 //
+// 25 (fix/nocx-4y82c-1-11-echo-twice, over main's 24): the stored block rows
+// summary carries WHERE A BLOCK'S OUTPUT BEGINS. The `summary` definition of
+// contracts/ledger.blockRows.schema.json declares `outputStartRow`
+// (nocx-4y82c.1.11) — an optional integer beside the dropped and lost counts,
+// so a reader can drop the command's echo — and a declared field is a surface
+// change even when it is optional and its absence means "no mark". Both
+// changes are in this tree: the branch's own 24 was written against a main at
+// 23, while main took 24 for the intent framing, so the merged surface is one
+// above main's and the golden below is written over the MERGED tree.
+//
 // The number in a stage branch means only that ITS surface moved; this is the
 // number the integrated surface carries, and its golden is the one written by
 // the recipe over all four stages at once.
-const ProtocolVersion = 29
+const ProtocolVersion = 26
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

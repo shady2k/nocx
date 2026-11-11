@@ -1291,6 +1291,31 @@ describe('stored block rows', () => {
     )
   })
 
+  it('drops the rows below the recorded output start, once, for every consumer', () => {
+    // The backend records where the block's output begins (nocx-4y82c.1.11):
+    // rows below it are the command's own echo and redraw.
+    const body = [
+      { from: 0, row: { text: '$ printf OUT' } },
+      { from: 1, row: { text: "'OUT'" } },
+      { from: 2, row: { text: 'OUT' } },
+    ]
+      .map((line) => JSON.stringify(line))
+      .join('\n')
+    const parsed = parseStoredBlockRows(body, {
+      truncated: null,
+      payload: { outputStartRow: 2 },
+      state: 'sealed',
+    })
+    expect(parsed.lines.map((line) => line.from)).toEqual([2])
+    expect(parsed.outputStartRow).toBe(2)
+    expect(storedBlockRowsText(parsed)).toBe('OUT')
+
+    // No recorded start: every row is the block's own, unchanged.
+    const whole = parseStoredBlockRows(body, { truncated: null, payload: {}, state: 'sealed' })
+    expect(whole.lines.map((line) => line.from)).toEqual([0, 1, 2])
+    expect(whole.outputStartRow).toBeUndefined()
+  })
+
   it('paints nothing for a line whose run does not partition its own text, rather than inventing a rectangle', () => {
     const malformed = parseStoredBlockRows(
       [

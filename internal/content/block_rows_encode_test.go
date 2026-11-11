@@ -91,8 +91,10 @@ func TestBlockRowsLine_DTOConformsToContract(t *testing.T) {
 		t.Fatalf("the stored line does not conform to contracts/ledger.blockRows.schema.json: %v", validateErr)
 	}
 
-	// And the summary sidecar rides the same contract.
-	summaryRaw, err := json.Marshal(blockRowsPayload{DroppedRows: 4, LostRows: 2})
+	// And the summary sidecar rides the same contract — including WHERE THE
+	// OUTPUT BEGINS, which a sealed block carries (nocx-4y82c.1.11).
+	outputStart := uint64(19)
+	summaryRaw, err := json.Marshal(blockRowsPayload{DroppedRows: 4, LostRows: 2, OutputStartRow: &outputStart})
 	if err != nil {
 		t.Fatalf("marshal summary: %v", err)
 	}

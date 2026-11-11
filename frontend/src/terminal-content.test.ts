@@ -2797,7 +2797,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
       await vi.waitFor(() =>
         expect(session.intent.mock.calls).toEqual([
-          ['paste', 'sleep 20'],
+          ['paste', 'sleep 20', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -2840,14 +2840,13 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
     }
   })
 
-  // nocx-evj4b.1.6: a plain sh never reaches prompt_ready, so the startup
-  // composer is the only place its first commands can be typed, and every
-  // Enter there was its own command. The draft used to survive each held
-  // Enter, so the last Enter's plan carried all of them concatenated and
-  // exactly one line ran; every submit after the first was swallowed as a
-  // duplicate of the one in flight. Five submits during startup must be five
-  // lines, in the order the person made them, when the shell settles.
-  it('every submit made while startup is held runs on its own when the shell settles conventional', async () => {
+  // nocx-evj4b.1.6, AS AMENDED BY THE OWNER (2026-11-10; nocx-evj4b.1.8): a
+  // plain sh never reaches prompt_ready, so the startup composer's submits are
+  // held against a prompt that will never come. Every Enter there is still its
+  // own command — the draft empties for each — but the lines are NOT written
+  // into a pty nobody proved ready; they come back to the composer, in order,
+  // and the person submits them at the prompt they can see.
+  it('every submit held during startup comes back to the composer when the shell settles conventional', async () => {
     const session = makeSession({ awaitsIntegration: true })
     const client = makeClient()
     client.openSession.mockResolvedValue(session)
@@ -2882,14 +2881,11 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
         reason: 'unsupported-shell',
         shell: '/bin/sh',
       })
-      await vi.waitFor(() =>
-        expect(session.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual(
-          lines.flatMap((line) => [
-            ['paste', line],
-            ['key', 'enter'],
-          ]),
-        ),
-      )
+      // THE QUEUE'S PROMISE CANNOT BE KEPT: no prompt is coming, so nothing
+      // is written; the five lines are the person's draft again.
+      await vi.waitFor(() => expect(editor.getDoc()).toBe(lines.join('\n')))
+      expect(session.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([])
+      expect(session.send).not.toHaveBeenCalled()
     } finally {
       teardown()
     }
@@ -2969,6 +2965,439 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
     }
   })
 
+  it('a submit at an integrated prompt is never bracketed pasted (nocx-evj4b.1.2)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const lifecycle = lifecycleHandler(client, session.sessionId)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    attemptScript(client, [
+      () =>
+        Promise.resolve({
+          id: 'att-1',
+          domain: 'd1',
+          state: 'open',
+          command: 'echo hi',
+          cwd: '',
+          host: '',
+          origin: 'app',
+          startedAt: '2026-08-08T12:00:00Z',
+        }),
+    ])
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'integrated', shell: '/bin/bash' })
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      session.intent.mockClear()
+      holdOne(editor, view, 'echo hi')
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls.filter((call) => call[0] === 'paste')).toEqual([
+          ['paste', 'echo hi', 'bare'],
+        ]),
+      )
+    } finally {
+      teardown()
+    }
+  })
+
+  it("a submit to a program inside a block is framed by that program's own mode (nocx-evj4b.1.2)", async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const lifecycle = lifecycleHandler(client, session.sessionId)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'integrated', shell: '/bin/bash' })
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      lifecycle({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-prog', state: 'open', origin: 'shell', command: 'python3', cwd: '' },
+      })
+      session.intent.mockClear()
+      session.send.mockClear()
+      holdOne(editor, view, 'print(1)')
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls.filter((call) => call[0] === 'paste')).toEqual([
+          ['paste', 'print(1)'],
+        ]),
+      )
+    } finally {
+      teardown()
+    }
+  })
+
+  // THE QUEUE IS A PROMISE (owner, 2026-11-10; nocx-evj4b.1.8). A line held
+  // against the prompt a live domain will announce is not delivered when the
+  // startup settles some other way — the far pty is still cooked and its
+  // startup chain can read stdin. It goes back to the person's draft.
+  it('returns a held line to the composer when the startup settles conventional (nocx-evj4b.1.8)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      session.intent.mockClear()
+      session.send.mockClear()
+      holdOne(editor, view, 'echo kept')
+      expect(session.intent).not.toHaveBeenCalled()
+
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(editor.getDoc(), "the line the queue could not deliver is the person's draft").toBe(
+        'echo kept',
+      )
+      expect(session.intent).not.toHaveBeenCalled()
+      expect(session.send).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('restores the reference-intact line, never the resolved secret (nocx-evj4b.1.8)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    client.call.mockImplementation((method: string) => {
+      if (method === 'vault.resolveLine') {
+        return Promise.resolve({
+          line: 'curl -H "Authorization: Bearer s3cr3t"',
+          refs: [{ name: 'token', resolved: true }],
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const lifecycle = lifecycleHandler(client, session.sessionId)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      editor.insertText('curl {{secret:token}}')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      for (let i = 0; i < 10; i++) await Promise.resolve()
+      expect(view.state.doc.toString()).toBe('')
+
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      // THE PERSON'S OWN TEXT. The resolved line is the pty's, never the
+      // draft's: 'curl {{secret:token}}' must come back with the reference
+      // intact, not with the token in clear.
+      await vi.waitFor(() => expect(editor.getDoc()).toBe('curl {{secret:token}}'))
+      expect(editor.getDoc()).not.toContain('s3cr3t')
+
+      // AND A RESUBMIT RECORDS THE SAME TEXT, never the secret.
+      const attempts: unknown[] = []
+      client.dispatcher.call.mockImplementation((method: string, params: unknown) => {
+        if (method !== 'lifecycle.submitAttempt') {
+          return Promise.reject(new Error('no store wired (fake)'))
+        }
+        attempts.push(params)
+        return Promise.resolve({
+          id: 'att-1',
+          domain: 'd1',
+          state: 'open',
+          command: '',
+          cwd: '',
+          host: '',
+          origin: 'app',
+          startedAt: '2026-08-08T12:00:00Z',
+        })
+      })
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      await vi.waitFor(() => expect(attempts).toHaveLength(1))
+      expect((attempts[0] as { command?: string }).command).toBe('curl {{secret:token}}')
+      expect(JSON.stringify(attempts[0])).not.toContain('s3cr3t')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a submit whose secret resolves after the startup settled stays in the composer (nocx-evj4b.1.8)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    let releaseResolve!: () => void
+    const resolved = new Promise<void>((resolve) => {
+      releaseResolve = resolve
+    })
+    client.call.mockImplementation((method: string) => {
+      if (method === 'vault.resolveLine') {
+        return resolved.then(() => ({
+          line: 'curl -H "Authorization: Bearer s3cr3t"',
+          refs: [{ name: 'token', resolved: true }],
+        }))
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      session.intent.mockClear()
+      session.send.mockClear()
+      editor.insertText('curl {{secret:token}}')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      // The verdict is in flight and the startup settles without a prompt.
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      releaseResolve()
+      for (let i = 0; i < 10; i++) await Promise.resolve()
+
+      // THE PERSON'S TEXT, STILL THEIRS: the verdict that resolved after the
+      // startup ended is not a licence to write into a pty nobody proved.
+      expect(editor.getDoc()).toBe('curl {{secret:token}}')
+      expect(editor.getDoc()).not.toContain('s3cr3t')
+      expect(session.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([])
+      expect(session.send).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a vetoed reference draft is visible even when focus has moved (nocx-evj4b.1.8)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    let releaseResolve!: () => void
+    const resolved = new Promise<void>((resolve) => {
+      releaseResolve = resolve
+    })
+    client.call.mockImplementation((method: string) => {
+      if (method === 'vault.resolveLine') {
+        return resolved.then(() => ({
+          line: 'curl -H "Authorization: Bearer s3cr3t"',
+          refs: [{ name: 'token', resolved: true }],
+        }))
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      editor.insertText('curl {{secret:token}}')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      // FOCUS MOVES WHILE THE VERDICT IS IN FLIGHT — the window this rule is
+      // for: the line is the person's, but the keyboard is not in the editor.
+      ;(document.activeElement as HTMLElement | null)?.blur()
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      releaseResolve()
+      for (let i = 0; i < 10; i++) await Promise.resolve()
+
+      expect(editor.getDoc()).toBe('curl {{secret:token}}')
+      expect(editor.isVisible, 'the vetoed line is on screen, not in a hidden draft').toBe(true)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a shell draft restored while Ask was active is visible once the shell is shown (nocx-evj4b.1.8)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    const inputTargets = (content as unknown as { inputTargets: { setActive(id: string): void } })
+      .inputTargets
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      holdOne(editor, view, 'echo shell-line')
+      inputTargets.setActive('agent')
+      editor.insertText('what did that print?')
+
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(editor.getDoc()).toBe('what did that print?')
+
+      // BACK TO THE SHELL: the draft is loaded AND the composer comes back
+      // with it. One rule, whichever path restored the draft.
+      inputTargets.setActive('shell')
+      await vi.waitFor(() => expect(editor.getDoc()).toBe('echo shell-line'))
+      expect(editor.isVisible, 'the restored shell draft is on screen').toBe(true)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a restored draft keeps the composer on screen until it is submitted or cleared (nocx-evj4b.1.8)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/bash' })
+      holdOne(editor, view, 'echo stays')
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/bash',
+      })
+      await vi.waitFor(() => expect(editor.getDoc()).toBe('echo stays'))
+      // THE PROJECTION THAT HID THE COMPOSER IS THE ONE THAT MUST KEEP IT: a
+      // draft restored without focus was hidden in the same update, and the
+      // person's line vanished into an invisible box.
+      expect(editor.isVisible, 'the restored draft is on screen').toBe(true)
+
+      // A later non-ready fact does not take it away either.
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/bash',
+      })
+      await Promise.resolve()
+      expect(editor.isVisible).toBe(true)
+
+      // The person's own submit empties the draft, and the composer's keep
+      // ends with it.
+      editor.clear()
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/bash',
+      })
+      await Promise.resolve()
+      expect(editor.isVisible).toBe(false)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('restores the held lines ahead of a newer draft, as one draft (nocx-evj4b.1.8)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      holdOne(editor, view, 'echo A')
+      // A NEWER DRAFT, typed while the startup was still settling.
+      editor.insertText('echo B')
+      expect(editor.getDoc()).toBe('echo B')
+
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      await vi.waitFor(() => expect(editor.getDoc()).toBe('echo A\necho B'))
+    } finally {
+      teardown()
+    }
+  })
+
+  it('restores a held shell line into the shell draft, not the question being typed (nocx-evj4b.1.8)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    const inputTargets = (content as unknown as { inputTargets: { setActive(id: string): void } })
+      .inputTargets
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      holdOne(editor, view, 'echo A')
+      // The person reached for the assistant while the shell was starting.
+      inputTargets.setActive('agent')
+      editor.insertText('what did that print?')
+      expect(editor.getDoc()).toBe('what did that print?')
+
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+      // The question's draft is untouched: the shell's line is not a question.
+      expect(editor.getDoc()).toBe('what did that print?')
+
+      inputTargets.setActive('shell')
+      await vi.waitFor(() => expect(editor.getDoc()).toBe('echo A'))
+    } finally {
+      teardown()
+    }
+  })
+
   // REVIEW FINDING 2 (P1): the release started both submissions at once. A's
   // attempt opened and waited; B's was refused because the lane was running,
   // and the refusal wrote B immediately — ahead of A, which then wrote second.
@@ -3017,9 +3446,9 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       })
       await vi.waitFor(() =>
         expect(session.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([
-          ['paste', 'echo A'],
+          ['paste', 'echo A', 'bare'],
           ['key', 'enter'],
-          ['paste', 'echo B'],
+          ['paste', 'echo B', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -3029,10 +3458,12 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
     }
   })
 
-  // REVIEW FINDING 3 (P2): the release read the CURRENTLY active target. A
-  // shell command held during startup, with the person switching to Ask before
-  // the settle, became an assistant question and never reached the shell.
-  it('a held command is delivered to the shell target it was typed for (sequence 3)', async () => {
+  // REVIEW FINDING 3 (P2), AS AMENDED BY THE OWNER (2026-11-10;
+  // nocx-evj4b.1.8): a shell command held during startup is not delivered when
+  // the startup settles conventional — it comes back to the composer — and it
+  // still never becomes an assistant question just because the person opened
+  // Ask meanwhile.
+  it('a held command comes back to the composer, never to another target (sequence 3)', async () => {
     const session = makeSession({ awaitsIntegration: true })
     const client = makeClient()
     client.openSession.mockResolvedValue(session)
@@ -3059,12 +3490,17 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
         reason: 'unsupported-shell',
         shell: '/bin/sh',
       })
-      await vi.waitFor(() =>
-        expect(session.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([
-          ['paste', 'echo for-the-shell'],
-          ['key', 'enter'],
-        ]),
-      )
+      await Promise.resolve()
+      await Promise.resolve()
+      // THE SHELL'S LINE IS NOT A QUESTION (nocx-evj4b.1.8): with Ask active
+      // it goes into the SHELL's draft, not into the editor showing Ask. The
+      // comment's own claim — that a shell command never becomes a question —
+      // is now true of the draft as well as of the wire.
+      const inputTargets = (content as unknown as { inputTargets: { setActive(id: string): void } })
+        .inputTargets
+      inputTargets.setActive('shell')
+      await vi.waitFor(() => expect(editor.getDoc()).toBe('echo for-the-shell'))
+      expect(session.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([])
       // and nothing became a question for the assistant
       expect(client.dispatcher.call.mock.calls.filter((c) => String(c[0]) === 'agent.ask')).toEqual(
         [],
@@ -3183,7 +3619,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       })
       await vi.waitFor(() =>
         expect(session.intent.mock.calls.filter((call) => call[0] === 'paste')).toEqual([
-          ['paste', 'sleep 60'],
+          ['paste', 'sleep 60', 'bare'],
         ]),
       )
       // The next prompt releases nothing: the withdrawn line went with the
@@ -3239,7 +3675,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       })
       await vi.waitFor(() =>
         expect(session.intent.mock.calls.filter((call) => call[0] === 'paste')).toEqual([
-          ['paste', 'sleep 60'],
+          ['paste', 'sleep 60', 'bare'],
         ]),
       )
       session.intent.mockClear()
@@ -3484,13 +3920,14 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
     }
   })
 
-  // CI run 42658168728, e2e/ssh-reconnect.spec.ts: a person who reconnects and
-  // types a command gets no block. The editor is on screen THROUGH the rebind,
+  // CI run 42658168728, e2e/ssh-reconnect.spec.ts, AS AMENDED BY THE OWNER
+  // (2026-11-10; nocx-evj4b.1.8): the editor is on screen THROUGH the rebind,
   // so a submit can land after `_bindGeneration` moved and before
-  // `this.session` became the new one: the origin recorded there mixed the new
-  // generation with the old session id, and every later check called it stale.
-  // Anything typed after the rebind must run in the session it produced.
-  it('a command typed while the rebind is in flight runs in the new session (sequence 11)', async () => {
+  // `this.session` became the new one. The line belongs to the session the
+  // rebind produces — and because that session announces nothing yet, the line
+  // waits, then comes back to the composer when the startup settles without a
+  // prompt. It never runs in the session that is gone.
+  it('a command typed while the rebind is in flight waits for the new session, then returns (sequence 11)', async () => {
     const client = makeClient()
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
     content.setVisible(true)
@@ -3526,20 +3963,17 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       expect(await reopening).toBe(true)
       expect(replacement.sessionId).not.toBe(session.sessionId)
 
-      // The new shell settles (or is already live); either way the line the
-      // person typed must reach it.
+      // The new shell settles conventional: no prompt is coming, so the line
+      // is not written into it — it is the person's draft again.
       integrationHandler(client)({
         sessionId: replacement.sessionId,
         status: 'conventional',
         reason: 'unsupported-shell',
         shell: '/bin/sh',
       })
-      await vi.waitFor(() =>
-        expect(replacement.intent.mock.calls.filter((call) => call[0] !== 'focus')).toHaveLength(2),
-      )
-      expect(
-        replacement.intent.mock.calls.filter((call) => call[0] !== 'focus').map((call) => call[1]),
-      ).toEqual(['echo after-the-reconnect', 'enter'])
+      await vi.waitFor(() => expect(editor.getDoc()).toBe('echo after-the-reconnect'))
+      expect(replacement.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([])
+      expect(replacement.send).not.toHaveBeenCalled()
     } finally {
       teardown()
     }
@@ -3619,11 +4053,12 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
     }
   })
 
-  // REVIEW ROUND 7, FINDING 2 (P2): a raw session never enters the integration
-  // axis, so nothing ever settles it — a command held across its rebind was
-  // held forever. The bind's own completion releases it when no prompt_ready
-  // will ever come.
-  it('a plain command typed during a raw session’s reconnect still runs (sequence 13)', async () => {
+  // REVIEW ROUND 7, FINDING 2 (P2), AS AMENDED BY THE OWNER (2026-11-10;
+  // nocx-evj4b.1.8): a raw session never enters the integration axis, so no
+  // prompt mark will ever prove the shell ready — and a line held across its
+  // rebind is therefore never delivered early. It comes back to the composer,
+  // where the person left it; their next submit is the one that runs.
+  it('a plain command typed during a raw session’s reconnect comes back to the composer (sequence 13)', async () => {
     const client = makeClient()
     const session = makeSession({ awaitsIntegration: false })
     client.openSession.mockResolvedValue(session)
@@ -3658,10 +4093,9 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       next.send.mockClear()
       openNew()
       expect(await reopening).toBe(true)
-      await vi.waitFor(() => expect(next.intent).toHaveBeenCalled())
-      expect(
-        next.intent.mock.calls.filter((call) => call[0] !== 'focus').map((call) => call[1]),
-      ).toEqual(['echo raw-after-reconnect', 'enter'])
+      // Nothing was written into a shell nobody has proved ready.
+      await vi.waitFor(() => expect(editor.getDoc()).toBe('echo raw-after-reconnect'))
+      expect(next.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([])
     } finally {
       teardown()
     }
@@ -3773,19 +4207,17 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       // in for its own, so the command is still held.
       expect(replacement.intent).not.toHaveBeenCalled()
 
-      // The replacement answers in its own time.
+      // The replacement answers in its own time — and the answer is that no
+      // prompt is coming, so the line returns to the composer instead of being
+      // written into a shell nobody proved ready.
       integrationHandler(client)({
         sessionId: replacement.sessionId,
         status: 'conventional',
         reason: 'unsupported-shell',
         shell: '/bin/sh',
       })
-      await vi.waitFor(() =>
-        expect(replacement.intent.mock.calls.filter((call) => call[0] !== 'focus')).toHaveLength(2),
-      )
-      expect(
-        replacement.intent.mock.calls.filter((call) => call[0] !== 'focus').map((call) => call[1]),
-      ).toEqual(['echo waits-for-the-new-verdict', 'enter'])
+      await vi.waitFor(() => expect(editor.getDoc()).toBe('echo waits-for-the-new-verdict'))
+      expect(replacement.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([])
     } finally {
       teardown()
     }
@@ -4029,7 +4461,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       // the whole command, then Enter.
       await vi.waitFor(() =>
         expect(session.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([
-          ['paste', 'echo after-the-reconnect'],
+          ['paste', 'echo after-the-reconnect', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -4041,7 +4473,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
     }
   })
 
-  it('releases a held shell submit as a conventional write when startup settles degraded', async () => {
+  it('returns a held shell submit to the composer when startup settles degraded', async () => {
     const session = makeSession({ awaitsIntegration: true })
     const client = makeClient()
     client.openSession.mockResolvedValue(session)
@@ -4069,12 +4501,10 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
         reason: 'unsupported-shell',
         shell: '/bin/bash',
       })
-      await vi.waitFor(() =>
-        expect(session.intent.mock.calls).toEqual([
-          ['paste', 'echo conventional'],
-          ['key', 'enter'],
-        ]),
-      )
+      // NOTHING IS WRITTEN: the verdict is the launcher's word about the
+      // shell, not the shell's own readiness (nocx-evj4b.1.8).
+      await vi.waitFor(() => expect(editor.getDoc()).toBe('echo conventional'))
+      expect(session.intent.mock.calls).toEqual([])
       expect(
         client.dispatcher.call.mock.calls.some((call) => call[0] === 'lifecycle.submitAttempt'),
       ).toBe(false)
@@ -8490,7 +8920,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // Paste and Enter reach the session in order through the intent queue.
       await vi.waitFor(() =>
         expect(sessionOf(content).intent.mock.calls.slice(-2)).toEqual([
-          ['paste', 'echo hello'],
+          ['paste', 'echo hello', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -8584,7 +9014,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       )
       await vi.waitFor(() =>
         expect(sessionOf(content).intent.mock.calls.slice(-2)).toEqual([
-          ['paste', 'echo again'],
+          ['paste', 'echo again', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -8893,7 +9323,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // had the keyboard never been dropped.
       await vi.waitFor(() =>
         expect(sent()).toEqual([
-          ['paste', 'read x'],
+          ['paste', 'read x', 'bare'],
           ['key', 'enter'],
           ['text', 'hi'],
           ['key', 'enter'],
@@ -8937,7 +9367,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       )
       await vi.waitFor(() =>
         expect(sent()).toEqual([
-          ['paste', 'read x'],
+          ['paste', 'read x', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -8974,7 +9404,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // it is the program being told the keyboard came back.
       await vi.waitFor(() =>
         expect(sent()).toEqual([
-          ['paste', 'read x'],
+          ['paste', 'read x', 'bare'],
           ['key', 'enter'],
           ['text', 'hi'],
           ['key', 'enter'],
@@ -9061,7 +9491,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // already ahead of every key in the queue.
       await vi.waitFor(() =>
         expect(sent()).toEqual([
-          ['paste', 'read x'],
+          ['paste', 'read x', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -9079,7 +9509,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
 
       await vi.waitFor(() =>
         expect(sent()).toEqual([
-          ['paste', 'read x'],
+          ['paste', 'read x', 'bare'],
           ['key', 'enter'],
           ['text', 'hi'],
           ['key', 'enter'],
@@ -9150,7 +9580,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // captured while submit was in flight. All four travel on one queue.
       await vi.waitFor(() =>
         expect(session.intent.mock.calls).toEqual([
-          ['paste', 'read x'],
+          ['paste', 'read x', 'bare'],
           ['key', 'enter'],
           ['text', 'hi'],
           ['key', 'enter'],
@@ -9335,7 +9765,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // Enter intents finish before there is no pending line left for ^C.
       await vi.waitFor(() =>
         expect(session.intent.mock.calls).toEqual([
-          ['paste', 'read x'],
+          ['paste', 'read x', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -9346,7 +9776,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // runtime's decision, never this client's (nocx-zg3k3.3.1).
       await vi.waitFor(() =>
         expect(session.intent.mock.calls).toEqual([
-          ['paste', 'read x'],
+          ['paste', 'read x', 'bare'],
           ['key', 'enter'],
           ['key', 'Ctrl+c'],
         ]),
@@ -9997,7 +10427,9 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       view.contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
-      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('paste', 'read reply'))
+      await vi.waitFor(() =>
+        expect(session.intent).toHaveBeenCalledWith('paste', 'read reply', 'bare'),
+      )
       handler({
         lane: 'lane-1',
         lifecycle: 'running',
@@ -10642,7 +11074,7 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       // Fail-open, unchanged: the refusal did not eat the command.
       await vi.waitFor(() =>
         expect(session.intent.mock.calls.slice(-2)).toEqual([
-          ['paste', 'make deploy'],
+          ['paste', 'make deploy', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -10762,7 +11194,7 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       })
       await vi.waitFor(() =>
         expect(session.intent.mock.calls.slice(-2)).toEqual([
-          ['paste', 'make deploy'],
+          ['paste', 'make deploy', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -10874,7 +11306,7 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       // intents travel on this same seam, so the wait names the paste rather
       // than the tail of the list.
       await vi.waitFor(() =>
-        expect(session.intent.mock.calls).toContainEqual(['paste', 'sleep 30']),
+        expect(session.intent.mock.calls).toContainEqual(['paste', 'sleep 30', 'bare']),
       )
       expect(document.activeElement).toBe(stop)
     } finally {
@@ -10898,7 +11330,7 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       ed.insertText('sleep 30')
       key(view, { key: 'Enter' })
       await vi.waitFor(() =>
-        expect(sessionOf(content).intent).toHaveBeenCalledWith('paste', 'sleep 30'),
+        expect(sessionOf(content).intent).toHaveBeenCalledWith('paste', 'sleep 30', 'bare'),
       )
       const attempt = {
         id: 'att-0',
@@ -11121,7 +11553,7 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       })
       await vi.waitFor(() =>
         expect(session.intent.mock.calls.slice(-2)).toEqual([
-          ['paste', 'make --token=SECRETVALUE'],
+          ['paste', 'make --token=SECRETVALUE', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -11224,7 +11656,7 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       // Enter, the attempt was refused — and the command still runs, whole.
       await vi.waitFor(() =>
         expect(session.intent.mock.calls.slice(-2)).toEqual([
-          ['paste', 'make deploy'],
+          ['paste', 'make deploy', 'bare'],
           ['key', 'enter'],
         ]),
       )

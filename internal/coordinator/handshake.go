@@ -81,10 +81,20 @@ package coordinator
 // are part of the surface ADR-0104 declares, and a published byte of them
 // moving is a bump.
 //
+// 24 (fix/nocx-evj4b.1-2-submit-framing, over main's 23): session.intent's
+// params gained `framing`. "auto" (or absent) frames a paste by the program's
+// own mode 2004; "bare" never brackets it, for the composer's submit behind a
+// live integration, where the editor holds the whole line and a mode belief the
+// ssh path cannot prove must not decide the encoding (nocx-evj4b.1.2). A window
+// that asks for a bare paste and meets a coordinator built before this field
+// would be answered "invalid session.intent params: unknown field framing",
+// because session.intent's validator is a closed set (internal/transport/
+// ws_intent.go); the two versions do not pair.
+//
 // The number in a stage branch means only that ITS surface moved; this is the
 // number the integrated surface carries, and its golden is the one written by
 // the recipe over all four stages at once.
-const ProtocolVersion = 23
+const ProtocolVersion = 24
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

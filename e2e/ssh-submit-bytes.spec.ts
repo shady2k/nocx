@@ -175,22 +175,21 @@ async function submitOne(page: Page, line: string): Promise<number> {
 /**
  * The bytes the far side received, checked against the typed line.
  *
- * The only addition allowed is the shell's OWN bracketed-paste framing: mode
- * 2004 is the program's (ADR-0004 §2), and a shell that asked for it gets
- * `ESC[200~` … `ESC[201~` around the text. Anything else in the interval —
- * a leading byte, a changed character, a second line — is the defect.
+ * NOTHING may be added (owner, 2026-11-10; nocx-evj4b.1.2): at an integrated
+ * prompt the composer's submit is never bracketed — the editor held the whole
+ * line, and the shell's own mode-2004 announcement is not the answer there.
+ * Anything in the interval — the frame pair, a leading byte, a changed
+ * character, a second line — is the defect.
  */
 function expectExactlyTyped(received: Buffer, typed: string, where: string): void {
   const text = Buffer.from(typed, 'utf8')
   const bare = Buffer.concat([text, Buffer.from('\r')])
-  const framed = Buffer.concat([Buffer.from('\x1b[200~'), text, Buffer.from('\x1b[201~\r')])
   const hex = (b: Buffer) => b.toString('hex').replace(/(..)/g, '$1 ').trim()
   expect(
-    [bare.toString('hex'), framed.toString('hex')],
+    received.toString('hex'),
     `${where}: the far shell received ${hex(received)} (${JSON.stringify(received.toString('utf8'))}), ` +
-      `which is neither the typed line ${JSON.stringify(typed)} and its Enter (${hex(bare)}) ` +
-      `nor that line in the shell's own bracketed paste (${hex(framed)})`,
-  ).toContain(received.toString('hex'))
+      `want the typed line ${JSON.stringify(typed)} and its Enter, nothing around it (${hex(bare)})`,
+  ).toBe(bare.toString('hex'))
 }
 
 /**

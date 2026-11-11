@@ -3,6 +3,7 @@ import { Dispatcher, RpcError } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
 import {
   SessionHandle,
+  SessionNotAttachedError,
   WSClient,
   isProvenSessionAbsence,
   type SessionIntentKind,
@@ -2380,7 +2381,9 @@ describe('reconnect and reattach', () => {
     expect(unavailableMessages[0]).toContain('retry the same session')
     const restored = vi.fn()
     client.onReconnectResult(restored)
-    await expect(session.intent('text', 'must not reach the shell')).rejects.toThrow('not attached')
+    await expect(session.intent('text', 'must not reach the shell')).rejects.toBeInstanceOf(
+      SessionNotAttachedError,
+    )
     expect(() => session.send('must not reach the shell')).toThrow('not attached')
     expect(ws.requests().filter((r) => r.method === 'session.intent')).toHaveLength(0)
     expect(ws.binaryFrames()).toHaveLength(0)

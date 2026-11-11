@@ -9858,6 +9858,22 @@ export class TerminalContent extends BasePaneContent {
     this._sessionCallHeld = false
   }
 
+  private _discardFailedSessionInput(refusal?: string): void {
+    this._discardQueuedIntents()
+    const message =
+      refusal !== undefined
+        ? t(
+            'terminal.input.refused',
+            'Input was refused ({error}). Remaining queued input was discarded.',
+            { error: refusal },
+          )
+        : t(
+            'terminal.input.uncertain',
+            'Input may not have reached the shell. It will not be sent again. Remaining queued input was discarded; check the shell before submitting another command.',
+          )
+    showToast({ message, level: 'danger', duration: 0 })
+  }
+
   private async drainSessionCallQueue(): Promise<void> {
     if (this._sessionCallSending || this._sessionCallHeld) return
     this._sessionCallSending = true
@@ -9871,10 +9887,22 @@ export class TerminalContent extends BasePaneContent {
       ) {
         const call = queue.shift()!
         try {
-          if (call.intent.kind === 'paste' && call.intent.framing === 'bare') {
-            await call.session.intent(call.intent.kind, call.intent.payload, 'bare')
-          } else {
-            await call.session.intent(call.intent.kind, call.intent.payload)
+          const result =
+            call.intent.kind === 'paste' && call.intent.framing === 'bare'
+              ? await call.session.intent(call.intent.kind, call.intent.payload, 'bare')
+              : await call.session.intent(call.intent.kind, call.intent.payload)
+          if (queue !== this._sessionCallQueue || epoch !== this._sessionCallEpoch) return
+          // SessionHandle owns retries. Only execution of its final result
+          // permits dependent input (in particular the submit's Enter).
+          if (result.state !== 'executed') {
+            this._discardFailedSessionInput(
+              result.state === 'refused' ? (result.refusal?.cause ?? 'unknown') : undefined,
+            )
+            log.warn('nocx: session input did not execute; queued input discarded', {
+              state: result.state,
+              bytesWritten: result.bytesWritten,
+            })
+            return
           }
         } catch (err: unknown) {
           // An interrupt or a replacement bind has already discarded this input.
@@ -9887,21 +9915,7 @@ export class TerminalContent extends BasePaneContent {
           // A lost answer does not prove the bytes were not written. Never
           // replay it, and never send the Enter left behind by a failed paste.
           // Discard queued type-ahead too: it depends on an uncertain shell line.
-          this._discardQueuedIntents()
-          const message =
-            err instanceof RpcError
-              ? t(
-                  'terminal.input.refused',
-                  'Input was refused ({error}). Remaining queued input was discarded.',
-                  {
-                    error: err.message,
-                  },
-                )
-              : t(
-                  'terminal.input.uncertain',
-                  'Input may not have reached the shell. It will not be sent again. Remaining queued input was discarded; check the shell before submitting another command.',
-                )
-          showToast({ message, level: 'danger', duration: 0 })
+          this._discardFailedSessionInput(err instanceof RpcError ? err.message : undefined)
           log.warn('nocx: session input failed; queued input discarded', { error: String(err) })
           return
         }

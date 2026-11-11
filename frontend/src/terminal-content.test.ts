@@ -12074,6 +12074,55 @@ describe('shell submit input intent ordering (nocx-zg3k3.3.1)', () => {
     await vi.waitFor(() => expect(session.intent).toHaveBeenCalled())
   }
 
+  it.each(['refused', 'failed_partial', 'delivery_unknown', 'cancelled', 'in_progress'] as const)(
+    'discards Enter and type-ahead after a paste resolves %s, then accepts a later submit',
+    async (state) => {
+      const client = makeClient()
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+      const session = sessionOf(content)
+      const success: SessionIntentResult = { state: 'executed', bytesWritten: 1, fenceAfter: 0 }
+      let finish!: (result: SessionIntentResult) => void
+      session.intent.mockImplementationOnce(
+        () =>
+          new Promise<SessionIntentResult>((resolve) => {
+            finish = resolve
+          }),
+      )
+      vi.mocked(showToast).mockClear()
+      try {
+        await submitOnce(content, ed, session, 'echo failed line')
+        typeIntoPane(content, 'queued')
+        finish({
+          state,
+          bytesWritten: state === 'failed_partial' ? 3 : 0,
+          fenceAfter: 0,
+          ...(state === 'refused' ? { refusal: { cause: 'cannot_encode' as const } } : {}),
+        })
+        const drain = content as unknown as { _sessionCallSending: boolean }
+        await vi.waitFor(() => expect(drain._sessionCallSending).toBe(false))
+        expect(session.intent.mock.calls).toEqual([['paste', 'echo failed line']])
+        expect(showToast).toHaveBeenCalled()
+        const notice = vi.mocked(showToast).mock.lastCall?.[0]
+        expect(notice?.level).toBe('danger')
+        expect(notice?.duration).toBe(0)
+        expect(notice?.message).toContain(
+          state === 'refused' ? 'cannot_encode' : 'will not be sent again',
+        )
+
+        session.intent.mockResolvedValue(success)
+        await submitOnce(content, ed, session, 'echo later')
+        await vi.waitFor(() =>
+          expect(session.intent.mock.calls.slice(1)).toEqual([
+            ['paste', 'echo later'],
+            ['key', 'enter'],
+          ]),
+        )
+      } finally {
+        teardown()
+      }
+    },
+  )
+
   it('holds an accepted submit if attachment drops before the lifecycle attempt answers', async () => {
     const client = makeClient()
     let resolveAttempt!: (value: unknown) => void
@@ -12128,61 +12177,64 @@ describe('shell submit input intent ordering (nocx-zg3k3.3.1)', () => {
     }
   })
 
-  it('drops the refused submit queued after an interrupt while the cancelled call settles', async () => {
-    const client = makeClient()
-    const session = makeSession()
-    client.openSession.mockResolvedValue(session)
-    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
-    const result: SessionIntentResult = { state: 'executed', bytesWritten: 1, fenceAfter: 0 }
-    let releaseFirst!: () => void
-    const firstAnswer = new Promise<SessionIntentResult>((resolve) => {
-      releaseFirst = () => resolve(result)
-    })
-    session.intent.mockImplementation((kind: string, payload: string) => {
-      if (kind === 'text' && payload === 'a') return firstAnswer
-      if (kind === 'paste' && payload === 'bad line') {
-        return Promise.reject(new RpcError('invalid session.intent params', -32602))
-      }
-      return Promise.resolve(result)
-    })
-    vi.mocked(showToast).mockClear()
-    try {
-      typeIntoPane(content, 'a')
-      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('text', 'a'))
-      typeIntoPane(content, '\x03')
-      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('key', 'Ctrl+c'))
-      expect(session.cancelPendingIntents).toHaveBeenCalled()
-
-      await submitOnce(content, ed, session, 'bad line')
-      const queue = content as unknown as {
-        _sessionCallQueue: Array<{ intent: SessionIntent }>
-        _sessionCallSending: boolean
-      }
-      await vi.waitFor(() =>
-        expect(queue._sessionCallQueue.map((call) => call.intent.payload)).toEqual([
-          'bad line',
-          'enter',
-        ]),
-      )
-      // The cancelled call succeeds after the replacement submit is queued.
-      // Its drain must not suppress the replacement paste's own refusal.
-      releaseFirst()
-      await vi.waitFor(() => {
-        expect(queue._sessionCallQueue).toHaveLength(0)
-        expect(queue._sessionCallSending).toBe(false)
+  it.each(['executed', 'cancelled', 'delivery_unknown'] as const)(
+    'drops the refused submit queued after an interrupt while the stale %s call settles',
+    async (state) => {
+      const client = makeClient()
+      const session = makeSession()
+      client.openSession.mockResolvedValue(session)
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+      const result: SessionIntentResult = { state: 'executed', bytesWritten: 1, fenceAfter: 0 }
+      let releaseFirst!: () => void
+      const firstAnswer = new Promise<SessionIntentResult>((resolve) => {
+        releaseFirst = () => resolve({ ...result, state })
       })
-      expect(session.intent).toHaveBeenCalledWith('paste', 'bad line')
-      expect(session.intent).not.toHaveBeenCalledWith('key', 'enter')
-      const notices = vi.mocked(showToast).mock.calls
-      const notice = notices[notices.length - 1]?.[0]
-      expect(notice?.message).toContain('invalid session.intent params')
-      expect(notice?.level).toBe('danger')
-      expect(notice?.duration).toBe(0)
-    } finally {
-      releaseFirst()
-      teardown()
-    }
-  })
+      session.intent.mockImplementation((kind: string, payload: string) => {
+        if (kind === 'text' && payload === 'a') return firstAnswer
+        if (kind === 'paste' && payload === 'bad line') {
+          return Promise.reject(new RpcError('invalid session.intent params', -32602))
+        }
+        return Promise.resolve(result)
+      })
+      vi.mocked(showToast).mockClear()
+      try {
+        typeIntoPane(content, 'a')
+        await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('text', 'a'))
+        typeIntoPane(content, '\x03')
+        await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('key', 'Ctrl+c'))
+        expect(session.cancelPendingIntents).toHaveBeenCalled()
+
+        await submitOnce(content, ed, session, 'bad line')
+        const queue = content as unknown as {
+          _sessionCallQueue: Array<{ intent: SessionIntent }>
+          _sessionCallSending: boolean
+        }
+        await vi.waitFor(() =>
+          expect(queue._sessionCallQueue.map((call) => call.intent.payload)).toEqual([
+            'bad line',
+            'enter',
+          ]),
+        )
+        // The cancelled call succeeds after the replacement submit is queued.
+        // Its drain must not suppress the replacement paste's own refusal.
+        releaseFirst()
+        await vi.waitFor(() => {
+          expect(queue._sessionCallQueue).toHaveLength(0)
+          expect(queue._sessionCallSending).toBe(false)
+        })
+        expect(session.intent).toHaveBeenCalledWith('paste', 'bad line')
+        expect(session.intent).not.toHaveBeenCalledWith('key', 'enter')
+        const notices = vi.mocked(showToast).mock.calls
+        const notice = notices[notices.length - 1]?.[0]
+        expect(notice?.message).toContain('invalid session.intent params')
+        expect(notice?.level).toBe('danger')
+        expect(notice?.duration).toBe(0)
+      } finally {
+        releaseFirst()
+        teardown()
+      }
+    },
+  )
 
   it('holds a command the renderer could not send, and writes it once when the session is attached again', async () => {
     const client = makeClient()

@@ -254,6 +254,57 @@ func TestBlockRowsArrived_AppendsToTheAuthenticatedCommand(t *testing.T) {
 	}
 }
 
+func TestClosingOnlyBlockRetainsAbsoluteOutputCoordinates(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+	e.ws.BlockOutputStartPlaneAttached(session.ID(sid))
+	attempt := startsACommand(t, e, pub, lane, h, 2, "printf short")
+	// Earlier commands advanced the helper's session-wide row coordinate.
+	// This command finishes on screen without departing any rows.
+	e.ws.BlockOutputStartRow(session.ID(sid), 4965)
+	fence := lifecycleFence(0x63)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3,
+		lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence)))
+	e.ws.BlockIntervalEnded(session.ID(sid), fence, 4965, []emulator.Row{
+		aStreamRow("short output"), aStreamRow("second line"),
+	}, false)
+
+	assertBlockSealed(t, db, attempt)
+	start := recordedOutputStart(t, db, attempt)
+	if start == nil || *start != 4965 {
+		t.Fatalf("output start = %v, want 4965", start)
+	}
+	rows := streamRows(t, db, attempt)
+	if len(rows) != 2 || rows[0].From != 4965 || rows[1].From != 4966 {
+		t.Fatalf("closing-only rows = %+v, want absolute output rows 4965/4966 above the recorded output start", rows)
+	}
+	lost, dropped := blockRowsSummaryOf(t, db, attempt)
+	if lost != 0 || dropped != 0 {
+		t.Fatalf("summary lost=%d dropped=%d, want no loss for rows before this block", lost, dropped)
+	}
+	entry, err := db.Ledger().Entry(context.Background(), attempt)
+	if err != nil {
+		t.Fatalf("Entry: %v", err)
+	}
+	for _, execution := range entry.Executions {
+		for _, artifact := range execution.Artifacts {
+			if artifact.MediaType != content.MediaBlockRows {
+				continue
+			}
+			page, err := db.Ledger().ArtifactRange(context.Background(), artifact.ID, 4965, 2)
+			if err != nil {
+				t.Fatalf("ArtifactRange: %v", err)
+			}
+			if page.FirstRow != 4965 || page.EndRow != 4967 || page.RowCount != 2 ||
+				len(page.RetainedRanges) != 1 || page.RetainedRanges[0] != (content.RowRange{From: 4965, To: 4967}) {
+				t.Fatalf("closing-only geometry = %+v, want first4965/end4967/count2 and retained [4965,4967)", page)
+			}
+			return
+		}
+	}
+	t.Fatal("no stored rows artifact")
+}
+
 func TestAnOutputStartMarkBeforeTheStartStillNamesTheBlocksStart(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
 	e.ws.AttachBlockRows(session.ID(sid))

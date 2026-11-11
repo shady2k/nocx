@@ -509,8 +509,11 @@ describe('ScrollbackController render-fence rendezvous (nocx-u7uh.8)', () => {
       disconnect(): void {
         this.observed.clear()
       }
-      deliver(): void {
-        this.cb([], this)
+      deliver(targets: Element[]): void {
+        this.cb(
+          targets.map((target) => ({ target }) as ResizeObserverEntry),
+          this,
+        )
       }
     }
     vi.stubGlobal('ResizeObserver', FakeSizeObserver)
@@ -543,15 +546,39 @@ describe('ScrollbackController render-fence rendezvous (nocx-u7uh.8)', () => {
       const block = controller.blockManager.blockForAttempt('att-1')
       const header = block!.el.querySelector<HTMLElement>(':scope > .cmd-header')!
       expect(FakeSizeObserver.latest!.observed.has(header), 'the new header is watched').toBe(true)
+      const otherHeaders = Array.from({ length: 499 }, () => {
+        const blockEl = document.createElement('div')
+        blockEl.className = 'cmd-block'
+        const other = document.createElement('div')
+        other.className = 'cmd-header'
+        blockEl.append(other)
+        controller.scrollbackInner.insertBefore(blockEl, controller.scrollbackInner.firstChild)
+        return other
+      })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      const reads = otherHeaders.map((other) =>
+        vi.spyOn(other, 'offsetHeight', 'get').mockReturnValue(80),
+      )
       Object.defineProperty(header, 'offsetHeight', { value: 400, configurable: true })
-      FakeSizeObserver.latest!.deliver()
+      FakeSizeObserver.latest!.deliver([header])
+      expect(
+        reads.every((read) => read.mock.calls.length === 0),
+        'a duration change does not measure the transcript',
+      ).toBe(true)
       expect(header.getAttribute('data-pinnable'), 'a third of 300 cannot hold 400').toBe('false')
 
       // AND THE OTHER DIRECTION: a header that becomes compact is pinnable
       // again without a scroll, a resize or a freeze.
       Object.defineProperty(header, 'offsetHeight', { value: 80, configurable: true })
-      FakeSizeObserver.latest!.deliver()
+      FakeSizeObserver.latest!.deliver([header])
       expect(header.getAttribute('data-pinnable')).toBeNull()
+
+      FakeSizeObserver.latest!.deliver([controller.scrollbackArea])
+      expect(
+        reads.every((read) => read.mock.calls.length === 1),
+        'a pane resize still measures every header',
+      ).toBe(true)
+      controller.dispose()
     } finally {
       vi.unstubAllGlobals()
       pane.remove()

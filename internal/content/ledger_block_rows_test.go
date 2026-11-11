@@ -655,12 +655,90 @@ func TestAppendBlockRows_TheCapDropsTheMiddleAndCountsIt(t *testing.T) {
 	if dropped := total - len(kept); uint64(dropped) != summary.DroppedRows { //nolint:gosec // a row count, not a byte count
 		t.Fatalf("the body is short %d rows but the block records %d — the count and the chunks disagree", dropped, summary.DroppedRows)
 	}
+	// THE GEOMETRY IS THE WHOLE BLOCK, not the rows that survived: the stream
+	// ran 0..400, and the retained rows are the head run and the tail run with
+	// one hole between them. A reader reserves the 400-row span and spends one
+	// notice on the hole; a page can never widen it (ADR-y45sp41c).
+	if art.EndRow != total {
+		t.Fatalf("EndRow = %d, want %d", art.EndRow, total)
+	}
+	if len(art.RetainedRanges) < 2 {
+		t.Fatalf("retained ranges = %+v, want the cap's head and tail as separate runs", art.RetainedRanges)
+	}
+	if art.RetainedRanges[0].From != 0 || art.RetainedRanges[len(art.RetainedRanges)-1].To != total {
+		t.Fatalf("retained ranges = %+v, want the first run from 0 and the last to %d", art.RetainedRanges, total)
+	}
+	var covered uint64
+	for _, rr := range art.RetainedRanges {
+		covered += rr.To - rr.From
+	}
+	if covered != uint64(len(kept)) { //nolint:gosec // a row count, not a byte count
+		t.Fatalf("retained ranges cover %d rows, the chunks hold %d", covered, len(kept))
+	}
 	// The middle is what is gone: the survivors are the head run and the
 	// tail run, and a row from between them is in neither.
 	for _, r := range kept {
 		if strings.Contains(r.Text, "row 0100") {
 			t.Fatal("a row the middle should have lost is still stored")
 		}
+	}
+}
+
+// An OPEN block's metadata reports the runs it holds. The payload is written
+// at close, but a reader that reconnects while the command still runs needs the
+// geometry now; a contiguous invented span would reserve the evicted middle and
+// collapse when the first page shows the split (ADR-8rt54tx2).
+func TestOpenBlockMetadataCarriesRetainedRanges(t *testing.T) {
+	ctx := context.Background()
+	policy := content.NewPolicy()
+	policy.SetOutputCapBytes(4 << 10)
+	_, led := newLedgerWithPolicy(t, policy)
+	entryID := recordOne(t, led, "yes | head")
+	if _, err := led.OpenBlockOutput(ctx, content.OpenBlockOutput{EntryID: entryID, ArtifactID: keptArtifact}); err != nil {
+		t.Fatalf("OpenBlockOutput: %v", err)
+	}
+	const total = 2000
+	rows := make([]emulator.Row, 0, total)
+	for i := 0; i < total; i++ {
+		rows = append(rows, aTextRow(strings.Repeat("y", 64)+fmt.Sprintf(" row %04d", i)))
+	}
+	if err := led.AppendBlockRows(ctx, content.AppendBlockRows{
+		EntryID: entryID, ArtifactID: keptArtifact, FromRow: 0, Rows: rows,
+	}); err != nil {
+		t.Fatalf("AppendBlockRows: %v", err)
+	}
+
+	entry, err := led.Entry(ctx, entryID)
+	if err != nil || entry == nil {
+		t.Fatalf("Entry = %+v, %v", entry, err)
+	}
+	var art *content.Artifact
+	for _, ex := range entry.Executions {
+		for i := range ex.Artifacts {
+			if ex.Artifacts[i].MediaType == content.MediaBlockRows {
+				art = &ex.Artifacts[i]
+			}
+		}
+	}
+	if art == nil {
+		t.Fatal("no open rows artifact on the entry")
+	}
+	var payload struct {
+		EndRow         *uint64            `json:"endRow"`
+		RowCount       *uint64            `json:"rowCount"`
+		RetainedRanges []content.RowRange `json:"retainedRanges"`
+	}
+	if err := json.Unmarshal([]byte(art.Payload), &payload); err != nil {
+		t.Fatalf("payload: %v", err)
+	}
+	if payload.EndRow == nil || *payload.EndRow != total {
+		t.Fatalf("endRow = %v, want %d", payload.EndRow, total)
+	}
+	if len(payload.RetainedRanges) < 2 {
+		t.Fatalf("retainedRanges = %+v, want the cap's head and tail while OPEN", payload.RetainedRanges)
+	}
+	if payload.RowCount == nil || *payload.RowCount >= total {
+		t.Fatalf("rowCount = %v, want fewer than %d retained rows", payload.RowCount, total)
 	}
 }
 

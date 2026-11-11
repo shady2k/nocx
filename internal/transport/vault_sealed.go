@@ -117,6 +117,28 @@ func (s *sealedNormalizer) TryResult(id json.RawMessage, result json.RawMessage)
 	return s.real.TryResult(id, result)
 }
 
+// TryResultSent forwards the stored-row slot's completion witness. The
+// normalizer is the Responder every production handler receives, so without
+// this method the handler's optional-interface assertion fails and the slot is
+// released at enqueue — the slot-until-sent rule would exist only in tests
+// whose responder implemented the method directly (ADR-y45sp41c).
+func (s *sealedNormalizer) TryResultSent(
+	id json.RawMessage,
+	result json.RawMessage,
+	sent func(),
+) error {
+	if forward, ok := s.real.(interface {
+		TryResultSent(id json.RawMessage, result json.RawMessage, sent func()) error
+	}); ok {
+		return forward.TryResultSent(id, result, sent)
+	}
+	err := s.real.TryResult(id, result)
+	if sent != nil {
+		sent()
+	}
+	return err
+}
+
 func (s *sealedNormalizer) TryNotify(method string, params json.RawMessage) error {
 	return s.real.TryNotify(method, params)
 }

@@ -14,6 +14,7 @@ package content
 // RTA calls every method here reflection-reachable.
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -1424,7 +1425,153 @@ func (s *sqliteContent) Artifact(ctx context.Context, id string) (*Artifact, err
 		}
 		a.Chunks = append(a.Chunks, body)
 	}
-	return a, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if a.MediaType == MediaBlockRows {
+		count, first, last, ranges, err := readRowGeometry(a.Chunks)
+		if err != nil {
+			return nil, fmt.Errorf("content: block rows: read the geometry of %s: %w", id, err)
+		}
+		a.RowCount, a.FirstRow, a.LastRow, a.RetainedRanges = count, first, last, ranges
+		if count > 0 {
+			a.EndRow = last + 1
+		}
+		// A sealed block's payload fixes the whole span; a page must never
+		// widen it (ADR-y45sp41c).
+		if sealed := decodeBlockRowsPayload(a.Payload); sealed.EndRow > a.EndRow {
+			a.EndRow = sealed.EndRow
+		}
+	}
+	return a, nil
+}
+
+// readRowGeometry fills a rows artifact's geometry from its chunks: how many
+// stored lines there are, their first and last stream indices, and the runs
+// between holes. The walk is the same one ArtifactRange makes, and it is the
+// only place a line's `from` is read on a full body.
+func readRowGeometry(chunks [][]byte) (count int, first, last uint64, ranges []RowRange, err error) {
+	have := false
+	for _, chunk := range chunks {
+		for _, line := range bytes.Split(chunk, []byte{'\n'}) {
+			if len(line) == 0 {
+				continue
+			}
+			var meta struct {
+				From uint64 `json:"from"`
+			}
+			if err := json.Unmarshal(line, &meta); err != nil {
+				return 0, 0, 0, nil, err
+			}
+			if !have {
+				first = meta.From
+				have = true
+			}
+			last = meta.From
+			count++
+			if n := len(ranges); n > 0 && meta.From == ranges[n-1].To {
+				ranges[n-1].To = meta.From + 1
+			} else {
+				ranges = append(ranges, RowRange{From: meta.From, To: meta.From + 1})
+			}
+		}
+	}
+	return count, first, last, ranges, nil
+}
+
+// ArtifactRange returns one page of a stored-rows artifact. The page is
+// selected by the rows' own absolute `from` index, and the whole artifact's
+// coordinates ride with it: a reader that must reserve a block's height before
+// any of its rows arrive has nowhere else to ask (nocx-t7xhe).
+//
+// The chunks are scanned once, in seq order, because the count and the page
+// come from the same walk. That walk is the store's own cost — the response is
+// the page, and the page is what the outbound queue carries.
+func (s *sqliteContent) ArtifactRange(ctx context.Context, id string, fromRow uint64, rowLimit int) (*ArtifactRange, error) {
+	a, err := s.artifactByID(ctx, id)
+	if err != nil || a == nil {
+		return nil, err
+	}
+	if a.MediaType != MediaBlockRows {
+		return nil, ErrArtifactNotRows
+	}
+	rows, err := s.conn(ctx).QueryContext(ctx,
+		`SELECT body FROM artifact_chunks WHERE artifact_id = ? ORDER BY seq`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := &ArtifactRange{Artifact: a}
+	var page bytes.Buffer
+	var firstFrom, lastFrom, pageFirst, pageLast uint64
+	var ranges []RowRange
+	haveAny, havePage := false, false
+	for rows.Next() {
+		var body []byte
+		if err := rows.Scan(&body); err != nil {
+			return nil, err
+		}
+		for _, line := range bytes.Split(body, []byte{'\n'}) {
+			if len(line) == 0 {
+				continue
+			}
+			var meta struct {
+				From uint64 `json:"from"`
+			}
+			if err := json.Unmarshal(line, &meta); err != nil {
+				return nil, fmt.Errorf("content: block rows: read a stored line of %s: %w", id, err)
+			}
+			if !haveAny {
+				firstFrom = meta.From
+				haveAny = true
+			}
+			lastFrom = meta.From
+			out.RowCount++
+			if n := len(ranges); n > 0 && meta.From == ranges[n-1].To {
+				ranges[n-1].To = meta.From + 1
+			} else {
+				ranges = append(ranges, RowRange{From: meta.From, To: meta.From + 1})
+			}
+			if meta.From < fromRow {
+				continue
+			}
+			if rowLimit > 0 && out.RangeCount >= rowLimit {
+				continue
+			}
+			if !havePage {
+				pageFirst = meta.From
+				havePage = true
+			}
+			pageLast = meta.From
+			out.RangeCount++
+			page.Write(line)
+			page.WriteByte('\n')
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out.RetainedRanges = ranges
+	if haveAny {
+		out.FirstRow, out.LastRow = firstFrom, lastFrom
+		out.EndRow = lastFrom + 1
+	}
+	if sealed := decodeBlockRowsPayload(a.Payload); sealed.EndRow > out.EndRow {
+		out.EndRow = sealed.EndRow
+	}
+	if havePage {
+		out.RangeStart = pageFirst
+		out.HasMoreBefore = pageFirst > firstFrom
+		out.HasMoreAfter = pageLast < lastFrom
+	} else {
+		out.RangeStart = out.EndRow
+		out.HasMoreBefore = haveAny
+	}
+	if page.Len() > 0 {
+		a.Chunks = [][]byte{page.Bytes()}
+	}
+	return out, nil
 }
 
 // artifactByID reads one artifact row plus its chunk count, without bodies.
@@ -1807,7 +1954,64 @@ func (s *sqliteContent) artifactsFor(ctx context.Context, executionID int64) ([]
 		if err != nil {
 			return nil, err
 		}
+		if a.MediaType == MediaBlockRows {
+			if err := s.enrichBlockRowsGeometry(ctx, a); err != nil {
+				return nil, err
+			}
+		}
 		out = append(out, *a)
 	}
 	return out, nil
+}
+
+// enrichBlockRowsGeometry puts a rows artifact's retained runs and stream end
+// into the payload a metadata read carries. A sealed artifact already wrote
+// them at close; an OPEN one did not, and a reader that invents one contiguous
+// span for it reserves the evicted middle as if it were kept, then collapses
+// when the first page reports the real split (ADR-8rt54tx2). The scan is this
+// read's cost and the response is still metadata: one open block at a time.
+func (s *sqliteContent) enrichBlockRowsGeometry(ctx context.Context, a *Artifact) error {
+	payload := decodeBlockRowsPayload(a.Payload)
+	if len(payload.RetainedRanges) > 0 && payload.EndRow > 0 {
+		return nil
+	}
+	rows, err := s.conn(ctx).QueryContext(ctx,
+		`SELECT body FROM artifact_chunks WHERE artifact_id = ? ORDER BY seq`, a.ID)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	var chunks [][]byte
+	for rows.Next() {
+		var body []byte
+		if scanErr := rows.Scan(&body); scanErr != nil {
+			return scanErr
+		}
+		chunks = append(chunks, body)
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return rowsErr
+	}
+	count, first, last, ranges, err := readRowGeometry(chunks)
+	if err != nil {
+		return err
+	}
+	if len(payload.RetainedRanges) == 0 {
+		payload.RetainedRanges = ranges
+	}
+	if payload.RowCount == 0 && count > 0 {
+		payload.RowCount = uint64(count) //nolint:gosec // a row count, not a byte count
+	}
+	if payload.FirstRow == 0 && count > 0 {
+		payload.FirstRow = first
+	}
+	end := payload.NextRow
+	if end == 0 && count > 0 {
+		end = last + 1
+	}
+	if end > payload.EndRow {
+		payload.EndRow = end
+	}
+	a.Payload = payload.json()
+	return nil
 }

@@ -7,7 +7,7 @@ import type { CommandSnapshotStore } from '../command-snapshot'
 import type { BlockOutputStart } from '../generated/block.outputStart'
 import type { ScreenSnapshot } from '../cell-model'
 import type { BlockClosed } from '../generated/block.closed'
-import { paintUnreadableRows, type StoredBlockRows } from './block-rows'
+import { loadedRowRanges, paintUnreadableRows, type StoredBlockRows } from './block-rows'
 import { wordRangeIn } from '../word-selection'
 import { insideLiveRegion } from '../live-region'
 import { createSecretChipUnresolved } from '../ui/secret-chip'
@@ -22,9 +22,9 @@ import { commandFragment } from '../command-text'
 import { KIND_LABELS, type SecretKind } from '../secret-kind'
 import type { ExecutionAttempt } from '../lifecycle/state'
 
-/** The block's own length, in milliseconds, from the two backend timestamps its
- *  attempt carries (ADR-tqjt5rkk) — the interval the block's header prints and
- *  the figure the composer's departure is decided on.
+/** The block's own elapsed time, in milliseconds, from the backend's duration
+ *  or its timestamps when no duration was recorded (ADR-tqjt5rkk) — the interval
+ *  the header prints and the figure the composer's departure is decided on.
  *
  *  NOT the renderer's clock: a completion reaches the renderer well after the
  *  command ended, so `performance.now()` between two facts measures the wire,
@@ -34,6 +34,7 @@ import type { ExecutionAttempt } from '../lifecycle/state'
  *  long the command ran prints no duration, and the composer treats it as long
  *  (a composer the product has no evidence to keep must not be kept). */
 export function attemptBlockMs(attempt: ExecutionAttempt): number | null {
+  if (attempt.durationMs !== undefined) return attempt.durationMs
   if (attempt.startedAt === undefined || attempt.completedAt === undefined) return null
   const ms = Date.parse(attempt.completedAt) - Date.parse(attempt.startedAt)
   return Number.isFinite(ms) ? ms : null
@@ -135,12 +136,6 @@ export function copyToClipboard(text: string): Promise<void> {
 // pane has let go of (`settleWithoutBackend` — the session that would say
 // it is gone).
 
-/** Upper bound on remembered block.closed notifications for blocks whose
- *  completion has not arrived yet (`_closedEarly`). Ordinarily one is
- *  consumed within a frame; the bound only keeps a notification for a
- *  block this pane never completes from being held forever. */
-const MAX_CLOSED_EARLY = 8
-
 /** How many displaced blocks remember their attempt while its completion is
  *  still in flight (nocx-evj4b.1.9). One per start that outran its
  *  predecessor's completion; the bound is for a stream that never delivers
@@ -153,7 +148,7 @@ const MAX_DISPLACED = 32
  *  entry is ordinarily drained the moment binding happens — but binding
  *  never happens for an attempt whose running fact is refused, lost, or
  *  never reaches this pane, and nothing else ever visits the entry to
- *  remove it. A small ring, for the same reason as `_closedEarly`: a
+ *  remove it. A small ring bounds these unbound row pages: a
  *  session has few blocks racing their own binding at once, so bounding it
  *  costs nothing a real session would notice and stops an unbound entry
  *  from being held forever. */
@@ -2097,6 +2092,10 @@ export interface BlockManagerOpts {
    *  backend's block.closed). Fires after afterVisualFreeze, so a waiter that sets
    *  that slot and an observer here never race. */
   onBlockFrozen?: (rec: BlockRecord) => void
+  /** Fired with the elements this manager actually removed from the DOM
+   *  (clearAll, an erase boundary). The caller's entry-id index drops those
+   *  elements; an index that outlives them keeps their rows alive. */
+  onBlocksRemoved?: (elements: readonly HTMLElement[]) => void
   /** Takes back a header the alternate-screen seat borrowed, through the
    *  party that bought it (nocx-evj4b.1.9). While a program owns the pane the
    *  running header is seated out of its block and the CONTROLLER holds that
@@ -2106,8 +2105,9 @@ export interface BlockManagerOpts {
    *  in a bare-bones embedding: nothing was ever seated, and the manager
    *  prepends nothing. */
   reclaimSeatedHeader?: () => void
+
   /** Paints rows read from the backend's block artifact. */
-  paintStoredRows?: (block: HTMLElement, rows: StoredBlockRows) => void
+  paintStoredRows?: (block: HTMLElement, rows: StoredBlockRows, reserve?: boolean) => void
   /** Runs a mutation that changes the transcript's shape — the freeze swaps a
    *  block's whole element — and leaves a reader who has scrolled away exactly
    *  where they were (nocx-3wmve). The scroller and the reader's place are the
@@ -2179,6 +2179,7 @@ export class BlockManager {
   private _nextId = 1
   private _now: () => number
   private _onBlockFrozen?: (rec: BlockRecord) => void
+  private _onBlocksRemoved?: (elements: readonly HTMLElement[]) => void
   private _scrollbackInner: HTMLElement
   private _liveContainer: HTMLElement
   private _runningBlock: BlockRecord | null = null
@@ -2187,7 +2188,7 @@ export class BlockManager {
   private _selectedBlockId: number | null = null
   private _snapshotStore: CommandSnapshotStore
   private _onDeferredFreeze?: (rec: BlockRecord) => void
-  private _paintStoredRows?: (block: HTMLElement, rows: StoredBlockRows) => void
+  private _paintStoredRows?: (block: HTMLElement, rows: StoredBlockRows, reserve?: boolean) => void
   private _holdReaderPlace?: (mutate: () => void) => void
   private _reclaimSeatedHeader?: () => void
   /** Blocks the next start displaced, by attempt id: their own completion has
@@ -2265,7 +2266,8 @@ export class BlockManager {
   >()
   /** block.closed notifications that arrived BEFORE their completion — the
    *  two cross the socket in either order. Consumed by the completion that
-   *  names the entry; bounded by MAX_CLOSED_EARLY. */
+   *  names the entry, or cleared when the session ends or scrollback clears.
+   *  Burst size cannot retire an entry whose completion is still in flight. */
   private _closedEarly = new Map<string, BlockScreenAnchor | null | undefined>()
   /** WHERE THE NEXT BLOCK THIS MANAGER OPENS BELONGS (ADR-0040).
    *
@@ -2288,6 +2290,7 @@ export class BlockManager {
     this._snapshotStore = opts.snapshotStore
     this._onDeferredFreeze = opts.onDeferredFreeze
     this._onBlockFrozen = opts.onBlockFrozen
+    this._onBlocksRemoved = opts.onBlocksRemoved
     this._paintStoredRows = opts.paintStoredRows
     this._holdReaderPlace = opts.holdReaderPlace
     this._reclaimSeatedHeader = opts.reclaimSeatedHeader
@@ -2329,15 +2332,20 @@ export class BlockManager {
    *  never carries the leading rule, whether it is the stack's child or a
    *  running block's body (ADR-3kqrem7v), and a block nested inside a turn is not
    *  a TOP-LEVEL entry at all. */
+  private _firstEntry: HTMLElement | null = null
+
   private _refreshFirstEntry(): void {
-    const first = this._scrollbackInner.querySelector<HTMLElement>(
-      ':scope > .cmd-block, :scope > .scrollback-restore-boundary',
-    )
-    for (const marked of this._scrollbackInner.querySelectorAll<HTMLElement>(
-      ':scope > [data-first-entry]',
-    )) {
-      if (marked !== first) delete marked.dataset.firstEntry
+    let first = this._scrollbackInner.firstElementChild as HTMLElement | null
+    while (
+      first &&
+      !first.classList.contains('cmd-block') &&
+      !first.classList.contains('scrollback-restore-boundary')
+    ) {
+      first = first.nextElementSibling as HTMLElement | null
     }
+    if (this._firstEntry === first) return
+    if (this._firstEntry) delete this._firstEntry.dataset.firstEntry
+    this._firstEntry = first
     if (first) first.dataset.firstEntry = 'true'
   }
 
@@ -2966,7 +2974,8 @@ export class BlockManager {
     // full 208 rows while the hold said 207, and the body showed the two rows
     // the grid still had.
     const painted = this._paintableRows(block, rows)
-    this._paintStoredRows?.(block, painted)
+    const live = this._liveContainer.parentElement === block
+    this._paintStoredRows?.(block, painted, live ? false : undefined)
     this._keepLiveBodyLast(block)
   }
 
@@ -2994,12 +3003,30 @@ export class BlockManager {
    *  FALL: a pane that GROWS pulls rows back out of history onto the top of
    *  the screen, and the body must stop painting them again or the joint
    *  shows the same line twice (nocx-4y82c.1.1). */
-  applyStoredRows(entryId: string, rows: StoredBlockRows, upTo?: number | null): void {
+  applyStoredRows(
+    entryId: string,
+    rows: StoredBlockRows,
+    upTo?: number | null,
+    reset = false,
+  ): void {
     const cursor = rows.lines.length > 0 ? rows.lines[rows.lines.length - 1].from : -1
     const seen = this._storedRowsCursor.get(entryId) ?? -1
-    if (cursor < seen) return
-    this._storedRowsCursor.set(entryId, cursor)
+    // `reset` is the reconnect's deliberate give-back (ADR-y45sp41c): the block
+    // keeps its coordinates and height and drops its rows so the visible page
+    // can be read first. It is not an older read, so the cursor does not
+    // reject it.
     const rec = this.blockForAttempt(entryId)
+    const previous = rec?.storedRows ?? this._pendingStoredRows.get(entryId)?.rows
+    const sameArtifact =
+      previous?.artifactVersion !== undefined && previous.artifactVersion === rows.artifactVersion
+    const previousStart = previous?.outputStartRow ?? 0
+    const outputStart = rows.outputStartRow ?? 0
+    if (!reset && sameArtifact && outputStart < previousStart) return
+    // Filtering a newly authenticated echo prefix can lower the loaded cursor
+    // without making this response older. Its predecessor must not restore it.
+    const advancesStart = sameArtifact && outputStart > previousStart
+    if (!reset && cursor < seen && !advancesStart) return
+    this._storedRowsCursor.set(entryId, advancesStart ? Math.max(cursor, seen) : cursor)
     if (!rec) {
       // A NEW entry may push the ring past its bound; re-setting one
       // already held must not — it stays at its original age.
@@ -3037,8 +3064,9 @@ export class BlockManager {
    *  that was handed the full rows cannot paint them. */
   private _paintableRows(block: HTMLElement, rows: StoredBlockRows): StoredBlockRows {
     const rec = this._blocks.find((b) => b.el === block)
+    const live = this._liveContainer.parentElement === block
     if (rec === undefined || rec.storedUpTo === undefined) return rows
-    if (this._liveContainer.parentElement !== block) return rows
+    if (!live) return rows
     return this._heldRows(rows, rec.storedUpTo, rec.outputStreamStart ?? 0)
   }
 
@@ -3055,7 +3083,22 @@ export class BlockManager {
     const boundary = streamStart + Math.max(0, limit)
     const lines = rows.lines.filter((line) => line.from >= streamStart && line.from < boundary)
     if (lines.length === rows.lines.length) return rows
-    return { ...rows, lines }
+    // A HELD BODY RESERVES ONLY WHAT IT MAY PAINT (ADR-y45sp41c). The
+    // coordinates describe the whole artifact, but the rows past the hold are
+    // waiting for the screen — reserving their height here would grow the
+    // block before its rows arrive, which is the "room first, rows later"
+    // frame e2e/output-jitter.spec.ts exists to catch. The hold's rows are
+    // painted, and the block grows with them, exactly as it did before pages.
+    return {
+      ...rows,
+      lines,
+      firstRow: lines[0]?.from ?? rows.firstRow,
+      lastRow: lines[lines.length - 1]?.from ?? rows.lastRow,
+      endRow: (lines[lines.length - 1]?.from ?? rows.firstRow ?? 0) + 1,
+      rowCount: lines.length,
+      retainedRanges: loadedRowRanges(lines),
+      reserve: false,
+    }
   }
 
   /** The part of a block's stored rows its body may paint: all of them,
@@ -3660,10 +3703,6 @@ export class BlockManager {
     }
     const rec = this.blockForAttempt(entryId)
     if (rec !== null && rec.status !== 'running') return
-    if (!this._closedEarly.has(entryId) && this._closedEarly.size >= MAX_CLOSED_EARLY) {
-      const oldest = this._closedEarly.keys().next().value
-      if (oldest !== undefined) this._closedEarly.delete(oldest)
-    }
     this._closedEarly.set(entryId, screenAnchor)
   }
 
@@ -4089,9 +4128,12 @@ export class BlockManager {
     // ONE list, because there is one owner: whatever this manager put in
     // the container comes out, whether it was a live block, an answer or a
     // restored one under its boundary (nocx-0zb1m).
+    const removed = [...this._owned]
     for (const rec of this._blocks) rec.header?.remove()
-    for (const el of this._owned) el.remove()
+    for (const el of removed) el.remove()
     this._owned.clear()
+    this._refreshFirstEntry()
+    this._onBlocksRemoved?.(removed)
     this._blocks = []
     this._answerBlocks = []
     this._runningBlock = null
@@ -4155,11 +4197,15 @@ export class BlockManager {
     for (const rec of this._blocks) {
       if (rec.el !== keep) rec.header?.remove()
     }
+    const removed: HTMLElement[] = []
     for (const el of [...this._owned]) {
       if (el === keep) continue
       el.remove()
       this._owned.delete(el)
+      removed.push(el)
     }
+    this._refreshFirstEntry()
+    this._onBlocksRemoved?.(removed)
     this._blocks = this._blocks.filter((b) => b.el === keep)
     this._answerBlocks = this._answerBlocks.filter((b) => b.el === keep)
     if (!keepingRunning) {

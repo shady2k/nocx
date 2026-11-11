@@ -105,8 +105,11 @@ export interface ScrollbackControllerOpts {
    *  fixed in the DOM (nocx-tjppv: the run tool's completion wait reads the
    *  output window from the frozen block). */
   onBlockFrozen?: (rec: BlockRecord) => void
+  /** Elements the block manager actually removed; the caller's index drops
+   *  them and the rows they still hold. */
+  onBlocksRemoved?: (elements: readonly HTMLElement[]) => void
   /** Paints backend-owned rows through the shared row painter. */
-  paintStoredRows?: (block: HTMLElement, rows: StoredBlockRows) => void
+  paintStoredRows?: (block: HTMLElement, rows: StoredBlockRows, reserve?: boolean) => void
   /** What a session is called to a person — passed straight to the block
    *  manager, which hands it to every tool-call line it draws (nocx-vnzek).
    *  This controller neither derives nor caches it. */
@@ -322,6 +325,7 @@ export class ScrollbackController {
         if (this._idleRequested && this._blockManager.runningBlock === null) this.setIdle()
       },
       onBlockFrozen: opts.onBlockFrozen,
+      onBlocksRemoved: opts.onBlocksRemoved,
       paintStoredRows: opts.paintStoredRows,
       sessionName: opts.sessionName,
       answerText: opts.answerText,
@@ -374,7 +378,17 @@ export class ScrollbackController {
     // header's height against a third of the scroller and writes one attribute;
     // there is no scroll, freeze or window trigger left to miss the next path.
     if (typeof ResizeObserver === 'function') {
-      this._sizeObserver = new ResizeObserver(() => this._judgeHeaderSizes())
+      this._sizeObserver = new ResizeObserver((entries) => {
+        if (entries.some((entry) => entry.target === this.scrollbackArea)) {
+          this._judgeHeaderSizes()
+          return
+        }
+        this._judgeHeaderSizes(
+          entries
+            .map((entry) => entry.target as HTMLElement)
+            .filter((header) => this._observedHeaders.has(header)),
+        )
+      })
       this._sizeObserver.observe(this.scrollbackArea)
     }
     if (typeof MutationObserver === 'function') {
@@ -1343,8 +1357,14 @@ export class ScrollbackController {
       // block and its logical line, so counting its position among the body's
       // children would walk tens of thousands of siblings on every settle for a
       // number nothing reads.
+      // A SPACER IS A ROW FOR THE ANCHOR (ADR-ywzcpbqe). A page replaces it
+      // with painted rows; its logical line is the only identity that follows
+      // the reader to the same stream row instead of to a neighbouring unit
+      // with the same class.
       const isRow =
-        unit.classList.contains('term-grid-row') && unit.dataset.logicalLine !== undefined
+        (unit.classList.contains('term-grid-row') ||
+          unit.classList.contains('cmd-output-spacer')) &&
+        unit.dataset.logicalLine !== undefined
       if (isRow) {
         return {
           element: unit,
@@ -1531,9 +1551,9 @@ export class ScrollbackController {
       if (place.line === null) return null
       const selector =
         place.blockId === null
-          ? `.cmd-output .term-grid-row[data-logical-line="${place.line}"]`
+          ? `.cmd-output [data-logical-line="${place.line}"]`
           : `.cmd-block[data-entry-id="${place.blockId}"] .cmd-output` +
-            ` .term-grid-row[data-logical-line="${place.line}"]`
+            ` [data-logical-line="${place.line}"]`
       return area.querySelector<HTMLElement>(selector)
     }
     if (place.kind === 'header') {
@@ -1801,9 +1821,9 @@ export class ScrollbackController {
    *  already gives one pinned header -- so a scroll cannot make it stale, and
    *  a header that changes size is re-judged by its own observer. The answer
    *  is one attribute; no box changes. */
-  private _judgeHeaderSizes(): void {
+  private _judgeHeaderSizes(headers: Iterable<HTMLElement> = this._observedHeaders): void {
     const heightPx = this.scrollbackArea.clientHeight
-    for (const header of this._observedHeaders) {
+    for (const header of headers) {
       if (!header.isConnected) continue
       if (headerFitsPinned(header.offsetHeight, heightPx)) header.removeAttribute('data-pinnable')
       else header.setAttribute('data-pinnable', 'false')

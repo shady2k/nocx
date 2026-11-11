@@ -12,11 +12,18 @@
 // merges.
 import type { WSClient } from './ipc'
 import { RpcError } from './dispatcher'
+import { RowReadQueue, RowReadShortError, rowReadRetryAfter } from './scrollback/row-read-queue'
 import type { LedgerQuery } from './generated/ledger.query'
 import type { UnreconciledCause } from './unreconciled-notice'
 import type { LedgerArtifact } from './generated/ledger.artifact'
 import type { Caused, LedgerGet } from './generated/ledger.get'
-import { parseStoredBlockRows, type StoredBlockRows } from './scrollback/block-rows'
+import {
+  describeStoredBlockRows,
+  parseStoredBlockRows,
+  storedRowRanges,
+  type StoredBlockRows,
+  type StoredBlocksRange,
+} from './scrollback/block-rows'
 
 /** How many blocks a pane comes back with.
  *
@@ -25,6 +32,125 @@ import { parseStoredBlockRows, type StoredBlockRows } from './scrollback/block-r
  *  end of it. Older commands are not lost — they are in recall, which is
  *  where a question about last week belongs. */
 const RESTORE_BLOCK_LIMIT = 50
+
+/** The page a lazy reader asks for: enough rows to fill a tall pane and the
+ *  screen or two above it, and far below the per-command cap. */
+export const BLOCK_ROWS_PAGE = 200
+
+/** Above this many stored rows a block is fetched a page at a time. A block
+ *  at or below it is one small response — cheaper to read whole than to ask
+ *  again on the first scroll — and the e2e transcript's hundred-row commands
+ *  stay exactly as they were. */
+export const LAZY_BLOCK_ROWS = 400
+
+/** The coordinates a rows artifact's payload carries with ledger.get, which
+ *  are what a block reserves its height from before any page arrives. The
+ *  closed form has rowCount and firstRow written at close; an open one has
+ *  its cursor and reservation, from which the span is derived. */
+function storedRowsCoordinates(payload: unknown): StoredBlocksRange | null {
+  if (typeof payload !== 'object' || payload === null) return null
+  const raw = payload as Record<string, unknown>
+  const nonNegative = (value: unknown): number | null =>
+    typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null
+  const first = nonNegative(raw.firstRow) ?? 0
+  const carried = storedRowRanges(raw.retainedRanges)
+  const rowCount = nonNegative(raw.rowCount)
+  if (carried !== undefined && carried.length > 0) {
+    return {
+      firstRow: carried[0].from,
+      lastRow: carried[carried.length - 1].to - 1,
+      endRow: Math.max(nonNegative(raw.endRow) ?? 0, carried[carried.length - 1].to),
+      rowCount: carried.reduce((total, rr) => total + (rr.to - rr.from), 0),
+      retainedRanges: carried,
+      rangeStart: null,
+      rangeCount: 0,
+      hasMoreBefore: false,
+      hasMoreAfter: false,
+    }
+  }
+  if (rowCount !== null) {
+    const ranges = rowCount > 0 ? [{ from: first, to: first + rowCount }] : []
+    return {
+      firstRow: first,
+      lastRow: first + Math.max(0, rowCount - 1),
+      endRow: first + rowCount,
+      rowCount,
+      retainedRanges: ranges,
+      rangeStart: null,
+      rangeCount: 0,
+      hasMoreBefore: false,
+      hasMoreAfter: false,
+    }
+  }
+  const next = nonNegative(raw.nextRow)
+  if (next === null) return null
+  const lost = nonNegative(raw.lostRows) ?? 0
+  const count = Math.max(0, next - first - lost)
+  if (count === 0) return null
+  return {
+    firstRow: first,
+    lastRow: first + count - 1,
+    endRow: next,
+    rowCount: count,
+    retainedRanges: [{ from: first, to: first + count }],
+    rangeStart: null,
+    rangeCount: 0,
+    hasMoreBefore: false,
+    hasMoreAfter: false,
+  }
+}
+
+/** The current durable geometry of one entry's rows artifact, without a
+ *  body. A reconnect compares this with what is loaded; small blocks included
+ *  (ADR-y45sp41c). Null means the entry keeps no rows artifact at all. */
+export interface BlockRowsMetadata {
+  readonly artifactId: string
+  readonly version: string
+  readonly geometry: StoredBlocksRange | null
+  /** The artifact's own ledger.get metadata, so a refresh that already read
+   *  the geometry can fetch its page without a second lookup. */
+  readonly artifact: LedgerGet['artifacts'][number]
+}
+
+export async function blockRowsMetadataForEntry(
+  client: WSClient,
+  entryId: string,
+): Promise<BlockRowsMetadata | null> {
+  let entry: LedgerGet
+  try {
+    entry = await client.call<LedgerGet>('ledger.get', { id: entryId })
+  } catch (err) {
+    if (storeKeepsNothing(err)) return null
+    throw err
+  }
+  const metadata = entry.artifacts.find((a) => a.mediaType === 'application/x-nocx-rows')
+  if (!metadata) return null
+  return {
+    artifactId: metadata.id,
+    version: metadata.id,
+    geometry: storedRowsCoordinates(metadata.payload),
+    artifact: metadata,
+  }
+}
+
+/** The page coordinates a ledger.artifact result carries. A body that is not
+ *  stored rows answers none, and is parsed without them. */
+function rangeOfArtifact(artifact: LedgerArtifact): StoredBlocksRange | undefined {
+  if (artifact.firstRow === null || artifact.lastRow === null || artifact.rowCount === 0) {
+    return undefined
+  }
+  return {
+    firstRow: artifact.firstRow,
+    lastRow: artifact.lastRow,
+    endRow: artifact.endRow ?? artifact.lastRow + 1,
+    rowCount: artifact.rowCount,
+    retainedRanges: (artifact.retainedRanges ?? []).map((rr) => ({ from: rr.from, to: rr.to })),
+    rangeStart: artifact.rangeStart,
+    rangeCount: artifact.rangeCount,
+    hasMoreBefore: artifact.hasMoreBefore,
+    hasMoreAfter: artifact.hasMoreAfter,
+  }
+}
 
 /** One block to draw, as the store knows it. The body is fetched separately;
  *  `null` means there is none to show, which is a hole and not silence. */
@@ -223,31 +349,67 @@ function storeKeepsNothing(err: unknown): boolean {
 }
 
 // A block's rows can be requested by several simultaneous restoration and
-// notification paths. They are the same read of the same stored artifact, so
-// share the in-flight operation per client and entry instead of putting
-// duplicate large artifact responses on the WebSocket at once.
-const blockRowsInFlight = new WeakMap<WSClient, Map<string, Promise<BlockRowsRead>>>()
+// notification paths, and a reconnect asks every mounted block at once. They
+// are the same read of the same stored artifact, so one priority queue per
+// client owns them: it shares a read between callers of one key, keeps at
+// most two in flight, and on the server's internal retry answer waits the
+// stated time and then sends the most urgent request it holds (ADR-y45sp41c).
+const blockRowQueues = new WeakMap<WSClient, RowReadQueue<BlockRowsRead>>()
 
-export function blockRowsForEntry(client: WSClient, entryId: string): Promise<BlockRowsRead> {
-  let entries = blockRowsInFlight.get(client)
-  if (!entries) {
-    entries = new Map()
-    blockRowsInFlight.set(client, entries)
+function blockRowQueueFor(client: WSClient): RowReadQueue<BlockRowsRead> {
+  let queue = blockRowQueues.get(client)
+  if (!queue) {
+    queue = new RowReadQueue<BlockRowsRead>()
+    blockRowQueues.set(client, queue)
   }
-  const existing = entries.get(entryId)
-  if (existing) return existing
-
-  const read = readBlockRowsForEntry(client, entryId)
-  entries.set(entryId, read)
-  const clear = () => {
-    if (entries?.get(entryId) === read) entries.delete(entryId)
-  }
-  void read.then(clear, clear)
-  return read
+  return queue
 }
 
-async function readBlockRowsForEntry(client: WSClient, entryId: string): Promise<BlockRowsRead> {
-  let artifact: FetchedArtifact
+export interface BlockRowsWindow {
+  readonly fromRow?: number
+  readonly rowLimit?: number
+}
+
+function blockRowsKey(entryId: string, window?: BlockRowsWindow): string {
+  return window?.fromRow === undefined && window?.rowLimit === undefined
+    ? entryId
+    : `${entryId}@${window?.fromRow ?? ''}:${window?.rowLimit ?? ''}`
+}
+
+export function blockRowsForEntry(
+  client: WSClient,
+  entryId: string,
+  window?: BlockRowsWindow,
+  priority: () => number = () => 0,
+): Promise<BlockRowsRead> {
+  // A page and a whole body are different reads, so they must not coalesce:
+  // sharing one promise would hand a page to a caller that asked for the
+  // block. The key carries the page when there is one.
+  return blockRowQueueFor(client).submit(blockRowsKey(entryId, window), priority, () =>
+    readBlockRowsForEntry(client, entryId, window),
+  )
+}
+
+/** A refresh whose geometry is already in hand. It goes through the SAME
+ *  priority queue as a page, so a `-32014` refusal waits and retries instead
+ *  of rejecting a refresh and leaving the new rows absent (ADR-8rt54tx2). */
+export function blockRowsForEntryWithMetadata(
+  client: WSClient,
+  entryId: string,
+  metadata: BlockRowsMetadata,
+  window?: BlockRowsWindow,
+  priority: () => number = () => 0,
+): Promise<BlockRowsRead> {
+  return blockRowQueueFor(client).submit(blockRowsKey(entryId, window), priority, () =>
+    readBlockRowsWithMetadata(client, metadata, window),
+  )
+}
+
+async function readBlockRowsForEntry(
+  client: WSClient,
+  entryId: string,
+  window?: BlockRowsWindow,
+): Promise<BlockRowsRead> {
   try {
     let entry: LedgerGet
     try {
@@ -258,19 +420,57 @@ async function readBlockRowsForEntry(client: WSClient, entryId: string): Promise
     }
     const metadata = entry.artifacts.find((a) => a.mediaType === 'application/x-nocx-rows')
     if (!metadata) return { kind: 'absent' }
-    const read = await client.call<LedgerArtifact>('ledger.artifact', { id: metadata.id })
-    artifact = { metadata, body: read.body }
+    return await readRowsFromMetadata(client, metadata, window)
   } catch (err) {
+    if (rowReadRetryAfter(err) !== null) throw err
     return { kind: 'unreadable', reason: `the stored rows could not be read: ${reasonOf(err)}` }
   }
+}
+
+/** The page half of a stored-rows read, from an artifact metadata object a
+ *  caller already holds. A reconnect's geometry read uses this so a fresh
+ *  window costs one ledger.get, not two (ADR-8rt54tx2). */
+async function readBlockRowsWithMetadata(
+  client: WSClient,
+  metadata: BlockRowsMetadata,
+  window?: BlockRowsWindow,
+): Promise<BlockRowsRead> {
   try {
-    return {
-      kind: 'rows',
-      rows: parseStoredBlockRows(artifact.body, artifact.metadata, artifact.metadata.id),
-    }
+    return await readRowsFromMetadata(client, metadata.artifact, window)
   } catch (err) {
-    return { kind: 'unreadable', reason: reasonOf(err) }
+    if (rowReadRetryAfter(err) !== null) throw err
+    return { kind: 'unreadable', reason: `the stored rows could not be read: ${reasonOf(err)}` }
   }
+}
+
+async function readRowsFromMetadata(
+  client: WSClient,
+  metadata: LedgerGet['artifacts'][number],
+  window?: BlockRowsWindow,
+): Promise<BlockRowsRead> {
+  const params: Record<string, unknown> = { id: metadata.id }
+  if (window?.fromRow !== undefined) params.fromRow = window.fromRow
+  if (window?.rowLimit !== undefined) params.rowLimit = window.rowLimit
+  const read = await client.call<LedgerArtifact>('ledger.artifact', params)
+  const range = rangeOfArtifact(read)
+  const parsed = parseStoredBlockRows(read.body, metadata, metadata.id, range)
+  // A SHORT PAGE IS NOT DONE. The server selects whole lines and can come
+  // back short when the artifact is open or a page is still being written;
+  // the queue waits and asks again rather than painting the hole as a loss
+  // (ADR-y45sp41c). A page that reached the retained end is complete.
+  if (window?.rowLimit !== undefined && window.fromRow !== undefined && range !== undefined) {
+    const available = range.retainedRanges.reduce(
+      (total, rr) => total + Math.max(0, rr.to - Math.max(rr.from, window.fromRow!)),
+      0,
+    )
+    const expected = Math.min(window.rowLimit, available)
+    if (read.rangeCount < expected && read.hasMoreAfter) {
+      throw new RowReadShortError(
+        `stored rows page ${window.fromRow}+${window.rowLimit} returned ${read.rangeCount}`,
+      )
+    }
+  }
+  return { kind: 'rows', rows: parsed }
 }
 
 /**
@@ -443,6 +643,36 @@ export async function restoredBody(client: WSClient, entryId: string): Promise<R
     const caused = entry.caused ?? []
     const rows = entry.artifacts.find((a) => a.mediaType === 'application/x-nocx-rows')
     if (entry.entry.kind !== 'ask' && rows) {
+      // A RESTORED BLOCK IS DRAWN AT ITS RESERVED HEIGHT AND FILLED IN LATER
+      // (ADR-y45sp41c). Its row count is already in the metadata, so the restore
+      // does not need one byte of the body to place it: every block reserves
+      // its height, what is on screen is asked for at the next frame, and
+      // older blocks are read newest-to-oldest as the person scrolls to them.
+      // A block whose payload carries no coordinates (a store written before
+      // this field existed) keeps the old whole-body read.
+      const coords = storedRowsCoordinates(rows.payload)
+      // A block small enough to be one response is read whole at restore: a
+      // 300-row command must be complete in the next window without a scroll,
+      // and a capped block's RETAINED rows may be only that. Lazy paging is for
+      // a body whose cost is the reason it exists (ADR-y45sp41c).
+      // A capped block is read whole: its retained body is bounded by the cap
+      // the user configured, and the cut line's identity is the row on either
+      // side of it — a page at the tail alone would put the notice beside a
+      // spacer, not between the rows it cuts (e2e/output-cut-marker).
+      if (
+        coords !== null &&
+        coords.rowCount > LAZY_BLOCK_ROWS &&
+        rows.truncated !== 'cap' &&
+        rows.truncated !== 'gap'
+      ) {
+        return {
+          kind: 'command',
+          body: null,
+          rows: describeStoredBlockRows(rows, rows.id, coords),
+          caused,
+          proseEvicted: !!entry.proseEvicted,
+        }
+      }
       // Restoration shares the in-flight row read used by notifications.
       // Reading the large artifact through the coalescing reader avoids a
       // second response when restoration races a block notification.

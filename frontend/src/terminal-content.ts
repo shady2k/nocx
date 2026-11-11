@@ -159,16 +159,30 @@ import {
   answerTextForTurn,
   arrangedByCause,
   blockRowsForEntry,
+  blockRowsForEntryWithMetadata,
+  blockRowsMetadataForEntry,
   blocksForPane,
+  BLOCK_ROWS_PAGE,
+  LAZY_BLOCK_ROWS,
   restoredBody,
   toolResultForEntry,
+  type BlockRowsMetadata,
+  type BlockRowsRead,
 } from './restore-client'
 import { restoredBlock, restoredTurn } from './scrollback/restored-block'
 import {
   blockColumnsOf,
+  loadedRowRanges,
+  retainedOutputRanges,
+  mergeStoredBlockRows,
+  missingRowRanges,
+  nextPageForRows,
   paintStoredRows,
+  streamRowAtVisualOffset,
   repaintStoredRows,
   storedBlockRowsText,
+  type StoredBlockRows,
+  type StoredBlocksRange,
 } from './scrollback/block-rows'
 import { recordStoredBlock } from './scrollback/cell-drift'
 import { toolCallTitle } from './scrollback/tool-call-title'
@@ -1900,6 +1914,30 @@ export class TerminalContent extends BasePaneContent {
   /** The promise that includes a queued final read, for `_ensureBlockRows` to
    *  await after block.closed. It points at the same chain as `_blockRowsInFlight`. */
   private readonly _blockRowsFinalPending = new Map<string, Promise<void>>()
+  /** The rows of a RESTORED block, which has no BlockRecord to hold them.
+   *  They are also the record of which pages have arrived, so scrolling into
+   *  an unloaded stretch asks only for what is missing (ADR-y45sp41c). */
+  private readonly _restoredRows = new Map<string, StoredBlockRows>()
+  /** ONE index from a block's entry id to the element that carries it. A
+   *  restored command can be nested inside a turn's `.cmd-children`, and a
+   *  live record's element is replaced at freeze; every door that needs a
+   *  block — loader, refresh, revalidation, settle — asks here first. */
+  private readonly _blockIndex = new Map<string, { element: HTMLElement; record?: BlockRecord }>()
+  /** Transcript rank changes only when a top-level block is inserted,
+   *  frozen into a replacement, or removed. Visibility stays a live read. */
+  private readonly _rowReadOrder = new Map<HTMLElement, number>()
+  private _rowReadOrderRoot: HTMLElement | null = null
+  private _rowReadOrderObserver: MutationObserver | null = null
+  private _rowReadOrderDirty = true
+  /** At most one page read per entry is outstanding; a scroll that fires
+   *  every frame must not turn one visible block into a stream of requests. */
+  private readonly _blockRowsPageInFlight = new Set<string>()
+  /** A request arrived while a page was in flight. It is demand, never a
+   *  reason to skip: the completion recomputes from the viewport. */
+  private readonly _blockRowsPagePending = new Set<string>()
+  /** The scroll listener that fills lazy rows in as they become visible. */
+  private _lazyScrollUnsub: (() => void) | null = null
+  private _lazyScrollRaf: number | null = null
 
   /** The held-Stop settlement subscription (nocx-zas0d). It exists because
    *  `held` is an ACCEPTANCE the request cannot follow up on: whatever happens
@@ -3303,11 +3341,20 @@ export class TerminalContent extends BasePaneContent {
           this.clearGrants()
         },
         onBlockFrozen: (rec) => this._onBlockFrozen(rec),
-        paintStoredRows: (block, rows) => {
+        onBlocksRemoved: (elements) => {
+          const gone = new Set(elements)
+          for (const [entryId, indexed] of [...this._blockIndex]) {
+            if (!gone.has(indexed.element)) continue
+            this._blockIndex.delete(entryId)
+            this._restoredRows.delete(entryId)
+          }
+        },
+        paintStoredRows: (block, rows, reserve) => {
           const fit = this._cellFit
           const metric = fit !== null && fit.begin() ? metricOf(fit) : null
           paintStoredRows(block, rows, {
             metric,
+            reserve,
             palette: fromITheme(getCurrentTheme()),
             // cell-fit's batch write (nocx-2v80t.3.18): warmed here, once
             // for the whole block, so `boxOf` inside `paintRow` above is a
@@ -4447,9 +4494,49 @@ export class TerminalContent extends BasePaneContent {
         // Notifications are not replayed after a socket outage. Refresh every
         // mounted command block from its durable rows so output produced while
         // disconnected is painted even when restorePast has already run.
-        for (const entryId of this.scrollback?.blockManager.storedRowEntryIds() ?? []) {
-          void this._refreshBlockRows(entryId)
+        //
+        // A LARGE BLOCK GIVES ITS BODY BACK FIRST (ADR-y45sp41c). Its reserved
+        // height stays — that is the row count in its metadata — and the
+        // visible page is read next, so the reconnect does not queue five
+        // hundred whole bodies and the person's screen is filled from what is
+        // on it outward. A small block keeps what it has: one page would be
+        // its whole body anyway.
+        const entryIds = [
+          ...new Set([
+            ...(this.scrollback?.blockManager.storedRowEntryIds() ?? []),
+            ...this._blockIndex.keys(),
+            ...this._restoredRows.keys(),
+          ]),
+        ]
+        for (const entryId of entryIds) {
+          const rows = this._storedRowsOf(entryId)
+          if (
+            rows?.rowCount !== undefined &&
+            rows.rowCount > LAZY_BLOCK_ROWS &&
+            // A RUNNING block keeps its body and its reservation. Resetting it
+            // would leave the live painter with no lines, and its reserve:false
+            // body has no spacers to keep the height; the reconnect's
+            // revalidation refreshes what grew (ADR-ywzcpbqe).
+            rows.sealed !== false
+          ) {
+            // A LARGE block gives its body back: the coordinates and the
+            // reserved height stay, and what is on screen is read at the next
+            // step. A short block is one page already and keeps what it has —
+            // blanking five hundred small blocks would be a repaint the
+            // person did not ask for, and it is not what the memory bound
+            // needs.
+            this._paintBlockRows(entryId, { ...rows, lines: [] }, true)
+            continue
+          }
+          if (rows === undefined) {
+            // A block that never read its rows (the outage began while it
+            // was running) has no reservation to paint into. Its durable rows
+            // are what the person is owed, so it is read now.
+            void this._refreshBlockRows(entryId)
+          }
         }
+        void this._revalidateMountedBlockRows(entryIds)
+        this._loadVisibleBlockRows()
       })
       // A returning socket may be a returning BACKEND, whose endpoints and
       // roles are not the ones this pane last read. The report fires once
@@ -4854,6 +4941,7 @@ export class TerminalContent extends BasePaneContent {
       // ── Clickable paths and urls (nocx-8yg.8) ─────────────────────────
       const scrollbackArea = this.scrollback?.scrollbackArea
       if (scrollbackArea) {
+        this._installLazyRows()
         this._detachLinks = attachTerminalLinks(
           scrollbackArea,
           painterSurface,
@@ -7142,6 +7230,7 @@ export class TerminalContent extends BasePaneContent {
     const snapshotStore = this.scrollback.snapshotStore
     const paintRows = (el: HTMLElement, entryId: string): HTMLElement => {
       const rows = bodies.get(entryId)?.rows
+      this._registerRestoredBlock(entryId, el, rows)
       if (rows) this.scrollback!.blockManager.paintStoredRows(el, rows)
       return el
     }
@@ -7330,6 +7419,15 @@ export class TerminalContent extends BasePaneContent {
       previousSession: this.session === null || this.session.recovered === null,
     })
     this._pastRestoring = false
+    this._installLazyRows()
+    // The past is drawn at its reserve height with the ill-fitting pages
+    // empty; the one that is on screen is asked for at the next frame, not at
+    // restore time for every block (ADR-y45sp41c).
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => this._loadVisibleBlockRows())
+    } else {
+      this._loadVisibleBlockRows()
+    }
   }
 
   // ── Capability rail (nocx-4t37.2) ─────────────────────────────────────
@@ -10410,6 +10508,16 @@ export class TerminalContent extends BasePaneContent {
     this._blockRowsInFlight.clear()
     this._blockRowsRefreshPending.clear()
     this._blockRowsFinalPending.clear()
+    this._restoredRows.clear()
+    this._blockIndex.clear()
+    this._rowReadOrderObserver?.disconnect()
+    this._rowReadOrderObserver = null
+    this._rowReadOrderRoot = null
+    this._rowReadOrder.clear()
+    this._rowReadOrderDirty = true
+    this._blockRowsPageInFlight.clear()
+    this._lazyScrollUnsub?.()
+    this._lazyScrollUnsub = null
     this._detachLinks?.detach()
     this._detachLinks = null
     this._homeUnsub?.()
@@ -11126,6 +11234,8 @@ export class TerminalContent extends BasePaneContent {
       startAnchor ?? undefined,
     )
     this.scrollback.blockManager.bindAttempt(attempt.id)
+    const bound = this.scrollback.blockManager.blockForAttempt(attempt.id)
+    if (bound !== null) this._registerBlock(attempt.id, bound.el, bound)
     // THE HOLD THE PARKED ROWS CAME WITHOUT (nocx-4y82c.1.1). A stored-rows
     // response that arrived before this binding was parked without an `upTo`,
     // and the binding drains it with the whole artifact; sizing the body to the
@@ -11268,6 +11378,390 @@ export class TerminalContent extends BasePaneContent {
     return promise
   }
 
+  /** The rows this entry currently holds, whether it is a live record or a
+   *  restored element. This is the one place the two lives meet for paging. */
+  private _storedRowsOf(entryId: string): StoredBlockRows | undefined {
+    return (
+      this.scrollback?.blockManager.blockForAttempt(entryId)?.storedRows ??
+      this._restoredRows.get(entryId)
+    )
+  }
+
+  /** The mounted element for an entry, live or restored. */
+  private _blockElement(entryId: string): HTMLElement | null {
+    const sb = this.scrollback
+    if (!sb) return null
+    const indexed = this._blockIndex.get(entryId)
+    if (indexed !== undefined) {
+      if (indexed.element.isConnected) return indexed.element
+      this._blockIndex.delete(entryId)
+    }
+    const live = sb.blockManager.blockForAttempt(entryId)
+    if (live) {
+      this._blockIndex.set(entryId, { element: live.el, record: live })
+      return live.el
+    }
+    // Register a block that arrived without its creation door telling us —
+    // a restored element nested under a turn, a record whose element was
+    // replaced by a freeze. The walk is the repair, never the normal lookup.
+    for (const el of sb.scrollbackInner.querySelectorAll<HTMLElement>(
+      '.cmd-block[data-entry-id]',
+    )) {
+      if (el.dataset.entryId === entryId) {
+        this._blockIndex.set(entryId, { element: el })
+        return el
+      }
+    }
+    return null
+  }
+
+  /** Record where a block lives. Called where a block is created (a live
+   *  attempt binding) and where one is restored (top-level or nested). */
+  private _registerBlock(entryId: string, element: HTMLElement, record?: BlockRecord): void {
+    this._blockIndex.set(entryId, { element, record })
+  }
+
+  /** Register a restored block. A rows descriptor is kept even when it is
+   *  EMPTY: an open command with zero rows yet is exactly the one revalidation
+   *  must see grow (ADR-8rt54tx2). */
+  private _registerRestoredBlock(
+    entryId: string,
+    element: HTMLElement,
+    rows?: StoredBlockRows,
+  ): void {
+    this._registerBlock(entryId, element)
+    if (rows !== undefined) this._restoredRows.set(entryId, rows)
+  }
+
+  /** How urgent one entry's read is: what is on screen first (0), then the
+   *  transcript newest to oldest. The queue re-reads this at every decision,
+   *  so a block that scrolls into view outranks one that has not. */
+  private _rowReadPriority(entryId: string): number {
+    const sb = this.scrollback
+    const el = this._blockElement(entryId)
+    if (!sb || !el) return Number.MAX_SAFE_INTEGER
+    const area = sb.scrollbackArea.getBoundingClientRect()
+    const rect = el.getBoundingClientRect()
+    if (rect.bottom > area.top && rect.top < area.bottom) return 0
+    const root = sb.scrollbackInner
+    if (this._rowReadOrderRoot !== root) {
+      this._rowReadOrderObserver?.disconnect()
+      this._rowReadOrderRoot = root
+      this._rowReadOrderDirty = true
+      this._rowReadOrderObserver = new MutationObserver(() => {
+        this._rowReadOrder.clear()
+        this._rowReadOrderDirty = true
+      })
+      this._rowReadOrderObserver.observe(root, { childList: true })
+    }
+    // A restore or freeze can ask for priority in the same task as its DOM
+    // change, before the observer's callback has had a chance to run.
+    if (this._rowReadOrderObserver!.takeRecords().length > 0) this._rowReadOrderDirty = true
+    if (this._rowReadOrderDirty) {
+      const blocks = root.querySelectorAll<HTMLElement>(':scope > .cmd-block')
+      this._rowReadOrder.clear()
+      blocks.forEach((block, index) => this._rowReadOrder.set(block, blocks.length - index))
+      this._rowReadOrderDirty = false
+    }
+    return this._rowReadOrder.get(el) ?? Number.MAX_SAFE_INTEGER
+  }
+
+  /** The page a refresh should ask for, or undefined for a block small enough
+   *  to read whole. A grown block asks for its newest rows; the same page
+   *  slides as the command prints, so a 5000-row command never re-reads its
+   *  whole body on every growth notification. */
+  private _refreshWindow(
+    entryId: string,
+    geometry?: StoredBlocksRange,
+  ): { fromRow: number; rowLimit: number } | undefined {
+    const rows = this._storedRowsOf(entryId)
+    const rowCount = geometry?.rowCount ?? rows?.rowCount
+    if (rows === undefined || rowCount === undefined || rowCount <= LAZY_BLOCK_ROWS) {
+      return undefined
+    }
+    const end = geometry?.endRow ?? rows.endRow ?? (rows.lastRow ?? rows.firstRow ?? 0) + 1
+    const retained = retainedOutputRanges({ ...rows, ...geometry })
+    if (rows.lines.length > 0) {
+      // A LIVE block must not skip rows between coalesced growth reads: ask
+      // from the row after the last retained row painted up to the end the
+      // metadata reports NOW. With no fresher geometry, ask to the server's
+      // page limit and let the completion's own demand loop continue.
+      const from = rows.lines[rows.lines.length - 1].from + 1
+      const limit = geometry?.endRow !== undefined ? Math.min(10_000, end - from) : 10_000
+      return { fromRow: from, rowLimit: Math.max(1, limit) }
+    }
+    // No body in hand: the reconnect gave it back, or the restore has not
+    // asked yet. Take the newest page of the LAST retained run — a capped
+    // block's tail run, not the count-derived end of a head-only guess.
+    const lastRange = retained?.[retained.length - 1]
+    const first = Math.max(rows.outputStartRow ?? 0, lastRange?.from ?? rows.firstRow ?? 0)
+    const last = (lastRange?.to ?? end) - 1
+    const from = Math.max(first, last - BLOCK_ROWS_PAGE + 1)
+    return { fromRow: from, rowLimit: Math.max(1, Math.min(BLOCK_ROWS_PAGE, last - from + 1)) }
+  }
+
+  /** Read a refresh with the growth rule: an open large block's page limit
+   *  comes from the end its metadata reports now, never from the cached
+   *  end (ADR-ywzcpbqe). A frozen/small block needs no metadata first. */
+  private async _readBlockRowsForRefresh(
+    entryId: string,
+    current: StoredBlockRows | undefined,
+    known?: BlockRowsMetadata,
+  ): Promise<BlockRowsRead> {
+    let metadata = known
+    // FRESH GEOMETRY BEFORE THE WINDOW (ADR-8rt54tx2). A block cached below
+    // the lazy threshold can cross it while disconnected; deciding from the
+    // cached 100 rows would send a whole-body read past 400. An open block
+    // also needs the end its metadata reports now, not the cached end.
+    if (metadata === undefined && current?.sealed === false) {
+      try {
+        metadata = (await blockRowsMetadataForEntry(this.client, entryId)) ?? undefined
+      } catch (err) {
+        log.warn("nocx: a block's growth geometry could not be read", {
+          entry: entryId,
+          error: String(err),
+        })
+      }
+    }
+    const window = this._refreshWindow(entryId, metadata?.geometry ?? undefined)
+    if (metadata !== undefined) {
+      return blockRowsForEntryWithMetadata(this.client, entryId, metadata, window, () =>
+        this._rowReadPriority(entryId),
+      )
+    }
+    return blockRowsForEntry(this.client, entryId, window, () => this._rowReadPriority(entryId))
+  }
+
+  /** Paint a read into whichever owner holds the block: a BlockRecord when
+   *  the block is live, the element itself when it is restored. */
+  private _paintBlockRows(entryId: string, rows: StoredBlockRows, reset = false): void {
+    const sb = this.scrollback
+    if (!sb || this._disposed) return
+    const rec = sb.blockManager.blockForAttempt(entryId)
+    const marker = rec?.el ?? this._blockElement(entryId)
+    if (marker !== null && marker !== undefined) {
+      // The e2e waits on this: a reconnect's give-back is a state a test can
+      // observe before it measures the reservation it just created.
+      if (reset) marker.dataset.rowsReset = 'true'
+      else delete marker.dataset.rowsReset
+    }
+    if (rec) {
+      sb.settleAround(() => {
+        sb.blockManager.applyStoredRows(entryId, rows, undefined, reset)
+        sb.scrollToBottomIfFollowing()
+      })
+      return
+    }
+    const el = this._blockElement(entryId)
+    if (!el) return
+    this._registerBlock(entryId, el)
+    // EVERY PAINT GOES THROUGH THE ONE SETTLE (ADR-8rt54tx2, #779). A
+    // revalidation landing above a scrolled-up reader must move neither their
+    // row nor their scroll position; the live-record branch has always done
+    // this, and a restored element is content in the same transcript.
+    sb.settleAround(() => {
+      this._restoredRows.set(entryId, rows)
+      sb.blockManager.paintStoredRows(el, rows)
+    })
+  }
+
+  /** Ask for one page of a restored or live block's rows, around the visible
+   *  stretch (ADR-y45sp41c). One page per entry is outstanding at a time. */
+  private _requestBlockRowsPage(entryId: string, fromRow: number, rowLimit: number): void {
+    if (this._blockRowsPageInFlight.has(entryId)) {
+      // Demand is recorded, not discarded. The completion below re-reads the
+      // viewport rather than merely clearing a flag (ADR-ywzcpbqe).
+      this._blockRowsPagePending.add(entryId)
+      return
+    }
+    this._blockRowsPageInFlight.add(entryId)
+    let painted = false
+    void blockRowsForEntry(this.client, entryId, { fromRow, rowLimit }, () =>
+      this._rowReadPriority(entryId),
+    )
+      .then((read) => {
+        if (this._disposed || !this._active) return
+        if (read.kind === 'rows') {
+          this._paintBlockRows(
+            entryId,
+            mergeStoredBlockRows(this._storedRowsOf(entryId), read.rows),
+          )
+          painted = true
+        } else if (read.kind === 'unreadable') {
+          log.warn("nocx: a block's stored rows could not be read", {
+            entry: entryId,
+            reason: read.reason,
+          })
+        }
+      })
+      .finally(() => {
+        this._blockRowsPageInFlight.delete(entryId)
+        const demanded = this._blockRowsPagePending.delete(entryId)
+        if (this._disposed || !this._active) return
+        // ONE DEMAND LOOP: every completion recomputes. A page that filled
+        // the old viewport may leave the new one still missing.
+        if (painted || demanded) this._loadVisibleBlockRows()
+      })
+  }
+
+  /** The geometry a loaded block claims, comparable with the metadata a
+   *  reconnect reads. A block whose stored rows grew while disconnected has a
+   *  different key even when it is small (ADR-y45sp41c). */
+  private _rowsGeometryKey(rows: StoredBlockRows | undefined, version?: string): string | null {
+    if (rows === undefined || rows.rowCount === undefined) return null
+    const ranges = (rows.retainedRanges ?? []).map((rr) => `${rr.from}-${rr.to}`).join(',')
+    return [
+      version ?? rows.artifactVersion ?? '',
+      rows.firstRow ?? 0,
+      rows.lastRow ?? 0,
+      rows.endRow ?? 0,
+      rows.rowCount,
+      ranges,
+    ].join('|')
+  }
+
+  /** One entry's metadata geometry in the same spelling. */
+  private _rangeGeometryKey(
+    version: string,
+    range: {
+      firstRow: number
+      lastRow: number
+      endRow: number
+      rowCount: number
+      retainedRanges: readonly { from: number; to: number }[]
+    } | null,
+  ): string | null {
+    if (range === null) return null
+    return [
+      version,
+      range.firstRow,
+      range.lastRow,
+      range.endRow,
+      range.rowCount,
+      range.retainedRanges.map((rr) => `${rr.from}-${rr.to}`).join(','),
+    ].join('|')
+  }
+
+  /** Every mounted block is re-validated against its durable metadata after a
+   *  reconnect, small blocks included. Notifications are not replayed, so a
+   *  command that grew while the socket was down would otherwise keep its
+   *  cached rows and look complete (ADR-y45sp41c). Metadata is read one block
+   *  at a time: small answers still must not become five hundred frames. */
+  private async _revalidateMountedBlockRows(entryIds: string[]): Promise<void> {
+    const ordered = [...entryIds].sort(
+      (a, b) => this._rowReadPriority(a) - this._rowReadPriority(b),
+    )
+    for (const entryId of ordered) {
+      if (this._disposed || !this._active) return
+      // A block with no cached rows is already being read by the reconnect's
+      // own refresh; there is no geometry to compare it with.
+      if (this._storedRowsOf(entryId) === undefined) continue
+      let meta
+      try {
+        meta = await blockRowsMetadataForEntry(this.client, entryId)
+      } catch (err) {
+        log.warn("nocx: a block's durable geometry could not be read", {
+          entry: entryId,
+          error: String(err),
+        })
+        continue
+      }
+      if (meta === null) continue
+      const current = this._rowsGeometryKey(this._storedRowsOf(entryId), meta.version)
+      const durable = this._rangeGeometryKey(meta.version, meta.geometry)
+      if (current !== durable) void this._refreshBlockRows(entryId, false, meta)
+    }
+  }
+
+  /** Fill what the person can see: a block near the viewport whose page has
+   *  not arrived asks for the rows around the visible line. Every block
+   *  already reserves its height from the metadata, so this paints into space
+   *  that was there before the page was and nothing moves (ADR-y45sp41c). */
+  private _loadVisibleBlockRows(): void {
+    const sb = this.scrollback
+    if (!sb || this._disposed) return
+    const area = sb.scrollbackArea
+    const areaRect = area.getBoundingClientRect()
+    const ids = new Set<string>(this._restoredRows.keys())
+    for (const entryId of this._blockIndex.keys()) ids.add(entryId)
+    for (const block of sb.blockManager.blocks) {
+      if (block.attemptId) ids.add(block.attemptId)
+    }
+    for (const entryId of ids) {
+      const rows = this._storedRowsOf(entryId)
+      if (rows === undefined || rows.rowCount === undefined) continue
+      const retained = retainedOutputRanges(rows)
+      const missing = missingRowRanges(retained, loadedRowRanges(rows.lines))
+      if (missing.length === 0) continue
+      const el = this._blockElement(entryId)
+      if (!el) continue
+      const rect = el.getBoundingClientRect()
+      // One viewport of lookahead: a block the person is about to scroll to
+      // is worth one page, and no block further away competes with the
+      // visible one.
+      const margin = areaRect.height
+      if (rect.bottom < areaRect.top - margin || rect.top > areaRect.bottom + margin) continue
+      // The demand loop must not depend on an element the painter may have
+      // removed (ADR-ywzcpbqe). A block with geometry but no body yet still
+      // has a place in the transcript, and its first page is still missing.
+      const output = el.querySelector<HTMLElement>(':scope > .cmd-output')
+      const stated = Number.parseFloat(getComputedStyle(el).getPropertyValue('--term-cell-height'))
+      const pitch = Number.isFinite(stated) && stated > 0 ? stated : 18
+      const first = retained[0]?.from ?? rows.firstRow ?? 0
+      const last = (retained[retained.length - 1]?.to ?? first + 1) - 1
+      const outRect = output?.getBoundingClientRect() ?? el.getBoundingClientRect()
+      const topOffset = Math.max(0, Math.floor((areaRect.top - outRect.top) / pitch))
+      const bottomOffset = Math.max(0, Math.floor((areaRect.bottom - outRect.top) / pitch))
+      // ONE MAPPING between visual position and stream index, the one the
+      // painter lays rows out with: a compressed cap gap maps to the first
+      // row of the tail, not to its visual offset (ADR-ywzcpbqe).
+      const topRow = streamRowAtVisualOffset(rows, topOffset)
+      const bottomRow = streamRowAtVisualOffset(rows, bottomOffset)
+      const loaded = loadedRowRanges(rows.lines)
+      const visibleMissing = missing.find((range) => range.to > topRow && range.from <= bottomRow)
+      const target = Math.max(first, Math.min(last, topRow))
+      if (
+        visibleMissing !== undefined &&
+        (target < visibleMissing.from || target >= visibleMissing.to)
+      ) {
+        // The top of the viewport is over a loaded row but the missing range
+        // below it is what the person can see; ask at its near edge.
+        const page = nextPageForRows(retained, loaded, visibleMissing.from, BLOCK_ROWS_PAGE)
+        if (page === null) continue
+        this._requestBlockRowsPage(entryId, page.fromRow, page.rowLimit)
+        continue
+      }
+      // WHAT IS MISSING, not what is between the first and last loaded row.
+      const page = nextPageForRows(retained, loaded, target, BLOCK_ROWS_PAGE)
+      if (page === null) continue
+      this._requestBlockRowsPage(entryId, page.fromRow, page.rowLimit)
+    }
+  }
+
+  /** Watch the scroller: the transcript's pages follow the person's
+   *  position, so a page is fetched when its block comes near the viewport
+   *  rather than all of them at reconnect. */
+  private _installLazyRows(): void {
+    const area = this.scrollback?.scrollbackArea
+    if (!area) return
+    this._lazyScrollUnsub?.()
+    const onScroll = (): void => {
+      if (this._lazyScrollRaf !== null) return
+      this._lazyScrollRaf = requestAnimationFrame(() => {
+        this._lazyScrollRaf = null
+        this._loadVisibleBlockRows()
+      })
+    }
+    area.addEventListener('scroll', onScroll, { passive: true })
+    this._lazyScrollUnsub = () => {
+      area.removeEventListener('scroll', onScroll)
+      if (this._lazyScrollRaf !== null) {
+        cancelAnimationFrame(this._lazyScrollRaf)
+        this._lazyScrollRaf = null
+      }
+    }
+  }
+
   /** Fetch one entry's stored rows, paint them, and follow the tail —
    *  everything a block.grew/block.closed notification's delivery does.
    *  Repeated growth notifications share one in-flight read and set one
@@ -11275,7 +11769,11 @@ export class TerminalContent extends BasePaneContent {
    *  `_ensureBlockRows` waits for the whole chain instead of reading
    *  `.cmd-output` before the final stored rows are ready. The pending flag
    *  is state, not a timer, so the last growth cannot be dropped. */
-  private _refreshBlockRows(entryId: string, final = false): Promise<void> {
+  private _refreshBlockRows(
+    entryId: string,
+    final = false,
+    known?: BlockRowsMetadata,
+  ): Promise<void> {
     if (final) {
       const closing = this._blockRowsFinalPending.get(entryId)
       if (closing) {
@@ -11306,87 +11804,105 @@ export class TerminalContent extends BasePaneContent {
     }
 
     this._blockRowsRefreshPending.delete(entryId)
-    const fetch: Promise<void> = blockRowsForEntry(this.client, entryId).then((read) => {
-      if (this._disposed) return
-      const sb = this.scrollback
-      if (!sb) return
-      // `absent` is the store keeping no rows for this block — nothing to
-      // paint, and nothing wrong. `unreadable` is output that did not reach
-      // the pane, and it is SAID, on the block and in the log, never drawn
-      // as an empty body (nocx-2v80t.3.27). Only the newest read for the
-      // entry may say it: an older fetch failing after a newer one was
-      // dispatched is not the block's current truth.
-      if (read.kind === 'absent') return
-      if (read.kind === 'unreadable') {
-        log.warn("nocx: a block's stored rows could not be read", {
-          entry: entryId,
-          reason: read.reason,
-        })
-        if (
-          this._blockRowsInFlight.get(entryId) === tracked &&
-          !this._blockRowsRefreshPending.has(entryId)
-        ) {
-          sb.blockManager.markRowsUnreadable(entryId, read.reason)
+    const current = this._storedRowsOf(entryId)
+    const fetch: Promise<void> = this._readBlockRowsForRefresh(entryId, current, known).then(
+      (read) => {
+        if (this._disposed) return
+        const sb = this.scrollback
+        if (!sb) return
+        // `absent` is the store keeping no rows for this block — nothing to
+        // paint, and nothing wrong. `unreadable` is output that did not reach
+        // the pane, and it is SAID, on the block and in the log, never drawn
+        // as an empty body (nocx-2v80t.3.27). Only the newest read for the
+        // entry may say it: an older fetch failing after a newer one was
+        // dispatched is not the block's current truth.
+        if (read.kind === 'absent') return
+        if (read.kind === 'unreadable') {
+          log.warn("nocx: a block's stored rows could not be read", {
+            entry: entryId,
+            reason: read.reason,
+          })
+          if (
+            this._blockRowsInFlight.get(entryId) === tracked &&
+            !this._blockRowsRefreshPending.has(entryId)
+          ) {
+            sb.blockManager.markRowsUnreadable(entryId, read.reason)
+          }
+          return
         }
-        return
-      }
-      const rows = read.rows
-      if (!this._active) {
-        sb.blockManager.applyStoredRows(entryId, rows)
-        return
-      }
-      // The rows arrive asynchronously, well after the block that owns
-      // them has already been laid out — a running block's own live
-      // growth is followed inline (controller.ts's own height guard), but
-      // this delivery is a SEPARATE mutation the controller does not see
-      // on its own. Without holding the tail around it, a block that grows
-      // once its stream lands pushes the viewport away from the tail a
-      // person was following, silently (nocx-2v80t.3.19).
-      //
-      // ONE DOOR, AND NOTHING ANIMATED (owner, 2026-11-08: "like Warp, no
-      // animation"). A running block's rows land above the live end, where
-      // the push down and the scroll that follows cancel for every row on
-      // screen; a frozen block's late rows land above the fold and cost the
-      // person nothing either. Both are applied and the tail re-pinned in one
-      // task, so the frame that paints shows the new rows where they will
-      // stay — ScrollbackController.settleAtTail is the whole rule.
-      //
-      // A running block's rows are also bounded by the screen this pane has
-      // painted: the record is written when a row leaves the emulator's
-      // screen, and the frame showing it gone can still be in flight, so the
-      // delivery may name rows this pane is still painting in the grid below.
-      // The pending frame is painted first and the rows past it are held
-      // (BlockManager.applyStoredRows's `upTo`), which is what keeps the body
-      // one continuous run of rows.
-      // ONE OWNER OF "WHICH BLOCK HOLDS THE GRID" (nocx-4y82c.1.1): liveBlock
-      // — the block the live container is inside — not the running slot. The
-      // logical freeze clears the slot while the card still owns the grid, and
-      // a delivery landing in that window must still be held against the
-      // painted screen (an unbound running block is that same block, before
-      // its attempt is named).
-      const live = sb.blockManager.liveBlock
-      if (live !== null && (live.attemptId === entryId || live.attemptId === undefined)) {
-        // THE HOLD IS THIS DELIVERY'S ANSWER ABOUT THE LIVE SCREEN, asked
-        // after the frame in flight has been painted, and null when there is
-        // no live screen to answer for (`_rowsTheScreenPassed`) — in which
-        // case the body takes every row the record holds, in this same paint.
-        // e2e/connection-overlay.spec.ts: a record delivered across a daemon
-        // cut used to be held against the screen the pane had before it, and
-        // the block kept the eight rows that screen had passed out of
-        // forty-one for the rest of the command.
-        this._flushPendingPaint()
-        const upTo = this._rowsTheScreenPassed(live)
-        sb.settleAround(() => {
-          sb.blockManager.applyStoredRows(entryId, rows, upTo)
-          sb.scrollToBottomIfFollowing()
-        })
-      } else {
-        sb.settleAround(() => {
+        // A paged read is one WINDOW of the block, never the whole body: join
+        // it with what is already painted so a growth notification that names
+        // the newest rows cannot blank the pages above them (ADR-y45sp41c).
+        const rows = mergeStoredBlockRows(this._storedRowsOf(entryId) ?? current, read.rows)
+        // A RESTORED block has no BlockRecord: applyStoredRows would park its
+        // rows in a queue nothing flushes. It lives in _restoredRows and is
+        // painted through the element's own door (ADR-8rt54tx2).
+        if (sb.blockManager.blockForAttempt(entryId) === null && this._restoredRows.has(entryId)) {
+          this._paintBlockRows(entryId, rows)
+          this._loadVisibleBlockRows()
+          return
+        }
+        if (!this._active) {
           sb.blockManager.applyStoredRows(entryId, rows)
-          sb.scrollToBottomIfFollowing()
-        })
-      }
-    })
+          return
+        }
+        // The rows arrive asynchronously, well after the block that owns
+        // them has already been laid out — a running block's own live
+        // growth is followed inline (controller.ts's own height guard), but
+        // this delivery is a SEPARATE mutation the controller does not see
+        // on its own. Without holding the tail around it, a block that grows
+        // once its stream lands pushes the viewport away from the tail a
+        // person was following, silently (nocx-2v80t.3.19).
+        //
+        // ONE DOOR, AND NOTHING ANIMATED (owner, 2026-11-08: "like Warp, no
+        // animation"). A running block's rows land above the live end, where
+        // the push down and the scroll that follows cancel for every row on
+        // screen; a frozen block's late rows land above the fold and cost the
+        // person nothing either. Both are applied and the tail re-pinned in one
+        // task, so the frame that paints shows the new rows where they will
+        // stay — ScrollbackController.settleAtTail is the whole rule.
+        //
+        // A running block's rows are also bounded by the screen this pane has
+        // painted: the record is written when a row leaves the emulator's
+        // screen, and the frame showing it gone can still be in flight, so the
+        // delivery may name rows this pane is still painting in the grid below.
+        // The pending frame is painted first and the rows past it are held
+        // (BlockManager.applyStoredRows's `upTo`), which is what keeps the body
+        // one continuous run of rows.
+        // ONE OWNER OF "WHICH BLOCK HOLDS THE GRID" (nocx-4y82c.1.1): liveBlock
+        // — the block the live container is inside — not the running slot. The
+        // logical freeze clears the slot while the card still owns the grid, and
+        // a delivery landing in that window must still be held against the
+        // painted screen (an unbound running block is that same block, before
+        // its attempt is named).
+        const live = sb.blockManager.liveBlock
+        if (live !== null && (live.attemptId === entryId || live.attemptId === undefined)) {
+          // THE HOLD IS THIS DELIVERY'S ANSWER ABOUT THE LIVE SCREEN, asked
+          // after the frame in flight has been painted, and null when there is
+          // no live screen to answer for (`_rowsTheScreenPassed`) — in which
+          // case the body takes every row the record holds, in this same paint.
+          // e2e/connection-overlay.spec.ts: a record delivered across a daemon
+          // cut used to be held against the screen the pane had before it, and
+          // the block kept the eight rows that screen had passed out of
+          // forty-one for the rest of the command.
+          this._flushPendingPaint()
+          const upTo = this._rowsTheScreenPassed(live)
+          sb.settleAround(() => {
+            sb.blockManager.applyStoredRows(entryId, rows, upTo)
+            sb.scrollToBottomIfFollowing()
+          })
+        } else {
+          sb.settleAround(() => {
+            sb.blockManager.applyStoredRows(entryId, rows)
+            sb.scrollToBottomIfFollowing()
+          })
+        }
+        // ONE DEMAND LOOP: a growth read that brought only part of the new
+        // rows does not wait for another notification. The viewport decides
+        // what is still missing (ADR-ywzcpbqe).
+        this._loadVisibleBlockRows()
+      },
+    )
     const tracked = fetch.finally(() => {
       if (this._blockRowsInFlight.get(entryId) !== tracked) return
       if (this._blockRowsRefreshPending.delete(entryId)) {
@@ -11438,6 +11954,9 @@ export class TerminalContent extends BasePaneContent {
    *  renderer clamps the text to the wire bound and states how much more
    *  the block holds — never a silent truncation. */
   private _onBlockFrozen(rec: BlockRecord): void {
+    // The freeze REPLACED the running element; the index must point at the
+    // new one or it keeps the detached element (and its rows) alive.
+    if (rec.attemptId !== undefined) this._registerBlock(rec.attemptId, rec.el, rec)
     // A newer freeze is a different owner, and it cannot inherit an ask the
     // person made over the previous one.
     this._pendingAutomaticAttachment = null

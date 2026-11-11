@@ -1190,6 +1190,11 @@ var (
 	// open block rows artifact: the keep decision refused it, or the block
 	// is already sealed. Either way there is nowhere for the rows to go.
 	ErrBlockNotOpen = errors.New("content: block rows: no open block on this entry")
+	// ErrArtifactNotRows is what a RANGE read answers for an artifact that is
+	// not a block's stored rows. A row index is meaningless for a text body or
+	// an SGR grid, and answering a page of bytes as though it were rows would
+	// make one coordinate mean two things.
+	ErrArtifactNotRows = errors.New("content: artifact is not stored rows")
 )
 
 // MaxArtifactBytes is that ceiling. Four times the per-command cap's default,
@@ -1918,6 +1923,15 @@ type Artifact struct {
 	ByteEnd        *int64
 	Encoding       string
 	Gaps           []Gap
+	// RowCount, FirstRow, LastRow, EndRow and RetainedRanges are the
+	// stored-rows artifact's own geometry, read with its chunks (nocx-t7xhe).
+	// They are zero for any other media type and for a rows artifact that holds
+	// no line.
+	RowCount       int
+	FirstRow       uint64
+	LastRow        uint64
+	EndRow         uint64
+	RetainedRanges []RowRange
 	// Evicted says the store HAD this body and retention took it, as
 	// distinct from a capture that never held anything: both are zero bytes
 	// over zero chunks, and "this command printed nothing" and "this output
@@ -1927,6 +1941,58 @@ type Artifact struct {
 	Evicted bool
 	Payload string
 	Chunks  [][]byte
+}
+
+// RowRange is one retained run of a block's rows, in the stream's absolute row
+// indices: [From, To), half-open so adjacent runs join without arithmetic. Cap
+// eviction keeps a head and a tail run apart; an emulator loss can leave a hole
+// inside what would have been one run. The ranges are the block's geometry: the
+// rows between two of them are a fixed-size notice, never a height that a page
+// can change (ADR-y45sp41c).
+type RowRange struct {
+	From uint64 `json:"from"`
+	To   uint64 `json:"to"`
+}
+
+// ArtifactRange is one page of a rows artifact (nocx-t7xhe): the artifact's
+// metadata, the page's own lines joined in seq order, and the coordinates a
+// reader needs to place the page inside the whole block before any row of it
+// arrives. FirstRow/LastRow are absolute row indices of the retained runs;
+// EndRow is one past the block's whole stream span; RetainedRanges names the
+// runs the store actually holds. RowCount is how many stored lines the artifact
+// holds, which is the block's retained height in rows.
+//
+// A page is selected by absolute index, never by array position: a block whose
+// middle the per-command cap took keeps its head and its tail, and a reader
+// asking for rows around its viewport must receive the rows that exist there
+// or the nearest ones above them.
+type ArtifactRange struct {
+	Artifact *Artifact
+	// FirstRow is the absolute index of the artifact's first stored row, and
+	// LastRow of its last. Both are zero when RowCount is zero.
+	FirstRow uint64
+	LastRow  uint64
+	// RowCount is how many stored lines the artifact holds — the number of
+	// retained rows, before the notices that stand in the gaps.
+	RowCount int
+	// EndRow is one past the last stream row this block ever held. A reader
+	// reserves the block's whole span from FirstRow..EndRow; nothing a page
+	// returns can widen it.
+	EndRow uint64
+	// RetainedRanges are the runs of stream rows the artifact holds, in
+	// ascending order, each [From, To). A gap between two runs is one notice,
+	// whatever its row count.
+	RetainedRanges []RowRange
+	// RangeStart is the absolute index of the page's first row. A page that
+	// begins past the end answers EndRow (or 0 for an empty artifact), so a
+	// reader can tell "nothing here" from "zero is the first row".
+	RangeStart uint64
+	// RangeCount is the number of rows in the page.
+	RangeCount int
+	// HasMoreBefore and HasMoreAfter say whether stored rows exist outside
+	// this page, which is what the renderer pages on.
+	HasMoreBefore bool
+	HasMoreAfter  bool
 }
 
 // LedgerRepository is the typed repository for schema v1 (ADR-0019,
@@ -2122,6 +2188,11 @@ type LedgerRepository interface {
 	// Artifact returns one artifact with its chunk bodies, or nil when no
 	// artifact carries id.
 	Artifact(ctx context.Context, id string) (*Artifact, error)
+	// ArtifactRange returns one page of a stored-rows artifact, selected by
+	// absolute row index, with the whole artifact's coordinates. A nil result
+	// means no artifact carries id; a non-rows artifact is
+	// ErrArtifactNotRows. rowLimit <= 0 means "to the last stored row".
+	ArtifactRange(ctx context.Context, id string, fromRow uint64, rowLimit int) (*ArtifactRange, error)
 	// CaptureFrame ingests one renderer-minted frame (agent.captureFrame)
 	// and returns the BACKEND-MINTED frame id — the frame lands as its own
 	// closed entry (kind=agent, intent=frame-capture) whose execution owns

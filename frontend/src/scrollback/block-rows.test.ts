@@ -8,6 +8,12 @@ import { DEFAULT_SNAPSHOT, type TerminalSnapshot } from './serializer'
 import { restoredBlock } from './restored-block'
 import {
   blockColumnsOf,
+  loadedRowRanges,
+  retainedOutputRanges,
+  mergeStoredBlockRows,
+  missingRowRanges,
+  nextPageForRows,
+  streamRowAtVisualOffset,
   paintStoredRows,
   repaintStoredRows,
   paintUnreadableRows,
@@ -101,6 +107,255 @@ describe('stored block rows', () => {
       block.querySelector('[data-artifact-version]')?.getAttribute('data-artifact-version'),
     ).toBe('font-artifact')
     expect(block.querySelector('[data-output-unreadable]')).toBe(notice)
+  })
+
+  it('carries the whole artifact coordinates a page reports (nocx-t7xhe)', () => {
+    const body = [
+      JSON.stringify({ from: 10, row: wireRowOf(okRow) }),
+      JSON.stringify({ from: 11, row: wireRowOf(abcRow) }),
+    ].join('\n')
+    const parsed = parseStoredBlockRows(
+      body,
+      { truncated: null, payload: { rowCount: 25 }, state: 'sealed' },
+      'artifact-1',
+      {
+        firstRow: 0,
+        lastRow: 24,
+        endRow: 25,
+        rowCount: 25,
+        retainedRanges: [{ from: 0, to: 25 }],
+        rangeStart: 10,
+        rangeCount: 2,
+        hasMoreBefore: true,
+        hasMoreAfter: true,
+      },
+    )
+    expect(parsed.firstRow).toBe(0)
+    expect(parsed.lastRow).toBe(24)
+    expect(parsed.rowCount).toBe(25)
+    expect(parsed.lines.map((line) => line.from)).toEqual([10, 11])
+  })
+
+  it('reserves the block height around a page before the rest of its rows arrive', () => {
+    const block = document.createElement('article')
+    block.dataset.entryId = 'block-page'
+    paintStoredRows(
+      block,
+      {
+        ...stored,
+        lines: [
+          { from: 10, row: wireRowOf(okRow) },
+          { from: 11, row: wireRowOf(abcRow) },
+        ],
+        artifactVersion: 'artifact-page',
+        firstRow: 0,
+        lastRow: 24,
+        rowCount: 25,
+      },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+    const spacers = [...block.querySelectorAll<HTMLElement>('.cmd-output-spacer')]
+    expect(spacers.map((el) => el.dataset.rows)).toEqual(['10', '13'])
+    expect(spacers[0].style.height).toContain('calc(var(--term-cell-height, 1.2em) * 10)')
+    expect(spacers[1].style.height).toContain('calc(var(--term-cell-height, 1.2em) * 13)')
+    expect(block.querySelectorAll('.term-grid-row')).toHaveLength(2)
+  })
+
+  it('reserves a block whose first page has not arrived at all', () => {
+    const block = document.createElement('article')
+    block.dataset.entryId = 'block-unloaded'
+    paintStoredRows(
+      block,
+      {
+        lines: [],
+        droppedRows: 0,
+        lostRows: 0,
+        truncated: null,
+        artifactVersion: 'artifact-unloaded',
+        firstRow: 0,
+        lastRow: 4999,
+        rowCount: 5000,
+        sealed: true,
+      },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+    const grid = block.querySelector<HTMLElement>('.cmd-output')!
+    expect(grid).not.toBeNull()
+    expect(grid.querySelectorAll('.term-grid-row')).toHaveLength(0)
+    const spacer = grid.querySelector<HTMLElement>('.cmd-output-spacer')!
+    expect(spacer.dataset.rows).toBe('5000')
+    expect(spacer.style.height).toContain('* 5000)')
+    // An unloaded block printed nothing is a different fact from a block
+    // whose page has not arrived; the second must not say the first.
+    expect(block.querySelector('[data-output-empty]')).toBeNull()
+  })
+
+  it('tracks loaded rows as ranges, so an interior hole is still missing', () => {
+    const loaded = loadedRowRanges([{ from: 0 }, { from: 1 }, { from: 4800 }, { from: 4801 }])
+    expect(loaded).toEqual([
+      { from: 0, to: 2 },
+      { from: 4800, to: 4802 },
+    ])
+    expect(missingRowRanges([{ from: 0, to: 5000 }], loaded)).toEqual([
+      { from: 2, to: 4800 },
+      { from: 4802, to: 5000 },
+    ])
+  })
+
+  it('fetches an interior hole when the reader reaches it, not because a tail is loaded', () => {
+    const retained = [{ from: 0, to: 5000 }]
+    const loaded = [
+      { from: 0, to: 200 },
+      { from: 4800, to: 5000 },
+    ]
+    expect(nextPageForRows(retained, loaded, 4800, 200)).toBeNull()
+    const page = nextPageForRows(retained, loaded, 2500, 200)!
+    expect(page.fromRow).toBeGreaterThanOrEqual(200)
+    expect(page.fromRow + page.rowLimit).toBeLessThanOrEqual(4800)
+    expect(page.rowLimit).toBe(200)
+  })
+
+  it('reserves a disjoint page set at the artifact height, not at the pages between them', () => {
+    const block = document.createElement('article')
+    block.dataset.entryId = 'disjoint'
+    paintStoredRows(
+      block,
+      {
+        ...stored,
+        lines: [
+          { from: 0, row: wireRowOf(okRow) },
+          { from: 1, row: wireRowOf(abcRow) },
+          { from: 4800, row: wireRowOf(okRow) },
+          { from: 4801, row: wireRowOf(abcRow) },
+        ],
+        artifactVersion: 'artifact-disjoint',
+        firstRow: 0,
+        lastRow: 4999,
+        endRow: 5000,
+        rowCount: 5000,
+        retainedRanges: [{ from: 0, to: 5000 }],
+        sealed: true,
+      },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+    expect(block.querySelectorAll('.term-grid-row')).toHaveLength(4)
+    expect(block.querySelectorAll('.cmd-output-gap')).toHaveLength(0)
+    const spacer = block.querySelector<HTMLElement>('.cmd-output-spacer')!
+    expect(spacer.dataset.rows).toBe('4798')
+    expect(spacer.dataset.logicalLine).toBe('2')
+    expect(block.querySelector<HTMLElement>('.cmd-output')!.dataset.rowsLoaded).toBe('4')
+  })
+
+  it('keeps the reservation and the rows when a page is entirely blank', () => {
+    const block = document.createElement('article')
+    block.dataset.entryId = 'blank-page'
+    const body = Array.from({ length: 200 }, (_, i) =>
+      JSON.stringify({ from: i, row: { text: '' } }),
+    ).join('\n')
+    const parsed = parseStoredBlockRows(
+      body,
+      {
+        truncated: null,
+        payload: { rowCount: 5000, endRow: 5000, retainedRanges: [{ from: 0, to: 5000 }] },
+        state: 'sealed',
+      },
+      'artifact-blank',
+      {
+        firstRow: 0,
+        lastRow: 4999,
+        endRow: 5000,
+        rowCount: 5000,
+        retainedRanges: [{ from: 0, to: 5000 }],
+        rangeStart: 0,
+        rangeCount: 200,
+        hasMoreBefore: false,
+        hasMoreAfter: true,
+      },
+    )
+    paintStoredRows(block, parsed, { metric: null, palette: DEFAULT_SNAPSHOT })
+    const output = block.querySelector<HTMLElement>('.cmd-output')
+    expect(output).not.toBeNull()
+    expect(output!.querySelectorAll('.term-grid-row')).toHaveLength(200)
+    expect(output!.querySelector<HTMLElement>('.cmd-output-spacer')!.dataset.rows).toBe('4800')
+  })
+
+  it('maps a compressed capped gap to the first row of the tail, not to its visual offset', () => {
+    const rows: StoredBlockRows = {
+      lines: [],
+      droppedRows: 4400,
+      lostRows: 0,
+      truncated: 'cap',
+      sealed: true,
+      firstRow: 0,
+      lastRow: 4999,
+      endRow: 5000,
+      rowCount: 600,
+      retainedRanges: [
+        { from: 0, to: 300 },
+        { from: 4700, to: 5000 },
+      ],
+      reserve: true,
+    }
+    expect(streamRowAtVisualOffset(rows, 0)).toBe(0)
+    expect(streamRowAtVisualOffset(rows, 299)).toBe(299)
+    expect(streamRowAtVisualOffset(rows, 300)).toBe(4700)
+    expect(streamRowAtVisualOffset(rows, 301)).toBe(4700)
+    expect(streamRowAtVisualOffset(rows, 600)).toBe(4999)
+  })
+
+  it('reserves a capped block from its retained runs, one notice on the hole', () => {
+    const block = document.createElement('article')
+    block.dataset.entryId = 'capped'
+    paintStoredRows(
+      block,
+      {
+        ...stored,
+        lines: [],
+        artifactVersion: 'artifact-capped',
+        firstRow: 0,
+        lastRow: 4999,
+        endRow: 5000,
+        rowCount: 600,
+        retainedRanges: [
+          { from: 0, to: 300 },
+          { from: 4700, to: 5000 },
+        ],
+        sealed: true,
+        truncated: 'cap',
+        droppedRows: 4400,
+      },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+    const spacers = [...block.querySelectorAll<HTMLElement>('.cmd-output-spacer')]
+    expect(spacers.map((el) => el.dataset.rows)).toEqual(['300', '300'])
+    expect(spacers.map((el) => el.dataset.logicalLine)).toEqual(['0', '4700'])
+    expect(block.querySelectorAll('.cmd-output-gap')).toHaveLength(1)
+    expect(block.querySelector('[data-output-empty]')).toBeNull()
+    expect(block.querySelector<HTMLElement>('.cmd-output')!.dataset.rowsCount).toBe('600')
+  })
+
+  it("keeps a running block's body element when it has geometry but no lines yet", () => {
+    const block = document.createElement('article')
+    paintStoredRows(
+      block,
+      {
+        lines: [],
+        droppedRows: 0,
+        lostRows: 0,
+        truncated: null,
+        sealed: false,
+        firstRow: 0,
+        lastRow: 4999,
+        endRow: 5000,
+        rowCount: 5000,
+        retainedRanges: [{ from: 0, to: 5000 }],
+        reserve: false,
+      },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+    const output = block.querySelector<HTMLElement>('.cmd-output')
+    expect(output).not.toBeNull()
+    expect(output!.dataset.rowsLoaded).toBe('0')
   })
 
   it('paints backend rows through the shared row painter', () => {
@@ -395,7 +650,11 @@ describe('stored block rows', () => {
       expect(rowsOf(block)[0].textContent).toBe('abc')
       expect(block.querySelector('[data-output-empty], [data-output-unreadable]')).toBeNull()
       paintStoredRows(block, artifact([{ from: 1, row: { text: 'abc', runs: [[0, 1]] } }]), options)
-      expect(block.querySelector('.cmd-output')).toBeNull()
+      // A malformed row paints no rectangle, but the body and its height stay:
+      // removing the output element collapsed the reservation under the reader
+      // (ADR-ywzcpbqe).
+      expect(block.querySelector('.cmd-output')).not.toBeNull()
+      expect(block.querySelectorAll('.term-grid-row')).toHaveLength(0)
       paintStoredRows(block, artifact([line(1, 'abc')]), options)
       expect(rowsOf(block)[0].textContent).toBe('abc')
     })
@@ -1032,6 +1291,72 @@ describe('stored block rows', () => {
     expect(() => parseStoredBlockRows('{"from":12}', { truncated: null, payload: {} })).toThrow(
       'stored block row is malformed',
     )
+  })
+
+  it('reserves only output rows after the echo prefix and keeps raw artifact coordinates', () => {
+    const parsed = parseStoredBlockRows(
+      [2, 3, 8, 9].map((from) => JSON.stringify({ from, row: { text: `row-${from}` } })).join('\n'),
+      {
+        truncated: null,
+        state: 'sealed',
+        payload: {
+          outputStartRow: 2,
+          retainedRanges: [
+            { from: 0, to: 4 },
+            { from: 8, to: 10 },
+          ],
+          endRow: 10,
+        },
+      },
+      'same-artifact',
+    )
+    const block = document.createElement('article')
+    paintStoredRows(block, parsed, { metric: null, palette: DEFAULT_SNAPSHOT })
+    expect(block.querySelector('.cmd-output')?.getAttribute('data-rows-loaded')).toBe('4')
+    expect(block.querySelector('.cmd-output')?.getAttribute('data-rows-count')).toBe('4')
+    expect(block.querySelectorAll('.cmd-output-spacer')).toHaveLength(0)
+    expect(streamRowAtVisualOffset(parsed, 0)).toBe(2)
+    expect(streamRowAtVisualOffset(parsed, 3)).toBe(8)
+    expect(parsed.retainedRanges).toEqual([
+      { from: 0, to: 4 },
+      { from: 8, to: 10 },
+    ])
+  })
+
+  it('clips retained runs before an output mark in a cap gap or after all retained rows', () => {
+    const raw = {
+      ...stored,
+      retainedRanges: [
+        { from: 0, to: 4 },
+        { from: 8, to: 10 },
+      ],
+    }
+    expect(retainedOutputRanges({ ...raw, outputStartRow: 6 })).toEqual([{ from: 8, to: 10 }])
+    expect(retainedOutputRanges({ ...raw, outputStartRow: 10 })).toEqual([])
+    const block = document.createElement('article')
+    paintStoredRows(
+      block,
+      { ...raw, lines: [], outputStartRow: 10 },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+    expect(block.querySelector('.cmd-output')).toBeNull()
+    expect(raw.retainedRanges).toEqual([
+      { from: 0, to: 4 },
+      { from: 8, to: 10 },
+    ])
+  })
+
+  it('drops previously loaded echo rows when the same artifact output start advances', () => {
+    const body = [0, 1, 2, 3]
+      .map((from) => JSON.stringify({ from, row: { text: `row-${from}` } }))
+      .join('\n')
+    const previous = parseStoredBlockRows(body, { truncated: null, payload: {} }, 'same-artifact')
+    const next = parseStoredBlockRows(
+      body,
+      { truncated: null, payload: { outputStartRow: 2 } },
+      'same-artifact',
+    )
+    expect(mergeStoredBlockRows(previous, next).lines.map((line) => line.from)).toEqual([2, 3])
   })
 
   it('drops the rows below the recorded output start, once, for every consumer', () => {

@@ -38,6 +38,7 @@ import type { PaneIdentity, PaneScreenReading } from './terminal-content'
 import { notifyAiConfigChanged } from './ai-config'
 import type { SessionEffect } from './generated/session.effect'
 import type { Row, SessionFrame } from './generated/session.frame'
+import type { LedgerBlockRowsLine } from './generated/ledger.blockRows'
 import { frameOf, styleOf, wireRowOf, type CellSpec } from './painter/fixtures'
 import type { CellPainter } from './painter/painter'
 import type { CellModel, ScreenSnapshot } from './cell-model'
@@ -100,7 +101,11 @@ import {
   type BlockRecord,
   type RunningBlockActions,
 } from './scrollback/blocks'
-import { storedBlockRowsForSelection } from './scrollback/block-rows'
+import {
+  parseStoredBlockRows,
+  storedBlockRowsForSelection,
+  type StoredBlockRows,
+} from './scrollback/block-rows'
 import type { AgentRunCompletion } from './run-command'
 import { CommandSnapshotStore } from './command-snapshot'
 import type { ActionFacts, DesiredMode } from './capability'
@@ -7213,6 +7218,565 @@ describe('the projections consume the kernel through the composition root (ADR-0
         ).toContain('recovered')
       })
       expect(client.call.mock.calls.filter(([method]) => method === 'ledger.get')).toHaveLength(1)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('asks a growth read up to the end the metadata reports now, not the cached end', async () => {
+    const client = makeClient()
+    const oldRows = Array.from({ length: 500 }, (_, i) =>
+      JSON.stringify({ from: i, row: wireRowOf([[`old-${i}`, 1, true]] as CellSpec[]) }),
+    )
+    const newRows = Array.from({ length: 500 }, (_, i) =>
+      JSON.stringify({
+        from: 500 + i,
+        row: wireRowOf([[`new-${500 + i}`, 1, true]] as CellSpec[]),
+      }),
+    )
+    const artifactParams: Array<{ fromRow?: number; rowLimit?: number }> = []
+    client.call.mockImplementation((method: string, params: unknown) => {
+      if (method === 'ledger.get') {
+        return Promise.resolve({
+          entry: {},
+          edges: [],
+          artifacts: [
+            {
+              id: 'art-rows',
+              mediaType: 'application/x-nocx-rows',
+              payload: { rowCount: 1000, endRow: 1000, retainedRanges: [{ from: 0, to: 1000 }] },
+            },
+          ],
+        })
+      }
+      if (method === 'ledger.artifact') {
+        artifactParams.push(params as { fromRow?: number; rowLimit?: number })
+        return Promise.resolve({
+          id: 'art-rows',
+          mediaType: 'application/x-nocx-rows',
+          body: `${newRows.join('\n')}\n`,
+          truncated: null,
+          byteLen: 1,
+          firstRow: 0,
+          lastRow: 999,
+          endRow: 1000,
+          rowCount: 1000,
+          retainedRanges: [{ from: 0, to: 1000 }],
+          rangeStart: 500,
+          rangeCount: 500,
+          hasMoreBefore: true,
+          hasMoreAfter: false,
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('make')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'make',
+        },
+      })
+      withScrollback.scrollback.blockManager.applyStoredRows('att-1', {
+        lines: oldRows.map((body) => {
+          const parsed = JSON.parse(body) as { from: number; row: LedgerBlockRowsLine['row'] }
+          return { from: parsed.from, row: parsed.row }
+        }),
+        artifactVersion: 'art-rows',
+        droppedRows: 0,
+        lostRows: 0,
+        truncated: null,
+        firstRow: 0,
+        lastRow: 499,
+        endRow: 500,
+        rowCount: 500,
+        retainedRanges: [{ from: 0, to: 500 }],
+        sealed: false,
+      })
+      const refresh = (
+        content as unknown as { _refreshBlockRows(id: string): Promise<void> }
+      )._refreshBlockRows('att-1')
+      await refresh
+      expect(artifactParams).toHaveLength(1)
+      expect(artifactParams[0].fromRow).toBe(500)
+      expect(artifactParams[0].rowLimit).toBe(500)
+    } finally {
+      teardown()
+    }
+  })
+
+  it("keeps a running block's body and reservation across a reconnect", async () => {
+    const client = makeClient()
+    const artifactCalls: unknown[] = []
+    client.call.mockImplementation((method: string) => {
+      if (method === 'ledger.get') {
+        return Promise.resolve({
+          entry: {},
+          edges: [],
+          artifacts: [
+            {
+              id: 'art-rows',
+              mediaType: 'application/x-nocx-rows',
+              payload: { rowCount: 500, endRow: 500, retainedRanges: [{ from: 0, to: 500 }] },
+            },
+          ],
+        })
+      }
+      if (method === 'ledger.artifact') {
+        artifactCalls.push({})
+        return Promise.reject(new Error('a running block must keep its body'))
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('make')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'make',
+        },
+      })
+      const lines = Array.from({ length: 500 }, (_, i) => ({
+        from: i,
+        row: wireRowOf([[`row-${i}`, 1, true]] as CellSpec[]),
+      }))
+      withScrollback.scrollback.blockManager.applyStoredRows('att-1', {
+        lines,
+        artifactVersion: 'art-rows',
+        droppedRows: 0,
+        lostRows: 0,
+        truncated: null,
+        firstRow: 0,
+        lastRow: 499,
+        endRow: 500,
+        rowCount: 500,
+        retainedRanges: [{ from: 0, to: 500 }],
+        sealed: false,
+      })
+      const before = withScrollback.scrollback.scrollbackInner.querySelector('.cmd-output')
+      expect(before?.querySelectorAll('.term-grid-row')).toHaveLength(500)
+
+      client._fireReconnect()
+      await vi.waitFor(() => {
+        expect(
+          withScrollback.scrollback.scrollbackInner
+            .querySelector('.cmd-block')
+            ?.getAttribute('data-rows-reset'),
+        ).not.toBe('true')
+      })
+      const after = withScrollback.scrollback.scrollbackInner.querySelector('.cmd-output')
+      expect(after).not.toBeNull()
+      expect(after?.querySelectorAll('.term-grid-row')).toHaveLength(500)
+      expect(artifactCalls).toHaveLength(0)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('reuses transcript order across row-read decisions while following visible blocks and replacements', async () => {
+    const { content, teardown } = await mountTerminal(makeClipboard(), {
+      attachToDocument: true,
+    })
+    const terminal = content as unknown as {
+      scrollback: ScrollbackController
+      _registerRestoredBlock(id: string, el: HTMLElement): void
+      _rowReadPriority(id: string): number
+    }
+    const sb = terminal.scrollback
+    const blocks = Array.from({ length: 48 }, (_, index) => {
+      const el = document.createElement('article')
+      el.className = 'cmd-block'
+      el.dataset.entryId = `priority-${index}`
+      terminal._registerRestoredBlock(el.dataset.entryId, el)
+      return el
+    })
+    let visible: HTMLElement | null = null
+    const setRect = (el: HTMLElement) => {
+      el.getBoundingClientRect = () =>
+        ({ top: el === visible ? 20 : -40, bottom: el === visible ? 40 : -20 }) as DOMRect
+    }
+    blocks.forEach(setRect)
+    sb.scrollbackArea.getBoundingClientRect = () => ({ top: 0, bottom: 100 }) as DOMRect
+    const scans = vi.spyOn(sb.scrollbackInner, 'querySelectorAll')
+    const decide = () => blocks.map((el) => terminal._rowReadPriority(el.dataset.entryId!))
+    try {
+      // Restore is the real controller path; priorities are the callbacks the
+      // terminal supplies to the connection's row-read queue.
+      sb.restorePast(blocks)
+      for (let round = 0; round < 4; round++) {
+        const priorities = decide()
+        for (let i = 1; i < priorities.length; i++) {
+          expect(priorities[i]).toBeLessThan(priorities[i - 1])
+        }
+      }
+      visible = blocks[3]
+      expect(decide()[3]).toBe(0)
+      visible = blocks[8]
+      expect(decide()[8]).toBe(0)
+      expect(decide()[3]).toBeGreaterThan(0)
+      visible = null
+
+      // Freeze replaces a command's element at the same seat. Removal and
+      // an older restore change the seats synchronously, before observers run.
+      const replacement = blocks[20].cloneNode() as HTMLElement
+      blocks[20].replaceWith(replacement)
+      blocks[20] = replacement
+      setRect(replacement)
+      terminal._registerRestoredBlock(replacement.dataset.entryId!, replacement)
+      expect(decide()[20]).toBeLessThan(decide()[19])
+      blocks[47].remove()
+      expect(terminal._rowReadPriority('priority-47')).toBe(Number.MAX_SAFE_INTEGER)
+      const older = document.createElement('article')
+      older.className = 'cmd-block'
+      older.dataset.entryId = 'priority-older'
+      setRect(older)
+      terminal._registerRestoredBlock('priority-older', older)
+      sb.restorePast([older])
+      expect(terminal._rowReadPriority('priority-older')).toBeGreaterThan(decide()[0])
+      for (let round = 0; round < 4; round++) decide()
+
+      // One transcript-order rebuild per structural change is enough, not
+      // one complete DOM walk per priority evaluation (hundreds above).
+      const orderScans = scans.mock.calls.filter(([selector]) => selector === ':scope > .cmd-block')
+      expect(orderScans.length).toBeLessThanOrEqual(4)
+    } finally {
+      scans.mockRestore()
+      teardown()
+    }
+  })
+
+  it('does not request excluded echo rows after all command output is loaded', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const terminal = content as unknown as {
+      scrollback: ScrollbackController
+      _registerRestoredBlock(id: string, el: HTMLElement, rows: StoredBlockRows): void
+      _loadVisibleBlockRows(): void
+      _requestBlockRowsPage(id: string, from: number, limit: number): void
+    }
+    try {
+      const rows = parseStoredBlockRows(
+        [0, 1, 2, 3]
+          .map((from) => JSON.stringify({ from, row: { text: `row-${from}` } }))
+          .join('\n'),
+        {
+          truncated: null,
+          state: 'sealed',
+          payload: { outputStartRow: 2, retainedRanges: [{ from: 0, to: 4 }] },
+        },
+        'echo-artifact',
+      )
+      const block = document.createElement('article')
+      block.className = 'cmd-block'
+      block.dataset.entryId = 'echo-command'
+      terminal.scrollback.restorePast([block])
+      terminal._registerRestoredBlock('echo-command', block, rows)
+      const requests = vi.spyOn(terminal, '_requestBlockRowsPage').mockImplementation(() => {})
+      terminal._loadVisibleBlockRows()
+      expect(rows.lines.map((line) => line.from)).toEqual([2, 3])
+      expect(requests).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('registers a restored open block whose rows are still empty', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      const el = document.createElement('article')
+      el.className = 'cmd-block'
+      el.dataset.entryId = 'empty-open'
+      const emptyRows = {
+        lines: [],
+        artifactVersion: 'art-empty',
+        droppedRows: 0,
+        lostRows: 0,
+        truncated: null,
+        firstRow: 0,
+        lastRow: 0,
+        endRow: 0,
+        rowCount: 0,
+        retainedRanges: [],
+        sealed: false,
+      } as StoredBlockRows
+      ;(
+        content as unknown as {
+          _registerRestoredBlock(id: string, el: HTMLElement, rows?: StoredBlockRows): void
+          _restoredRows: Map<string, StoredBlockRows>
+        }
+      )._registerRestoredBlock('empty-open', el, emptyRows)
+      expect(
+        (content as unknown as { _restoredRows: Map<string, StoredBlockRows> })._restoredRows.has(
+          'empty-open',
+        ),
+      ).toBe(true)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('finds a restored command nested inside a turn through the block index', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const sb = (content as unknown as { scrollback: ScrollbackController }).scrollback
+    try {
+      const turn = document.createElement('div')
+      turn.className = 'cmd-block'
+      turn.dataset.entryId = 'turn-1'
+      const children = document.createElement('div')
+      children.className = 'cmd-children'
+      const nested = document.createElement('article')
+      nested.className = 'cmd-block'
+      nested.dataset.entryId = 'nested-command'
+      children.appendChild(nested)
+      turn.appendChild(children)
+      sb.scrollbackInner.appendChild(turn)
+
+      const found = (
+        content as unknown as { _blockElement(entryId: string): HTMLElement | null }
+      )._blockElement('nested-command')
+      expect(found).toBe(nested)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('re-validates a restored block and pages when it crossed the lazy threshold', async () => {
+    const client = makeClient()
+    const artifactParams: Array<{ fromRow?: number; rowLimit?: number }> = []
+    const grown = Array.from({ length: 400 }, (_, i) =>
+      JSON.stringify({
+        from: 100 + i,
+        row: wireRowOf([[`grown-${100 + i}`, 1, true]] as CellSpec[]),
+      }),
+    ).join('\n')
+    client.call.mockImplementation((method: string, params: unknown) => {
+      if (method === 'ledger.get') {
+        return Promise.resolve({
+          entry: {},
+          edges: [],
+          artifacts: [
+            {
+              id: 'art-restored',
+              mediaType: 'application/x-nocx-rows',
+              payload: { rowCount: 500, endRow: 500, retainedRanges: [{ from: 0, to: 500 }] },
+            },
+          ],
+        })
+      }
+      if (method === 'ledger.artifact') {
+        artifactParams.push(params as { fromRow?: number; rowLimit?: number })
+        return Promise.resolve({
+          id: 'art-restored',
+          mediaType: 'application/x-nocx-rows',
+          body: `${grown}\n`,
+          truncated: null,
+          byteLen: grown.length,
+          firstRow: 0,
+          lastRow: 499,
+          endRow: 500,
+          rowCount: 500,
+          retainedRanges: [{ from: 0, to: 500 }],
+          rangeStart: 100,
+          rangeCount: 400,
+          hasMoreBefore: true,
+          hasMoreAfter: true,
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const inner = (content as unknown as { scrollback: { scrollbackInner: HTMLElement } })
+      .scrollback.scrollbackInner
+    try {
+      content.setVisible(true)
+      const el = document.createElement('article')
+      el.className = 'cmd-block'
+      el.dataset.entryId = 'entry-restored'
+      inner.appendChild(el)
+      const old = Array.from({ length: 100 }, (_, i) => ({
+        from: i,
+        row: wireRowOf([[`old-${i}`, 1, true]] as CellSpec[]),
+      }))
+      ;(content as unknown as { _restoredRows: Map<string, StoredBlockRows> })._restoredRows.set(
+        'entry-restored',
+        {
+          lines: old,
+          artifactVersion: 'art-restored',
+          droppedRows: 0,
+          lostRows: 0,
+          truncated: null,
+          firstRow: 0,
+          lastRow: 99,
+          endRow: 100,
+          rowCount: 100,
+          retainedRanges: [{ from: 0, to: 100 }],
+          sealed: false,
+        },
+      )
+      const settle = vi.spyOn(
+        (content as unknown as { scrollback: ScrollbackController }).scrollback,
+        'settleAround',
+      )
+      client._fireReconnect()
+      await vi.waitFor(() => {
+        expect(el.querySelector('.cmd-output')?.textContent).toContain('grown')
+      })
+      expect(settle).toHaveBeenCalled()
+      expect(artifactParams).toHaveLength(1)
+      expect(artifactParams[0].fromRow).toBe(100)
+      expect(artifactParams[0].rowLimit).toBe(400)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('re-validates a small block whose durable rows grew while disconnected', async () => {
+    const client = makeClient()
+    const oldLine = JSON.stringify({ from: 0, row: wireRowOf([['old', 1, true]] as CellSpec[]) })
+    const newLine = JSON.stringify({ from: 1, row: wireRowOf([['grown', 1, true]] as CellSpec[]) })
+    let reads = 0
+    client.call.mockImplementation((method: string) => {
+      if (method === 'ledger.get') {
+        reads++
+        return Promise.resolve({
+          entry: {},
+          edges: [],
+          artifacts: [
+            {
+              id: 'art-rows',
+              mediaType: 'application/x-nocx-rows',
+              payload: { rowCount: 2, endRow: 2, retainedRanges: [{ from: 0, to: 2 }] },
+            },
+          ],
+        })
+      }
+      if (method === 'ledger.artifact') {
+        return Promise.resolve({
+          id: 'art-rows',
+          mediaType: 'application/x-nocx-rows',
+          body: `${oldLine}\n${newLine}\n`,
+          truncated: null,
+          byteLen: oldLine.length + newLine.length,
+          firstRow: 0,
+          lastRow: 1,
+          endRow: 2,
+          rowCount: 2,
+          retainedRanges: [{ from: 0, to: 2 }],
+          rangeStart: 0,
+          rangeCount: 2,
+          hasMoreBefore: false,
+          hasMoreAfter: false,
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('make')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'make',
+        },
+      })
+      // The cached body is the pre-outage one row. No notification replays.
+      withScrollback.scrollback.blockManager.applyStoredRows('att-1', {
+        lines: [{ from: 0, row: wireRowOf([['old', 1, true]] as CellSpec[]) }],
+        artifactVersion: 'art-rows',
+        droppedRows: 0,
+        lostRows: 0,
+        truncated: null,
+        firstRow: 0,
+        lastRow: 0,
+        endRow: 1,
+        rowCount: 1,
+        retainedRanges: [{ from: 0, to: 1 }],
+        sealed: false,
+      })
+      client._fireReconnect()
+      await vi.waitFor(() => {
+        const text =
+          withScrollback.scrollback.scrollbackInner.querySelector('.cmd-output')?.textContent
+        expect(text).toContain('grown')
+      })
+      // One metadata read for the comparison; its artifact metadata is
+      // reused for the page, so the refresh does not ask ledger.get again.
+      expect(reads).toBe(1)
     } finally {
       teardown()
     }

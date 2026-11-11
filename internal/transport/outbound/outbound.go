@@ -94,6 +94,12 @@ var stallNotice = Frame{
 type Frame struct {
 	MsgType int
 	Data    []byte
+	// after runs exactly once when this frame has left the queue: written
+	// to the socket, or dropped because the connection closed first. It is
+	// how a handler that owns a capacity slot releases it at the moment the
+	// owner's decision names — the RESPONSE leaving, never the handler
+	// returning (ADR-y45sp41c). Nil for every ordinary frame.
+	after func()
 }
 
 // Socket is the write seam the pump writes through. *websocket.Conn
@@ -223,6 +229,11 @@ type Conn struct {
 	overload      chan Frame // capacity 1: the reserved control-overload slot
 	roomMu        sync.Mutex
 	room          chan struct{}
+	// enqueueMu makes "is it closed" and "put it on the queue" one decision
+	// against Close: Close takes the write side before draining. Without it an
+	// enqueue that passed the closed check can insert after the drain, return
+	// success, and leave its completion witness with nobody to run it.
+	enqueueMu sync.RWMutex
 
 	stalled    atomic.Bool
 	stallCount atomic.Uint64
@@ -265,17 +276,20 @@ func New(sock Socket, cfg Config) *Conn {
 // path: use TryEnqueueCriticalFrame or TryEnqueueResponse, which use reserved
 // capacity and are never silently dropped.
 func (c *Conn) TryEnqueue(msgType int, data []byte) error {
+	c.enqueueMu.RLock()
 	select {
 	case <-c.closed:
+		c.enqueueMu.RUnlock()
 		return ErrConnClosed
 	default:
 	}
-
 	if c.budget != nil && !c.budget.tryReserve(int64(len(data))) {
+		c.enqueueMu.RUnlock()
 		return c.overflow(msgType, data)
 	}
 	select {
 	case c.queue <- Frame{MsgType: msgType, Data: data}:
+		c.enqueueMu.RUnlock()
 		// The queue accepted a frame again: whatever stall was in
 		// effect is over.
 		if c.stalled.Swap(false) {
@@ -283,6 +297,7 @@ func (c *Conn) TryEnqueue(msgType int, data []byte) error {
 		}
 		return nil
 	default:
+		c.enqueueMu.RUnlock()
 		if c.budget != nil {
 			c.budget.release(int64(len(data)))
 		}
@@ -298,8 +313,13 @@ func (c *Conn) TryEnqueue(msgType int, data []byte) error {
 // closed connection is terminal for the caller.
 func (c *Conn) EnqueueOrdered(ctx context.Context, msgType int, data []byte) error {
 	for {
+		// Observe the wake generation before testing capacity. A dequeue
+		// between a failed send and a later snapshot would otherwise be lost.
+		roomWake := c.roomSignal()
+		c.enqueueMu.RLock()
 		select {
 		case <-c.closed:
+			c.enqueueMu.RUnlock()
 			return ErrConnClosed
 		default:
 		}
@@ -307,6 +327,7 @@ func (c *Conn) EnqueueOrdered(ctx context.Context, msgType int, data []byte) err
 		if c.budget != nil {
 			budgetChanged = c.budget.changedSignal()
 			if !c.budget.tryReserve(int64(len(data))) {
+				c.enqueueMu.RUnlock()
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
@@ -321,17 +342,20 @@ func (c *Conn) EnqueueOrdered(ctx context.Context, msgType int, data []byte) err
 		}
 		select {
 		case c.queue <- Frame{MsgType: msgType, Data: data}:
+			c.enqueueMu.RUnlock()
 			return nil
-		case <-ctx.Done():
+		default:
+			c.enqueueMu.RUnlock()
 			if c.budget != nil {
 				c.budget.release(int64(len(data)))
 			}
+		}
+		select {
+		case <-ctx.Done():
 			return ctx.Err()
 		case <-c.closed:
-			if c.budget != nil {
-				c.budget.release(int64(len(data)))
-			}
 			return ErrConnClosed
+		case <-roomWake:
 		}
 	}
 }
@@ -363,26 +387,51 @@ func (c *Conn) TryEnqueueResponseFrame(msgType int, data []byte) error {
 	return c.TryEnqueueCriticalFrame(msgType, data)
 }
 
+// TryEnqueueResponseFrameSent is TryEnqueueResponseFrame with a completion
+// witness: after is called exactly once, when the frame has left the queue —
+// written, or dropped by Close before the pump reached it. It is what a
+// handler holding a stored-row slot waits on, since the slot must cover the
+// response while it sits in the queue or in the socket write (ADR-y45sp41c).
+//
+// A frame that cannot be queued calls after itself: the response will never
+// be written, so a slot held for it must not be kept.
+func (c *Conn) TryEnqueueResponseFrameSent(msgType int, data []byte, after func()) error {
+	err := c.tryEnqueueCriticalFrame(msgType, data, after)
+	if err != nil && after != nil {
+		after()
+	}
+	return err
+}
+
 // TryEnqueueCriticalFrame queues a non-refreshable frame on reserved capacity
 // shared with responses and data-plane carriers. Broker request notifications
 // belong here: dropping one makes the backend fail before the renderer can
 // perform the requested effect. Refreshable state and PTY output must continue
 // to use TryEnqueue.
 func (c *Conn) TryEnqueueCriticalFrame(msgType int, data []byte) error {
+	return c.tryEnqueueCriticalFrame(msgType, data, nil)
+}
+
+func (c *Conn) tryEnqueueCriticalFrame(msgType int, data []byte, after func()) error {
+	c.enqueueMu.RLock()
 	select {
 	case <-c.closed:
+		c.enqueueMu.RUnlock()
 		return ErrConnClosed
 	default:
 	}
 
 	if c.budget != nil && !c.budget.tryReserve(int64(len(data))) {
+		c.enqueueMu.RUnlock()
 		c.overflowCritical()
 		return ErrStalled
 	}
 	select {
-	case c.criticalQueue <- Frame{MsgType: msgType, Data: data}:
+	case c.criticalQueue <- Frame{MsgType: msgType, Data: data, after: after}:
+		c.enqueueMu.RUnlock()
 		return nil
 	default:
+		c.enqueueMu.RUnlock()
 		if c.budget != nil {
 			c.budget.release(int64(len(data)))
 		}
@@ -512,20 +561,32 @@ func (c *Conn) StallCount() uint64 { return c.stallCount.Load() }
 // will never be written.
 func (c *Conn) Close() {
 	c.closeOnce.Do(func() {
+		// Close owns the queue side while it closes and drains. An enqueue
+		// either completed before this write lock (and is drained below) or
+		// runs after it and sees closed. There is no success nobody drains.
+		c.enqueueMu.Lock()
 		close(c.closed)
-		if c.budget != nil {
-			for {
-				select {
-				case f := <-c.queue:
+		// Every queued frame is now undeliverable, and every completion
+		// witness on one must run: a frame dropped by Close is as final as
+		// one written, and a slot held for it would never come back.
+		for {
+			select {
+			case f := <-c.queue:
+				if c.budget != nil {
 					c.budget.release(int64(len(f.Data)))
-				case f := <-c.criticalQueue:
-					c.budget.release(int64(len(f.Data)))
-				default:
-					goto drained
 				}
+				c.finish(f)
+			case f := <-c.criticalQueue:
+				if c.budget != nil {
+					c.budget.release(int64(len(f.Data)))
+				}
+				c.finish(f)
+			default:
+				goto drained
 			}
-		drained:
 		}
+	drained:
+		c.enqueueMu.Unlock()
 		_ = c.sock.Close()
 		c.pingRoom()
 	})
@@ -560,7 +621,9 @@ func (c *Conn) pump(writeDeadline time.Duration) {
 			if c.budget != nil {
 				c.budget.release(int64(len(f.Data)))
 			}
-			if c.write(deadline, f) != nil {
+			err := c.write(deadline, f)
+			c.finish(f)
+			if err != nil {
 				return
 			}
 			continue
@@ -577,7 +640,9 @@ func (c *Conn) pump(writeDeadline time.Duration) {
 			if c.budget != nil {
 				c.budget.release(int64(len(f.Data)))
 			}
-			if c.write(deadline, f) != nil {
+			err := c.write(deadline, f)
+			c.finish(f)
+			if err != nil {
 				return
 			}
 		case f := <-c.queue:
@@ -591,6 +656,14 @@ func (c *Conn) pump(writeDeadline time.Duration) {
 			}
 			c.pingRoom()
 		}
+	}
+}
+
+// finish runs a frame's completion witness, exactly once. A frame without
+// one is the ordinary case and costs nothing.
+func (c *Conn) finish(f Frame) {
+	if f.after != nil {
+		f.after()
 	}
 }
 

@@ -3096,7 +3096,14 @@ func (s *WSServer) closeBlockRowsNow(ctx context.Context, sid session.ID, attemp
 	closingIn := block.closingIn
 	bs.mu.Unlock()
 	if len(closing) > 0 && !closingIn {
-		// The closing screen goes where the artifact actually is.
+		// With no delivery yet, zero is the empty artifact's cursor, not
+		// this command's absolute row origin. Its first append can start at
+		// the end marker's boundary without claiming earlier commands' rows
+		// as lost. Keep the closing screen in the output mark's coordinates.
+		if cursor == 0 {
+			cursor = endRow
+		}
+		// Once rows exist, the closing screen follows the artifact's cursor.
 		//
 		// The index relation the block states is that the artifact holds the
 		// interval's rows at [begin, endRow) and its closing screen follows at
@@ -3973,8 +3980,10 @@ func (bs *blockStream) publishFence(ctx context.Context, s *WSServer, sid sessio
 	}
 }
 
-// notifyBlockSubscriber sends a block notification to the session's one
-// attached subscriber — the same fan-out files.changed and git.changed use.
+// notifyBlockSubscriber sends ordered block notifications to the session's
+// one attached subscriber. Open, growth and close share the same bounded FIFO;
+// a final close has no later notification guaranteed to repair its loss. The
+// independent outbound writer drains while the committing producer waits.
 // No subscriber, no send: a client that attaches later reads history.
 //
 // Inside a lifecycle frame the notification waits for the frame's commit, in
@@ -3983,10 +3992,10 @@ func (bs *blockStream) publishFence(ctx context.Context, s *WSServer, sid sessio
 // store — and, after the frame's failure, this stream's memory — still holds
 // open. Outside a frame it goes at once.
 func (s *WSServer) notifyBlockSubscriber(ctx context.Context, sid session.ID, method string, params any) {
-	lifecyclecommit.OnCommit(ctx, func() { s.sendBlockNotification(sid, method, params) })
+	lifecyclecommit.OnCommit(ctx, func() { s.sendBlockNotification(ctx, sid, method, params) })
 }
 
-func (s *WSServer) sendBlockNotification(sid session.ID, method string, params any) {
+func (s *WSServer) sendBlockNotification(ctx context.Context, sid session.ID, method string, params any) {
 	rx := s.getRx(sid)
 	if rx == nil {
 		return
@@ -3995,7 +4004,7 @@ func (s *WSServer) sendBlockNotification(sid session.ID, method string, params a
 	if wconn == nil {
 		return
 	}
-	if err := wconn.TryNotify(method, mustMarshal(params)); err != nil {
+	if err := wconn.EnqueueOrderedNotify(ctx, method, mustMarshal(params)); err != nil {
 		s.log.Debug("write block notification", "session", sid, "method", method, "error", err)
 	}
 }

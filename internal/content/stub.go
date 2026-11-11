@@ -433,6 +433,11 @@ func (s *ledgerStub) Artifact(_ context.Context, id string) (*Artifact, error) {
 	return nil, ErrNotImplemented
 }
 
+func (s *ledgerStub) ArtifactRange(_ context.Context, id string, fromRow uint64, rowLimit int) (*ArtifactRange, error) {
+	s.log.Info("content stub: LedgerRepository.ArtifactRange", "id", id, "fromRow", fromRow, "rowLimit", rowLimit)
+	return nil, ErrNotImplemented
+}
+
 func (s *ledgerStub) AddEdge(_ context.Context, e Edge) error {
 	s.log.Info("content stub: LedgerRepository.AddEdge", "from", e.From, "to", e.To, "rel", string(e.Rel))
 	return ErrNotImplemented

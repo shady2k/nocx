@@ -5,26 +5,24 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-// A FULL-SCREEN PROGRAM MUST NOT LEAVE THE PANE ROWS IT CANNOT SHOW, AND ITS
-// EXIT MUST NOT BE THE RESIZE (nocx-djx1u).
+// AN ALTERNATE-SCREEN ENTRY AND EXIT CHANGE NOTHING (ADR-92zzg2y2).
 //
-// Leaving the alternate screen sends no resize: a resize there is the SIGWINCH
-// that starts the next borrow (ADR-2yzsq8mk decision 4). So the pty keeps the
-// grid the program was given — its ROWS included — and the four-side margin
-// (decision 5) is two rows shorter than the box that program had. A plain ssh
-// shell has no OSC 133, so no authenticated prompt ever comes to hand the grid
-// back; the rows that used to fall off the bottom were the newest ones, the
-// prompt included.
+// The old rule fitted a full-screen program flush to the pane and gave it one
+// row of bottom margin; leaving it kept the program's grid, and a markerless
+// shell handed the grid back at the person's first key with one resize
+// (ADR-2yzsq8mk, nocx-djx1u). The owner's rule of 2026-11-10 gives every mode
+// the same one-cell gutter and half-row vertical margin, so the terminal's size
+// never changes at a switch and there is nothing to hand back.
 //
-// The owner's answer, and this is what the spec proves in order:
+// A plain ssh shell is the sharpest witness: it has no OSC 133 markers, so if
+// the switch did resize, nothing in the session could announce the moment the
+// program was done with the pane. This spec proves:
 //
-//   1. until something hands the grid back, the pane IS the program's box — rows
-//      all visible, no vertical margin — because the alternative is clipping;
-//   2. the hand-back moment is the person's FIRST KEY: the shell is what reads a
-//      key, so that key is the prompt a markerless session can observe, and the
-//      exit itself stays untouched;
-//   3. at that key the ledger's column and its four margins return, with exactly
-//      ONE resize — never one the program's own exit caused, and never two.
+//   1. entering and leaving the alternate screen sends NO resize, and the pty's
+//      grid is unchanged;
+//   2. the pane keeps its one gutter in both buffers, and no rows are cut;
+//   3. a screenful printed after the exit is whole, newest row included;
+//   4. a program that enters the screen again still changes nothing.
 
 const GRID = '.pane.active .terminal-live-grid'
 const ROW = '.term-grid-row'
@@ -41,9 +39,7 @@ interface Frame {
 }
 
 interface Layout {
-  /** The layout class that gives the vertical margin up for a borrowed grid. */
-  borrowed: boolean
-  /** The margin the layout is paying right now, in CSS pixels. */
+  /** The one gutter the layout pays, in CSS pixels. */
   paddingTop: number
   paddingBottom: number
   /** How many resize RPCs this page has sent since it loaded. */
@@ -80,7 +76,6 @@ async function layout(page: import('@playwright/test').Page): Promise<Layout | n
     const style = getComputedStyle(el)
     const counter = (window as unknown as { __nocxResizes?: unknown[] }).__nocxResizes
     return {
-      borrowed: el.classList.contains('inner-borrowed-grid'),
       paddingTop: parseFloat(style.paddingTop) || 0,
       paddingBottom: parseFloat(style.paddingBottom) || 0,
       resizes: Array.isArray(counter) ? counter.length : -1,
@@ -190,23 +185,31 @@ async function openMarkerlessPane(page: import('@playwright/test').Page): Promis
   }
 }
 
-test('a borrowed grid is shown whole, and one key gives the pane its margins back (nocx-djx1u)', async ({
+test('entering and leaving the alternate screen sends no resize, and the screenful after it is whole', async ({
   page,
 }) => {
   test.setTimeout(240_000)
   const stand = await openMarkerlessPane(page)
   try {
+    // The shell has drawn and settled; its own attach fit is not this test's
+    // subject.
+    const before = await frame(page)
+    const beforeLayout = await layout(page)
+    expect(before, 'the shell painted a grid').not.toBeNull()
+    expect(beforeLayout).not.toBeNull()
+
     // ONE COMMAND, because the shell is markerless: enter the alternate screen,
-    // hold it long enough for the switch's resize to apply and settle, leave it,
-    // then print a screenful on the primary buffer.
+    // hold it, leave it, then print a screenful on the primary buffer.
     await page.keyboard.type(
-      "printf '\\033[?1049h\\033[H'; sleep 0.8; printf '\\033[?1049l'; " +
-        'i=1; while [ $i -le 40 ]; do echo EXITROW-$i; i=$((i+1)); done',
+      "C1=$(stty size); printf '\\033[?1049h\\033[H'; sleep 0.8; " +
+        "printf '\\033[?1049l'; " +
+        'i=1; while [ $i -le 40 ]; do echo EXITROW-$i; i=$((i+1)); done; ' +
+        'printf "SIZES %s %s\\n" "$C1" "$(stty size)"',
     )
     await page.keyboard.press('Enter')
 
-    // 1. THE SCREENFUL IS WHOLE. The last row is the witness: it is the newest
-    //    row, and the one a two-row-short box used to cut.
+    // THE SCREENFUL IS WHOLE. The last row is the witness: it is the newest
+    // row, and the one a short box used to cut.
     await expect
       .poll(
         async () => {
@@ -216,114 +219,80 @@ test('a borrowed grid is shown whole, and one key gives the pane its margins bac
         { timeout: 40_000 },
       )
       .toBe(true)
-    const before = await frame(page)
-    const beforeLayout = await layout(page)
-    const spoken = `borrowed: ${JSON.stringify(before)} ${JSON.stringify(beforeLayout)}`
-    expect(before, spoken).not.toBeNull()
-    expect(beforeLayout, spoken).not.toBeNull()
-    // NOTHING IS CUT: the grid's box is the pane's box…
-    expect(before!.fits, spoken).toBe(true)
-    const newest = before!.painted.find((row) => row.text === 'EXITROW-40')
-    expect(newest, spoken).toBeDefined()
-    expect(newest!.bottom, spoken).toBeLessThanOrEqual(before!.area.bottom + 1)
-    // …and that is the program's own box: the pane has given up the vertical
-    // margin to hold those rows, which is the state the exit leaves behind.
-    expect(beforeLayout!.borrowed, spoken).toBe(true)
-    expect(beforeLayout!.paddingTop, spoken).toBe(0)
-    expect(beforeLayout!.paddingBottom, spoken).toBe(0)
-
-    // 2. THE FIRST KEY IS THE PROMPT A MARKERLESS SESSION HAS. One character at
-    //    the shell; it is read, and it is what hands the grid back.
-    await page.keyboard.type('x')
-    await expect.poll(async () => (await layout(page))?.borrowed, { timeout: 20_000 }).toBe(false)
-
-    // 3. THE MARGINS ARE BACK, and the rows are the ordinary box's.
     const after = await frame(page)
     const afterLayout = await layout(page)
-    const spokenAfter = `released: ${JSON.stringify(after)} ${JSON.stringify(afterLayout)}`
-    expect(after, spokenAfter).not.toBeNull()
-    expect(afterLayout, spokenAfter).not.toBeNull()
-    expect(afterLayout!.paddingTop, spokenAfter).toBeGreaterThan(0)
-    expect(afterLayout!.paddingBottom, spokenAfter).toBeGreaterThan(0)
-    expect(after!.fits, spokenAfter).toBe(true)
-    // The grid came down to the box the margin leaves: the borrowed grid's rows
-    // were the full-screen count, and this one is the pane's own.
-    expect(after!.grid.rows, spokenAfter).toBeLessThan(before!.grid.rows)
-    // AND EXACTLY ONE RESIZE CAME OF IT — the one the hand-back owes, never one
-    // the exit caused, and never a second from the key or the settle.
-    await page.waitForTimeout(500)
-    const settled = await layout(page)
-    expect(settled!.resizes - beforeLayout!.resizes, spokenAfter).toBe(1)
+    const spoken = `after the switch: ${JSON.stringify(after)} ${JSON.stringify(afterLayout)}`
+    expect(after, spoken).not.toBeNull()
+    expect(afterLayout, spoken).not.toBeNull()
+    // NOTHING IS CUT: the grid's box is inside the pane's, and the newest row
+    // is above the pane's bottom edge by the one gutter.
+    expect(after!.fits, spoken).toBe(true)
+    const newest = after!.painted.find((row) => row.text === 'EXITROW-40')
+    expect(newest, spoken).toBeDefined()
+    expect(newest!.bottom, spoken).toBeLessThanOrEqual(after!.area.bottom + 1)
+    // THE SAME GRID AS BEFORE THE SWITCH, and the same one gutter.
+    expect(after!.grid.rows, spoken).toBe(before!.grid.rows)
+    expect(afterLayout!.paddingTop, spoken).toBeCloseTo(beforeLayout!.paddingTop, 1)
+    expect(afterLayout!.paddingBottom, spoken).toBeCloseTo(beforeLayout!.paddingBottom, 1)
+    // AND THE PTY'S OWN SIZE DID NOT MOVE. The switch is a presentation change
+    // (ADR-92zzg2y2); the pane never moved, so `stty size` on both sides of it
+    // is one number. (A resize RPC count would also count the pane's own
+    // attach fit; the program's ground truth is the size it reads.)
+    const sizes = after!.painted.find((row) => row.text.startsWith('SIZES '))
+    expect(sizes, `${spoken} — the command reported both sizes`).toBeDefined()
+    // `stty size` prints "rows cols"; both pairs must be one size.
+    const [, r1, c1, r2, c2] = sizes!.text.split(/\s+/)
+    expect(r1, spoken).toBeDefined()
+    expect(`${r2} ${c2}`, spoken).toBe(`${r1} ${c1}`)
   } finally {
     await stand.close()
   }
 })
 
-// A PROGRAM THAT TAKES THE PANE AGAIN OWNS ITS KEYS AGAIN (nocx-djx1u).
-//
-// The exit keeps the grid the program was given, and in a markerless session
-// the person's first key is what hands it back. But "leaving the alternate
-// screen" is not the same state as "outside it": a program that walks back in
-// owns the pane again — vim re-entering after a suspend, a TUI that redraws by
-// leaving and entering — and a key pressed there is the PROGRAM's key, not a
-// prompt. Nothing retired the retained grid on the way in, so that key used to
-// release a grid the program still owned and refit the pane with the margin
-// subtracted twice: a resize under a running full-screen program, which is the
-// SIGWINCH decision 4 of ADR-2yzsq8mk exists to prevent.
-//
-// The sequence a browser is needed for, in one shell line: enter, leave (the
-// grid is retained), enter again and hold, leave again, and print a row on the
-// primary buffer.
-test('a program that takes the pane again keeps the grid from its keys (nocx-djx1u)', async ({
-  page,
-}) => {
+test('a program that takes the pane again still changes nothing', async ({ page }) => {
   test.setTimeout(240_000)
   const stand = await openMarkerlessPane(page)
   try {
+    const beforeLayout = await layout(page)
+    expect(beforeLayout).not.toBeNull()
+    const before = await frame(page)
+    expect(before).not.toBeNull()
+
+    // Enter, leave, enter again, leave again, and print a row on the primary
+    // buffer. Nothing in this sequence is a size change.
     await page.keyboard.type(
-      "printf '\\033[?1049h\\033[H'; sleep 1.2; printf '\\033[?1049l'; sleep 1.2; " +
-        "printf '\\033[?1049h\\033[H'; sleep 6; printf '\\033[?1049l'; printf 'AFTER\\n'",
+      "C1=$(stty size); printf '\\033[?1049h\\033[H'; sleep 1.2; " +
+        "printf '\\033[?1049l'; sleep 1.2; " +
+        "printf '\\033[?1049h\\033[H'; sleep 1.2; printf '\\033[?1049l'; " +
+        'printf "AFTER\\n"; printf "SIZES %s %s\\n" "$C1" "$(stty size)"',
     )
     await page.keyboard.press('Enter')
 
-    const program = '.pane.active .scrollback-layout.inner-pane-program'
-    const borrowed = '.pane.active .scrollback-layout.inner-borrowed-grid'
-
-    // 1. The program owns the pane…
-    await expect(page.locator(program)).toHaveCount(1, { timeout: 30_000 })
-    // 2. …leaves it, and the grid it was given stays the pane's — the state a
-    //    key at the shell is what releases.
-    await expect(page.locator(borrowed)).toHaveCount(1, { timeout: 30_000 })
-    // 3. …and takes it again while its command still runs.
-    await expect(page.locator(program)).toHaveCount(1, { timeout: 30_000 })
-    await page.locator('.pane.active .terminal-live-container').click()
-
-    // A KEY INSIDE THE PROGRAM IS THE PROGRAM'S. It proves no prompt, so
-    // nothing is handed back and no resize goes out while the pane is the
-    // program's.
-    const before = await layout(page)
-    expect(before).not.toBeNull()
-    await page.keyboard.press('x')
-    await page.waitForTimeout(600)
-    const during = await layout(page)
-    const spoken = `during: ${JSON.stringify(before)} → ${JSON.stringify(during)}`
-    expect(during, spoken).not.toBeNull()
-    expect(during!.borrowed, spoken).toBe(false)
-    expect(during!.resizes - before!.resizes, spoken).toBe(0)
-    // …and the program is still there: the hold was long enough to say so.
-    await expect(page.locator(program)).toHaveCount(1)
-
-    // 4. Out again: the grid it was given is retained once more — clearing the
-    //    old borrow on the way in did not cost this exit its rows — and the
-    //    person's own key at the shell hands it back, one resize, once.
-    await expect(page.locator(borrowed)).toHaveCount(1, { timeout: 30_000 })
-    const released = await layout(page)
-    expect(released).not.toBeNull()
-    await page.keyboard.type('y')
-    await expect.poll(async () => (await layout(page))?.borrowed, { timeout: 20_000 }).toBe(false)
-    await page.waitForTimeout(500)
-    const settled = await layout(page)
-    expect(settled!.resizes - released!.resizes).toBe(1)
+    await expect
+      .poll(
+        async () => {
+          const f = await frame(page)
+          return (
+            (f?.painted.some((row) => row.text === 'AFTER') ?? false) &&
+            (f?.painted.some((row) => row.text.startsWith('SIZES ')) ?? false)
+          )
+        },
+        { timeout: 40_000 },
+      )
+      .toBe(true)
+    const after = await frame(page)
+    const afterLayout = await layout(page)
+    const spoken = `after two switches: ${JSON.stringify(after)} ${JSON.stringify(afterLayout)}`
+    expect(after, spoken).not.toBeNull()
+    expect(afterLayout, spoken).not.toBeNull()
+    expect(after!.fits, spoken).toBe(true)
+    expect(after!.grid.rows, spoken).toBe(before!.grid.rows)
+    const sizes = after!.painted.find((row) => row.text.startsWith('SIZES '))
+    expect(sizes, `${spoken} — the command reported both sizes`).toBeDefined()
+    // `stty size` prints "rows cols"; both pairs must be one size.
+    const [, r1, c1, r2, c2] = sizes!.text.split(/\s+/)
+    expect(r1, spoken).toBeDefined()
+    expect(`${r2} ${c2}`, spoken).toBe(`${r1} ${c1}`)
   } finally {
     await stand.close()
   }

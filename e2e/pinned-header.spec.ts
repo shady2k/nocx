@@ -16,7 +16,7 @@
  *     output: its header's top edge is the scroller's top edge, the command it
  *     shows is that block's, and its actions work from there (the ⋮ menu
  *     opens, Stop stops a running command).
- *  2. NO ROW MOVED. The header must not move a single row (ADR-2yzsq8mk,
+ *  2. NO ROW MOVED. The header must not move a single row (ADR-92zzg2y2,
  *     PR #752, merged the day this was asked for). Every output row keeps its
  *     position in the scroller's CONTENT between the unpinned frame and the
  *     pinned one, and the block keeps its own offset and height. A sticky
@@ -302,7 +302,7 @@ test.describe('a tall block keeps its own header at the top of the pane', () => 
     expect(pinned.pinned, 'one pinned header at a time').toHaveLength(1)
     expect(pinned.pinned[0]!.command, 'and it is the block the top of the view is in').toBe(LONG_A)
 
-    // NO ROW MOVED (ADR-2yzsq8mk, PR #752). Every row the two frames share
+    // NO ROW MOVED (ADR-92zzg2y2, PR #752). Every row the two frames share
     // holds its place in the scroller's content, and the block's own top and
     // height are unchanged — the header is overlaying the output, not taking
     // a row of it.
@@ -469,7 +469,7 @@ test.describe('a tall block keeps its own header at the top of the pane', () => 
     expect(scrolledBlock.header!.top, 'the tall header scrolled away').toBeLessThan(-100)
     expect(scrolled.pinned, 'no header is pinned over the view').toHaveLength(0)
 
-    // NO ROW MOVED (ADR-2yzsq8mk): the decision is a position change only, so
+    // NO ROW MOVED (ADR-92zzg2y2): the decision is a position change only, so
     // every shared row holds its place in the scroller's content -- and the
     // shared set is the SAME artifact rows, matched by identity.
     const restRows = new Map(block.rows.map((row) => [row.id, row.y]))
@@ -653,7 +653,7 @@ test.describe('a tall block keeps its own header at the top of the pane', () => 
     // resize had settled -- so the new header's size was never judged and it
     // stayed sticky over the output. The replacement itself must schedule the
     // same check, with no scroll and no resize to lean on.
-    await page.setViewportSize({ width: 900, height: 720 })
+    await page.setViewportSize({ width: 900, height: 640 })
     await page.goto('/')
     await promptReady(page)
     const words = Array.from({ length: 120 }, (_, i) => `late-${String(i + 1).padStart(3, '0')}`)
@@ -745,7 +745,7 @@ test.describe('a tall block keeps its own header at the top of the pane', () => 
     // that changed -- no scroll, no scroller resize. A per-trigger check had
     // no path here, so an oversized header stayed pinned (and a newly compact
     // one stayed unpinned). The decision has to follow the header's own size.
-    await page.setViewportSize({ width: 900, height: 720 })
+    await page.setViewportSize({ width: 900, height: 640 })
     await page.goto('/')
     await promptReady(page)
     const words = Array.from({ length: 40 }, (_, i) => `word-${String(i + 1).padStart(2, '0')}`)
@@ -774,8 +774,9 @@ test.describe('a tall block keeps its own header at the top of the pane', () => 
     )
 
     try {
-      // THE SETTING, AS SETTINGS WRITES IT. Nordwand Mono is wider: the same
-      // command's header goes from 160px to 180px against a 166px third here.
+      // THE SETTING, AS SETTINGS WRITES IT. Nordwand Mono is wider: at this
+      // pane the same command's header goes from 140px to 160–180px (the
+      // engines round the face differently) against a ~150px third here.
       const info = await resolveBackend(page)
       await rpc(page, info, 'settings.set', {
         key: 'terminal.fontFamily',

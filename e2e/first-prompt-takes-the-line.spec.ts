@@ -27,7 +27,7 @@ test('a fresh tab runs the first command typed at its prompt', async ({ page }) 
   // earliest instant a person can type, and it is a product state, not a delay.
   await promptReady(page)
 
-  await page.keyboard.type(`printf '${MARKER}\\n'`)
+  await page.keyboard.type(`printf 'first-prompt-line-%s\\n' '${nonce}'`)
   await page.keyboard.press('Enter')
 
   // "The command ran", observable at the product's own surface: a settled block

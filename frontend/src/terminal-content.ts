@@ -10879,18 +10879,6 @@ export class TerminalContent extends BasePaneContent {
           })
           return
         }
-        // This is deliberately after lifecycle.submitAttempt resolved: the
-        // broker can withdraw the request during that round trip, and a
-        // check at submit entry would miss the only unsafe window.
-        if (beforeWrite && !beforeWrite()) return
-        // Detach the queue BEFORE the command goes out, flush it after.
-        //
-        // Both halves matter and the order is the whole point. Close the held
-        // window before submitting so the command's paste and Enter enter the
-        // session-intent queue first; then replay keys captured during the
-        // attempt RPC. The serial queue keeps those later intents behind the
-        // command, rather than allowing Enter to bypass its paste.
-        const taken = this.takeHeldWindow()
         // THE GRID THE COMMAND RUNS AT IS APPLIED BEFORE ITS BYTES GO OUT
         // (nocx-evj4b.1.9). The prompt prediction measures that height at the
         // Enter, but its report rides the settle timer while the attempt's own
@@ -10904,7 +10892,13 @@ export class TerminalContent extends BasePaneContent {
         const deliver = (): void => {
           try {
             if (this._bind !== bind || !this._bindIsCurrent(origin)) return
-            deliverCommand(taken)
+            // The broker can withdraw during either the attempt or geometry
+            // round trip. This gate also marks its write started: run it once,
+            // only when the bytes can actually follow.
+            if (beforeWrite && !beforeWrite()) return
+            // Keep raw input held through the geometry receipt, then detach
+            // immediately before paste/Enter and replay it after the command.
+            deliverCommand(this.takeHeldWindow())
           } finally {
             // Written, or withdrawn — either way this submission has RESOLVED,
             // and whoever is waiting for its delivery may go on.

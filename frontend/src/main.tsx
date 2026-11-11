@@ -4,6 +4,7 @@ import { render } from 'solid-js/web'
 import { Show, createSignal, untrack } from 'solid-js'
 import App from './App'
 import { log } from './log'
+import { mountSettingsShortcut } from './settings-shortcut'
 import { t } from './i18n/locale-model'
 import { hasWailsWebview, installBrowserTransport } from './wails-runtime'
 import { WSClient } from './ipc'
@@ -1646,13 +1647,7 @@ function main(): void {
   // there is no sidebar to reveal anything in.
   revealFilesView = () => sidebar?.revealView(FILES_VIEW_ID)
 
-  // Cmd/Ctrl+, opens or focuses the Settings tab.
-  document.addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key === ',') {
-      e.preventDefault()
-      openSettingsPane()
-    }
-  })
+  mountSettingsShortcut(openSettingsPane)
 
   // ── Quick-connect picker (nocx-imkb.7) ──────────────────────────────
   // Both the initial tab strip AND replacement strips (via replaceStrip)

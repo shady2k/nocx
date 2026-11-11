@@ -22896,7 +22896,7 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
     // resize that followed scrolled its summary off the top — the block's first
     // rows landed in its body, which is the owner's screenshot. The write waits
     // for the same receipt the alternate-screen switch's fence waits for.
-    const { session, typeCommand, submitCommand, restore } = await paneWithLayout()
+    const { content, session, typeCommand, submitCommand, restore } = await paneWithLayout()
     try {
       let applied!: () => void
       session.resizeApplied.mockImplementation(
@@ -22916,8 +22916,113 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
       // The write reached the receipt and is holding on it.
       await vi.waitFor(() => expect(session.resizeApplied).toHaveBeenCalled())
       expect(bytes()).toEqual([])
+      typeIntoPane(content, 'x')
+      expect(bytes()).toEqual([])
       applied()
-      await vi.waitFor(() => expect(bytes().length).toBeGreaterThan(0))
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls.filter(([kind]) => kind !== 'focus')).toEqual([
+          ['paste', 'top', 'bare'],
+          ['key', 'enter'],
+          ['text', 'x'],
+        ]),
+      )
+    } finally {
+      restore()
+    }
+  })
+
+  function nextDelivery(content: TerminalContent): Promise<void> {
+    const submitter = content as unknown as {
+      submitShellCommand(options: { onDelivered?: () => void }): unknown
+    }
+    const submit = submitter.submitShellCommand.bind(submitter)
+    return new Promise((resolve) => {
+      vi.spyOn(submitter, 'submitShellCommand').mockImplementationOnce((options) =>
+        submit({
+          ...options,
+          onDelivered: () => {
+            options.onDelivered?.()
+            resolve()
+          },
+        }),
+      )
+    })
+  }
+
+  it('a Ctrl-C during submit geometry withdraws the command and held input', async () => {
+    const { content, session, typeCommand, submitCommand, restore } = await paneWithLayout()
+    let applied!: () => void
+    session.resizeApplied.mockImplementation(
+      () =>
+        new Promise<'applied'>((resolve) => {
+          applied = () => resolve('applied')
+        }),
+    )
+    const delivered = nextDelivery(content)
+    try {
+      typeCommand('top')
+      submitCommand('top')
+      await vi.waitFor(() => expect(applied).toBeDefined())
+      typeIntoPane(content, 'x', '\x03')
+      applied()
+      await delivered
+      expect(session.intent.mock.calls.filter(([kind]) => kind !== 'focus')).toEqual([])
+    } finally {
+      restore()
+    }
+  })
+
+  it('an agent withdrawal during submit geometry writes nothing', async () => {
+    const { content, session, restore } = await paneWithLayout()
+    let applied!: () => void
+    session.resizeApplied.mockImplementation(
+      () =>
+        new Promise<'applied'>((resolve) => {
+          applied = () => resolve('applied')
+        }),
+    )
+    const controller = new AbortController()
+    const delivered = nextDelivery(content)
+    try {
+      const pending = content.submitAgentCommand('touch pid', 'geometry-cancel', controller.signal)
+      const rejected = expect(pending).rejects.toThrow('submission expired before execution')
+      await vi.waitFor(() => expect(applied).toBeDefined())
+      controller.abort()
+      applied()
+      await delivered
+      expect(session.intent.mock.calls.filter(([kind]) => kind !== 'focus')).toEqual([])
+      await rejected
+    } finally {
+      restore()
+    }
+  })
+
+  it('a replaced session receives no command or held input from pending geometry', async () => {
+    const { content, session, typeCommand, submitCommand, restore } = await paneWithLayout()
+    let applied!: () => void
+    session.resizeApplied.mockImplementation(
+      () =>
+        new Promise<'applied'>((resolve) => {
+          applied = () => resolve('applied')
+        }),
+    )
+    const delivered = nextDelivery(content)
+    try {
+      typeCommand('top')
+      submitCommand('top')
+      await vi.waitFor(() => expect(applied).toBeDefined())
+      typeIntoPane(content, 'x')
+      const onExit = session.onExit.mock.calls[0][0] as (exit: {
+        sessionId: string
+        cause: 'interrupted'
+      }) => void
+      onExit({ sessionId: session.sessionId, cause: 'interrupted' })
+      expect(await content.reconnect()).toBe(true)
+      const replacement = sessionOf(content)
+      replacement.intent.mockClear()
+      applied()
+      await delivered
+      expect(replacement.intent.mock.calls.filter(([kind]) => kind !== 'focus')).toEqual([])
     } finally {
       restore()
     }

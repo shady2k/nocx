@@ -530,7 +530,7 @@ describe('TerminalContent geometry follows accepted painter frames', () => {
     const widthSpy = vi
       .spyOn(HTMLElement.prototype, 'clientWidth', 'get')
       .mockImplementation(function (this: HTMLElement) {
-        return this.classList.contains('scrollback-area') ? 976 : 0
+        return this.classList.contains('scrollback-area') ? 974 : 0
       })
     // jsdom cannot resolve CSS custom properties. Model the stylesheet's
     // one-cell gutter: the UI font's 1ch fallback is not the terminal cell.
@@ -541,7 +541,7 @@ describe('TerminalContent geometry follows accepted painter frames', () => {
       const get = result.getPropertyValue.bind(result)
       result.getPropertyValue = (name) =>
         name === '--pane-inline-padding'
-          ? el.closest<HTMLElement>('.pane')?.style.getPropertyValue('--term-cell-width') || '4px'
+          ? el.closest<HTMLElement>('.pane')?.style.getPropertyValue('--term-cell-width') || '1ch'
           : get(name)
       return result
     })

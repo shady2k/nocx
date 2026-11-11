@@ -9895,6 +9895,7 @@ export class TerminalContent extends BasePaneContent {
           // SessionHandle owns retries. Only execution of its final result
           // permits dependent input (in particular the submit's Enter).
           if (result.state !== 'executed') {
+            if (call.intent.kind === 'focus') continue
             this._discardFailedSessionInput(
               result.state === 'refused' ? (result.refusal?.cause ?? 'unknown') : undefined,
             )
@@ -9907,6 +9908,12 @@ export class TerminalContent extends BasePaneContent {
         } catch (err: unknown) {
           // An interrupt or a replacement bind has already discarded this input.
           if (queue !== this._sessionCallQueue || epoch !== this._sessionCallEpoch) return
+          // Focus reports carry no command content. Losing an earlier report
+          // cannot make a later, still-unsent submit uncertain.
+          if (call.intent.kind === 'focus') {
+            log.warn('nocx: session focus report failed', { error: String(err) })
+            continue
+          }
           if (err instanceof SessionNotAttachedError) {
             queue.unshift(call)
             this._sessionCallHeld = true

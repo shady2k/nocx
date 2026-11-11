@@ -15,6 +15,7 @@ interface WireProof {
   submittedSession: string
   attachedSession: string
   pastes: string[]
+  intents: Array<{ id?: number; kind?: string; payload?: string; result?: unknown }>
   release(): void
 }
 
@@ -36,6 +37,7 @@ async function installPreSendDrop(page: Page): Promise<void> {
       submittedSession: '',
       attachedSession: '',
       pastes: [],
+      intents: [],
       release() {
         proof.releaseAttach = true
         if (waiting) {
@@ -56,6 +58,8 @@ async function installPreSendDrop(page: Page): Promise<void> {
           const response = JSON.parse(event.data) as { id?: number }
           if (response.id === undefined) return
           const request = requests.get(response.id)
+          const intent = proof.intents.find((entry) => entry.id === response.id)
+          if (intent) intent.result = JSON.parse(event.data)
           if (proof.armed && !proof.cut && request?.method === 'lifecycle.submitAttempt') {
             event.stopImmediatePropagation()
             proof.cut = true
@@ -75,6 +79,13 @@ async function installPreSendDrop(page: Page): Promise<void> {
         if (typeof data === 'string') {
           const request = JSON.parse(data) as Request
           if (request.id !== undefined) requests.set(request.id, request)
+          if (request.method === 'session.intent') {
+            proof.intents.push({
+              id: request.id,
+              kind: request.params?.kind,
+              payload: request.params?.payload,
+            })
+          }
           if (request.method === 'open') proof.opens++
           if (request.method === 'session.intent' && request.params?.kind === 'paste') {
             proof.submittedSession = request.params.sessionId ?? ''
@@ -102,51 +113,65 @@ const proof = (page: Page) =>
 
 test('a submit whose socket drops before sending runs once after same-session reattach', async ({
   page,
-}) => {
+}, testInfo) => {
   await installPreSendDrop(page)
-  await page.goto('/')
-  await promptReady(page)
-  const initial = await proof(page)
-  const editor = page.locator('.pane.active .nocx-editor-input')
-  // Shell-local state makes a duplicate execution visible, not merely a second
-  // rendering of the same output. Split markers cannot match the command echo.
-  const command =
-    'nocx_held_count=$(( ${nocx_held_count:-0} + 1 )); printf "HELD-RUN-%s\\n" "$nocx_held_count"'
-  await editor.fill(command)
-  await page.evaluate(() => {
-    ;(window as unknown as { __heldSubmitProof: WireProof }).__heldSubmitProof.armed = true
-  })
-  await editor.press('Enter')
+  try {
+    await page.goto('/')
+    await promptReady(page)
+    const initial = await proof(page)
+    const editor = page.locator('.pane.active .nocx-editor-input')
+    // Shell-local state makes a duplicate execution visible, not merely a second
+    // rendering of the same output. Split markers cannot match the command echo.
+    const command =
+      'nocx_held_count=$(( ${nocx_held_count:-0} + 1 )); printf "HELD-RUN-%s\\n" "$nocx_held_count"'
+    await editor.fill(command)
+    await page.evaluate(() => {
+      ;(window as unknown as { __heldSubmitProof: WireProof }).__heldSubmitProof.armed = true
+    })
+    await editor.press('Enter')
 
-  // The composer accepted Enter before the connection vanished. The real
-  // backend has answered attach, but the renderer has not seen that answer:
-  // none of the command's bytes may have crossed the wire yet.
-  await expect.poll(async () => (await proof(page)).attachWaiting).toBe(true)
-  const detached = await proof(page)
-  expect(detached.cut).toBe(true)
-  expect(detached.pastes).toEqual([])
-  expect(detached.opens).toBe(initial.opens)
-  await expect(editor).toHaveText('')
+    // The composer accepted Enter before the connection vanished. The real
+    // backend has answered attach, but the renderer has not seen that answer:
+    // none of the command's bytes may have crossed the wire yet.
+    await expect.poll(async () => (await proof(page)).attachWaiting).toBe(true)
+    const detached = await proof(page)
+    expect(detached.cut).toBe(true)
+    expect(detached.pastes).toEqual([])
+    expect(detached.opens).toBe(initial.opens)
+    await expect(editor).toHaveText('')
 
-  await page.evaluate(() => {
-    ;(window as unknown as { __heldSubmitProof: WireProof }).__heldSubmitProof.release()
-  })
-  const pane = page.locator('.pane.active')
-  await expect(pane).toContainText('HELD-RUN-1')
-  await promptReady(page)
-  const resumed = await proof(page)
-  expect(resumed.submittedSession).toBe(detached.attachedSession)
-  expect(resumed.submittedSession).not.toBe('')
-  expect(resumed.opens).toBe(initial.opens)
-  expect(resumed.pastes.map((payload) => Buffer.from(payload, 'base64').toString('utf8'))).toEqual([
-    command,
-  ])
+    await page.evaluate(() => {
+      ;(window as unknown as { __heldSubmitProof: WireProof }).__heldSubmitProof.release()
+    })
+    const pane = page.locator('.pane.active')
+    await expect(pane).toContainText('HELD-RUN-1')
+    await promptReady(page)
+    const resumed = await proof(page)
+    expect(resumed.submittedSession).toBe(detached.attachedSession)
+    expect(resumed.submittedSession).not.toBe('')
+    expect(resumed.opens).toBe(initial.opens)
+    expect(
+      resumed.pastes.map((payload) => Buffer.from(payload, 'base64').toString('utf8')),
+    ).toEqual([command])
 
-  // A later command in the SAME shell confirms the held line ran exactly once.
-  await editor.fill('printf "HELD-COUNT-%s\\n" "$nocx_held_count"')
-  await editor.press('Enter')
-  await expect(pane).toContainText('HELD-COUNT-1')
-  await promptReady(page)
-  await expect(pane).not.toContainText('HELD-RUN-2')
-  await expect(page.getByText(/will not be sent again/)).toHaveCount(0)
+    // A later command in the SAME shell confirms the held line ran exactly once.
+    await editor.fill('printf "HELD-COUNT-%s\\n" "$nocx_held_count"')
+    await editor.press('Enter')
+    await expect(pane).toContainText('HELD-COUNT-1')
+    await promptReady(page)
+    await expect(pane).not.toContainText('HELD-RUN-2')
+    await expect(page.getByText(/will not be sent again/)).toHaveCount(0)
+  } finally {
+    if (testInfo.status !== testInfo.expectedStatus) {
+      const wire = await page
+        .evaluate(
+          () => (window as unknown as { __heldSubmitProof: WireProof }).__heldSubmitProof.intents,
+        )
+        .catch(() => [])
+      await testInfo.attach('held-submit-intents', {
+        body: JSON.stringify(wire, null, 2),
+        contentType: 'application/json',
+      })
+    }
+  }
 })

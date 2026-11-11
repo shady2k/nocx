@@ -12123,6 +12123,71 @@ describe('shell submit input intent ordering (nocx-zg3k3.3.1)', () => {
     },
   )
 
+  it.each(['reject-before-detach', 'reject-after-detach', 'negative'] as const)(
+    'keeps the unsent submit after an earlier focus call fails (%s)',
+    async (failure) => {
+      const client = makeClient()
+      const { ed, content, teardown } = await mountTerminal(
+        makeClipboard(),
+        { attachToDocument: true },
+        client,
+      )
+      const session = sessionOf(content)
+      const success: SessionIntentResult = { state: 'executed', bytesWritten: 1, fenceAfter: 0 }
+      let rejectFocus!: (err: Error) => void
+      let resolveFocus!: (result: SessionIntentResult) => void
+      const focus = new Promise<SessionIntentResult>((resolve, reject) => {
+        resolveFocus = resolve
+        rejectFocus = reject
+      })
+      let attached = true
+      session.intent.mockImplementation((kind: string) => {
+        if (kind === 'focus') return focus
+        if (!attached)
+          return Promise.reject(new SessionNotAttachedError('Session is not attached.'))
+        return Promise.resolve(success)
+      })
+      vi.mocked(showToast).mockClear()
+      try {
+        content.setVisible(true)
+        intentElementOf(content).dispatchEvent(new FocusEvent('focus'))
+        await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('focus', 'in'))
+        await submitOnce(content, ed, session, 'echo survives focus')
+        const pending = content as unknown as {
+          _sessionCallQueue: Array<{ intent: SessionIntent }>
+          _sessionCallSending: boolean
+        }
+        await vi.waitFor(() =>
+          expect(pending._sessionCallQueue.map((c) => c.intent.payload)).toContain(
+            'echo survives focus',
+          ),
+        )
+        if (failure !== 'reject-before-detach') {
+          attached = false
+          session.fireAttachment({ kind: 'attaching' })
+        }
+        if (failure === 'negative')
+          resolveFocus({ state: 'delivery_unknown', bytesWritten: 0, fenceAfter: 0 })
+        else rejectFocus(new Error('ws closed'))
+        await vi.waitFor(() => expect(pending._sessionCallSending).toBe(false))
+        if (failure !== 'reject-before-detach') {
+          attached = true
+          session.fireAttachment({ kind: 'attached' })
+        }
+        await vi.waitFor(() =>
+          expect(
+            session.intent.mock.calls.filter((c) => c[0] !== 'focus' && c[0] !== 'paste'),
+          ).toEqual([['key', 'enter']]),
+        )
+        expect(session.intent).toHaveBeenCalledWith('paste', 'echo survives focus')
+        expect(showToast).not.toHaveBeenCalled()
+      } finally {
+        resolveFocus(success)
+        teardown()
+      }
+    },
+  )
+
   it('holds an accepted submit if attachment drops before the lifecycle attempt answers', async () => {
     const client = makeClient()
     let resolveAttempt!: (value: unknown) => void

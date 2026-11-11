@@ -77,6 +77,8 @@ export class LayoutStore {
    *  compares REQUESTS, and the defect is in the ANSWERS (nocx-1ebrs.56). */
   private mutations = 0
   private readonly listeners = new Set<() => void>()
+  /** How many panel writes have been SENT per tab (see setTabPanel). */
+  private readonly panelWrites = new Map<string, number>()
 
   constructor(private readonly client: LayoutClientLike) {}
 
@@ -431,7 +433,19 @@ export class LayoutStore {
    * mutation here, so a refusal leaves the cache exactly as it was.
    */
   async setTabPanel(tabId: string, view: string, collapsed: boolean): Promise<void> {
-    this.replaceTab((await this.client.setTabPanel(tabId, view, collapsed)).tab)
+    // THE ANSWER THAT COUNTS IS THE LAST REQUEST'S, not the last to arrive.
+    // A view click writes twice — the view, then the expansion — and the two
+    // answers come back in either order: measured on the repeat-changed run,
+    // the second request's answer landed first and the first one then folded
+    // the row BACKWARDS, so the tab re-opened collapsed. Same guard as
+    // `load()` has for reads, for the same reason: an answer describes the row
+    // as it was when the request left, and a newer request has already moved
+    // it on.
+    const seq = (this.panelWrites.get(tabId) ?? 0) + 1
+    this.panelWrites.set(tabId, seq)
+    const answered = (await this.client.setTabPanel(tabId, view, collapsed)).tab
+    if (this.panelWrites.get(tabId) !== seq) return
+    this.replaceTab(answered)
   }
 
   /**

@@ -516,6 +516,37 @@ describe('LayoutStore', () => {
     expect(changes).not.toHaveBeenCalled()
   })
 
+  it('keeps the LAST panel written when the answers arrive out of order', async () => {
+    // The panel writes of one tab can be issued back to back — a view click
+    // changes the view and then expands the rail — and the two answers can
+    // come back in either order (measured: the later one first). The cache
+    // must keep what the LAST REQUEST said, or the row goes backwards and the
+    // tab re-opens collapsed (nocx-ouru5.1.18, the repeat-changed failure).
+    const pending: Array<() => void> = []
+    const client = fakeClient({
+      setTabPanel: (id, view, collapsed) =>
+        new Promise((resolve) => {
+          pending.push(() =>
+            resolve({ tab: tab(id, { panelView: view, panelCollapsed: collapsed }) }),
+          )
+        }),
+    })
+    const store = new LayoutStore(client)
+    await store.load()
+    const opened = store.openTab({ kind: 'local', endpoint: null, cwd: '' })
+    await opened.created
+
+    const first = store.setTabPanel(opened.tabId, 'files', true)
+    const second = store.setTabPanel(opened.tabId, 'ports', false)
+    // The SECOND request is answered first; the first one lands afterwards.
+    pending[1]()
+    await second
+    pending[0]()
+    await first
+
+    expect(store.tab(opened.tabId)).toMatchObject({ panelView: 'ports', panelCollapsed: false })
+  })
+
   it('reorders from the answer, and a refusal leaves the strip exactly where it was', async () => {
     const client = fakeClient()
     const store = new LayoutStore(client)

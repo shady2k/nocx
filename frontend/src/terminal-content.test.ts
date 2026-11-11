@@ -515,6 +515,76 @@ describe('TerminalContent geometry follows accepted painter frames', () => {
     }
   })
 
+  it('keeps the opening columns through first output (nocx-evj4b.1.15)', async () => {
+    const style = document.createElement('style')
+    style.textContent = '.cell-metric-probe { line-height: 17px; }'
+    document.head.append(style)
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLElement) {
+        if (this.classList.contains('cell-metric-probe')) {
+          return { width: 64 * 7, height: 17 } as DOMRect
+        }
+        return Element.prototype.getBoundingClientRect.call(this)
+      })
+    const widthSpy = vi
+      .spyOn(HTMLElement.prototype, 'clientWidth', 'get')
+      .mockImplementation(function (this: HTMLElement) {
+        return this.classList.contains('scrollback-area') ? 974 : 0
+      })
+    // jsdom cannot resolve CSS custom properties. Model the stylesheet's
+    // one-cell gutter: the UI font's 1ch fallback is not the terminal cell.
+    const computed = window.getComputedStyle.bind(window)
+    const computedSpy = vi.spyOn(window, 'getComputedStyle').mockImplementation((el) => {
+      const result = computed(el)
+      if (!el.classList.contains('scrollback-area')) return result
+      const get = result.getPropertyValue.bind(result)
+      result.getPropertyValue = (name) =>
+        name === '--pane-inline-padding'
+          ? el.closest<HTMLElement>('.pane')?.style.getPropertyValue('--term-cell-width') || '1ch'
+          : get(name)
+      return result
+    })
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        attachToDocument: true,
+        viewportBeforeMount: { width: 996, height: 800 },
+      },
+      client,
+    )
+    try {
+      tab.setActive(true)
+      const opening = client.openSession.mock.calls[0][0]
+      expect(opening.cols).toBe(137)
+      const session = sessionOf(content)
+      session.fireScreenFrame(
+        screenFrame(
+          1,
+          Array.from({ length: SCREEN_ROWS }, () => 'x'.repeat(137)),
+          {
+            cols: opening.cols,
+            rows: opening.rows,
+            cellWidthPx: 7,
+            cellHeightPx: 17,
+          },
+        ),
+      )
+      await vi.waitFor(() => expect(paneScreen()?.revision).toBe(1))
+      content.viewportChanged({ width: 996, height: 800 })
+      expect(
+        (content as unknown as { _reportedSize(): { cols: number } })._reportedSize().cols,
+      ).toBe(opening.cols)
+    } finally {
+      teardown()
+      computedSpy.mockRestore()
+      widthSpy.mockRestore()
+      rectSpy.mockRestore()
+      style.remove()
+    }
+  })
+
   it('bootstraps the first pixel report from the shared font probe when the backend has none', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     const rectSpy = vi

@@ -6779,6 +6779,11 @@ export class TerminalContent extends BasePaneContent {
    * jsdom reports 0 for both, a real pane mid-layout can report one.
    */
   private usableViewport(viewport: ContentViewport): ContentViewport {
+    // The gutter uses the same cell as the fit. Publish the measured metric
+    // before reading it: the controller's constructor runs before this.scrollback
+    // is assigned, so its initial probe cannot yet measure the terminal font.
+    // Waiting for the first frame opens at the UI font's 1ch fallback instead.
+    this.scrollback?.cellMetricsChanged()
     const area = this.scrollback?.scrollbackArea
     const outer = area && area.clientWidth > 0 ? area.clientWidth : viewport.width
     const gutter =

@@ -651,7 +651,20 @@ export async function restoredBody(client: WSClient, entryId: string): Promise<R
       // A block whose payload carries no coordinates (a store written before
       // this field existed) keeps the old whole-body read.
       const coords = storedRowsCoordinates(rows.payload)
-      if (coords !== null) {
+      // A block small enough to be one response is read whole at restore: a
+      // 300-row command must be complete in the next window without a scroll,
+      // and a capped block's RETAINED rows may be only that. Lazy paging is for
+      // a body whose cost is the reason it exists (ADR-y45sp41c).
+      // A capped block is read whole: its retained body is bounded by the cap
+      // the user configured, and the cut line's identity is the row on either
+      // side of it — a page at the tail alone would put the notice beside a
+      // spacer, not between the rows it cuts (e2e/output-cut-marker).
+      if (
+        coords !== null &&
+        coords.rowCount > LAZY_BLOCK_ROWS &&
+        rows.truncated !== 'cap' &&
+        rows.truncated !== 'gap'
+      ) {
         return {
           kind: 'command',
           body: null,

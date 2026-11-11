@@ -52,8 +52,10 @@ could land on another spacer instead of the rows the person was reading.
    element (and live record) is written where a block is bound to an attempt and where a
    restored block is built — top-level or nested under a turn, with rows or still empty.
    The loader, refresh, revalidation and settle look a block up there instead of walking
-   the transcript or a list of live records; a stale entry is dropped when its element is
-   no longer connected.
+   the transcript or a list of live records. The block manager reports the elements it
+   removes (clear-all, an erase boundary), the freeze re-points the entry at its new
+   element, and a stale entry is dropped when its element is no longer connected — so the
+   index stays bounded through churn.
 6. **Reconnect revalidates restored blocks, and refresh reads fresh geometry first.**
    `_restoredRows` is a reconnect source alongside the live block records; a restored
    block's refresh paints through its own element, never through `applyStoredRows` (which

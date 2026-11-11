@@ -2091,6 +2091,10 @@ export interface BlockManagerOpts {
    *  backend's block.closed). Fires after afterVisualFreeze, so a waiter that sets
    *  that slot and an observer here never race. */
   onBlockFrozen?: (rec: BlockRecord) => void
+  /** Fired with the elements this manager actually removed from the DOM
+   *  (clearAll, an erase boundary). The caller's entry-id index drops those
+   *  elements; an index that outlives them keeps their rows alive. */
+  onBlocksRemoved?: (elements: readonly HTMLElement[]) => void
   /** Paints rows read from the backend's block artifact. */
   paintStoredRows?: (block: HTMLElement, rows: StoredBlockRows, reserve?: boolean) => void
   /** Runs a mutation that changes the transcript's shape — the freeze swaps a
@@ -2164,6 +2168,7 @@ export class BlockManager {
   private _nextId = 1
   private _now: () => number
   private _onBlockFrozen?: (rec: BlockRecord) => void
+  private _onBlocksRemoved?: (elements: readonly HTMLElement[]) => void
   private _scrollbackInner: HTMLElement
   private _liveContainer: HTMLElement
   private _runningBlock: BlockRecord | null = null
@@ -2266,6 +2271,7 @@ export class BlockManager {
     this._snapshotStore = opts.snapshotStore
     this._onDeferredFreeze = opts.onDeferredFreeze
     this._onBlockFrozen = opts.onBlockFrozen
+    this._onBlocksRemoved = opts.onBlocksRemoved
     this._paintStoredRows = opts.paintStoredRows
     this._holdReaderPlace = opts.holdReaderPlace
     this._sessionName = opts.sessionName
@@ -4051,9 +4057,11 @@ export class BlockManager {
     // ONE list, because there is one owner: whatever this manager put in
     // the container comes out, whether it was a live block, an answer or a
     // restored one under its boundary (nocx-0zb1m).
+    const removed = [...this._owned]
     for (const rec of this._blocks) rec.header?.remove()
-    for (const el of this._owned) el.remove()
+    for (const el of removed) el.remove()
     this._owned.clear()
+    this._onBlocksRemoved?.(removed)
     this._blocks = []
     this._answerBlocks = []
     this._runningBlock = null
@@ -4117,11 +4125,14 @@ export class BlockManager {
     for (const rec of this._blocks) {
       if (rec.el !== keep) rec.header?.remove()
     }
+    const removed: HTMLElement[] = []
     for (const el of [...this._owned]) {
       if (el === keep) continue
       el.remove()
       this._owned.delete(el)
+      removed.push(el)
     }
+    this._onBlocksRemoved?.(removed)
     this._blocks = this._blocks.filter((b) => b.el === keep)
     this._answerBlocks = this._answerBlocks.filter((b) => b.el === keep)
     if (!keepingRunning) {

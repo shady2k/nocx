@@ -3399,6 +3399,14 @@ export class TerminalContent extends BasePaneContent {
           this.clearGrants()
         },
         onBlockFrozen: (rec) => this._onBlockFrozen(rec),
+        onBlocksRemoved: (elements) => {
+          const gone = new Set(elements)
+          for (const [entryId, indexed] of [...this._blockIndex]) {
+            if (!gone.has(indexed.element)) continue
+            this._blockIndex.delete(entryId)
+            this._restoredRows.delete(entryId)
+          }
+        },
         paintStoredRows: (block, rows, reserve) => {
           const fit = this._cellFit
           const metric = fit !== null && fit.begin() ? metricOf(fit) : null
@@ -12261,6 +12269,9 @@ export class TerminalContent extends BasePaneContent {
    *  renderer clamps the text to the wire bound and states how much more
    *  the block holds — never a silent truncation. */
   private _onBlockFrozen(rec: BlockRecord): void {
+    // The freeze REPLACED the running element; the index must point at the
+    // new one or it keeps the detached element (and its rows) alive.
+    if (rec.attemptId !== undefined) this._registerBlock(rec.attemptId, rec.el, rec)
     // A newer freeze is a different owner, and it cannot inherit an ask the
     // person made over the previous one.
     this._pendingAutomaticAttachment = null

@@ -105,6 +105,9 @@ export interface ScrollbackControllerOpts {
    *  fixed in the DOM (nocx-tjppv: the run tool's completion wait reads the
    *  output window from the frozen block). */
   onBlockFrozen?: (rec: BlockRecord) => void
+  /** Elements the block manager actually removed; the caller's index drops
+   *  them and the rows they still hold. */
+  onBlocksRemoved?: (elements: readonly HTMLElement[]) => void
   /** Paints backend-owned rows through the shared row painter. */
   paintStoredRows?: (block: HTMLElement, rows: StoredBlockRows, reserve?: boolean) => void
   /** What a session is called to a person — passed straight to the block
@@ -302,6 +305,7 @@ export class ScrollbackController {
         if (this._idleRequested && this._blockManager.runningBlock === null) this.setIdle()
       },
       onBlockFrozen: opts.onBlockFrozen,
+      onBlocksRemoved: opts.onBlocksRemoved,
       paintStoredRows: opts.paintStoredRows,
       sessionName: opts.sessionName,
       answerText: opts.answerText,

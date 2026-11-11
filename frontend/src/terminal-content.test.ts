@@ -23763,3 +23763,68 @@ describe('a slow open states what it is doing in the pane (nocx-q9od5)', () => {
     }
   })
 })
+
+// A SECOND block.closed for one block means its stored rows changed after the
+// read the first one asked for — a late output start written to an artifact
+// that was already sealed (nocx-4y82c.1.11 review 6). The card has to read
+// again, or it keeps the echo it froze and never hears anything else.
+describe('a repeated block.closed reads the stored rows again', () => {
+  it('queues one more read behind the one in flight', async () => {
+    const client = makeClient()
+    const reads: Array<(value: unknown) => void> = []
+    client.call.mockImplementation((method: string, params?: unknown) => {
+      const id = (params as { id?: string } | undefined)?.id
+      if (method === 'ledger.get' && id === 'late-start-entry') {
+        return Promise.resolve({
+          entry: {},
+          edges: [],
+          artifacts: [{ id: 'late-start-artifact', mediaType: 'application/x-nocx-rows' }],
+        })
+      }
+      if (method === 'ledger.artifact' && id === 'late-start-artifact') {
+        return new Promise((resolve) => {
+          reads.push(resolve)
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const sb = scrollbackFor(content)
+    const refresh = content as unknown as {
+      _refreshBlockRows(entryId: string, final?: boolean): Promise<void>
+    }
+    const artifact = (text: string) => {
+      const body = `${JSON.stringify({
+        from: 0,
+        row: wireRowOf(Array.from(text, (char) => [char, 1, true] as CellSpec)),
+      })}\n`
+      return {
+        id: 'late-start-artifact',
+        mediaType: 'application/x-nocx-rows',
+        body,
+        byteLen: body.length,
+        truncated: null,
+      }
+    }
+    try {
+      const rec = sb.blockManager.startBlock('produce', '~', 0)
+      sb.blockManager.bindAttempt('late-start-entry')
+      const first = refresh._refreshBlockRows('late-start-entry', true)
+      const second = refresh._refreshBlockRows('late-start-entry', true)
+      await vi.waitFor(() => expect(reads).toHaveLength(1))
+      reads[0](artifact('echo'))
+      // The queued follow-up is what makes the second read, and the chain
+      // the first close returned resolves only when that one does.
+      await vi.waitFor(() => expect(reads).toHaveLength(2))
+      reads[1](artifact('echo'))
+      await Promise.all([first, second])
+      await vi.waitFor(() => expect(rec.storedRows?.lines).toHaveLength(1))
+    } finally {
+      teardown()
+    }
+  })
+})

@@ -32,6 +32,11 @@
           "type": "integer",
           "minimum": 0,
           "description": "How many rows the emulator pruned before the coordinator could read them, carried here because no cap chose it. Present only when non-zero. Loss and eviction are different facts: a reader that reports loss as a cap verdict sends a user to raise a limit that took nothing."
+        },
+        "outputStartRow": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Where the block's OUTPUT begins, in the same absolute row coordinate each stored line's `from` uses (nocx-4y82c.1.11). Written once when the helper's ordered output mark applies, the first mark winning; present only when a mark was recorded, so a shell with no integration carries none and every stored row is the block's own. The rows below it are the command's echo and redraw, and a reader drops them: the frozen card, the running body's hold, selection and copy, and the body read all start here. Absent means no mark, not row zero."
         }
       }
     },

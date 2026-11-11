@@ -54,6 +54,10 @@ func (s *raceOpenStore) RecordBlockRowsFence(ctx context.Context, in content.Rec
 	return s.ledger.RecordBlockRowsFence(ctx, in)
 }
 
+func (s *raceOpenStore) RecordBlockRowsOutputStart(ctx context.Context, in content.RecordBlockRowsOutputStart) error {
+	return s.ledger.RecordBlockRowsOutputStart(ctx, in)
+}
+
 func (s *raceOpenStore) OpenBlockOutput(ctx context.Context, in content.OpenBlockOutput) (string, error) {
 	select {
 	case <-s.bound:
@@ -263,6 +267,10 @@ func (s *queueingOpenStore) OpenBlockRowsForSession(context.Context, string) (co
 }
 
 func (s *queueingOpenStore) RecordBlockRowsFence(context.Context, content.RecordBlockRowsFence) error {
+	return nil
+}
+
+func (s *queueingOpenStore) RecordBlockRowsOutputStart(context.Context, content.RecordBlockRowsOutputStart) error {
 	return nil
 }
 

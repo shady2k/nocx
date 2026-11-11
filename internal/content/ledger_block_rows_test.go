@@ -123,7 +123,7 @@ const (
 	keptArtifact2 = "00000000-0000-7000-8000-00000000b002"
 )
 
-func TestBlockRowsText_ReadsStyledWideRows(t *testing.T) {
+func TestBlockRowsTextAfter_ReadsStyledWideRows(t *testing.T) {
 	ctx := context.Background()
 	_, led := newLedger(t)
 	entryID := recordOne(t, led, "printf 'A中\\nnext'")
@@ -154,12 +154,12 @@ func TestBlockRowsText_ReadsStyledWideRows(t *testing.T) {
 	if artifact == nil {
 		t.Fatal("block rows artifact missing")
 	}
-	got, err := content.BlockRowsText(artifact.Chunks)
+	got, err := content.BlockRowsTextAfter(artifact.Chunks, 0)
 	if err != nil {
-		t.Fatalf("BlockRowsText: %v", err)
+		t.Fatalf("BlockRowsTextAfter: %v", err)
 	}
 	if got != "A中\nnext\n" {
-		t.Fatalf("BlockRowsText = %q, want %q", got, "A中\nnext\n")
+		t.Fatalf("BlockRowsTextAfter(..., 0) = %q, want %q", got, "A中\nnext\n")
 	}
 }
 

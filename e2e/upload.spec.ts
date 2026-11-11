@@ -44,7 +44,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import path from 'node:path'
 
 import { dropFileOnActivePane } from './drop-gesture'
-import { appReadyForInput, test, expect } from './harness'
+import { appReadyForInput, test, expect, showSidebarView } from './harness'
 import { readStand } from './stand'
 import { rpc, startSshd, type SshdFixture } from './sshd-fixture'
 
@@ -131,11 +131,15 @@ test('a file dropped on an SSH tab arrives on the far host', async ({ page }) =>
       timeout: 90_000,
     })
 
-    // The Files panel is open on Files from cold start; it rescopes to the SSH
-    // session, roots at `/`, and REVEALS the tab's cwd — which is what puts
-    // the destination directory's rows on screen for the assertion below.
-    // `data-selected` is the reveal's own account of having landed, and it is
-    // only set for a cwd the frontend VERIFIED.
+    // THE PANEL IS THE TAB'S (ADR-x7cvh8e1). Cold start opened Files on the
+    // window's first tab, but the quick connect above put a NEW tab in front —
+    // one that has never opened a panel, so its rail is collapsed and Files is
+    // not on screen. A person opens it on the tab they are now in; opened, it
+    // rescopes to the SSH session, roots at `/`, and REVEALS the tab's cwd —
+    // which is what puts the destination directory's rows on screen for the
+    // assertion below. `data-selected` is the reveal's own account of having
+    // landed, and it is only set for a cwd the frontend VERIFIED.
+    await showSidebarView(page, 'files')
     const panel = page.locator(FILES_PANEL)
     await expect(panel).toBeVisible({ timeout: 15_000 })
     await expect(panel).toHaveAttribute('data-root', '/', { timeout: 30_000 })

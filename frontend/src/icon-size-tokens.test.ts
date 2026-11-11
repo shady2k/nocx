@@ -57,15 +57,21 @@ describe('icon and gutter tokens', () => {
     expect(valueOf('--icon-size-lg')).toBe('20px')
   })
 
-  it('declares the pane gutter in the token layer and nowhere else', () => {
-    // var(--space-4) since nocx-9bpeq.8, which moved xterm's column count to
-    // match: rows carry the gutter now, not the pane. Raised to var(--space-6)
-    // (24px) by the terminal-screen mockup decision record's §3 shared
-    // contract (nocx-9bpeq.23) — still one token, still declared once.
-    expect(valueOf('--pane-inline-padding')).toBe('var(--space-6)')
-    expect(
-      declarations(read('styles/base.css')).some((d) => d.property === '--pane-inline-padding'),
-    ).toBe(false)
+  it('declares the pane gutter where the cell metric is published, not in the token layer', () => {
+    // ADR-92zzg2y2: the gutter is one terminal cell wide on the sides and half
+    // a row top and bottom, so it scales with the font. The renderer publishes
+    // `--term-cell-width` / `--term-cell-height` on `.pane`, and a custom
+    // property's `var()` is resolved where it is declared — so the gutter lives
+    // on `.pane` too, and the token layer declares neither.
+    expect(valueOf('--pane-inline-padding')).toBeUndefined()
+    expect(valueOf('--pane-block-padding')).toBeUndefined()
+    const pane = declarations(read('styles/base.css'))
+    expect(pane.find((d) => d.property === '--pane-inline-padding')?.value).toBe(
+      'var(--term-cell-width, 1ch)',
+    )
+    expect(pane.find((d) => d.property === '--pane-block-padding')?.value).toBe(
+      'calc(var(--term-cell-height, 1.2em) / 2)',
+    )
   })
 
   it('sizes every IconButton glyph through an icon-size token', () => {

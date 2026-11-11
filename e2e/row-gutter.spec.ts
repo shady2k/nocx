@@ -1,10 +1,10 @@
 /**
  * Rows are full width, and a normal command's rows all sit in the transcript's
- * column (nocx-9bpeq.8, spec 2026-09-14 §4, ADR-2yzsq8mk).
+ * column (nocx-9bpeq.8, spec 2026-09-14 §4, ADR-92zzg2y2).
  *
  * The pane used to inset everything; the ledger's rows carry that inset now so
- * a row can paint to the edge. ADR-2yzsq8mk decides which rows wear it: a
- * normal command — running or finished — sits in the transcript's 24px gutter,
+ * a row can paint to the edge. ADR-92zzg2y2 decides which rows wear it: a
+ * normal command — running or finished — sits in the transcript's one-cell gutter,
  * so nothing moves when its card freezes, and only a full-screen program owns
  * the whole width (e2e/grid-width.spec.ts). The risk is geometry, not colour:
  * cols come from a width the fit computes, the frozen block reproduces the grid
@@ -38,7 +38,7 @@ async function measure(page: Page) {
     const liveContent = live.clientWidth - inlineInset
     // The transcript gutter a normal row wears, read from the box that pays it
     // rather than hard-coded: the frozen block and the active grid are one
-    // column (ADR-2yzsq8mk).
+    // column (ADR-92zzg2y2).
     const blockStyle = block ? getComputedStyle(block) : null
     const blockPadLeft = blockStyle ? parseFloat(blockStyle.paddingLeft) : 0
     // Match terminal-content.ts `usableViewport`: fitting starts at the
@@ -111,7 +111,7 @@ async function settled(page: Page, previousCols: number | null) {
 }
 
 function assertAligned(m: Awaited<ReturnType<typeof measure>>) {
-  // ONE COLUMN (ADR-2yzsq8mk): a normal command, running or finished, sits at
+  // ONE COLUMN (ADR-92zzg2y2): a normal command, running or finished, sits at
   // the transcript's gutter — so nothing moves when the card freezes. What is
   // NOT allowed is either one drifting from that rule: a frozen row off the
   // block's padding, or an active row off the same gutter.

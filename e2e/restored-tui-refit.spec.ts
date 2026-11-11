@@ -87,6 +87,8 @@ interface PaneMeasure {
   paintedCols: number
   paintedRows: number
   gridWidth: number
+  /** The pane's one gutter: one cell each side (ADR-92zzg2y2). */
+  gutter: number
 }
 
 async function measurePane(page: Page): Promise<PaneMeasure> {
@@ -95,11 +97,15 @@ async function measurePane(page: Page): Promise<PaneMeasure> {
     const area = pane?.querySelector<HTMLElement>('.scrollback-area')
     const rows = [...(pane?.querySelectorAll<HTMLElement>('.term-grid-row') ?? [])]
     const widths = rows.map((r) => r.getBoundingClientRect().width)
+    const paneEl = document.querySelector<HTMLElement>('.pane.active')
     return {
       areaWidth: area?.clientWidth ?? 0,
       paintedCols: rows.length > 0 ? (rows[0].textContent?.length ?? 0) : 0,
       paintedRows: rows.length,
       gridWidth: widths.length > 0 ? Math.max(...widths) : 0,
+      gutter: paneEl
+        ? parseFloat(getComputedStyle(paneEl).getPropertyValue('--pane-inline-padding')) || 0
+        : 0,
     }
   })
 }
@@ -329,8 +335,13 @@ test.describe('a restored tab refits its program (nocx-1ebrs.42)', () => {
     // THE BEAD: the restored pane refits the program to the pane it came back
     // into. The fixture's PTY size is the program's ground truth; the painted
     // grid is what a person sees.
-    expect(restoredCols * cellPx, label).toBeGreaterThanOrEqual(restored.areaWidth - cellPx * 2)
-    expect(restoredCols * cellPx, label).toBeLessThanOrEqual(restored.areaWidth)
+    // ADR-92zzg2y2: one gutter, one cell each side, in every mode.
+    expect(restoredCols * cellPx, label).toBeGreaterThanOrEqual(
+      restored.areaWidth - 2 * restored.gutter - cellPx,
+    )
+    expect(restoredCols * cellPx, label).toBeLessThanOrEqual(
+      restored.areaWidth - 2 * restored.gutter + 0.5,
+    )
 
     // …and the repaint followed the resize: what the painter shows is what
     // the program repainted.

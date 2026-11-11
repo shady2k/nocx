@@ -5,14 +5,16 @@
   /* The field below reshapes by the card's own width, not the viewport's: a
      pane beside an open sidebar can be narrower than any viewport query. */
   container-type: inline-size;
-  /* THE CARD'S TEXT IS THE LEDGER'S COLUMN (ADR-2yzsq8mk, the owner's Warp
-     pass): a block's header and its output start at --pane-inline-padding, and
-     the command a person is typing must start on that same x. The margin is
-     what is left of the column after the card's own border and padding, so the
-     first glyph lands on the gutter instead of eight pixels past it. */
-  margin: 0 calc(var(--pane-inline-padding) - var(--terminal-card-padding) - 1px)
-    var(--terminal-card-margin);
-  padding: var(--terminal-card-padding);
+  /* THE CARD'S TEXT IS THE LEDGER'S COLUMN (ADR-92zzg2y2). A block's header,
+     its output and a full-screen program start at --pane-inline-padding, and
+     the command a person is typing must start on that same x. The gutter is one
+     cell now, narrower than the card's own border plus its old 12 px padding,
+     so the card spans the pane and pays the gutter as its INLINE padding
+     instead: the first glyph lands on the column, and the card is never pushed
+     outside the pane to reach it. The block padding keeps the card's own
+     vertical rhythm. */
+  margin: 0 0 var(--terminal-card-margin);
+  padding: var(--terminal-card-padding) calc(var(--pane-inline-padding) - 1px);
   border: 1px solid var(--color-divider);
   border-radius: var(--control-radius-lg);
   background: var(--color-terminal-chrome);

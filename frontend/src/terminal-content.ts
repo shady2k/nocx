@@ -219,13 +219,7 @@ import {
   type InputPresentation,
   type DesiredMode,
 } from './capability'
-import {
-  createCellModel,
-  padSnapshotToColumns,
-  snapshotRowText,
-  type CellModel,
-  type ScreenSnapshot,
-} from './cell-model'
+import { createCellModel, snapshotRowText, type CellModel, type ScreenSnapshot } from './cell-model'
 import type { SessionFrame } from './generated/session.frame'
 import { createCellPainter, metricOf, type CellPainter } from './painter/painter'
 import { createMapping } from './painter/mapping'
@@ -396,32 +390,6 @@ export const SUBMIT_GRACE_MS = 40
  * No test asserts the number; the tests assert the behaviour it protects.
  */
 export const PROMPT_BACKSTOP_MS = 250
-
-/**
- * The LAST-RESORT release of an alternate-screen fence (nocx-1ebrs.10): how
- * long the switch may hold the person's input with no answer at all.
- *
- * IT IS NOT THE NORMAL PATH. The fence opens on the transport's own receipt,
- * and nothing below this line decides an ordinary switch.
- *
- * It exists because NOTHING ELSE BOUNDS THE WAIT. `dispatcher.call` carries no
- * per-request timeout — a pending call is settled by its answer, by a socket
- * close, or by an abort, and by nothing else — and the connection's heartbeat
- * does not help: it pings an idle socket and closes one that stops answering
- * PINGS, so a coordinator that stalls this one request while still answering
- * transport frames leaves the receipt pending forever and the held keys with
- * it.
- *
- * The value comes from the measurements this bead was opened with: on a real
- * PTY program the resize request goes out 87–234 ms after the first fullscreen
- * frame and the pty is corrected 109–274 ms after the switch. 1.5 s is more
- * than five times the slowest observed round trip, and a person's held
- * keystrokes surfacing late is still better than keystrokes that never land.
- * On expiry the held intents are DELIVERED, in order — a key typed at the
- * wrong width is a rendering problem; a key swallowed forever is lost work —
- * and the release is logged so the next investigation can see it happened.
- */
-const ALT_SCREEN_RECEIPT_DEADLINE_MS = 1_500
 
 /**
  * How long output is treated as the shell's answer to a resize rather than as
@@ -783,35 +751,6 @@ interface HeldWindow {
   /** True once a Ctrl-C arrived in the window: the submission is not to be
    *  written, and nothing held for it is delivered. */
   cancelled: boolean
-}
-
-/** What an alternate-screen switch holds until the pty has APPLIED the
- *  pane's grid (nocx-1ebrs.10).
- *
- *  `held` is what the person produced after the switch, in order, and it is
- *  delivered only once a receipt says the resize applied — an ordinary error
- *  or a closed session releases it too, because a pane that can no longer
- *  carry the input must not keep holding it. `generation` numbers the
- *  requests so a late answer to an older one cannot open the fence, and
- *  `sent` remembers the report the newest one carried, so the same
- *  measurement is not asked for twice, and `deadline` is the one timer here —
- *  the last-resort release of a request that is never answered
- *  (ALT_SCREEN_RECEIPT_DEADLINE_MS), not a step in the normal path.
- *
- *  Otherwise there is no timer in here and no frame count: the receipt is an
- *  RPC answer, the close is an RPC rejection or a socket loss, and those are
- *  what opens the fence. */
-interface AlternateScreenFence {
-  /** The intents produced after the switch, in the order produced. */
-  held: SessionIntent[]
-  /** How many resize requests this fence has issued. */
-  generation: number
-  /** The newest generation whose answer may open this fence. */
-  newest: number
-  /** The report the newest request carried, so a repeat is not sent again. */
-  sent: SessionSize | null
-  /** The last-resort release's timer (ALT_SCREEN_RECEIPT_DEADLINE_MS). */
-  deadline: number | undefined
 }
 
 /**
@@ -1833,47 +1772,6 @@ export class TerminalContent extends BasePaneContent {
    *  tier), detached at dispose. */
   private env: DomainEnvironmentProjection | null = null
   private _bufferType: 'normal' | 'alternate' = 'normal'
-  /** THE ALTERNATE-SCREEN SIZE FENCE (nocx-1ebrs.10). An alternate-screen
-   *  program is told its new grid by a resize REQUEST, and until that request
-   *  has APPLIED the program still reads and writes at the previous mode's
-   *  width — measured: 87–234 ms after the first fullscreen frame, with the
-   *  pty still at the old width while the person's keys arrived.
-   *
-   *  So the switch opens one fence. It sends the pane's own measured grid at
-   *  once (no settle timer: the moment is known), presents the frames that
-   *  arrive before it against that grid, and holds what the person produces
-   *  until a receipt says the resize applied. Nothing here waits on a
-   *  painted frame — a frame can depend on the input this fence is holding,
-   *  which is the deadlock the receipt exists to avoid.
-   *
-   *  The one timer is a last-resort release, not a step in the order: nothing
-   *  else bounds a request that is never answered, because `dispatcher.call`
-   *  has no per-request timeout and the connection's heartbeat keeps a socket
-   *  that still answers pings alive. See ALT_SCREEN_RECEIPT_DEADLINE_MS. */
-  private _fence: AlternateScreenFence | null = null
-  /** Whether alternate-screen frames are presented on THIS PANE's measured
-   *  grid, from the switch until the program's own grid catches up with it
-   *  (nocx-1ebrs.10). Read by _presentedSnapshot; false is the steady state,
-   *  where the frame's own geometry is the truth.
-   *
-   *  It is a FLAG and not a number on purpose. The columns it presents are
-   *  read from `lastLocalGridSize` at the moment of the paint, because the
-   *  number that matters is the pane's fit AFTER the switch applied — the one
-   *  the fullscreen layout produces, with the prose inset gone. A number
-   *  captured when the switch was accepted was the PREVIOUS layout's fit (192
-   *  columns with the gutter, where the fullscreen pane admits 199), and
-   *  presenting it reproduced the defect exactly: the assertion is the pane's
-   *  own grid, so the presentation has to read the pane's current one.
-   *
-   *  It outlives the fence on purpose. The fence opens on the resize RECEIPT
-   *  — that is when input may go — while the frame that carried the previous
-   *  mode's width may still be the one waiting in the paint queue: the answer
-   *  can arrive in 2 ms (measured: resize sent → PTY correction 0.5–11 ms) and
-   *  the paint is the next animation frame. Binding the presentation to the
-   *  receipt would let exactly the frame this bead is about paint at the old
-   *  width, so the presentation ends where the evidence does — a frame whose
-   *  own grid is the pane's. */
-  private _switchPresents = false
   private nativeMode = false
   private _disposed = false
   private mountAbortController: AbortController | null = null
@@ -4361,12 +4259,6 @@ export class TerminalContent extends BasePaneContent {
           // desynchronized episode comes back, used to stay flat until the
           // first command opened a block. setIdle declines while an
           // alt-screen program owns the pane.
-          //
-          // AND THE PROMPT TAKES THE GRID BACK (ADR-2yzsq8mk): a command that
-          // borrowed the alternate screen kept the pane's width until it
-          // ended, and this boundary is where the transcript's column returns
-          // — one resize, owed here, never inside the borrow.
-          this._releaseBorrowedGrid()
           this.scrollback?.setIdle()
         } else if (
           this.lifecycle.state.kind === 'running' &&
@@ -5330,15 +5222,8 @@ export class TerminalContent extends BasePaneContent {
     // The token the editor holds for a submit is per bind; the new bind starts
     // with none.
     this.editor?.resetSubmitInFlight()
-    // A bind is a new session (or the same one reattached): the previous
-    // binding's resize receipt will never arrive for anything this pane sends
-    // now, and the input it was holding belongs to a surface whose screen
-    // this bind is about to replace (nocx-1ebrs.10).
-    clearTimeout(this._fence?.deadline)
-    this._fence = null
-    this._switchPresents = false
     // AND THE HELD ROWS COME BACK, BECAUSE THE SCREEN THEY WERE HELD FOR IS
-    // OVER (ADR-2yzsq8mk's joint, nocx-djx1u). The running block's body holds
+    // OVER (nocx-djx1u). The running block's body holds
     // the rows its painted screen has not passed yet, and the count is only
     // meaningful on the generation that produced it: this bind ends that
     // generation here, and the body takes every row the record holds rather
@@ -5869,54 +5754,13 @@ export class TerminalContent extends BasePaneContent {
           // Latest-value metadata is consumed only with an accepted frame:
           // its title/cwd and cell rows belong to the same backend revision.
           this._resetFrameMetadataSession(session.sessionId)
-          // THE SWITCH'S PRESENTATION STARTS ON THE FRAME, BEFORE IT IS
-          // PAINTED (nocx-1ebrs.10). The flag is set here, synchronously, so
-          // the paint that this handler schedules below already knows the
-          // frame is to be presented on the pane's grid; the GRID itself is
-          // read at paint time, because the fit that matters is the one the
-          // fullscreen layout produces a moment later (_applyBufferKind).
-          if (
-            result.snapshot.state.bufferKind === 'alternate' &&
-            this._bufferType !== 'alternate'
-          ) {
-            this._switchPresents = true
-          }
           this.scrollback?.blockManager.acceptOutputStartFrame(result.snapshot)
           this.scrollback?.outputAnchorChanged()
           this.cols = result.snapshot.geometry.cols
           this.rows = result.snapshot.geometry.rows
           const geometry = result.snapshot.geometry
           this._rememberAcceptedGeometryDpr(geometry)
-          // THE TRANSITION IS OVER WHEN THE PROGRAM AGREES WITH THE PANE. The
-          // padded presentation exists for frames still describing the size
-          // the switch replaced; a frame whose own grid is at least this
-          // pane's fit is the program drawing at the new size, and from there
-          // the frame is the truth again — a program legitimately narrower
-          // than this pane (another window's grid) is not padded a second
-          // time.
-          const fitted = this.lastLocalGridSize
-          if (
-            this._switchPresents &&
-            // …and not on the frame that STARTED the transition: its grid is
-            // the one being replaced, measured against the fit this pane had
-            // before the mode change (192 where the fullscreen pane admits
-            // 199), so comparing the two here would end the presentation on
-            // its own first frame.
-            this._bufferType === 'alternate' &&
-            result.snapshot.state.bufferKind === 'alternate' &&
-            fitted !== null &&
-            geometry.cols >= fitted.cols
-          ) {
-            this._switchPresents = false
-          }
-          // The grid this pane PRESENTS is its own measurement; the one the
-          // frame declares is the program's, and it is applied by a request
-          // that may not have landed yet (nocx-1ebrs.10). The geometry below
-          // stays the FRAME's: what changed on the wire, what the accepted
-          // cell metric is, and what the pane reports all describe the
-          // program's grid, not the rectangle it is shown in.
-          const presented = this._presentedSnapshot(result.snapshot)
-          this._updateGridOwner(presented.geometry)
+          this._updateGridOwner(result.snapshot.geometry)
           const geometryChanged =
             previous === null ||
             previous.geometry.cols !== geometry.cols ||
@@ -6067,13 +5911,6 @@ export class TerminalContent extends BasePaneContent {
       // can hold its rows for a frame that will never arrive.
       this._screenGeneration++
       this._submittedAwaitingStart = false
-      // Nothing this pane asks for can be applied by a session that has
-      // ended, and the transport answers a resize cancelled by a close with
-      // the same supersession code it answers a newer one — which is not a
-      // reason to hold the person's keys forever. The fence and the switch's
-      // presentation end here (nocx-1ebrs.10).
-      this._switchPresents = false
-      this._closeAlternateScreenFence('closed')
       this._cancelDeferredShellSubmissions()
       this.hooks.onActiveOriginChange?.()
       this._projections?.reset()
@@ -6300,14 +6137,11 @@ export class TerminalContent extends BasePaneContent {
    * criterion's "changes batched into animation frames". The row-level diff
    * inside the painter makes the pass cheap: an unchanged row keeps its DOM.
    *
-   * `snapshot` is the revision the backend accepted and `presented` is that
-   * same revision drawn in this pane's rectangle — the two differ only while
-   * an alternate-screen switch is still being sized (see _presentedSnapshot).
-   * Everything
-   * that asks "what does the screen SAY" (selection, links, the column count
-   * the history pages address) reads the accepted one; only the painter and
-   * the pixel mapping, which answer "where is that on my glass", read the
-   * presented one.
+   * Everything that asks "what does the screen SAY" (selection, links, the
+   * column count the history pages address) reads the accepted revision; the
+   * painter and the pixel mapping answer "where is that on my glass" from the
+   * same one, because the pane's rectangle is the same in every mode
+   * (ADR-92zzg2y2).
    */
   private _paintFrame(snapshot: ScreenSnapshot): void {
     // THE ONE WATCHER FRAMES FLOW THROUGH (nocx-zg3k3.10.4): a column
@@ -6357,13 +6191,7 @@ export class TerminalContent extends BasePaneContent {
     const pending = this._pendingPaint
     this._pendingPaint = null
     if (pending === null || this._disposed || !this._active) return false
-    // THE RECTANGLE IS READ HERE, NOT WHEN THE FRAME ARRIVED. An alternate
-    // switch moves the pane's usable box (the prose gutter goes away), and
-    // that refit lands between accepting the frame and painting it — so a
-    // snapshot padded from the fit known at acceptance would carry the
-    // PREVIOUS layout's width, which is the defect. By the time this runs,
-    // the fit is the one the pane will actually show (nocx-1ebrs.10).
-    this._painter?.apply(this._presentedSnapshot(pending))
+    this._painter?.apply(pending)
     this._lastPaintedBaseRow = pending.state.baseRow
     // THE BOX AND THE ROWS IT SHOWS ARE ONE PAINT (owner, 2026-11-08: "the
     // room for the new rows is made a frame before the rows are drawn"). The
@@ -6375,21 +6203,12 @@ export class TerminalContent extends BasePaneContent {
     // rows that was a step of 170px with the newest rows clipped until it
     // landed.
     this.scrollback?.setLiveHeight(
-      this.liveContentHeight(this._presentedSnapshot(pending)),
+      this.liveContentHeight(pending),
       // THE ONE DOOR THAT PAINTED THE ROWS. Every other sizing pass re-applies
       // this height, so a box can never take a measurement the grid has not
       // drawn (nocx-4y82c.1.1).
       true,
     )
-    // AND THE MARGIN RETURNS WHEN THE PANE CAN HOLD THE ROWS WITH IT
-    // (nocx-djx1u). A borrowed grid is given the pane's own box because the
-    // four-side margin is two rows shorter than the box the program had; once
-    // the person's first key has handed the grid back, the shell redraws at the
-    // pane's size and this frame is the proof it has. Flipping the margin back
-    // at the key instead would cut those two rows again for the round trip the
-    // resize needs — the clipping this whole rule exists to stop, this time for
-    // a tenth of a second.
-    this._dropBorrowedMarginWhenItFits(this._presentedSnapshot(pending))
     this._widenRunningRowsToScreen()
     // A REPAINT CHANGES WHAT THE MEASUREMENT READS (nocx-1ebrs.42). The
     // output-driven resize path runs its refit in a frame scheduled BEFORE
@@ -6452,14 +6271,19 @@ export class TerminalContent extends BasePaneContent {
     // THE PAINTED SCREEN'S ROW, not the model's: a frame can be accepted and
     // not painted yet, and the body must stop where the grid it is joined to
     // stops. Falls back to the model only before the first paint.
-    const passed = (this._lastPaintedBaseRow ?? snapshot.state.baseRow) - start
-    // A LIVE SCREEN THAT HAS NOT REACHED THE BLOCK'S ROWS HAS PASSED NONE OF
-    // THEM, and zero is the answer: the block opened on a row the screen has
-    // not scrolled past yet (the anchor is at or below the base), so every
-    // row the record holds is still on screen and all of it is held. That is
-    // the same bound the clamp below has always given; what makes it a hold
-    // now is the generation check above, not the sign of this number.
-    return Number.isSafeInteger(passed) ? Math.max(0, passed) : null
+    const base = (this._lastPaintedBaseRow ?? snapshot.state.baseRow) - start
+    // THE ROWS THE BOX HIDES AT THE TOP ARE PART OF THE BODY TOO
+    // (ADR-92zzg2y2). The live grid is translated by what its box does not
+    // show; the rows above the box are still screen rows, and the stored body
+    // above the box must paint them or a row that leaves the screen top is
+    // one row lower when it lands in the body than it was in the grid — the
+    // owner's "output moves down" frame. `hiddenScreenRows` is that
+    // translation in whole rows, taken from the frame the grid was painted
+    // from. Before the screen reaches the block's first output row the sum is
+    // negative and zero is the answer: nothing the record holds has left the
+    // screen yet.
+    const hidden = this.scrollback?.hiddenScreenRows ?? 0
+    return Number.isSafeInteger(base) ? Math.max(0, base + hidden) : null
   }
 
   /** Paint the running block's held rows as the painted screen passes them —
@@ -6479,39 +6303,6 @@ export class TerminalContent extends BasePaneContent {
     const upTo = this._rowsTheScreenPassed(rec)
     if (!sb.blockManager.holdStoredRows(rec.attemptId, upTo)) return
     sb.scrollToBottomIfFollowing()
-  }
-
-  /**
-   * The accepted frame, as this pane PRESENTS it: on the columns the pane has
-   * measured since an alternate-screen switch, and at the frame's own grid
-   * otherwise (nocx-1ebrs.10).
-   *
-   * The frames in that window are the previous mode's grid — measured, at the
-   * switch: 192 columns with the pane already settled wider, and 70 in a
-   * 1394 px pane — because the program has not yet been told the new size.
-   * Painting that width is what left the strip on the right of a full-screen
-   * program, and it is why the first presented frame's columns are this
-   * pane's and not the previous mode's.
-   *
-   * Only the WIDTH is the pane's. The rows stay the frame's: a shorter or
-   * taller program is a fact about the program, and inventing rows to fill
-   * the box would paint output nobody wrote. The content itself is never
-   * dropped either — padding only ever widens (padSnapshotToColumns), so a
-   * frame from a wider window keeps its cells and is clipped by the box, as
-   * before. Nothing here measures anything: `cols` is the fit's answer, taken
-   * when the fence opened.
-   */
-  private _presentedSnapshot(snapshot: ScreenSnapshot): ScreenSnapshot {
-    if (!this._switchPresents || snapshot.state.bufferKind !== 'alternate') return snapshot
-    // THE PANE'S CURRENT FIT, read now — not a width captured when the switch
-    // was accepted. A captured number was the PREVIOUS layout's: the prose
-    // gutter is still subtracted at that instant and the fullscreen pane
-    // admits more columns than the fit had (192 against 199, measured in the
-    // e2e), so presenting the captured one reproduced the defect the same
-    // frame it was meant to fix.
-    const cols = this.lastLocalGridSize?.cols ?? null
-    if (cols === null) return snapshot
-    return padSnapshotToColumns(snapshot, cols)
   }
 
   // ── B.5 viewport delivery ─────────────────────────────────────────────
@@ -6586,148 +6377,6 @@ export class TerminalContent extends BasePaneContent {
   /** The most recent grid this window derived from its own measured viewport.
    *  An accepted frame may instead describe another attached client's grid. */
   private lastLocalGridSize: { cols: number; rows: number } | null = null
-
-  /**
-   * THE GRID A PROGRAM OWNS, KEPT WHILE ITS COMMAND RUNS (ADR-2yzsq8mk).
-   *
-   * A program that borrows the alternate screen to redraw is borrowing it
-   * because the pane resized. If leaving the screen resized the pty back, that
-   * SIGWINCH would be the borrow's own trigger and the program would borrow
-   * again — the presentation loop ADR-3kqrem7v removed, measured at four
-   * alternate entries and eight resizes for one pane resize. So on leaving the
-   * alternate screen the pane keeps presenting the grid it applied to the
-   * program, and the running block that holds it is drawn flush (its rows were
-   * written at the pane's width). The prompt is where the transcript's column
-   * returns, and the one resize owed for that happens there.
-   */
-  private _ownedGrid: { cols: number; rows: number } | null = null
-
-  /** Whether the borrowed grid has been handed back and the pane is waiting for
-   *  the shell to redraw at its own size, so the fit must leave the vertical
-   *  margin out of the height it reads (nocx-djx1u).
-   *
-   *  It is a sub-state of the LAYOUT's `inner-borrowed-grid`, never a state of
-   *  its own: the vertical margin is only missing from the box while that class
-   *  is on, so this flag is read through `_borrowedMarginOwed()` and nothing
-   *  else. A structured session has the margin on its box already — subtracting
-   *  it again there cost every later fit its rows (independent read,
-   *  2026-11-08). */
-  private _borrowedReleased = false
-
-  /**
-   * Whether the grid on screen is the one a PROGRAM owns — borrowed, not
-   * measured by this window — which is the one question both resize paths ask
-   * before they report a size (nocx-djx1u).
-   *
-   * It has to be asked twice and for the same reason. `fitUsableViewport`
-   * asks it when it decides whether a fit may arm a report at all; the settle
-   * timer asks it again when it FIRES, because a timer armed before the
-   * program left outlives the reason it was armed for: it fires into the exit,
-   * after the ordinary refit has measured the ledger's column, and would send
-   * that column's width to a pty still holding the program's. That is exactly
-   * the SIGWINCH leaving the alternate screen must not cause (ADR-2yzsq8mk
-   * decision 4), so the answer is read at the wire, not only at the
-   * scheduling.
-   */
-  private _gridIsBorrowed(): boolean {
-    return this._ownedGrid !== null && this.scrollback?.mode !== 'fullscreen'
-  }
-
-  /**
-   * Whether the vertical margin is OWED to a handed-back grid — holding the
-   * margin out of the height the fit reads, until the paint that proves the
-   * rows fit inside it (nocx-djx1u).
-   *
-   * The margin is missing from the box exactly while the layout wears
-   * `inner-borrowed-grid`, so this is the layout's answer ANDed with the
-   * hand-back's: a structured session's box already has the margin (the block
-   * owns the rows and scrolls), and subtracting it there again took two rows
-   * off every later fit until the next alternate exit (independent read,
-   * 2026-11-08).
-   */
-  private _borrowedMarginOwed(): boolean {
-    return this._borrowedReleased && this.scrollback?.isBorrowedGrid() === true
-  }
-
-  /**
-   * Hand a borrowed grid back to the pane's own layout: the ledger's column and
-   * its four margins (ADR-2yzsq8mk decisions 4 and 5, nocx-djx1u).
-   *
-   * Called from the two moments a session can prove the program is done with
-   * the pane — an authenticated `prompt_ready`, and the person's first key in a
-   * session that has no markers. The fit that follows is the ordinary one and
-   * arms ONE settle report, so the pty is told once and the margins return with
-   * it. Nothing is sent at the alternate screen's exit itself, which is the
-   * rule the whole borrow exists to keep.
-   */
-  private _releaseBorrowedGrid(): void {
-    if (this._ownedGrid === null) return
-    this._ownedGrid = null
-    const sb = this.scrollback
-    if (sb?.isBorrowedGrid() === true) {
-      // THE PANE IS MEASURED WITH THE MARGIN IT IS GOING BACK TO (nocx-djx1u).
-      // The box still holds the borrowed rows until the shell's own redraw
-      // proves they fit inside the margin, so the fit is told to leave that
-      // margin out of the height it reads (`usableViewport`) and report the
-      // pane's own grid. Without it the fit reads the borrowed box, reports the
-      // size the pty already has, and nothing moves.
-      this._borrowedReleased = true
-    } else {
-      // NOTHING WAS GIVEN UP, SO NOTHING IS OWED (independent read,
-      // 2026-11-08). A structured session's margin is on the box already: the
-      // block owns the rows, the fit's height never included the margin, and
-      // holding the margin out of it here would take two rows off every fit
-      // until the next alternate exit reset the flag — which never came,
-      // because the release that would clear it lives in the borrowed layout.
-      this._borrowedReleased = false
-      sb?.setBorrowedGrid(false)
-    }
-    this.refitIfResized()
-  }
-
-  /**
-   * Put the ledger's vertical margin back on the paint that proves the rows fit
-   * inside it (nocx-djx1u; ADR-2yzsq8mk decision 5).
-   *
-   * The hand-back is a round trip: the key releases the grid, the report goes
-   * out, and the shell redraws at the pane's own size. Until that redraw lands
-   * the rows are still the program's, and the margin is two of them too short —
-   * so the margin waits for the frame that fits, rather than for the key.
-   */
-  private _dropBorrowedMarginWhenItFits(snapshot: ScreenSnapshot): void {
-    const sb = this.scrollback
-    if (!sb || !sb.isBorrowedGrid() || this._gridIsBorrowed()) return
-    const area = sb.scrollbackArea
-    const content = this.liveContentHeight(snapshot)
-    // THE QUESTION IS WHOLE ROWS, NOT TWO FLOAT HEIGHTS (independent reads,
-    // 2026-11-09 and round 5). The release asks for rows; the shell redraws
-    // that many; so "does the returning frame fit" is `rows(content) <=
-    // rows(box − margins)`, counted by `gridRows` — the one row computation
-    // with its one epsilon. Comparing pixel heights instead is what failed
-    // twice: `clientHeight` is rounded to a whole CSS pixel while the fit is
-    // fractional (a 429.34375px scroller answered 429, the release asked 22
-    // rows = 381.333px, and 381.333 <= 429 − 48 = 381 was false), and even two
-    // unrounded floats disagree at a row boundary (552px of box, 24px margins,
-    // 28-device-pixel cells at DPR 1.5: 27 rows is 504.00000000000006 against
-    // an available 504). Either way the proof failed on every full-height
-    // frame, so `inner-borrowed-grid` and its missing margins stayed for the
-    // rest of the session. Rows cannot disagree with the fit: it asked for
-    // rows too.
-    const metrics = this.liveCellMetrics()
-    const box = this._borrowedBoxPx(area, this._latestViewport)
-    if (content === null || metrics === null || box <= 0) return
-    const available = box - 2 * this._paneMarginPx(area)
-    if (gridRows(content, metrics.cellHeight) <= gridRows(available, metrics.cellHeight)) {
-      this._borrowedReleased = false
-      sb.setBorrowedGrid(false)
-    }
-  }
-
-  /** The ledger's margin, one number for the gutter and for the vertical pair
-   *  (ADR-2yzsq8mk): read from the stylesheet, never measured off a row. */
-  private _paneMarginPx(area: HTMLElement): number {
-    return parseFloat(getComputedStyle(area).getPropertyValue('--pane-inline-padding')) || 0
-  }
 
   /**
    * The size report this window would send now: its locally fitted grid and
@@ -6818,23 +6467,8 @@ export class TerminalContent extends BasePaneContent {
    * made (nocx-eidfb.3): the schedule is skipped entirely.
    */
   private _scheduleResizeReport(): void {
-    // WHILE THE FENCE IS CLOSED, THE REPORT IS THE FENCE'S (nocx-1ebrs.10).
-    // A grid change during the switch is a new measurement of the pane, not a
-    // settle candidate: it is reported at once, and its receipt is the one
-    // that can open the fence. Leaving it to the timer would send AFTER the
-    // input the fence is holding, which is the order this bead is about.
-    if (this._fence !== null) {
-      this._requestFenceResize()
-      return
-    }
     clearTimeout(this.resizeTimer)
     this.resizeTimer = window.setTimeout(() => {
-      // THE GRID MAY HAVE BEEN BORROWED WHILE THIS TIMER WAS ARMED (nocx-djx1u).
-      // The program's exit re-measures the pane at the ledger's column, and
-      // reporting that here would be the resize decision 4 forbids: the pty
-      // keeps the program's grid until its command ends, and the column is
-      // sent at the prompt — where the ordinary fit arms its own report.
-      if (this._gridIsBorrowed()) return
       // A resize makes the shell redraw its prompt, and that redraw arrives
       // on `session.onData` looking exactly like output the user has not
       // seen. It is not: we asked for it. Switching the strip from vertical
@@ -6915,11 +6549,6 @@ export class TerminalContent extends BasePaneContent {
     // same count, not a second division (see `gridRows`).
     const rows = Math.max(1, gridRows(usable.height, metrics.cellHeight))
     this.lastLocalGridSize = { cols, rows }
-    // A pane that moves DURING an alternate-screen switch is the pane the
-    // frames in the transition are fitted to (nocx-1ebrs.10) — and nothing
-    // has to be copied out of here for that: the presentation reads THIS fit
-    // at paint time, which is why the width it uses is always the current
-    // one and never the one the switch was accepted at.
     const accepted = this._cellModel?.current()?.geometry
     if (accepted && (accepted.cellWidthPx <= 0 || accepted.cellHeightPx <= 0)) {
       this.scrollback?.cellMetricsChanged()
@@ -6929,18 +6558,6 @@ export class TerminalContent extends BasePaneContent {
     const sameViewport =
       last !== null && last.width === usable.width && last.height === usable.height
     const sameSize = cols === this.cols && rows === this.rows
-    // A BORROWED COMMAND'S ROWS STAY AS WRITTEN (ADR-2yzsq8mk): the pane paints
-    // them on the ledger's column, but its pty keeps the grid the program was
-    // given until the command ends, so no report goes out for the placement —
-    // that SIGWINCH is what would start the borrow again.
-    if (this._gridIsBorrowed()) {
-      if (!sameViewport || !sameSize) {
-        this.lastFitGeometry = { width: usable.width, height: usable.height }
-        this.cols = cols
-        this.rows = rows
-      }
-      return
-    }
     const report = this._lastReport
     const sameMetric =
       report !== null &&
@@ -6997,45 +6614,26 @@ export class TerminalContent extends BasePaneContent {
    * presentation or DOM seat. Prompt prediction reserves the same header,
    * so submitting cannot resize a program after its bytes are delivered. */
   private _gridHeight(area: HTMLElement | undefined, viewport: ContentViewport): number {
-    const scroller =
-      area && this._areaHeightPx(area) > 0 ? this._areaHeightPx(area) : viewport.height
+    const measured = area !== undefined && this._areaHeightPx(area) > 0
+    const scroller = measured && area !== undefined ? this._areaHeightPx(area) : viewport.height
     const sb = this.scrollback
     if (!sb) return scroller
-    // THE PROGRAM THAT OWNS THE PANE IS TOLD ITS BOX (ADR-2yzsq8mk). The
-    // controller owns that height — `paneFillHeight`, which `_fillPane` writes
-    // to the box — so the alternate screen's one-row margin cannot cost a
-    // full-screen program a row: read from one owner, the markerless session's
-    // program (no running block to take the branch below) gets the box's
-    // height too, instead of the whole scroller the box does not show.
-    if (sb.mode === 'fullscreen' || sb.mode === 'unstructured') {
-      const box = sb.paneFillHeight
-      // No layout at all yet — the delivered box is the better guess, the same
-      // fallback every other mode takes here.
-      return box > 0 ? box : scroller
-    }
-    const structured =
-      sb.mode === 'idle' || sb.mode === 'running' || sb.blockManager.runningBlock !== null
-    if (!structured) return scroller
-    // ONE OWNER of the running box, AND ONE INTEGER ROW COUNT (independent read,
-    // 2026-11-08: "compute the row count once, in integers, and derive the box
-    // from it"). Every structured mode answers with `rows * cell` from the same
-    // helper, so the normal screen, the prompt and the alternate screen cannot
-    // disagree by a row — and `floor(537.333 / 17.222)` cannot come out as
-    // 30.999999999999996 and cost the program a row that the alternate screen,
-    // reading the raw height, then adds back as a resize.
+    // ONE BOX, ONE EXPRESSION, EVERY MODE (ADR-92zzg2y2). The scroller plus
+    // the in-flow composer is the pane the terminal may occupy (the composer is
+    // hidden in the alternate screen and its pixels are back in the scroller,
+    // so the sum is the same on both sides of a switch). The one header a
+    // structured session reserves comes off it — at the prompt too, so a
+    // submit cannot resize the program — and the rows are floored ONCE, in
+    // integers, so the box that is drawn and the grid the pty is told cannot
+    // disagree by a row. No mode branch: a presentation change never changes
+    // this number.
+    const total = Math.max(
+      0,
+      (measured && area !== undefined ? this._terminalAreaPx(area) : scroller) -
+        sb.reservedHeaderHeightPx,
+    )
     const cell = this.liveCellMetrics()?.cellHeight ?? 0
-    if (cell > 0) {
-      const max = sb.runningLiveCap
-      const height = max ?? Math.max(0, this._terminalAreaPx(area!) - sb.runningHeaderHeightPx)
-      // (The alternate screen left this branch above: it is told its box's
-      // height, which already gives back the margin row ADR-2yzsq8mk keeps
-      // below a program's last row.)
-      return gridRows(height, cell) * cell
-    }
-    const cap = sb.runningLiveCap
-    if (cap !== null) return Math.max(0, cap)
-    const total = area && this._areaHeightPx(area) > 0 ? this._terminalAreaPx(area) : scroller
-    return Math.max(0, total - sb.runningHeaderHeightPx)
+    return cell > 0 ? gridRows(total, cell) * cell : total
   }
 
   /**
@@ -7083,100 +6681,38 @@ export class TerminalContent extends BasePaneContent {
   }
 
   /**
-   * THE HEIGHT A FIT THAT GIVES THE MARGIN BACK MUST READ (nocx-djx1u).
+   * THE CONTENT BOX THE GRID IS FITTED TO — one expression, every mode
+   * (ADR-92zzg2y2).
    *
-   * This is the one fit that subtracts a margin, so it is the one that must
-   * subtract it from the box BEFORE the row count is floored. `_gridHeight`
-   * answers in whole rows already — `paneFillHeight` is `gridRows(box) * cell`
-   * — and `fitUsableViewport` floors again, so subtracting the margin from
-   * that answer rounds twice: a 422px box, 17px cells and a 24px margin asked
-   * for floor((408 − 48)/17) = 21 rows where the pane has
-   * floor((422 − 48)/17) = 22. The returning frame then fitted 22, the margin
-   * came back, and the ordinary fit asked for 22 again — a second resize with
-   * no pane change. One floor, on the raw box.
-   */
-  private _releasedFitHeight(area: HTMLElement, viewport: ContentViewport): number {
-    const height = Math.max(0, this._borrowedBoxPx(area, viewport) - 2 * this._paneMarginPx(area))
-    const cell = this.liveCellMetrics()?.cellHeight ?? 0
-    return cell > 0 ? gridRows(height, cell) * cell : height
-  }
-
-  /**
-   * THE BOX THE HAND-BACK IS MEASURED AGAINST, on BOTH sides of it
-   * (nocx-djx1u). The fit that gives the margin back reads it, and the paint
-   * that decides the rows now fit inside the margin reads it — one expression,
-   * because `clientHeight` is a rounded number and the fit is not: a 429.34375
-   * px scroller answered `429`, the release asked 22 rows (381.333px), and the
-   * frame proving them asked `381.333 <= 429 − 48`, which is false, forever.
+   * Width: the scroller's content box less the one-cell gutter on each side.
+   * The gutter is read from the stylesheet rather than measured off the live
+   * region: measured, it lags — the running live region lives inside the
+   * block, whose width is written from the scroller's on the next sizing pass,
+   * so a pane that had just changed size was fitted against the OLD box for a
+   * frame, and the size report that followed the real box looked like a resize
+   * caused by whatever landed in between. The scroller's clientWidth is the
+   * pane's own content box and moves with the pane; the gutter is the one
+   * declared number every row of the ledger pays.
    *
-   * It is the controller's `paneBoxHeight` — the fractional, unrounded box the
-   * live region is sized from — with the two fallbacks the fit has always had:
-   * a measured scroller, then the delivered viewport.
+   * Height: `_gridHeight`, which is the scroller plus the in-flow composer
+   * less the one reserved header, floored to whole rows. The alternate screen
+   * is not an exception: the composer's pixels are back in the scroller there
+   * and the running header is the same one, so both sides of a switch produce
+   * this same number.
+   *
+   * Zero before first layout — the delivered box is the better guess then, and
+   * the next viewport delivery corrects it. Each axis falls back on its own:
+   * jsdom reports 0 for both, a real pane mid-layout can report one.
    */
-  private _borrowedBoxPx(area: HTMLElement, viewport: ContentViewport | null): number {
-    const box = this.scrollback?.paneBoxHeight ?? 0
-    if (box > 0) return box
-    const measured = this._areaHeightPx(area)
-    if (measured > 0) return measured
-    return viewport?.height ?? 0
-  }
-
   private usableViewport(viewport: ContentViewport): ContentViewport {
     const area = this.scrollback?.scrollbackArea
-    const sb = this.scrollback
-    const metrics = this.liveCellMetrics()
-    const owned = this._ownedGrid
-    if (owned !== null && metrics !== null && this._gridIsBorrowed()) {
-      // THE ROWS THE PROGRAM HAS, ON THE LEDGER'S COLUMN (ADR-2yzsq8mk). The
-      // pty keeps the size the program was given (see `_ownedGrid`), so a
-      // switch back to the primary buffer cannot resize it; what changes is
-      // where those rows are DRAWN — back at the transcript's column, which is
-      // the block a person reads, and a placement change costs no SIGWINCH.
-      const outer = area && area.clientWidth > 0 ? area.clientWidth : viewport.width
-      const gutter =
-        area === undefined
-          ? 0
-          : parseFloat(getComputedStyle(area).getPropertyValue('--pane-inline-padding')) || 0
-      return {
-        ...viewport,
-        width: Math.max(0, outer - 2 * gutter),
-        height: owned.rows * metrics.cellHeight,
-      }
-    }
-    // Zero before first layout — the delivered box is the better guess then,
-    // and the next viewport delivery corrects it. Each axis falls back on its
-    // own: jsdom reports 0 for both, a real pane mid-layout can report one.
-    // The height is `_gridHeight`'s: the running cap, held at the prompt.
-    // A HANDED-BACK GRID IS MEASURED WITH THE MARGIN IT RETURNS TO (nocx-djx1u).
-    // The box still holds the borrowed rows until the shell's redraw, and the
-    // fit must not report that box: the pane's own grid is the one the margin
-    // leaves, and it is the size the pty is owed. Both sides of the vertical
-    // pair come off, which is the same token the gutter uses — and they come
-    // off BEFORE the row count is floored (`_releasedFitHeight`).
-    const height =
-      area !== undefined && this._borrowedMarginOwed()
-        ? this._releasedFitHeight(area, viewport)
-        : this._gridHeight(area, viewport)
-    // ADR-2yzsq8mk: a normal command is one column with the transcript's gutter,
-    // and a full-screen program owns the whole width. The gutter is read from
-    // the STYLESHEET, not measured off the live region: measured, it lags — the
-    // running live region lives inside the block, whose width is written from
-    // the scroller's on the next sizing pass, so a pane that had just changed
-    // size was fitted against the OLD box for a frame, and the size report that
-    // followed the real box looked like a resize caused by whatever landed in
-    // between (the alternate-screen switch). The scroller's clientWidth is the
-    // pane's own content box and moves with the pane; the gutter is the one
-    // declared number every row of the ledger pays.
     const outer = area && area.clientWidth > 0 ? area.clientWidth : viewport.width
-    // ONLY A FULL-SCREEN PROGRAM OWNS THE PANE'S WHOLE WIDTH (ADR-2yzsq8mk).
-    // Every normal row — a running command, a plain ssh shell with no blocks
-    // yet — wears the ledger's gutter on both sides, so no painted column
-    // touches the pane's left or right edge.
     const gutter =
-      sb?.mode === 'fullscreen' || area === undefined
+      area === undefined
         ? 0
         : parseFloat(getComputedStyle(area).getPropertyValue('--pane-inline-padding')) || 0
     const width = Math.max(0, outer - 2 * gutter)
+    const height = this._gridHeight(area, viewport)
     return { ...viewport, width, height }
   }
 
@@ -8442,172 +7978,6 @@ export class TerminalContent extends BasePaneContent {
     this.env?.recordCwd(path)
   }
 
-  // ── The alternate-screen size fence (nocx-1ebrs.10) ──────────────────
-  //
-  // WHAT IT IS FOR. A full-screen program learns its grid from TIOCSWINSZ, so
-  // between the mode switch and the pty's application of the pane's size the
-  // program reads and writes at the PREVIOUS mode's width. Measured in the
-  // diagnostic this replaces: the correction landed 87–279 ms after the first
-  // fullscreen frame, the resize request went out 87–234 ms after it and
-  // always AFTER the post-switch text, and the program read keys while its
-  // own `stty` still reported the old width. The person's keys are not the
-  // thing to sacrifice to that round trip, so they wait for it — and only
-  // they: what the program paints is presented at once (see
-  // _presentedSnapshot), because output cannot be recalled and hiding it
-  // would trade a wrong size for a missing screen.
-  //
-  // WHAT IT CANNOT DO, and the PR says so: bytes already written to the pty
-  // are not recalled, so this holds only input produced AFTER the switch. The
-  // backend cannot pick the pane's CSS extent for us either — one ordered
-  // control channel, and AD-6 forbids sniffing the byte stream — so the grid
-  // the fence reports is this window's own measurement, taken here.
-
-  /**
-   * Open the fence: from this instant the person's input is held.
-   *
-   * ARMING AND SENDING ARE TWO STEPS ON PURPOSE (nocx-1ebrs.10). The fence is
-   * armed BEFORE the mode change, because the layout change itself can produce
-   * intents (the surface it seats takes the keyboard, and a focus intent is an
-   * intent like any other) and those belong behind the resize too. The request
-   * goes out AFTER the mode change has refitted, because entering fullscreen
-   * moves the pane's grid and a report taken before it asks the pty for the
-   * previous layout's width — the stale size this bead is about.
-   *
-   * And the arm comes before the send for a second reason: the receipt for the
-   * request that is about to go out must find a fence to open. A fence armed
-   * after its own request is a fence that can miss its own answer.
-   */
-  private _openAlternateScreenFence(): void {
-    if (this._fence !== null) return
-    // Every release below is an answer from a session, so a pane without one
-    // has nothing that could ever open the fence — it would hold the input
-    // for good instead of for a round trip.
-    if (this.session === null) return
-    this._fence = { held: [], generation: 0, newest: 0, sent: null, deadline: undefined }
-    this._switchPresents = true
-  }
-
-  /**
-   * Ask the session for this pane's measured grid, off the settle timer.
-   *
-   * The switch is a known moment, so there is nothing to debounce: the report
-   * is computed now and sent now, and that is what puts the request ahead of
-   * the input the fence is holding (the person's next key). The timer's own
-   * send is cancelled rather than left to duplicate this one — the report
-   * has not changed, and a second identical request would supersede the first
-   * and take the receipt with it.
-   *
-   * Only the NEWEST request may open the fence: an answer to an older one
-   * describes a grid that is no longer the pane's.
-   */
-  private _requestFenceResize(): void {
-    const fence = this._fence
-    const session = this.session
-    if (fence === null || session === null) return
-    const size = this._reportedSize()
-    const sent = fence.sent
-    if (
-      sent !== null &&
-      sent.cols === size.cols &&
-      sent.rows === size.rows &&
-      sent.xpixel === size.xpixel &&
-      sent.ypixel === size.ypixel
-    ) {
-      return
-    }
-    fence.sent = size
-    const generation = ++fence.generation
-    fence.newest = generation
-    clearTimeout(this.resizeTimer)
-    this.resizeTimer = undefined
-    this._armFenceDeadline(fence, generation)
-    const receipt = session.resizeApplied(size)
-    void receipt.then(
-      (outcome) => {
-        if (this._fence !== fence || generation !== fence.newest) return
-        if (outcome === 'applied') this._closeAlternateScreenFence('applied')
-        else if (outcome === 'closed') this._closeAlternateScreenFence('closed')
-        // 'superseded' is neither success nor failure: a NEWER resize owns
-        // the session's pending slot, so the grid this pane asked for is
-        // still on its way. The fence stays closed and the answer that opens
-        // it belongs to that newer request — which is this pane's own next
-        // report whenever the pane moves again. No toast (nothing failed) and
-        // no retry (a retry is how one switch becomes a resize storm).
-      },
-      (err: unknown) => {
-        if (this._fence !== fence || generation !== fence.newest) return
-        // A real failure, or the socket gone under the request. Either way
-        // the pane cannot hold the person's input for a size it will never
-        // learn: log it and let the input through at the size the pty has.
-        log.warn('nocx: the resize at an alternate-screen switch did not apply', {
-          pane: this.pane.paneId,
-          error: err instanceof Error ? err.message : String(err),
-        })
-        this._closeAlternateScreenFence('failed')
-      },
-    )
-  }
-
-  /**
-   * The last-resort release for a request nothing answered
-   * (ALT_SCREEN_RECEIPT_DEADLINE_MS).
-   *
-   * Armed per generation and re-armed by every new request, so it always
-   * measures the wait on the newest one, and it never fires for a fence that
-   * has already been released or replaced. On expiry the fence is released as
-   * `forced`: the held intents are DELIVERED in order, because a key delivered
-   * to a program at the old width is a rendering problem while a key swallowed
-   * forever is lost work — and the release is logged, because an input path
-   * that silently changes its mind is one nobody can investigate later.
-   */
-  private _armFenceDeadline(fence: AlternateScreenFence, generation: number): void {
-    clearTimeout(fence.deadline)
-    fence.deadline = window.setTimeout(() => {
-      fence.deadline = undefined
-      if (this._fence !== fence || generation !== fence.newest) return
-      log.warn('nocx: no resize receipt at an alternate-screen switch — releasing held input', {
-        pane: this.pane.paneId,
-        held: fence.held.length,
-        waitedMs: ALT_SCREEN_RECEIPT_DEADLINE_MS,
-      })
-      this._closeAlternateScreenFence('forced')
-    }, ALT_SCREEN_RECEIPT_DEADLINE_MS)
-  }
-
-  /**
-   * Release the fence and deliver what it held, in the order it was produced.
-   *
-   * `applied`, `forced` and `failed` deliver: the session is alive and the
-   * person's input is owed to it. `failed` and `forced` delivering is
-   * deliberate — the fence exists to keep keys away from a grid that is about
-   * to change, and once the request cannot succeed (or has gone unanswered
-   * for far longer than any observed round trip) there is no change left to
-   * wait for; holding forever would be the deadlock the receipt exists to
-   * prevent. `thaw` (the program left the alternate screen) delivers for the
-   * same reason: the mode the fence was holding for is over. `closed`
-   * delivers nothing — the session this input was meant for no longer exists.
-   *
-   * EXACTLY ONCE, IN ORDER. The queue is detached before the first delivery —
-   * the fence is already gone, so an intent produced while this loop runs (a
-   * key that arrives between two held ones) is queued by the ordinary path
-   * BEHIND them rather than appended to the list being walked, and nothing
-   * here can re-enter with the same object. Delivery goes back through
-   * onSessionIntent, so a held Ctrl-C meets the submit window's own rule
-   * instead of a second copy of it.
-   */
-  private _closeAlternateScreenFence(
-    reason: 'applied' | 'closed' | 'failed' | 'forced' | 'thaw',
-  ): void {
-    const fence = this._fence
-    if (fence === null) return
-    this._fence = null
-    clearTimeout(fence.deadline)
-    fence.deadline = undefined
-    if (reason === 'closed') return
-    const held = fence.held
-    for (const intent of held) this.onSessionIntent(intent)
-  }
-
   /** Apply alternate-screen presentation only from a locally accepted backend
    *  frame. The frame is the same revision the painter shows; no second
    *  authority decides buffer identity. */
@@ -8623,42 +7993,12 @@ export class TerminalContent extends BasePaneContent {
     // ownership. The runtime's frame supplies this state independently.
     this.lifecycle.setBuffer(type)
     if (type === 'alternate') {
-      // A NEW BORROW REPLACES THE ONE THE PANE WAS HOLDING (independent read,
-      // 2026-11-08). A program that walks back into the alternate screen owns
-      // the pane again: its keys are the program's, not the shell's proof of a
-      // prompt, and the grid it is given now is the one its own exit will keep.
-      // Leaving these set let the person's first key inside the program release
-      // a grid it still owned — a resize under a running full-screen program,
-      // the SIGWINCH decision 4 exists to prevent — and the margin it had
-      // already given back with it.
-      this._ownedGrid = null
-      this._borrowedReleased = false
-      this.scrollback?.setBorrowedGrid(false)
-      // ADR-3kqrem7v: switching the presentation does not change desired
-      // geometry. Keep the receipt fence for a REAL pane resize in flight;
-      // an equal applied size reuses its receipt and sends no resize RPC.
-      this._openAlternateScreenFence()
+      // THE SWITCH IS PRESENTATION, NOT GEOMETRY (ADR-92zzg2y2). The fit is the
+      // same box in both modes, so there is no resize to request, nothing to
+      // present on a borrowed grid and nothing to hold the person's input for.
       this.scrollback?.enterFullscreen()
       this.refitIfResized()
-      this._requestFenceResize()
     } else {
-      // Leaving cannot be waited on: the program is not full-screen any more,
-      // so the grid the fence was holding for is no longer the one being
-      // drawn — and a fence with no owner to apply it would hold keys forever.
-      if (thawing) {
-        this._switchPresents = false
-        this._closeAlternateScreenFence('thaw')
-        // AND THE GRID IT HAS IS THE GRID IT KEEPS (ADR-2yzsq8mk). A resize
-        // sent because the program stepped out of the alternate screen would
-        // arrive as the SIGWINCH that makes a borrowing program borrow again.
-        this._ownedGrid = this.lastLocalGridSize
-        this._borrowedReleased = false
-        // AND THE LAYOUT KNOWS, because in a markerless session nothing will
-        // ever hand it back (nocx-djx1u): the four-side margin is two rows
-        // shorter than the box the program had, and the rows it clipped were
-        // the newest ones — the prompt.
-        this.scrollback?.setBorrowedGrid(true)
-      }
       // A conventional terminal stays unstructured: the scrollback-block
       // model never takes over (ADR-0024 §4). Exit fullscreen before deciding
       // which layout the lifecycle currently owns.
@@ -10366,43 +9706,6 @@ export class TerminalContent extends BasePaneContent {
       this._cancelDeferredShellSubmissions()
     }
     if (isAwaitingIntegration(this._integration, this._awaitsIntegration)) return false
-    // THE FIRST KEY HANDS A BORROWED GRID BACK (nocx-djx1u; ADR-2yzsq8mk
-    // decision 4). In a session with an authenticated prompt that job belongs
-    // to the prompt; a markerless session has none, and leaving the alternate
-    // screen must not resize — that SIGWINCH is what makes a program borrow
-    // again. What the person's own key proves is that something is at the
-    // shell, waiting: a program that is still drawing the pane would not be
-    // reading their typing, and the shell is what reads it. So that key is the
-    // prompt a markerless session can observe, and it is where the ledger's
-    // column and its four margins come back — one resize, once per exit, and
-    // never one the program's own exit caused.
-    //
-    // Only input counts: a focus change or a pointer report is not the person
-    // speaking to a shell. And only a key into the PRIMARY buffer counts: an
-    // alternate-screen program is reading its own keys, and a structured
-    // command's release belongs to its authenticated prompt — its box already
-    // has the margin, so a key there has nothing to hand back (independent
-    // read, 2026-11-08).
-    if (
-      this._ownedGrid !== null &&
-      this._bufferType === 'normal' &&
-      this.scrollback?.isBorrowedGrid() === true &&
-      (intent.kind === 'key' || intent.kind === 'text' || intent.kind === 'paste')
-    ) {
-      this._releaseBorrowedGrid()
-    }
-    // THE SWITCH'S FENCE COMES FIRST (nocx-1ebrs.10). Everything the person
-    // produces after an alternate-screen switch waits for the resize receipt,
-    // and it waits in ONE queue so the order they produced survives — a focus
-    // change between two keys included, because the program reads these as a
-    // stream and a reordered one is a different input. Held is not lost: the
-    // receipt, an ordinary error or a close releases the queue (see
-    // _closeAlternateScreenFence), never a timer and never a painted frame.
-    const fence = this._fence
-    if (fence !== null) {
-      fence.held.push(intent)
-      return true
-    }
     // INPUT ENDS A LIVE SELECTION (nocx-1ebrs.19). A key, committed text or a
     // paste is what makes a full-screen program redraw the screen the person
     // had selected from, so the highlight is over the moment it is SENT —
@@ -10983,12 +10286,6 @@ export class TerminalContent extends BasePaneContent {
     this._settleTimer = undefined
     clearTimeout(this.resizeTimer)
     this.resizeTimer = undefined
-    // The fence dies with the pane: a receipt arriving after dispose has no
-    // session to deliver to, and the input it held belongs to a surface the
-    // person no longer has. Its last-resort timer dies with it.
-    clearTimeout(this._fence?.deadline)
-    this._fence = null
-    this._switchPresents = false
     // And the prediction's pending frame: a callback landing on a disposed
     // pane would measure nothing that exists (the same rule the paint
     // frame's cancellation below keeps).

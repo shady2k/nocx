@@ -313,6 +313,9 @@ func (c *Conn) TryEnqueue(msgType int, data []byte) error {
 // closed connection is terminal for the caller.
 func (c *Conn) EnqueueOrdered(ctx context.Context, msgType int, data []byte) error {
 	for {
+		// Observe the wake generation before testing capacity. A dequeue
+		// between a failed send and a later snapshot would otherwise be lost.
+		roomWake := c.roomSignal()
 		c.enqueueMu.RLock()
 		select {
 		case <-c.closed:
@@ -347,7 +350,6 @@ func (c *Conn) EnqueueOrdered(ctx context.Context, msgType int, data []byte) err
 				c.budget.release(int64(len(data)))
 			}
 		}
-		roomWake := c.roomSignal()
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

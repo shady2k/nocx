@@ -280,7 +280,7 @@ func (s *WSServer) PublishLifecycleProjection(ctx context.Context, f lifecyclepu
 	stored := s.storedAttempt(ctx, f)
 	recorded := s.syncLifecycleLedger(ctx, stored)
 	if recorded != nil {
-		lifecyclecommit.OnCommit(ctx, func() { s.publishHistoryRecorded(f, *recorded) })
+		lifecyclecommit.OnCommit(ctx, func() { s.publishHistoryRecorded(ctx, f, *recorded) })
 	}
 	// The streamed block's half of the same fact: an authenticated start
 	// opens (and answers the keep decision for) the command's block, a
@@ -331,7 +331,7 @@ func (s *WSServer) storedAttempt(ctx context.Context, f lifecyclepub.Fact) lifec
 // test that reads the obligation itself would be the only thing that noticed.
 var _ lifecyclepub.AttemptTransitionEmitter = (*WSServer)(nil)
 
-func (s *WSServer) publishHistoryRecorded(f lifecyclepub.Fact, data historyRecordedData) {
+func (s *WSServer) publishHistoryRecorded(ctx context.Context, f lifecyclepub.Fact, data historyRecordedData) {
 	s.lifecycleMu.Lock()
 	sid, ok := s.lifecycleLanes[lifecycle.LaneID(f.Lane)]
 	s.lifecycleMu.Unlock()
@@ -344,7 +344,7 @@ func (s *WSServer) publishHistoryRecorded(f lifecyclepub.Fact, data historyRecor
 	}
 	wconn, state := rx.getSubscriber()
 	if wconn != nil {
-		s.historyRecordedNotification(wconn, state, data)
+		s.historyRecordedNotification(ctx, wconn, state, data)
 	}
 }
 
@@ -599,7 +599,10 @@ func (s *WSServer) PublishLifecycle(ctx context.Context, f lifecyclepub.Fact) {
 		// never got its capture-offer chip. Sending the fact first costs
 		// nothing else it did not already cost — the receipt is still the very
 		// next write on this connection.
-		if err := wconn.TryNotify("lifecycle.changed", mustMarshal(params)); err != nil {
+		// A final fact has no later refresh guaranteed to repair its loss.
+		// Backpressure this lane, not the socket reader: the outbound writer
+		// drains independently of lifecycle commits and renderer ACKs.
+		if err := wconn.EnqueueOrderedNotify(ctx, "lifecycle.changed", mustMarshal(params)); err != nil {
 			s.log.Debug("write lifecycle.changed", "session", string(sid), "lane", f.Lane, "error", err)
 			return
 		}
@@ -610,7 +613,7 @@ func (s *WSServer) PublishLifecycle(ctx context.Context, f lifecyclepub.Fact) {
 		s.log.Debug("lifecycle.changed sent", "session", string(sid), "lane", f.Lane,
 			"lifecycle", f.Lifecycle, "domain", f.Domain, "epoch", f.Epoch)
 		if recorded != nil {
-			s.historyRecordedNotification(wconn, state, *recorded)
+			s.historyRecordedNotification(ctx, wconn, state, *recorded)
 		} else if f.Attempt != nil {
 			// publishClosedAttemptHistory (transitionsBelow, run before this
 			// fact by Ingest) is usually the one that actually closed the
@@ -618,7 +621,7 @@ func (s *WSServer) PublishLifecycle(ctx context.Context, f lifecyclepub.Fact) {
 			// again HERE answers nil — its receipt is waiting in the stash for
 			// exactly this fact, never sent ahead of it (nocx-2v80t.3.22).
 			if stashed, ok := s.takeStashedHistoryRecorded(lifecycle.AttemptID(f.Attempt.ID)); ok {
-				s.historyRecordedNotification(wconn, state, stashed)
+				s.historyRecordedNotification(ctx, wconn, state, stashed)
 			}
 		}
 	})

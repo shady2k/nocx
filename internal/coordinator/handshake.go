@@ -81,10 +81,18 @@ package coordinator
 // are part of the surface ADR-0104 declares, and a published byte of them
 // moving is a bump.
 //
+// 24 (fix/nocx-ouru5-1-18-panel-per-tab-2, over main's 23): the panel belongs
+// to the tab. `tabs.setPanel` is a new method, the tab shape gained
+// `panelView` and `panelCollapsed` (carried on every tabs.* result and on
+// layout.read), and the UI-state document's `sidebar` lost `collapsed` and
+// `activeViewId` — the window-wide pair it kept until this version. A window
+// built against 23 would read a tab's panel as absent and would send a
+// document 24 refuses, so the two versions do not pair.
+//
 // The number in a stage branch means only that ITS surface moved; this is the
 // number the integrated surface carries, and its golden is the one written by
 // the recipe over all four stages at once.
-const ProtocolVersion = 23
+const ProtocolVersion = 24
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

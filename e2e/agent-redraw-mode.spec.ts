@@ -176,16 +176,15 @@ test('one pane resize cannot feed a resize-borrow presentation loop', async ({ p
       `${counts}; banner occurs ${occurrences} times in block output: ${JSON.stringify(matches)}`,
     )
     .toBeLessThanOrEqual(1)
-  // TWO, AND THAT IS THE WHOLE BILL (ADR-2yzsq8mk): the pane's own resize, and
-  // the one entry into the alternate screen that tells the program the pane's
-  // width — the column change the owner accepted. A third would be the loop:
-  // the EXIT's resize is exactly what arrives as the SIGWINCH that makes a
-  // borrowing program borrow again (measured before this rule: eight resizes
-  // and four entries for one pane resize), so the pane does not send it and the
-  // program keeps the grid it was given until its command ends.
+  // ONE, AND THAT IS THE WHOLE BILL (ADR-92zzg2y2): the pane's own resize. The
+  // entry into the alternate screen is a presentation change now — one gutter
+  // in every mode — so it sends nothing. A second would be the loop the old
+  // rule bought: a resize at a switch is the SIGWINCH that makes a borrowing
+  // program borrow again (measured before it: eight resizes and four entries
+  // for one pane resize).
   expect
     .soft(resizes.length, `${counts}; requests: ${JSON.stringify(resizes)}`)
-    .toBeLessThanOrEqual(2)
+    .toBeLessThanOrEqual(1)
   expect
     .soft(sigwinches.length, `${counts}; PTY events: ${JSON.stringify(programEvents)}`)
     .toBeLessThanOrEqual(2)

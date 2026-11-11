@@ -1134,6 +1134,9 @@ func (s *Session) encodeForModes(i Intent) ([]byte, error) {
 	case IntentKindText:
 		return append([]byte(nil), i.Payload...), nil
 	case IntentKindPaste:
+		if i.Framing == PasteFramingBare {
+			return s.emulator.PasteBare(i.Payload)
+		}
 		return s.emulator.Paste(i.Payload)
 	case IntentKindMouse:
 		ev, err := mouseEvent(i.Payload)

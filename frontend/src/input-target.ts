@@ -8,6 +8,11 @@ import type { CommandAuthor } from './command-ledger'
 import type { SessionIntent } from './intent-input'
 export interface SubmitContext {
   readonly targetId: string
+  /** The framing this submit was given when the person made it
+   *  (nocx-evj4b.1.2). The bytes are written a round trip later, and by then
+   *  the program may already be running; the answer is the one the pane had at
+   *  the gesture. Absent means the target's own provider answers. */
+  readonly framing?: 'auto' | 'bare'
 }
 
 export interface InputTarget {
@@ -64,14 +69,23 @@ export class ShellInputTarget implements InputTarget {
      *  at the root and carried through the target so the seam is exercised:
      *  the editor receives its surface from the target, never from itself. */
     private readonly extensions: Extension[] = [],
+    /** How a submit is framed, asked at the moment of the submit (owner,
+     *  2026-11-10; nocx-evj4b.1.2). 'bare' is the integrated shell at its
+     *  prompt: the editor holds the whole line, so the bracketed-paste
+     *  markers protect nothing and a mode belief over ssh cannot be trusted.
+     *  'auto' is every other case — a program running inside a block, or a
+     *  shell with no integration — where the runtime frames by the mode the
+     *  program itself announced. */
+    private readonly framing: () => 'auto' | 'bare' = () => 'auto',
   ) {}
 
   editorExtensions(): Extension[] {
     return this.extensions
   }
 
-  submit(doc: string): Promise<void> {
-    this.sendIntent({ kind: 'paste', payload: doc })
+  submit(doc: string, ctx?: SubmitContext): Promise<void> {
+    const framing = ctx?.framing ?? this.framing()
+    this.sendIntent({ kind: 'paste', payload: doc, ...(framing === 'bare' ? { framing } : {}) })
     this.sendIntent({ kind: 'key', payload: 'enter' })
     return Promise.resolve()
   }

@@ -699,9 +699,17 @@ export class SessionHandle {
    *  from a keystroke lost forever into a round trip — and it is safe for
    *  exactly the reason the refusal is: nothing was written, so the second
    *  attempt is the first write. A partial write (bytesWritten > 0) is never
-   *  re-presented, because that one did reach the program. */
-  intent(kind: SessionIntentKind, payload: string): Promise<SessionIntentResult> {
-    return this._intent(kind, payload, true)
+   *  re-presented, because that one did reach the program.
+   *
+   *  A RE-PRESENTATION KEEPS THE FRAMING IT WAS FIRST PRESENTED WITH
+   *  (nocx-evj4b.1.2). `framing` is the caller's statement about THIS paste —
+   *  "never bracket it" for a composer submit behind a live integration — and
+   *  it is a property of the intent, not of the attempt: the revocation path
+   *  and the backpressure path both carry it into the presentation that
+   *  actually writes. A retry that dropped it would deliver the same
+   *  keystrokes under a different encoding than the one the surface chose. */
+  intent(kind: SessionIntentKind, payload: string, framing?: 'bare'): Promise<SessionIntentResult> {
+    return this._intent(kind, payload, true, framing)
   }
 
   /** The wire's own encoding of one intent payload, in the one place that
@@ -724,6 +732,7 @@ export class SessionHandle {
     kind: SessionIntentKind,
     payload: string,
     mayRepresent: boolean,
+    framing?: 'bare',
     attempt = 1,
     epoch = this.intentEpoch,
   ): Promise<SessionIntentResult> {
@@ -733,6 +742,7 @@ export class SessionHandle {
       presented,
       kind,
       intentPayload(payload),
+      framing,
     )
     if (typeof result.accessEpoch === 'number' && result.accessEpoch > 0) {
       this.accessEpoch = result.accessEpoch
@@ -753,7 +763,7 @@ export class SessionHandle {
       result.bytesWritten === 0 &&
       this.accessEpoch !== presented
     ) {
-      return this._intent(kind, payload, false)
+      return this._intent(kind, payload, false, framing)
     }
     // A REFUSAL THAT WROTE NOTHING, AND THE CAUSE IT NAMED (nocx-atpw5.1.38,
     // nocx-evj4b.1.12). The wire's contract is that `refused` wrote nothing
@@ -794,7 +804,9 @@ export class SessionHandle {
           return result
         }
         if (epoch !== this.intentEpoch) return result
-        return this._intent(kind, payload, false, attempt + 1, epoch)
+        // THE SAME FRAMING, ON EVERY PRESENTATION (nocx-evj4b.1.2): the wait
+        // is about WHEN the intent is presented, never about HOW.
+        return this._intent(kind, payload, false, framing, attempt + 1, epoch)
       }
       if (cause !== 'access_revoked') {
         log.warn('nocx: a keystroke was refused with nothing written and is not retried', {
@@ -2097,6 +2109,7 @@ export class WSClient {
     accessEpoch: number | null,
     kind: SessionIntentKind,
     payload: string,
+    framing?: 'bare',
   ): Promise<SessionIntentResult> {
     const error = this._sessionInputError(sessionId)
     if (error) return Promise.reject(error)
@@ -2108,6 +2121,7 @@ export class WSClient {
       sessionId,
       kind,
       payload,
+      ...(framing !== undefined ? { framing } : {}),
       ...(accessEpoch !== null && accessEpoch > 0 ? { accessEpoch } : {}),
     })
   }

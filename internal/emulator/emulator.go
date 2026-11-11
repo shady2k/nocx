@@ -626,6 +626,20 @@ type Terminal interface {
 	// reply's or behind them depending on which goroutine won.
 	Paste(text []byte) ([]byte, error)
 
+	// PasteBare hands the terminal a paste that must NOT be bracketed, whatever
+	// mode the program set, and returns the bytes to send (nocx-evj4b.1.2). It
+	// exists for the one caller that knows better than the mode: the composer,
+	// where the editor holds the whole line and the submit is a statement the
+	// person made rather than a clipboard pasted into the program. Over ssh the
+	// program's own mode-2004 announcement can be consumed before the terminal
+	// parses it, so a mode-driven framing alternates within one session, and a
+	// far shell without bracketed paste runs the escape as text.
+	//
+	// The terminal still owns the encoding: control bytes are stripped and a
+	// newline becomes the carriage return a shell's line editor reads, exactly
+	// as on the unbracketed path of Paste. The mode is not consulted at all.
+	PasteBare(text []byte) ([]byte, error)
+
 	// Mouse hands the terminal one mouse event and returns the bytes the
 	// program is to be sent, in the tracking mode and output format the
 	// PROGRAM set. With no tracking mode enabled it reports [ErrUnsupported]

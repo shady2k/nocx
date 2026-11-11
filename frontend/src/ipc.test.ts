@@ -273,6 +273,81 @@ describe('session.intent', () => {
     await expect(pending).resolves.toMatchObject({ state: 'executed', bytesWritten: 1 })
   })
 
+  // A RE-PRESENTATION KEEPS THE FRAMING (nocx-evj4b.1.2). A composer submit
+  // behind a live integration asks for a bare paste, and the queue that
+  // re-presents a backpressured intent must deliver the SAME encoding: the
+  // wait is about when the intent is presented, never about how. Asserting
+  // the retried request is the whole test — a retry that dropped the
+  // parameter would send `auto` here and bracket a line the surface
+  // deliberately did not.
+  it('keeps a bare paste bare when backpressure presents it again', async () => {
+    const { session, ws } = await connectedSession()
+    const attempts = (): ReturnType<typeof ws.requests> =>
+      ws.requests().filter((candidate) => candidate.method === 'session.intent')
+    const pending = session.intent('paste', 'echo hi', 'bare')
+    expect(attempts()[0].params).toEqual({
+      sessionId: SID,
+      accessEpoch: 3,
+      kind: 'paste',
+      payload: btoa('echo hi'),
+      framing: 'bare',
+    })
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: attempts()[0].id,
+      result: { state: 'refused', bytesWritten: 0, fenceAfter: 4, refusal: { cause: 'busy' } },
+    })
+    await expect.poll(() => attempts().length, { timeout: 2_000 }).toBe(2)
+    expect(attempts()[1].params, 'the retry presents the same paste, not a re-framed one').toEqual({
+      sessionId: SID,
+      accessEpoch: 3,
+      kind: 'paste',
+      payload: btoa('echo hi'),
+      framing: 'bare',
+    })
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: attempts()[1].id,
+      result: { state: 'executed', bytesWritten: 1, fenceAfter: 6, accessEpoch: 3 },
+    })
+    await expect(pending).resolves.toMatchObject({ state: 'executed', bytesWritten: 1 })
+  })
+
+  // THE SAME RULE ON THE RE-SEATING PATH. A revoked epoch re-presents the
+  // intent once with the epoch the refusal named; the framing is the intent's,
+  // so it rides that presentation too (nocx-evj4b.1.2).
+  it('keeps a bare paste bare when a revocation re-presents it', async () => {
+    const { session, ws } = await connectedSession()
+    const attempts = (): ReturnType<typeof ws.requests> =>
+      ws.requests().filter((candidate) => candidate.method === 'session.intent')
+    const pending = session.intent('paste', 'echo hi', 'bare')
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: attempts()[0].id,
+      result: {
+        state: 'refused',
+        bytesWritten: 0,
+        fenceAfter: 4,
+        accessEpoch: 9,
+        refusal: { cause: 'access_revoked' },
+      },
+    })
+    await expect.poll(() => attempts().length, { timeout: 2_000 }).toBe(2)
+    expect(attempts()[1].params).toEqual({
+      sessionId: SID,
+      accessEpoch: 9,
+      kind: 'paste',
+      payload: btoa('echo hi'),
+      framing: 'bare',
+    })
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: attempts()[1].id,
+      result: { state: 'executed', bytesWritten: 1, fenceAfter: 6, accessEpoch: 9 },
+    })
+    await expect(pending).resolves.toMatchObject({ state: 'executed', bytesWritten: 1 })
+  })
+
   // A BUSY SESSION IS BACKPRESSURE, NOT AN ANSWER ABOUT THE CHARACTER
   // (nocx-evj4b.1.12): the queue fills and drains, and the keystroke is still
   // the person's to make. It is presented again after the queue has had a

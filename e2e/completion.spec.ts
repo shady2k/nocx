@@ -451,12 +451,23 @@ test.describe('tab completion', () => {
       await expect(dropdown).toBeVisible({ timeout: 5000 })
       await expect(dropdown.locator('.ui-floating-panel__row').first()).toContainText('alpha/')
 
-      // Erase the whole line: the panel must CLOSE, not hang showing only
-      // its footer.
-      await page.keyboard.press('Control+a')
-      await page.keyboard.press('Backspace')
+      // ERASE THE LINE THE WAY THIS FILE ALREADY ERASES ONE: Backspace until
+      // the DRAFT is observed empty, never a select-all chord (nocx-7qv0).
+      // Ctrl+A is CodeMirror's selectAll only where Mod is Ctrl; on macOS the
+      // same chord is readline's beginning-of-line, so the Backspace after it
+      // deleted one character and the line this test is about was never
+      // erased. clearDraft waits on the observable the erase produces, on
+      // every platform.
+      await clearDraft(page)
+
+      // THE LINE IS EMPTY FIRST. A panel assertion reads as a stale-panel
+      // report only when the line was actually erased; if the erase was
+      // incomplete, that is what this fails on, named as the draft.
+      expect(await draft(page)).toBe('')
+
+      // And then the panel must CLOSE, not hang showing only its footer. A
+      // footer-only or stale panel is still visible here and still fails.
       await expect(dropdown).not.toBeVisible({ timeout: 5000 })
-      await expect(page.locator(INPUT)).toHaveText('')
       await page.screenshot({ path: '/tmp/nocx-c3-erased-closed.png' })
     } finally {
       fs.rmSync(fixture, { recursive: true, force: true })

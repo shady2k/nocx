@@ -21,7 +21,7 @@ import {
   setBlockWhere,
   type BlockKind,
 } from './blocks'
-import { paintStoredRows } from './block-rows'
+import { paintStoredRows, parseStoredBlockRows } from './block-rows'
 import { restoredBlock } from './restored-block'
 import type { Row } from '../generated/ledger.blockRows'
 import { wireRowOf, type CellSpec } from '../painter/fixtures'
@@ -4857,6 +4857,30 @@ describe('backend-owned block rows', () => {
     })
     return { inner, manager, liveContainer }
   }
+
+  it('accepts an advancing output mark that removes all echo without accepting its stale predecessor', () => {
+    const { manager, inner } = newManager()
+    const rec = manager.startBlock('echo', '~', 0)
+    manager.bindAttempt('echo-only')
+    const body = [0, 1].map((from) => JSON.stringify({ from, row: { text: 'echo' } })).join('\n')
+    const previous = parseStoredBlockRows(body, { truncated: null, payload: {} }, 'same')
+    const next = parseStoredBlockRows(
+      body,
+      { truncated: null, payload: { outputStartRow: 2 } },
+      'same',
+    )
+    try {
+      manager.applyStoredRows('echo-only', previous)
+      manager.applyStoredRows('echo-only', next)
+      expect(rec.storedRows).toBe(next)
+      expect(rec.el.querySelector('.cmd-output')).toBeNull()
+      manager.applyStoredRows('echo-only', previous)
+      expect(rec.storedRows).toBe(next)
+    } finally {
+      manager.dispose()
+      inner.remove()
+    }
+  })
 
   it('keeps the real input focused without focus transitions while retained output grows', () => {
     const { manager, inner, liveContainer } = newManager()

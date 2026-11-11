@@ -101,7 +101,11 @@ import {
   type BlockRecord,
   type RunningBlockActions,
 } from './scrollback/blocks'
-import { storedBlockRowsForSelection, type StoredBlockRows } from './scrollback/block-rows'
+import {
+  parseStoredBlockRows,
+  storedBlockRowsForSelection,
+  type StoredBlockRows,
+} from './scrollback/block-rows'
 import type { AgentRunCompletion } from './run-command'
 import { CommandSnapshotStore } from './command-snapshot'
 import type { ActionFacts, DesiredMode } from './capability'
@@ -7321,6 +7325,45 @@ describe('the projections consume the kernel through the composition root (ADR-0
       expect(orderScans.length).toBeLessThanOrEqual(4)
     } finally {
       scans.mockRestore()
+      teardown()
+    }
+  })
+
+  it('does not request excluded echo rows after all command output is loaded', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const terminal = content as unknown as {
+      scrollback: ScrollbackController
+      _registerRestoredBlock(id: string, el: HTMLElement, rows: StoredBlockRows): void
+      _loadVisibleBlockRows(): void
+      _requestBlockRowsPage(id: string, from: number, limit: number): void
+    }
+    try {
+      const rows = parseStoredBlockRows(
+        [0, 1, 2, 3]
+          .map((from) => JSON.stringify({ from, row: { text: `row-${from}` } }))
+          .join('\n'),
+        {
+          truncated: null,
+          state: 'sealed',
+          payload: { outputStartRow: 2, retainedRanges: [{ from: 0, to: 4 }] },
+        },
+        'echo-artifact',
+      )
+      const block = document.createElement('article')
+      block.className = 'cmd-block'
+      block.dataset.entryId = 'echo-command'
+      terminal.scrollback.restorePast([block])
+      terminal._registerRestoredBlock('echo-command', block, rows)
+      const requests = vi.spyOn(terminal, '_requestBlockRowsPage').mockImplementation(() => {})
+      terminal._loadVisibleBlockRows()
+      expect(rows.lines.map((line) => line.from)).toEqual([2, 3])
+      expect(requests).not.toHaveBeenCalled()
+    } finally {
       teardown()
     }
   })

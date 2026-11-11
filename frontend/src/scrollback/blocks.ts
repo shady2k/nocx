@@ -2985,9 +2985,18 @@ export class BlockManager {
     // keeps its coordinates and height and drops its rows so the visible page
     // can be read first. It is not an older read, so the cursor does not
     // reject it.
-    if (!reset && cursor < seen) return
-    this._storedRowsCursor.set(entryId, cursor)
     const rec = this.blockForAttempt(entryId)
+    const previous = rec?.storedRows ?? this._pendingStoredRows.get(entryId)?.rows
+    const sameArtifact =
+      previous?.artifactVersion !== undefined && previous.artifactVersion === rows.artifactVersion
+    const previousStart = previous?.outputStartRow ?? 0
+    const outputStart = rows.outputStartRow ?? 0
+    if (!reset && sameArtifact && outputStart < previousStart) return
+    // Filtering a newly authenticated echo prefix can lower the loaded cursor
+    // without making this response older. Its predecessor must not restore it.
+    const advancesStart = sameArtifact && outputStart > previousStart
+    if (!reset && cursor < seen && !advancesStart) return
+    this._storedRowsCursor.set(entryId, advancesStart ? Math.max(cursor, seen) : cursor)
     if (!rec) {
       // A NEW entry may push the ring past its bound; re-setting one
       // already held must not — it stays at its original age.

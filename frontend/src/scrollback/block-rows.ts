@@ -103,6 +103,26 @@ function rowLine(value: unknown): LedgerBlockRowsLine {
   }
 }
 
+/** Rows the body can show or request. Artifact geometry stays unchanged for
+ *  reconnect comparison; the ordered output mark excludes the echoed command. */
+export function retainedOutputRanges(stored: StoredBlockRows): StoredRowRange[] {
+  const ranges =
+    stored.retainedRanges !== undefined && stored.retainedRanges.length > 0
+      ? stored.retainedRanges
+      : (stored.rowCount ?? 0) > 0
+        ? [
+            {
+              from: stored.firstRow ?? 0,
+              to: stored.endRow ?? (stored.lastRow ?? stored.firstRow ?? 0) + 1,
+            },
+          ]
+        : loadedRowRanges(stored.lines)
+  const start = stored.outputStartRow ?? 0
+  return ranges
+    .filter((range) => range.to > start)
+    .map((range) => ({ from: Math.max(start, range.from), to: range.to }))
+}
+
 /** The runs of stream rows a set of loaded lines covers, ascending. A page
  *  around the viewport and the tail as it grows are two runs with an interior
  *  hole between them; coverage is a question about these, never about the
@@ -312,7 +332,9 @@ export function mergeStoredBlockRows(
     return next
   }
   const byFrom = new Map<number, StoredBlockRows['lines'][number]>()
-  for (const line of previous.lines) byFrom.set(line.from, line)
+  for (const line of previous.lines) {
+    if (line.from >= (next.outputStartRow ?? 0)) byFrom.set(line.from, line)
+  }
   for (const line of next.lines) byFrom.set(line.from, line)
   const lines = [...byFrom.values()].sort((a, b) => a.from - b.from)
   if (next.retainedRanges !== undefined && next.retainedRanges.length > 0) {
@@ -752,17 +774,7 @@ function buildSegments(stored: StoredBlockRows): Segment[] {
     }
     return out
   }
-  const ranges =
-    stored.retainedRanges !== undefined && stored.retainedRanges.length > 0
-      ? [...stored.retainedRanges].sort((a, b) => a.from - b.from)
-      : (stored.rowCount ?? 0) > 0
-        ? [
-            {
-              from: stored.firstRow ?? 0,
-              to: stored.endRow ?? (stored.lastRow ?? stored.firstRow ?? 0) + 1,
-            },
-          ]
-        : loadedRowRanges(loaded)
+  const ranges = retainedOutputRanges(stored).sort((a, b) => a.from - b.from)
   if (ranges.length === 0) return []
   const endRow = Math.max(stored.endRow ?? 0, ranges[ranges.length - 1].to)
   const out: Segment[] = []
@@ -885,17 +897,21 @@ function paintOutput(
   const reserve =
     opts.reserve ?? (stored.reserve !== undefined ? stored.reserve : (previous?.reserve ?? true))
   const segments = buildSegments({ ...stored, lines, reserve })
+  const outputRowCount = retainedOutputRanges(stored).reduce(
+    (count, range) => count + range.to - range.from,
+    0,
+  )
   if (segments.length === 0 && lines.length === 0) {
     // NEVER REMOVE A BODY THAT STILL HAS GEOMETRY (ADR-ywzcpbqe): a running
     // block between a reconnect and its first page keeps its element, and the
     // demand loop finds it. Only a block with nothing to reserve loses its
     // empty body.
-    if ((stored.rowCount ?? 0) > 0 || (stored.retainedRanges?.length ?? 0) > 0) {
+    if (outputRowCount > 0) {
       output.className = 'cmd-output'
       output.dataset.rowsFirst = String(stored.firstRow ?? 0)
       output.dataset.rowsLast = String(stored.lastRow ?? 0)
       output.dataset.rowsEnd = String(stored.endRow ?? 0)
-      output.dataset.rowsCount = String(stored.rowCount ?? 0)
+      output.dataset.rowsCount = String(outputRowCount)
       output.dataset.rowsLoaded = '0'
       if (output.parentElement !== block) block.appendChild(output)
       return
@@ -992,7 +1008,7 @@ function paintOutput(
   output.dataset.rowsFirst = String(stored.firstRow ?? 0)
   output.dataset.rowsLast = String(stored.lastRow ?? 0)
   output.dataset.rowsEnd = String(stored.endRow ?? 0)
-  output.dataset.rowsCount = String(stored.rowCount ?? lines.length)
+  output.dataset.rowsCount = String(outputRowCount)
   output.dataset.rowsLoaded = String(lines.length)
   if (output.parentElement !== block) block.appendChild(output)
   const metric = opts.metric

@@ -9,6 +9,8 @@ import { restoredBlock } from './restored-block'
 import {
   blockColumnsOf,
   loadedRowRanges,
+  retainedOutputRanges,
+  mergeStoredBlockRows,
   missingRowRanges,
   nextPageForRows,
   streamRowAtVisualOffset,
@@ -1289,6 +1291,72 @@ describe('stored block rows', () => {
     expect(() => parseStoredBlockRows('{"from":12}', { truncated: null, payload: {} })).toThrow(
       'stored block row is malformed',
     )
+  })
+
+  it('reserves only output rows after the echo prefix and keeps raw artifact coordinates', () => {
+    const parsed = parseStoredBlockRows(
+      [2, 3, 8, 9].map((from) => JSON.stringify({ from, row: { text: `row-${from}` } })).join('\n'),
+      {
+        truncated: null,
+        state: 'sealed',
+        payload: {
+          outputStartRow: 2,
+          retainedRanges: [
+            { from: 0, to: 4 },
+            { from: 8, to: 10 },
+          ],
+          endRow: 10,
+        },
+      },
+      'same-artifact',
+    )
+    const block = document.createElement('article')
+    paintStoredRows(block, parsed, { metric: null, palette: DEFAULT_SNAPSHOT })
+    expect(block.querySelector('.cmd-output')?.getAttribute('data-rows-loaded')).toBe('4')
+    expect(block.querySelector('.cmd-output')?.getAttribute('data-rows-count')).toBe('4')
+    expect(block.querySelectorAll('.cmd-output-spacer')).toHaveLength(0)
+    expect(streamRowAtVisualOffset(parsed, 0)).toBe(2)
+    expect(streamRowAtVisualOffset(parsed, 3)).toBe(8)
+    expect(parsed.retainedRanges).toEqual([
+      { from: 0, to: 4 },
+      { from: 8, to: 10 },
+    ])
+  })
+
+  it('clips retained runs before an output mark in a cap gap or after all retained rows', () => {
+    const raw = {
+      ...stored,
+      retainedRanges: [
+        { from: 0, to: 4 },
+        { from: 8, to: 10 },
+      ],
+    }
+    expect(retainedOutputRanges({ ...raw, outputStartRow: 6 })).toEqual([{ from: 8, to: 10 }])
+    expect(retainedOutputRanges({ ...raw, outputStartRow: 10 })).toEqual([])
+    const block = document.createElement('article')
+    paintStoredRows(
+      block,
+      { ...raw, lines: [], outputStartRow: 10 },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+    expect(block.querySelector('.cmd-output')).toBeNull()
+    expect(raw.retainedRanges).toEqual([
+      { from: 0, to: 4 },
+      { from: 8, to: 10 },
+    ])
+  })
+
+  it('drops previously loaded echo rows when the same artifact output start advances', () => {
+    const body = [0, 1, 2, 3]
+      .map((from) => JSON.stringify({ from, row: { text: `row-${from}` } }))
+      .join('\n')
+    const previous = parseStoredBlockRows(body, { truncated: null, payload: {} }, 'same-artifact')
+    const next = parseStoredBlockRows(
+      body,
+      { truncated: null, payload: { outputStartRow: 2 } },
+      'same-artifact',
+    )
+    expect(mergeStoredBlockRows(previous, next).lines.map((line) => line.from)).toEqual([2, 3])
   })
 
   it('drops the rows below the recorded output start, once, for every consumer', () => {

@@ -173,6 +173,7 @@ import { restoredBlock, restoredTurn } from './scrollback/restored-block'
 import {
   blockColumnsOf,
   loadedRowRanges,
+  retainedOutputRanges,
   mergeStoredBlockRows,
   missingRowRanges,
   nextPageForRows,
@@ -11392,7 +11393,7 @@ export class TerminalContent extends BasePaneContent {
       return undefined
     }
     const end = geometry?.endRow ?? rows.endRow ?? (rows.lastRow ?? rows.firstRow ?? 0) + 1
-    const retained = geometry?.retainedRanges ?? rows.retainedRanges
+    const retained = retainedOutputRanges({ ...rows, ...geometry })
     if (rows.lines.length > 0) {
       // A LIVE block must not skip rows between coalesced growth reads: ask
       // from the row after the last retained row painted up to the end the
@@ -11406,7 +11407,7 @@ export class TerminalContent extends BasePaneContent {
     // asked yet. Take the newest page of the LAST retained run — a capped
     // block's tail run, not the count-derived end of a head-only guess.
     const lastRange = retained?.[retained.length - 1]
-    const first = lastRange?.from ?? rows.firstRow ?? 0
+    const first = Math.max(rows.outputStartRow ?? 0, lastRange?.from ?? rows.firstRow ?? 0)
     const last = (lastRange?.to ?? end) - 1
     const from = Math.max(first, last - BLOCK_ROWS_PAGE + 1)
     return { fromRow: from, rowLimit: Math.max(1, Math.min(BLOCK_ROWS_PAGE, last - from + 1)) }
@@ -11602,17 +11603,7 @@ export class TerminalContent extends BasePaneContent {
     for (const entryId of ids) {
       const rows = this._storedRowsOf(entryId)
       if (rows === undefined || rows.rowCount === undefined) continue
-      const retained =
-        rows.retainedRanges !== undefined && rows.retainedRanges.length > 0
-          ? rows.retainedRanges
-          : rows.rowCount > 0
-            ? [
-                {
-                  from: rows.firstRow ?? 0,
-                  to: rows.endRow ?? (rows.lastRow ?? rows.firstRow ?? 0) + 1,
-                },
-              ]
-            : []
+      const retained = retainedOutputRanges(rows)
       const missing = missingRowRanges(retained, loadedRowRanges(rows.lines))
       if (missing.length === 0) continue
       const el = this._blockElement(entryId)

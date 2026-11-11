@@ -29,10 +29,14 @@ echo "=== host: $(sed -n 's/^PRETTY_NAME=//p' /etc/os-release) / mutation: $MUTA
 # The release gate stays Arch. An optional Ubuntu image exercises FreeType
 # 2.13.2 with the exact same extraction, fixtures, probe and assertions.
 if command -v pacman >/dev/null; then
-  pacman -Sy --needed --noconfirm --quiet \
+  # -Syu, never -Sy: Arch does not support a partial upgrade, and a sync-only
+  # install breaks as soon as a package is split or renamed, because the old
+  # package's files are already on disk (openssl-3 alongside openssl). Keep the
+  # log instead of discarding it, so the next break names its cause here.
+  pacman_log="$(pacman -Syu --needed --noconfirm --quiet \
     xorg-server-xvfb xorg-xauth strace python python-fonttools \
-    fontconfig fribidi harfbuzz ttf-dejavu xdotool xorg-xdpyinfo imagemagick binutils >/dev/null 2>&1 \
-    || fail "could not install Arch regression host dependencies"
+    fontconfig fribidi harfbuzz ttf-dejavu xdotool xorg-xdpyinfo imagemagick binutils 2>&1)" \
+    || fail "could not install Arch regression host dependencies: $(printf '%s\n' "$pacman_log" | tail -20)"
   pacman -Q freetype2 fontconfig harfbuzz || fail "missing modern host text libraries"
   for absent in gtk3 webkit2gtk-4.1; do
     pacman -Q "$absent" >/dev/null 2>&1 && fail "$absent installed; cannot prove self-containment"

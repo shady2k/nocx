@@ -1,7 +1,7 @@
 import { expect, type Page } from '@playwright/test'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { basename, join } from 'node:path'
+import { join } from 'node:path'
 
 import {
   standalone as base,
@@ -155,36 +155,11 @@ function bannerAttempts(logPath: string): number {
 
 /** Park a shell on a gate file, then have it print OSC 9. Typed and
  *  submitted; it returns with the command still running, which is the point —
- *  nothing is announced until the gate is opened.
- *
- *  THE TYPED LINE IS A SHORT INVOCATION, not the loop itself (nocx-evj4b.1.9).
- *  A fresh tab's shell is still initializing when the composer accepts a line:
- *  readline's terminal prep runs after the first prompt_ready fact and flushes
- *  what is already queued. The announcement is a fixture, not the behaviour
- *  under test, so it goes into a file the test owns and the line that reaches
- *  the pty is `sh <script>` — short enough that a startup flush or a split
- *  paste cannot leave a half-command to run and exit. */
+ *  nothing is announced until the gate is opened. */
 async function parkAnnouncement(page: Page, gate: string, body: string): Promise<void> {
-  const script = `${gate}.sh`
-  writeFileSync(
-    script,
-    `while [ ! -e '${gate}' ]; do sleep 0.1; done\nprintf '\\033]9;${body}\\007'\n`,
+  await page.keyboard.type(
+    `while [ ! -e ${gate} ]; do sleep 0.1; done; printf '\\033]9;${body}\\007'`,
   )
-  // ONE COMMAND FIRST, AND ITS OUTPUT IS THE PROOF THE SHELL READ IT. A fresh
-  // tab's first prompt_ready is emitted from PROMPT_COMMAND, before readline
-  // has prepped its terminal and flushed what was queued; a line written into
-  // that interval leaves no output behind. The probe is a short no-op whose
-  // block body is waited for, so the announcement below is the SECOND command
-  // at a prompt readline has already entered. It is a readiness handshake, not
-  // a retry: a lost probe fails here, naming the session, and is not repeated.
-  const ready = `parked-ready-${basename(gate)}-${nonce}`
-  await page.keyboard.type(`printf '${ready}\\n'`)
-  await page.keyboard.press('Enter')
-  await expect(
-    page.locator('.pane.active .cmd-block:not(.cmd-block-running) .cmd-output'),
-  ).toContainText(ready, { timeout: 20_000 })
-  await promptReady(page)
-  await page.keyboard.type(`sh ${script}`)
   await page.keyboard.press('Enter')
 }
 
@@ -228,26 +203,9 @@ test('turning the OS banner off leaves the toast on, and the banner is never rea
     // keyboard, or the line below is typed into nothing (nocx-z9s9.15).
     await promptReady(page)
     await parkAnnouncement(page, controlGate, CONTROL)
-    const firstSession = await page.locator('.pane.active').getAttribute('data-session-id')
 
     await page.keyboard.press('Meta+t')
     await expect(page.locator(TAB)).toHaveCount(2)
-    // THE NEW TAB MUST BE THE ACTIVE ONE BEFORE ANY READINESS IS READ. The
-    // strip paints the tab before activation reaches `.pane.active`, and a
-    // readiness barrier scoped to the active pane would then have answered
-    // for the tab being left behind: its session is ready, its editor is
-    // focused, and the line is typed at whichever pane activation reached
-    // next (nocx-evj4b.1.9).
-    await expect(page.locator(TAB).nth(1)).toHaveAttribute('aria-selected', 'true', {
-      timeout: 10_000,
-    })
-    // AND THE ACTIVE PANE MUST BE THE NEW SESSION, not the one being left
-    // behind. The strip's selection and `.pane.active` are two writes, so a
-    // readiness barrier can still read the old pane for a frame after the tab
-    // looks selected; the session id is what names which pane it read.
-    await expect
-      .poll(async () => page.locator('.pane.active').getAttribute('data-session-id'))
-      .not.toBe(firstSession)
     await promptReady(page)
     await parkAnnouncement(page, routedGate, ROUTED)
 

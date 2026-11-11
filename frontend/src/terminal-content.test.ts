@@ -12041,6 +12041,61 @@ describe('shell submit input intent ordering (nocx-zg3k3.3.1)', () => {
       teardown()
     }
   })
+
+  // THE COMMAND IS NOT THE SOCKET'S TO DROP (nocx-evj4b.1.14).
+  //
+  // A submit is two intents — the paste and the Enter. When the transport is
+  // gone (the socket dropped, or this pane is no longer attached) the call
+  // rejects and NOTHING was written; the defect this holds shut is the queue
+  // moving on: the Enter then goes alone, bash reads a bare newline, prints a
+  // fresh prompt and the person's command is gone with no output and no block.
+  // The line is held instead, and written when the pane is attached again —
+  // the release is the session's own fact, not a timer.
+  it('holds a command the transport did not take and writes it when the session is attached again', async () => {
+    const client = makeClient()
+    const session = makeSession()
+    client.openSession.mockResolvedValue(session)
+    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const result: SessionIntentResult = { state: 'executed', bytesWritten: 1, fenceAfter: 0 }
+    const delivered: Array<[string, string]> = []
+    let reachable = false
+    session.intent.mockImplementation((kind: string, payload: string) => {
+      if (!reachable) return Promise.reject(new Error('Session is not attached.'))
+      delivered.push([kind, payload])
+      return Promise.resolve(result)
+    })
+    try {
+      content.setVisible(true)
+      ed.show()
+      ed.insertText('echo held')
+      viewOf(ed).contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+
+      // The paste is presented and rejected; the Enter is NOT presented on its
+      // own — the line is one submission and its text goes first.
+      await vi.waitFor(() => expect(delivered).toEqual([]))
+      expect(
+        (
+          content as unknown as {
+            _sessionCallQueue: Array<{ intent?: { payload: string } }>
+          }
+        )._sessionCallQueue.map((call) => call.intent?.payload),
+      ).toEqual(['echo held', 'enter'])
+
+      // Attached again: the whole line goes, in the order it was made.
+      reachable = true
+      session.fireAttachment({ kind: 'attached' })
+      await vi.waitFor(() =>
+        expect(delivered).toEqual([
+          ['paste', 'echo held'],
+          ['key', 'enter'],
+        ]),
+      )
+    } finally {
+      teardown()
+    }
+  })
 })
 
 // ───────────────────────────────────────────────────────────────────────────

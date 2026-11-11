@@ -1100,6 +1100,16 @@ export class TerminalContent extends BasePaneContent {
     return this._bind.callQueue
   }
   private _sessionCallSending = false
+  /**
+   * The head of the queue was presented and the session did not take it — a
+   * transport that went away, not a refusal (see drainSessionCallQueue). The
+   * call STAYS at the head: a submitted command is one line, and an Enter
+   * written without the paste it belongs to puts a bare newline at the shell —
+   * a fresh prompt, no output and no block, which is the person's command
+   * vanishing (nocx-evj4b.1.14). It is written when this pane is attached to
+   * its session again.
+   */
+  private _sessionCallHeld = false
   private editor: CommandEditor | null = null
   private shellTarget: ShellInputTarget | null = null
   /** The input-target registry (ADR-0004 §3): a submitted document routes
@@ -2059,6 +2069,11 @@ export class TerminalContent extends BasePaneContent {
       // decides whether the startup interval is really over — this only offers
       // the moment.
       this._releaseDeferredShellSubmissions()
+      // AND A LINE THE SESSION COULD NOT TAKE GOES WITH IT (nocx-evj4b.1.14):
+      // an intent presented while the transport was gone stayed at the head
+      // of the queue rather than vanishing, and this is the moment it can be
+      // written.
+      this._resumeHeldSessionCalls()
     }
     this._syncAttachOffer()
     if (changed) this._syncLifecycleOwnership()
@@ -9838,6 +9853,10 @@ export class TerminalContent extends BasePaneContent {
    *  when its answer arrives. */
   private _discardQueuedIntents(): void {
     this._sessionCallQueue.length = 0
+    // A queue that was discarded owes the session nothing — including the
+    // call an unattached session was holding (nocx-evj4b.1.14). The hold is
+    // the queue's, so it ends with it.
+    this._sessionCallHeld = false
   }
 
   private async drainSessionCallQueue(): Promise<void> {
@@ -9845,6 +9864,10 @@ export class TerminalContent extends BasePaneContent {
     this._sessionCallSending = true
     try {
       while (this._sessionCallQueue.length > 0) {
+        // Taken off the queue while it is presented, so text typed in the
+        // meantime coalesces into a NEW entry behind it instead of mutating
+        // the call already on the wire; a call the session did not take goes
+        // back to the head (see the catch below).
         const call = this._sessionCallQueue.shift()!
         try {
           // THE FRAMING RIDES ONLY WHERE IT WAS ASKED FOR (nocx-evj4b.1.2):
@@ -9856,16 +9879,48 @@ export class TerminalContent extends BasePaneContent {
             await call.session.intent(call.intent.kind, call.intent.payload)
           }
         } catch (err: unknown) {
-          log.warn('nocx: session intent did not reach the session', {
-            kind: call.intent.kind,
-            error: String(err),
-          })
+          // THE SESSION DID NOT TAKE IT, SO IT IS HELD, NOT DROPPED
+          // (nocx-evj4b.1.14). A rejection here is a transport that is gone —
+          // the socket dropped, or the session stopped being attached — and
+          // the bytes never reached the shell. Dropping them loses the
+          // person's command with no output and no block, and then delivers
+          // the NEXT queued intent on its own: for a submit that is the Enter
+          // without its paste, a bare newline that makes a fresh prompt and
+          // leaves nothing where the command should be. So the call stays at
+          // the head — the queue is one ordered line, and the Enter cannot
+          // overtake the text it belongs to — and _resumeHeldSessionCalls
+          // presents it once this pane is attached again. Nothing is retried
+          // on a timer: the release is the session's own attachment fact.
+          this._sessionCallHeld = true
+          // Back where it was: ahead of everything typed after it, because
+          // this pane's queue is one ordered line.
+          this._sessionCallQueue.unshift(call)
+          log.warn(
+            'nocx: the session did not take this input; it is held until it is attached again',
+            {
+              kind: call.intent.kind,
+              error: String(err),
+            },
+          )
+          return
         }
       }
     } finally {
       this._sessionCallSending = false
-      if (this._sessionCallQueue.length > 0) void this.drainSessionCallQueue()
+      if (this._sessionCallQueue.length > 0 && !this._sessionCallHeld) {
+        void this.drainSessionCallQueue()
+      }
     }
+  }
+
+  /** Present what the session could not take, now that it can
+   *  (nocx-evj4b.1.14). Called from the one step that installs an attached
+   *  session — the same entrance that releases the held submits — so the
+   *  release is a fact about the session, never a duration. */
+  private _resumeHeldSessionCalls(): void {
+    if (!this._sessionCallHeld) return
+    this._sessionCallHeld = false
+    if (this._sessionCallQueue.length > 0) void this.drainSessionCallQueue()
   }
 
   /** Start holding, and hand back the window being held in: from here until

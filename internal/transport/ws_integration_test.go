@@ -1106,12 +1106,28 @@ func TestIntegration_AFinalStatusDroppedOnAFullQueueArrivesOnTheReconnect(t *tes
 	_, state := rx.getSubscriber()
 	rx.setSubscriber(&wsConn{out: stalledOut, log: e.ws.log}, state)
 
-	// The shell integrates while nothing can be written: the final status is
-	// dropped, and the connection says so.
-	mustLifecycleIngest(t, e.pub, "T", lifecycleEnv(e.lane, e.h, 1, lifecycleHelloEvt()))
+	// Integration status is refreshable and drops on the full queue. The
+	// lifecycle fact is ordered: publication waits until the consumer resumes.
+	published := make(chan error, 1)
+	go func() {
+		published <- e.pub.Ingest(context.Background(), "T", lifecycleEnv(e.lane, e.h, 1, lifecycleHelloEvt()))
+	}()
 	waittest.WaitForTimeout(t, "the integrated status to overflow the stopped queue", 5*time.Second,
 		stalledOut.Stalled)
+	select {
+	case err := <-published:
+		t.Fatalf("publication returned before the full queue drained: %v", err)
+	default:
+	}
 	close(sock.released)
+	select {
+	case err := <-published:
+		if err != nil {
+			t.Fatalf("Ingest: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("publication did not resume after the consumer drained")
+	}
 	waittest.WaitForTimeout(t, "the stall notice on the wire", 5*time.Second, func() bool {
 		sock.mu.Lock()
 		defer sock.mu.Unlock()

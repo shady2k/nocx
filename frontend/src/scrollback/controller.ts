@@ -172,6 +172,12 @@ export class ScrollbackController {
    *  leaves the screen top appears one row lower when it moves from the grid
    *  to the body (the owner's "output moves down" frame). */
   private _hiddenScreenRows = 0
+  /** The echo shift the rows currently painted were sized with. A sizing pass
+   *  that has NOT painted rows (an accepted anchor, a box resize) must not
+   *  release it to the new anchor: the grid on screen still holds the echo
+   *  row, and releasing the shift before the frame without it is painted
+   *  exposes that row (nocx-4y82c.1.21). */
+  private _paintedEchoShiftPx = 0
   /** A ready prompt asked for the idle layout while a completed block was
    *  still waiting for its block.closed; applied when the close lands, and
    *  dropped the moment a command owns the live region again. */
@@ -663,7 +669,28 @@ export class ScrollbackController {
     // The backend anchor and its accepted frame decide the echo shift. Apply
     // it before height guards so a frame update can release the shift even
     // when the measured live box does not change.
-    this._applyEchoShift()
+    //
+    // ONLY A PASS THAT PAINTED THE ROWS MAY CHANGE IT. `painted` is the
+    // painter's own call, from the frame those rows were drawn from; every
+    // other caller (an accepted anchor, the box's ResizeObserver) still has
+    // the previous frame on screen. Releasing the echo shift from the new
+    // anchor there uncovered the pre-shrink echo row for as long as the
+    // paint took — and, when the anchor moves above the screen, cleared the
+    // shift entirely while the old row was the first thing in the grid
+    // (nocx-4y82c.1.21: the command's own echo visible in a waiting block
+    // after the pane got shorter).
+    let echoShift: number
+    if (painted) {
+      echoShift = this._echoShiftPx()
+      this._paintedEchoShiftPx = echoShift
+    } else if (this._lastLiveHeightPx === null) {
+      // Nothing has been painted yet: the mode-entry passes have no rows to
+      // protect, and the anchor is the only answer there is.
+      echoShift = this._echoShiftPx()
+    } else {
+      echoShift = this._paintedEchoShiftPx
+    }
+    this._applyShift(echoShift)
     // Null means the accepted grid has no usable metrics; the class fallback
     // height stands. Zero is a grid nobody has written to yet. While the
     // running block still owns its waiting stand-in, keep that fallback:
@@ -687,7 +714,7 @@ export class ScrollbackController {
     // so the flow box must not reserve it. The padding: the block body has
     // it, this region is that body while the command runs, and the cap is a
     // ceiling on the whole box rather than on the rows inside it.
-    const content = Math.min(Math.max(0, height - this._echoShiftPx()), Math.max(0, max - pad))
+    const content = Math.min(Math.max(0, height - echoShift), Math.max(0, max - pad))
     // ONE ARITHMETIC FOR THE BOX AND THE GRID (owner, 2026-11-08: "a row never
     // moves down by a line when the live box grows by one"). The grid is
     // translated by exactly what the box does NOT show — `px - content` —

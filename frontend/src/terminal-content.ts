@@ -1494,7 +1494,7 @@ export class TerminalContent extends BasePaneContent {
     if (
       active &&
       (this.editor.rootContains(active) ||
-        this.scrollback?.terminalLiveContainer.contains(active) ||
+        (this.scrollback?.terminalLiveContainer.contains(active) && !this._restoredShellDraft()) ||
         this.receipt?.root.contains(active) ||
         active.closest('[data-block-control]') ||
         // …AND THE MENU A RIGHT-CLICK OPENS, which is the one overlay created
@@ -9779,6 +9779,16 @@ export class TerminalContent extends BasePaneContent {
     if (intent.kind === 'key' && intent.payload === INTERRUPT_KEY) {
       this._cancelDeferredShellSubmissions()
     }
+    // A restored startup draft remains the shell input owner until it is
+    // submitted or cleared. A grid click must not bypass that draft.
+    if (
+      this.editor?.isVisible &&
+      this._restoredShellDraft() &&
+      (intent.kind === 'key' || intent.kind === 'text' || intent.kind === 'paste')
+    ) {
+      this.bounceFocusToEditor()
+      return false
+    }
     if (isAwaitingIntegration(this._integration, this._awaitsIntegration)) return false
     // INPUT ENDS A LIVE SELECTION (nocx-1ebrs.19). A key, committed text or a
     // paste is what makes a full-screen program redraw the screen the person
@@ -10177,13 +10187,8 @@ export class TerminalContent extends BasePaneContent {
         nativeMode: this.nativeMode,
       })
     }
-    // The grid's writability follows ownership, not the visibility
-    // transition: the editor hides ITSELF at submit (the atomic handoff),
-    // so by the time the running fact lands `editor.isVisible` is already
-    // false and a transition-gated setReadOnly(false) never runs — the grid
-    // stays read-only, typed input is dropped, and a program waiting on
-    // stdin (read, ssh, less) hangs with no editor and no input surface
-    // (nocx-u7uh.23). The invariant: editor shown ⟺ grid read-only.
+    // A restored draft keeps the composer as the shell input owner. Grid
+    // focus and input honor that same _restoredShellDraft decision.
     const answerInSummon = this._summoned && this._currentSummonedAnswer() !== null
     if (show) {
       // THE SHELL IS BACK INSIDE THE WAIT (ADR-tqjt5rkk). The box never left

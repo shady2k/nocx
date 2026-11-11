@@ -8,8 +8,10 @@
  * Authority:
  *   Collapsed    → sidebar component (keyboard shortcut Ctrl/Cmd+B, icon click)
  *   Active view  → sidebar component (icon click)
- *   Persistence  → SidebarPersistence, over the UI-state document
- *                  (ADR-0048) — not modeled here
+ *   Persistence  → the TAB's layout row (ADR-x7cvh8e1, nocx-ouru5.1.18), through the
+ *                  composition root — not modeled here. The panel is the
+ *                  tab's, not the window's, so there is no document-level
+ *                  sidebar view or collapse any more.
  *
  * Terminal render state is NOT modeled (AD-6).  The sidebar never touches it.
  */
@@ -74,11 +76,13 @@ export function setActiveView(state: SidebarState, viewId: string): SidebarState
 }
 
 /**
- * Collapse the sidebar unconditionally.
+ * Put the panel in the state a tab remembers (ADR-x7cvh8e1): the view it
+ * shows ("" for none) and whether its rail is collapsed.
  *
- * Authority: tab activation (panel closes when content below gains focus).
+ * Authority: the composition root, when the tab in front changes — the panel
+ * is the tab's, so a switch REPLACES the state rather than toggling it.
  */
-export function collapseSidebar(state: SidebarState): SidebarState {
-  if (state.collapsed) return state
-  return { ...state, collapsed: true }
+export function setPanel(state: SidebarState, viewId: string, collapsed: boolean): SidebarState {
+  if (state.activeViewId === viewId && state.collapsed === collapsed) return state
+  return { collapsed, activeViewId: viewId }
 }

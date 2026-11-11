@@ -2967,6 +2967,104 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
     }
   })
 
+  it.each(['before-settlement', 'after-settlement'] as const)(
+    'submits the restored startup draft exactly once with attachment %s',
+    async (attachmentOrder) => {
+      const session = makeSession({ awaitsIntegration: true })
+      const client = makeClient()
+      client.openSession.mockResolvedValue(session)
+      const fireIntegration = integrationHandler(client, session)
+      const { content, ed, view, teardown } = await mountTerminal(makeClipboard(), {}, client)
+      const line = 'echo after-the-prompt'
+      try {
+        content.setVisible(true)
+        fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+        ed.insertText(line)
+        view.contentDOM.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+        )
+        expect(ed.getDoc()).toBe('')
+        expect(session.intent).not.toHaveBeenCalled()
+        if (attachmentOrder === 'before-settlement') session.fireAttachment({ kind: 'attached' })
+        fireIntegration({
+          sessionId: session.sessionId,
+          status: 'conventional',
+          reason: 'unsupported-shell',
+          shell: '/bin/sh',
+        })
+        if (attachmentOrder === 'after-settlement') session.fireAttachment({ kind: 'attached' })
+        expect(ed.getDoc()).toBe(line)
+        expect(ed.isVisible).toBe(true)
+        expect(session.intent).not.toHaveBeenCalled()
+
+        // Invariant: one submitted draft produces one paste and one Enter,
+        // regardless of attachment/startup release ordering. The draft is
+        // already here; typing it again would submit a different, doubled line.
+        view.contentDOM.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+        )
+        await vi.waitFor(() =>
+          expect(session.intent.mock.calls).toEqual([
+            ['paste', line],
+            ['key', 'enter'],
+          ]),
+        )
+      } finally {
+        teardown()
+      }
+    },
+  )
+
+  it.each([
+    ['attachment', 'geometry', 'startup'],
+    ['attachment', 'startup', 'geometry'],
+    ['geometry', 'attachment', 'startup'],
+    ['geometry', 'startup', 'attachment'],
+    ['startup', 'attachment', 'geometry'],
+    ['startup', 'geometry', 'attachment'],
+  ])('writes one startup submit once in release order %s, %s, %s', async (...order) => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, ed, view, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    let applyGeometry!: () => void
+    const geometry = new Promise<'applied'>((resolve) => {
+      applyGeometry = () => resolve('applied')
+    })
+    session.resizeApplied.mockReturnValue(geometry)
+    const line = 'echo exactly once'
+    const lifecycle = lifecycleHandler(client, session.sessionId)
+    try {
+      content.setVisible(true)
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/bash' })
+      holdOne(ed, view, line)
+      expect(session.intent).not.toHaveBeenCalled()
+      for (const event of order) {
+        if (event === 'attachment') session.fireAttachment({ kind: 'attached' })
+        if (event === 'geometry') applyGeometry()
+        if (event === 'startup') {
+          lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+        }
+        await Promise.resolve()
+      }
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls).toEqual([
+          ['paste', line, 'bare'],
+          ['key', 'enter'],
+        ]),
+      )
+      // Repeated attachment/prompt facts must not present the line again.
+      session.fireAttachment({ kind: 'attached' })
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      await Promise.resolve()
+      expect(session.intent).toHaveBeenCalledTimes(2)
+    } finally {
+      applyGeometry()
+      teardown()
+    }
+  })
+
   /** Type one line into the composer and press Enter; the line leaves for the
    *  host's queue, so the draft must be empty afterwards. */
   const holdOne = (editor: CommandEditor, view: EditorView, line: string): void => {
@@ -3354,6 +3452,63 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       inputTargets.setActive('shell')
       await vi.waitFor(() => expect(editor.getDoc()).toBe('echo shell-line'))
       expect(editor.isVisible, 'the restored shell draft is on screen').toBe(true)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a live-grid click cannot bypass the restored composer with raw typing', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      holdOne(editor, view, 'echo restored')
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      await vi.waitFor(() => expect(editor.getDoc()).toBe('echo restored'))
+      expect(editor.isVisible).toBe(true)
+      session.intent.mockClear()
+
+      const live = tab.pane.querySelector<HTMLElement>('.terminal-live-container')!
+      expect(live).not.toBeNull()
+      live.dispatchEvent(new MouseEvent('mousedown', { button: 0, bubbles: true }))
+      live.dispatchEvent(new MouseEvent('mouseup', { button: 0, bubbles: true }))
+      live.dispatchEvent(new MouseEvent('click', { button: 0, detail: 1, bubbles: true }))
+      // jsdom has no native character insertion. Deliver the input event only
+      // to the textarea if the real pointer route actually gave it focus.
+      const holder = document.activeElement as HTMLElement
+      holder.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'x', code: 'KeyX', bubbles: true, cancelable: true }),
+      )
+      if (holder instanceof HTMLTextAreaElement) {
+        holder.value = 'x'
+        holder.dispatchEvent(
+          new InputEvent('input', { data: 'x', inputType: 'insertText', bubbles: true }),
+        )
+      }
+      // Wait for the input queue to finish before making a negative assertion.
+      await vi.waitFor(() =>
+        expect((content as unknown as { _sessionCallSending: boolean })._sessionCallSending).toBe(
+          false,
+        ),
+      )
+      expect(editor.getDoc()).toBe('echo restored')
+      expect(session.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([])
+      expect(view.contentDOM.contains(document.activeElement)).toBe(true)
     } finally {
       teardown()
     }
@@ -23911,6 +24066,146 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
       expect(fits().length).toBe(before)
       resize(776)
       await vi.waitFor(() => expect(fits().length).toBe(before + 1))
+    } finally {
+      restore()
+    }
+  })
+
+  it('a submit waits for the grid it will run at to apply, and its bytes then go out (nocx-evj4b.1.9)', async () => {
+    // The prompt prediction measures the running height at the Enter, but its
+    // report rides the settle timer while the submit's own attempt round trip
+    // is already in flight. On a loaded runner the bytes reached a pty that was
+    // still the prompt's taller grid: `top` drew for the taller screen, and the
+    // resize that followed scrolled its summary off the top — the block's first
+    // rows landed in its body, which is the owner's screenshot. The write waits
+    // for the same receipt the alternate-screen switch's fence waits for.
+    const { content, session, typeCommand, submitCommand, restore } = await paneWithLayout()
+    try {
+      let applied!: () => void
+      session.resizeApplied.mockImplementation(
+        () =>
+          new Promise<'applied'>((resolve) => {
+            applied = () => resolve('applied')
+          }),
+      )
+      typeCommand('top')
+      submitCommand('top')
+      // Nothing of the command is on the wire: the grid it will draw for is
+      // not applied yet. Focus and other intents the handoff itself produces
+      // are not the command's bytes.
+      const bytes = (): unknown[] =>
+        session.intent.mock.calls.filter(([kind]) => kind === 'text' || kind === 'key')
+      expect(bytes()).toEqual([])
+      // The write reached the receipt and is holding on it.
+      await vi.waitFor(() => expect(session.resizeApplied).toHaveBeenCalled())
+      expect(bytes()).toEqual([])
+      typeIntoPane(content, 'x')
+      expect(bytes()).toEqual([])
+      applied()
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls.filter(([kind]) => kind !== 'focus')).toEqual([
+          ['paste', 'top', 'bare'],
+          ['key', 'enter'],
+          ['text', 'x'],
+        ]),
+      )
+    } finally {
+      restore()
+    }
+  })
+
+  function nextDelivery(content: TerminalContent): Promise<void> {
+    const submitter = content as unknown as {
+      submitShellCommand(options: { onDelivered?: () => void }): unknown
+    }
+    const submit = submitter.submitShellCommand.bind(submitter)
+    return new Promise((resolve) => {
+      vi.spyOn(submitter, 'submitShellCommand').mockImplementationOnce((options) =>
+        submit({
+          ...options,
+          onDelivered: () => {
+            options.onDelivered?.()
+            resolve()
+          },
+        }),
+      )
+    })
+  }
+
+  it('a Ctrl-C during submit geometry withdraws the command and held input', async () => {
+    const { content, session, typeCommand, submitCommand, restore } = await paneWithLayout()
+    let applied!: () => void
+    session.resizeApplied.mockImplementation(
+      () =>
+        new Promise<'applied'>((resolve) => {
+          applied = () => resolve('applied')
+        }),
+    )
+    const delivered = nextDelivery(content)
+    try {
+      typeCommand('top')
+      submitCommand('top')
+      await vi.waitFor(() => expect(applied).toBeDefined())
+      typeIntoPane(content, 'x', '\x03')
+      applied()
+      await delivered
+      expect(session.intent.mock.calls.filter(([kind]) => kind !== 'focus')).toEqual([])
+    } finally {
+      restore()
+    }
+  })
+
+  it('an agent withdrawal during submit geometry writes nothing', async () => {
+    const { content, session, restore } = await paneWithLayout()
+    let applied!: () => void
+    session.resizeApplied.mockImplementation(
+      () =>
+        new Promise<'applied'>((resolve) => {
+          applied = () => resolve('applied')
+        }),
+    )
+    const controller = new AbortController()
+    const delivered = nextDelivery(content)
+    try {
+      const pending = content.submitAgentCommand('touch pid', 'geometry-cancel', controller.signal)
+      const rejected = expect(pending).rejects.toThrow('submission expired before execution')
+      await vi.waitFor(() => expect(applied).toBeDefined())
+      controller.abort()
+      applied()
+      await delivered
+      expect(session.intent.mock.calls.filter(([kind]) => kind !== 'focus')).toEqual([])
+      await rejected
+    } finally {
+      restore()
+    }
+  })
+
+  it('a replaced session receives no command or held input from pending geometry', async () => {
+    const { content, session, typeCommand, submitCommand, restore } = await paneWithLayout()
+    let applied!: () => void
+    session.resizeApplied.mockImplementation(
+      () =>
+        new Promise<'applied'>((resolve) => {
+          applied = () => resolve('applied')
+        }),
+    )
+    const delivered = nextDelivery(content)
+    try {
+      typeCommand('top')
+      submitCommand('top')
+      await vi.waitFor(() => expect(applied).toBeDefined())
+      typeIntoPane(content, 'x')
+      const onExit = session.onExit.mock.calls[0][0] as (exit: {
+        sessionId: string
+        cause: 'interrupted'
+      }) => void
+      onExit({ sessionId: session.sessionId, cause: 'interrupted' })
+      expect(await content.reconnect()).toBe(true)
+      const replacement = sessionOf(content)
+      replacement.intent.mockClear()
+      applied()
+      await delivered
+      expect(replacement.intent.mock.calls.filter(([kind]) => kind !== 'focus')).toEqual([])
     } finally {
       restore()
     }

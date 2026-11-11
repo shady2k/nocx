@@ -3657,6 +3657,8 @@ describe('a worker participant tab appears live (nocx-ui8q6.3)', () => {
     pinned: false,
     layout: 'row',
     seenAt: null,
+    panelView: '',
+    panelCollapsed: false,
     ...over,
   })
 

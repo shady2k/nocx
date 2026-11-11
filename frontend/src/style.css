@@ -451,6 +451,18 @@
    window crops or scrolls, a larger one shows margins. `min-width: 100%`
    is what keeps the narrow case a margin rather than a shrunken box, and the
    layers below the scroller stop clipping only while the attribute is set. */
+/* A HORIZONTAL BAR COSTS THIS BOX A ROW (nocx-ouru5.1.18). A session keeps its
+   grid scrollable while a frame's grid is another window's fit, so a horizontal
+   bar can appear and leave as the cells are measured; each appearance takes a
+   row of `clientHeight` with it (measured: 649 -> 659 with the border box
+   unchanged), and a transcript pinned at its tail has nowhere to go but down by
+   that row. Its own rows are laid out for the width it has, so the bar is drawn
+   at zero height: the grid stays scrollable, the box's height stays the
+   layout's, and the row a bar would have taken is a row of output. */
+.scrollback-area::-webkit-scrollbar:horizontal {
+  height: 0;
+}
+
 .scrollback-area[data-grid-owner='session'] {
   overflow-x: auto;
 }

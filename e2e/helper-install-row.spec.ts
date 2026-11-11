@@ -36,6 +36,7 @@ import {
   expect,
   promptReady,
   resolveBackend,
+  showSidebarView,
   test,
   type BackendEndpoint,
   type Page,
@@ -190,6 +191,12 @@ test('a first open installs the helper as one row, cancellable, and a repeat ope
     await openProfile(page, profileName)
     await answerWithHelper(page)
 
+    // THE PANEL IS THE TAB'S (ADR-x7cvh8e1), and the open put a NEW tab in
+    // front — one that has never opened a panel, so the rail is collapsed and
+    // the list above went off screen with it. A person watching the install
+    // clicks Operations again on the tab they are now in; this does the same.
+    await showSidebarView(page, 'operations')
+
     const row = page.locator(ROW).filter({ hasText: COPYING })
     await expect(row).toHaveCount(1, { timeout: 30_000 })
     await expect(row).toContainText('@')
@@ -227,6 +234,8 @@ test('a first open installs the helper as one row, cancellable, and a repeat ope
     await expect(
       page.getByRole('dialog').filter({ hasText: 'Choose how nocx connects' }),
     ).toHaveCount(0)
+    // This open brought its own tab to the front as well: the same click.
+    await showSidebarView(page, 'operations')
     const second = page.locator(ROW).filter({ hasText: COPYING })
     await expect(second).toHaveCount(1, { timeout: 30_000 })
     await expect(second.locator('.ui-operation-row__percent')).toBeVisible()
@@ -246,6 +255,10 @@ test('a first open installs the helper as one row, cancellable, and a repeat ope
     await openProfile(page, profileName)
     await expect(page.locator(TAB)).toHaveCount(3, { timeout: 120_000 })
     await promptReady(page)
+    // Opened on the new tab too, or "no row" would be a claim about a closed
+    // panel rather than about the wire — and `rowTitles` (below) records what
+    // the LIST drew.
+    await showSidebarView(page, 'operations')
     await expect(page.locator(ROW)).toHaveCount(0)
     // The wire, not the DOM: an install row that appeared and vanished
     // between two looks could not hide here.

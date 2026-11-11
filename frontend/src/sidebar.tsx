@@ -180,26 +180,36 @@ export interface SidebarAction {
   readonly onActivate: () => void
 }
 
-/** The sidebar's remembered state, and the seam that records a change.
+/** The panel a tab remembers (ADR-x7cvh8e1, `nocx-ouru5.1.18`): which
+ *  sidebar view it shows, or "" for a panel showing nothing, and whether its
+ *  rail is collapsed.
  *
- *  It used to be `localStorage` under `nocx.sidebar.collapsed`, which is
- *  precisely the ad-hoc pattern ADR-0048 ends: localStorage may not carry
- *  facts. The panel's collapse and its active view are UI state — what the
- *  app must remember without being asked — so they live in the UI-state
- *  document on the Go side and are reached over the control plane.
+ *  It is the TAB's state, not the window's — switching tabs restores the
+ *  panel each one left behind — so it is stored on the tab's layout row
+ *  beside its colour and pinning, never in a store of its own. */
+interface SidebarPanel {
+  readonly view: string
+  readonly collapsed: boolean
+}
+
+/** The panel the front tab remembers, and the seam that records a change.
+ *
+ *  `panel` is null when no tab holds one: a Settings pane is in no chain, and
+ *  a window with no tab has nothing to remember. Null is therefore "no panel"
+ *  and renders as the rail collapsed, never as "the last panel" — a second
+ *  answer to which panel is open is exactly the defect this seam removes
+ *  (ADR-x7cvh8e1).
  *
  *  Injectable and null-able, so a test needs no transport and a shell
  *  without a backend simply starts expanded on the first view. */
 export interface SidebarPersistence {
-  /** Collapsed at boot, as the document had it. */
-  readonly collapsed: boolean
-  /** The view that was on screen, or "" for none. An id this build no
-   *  longer registers falls back to the first view — the ordinary path for
-   *  a view that has since been renamed or removed. */
-  readonly activeViewId: string
-  /** Record a change. Fire-and-forget: the write is coalesced on the Go
-   *  side, and a failed one never reverts what is on screen. */
-  save(state: { collapsed: boolean; activeViewId: string }): void
+  /** The front tab's panel at mount, or null when no tab holds one. An id
+   *  this build no longer registers is repaired to the first view — the
+   *  ordinary path for a view that has since been renamed or removed. */
+  readonly panel: SidebarPanel | null
+  /** Record a change against the front tab. Fire-and-forget: the write is a
+   *  layout call, and a failed one never reverts what is on screen. */
+  save(panel: SidebarPanel): void
 }
 
 /** Handle returned by mountSidebar. */
@@ -209,6 +219,45 @@ export interface SidebarHandle {
    *  the panel on the view when it is hidden, focuses the view's
    *  activity-bar button when it is already on screen. */
   revealView(viewId: string): void
+  /** Show the panel a tab remembers (nocx-ouru5.1.18), or null for a tab
+   *  with no panel at all — a Settings pane, which is in no chain.
+   *
+   *  This is the tab's state ARRIVING, not a person's change, so it applies
+   *  without writing: the persistence seam is for what the person does. */
+  showPanel(panel: SidebarPanel | null): void
+}
+
+/** The state the panel starts in, from the front tab's remembered panel.
+ *
+ *  A shell with no persistence starts expanded on the first view. A tab with
+ *  no panel (or none recorded at all) starts with the rail collapsed: there
+ *  is nothing to show, and "the last panel" is not a fact anybody holds. */
+function initialPanel(
+  views: readonly SidebarViewDescriptor[],
+  firstViewId: string,
+  persistence?: SidebarPersistence | null,
+): SidebarPanel {
+  if (!persistence) return { view: firstViewId, collapsed: false }
+  const remembered = persistence.panel
+  if (remembered === null || remembered.view === '') return { view: '', collapsed: true }
+  if (views.some((v) => v.id === remembered.view)) {
+    return { view: remembered.view, collapsed: remembered.collapsed }
+  }
+  // A renamed or removed view id is repaired to the first view, never obeyed.
+  return { view: firstViewId, collapsed: remembered.collapsed }
+}
+
+/** The panel to APPLY from a tab, repaired the same way. */
+function applyablePanel(
+  panel: SidebarPanel | null,
+  views: readonly SidebarViewDescriptor[],
+  firstViewId: string,
+): SidebarPanel {
+  if (panel === null || panel.view === '') return { view: '', collapsed: true }
+  if (!views.some((v) => v.id === panel.view)) {
+    return { view: firstViewId, collapsed: panel.collapsed }
+  }
+  return panel
 }
 
 interface PanelRootProps {
@@ -329,9 +378,16 @@ interface SidebarSolidProps {
   persistence: SidebarPersistence | null
   state: AppState
   storeActions: AppActions
-  /** Reactive: true while the ACTIVE tab is a Settings tab (nocx-3e3b).
-   *  Wired by the composition root to the active tab's surface type. */
-  getActivePaneIsSettings: () => boolean
+  /** The panel last APPLIED from a tab, so the persist effect can tell a
+   *  person's change from the tab's own state arriving. Shared with
+   *  `showPanel` because both live outside this component. */
+  panelState: { applied: SidebarPanel | null }
+  /** Where the keyboard goes back to when an ICON CLICK collapses the panel
+   *  (the view's own button). Shared with `showPanel`, which CLEARS it: a
+   *  collapse caused by a tab switch is not a click, and pulling the
+   *  keyboard out of the terminal the switch just focused is the defect
+   *  nocx-ouru5.1.18's first gate found. */
+  focusReturn: { anchor: string | null }
 }
 
 function SidebarSolid(props: SidebarSolidProps) {
@@ -360,74 +416,63 @@ function SidebarSolid(props: SidebarSolidProps) {
   })
 
   // ── Keyboard shortcut: Ctrl/Cmd+B toggles sidebar ──────────────────────
+  //
+  // EXPANDING A TAB WITH NO REMEMBERED VIEW PICKS THE DEFAULT ONE. A tab that
+  // has never opened a panel is `{view: '', collapsed: true}`; toggling the
+  // collapse alone would leave it showing nothing, so the panel would never
+  // open (ADR-x7cvh8e1; codex P2). The registry is the component's, which is
+  // why this rule lives here and not in the store's transition.
+  const togglePanel = (): void => {
+    if (!props.state.sidebar.collapsed) {
+      props.storeActions.toggleSidebar()
+      return
+    }
+    const remembered = props.state.sidebar.activeViewId ?? ''
+    const view = props.views.some((v) => v.id === remembered)
+      ? remembered
+      : (props.views[0]?.id ?? '')
+    props.storeActions.setPanel(view, false)
+  }
   createEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key === 'b') {
         e.preventDefault()
-        props.storeActions.toggleSidebar()
+        togglePanel()
       }
     }
     document.addEventListener('keydown', handler)
     onCleanup(() => document.removeEventListener('keydown', handler))
   })
 
-  // ── Settings-tab transient collapse (nocx-3e3b) ─────────────────────
-  // The panel's tab-scoped views — Files, Ports and Git — speak for the
-  // machine a terminal tab is on; a Settings tab is not a place, so arriving
-  // on one collapses the panel and the width goes to the settings content.
-  // This used to open "Every sidebar view speaks for...", which is false:
-  // Notes, Operations and Notifications are window-scoped. They have nothing
-  // to say about a Settings tab either, so the collapse is right for the
-  // whole panel and not only for the half that reads activeOrigin — but the
-  // reason is that none of the six has anything to add there, not that they
-  // all follow the front tab (nocx-crjft). The collapse is a consequence of
-  // where the user is, NEVER an edit to their preference: the pre-Settings
-  // collapsed state is snapshotted on arrival and restored on departure, and
-  // the collapsed-preference write below stands down while the collapse is
-  // in force so the transient state cannot leak into the next boot.
+  // ── The panel follows the TAB that is in front (nocx-ouru5.1.18) ─────
+  // The panel is the tab's, not the window's: switching tabs restores the
+  // panel each one left behind, and a tab that has never opened one shows
+  // the rail collapsed. The composition root applies a tab's panel through
+  // `showPanel` on every activation — including a Settings tab, whose null
+  // panel collapses the rail for as long as the person is there. That
+  // replaces the old transient-collapse machinery: there is no longer a
+  // window-wide preference to snapshot and restore around Settings, because
+  // there is no window-wide panel at all.
   //
-  // The rule fires only on the settings-mode EDGES (false→true, true→false):
-  // once the user is on Settings, opening or closing the panel is theirs
-  // until they leave — a user who deliberately opens the sidebar there gets
-  // it, and it stays until they close it.
-  let preSettingsCollapsed: boolean | null = null
-  createEffect(
-    on(
-      () => props.getActivePaneIsSettings(),
-      (isSettings, wasSettings) => {
-        const arriving = isSettings && !wasSettings
-        const leaving = !isSettings && wasSettings
-        if (arriving) {
-          // Snapshot the user's state; collapse only when the panel was
-          // open. `untrack` is deliberate — the snapshot is a point-in-time
-          // read, never a tracked dependency.
-          const preCollapsed = untrack(() => props.state.sidebar.collapsed)
-          preSettingsCollapsed = preCollapsed
-          if (!preCollapsed) props.storeActions.collapseSidebar()
-        } else if (leaving && preSettingsCollapsed !== null) {
-          const wanted = preSettingsCollapsed
-          preSettingsCollapsed = null
-          if (untrack(() => props.state.sidebar.collapsed) !== wanted) {
-            props.storeActions.toggleSidebar()
-          }
-        }
-      },
-    ),
-  )
-
-  // ── Persist the collapse and the active view ──────────────────────────
-  // Stands down while the Settings collapse is in force (nocx-3e3b): the
-  // transient collapse is a consequence of where the user is, and persisting
-  // it would rewrite the state the next boot restores from.
+  // What is written back is the PERSON's change: a view click, Ctrl/Cmd+B,
+  // a reveal. `panelState.applied` is what arrived from the tab, so the
+  // effect can tell the two apart and does not echo an apply back as an
+  // edit.
   createEffect(() => {
-    if (props.getActivePaneIsSettings()) return
-    props.persistence?.save({
+    const current: SidebarPanel = {
+      view: props.state.sidebar.activeViewId ?? '',
       collapsed: props.state.sidebar.collapsed,
-      // "" rather than null on the wire: the document's activeViewId is a
-      // string whose empty value means "no view", so the absence has one
-      // spelling instead of two.
-      activeViewId: props.state.sidebar.activeViewId ?? '',
-    })
+    }
+    const applied = props.panelState.applied
+    if (
+      applied !== null &&
+      applied.view === current.view &&
+      applied.collapsed === current.collapsed
+    ) {
+      return
+    }
+    props.panelState.applied = current
+    props.persistence?.save(current)
   })
 
   // ── Collapsed class on the panel host (CSS in style.css) ──────────────
@@ -436,15 +481,15 @@ function SidebarSolid(props: SidebarSolidProps) {
   })
 
   // ── Focus return on collapse ─────────────────────────────────────────
-  let focusAnchor: string | null = null
   createEffect(
     on(
       () => props.state.sidebar.collapsed,
       (collapsed, prev) => {
-        if (prev === false && collapsed && focusAnchor) {
-          const btn = props.bar.querySelector<HTMLElement>(`button[data-view="${focusAnchor}"]`)
+        const anchor = props.focusReturn.anchor
+        if (prev === false && collapsed && anchor) {
+          const btn = props.bar.querySelector<HTMLElement>(`button[data-view="${anchor}"]`)
           btn?.focus()
-          focusAnchor = null
+          props.focusReturn.anchor = null
         }
       },
     ),
@@ -494,11 +539,15 @@ function SidebarSolid(props: SidebarSolidProps) {
 
   // ── View click handler ─────────────────────────────────────────────────
   const handleViewClick = (view: SidebarViewDescriptor) => {
-    focusAnchor = view.id
+    props.focusReturn.anchor = view.id
     const { collapsed } = props.state.sidebar
     if (collapsed) {
-      props.storeActions.setActiveView(view.id)
-      props.storeActions.toggleSidebar()
+      // ONE CHANGE, ONE WRITE. Showing a view and expanding the rail is one
+      // choice, but it used to be two store updates — two panel writes to the
+      // same tab, issued back to back — and their answers can come back in
+      // either order: measured on a 50× repeat, the superseded write landed
+      // last and the tab's own row ended collapsed on Ports (nocx-ouru5.1.18).
+      props.storeActions.setPanel(view.id, false)
     } else {
       props.storeActions.setActiveView(view.id)
     }
@@ -642,10 +691,11 @@ function SidebarSolid(props: SidebarSolidProps) {
  * @param panel              #sidebar element — Solid mounts the panel content here
  * @param views              view descriptors (top zone)
  * @param actions            action descriptors (bottom zone)
- * @param persistence        the sidebar's remembered state and the seam
- *                           that records it (ADR-0048), from the UI-state
- *                           document. Null starts expanded on the first
- *                           view and remembers nothing.
+ * @param persistence        the panel the front tab remembers and the seam
+ *                           that records a change (nocx-ouru5.1.18), stored
+ *                           on the tab's layout row. Null (no persistence)
+ *                           starts expanded on the first view and remembers
+ *                           nothing.
  * @param getActiveProfileId reactive accessor for the active tab's
  *                           saved-profile id, forwarded to every view
  *                           (see SidebarViewProps). Defaults to null —
@@ -659,14 +709,7 @@ function SidebarSolid(props: SidebarSolidProps) {
  *                           document's width. When present the panel
  *                           renders the kit ResizeHandle and drags resize
  *                           #sidebar.
- * @param getActivePaneIsSettings reactive accessor for "the active tab is a
- *                           Settings tab" (nocx-3e3b): while true, the
- *                           panel collapses transiently on arrival — the
- *                           user's pre-Settings state is restored on
- *                           departure, and neither the collapsed preference
- *                           nor the width is written. Defaults to false —
- *                           the shell without a Settings surface never
- *                           collapses for it.
+ * @param indicator          the one optional status beside Settings.
  */
 export function mountSidebar(
   bar: HTMLElement,
@@ -677,38 +720,34 @@ export function mountSidebar(
   getActiveProfileId?: () => string | null,
   getActiveOrigin?: () => ActiveOrigin | null,
   resize?: SidebarWidthController,
-  getActivePaneIsSettings?: () => boolean,
   indicator?: SidebarIndicator,
 ): SidebarHandle {
   const activeProfileId = getActiveProfileId ?? (() => null)
   const activeOrigin = getActiveOrigin ?? (() => null)
-  const activePaneIsSettings = getActivePaneIsSettings ?? (() => false)
 
   const [state, storeActions] = createAppStore()
 
-  // ── Fix nocx-rp2j: correct initial state ─────────────────────────────
+  // ── The state the panel starts in ────────────────────────────────────
+  // A shell with no persistence (dev-web, a test) starts expanded on the
+  // first view and remembers nothing. With persistence, the panel is the
+  // front tab's: its view and its collapse, or nothing at all when no tab
+  // holds one — which renders as the rail collapsed, never as "the last
+  // panel" (there is no last panel any more).
+  //
+  // A view id this build no longer registers is REPAIRED to the first view
+  // rather than leaving the panel open on nothing — a value the app no
+  // longer understands is repaired, never treated as an error (ADR-0048 §4).
   const firstViewId = views.length > 0 ? views[0].id : ''
-  const persistedCollapsed = persistence?.collapsed === true
-  // The remembered view, when this build still registers it. A renamed or
-  // removed id falls back to the first view rather than leaving the panel
-  // open on nothing — a value the app no longer understands is repaired,
-  // never treated as an error (ADR-0048 §4).
-  const rememberedViewId =
-    persistence && views.some((v) => v.id === persistence.activeViewId)
-      ? persistence.activeViewId
-      : firstViewId
+  const startPanel = initialPanel(views, firstViewId, persistence)
+  storeActions.setPanel(startPanel.view, startPanel.collapsed)
 
-  // Set active view to the remembered one, else the first registered view
-  if (rememberedViewId !== state.sidebar.activeViewId) {
-    storeActions.setActiveView(rememberedViewId)
-  }
+  // The panel last APPLIED from a tab, shared with the persist effect below
+  // so the tab's state arriving is not written back as a person's edit.
+  const panelState: { applied: SidebarPanel | null } = { applied: startPanel }
+  // Where the keyboard returns to when an icon click collapses the panel. See
+  // SidebarSolidProps.focusReturn.
+  const focusReturn: { anchor: string | null } = { anchor: null }
 
-  // Restore persisted collapsed state, or collapse if no views exist
-  if (persistedCollapsed || rememberedViewId === '') {
-    if (!state.sidebar.collapsed) {
-      storeActions.collapseSidebar()
-    }
-  }
   const appVisibility = createAppVisibility()
 
   // ── Render the activity bar (toolbar) into `bar` ─────────────────────
@@ -723,7 +762,8 @@ export function mountSidebar(
         persistence={persistence ?? null}
         state={state}
         storeActions={storeActions}
-        getActivePaneIsSettings={activePaneIsSettings}
+        panelState={panelState}
+        focusReturn={focusReturn}
       />
     ),
     bar,
@@ -760,6 +800,19 @@ export function mountSidebar(
     if (collapsed) storeActions.toggleSidebar()
   }
 
+  /** Show the panel a tab remembers (nocx-ouru5.1.18), or null for a tab
+   *  with no panel at all. Applied, never written: this is the tab's state
+   *  arriving, and the persist effect above is for what the person does. */
+  const showPanel = (next: SidebarPanel | null): void => {
+    const panel = applyablePanel(next, views, firstViewId)
+    // A tab switch is not a click: whatever a previous icon click asked the
+    // keyboard to return to, this collapse must not take the keyboard away
+    // from the terminal the switch just focused.
+    focusReturn.anchor = null
+    panelState.applied = panel
+    storeActions.setPanel(panel.view, panel.collapsed)
+  }
+
   return {
     destroy() {
       appVisibility.destroy()
@@ -767,5 +820,6 @@ export function mountSidebar(
       destroyPanel()
     },
     revealView,
+    showPanel,
   }
 }

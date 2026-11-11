@@ -2488,3 +2488,117 @@ describe('a pinned header is a compact part of the view (nocx-4y82c.1.3, P2)', (
     expect(headerFitsPinned(20, 0), 'no scrollport yet').toBe(false)
   })
 })
+
+describe('a follower whose next row lands between pins (nocx-ouru5.1.18)', () => {
+  /** The scroller the output-jitter failure measured: the tail is pinned, then
+   *  the program commits one row (one row pitch, here 30px of three) before
+   *  anything settles. The scroller is now short of the end by exactly that
+   *  row, and `_followsNow` used to read the gap as a gesture — capturing the
+   *  reader's place a row up and pinning it after the mutation. */
+  function scroller(controller: ScrollbackController): {
+    area: HTMLElement
+    grow: (px: number) => void
+    max: () => number
+  } {
+    const area = controller.scrollbackArea
+    let scrollHeight = 1000
+    Object.defineProperty(area, 'clientHeight', { configurable: true, value: 400 })
+    Object.defineProperty(area, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollHeight,
+    })
+    // The reader is at the end to begin with: this is the follower's case.
+    let scrollTop = 600
+    Object.defineProperty(area, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = Math.max(0, Math.min(value, scrollHeight - 400))
+      },
+    })
+    Object.defineProperty(area, 'scrollTo', {
+      configurable: true,
+      value: (options: { top: number }) => {
+        scrollTop = Math.max(0, Math.min(options.top, scrollHeight - 400))
+      },
+    })
+    area.getBoundingClientRect = () => rect(0, 600)
+    return {
+      area,
+      grow: (px: number) => {
+        scrollHeight += px
+      },
+      max: () => scrollHeight - 400,
+    }
+  }
+
+  it('stays at the end instead of pinning the reader one row up', () => {
+    const { controller } = makeController()
+    const at = scroller(controller)
+    // The tail is pinned here: the person is following, at the end.
+    controller.holdReaderPlace(() => {})
+    expect(at.area.scrollTop).toBe(at.max())
+
+    // A row is committed. Nothing has settled yet, so the scroller is one row
+    // short of the end — the state the failure measured (top 3652, max 3662).
+    at.grow(10)
+    expect(at.area.scrollTop).toBe(at.max() - 10)
+
+    // The next structural change arrives. A follower is moved by the END.
+    controller.holdReaderPlace(() => {
+      at.grow(10)
+    })
+    expect(at.area.scrollTop).toBe(at.max())
+  })
+
+  it('does not read a live-end sentinel pushed out by a row as a gesture', () => {
+    // The live end leaves the observer's root the moment a row lands below the
+    // fold. That delivery is about the CONTENT, not about the person.
+    const saved = globalThis.IntersectionObserver
+    const seen: { deliver: ((entries: { isIntersecting: boolean }[]) => void) | null } = {
+      deliver: null,
+    }
+    class FakeObserver {
+      constructor(cb: (entries: { isIntersecting: boolean }[]) => void) {
+        seen.deliver = cb
+      }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+      takeRecords(): never[] {
+        return []
+      }
+    }
+    globalThis.IntersectionObserver = FakeObserver as never
+    try {
+      const { controller } = makeController()
+      const at = scroller(controller)
+      controller.holdReaderPlace(() => {})
+      expect(at.area.scrollTop).toBe(at.max())
+
+      // A row lands and the sentinel falls out of the root.
+      at.grow(10)
+      seen.deliver?.([{ isIntersecting: false }])
+
+      controller.holdReaderPlace(() => {
+        at.grow(10)
+      })
+      expect(at.area.scrollTop).toBe(at.max())
+    } finally {
+      globalThis.IntersectionObserver = saved
+    }
+  })
+
+  it('leaves a reader who moved their own row alone', () => {
+    const { controller } = makeController()
+    const at = scroller(controller)
+    controller.holdReaderPlace(() => {})
+    // Their own gesture: three rows up, which the observer has not reported
+    // yet. This is not content growth, and the anchor must hold it.
+    at.area.scrollTop = at.max() - 30
+    controller.holdReaderPlace(() => {
+      at.grow(10)
+    })
+    expect(at.area.scrollTop).toBe(at.max() - 40)
+  })
+})

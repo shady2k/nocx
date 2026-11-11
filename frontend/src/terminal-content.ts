@@ -1125,6 +1125,17 @@ export class TerminalContent extends BasePaneContent {
    *  of a switch, tracked here because the registry's change notification
    *  names only the incoming target. */
   private activeTargetId: string | null = null
+  /** THE DRAFTS THIS PANE HANDED BACK TO THE PERSON, by target id
+   *  (nocx-evj4b.1.8, P2). One rule for every path that restores a line — a
+   *  settle returning the held ones, a verdict vetoed after its startup
+   *  settled, a shell draft written while Ask was active — set at the one
+   *  place they all pass through (`_keepRestoredShellDraft`). The ownership
+   *  projection hides the composer at a non-ready fact unless the line is
+   *  typed AND focused, so a restored draft shown without focus was hidden in
+   *  the same update and the person's text vanished into an invisible box. A
+   *  restored draft keeps the composer of ITS OWN target visible whenever that
+   *  target is the one shown, until the person submits or clears it. */
+  private readonly _restoredDrafts = new Set<string>()
   private agentTarget: AgentInputTarget | null = null
   /** The editor is SUMMONED: the person asked for it over a command that is
    *  still running (nocx-92gfl).
@@ -3582,6 +3593,10 @@ export class TerminalContent extends BasePaneContent {
         // seam: the shell highlighter and the completion surface — the two
         // that ARE about commands — on top of the shared document layer.
         [...shellExtensions(this.snapshotStore), ...this.completion.extensions(), ...documentLayer],
+        // HOW THIS PANE FRAMES A SUBMIT (owner, 2026-11-10; nocx-evj4b.1.2):
+        // asked per submit, because the answer is the pane's state at that
+        // instant — a program can start, and a prompt can come back.
+        () => this.submitPasteFraming(),
       )
       const vault = new VaultClient(this.client)
       this.vault = vault
@@ -3645,6 +3660,14 @@ export class TerminalContent extends BasePaneContent {
           this.restoreScrollbackRange(held)
         }
         this.activeTargetId = target.id
+        // THE TARGET THAT WAS SWITCHED TO MAY OWE THE PERSON A DRAFT
+        // (nocx-evj4b.1.8, P2). A restored shell draft stored while Ask was
+        // active is loaded by the swap above into a hidden editor. The rule
+        // is the one predicate the ownership projection reads; this is its
+        // other half — the target is on screen NOW, and the draft with it.
+        if (this._restoredShellDraft() && this.editor !== null && !this.editor.isVisible) {
+          this.editor.show({ focus: false })
+        }
         // The line-start indicator renders the registry's active target
         // and nothing else repaints it: this notification IS its refresh
         // signal (ask-entry.ts). The indicator derives its own WORD from
@@ -3856,6 +3879,12 @@ export class TerminalContent extends BasePaneContent {
             // to the one it was typed for.
             const origin = this._currentBind()
             const bind = this._bind
+            // THE STARTUP THIS LINE WAS TYPED INTO (nocx-evj4b.1.8, P1). A
+            // reference resolves over the wire, and by the time its verdict
+            // lands the startup may have settled — so the decision must
+            // remember what the composer WAS at the Enter, not read what the
+            // session is now. Captured here, synchronously, like the origin.
+            const startupAtEnter = this._bind.phase !== 'live' || this._awaitsFirstPrompt()
             const sync = planSubmitSync(doc)
             if (sync) {
               // ADR-0024 §1 (the projection bead nocx-u7uh.7): the typed-ssh
@@ -3867,7 +3896,7 @@ export class TerminalContent extends BasePaneContent {
               // shell.launcherCommand RPC was deleted with the marker
               // latch (nocx-u7uh.1), so the line goes out unchanged —
               // fail-open — until a rewrite input exists.
-              return this.deferShellSubmissionUntilReady(sync, origin)
+              return this.deferShellSubmissionUntilReady(sync, origin, startupAtEnter)
             }
             return planSubmit(doc, (line) => vault.resolveLine(line)).then((verdict) => {
               // The verdict resolves in whatever bind is current; this line
@@ -3877,7 +3906,7 @@ export class TerminalContent extends BasePaneContent {
                 this.reportSubmitFailure(verdict)
                 return false
               }
-              return this.deferShellSubmissionUntilReady(verdict, origin)
+              return this.deferShellSubmissionUntilReady(verdict, origin, startupAtEnter)
             })
           },
           submit: (doc: string, plan?: SubmitPlan) => this.submitFromComposer(doc, plan),
@@ -7320,6 +7349,7 @@ export class TerminalContent extends BasePaneContent {
     this._updateCapability()
     this._syncIntegrationWaiting()
     this._releaseDeferredShellSubmissions()
+    if (isDegraded(fact)) this._settleDeferredShellSubmissions()
     this._syncLifecycleOwnership()
     if (!isDegraded(fact)) {
       // Recovered, or never failed. The card belongs to the state that
@@ -7459,6 +7489,10 @@ export class TerminalContent extends BasePaneContent {
      *  6). Every path below judges against THIS, never against whatever is
      *  bound now. */
     origin: BindIdentity,
+    /** Whether the composer WAS the startup composer at the Enter
+     *  (nocx-evj4b.1.8, P1): a line typed there is not yet the host's, and a
+     *  startup that settles while its reference resolves cannot send it. */
+    startupAtEnter = false,
   ): SubmitPlan | false | 'held' {
     if (this._attachment.kind !== 'attached') return false
     const target = this.inputTargets?.active()
@@ -7486,8 +7520,30 @@ export class TerminalContent extends BasePaneContent {
       this._deferredShellSubmissions.push({ plan, target, origin })
       return 'held'
     }
+    // THE STARTUP ENDED WITHOUT A PROMPT WHILE THIS LINE RESOLVED (P1). The
+    // line was typed into the startup composer, so no queue ever took it: it
+    // is still the editor's draft. Delivering it now would write into a pty
+    // that no prompt has proved ready (the .1.1 finding) — and the reference
+    // resolution that just finished is not a readiness signal. The veto keeps
+    // the person's text where they left it, reference intact, and the
+    // composer on screen with it.
+    if (
+      startupAtEnter &&
+      !this._awaitsFirstPrompt() &&
+      this.lifecycle.state.kind !== 'prompt_ready'
+    ) {
+      this._keepRestoredShellDraft()
+      return false
+    }
     if (!this._awaitsFirstPrompt()) return plan
-    if (this.lifecycle.state.kind === 'prompt_ready' || isDegraded(this._integration)) return plan
+    if (this.lifecycle.state.kind === 'prompt_ready') return plan
+    // THE QUEUE IS A PROMISE (owner, 2026-11-10; nocx-evj4b.1.8). `held` says
+    // the line will be delivered when the prompt a live domain announces
+    // arrives; the release below keeps that promise and the settle returns it
+    // (into the editor) when the startup ends without one. A session that is
+    // not awaiting a prompt never reaches here: with no integration it sends
+    // through the ordinary path — there is no marker to wait for, and no
+    // composer on screen to queue from.
     this._deferredShellSubmissions.push({ plan, target, origin })
     return 'held'
   }
@@ -7550,12 +7606,14 @@ export class TerminalContent extends BasePaneContent {
     // session's own flags; the attach callback arrives before those flags are
     // in, so a check made from there must not read them at all.
     if (bind.phase !== 'live') return false
-    if (this.lifecycle.state.kind === 'prompt_ready') return true
-    if (isDegraded(bind.integration)) return true
-    // No integration was ever requested for THIS session, so no verdict is
-    // coming and no prompt mark will ever arrive. `awaitsIntegration` is this
-    // bind's own ack field, never the session that went away.
-    return bind.integration === null && !bind.awaitsIntegration
+    // THE QUEUE RELEASES AT THE PROMPT AND NOWHERE ELSE (owner, 2026-11-10;
+    // nocx-evj4b.1.8). A `conventional`/`lost` verdict used to release it —
+    // that is how a line reached a far pty that was still cooked, because the
+    // verdict is the launcher's word about the shell, not the shell's own
+    // readiness. A session that will never announce a prompt releases
+    // nothing; what it held goes back to the composer (see
+    // `_settleDeferredShellSubmissions`).
+    return this.lifecycle.state.kind === 'prompt_ready'
   }
 
   /** Deliver the held lines ONE AT A TIME, in the order the person made them,
@@ -7653,7 +7711,12 @@ export class TerminalContent extends BasePaneContent {
   private _finishBind<T extends 'bound' | 'uncertain' | 'aborted'>(outcome: T): T {
     if (this._bind.phase === 'opening') {
       this._bind.phase = 'live'
-      this._releaseDeferredShellSubmissions()
+      if (this._startupCanHold()) this._releaseDeferredShellSubmissions()
+      else if (this._bind.integration === null && !this._bind.awaitsIntegration) {
+        // THIS SESSION NEVER ASKED FOR A PROMPT MARK, so none is coming and
+        // the queue's promise cannot be kept.
+        this._settleDeferredShellSubmissions()
+      }
     }
     return outcome
   }
@@ -7663,6 +7726,34 @@ export class TerminalContent extends BasePaneContent {
    *  were typed into is gone. */
   private _cancelDeferredShellSubmissions(): void {
     this._bind.held.length = 0
+  }
+
+  /** THE STARTUP ENDED WITHOUT A PROMPT (owner, 2026-11-10; nocx-evj4b.1.8).
+   *
+   *  A line the -775 queue held was held against a promise: the prompt a live
+   *  domain will announce. When the startup settles some other way —
+   *  `conventional`/`lost`, or a bind that never asked for integration — that
+   *  prompt is not coming, and delivering the line would write into a pty
+   *  nobody has proved ready (the far side is still cooked and its startup
+   *  chain can read stdin). The line goes back to the person instead: the
+   *  editor's draft, where they left it. The composer is not forced on screen
+   *  — a conventional pane's input surface is the grid, and the person
+   *  submits there once they see the prompt. */
+  private _settleDeferredShellSubmissions(): void {
+    const held = this._bind.held
+    if (held.length === 0) return
+    // THE PERSON'S OWN TEXT, NEVER THE RESOLVED ONE (nocx-evj4b.1.8, P1). A
+    // place's `sendLine` carries the vault's resolved secret — that is the
+    // line the pty is owed, and the whole reason the plan keeps two. A draft
+    // restored from it put `curl -H "Authorization: Bearer …"` back in front
+    // of the person and, on the next Enter, into ledger history: a secret in
+    // clear, twice. `recordLine` is the text they typed, references intact.
+    const lines = held.map((entry) => entry.plan.recordLine)
+    held.length = 0
+    // AND INTO THE TARGET THAT HELD THEM, through the one restore rule
+    // (P2): the person may have switched to Ask while the shell was starting,
+    // and the line belongs to the shell's draft, never to the question's.
+    this._restoreShellDraft(lines)
   }
 
   /** Show the waiting card and hide the terminal grid for exactly as long as
@@ -7686,6 +7777,69 @@ export class TerminalContent extends BasePaneContent {
    *  on both calls, and this method is never asked to hide anything — the
    *  terminal is live from its first frame, which is what "absence is
    *  conventional by design" requires. */
+  /** The shell target's id — the target whose drafts this pane restores. */
+  private _shellTargetId(): string {
+    return this.shellTarget?.id ?? 'shell'
+  }
+
+  /** WHETHER A RESTORED SHELL DRAFT IS THE TEXT ON SCREEN (nocx-evj4b.1.8,
+   *  P2). One rule, read by the ownership projection: the draft exists (the
+   *  editor's, when the shell is the target shown; the stored draft, when it
+   *  is not), it is not empty, and the shell is the target being shown. Cleared
+   *  by the same read that answers it — a submit or a clear empties the
+   *  editor, and with it the keep. */
+  private _restoredShellDraft(): boolean {
+    const editor = this.editor
+    if (editor === null) return false
+    const id = this._shellTargetId()
+    if (!this._restoredDrafts.has(id)) return false
+    if (this.activeTargetId !== id) return false
+    if (editor.getDoc().trim() === '') {
+      this._restoredDrafts.delete(id)
+      return false
+    }
+    return true
+  }
+
+  /** THE ONE PLACE A HANDED-BACK DRAFT IS RECORDED (nocx-evj4b.1.8, P2).
+   *  Every path that returns a line to the person passes through here, so the
+   *  visibility rule is one rule rather than a fix per path, and the composer
+   *  of the target that owns the draft is shown with it when that target is
+   *  the one on screen. */
+  private _keepRestoredShellDraft(): void {
+    const id = this._shellTargetId()
+    this._restoredDrafts.add(id)
+    if (this.activeTargetId !== id) return
+    const editor = this.editor
+    // A DRAFT THE PERSON CANNOT SEE IS NOT THEIRS. The startup composer hid
+    // when the session settled; the line it now holds is the person's, so the
+    // composer comes back with it — and the projection above keeps it there.
+    if (editor !== null && !editor.isVisible) editor.show({ focus: false })
+  }
+
+  /** HAND A LINE BACK TO THE SHELL DRAFT (nocx-evj4b.1.8). The held lines come
+   *  first, then the draft that is there now — the person may have typed a
+   *  newer line while the startup was settling, and `insertText` at the caret
+   *  put the earlier line into the middle of it ("echo Becho A") or over a
+   *  selection. The document is replaced whole. */
+  private _restoreShellDraft(lines: string[]): void {
+    const id = this._shellTargetId()
+    const editor = this.editor
+    const active = this.activeTargetId === id
+    const current = active ? (editor?.getDoc() ?? '') : (this.targetState.draft(id)?.text ?? '')
+    const next = [...lines, ...(current.trim() === '' ? [] : [current])].join('\n')
+    const stored = this.targetState.draft(id)
+    this.targetState.saveDraft(id, {
+      text: next,
+      from: next.length,
+      to: next.length,
+      scrollTop: stored?.scrollTop ?? 0,
+    })
+    this._keepRestoredShellDraft()
+    if (!active || editor === null) return
+    editor.replaceDoc(next)
+  }
+
   private _syncIntegrationWaiting(): void {
     const waiting = isAwaitingIntegration(this._integration, this._awaitsIntegration)
     if (waiting) {
@@ -9693,7 +9847,14 @@ export class TerminalContent extends BasePaneContent {
       while (this._sessionCallQueue.length > 0) {
         const call = this._sessionCallQueue.shift()!
         try {
-          await call.session.intent(call.intent.kind, call.intent.payload)
+          // THE FRAMING RIDES ONLY WHERE IT WAS ASKED FOR (nocx-evj4b.1.2):
+          // a paste the pane marked bare, and nothing else — every other
+          // intent keeps the two-argument shape the wire has always had.
+          if (call.intent.kind === 'paste' && call.intent.framing === 'bare') {
+            await call.session.intent(call.intent.kind, call.intent.payload, 'bare')
+          } else {
+            await call.session.intent(call.intent.kind, call.intent.payload)
+          }
         } catch (err: unknown) {
           log.warn('nocx: session intent did not reach the session', {
             kind: call.intent.kind,
@@ -9862,7 +10023,10 @@ export class TerminalContent extends BasePaneContent {
     // (see _awaitsFirstPrompt).
     const startupComposer = this.lifecycle.state.kind === 'native' && this._awaitsFirstPrompt()
     const show =
-      (shouldShowEditor(this.lifecycle.state) || summoned || startupComposer) &&
+      (shouldShowEditor(this.lifecycle.state) ||
+        summoned ||
+        startupComposer ||
+        this._restoredShellDraft()) &&
       (summoned || this.lifecycle.buffer === 'normal') &&
       !this.nativeMode
     // The one case in which an authenticated prompt still shows no editor is
@@ -10362,6 +10526,26 @@ export class TerminalContent extends BasePaneContent {
    *  Enter's line does — the ledger record, the keyboard handoff, the
    *  running block and the byte route are the submit's, not the surface's.
    */
+  /** HOW A COMPOSER SUBMIT IS FRAMED (owner, 2026-11-10; nocx-evj4b.1.2).
+   *
+   *  With shell integration active — the pane's command blocks are the
+   *  transcript — and the shell at its prompt, a submit is NEVER bracketed:
+   *  the editor holds the whole line, so the markers protect nothing, and over
+   *  ssh a mode belief the terminal cannot prove (the far side's own
+   *  `ESC[?2004h` can be consumed before the parser sees it) made one
+   *  session's framing alternate — a far shell without bracketed paste ran
+   *  `\x1b[200~echo …` as text.
+   *
+   *  With no integration, and whenever a program is running inside a block (a
+   *  REPL, `read`, any foreground program), the composer's text goes to THAT
+   *  program, and its own announcement is the answer: the runtime frames by
+   *  the mode the program set at encode time.
+   */
+  private submitPasteFraming(): 'auto' | 'bare' {
+    if (this.hasRunningCommand()) return 'auto'
+    return this.lifecycle.state.kind === 'prompt_ready' ? 'bare' : 'auto'
+  }
+
   private submitFromComposer(
     doc: string,
     plan?: SubmitPlan,
@@ -10399,6 +10583,12 @@ export class TerminalContent extends BasePaneContent {
       host: this._host,
       at: Date.now(),
     })
+    // THE FRAMING IS THE GESTURE'S ANSWER (owner, 2026-11-10; nocx-evj4b.1.2):
+    // a submit is written after the attempt round trip, and by then the program
+    // it starts may already be running — asking the pane then would read the
+    // new program's state and, with integration live, lose the bare submit the
+    // prompt deserved.
+    const framing = this.submitPasteFraming()
     if (!active.routesToShell) {
       // The target surfaces its own refusal (onRefusal → the
       // toast); the rethrow is for programmatic callers, so the
@@ -10449,7 +10639,8 @@ export class TerminalContent extends BasePaneContent {
       recordLine: plan?.recordLine ?? doc,
       author: active.author,
       takeKeys: true,
-      sendLine: (d) => void active.submit(d, { targetId: active.id }),
+      framing,
+      sendLine: (d) => void active.submit(d, { targetId: active.id, framing }),
       onDelivered,
       origin,
     })
@@ -10480,6 +10671,9 @@ export class TerminalContent extends BasePaneContent {
     recordLine: string
     author: CommandAuthor
     takeKeys: boolean
+    /** The framing taken at the gesture (nocx-evj4b.1.2); absent lets the
+     *  target's own provider answer. */
+    framing?: 'auto' | 'bare'
     sendLine: (d: string) => void
     /** The broker request that caused this assistant submission. */
     requestId?: string

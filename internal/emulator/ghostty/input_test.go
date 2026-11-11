@@ -205,3 +205,46 @@ func TestFocusIsSentOnlyWhenTheProgramAskedForIt(t *testing.T) {
 		t.Errorf("focus after the mode was reset gave (%q, %v), want ErrUnsupported and no bytes", got, err)
 	}
 }
+
+// TestPasteBareIgnoresTheProgramsMode proves the caller's "bare" framing is
+// never the mode's (nocx-evj4b.1.2): inside mode 2004 the same text comes back
+// unframed, with the bare path's own newline rule, and an empty body says
+// nothing because nothing was bracketed.
+func TestPasteBareIgnoresTheProgramsMode(t *testing.T) {
+	term := newTerminal(t, 20, 4)
+	ingest(t, term, "\x1b[?2004h")
+
+	// The mode would frame this one.
+	got, err := term.Paste([]byte("echo a\necho b"))
+	if err != nil {
+		t.Fatalf("paste inside bracketed paste mode: %v", err)
+	}
+	if want := "\x1b[200~echo a\necho b\x1b[201~"; string(got) != want {
+		t.Errorf("the mode's paste = %q, want %q", got, want)
+	}
+
+	// The caller's bare request does not, and keeps the bare path's rule that
+	// a newline arrives as the carriage return a line editor reads.
+	got, err = term.PasteBare([]byte("echo a\necho b"))
+	if err != nil {
+		t.Fatalf("bare paste inside bracketed paste mode: %v", err)
+	}
+	if want := "echo a\recho b"; string(got) != want {
+		t.Errorf("a bare paste = %q, want %q", got, want)
+	}
+
+	// Tabs are left as typed: the bare path removes only what cannot travel.
+	got, err = term.PasteBare([]byte("printf 'a\tb'"))
+	if err != nil {
+		t.Fatalf("bare paste with a tab: %v", err)
+	}
+	if want := "printf 'a\tb'"; string(got) != want {
+		t.Errorf("a bare paste with a tab = %q, want %q", got, want)
+	}
+
+	// An empty body outside the brackets has no encoding, exactly as on the
+	// unbracketed path of Paste.
+	if got, err = term.PasteBare(nil); err != nil || got != nil {
+		t.Errorf("an empty bare paste gave (%q, %v), want no bytes and no error", got, err)
+	}
+}

@@ -42,7 +42,7 @@ import { createTerminalInput } from './ui/terminal-input-element'
 export type SessionIntent =
   | { readonly kind: 'key'; readonly payload: string }
   | { readonly kind: 'text'; readonly payload: string }
-  | { readonly kind: 'paste'; readonly payload: string }
+  | { readonly kind: 'paste'; readonly payload: string; readonly framing?: 'bare' }
   | { readonly kind: 'mouse'; readonly payload: string }
   | { readonly kind: 'focus'; readonly payload: string }
 

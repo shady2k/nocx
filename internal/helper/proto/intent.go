@@ -151,6 +151,10 @@ type IntentParams struct {
 	// kind "text". Encoding it against the terminal's own modes happens at
 	// the commit point, never here.
 	Payload []byte `json:"payload"`
+	// Framing is the paste framing the controller asked for (nocx-evj4b.1.2):
+	// "auto" (or empty) frames by the program's own mode 2004, "bare" never
+	// brackets. Only kind "paste" reads it; the runtime still owns the bytes.
+	Framing string `json:"framing,omitempty"`
 }
 
 // IntentResult is what became of one session.intent (design §6.5). State is

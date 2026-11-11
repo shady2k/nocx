@@ -89,6 +89,7 @@ import { LifecycleKernel, shouldShowEditor } from './lifecycle/state'
 import { ProfileClient, type SSHProfile } from './profiles'
 import { Dispatcher, RpcError } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
+import { SessionNotAttachedError } from './ipc'
 import type { SessionHandle, SessionRecovery, WSClient } from './ipc'
 import type { SessionIntent } from './intent-input'
 import type { SessionIntentResult } from './generated/session.intent'
@@ -510,6 +511,76 @@ describe('TerminalContent geometry follows accepted painter frames', () => {
       })
     } finally {
       teardown()
+      rectSpy.mockRestore()
+      style.remove()
+    }
+  })
+
+  it('keeps the opening columns through first output (nocx-evj4b.1.15)', async () => {
+    const style = document.createElement('style')
+    style.textContent = '.cell-metric-probe { line-height: 17px; }'
+    document.head.append(style)
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLElement) {
+        if (this.classList.contains('cell-metric-probe')) {
+          return { width: 64 * 7, height: 17 } as DOMRect
+        }
+        return Element.prototype.getBoundingClientRect.call(this)
+      })
+    const widthSpy = vi
+      .spyOn(HTMLElement.prototype, 'clientWidth', 'get')
+      .mockImplementation(function (this: HTMLElement) {
+        return this.classList.contains('scrollback-area') ? 974 : 0
+      })
+    // jsdom cannot resolve CSS custom properties. Model the stylesheet's
+    // one-cell gutter: the UI font's 1ch fallback is not the terminal cell.
+    const computed = window.getComputedStyle.bind(window)
+    const computedSpy = vi.spyOn(window, 'getComputedStyle').mockImplementation((el) => {
+      const result = computed(el)
+      if (!el.classList.contains('scrollback-area')) return result
+      const get = result.getPropertyValue.bind(result)
+      result.getPropertyValue = (name) =>
+        name === '--pane-inline-padding'
+          ? el.closest<HTMLElement>('.pane')?.style.getPropertyValue('--term-cell-width') || '1ch'
+          : get(name)
+      return result
+    })
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        attachToDocument: true,
+        viewportBeforeMount: { width: 996, height: 800 },
+      },
+      client,
+    )
+    try {
+      tab.setActive(true)
+      const opening = client.openSession.mock.calls[0][0]
+      expect(opening.cols).toBe(137)
+      const session = sessionOf(content)
+      session.fireScreenFrame(
+        screenFrame(
+          1,
+          Array.from({ length: SCREEN_ROWS }, () => 'x'.repeat(137)),
+          {
+            cols: opening.cols,
+            rows: opening.rows,
+            cellWidthPx: 7,
+            cellHeightPx: 17,
+          },
+        ),
+      )
+      await vi.waitFor(() => expect(paneScreen()?.revision).toBe(1))
+      content.viewportChanged({ width: 996, height: 800 })
+      expect(
+        (content as unknown as { _reportedSize(): { cols: number } })._reportedSize().cols,
+      ).toBe(opening.cols)
+    } finally {
+      teardown()
+      computedSpy.mockRestore()
+      widthSpy.mockRestore()
       rectSpy.mockRestore()
       style.remove()
     }
@@ -12559,6 +12630,399 @@ describe('shell submit input intent ordering (nocx-zg3k3.3.1)', () => {
       expect(session.send).not.toHaveBeenCalled()
     } finally {
       releasePaste()
+      teardown()
+    }
+  })
+
+  // ONE SUBMIT, THREE REJECTIONS, THREE REMEDIES (nocx-evj4b.1.14).
+  //
+  // A submit is two intents — the paste and the Enter. The pane's queue used
+  // to log a rejection and move on, so the Enter went alone: bash read a bare
+  // newline, printed a fresh prompt, and the command left no output and no
+  // block. The remedy depends on WHY the call was rejected, and the three
+  // cases are pinned here because guessing wrong is worse than the bug:
+  //
+  //   not attached   nothing was sent, so the line is HELD and written when
+  //                  the pane is attached again — once;
+  //   definitive     a JSON-RPC error answer: refused, nothing written, so the
+  //                  submit ends visibly and the pane keeps working;
+  //   unknown        the connection died: the shell may have the line already,
+  //                  so it is NEVER presented again (that runs `rm` twice) and
+  //                  the person is told it may have gone.
+  /** Queue one submitted line and return what the pane did with it. */
+  async function submitOnce(
+    content: unknown,
+    ed: unknown,
+    session: ReturnType<typeof makeSession>,
+    line: string,
+  ): Promise<void> {
+    ;(content as { setVisible(v: boolean): void }).setVisible(true)
+    ;(ed as { show(): void }).show()
+    ;(ed as { insertText(t: string): void }).insertText(line)
+    viewOf(ed as never).contentDOM.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+    )
+    await vi.waitFor(() => expect(session.intent).toHaveBeenCalled())
+  }
+
+  it.each(['refused', 'failed_partial', 'delivery_unknown', 'cancelled', 'in_progress'] as const)(
+    'discards Enter and type-ahead after a paste resolves %s, then accepts a later submit',
+    async (state) => {
+      const client = makeClient()
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+      const session = sessionOf(content)
+      const success: SessionIntentResult = { state: 'executed', bytesWritten: 1, fenceAfter: 0 }
+      let finish!: (result: SessionIntentResult) => void
+      session.intent.mockImplementationOnce(
+        () =>
+          new Promise<SessionIntentResult>((resolve) => {
+            finish = resolve
+          }),
+      )
+      vi.mocked(showToast).mockClear()
+      try {
+        await submitOnce(content, ed, session, 'echo failed line')
+        typeIntoPane(content, 'queued')
+        finish({
+          state,
+          bytesWritten: state === 'failed_partial' ? 3 : 0,
+          fenceAfter: 0,
+          ...(state === 'refused' ? { refusal: { cause: 'cannot_encode' as const } } : {}),
+        })
+        const drain = content as unknown as { _sessionCallSending: boolean }
+        await vi.waitFor(() => expect(drain._sessionCallSending).toBe(false))
+        expect(session.intent.mock.calls).toEqual([['paste', 'echo failed line']])
+        expect(showToast).toHaveBeenCalled()
+        const notice = vi.mocked(showToast).mock.lastCall?.[0]
+        expect(notice?.level).toBe('danger')
+        expect(notice?.duration).toBe(0)
+        expect(notice?.message).toContain(
+          state === 'refused' ? 'cannot_encode' : 'will not be sent again',
+        )
+
+        session.intent.mockResolvedValue(success)
+        await submitOnce(content, ed, session, 'echo later')
+        await vi.waitFor(() =>
+          expect(session.intent.mock.calls.slice(1)).toEqual([
+            ['paste', 'echo later'],
+            ['key', 'enter'],
+          ]),
+        )
+      } finally {
+        teardown()
+      }
+    },
+  )
+
+  it.each(['reject-before-detach', 'reject-after-detach', 'negative'] as const)(
+    'keeps the unsent submit after an earlier focus call fails (%s)',
+    async (failure) => {
+      const client = makeClient()
+      const { ed, content, teardown } = await mountTerminal(
+        makeClipboard(),
+        { attachToDocument: true },
+        client,
+      )
+      const session = sessionOf(content)
+      const success: SessionIntentResult = { state: 'executed', bytesWritten: 1, fenceAfter: 0 }
+      let rejectFocus!: (err: Error) => void
+      let resolveFocus!: (result: SessionIntentResult) => void
+      const focus = new Promise<SessionIntentResult>((resolve, reject) => {
+        resolveFocus = resolve
+        rejectFocus = reject
+      })
+      let attached = true
+      session.intent.mockImplementation((kind: string) => {
+        if (kind === 'focus') return focus
+        if (!attached)
+          return Promise.reject(new SessionNotAttachedError('Session is not attached.'))
+        return Promise.resolve(success)
+      })
+      vi.mocked(showToast).mockClear()
+      try {
+        content.setVisible(true)
+        intentElementOf(content).dispatchEvent(new FocusEvent('focus'))
+        await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('focus', 'in'))
+        await submitOnce(content, ed, session, 'echo survives focus')
+        const pending = content as unknown as {
+          _sessionCallQueue: Array<{ intent: SessionIntent }>
+          _sessionCallSending: boolean
+        }
+        await vi.waitFor(() =>
+          expect(pending._sessionCallQueue.map((c) => c.intent.payload)).toContain(
+            'echo survives focus',
+          ),
+        )
+        if (failure !== 'reject-before-detach') {
+          attached = false
+          session.fireAttachment({ kind: 'attaching' })
+        }
+        if (failure === 'negative')
+          resolveFocus({ state: 'delivery_unknown', bytesWritten: 0, fenceAfter: 0 })
+        else rejectFocus(new Error('ws closed'))
+        await vi.waitFor(() => expect(pending._sessionCallSending).toBe(false))
+        if (failure !== 'reject-before-detach') {
+          attached = true
+          session.fireAttachment({ kind: 'attached' })
+        }
+        await vi.waitFor(() =>
+          expect(
+            session.intent.mock.calls.filter((c) => c[0] !== 'focus' && c[0] !== 'paste'),
+          ).toEqual([['key', 'enter']]),
+        )
+        expect(session.intent).toHaveBeenCalledWith('paste', 'echo survives focus')
+        expect(showToast).not.toHaveBeenCalled()
+      } finally {
+        resolveFocus(success)
+        teardown()
+      }
+    },
+  )
+
+  it('holds an accepted submit if attachment drops before the lifecycle attempt answers', async () => {
+    const client = makeClient()
+    let resolveAttempt!: (value: unknown) => void
+    const attempt = new Promise<unknown>((resolve) => {
+      resolveAttempt = resolve
+    })
+    const ordinaryCall = client.dispatcher.call.getMockImplementation()!
+    client.dispatcher.call.mockImplementation((method, params) => {
+      if (method === 'lifecycle.submitAttempt') return attempt
+      return ordinaryCall(method, params)
+    })
+    const { ed, content, view, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const session = sessionOf(content)
+    try {
+      content.setVisible(true)
+      lifecycleHandler(client)({
+        lane: 'lane-1',
+        lifecycle: 'prompt_ready',
+        domain: 'd1',
+        epoch: 1,
+      })
+      ed.insertText('echo pre-send-held')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      expect(client.dispatcher.call).toHaveBeenCalledWith(
+        'lifecycle.submitAttempt',
+        expect.objectContaining({ command: 'echo pre-send-held' }),
+      )
+      expect(ed.getDoc()).toBe('')
+      session.fireAttachment({ kind: 'attaching' })
+      resolveAttempt({ id: 'pre-send-attempt' })
+      await attempt
+      // The accepted submit is past its lifecycle round trip, but the same
+      // handle cannot send yet. No private queue state manufactures the hold.
+      await Promise.resolve()
+      expect(session.intent).not.toHaveBeenCalled()
+
+      session.fireAttachment({ kind: 'attached' })
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls).toEqual([
+          ['paste', 'echo pre-send-held', 'bare'],
+          ['key', 'enter'],
+        ]),
+      )
+      session.fireAttachment({ kind: 'attached' })
+      expect(session.intent).toHaveBeenCalledTimes(2)
+      expect(sessionOf(content)).toBe(session)
+    } finally {
+      resolveAttempt({ id: 'pre-send-attempt' })
+      teardown()
+    }
+  })
+
+  it.each(['executed', 'cancelled', 'delivery_unknown'] as const)(
+    'drops the refused submit queued after an interrupt while the stale %s call settles',
+    async (state) => {
+      const client = makeClient()
+      const session = makeSession()
+      client.openSession.mockResolvedValue(session)
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+      const result: SessionIntentResult = { state: 'executed', bytesWritten: 1, fenceAfter: 0 }
+      let releaseFirst!: () => void
+      const firstAnswer = new Promise<SessionIntentResult>((resolve) => {
+        releaseFirst = () => resolve({ ...result, state })
+      })
+      session.intent.mockImplementation((kind: string, payload: string) => {
+        if (kind === 'text' && payload === 'a') return firstAnswer
+        if (kind === 'paste' && payload === 'bad line') {
+          return Promise.reject(new RpcError('invalid session.intent params', -32602))
+        }
+        return Promise.resolve(result)
+      })
+      vi.mocked(showToast).mockClear()
+      try {
+        typeIntoPane(content, 'a')
+        await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('text', 'a'))
+        typeIntoPane(content, '\x03')
+        await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('key', 'Ctrl+c'))
+        expect(session.cancelPendingIntents).toHaveBeenCalled()
+
+        await submitOnce(content, ed, session, 'bad line')
+        const queue = content as unknown as {
+          _sessionCallQueue: Array<{ intent: SessionIntent }>
+          _sessionCallSending: boolean
+        }
+        await vi.waitFor(() =>
+          expect(queue._sessionCallQueue.map((call) => call.intent.payload)).toEqual([
+            'bad line',
+            'enter',
+          ]),
+        )
+        // The cancelled call succeeds after the replacement submit is queued.
+        // Its drain must not suppress the replacement paste's own refusal.
+        releaseFirst()
+        await vi.waitFor(() => {
+          expect(queue._sessionCallQueue).toHaveLength(0)
+          expect(queue._sessionCallSending).toBe(false)
+        })
+        expect(session.intent).toHaveBeenCalledWith('paste', 'bad line')
+        expect(session.intent).not.toHaveBeenCalledWith('key', 'enter')
+        const notices = vi.mocked(showToast).mock.calls
+        const notice = notices[notices.length - 1]?.[0]
+        expect(notice?.message).toContain('invalid session.intent params')
+        expect(notice?.level).toBe('danger')
+        expect(notice?.duration).toBe(0)
+      } finally {
+        releaseFirst()
+        teardown()
+      }
+    },
+  )
+
+  it('holds a command the renderer could not send, and writes it once when the session is attached again', async () => {
+    const client = makeClient()
+    const session = makeSession()
+    client.openSession.mockResolvedValue(session)
+    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const result: SessionIntentResult = { state: 'executed', bytesWritten: 1, fenceAfter: 0 }
+    const delivered: Array<[string, string]> = []
+    let reachable = false
+    session.intent.mockImplementation((kind: string, payload: string) => {
+      if (!reachable) {
+        return Promise.reject(new SessionNotAttachedError('Session is not attached.'))
+      }
+      delivered.push([kind, payload])
+      return Promise.resolve(result)
+    })
+    vi.mocked(showToast).mockClear()
+    try {
+      await submitOnce(content, ed, session, 'echo held')
+
+      // The paste is rejected before any frame; the Enter is NOT presented on
+      // its own — the line is one submission and its text goes first.
+      expect(delivered).toEqual([])
+      const queued = (
+        content as unknown as {
+          _sessionCallQueue: Array<{ intent?: { payload: string }; session?: unknown }>
+        }
+      )._sessionCallQueue
+      expect(queued.map((call) => call.intent?.payload)).toEqual(['echo held', 'enter'])
+
+      // Attached again: the whole line goes, in the order it was made, to the
+      // handle the pane is attached to — `call.session` and the pane's own
+      // session are one object across a reattach (the queue belongs to the
+      // bind, so a replacement session brings a replacement queue).
+      reachable = true
+      session.fireAttachment({ kind: 'attached' })
+      await vi.waitFor(() =>
+        expect(delivered).toEqual([
+          ['paste', 'echo held'],
+          ['key', 'enter'],
+        ]),
+      )
+      // Exactly once: nothing was re-presented, and nothing was said because
+      // nothing went wrong that the person must act on.
+      expect(delivered.filter(([kind]) => kind === 'paste')).toHaveLength(1)
+      expect(showToast).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it.each(['paste', 'key'])(
+    'never re-presents a line whose %s answer was lost, and says it may have gone',
+    async (failedKind) => {
+      const client = makeClient()
+      const session = makeSession()
+      client.openSession.mockResolvedValue(session)
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+      const delivered: Array<[string, string]> = []
+      session.intent.mockImplementation((kind: string, payload: string) => {
+        if (kind === failedKind) return Promise.reject(new Error('ws closed'))
+        delivered.push([kind, payload])
+        return Promise.resolve({ state: 'executed', bytesWritten: 1, fenceAfter: 0 })
+      })
+      vi.mocked(showToast).mockClear()
+      try {
+        await submitOnce(content, ed, session, 'rm -rf build')
+
+        // The submit ends with its paste: the Enter is dropped with it, so the
+        // shell never receives a bare newline instead of the command.
+        await vi.waitFor(() => expect(showToast).toHaveBeenCalled())
+        const sentBeforeFailure = failedKind === 'paste' ? [] : [['paste', 'rm -rf build']]
+        expect(delivered).toEqual(sentBeforeFailure)
+        expect(
+          (
+            content as unknown as { _sessionCallQueue: Array<{ intent?: { payload: string } }> }
+          )._sessionCallQueue.map((call) => call.intent?.payload),
+        ).toEqual([])
+
+        // AND IT IS NOT PRESENTED AGAIN when the session comes back: the shell
+        // may already have run it, and running a person's `rm` twice is worse
+        // than not knowing.
+        session.fireAttachment({ kind: 'attached' })
+        expect(delivered).toEqual(sentBeforeFailure)
+        expect(session.intent).toHaveBeenCalledTimes(failedKind === 'paste' ? 1 : 2)
+        const calls = vi.mocked(showToast).mock.calls
+        expect(String(calls[calls.length - 1]?.[0]?.message)).toContain(
+          'may not have reached the shell',
+        )
+      } finally {
+        teardown()
+      }
+    },
+  )
+
+  it('ends a submit the session refused, names the refusal, and keeps the pane working', async () => {
+    const client = makeClient()
+    const session = makeSession()
+    client.openSession.mockResolvedValue(session)
+    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const delivered: Array<[string, string]> = []
+    session.intent.mockImplementation((kind: string, payload: string) => {
+      if (payload === 'bad line') {
+        return Promise.reject(new RpcError('invalid session.intent params', -32602))
+      }
+      delivered.push([kind, payload])
+      return Promise.resolve({ state: 'executed', bytesWritten: 1, fenceAfter: 0 })
+    })
+    vi.mocked(showToast).mockClear()
+    try {
+      await submitOnce(content, ed, session, 'bad line')
+      await vi.waitFor(() => expect(showToast).toHaveBeenCalled())
+      const calls = vi.mocked(showToast).mock.calls
+      expect(String(calls[calls.length - 1]?.[0]?.message)).toContain(
+        'invalid session.intent params',
+      )
+
+      // NOT WEDGED: the next line the person types is presented, so a refusal
+      // that can never change is not a queue that never moves again.
+      await vi.waitFor(() => expect(delivered).toEqual([]))
+      ed.show()
+      ed.insertText('echo after')
+      viewOf(ed).contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      await vi.waitFor(() =>
+        expect(delivered).toEqual([
+          ['paste', 'echo after'],
+          ['key', 'enter'],
+        ]),
+      )
+    } finally {
       teardown()
     }
   })

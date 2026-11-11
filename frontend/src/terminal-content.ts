@@ -191,7 +191,14 @@ import { getCurrentTheme, subscribeThemeChanges } from './renderers/theme-adapte
 import { subscribeTerminalFontChanges } from './terminal-font'
 import { log, logDecision, isDecisionTracing } from './log'
 import type { BlockClosed } from './generated/block.closed'
-import type { WSClient, SessionHandle, OpenAnchor, SessionSize, SessionAttachment } from './ipc'
+import {
+  SessionNotAttachedError,
+  type WSClient,
+  type SessionHandle,
+  type OpenAnchor,
+  type SessionSize,
+  type SessionAttachment,
+} from './ipc'
 import type { PendingCallView } from './dispatcher'
 import { showConfirm } from './ui/dialog'
 import { createFilesPanelServices } from './files/files-client'
@@ -1113,6 +1120,9 @@ export class TerminalContent extends BasePaneContent {
     return this._bind.callQueue
   }
   private _sessionCallSending = false
+  /** Only a local not-attached rejection proves that no bytes were sent. */
+  private _sessionCallHeld = false
+  private _sessionCallEpoch = 0
   private editor: CommandEditor | null = null
   private shellTarget: ShellInputTarget | null = null
   /** The input-target registry (ADR-0004 §3): a submitted document routes
@@ -2096,6 +2106,8 @@ export class TerminalContent extends BasePaneContent {
       // decides whether the startup interval is really over — this only offers
       // the moment.
       this._releaseDeferredShellSubmissions()
+      // Only locally refused input waits for this same handle's attachment.
+      this._resumeHeldSessionCalls()
     }
     this._syncAttachOffer()
     if (changed) this._syncLifecycleOwnership()
@@ -3634,7 +3646,7 @@ export class TerminalContent extends BasePaneContent {
         unresolvedRedactionField,
       ]
       this.shellTarget = new ShellInputTarget(
-        (intent) => this.sendIntent(intent),
+        (intent) => this.sendIntent(intent, true),
         // The target carries the shell's editor extensions through the §8.8
         // seam: the shell highlighter and the completion surface — the two
         // that ARE about commands — on top of the shared document layer.
@@ -5302,6 +5314,7 @@ export class TerminalContent extends BasePaneContent {
     // delivered by this one: the new object starts `opening`, with an UNKNOWN
     // verdict, and the old object is unreachable. (Rounds 5 and 7 each reset a
     // field here; the object is why there is nothing left to remember.)
+    this._discardQueuedIntents()
     this._bind = new BindState(this._bind.generation + 1)
     // AND THE EDITOR'S OWN PER-SUBMIT STATE (review round 10, P2): a reference
     // resolution still pending from the lost session left `_submitInFlight`
@@ -6792,6 +6805,11 @@ export class TerminalContent extends BasePaneContent {
    * jsdom reports 0 for both, a real pane mid-layout can report one.
    */
   private usableViewport(viewport: ContentViewport): ContentViewport {
+    // The gutter uses the same cell as the fit. Publish the measured metric
+    // before reading it: the controller's constructor runs before this.scrollback
+    // is assigned, so its initial probe cannot yet measure the terminal font.
+    // Waiting for the first frame opens at the UI font's 1ch fallback instead.
+    this.scrollback?.cellMetricsChanged()
     const area = this.scrollback?.scrollbackArea
     const outer = area && area.clientWidth > 0 ? area.clientWidth : viewport.width
     const gutter =
@@ -9842,15 +9860,10 @@ export class TerminalContent extends BasePaneContent {
     return this.sendIntent(intent)
   }
 
-  /** Hand one intent to the session, which decides what it means.
-   *
-   *  The handle owns the access epoch and re-presents a refusal that wrote
-   *  nothing once (ipc.ts), so an intent that raced a revocation costs a round
-   *  trip rather than a keystroke. A rejection here is the transport itself
-   *  failing — a closed socket, a refused call — and it is logged rather than
-   *  swallowed: a keystroke that reached nobody is a fact the person is owed,
-   *  and printing it to a console would be the silent version of it. */
-  private sendIntent(intent: SessionIntent): boolean {
+  /** Hand one intent to the session in order. Only the already-accepted
+   *  composer's submit may queue while detached. Raw input still requires an
+   *  attachment; a failed RPC is handled by drainSessionCallQueue. */
+  private sendIntent(intent: SessionIntent, submitted = false): boolean {
     // AN INTERRUPT FLUSHES THE HELD COMMANDS (review rounds 2 and 9). A real
     // tty discards type-ahead on SIGINT, and every Ctrl-C the person makes
     // passes THIS function, whichever surface produced it: the grid's key
@@ -9872,9 +9885,14 @@ export class TerminalContent extends BasePaneContent {
       // answer ends) left two races, so there is no window left to chase.
       return this.sendInterrupt(intent)
     }
-    if (this._attachment.kind !== 'attached') return false
+    const attached = this._attachment.kind === 'attached'
+    if (!attached && !submitted) return false
     const session = this.session
     if (!session) return false
+    // The composer accepted this submit before its attempt RPC. If the
+    // connection changed during that round trip, none of its intents went out.
+    // Keep them for this handle's attachment, not for a replacement shell.
+    if (!attached) this._sessionCallHeld = true
     const tail = this._sessionCallQueue[this._sessionCallQueue.length - 1]
     if (
       intent.kind === 'text' &&
@@ -9934,35 +9952,99 @@ export class TerminalContent extends BasePaneContent {
    *  flight is not in the queue — cancelPendingIntents stamps it, and it ends
    *  when its answer arrives. */
   private _discardQueuedIntents(): void {
+    this._sessionCallEpoch++
     this._sessionCallQueue.length = 0
+    // A queue that was discarded owes the session nothing — including the
+    // call an unattached session was holding (nocx-evj4b.1.14). The hold is
+    // the queue's, so it ends with it.
+    this._sessionCallHeld = false
+  }
+
+  private _discardFailedSessionInput(refusal?: string): void {
+    this._discardQueuedIntents()
+    const message =
+      refusal !== undefined
+        ? t(
+            'terminal.input.refused',
+            'Input was refused ({error}). Remaining queued input was discarded.',
+            { error: refusal },
+          )
+        : t(
+            'terminal.input.uncertain',
+            'Input may not have reached the shell. It will not be sent again. Remaining queued input was discarded; check the shell before submitting another command.',
+          )
+    showToast({ message, level: 'danger', duration: 0 })
   }
 
   private async drainSessionCallQueue(): Promise<void> {
-    if (this._sessionCallSending) return
+    if (this._sessionCallSending || this._sessionCallHeld) return
     this._sessionCallSending = true
+    const queue = this._sessionCallQueue
+    const epoch = this._sessionCallEpoch
     try {
-      while (this._sessionCallQueue.length > 0) {
-        const call = this._sessionCallQueue.shift()!
+      while (
+        queue === this._sessionCallQueue &&
+        epoch === this._sessionCallEpoch &&
+        queue.length > 0
+      ) {
+        const call = queue.shift()!
         try {
-          // THE FRAMING RIDES ONLY WHERE IT WAS ASKED FOR (nocx-evj4b.1.2):
-          // a paste the pane marked bare, and nothing else — every other
-          // intent keeps the two-argument shape the wire has always had.
-          if (call.intent.kind === 'paste' && call.intent.framing === 'bare') {
-            await call.session.intent(call.intent.kind, call.intent.payload, 'bare')
-          } else {
-            await call.session.intent(call.intent.kind, call.intent.payload)
+          const result =
+            call.intent.kind === 'paste' && call.intent.framing === 'bare'
+              ? await call.session.intent(call.intent.kind, call.intent.payload, 'bare')
+              : await call.session.intent(call.intent.kind, call.intent.payload)
+          if (queue !== this._sessionCallQueue || epoch !== this._sessionCallEpoch) return
+          // SessionHandle owns retries. Only execution of its final result
+          // permits dependent input (in particular the submit's Enter).
+          if (result.state !== 'executed') {
+            if (call.intent.kind === 'focus') continue
+            this._discardFailedSessionInput(
+              result.state === 'refused' ? (result.refusal?.cause ?? 'unknown') : undefined,
+            )
+            log.warn('nocx: session input did not execute; queued input discarded', {
+              state: result.state,
+              bytesWritten: result.bytesWritten,
+            })
+            return
           }
         } catch (err: unknown) {
-          log.warn('nocx: session intent did not reach the session', {
-            kind: call.intent.kind,
-            error: String(err),
-          })
+          // An interrupt or a replacement bind has already discarded this input.
+          if (queue !== this._sessionCallQueue || epoch !== this._sessionCallEpoch) return
+          // Focus reports carry no command content. Losing an earlier report
+          // cannot make a later, still-unsent submit uncertain.
+          if (call.intent.kind === 'focus') {
+            log.warn('nocx: session focus report failed', { error: String(err) })
+            continue
+          }
+          if (err instanceof SessionNotAttachedError) {
+            queue.unshift(call)
+            this._sessionCallHeld = true
+            return
+          }
+          // A lost answer does not prove the bytes were not written. Never
+          // replay it, and never send the Enter left behind by a failed paste.
+          // Discard queued type-ahead too: it depends on an uncertain shell line.
+          this._discardFailedSessionInput(err instanceof RpcError ? err.message : undefined)
+          log.warn('nocx: session input failed; queued input discarded', { error: String(err) })
+          return
         }
       }
     } finally {
       this._sessionCallSending = false
-      if (this._sessionCallQueue.length > 0) void this.drainSessionCallQueue()
+      if (this._sessionCallQueue.length > 0 && !this._sessionCallHeld) {
+        void this.drainSessionCallQueue()
+      }
     }
+  }
+
+  /** Present what the session could not take, now that it can
+   *  (nocx-evj4b.1.14). Called from the one step that installs an attached
+   *  session — the same entrance that releases the held submits — so the
+   *  release is a fact about the session, never a duration. */
+  private _resumeHeldSessionCalls(): void {
+    if (!this._sessionCallHeld) return
+    this._sessionCallHeld = false
+    if (this._sessionCallQueue.length > 0) void this.drainSessionCallQueue()
   }
 
   /** Start holding, and hand back the window being held in: from here until

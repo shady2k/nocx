@@ -411,6 +411,14 @@ interface AckThrottle {
   pendingOffset: number
 }
 
+/** Local input refusal, before any frame was sent. Safe to hold until attached. */
+export class SessionNotAttachedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'SessionNotAttachedError'
+  }
+}
+
 export class SessionHandle {
   /** What a reclaim recovered from the recording, and what the recording has
    *  since revised it to (nocx-zg3k3.14.24). Seated by the constructor and
@@ -2099,7 +2107,9 @@ export class WSClient {
   private _sessionInputError(sessionId: string): Error | null {
     const state = this.sessions.get(sessionId)
     if (!state || state.attachment.kind === 'attached') return null
-    return new Error('Session is not attached. Retry the existing session before sending input.')
+    return new SessionNotAttachedError(
+      'Session is not attached. Retry the existing session before sending input.',
+    )
   }
 
   /** Sends a control-plane session intent for the pane's renderer. Payload is

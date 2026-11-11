@@ -349,6 +349,9 @@ abstract class TabStripBase implements TabStrip {
   protected dispose: (() => void) | null = null
   protected container: HTMLElement | null = null
   private mounted = false
+  /** Widths held while a pointer is on the strip's actions; see freezeTabWidths. */
+  private frozenTabs: { el: HTMLElement; width: string; flex: string }[] | null = null
+  private releaseWidthsTimer: ReturnType<typeof setTimeout> | null = null
 
   // Solid stores/signals — set during mount(), used by imperative API
   private _setPaneViews!: Setter<PaneView[]>
@@ -1157,7 +1160,12 @@ abstract class TabStripBase implements TabStrip {
                 where they have room for their names — and a name is a better
                 affordance than a key glyph for an action performed twice an
                 hour. */}
-            <div class="tabstrip-actions">
+            <div
+              class="tabstrip-actions"
+              onPointerEnter={() => this.freezeTabWidths()}
+              onPointerLeave={() => this.releaseTabWidths()}
+              onPointerDown={() => this.freezeTabWidths()}
+            >
               <IconButton ariaLabel="New tab" onClick={() => this.onNewPane?.()}>
                 <PlusIcon />
               </IconButton>
@@ -1201,6 +1209,60 @@ abstract class TabStripBase implements TabStrip {
         </>
       )
     }, container)
+  }
+
+  /**
+   * HOLD THE TAB ROW STILL WHILE A POINTER IS ON ITS ACTIONS (nocx-4y82c.1.26).
+   *
+   * The New tab control is the row's last item, so it sits wherever the last
+   * tab's width puts it — and a tab's width follows its label between 184 and
+   * 220px. A label that lands late therefore moves the control: in CI run
+   * 42920156062 the fifth tab widened by 36px between the pointerdown and the
+   * pointerup of a click on the +, the pointerup hit the tab bar instead, and
+   * the click was never synthesised. A person sees exactly that: a click that
+   * opens nothing.
+   *
+   * So the row's current widths are pinned while the pointer is on the
+   * actions, and released when it leaves or when the gesture ends. A late
+   * label settles as soon as no click is in flight; the tab under the pointer
+   * does not move.
+   */
+  private readonly freezeTabWidths = (): void => {
+    if (this.orientation !== 'horizontal' || this.frozenTabs !== null) return
+    const tabs = this.container?.querySelectorAll<HTMLElement>('.nocx-tab')
+    if (tabs === undefined || tabs.length === 0) return
+    this.frozenTabs = Array.from(tabs, (el) => {
+      const held = { el, width: el.style.width, flex: el.style.flex }
+      el.style.width = `${el.getBoundingClientRect().width}px`
+      el.style.flex = '0 0 auto'
+      return held
+    })
+    // A gesture can end outside the strip, and a pointer that leaves the
+    // window may never send pointerleave; both releases are the same method.
+    window.addEventListener('mouseup', this.releaseTabWidths, true)
+    window.addEventListener('pointercancel', this.releaseTabWidths, true)
+    this.releaseWidthsTimer = setTimeout(this.releaseTabWidths, 5000)
+  }
+
+  private readonly releaseTabWidths = (): void => {
+    window.removeEventListener('mouseup', this.releaseTabWidths, true)
+    window.removeEventListener('pointercancel', this.releaseTabWidths, true)
+    if (this.releaseWidthsTimer !== null) {
+      clearTimeout(this.releaseWidthsTimer)
+      this.releaseWidthsTimer = null
+    }
+    const held = this.frozenTabs
+    if (held === null) return
+    this.frozenTabs = null
+    // The browser synthesises the click synchronously after mouseup. Release
+    // in a later task, so the click already on its way is measured against
+    // the geometry it was aimed at.
+    setTimeout(() => {
+      for (const { el, width, flex } of held) {
+        el.style.width = width
+        el.style.flex = flex
+      }
+    }, 0)
   }
 
   addPane(tab: PaneView): void {

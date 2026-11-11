@@ -709,6 +709,49 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     expect(controller.terminalLiveInner.style.transform).toBe('')
   })
 
+  it('keeps the painted echo shift until the frame without the echo is painted', () => {
+    // The pane gets shorter: a frame moves the base past the anchor, so the
+    // echo is no longer on the screen, and the anchor notification arrives
+    // BEFORE the paint of that frame. The grid on screen is still the old one
+    // and still holds the echo at its top; releasing the shift here showed it
+    // in the waiting block (nocx-4y82c.1.21). A sizing pass that has not
+    // painted rows keeps the shift the painted rows were sized with.
+    const renderer = rendererWithGeometry()
+    const pane = document.createElement('div')
+    const controller = new ScrollbackController({
+      pane,
+      liveContentHeight: () => renderer.liveContentHeight(),
+      cellMetrics: () => ({ cellWidth: renderer.cellWidth, cellHeight: renderer.cellHeight }),
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
+      value: 360,
+      configurable: true,
+    })
+    controller.scrollbackArea.scrollTo = vi.fn()
+
+    controller.beginBlock('printf OWN-LINE; read x', '~', 0)
+    const record = controller.blockManager.runningBlock!
+    record.outputAnchorOffset = 1
+    record.outputAnchorText = 'prompt printf OWN-LINE; read x'
+    // The first paint: three rows, the echo among them, shifted out.
+    controller.setLiveHeight(3 * 16, true)
+    expect(controller.terminalLiveInner.style.transform).toBe('translateY(-16px)')
+
+    // A shorter frame arrives: its base has moved past the anchor, so the
+    // echo is above the screen and its new offset is zero. The anchor is
+    // applied before the frame is painted; the grid still has the echo.
+    record.outputAnchorOffset = 0
+    record.outputAnchorText = ''
+    controller.outputAnchorChanged()
+    expect(controller.terminalLiveInner.style.transform).toBe('translateY(-16px)')
+
+    // The paint follows: the rows no longer contain the echo, and the shift
+    // becomes whatever the box hides (the cap here).
+    controller.setLiveHeight(24 * 16, true)
+    expect(controller.terminalLiveInner.style.transform).toBe('translateY(-64px)')
+  })
+
   it('hides the backend-anchored echo row and sizes the live region without renderer line numbers', () => {
     const renderer = rendererWithGeometry()
 

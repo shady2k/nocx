@@ -7182,6 +7182,78 @@ describe('the projections consume the kernel through the composition root (ADR-0
     }
   })
 
+  it('reuses transcript order across row-read decisions while following visible blocks and replacements', async () => {
+    const { content, teardown } = await mountTerminal(makeClipboard(), {
+      attachToDocument: true,
+    })
+    const terminal = content as unknown as {
+      scrollback: ScrollbackController
+      _registerRestoredBlock(id: string, el: HTMLElement): void
+      _rowReadPriority(id: string): number
+    }
+    const sb = terminal.scrollback
+    const blocks = Array.from({ length: 48 }, (_, index) => {
+      const el = document.createElement('article')
+      el.className = 'cmd-block'
+      el.dataset.entryId = `priority-${index}`
+      terminal._registerRestoredBlock(el.dataset.entryId, el)
+      return el
+    })
+    let visible: HTMLElement | null = null
+    const setRect = (el: HTMLElement) => {
+      el.getBoundingClientRect = () =>
+        ({ top: el === visible ? 20 : -40, bottom: el === visible ? 40 : -20 }) as DOMRect
+    }
+    blocks.forEach(setRect)
+    sb.scrollbackArea.getBoundingClientRect = () => ({ top: 0, bottom: 100 }) as DOMRect
+    const scans = vi.spyOn(sb.scrollbackInner, 'querySelectorAll')
+    const decide = () => blocks.map((el) => terminal._rowReadPriority(el.dataset.entryId!))
+    try {
+      // Restore is the real controller path; priorities are the callbacks the
+      // terminal supplies to the connection's row-read queue.
+      sb.restorePast(blocks)
+      for (let round = 0; round < 4; round++) {
+        const priorities = decide()
+        for (let i = 1; i < priorities.length; i++) {
+          expect(priorities[i]).toBeLessThan(priorities[i - 1])
+        }
+      }
+      visible = blocks[3]
+      expect(decide()[3]).toBe(0)
+      visible = blocks[8]
+      expect(decide()[8]).toBe(0)
+      expect(decide()[3]).toBeGreaterThan(0)
+      visible = null
+
+      // Freeze replaces a command's element at the same seat. Removal and
+      // an older restore change the seats synchronously, before observers run.
+      const replacement = blocks[20].cloneNode() as HTMLElement
+      blocks[20].replaceWith(replacement)
+      blocks[20] = replacement
+      setRect(replacement)
+      terminal._registerRestoredBlock(replacement.dataset.entryId!, replacement)
+      expect(decide()[20]).toBeLessThan(decide()[19])
+      blocks[47].remove()
+      expect(terminal._rowReadPriority('priority-47')).toBe(Number.MAX_SAFE_INTEGER)
+      const older = document.createElement('article')
+      older.className = 'cmd-block'
+      older.dataset.entryId = 'priority-older'
+      setRect(older)
+      terminal._registerRestoredBlock('priority-older', older)
+      sb.restorePast([older])
+      expect(terminal._rowReadPriority('priority-older')).toBeGreaterThan(decide()[0])
+      for (let round = 0; round < 4; round++) decide()
+
+      // One transcript-order rebuild per structural change is enough, not
+      // one complete DOM walk per priority evaluation (hundreds above).
+      const orderScans = scans.mock.calls.filter(([selector]) => selector === ':scope > .cmd-block')
+      expect(orderScans.length).toBeLessThanOrEqual(4)
+    } finally {
+      scans.mockRestore()
+      teardown()
+    }
+  })
+
   it('registers a restored open block whose rows are still empty', async () => {
     const client = makeClient()
     const { content, teardown } = await mountTerminal(

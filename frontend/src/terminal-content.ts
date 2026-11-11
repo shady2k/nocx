@@ -1898,6 +1898,12 @@ export class TerminalContent extends BasePaneContent {
    *  live record's element is replaced at freeze; every door that needs a
    *  block — loader, refresh, revalidation, settle — asks here first. */
   private readonly _blockIndex = new Map<string, { element: HTMLElement; record?: BlockRecord }>()
+  /** Transcript rank changes only when a top-level block is inserted,
+   *  frozen into a replacement, or removed. Visibility stays a live read. */
+  private readonly _rowReadOrder = new Map<HTMLElement, number>()
+  private _rowReadOrderRoot: HTMLElement | null = null
+  private _rowReadOrderObserver: MutationObserver | null = null
+  private _rowReadOrderDirty = true
   /** At most one page read per entry is outstanding; a scroll that fires
    *  every frame must not turn one visible block into a stream of requests. */
   private readonly _blockRowsPageInFlight = new Set<string>()
@@ -10355,6 +10361,11 @@ export class TerminalContent extends BasePaneContent {
     this._blockRowsFinalPending.clear()
     this._restoredRows.clear()
     this._blockIndex.clear()
+    this._rowReadOrderObserver?.disconnect()
+    this._rowReadOrderObserver = null
+    this._rowReadOrderRoot = null
+    this._rowReadOrder.clear()
+    this._rowReadOrderDirty = true
     this._blockRowsPageInFlight.clear()
     this._lazyScrollUnsub?.()
     this._lazyScrollUnsub = null
@@ -11262,12 +11273,27 @@ export class TerminalContent extends BasePaneContent {
     const area = sb.scrollbackArea.getBoundingClientRect()
     const rect = el.getBoundingClientRect()
     if (rect.bottom > area.top && rect.top < area.bottom) return 0
-    const blocks = [...sb.scrollbackInner.querySelectorAll<HTMLElement>(':scope > .cmd-block')]
-    const index = blocks.indexOf(el)
-    if (index < 0) return Number.MAX_SAFE_INTEGER
-    // Lower is more urgent: the newest not-visible block goes before the one
-    // above it.
-    return 1 + (blocks.length - 1 - index)
+    const root = sb.scrollbackInner
+    if (this._rowReadOrderRoot !== root) {
+      this._rowReadOrderObserver?.disconnect()
+      this._rowReadOrderRoot = root
+      this._rowReadOrderDirty = true
+      this._rowReadOrderObserver = new MutationObserver(() => {
+        this._rowReadOrder.clear()
+        this._rowReadOrderDirty = true
+      })
+      this._rowReadOrderObserver.observe(root, { childList: true })
+    }
+    // A restore or freeze can ask for priority in the same task as its DOM
+    // change, before the observer's callback has had a chance to run.
+    if (this._rowReadOrderObserver!.takeRecords().length > 0) this._rowReadOrderDirty = true
+    if (this._rowReadOrderDirty) {
+      const blocks = root.querySelectorAll<HTMLElement>(':scope > .cmd-block')
+      this._rowReadOrder.clear()
+      blocks.forEach((block, index) => this._rowReadOrder.set(block, blocks.length - index))
+      this._rowReadOrderDirty = false
+    }
+    return this._rowReadOrder.get(el) ?? Number.MAX_SAFE_INTEGER
   }
 
   /** The page a refresh should ask for, or undefined for a block small enough

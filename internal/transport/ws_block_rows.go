@@ -3096,7 +3096,14 @@ func (s *WSServer) closeBlockRowsNow(ctx context.Context, sid session.ID, attemp
 	closingIn := block.closingIn
 	bs.mu.Unlock()
 	if len(closing) > 0 && !closingIn {
-		// The closing screen goes where the artifact actually is.
+		// With no delivery yet, zero is the empty artifact's cursor, not
+		// this command's absolute row origin. Its first append can start at
+		// the end marker's boundary without claiming earlier commands' rows
+		// as lost. Keep the closing screen in the output mark's coordinates.
+		if cursor == 0 {
+			cursor = endRow
+		}
+		// Once rows exist, the closing screen follows the artifact's cursor.
 		//
 		// The index relation the block states is that the artifact holds the
 		// interval's rows at [begin, endRow) and its closing screen follows at

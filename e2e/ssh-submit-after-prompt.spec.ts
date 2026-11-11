@@ -266,10 +266,11 @@ test('a submit during a plain sh startup stays in the composer until the person 
       'the line reached the far pty before the person submitted after the prompt',
     ).toBe('')
 
-    // Now the person submits at the prompt they can see.
-    await page.locator(PANE).click()
-    await page.keyboard.type(LINE)
-    await page.keyboard.press('Enter')
+    // Submit the restored draft, not a second copy of it. A pane click can
+    // focus the composer; typing LINE again appended it to the existing draft
+    // and sent one paste containing LINE + LINE. Address its owner directly.
+    await expect(editor).toBeVisible()
+    await editor.press('Enter')
     await expect
       .poll(() => readFileSync(logPath).subarray(framesEnd).toString('utf8'), {
         timeout: 60_000,

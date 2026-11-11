@@ -2892,6 +2892,104 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
     }
   })
 
+  it.each(['before-settlement', 'after-settlement'] as const)(
+    'submits the restored startup draft exactly once with attachment %s',
+    async (attachmentOrder) => {
+      const session = makeSession({ awaitsIntegration: true })
+      const client = makeClient()
+      client.openSession.mockResolvedValue(session)
+      const fireIntegration = integrationHandler(client, session)
+      const { content, ed, view, teardown } = await mountTerminal(makeClipboard(), {}, client)
+      const line = 'echo after-the-prompt'
+      try {
+        content.setVisible(true)
+        fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+        ed.insertText(line)
+        view.contentDOM.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+        )
+        expect(ed.getDoc()).toBe('')
+        expect(session.intent).not.toHaveBeenCalled()
+        if (attachmentOrder === 'before-settlement') session.fireAttachment({ kind: 'attached' })
+        fireIntegration({
+          sessionId: session.sessionId,
+          status: 'conventional',
+          reason: 'unsupported-shell',
+          shell: '/bin/sh',
+        })
+        if (attachmentOrder === 'after-settlement') session.fireAttachment({ kind: 'attached' })
+        expect(ed.getDoc()).toBe(line)
+        expect(ed.isVisible).toBe(true)
+        expect(session.intent).not.toHaveBeenCalled()
+
+        // Invariant: one submitted draft produces one paste and one Enter,
+        // regardless of attachment/startup release ordering. The draft is
+        // already here; typing it again would submit a different, doubled line.
+        view.contentDOM.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+        )
+        await vi.waitFor(() =>
+          expect(session.intent.mock.calls).toEqual([
+            ['paste', line],
+            ['key', 'enter'],
+          ]),
+        )
+      } finally {
+        teardown()
+      }
+    },
+  )
+
+  it.each([
+    ['attachment', 'geometry', 'startup'],
+    ['attachment', 'startup', 'geometry'],
+    ['geometry', 'attachment', 'startup'],
+    ['geometry', 'startup', 'attachment'],
+    ['startup', 'attachment', 'geometry'],
+    ['startup', 'geometry', 'attachment'],
+  ])('writes one startup submit once in release order %s, %s, %s', async (...order) => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, ed, view, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    let applyGeometry!: () => void
+    const geometry = new Promise<'applied'>((resolve) => {
+      applyGeometry = () => resolve('applied')
+    })
+    session.resizeApplied.mockReturnValue(geometry)
+    const line = 'echo exactly once'
+    const lifecycle = lifecycleHandler(client, session.sessionId)
+    try {
+      content.setVisible(true)
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/bash' })
+      holdOne(ed, view, line)
+      expect(session.intent).not.toHaveBeenCalled()
+      for (const event of order) {
+        if (event === 'attachment') session.fireAttachment({ kind: 'attached' })
+        if (event === 'geometry') applyGeometry()
+        if (event === 'startup') {
+          lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+        }
+        await Promise.resolve()
+      }
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls).toEqual([
+          ['paste', line, 'bare'],
+          ['key', 'enter'],
+        ]),
+      )
+      // Repeated attachment/prompt facts must not present the line again.
+      session.fireAttachment({ kind: 'attached' })
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      await Promise.resolve()
+      expect(session.intent).toHaveBeenCalledTimes(2)
+    } finally {
+      applyGeometry()
+      teardown()
+    }
+  })
+
   /** Type one line into the composer and press Enter; the line leaves for the
    *  host's queue, so the draft must be empty afterwards. */
   const holdOne = (editor: CommandEditor, view: EditorView, line: string): void => {

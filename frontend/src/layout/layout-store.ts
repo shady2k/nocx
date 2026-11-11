@@ -79,6 +79,8 @@ export class LayoutStore {
   private readonly listeners = new Set<() => void>()
   /** How many panel writes have been SENT per tab (see setTabPanel). */
   private readonly panelWrites = new Map<string, number>()
+  /** The newest of those that has been FOLDED per tab (see setTabPanel). */
+  private readonly panelFolded = new Map<string, number>()
 
   constructor(private readonly client: LayoutClientLike) {}
 
@@ -433,18 +435,27 @@ export class LayoutStore {
    * mutation here, so a refusal leaves the cache exactly as it was.
    */
   async setTabPanel(tabId: string, view: string, collapsed: boolean): Promise<void> {
-    // THE ANSWER THAT COUNTS IS THE LAST REQUEST'S, not the last to arrive.
-    // A view click writes twice — the view, then the expansion — and the two
-    // answers come back in either order: measured on the repeat-changed run,
-    // the second request's answer landed first and the first one then folded
-    // the row BACKWARDS, so the tab re-opened collapsed. Same guard as
-    // `load()` has for reads, for the same reason: an answer describes the row
-    // as it was when the request left, and a newer request has already moved
-    // it on.
+    // NO ANSWER MAY FOLD OVER A NEWER ONE (nocx-ouru5.1.18). A view click
+    // writes twice — the view, then the expansion — and the two answers come
+    // back in either order: measured on the repeat-changed run, the second
+    // request's answer landed first and the first one then folded the row
+    // BACKWARDS, so the tab re-opened collapsed. Same guard as `load()` has for
+    // reads, for the same reason: an answer describes the row as it was when
+    // the request left.
+    //
+    // The comparison is with the newest FOLDED answer, not with the newest
+    // request. An answer that lands before the newer request has answered is
+    // the backend's own truth at that moment and folds — it is the row the
+    // chain holds — while a late one, behind an answer already folded, is
+    // dropped. Asking "is a newer write outstanding?" instead lost that
+    // legitimate answer and left the cache disagreeing with the backend until
+    // some later write happened to land (ci-frontend, panes-layout: a tab's
+    // row stayed empty after the write that put `ports` in it).
     const seq = (this.panelWrites.get(tabId) ?? 0) + 1
     this.panelWrites.set(tabId, seq)
     const answered = (await this.client.setTabPanel(tabId, view, collapsed)).tab
-    if (this.panelWrites.get(tabId) !== seq) return
+    if (seq <= (this.panelFolded.get(tabId) ?? 0)) return
+    this.panelFolded.set(tabId, seq)
     this.replaceTab(answered)
   }
 

@@ -19,6 +19,18 @@ pull request's own CI honours the same file
   protection without editing this file, and a bead that does not exist refuses it.
 - The entry is evidence, not a fix. The bead still has to be worked.
 
+## A past run is judged at that run
+
+A new run asks today's question: a bead closed now protects nothing, and closing it ends
+the protection without editing this file. The promotion does not run CI — it re-reads a
+merged pull request's run — so it asks the question at the moment the failing job ran
+([ADR-q0bqxcev](../decisions/q0bqxcev-a-past-runs-quarantine-is-judged-at-that-run.md)).
+A test that run's own gate accepted under a bead that was open then stays accepted after
+that bead is closed, which is why fixing a flake does not block a release.
+
+An entry may therefore stay in this file after its bead closes. It protects nothing on a
+new run, and it is the record of why an older run is green.
+
 ## Committing an entry
 
 Add the entry with the key the suite printed, then commit it under the **bookkeeping task

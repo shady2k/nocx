@@ -16,6 +16,11 @@
     "rowBufferBytes"
   ],
   "properties": {
+    "sessionIdleDays": {
+      "description": "Unattached lifetime in 24-hour days, fixed at spawn. Omitted defaults to 3; zero disables expiry.",
+      "type": "integer",
+      "minimum": 0
+    },
     "workspace": {
       "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/workspaceId"
     },

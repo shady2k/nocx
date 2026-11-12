@@ -150,7 +150,7 @@ export interface PaneContent {
 
   /** Tear down all resources. Idempotent. Cancels an in-flight mount
    *  through the AbortSignal passed to mount() (B.6). */
-  dispose(): void
+  dispose(reason?: 'end-session'): void
 
   /** Show or hide the content without remounting it.
    *  Never triggers a remount, WebGL context churn, or session teardown. */

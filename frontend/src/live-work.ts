@@ -86,6 +86,11 @@ function nameOf(member: WorkspaceMember): string {
   return host === null ? `“${what}”` : `“${what}” on ${host}`
 }
 
+/** The same live-work rule applies to a single intentional tab close. */
+export function closingTabMessage(member: WorkspaceMember): string | null {
+  return isLive(member) ? `Closing this tab ends ${nameOf(member)}. Close it?` : null
+}
+
 /**
  * The question put to a person closing a workspace: how many tabs go, and
  * what is live among them.

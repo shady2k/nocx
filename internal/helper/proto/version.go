@@ -341,4 +341,7 @@ package proto
 // directions, which is what makes the number the whole of the compatibility
 // story, and no shim reads one shape as the other: a generation that cannot
 // state the rendering does not answer this coordinator at all.
-const Version = "24"
+// Version 25 adds sessionIdleDays to the closed spawn and spawn-ssh params
+// (nocx-wkjdb, ADR-v7xk8mq8). Older generations retain their previous lifetime
+// policy and cannot negotiate this protocol; no compatibility shim is used.
+const Version = "25"

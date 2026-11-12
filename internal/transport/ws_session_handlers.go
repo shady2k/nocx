@@ -809,6 +809,10 @@ func (h sessionOpsHandlers) handleClose(ctx context.Context, state *connState, r
 	}
 	h.machine.closeSession(sid, sess)
 	state.remove(sid)
+	if err != nil {
+		_ = respond(h.r, newJSONRPCError(req.ID, -32603, "Session termination failed"))
+		return
+	}
 
 	result, _ := json.Marshal(map[string]any{})
 	resp := newJSONRPCResult(req.ID, result)

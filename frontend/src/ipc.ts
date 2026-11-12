@@ -561,8 +561,8 @@ export class SessionHandle {
     return this.client.signalSession(this.sessionId, signal)
   }
 
-  close(): void {
-    this.client.closeSession(this.sessionId)
+  close(onError?: (error: unknown) => void): void {
+    this.client.closeSession(this.sessionId, onError)
   }
 
   detach(): void {
@@ -2168,10 +2168,16 @@ export class WSClient {
     this.sessions.delete(sessionId)
   }
 
-  closeSession(sessionId: string): void {
+  closeSession(sessionId: string, onError?: (error: unknown) => void): void {
+    const failed = (error: unknown): void => {
+      log.error('nocx: the session could not be ended', { sessionId, error: String(error) })
+      onError?.(error)
+    }
     const ws = this.dispatcher.socket
     if (ws && ws.readyState === WebSocket.OPEN) {
-      void this.dispatcher.call('close', { sessionId }).catch(() => {})
+      void this.dispatcher.call('close', { sessionId }).catch(failed)
+    } else {
+      failed(new Error('The connection is unavailable'))
     }
     this._flushAck(sessionId)
     this.sessions.delete(sessionId)

@@ -348,7 +348,8 @@ type attachment struct {
 
 // hostSession is one PTY and everything the helper knows about it.
 type hostSession struct {
-	lifecycleWin *window
+	terminationMu sync.Mutex
+	lifecycleWin  *window
 	// lifecycleLaunch is the coordinator-minted identity this session's
 	// shell was started with, kept so a REPLACING coordinator can take the
 	// domain over instead of dropping every frame the shell sends
@@ -367,6 +368,9 @@ type hostSession struct {
 	// asked to honour it, not to publish it.
 	key              string
 	startedAt        time.Time
+	idleTTL          time.Duration
+	unattachedAt     time.Time // guarded by mu; reset only when last attachment leaves
+	expiring         bool      // guarded by mu; fences attach against expiry selection
 	launch           proto.LaunchRecord
 	proc             Process
 	lifecycleCounted bool // guarded by Service.mu; true while the row keeps the daemon alive
@@ -720,7 +724,7 @@ func (s *hostSession) attach(p proto.AttachParams, sink Sink, mintAttachment fun
 	ctx, stop := context.WithCancel(context.Background())
 
 	s.mu.Lock()
-	if s.stopped {
+	if s.stopped || s.expiring {
 		s.mu.Unlock()
 		stop()
 		return proto.AttachResult{}, ErrNoSuchSession
@@ -1194,6 +1198,9 @@ func (s *hostSession) detach(sink Sink, att proto.AttachmentID) (bool, bool) {
 		return false, false
 	}
 	delete(s.attachments, att)
+	if len(s.attachments) == 0 {
+		s.unattachedAt = s.now()
+	}
 	released := false
 	if s.writerAtt == att && s.writer != nil {
 		s.writer = nil
@@ -1254,6 +1261,7 @@ func (s *hostSession) stopSubscriber(sub *subscriber) {
 // A nil sink releases everything, which is only shutdown (stop).
 func (s *hostSession) releaseConnection(sink Sink) {
 	s.mu.Lock()
+	hadAttachments := len(s.attachments) > 0
 	subs := make([]*subscriber, 0, len(s.subs))
 	for id, sub := range s.subs {
 		if sink != nil && sub.sink != sink {
@@ -1270,6 +1278,9 @@ func (s *hostSession) releaseConnection(sink Sink) {
 		if gone[att.subscriber] {
 			delete(s.attachments, id)
 		}
+	}
+	if hadAttachments && len(s.attachments) == 0 {
+		s.unattachedAt = s.now()
 	}
 	if s.writer != nil && gone[*s.writer] {
 		s.writer = nil

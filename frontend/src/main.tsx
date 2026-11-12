@@ -1585,8 +1585,8 @@ function main(): void {
   let sidebar: SidebarHandle | null = null
   // ── The panel follows the tab in front (ADR-x7cvh8e1) ────────────────
   //
-  // Restoration already owns the complete pair, including an empty view.
-  // Only startup's creation path seeds a default (ADR-5yepvh9j).
+  // Restoration owns the complete pair, including an explicitly empty view.
+  // Startup seeds only an unchosen panel (ADR-5yepvh9j).
   applyActiveTabPanel = () => {
     const panel = tm.activeTabPanel()
     if (panel === null) {

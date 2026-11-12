@@ -1324,6 +1324,13 @@ export class PaneManager {
       this.panes.find((p) => p.wireId === remembered) ??
       this.panes[0] ??
       this.createInitialPane(initialPanel)
+    const tabId = this.tabIdOfPane(front)
+    const tab = tabId ? this.layout.tab(tabId) : undefined
+    // Empty/expanded is an unchosen row (including a backend replacement).
+    // Empty/collapsed is an explicit no-panel choice and must survive boot.
+    if (initialPanel && tab?.panelView === '' && !tab.panelCollapsed) {
+      this.setPanePanel(front, initialPanel)
+    }
     await this.activate(front)
     const content = front.content
     if (!(content instanceof TerminalContent)) {
@@ -1815,6 +1822,8 @@ export class PaneManager {
       },
       (err: unknown) => {
         this.tabIdOfCreatedPane.delete(opened.paneId)
+        this.unconfirmedPanels.delete(opened.tabId)
+        this.panelsAwaitingRow.delete(opened.tabId)
         const message = err instanceof Error ? err.message : String(err)
         log.error('nocx: the backend refused a new tab', { error: message })
         showToast({ level: 'danger', message: `Could not open a tab: ${message}` })
@@ -1841,7 +1850,7 @@ export class PaneManager {
     }
   }
 
-  /** Only startup can seed a fresh tab; restored and later tabs keep their own choice. */
+  /** A fresh startup tab receives the supplied default before activation. */
   private createInitialPane(panel?: TabPanel): Pane {
     const pane = this.buildLocalPane(this.mintPane('local', null), false)
     if (panel) this.setPanePanel(pane, panel)
@@ -2238,6 +2247,11 @@ export class PaneManager {
     }
     this.attachDisplayChange(pane)
     this.tabStrip.addPane(pane)
+    // Later renderer-created tabs choose no panel, including SSH and duplicates.
+    // Startup builds without activation and supplies its own default instead.
+    if (activateNow && this.tabIdOfCreatedPane.has(wireId)) {
+      this.setPanePanel(pane, { view: '', collapsed: true })
+    }
     if (activateNow) {
       void this.activate(pane)
     } else {
@@ -2667,12 +2681,17 @@ export class PaneManager {
     // handler must reach the chrome, and the chrome cannot be built until
     // the readiness it waits on exists.
     const paneRef = { current: undefined as Pane | undefined }
+    this.tabIdOfCreatedPane.set(made.paneId, made.tabId)
     const registered = made.created.then(
       () => {
         this.registered.add(made.paneId)
+        this.tabIdOfCreatedPane.delete(made.paneId)
         return true
       },
       (err: unknown) => {
+        this.tabIdOfCreatedPane.delete(made.paneId)
+        this.unconfirmedPanels.delete(made.tabId)
+        this.panelsAwaitingRow.delete(made.tabId)
         const message = err instanceof Error ? err.message : String(err)
         log.error('nocx: the backend refused a workspace', { error: message })
         showToast({ level: 'danger', message: `Could not create the workspace: ${message}` })

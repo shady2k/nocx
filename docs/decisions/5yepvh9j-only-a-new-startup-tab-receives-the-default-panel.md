@@ -1,4 +1,4 @@
-# ADR-5yepvh9j — Only a new startup tab receives the default panel
+# ADR-5yepvh9j — Only an unchosen startup panel receives the default
 
 - **Status:** Accepted (2026-11-12, `nocx-peg8e.1.2`)
 - **Date:** 2026-11-12
@@ -7,30 +7,38 @@
 ## Context
 
 ADR-x7cvh8e1 stores the selected panel and collapse bit on each tab's layout
-row. Its exception seeds the tab the window opens with once per page load.
-That includes a restored tab whose empty panel is a valid saved choice:
-startup replaces it with Files and writes over the tab's row. The existing
-restart check opens on Ports, so it never exercises that exception.
+row. Seeding every restored empty view overwrites a valid no-panel choice.
+Seeding only tabs created by the renderer fails in the opposite direction:
+a fresh row can already exist when boot adopts it. In particular, the e2e
+stand closes its last pane with a replacement before the next renderer boots.
+That replacement has the store's default pair, empty view and expanded.
+
+Closing a visible panel retains its view and sets collapsed to true. Thus an
+empty view alone does not say whether the row has chosen a panel state.
 
 ## Decision
 
-Only a tab **created by startup** receives the default panel. A restored tab
-always uses its stored pair, including an empty view. Ordinary new tabs still
-start with no panel. A clean start creates a new initial tab and receives the
-default, just like an empty layout.
+The existing layout pair distinguishes an **unchosen panel** (`view: ''`,
+`collapsed: false`) from an **explicit no-panel choice** (`view: ''`,
+`collapsed: true`). No additional field or persistence owner is needed.
 
-PaneManager already decides whether startup adopts a tab or creates one. It
-accepts the composition root's default panel at `openInitialPane` and applies
-it only in the latter case, through the existing tab-panel writer before
-activation. The composition root supplies Files; it no longer infers a fresh
-tab from an empty view or tracks the first pane element for defaulting.
+Only the tab startup puts in front receives the default panel, and only if
+its pair is unchosen. It does not matter whether startup created that tab or
+adopted a backend row. The composition root supplies Files; PaneManager
+records the default through the existing tab-panel writer before activation.
+
+A tab the person opens later starts with the explicit no-panel pair, recorded
+through that same writer. It remains closed when restored as the opening tab.
+Closing Files retains Files and its collapse bit; Ports retains Ports. Neither
+choice is replaced at startup. A clean start still receives the default.
 
 The layout row remains the only durable owner. No settings or UI-state fields
 change, and no state inside a panel is retained by this decision.
 
 ## Verification
 
-`e2e/panel-per-tab.spec.ts` restarts backend and renderer with an empty panel
-on the opening tab and Ports on its neighbour, in addition to the existing
-collapsed-Files/Ports case. `panes-layout.test.ts` checks defaulting on a fresh
-startup, a later tab, a restored empty tab and a clean start.
+`e2e/files.spec.ts` checks the shared stand's adopted cold-start tab opens on
+Files. `e2e/panel-per-tab.spec.ts` restarts backend and renderer on both a
+collapsed Files tab and an explicitly empty tab, with Ports on the neighbour.
+`panes-layout.test.ts` checks defaulting on fresh and adopted unchosen startup
+tabs, later tabs, an explicitly empty restored tab and a clean start.

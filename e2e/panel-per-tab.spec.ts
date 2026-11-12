@@ -10,8 +10,8 @@
  * The cold start is deliberately NOT changed: the window's opening tab is
  * seeded with the app's default panel (Files), which is what the file-manager
  * design §7 and e2e/files.spec.ts have always asserted. A tab the person opens
- * afterwards has no panel and shows the rail collapsed. ADR-5yepvh9j limits
- * the seed to a newly created startup tab; restored tabs keep even an empty view.
+ * afterwards has no panel and shows the rail collapsed. ADR-5yepvh9j seeds
+ * only an unchosen startup panel; explicit closed choices survive restoration.
  *
  * The spec starts its OWN backend (like e2e/active-tab-restore.spec.ts) so it
  * can restart it mid-test and watch the panel come back through layout.read,
@@ -186,14 +186,16 @@ test.describe('each tab remembers its own right-hand panel (nocx-ouru5.1.18)', (
       await expect
         .poll(async () => {
           const layout = (await wire.call('layout.read', {})) as {
-            tabs: Array<{ id: string; panelView: string }>
+            tabs: Array<{ id: string; panelView: string; panelCollapsed: boolean }>
             panes: Array<{ id: string; tabId: string }>
           }
           const state = (await wire.call('uistate.get', {})) as { activeTab: string }
           const active = layout.panes.find((pane) => pane.id === state.activeTab)
           return (
             layout.tabs.length === 2 &&
-            layout.tabs.find((tab) => tab.id === active?.tabId)?.panelView === ''
+            layout.tabs.some(
+              (tab) => tab.id === active?.tabId && tab.panelView === '' && tab.panelCollapsed,
+            )
           )
         })
         .toBe(true)

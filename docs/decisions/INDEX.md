@@ -224,7 +224,7 @@ was left alone.
 
 | 8rt54tx2 | 2026-11-10 | [The sent witness crosses every responder, and a running block keeps its body](8rt54tx2-the-sent-witness-crosses-every-responder.md) | Accepted (owner review of PR #789, round 3, 2026-11-10, `nocx-4y82c.1.18`; refines ADR-y45sp41c and ADR-ywzcpbqe) |
 
-| 5yepvh9j | 2026-11-12 | [Only a new startup tab receives the default panel](5yepvh9j-only-a-new-startup-tab-receives-the-default-panel.md) | Accepted (`nocx-peg8e.1.2`; supersedes ADR-x7cvh8e1’s startup-seeding exception only) |
+| 5yepvh9j | 2026-11-12 | [Only an unchosen startup panel receives the default](5yepvh9j-only-a-new-startup-tab-receives-the-default-panel.md) | Accepted (`nocx-peg8e.1.2`; supersedes ADR-x7cvh8e1’s startup-seeding exception only) |
 
 ## Adding one
 

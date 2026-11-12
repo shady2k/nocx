@@ -813,4 +813,121 @@ test.describe('a tall block keeps its own header at the top of the pane', () => 
       await rpc(page, info, 'settings.set', { key: 'terminal.fontFamily', value: shipped })
     }
   })
+
+  test("the alternate screen's header sits on the pane's top gutter, where a block's first row sits", async ({
+    page,
+  }) => {
+    // A FULL-SCREEN PROGRAM'S HEADER IS AT THE PANE'S TOP GUTTER (nocx-4y82c.2).
+    //
+    // On macOS, running htop, the pinned `> htop · Running` header sat about a
+    // row lower than the top gutter, with an empty band between the pane's top
+    // edge and the header, while a primary-screen block's first row sat almost
+    // level. The owner likes the gutters around the program itself; only the
+    // band above the header is wrong.
+    //
+    // The alternate screen's header is the running block's own node, seated as a
+    // direct child of the stack (controller._seatLive), and the stack is
+    // BOTTOM-anchored (`margin-top: auto`) so a short transcript hangs above the
+    // composer. The live box under the header is sized from the scroller less
+    // the header, floored to whole rows, so the pair is a few pixels shorter
+    // than the scroller — and the bottom anchor spent that remainder ABOVE the
+    // header, which is the band. Measured against the primary screen's own first
+    // row, the two must be one number: the gutter, and nothing more.
+    await runCommand(page, LONG_A, 'A-END')
+    await sealedBody(page, LONG_A)
+
+    const seat = (which: 'primary' | 'alternate') =>
+      page.evaluate((mode) => {
+        const r2 = (value: number): number => Math.round(value * 100) / 100
+        const pane = document.querySelector<HTMLElement>('.pane.active')
+        if (!pane) throw new Error('no active pane')
+        const scroller = pane.querySelector<HTMLElement>('.scrollback-area')
+        if (!scroller) throw new Error('no scrollback scroller')
+        const stack = pane.querySelector<HTMLElement>('.scrollback-inner')
+        const layout = pane.querySelector<HTMLElement>('.scrollback-layout')
+        if (!stack || !layout) throw new Error('no scrollback stack')
+        const box =
+          mode === 'alternate'
+            ? stack.querySelector<HTMLElement>(':scope > .cmd-header')
+            : stack.querySelector<HTMLElement>(':scope > .cmd-block')
+        if (!box) throw new Error(`no ${mode} first row`)
+        const live =
+          mode === 'alternate'
+            ? stack.querySelector<HTMLElement>(':scope > .terminal-live-container')
+            : null
+        const paneTop = pane.getBoundingClientRect().top
+        const boxBox = box.getBoundingClientRect()
+        return {
+          gap: r2(boxBox.top - paneTop),
+          rowHeight: r2(boxBox.height),
+          // The pane's own top gutter: the layout's vertical padding, half a row
+          // (ADR-92zzg2y2), read from the box that wears it.
+          gutter: r2(parseFloat(getComputedStyle(layout).paddingTop) || 0),
+          liveGap: live === null ? null : r2(live.getBoundingClientRect().top - boxBox.bottom),
+          cell: parseFloat(getComputedStyle(stack).getPropertyValue('--term-cell-height')) || 0,
+        }
+      }, which)
+
+    // THE PRIMARY SCREEN'S OWN ANSWER, taken at the top of the transcript: the
+    // first block's first row sits on the pane's top gutter.
+    await page.evaluate(() => {
+      const scroller = document.querySelector<HTMLElement>('.pane.active .scrollback-area')
+      if (scroller) scroller.scrollTop = 0
+    })
+    await expect
+      .poll(
+        async () =>
+          page.evaluate(
+            () =>
+              document.querySelector<HTMLElement>('.pane.active .scrollback-area')?.scrollTop ?? -1,
+          ),
+        { timeout: 5_000 },
+      )
+      .toBe(0)
+    const primary = await seat('primary')
+    // ON THE GUTTER, give or take the hairline a transcript puts above its first
+    // block. This is the number the alternate screen's header has to match.
+    expect(
+      Math.abs(primary.gap - primary.gutter),
+      `a block's first row sits on the pane's top gutter: ${JSON.stringify(primary)}`,
+    ).toBeLessThanOrEqual(1)
+
+    // THE ALTERNATE SCREEN: a real program takes the pane and holds it.
+    await clickIntoEditor(page)
+    await page.keyboard.type("printf '\\033[?1049h\\033[H'; sleep 300")
+    await page.keyboard.press('Enter')
+    await expect(page.locator('.pane.active .terminal-live-container')).toHaveClass(
+      /live-fullscreen/,
+      { timeout: 30_000 },
+    )
+    // The seat move is the observable: the running block's own header is now a
+    // direct child of the stack, above the live box.
+    await expect(
+      page.locator(".pane.active .scrollback-inner > .cmd-header[data-variant='running']"),
+    ).toHaveCount(1, { timeout: 30_000 })
+    const alternate = await seat('alternate')
+    const said = `primary ${JSON.stringify(primary)}, alternate ${JSON.stringify(alternate)}`
+
+    // ONE NUMBER: the pane's top gutter, in both buffers. The alternate
+    // screen's header is not a row below the block's first row.
+    expect(
+      Math.abs(alternate.gap - primary.gap),
+      `the header sits where a block's first row sits: ${said}`,
+    ).toBeLessThanOrEqual(1)
+    expect(
+      alternate.gap - alternate.gutter,
+      `and no band above it beyond the gutter: ${said}`,
+    ).toBeLessThanOrEqual(1)
+    // AND THE PROGRAM IS STILL RIGHT BELOW THE HEADER — the band is the only
+    // thing that moved.
+    expect(
+      alternate.liveGap,
+      `the program keeps its place under the header: ${said}`,
+    ).not.toBeNull()
+    expect(
+      Math.abs(alternate.liveGap!),
+      `the program sits directly under the header: ${said}`,
+    ).toBeLessThanOrEqual(1)
+    await page.keyboard.press('Control+C')
+  })
 })

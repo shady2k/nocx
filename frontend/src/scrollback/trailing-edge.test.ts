@@ -197,6 +197,19 @@ describe('rows are full width, and the gutter lives in them (nocx-9bpeq.8)', () 
     expect(shipped('.scrollback-layout.inner-pane-program', 'padding-block')).toBeNull()
   })
 
+  it('a filled pane hangs from the top gutter, and a transcript from the bottom', () => {
+    // WHY THE STACK IS BOTTOM-ANCHORED AT ALL: a short transcript hangs from
+    // the scroller's bottom edge, right above the composer, the way output
+    // leaves a terminal (owner, 2026-09-15). The alternate screen has no
+    // composer above it and its live box is sized from the scroller less the
+    // one running header, floored to whole rows — so the pair is a few pixels
+    // short of the scroller, and the bottom anchor spent that remainder as a
+    // BAND ABOVE THE PINNED HEADER (nocx-4y82c.2: the header sat about a row
+    // below a block's first row). Nothing hangs from the bottom in that mode,
+    // so nothing is anchored there and the header starts on the gutter.
+    expect(shipped('.scrollback-inner', 'margin-top')).toBe('auto')
+    expect(shipped('.scrollback-inner.inner-fullscreen-mode', 'margin-top')).toBe('0')
+  })
   it('a full-screen program wears the same gutter and no extra bottom margin', () => {
     // ADR-92zzg2y2: the alternate screen is not an exception. The row rule
     // above gives its live container the same one-cell gutter, and nothing
@@ -216,7 +229,7 @@ describe('rows are full width, and the gutter lives in them (nocx-9bpeq.8)', () 
     expect(shipped('.nocx-summon-answers > *', 'box-sizing')).toBe('border-box')
   })
 
-  it('the composer is a card with its OWN inset, not a row wearing the ledger gutter', () => {
+  it('the composer is a card with its OWN fixed inset, not a row wearing the ledger gutter', () => {
     // Superseded by the mockup decision record's ComposerFrame (§4,
     // nocx-9bpeq.23 round 2): the composer stopped being a full-width row
     // carrying `--pane-inline-padding` like a block or the live region —
@@ -227,16 +240,21 @@ describe('rows are full width, and the gutter lives in them (nocx-9bpeq.8)', () 
     // deliberately narrower than the ledger's 24px row inset (the mockup's
     // own "10-12 px external gutter" for the card, not the row's).
     expect(shipped('.nocx-editor', 'padding')).toBeNull()
-    // …and the card's TEXT starts on the ledger's column (ADR-92zzg2y2): the
-    // gutter is narrower than the card's border plus its
-    // old 12px padding, so the card spans the pane and pays the gutter as its
-    // inline padding — the first glyph lands on the column, and the card is
-    // never pushed outside the pane to reach it.
+    // AND THE CARD DOES NOT FOLLOW THE PANE'S ONE-CELL GUTTER
+    // (ADR-my0wd0za). ADR-92zzg2y2 carried the composer along on a
+    // consequence the owner never decided: at a one-cell gutter the card
+    // spanned the pane and paid the gutter as its inline padding, so it
+    // stopped being an inset card. The geometry from before that change is
+    // restored as fixed spacing-scale numbers — the old 24px gutter
+    // (`--space-6`) less the card's own 12px padding and its 1px border for
+    // the margin, and the 12px padding itself — so the card is the same card
+    // at every font scale and nothing in it reads the cell metric.
     expect(shipped('.ui-composer-frame', 'margin')?.replace(/\s+/g, ' ')).toBe(
-      '0 0 var(--terminal-card-margin)',
+      '0 calc(var(--space-6) - var(--terminal-card-padding) - 1px) var(--terminal-card-margin)',
     )
     expect(shipped('.ui-composer-frame', 'padding')?.replace(/\s+/g, ' ')).toBe(
-      'var(--terminal-card-padding) calc(var(--pane-inline-padding) - 1px)',
+      'var(--terminal-card-padding)',
     )
+    expect(shipped('.ui-composer-frame', 'padding') ?? '').not.toContain('--pane-inline-padding')
   })
 })

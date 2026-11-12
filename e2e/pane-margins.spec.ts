@@ -2,8 +2,9 @@
  * NO TEXT TOUCHES THE PANE'S EDGE (ADR-92zzg2y2, the owner's one-gutter rule).
  *
  * Nothing the terminal paints may touch the pane's left, right, top or bottom
- * edge — every side keeps a margin — and the composer's own text starts on the
- * same column a block's header and output start on.
+ * edge — every side keeps a margin. The composer is the one surface that does
+ * NOT wear that one-cell gutter: it is an inset card on its own fixed numbers
+ * (ADR-my0wd0za), and the last test here states where its border box sits.
  *
  * ONE GUTTER FOR EVERYTHING: one character cell wide on the left and on the
  * right, half a row on top and on bottom, in every mode — ordinary output,
@@ -33,9 +34,8 @@ interface Edges {
   pane: { left: number; right: number; top: number; bottom: number }
   /** The painted text's box, clipped to what the pane actually shows. */
   text: { left: number; right: number; top: number; bottom: number } | null
-  /** The first painted row's left edge, and the composer's first line's. */
+  /** The first painted row's left edge. */
   rowLeft: number | null
-  composerTextLeft: number | null
   /** The one gutter: one cell sideways, half a row vertically. */
   gutterX: number
   gutterY: number
@@ -78,7 +78,6 @@ async function edges(page: Page): Promise<Edges> {
       box.bottom = Math.max(box.bottom, bottom)
     }
     const first = rows[0] ?? null
-    const line = pane.querySelector<HTMLElement>('.cm-line')
     const layout = pane.querySelector<HTMLElement>('.scrollback-layout')
     const lr = layout ? layout.getBoundingClientRect() : pr
     const lcs = layout ? getComputedStyle(layout) : null
@@ -105,7 +104,6 @@ async function edges(page: Page): Promise<Edges> {
           }
         : null,
       rowLeft: first ? r2(first.getBoundingClientRect().left) : null,
-      composerTextLeft: line ? r2(line.getBoundingClientRect().left) : null,
       gutterX: parseFloat(pcs.getPropertyValue('--pane-inline-padding')) || 0,
       // A custom property holding `calc(...)` is not resolved by
       // `getPropertyValue`; the real padding is.
@@ -147,9 +145,7 @@ function assertInside(e: Edges, spoken: string): void {
   )
 }
 
-test('a normal command keeps every edge, and its composer starts on the same column', async ({
-  page,
-}) => {
+test('a normal command keeps every edge', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 })
   await page.goto('/')
   await promptReady(page)
@@ -165,13 +161,6 @@ test('a normal command keeps every edge, and its composer starts on the same col
   const e = await edges(page)
   const spoken = `frozen command: ${JSON.stringify(e)}`
   assertInside(e, spoken)
-  // THE COMPOSER'S TEXT IS THE LEDGER'S COLUMN (ADR-92zzg2y2): the block's
-  // first painted row and the line a person types start on one x.
-  expect(e.composerTextLeft, spoken).not.toBeNull()
-  expect(
-    Math.abs(e.composerTextLeft! - e.rowLeft!),
-    `the composer's text and the block's row start on one column: ${spoken}`,
-  ).toBeLessThanOrEqual(TOLERANCE)
   expect(e.rowLeft! - e.pane.left, spoken).toBeGreaterThanOrEqual(e.gutterX - TOLERANCE)
 
   // AND WHILE IT RUNS: the composer is gone, so the live box's own bottom
@@ -251,6 +240,90 @@ test('the gutter is one cell and half a row at two font scales', async ({ page }
     pane.style.removeProperty('--term-cell-width')
     pane.style.removeProperty('--term-cell-height')
   })
+})
+
+/** The composer card's inset from the pane's content box: the 24 px gutter the
+ *  pane's text had before the one-cell change (`--space-6`), less the card's
+ *  12 px padding and its 1 px border. Fixed numbers, never the cell metric. */
+const CARD_INSET = 11
+
+test("the composer's card keeps its own fixed inset at two font scales", async ({ page }) => {
+  // A CARD IS NOT A ROW (ADR-my0wd0za). ADR-92zzg2y2 carried the composer
+  // along on a consequence the owner never decided — the card spanned the pane
+  // and paid the one-cell gutter as its inline padding — and the geometry from
+  // before that change is restored: the card is inset from the pane by the 24
+  // px the pane's text used to start at, less its own padding and border, and
+  // its padding is 12 px. Because those are spacing-scale numbers and not the
+  // published cell metric, the card sits in exactly the same place at every
+  // font scale: the two cell metrics below stand in for two of them.
+  await page.setViewportSize({ width: 1280, height: 800 })
+  await page.goto('/')
+  await promptReady(page)
+  await clickIntoEditor(page)
+
+  const at = (cellWidth: number, cellHeight: number) =>
+    page.evaluate(
+      ({ cellWidth, cellHeight }) => {
+        const r2 = (value: number): number => Math.round(value * 100) / 100
+        const pane = document.querySelector<HTMLElement>('.pane.active')!
+        pane.style.setProperty('--term-cell-width', `${cellWidth}px`)
+        pane.style.setProperty('--term-cell-height', `${cellHeight}px`)
+        const card = pane.querySelector<HTMLElement>('.ui-composer-frame')
+        if (!card) throw new Error('the pane has no composer card')
+        const paneBox = pane.getBoundingClientRect()
+        const paneStyle = getComputedStyle(pane)
+        const cardBox = card.getBoundingClientRect()
+        const cardStyle = getComputedStyle(card)
+        // THE PANE'S CONTENT BOX: its border box less the padding it declares
+        // (none today, and the measurement says so rather than assuming it).
+        const contentLeft = paneBox.left + parseFloat(paneStyle.paddingLeft)
+        const contentRight = paneBox.right - parseFloat(paneStyle.paddingRight)
+        return {
+          left: r2(cardBox.left - contentLeft),
+          right: r2(contentRight - cardBox.right),
+          width: r2(cardBox.width),
+          margin: cardStyle.marginLeft,
+          padding: cardStyle.paddingLeft,
+        }
+      },
+      { cellWidth, cellHeight },
+    )
+
+  const readings: { spoken: string; left: number; right: number; width: number }[] = []
+  try {
+    for (const [spoken, cellWidth, cellHeight] of [
+      ['small', 8, 16],
+      ['large', 13, 26],
+    ] as const) {
+      const m = await at(cellWidth, cellHeight)
+      const said = `${spoken}: ${JSON.stringify(m)}`
+      // STRICTLY INSIDE, BY ITS OWN INSET, ON BOTH SIDES.
+      expect(Math.abs(m.left - CARD_INSET), `${said} — the card's left inset`).toBeLessThanOrEqual(
+        1,
+      )
+      expect(
+        Math.abs(m.right - CARD_INSET),
+        `${said} — the card's right inset`,
+      ).toBeLessThanOrEqual(1)
+      expect(m.left, `${said} — the card is inside the pane's left edge`).toBeGreaterThan(0)
+      expect(m.right, `${said} — and inside its right edge`).toBeGreaterThan(0)
+      expect(m.margin, `${said} — the card's side margin`).toBe('11px')
+      expect(m.padding, `${said} — the card's own padding`).toBe('12px')
+      readings.push({ spoken, ...m })
+    }
+    // AND IT DID NOT MOVE WITH THE GUTTER. The cell metric changed by 5 px
+    // sideways; the card's inset did not follow it.
+    expect(readings[1]!.width, 'the card keeps its width across the two scales').toBeCloseTo(
+      readings[0]!.width,
+      1,
+    )
+  } finally {
+    await page.evaluate(() => {
+      const pane = document.querySelector<HTMLElement>('.pane.active')!
+      pane.style.removeProperty('--term-cell-width')
+      pane.style.removeProperty('--term-cell-height')
+    })
+  }
 })
 
 test('a plain ssh shell keeps every edge too', async ({ page }) => {

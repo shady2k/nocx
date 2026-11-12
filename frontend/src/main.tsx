@@ -1585,50 +1585,15 @@ function main(): void {
   let sidebar: SidebarHandle | null = null
   // ── The panel follows the tab in front (ADR-x7cvh8e1) ────────────────
   //
-  // Every activation applies the panel the tab remembers. The ONE exception
-  // is the tab this page load OPENED WITH: the window shows its tools there,
-  // so that tab, when it has never opened a panel, is seeded with the app's
-  // default (the first registered view) and the choice is RECORDED against
-  // it. Every tab the person opens afterwards has no panel and shows the rail
-  // collapsed — which is the point of a per-tab panel, and why the seed
-  // belongs to that one tab rather than to "whichever activation came first".
-  //
-  // The seed is what keeps the documented cold start ("the panel is open on
-  // Files", e2e/files.spec.ts and the file-manager design §7) true while the
-  // panel itself becomes the tab's.
-  let panelSeeded = false
-  /** The pane the window opened with, by element identity (see the seed). */
-  let openingPane: HTMLElement | null = null
+  // Restoration already owns the complete pair, including an empty view.
+  // Only startup's creation path seeds a default (ADR-5yepvh9j).
   applyActiveTabPanel = () => {
-    // WHICH TAB THE WINDOW OPENED WITH, by identity. It is what the seed
-    // below belongs to, and it is not "the first call that happened to find a
-    // sidebar mounted": the first activation can beat the sidebar's mount,
-    // and then a LATER tab — one the person opened — would be seeded with
-    // Files and would open with a panel it never asked for. That is exactly
-    // what the first gate of this feature caught, once, under load.
-    const paneEl = tm.activePaneElement()
-    if (openingPane === null) openingPane = paneEl
-    const opening = paneEl !== null && paneEl === openingPane
-
-    let panel = tm.activeTabPanel()
+    const panel = tm.activeTabPanel()
     if (panel === null) {
-      // A pane in NO CHAIN — Settings, a diff, a file viewer. Settings is the
-      // one place the panel collapses for (nocx-3e3b): a Settings tab is not
-      // a place, so the panel has nothing to say there. Every other view pane
-      // was opened FROM the panel (a diff out of the Git view, a file out of
-      // Files), so the panel stays exactly where it is — collapsing it would
-      // take away the list the person is working through.
+      // View panes have no tab row. Settings collapses the panel; viewers
+      // opened from it keep the list the person was using.
       if (tm.activeSurfaceType() === SURFACE_SETTINGS) sidebar?.showPanel(null)
       return
-    }
-    if (!panelSeeded && opening && panel.view === '') {
-      // THE WINDOW OPENS ON A TAB AND SHOWS ITS TOOLS THERE. Recorded against
-      // the tab rather than painted here, so it holds whether or not the
-      // sidebar has mounted yet — the mount reads `activeTabPanel()`, and a
-      // recorded choice survives a sidebar that came up late.
-      panelSeeded = true
-      panel = { view: FILES_VIEW_ID, collapsed: false }
-      tm.setActiveTabPanel(panel)
     }
     sidebar?.showPanel(panel)
   }
@@ -2240,7 +2205,7 @@ function main(): void {
       if (initialPaneStarted) return
       initialPaneStarted = true
       void tm
-        .openInitialPane()
+        .openInitialPane({ view: FILES_VIEW_ID, collapsed: false })
         .then(() => ReportHealthy())
         .catch((err) => {
           // NOT A CONSOLE LINE (nocx-vh2hr.1.13). This is the only account of

@@ -1284,3 +1284,65 @@ describe('an inline ssh comes back local, and its blocks still say where they ra
     expect(location.textContent).toBe('srv-01')
   })
 })
+
+describe('only a newly created startup tab receives the default panel (nocx-peg8e.1.2)', () => {
+  beforeEach(() => {
+    resetSessionCounter()
+    vi.clearAllMocks()
+    applyRestoreOnStartup(true)
+  })
+
+  it('opens Files on a fresh startup, but leaves a later tab with no panel', async () => {
+    const { manager, backend } = await mountPaneManager(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { view: 'files', collapsed: false },
+    )
+    expect(manager.activeTabPanel()).toEqual({ view: 'files', collapsed: false })
+    await vi.waitFor(() => expect(backend.rows().tabs[0].panelView).toBe('files'))
+    manager.newPane()
+    expect(manager.activeTabPanel()?.view).toBe('')
+  })
+
+  it('does not replace the empty panel of a restored startup tab with Files', async () => {
+    const backend = await seededBackend({ decorate: false })
+    const { manager } = await mountPaneManager(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { store: makeLayoutStore(backend).store, backend },
+      undefined,
+      undefined,
+      { view: 'files', collapsed: false },
+    )
+    expect(manager.activeTabPanel()?.view).toBe('')
+    expect(backend.rows().tabs.every((tab) => tab.panelView === '')).toBe(true)
+  })
+
+  it('opens the default on a clean start without adopting stored tabs', async () => {
+    applyRestoreOnStartup(false)
+    try {
+      const backend = await seededBackend({ decorate: false })
+      const { manager } = await mountPaneManager(
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { store: makeLayoutStore(backend).store, backend },
+        undefined,
+        undefined,
+        { view: 'files', collapsed: false },
+      )
+      expect(manager.paneCount).toBe(1)
+      expect(manager.activeTabPanel()).toEqual({ view: 'files', collapsed: false })
+    } finally {
+      applyRestoreOnStartup(true)
+    }
+  })
+})

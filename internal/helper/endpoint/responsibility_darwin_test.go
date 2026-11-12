@@ -38,16 +38,20 @@ func TestStartedHelperOwnsItsResponsibleExecutable(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = conn.Close() }()
-	raw, err := conn.(*net.UnixConn).SyscallConn()
+	unixConn, ok := conn.(*net.UnixConn)
+	if !ok {
+		t.Fatalf("helper connection has type %T, want *net.UnixConn", conn)
+	}
+	raw, err := unixConn.SyscallConn()
 	if err != nil {
 		t.Fatal(err)
 	}
 	var pid int
 	var peerErr error
-	if err := raw.Control(func(fd uintptr) {
+	if controlErr := raw.Control(func(fd uintptr) {
 		pid, peerErr = unix.GetsockoptInt(int(fd), unix.SOL_LOCAL, unix.LOCAL_PEERPID)
-	}); err != nil {
-		t.Fatal(err)
+	}); controlErr != nil {
+		t.Fatal(controlErr)
 	}
 	if peerErr != nil {
 		t.Fatal(peerErr)
@@ -67,7 +71,7 @@ func responsiblePath(t *testing.T, pid int) string {
 	t.Helper()
 	// procinfo needs root. ci-mac's hosted runner has passwordless sudo; failure
 	// is a failed assertion, not a skip that silently loses Darwin coverage.
-	output, err := exec.Command("sudo", "-n", "/bin/launchctl", "procinfo", strconv.Itoa(pid)).CombinedOutput()
+	output, err := exec.Command("sudo", "-n", "/bin/launchctl", "procinfo", strconv.Itoa(pid)).CombinedOutput() //nolint:gosec // fixed diagnostic command; pid comes from the test helper's socket peer credentials
 	if err != nil {
 		t.Fatalf("procinfo: %v: %s", err, output)
 	}

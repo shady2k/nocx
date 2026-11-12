@@ -1,41 +1,15 @@
 # Sustained output at retention boundaries
 
 Measured 2026-11-10 on Linux amd64, Ryzen 7 5700X, Go 1.26.10.
-Tasks: nocx-4y82c.1.22, nocx-4y82c.1.23 and nocx-4y82c.1.24.
-Main was fast-forwarded from `f49860272` to `1a5edc876` before investigation.
-No existing pull request was merged.
+Tasks: nocx-4y82c.1.22 (post-cap eviction scan) and nocx-4y82c.1.23 (wrapped text assembly).
+Main was at `1a5edc876` when these were measured.
 
 ## Decision
 
 Keep the existing retention policy and ownership. Reduce the work required to
-apply it, assemble text linearly, and make the paged renderer discard cached rows
-that its accepted retention geometry says no longer exist. These are three
-independent defects, not an invitation to change polling, buffers or deadlines.
-AD-1, AD-6, AD-8 and ADR-0078 remain unchanged.
-
-The backend changes are based directly on main. The renderer correction is based
-on PR #789 at `33f48cd885a9ae95b2bc7cad9cde1f77f00934de`, because its paged merge
-is not on main. Do not transplant that correction as though main already paged.
-
-## Open pull requests inspected
-
-Check states below are the inspection snapshot, not a promise about later CI.
-
-| PR                                               | Relevance                                    | Observed check state / recommendation                                                                                |
-| ------------------------------------------------ | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| [#793](https://github.com/shady2k/nocx/pull/793) | One gutter for live and stored output        | Multiple failures; geometry is relevant, but not a performance proof                                                 |
-| [#792](https://github.com/shady2k/nocx/pull/792) | Refused input and focus ownership            | Chromium failure, some checks pending; separate from retention                                                       |
-| [#790](https://github.com/shady2k/nocx/pull/790) | Submit framing and readiness                 | Multiple failures; separate from retained output                                                                     |
-| [#789](https://github.com/shady2k/nocx/pull/789) | Lazy paged output and bounded response queue | Multiple failures; directly relevant, plus reproduced cache-retention defect corrected on its own branch             |
-| [#786](https://github.com/shady2k/nocx/pull/786) | Fresh rows held until output-start           | Multiple failures; avoid treating duplicated/early rows as a retention optimization                                  |
-| [#743](https://github.com/shady2k/nocx/pull/743) | Busy-terminal CPU and allocation reductions  | All 13 checks successful at `f0b6e11e760120aa676a5c4a0c1872aff5c44b06`; reuse its work rather than reimplementing it |
-| [#732](https://github.com/shady2k/nocx/pull/732) | External harness decision                    | Documentation checks green, product checks skipped; unrelated                                                        |
-| [#91](https://github.com/shady2k/nocx/pull/91)   | Old sandbox work                             | Latest displayed checks skipped; historical body evidence is not current validation                                  |
-
-PR #743 already covers prefix capture, bulk emulator reads, immutable cell-model
-sharing, hidden-block settlement and asynchronous durable recording. Its bounded,
-revision-consistent incremental-read work is a design/prototype, not shipped
-paging. Its historical native CPU/PSS figures are not measurements made here.
+apply it and assemble text linearly. These are two independent defects, not an
+invitation to change polling, buffers or deadlines. AD-1, AD-6, AD-8 and
+ADR-0078 remain unchanged.
 
 ## Which limit means what
 
@@ -91,11 +65,12 @@ count keeps the fresh case below the default cap.
 
 ## 2. One long wrapped line
 
-`BlockRowsText` joined each continuation onto the accumulated string, repeatedly
-copying its growing prefix. It also concatenated the encoded chunks before JSON
-decoding. It now decodes a reader chain and writes text once through a builder.
-Empty rows, Unicode, continuation across arbitrary chunk boundaries, summary
-records and malformed-input errors keep their meaning.
+`BlockRowsTextAfter` joined each continuation onto the accumulated string,
+repeatedly copying its growing prefix. It also concatenated the encoded chunks
+before JSON decoding. It now decodes a reader chain and writes text once through
+a builder. Empty rows, Unicode, continuation across arbitrary chunk boundaries,
+summary records, malformed-input errors and the skip of rows below the recorded
+output start (nocx-4y82c.1.11) keep their meaning.
 
 | Input text                |     Before |     After |  Before allocated | After allocated |
 | ------------------------- | ---------: | --------: | ----------------: | --------------: |
@@ -111,35 +86,6 @@ go test -run '^TestBlockRows' -bench '^BenchmarkBlockRowsText$' -benchtime=1x -c
 These are production-function microbenchmarks, one iteration each, not a claim
 that the whole application became 45 times faster. The remaining roughly 215 MB
 of allocation for 4 MiB of text includes row/cell decoding and still matters.
-
-## 3. PR #789's cache outlives retention
-
-`mergeStoredBlockRows` previously unioned every accepted page forever. New geometry
-could say rows were evicted while the cache, DOM and selection still held them.
-The repair filters the ordered union through the accepted next retained ranges.
-An explicit empty range set means full eviction; absent geometry retains the
-existing fallback. Unloaded retained ranges remain spacers, not loss.
-
-A real-module/jsdom probe delivered 500 batches of 100 rows with 400 retained:
-
-| Metric                  | Pinned PR baseline | Corrected merge |
-| ----------------------- | -----------------: | --------------: |
-| Final cached / DOM rows |             50,000 |             400 |
-| Total merge time        |         671.117 ms |       17.419 ms |
-| Final paint time        |        2272.517 ms |       43.248 ms |
-| Missing-output notices  |                  0 |               1 |
-
-This is a renderer-component measurement, not native application frame timing.
-A real Chromium surface importing the actual parser, merge and painter also
-passed: 200 batches, 400 stream rows, eight retained; maximum DOM/cache/selection
-all eight; exact surviving indices `0,1,2,3,396,397,398,399`; one gap marker.
-A separate partially loaded retained interval kept an eight-row spacer and no gap.
-
-**Remaining protocol risk:** the caller must supply current `next` geometry.
-`artifactVersion` is an artifact identity, not a mutation revision. Separate page
-and refresh requests can compete; this repair does not establish freshness.
-Revision-consistent incremental reads remain the subject of nocx-3an1s.1.16.
-A delayed-old-page / new-refresh experiment is not proved by these merge tests.
 
 ## Actual application checks
 
@@ -202,9 +148,8 @@ print('OVERFLOW-DONE', flush=True)
   sequences, protected ends, prepend, SQL failure rollback and cancellation.
 - Assembled backend regressions passed with `-race`:
   `go test -race -run 'Test(BlockRows|AppendBlockRows|AMultiChunkPrepend|APrependThatPasses)' -count=1 ./internal/content`.
-- The paging module passed all 66 tests with `npx vitest run src/scrollback/block-rows.test.ts`.
-- Both repairs received independent, same-model read-only review: no blockers;
-  no claim of cross-model review or mutation testing.
+- Both backend changes received independent, same-model read-only review: no
+  blockers; no claim of cross-model review or mutation testing.
 - Backend pre-commit passed with `GOTOOLCHAIN=go1.26.5`, the patch pinned in the
   repository's Linux CI image. The installed golangci-lint 1.64.8 under Go 1.26.10
   first reported widespread SA5011 warnings after `t.Fatal`; changing only the
@@ -213,12 +158,10 @@ print('OVERFLOW-DONE', flush=True)
   multi-hour soak or global-budget saturation was performed. Docker had no
   available daemon; these are host/headless checks, not container-suite results.
 - Global eviction is separate: append/close do not invoke the same retention
-  sweep that submission does. This investigation does not establish a strict
-  global disk ceiling during a long active command or between sweeps.
+  sweep that submission does (nocx-lp371.1). This investigation does not
+  establish a strict global disk ceiling during a long active command or between
+  sweeps.
 - The automatic document-readiness gate is not installed in this repository;
   documentation is reviewed, not reported as automatically accepted.
 
-Integrate the backend fixes independently after their PR checks. Keep the paged
-correction tied to PR #789, resolve its required-check failures and establish
-read freshness before treating that larger change as accepted. Neither existing
-performance PR is authorized to merge by this investigation.
+Integrate the two backend changes together once their checks pass.

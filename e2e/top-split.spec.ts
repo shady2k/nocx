@@ -53,6 +53,13 @@ interface Frame {
   running: number
   /** The clock reading in the program's own header, when it has one. */
   clock: string | null
+  /** DOM text is not enough: the live viewport may clip the summary away. */
+  summaryVisible: boolean
+  liveHeight: number
+  transform: string
+  attemptIds: string[]
+  reportedRows: number | null
+  committedRows: number | null
 }
 
 /**
@@ -80,10 +87,32 @@ async function startSampling(page: Page): Promise<void> {
       if (stopped) return
       const blocks = [...pane.querySelectorAll<HTMLElement>('.cmd-block')]
       const grid = pane.querySelector<HTMLElement>('.terminal-live-grid')?.textContent ?? ''
+      const live = pane.querySelector<HTMLElement>('.terminal-live-viewport')
+      const scroller = pane.querySelector<HTMLElement>('.scrollback-area')
+      const summary = [
+        ...pane.querySelectorAll<HTMLElement>('.terminal-live-grid .term-grid-row'),
+      ].find((row) => row.textContent?.includes('load average'))
+      const rowBox = summary?.getBoundingClientRect()
+      const liveBox = live?.getBoundingClientRect()
+      const scrollBox = scroller?.getBoundingClientRect()
+      const summaryVisible = !!(
+        rowBox &&
+        liveBox &&
+        scrollBox &&
+        rowBox.height > 0 &&
+        rowBox.top >= Math.max(liveBox.top, scrollBox.top) - 1 &&
+        rowBox.bottom <= Math.min(liveBox.bottom, scrollBox.bottom) + 1
+      )
       host.__topSplitSamples!.push({
         total: blocks.length,
         running: blocks.filter((b) => b.classList.contains('cmd-block-running')).length,
         clock: /\b\d{2}:\d{2}:\d{2}\b/.exec(grid)?.[0] ?? null,
+        summaryVisible,
+        liveHeight: liveBox?.height ?? 0,
+        transform: pane.querySelector<HTMLElement>('.terminal-live-inner')?.style.transform ?? '',
+        attemptIds: blocks.map((block) => block.dataset.entryId ?? '(unbound)'),
+        reportedRows: window.__nocxPaneScreen?.()?.reported?.rows ?? null,
+        committedRows: window.__nocxPaneScreen?.()?.geometry?.rows ?? null,
       })
       requestAnimationFrame(tick)
     }
@@ -110,7 +139,9 @@ async function stopSampling(page: Page): Promise<Frame[]> {
  *  a split makes the assertion that is waiting on the clocks fail with the
  *  frames that show it. */
 function framesSplitting(frames: Frame[]): Frame[] {
-  return frames.filter((f) => f.running !== 1 || f.total !== 1)
+  return frames.filter(
+    (f) => f.running !== 1 || f.total !== 1 || (f.clock !== null && !f.summaryVisible),
+  )
 }
 
 /** Run the repainting program, wait (bounded) for its third repaint while
@@ -150,6 +181,10 @@ async function expectOneBlockAcrossRepaints(page: Page): Promise<void> {
     .toBeGreaterThanOrEqual(3)
 
   const frames = await stopSampling(page)
+  await test.info().attach('top-repaint-samples', {
+    body: JSON.stringify(frames),
+    contentType: 'application/json',
+  })
   const said = `split frames: ${JSON.stringify(framesSplitting(frames).slice(0, 3))}`
   expect(frames.length, said).toBeGreaterThan(0)
   expect(framesSplitting(frames), said).toEqual([])
@@ -182,60 +217,61 @@ test('a full-screen program repainting the primary screen keeps one block locall
   await expectOneBlockAcrossRepaints(page)
 })
 
-test('a full-screen program repainting the primary screen keeps one block over ssh (nocx-evj4b.1.9)', async ({
-  page,
-}) => {
-  test.setTimeout(300_000)
-  const remoteHome = mkdtempSync(path.join(tmpdir(), 'top-split-remote-'))
-  const remoteCwd = mkdtempSync(path.join(tmpdir(), 'top-split-cwd-'))
-  const fixture: SshdFixture = await startSshd({ home: remoteHome, cwd: remoteCwd })
-  let createdId: string | null = null
-  try {
-    const sshDir = path.join(readStand().home, '.ssh')
-    mkdirSync(sshDir, { recursive: true, mode: 0o700 })
-    writeFileSync(path.join(sshDir, 'known_hosts'), `${fixture.knownHosts}\n`)
-    await page.setViewportSize({ width: 1280, height: 800 })
-    await page.goto('/')
-    await promptReady(page)
-    const info = await resolveBackend(page)
-    const profileName = `top-split-${Date.now()}`
-    const created = await rpc<{ id: string }>(page, info, 'profiles.create', {
-      type: 'ssh',
-      name: profileName,
-      options: {
-        host: fixture.host,
-        port: fixture.port,
-        user: fixture.user,
-        keyPath: fixture.userKey,
-        // The piped integration carrier: the far shell's prompt is
-        // authenticated, so the block model — not a conventional grid — owns
-        // the pane, which is the mode the owner reported.
-        desiredMode: 'script',
-      },
-    })
-    createdId = created.id
-    await page.keyboard.press('Control+Shift+P')
-    const search = page.locator('.quick-connect__search input')
-    await expect(search).toBeVisible({ timeout: 30_000 })
-    await search.fill(profileName)
-    await expect(page.locator('.quick-connect__item', { hasText: profileName })).toBeVisible({
-      timeout: 30_000,
-    })
-    await page.keyboard.press('Enter')
-    await promptReady(page)
-    await expectOneBlockAcrossRepaints(page)
-    // The pane really is the far host's: the block's where-line names the
-    // fixture's destination, so a local pane could not pass this spec.
-    await expect(page.locator('.pane.active .cmd-block .cmd-header-meta')).toContainText(
-      `${fixture.user}@${fixture.host}`,
-    )
-  } finally {
+for (const desiredMode of ['script', 'helper'] as const) {
+  test(`a full-screen program repainting the primary screen keeps one block over ssh ${desiredMode} (nocx-peg8e.1.1)`, async ({
+    page,
+  }) => {
+    test.setTimeout(300_000)
+    const remoteHome = mkdtempSync(path.join(tmpdir(), 'top-split-remote-'))
+    const remoteCwd = mkdtempSync(path.join(tmpdir(), 'top-split-cwd-'))
+    const fixture: SshdFixture = await startSshd({ home: remoteHome, cwd: remoteCwd })
+    let createdId: string | null = null
     try {
+      const sshDir = path.join(readStand().home, '.ssh')
+      mkdirSync(sshDir, { recursive: true, mode: 0o700 })
+      writeFileSync(path.join(sshDir, 'known_hosts'), `${fixture.knownHosts}\n`)
+      await page.setViewportSize({ width: 1280, height: 800 })
+      await page.goto('/')
+      await promptReady(page)
       const info = await resolveBackend(page)
-      if (createdId !== null) await rpc(page, info, 'profiles.delete', { id: createdId })
-    } catch {
-      // A cleanup that throws would replace the real failure with its own.
+      const profileName = `top-split-${Date.now()}`
+      const created = await rpc<{ id: string }>(page, info, 'profiles.create', {
+        type: 'ssh',
+        name: profileName,
+        options: {
+          host: fixture.host,
+          port: fixture.port,
+          user: fixture.user,
+          keyPath: fixture.userKey,
+          // Keep the original piped-carrier control and exercise the remote
+          // helper too: the script-only control did not cover that PTY owner.
+          desiredMode,
+        },
+      })
+      createdId = created.id
+      await page.keyboard.press('Control+Shift+P')
+      const search = page.locator('.quick-connect__search input')
+      await expect(search).toBeVisible({ timeout: 30_000 })
+      await search.fill(profileName)
+      await expect(page.locator('.quick-connect__item', { hasText: profileName })).toBeVisible({
+        timeout: 30_000,
+      })
+      await page.keyboard.press('Enter')
+      await promptReady(page)
+      await expectOneBlockAcrossRepaints(page)
+      // The pane really is the far host's: the block's where-line names the
+      // fixture's destination, so a local pane could not pass this spec.
+      await expect(page.locator('.pane.active .cmd-block .cmd-header-meta')).toContainText(
+        `${fixture.user}@${fixture.host}`,
+      )
+    } finally {
+      try {
+        const info = await resolveBackend(page)
+        if (createdId !== null) await rpc(page, info, 'profiles.delete', { id: createdId })
+      } catch {
+        // A cleanup that throws would replace the real failure with its own.
+      }
+      fixture.proc.kill('SIGKILL')
     }
-    fixture.proc.kill('SIGKILL')
-  }
-})
+  })
+}

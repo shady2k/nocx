@@ -245,9 +245,12 @@ appTest(
     const command = String.raw`printf '\033[?1049h\033[?25l\033[H${prefix}0'; IFS= read -r answer; printf '\033[1;40H1'; IFS= read -r answer; printf '\033[?25h\033[?1049l'`
     await page.locator('.pane.active .nocx-editor-input').fill(command)
     await page.keyboard.press('Enter')
+    await expect(page.locator('.pane.active .terminal-live-container')).toHaveClass(
+      /live-fullscreen/,
+    )
     const row = page
       .locator('.pane.active .terminal-live-grid .term-grid-row')
-      .filter({ hasText: prefix })
+      .filter({ hasText: new RegExp(`^${prefix}[01] *$`) })
     await expect(row).toHaveText(new RegExp(`^${prefix}0 *$`))
     await expect(row.locator('svg')).toHaveCount(1)
     const ink = await row.locator('svg').first().elementHandle()

@@ -19,17 +19,15 @@ pull request's own CI honours the same file
   protection without editing this file, and a bead that does not exist refuses it.
 - The entry is evidence, not a fix. The bead still has to be worked.
 
-## A past run is judged at that run
+## Only a new run asks
 
-A new run asks today's question: a bead closed now protects nothing, and closing it ends
-the protection without editing this file. The promotion does not run CI — it re-reads a
-merged pull request's run — so it asks the question at the moment the failing job ran
-([ADR-q0bqxcev](../decisions/q0bqxcev-a-past-runs-quarantine-is-judged-at-that-run.md)).
-A test that run's own gate accepted under a bead that was open then stays accepted after
-that bead is closed, which is why fixing a flake does not block a release.
-
-An entry may therefore stay in this file after its bead closes. It protects nothing on a
-new run, and it is the record of why an older run is green.
+A run that is happening now asks the question the file answers today: a bead closed now
+protects nothing, and closing it ends the protection without editing this file. The stable
+promotion no longer re-reads a merged pull request's run at all — the owner promotes by
+hand a nightly he installed and tried, and that trial is the release's authority
+([ADR-gvnw2nv8](../decisions/gvnw2nv8-a-stable-promotion-trusts-the-owners-trial.md)). So this
+file decides a pull request's CI and nothing else, and an entry whose bead has closed may
+stay as the record of why that PR was allowed to merge.
 
 ## Committing an entry
 

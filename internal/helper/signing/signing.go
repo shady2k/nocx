@@ -1,16 +1,7 @@
-// Package signing reads what macOS codesign reports about one executable and
-// refuses a code identity this product did not choose.
-//
-// WHY THIS EXISTS (nocx-vh2hr.1.7). The local helper runs the pane shell on
-// this machine. After an in-app update replaces nocx.app, an old helper can
-// outlive the app (ADR-0104 keeps helpers and their shells alive), and macOS
-// Local Network Privacy attributes the shell's non-platform children to the
-// responsible code — which is then the orphaned helper. A helper left ad-hoc
-// signed takes its identifier from the output file name ("a.out" today), so
-// every build is a different program to LNP and no local-network grant can
-// survive. The release signs the darwin local helper with the app's
-// certificate and a fixed identifier, and this package is the gate that reads
-// the result back: an ad-hoc helper is a refused release, not a warning.
+// Package signing reads macOS codesign identity for the local helper.
+// The release signs it with a stable identifier and certificate. Darwin's
+// endpoint spawn gives it its own responsible code (ADR-qy0pf1va); orphaning
+// alone does not do that, as the owner's procinfo evidence demonstrated.
 package signing
 
 import (
@@ -18,16 +9,8 @@ import (
 	"strings"
 )
 
-// The stable identity of the local darwin helper.
-//
-// HelperIdentifier is deliberately its own identifier rather than the app's
-// dev.nocx: the helper is a distinct executable and TCC/LNP track it by its
-// designated requirement (identifier + certificate). Fixing the identifier
-// and keeping the app's certificate is what makes that requirement — and any
-// grant recorded for it — survive every build. The app remains the
-// responsible code for every chain where the app still exists (no spawn path
-// was changed to disclaim responsibility); this identity is what remains when
-// the app has been replaced and the helper is the nearest surviving process.
+// The local helper is distinct responsible code, not the app's dev.nocx.
+// Its identifier and certificate remain stable across builds.
 const (
 	HelperIdentifier = "dev.nocx.helper"
 	Authority        = "nocx Project Code Signing"

@@ -299,6 +299,12 @@ timeout here.
 - **Tab-restore ownership.** The restore record is assembled at persist time from backend-owned `{sessionId, kind, host}` plus a frontend-supplied `cwd` snapshot; `config` persists, the frontend supplies — one writer, defined inputs.
 - **Web target deploy (later).** The same Go core runs as a network service serving the frontend bundle + WS. Security invariant: auth token + bind-to-localhost by default; exposure beyond localhost is an explicit, deliberate configuration.
 
+The local helper's Darwin spawn disclaims inherited macOS responsibility so
+its own signed, content-addressed binary remains the responsible code while
+an app update replaces the coordinator. The helper carries its own embedded
+Local Network usage description; Linux spawn is unchanged
+([ADR-qy0pf1va](decisions/qy0pf1va-the-darwin-helper-owns-its-responsible-code-from-spawn.md)).
+
 ## Deferred / Seams (Phase 2+)
 
 - **Web version** — same core served over the network. Revisit when a non-macOS or remote-access need appears (Phase 2/3).

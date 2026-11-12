@@ -86,9 +86,11 @@ function nameOf(member: WorkspaceMember): string {
   return host === null ? `“${what}”` : `“${what}” on ${host}`
 }
 
-/** The same live-work rule applies to a single intentional tab close. */
+/** A single tab asks only for a running command, not an idle SSH connection. */
 export function closingTabMessage(member: WorkspaceMember): string | null {
-  return isLive(member) ? `Closing this tab ends ${nameOf(member)}. Close it?` : null
+  return present(member.command) !== null
+    ? `Closing this tab ends ${nameOf(member)}. Close it?`
+    : null
 }
 
 /**

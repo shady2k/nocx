@@ -324,6 +324,19 @@ describe('PaneManager', () => {
     expect(session.detach).not.toHaveBeenCalled()
   })
 
+  it('closes an idle SSH tab immediately without confirmation or a remote acknowledgement', async () => {
+    const { client, manager, bar } = await mountPaneManager()
+    const content = manager.activeTerminalContent()!
+    vi.spyOn(content, 'liveWork').mockReturnValue({ command: null, host: 'user@host' })
+    client._sessions[0].close.mockImplementation(() => {})
+
+    manager.closeActivePane()
+
+    expect(showConfirmMock).not.toHaveBeenCalled()
+    expect(bar.querySelectorAll('.nocx-tab')).toHaveLength(0)
+    expect(client._sessions[0].close).toHaveBeenCalledOnce()
+  })
+
   it('shows a failed termination instead of claiming the session ended', async () => {
     const { client, manager } = await mountPaneManager()
     client._sessions[0].close.mockImplementation((failed?: (error: unknown) => void) => {

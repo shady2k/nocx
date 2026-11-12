@@ -3426,7 +3426,16 @@ export class TerminalContent extends BasePaneContent {
       // the design's measurement seam. begin() runs per apply: mount, font
       // loads, zoom and dpr changes move the published numbers, and a
       // verdict must never outlive the numbers it was measured with.
-      this._cellFit = createCellFit(() => this.scrollback?.scrollbackInner ?? null)
+      this._cellFit = createCellFit(
+        () => this.scrollback?.scrollbackInner ?? null,
+        undefined,
+        // A face that lands after its first measurement changes the advance of
+        // every glyph it now serves — yazi's private-use icons measured as the
+        // primary font's .notdef and then swapped for a 1em glyph, moving the
+        // columns after them (nocx-peg8e.1.3). cell-fit cannot repaint; this
+        // pane can, through the same path a font-setting change takes.
+        () => this._refreshFontMetrics(),
+      )
       this._painter = createCellPainter({
         surface: painterSurface,
         metric: () => {

@@ -228,6 +228,18 @@ function cellWidthOf(container: HTMLElement): number {
 export function createCellFit(
   container: () => HTMLElement | null,
   measure: BatchMeasure = domBatchMeasure,
+  /**
+   * Told AFTER the epoch has advanced, when the document reports a completed
+   * font load. The measuring authority does not paint, so the surface that
+   * does subscribes here and repaints: a face that lands after its first
+   * measurement leaves the verdict taken against its fallback stale, and
+   * nothing else in the product asks for a new frame. Measured on yazi
+   * (nocx-peg8e.1.3): U+EB9C/U+E5FF measured as the primary font's .notdef —
+   * exactly one cell, so no box — and when SymbolsNerdFontMono arrived the
+   * browser swapped in its 1em glyph, laying out every cell after it 0.4em
+   * to the right while the cached verdict still said "lands on its own".
+   */
+  onFontLoad?: () => void,
 ): CellFit {
   // КЭШ ХРАНИТ ЗАМЕР, А НЕ ВЕРДИКТ. Оба вывода — нужна ли коробка и на
   // сколько ужимать краску — считаются из продвижки, поэтому вторая
@@ -247,6 +259,7 @@ export function createCellFit(
   let fontEpoch = 0
   const onFontsLoaded = (): void => {
     fontEpoch += 1
+    onFontLoad?.()
   }
   const fonts = (document as Document & { fonts?: FontFaceSet }).fonts
   fonts?.addEventListener?.('loadingdone', onFontsLoaded)

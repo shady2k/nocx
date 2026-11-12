@@ -216,7 +216,7 @@ describe('rows are full width, and the gutter lives in them (nocx-9bpeq.8)', () 
     expect(shipped('.nocx-summon-answers > *', 'box-sizing')).toBe('border-box')
   })
 
-  it('the composer is a card with its OWN inset, not a row wearing the ledger gutter', () => {
+  it('the composer is a card with its OWN fixed inset, not a row wearing the ledger gutter', () => {
     // Superseded by the mockup decision record's ComposerFrame (§4,
     // nocx-9bpeq.23 round 2): the composer stopped being a full-width row
     // carrying `--pane-inline-padding` like a block or the live region —
@@ -227,16 +227,21 @@ describe('rows are full width, and the gutter lives in them (nocx-9bpeq.8)', () 
     // deliberately narrower than the ledger's 24px row inset (the mockup's
     // own "10-12 px external gutter" for the card, not the row's).
     expect(shipped('.nocx-editor', 'padding')).toBeNull()
-    // …and the card's TEXT starts on the ledger's column (ADR-92zzg2y2): the
-    // gutter is narrower than the card's border plus its
-    // old 12px padding, so the card spans the pane and pays the gutter as its
-    // inline padding — the first glyph lands on the column, and the card is
-    // never pushed outside the pane to reach it.
+    // AND THE CARD DOES NOT FOLLOW THE PANE'S ONE-CELL GUTTER
+    // (ADR-my0wd0za). ADR-92zzg2y2 carried the composer along on a
+    // consequence the owner never decided: at a one-cell gutter the card
+    // spanned the pane and paid the gutter as its inline padding, so it
+    // stopped being an inset card. The geometry from before that change is
+    // restored as fixed spacing-scale numbers — the old 24px gutter
+    // (`--space-6`) less the card's own 12px padding and its 1px border for
+    // the margin, and the 12px padding itself — so the card is the same card
+    // at every font scale and nothing in it reads the cell metric.
     expect(shipped('.ui-composer-frame', 'margin')?.replace(/\s+/g, ' ')).toBe(
-      '0 0 var(--terminal-card-margin)',
+      '0 calc(var(--space-6) - var(--terminal-card-padding) - 1px) var(--terminal-card-margin)',
     )
     expect(shipped('.ui-composer-frame', 'padding')?.replace(/\s+/g, ' ')).toBe(
-      'var(--terminal-card-padding) calc(var(--pane-inline-padding) - 1px)',
+      'var(--terminal-card-padding)',
     )
+    expect(shipped('.ui-composer-frame', 'padding') ?? '').not.toContain('--pane-inline-padding')
   })
 })

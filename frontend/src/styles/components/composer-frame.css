@@ -5,16 +5,21 @@
   /* The field below reshapes by the card's own width, not the viewport's: a
      pane beside an open sidebar can be narrower than any viewport query. */
   container-type: inline-size;
-  /* THE CARD'S TEXT IS THE LEDGER'S COLUMN (ADR-92zzg2y2). A block's header,
-     its output and a full-screen program start at --pane-inline-padding, and
-     the command a person is typing must start on that same x. The gutter is one
-     cell now, narrower than the card's own border plus its old 12 px padding,
-     so the card spans the pane and pays the gutter as its INLINE padding
-     instead: the first glyph lands on the column, and the card is never pushed
-     outside the pane to reach it. The block padding keeps the card's own
-     vertical rhythm. */
-  margin: 0 0 var(--terminal-card-margin);
-  padding: var(--terminal-card-padding) calc(var(--pane-inline-padding) - 1px);
+  /* THE CARD IS INSET FROM THE PANE BY ITS OWN FIXED NUMBERS (ADR-my0wd0za).
+     ADR-92zzg2y2 carried the composer along on a consequence the owner never
+     decided and put the card on the pane's one-cell gutter: the card spanned
+     the pane and paid the gutter as its inline padding, so it stopped being an
+     inset card at all. The geometry from before that change is restored here
+     as the spacing scale's own numbers — the card's side margin is the 24 px
+     gutter the pane's text had (`--space-6`) less the card's 12 px padding and
+     its 1 px border, and its padding is that 12 px again — so the same card is
+     drawn at every font scale and nothing here reads `--pane-inline-padding`.
+     The card's text therefore stands at a fixed 24 px inset, NOT on a block's
+     first column: nothing in the composer is fitted to a PTY column, so the
+     clipping argument that moved the pane's text to one cell does not reach it.
+     The block padding keeps the card's own vertical rhythm. */
+  margin: 0 calc(var(--space-6) - var(--terminal-card-padding) - 1px) var(--terminal-card-margin);
+  padding: var(--terminal-card-padding);
   border: 1px solid var(--color-divider);
   border-radius: var(--control-radius-lg);
   background: var(--color-terminal-chrome);

@@ -8,15 +8,17 @@
  *
  * WHICH EDGE IS THE RULE, decided from the frozen card and ADR-92zzg2y2: the
  * column's left edge is `--pane-inline-padding` from the pane, and the frozen
- * card puts three things on it — the header's chevron, the body's first output
- * column, and (at the prompt) the composer's first glyph. The command TEXT
- * begins one chevron-and-gap after that edge, in the frozen card and in the
- * running one alike; it is not itself the column. ADR-92zzg2y2 decision 6 says
- * the header, its output and the composer's text are one column, and decision 1
- * says the running body and the frozen body both wear `--pane-inline-padding`.
- * So the rule asserted here is: chevron == output's first column == the gutter,
- * for a running block and for the frozen card, and the header keeps that x when
- * the command ends.
+ * card puts two things on it — the header's chevron and the body's first output
+ * column. The command TEXT begins one chevron-and-gap after that edge, in the
+ * frozen card and in the running one alike; it is not itself the column.
+ * ADR-92zzg2y2 decision 1 says the running body and the frozen body both wear
+ * `--pane-inline-padding`, so the rule asserted here is: chevron == output's
+ * first column == the gutter, for a running block and for the frozen card, and
+ * the header keeps that x when the command ends.
+ *
+ * THE COMPOSER IS NOT ON THIS COLUMN, and it is not supposed to be: the
+ * composer is an inset card on its own fixed numbers (ADR-my0wd0za, which
+ * supersedes the one line of ADR-92zzg2y2 that put it here).
  *
  * WHY THE RUNNING HEADER WAS ONE GUTTER RIGHT: PR #752 stopped the running
  * block from cancelling the stack's row gutter (`nocx-9bpeq.8` — every row of

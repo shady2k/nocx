@@ -655,6 +655,21 @@ export class ScrollbackController {
   }
 
   /**
+   * Re-apply the echo shift after the backend has placed the running block on
+   * a frame that is ALREADY PAINTED (nocx-peg8e.1.1).
+   *
+   * `setLiveHeight`'s painted door belongs to the painter, because a shift read
+   * from a frame the grid has not drawn uncovers rows nobody has painted yet.
+   * This call is that same case from the other side: the frame is the one on
+   * screen — the anchor names its revision — and only the placement arrives
+   * late, after a resize's last frame, with nothing following it. The height
+   * stays the last painted one; only the anchor's shift moves.
+   */
+  outputAnchorLanded(): void {
+    this.setLiveHeight(this._lastLiveHeightPx, true)
+  }
+
+  /**
    * Size the live box, from the height of the frame its rows were painted
    * from.
    *

@@ -11262,6 +11262,101 @@ describe('two attempts and the live region stay separate while running (nocx-m87
     }
   })
 
+  it('places a refreshed anchor that names a frame already on screen (nocx-peg8e.1.1)', async () => {
+    // THE SHRINK'S OWN RACE. A resize publishes its frame and the refreshed
+    // anchor in that order, and the window accepts the frame first: while the
+    // record still holds the anchor from before the resize — another buffer
+    // instance, because the reflow renumbered the rows — acceptOutputStartFrame
+    // refuses it and the block stays unplaced. The refreshed anchor then names
+    // the revision already painted, and a program that is waiting sends no
+    // further frame, so nothing ever places the block: it falls back to the row
+    // it was minted on, one row above its own output, and the command's echo
+    // stays in the running block.
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const scrollback = scrollbackFor(content)
+    try {
+      tab.setActive(true)
+      // A scroller tall enough that the live region's cap never binds: the
+      // shift this test reads is then the anchor's own, not the box's.
+      Object.defineProperty(scrollback.scrollbackArea, 'clientHeight', {
+        value: 2000,
+        configurable: true,
+      })
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      const before = screenFrame(
+        1,
+        ['100', 'prompt top', 'OWN-LINE', '', '', ''].concat(Array.from({ length: 30 }, () => '')),
+        { cols: 80, rows: 36 },
+      )
+      before.state.baseRow = 69
+      sessionOf(content).fireScreenFrame(before)
+      await flushDisplayFrame()
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-shrink', state: 'open', origin: 'shell', command: 'top' },
+      })
+      // An anchor from the screen before the resize: another instance, so no
+      // frame this pane accepts places the block.
+      client._fireBlockOutputStart({
+        entryId: 'att-shrink',
+        row: 102,
+        fromRow: 0,
+        screenRevision: 1,
+        bufferKind: 'normal',
+        bufferInstance: '2',
+        cols: 80,
+        rows: 36,
+      })
+      const shrunk = screenFrame(
+        2,
+        ['98', '99', '100', 'prompt top', 'OWN-LINE', ''].concat(
+          Array.from({ length: 27 }, () => ''),
+        ),
+        { cols: 80, rows: 33 },
+      )
+      shrunk.state.baseRow = 71
+      sessionOf(content).fireScreenFrame(shrunk)
+      await flushDisplayFrame()
+      const block = scrollback.blockManager.blockForAttempt('att-shrink')!
+      // THE PREMISE: the record's anchor names another buffer instance, so the
+      // frame above placed nothing and the block still sits on its mint row.
+      expect(block.outputStart).toBeUndefined()
+      expect(block.outputAnchorOffset).toBeUndefined()
+      const onItsMintRow = scrollback.terminalLiveInner.style.transform
+      // THE REFRESHED ANCHOR, naming the revision that is on screen now.
+      client._fireBlockOutputStart({
+        entryId: 'att-shrink',
+        row: 102,
+        fromRow: 0,
+        screenRevision: 2,
+        bufferKind: 'normal',
+        bufferInstance: '1',
+        cols: 80,
+        rows: 33,
+      })
+      await vi.waitFor(() => {
+        expect(block.outputStart).toBe(102)
+        expect(block.outputAnchorOffset).toBe(31)
+      })
+      // And the shift is the anchor's, not the row the block was minted on:
+      // the box arithmetic that turns the offset into pixels is the live
+      // region's own and is asserted in the browser (e2e/top-split.spec.ts and
+      // running-block-shows-its-own-rows.spec.ts).
+      expect(scrollback.terminalLiveInner.style.transform).not.toBe(onItsMintRow)
+    } finally {
+      teardown()
+    }
+  })
+
   it('keeps a running block on its own rows when the pane loses rows while it runs (nocx-zg3k3.32)', async () => {
     const client = makeClient()
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)

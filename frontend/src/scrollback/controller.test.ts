@@ -727,7 +727,7 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     return renderer
   }
 
-  it('releases the shift only when an accepted backend row no longer contains the echo', () => {
+  it('uses backend output coordinates, never command-like text, to clip the live grid', () => {
     const renderer = rendererWithGeometry()
     const controller = new ScrollbackController({
       pane: document.createElement('div'),
@@ -738,12 +738,13 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     controller.beginBlock('top', '~', 0)
     const record = controller.blockManager.runningBlock!
     record.outputAnchorOffset = 1
-    record.outputAnchorText = 'prompt top'
+    // Only accepted backend coordinates choose which rows are output.
     controller.outputAnchorChanged()
     expect(controller.terminalLiveInner.style.transform).toBe('translateY(-16px)')
-    record.outputAnchorText = 'top - 19:20:15 up 18 days,  1:53,  2 users'
+    record.outputAnchorOffset = 0
     controller.outputAnchorChanged()
     expect(controller.terminalLiveInner.style.transform).toBe('')
+    controller.blockManager.clearAll()
   })
 
   it('keeps the painted echo shift until the frame without the echo is painted', () => {
@@ -770,7 +771,6 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     controller.beginBlock('printf OWN-LINE; read x', '~', 0)
     const record = controller.blockManager.runningBlock!
     record.outputAnchorOffset = 1
-    record.outputAnchorText = 'prompt printf OWN-LINE; read x'
     // The first paint: three rows, the echo among them, shifted out.
     controller.setLiveHeight(3 * 16, true)
     expect(controller.terminalLiveInner.style.transform).toBe('translateY(-16px)')
@@ -779,7 +779,6 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     // echo is above the screen and its new offset is zero. The anchor is
     // applied before the frame is painted; the grid still has the echo.
     record.outputAnchorOffset = 0
-    record.outputAnchorText = ''
     controller.outputAnchorChanged()
     expect(controller.terminalLiveInner.style.transform).toBe('translateY(-16px)')
 
@@ -810,7 +809,6 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     controller.beginBlock('ls', '~', 0)
     const record = controller.blockManager.runningBlock!
     record.outputAnchorOffset = 1
-    record.outputAnchorText = 'prompt ls'
     controller.outputAnchorChanged()
     expect(controller.mode).toBe('running')
     expect(controller.terminalLiveInner.style.transform).toBe('translateY(-16px)')
@@ -881,7 +879,6 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
 
     controller.beginBlock('ls', '~', 0)
     controller.blockManager.runningBlock!.outputAnchorOffset = 1
-    controller.blockManager.runningBlock!.outputAnchorText = 'prompt ls'
     controller.outputAnchorChanged()
     controller.setLiveHeight(3 * 16)
     expect(controller.terminalLiveViewport.style.height).toBe('32px')

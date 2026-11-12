@@ -2503,6 +2503,7 @@ func (s *Session) publishNowLocked() error {
 	if err != nil {
 		return err
 	}
+	s.refreshLiveOutputAnchorLocked(snap)
 	s.latest = &publishedFrame{rev: snap.Revision, bytes: encoded}
 	return s.deliverLocked(queued{class: DeliveryCoalescable, rev: snap.Revision, bytes: encoded})
 }

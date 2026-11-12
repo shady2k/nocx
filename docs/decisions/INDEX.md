@@ -229,6 +229,8 @@ was left alone.
 
 | my0wd0za | 2026-11-12 | [The composer is a card with its own fixed inset](my0wd0za-the-composer-keeps-its-own-fixed-inset.md) | Accepted (owner correction, 2026-11-12, `nocx-4y82c.1.27`; supersedes one line of ADR-92zzg2y2 — the composer's inline padding as the gutter less its border — and leaves that record's one-cell gutter, its mode-independent terminal size and its removal of the resize-at-a-switch machinery standing) |
 
+| 23dn5775 | 2026-11-12 | [Only backend lifecycle facts author command blocks](23dn5775-only-backend-lifecycle-facts-author-command-blocks.md) | Accepted (owner decision, `nocx-peg8e.1.1`; extends ADR-0074: screen behaviour never authors a boundary) |
+
 | 5yepvh9j | 2026-11-12 | [Only an unchosen startup panel receives the default](5yepvh9j-only-a-new-startup-tab-receives-the-default-panel.md) | Accepted (`nocx-peg8e.1.2`; supersedes ADR-x7cvh8e1’s startup-seeding exception only) |
 
 ## Adding one

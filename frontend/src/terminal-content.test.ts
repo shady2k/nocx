@@ -11159,21 +11159,18 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       client._sessions[0].fireScreenFrame(otherWidth)
       await flushDisplayFrame()
       expect(block.outputAnchorOffset).toBe(2)
-      expect(block.outputAnchorText).toBe('')
 
       const accepted = screenFrame(8, ['', 'prompt ls', ''])
       accepted.state.baseRow = 10
       client._sessions[0].fireScreenFrame(accepted)
       expect(block.outputAnchor).toEqual(anchor)
       expect(block.outputAnchorOffset).toBe(2)
-      expect(block.outputAnchorText).toBe('prompt ls')
       expect(block.outputStart).toBe(12)
       const mismatchAfterAcceptance = screenFrame(9, ['', '', 'replacement'])
       mismatchAfterAcceptance.state.baseRow = 10
       mismatchAfterAcceptance.state.bufferInstance = '2'
       client._sessions[0].fireScreenFrame(mismatchAfterAcceptance)
       expect(block.outputAnchorOffset).toBe(2)
-      expect(block.outputAnchorText).toBe('prompt ls')
 
       // One accepted output row below the command echo must occupy one row
       // in the live clip. The controller subtracts the two-row echo offset;
@@ -11197,6 +11194,164 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       output.state.baseRow = 10
       client._sessions[0].fireScreenFrame(output)
       await vi.waitFor(() => expect(scrollback.terminalLiveViewport.style.height).toBe('16px'))
+    } finally {
+      teardown()
+    }
+  })
+
+  it('uses backend ownership for a home repaint above history without changing the attempt', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const handler = factHandler(client)
+    const scrollback = scrollbackFor(content)
+    try {
+      Object.defineProperty(scrollback.scrollbackArea, 'clientHeight', {
+        value: 400,
+        configurable: true,
+      })
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-home', state: 'open', origin: 'shell', command: 'top' },
+      })
+      const initialAnchor = {
+        entryId: 'att-home',
+        row: 106,
+        fromRow: 0,
+        screenRevision: 1,
+        bufferKind: 'normal' as const,
+        bufferInstance: '1',
+        cols: 80,
+        rows: 12,
+      }
+      client._fireBlockOutputStart(initialAnchor)
+      const before = screenFrame(
+        1,
+        ['old1', 'old2', 'old3', 'old4', 'old5', 'prompt top', 'first'],
+        { cols: 80, rows: 12 },
+      )
+      before.state.baseRow = 100
+      sessionOf(content).fireScreenFrame(before)
+      await flushDisplayFrame()
+      const block = scrollback.blockManager.blockForAttempt('att-home')!
+      expect(block.outputAnchorOffset).toBe(6)
+      for (let revision = 2; revision <= 4; revision++) {
+        client._fireBlockOutputStart({ ...initialAnchor, row: 100, screenRevision: revision })
+        const repaint = screenFrame(
+          revision,
+          ['summary top', 'Tasks', 'CPU', 'Memory', 'Swap', 'PID', 'process'],
+          { cols: 80, rows: 12 },
+        )
+        repaint.state.baseRow = 100
+        repaint.cursor.y = 0
+        sessionOf(content).fireScreenFrame(repaint)
+        await vi.waitFor(() => {
+          expect(scrollback.terminalLiveInner.style.transform).toBe('')
+          expect(scrollback.terminalLiveViewport.style.height).toBe('112px')
+        })
+        expect(scrollback.blockManager.blocks).toHaveLength(1)
+        expect(scrollback.blockManager.runningBlock).toBe(block)
+        expect(block.status).toBe('running')
+        expect(block.outputStreamStart).toBe(0)
+      }
+    } finally {
+      teardown()
+    }
+  })
+
+  it('places a refreshed anchor that names a frame already on screen (nocx-peg8e.1.1)', async () => {
+    // THE SHRINK'S OWN RACE. A resize publishes its frame and the refreshed
+    // anchor in that order, and the window accepts the frame first: while the
+    // record still holds the anchor from before the resize — another buffer
+    // instance, because the reflow renumbered the rows — acceptOutputStartFrame
+    // refuses it and the block stays unplaced. The refreshed anchor then names
+    // the revision already painted, and a program that is waiting sends no
+    // further frame, so nothing ever places the block: it falls back to the row
+    // it was minted on, one row above its own output, and the command's echo
+    // stays in the running block.
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const scrollback = scrollbackFor(content)
+    try {
+      tab.setActive(true)
+      // A scroller tall enough that the live region's cap never binds: the
+      // shift this test reads is then the anchor's own, not the box's.
+      Object.defineProperty(scrollback.scrollbackArea, 'clientHeight', {
+        value: 2000,
+        configurable: true,
+      })
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      const before = screenFrame(
+        1,
+        ['100', 'prompt top', 'OWN-LINE', '', '', ''].concat(Array.from({ length: 30 }, () => '')),
+        { cols: 80, rows: 36 },
+      )
+      before.state.baseRow = 69
+      sessionOf(content).fireScreenFrame(before)
+      await flushDisplayFrame()
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-shrink', state: 'open', origin: 'shell', command: 'top' },
+      })
+      // An anchor from the screen before the resize: another instance, so no
+      // frame this pane accepts places the block.
+      client._fireBlockOutputStart({
+        entryId: 'att-shrink',
+        row: 102,
+        fromRow: 0,
+        screenRevision: 1,
+        bufferKind: 'normal',
+        bufferInstance: '2',
+        cols: 80,
+        rows: 36,
+      })
+      const shrunk = screenFrame(
+        2,
+        ['98', '99', '100', 'prompt top', 'OWN-LINE', ''].concat(
+          Array.from({ length: 27 }, () => ''),
+        ),
+        { cols: 80, rows: 33 },
+      )
+      shrunk.state.baseRow = 71
+      sessionOf(content).fireScreenFrame(shrunk)
+      await flushDisplayFrame()
+      const block = scrollback.blockManager.blockForAttempt('att-shrink')!
+      // THE PREMISE: the record's anchor names another buffer instance, so the
+      // frame above placed nothing and the block still sits on its mint row.
+      expect(block.outputStart).toBeUndefined()
+      expect(block.outputAnchorOffset).toBeUndefined()
+      const onItsMintRow = scrollback.terminalLiveInner.style.transform
+      // THE REFRESHED ANCHOR, naming the revision that is on screen now.
+      client._fireBlockOutputStart({
+        entryId: 'att-shrink',
+        row: 102,
+        fromRow: 0,
+        screenRevision: 2,
+        bufferKind: 'normal',
+        bufferInstance: '1',
+        cols: 80,
+        rows: 33,
+      })
+      await vi.waitFor(() => {
+        expect(block.outputStart).toBe(102)
+        expect(block.outputAnchorOffset).toBe(31)
+      })
+      // And the shift is the anchor's, not the row the block was minted on:
+      // the box arithmetic that turns the offset into pixels is the live
+      // region's own and is asserted in the browser (e2e/top-split.spec.ts and
+      // running-block-shows-its-own-rows.spec.ts).
+      expect(scrollback.terminalLiveInner.style.transform).not.toBe(onItsMintRow)
     } finally {
       teardown()
     }
@@ -11244,17 +11399,14 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       client._sessions[0].fireScreenFrame(shrunk)
       await flushDisplayFrame()
       expect(block.outputAnchorOffset).toBe(1)
-      expect(block.outputAnchorText).toBe('prompt ls')
 
       // A width change on the way (WebKit flashes a scrollbar during a
-      // resize) still moves the band with the base; the echo reading is
-      // kept from the last frame of the anchor's own width.
+      // resize) still moves the backend-owned band with the base.
       const wider = screenFrame(8, ['out', ''], { cols: SCREEN_COLS + 1, rows: SCREEN_ROWS - 2 })
       wider.state.baseRow = 12
       client._sessions[0].fireScreenFrame(wider)
       await flushDisplayFrame()
       expect(block.outputAnchorOffset).toBe(0)
-      expect(block.outputAnchorText).toBe('prompt ls')
     } finally {
       teardown()
     }
@@ -11369,7 +11521,6 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       client._sessions[0].fireScreenFrame(placed)
       await flushDisplayFrame()
       expect(block.outputAnchorOffset).toBe(29)
-      expect(block.outputAnchorText).toBe('sleep 30')
       expect(scrollback.terminalLiveInner.style.transform).toBe('translateY(-464px)')
     } finally {
       teardown()
@@ -11434,6 +11585,16 @@ describe('two attempts and the live region stay separate while running (nocx-m87
 
         // A program that clears and repaints the normal buffer keeps its new
         // top row; the old echo's coordinates cannot hide replacement output.
+        client._fireBlockOutputStart({
+          entryId: 'att-wrapped-echo',
+          row: 0,
+          fromRow: 0,
+          screenRevision: 2,
+          bufferKind: 'normal',
+          bufferInstance: '1',
+          cols: 12,
+          rows: 8,
+        })
         const cleared = screenFrame(2, ['fresh output'], { cols: 12, rows: 8 })
         cleared.cursor.y = 0
         sessionOf(content).fireScreenFrame(cleared)

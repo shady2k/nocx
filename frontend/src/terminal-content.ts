@@ -2006,6 +2006,11 @@ export class TerminalContent extends BasePaneContent {
    *  has been accepted but not painted is not on screen, and a hold taken
    *  from it paints rows the grid still shows (nocx-4y82c.1.1). */
   private _lastPaintedBaseRow: number | undefined
+  /** The revision the grid was last painted from, for the one caller that has
+   *  to tell "a frame is on screen" from "a frame was accepted": an anchor the
+   *  backend publishes for a revision already painted places the block even
+   *  though no frame follows it (nocx-peg8e.1.1). */
+  private _lastPaintedRevision: number | undefined
   /** The live tier's scrollback surface (nocx-zg3k3.10.4): the rows above
    *  the live rectangle in a session with no shell integration. Created at
    *  mount beside the painter it shares its painter and its measuring
@@ -5543,6 +5548,33 @@ export class TerminalContent extends BasePaneContent {
           anchor,
           this._screenGeneration,
         )
+        // AN ANCHOR CAN NAME A FRAME THAT IS ALREADY ON SCREEN (nocx-peg8e.1.1).
+        // A resize publishes its frame and the refreshed anchor in that order,
+        // and while the record still held the pre-resize anchor — another
+        // buffer instance, because a reflow renumbers the rows — that frame
+        // placed nothing. A program that is then waiting sends no further
+        // frame, so without this the running block stays on the row it was
+        // minted on, one row above its own output, and the command's echo stays
+        // inside it. Placing against a PAINTED revision is safe for the reason
+        // `setLiveHeight`'s one door exists: the anchor names the frame the
+        // rows came from, and `acceptOutputStartFrame` refuses any other
+        // identity, so nothing here is measured from a frame nobody saw.
+        // The frame the anchor names may be on screen, or in the batch about
+        // to be painted in this same animation frame. Placing it there is what
+        // the paint will read; arriving between the two used to leave the
+        // placement for a frame that never comes.
+        const named =
+          this._pendingPaint?.revision === anchor.screenRevision
+            ? this._pendingPaint
+            : ((this._cellModel?.current()?.revision === anchor.screenRevision
+                ? this._cellModel?.current()
+                : null) ?? null)
+        if (named !== null) {
+          this.scrollback?.blockManager.acceptOutputStartFrame(named)
+          if (this._lastPaintedRevision === anchor.screenRevision) {
+            this.scrollback?.outputAnchorLanded()
+          }
+        }
         this.scrollback?.outputAnchorChanged()
       }),
     )
@@ -6315,6 +6347,7 @@ export class TerminalContent extends BasePaneContent {
     if (pending === null || this._disposed || !this._active) return false
     this._painter?.apply(pending)
     this._lastPaintedBaseRow = pending.state.baseRow
+    this._lastPaintedRevision = pending.revision
     // THE BOX AND THE ROWS IT SHOWS ARE ONE PAINT (owner, 2026-11-08: "the
     // room for the new rows is made a frame before the rows are drawn"). The
     // live region's height is derived from the frame being painted — its last

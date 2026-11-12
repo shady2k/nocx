@@ -136,12 +136,6 @@ export function copyToClipboard(text: string): Promise<void> {
 // pane has let go of (`settleWithoutBackend` — the session that would say
 // it is gone).
 
-/** How many displaced blocks remember their attempt while its completion is
- *  still in flight (nocx-evj4b.1.9). One per start that outran its
- *  predecessor's completion; the bound is for a stream that never delivers
- *  them, and an evicted block keeps the `unknown` it was frozen with. */
-const MAX_DISPLACED = 32
-
 /** Upper bound on rows held for an entry whose block has not bound yet
  *  (`_pendingStoredRows`). A block.grew/closed notification can arrive
  *  before `bindAttempt` names the block it belongs to, and the pending
@@ -680,6 +674,8 @@ export interface BlockRecord {
   author: CommandAuthor
   /** Duration in ms: C marker to D marker. */
   durationMs: number | null
+  /** Local fallback clock for this card, independent of a later live owner. */
+  startedAt?: number
   exitCode: number | null
   /** Presentation state. 'entered' = frozen on environment entry (N6):
    *  neither success nor failure, no exit code — the block the ssh command
@@ -784,8 +780,6 @@ export interface BlockRecord {
   outputStreamStart?: number
   /** Offset from the accepted frame base row when its identity matches the anchor. */
   outputAnchorOffset?: number
-  /** Observed input-span text immediately before the accepted output anchor. */
-  outputAnchorText?: string
   /** Rows of the latest accepted frame above `startLine`, while no output
    *  anchor has placed the block (nocx-zg3k3.32). Nothing clears the
    *  terminal between commands, so until the backend's anchor lands those
@@ -2191,12 +2185,6 @@ export class BlockManager {
   private _paintStoredRows?: (block: HTMLElement, rows: StoredBlockRows, reserve?: boolean) => void
   private _holdReaderPlace?: (mutate: () => void) => void
   private _reclaimSeatedHeader?: () => void
-  /** Blocks the next start displaced, by attempt id: their own completion has
-   *  not arrived yet and belongs to that card, not to the one that replaced
-   *  it (nocx-evj4b.1.9; ADR-0074's two independent carriers can deliver the
-   *  start first). Bounded by MAX_DISPLACED; an entry leaves on its own
-   *  completion or abandonment, and an evicted one keeps its `unknown`. */
-  private _displaced = new Map<string, BlockRecord>()
   private _visible = true
   /** Hidden paints belong to their DOM owner, not a second block registry.
    *  Removed/replaced owners can be collected without draining a strong queue. */
@@ -2777,11 +2765,11 @@ export class BlockManager {
     rec.outputStreamStart = anchor.fromRow
     rec.outputScreen = undefined
     rec.outputAnchorOffset = undefined
-    rec.outputAnchorText = undefined
   }
 
-  /** Consume only a frame accepted by the pane CellModel and matching every
-   *  anchor identity field. The row it supplies belongs to the screen the
+  /** Consume only a frame accepted by the pane CellModel at or beyond the
+   *  anchor revision and in its buffer instance. Resizing does not renumber
+   *  absolute rows. The row it supplies belongs to the screen the
    *  anchor came from (`outputAnchorScreen`), which is what the running
    *  block's hold is taken against (nocx-djx1u). */
   acceptOutputStartFrame(snapshot: ScreenSnapshot): void {
@@ -2799,22 +2787,6 @@ export class BlockManager {
         anchor.bufferKind !== 'normal'
       )
         continue
-      // A frame of another SIZE still is (nocx-zg3k3.32). The anchor is an
-      // absolute row of the shared screen coordinate, and a pane that gets
-      // shorter pushes the top of the screen into history, moving the base
-      // over that row: refusing the frame left the shift at its old value,
-      // and the block hid its own output. A width change reflows wrapped
-      // rows and can renumber them, so there the row is the best estimate
-      // rather than exact. Once the block is placed only the offset follows
-      // it — the echo text keeps its last reading, so a transient width
-      // (WebKit's scrollbar flash during a resize, nocx-zg3k3.30) cannot
-      // release the shift through the echo check. A block not yet placed
-      // takes the estimate whole: its echo check still guards it.
-      if (snapshot.geometry.cols !== anchor.cols && rec.outputAnchorOffset !== undefined) {
-        const index = anchor.row - snapshot.state.baseRow
-        rec.outputAnchorOffset = Math.max(0, Math.min(index, snapshot.geometry.rows - 1))
-        continue
-      }
       // THE TWO NUMBERS, AND WHAT EACH ONE MEANS (nocx-4y82c.1.10). `row` is
       // the block's first output row in the SHARED SCREEN coordinate and is
       // ALREADY ABSOLUTE: the backend's screenRowAnchorLocked emits
@@ -2833,7 +2805,6 @@ export class BlockManager {
         // The anchor names the first output row. Its preceding echo row is
         // already above the visible screen (or absent), so there is no shift.
         rec.outputAnchorOffset = 0
-        rec.outputAnchorText = ''
         continue
       }
       if (index >= snapshot.geometry.rows) {
@@ -2847,39 +2818,9 @@ export class BlockManager {
         // once the base moved past that row it read as "no shift", which
         // painted the previous command's output into the running block.
         rec.outputAnchorOffset = snapshot.geometry.rows
-        rec.outputAnchorText = undefined
         continue
       }
-      const echoRow = snapshot.rowAt(index - 1)
-      if (!echoRow) continue
       rec.outputAnchorOffset = index
-      // Only the current live owner consumes this text. A frozen card's
-      // anchor coordinates still follow the accepted frame above.
-      if (rec !== this._runningBlock) continue
-      const command = rec.command.trim()
-      let remainingLines = 1
-      for (let i = 0; i < command.length; i++) {
-        if (command.charCodeAt(i) === 10) remainingLines++
-      }
-      let firstRow = index - 1
-      while (firstRow > 0) {
-        const previous = snapshot.rowAt(firstRow - 1)
-        if (!previous) break
-        if (!previous.wrap && --remainingLines === 0) break
-        firstRow--
-      }
-      // Preserve whitespace at soft-wrap joints. Per-row trimming would
-      // change the command; hard input lines retain their actual newline.
-      const parts: string[] = []
-      for (let i = firstRow; i < index; i++) {
-        // The backwards walk checked every row in this contiguous span.
-        const row = snapshot.rowAt(i)!
-        for (const cell of row.cells) {
-          if (cell.hasText) parts.push(cell.grapheme)
-        }
-        if (i < index - 1 && !row.wrap) parts.push('\n')
-      }
-      rec.outputAnchorText = parts.join('').trimEnd()
     }
   }
 
@@ -3233,8 +3174,12 @@ export class BlockManager {
     author: CommandAuthor = 'shell',
     startAnchor?: BlockScreenAnchor,
   ): BlockRecord {
+    // A new authenticated start takes the live seat, never the previous
+    // attempt's outcome. That card waits for its own backend terminal fact.
     if (this._runningBlock) {
-      this._settleDisplacedRunning()
+      this._reclaimSeatedHeader?.()
+      this._stopTicker()
+      this._clearCommandIndicator()
     }
 
     const id = this._nextId++
@@ -3275,6 +3220,7 @@ export class BlockManager {
       cwd,
       author,
       durationMs: null,
+      startedAt: this._cmdStartTime,
       exitCode: null,
       status: 'running',
       header: el.querySelector<HTMLElement>(':scope > .cmd-header') ?? undefined,
@@ -3466,13 +3412,19 @@ export class BlockManager {
     status: FrozenStatus,
     blockMs?: number | null,
   ): FrozenStatus {
-    this._stopTicker()
-    // The running command's stand-in stands down with the command itself:
-    // a terminal freeze is a close, and no dots may type a command that
-    // will not write any more (nocx-vnirv.1).
-    this._clearCommandIndicator()
-    rec.durationMs = blockMs === undefined ? this.elapsedCommandMs() : blockMs
-    this._cmdStartTime = null
+    if (rec === this._runningBlock) {
+      this._stopTicker()
+      this._clearCommandIndicator()
+      this._cmdStartTime = null
+      this._runningBlock = null
+      this._attemptId = null
+    }
+    rec.durationMs =
+      blockMs === undefined
+        ? rec.startedAt === undefined
+          ? null
+          : this._now() - rec.startedAt
+        : blockMs
     rec.exitCode = exitCode
     rec.status = status
     // THE HOLD OUTLIVES THE LOGICAL FREEZE (nocx-4y82c.1.1). The card is
@@ -3482,7 +3434,6 @@ export class BlockManager {
     // clearing it here painted the whole artifact over rows the screen still
     // showed, duplicating them until block.closed. `_freezeCard` ends the hold
     // when the grid leaves the block.
-    this._runningBlock = null
     return status
   }
 
@@ -3600,33 +3551,8 @@ export class BlockManager {
    *  coordinator and ends in block.closed (nocx-2v80t.3.29). */
   freezeFromAttempt(attempt: ExecutionAttempt, endLine: number): BlockRecord | null {
     if (attempt.state !== 'completed') return null
-    const displaced = this._displaced.get(attempt.id)
-    if (displaced !== undefined) {
-      // The block this attempt opened was displaced by a later start before
-      // its own completion arrived (ADR-0074's two carriers are independent).
-      // The outcome belongs to THAT card, and the command that replaced it is
-      // not touched: no running slot, no live region, no element of it
-      // (nocx-evj4b.1.9). The card is already the frozen one, so there is no
-      // visual freeze to report.
-      this._displaced.delete(attempt.id)
-      const { code, status } = this._completedStatus(attempt, displaced.stopRequested)
-      // The attempt's own length when its fact carries it; otherwise the
-      // length this manager measured at the displacement (never `now`, which
-      // by this point belongs to the command that replaced it). The fields
-      // land on the DISPLACED record only: `_logicalFreeze` would take the
-      // running slot, and that slot is the new command's now.
-      displaced.durationMs = attemptBlockMs(attempt) ?? displaced.durationMs ?? null
-      displaced.exitCode = code
-      displaced.status = status
-      settleBlockOutcome(displaced.el, 'command', displaced.durationMs ?? 0, {
-        status,
-        exitCode: code,
-      })
-      return null
-    }
-    if (this._attemptId !== attempt.id) return null
-    const rec = this._runningBlock
-    if (!rec) return null
+    const rec = this.blockForAttempt(attempt.id)
+    if (!rec || rec.status !== 'running') return null
     const { code, status } = this._completedStatus(attempt, rec.stopRequested)
 
     // LOGICAL freeze — the authenticated event alone flips the block's
@@ -3635,8 +3561,6 @@ export class BlockManager {
     // both timestamps; a fact that cannot say (a replayed or foreign attempt)
     // keeps what this manager measured, which is what it always printed.
     const terminal = this._logicalFreeze(rec, code, status, attemptBlockMs(attempt) ?? undefined)
-    this._attemptId = null
-
     return this._closeOnBackend(rec, endLine, terminal) ? rec : null
   }
 
@@ -3714,18 +3638,12 @@ export class BlockManager {
     sessionGone = false,
   ): BlockRecord | null {
     if (attempt.state !== 'unknown') return null
-    // A displaced block already says unknown (it froze for want of its own
-    // completion, and this is the answer that it gets none); its close fills
-    // its rows as usual (nocx-evj4b.1.9).
-    if (this._displaced.delete(attempt.id)) return null
-    if (this._attemptId !== attempt.id) return null
-    const rec = this._runningBlock
-    if (!rec) return null
+    const rec = this.blockForAttempt(attempt.id)
+    if (!rec || rec.status !== 'running') return null
     // No interaction with the blocks awaiting their close: those belong to
     // older, already logically frozen blocks, never to the running block
     // being abandoned.
     const status = this._logicalFreeze(rec, null, 'unknown')
-    this._attemptId = null
     if (sessionGone) {
       this._freezeCard(rec, endLine, status)
       return rec
@@ -4114,7 +4032,6 @@ export class BlockManager {
     this._stopTicker()
     this._awaitingClose.clear()
     this._closedEarly.clear()
-    this._displaced.clear()
     this._pendingStoredRows.clear()
     this._pendingOutputAnchors.clear()
     this._deferredStoredPaint = new WeakMap()
@@ -4210,53 +4127,6 @@ export class BlockManager {
         this._answerBlocks.some((b) => b.id === this._selectedBlockId)
       if (!stillThere) this._selectedBlockId = null
     }
-  }
-
-  /**
-   * A block the next start displaces (nocx-evj4b.1.9).
-   *
-   * There is exactly one running block, so a start that arrives while one is
-   * still on screen has to settle it. Leaving it alone — which this used to
-   * do, with a hidden `failure` and no DOM at all — kept the displaced card
-   * wearing `cmd-block-running` and its frozen ticker forever: its own
-   * `block.closed` then found a record whose status was no longer `running`
-   * and returned without closing it, so the pane showed TWO running cards
-   * and no event could ever settle the older one. A person reading the pane
-   * could not tell which command was still going.
-   *
-   * The displaced block is NOT the command that just ended: its attempt is
-   * still open and its own completion is not news this start may carry, so it
-   * freezes as `unknown` — never as a success it never received — and its
-   * stored rows still arrive with its `block.closed`, because the card is
-   * built with its attempt's entry and the transport's close refreshes it.
-   * A header the alternate seat borrowed comes home first: the next block
-   * must not open wearing the displaced command's header while the displaced
-   * one is left headless.
-   */
-  private _settleDisplacedRunning(): void {
-    const rec = this._runningBlock
-    if (!rec) {
-      this._stopTicker()
-      this._clearCommandIndicator()
-      return
-    }
-    // The seat takes its header back BEFORE the running slot is freed: the
-    // controller restores it into the block this start is displacing, and
-    // drops its own reference with it. Reparenting the node here instead
-    // would leave that reference standing, and the next fullscreen exit
-    // would prepend the displaced command's header into the new command's
-    // card (nocx-evj4b.1.9).
-    this._reclaimSeatedHeader?.()
-    const status = this._logicalFreeze(rec, null, 'unknown')
-    this._attemptId = null
-    if (rec.attemptId !== undefined) {
-      if (this._displaced.size >= MAX_DISPLACED) {
-        const oldest = this._displaced.keys().next().value
-        if (oldest !== undefined) this._displaced.delete(oldest)
-      }
-      this._displaced.set(rec.attemptId, rec)
-    }
-    this._freezeCard(rec, rec.endLine, status)
   }
 
   dispose(): void {

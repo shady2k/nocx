@@ -112,8 +112,18 @@ package coordinator
 // The number in a stage branch means only that ITS surface moved; this is the
 // number the integrated surface carries, and its golden is the one written by
 // the recipe over all four stages at once.
-// Version 28 carries the session absence policy on helper spawn (ADR-v7xk8mq8).
-const ProtocolVersion = 28
+// 29 (diag/nocx-peg8e-1-1-top-split, over main's 28): block.outputStart's
+// description declared the anchor as a fixed place — "the anchor's screen row"
+// — and it is now the running interval's CURRENT screen cut, refreshed when a
+// program repaints rows above its own start (ADR-23dn5775, nocx-peg8e.1.1).
+// No field was added or removed: `row` moves and `fromRow` stays the
+// interval's one start, which is exactly the reading a window built against 28
+// cannot make, because it clips the live region at the first anchor it saw and
+// loses everything a primary-screen program painted above it. A contract's
+// text is part of the surface ADR-0104 declares, so this is a bump.
+//
+// Version 29 carries the refreshed live output anchor on block.outputStart.
+const ProtocolVersion = 29
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

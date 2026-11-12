@@ -1217,20 +1217,33 @@ func closingRowsForStream(scr ObservationScreen, skip int) []emulator.Row {
 // taken, or it cannot be located right now, does the count fall back to the
 // positional arithmetic, which is exact whenever no commit re-laid the rows.
 func (s *Session) outputStartSkipLocked(pin emulator.RowTrack, prefix []emulator.Row, startRow int, markDeparted uint64, scr ObservationScreen) int {
+	skip, _ := s.outputStartSkipLocatedLocked(pin, prefix, startRow, markDeparted, scr)
+	return skip
+}
+
+// outputStartSkipLocatedLocked is outputStartSkipLocked and whether the pin
+// was LOCATED on the screen scr was read from. A caller that keeps a row from
+// an earlier frame needs the difference: a located pin's row is the interval's
+// output on this screen, while one the screen no longer holds (or a session
+// that never took a pin) leaves the caller with its positional arithmetic and
+// nothing to locate.
+func (s *Session) outputStartSkipLocatedLocked(pin emulator.RowTrack, prefix []emulator.Row, startRow int, markDeparted uint64, scr ObservationScreen) (int, bool) {
 	skip := outputMarkSkipLocked(startRow, markDeparted, s.screenDepartedRows)
+	located := false
 	if pin != nil {
 		y, err := pin.ActiveRow()
 		switch {
 		case err == nil:
 			skip = max(y-boundaryRowsTop(scr), 0)
+			located = true
 		case errors.Is(err, emulator.ErrOutOfRange):
 			skip = 0
 		}
 	}
 	if skip > 0 && !outputPrefixStands(boundaryRowsThatLeave(scr), skip, prefix) {
-		return untouchedPrefixRows(boundaryRowsThatLeave(scr), skip, prefix)
+		return untouchedPrefixRows(boundaryRowsThatLeave(scr), skip, prefix), located
 	}
-	return skip
+	return skip, located
 }
 
 // untouchedPrefixRows is how many of a no-longer-standing prefix's leading

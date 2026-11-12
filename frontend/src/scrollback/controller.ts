@@ -655,6 +655,21 @@ export class ScrollbackController {
   }
 
   /**
+   * Re-apply the echo shift after the backend has placed the running block on
+   * a frame that is ALREADY PAINTED (nocx-peg8e.1.1).
+   *
+   * `setLiveHeight`'s painted door belongs to the painter, because a shift read
+   * from a frame the grid has not drawn uncovers rows nobody has painted yet.
+   * This call is that same case from the other side: the frame is the one on
+   * screen — the anchor names its revision — and only the placement arrives
+   * late, after a resize's last frame, with nothing following it. The height
+   * stays the last painted one; only the anchor's shift moves.
+   */
+  outputAnchorLanded(): void {
+    this.setLiveHeight(this._lastLiveHeightPx, true)
+  }
+
+  /**
    * Size the live box, from the height of the frame its rows were painted
    * from.
    *
@@ -793,19 +808,6 @@ export class ScrollbackController {
     // a screen nothing clears (nocx-zg3k3.32). The echo itself stays visible
     // for that moment; the anchor is what knows where it ends.
     if (rec.outputAnchorOffset === undefined) return (rec.startOffset ?? 0) * cell
-    // A placed anchor carries the echo row's reading, and the shift is
-    // released only when that reading no longer ends with the command — a
-    // reflow can renumber the row it names (nocx-zg3k3.30). An anchor this
-    // screen cannot place carries no reading at all, because it names no
-    // visible row: its offset is already the whole grid (nocx-1ebrs.66.1.24).
-    const command = rec.command.trim()
-    if (
-      rec.outputAnchorText !== undefined &&
-      command !== '' &&
-      !rec.outputAnchorText.endsWith(command)
-    ) {
-      return 0
-    }
     return rec.outputAnchorOffset * cell
   }
 
@@ -1076,20 +1078,6 @@ export class ScrollbackController {
   }
 
   // ── Command cycle ─────────────────────────────────────────────────────
-
-  /**
-   * Called on OSC 133 C: create a running block, expand the live region.
-   */
-  onCommandStart(
-    command: string,
-    cwd: string,
-    startLine: number,
-    startAnchor?: BlockScreenAnchor,
-  ): void {
-    const cmd = command || '(empty)'
-    this._blockManager.startBlock(cmd, cwd, startLine, 'shell', startAnchor)
-    this.setRunning()
-  }
 
   /**
    * Open a running block for an authenticated start (nocx-2v80t.3.2): the

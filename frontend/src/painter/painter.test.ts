@@ -442,7 +442,7 @@ describe('metricOf — the CellFit → RunMetric seam the cutover calls', () => 
     painter.apply(snapshotOf(frameOf(2, [MERGE_ROW, [['y', 1, true]]])))
     const [keptAfter, changedAfter] = surface.querySelectorAll('.term-grid-row')
     expect(keptAfter).toBe(keptBefore)
-    expect(changedAfter).not.toBe(changedBefore)
+    expect(changedAfter).toBe(changedBefore)
     expect(changedAfter.textContent?.trimEnd()).toBe('y')
   })
 

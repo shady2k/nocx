@@ -371,9 +371,7 @@ export function createCellPainter(opts: CellPainterOptions): CellPainter {
       for (const row of rows) surface.insertBefore(row, cursor)
     } else {
       for (const r of toPaint) {
-        const next = paintRow(snapshot.rows[r], { metric, palette })
-        rows[r].replaceWith(next)
-        rows[r] = next
+        paintRow(snapshot.rows[r], { metric, palette }, rows[r])
       }
     }
     if (activeRow !== null && activeRow >= rows.length)

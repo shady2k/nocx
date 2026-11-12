@@ -497,19 +497,11 @@
   margin-top: auto;
 }
 
-/* A FILLED PANE HANGS FROM THE TOP GUTTER (nocx-4y82c.2). The alternate
-   screen and a markerless session size their live box from the scroller less
-   the one running header, floored to whole rows (controller.paneFillHeight),
-   so the box is a few pixels shorter than the pane. Under the bottom anchor
-   that remainder was spent ABOVE the pinned header: running htop on macOS, the
-   `> htop · Running` header sat about a row below where a primary-screen
-   block's first row sits, with an empty band between the pane's top edge and
-   the header. Nothing hangs above a composer in these modes — there is no
-   composer above the terminal, and the box fills the pane — so nothing is
-   anchored to the bottom and the header starts on the pane's own top gutter.
-   The gap between the header and the program is not touched: the box still
-   follows the header directly, and the remainder falls below the last row
-   instead of above the first. */
+/* A filled pane starts on the top gutter (nocx-4y82c.2). The live box
+   remains exactly the whole-row grid beneath the running header. Only the
+   sub-row fit remainder falls below it, inside the scroller; the layout
+   supplies the same half-row outer gutter on both edges (ADR-92zzg2y2).
+   Blank rows inside that grid belong to the program, not to the gutter. */
 .scrollback-inner.inner-fullscreen-mode {
   margin-top: 0;
 }

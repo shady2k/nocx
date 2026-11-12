@@ -166,6 +166,46 @@ func TestModesReportTheSynchronizedOutputHold(t *testing.T) {
 	}
 }
 
+// TestYazisThemeIconsTakeOneCell is the width half of nocx-peg8e.1.3, and it
+// is here because the question the report asked was "which party's width is
+// wrong": yazi positions the cell after an icon by counting one column for it
+// (Rust's unicode-width reports 1 for every private-use codepoint), and the
+// terminal has to agree or the rest of that row lands somewhere else. These are
+// the codepoints yazi's shipped theme-dark.toml assigns — Library's U+EB9C, the
+// directory and hovered-directory U+E5FF/U+E5FE, the Documents/Downloads
+// U+F401/U+F498, and the supplementary-plane U+F0219 — read out of the bytes
+// yazi 26.9.1 writes, not out of its source. A pin that made any of them two
+// columns would move every cell after it on that row, which is exactly what the
+// owner saw; this test fails at the emulator rather than in a screenshot.
+func TestYazisThemeIconsTakeOneCell(t *testing.T) {
+	icons := []string{"\ueb9c", "\ue5ff", "\ue5fe", "\uf401", "\uf498", "\U000f0219"}
+	term := newTerminal(t, 20, 2)
+	for _, icon := range icons {
+		ingest(t, term, icon)
+	}
+	cursor, err := term.Cursor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cursor.X != len(icons) {
+		t.Fatalf("%d one-cell icons left the cursor at column %d, want %d: a two-column icon shifts its row",
+			len(icons), cursor.X, len(icons))
+	}
+	for x, icon := range icons {
+		cell, err := term.Cell(x, 0)
+		if err != nil {
+			t.Fatalf("cell %d: %v", x, err)
+		}
+		if cell.Grapheme != icon || cell.Width != emulator.WidthNarrow || !cell.HasText {
+			t.Errorf("cell %d = %q width %v text %v, want %q at one column",
+				x, cell.Grapheme, cell.Width, cell.HasText, icon)
+		}
+	}
+	if tail, err := term.Cell(len(icons), 0); err != nil || tail.Width != emulator.WidthNarrow || tail.HasText {
+		t.Errorf("the cell after the icons = %+v, %v; want an untouched narrow blank", tail, err)
+	}
+}
+
 func TestCellReportsGraphemeWidthAndStyle(t *testing.T) {
 	term := newTerminal(t, 20, 3)
 	ingest(t, term, "\x1b[1;31mA\x1b[0m\x1b[38;2;1;2;3mB\x1b[0m\x1b[48;5;42mC\x1b[0m\x1b[4:3mD\x1b[0m中")

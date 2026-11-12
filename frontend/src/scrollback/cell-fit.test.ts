@@ -304,6 +304,46 @@ describe('createCellFit', () => {
     }
   })
 
+  it('a face that lands after a measurement asks its owner to measure again', () => {
+    // ТО, ЧЕГО НЕ ХВАТАЛО ЗАМЕРУ (nocx-peg8e.1.3). Пока SymbolsNerdFontMono не
+    // загружен, его codepoint рисуется .notdef'ом ОСНОВНОГО шрифта, а .notdef
+    // моноширинного шрифта идёт ровно в ячейку: замер говорит «ложится», и
+    // коробки нет. Когда лицо доезжает, браузер подменяет глиф на 1em, строка
+    // перекладывается на 0.4em вправо, а замер остаётся прежним. Эпоха
+    // загрузки делает замер недействительным, но перерисовать может только
+    // владелец краски — поэтому cell-fit зовёт его.
+    const trigger = new Map<string, () => void>()
+    const stub = {
+      addEventListener: (type: string, fn: () => void) => trigger.set(type, fn),
+      removeEventListener: (type: string) => trigger.delete(type),
+    }
+    const doc = document as Document & { fonts?: unknown }
+    const had = Object.prototype.hasOwnProperty.call(doc, 'fonts')
+    const prior = doc.fonts
+    Object.defineProperty(doc, 'fonts', { value: stub, configurable: true })
+    try {
+      let advance = 8 // .notdef основного шрифта: ровно ячейка, коробки нет
+      const measure = batch(() => advance)
+      const reload = vi.fn()
+      const fit = createCellFit(() => containerWith(8), measure, reload)
+      const icon = { chars: '\ue5ff', width: 1, face: REGULAR }
+      fit.begin()
+      fit.warm([icon])
+      expect(fit.boxOf(icon.chars, 1, REGULAR)).toBeNull()
+
+      advance = 14 // лицо доехало: 1em против ячейки 0.6em
+      trigger.get('loadingdone')?.()
+
+      expect(reload).toHaveBeenCalledTimes(1)
+      fit.begin()
+      fit.warm([icon])
+      expect(fit.boxOf(icon.chars, 1, REGULAR)).toEqual({ cols: 1, fit: 0.5714 })
+    } finally {
+      if (had) Object.defineProperty(doc, 'fonts', { value: prior, configurable: true })
+      else delete (doc as { fonts?: unknown }).fonts
+    }
+  })
+
   it('вытесняет по-настоящему давно не использованное', () => {
     // Map хранит порядок ВСТАВКИ, поэтому наивное «удалить первый ключ» —
     // это FIFO, а не LRU: только что прочитанная запись вылетела бы первой.

@@ -112,7 +112,8 @@ package coordinator
 // The number in a stage branch means only that ITS surface moved; this is the
 // number the integrated surface carries, and its golden is the one written by
 // the recipe over all four stages at once.
-const ProtocolVersion = 27
+// Version 28 carries the session absence policy on helper spawn (ADR-v7xk8mq8).
+const ProtocolVersion = 28
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

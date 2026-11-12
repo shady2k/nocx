@@ -313,17 +313,61 @@ describe('PaneManager', () => {
     expect(sshHooks.createBranchSource).toBe(createBranchSource)
   })
 
-  // ── closing detaches the session and activates a neighbour ──────────────
-  it('detaches the session when the active tab is closed', async () => {
+  // ── closing ends the session and activates a neighbour ──────────────
+  it('ends the session when the active tab is closed', async () => {
     const { client, manager } = await mountPaneManager()
 
     const session = client._sessions[0]
     manager.closeActivePane()
 
-    // Closing level-1 chrome drops only this attachment. The helper process
-    // remains in its inventory for a later reattach.
-    expect(session.detach).toHaveBeenCalled()
-    expect(session.close).not.toHaveBeenCalled()
+    expect(session.close).toHaveBeenCalledOnce()
+    expect(session.detach).not.toHaveBeenCalled()
+  })
+
+  it('closes an idle SSH tab immediately without confirmation or a remote acknowledgement', async () => {
+    const { client, manager, bar } = await mountPaneManager()
+    const content = manager.activeTerminalContent()!
+    vi.spyOn(content, 'liveWork').mockReturnValue({ command: null, host: 'user@host' })
+    client._sessions[0].close.mockImplementation(() => {})
+
+    manager.closeActivePane()
+
+    expect(showConfirmMock).not.toHaveBeenCalled()
+    expect(bar.querySelectorAll('.nocx-tab')).toHaveLength(0)
+    expect(client._sessions[0].close).toHaveBeenCalledOnce()
+  })
+
+  it('shows a failed termination instead of claiming the session ended', async () => {
+    const { client, manager } = await mountPaneManager()
+    client._sessions[0].close.mockImplementation((failed?: (error: unknown) => void) => {
+      failed?.(new Error('hangup failed'))
+    })
+    manager.closeActivePane()
+    expect(showToast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        level: 'danger',
+        message: expect.stringContaining('may still be running') as string,
+      }),
+    )
+  })
+
+  it('disposal releases the attachment without ending the session', async () => {
+    const { client, manager } = await mountPaneManager()
+    manager.activeTerminalContent()?.dispose()
+    expect(client._sessions[0].detach).toHaveBeenCalledOnce()
+    expect(client._sessions[0].close).not.toHaveBeenCalled()
+  })
+
+  it('asks before ending a running command and cancelling keeps it alive', async () => {
+    showConfirmMock.mockResolvedValue(false)
+    const { client, manager } = await mountPaneManager()
+    const content = manager.activeTerminalContent()!
+    vi.spyOn(content, 'liveWork').mockReturnValue({ command: 'sleep 100000', host: null })
+    manager.closeActivePane()
+    await vi.waitFor(() => expect(showConfirmMock).toHaveBeenCalled())
+    expect(String(showConfirmMock.mock.calls[0][0])).toContain('sleep 100000')
+    expect(client._sessions[0].close).not.toHaveBeenCalled()
+    expect(client._sessions[0].detach).not.toHaveBeenCalled()
   })
 
   it('activates a neighbour tab when the active tab is closed', async () => {
@@ -1024,7 +1068,7 @@ describe('PaneManager', () => {
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', metaKey: true, bubbles: true }))
 
     // The attachment dies with the chrome, while the helper session survives.
-    expect(session.detach).toHaveBeenCalled()
+    expect(session.close).toHaveBeenCalled()
     // The strip is never left empty, but the tab that fills it is the
     // backend's replacement and lands a round trip later.
     await vi.waitFor(() => {
@@ -1132,7 +1176,7 @@ describe('PaneManager', () => {
     tabButtons[0].dispatchEvent(new MouseEvent('mousedown', { button: 1, bubbles: true }))
 
     // Check it was closed
-    expect(session0.detach).toHaveBeenCalled()
+    expect(session0.close).toHaveBeenCalled()
     expect(bar.querySelectorAll('.nocx-tab').length).toBe(1)
   })
 
@@ -1159,9 +1203,7 @@ describe('PaneManager', () => {
     await vi.waitFor(() => {
       expect(client.notifyPaneClosed).toHaveBeenCalledWith(first)
     })
-    // The same close-tab gesture also drops only the local attachment; the
-    // layout close below is durable-container bookkeeping, not session end.
-    expect(client._sessions[0].detach).toHaveBeenCalled()
+    expect(client._sessions[0].close).toHaveBeenCalledOnce()
     expect(client.notifyPaneClosed).not.toHaveBeenCalledWith(second)
 
     // Close the remaining tab: its own id is announced, and the replacement
@@ -2716,7 +2758,7 @@ describe('closing a tab that opened other tabs', () => {
     clickClose(bar, 0)
 
     await vi.waitFor(() => {
-      expect(opened[0].detach).toHaveBeenCalled()
+      expect(opened[0].close).toHaveBeenCalled()
     })
     expect(opened[1].detach).not.toHaveBeenCalled()
     expect(bar.querySelectorAll('.nocx-tab').length).toBe(1)
@@ -2733,7 +2775,7 @@ describe('closing a tab that opened other tabs', () => {
     clickClose(bar, 1)
 
     await vi.waitFor(() => {
-      expect(opened[1].detach).toHaveBeenCalled()
+      expect(opened[1].close).toHaveBeenCalled()
     })
     expect(showConfirmMock).not.toHaveBeenCalled()
   })
@@ -2849,8 +2891,8 @@ describe('closing a workspace names what is live before anything dies (nocx-isop
 
     await manager.closeWorkspace('ansible-rollout', members)
 
-    expect(client._sessions[1].detach).toHaveBeenCalled()
-    expect(client._sessions[2].detach).toHaveBeenCalled()
+    expect(client._sessions[1].close).toHaveBeenCalled()
+    expect(client._sessions[2].close).toHaveBeenCalled()
     // The tab in another workspace is untouched — the close takes the
     // workspace's members and never a neighbour's.
     expect(client._sessions[0].detach).not.toHaveBeenCalled()

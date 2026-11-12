@@ -3,6 +3,7 @@ package client_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"syscall"
@@ -66,6 +67,28 @@ func hostedSessions(t *testing.T) *client.Client {
 // TestSpawnAndInventoryOverTheWireConformToTheirContracts is the check that a
 // payload built by the test cannot make: the real service, marshalling a real
 // PTY's real launch record, off the real socket.
+
+// TestSessionAbsenceSettingOverTheWireConformsToContract exercises explicit
+// zero as well as a configured limit through the real helper service.
+func TestSessionAbsenceSettingOverTheWireConformsToContract(t *testing.T) {
+	for _, days := range []int{0, 3, 7} {
+		t.Run(fmt.Sprint(days), func(t *testing.T) {
+			c := hostedSessions(t)
+			in := proto.SpawnParams{Cwd: "/", Cols: 80, Rows: 24, SessionIdleDays: &days}
+			if err := validateHelperJSON(loadHelperSchema(t, "session.spawn.params.schema.json"), mustMarshal(t, in)); err != nil {
+				t.Fatal(err)
+			}
+			var raw json.RawMessage
+			if err := c.Call(context.Background(), proto.ServiceSession, proto.OpSpawn, in, &raw); err != nil {
+				t.Fatal(err)
+			}
+			if err := validateHelperJSON(loadHelperSchema(t, "session.spawn.schema.json"), raw); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestSpawnAndInventoryOverTheWireConformToTheirContracts(t *testing.T) {
 	c := hostedSessions(t)
 

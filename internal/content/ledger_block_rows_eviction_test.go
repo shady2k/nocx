@@ -15,7 +15,23 @@ import (
 
 const evictionArtifact = "00000000-0000-7000-8000-00000000e001"
 
-func newBlockRowsEvictionStore(t *testing.T) (*sqliteContent, string) {
+// assertByteLenIsChunkTotal pins the invariant evictBlockRowsToCap's tail
+// threshold reads (nocx-4y82c.1.22): byte_len is the sum of the retained chunk
+// bodies, so "at least half the cap follows this chunk" is a statement about
+// bytes the artifact still holds. Drift between the two makes the walk protect
+// a tail that is not there.
+func assertByteLenIsChunkTotal(t *testing.T, art *Artifact) {
+	t.Helper()
+	var total int64
+	for _, chunk := range art.Chunks {
+		total += int64(len(chunk))
+	}
+	if art.ByteLen != total {
+		t.Fatalf("byte_len = %d, retained chunk bodies total %d: eviction accounting drifted from the bytes it keeps", art.ByteLen, total)
+	}
+}
+
+func newBlockRowsEvictionStore(t testing.TB) (*sqliteContent, string) {
 	t.Helper()
 	ctx, logger := logtest.New(t)
 	db, err := Open(ctx, Config{
@@ -136,6 +152,7 @@ func TestBlockRowsEvictionRetainsExactChunks(t *testing.T) {
 			if art.ByteLen != tc.bytes*unit {
 				t.Fatalf("byte_len = %d, want %d", art.ByteLen, tc.bytes*unit)
 			}
+			assertByteLenIsChunkTotal(t, art)
 			if tc.dropped > 0 && (art.Truncated == nil || *art.Truncated != TruncCap) {
 				t.Fatalf("truncation = %v, want cap", art.Truncated)
 			}
@@ -192,6 +209,11 @@ func TestBlockRowsAppendRollsBackEvictionFailures(t *testing.T) {
 			if _, err := s.CloseBlockRows(ctx, CloseBlockRows{EntryID: entry, ArtifactID: evictionArtifact}); err != nil {
 				t.Fatal(err)
 			}
+			kept, keepErr := s.Artifact(ctx, evictionArtifact)
+			if keepErr != nil {
+				t.Fatal(keepErr)
+			}
+			assertByteLenIsChunkTotal(t, kept)
 		})
 	}
 }
@@ -214,4 +236,5 @@ func TestBlockRowsEvictionCancelledTransaction(t *testing.T) {
 	if err != nil || art == nil || art.ByteLen != 0 || len(art.Chunks) != 0 {
 		t.Fatalf("cancelled transaction changed empty artifact: %+v, %v", art, err)
 	}
+	assertByteLenIsChunkTotal(t, art)
 }

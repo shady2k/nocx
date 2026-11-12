@@ -67,12 +67,73 @@ function paintedCellText(cell: ScreenSnapshot['rows'][number]['cells'][number]):
   return cell.hasText ? cell.grapheme : ' '
 }
 
+// Installed run geometry belongs to its DOM node. It cannot be re-derived
+// from the fit later: its bounded measurement cache may have evicted a verdict.
+const paintedRuns = new WeakMap<Node, GeometryRun<Style>>()
+
 export function paintRow(
   row: ScreenSnapshot['rows'][number],
   opts: PaintRowOptions,
+  previous?: HTMLDivElement,
 ): HTMLDivElement {
-  const el = document.createElement('div')
+  const el = previous ?? document.createElement('div')
   el.className = 'term-grid-row'
+  const runs = runsFor(row, opts.metric)
+  const oldNodes = Array.from(el.childNodes)
+  const oldRuns = oldNodes.map((node) => paintedRuns.get(node)!)
+  const defaultSpacing = opts.metric?.defaultSpacing ?? 0
+  let oldIndex = 0
+  let oldColumn = 0
+  let column = 0
+  let before = el.firstChild
+  for (const run of runs) {
+    while (oldIndex < oldRuns.length && oldColumn < column) {
+      oldColumn += oldRuns[oldIndex++].cols
+    }
+    const oldRun = oldRuns[oldIndex]
+    if (oldColumn === column && oldRun !== undefined && runEquals(oldRun, run)) {
+      const node = oldNodes[oldIndex]
+      if (node !== before) el.insertBefore(node, before)
+      before = node.nextSibling
+    } else {
+      // appendRun remains the only owner of markup and procedural geometry.
+      const fragment = document.createElement('div')
+      appendRun(fragment, run, defaultSpacing, opts)
+      const node = fragment.firstChild!
+      paintedRuns.set(node, run)
+      el.insertBefore(node, before)
+    }
+    column += run.cols
+  }
+  while (before !== null) {
+    const next = before.nextSibling
+    before.remove()
+    before = next
+  }
+  return el
+}
+
+function runEquals(a: GeometryRun<Style>, b: GeometryRun<Style>): boolean {
+  return (
+    a.chars === b.chars &&
+    a.cols === b.cols &&
+    a.spacing === b.spacing &&
+    styleEquals(a.attrs, b.attrs) &&
+    a.box?.cols === b.box?.cols &&
+    a.box?.fit === b.box?.fit &&
+    (a.spans === undefined
+      ? b.spans === undefined
+      : b.spans !== undefined &&
+        a.spans.length === b.spans.length &&
+        a.spans.every((span, i) => span === b.spans![i]))
+  )
+}
+
+/** Only a run at the same column with the same ink and geometry can survive. */
+function runsFor(
+  row: ScreenSnapshot['rows'][number],
+  metric: RunMetric | null,
+): GeometryRun<Style>[] {
   // The walk's cells, in the owner's shape: a cell without text is a blank
   // spelled as a space — the measurer is never asked about one. `cols` is
   // the model's declared span, which is the wire's own arithmetic; nothing
@@ -87,18 +148,13 @@ export function paintRow(
     if (chars === null) continue
     cells.push({ chars, cols: cell.span, attrs: cell.style, blank: !cell.hasText })
   }
-  const runs = runsOf(
+  return runsOf(
     cells,
     styleEquals,
     faceOf,
-    opts.metric ?? undefined,
-    proceduralOf(opts.metric) ? isProceduralInk : undefined,
+    metric ?? undefined,
+    proceduralOf(metric) ? isProceduralInk : undefined,
   )
-  const defaultSpacing = opts.metric?.defaultSpacing ?? 0
-  for (const run of runs) {
-    appendRun(el, run, defaultSpacing, opts)
-  }
-  return el
 }
 
 /** Procedural ink is paintable when the metric carries both halves of the

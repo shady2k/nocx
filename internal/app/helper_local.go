@@ -351,6 +351,7 @@ type localHelperOpener struct {
 	// rowBuffers carries the helper's row buffer setting to each spawn
 	// (nocx-2v80t.3.36). Nil sends zero, the helper's default.
 	rowBuffers *rowBuffers
+	lifetime   *sessionLifetimeSetting
 	// scrollback is the person's scrollback budget (nocx-zg3k3.10.1): what a
 	// pane this opener creates is born with, and what a change fans out to
 	// every live session through watchScrollback.
@@ -775,7 +776,8 @@ func (o *localHelperOpener) openHostedOnce(ctx context.Context, cfg session.Conf
 				IdempotencyKey: claim,
 				// The person's row buffer setting, as it reads now: a
 				// changed value applies to the next pane (nocx-2v80t.3.36).
-				RowBufferBytes: o.rowBuffers.helperBytes(),
+				RowBufferBytes:  o.rowBuffers.helperBytes(),
+				SessionIdleDays: o.lifetime.daysPtr(),
 				// The person's scrollback budget, as it reads now
 				// (nocx-zg3k3.10.1): the budget a pane is born with, while a
 				// change reaches the panes already running through the watch.
@@ -1141,7 +1143,8 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 	}
 	params := proto.SSHSpawnParams{
 		// The person's row buffer setting, as it reads now (nocx-2v80t.3.36).
-		RowBufferBytes: o.rowBuffers.helperBytes(),
+		RowBufferBytes:  o.rowBuffers.helperBytes(),
+		SessionIdleDays: o.lifetime.daysPtr(),
 		// The person's scrollback budget, as it reads now (nocx-zg3k3.10.1):
 		// the budget a pane is born with, while a change reaches the panes
 		// already running through the watch.

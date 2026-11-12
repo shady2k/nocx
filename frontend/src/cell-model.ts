@@ -59,6 +59,9 @@ import type {
   SessionFrame,
   Style as WireStyle,
 } from './generated/session.frame'
+import { ownRow, sameRow } from './compact-row'
+
+type WireRow = SessionFrame['rows'][number]
 
 /** The column footprints a committed frame carries (emulator.Width minus
  *  the 0 a committed frame does not carry — refused at intake). The
@@ -273,26 +276,49 @@ export function rowColumnsOf(wireRow: SessionFrame['rows'][number]): number {
   return 'malformed' in positions ? 0 : explicitColumnsOf(positions)
 }
 
+function sameRowSpace(frame: SessionFrame, previous: ScreenSnapshot): boolean {
+  const a = frame.geometry
+  const b = previous.geometry
+  return (
+    a.cols === b.cols &&
+    a.rows === b.rows &&
+    a.cellWidthPx === b.cellWidthPx &&
+    a.cellHeightPx === b.cellHeightPx &&
+    a.revision === b.revision &&
+    frame.state?.bufferKind === previous.state.bufferKind &&
+    frame.state?.bufferInstance === previous.state.bufferInstance &&
+    frame.state?.baseRow === previous.state.baseRow
+  )
+}
+
 /** Validate intake before building cells, retaining each row's positions.
  *  Reject malformed shapes (a rows array that is not geometry.rows long, a
  *  row whose explicit content spans more columns than geometry.cols, a
  *  mark that claims more codepoints than the text has left or names a
  *  position twice, a width outside {1, 2, 4}, present runs whose lengths
- *  do not partition the row's own explicit width). A refusal installs nothing;
- *  successful positions live only for this apply. */
+ *  do not partition the row's own explicit width). A refusal installs nothing.
+ *  Existing rows certify equality with an already validated row in the same
+ *  grid position and buffer/geometry; changed positions live only for this apply. */
 function validateFrame(
   frame: SessionFrame,
-  currentRevision: number | null,
-): RowPositions[] | FrameRefusal {
+  previous: ScreenSnapshot | null,
+  previousRows: readonly WireRow[],
+): (RowPositions | ModelRow)[] | FrameRefusal {
+  const currentRevision = previous?.revision ?? null
   if (currentRevision !== null && frame.revision <= currentRevision) {
     return { reason: 'stale-revision', revision: frame.revision, current: currentRevision }
   }
   if (frame.rows.length !== frame.geometry.rows) {
     return { reason: 'malformed-geometry', detail: 'row-count' }
   }
-  const rows: RowPositions[] = []
+  const reusable = previous !== null && sameRowSpace(frame, previous)
+  const rows: (RowPositions | ModelRow)[] = []
   for (let r = 0; r < frame.rows.length; r++) {
     const wireRow = frame.rows[r]
+    if (previous !== null && reusable && sameRow(wireRow, previousRows[r])) {
+      rows.push(previous.rows[r])
+      continue
+    }
     const positions = positionsOf(wireRow)
     if ('malformed' in positions) {
       return { reason: 'malformed-row', row: r, detail: 'marks' }
@@ -402,6 +428,7 @@ function buildRow(
 
 export function createCellModel(): CellModel {
   let installed: ScreenSnapshot | null = null
+  let comparisonRows: readonly WireRow[] = []
 
   return {
     current(): ScreenSnapshot | null {
@@ -409,20 +436,30 @@ export function createCellModel(): CellModel {
     },
 
     apply(frame: SessionFrame): ApplyResult {
-      const positions = validateFrame(frame, installed?.revision ?? null)
+      const positions = validateFrame(frame, installed, comparisonRows)
       if (!Array.isArray(positions)) {
         return { ok: false, refusal: positions }
       }
-      // Decode builds every fact fresh from the frame's strings and
-      // numbers — there is nothing left to alias, so freezing the result
-      // (rather than the frame) is what protects an installed revision
-      // from a caller mutating the frame object afterward.
+      // All rows and frame state have passed validation before either the
+      // snapshot or its comparison facts can advance. Shared rows are already
+      // frozen; rebuilt rows and comparison facts never alias wire arrays.
       const geometry = Object.freeze({ ...frame.geometry })
       const cursor = Object.freeze({ ...frame.cursor })
-      const state: FrameState = Object.freeze({ ...frame.state })
+      const state: FrameState = Object.freeze({
+        ...frame.state,
+        cwd: frame.state.cwd === null ? null : Object.freeze({ ...frame.state.cwd }),
+      })
       const rows: ModelRow[] = []
+      const nextComparisonRows: WireRow[] = []
       for (let r = 0; r < frame.rows.length; r++) {
-        rows.push(buildRow(r, frame.rows[r], geometry.cols, positions[r]))
+        const rowPositions = positions[r]
+        if ('cells' in rowPositions) {
+          rows.push(rowPositions)
+          nextComparisonRows.push(comparisonRows[r])
+        } else {
+          rows.push(buildRow(r, frame.rows[r], geometry.cols, rowPositions))
+          nextComparisonRows.push(ownRow(frame.rows[r]))
+        }
       }
       Object.freeze(rows)
       const snapshot: ScreenSnapshot = Object.freeze({
@@ -439,6 +476,7 @@ export function createCellModel(): CellModel {
         },
       })
       installed = snapshot
+      comparisonRows = nextComparisonRows
       return { ok: true, snapshot }
     },
   }

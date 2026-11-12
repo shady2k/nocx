@@ -48,6 +48,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/emulator"
 	"github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
@@ -461,6 +462,69 @@ func typeCommand(t *testing.T, c *client.Client, id proto.HostSessionID, text st
 		}
 	}
 	t.Fatal("the command never reached the shell: the write path refused every attempt")
+}
+
+func TestBoundsConfirmationsCoalesceWhileARequestIsInFlight(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+	attempt := startsACommand(t, e, pub, lane, h, 2, "eight rows")
+	rec := &boundsRecorder{sid: session.ID(sid), ws: e.ws}
+	entered, release, latest := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var unblock sync.Once
+	var marks []uint64
+	rec.startConfirmations(func(_ context.Context, mark uint64) error {
+		marks = append(marks, mark)
+		if len(marks) == 1 {
+			close(entered)
+			<-release
+		}
+		if mark == 8 {
+			close(latest)
+		}
+		return nil
+	})
+	t.Cleanup(func() {
+		unblock.Do(func() { close(release) })
+		rec.stopConfirmations()
+	})
+	await := func(ch <-chan struct{}, what string) {
+		t.Helper()
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("waiting for %s", what)
+		}
+	}
+	rec.onRows(client.OutputRows{FromRow: 0, Rows: []emulator.Row{aStreamRow("first")}})
+	await(entered, "the first confirmation to block")
+	// The reader stores the rest while its first confirmation is in flight.
+	for i := uint64(1); i < 8; i++ {
+		rec.onRows(client.OutputRows{FromRow: i, Rows: []emulator.Row{aStreamRow("next")}})
+	}
+	unblock.Do(func() { close(release) })
+	await(latest, "the resumed confirmer to acknowledge the stored prefix")
+	rec.stopConfirmations()
+	if len(marks) != 2 || marks[0] != 1 || marks[1] != 8 {
+		t.Fatalf("confirmation RPCs = %v, want [1 8]: superseded marks must coalesce", marks)
+	}
+	nonce, _ := fenceNonce(1)
+	if err := pub.Ingest(context.Background(), "T", lifecycleEnv(lane, h, 3,
+		lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, nonce))); err != nil {
+		t.Fatalf("ingest completion: %v", err)
+	}
+	// This fixture-level gate models a producer resuming after acknowledgement;
+	// the real-helper geometry test below separately proves wire delivery.
+	rec.onEnd(client.IntervalEnd{Nonce: sessionruntime.FenceNonce(nonce), EndRow: 8})
+	end := waitForEnds(t, rec, 1)
+	if end.EndRow != 8 || end.Nonce != sessionruntime.FenceNonce(nonce) {
+		t.Fatalf("end after confirmations resumed = %+v", end)
+	}
+	if got := storedLines(waitForSealed(t, db, attempt)); got != 8 {
+		t.Fatalf("sealed rows = %d, want 8", got)
+	}
+	if rec.sawIncomplete || rec.sawLoss != 0 {
+		t.Fatalf("incomplete=%v lost=%d", rec.sawIncomplete, rec.sawLoss)
+	}
 }
 
 func TestTheThreeOutputBoundsHoldTogetherAtRealGeometry(t *testing.T) {

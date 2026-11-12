@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os/exec"
 	"time"
 
 	"github.com/shady2k/nocx/internal/helper/proto"
@@ -187,18 +186,12 @@ func Ensure(ctx context.Context, dir string, gen, exeGen proto.GenerationID, exe
 // Ensure answers it by making the start again (see startAttempts). Every other
 // outcome is a connection, or an error the caller keeps.
 func startAndAwait(ctx context.Context, dir string, gen proto.GenerationID, exe string) (conn net.Conn, yielded bool, err error) {
-	cmd := exec.Command(exe, ServeCommand) // #nosec G204 — exe is os.Executable(), never a caller's string
-	// Detached from this process's streams and its terminal: an ssh exec lane
-	// does not return while a child holds its stdout, so a helper that
-	// inherited it would keep the lane open for as long as it serves — which
-	// is the whole point of it, forever.
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
-	cmd.SysProcAttr = detachAttr()
-	if err := cmd.Start(); err != nil {
+	wait, err := startHelper(exe)
+	if err != nil {
 		return nil, false, fmt.Errorf("endpoint: start a helper for %s: %w", short(gen), err)
 	}
 	exited := make(chan error, 1)
-	go func() { exited <- cmd.Wait() }()
+	go func() { exited <- wait() }()
 
 	timer := time.NewTimer(0)
 	defer timer.Stop()

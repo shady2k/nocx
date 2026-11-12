@@ -231,6 +231,8 @@ was left alone.
 
 | 5yepvh9j | 2026-11-12 | [Only an unchosen startup panel receives the default](5yepvh9j-only-a-new-startup-tab-receives-the-default-panel.md) | Accepted (`nocx-peg8e.1.2`; supersedes ADR-x7cvh8e1’s startup-seeding exception only) |
 
+| qy0pf1va | 2026-11-12 | [The Darwin helper owns its responsible code from spawn](qy0pf1va-the-darwin-helper-owns-its-responsible-code-from-spawn.md) | Accepted (owner direction; `nocx-vh2hr.1.26`; refines ADR-0104) |
+
 ## Adding one
 
 1. `node .githooks/adr-identifier.mjs` prints an identifier.

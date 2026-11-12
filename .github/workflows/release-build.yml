@@ -284,15 +284,11 @@ jobs:
 
   # THE LOCAL DARWIN HELPERS CARRY A STABLE CODE IDENTITY (nocx-vh2hr.1.7).
   #
-  # macOS attributes a pane shell's local-network access to its RESPONSIBLE
-  # code. That is the app while the app exists; after an in-place replacement
-  # the old helper outlives it (ADR-0104 keeps helpers and their shells alive),
-  # is reparented to launchd, and becomes the nearest surviving process. An
-  # ad-hoc helper takes its identifier from the output file name — "a.out" in
-  # the owner's evidence — so every build is a different program to Local
-  # Network Privacy and no grant can survive. The owner's decision
-  # (2026-11-02) is a stable signature: the app's certificate, a fixed
-  # identifier, no responsibility-disclaim API.
+  # Signing alone does not change responsible code. Owner procinfo evidence
+  # (2026-11-12) retained the replaced app path even after reparenting to PID 1.
+  # ADR-qy0pf1va now disclaims the helper spawn; the helper owns its responsible
+  # path and carries its own embedded Local Network usage description. Keep
+  # the app certificate and fixed dev.nocx.helper identifier across builds.
   #
   # SIGNING HAS TO HAPPEN ON macOS, and the helpers' one origin is the Linux
   # `helpers` job, so this job is the transformation between them: it takes the
@@ -639,13 +635,16 @@ jobs:
           # It is built here rather than fetched or generated later because
           # of the codesign line at the end of this step — see below.
           #
-          # CGO_ENABLED=0 and no wails tags: cmd/nocx-server has no window.
+          # cgo supplies libSystem for disclaimed helper spawn (ADR-qy0pf1va).
+          # No Wails tags: cmd/nocx-server still has no window.
           # It still needs both slices, because the app it is spawned by is
           # universal and a user on either architecture runs the same bundle.
-          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 \
+          CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 \
+            CGO_CFLAGS="-arch x86_64" CGO_LDFLAGS="-arch x86_64" \
             go build -tags release -ldflags "$LDFLAGS" \
             -o build/bin/darwin-amd64/nocx-server ./cmd/nocx-server
-          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 \
+          CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
+            CGO_CFLAGS="-arch arm64" CGO_LDFLAGS="-arch arm64" \
             go build -tags release -ldflags "$LDFLAGS" \
             -o build/bin/darwin-arm64/nocx-server ./cmd/nocx-server
           mkdir -p build/bin/nocx.app/Contents/MacOS build/bin/nocx.app/Contents/Resources
@@ -969,7 +968,7 @@ jobs:
           # certificate is that ours is not.
           LD="-X github.com/shady2k/nocx/internal/version.Version=${VERSION}"
           for stamp in A B; do
-            CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -tags release \
+            CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -tags release \
               -ldflags "$LD -X github.com/shady2k/nocx/internal/version.Date=stamp-$stamp" \
               -o "$RUNNER_TEMP/srv-$stamp" ./cmd/nocx-server
             codesign --force --sign "$SIGN_IDENTITY" -i com.nocx.server "$RUNNER_TEMP/srv-$stamp"

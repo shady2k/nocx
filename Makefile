@@ -352,9 +352,10 @@ build: build-server
 # SiblingPath is that fact stated once, so a local `make build` has to
 # reproduce the layout or the launcher cannot be exercised outside a release.
 #
-# CGO_ENABLED=0 and no wails tags: the coordinator has no window, no GTK and
-# no WebKit (cmd/nocx-server), and building it against them would drag the
-# desktop shell's dependency surface into a headless daemon for nothing.
+# No wails tags: the coordinator has no window, GTK or WebKit. Darwin needs
+# libSystem through cgo for the helper's disclaimed posix_spawn; Linux keeps
+# the pure-Go coordinator. cgo does not add a dependency on the desktop shell.
+SERVER_CGO := $(if $(filter darwin,$(HOST_GOOS)),1,0)
 # Same -ldflags as the app, because a pair that cannot report one version is
 # the defect the update health check exists to catch.
 #
@@ -364,7 +365,7 @@ build: build-server
 # serves no pane at all. The gate is what makes that a build failure here
 # rather than a refusal at the first window.
 build-server: helpers require-local-helper
-	CGO_ENABLED=0 $(GO) build -ldflags "$(LDFLAGS)" -o build/bin/nocx-server ./cmd/nocx-server
+	CGO_ENABLED=$(SERVER_CGO) $(GO) build -ldflags "$(LDFLAGS)" -o build/bin/nocx-server ./cmd/nocx-server
 
 # The shipped artefact. `-tags release` is what selects the real profile
 # directory, and it is deliberately the side that needs the flag: a build made
@@ -387,7 +388,7 @@ build-server: helpers require-local-helper
 build-release: helpers require-local-helper
 	$(FRONTEND_BUILD)
 	$(GO) build -tags "$(strip release production $(WAILS_PLATFORM_TAGS))" -ldflags "$(LDFLAGS)" -o build/bin/nocx .
-	CGO_ENABLED=0 $(GO) build -tags release -ldflags "$(LDFLAGS)" -o build/bin/nocx-server ./cmd/nocx-server
+	CGO_ENABLED=$(SERVER_CGO) $(GO) build -tags release -ldflags "$(LDFLAGS)" -o build/bin/nocx-server ./cmd/nocx-server
 
 # A local dev loop: build the embedded frontend and run the app with the dev
 # profile. `wails dev` used to provide a hot-reloading asset server; v3 has
@@ -578,7 +579,7 @@ ci-full: ci-os-split ci-local-ssh-split ci ci-mac ci-backend ci-linux ci-fronten
 # table which device a path belongs to, and that question has one answer per
 # platform (mounts_darwin.go / mounts_linux.go). A provider that can say
 # neither still gets a domain of its own, but the reading is the OS's.
-OS_PKG_DIRS := cmd/e2e-sshd internal/apicoll internal/app internal/contentkey \
+OS_PKG_DIRS := cmd/e2e-sshd cmd/nocx-helper internal/apicoll internal/app internal/contentkey \
                internal/coordinator internal/desktopidentity \
                internal/filesystem/local internal/git \
                internal/helper/endpoint internal/helper/fishchannel \

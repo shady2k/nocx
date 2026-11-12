@@ -162,29 +162,33 @@ async function expectOneBlockAcrossRepaints(page: Page): Promise<void> {
   })
 
   await startSampling(page)
-  await expect
-    .poll(
-      async () => {
-        const frames = await readSamples(page)
-        const split = framesSplitting(frames)
-        // The invariant is checked on EVERY sample, not only the last one: a
-        // second block that appeared and went again between two driver polls
-        // is still a split.
-        if (split.length > 0) {
-          throw new Error(`the block split: ${JSON.stringify(split.slice(0, 3))}`)
-        }
-        const clocks = new Set(frames.map((f) => f.clock).filter((c) => c !== null))
-        return clocks.size
-      },
-      { timeout: THREE_REFRESHES_MS, intervals: [100] },
-    )
-    .toBeGreaterThanOrEqual(3)
+  try {
+    await expect
+      .poll(
+        async () => {
+          const frames = await readSamples(page)
+          const split = framesSplitting(frames)
+          // The invariant is checked on EVERY sample, not only the last one: a
+          // second block that appeared and went again between two driver polls
+          // is still a split.
+          if (split.length > 0) {
+            throw new Error(`the block split: ${JSON.stringify(split.slice(0, 3))}`)
+          }
+          const clocks = new Set(frames.map((f) => f.clock).filter((c) => c !== null))
+          return clocks.size
+        },
+        { timeout: THREE_REFRESHES_MS, intervals: [100] },
+      )
+      .toBeGreaterThanOrEqual(3)
+  } finally {
+    const samples = await stopSampling(page)
+    await test.info().attach('top-repaint-samples', {
+      body: JSON.stringify(samples),
+      contentType: 'application/json',
+    })
+  }
 
-  const frames = await stopSampling(page)
-  await test.info().attach('top-repaint-samples', {
-    body: JSON.stringify(frames),
-    contentType: 'application/json',
-  })
+  const frames = await readSamples(page)
   const said = `split frames: ${JSON.stringify(framesSplitting(frames).slice(0, 3))}`
   expect(frames.length, said).toBeGreaterThan(0)
   expect(framesSplitting(frames), said).toEqual([])
@@ -257,6 +261,13 @@ for (const desiredMode of ['script', 'helper'] as const) {
         timeout: 30_000,
       })
       await page.keyboard.press('Enter')
+      if (desiredMode === 'helper') {
+        const helperAsk = page.getByRole('dialog').filter({ hasText: 'Choose how nocx connects' })
+        await expect(helperAsk).toBeVisible({ timeout: 30_000 })
+        await helperAsk.getByRole('radio', { name: 'Helper' }).click()
+        await helperAsk.getByRole('button', { name: 'Continue' }).click()
+        await expect(helperAsk).not.toBeVisible()
+      }
       await promptReady(page)
       await expectOneBlockAcrossRepaints(page)
       // The pane really is the far host's: the block's where-line names the

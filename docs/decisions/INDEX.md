@@ -218,11 +218,12 @@ was left alone.
 | x7cvh8e1 | 2026-11-09 | [A tab's panel belongs to the tab, and the UI-state document keeps only the width](x7cvh8e1-a-tabs-panel-belongs-to-the-tab-and-the-document-keeps-the-width.md) | Accepted (2026-11-09, with `nocx-ouru5.1.18`; supersedes the `sidebar.collapsed`/`sidebar.activeViewId` half of ADR-0048 — a tab's panel view and collapse live on its layout row — and leaves that record's store, its settings/UI-state line and its §4 repair rule standing) |
 | 92zzg2y2 | 2026-11-10 | [One gutter for everything the pane shows](92zzg2y2-one-gutter-for-everything-the-pane-shows.md) | Accepted (owner decision, 2026-11-10, `nocx-4y82c.1.14`; supersedes ADR-2yzsq8mk's 24 px gutter, full-width alternate screen and one-row bottom margin, ADR-v26axn1t §1's alternate-screen exception, and ADR-3kqrem7v's resize-at-a-switch permission) |
 
-| y45sp41c | 2026-11-10 | [A stored-row read is a page with a slot, and the renderer reads what is on screen first](y45sp41c-a-stored-row-read-is-a-page-with-a-slot.md) | Accepted (owner decision, 2026-11-10, `nocx-large-block-read-response-queue-overflow-t7xhe`; refines ADR-8eej3e66 §7 for one internal retry — the refusal never reaches a person); refined by ADR-ywzcpbqe |
+| y45sp41c | 2026-11-10 | [A stored-row read is a page with a slot, and the renderer reads what is on screen first](y45sp41c-a-stored-row-read-is-a-page-with-a-slot.md) | Accepted (owner decision, 2026-11-10, `nocx-large-block-read-response-queue-overflow-t7xhe`; refines ADR-8eej3e66 §7 for one internal retry — the refusal never reaches a person); refined by ADR-ywzcpbqe and ADR-40d9xt5n |
 
-| ywzcpbqe | 2026-11-10 | [A block's rows are a set of ranges, and its height is its geometry](ywzcpbqe-a-blocks-rows-are-a-set-of-ranges.md) | Accepted (owner review of PR #789, 2026-11-10, `nocx-4y82c.1.18`; refines ADR-y45sp41c decisions 1 and 3) |
+| ywzcpbqe | 2026-11-10 | [A block's rows are a set of ranges, and its height is its geometry](ywzcpbqe-a-blocks-rows-are-a-set-of-ranges.md) | Accepted (owner review of PR #789, 2026-11-10, `nocx-4y82c.1.18`; refines ADR-y45sp41c decisions 1 and 3); refined by ADR-40d9xt5n |
 
 | 8rt54tx2 | 2026-11-10 | [The sent witness crosses every responder, and a running block keeps its body](8rt54tx2-the-sent-witness-crosses-every-responder.md) | Accepted (owner review of PR #789, round 3, 2026-11-10, `nocx-4y82c.1.18`; refines ADR-y45sp41c and ADR-ywzcpbqe) |
+| 40d9xt5n | 2026-11-12 | [A block's cached rows follow the retention they were accepted under, and one entry has one read owner](40d9xt5n-a-blocks-cached-rows-follow-the-retention-they-were-accepted-under.md) | Accepted (implementation of `nocx-4y82c.1.24`, 2026-11-12; refines ADR-y45sp41c §3 and ADR-ywzcpbqe) |
 
 ## Adding one
 

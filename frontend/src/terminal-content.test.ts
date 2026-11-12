@@ -7223,6 +7223,363 @@ describe('the projections consume the kernel through the composition root (ADR-0
     }
   })
 
+  describe('page and refresh reads share the current pane (nocx-4y82c.1.24)', () => {
+    const entryId = 'ordering-command'
+    const artifactId = 'ordering-artifact'
+    type Snapshot = {
+      label: string
+      endRow: number
+      retainedRanges: Array<{ from: number; to: number }>
+    }
+    const original: Snapshot = {
+      label: 'before-cap',
+      endRow: 1000,
+      retainedRanges: [{ from: 0, to: 1000 }],
+    }
+    const capped: Snapshot = {
+      label: 'after-cap',
+      endRow: 1001,
+      retainedRanges: [
+        { from: 0, to: 10 },
+        { from: 900, to: 1001 },
+      ],
+    }
+    const geometry = (snapshot: Snapshot) => ({
+      firstRow: snapshot.retainedRanges[0].from,
+      lastRow: snapshot.endRow - 1,
+      endRow: snapshot.endRow,
+      rowCount: snapshot.retainedRanges.reduce((count, range) => count + range.to - range.from, 0),
+      retainedRanges: snapshot.retainedRanges,
+    })
+    const line = (snapshot: Snapshot, from: number): LedgerBlockRowsLine => ({
+      from,
+      row: wireRowOf([[`${snapshot.label}-${from}`, 1, true]] as CellSpec[]),
+    })
+    const stored = (snapshot: Snapshot, indices: number[]): StoredBlockRows => ({
+      ...geometry(snapshot),
+      lines: indices.map((from) => line(snapshot, from)),
+      artifactVersion: artifactId,
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+      sealed: false,
+    })
+
+    async function mountReadOrdering(holdEveryRead = false) {
+      const client = makeClient()
+      let durable = original
+      let durableArtifactId = artifactId
+      let release: (() => void) | undefined
+      let holdNext = true
+      client.call.mockImplementation((method: string, raw?: unknown) => {
+        if (method === 'ledger.get') {
+          return Promise.resolve({
+            entry: {},
+            edges: [],
+            artifacts: [
+              {
+                id: durableArtifactId,
+                mediaType: 'application/x-nocx-rows',
+                state: 'open',
+                payload: geometry(durable),
+              },
+            ],
+          })
+        }
+        if (method !== 'ledger.artifact') {
+          return Promise.reject(new Error('no store wired (fake)'))
+        }
+        // Capture the store at request time, not when the delayed reply is
+        // released. A later cap cannot retroactively change this old reply.
+        const snapshot = durable
+        const params = raw as { fromRow?: number; rowLimit?: number }
+        const from = params.fromRow ?? 0
+        const to = from + (params.rowLimit ?? snapshot.endRow)
+        const indices = snapshot.retainedRanges.flatMap((range) => {
+          const start = Math.max(from, range.from)
+          const end = Math.min(to, range.to)
+          return Array.from({ length: Math.max(0, end - start) }, (_, i) => start + i)
+        })
+        const body = indices.map((index) => JSON.stringify(line(snapshot, index))).join('\n')
+        const response = {
+          id: durableArtifactId,
+          mediaType: 'application/x-nocx-rows',
+          body,
+          truncated: null,
+          byteLen: body.length,
+          ...geometry(snapshot),
+          rangeStart: from,
+          rangeCount: indices.length,
+          hasMoreBefore: from > 0,
+          hasMoreAfter: to < snapshot.endRow,
+        }
+        if (!holdNext && !holdEveryRead) return Promise.resolve(response)
+        holdNext = false
+        return new Promise((resolve) => {
+          release = () => resolve(response)
+        })
+      })
+      const mounted = await mountTerminal(makeClipboard(), { attachToDocument: true }, client)
+      const { content } = mounted
+      content.setVisible(true)
+      // Let the show-triggered demand run before installing the fixture. The
+      // tests below choose the first request with a scroll or a block event.
+      await flushDisplayFrame()
+      const sb = scrollbackFor(content)
+      vi.spyOn(sb.scrollbackArea, 'getBoundingClientRect').mockReturnValue(
+        new DOMRect(0, 0, 800, 180),
+      )
+      // The established restore seam installs fixture data; all read demand
+      // below goes through public scroll, block.grew and reconnect events.
+      const terminal = content as unknown as {
+        _registerRestoredBlock(id: string, el: HTMLElement, rows: StoredBlockRows): void
+      }
+      const install = (rows: StoredBlockRows): HTMLElement => {
+        const block = document.createElement('article')
+        block.className = 'cmd-block'
+        block.dataset.entryId = entryId
+        vi.spyOn(block, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 800, 18000))
+        sb.restorePast([block])
+        terminal._registerRestoredBlock(entryId, block, rows)
+        sb.blockManager.paintStoredRows(block, rows)
+        return block
+      }
+      const block = install(stored(original, [999]))
+      const scroll = async (): Promise<void> => {
+        sb.scrollbackArea.dispatchEvent(new Event('scroll'))
+        await flushDisplayFrame()
+      }
+      const grow = (): void => {
+        const handler = client.dispatcher.subscribe.mock.calls.find(
+          ([method]) => method === 'block.grew',
+        )?.[1] as ((params: unknown) => void) | undefined
+        if (!handler) throw new Error('the pane did not subscribe to block.grew')
+        handler({ entryId })
+      }
+      return {
+        ...mounted,
+        client,
+        block,
+        install,
+        scroll,
+        grow,
+        setDurable: (snapshot: Snapshot, version = artifactId): void => {
+          durable = snapshot
+          durableArtifactId = version
+        },
+        waitForRead: async (): Promise<void> => {
+          await vi.waitFor(() => expect(release).toBeDefined())
+        },
+        release: (): void => {
+          const finish = release
+          release = undefined
+          finish?.()
+        },
+      }
+    }
+
+    it('a page requested before a cap refresh cannot restore evicted rows or older geometry', async () => {
+      const pane = await mountReadOrdering()
+      try {
+        await pane.scroll()
+        await pane.waitForRead()
+        pane.setDurable(capped)
+        pane.grow()
+        // Both a serialized refresh and an already-started refresh may settle
+        // safely; do not require the newer response to overtake the old page.
+        await flushDisplayFrame()
+        pane.release()
+        await vi.waitFor(() => expect(pane.block.textContent).toContain('after-cap-1000'))
+        await flushDisplayFrame()
+
+        const selected = storedBlockRowsForSelection(pane.block, artifactId)
+        expect(selected?.retainedRanges).toEqual([
+          { from: 0, to: 10 },
+          { from: 900, to: 1001 },
+        ])
+        expect(selected?.endRow).toBe(1001)
+        expect(selected?.rowCount).toBe(111)
+        expect(selected?.lines.map((row) => row.from)).toEqual([
+          ...Array.from({ length: 10 }, (_, i) => i),
+          ...Array.from({ length: 101 }, (_, i) => 900 + i),
+        ])
+        expect(pane.block.textContent).not.toContain('before-cap-')
+        expect(pane.block.querySelectorAll('.term-grid-row')).toHaveLength(111)
+      } finally {
+        pane.release()
+        pane.teardown()
+      }
+    })
+
+    it('page demand during a refresh eventually paints unloaded retained viewport rows without another scroll', async () => {
+      const pane = await mountReadOrdering()
+      try {
+        pane.setDurable({
+          label: 'grown',
+          endRow: 1001,
+          retainedRanges: [{ from: 0, to: 1001 }],
+        })
+        pane.grow()
+        await pane.waitForRead()
+        // The refresh asks for the new tail. The person is reading the head,
+        // whose page demand must survive that outstanding tail read.
+        await pane.scroll()
+        pane.release()
+        await vi.waitFor(() => {
+          expect(pane.block.textContent).toContain('grown-0')
+          expect(pane.block.textContent).toContain('grown-1000')
+        })
+        const selected = storedBlockRowsForSelection(pane.block, artifactId)
+        expect(selected?.lines.some((row) => row.from === 0)).toBe(true)
+        expect(selected?.lines.some((row) => row.from === 1000)).toBe(true)
+        expect(selected?.endRow).toBe(1001)
+        expect(selected?.retainedRanges).toEqual([{ from: 0, to: 1001 }])
+      } finally {
+        pane.release()
+        pane.teardown()
+      }
+    })
+
+    it('loads retained viewport rows between sustained growth reads without starving the tail', async () => {
+      const pane = await mountReadOrdering(true)
+      const advance = (endRow: number): void => {
+        pane.setDurable({
+          label: 'growing',
+          endRow,
+          retainedRanges: [{ from: 0, to: endRow }],
+        })
+        pane.grow()
+      }
+      try {
+        advance(1001)
+        await pane.waitForRead()
+        await pane.scroll()
+        advance(1002)
+        pane.release()
+        await pane.waitForRead()
+        // Another growth arrives before every reply. The pending head page
+        // must get a turn rather than wait for output to become quiet.
+        advance(1003)
+        pane.release()
+        await pane.waitForRead()
+        await vi.waitFor(() => expect(pane.block.textContent).toContain('growing-0'))
+        // Serving that page must preserve the queued growth as well.
+        pane.release()
+        await vi.waitFor(() => expect(pane.block.textContent).toContain('growing-1002'))
+        expect(storedBlockRowsForSelection(pane.block, artifactId)?.endRow).toBe(1003)
+      } finally {
+        pane.teardown()
+        pane.release()
+      }
+    })
+
+    it('reconnect replaces cached rows when the artifact changes without changing its geometry', async () => {
+      const pane = await mountReadOrdering()
+      try {
+        const small: Snapshot = {
+          label: 'cached-artifact',
+          endRow: 1,
+          retainedRanges: [{ from: 0, to: 1 }],
+        }
+        pane.block.remove()
+        const block = pane.install(stored(small, [0]))
+        expect(block.textContent).toContain('cached-artifact-0')
+        // Every retained row is already loaded, so scrolling cannot discover
+        // this replacement. Reconnect must compare the artifact identity too.
+        pane.setDurable({ ...small, label: 'replacement-artifact' }, 'replacement-artifact')
+        pane.client._fireReconnect()
+        await pane.waitForRead()
+        pane.release()
+        await vi.waitFor(() => expect(block.textContent).toContain('replacement-artifact-0'))
+
+        expect(block.textContent).not.toContain('cached-artifact-0')
+        expect(storedBlockRowsForSelection(block, artifactId)).toBeNull()
+        const selected = storedBlockRowsForSelection(block, 'replacement-artifact')
+        expect(selected?.artifactVersion).toBe('replacement-artifact')
+        expect(selected?.lines.map((row) => row.from)).toEqual([0])
+        expect(selected?.rowCount).toBe(1)
+        expect(selected?.endRow).toBe(1)
+        expect(selected?.retainedRanges).toEqual([{ from: 0, to: 1 }])
+      } finally {
+        pane.release()
+        pane.teardown()
+      }
+    })
+
+    it.each(['page', 'refresh'] as const)(
+      'a %s response from the previous bind cannot change the replacement pane',
+      async (readKind) => {
+        const pane = await mountReadOrdering()
+        try {
+          pane.setDurable({
+            label: 'before-cap',
+            endRow: 1001,
+            retainedRanges: [{ from: 0, to: 1001 }],
+          })
+          if (readKind === 'page') await pane.scroll()
+          else pane.grow()
+          await pane.waitForRead()
+          const session = sessionOf(pane.content)
+          const onExit = session.onExit.mock.calls[0]?.[0] as
+            ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
+          if (!onExit) throw new Error('the session did not register an exit handler')
+          onExit({ sessionId: session.sessionId, cause: 'interrupted' })
+          expect(await pane.content.reconnect()).toBe(true)
+          const replacementRows = stored(
+            {
+              label: 'replacement',
+              endRow: 1,
+              retainedRanges: [{ from: 0, to: 1 }],
+            },
+            [0],
+          )
+          pane.block.remove()
+          const replacement = pane.install(replacementRows)
+          pane.release()
+          await flushDisplayFrame()
+
+          expect(replacement.textContent).toContain('replacement-0')
+          expect(replacement.textContent).not.toContain('before-cap-')
+          expect(storedBlockRowsForSelection(replacement, artifactId)).toEqual(replacementRows)
+          expect(replacement.querySelectorAll('.term-grid-row')).toHaveLength(1)
+        } finally {
+          pane.release()
+          pane.teardown()
+        }
+      },
+    )
+
+    it.each(['page', 'refresh'] as const)(
+      'disposing the pane prevents its pending %s response from painting',
+      async (readKind) => {
+        const pane = await mountReadOrdering()
+        let disposed = false
+        try {
+          pane.setDurable({
+            label: 'before-cap',
+            endRow: 1001,
+            retainedRanges: [{ from: 0, to: 1001 }],
+          })
+          if (readKind === 'page') await pane.scroll()
+          else pane.grow()
+          await pane.waitForRead()
+          pane.teardown()
+          disposed = true
+          const before = pane.block.textContent
+          const selected = storedBlockRowsForSelection(pane.block, artifactId)
+          pane.release()
+          await flushDisplayFrame()
+          expect(pane.block.textContent).toBe(before)
+          expect(storedBlockRowsForSelection(pane.block, artifactId)).toEqual(selected)
+          expect(pane.block.isConnected).toBe(false)
+        } finally {
+          pane.release()
+          if (!disposed) pane.teardown()
+        }
+      },
+    )
+  })
+
   it('asks a growth read up to the end the metadata reports now, not the cached end', async () => {
     const client = makeClient()
     const oldRows = Array.from({ length: 500 }, (_, i) =>

@@ -316,10 +316,10 @@ export function parseStoredBlockRows(
   }
 }
 
-/** Two reads of one artifact, joined by the row index each line carries.
- *  `next` owns the geometry and artifact state — it is the newer read — while
- *  the lines are the union, so a page of the tail cannot blank the pages
- *  above it. */
+/** Two accepted reads of one artifact, joined by each line's row index.
+ *  The caller owns freshness: `next` owns the geometry and artifact state.
+ *  Keep loaded pages only within its retained ranges, so a tail page cannot
+ *  blank retained pages above it or keep rows the store has evicted. */
 export function mergeStoredBlockRows(
   previous: StoredBlockRows | undefined,
   next: StoredBlockRows,
@@ -336,25 +336,21 @@ export function mergeStoredBlockRows(
     if (line.from >= (next.outputStartRow ?? 0)) byFrom.set(line.from, line)
   }
   for (const line of next.lines) byFrom.set(line.from, line)
-  const lines = [...byFrom.values()].sort((a, b) => a.from - b.from)
-  if (next.retainedRanges !== undefined && next.retainedRanges.length > 0) {
-    return { ...next, lines }
-  }
-  if (previous.retainedRanges === undefined || previous.retainedRanges.length === 0) {
-    return { ...next, lines }
-  }
-  // A legacy read that carried no geometry takes the one already known; the
-  // lines it brought are still added, so a whole-body refresh cannot blank a
-  // page that is already painted.
-  return {
-    ...next,
-    lines,
-    firstRow: previous.firstRow,
-    lastRow: previous.lastRow,
-    endRow: Math.max(next.endRow ?? 0, previous.endRow ?? 0),
-    rowCount: previous.rowCount,
-    retainedRanges: previous.retainedRanges,
-  }
+  const merged = [...byFrom.values()].sort((a, b) => a.from - b.from)
+  // A read from the wire always carries geometry (parseStoredBlockRows builds
+  // it from the payload), and an explicitly empty run set is full eviction,
+  // not a missing one: it evicts every cached row. Only a hand-built snapshot
+  // can name no runs at all, and then there is nothing to clip the cache to.
+  const retained = next.retainedRanges
+  let rangeAt = 0
+  const lines =
+    retained === undefined
+      ? merged
+      : merged.filter((line) => {
+          while (rangeAt < retained.length && retained[rangeAt].to <= line.from) rangeAt++
+          return rangeAt < retained.length && retained[rangeAt].from <= line.from
+        })
+  return { ...next, lines }
 }
 
 /** A block whose rows have not been fetched yet, with the height it must
@@ -907,6 +903,12 @@ function paintOutput(
     // demand loop finds it. Only a block with nothing to reserve loses its
     // empty body.
     if (outputRowCount > 0) {
+      output.replaceChildren()
+      if (previous) {
+        previous.rows.clear()
+        previous.segments.length = 0
+        previous.elements.clear()
+      }
       output.className = 'cmd-output'
       output.dataset.rowsFirst = String(stored.firstRow ?? 0)
       output.dataset.rowsLast = String(stored.lastRow ?? 0)

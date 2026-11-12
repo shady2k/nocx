@@ -159,16 +159,30 @@ import {
   answerTextForTurn,
   arrangedByCause,
   blockRowsForEntry,
+  blockRowsForEntryWithMetadata,
+  blockRowsMetadataForEntry,
   blocksForPane,
+  BLOCK_ROWS_PAGE,
+  LAZY_BLOCK_ROWS,
   restoredBody,
   toolResultForEntry,
+  type BlockRowsMetadata,
+  type BlockRowsRead,
 } from './restore-client'
 import { restoredBlock, restoredTurn } from './scrollback/restored-block'
 import {
   blockColumnsOf,
+  loadedRowRanges,
+  retainedOutputRanges,
+  mergeStoredBlockRows,
+  missingRowRanges,
+  nextPageForRows,
   paintStoredRows,
+  streamRowAtVisualOffset,
   repaintStoredRows,
   storedBlockRowsText,
+  type StoredBlockRows,
+  type StoredBlocksRange,
 } from './scrollback/block-rows'
 import { recordStoredBlock } from './scrollback/cell-drift'
 import { toolCallTitle } from './scrollback/tool-call-title'
@@ -178,7 +192,14 @@ import { getCurrentTheme, subscribeThemeChanges } from './renderers/theme-adapte
 import { subscribeTerminalFontChanges } from './terminal-font'
 import { log, logDecision, isDecisionTracing } from './log'
 import type { BlockClosed } from './generated/block.closed'
-import type { WSClient, SessionHandle, OpenAnchor, SessionSize, SessionAttachment } from './ipc'
+import {
+  SessionNotAttachedError,
+  type WSClient,
+  type SessionHandle,
+  type OpenAnchor,
+  type SessionSize,
+  type SessionAttachment,
+} from './ipc'
 import type { PendingCallView } from './dispatcher'
 import { showConfirm } from './ui/dialog'
 import { createFilesPanelServices } from './files/files-client'
@@ -219,13 +240,7 @@ import {
   type InputPresentation,
   type DesiredMode,
 } from './capability'
-import {
-  createCellModel,
-  padSnapshotToColumns,
-  snapshotRowText,
-  type CellModel,
-  type ScreenSnapshot,
-} from './cell-model'
+import { createCellModel, snapshotRowText, type CellModel, type ScreenSnapshot } from './cell-model'
 import type { SessionFrame } from './generated/session.frame'
 import { createCellPainter, metricOf, type CellPainter } from './painter/painter'
 import { createMapping } from './painter/mapping'
@@ -398,30 +413,18 @@ export const SUBMIT_GRACE_MS = 40
 export const PROMPT_BACKSTOP_MS = 250
 
 /**
- * The LAST-RESORT release of an alternate-screen fence (nocx-1ebrs.10): how
- * long the switch may hold the person's input with no answer at all.
+/**
+ * How long a submit waits for the grid it will run at to APPLY before its
+ * bytes go out (nocx-evj4b.1.9).
  *
- * IT IS NOT THE NORMAL PATH. The fence opens on the transport's own receipt,
- * and nothing below this line decides an ordinary switch.
- *
- * It exists because NOTHING ELSE BOUNDS THE WAIT. `dispatcher.call` carries no
- * per-request timeout — a pending call is settled by its answer, by a socket
- * close, or by an abort, and by nothing else — and the connection's heartbeat
- * does not help: it pings an idle socket and closes one that stops answering
- * PINGS, so a coordinator that stalls this one request while still answering
- * transport frames leaves the receipt pending forever and the held keys with
- * it.
- *
- * The value comes from the measurements this bead was opened with: on a real
- * PTY program the resize request goes out 87–234 ms after the first fullscreen
- * frame and the pty is corrected 109–274 ms after the switch. 1.5 s is more
- * than five times the slowest observed round trip, and a person's held
- * keystrokes surfacing late is still better than keystrokes that never land.
- * On expiry the held intents are DELIVERED, in order — a key typed at the
- * wrong width is a rendering problem; a key swallowed forever is lost work —
- * and the release is logged so the next investigation can see it happened.
+ * A stall guard, not a working budget: the receipt is one control-plane round
+ * trip on a socket that is already open, and every observed one is far inside
+ * this. It exists because the wait is a *submit*: a receipt that never came —
+ * a backend that stopped answering, a frame lost in a reconnect — must not
+ * leave a person unable to run a command. On expiry the bytes go out at the
+ * size the pty has, which is what happened before the wait existed.
  */
-const ALT_SCREEN_RECEIPT_DEADLINE_MS = 1_500
+const SUBMIT_GRID_DEADLINE_MS = 1_000
 
 /**
  * How long output is treated as the shell's answer to a resize rather than as
@@ -771,7 +774,8 @@ class BindState {
     number,
     { entryId: string | null; waiting: ((entryId: string) => void) | null }
   >()
-  /** Intents and signals already queued against this bind's handle. */
+  /** Intents already queued against this bind's handle. Signals are sent on
+   *  their own path and never wait here (nocx-evj4b.1.12). */
   readonly callQueue: PendingSessionCall[] = []
 }
 
@@ -782,35 +786,6 @@ interface HeldWindow {
   /** True once a Ctrl-C arrived in the window: the submission is not to be
    *  written, and nothing held for it is delivered. */
   cancelled: boolean
-}
-
-/** What an alternate-screen switch holds until the pty has APPLIED the
- *  pane's grid (nocx-1ebrs.10).
- *
- *  `held` is what the person produced after the switch, in order, and it is
- *  delivered only once a receipt says the resize applied — an ordinary error
- *  or a closed session releases it too, because a pane that can no longer
- *  carry the input must not keep holding it. `generation` numbers the
- *  requests so a late answer to an older one cannot open the fence, and
- *  `sent` remembers the report the newest one carried, so the same
- *  measurement is not asked for twice, and `deadline` is the one timer here —
- *  the last-resort release of a request that is never answered
- *  (ALT_SCREEN_RECEIPT_DEADLINE_MS), not a step in the normal path.
- *
- *  Otherwise there is no timer in here and no frame count: the receipt is an
- *  RPC answer, the close is an RPC rejection or a socket loss, and those are
- *  what opens the fence. */
-interface AlternateScreenFence {
-  /** The intents produced after the switch, in the order produced. */
-  held: SessionIntent[]
-  /** How many resize requests this fence has issued. */
-  generation: number
-  /** The newest generation whose answer may open this fence. */
-  newest: number
-  /** The report the newest request carried, so a repeat is not sent again. */
-  sent: SessionSize | null
-  /** The last-resort release's timer (ALT_SCREEN_RECEIPT_DEADLINE_MS). */
-  deadline: number | undefined
 }
 
 /**
@@ -1126,15 +1101,10 @@ function isBlockScreenAnchor(value: unknown): value is BlockScreenAnchor {
   )
 }
 
-type PendingSessionCall =
-  | { type: 'intent'; session: SessionHandle; intent: SessionIntent }
-  | {
-      type: 'signal'
-      session: SessionHandle
-      signal: SessionSignal['signal']
-      resolve: (result: Awaited<ReturnType<SessionHandle['signal']>>) => void
-      reject: (reason?: unknown) => void
-    }
+/** One intent waiting for its turn at the pane's serial queue. Signals are not
+ *  here: an interrupt goes on its own path, never behind anything
+ *  (nocx-evj4b.1.12). */
+type PendingSessionCall = { type: 'intent'; session: SessionHandle; intent: SessionIntent }
 
 /** The live surfaces' palette: the current theme as a snapshot, one object
  *  per theme, so the painter can tell a theme change from a repeat read by
@@ -1156,13 +1126,18 @@ export class TerminalContent extends BasePaneContent {
   private _metadataSessionId: string | null = null
   private _frameTitle: string | undefined
   private _frameCwdPath: string | undefined
-  /** Session control calls stay in user order. Adjacent committed-text intents
+  /** Session intents stay in user order. Adjacent committed-text intents
    *  coalesce while queued, so fast typing does not flood the bounded executor;
-   *  keys, mouse events and signals remain ordering fences. */
+   *  keys and mouse events remain ordering fences. An interrupt is not here at
+   *  all: it is sent immediately and cancels everything before it
+   *  (nocx-evj4b.1.12). */
   private get _sessionCallQueue(): PendingSessionCall[] {
     return this._bind.callQueue
   }
   private _sessionCallSending = false
+  /** Only a local not-attached rejection proves that no bytes were sent. */
+  private _sessionCallHeld = false
+  private _sessionCallEpoch = 0
   private editor: CommandEditor | null = null
   private shellTarget: ShellInputTarget | null = null
   /** The input-target registry (ADR-0004 §3): a submitted document routes
@@ -1188,6 +1163,17 @@ export class TerminalContent extends BasePaneContent {
    *  of a switch, tracked here because the registry's change notification
    *  names only the incoming target. */
   private activeTargetId: string | null = null
+  /** THE DRAFTS THIS PANE HANDED BACK TO THE PERSON, by target id
+   *  (nocx-evj4b.1.8, P2). One rule for every path that restores a line — a
+   *  settle returning the held ones, a verdict vetoed after its startup
+   *  settled, a shell draft written while Ask was active — set at the one
+   *  place they all pass through (`_keepRestoredShellDraft`). The ownership
+   *  projection hides the composer at a non-ready fact unless the line is
+   *  typed AND focused, so a restored draft shown without focus was hidden in
+   *  the same update and the person's text vanished into an invisible box. A
+   *  restored draft keeps the composer of ITS OWN target visible whenever that
+   *  target is the one shown, until the person submits or clears it. */
+  private readonly _restoredDrafts = new Set<string>()
   private agentTarget: AgentInputTarget | null = null
   /** The editor is SUMMONED: the person asked for it over a command that is
    *  still running (nocx-92gfl).
@@ -1522,7 +1508,7 @@ export class TerminalContent extends BasePaneContent {
     if (
       active &&
       (this.editor.rootContains(active) ||
-        this.scrollback?.terminalLiveContainer.contains(active) ||
+        (this.scrollback?.terminalLiveContainer.contains(active) && !this._restoredShellDraft()) ||
         this.receipt?.root.contains(active) ||
         active.closest('[data-block-control]') ||
         // …AND THE MENU A RIGHT-CLICK OPENS, which is the one overlay created
@@ -1824,47 +1810,6 @@ export class TerminalContent extends BasePaneContent {
    *  tier), detached at dispose. */
   private env: DomainEnvironmentProjection | null = null
   private _bufferType: 'normal' | 'alternate' = 'normal'
-  /** THE ALTERNATE-SCREEN SIZE FENCE (nocx-1ebrs.10). An alternate-screen
-   *  program is told its new grid by a resize REQUEST, and until that request
-   *  has APPLIED the program still reads and writes at the previous mode's
-   *  width — measured: 87–234 ms after the first fullscreen frame, with the
-   *  pty still at the old width while the person's keys arrived.
-   *
-   *  So the switch opens one fence. It sends the pane's own measured grid at
-   *  once (no settle timer: the moment is known), presents the frames that
-   *  arrive before it against that grid, and holds what the person produces
-   *  until a receipt says the resize applied. Nothing here waits on a
-   *  painted frame — a frame can depend on the input this fence is holding,
-   *  which is the deadlock the receipt exists to avoid.
-   *
-   *  The one timer is a last-resort release, not a step in the order: nothing
-   *  else bounds a request that is never answered, because `dispatcher.call`
-   *  has no per-request timeout and the connection's heartbeat keeps a socket
-   *  that still answers pings alive. See ALT_SCREEN_RECEIPT_DEADLINE_MS. */
-  private _fence: AlternateScreenFence | null = null
-  /** Whether alternate-screen frames are presented on THIS PANE's measured
-   *  grid, from the switch until the program's own grid catches up with it
-   *  (nocx-1ebrs.10). Read by _presentedSnapshot; false is the steady state,
-   *  where the frame's own geometry is the truth.
-   *
-   *  It is a FLAG and not a number on purpose. The columns it presents are
-   *  read from `lastLocalGridSize` at the moment of the paint, because the
-   *  number that matters is the pane's fit AFTER the switch applied — the one
-   *  the fullscreen layout produces, with the prose inset gone. A number
-   *  captured when the switch was accepted was the PREVIOUS layout's fit (192
-   *  columns with the gutter, where the fullscreen pane admits 199), and
-   *  presenting it reproduced the defect exactly: the assertion is the pane's
-   *  own grid, so the presentation has to read the pane's current one.
-   *
-   *  It outlives the fence on purpose. The fence opens on the resize RECEIPT
-   *  — that is when input may go — while the frame that carried the previous
-   *  mode's width may still be the one waiting in the paint queue: the answer
-   *  can arrive in 2 ms (measured: resize sent → PTY correction 0.5–11 ms) and
-   *  the paint is the next animation frame. Binding the presentation to the
-   *  receipt would let exactly the frame this bead is about paint at the old
-   *  width, so the presentation ends where the evidence does — a frame whose
-   *  own grid is the pane's. */
-  private _switchPresents = false
   private nativeMode = false
   private _disposed = false
   private mountAbortController: AbortController | null = null
@@ -1969,6 +1914,30 @@ export class TerminalContent extends BasePaneContent {
   /** The promise that includes a queued final read, for `_ensureBlockRows` to
    *  await after block.closed. It points at the same chain as `_blockRowsInFlight`. */
   private readonly _blockRowsFinalPending = new Map<string, Promise<void>>()
+  /** The rows of a RESTORED block, which has no BlockRecord to hold them.
+   *  They are also the record of which pages have arrived, so scrolling into
+   *  an unloaded stretch asks only for what is missing (ADR-y45sp41c). */
+  private readonly _restoredRows = new Map<string, StoredBlockRows>()
+  /** ONE index from a block's entry id to the element that carries it. A
+   *  restored command can be nested inside a turn's `.cmd-children`, and a
+   *  live record's element is replaced at freeze; every door that needs a
+   *  block — loader, refresh, revalidation, settle — asks here first. */
+  private readonly _blockIndex = new Map<string, { element: HTMLElement; record?: BlockRecord }>()
+  /** Transcript rank changes only when a top-level block is inserted,
+   *  frozen into a replacement, or removed. Visibility stays a live read. */
+  private readonly _rowReadOrder = new Map<HTMLElement, number>()
+  private _rowReadOrderRoot: HTMLElement | null = null
+  private _rowReadOrderObserver: MutationObserver | null = null
+  private _rowReadOrderDirty = true
+  /** At most one page read per entry is outstanding; a scroll that fires
+   *  every frame must not turn one visible block into a stream of requests. */
+  private readonly _blockRowsPageInFlight = new Set<string>()
+  /** A request arrived while a page was in flight. It is demand, never a
+   *  reason to skip: the completion recomputes from the viewport. */
+  private readonly _blockRowsPagePending = new Set<string>()
+  /** The scroll listener that fills lazy rows in as they become visible. */
+  private _lazyScrollUnsub: (() => void) | null = null
+  private _lazyScrollRaf: number | null = null
 
   /** The held-Stop settlement subscription (nocx-zas0d). It exists because
    *  `held` is an ACCEPTANCE the request cannot follow up on: whatever happens
@@ -2152,6 +2121,8 @@ export class TerminalContent extends BasePaneContent {
       // decides whether the startup interval is really over — this only offers
       // the moment.
       this._releaseDeferredShellSubmissions()
+      // Only locally refused input waits for this same handle's attachment.
+      this._resumeHeldSessionCalls()
     }
     this._syncAttachOffer()
     if (changed) this._syncLifecycleOwnership()
@@ -3370,11 +3341,20 @@ export class TerminalContent extends BasePaneContent {
           this.clearGrants()
         },
         onBlockFrozen: (rec) => this._onBlockFrozen(rec),
-        paintStoredRows: (block, rows) => {
+        onBlocksRemoved: (elements) => {
+          const gone = new Set(elements)
+          for (const [entryId, indexed] of [...this._blockIndex]) {
+            if (!gone.has(indexed.element)) continue
+            this._blockIndex.delete(entryId)
+            this._restoredRows.delete(entryId)
+          }
+        },
+        paintStoredRows: (block, rows, reserve) => {
           const fit = this._cellFit
           const metric = fit !== null && fit.begin() ? metricOf(fit) : null
           paintStoredRows(block, rows, {
             metric,
+            reserve,
             palette: fromITheme(getCurrentTheme()),
             // cell-fit's batch write (nocx-2v80t.3.18): warmed here, once
             // for the whole block, so `boxOf` inside `paintRow` above is a
@@ -3681,11 +3661,15 @@ export class TerminalContent extends BasePaneContent {
         unresolvedRedactionField,
       ]
       this.shellTarget = new ShellInputTarget(
-        (intent) => this.sendIntent(intent),
+        (intent) => this.sendIntent(intent, true),
         // The target carries the shell's editor extensions through the §8.8
         // seam: the shell highlighter and the completion surface — the two
         // that ARE about commands — on top of the shared document layer.
         [...shellExtensions(this.snapshotStore), ...this.completion.extensions(), ...documentLayer],
+        // HOW THIS PANE FRAMES A SUBMIT (owner, 2026-11-10; nocx-evj4b.1.2):
+        // asked per submit, because the answer is the pane's state at that
+        // instant — a program can start, and a prompt can come back.
+        () => this.submitPasteFraming(),
       )
       const vault = new VaultClient(this.client)
       this.vault = vault
@@ -3749,6 +3733,14 @@ export class TerminalContent extends BasePaneContent {
           this.restoreScrollbackRange(held)
         }
         this.activeTargetId = target.id
+        // THE TARGET THAT WAS SWITCHED TO MAY OWE THE PERSON A DRAFT
+        // (nocx-evj4b.1.8, P2). A restored shell draft stored while Ask was
+        // active is loaded by the swap above into a hidden editor. The rule
+        // is the one predicate the ownership projection reads; this is its
+        // other half — the target is on screen NOW, and the draft with it.
+        if (this._restoredShellDraft() && this.editor !== null && !this.editor.isVisible) {
+          this.editor.show({ focus: false })
+        }
         // The line-start indicator renders the registry's active target
         // and nothing else repaints it: this notification IS its refresh
         // signal (ask-entry.ts). The indicator derives its own WORD from
@@ -3960,6 +3952,12 @@ export class TerminalContent extends BasePaneContent {
             // to the one it was typed for.
             const origin = this._currentBind()
             const bind = this._bind
+            // THE STARTUP THIS LINE WAS TYPED INTO (nocx-evj4b.1.8, P1). A
+            // reference resolves over the wire, and by the time its verdict
+            // lands the startup may have settled — so the decision must
+            // remember what the composer WAS at the Enter, not read what the
+            // session is now. Captured here, synchronously, like the origin.
+            const startupAtEnter = this._bind.phase !== 'live' || this._awaitsFirstPrompt()
             const sync = planSubmitSync(doc)
             if (sync) {
               // ADR-0024 §1 (the projection bead nocx-u7uh.7): the typed-ssh
@@ -3971,7 +3969,7 @@ export class TerminalContent extends BasePaneContent {
               // shell.launcherCommand RPC was deleted with the marker
               // latch (nocx-u7uh.1), so the line goes out unchanged —
               // fail-open — until a rewrite input exists.
-              return this.deferShellSubmissionUntilReady(sync, origin)
+              return this.deferShellSubmissionUntilReady(sync, origin, startupAtEnter)
             }
             return planSubmit(doc, (line) => vault.resolveLine(line)).then((verdict) => {
               // The verdict resolves in whatever bind is current; this line
@@ -3981,7 +3979,7 @@ export class TerminalContent extends BasePaneContent {
                 this.reportSubmitFailure(verdict)
                 return false
               }
-              return this.deferShellSubmissionUntilReady(verdict, origin)
+              return this.deferShellSubmissionUntilReady(verdict, origin, startupAtEnter)
             })
           },
           submit: (doc: string, plan?: SubmitPlan) => this.submitFromComposer(doc, plan),
@@ -4334,12 +4332,6 @@ export class TerminalContent extends BasePaneContent {
           // desynchronized episode comes back, used to stay flat until the
           // first command opened a block. setIdle declines while an
           // alt-screen program owns the pane.
-          //
-          // AND THE PROMPT TAKES THE GRID BACK (ADR-2yzsq8mk): a command that
-          // borrowed the alternate screen kept the pane's width until it
-          // ended, and this boundary is where the transcript's column returns
-          // — one resize, owed here, never inside the borrow.
-          this._releaseBorrowedGrid()
           this.scrollback?.setIdle()
         } else if (
           this.lifecycle.state.kind === 'running' &&
@@ -4502,9 +4494,49 @@ export class TerminalContent extends BasePaneContent {
         // Notifications are not replayed after a socket outage. Refresh every
         // mounted command block from its durable rows so output produced while
         // disconnected is painted even when restorePast has already run.
-        for (const entryId of this.scrollback?.blockManager.storedRowEntryIds() ?? []) {
-          void this._refreshBlockRows(entryId)
+        //
+        // A LARGE BLOCK GIVES ITS BODY BACK FIRST (ADR-y45sp41c). Its reserved
+        // height stays — that is the row count in its metadata — and the
+        // visible page is read next, so the reconnect does not queue five
+        // hundred whole bodies and the person's screen is filled from what is
+        // on it outward. A small block keeps what it has: one page would be
+        // its whole body anyway.
+        const entryIds = [
+          ...new Set([
+            ...(this.scrollback?.blockManager.storedRowEntryIds() ?? []),
+            ...this._blockIndex.keys(),
+            ...this._restoredRows.keys(),
+          ]),
+        ]
+        for (const entryId of entryIds) {
+          const rows = this._storedRowsOf(entryId)
+          if (
+            rows?.rowCount !== undefined &&
+            rows.rowCount > LAZY_BLOCK_ROWS &&
+            // A RUNNING block keeps its body and its reservation. Resetting it
+            // would leave the live painter with no lines, and its reserve:false
+            // body has no spacers to keep the height; the reconnect's
+            // revalidation refreshes what grew (ADR-ywzcpbqe).
+            rows.sealed !== false
+          ) {
+            // A LARGE block gives its body back: the coordinates and the
+            // reserved height stay, and what is on screen is read at the next
+            // step. A short block is one page already and keeps what it has —
+            // blanking five hundred small blocks would be a repaint the
+            // person did not ask for, and it is not what the memory bound
+            // needs.
+            this._paintBlockRows(entryId, { ...rows, lines: [] }, true)
+            continue
+          }
+          if (rows === undefined) {
+            // A block that never read its rows (the outage began while it
+            // was running) has no reservation to paint into. Its durable rows
+            // are what the person is owed, so it is read now.
+            void this._refreshBlockRows(entryId)
+          }
         }
+        void this._revalidateMountedBlockRows(entryIds)
+        this._loadVisibleBlockRows()
       })
       // A returning socket may be a returning BACKEND, whose endpoints and
       // roles are not the ones this pane last read. The report fires once
@@ -4909,6 +4941,7 @@ export class TerminalContent extends BasePaneContent {
       // ── Clickable paths and urls (nocx-8yg.8) ─────────────────────────
       const scrollbackArea = this.scrollback?.scrollbackArea
       if (scrollbackArea) {
+        this._installLazyRows()
         this._detachLinks = attachTerminalLinks(
           scrollbackArea,
           painterSurface,
@@ -5296,6 +5329,7 @@ export class TerminalContent extends BasePaneContent {
     // delivered by this one: the new object starts `opening`, with an UNKNOWN
     // verdict, and the old object is unreachable. (Rounds 5 and 7 each reset a
     // field here; the object is why there is nothing left to remember.)
+    this._discardQueuedIntents()
     this._bind = new BindState(this._bind.generation + 1)
     // AND THE EDITOR'S OWN PER-SUBMIT STATE (review round 10, P2): a reference
     // resolution still pending from the lost session left `_submitInFlight`
@@ -5303,15 +5337,8 @@ export class TerminalContent extends BasePaneContent {
     // The token the editor holds for a submit is per bind; the new bind starts
     // with none.
     this.editor?.resetSubmitInFlight()
-    // A bind is a new session (or the same one reattached): the previous
-    // binding's resize receipt will never arrive for anything this pane sends
-    // now, and the input it was holding belongs to a surface whose screen
-    // this bind is about to replace (nocx-1ebrs.10).
-    clearTimeout(this._fence?.deadline)
-    this._fence = null
-    this._switchPresents = false
     // AND THE HELD ROWS COME BACK, BECAUSE THE SCREEN THEY WERE HELD FOR IS
-    // OVER (ADR-2yzsq8mk's joint, nocx-djx1u). The running block's body holds
+    // OVER (nocx-djx1u). The running block's body holds
     // the rows its painted screen has not passed yet, and the count is only
     // meaningful on the generation that produced it: this bind ends that
     // generation here, and the body takes every row the record holds rather
@@ -5842,54 +5869,13 @@ export class TerminalContent extends BasePaneContent {
           // Latest-value metadata is consumed only with an accepted frame:
           // its title/cwd and cell rows belong to the same backend revision.
           this._resetFrameMetadataSession(session.sessionId)
-          // THE SWITCH'S PRESENTATION STARTS ON THE FRAME, BEFORE IT IS
-          // PAINTED (nocx-1ebrs.10). The flag is set here, synchronously, so
-          // the paint that this handler schedules below already knows the
-          // frame is to be presented on the pane's grid; the GRID itself is
-          // read at paint time, because the fit that matters is the one the
-          // fullscreen layout produces a moment later (_applyBufferKind).
-          if (
-            result.snapshot.state.bufferKind === 'alternate' &&
-            this._bufferType !== 'alternate'
-          ) {
-            this._switchPresents = true
-          }
           this.scrollback?.blockManager.acceptOutputStartFrame(result.snapshot)
           this.scrollback?.outputAnchorChanged()
           this.cols = result.snapshot.geometry.cols
           this.rows = result.snapshot.geometry.rows
           const geometry = result.snapshot.geometry
           this._rememberAcceptedGeometryDpr(geometry)
-          // THE TRANSITION IS OVER WHEN THE PROGRAM AGREES WITH THE PANE. The
-          // padded presentation exists for frames still describing the size
-          // the switch replaced; a frame whose own grid is at least this
-          // pane's fit is the program drawing at the new size, and from there
-          // the frame is the truth again — a program legitimately narrower
-          // than this pane (another window's grid) is not padded a second
-          // time.
-          const fitted = this.lastLocalGridSize
-          if (
-            this._switchPresents &&
-            // …and not on the frame that STARTED the transition: its grid is
-            // the one being replaced, measured against the fit this pane had
-            // before the mode change (192 where the fullscreen pane admits
-            // 199), so comparing the two here would end the presentation on
-            // its own first frame.
-            this._bufferType === 'alternate' &&
-            result.snapshot.state.bufferKind === 'alternate' &&
-            fitted !== null &&
-            geometry.cols >= fitted.cols
-          ) {
-            this._switchPresents = false
-          }
-          // The grid this pane PRESENTS is its own measurement; the one the
-          // frame declares is the program's, and it is applied by a request
-          // that may not have landed yet (nocx-1ebrs.10). The geometry below
-          // stays the FRAME's: what changed on the wire, what the accepted
-          // cell metric is, and what the pane reports all describe the
-          // program's grid, not the rectangle it is shown in.
-          const presented = this._presentedSnapshot(result.snapshot)
-          this._updateGridOwner(presented.geometry)
+          this._updateGridOwner(result.snapshot.geometry)
           const geometryChanged =
             previous === null ||
             previous.geometry.cols !== geometry.cols ||
@@ -6040,13 +6026,6 @@ export class TerminalContent extends BasePaneContent {
       // can hold its rows for a frame that will never arrive.
       this._screenGeneration++
       this._submittedAwaitingStart = false
-      // Nothing this pane asks for can be applied by a session that has
-      // ended, and the transport answers a resize cancelled by a close with
-      // the same supersession code it answers a newer one — which is not a
-      // reason to hold the person's keys forever. The fence and the switch's
-      // presentation end here (nocx-1ebrs.10).
-      this._switchPresents = false
-      this._closeAlternateScreenFence('closed')
       this._cancelDeferredShellSubmissions()
       this.hooks.onActiveOriginChange?.()
       this._projections?.reset()
@@ -6273,14 +6252,11 @@ export class TerminalContent extends BasePaneContent {
    * criterion's "changes batched into animation frames". The row-level diff
    * inside the painter makes the pass cheap: an unchanged row keeps its DOM.
    *
-   * `snapshot` is the revision the backend accepted and `presented` is that
-   * same revision drawn in this pane's rectangle — the two differ only while
-   * an alternate-screen switch is still being sized (see _presentedSnapshot).
-   * Everything
-   * that asks "what does the screen SAY" (selection, links, the column count
-   * the history pages address) reads the accepted one; only the painter and
-   * the pixel mapping, which answer "where is that on my glass", read the
-   * presented one.
+   * Everything that asks "what does the screen SAY" (selection, links, the
+   * column count the history pages address) reads the accepted revision; the
+   * painter and the pixel mapping answer "where is that on my glass" from the
+   * same one, because the pane's rectangle is the same in every mode
+   * (ADR-92zzg2y2).
    */
   private _paintFrame(snapshot: ScreenSnapshot): void {
     // THE ONE WATCHER FRAMES FLOW THROUGH (nocx-zg3k3.10.4): a column
@@ -6330,13 +6306,7 @@ export class TerminalContent extends BasePaneContent {
     const pending = this._pendingPaint
     this._pendingPaint = null
     if (pending === null || this._disposed || !this._active) return false
-    // THE RECTANGLE IS READ HERE, NOT WHEN THE FRAME ARRIVED. An alternate
-    // switch moves the pane's usable box (the prose gutter goes away), and
-    // that refit lands between accepting the frame and painting it — so a
-    // snapshot padded from the fit known at acceptance would carry the
-    // PREVIOUS layout's width, which is the defect. By the time this runs,
-    // the fit is the one the pane will actually show (nocx-1ebrs.10).
-    this._painter?.apply(this._presentedSnapshot(pending))
+    this._painter?.apply(pending)
     this._lastPaintedBaseRow = pending.state.baseRow
     // THE BOX AND THE ROWS IT SHOWS ARE ONE PAINT (owner, 2026-11-08: "the
     // room for the new rows is made a frame before the rows are drawn"). The
@@ -6348,21 +6318,12 @@ export class TerminalContent extends BasePaneContent {
     // rows that was a step of 170px with the newest rows clipped until it
     // landed.
     this.scrollback?.setLiveHeight(
-      this.liveContentHeight(this._presentedSnapshot(pending)),
+      this.liveContentHeight(pending),
       // THE ONE DOOR THAT PAINTED THE ROWS. Every other sizing pass re-applies
       // this height, so a box can never take a measurement the grid has not
       // drawn (nocx-4y82c.1.1).
       true,
     )
-    // AND THE MARGIN RETURNS WHEN THE PANE CAN HOLD THE ROWS WITH IT
-    // (nocx-djx1u). A borrowed grid is given the pane's own box because the
-    // four-side margin is two rows shorter than the box the program had; once
-    // the person's first key has handed the grid back, the shell redraws at the
-    // pane's size and this frame is the proof it has. Flipping the margin back
-    // at the key instead would cut those two rows again for the round trip the
-    // resize needs — the clipping this whole rule exists to stop, this time for
-    // a tenth of a second.
-    this._dropBorrowedMarginWhenItFits(this._presentedSnapshot(pending))
     this._widenRunningRowsToScreen()
     // A REPAINT CHANGES WHAT THE MEASUREMENT READS (nocx-1ebrs.42). The
     // output-driven resize path runs its refit in a frame scheduled BEFORE
@@ -6425,14 +6386,19 @@ export class TerminalContent extends BasePaneContent {
     // THE PAINTED SCREEN'S ROW, not the model's: a frame can be accepted and
     // not painted yet, and the body must stop where the grid it is joined to
     // stops. Falls back to the model only before the first paint.
-    const passed = (this._lastPaintedBaseRow ?? snapshot.state.baseRow) - start
-    // A LIVE SCREEN THAT HAS NOT REACHED THE BLOCK'S ROWS HAS PASSED NONE OF
-    // THEM, and zero is the answer: the block opened on a row the screen has
-    // not scrolled past yet (the anchor is at or below the base), so every
-    // row the record holds is still on screen and all of it is held. That is
-    // the same bound the clamp below has always given; what makes it a hold
-    // now is the generation check above, not the sign of this number.
-    return Number.isSafeInteger(passed) ? Math.max(0, passed) : null
+    const base = (this._lastPaintedBaseRow ?? snapshot.state.baseRow) - start
+    // THE ROWS THE BOX HIDES AT THE TOP ARE PART OF THE BODY TOO
+    // (ADR-92zzg2y2). The live grid is translated by what its box does not
+    // show; the rows above the box are still screen rows, and the stored body
+    // above the box must paint them or a row that leaves the screen top is
+    // one row lower when it lands in the body than it was in the grid — the
+    // owner's "output moves down" frame. `hiddenScreenRows` is that
+    // translation in whole rows, taken from the frame the grid was painted
+    // from. Before the screen reaches the block's first output row the sum is
+    // negative and zero is the answer: nothing the record holds has left the
+    // screen yet.
+    const hidden = this.scrollback?.hiddenScreenRows ?? 0
+    return Number.isSafeInteger(base) ? Math.max(0, base + hidden) : null
   }
 
   /** Paint the running block's held rows as the painted screen passes them —
@@ -6452,39 +6418,6 @@ export class TerminalContent extends BasePaneContent {
     const upTo = this._rowsTheScreenPassed(rec)
     if (!sb.blockManager.holdStoredRows(rec.attemptId, upTo)) return
     sb.scrollToBottomIfFollowing()
-  }
-
-  /**
-   * The accepted frame, as this pane PRESENTS it: on the columns the pane has
-   * measured since an alternate-screen switch, and at the frame's own grid
-   * otherwise (nocx-1ebrs.10).
-   *
-   * The frames in that window are the previous mode's grid — measured, at the
-   * switch: 192 columns with the pane already settled wider, and 70 in a
-   * 1394 px pane — because the program has not yet been told the new size.
-   * Painting that width is what left the strip on the right of a full-screen
-   * program, and it is why the first presented frame's columns are this
-   * pane's and not the previous mode's.
-   *
-   * Only the WIDTH is the pane's. The rows stay the frame's: a shorter or
-   * taller program is a fact about the program, and inventing rows to fill
-   * the box would paint output nobody wrote. The content itself is never
-   * dropped either — padding only ever widens (padSnapshotToColumns), so a
-   * frame from a wider window keeps its cells and is clipped by the box, as
-   * before. Nothing here measures anything: `cols` is the fit's answer, taken
-   * when the fence opened.
-   */
-  private _presentedSnapshot(snapshot: ScreenSnapshot): ScreenSnapshot {
-    if (!this._switchPresents || snapshot.state.bufferKind !== 'alternate') return snapshot
-    // THE PANE'S CURRENT FIT, read now — not a width captured when the switch
-    // was accepted. A captured number was the PREVIOUS layout's: the prose
-    // gutter is still subtracted at that instant and the fullscreen pane
-    // admits more columns than the fit had (192 against 199, measured in the
-    // e2e), so presenting the captured one reproduced the defect the same
-    // frame it was meant to fix.
-    const cols = this.lastLocalGridSize?.cols ?? null
-    if (cols === null) return snapshot
-    return padSnapshotToColumns(snapshot, cols)
   }
 
   // ── B.5 viewport delivery ─────────────────────────────────────────────
@@ -6559,148 +6492,6 @@ export class TerminalContent extends BasePaneContent {
   /** The most recent grid this window derived from its own measured viewport.
    *  An accepted frame may instead describe another attached client's grid. */
   private lastLocalGridSize: { cols: number; rows: number } | null = null
-
-  /**
-   * THE GRID A PROGRAM OWNS, KEPT WHILE ITS COMMAND RUNS (ADR-2yzsq8mk).
-   *
-   * A program that borrows the alternate screen to redraw is borrowing it
-   * because the pane resized. If leaving the screen resized the pty back, that
-   * SIGWINCH would be the borrow's own trigger and the program would borrow
-   * again — the presentation loop ADR-3kqrem7v removed, measured at four
-   * alternate entries and eight resizes for one pane resize. So on leaving the
-   * alternate screen the pane keeps presenting the grid it applied to the
-   * program, and the running block that holds it is drawn flush (its rows were
-   * written at the pane's width). The prompt is where the transcript's column
-   * returns, and the one resize owed for that happens there.
-   */
-  private _ownedGrid: { cols: number; rows: number } | null = null
-
-  /** Whether the borrowed grid has been handed back and the pane is waiting for
-   *  the shell to redraw at its own size, so the fit must leave the vertical
-   *  margin out of the height it reads (nocx-djx1u).
-   *
-   *  It is a sub-state of the LAYOUT's `inner-borrowed-grid`, never a state of
-   *  its own: the vertical margin is only missing from the box while that class
-   *  is on, so this flag is read through `_borrowedMarginOwed()` and nothing
-   *  else. A structured session has the margin on its box already — subtracting
-   *  it again there cost every later fit its rows (independent read,
-   *  2026-11-08). */
-  private _borrowedReleased = false
-
-  /**
-   * Whether the grid on screen is the one a PROGRAM owns — borrowed, not
-   * measured by this window — which is the one question both resize paths ask
-   * before they report a size (nocx-djx1u).
-   *
-   * It has to be asked twice and for the same reason. `fitUsableViewport`
-   * asks it when it decides whether a fit may arm a report at all; the settle
-   * timer asks it again when it FIRES, because a timer armed before the
-   * program left outlives the reason it was armed for: it fires into the exit,
-   * after the ordinary refit has measured the ledger's column, and would send
-   * that column's width to a pty still holding the program's. That is exactly
-   * the SIGWINCH leaving the alternate screen must not cause (ADR-2yzsq8mk
-   * decision 4), so the answer is read at the wire, not only at the
-   * scheduling.
-   */
-  private _gridIsBorrowed(): boolean {
-    return this._ownedGrid !== null && this.scrollback?.mode !== 'fullscreen'
-  }
-
-  /**
-   * Whether the vertical margin is OWED to a handed-back grid — holding the
-   * margin out of the height the fit reads, until the paint that proves the
-   * rows fit inside it (nocx-djx1u).
-   *
-   * The margin is missing from the box exactly while the layout wears
-   * `inner-borrowed-grid`, so this is the layout's answer ANDed with the
-   * hand-back's: a structured session's box already has the margin (the block
-   * owns the rows and scrolls), and subtracting it there again took two rows
-   * off every later fit until the next alternate exit (independent read,
-   * 2026-11-08).
-   */
-  private _borrowedMarginOwed(): boolean {
-    return this._borrowedReleased && this.scrollback?.isBorrowedGrid() === true
-  }
-
-  /**
-   * Hand a borrowed grid back to the pane's own layout: the ledger's column and
-   * its four margins (ADR-2yzsq8mk decisions 4 and 5, nocx-djx1u).
-   *
-   * Called from the two moments a session can prove the program is done with
-   * the pane — an authenticated `prompt_ready`, and the person's first key in a
-   * session that has no markers. The fit that follows is the ordinary one and
-   * arms ONE settle report, so the pty is told once and the margins return with
-   * it. Nothing is sent at the alternate screen's exit itself, which is the
-   * rule the whole borrow exists to keep.
-   */
-  private _releaseBorrowedGrid(): void {
-    if (this._ownedGrid === null) return
-    this._ownedGrid = null
-    const sb = this.scrollback
-    if (sb?.isBorrowedGrid() === true) {
-      // THE PANE IS MEASURED WITH THE MARGIN IT IS GOING BACK TO (nocx-djx1u).
-      // The box still holds the borrowed rows until the shell's own redraw
-      // proves they fit inside the margin, so the fit is told to leave that
-      // margin out of the height it reads (`usableViewport`) and report the
-      // pane's own grid. Without it the fit reads the borrowed box, reports the
-      // size the pty already has, and nothing moves.
-      this._borrowedReleased = true
-    } else {
-      // NOTHING WAS GIVEN UP, SO NOTHING IS OWED (independent read,
-      // 2026-11-08). A structured session's margin is on the box already: the
-      // block owns the rows, the fit's height never included the margin, and
-      // holding the margin out of it here would take two rows off every fit
-      // until the next alternate exit reset the flag — which never came,
-      // because the release that would clear it lives in the borrowed layout.
-      this._borrowedReleased = false
-      sb?.setBorrowedGrid(false)
-    }
-    this.refitIfResized()
-  }
-
-  /**
-   * Put the ledger's vertical margin back on the paint that proves the rows fit
-   * inside it (nocx-djx1u; ADR-2yzsq8mk decision 5).
-   *
-   * The hand-back is a round trip: the key releases the grid, the report goes
-   * out, and the shell redraws at the pane's own size. Until that redraw lands
-   * the rows are still the program's, and the margin is two of them too short —
-   * so the margin waits for the frame that fits, rather than for the key.
-   */
-  private _dropBorrowedMarginWhenItFits(snapshot: ScreenSnapshot): void {
-    const sb = this.scrollback
-    if (!sb || !sb.isBorrowedGrid() || this._gridIsBorrowed()) return
-    const area = sb.scrollbackArea
-    const content = this.liveContentHeight(snapshot)
-    // THE QUESTION IS WHOLE ROWS, NOT TWO FLOAT HEIGHTS (independent reads,
-    // 2026-11-09 and round 5). The release asks for rows; the shell redraws
-    // that many; so "does the returning frame fit" is `rows(content) <=
-    // rows(box − margins)`, counted by `gridRows` — the one row computation
-    // with its one epsilon. Comparing pixel heights instead is what failed
-    // twice: `clientHeight` is rounded to a whole CSS pixel while the fit is
-    // fractional (a 429.34375px scroller answered 429, the release asked 22
-    // rows = 381.333px, and 381.333 <= 429 − 48 = 381 was false), and even two
-    // unrounded floats disagree at a row boundary (552px of box, 24px margins,
-    // 28-device-pixel cells at DPR 1.5: 27 rows is 504.00000000000006 against
-    // an available 504). Either way the proof failed on every full-height
-    // frame, so `inner-borrowed-grid` and its missing margins stayed for the
-    // rest of the session. Rows cannot disagree with the fit: it asked for
-    // rows too.
-    const metrics = this.liveCellMetrics()
-    const box = this._borrowedBoxPx(area, this._latestViewport)
-    if (content === null || metrics === null || box <= 0) return
-    const available = box - 2 * this._paneMarginPx(area)
-    if (gridRows(content, metrics.cellHeight) <= gridRows(available, metrics.cellHeight)) {
-      this._borrowedReleased = false
-      sb.setBorrowedGrid(false)
-    }
-  }
-
-  /** The ledger's margin, one number for the gutter and for the vertical pair
-   *  (ADR-2yzsq8mk): read from the stylesheet, never measured off a row. */
-  private _paneMarginPx(area: HTMLElement): number {
-    return parseFloat(getComputedStyle(area).getPropertyValue('--pane-inline-padding')) || 0
-  }
 
   /**
    * The size report this window would send now: its locally fitted grid and
@@ -6791,23 +6582,8 @@ export class TerminalContent extends BasePaneContent {
    * made (nocx-eidfb.3): the schedule is skipped entirely.
    */
   private _scheduleResizeReport(): void {
-    // WHILE THE FENCE IS CLOSED, THE REPORT IS THE FENCE'S (nocx-1ebrs.10).
-    // A grid change during the switch is a new measurement of the pane, not a
-    // settle candidate: it is reported at once, and its receipt is the one
-    // that can open the fence. Leaving it to the timer would send AFTER the
-    // input the fence is holding, which is the order this bead is about.
-    if (this._fence !== null) {
-      this._requestFenceResize()
-      return
-    }
     clearTimeout(this.resizeTimer)
     this.resizeTimer = window.setTimeout(() => {
-      // THE GRID MAY HAVE BEEN BORROWED WHILE THIS TIMER WAS ARMED (nocx-djx1u).
-      // The program's exit re-measures the pane at the ledger's column, and
-      // reporting that here would be the resize decision 4 forbids: the pty
-      // keeps the program's grid until its command ends, and the column is
-      // sent at the prompt — where the ordinary fit arms its own report.
-      if (this._gridIsBorrowed()) return
       // A resize makes the shell redraw its prompt, and that redraw arrives
       // on `session.onData` looking exactly like output the user has not
       // seen. It is not: we asked for it. Switching the strip from vertical
@@ -6888,11 +6664,6 @@ export class TerminalContent extends BasePaneContent {
     // same count, not a second division (see `gridRows`).
     const rows = Math.max(1, gridRows(usable.height, metrics.cellHeight))
     this.lastLocalGridSize = { cols, rows }
-    // A pane that moves DURING an alternate-screen switch is the pane the
-    // frames in the transition are fitted to (nocx-1ebrs.10) — and nothing
-    // has to be copied out of here for that: the presentation reads THIS fit
-    // at paint time, which is why the width it uses is always the current
-    // one and never the one the switch was accepted at.
     const accepted = this._cellModel?.current()?.geometry
     if (accepted && (accepted.cellWidthPx <= 0 || accepted.cellHeightPx <= 0)) {
       this.scrollback?.cellMetricsChanged()
@@ -6902,18 +6673,6 @@ export class TerminalContent extends BasePaneContent {
     const sameViewport =
       last !== null && last.width === usable.width && last.height === usable.height
     const sameSize = cols === this.cols && rows === this.rows
-    // A BORROWED COMMAND'S ROWS STAY AS WRITTEN (ADR-2yzsq8mk): the pane paints
-    // them on the ledger's column, but its pty keeps the grid the program was
-    // given until the command ends, so no report goes out for the placement —
-    // that SIGWINCH is what would start the borrow again.
-    if (this._gridIsBorrowed()) {
-      if (!sameViewport || !sameSize) {
-        this.lastFitGeometry = { width: usable.width, height: usable.height }
-        this.cols = cols
-        this.rows = rows
-      }
-      return
-    }
     const report = this._lastReport
     const sameMetric =
       report !== null &&
@@ -6970,45 +6729,26 @@ export class TerminalContent extends BasePaneContent {
    * presentation or DOM seat. Prompt prediction reserves the same header,
    * so submitting cannot resize a program after its bytes are delivered. */
   private _gridHeight(area: HTMLElement | undefined, viewport: ContentViewport): number {
-    const scroller =
-      area && this._areaHeightPx(area) > 0 ? this._areaHeightPx(area) : viewport.height
+    const measured = area !== undefined && this._areaHeightPx(area) > 0
+    const scroller = measured && area !== undefined ? this._areaHeightPx(area) : viewport.height
     const sb = this.scrollback
     if (!sb) return scroller
-    // THE PROGRAM THAT OWNS THE PANE IS TOLD ITS BOX (ADR-2yzsq8mk). The
-    // controller owns that height — `paneFillHeight`, which `_fillPane` writes
-    // to the box — so the alternate screen's one-row margin cannot cost a
-    // full-screen program a row: read from one owner, the markerless session's
-    // program (no running block to take the branch below) gets the box's
-    // height too, instead of the whole scroller the box does not show.
-    if (sb.mode === 'fullscreen' || sb.mode === 'unstructured') {
-      const box = sb.paneFillHeight
-      // No layout at all yet — the delivered box is the better guess, the same
-      // fallback every other mode takes here.
-      return box > 0 ? box : scroller
-    }
-    const structured =
-      sb.mode === 'idle' || sb.mode === 'running' || sb.blockManager.runningBlock !== null
-    if (!structured) return scroller
-    // ONE OWNER of the running box, AND ONE INTEGER ROW COUNT (independent read,
-    // 2026-11-08: "compute the row count once, in integers, and derive the box
-    // from it"). Every structured mode answers with `rows * cell` from the same
-    // helper, so the normal screen, the prompt and the alternate screen cannot
-    // disagree by a row — and `floor(537.333 / 17.222)` cannot come out as
-    // 30.999999999999996 and cost the program a row that the alternate screen,
-    // reading the raw height, then adds back as a resize.
+    // ONE BOX, ONE EXPRESSION, EVERY MODE (ADR-92zzg2y2). The scroller plus
+    // the in-flow composer is the pane the terminal may occupy (the composer is
+    // hidden in the alternate screen and its pixels are back in the scroller,
+    // so the sum is the same on both sides of a switch). The one header a
+    // structured session reserves comes off it — at the prompt too, so a
+    // submit cannot resize the program — and the rows are floored ONCE, in
+    // integers, so the box that is drawn and the grid the pty is told cannot
+    // disagree by a row. No mode branch: a presentation change never changes
+    // this number.
+    const total = Math.max(
+      0,
+      (measured && area !== undefined ? this._terminalAreaPx(area) : scroller) -
+        sb.reservedHeaderHeightPx,
+    )
     const cell = this.liveCellMetrics()?.cellHeight ?? 0
-    if (cell > 0) {
-      const max = sb.runningLiveCap
-      const height = max ?? Math.max(0, this._terminalAreaPx(area!) - sb.runningHeaderHeightPx)
-      // (The alternate screen left this branch above: it is told its box's
-      // height, which already gives back the margin row ADR-2yzsq8mk keeps
-      // below a program's last row.)
-      return gridRows(height, cell) * cell
-    }
-    const cap = sb.runningLiveCap
-    if (cap !== null) return Math.max(0, cap)
-    const total = area && this._areaHeightPx(area) > 0 ? this._terminalAreaPx(area) : scroller
-    return Math.max(0, total - sb.runningHeaderHeightPx)
+    return cell > 0 ? gridRows(total, cell) * cell : total
   }
 
   /**
@@ -7041,6 +6781,53 @@ export class TerminalContent extends BasePaneContent {
     this._measurePromptPrediction(doc)
   }
 
+  /**
+   * The size a submitted command will run at, APPLIED before its bytes go out
+   * (nocx-evj4b.1.9).
+   *
+   * The prompt prediction measures that height at the Enter (nocx-2v80t.3.50),
+   * but its report rides the settle timer: the submit's own attempt round trip
+   * can put the bytes on the wire first. Then the command starts at the
+   * prompt's grid, which is a row or two taller — a full-screen program draws
+   * for it, and the resize that follows scrolls the program's first rows off
+   * the top of the screen. `top`'s summary left the live grid and landed in the
+   * block's body this way, on a loaded runner, in `e2e/top-split.spec.ts`.
+   *
+   * The receipt is SHARED with the debounced report, not re-sent: a size the
+   * backend already applied answers at once, and an identical report still on
+   * its way answers when it lands. Both failures fail OPEN — a command
+   * swallowed because a size could not be confirmed is worse than one that
+   * runs at the size the pty already has.
+   */
+  private async awaitSubmitGeometry(): Promise<void> {
+    const session = this.session
+    if (session === null) return
+    const receipt = session.resizeApplied(this._reportedSize())
+    let stalled: ReturnType<typeof setTimeout> | undefined
+    const deadline = new Promise<void>((resolve) => {
+      stalled = setTimeout(resolve, SUBMIT_GRID_DEADLINE_MS)
+    })
+    try {
+      const outcome = await Promise.race([receipt, deadline])
+      if (outcome !== 'applied') {
+        log.warn(
+          'nocx: the grid a submitted command will run at did not apply; its bytes go out at the pty size',
+          {
+            pane: this.pane.paneId,
+            outcome,
+          },
+        )
+      }
+    } catch (err) {
+      log.warn('nocx: the grid a submitted command will run at could not be confirmed', {
+        pane: this.pane.paneId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    } finally {
+      clearTimeout(stalled)
+    }
+  }
+
   /** Refit the pane rectangle once per delivered prompt measurement. Text
    * changes do not change chrome height (ADR-3kqrem7v). */
   private _measurePromptPrediction(text: string): void {
@@ -7056,100 +6843,43 @@ export class TerminalContent extends BasePaneContent {
   }
 
   /**
-   * THE HEIGHT A FIT THAT GIVES THE MARGIN BACK MUST READ (nocx-djx1u).
+   * THE CONTENT BOX THE GRID IS FITTED TO — one expression, every mode
+   * (ADR-92zzg2y2).
    *
-   * This is the one fit that subtracts a margin, so it is the one that must
-   * subtract it from the box BEFORE the row count is floored. `_gridHeight`
-   * answers in whole rows already — `paneFillHeight` is `gridRows(box) * cell`
-   * — and `fitUsableViewport` floors again, so subtracting the margin from
-   * that answer rounds twice: a 422px box, 17px cells and a 24px margin asked
-   * for floor((408 − 48)/17) = 21 rows where the pane has
-   * floor((422 − 48)/17) = 22. The returning frame then fitted 22, the margin
-   * came back, and the ordinary fit asked for 22 again — a second resize with
-   * no pane change. One floor, on the raw box.
-   */
-  private _releasedFitHeight(area: HTMLElement, viewport: ContentViewport): number {
-    const height = Math.max(0, this._borrowedBoxPx(area, viewport) - 2 * this._paneMarginPx(area))
-    const cell = this.liveCellMetrics()?.cellHeight ?? 0
-    return cell > 0 ? gridRows(height, cell) * cell : height
-  }
-
-  /**
-   * THE BOX THE HAND-BACK IS MEASURED AGAINST, on BOTH sides of it
-   * (nocx-djx1u). The fit that gives the margin back reads it, and the paint
-   * that decides the rows now fit inside the margin reads it — one expression,
-   * because `clientHeight` is a rounded number and the fit is not: a 429.34375
-   * px scroller answered `429`, the release asked 22 rows (381.333px), and the
-   * frame proving them asked `381.333 <= 429 − 48`, which is false, forever.
+   * Width: the scroller's content box less the one-cell gutter on each side.
+   * The gutter is read from the stylesheet rather than measured off the live
+   * region: measured, it lags — the running live region lives inside the
+   * block, whose width is written from the scroller's on the next sizing pass,
+   * so a pane that had just changed size was fitted against the OLD box for a
+   * frame, and the size report that followed the real box looked like a resize
+   * caused by whatever landed in between. The scroller's clientWidth is the
+   * pane's own content box and moves with the pane; the gutter is the one
+   * declared number every row of the ledger pays.
    *
-   * It is the controller's `paneBoxHeight` — the fractional, unrounded box the
-   * live region is sized from — with the two fallbacks the fit has always had:
-   * a measured scroller, then the delivered viewport.
+   * Height: `_gridHeight`, which is the scroller plus the in-flow composer
+   * less the one reserved header, floored to whole rows. The alternate screen
+   * is not an exception: the composer's pixels are back in the scroller there
+   * and the running header is the same one, so both sides of a switch produce
+   * this same number.
+   *
+   * Zero before first layout — the delivered box is the better guess then, and
+   * the next viewport delivery corrects it. Each axis falls back on its own:
+   * jsdom reports 0 for both, a real pane mid-layout can report one.
    */
-  private _borrowedBoxPx(area: HTMLElement, viewport: ContentViewport | null): number {
-    const box = this.scrollback?.paneBoxHeight ?? 0
-    if (box > 0) return box
-    const measured = this._areaHeightPx(area)
-    if (measured > 0) return measured
-    return viewport?.height ?? 0
-  }
-
   private usableViewport(viewport: ContentViewport): ContentViewport {
+    // The gutter uses the same cell as the fit. Publish the measured metric
+    // before reading it: the controller's constructor runs before this.scrollback
+    // is assigned, so its initial probe cannot yet measure the terminal font.
+    // Waiting for the first frame opens at the UI font's 1ch fallback instead.
+    this.scrollback?.cellMetricsChanged()
     const area = this.scrollback?.scrollbackArea
-    const sb = this.scrollback
-    const metrics = this.liveCellMetrics()
-    const owned = this._ownedGrid
-    if (owned !== null && metrics !== null && this._gridIsBorrowed()) {
-      // THE ROWS THE PROGRAM HAS, ON THE LEDGER'S COLUMN (ADR-2yzsq8mk). The
-      // pty keeps the size the program was given (see `_ownedGrid`), so a
-      // switch back to the primary buffer cannot resize it; what changes is
-      // where those rows are DRAWN — back at the transcript's column, which is
-      // the block a person reads, and a placement change costs no SIGWINCH.
-      const outer = area && area.clientWidth > 0 ? area.clientWidth : viewport.width
-      const gutter =
-        area === undefined
-          ? 0
-          : parseFloat(getComputedStyle(area).getPropertyValue('--pane-inline-padding')) || 0
-      return {
-        ...viewport,
-        width: Math.max(0, outer - 2 * gutter),
-        height: owned.rows * metrics.cellHeight,
-      }
-    }
-    // Zero before first layout — the delivered box is the better guess then,
-    // and the next viewport delivery corrects it. Each axis falls back on its
-    // own: jsdom reports 0 for both, a real pane mid-layout can report one.
-    // The height is `_gridHeight`'s: the running cap, held at the prompt.
-    // A HANDED-BACK GRID IS MEASURED WITH THE MARGIN IT RETURNS TO (nocx-djx1u).
-    // The box still holds the borrowed rows until the shell's redraw, and the
-    // fit must not report that box: the pane's own grid is the one the margin
-    // leaves, and it is the size the pty is owed. Both sides of the vertical
-    // pair come off, which is the same token the gutter uses — and they come
-    // off BEFORE the row count is floored (`_releasedFitHeight`).
-    const height =
-      area !== undefined && this._borrowedMarginOwed()
-        ? this._releasedFitHeight(area, viewport)
-        : this._gridHeight(area, viewport)
-    // ADR-2yzsq8mk: a normal command is one column with the transcript's gutter,
-    // and a full-screen program owns the whole width. The gutter is read from
-    // the STYLESHEET, not measured off the live region: measured, it lags — the
-    // running live region lives inside the block, whose width is written from
-    // the scroller's on the next sizing pass, so a pane that had just changed
-    // size was fitted against the OLD box for a frame, and the size report that
-    // followed the real box looked like a resize caused by whatever landed in
-    // between (the alternate-screen switch). The scroller's clientWidth is the
-    // pane's own content box and moves with the pane; the gutter is the one
-    // declared number every row of the ledger pays.
     const outer = area && area.clientWidth > 0 ? area.clientWidth : viewport.width
-    // ONLY A FULL-SCREEN PROGRAM OWNS THE PANE'S WHOLE WIDTH (ADR-2yzsq8mk).
-    // Every normal row — a running command, a plain ssh shell with no blocks
-    // yet — wears the ledger's gutter on both sides, so no painted column
-    // touches the pane's left or right edge.
     const gutter =
-      sb?.mode === 'fullscreen' || area === undefined
+      area === undefined
         ? 0
         : parseFloat(getComputedStyle(area).getPropertyValue('--pane-inline-padding')) || 0
     const width = Math.max(0, outer - 2 * gutter)
+    const height = this._gridHeight(area, viewport)
     return { ...viewport, width, height }
   }
 
@@ -7500,6 +7230,7 @@ export class TerminalContent extends BasePaneContent {
     const snapshotStore = this.scrollback.snapshotStore
     const paintRows = (el: HTMLElement, entryId: string): HTMLElement => {
       const rows = bodies.get(entryId)?.rows
+      this._registerRestoredBlock(entryId, el, rows)
       if (rows) this.scrollback!.blockManager.paintStoredRows(el, rows)
       return el
     }
@@ -7688,6 +7419,15 @@ export class TerminalContent extends BasePaneContent {
       previousSession: this.session === null || this.session.recovered === null,
     })
     this._pastRestoring = false
+    this._installLazyRows()
+    // The past is drawn at its reserve height with the ill-fitting pages
+    // empty; the one that is on screen is asked for at the next frame, not at
+    // restore time for every block (ADR-y45sp41c).
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => this._loadVisibleBlockRows())
+    } else {
+      this._loadVisibleBlockRows()
+    }
   }
 
   // ── Capability rail (nocx-4t37.2) ─────────────────────────────────────
@@ -7786,6 +7526,7 @@ export class TerminalContent extends BasePaneContent {
     this._updateCapability()
     this._syncIntegrationWaiting()
     this._releaseDeferredShellSubmissions()
+    if (isDegraded(fact)) this._settleDeferredShellSubmissions()
     this._syncLifecycleOwnership()
     if (!isDegraded(fact)) {
       // Recovered, or never failed. The card belongs to the state that
@@ -7925,6 +7666,10 @@ export class TerminalContent extends BasePaneContent {
      *  6). Every path below judges against THIS, never against whatever is
      *  bound now. */
     origin: BindIdentity,
+    /** Whether the composer WAS the startup composer at the Enter
+     *  (nocx-evj4b.1.8, P1): a line typed there is not yet the host's, and a
+     *  startup that settles while its reference resolves cannot send it. */
+    startupAtEnter = false,
   ): SubmitPlan | false | 'held' {
     if (this._attachment.kind !== 'attached') return false
     const target = this.inputTargets?.active()
@@ -7952,8 +7697,30 @@ export class TerminalContent extends BasePaneContent {
       this._deferredShellSubmissions.push({ plan, target, origin })
       return 'held'
     }
+    // THE STARTUP ENDED WITHOUT A PROMPT WHILE THIS LINE RESOLVED (P1). The
+    // line was typed into the startup composer, so no queue ever took it: it
+    // is still the editor's draft. Delivering it now would write into a pty
+    // that no prompt has proved ready (the .1.1 finding) — and the reference
+    // resolution that just finished is not a readiness signal. The veto keeps
+    // the person's text where they left it, reference intact, and the
+    // composer on screen with it.
+    if (
+      startupAtEnter &&
+      !this._awaitsFirstPrompt() &&
+      this.lifecycle.state.kind !== 'prompt_ready'
+    ) {
+      this._keepRestoredShellDraft()
+      return false
+    }
     if (!this._awaitsFirstPrompt()) return plan
-    if (this.lifecycle.state.kind === 'prompt_ready' || isDegraded(this._integration)) return plan
+    if (this.lifecycle.state.kind === 'prompt_ready') return plan
+    // THE QUEUE IS A PROMISE (owner, 2026-11-10; nocx-evj4b.1.8). `held` says
+    // the line will be delivered when the prompt a live domain announces
+    // arrives; the release below keeps that promise and the settle returns it
+    // (into the editor) when the startup ends without one. A session that is
+    // not awaiting a prompt never reaches here: with no integration it sends
+    // through the ordinary path — there is no marker to wait for, and no
+    // composer on screen to queue from.
     this._deferredShellSubmissions.push({ plan, target, origin })
     return 'held'
   }
@@ -8016,12 +7783,14 @@ export class TerminalContent extends BasePaneContent {
     // session's own flags; the attach callback arrives before those flags are
     // in, so a check made from there must not read them at all.
     if (bind.phase !== 'live') return false
-    if (this.lifecycle.state.kind === 'prompt_ready') return true
-    if (isDegraded(bind.integration)) return true
-    // No integration was ever requested for THIS session, so no verdict is
-    // coming and no prompt mark will ever arrive. `awaitsIntegration` is this
-    // bind's own ack field, never the session that went away.
-    return bind.integration === null && !bind.awaitsIntegration
+    // THE QUEUE RELEASES AT THE PROMPT AND NOWHERE ELSE (owner, 2026-11-10;
+    // nocx-evj4b.1.8). A `conventional`/`lost` verdict used to release it —
+    // that is how a line reached a far pty that was still cooked, because the
+    // verdict is the launcher's word about the shell, not the shell's own
+    // readiness. A session that will never announce a prompt releases
+    // nothing; what it held goes back to the composer (see
+    // `_settleDeferredShellSubmissions`).
+    return this.lifecycle.state.kind === 'prompt_ready'
   }
 
   /** Deliver the held lines ONE AT A TIME, in the order the person made them,
@@ -8119,7 +7888,12 @@ export class TerminalContent extends BasePaneContent {
   private _finishBind<T extends 'bound' | 'uncertain' | 'aborted'>(outcome: T): T {
     if (this._bind.phase === 'opening') {
       this._bind.phase = 'live'
-      this._releaseDeferredShellSubmissions()
+      if (this._startupCanHold()) this._releaseDeferredShellSubmissions()
+      else if (this._bind.integration === null && !this._bind.awaitsIntegration) {
+        // THIS SESSION NEVER ASKED FOR A PROMPT MARK, so none is coming and
+        // the queue's promise cannot be kept.
+        this._settleDeferredShellSubmissions()
+      }
     }
     return outcome
   }
@@ -8129,6 +7903,34 @@ export class TerminalContent extends BasePaneContent {
    *  were typed into is gone. */
   private _cancelDeferredShellSubmissions(): void {
     this._bind.held.length = 0
+  }
+
+  /** THE STARTUP ENDED WITHOUT A PROMPT (owner, 2026-11-10; nocx-evj4b.1.8).
+   *
+   *  A line the -775 queue held was held against a promise: the prompt a live
+   *  domain will announce. When the startup settles some other way —
+   *  `conventional`/`lost`, or a bind that never asked for integration — that
+   *  prompt is not coming, and delivering the line would write into a pty
+   *  nobody has proved ready (the far side is still cooked and its startup
+   *  chain can read stdin). The line goes back to the person instead: the
+   *  editor's draft, where they left it. The composer is not forced on screen
+   *  — a conventional pane's input surface is the grid, and the person
+   *  submits there once they see the prompt. */
+  private _settleDeferredShellSubmissions(): void {
+    const held = this._bind.held
+    if (held.length === 0) return
+    // THE PERSON'S OWN TEXT, NEVER THE RESOLVED ONE (nocx-evj4b.1.8, P1). A
+    // place's `sendLine` carries the vault's resolved secret — that is the
+    // line the pty is owed, and the whole reason the plan keeps two. A draft
+    // restored from it put `curl -H "Authorization: Bearer …"` back in front
+    // of the person and, on the next Enter, into ledger history: a secret in
+    // clear, twice. `recordLine` is the text they typed, references intact.
+    const lines = held.map((entry) => entry.plan.recordLine)
+    held.length = 0
+    // AND INTO THE TARGET THAT HELD THEM, through the one restore rule
+    // (P2): the person may have switched to Ask while the shell was starting,
+    // and the line belongs to the shell's draft, never to the question's.
+    this._restoreShellDraft(lines)
   }
 
   /** Show the waiting card and hide the terminal grid for exactly as long as
@@ -8152,6 +7954,69 @@ export class TerminalContent extends BasePaneContent {
    *  on both calls, and this method is never asked to hide anything — the
    *  terminal is live from its first frame, which is what "absence is
    *  conventional by design" requires. */
+  /** The shell target's id — the target whose drafts this pane restores. */
+  private _shellTargetId(): string {
+    return this.shellTarget?.id ?? 'shell'
+  }
+
+  /** WHETHER A RESTORED SHELL DRAFT IS THE TEXT ON SCREEN (nocx-evj4b.1.8,
+   *  P2). One rule, read by the ownership projection: the draft exists (the
+   *  editor's, when the shell is the target shown; the stored draft, when it
+   *  is not), it is not empty, and the shell is the target being shown. Cleared
+   *  by the same read that answers it — a submit or a clear empties the
+   *  editor, and with it the keep. */
+  private _restoredShellDraft(): boolean {
+    const editor = this.editor
+    if (editor === null) return false
+    const id = this._shellTargetId()
+    if (!this._restoredDrafts.has(id)) return false
+    if (this.activeTargetId !== id) return false
+    if (editor.getDoc().trim() === '') {
+      this._restoredDrafts.delete(id)
+      return false
+    }
+    return true
+  }
+
+  /** THE ONE PLACE A HANDED-BACK DRAFT IS RECORDED (nocx-evj4b.1.8, P2).
+   *  Every path that returns a line to the person passes through here, so the
+   *  visibility rule is one rule rather than a fix per path, and the composer
+   *  of the target that owns the draft is shown with it when that target is
+   *  the one on screen. */
+  private _keepRestoredShellDraft(): void {
+    const id = this._shellTargetId()
+    this._restoredDrafts.add(id)
+    if (this.activeTargetId !== id) return
+    const editor = this.editor
+    // A DRAFT THE PERSON CANNOT SEE IS NOT THEIRS. The startup composer hid
+    // when the session settled; the line it now holds is the person's, so the
+    // composer comes back with it — and the projection above keeps it there.
+    if (editor !== null && !editor.isVisible) editor.show({ focus: false })
+  }
+
+  /** HAND A LINE BACK TO THE SHELL DRAFT (nocx-evj4b.1.8). The held lines come
+   *  first, then the draft that is there now — the person may have typed a
+   *  newer line while the startup was settling, and `insertText` at the caret
+   *  put the earlier line into the middle of it ("echo Becho A") or over a
+   *  selection. The document is replaced whole. */
+  private _restoreShellDraft(lines: string[]): void {
+    const id = this._shellTargetId()
+    const editor = this.editor
+    const active = this.activeTargetId === id
+    const current = active ? (editor?.getDoc() ?? '') : (this.targetState.draft(id)?.text ?? '')
+    const next = [...lines, ...(current.trim() === '' ? [] : [current])].join('\n')
+    const stored = this.targetState.draft(id)
+    this.targetState.saveDraft(id, {
+      text: next,
+      from: next.length,
+      to: next.length,
+      scrollTop: stored?.scrollTop ?? 0,
+    })
+    this._keepRestoredShellDraft()
+    if (!active || editor === null) return
+    editor.replaceDoc(next)
+  }
+
   private _syncIntegrationWaiting(): void {
     const waiting = isAwaitingIntegration(this._integration, this._awaitsIntegration)
     if (waiting) {
@@ -8290,172 +8155,6 @@ export class TerminalContent extends BasePaneContent {
     this.env?.recordCwd(path)
   }
 
-  // ── The alternate-screen size fence (nocx-1ebrs.10) ──────────────────
-  //
-  // WHAT IT IS FOR. A full-screen program learns its grid from TIOCSWINSZ, so
-  // between the mode switch and the pty's application of the pane's size the
-  // program reads and writes at the PREVIOUS mode's width. Measured in the
-  // diagnostic this replaces: the correction landed 87–279 ms after the first
-  // fullscreen frame, the resize request went out 87–234 ms after it and
-  // always AFTER the post-switch text, and the program read keys while its
-  // own `stty` still reported the old width. The person's keys are not the
-  // thing to sacrifice to that round trip, so they wait for it — and only
-  // they: what the program paints is presented at once (see
-  // _presentedSnapshot), because output cannot be recalled and hiding it
-  // would trade a wrong size for a missing screen.
-  //
-  // WHAT IT CANNOT DO, and the PR says so: bytes already written to the pty
-  // are not recalled, so this holds only input produced AFTER the switch. The
-  // backend cannot pick the pane's CSS extent for us either — one ordered
-  // control channel, and AD-6 forbids sniffing the byte stream — so the grid
-  // the fence reports is this window's own measurement, taken here.
-
-  /**
-   * Open the fence: from this instant the person's input is held.
-   *
-   * ARMING AND SENDING ARE TWO STEPS ON PURPOSE (nocx-1ebrs.10). The fence is
-   * armed BEFORE the mode change, because the layout change itself can produce
-   * intents (the surface it seats takes the keyboard, and a focus intent is an
-   * intent like any other) and those belong behind the resize too. The request
-   * goes out AFTER the mode change has refitted, because entering fullscreen
-   * moves the pane's grid and a report taken before it asks the pty for the
-   * previous layout's width — the stale size this bead is about.
-   *
-   * And the arm comes before the send for a second reason: the receipt for the
-   * request that is about to go out must find a fence to open. A fence armed
-   * after its own request is a fence that can miss its own answer.
-   */
-  private _openAlternateScreenFence(): void {
-    if (this._fence !== null) return
-    // Every release below is an answer from a session, so a pane without one
-    // has nothing that could ever open the fence — it would hold the input
-    // for good instead of for a round trip.
-    if (this.session === null) return
-    this._fence = { held: [], generation: 0, newest: 0, sent: null, deadline: undefined }
-    this._switchPresents = true
-  }
-
-  /**
-   * Ask the session for this pane's measured grid, off the settle timer.
-   *
-   * The switch is a known moment, so there is nothing to debounce: the report
-   * is computed now and sent now, and that is what puts the request ahead of
-   * the input the fence is holding (the person's next key). The timer's own
-   * send is cancelled rather than left to duplicate this one — the report
-   * has not changed, and a second identical request would supersede the first
-   * and take the receipt with it.
-   *
-   * Only the NEWEST request may open the fence: an answer to an older one
-   * describes a grid that is no longer the pane's.
-   */
-  private _requestFenceResize(): void {
-    const fence = this._fence
-    const session = this.session
-    if (fence === null || session === null) return
-    const size = this._reportedSize()
-    const sent = fence.sent
-    if (
-      sent !== null &&
-      sent.cols === size.cols &&
-      sent.rows === size.rows &&
-      sent.xpixel === size.xpixel &&
-      sent.ypixel === size.ypixel
-    ) {
-      return
-    }
-    fence.sent = size
-    const generation = ++fence.generation
-    fence.newest = generation
-    clearTimeout(this.resizeTimer)
-    this.resizeTimer = undefined
-    this._armFenceDeadline(fence, generation)
-    const receipt = session.resizeApplied(size)
-    void receipt.then(
-      (outcome) => {
-        if (this._fence !== fence || generation !== fence.newest) return
-        if (outcome === 'applied') this._closeAlternateScreenFence('applied')
-        else if (outcome === 'closed') this._closeAlternateScreenFence('closed')
-        // 'superseded' is neither success nor failure: a NEWER resize owns
-        // the session's pending slot, so the grid this pane asked for is
-        // still on its way. The fence stays closed and the answer that opens
-        // it belongs to that newer request — which is this pane's own next
-        // report whenever the pane moves again. No toast (nothing failed) and
-        // no retry (a retry is how one switch becomes a resize storm).
-      },
-      (err: unknown) => {
-        if (this._fence !== fence || generation !== fence.newest) return
-        // A real failure, or the socket gone under the request. Either way
-        // the pane cannot hold the person's input for a size it will never
-        // learn: log it and let the input through at the size the pty has.
-        log.warn('nocx: the resize at an alternate-screen switch did not apply', {
-          pane: this.pane.paneId,
-          error: err instanceof Error ? err.message : String(err),
-        })
-        this._closeAlternateScreenFence('failed')
-      },
-    )
-  }
-
-  /**
-   * The last-resort release for a request nothing answered
-   * (ALT_SCREEN_RECEIPT_DEADLINE_MS).
-   *
-   * Armed per generation and re-armed by every new request, so it always
-   * measures the wait on the newest one, and it never fires for a fence that
-   * has already been released or replaced. On expiry the fence is released as
-   * `forced`: the held intents are DELIVERED in order, because a key delivered
-   * to a program at the old width is a rendering problem while a key swallowed
-   * forever is lost work — and the release is logged, because an input path
-   * that silently changes its mind is one nobody can investigate later.
-   */
-  private _armFenceDeadline(fence: AlternateScreenFence, generation: number): void {
-    clearTimeout(fence.deadline)
-    fence.deadline = window.setTimeout(() => {
-      fence.deadline = undefined
-      if (this._fence !== fence || generation !== fence.newest) return
-      log.warn('nocx: no resize receipt at an alternate-screen switch — releasing held input', {
-        pane: this.pane.paneId,
-        held: fence.held.length,
-        waitedMs: ALT_SCREEN_RECEIPT_DEADLINE_MS,
-      })
-      this._closeAlternateScreenFence('forced')
-    }, ALT_SCREEN_RECEIPT_DEADLINE_MS)
-  }
-
-  /**
-   * Release the fence and deliver what it held, in the order it was produced.
-   *
-   * `applied`, `forced` and `failed` deliver: the session is alive and the
-   * person's input is owed to it. `failed` and `forced` delivering is
-   * deliberate — the fence exists to keep keys away from a grid that is about
-   * to change, and once the request cannot succeed (or has gone unanswered
-   * for far longer than any observed round trip) there is no change left to
-   * wait for; holding forever would be the deadlock the receipt exists to
-   * prevent. `thaw` (the program left the alternate screen) delivers for the
-   * same reason: the mode the fence was holding for is over. `closed`
-   * delivers nothing — the session this input was meant for no longer exists.
-   *
-   * EXACTLY ONCE, IN ORDER. The queue is detached before the first delivery —
-   * the fence is already gone, so an intent produced while this loop runs (a
-   * key that arrives between two held ones) is queued by the ordinary path
-   * BEHIND them rather than appended to the list being walked, and nothing
-   * here can re-enter with the same object. Delivery goes back through
-   * onSessionIntent, so a held Ctrl-C meets the submit window's own rule
-   * instead of a second copy of it.
-   */
-  private _closeAlternateScreenFence(
-    reason: 'applied' | 'closed' | 'failed' | 'forced' | 'thaw',
-  ): void {
-    const fence = this._fence
-    if (fence === null) return
-    this._fence = null
-    clearTimeout(fence.deadline)
-    fence.deadline = undefined
-    if (reason === 'closed') return
-    const held = fence.held
-    for (const intent of held) this.onSessionIntent(intent)
-  }
-
   /** Apply alternate-screen presentation only from a locally accepted backend
    *  frame. The frame is the same revision the painter shows; no second
    *  authority decides buffer identity. */
@@ -8471,42 +8170,12 @@ export class TerminalContent extends BasePaneContent {
     // ownership. The runtime's frame supplies this state independently.
     this.lifecycle.setBuffer(type)
     if (type === 'alternate') {
-      // A NEW BORROW REPLACES THE ONE THE PANE WAS HOLDING (independent read,
-      // 2026-11-08). A program that walks back into the alternate screen owns
-      // the pane again: its keys are the program's, not the shell's proof of a
-      // prompt, and the grid it is given now is the one its own exit will keep.
-      // Leaving these set let the person's first key inside the program release
-      // a grid it still owned — a resize under a running full-screen program,
-      // the SIGWINCH decision 4 exists to prevent — and the margin it had
-      // already given back with it.
-      this._ownedGrid = null
-      this._borrowedReleased = false
-      this.scrollback?.setBorrowedGrid(false)
-      // ADR-3kqrem7v: switching the presentation does not change desired
-      // geometry. Keep the receipt fence for a REAL pane resize in flight;
-      // an equal applied size reuses its receipt and sends no resize RPC.
-      this._openAlternateScreenFence()
+      // THE SWITCH IS PRESENTATION, NOT GEOMETRY (ADR-92zzg2y2). The fit is the
+      // same box in both modes, so there is no resize to request, nothing to
+      // present on a borrowed grid and nothing to hold the person's input for.
       this.scrollback?.enterFullscreen()
       this.refitIfResized()
-      this._requestFenceResize()
     } else {
-      // Leaving cannot be waited on: the program is not full-screen any more,
-      // so the grid the fence was holding for is no longer the one being
-      // drawn — and a fence with no owner to apply it would hold keys forever.
-      if (thawing) {
-        this._switchPresents = false
-        this._closeAlternateScreenFence('thaw')
-        // AND THE GRID IT HAS IS THE GRID IT KEEPS (ADR-2yzsq8mk). A resize
-        // sent because the program stepped out of the alternate screen would
-        // arrive as the SIGWINCH that makes a borrowing program borrow again.
-        this._ownedGrid = this.lastLocalGridSize
-        this._borrowedReleased = false
-        // AND THE LAYOUT KNOWS, because in a markerless session nothing will
-        // ever hand it back (nocx-djx1u): the four-side margin is two rows
-        // shorter than the box the program had, and the rows it clipped were
-        // the newest ones — the prompt.
-        this.scrollback?.setBorrowedGrid(true)
-      }
       // A conventional terminal stays unstructured: the scrollback-block
       // model never takes over (ADR-0024 §4). Exit fullscreen before deciding
       // which layout the lifecycle currently owns.
@@ -9799,7 +9468,7 @@ export class TerminalContent extends BasePaneContent {
     const revertStopRequested = (): void => {
       if (signal === 'stop' && targetBlock) targetBlock.stopRequested = false
     }
-    void this.queueSessionSignal(session, signal).then(
+    void this.sendSessionSignal(session, signal).then(
       (result) => {
         // A SWITCH, AND EXHAUSTIVE ON PURPOSE. The outcome set is closed by
         // the contract and this is the branch the person reads, so a word
@@ -10213,44 +9882,17 @@ export class TerminalContent extends BasePaneContent {
     if (intent.kind === 'key' && intent.payload === INTERRUPT_KEY) {
       this._cancelDeferredShellSubmissions()
     }
-    if (isAwaitingIntegration(this._integration, this._awaitsIntegration)) return false
-    // THE FIRST KEY HANDS A BORROWED GRID BACK (nocx-djx1u; ADR-2yzsq8mk
-    // decision 4). In a session with an authenticated prompt that job belongs
-    // to the prompt; a markerless session has none, and leaving the alternate
-    // screen must not resize — that SIGWINCH is what makes a program borrow
-    // again. What the person's own key proves is that something is at the
-    // shell, waiting: a program that is still drawing the pane would not be
-    // reading their typing, and the shell is what reads it. So that key is the
-    // prompt a markerless session can observe, and it is where the ledger's
-    // column and its four margins come back — one resize, once per exit, and
-    // never one the program's own exit caused.
-    //
-    // Only input counts: a focus change or a pointer report is not the person
-    // speaking to a shell. And only a key into the PRIMARY buffer counts: an
-    // alternate-screen program is reading its own keys, and a structured
-    // command's release belongs to its authenticated prompt — its box already
-    // has the margin, so a key there has nothing to hand back (independent
-    // read, 2026-11-08).
+    // A restored startup draft remains the shell input owner until it is
+    // submitted or cleared. A grid click must not bypass that draft.
     if (
-      this._ownedGrid !== null &&
-      this._bufferType === 'normal' &&
-      this.scrollback?.isBorrowedGrid() === true &&
+      this.editor?.isVisible &&
+      this._restoredShellDraft() &&
       (intent.kind === 'key' || intent.kind === 'text' || intent.kind === 'paste')
     ) {
-      this._releaseBorrowedGrid()
+      this.bounceFocusToEditor()
+      return false
     }
-    // THE SWITCH'S FENCE COMES FIRST (nocx-1ebrs.10). Everything the person
-    // produces after an alternate-screen switch waits for the resize receipt,
-    // and it waits in ONE queue so the order they produced survives — a focus
-    // change between two keys included, because the program reads these as a
-    // stream and a reordered one is a different input. Held is not lost: the
-    // receipt, an ordinary error or a close releases the queue (see
-    // _closeAlternateScreenFence), never a timer and never a painted frame.
-    const fence = this._fence
-    if (fence !== null) {
-      fence.held.push(intent)
-      return true
-    }
+    if (isAwaitingIntegration(this._integration, this._awaitsIntegration)) return false
     // INPUT ENDS A LIVE SELECTION (nocx-1ebrs.19). A key, committed text or a
     // paste is what makes a full-screen program redraw the screen the person
     // had selected from, so the highlight is over the moment it is SENT —
@@ -10290,15 +9932,10 @@ export class TerminalContent extends BasePaneContent {
     return this.sendIntent(intent)
   }
 
-  /** Hand one intent to the session, which decides what it means.
-   *
-   *  The handle owns the access epoch and re-presents a refusal that wrote
-   *  nothing once (ipc.ts), so an intent that raced a revocation costs a round
-   *  trip rather than a keystroke. A rejection here is the transport itself
-   *  failing — a closed socket, a refused call — and it is logged rather than
-   *  swallowed: a keystroke that reached nobody is a fact the person is owed,
-   *  and printing it to a console would be the silent version of it. */
-  private sendIntent(intent: SessionIntent): boolean {
+  /** Hand one intent to the session in order. Only the already-accepted
+   *  composer's submit may queue while detached. Raw input still requires an
+   *  attachment; a failed RPC is handled by drainSessionCallQueue. */
+  private sendIntent(intent: SessionIntent, submitted = false): boolean {
     // AN INTERRUPT FLUSHES THE HELD COMMANDS (review rounds 2 and 9). A real
     // tty discards type-ahead on SIGINT, and every Ctrl-C the person makes
     // passes THIS function, whichever surface produced it: the grid's key
@@ -10311,10 +9948,23 @@ export class TerminalContent extends BasePaneContent {
     // Stop/Interrupt) is signalActiveCommand's.
     if (intent.kind === 'key' && intent.payload === INTERRUPT_KEY) {
       this._cancelDeferredShellSubmissions()
+      // AND IT DOES NOT TRAVEL THROUGH THE QUEUE AT ALL (nocx-evj4b.1.12).
+      // Whatever the queue is doing — a presentation in flight, a retry
+      // waiting, a second intent queued behind the first — the person ending
+      // what is running is sent NOW, and everything they typed before it is
+      // marked cancelled and dropped: type-ahead a tty discards on SIGINT.
+      // Chasing the windows instead (release the wait, hope the next busy
+      // answer ends) left two races, so there is no window left to chase.
+      return this.sendInterrupt(intent)
     }
-    if (this._attachment.kind !== 'attached') return false
+    const attached = this._attachment.kind === 'attached'
+    if (!attached && !submitted) return false
     const session = this.session
     if (!session) return false
+    // The composer accepted this submit before its attempt RPC. If the
+    // connection changed during that round trip, none of its intents went out.
+    // Keep them for this handle's attachment, not for a replacement shell.
+    if (!attached) this._sessionCallHeld = true
     const tail = this._sessionCallQueue[this._sessionCallQueue.length - 1]
     if (
       intent.kind === 'text' &&
@@ -10334,46 +9984,139 @@ export class TerminalContent extends BasePaneContent {
     return true
   }
 
-  /** Keep Interrupt behind pointer intents already received by this pane. If
-   *  SIGINT ends the foreground program first, its queued mouse release can
-   *  become input to the shell that resumes. */
-  private queueSessionSignal(
+  /** Send the person's interrupt on its own path, never through the intent
+   *  queue (nocx-evj4b.1.12).
+   *
+   *  Both halves are one act and happen together: every intent queued or in
+   *  flight before this moment is MARKED CANCELLED (the handle's epoch check
+   *  ends it at its next decision, and its next busy answer never retries), and
+   *  the key is presented at once. What is dropped is type-ahead a tty discards
+   *  when SIGINT arrives; what is not dropped is the interrupt, which is why it
+   *  cannot be held behind any wait. */
+  private sendInterrupt(intent: SessionIntent): boolean {
+    this._discardQueuedIntents()
+    const session = this.session
+    if (this._attachment.kind !== 'attached' || !session) return false
+    session.cancelPendingIntents()
+    void session.intent(intent.kind, intent.payload).catch((err: unknown) => {
+      log.warn('nocx: the interrupt did not reach the session', { error: String(err) })
+    })
+    return true
+  }
+
+  /** Address a signal to the running command on its own path: no queue, and
+   *  every intent queued or in flight before it is cancelled first
+   *  (nocx-evj4b.1.12). The old rule kept an interrupt behind the pointer
+   *  intents already received — and a serial queue with a retry that has no
+   *  attempt bound turned "behind" into "possibly never". A tty discards the
+   *  type-ahead SIGINT finds, and dropping it is the same semantics as the key
+   *  form. */
+  private sendSessionSignal(
     session: SessionHandle,
     signal: SessionSignal['signal'],
   ): Promise<Awaited<ReturnType<SessionHandle['signal']>>> {
-    return new Promise((resolve, reject) => {
-      this._sessionCallQueue.push({ type: 'signal', session, signal, resolve, reject })
-      void this.drainSessionCallQueue()
-    })
+    this._discardQueuedIntents()
+    session.cancelPendingIntents()
+    return session.signal(signal)
+  }
+
+  /** Drop every intent this pane queued but has not presented yet. The one in
+   *  flight is not in the queue — cancelPendingIntents stamps it, and it ends
+   *  when its answer arrives. */
+  private _discardQueuedIntents(): void {
+    this._sessionCallEpoch++
+    this._sessionCallQueue.length = 0
+    // A queue that was discarded owes the session nothing — including the
+    // call an unattached session was holding (nocx-evj4b.1.14). The hold is
+    // the queue's, so it ends with it.
+    this._sessionCallHeld = false
+  }
+
+  private _discardFailedSessionInput(refusal?: string): void {
+    this._discardQueuedIntents()
+    const message =
+      refusal !== undefined
+        ? t(
+            'terminal.input.refused',
+            'Input was refused ({error}). Remaining queued input was discarded.',
+            { error: refusal },
+          )
+        : t(
+            'terminal.input.uncertain',
+            'Input may not have reached the shell. It will not be sent again. Remaining queued input was discarded; check the shell before submitting another command.',
+          )
+    showToast({ message, level: 'danger', duration: 0 })
   }
 
   private async drainSessionCallQueue(): Promise<void> {
-    if (this._sessionCallSending) return
+    if (this._sessionCallSending || this._sessionCallHeld) return
     this._sessionCallSending = true
+    const queue = this._sessionCallQueue
+    const epoch = this._sessionCallEpoch
     try {
-      while (this._sessionCallQueue.length > 0) {
-        const call = this._sessionCallQueue.shift()!
-        if (call.type === 'signal') {
-          try {
-            void call.session.signal(call.signal).then(call.resolve, call.reject)
-          } catch (err: unknown) {
-            call.reject(err)
-          }
-          continue
-        }
+      while (
+        queue === this._sessionCallQueue &&
+        epoch === this._sessionCallEpoch &&
+        queue.length > 0
+      ) {
+        const call = queue.shift()!
         try {
-          await call.session.intent(call.intent.kind, call.intent.payload)
+          const result =
+            call.intent.kind === 'paste' && call.intent.framing === 'bare'
+              ? await call.session.intent(call.intent.kind, call.intent.payload, 'bare')
+              : await call.session.intent(call.intent.kind, call.intent.payload)
+          if (queue !== this._sessionCallQueue || epoch !== this._sessionCallEpoch) return
+          // SessionHandle owns retries. Only execution of its final result
+          // permits dependent input (in particular the submit's Enter).
+          if (result.state !== 'executed') {
+            if (call.intent.kind === 'focus') continue
+            this._discardFailedSessionInput(
+              result.state === 'refused' ? (result.refusal?.cause ?? 'unknown') : undefined,
+            )
+            log.warn('nocx: session input did not execute; queued input discarded', {
+              state: result.state,
+              bytesWritten: result.bytesWritten,
+            })
+            return
+          }
         } catch (err: unknown) {
-          log.warn('nocx: session intent did not reach the session', {
-            kind: call.intent.kind,
-            error: String(err),
-          })
+          // An interrupt or a replacement bind has already discarded this input.
+          if (queue !== this._sessionCallQueue || epoch !== this._sessionCallEpoch) return
+          // Focus reports carry no command content. Losing an earlier report
+          // cannot make a later, still-unsent submit uncertain.
+          if (call.intent.kind === 'focus') {
+            log.warn('nocx: session focus report failed', { error: String(err) })
+            continue
+          }
+          if (err instanceof SessionNotAttachedError) {
+            queue.unshift(call)
+            this._sessionCallHeld = true
+            return
+          }
+          // A lost answer does not prove the bytes were not written. Never
+          // replay it, and never send the Enter left behind by a failed paste.
+          // Discard queued type-ahead too: it depends on an uncertain shell line.
+          this._discardFailedSessionInput(err instanceof RpcError ? err.message : undefined)
+          log.warn('nocx: session input failed; queued input discarded', { error: String(err) })
+          return
         }
       }
     } finally {
       this._sessionCallSending = false
-      if (this._sessionCallQueue.length > 0) void this.drainSessionCallQueue()
+      if (this._sessionCallQueue.length > 0 && !this._sessionCallHeld) {
+        void this.drainSessionCallQueue()
+      }
     }
+  }
+
+  /** Present what the session could not take, now that it can
+   *  (nocx-evj4b.1.14). Called from the one step that installs an attached
+   *  session — the same entrance that releases the held submits — so the
+   *  release is a fact about the session, never a duration. */
+  private _resumeHeldSessionCalls(): void {
+    if (!this._sessionCallHeld) return
+    this._sessionCallHeld = false
+    if (this._sessionCallQueue.length > 0) void this.drainSessionCallQueue()
   }
 
   /** Start holding, and hand back the window being held in: from here until
@@ -10531,7 +10274,10 @@ export class TerminalContent extends BasePaneContent {
     // (see _awaitsFirstPrompt).
     const startupComposer = this.lifecycle.state.kind === 'native' && this._awaitsFirstPrompt()
     const show =
-      (shouldShowEditor(this.lifecycle.state) || summoned || startupComposer) &&
+      (shouldShowEditor(this.lifecycle.state) ||
+        summoned ||
+        startupComposer ||
+        this._restoredShellDraft()) &&
       (summoned || this.lifecycle.buffer === 'normal') &&
       !this.nativeMode
     // The one case in which an authenticated prompt still shows no editor is
@@ -10544,13 +10290,8 @@ export class TerminalContent extends BasePaneContent {
         nativeMode: this.nativeMode,
       })
     }
-    // The grid's writability follows ownership, not the visibility
-    // transition: the editor hides ITSELF at submit (the atomic handoff),
-    // so by the time the running fact lands `editor.isVisible` is already
-    // false and a transition-gated setReadOnly(false) never runs — the grid
-    // stays read-only, typed input is dropped, and a program waiting on
-    // stdin (read, ssh, less) hangs with no editor and no input surface
-    // (nocx-u7uh.23). The invariant: editor shown ⟺ grid read-only.
+    // A restored draft keeps the composer as the shell input owner. Grid
+    // focus and input honor that same _restoredShellDraft decision.
     const answerInSummon = this._summoned && this._currentSummonedAnswer() !== null
     if (show) {
       // THE SHELL IS BACK INSIDE THE WAIT (ADR-tqjt5rkk). The box never left
@@ -10767,6 +10508,16 @@ export class TerminalContent extends BasePaneContent {
     this._blockRowsInFlight.clear()
     this._blockRowsRefreshPending.clear()
     this._blockRowsFinalPending.clear()
+    this._restoredRows.clear()
+    this._blockIndex.clear()
+    this._rowReadOrderObserver?.disconnect()
+    this._rowReadOrderObserver = null
+    this._rowReadOrderRoot = null
+    this._rowReadOrder.clear()
+    this._rowReadOrderDirty = true
+    this._blockRowsPageInFlight.clear()
+    this._lazyScrollUnsub?.()
+    this._lazyScrollUnsub = null
     this._detachLinks?.detach()
     this._detachLinks = null
     this._homeUnsub?.()
@@ -10791,12 +10542,6 @@ export class TerminalContent extends BasePaneContent {
     this._settleTimer = undefined
     clearTimeout(this.resizeTimer)
     this.resizeTimer = undefined
-    // The fence dies with the pane: a receipt arriving after dispose has no
-    // session to deliver to, and the input it held belongs to a surface the
-    // person no longer has. Its last-resort timer dies with it.
-    clearTimeout(this._fence?.deadline)
-    this._fence = null
-    this._switchPresents = false
     // And the prediction's pending frame: a callback landing on a disposed
     // pane would measure nothing that exists (the same rule the paint
     // frame's cancellation below keeps).
@@ -11037,6 +10782,26 @@ export class TerminalContent extends BasePaneContent {
    *  Enter's line does — the ledger record, the keyboard handoff, the
    *  running block and the byte route are the submit's, not the surface's.
    */
+  /** HOW A COMPOSER SUBMIT IS FRAMED (owner, 2026-11-10; nocx-evj4b.1.2).
+   *
+   *  With shell integration active — the pane's command blocks are the
+   *  transcript — and the shell at its prompt, a submit is NEVER bracketed:
+   *  the editor holds the whole line, so the markers protect nothing, and over
+   *  ssh a mode belief the terminal cannot prove (the far side's own
+   *  `ESC[?2004h` can be consumed before the parser sees it) made one
+   *  session's framing alternate — a far shell without bracketed paste ran
+   *  `\x1b[200~echo …` as text.
+   *
+   *  With no integration, and whenever a program is running inside a block (a
+   *  REPL, `read`, any foreground program), the composer's text goes to THAT
+   *  program, and its own announcement is the answer: the runtime frames by
+   *  the mode the program set at encode time.
+   */
+  private submitPasteFraming(): 'auto' | 'bare' {
+    if (this.hasRunningCommand()) return 'auto'
+    return this.lifecycle.state.kind === 'prompt_ready' ? 'bare' : 'auto'
+  }
+
   private submitFromComposer(
     doc: string,
     plan?: SubmitPlan,
@@ -11074,6 +10839,12 @@ export class TerminalContent extends BasePaneContent {
       host: this._host,
       at: Date.now(),
     })
+    // THE FRAMING IS THE GESTURE'S ANSWER (owner, 2026-11-10; nocx-evj4b.1.2):
+    // a submit is written after the attempt round trip, and by then the program
+    // it starts may already be running — asking the pane then would read the
+    // new program's state and, with integration live, lose the bare submit the
+    // prompt deserved.
+    const framing = this.submitPasteFraming()
     if (!active.routesToShell) {
       // The target surfaces its own refusal (onRefusal → the
       // toast); the rethrow is for programmatic callers, so the
@@ -11124,7 +10895,8 @@ export class TerminalContent extends BasePaneContent {
       recordLine: plan?.recordLine ?? doc,
       author: active.author,
       takeKeys: true,
-      sendLine: (d) => void active.submit(d, { targetId: active.id }),
+      framing,
+      sendLine: (d) => void active.submit(d, { targetId: active.id, framing }),
       onDelivered,
       origin,
     })
@@ -11155,6 +10927,9 @@ export class TerminalContent extends BasePaneContent {
     recordLine: string
     author: CommandAuthor
     takeKeys: boolean
+    /** The framing taken at the gesture (nocx-evj4b.1.2); absent lets the
+     *  target's own provider answer. */
+    framing?: 'auto' | 'bare'
     sendLine: (d: string) => void
     /** The broker request that caused this assistant submission. */
     requestId?: string
@@ -11234,7 +11009,56 @@ export class TerminalContent extends BasePaneContent {
     // record (CommandLedger.open refuses empty commands) and no block. The
     // shell still gets its newline — a conventional terminal stays
     // conventional.
+    /** The command's own bytes, and the held window's keys after them. */
+    const deliverCommand = (taken: HeldWindow | null): void => {
+      try {
+        // A Ctrl-C that arrived while this submission was in flight
+        // (nocx-xn63t.6.12): the line is not to run. Nor is it "run and then
+        // interrupt" — the interrupt came first, and writing the command
+        // would put it at the pty with the shell's line editor already told
+        // to discard the line. So the command is not written AT ALL, and
+        // there is nothing at the pty for an 0x03 to mean: no interrupt is
+        // written for it either.
+        //
+        // Read from the window THIS submission armed. Taking the queue tells
+        // us what the pane last held, which after another submission has
+        // taken it is not this window — and reading the cancellation from
+        // there would resurrect exactly the line the person withdrew.
+        if (heldWindow?.cancelled === true) {
+          // No card to withdraw (nocx-2v80t.3.2): the submit opened none,
+          // and the bytes below were never written. The ledger record stays
+          // unbound and running, persisting nothing — the same residue the
+          // agent lane's withdrawal leaves.
+          return
+        }
+        submitCommand(doc, {
+          // The deferred half of the handoff to the grid: the synchronous call
+          // above already took the keyboard at commit, and this one only
+          // repairs it if the round trip left it on nobody
+          // (takeKeyboardToGridAfterSubmit).
+          focusGrid: () => this.takeKeyboardToGridAfterSubmit(),
+          sendDoc: sendLine,
+        })
+        // The command is on the pane's intent queue, ahead of any key that
+        // follows it, and the running fact has not been applied yet. That is
+        // not the held window and not the running command: it is the
+        // interval an unclaimed keyboard must still be read in
+        // (nocx-atpw5.1.20).
+        if (takeKeys) this._submittedAwaitingStart = true
+      } finally {
+        // In a `finally`, and fail-open: a write that threw sent nothing,
+        // and holding the keys anyway would swallow them for the rest of the
+        // session. Late at a prompt is a line the user can see and erase;
+        // silently gone is not.
+        //
+        // A cancelled window holds no keys — the interrupt discarded them —
+        // so this is empty on the withdrawal path by construction, never by
+        // a second rule about which keys a cancelled submission may carry.
+        for (const intent of taken?.keys ?? []) this.sendIntent(intent)
+      }
+    }
     const write = (): void => {
+      let deferred = false
       try {
         // A COMMAND HELD FOR A SESSION THAT IS GONE IS DROPPED, never delivered
         // elsewhere (review rounds 4 and 6). Checked at the write itself,
@@ -11250,67 +11074,39 @@ export class TerminalContent extends BasePaneContent {
           })
           return
         }
-        // This is deliberately after lifecycle.submitAttempt resolved: the
-        // broker can withdraw the request during that round trip, and a
-        // check at submit entry would miss the only unsafe window.
-        if (beforeWrite && !beforeWrite()) return
-        // Detach the queue BEFORE the command goes out, flush it after.
-        //
-        // Both halves matter and the order is the whole point. Close the held
-        // window before submitting so the command's paste and Enter enter the
-        // session-intent queue first; then replay keys captured during the
-        // attempt RPC. The serial queue keeps those later intents behind the
-        // command, rather than allowing Enter to bypass its paste.
-        const taken = this.takeHeldWindow()
-        try {
-          // A Ctrl-C that arrived while this submission was in flight
-          // (nocx-xn63t.6.12): the line is not to run. Nor is it "run and then
-          // interrupt" — the interrupt came first, and writing the command
-          // would put it at the pty with the shell's line editor already told
-          // to discard the line. So the command is not written AT ALL, and
-          // there is nothing at the pty for an 0x03 to mean: no interrupt is
-          // written for it either.
-          //
-          // Read from the window THIS submission armed. Taking the queue tells
-          // us what the pane last held, which after another submission has
-          // taken it is not this window — and reading the cancellation from
-          // there would resurrect exactly the line the person withdrew.
-          if (heldWindow?.cancelled === true) {
-            // No card to withdraw (nocx-2v80t.3.2): the submit opened none,
-            // and the bytes below were never written. The ledger record stays
-            // unbound and running, persisting nothing — the same residue the
-            // agent lane's withdrawal leaves.
-            return
+        // THE GRID THE COMMAND RUNS AT IS APPLIED BEFORE ITS BYTES GO OUT
+        // (nocx-evj4b.1.9). The prompt prediction measures that height at the
+        // Enter, but its report rides the settle timer while the attempt's own
+        // round trip is already in flight. On a slow machine the bytes reached
+        // a pty that was still the prompt's taller grid: the program drew for
+        // the taller screen, and the resize that followed scrolled its first
+        // rows into the block's body — the owner's `top` losing its summary.
+        // Waiting for the receipt here costs one round trip already applied
+        // (the receipt is shared with the debounced report, not re-sent).
+        deferred = true
+        const deliver = (): void => {
+          try {
+            if (this._bind !== bind || !this._bindIsCurrent(origin)) return
+            // The broker can withdraw during either the attempt or geometry
+            // round trip. This gate also marks its write started: run it once,
+            // only when the bytes can actually follow.
+            if (beforeWrite && !beforeWrite()) return
+            // Keep raw input held through the geometry receipt, then detach
+            // immediately before paste/Enter and replay it after the command.
+            deliverCommand(this.takeHeldWindow())
+          } finally {
+            // Written, or withdrawn — either way this submission has RESOLVED,
+            // and whoever is waiting for its delivery may go on.
+            settle()
           }
-          submitCommand(doc, {
-            // The deferred half of the handoff to the grid: the synchronous call
-            // above already took the keyboard at commit, and this one only
-            // repairs it if the round trip left it on nobody
-            // (takeKeyboardToGridAfterSubmit).
-            focusGrid: () => this.takeKeyboardToGridAfterSubmit(),
-            sendDoc: sendLine,
-          })
-          // The command is on the pane's intent queue, ahead of any key that
-          // follows it, and the running fact has not been applied yet. That is
-          // not the held window and not the running command: it is the
-          // interval an unclaimed keyboard must still be read in
-          // (nocx-atpw5.1.20).
-          if (takeKeys) this._submittedAwaitingStart = true
-        } finally {
-          // In a `finally`, and fail-open: a write that threw sent nothing,
-          // and holding the keys anyway would swallow them for the rest of
-          // the session. Late at a prompt is a line the user can see and
-          // erase; silently gone is not.
-          //
-          // A cancelled window holds no keys — the interrupt discarded them —
-          // so this is empty on the withdrawal path by construction, never by
-          // a second rule about which keys a cancelled submission may carry.
-          for (const intent of taken?.keys ?? []) this.sendIntent(intent)
         }
+        void this.awaitSubmitGeometry().then(deliver, deliver)
       } finally {
-        // Written, or withdrawn — either way this submission has RESOLVED,
-        // and whoever is waiting for its delivery may go on.
-        settle()
+        if (!deferred) {
+          // The early returns above wrote nothing: this submission has
+          // RESOLVED too, and whoever is waiting on it may go on.
+          settle()
+        }
       }
     }
     if (recordLine === '') {
@@ -11438,6 +11234,8 @@ export class TerminalContent extends BasePaneContent {
       startAnchor ?? undefined,
     )
     this.scrollback.blockManager.bindAttempt(attempt.id)
+    const bound = this.scrollback.blockManager.blockForAttempt(attempt.id)
+    if (bound !== null) this._registerBlock(attempt.id, bound.el, bound)
     // THE HOLD THE PARKED ROWS CAME WITHOUT (nocx-4y82c.1.1). A stored-rows
     // response that arrived before this binding was parked without an `upTo`,
     // and the binding drains it with the whole artifact; sizing the body to the
@@ -11580,6 +11378,390 @@ export class TerminalContent extends BasePaneContent {
     return promise
   }
 
+  /** The rows this entry currently holds, whether it is a live record or a
+   *  restored element. This is the one place the two lives meet for paging. */
+  private _storedRowsOf(entryId: string): StoredBlockRows | undefined {
+    return (
+      this.scrollback?.blockManager.blockForAttempt(entryId)?.storedRows ??
+      this._restoredRows.get(entryId)
+    )
+  }
+
+  /** The mounted element for an entry, live or restored. */
+  private _blockElement(entryId: string): HTMLElement | null {
+    const sb = this.scrollback
+    if (!sb) return null
+    const indexed = this._blockIndex.get(entryId)
+    if (indexed !== undefined) {
+      if (indexed.element.isConnected) return indexed.element
+      this._blockIndex.delete(entryId)
+    }
+    const live = sb.blockManager.blockForAttempt(entryId)
+    if (live) {
+      this._blockIndex.set(entryId, { element: live.el, record: live })
+      return live.el
+    }
+    // Register a block that arrived without its creation door telling us —
+    // a restored element nested under a turn, a record whose element was
+    // replaced by a freeze. The walk is the repair, never the normal lookup.
+    for (const el of sb.scrollbackInner.querySelectorAll<HTMLElement>(
+      '.cmd-block[data-entry-id]',
+    )) {
+      if (el.dataset.entryId === entryId) {
+        this._blockIndex.set(entryId, { element: el })
+        return el
+      }
+    }
+    return null
+  }
+
+  /** Record where a block lives. Called where a block is created (a live
+   *  attempt binding) and where one is restored (top-level or nested). */
+  private _registerBlock(entryId: string, element: HTMLElement, record?: BlockRecord): void {
+    this._blockIndex.set(entryId, { element, record })
+  }
+
+  /** Register a restored block. A rows descriptor is kept even when it is
+   *  EMPTY: an open command with zero rows yet is exactly the one revalidation
+   *  must see grow (ADR-8rt54tx2). */
+  private _registerRestoredBlock(
+    entryId: string,
+    element: HTMLElement,
+    rows?: StoredBlockRows,
+  ): void {
+    this._registerBlock(entryId, element)
+    if (rows !== undefined) this._restoredRows.set(entryId, rows)
+  }
+
+  /** How urgent one entry's read is: what is on screen first (0), then the
+   *  transcript newest to oldest. The queue re-reads this at every decision,
+   *  so a block that scrolls into view outranks one that has not. */
+  private _rowReadPriority(entryId: string): number {
+    const sb = this.scrollback
+    const el = this._blockElement(entryId)
+    if (!sb || !el) return Number.MAX_SAFE_INTEGER
+    const area = sb.scrollbackArea.getBoundingClientRect()
+    const rect = el.getBoundingClientRect()
+    if (rect.bottom > area.top && rect.top < area.bottom) return 0
+    const root = sb.scrollbackInner
+    if (this._rowReadOrderRoot !== root) {
+      this._rowReadOrderObserver?.disconnect()
+      this._rowReadOrderRoot = root
+      this._rowReadOrderDirty = true
+      this._rowReadOrderObserver = new MutationObserver(() => {
+        this._rowReadOrder.clear()
+        this._rowReadOrderDirty = true
+      })
+      this._rowReadOrderObserver.observe(root, { childList: true })
+    }
+    // A restore or freeze can ask for priority in the same task as its DOM
+    // change, before the observer's callback has had a chance to run.
+    if (this._rowReadOrderObserver!.takeRecords().length > 0) this._rowReadOrderDirty = true
+    if (this._rowReadOrderDirty) {
+      const blocks = root.querySelectorAll<HTMLElement>(':scope > .cmd-block')
+      this._rowReadOrder.clear()
+      blocks.forEach((block, index) => this._rowReadOrder.set(block, blocks.length - index))
+      this._rowReadOrderDirty = false
+    }
+    return this._rowReadOrder.get(el) ?? Number.MAX_SAFE_INTEGER
+  }
+
+  /** The page a refresh should ask for, or undefined for a block small enough
+   *  to read whole. A grown block asks for its newest rows; the same page
+   *  slides as the command prints, so a 5000-row command never re-reads its
+   *  whole body on every growth notification. */
+  private _refreshWindow(
+    entryId: string,
+    geometry?: StoredBlocksRange,
+  ): { fromRow: number; rowLimit: number } | undefined {
+    const rows = this._storedRowsOf(entryId)
+    const rowCount = geometry?.rowCount ?? rows?.rowCount
+    if (rows === undefined || rowCount === undefined || rowCount <= LAZY_BLOCK_ROWS) {
+      return undefined
+    }
+    const end = geometry?.endRow ?? rows.endRow ?? (rows.lastRow ?? rows.firstRow ?? 0) + 1
+    const retained = retainedOutputRanges({ ...rows, ...geometry })
+    if (rows.lines.length > 0) {
+      // A LIVE block must not skip rows between coalesced growth reads: ask
+      // from the row after the last retained row painted up to the end the
+      // metadata reports NOW. With no fresher geometry, ask to the server's
+      // page limit and let the completion's own demand loop continue.
+      const from = rows.lines[rows.lines.length - 1].from + 1
+      const limit = geometry?.endRow !== undefined ? Math.min(10_000, end - from) : 10_000
+      return { fromRow: from, rowLimit: Math.max(1, limit) }
+    }
+    // No body in hand: the reconnect gave it back, or the restore has not
+    // asked yet. Take the newest page of the LAST retained run — a capped
+    // block's tail run, not the count-derived end of a head-only guess.
+    const lastRange = retained?.[retained.length - 1]
+    const first = Math.max(rows.outputStartRow ?? 0, lastRange?.from ?? rows.firstRow ?? 0)
+    const last = (lastRange?.to ?? end) - 1
+    const from = Math.max(first, last - BLOCK_ROWS_PAGE + 1)
+    return { fromRow: from, rowLimit: Math.max(1, Math.min(BLOCK_ROWS_PAGE, last - from + 1)) }
+  }
+
+  /** Read a refresh with the growth rule: an open large block's page limit
+   *  comes from the end its metadata reports now, never from the cached
+   *  end (ADR-ywzcpbqe). A frozen/small block needs no metadata first. */
+  private async _readBlockRowsForRefresh(
+    entryId: string,
+    current: StoredBlockRows | undefined,
+    known?: BlockRowsMetadata,
+  ): Promise<BlockRowsRead> {
+    let metadata = known
+    // FRESH GEOMETRY BEFORE THE WINDOW (ADR-8rt54tx2). A block cached below
+    // the lazy threshold can cross it while disconnected; deciding from the
+    // cached 100 rows would send a whole-body read past 400. An open block
+    // also needs the end its metadata reports now, not the cached end.
+    if (metadata === undefined && current?.sealed === false) {
+      try {
+        metadata = (await blockRowsMetadataForEntry(this.client, entryId)) ?? undefined
+      } catch (err) {
+        log.warn("nocx: a block's growth geometry could not be read", {
+          entry: entryId,
+          error: String(err),
+        })
+      }
+    }
+    const window = this._refreshWindow(entryId, metadata?.geometry ?? undefined)
+    if (metadata !== undefined) {
+      return blockRowsForEntryWithMetadata(this.client, entryId, metadata, window, () =>
+        this._rowReadPriority(entryId),
+      )
+    }
+    return blockRowsForEntry(this.client, entryId, window, () => this._rowReadPriority(entryId))
+  }
+
+  /** Paint a read into whichever owner holds the block: a BlockRecord when
+   *  the block is live, the element itself when it is restored. */
+  private _paintBlockRows(entryId: string, rows: StoredBlockRows, reset = false): void {
+    const sb = this.scrollback
+    if (!sb || this._disposed) return
+    const rec = sb.blockManager.blockForAttempt(entryId)
+    const marker = rec?.el ?? this._blockElement(entryId)
+    if (marker !== null && marker !== undefined) {
+      // The e2e waits on this: a reconnect's give-back is a state a test can
+      // observe before it measures the reservation it just created.
+      if (reset) marker.dataset.rowsReset = 'true'
+      else delete marker.dataset.rowsReset
+    }
+    if (rec) {
+      sb.settleAround(() => {
+        sb.blockManager.applyStoredRows(entryId, rows, undefined, reset)
+        sb.scrollToBottomIfFollowing()
+      })
+      return
+    }
+    const el = this._blockElement(entryId)
+    if (!el) return
+    this._registerBlock(entryId, el)
+    // EVERY PAINT GOES THROUGH THE ONE SETTLE (ADR-8rt54tx2, #779). A
+    // revalidation landing above a scrolled-up reader must move neither their
+    // row nor their scroll position; the live-record branch has always done
+    // this, and a restored element is content in the same transcript.
+    sb.settleAround(() => {
+      this._restoredRows.set(entryId, rows)
+      sb.blockManager.paintStoredRows(el, rows)
+    })
+  }
+
+  /** Ask for one page of a restored or live block's rows, around the visible
+   *  stretch (ADR-y45sp41c). One page per entry is outstanding at a time. */
+  private _requestBlockRowsPage(entryId: string, fromRow: number, rowLimit: number): void {
+    if (this._blockRowsPageInFlight.has(entryId)) {
+      // Demand is recorded, not discarded. The completion below re-reads the
+      // viewport rather than merely clearing a flag (ADR-ywzcpbqe).
+      this._blockRowsPagePending.add(entryId)
+      return
+    }
+    this._blockRowsPageInFlight.add(entryId)
+    let painted = false
+    void blockRowsForEntry(this.client, entryId, { fromRow, rowLimit }, () =>
+      this._rowReadPriority(entryId),
+    )
+      .then((read) => {
+        if (this._disposed || !this._active) return
+        if (read.kind === 'rows') {
+          this._paintBlockRows(
+            entryId,
+            mergeStoredBlockRows(this._storedRowsOf(entryId), read.rows),
+          )
+          painted = true
+        } else if (read.kind === 'unreadable') {
+          log.warn("nocx: a block's stored rows could not be read", {
+            entry: entryId,
+            reason: read.reason,
+          })
+        }
+      })
+      .finally(() => {
+        this._blockRowsPageInFlight.delete(entryId)
+        const demanded = this._blockRowsPagePending.delete(entryId)
+        if (this._disposed || !this._active) return
+        // ONE DEMAND LOOP: every completion recomputes. A page that filled
+        // the old viewport may leave the new one still missing.
+        if (painted || demanded) this._loadVisibleBlockRows()
+      })
+  }
+
+  /** The geometry a loaded block claims, comparable with the metadata a
+   *  reconnect reads. A block whose stored rows grew while disconnected has a
+   *  different key even when it is small (ADR-y45sp41c). */
+  private _rowsGeometryKey(rows: StoredBlockRows | undefined, version?: string): string | null {
+    if (rows === undefined || rows.rowCount === undefined) return null
+    const ranges = (rows.retainedRanges ?? []).map((rr) => `${rr.from}-${rr.to}`).join(',')
+    return [
+      version ?? rows.artifactVersion ?? '',
+      rows.firstRow ?? 0,
+      rows.lastRow ?? 0,
+      rows.endRow ?? 0,
+      rows.rowCount,
+      ranges,
+    ].join('|')
+  }
+
+  /** One entry's metadata geometry in the same spelling. */
+  private _rangeGeometryKey(
+    version: string,
+    range: {
+      firstRow: number
+      lastRow: number
+      endRow: number
+      rowCount: number
+      retainedRanges: readonly { from: number; to: number }[]
+    } | null,
+  ): string | null {
+    if (range === null) return null
+    return [
+      version,
+      range.firstRow,
+      range.lastRow,
+      range.endRow,
+      range.rowCount,
+      range.retainedRanges.map((rr) => `${rr.from}-${rr.to}`).join(','),
+    ].join('|')
+  }
+
+  /** Every mounted block is re-validated against its durable metadata after a
+   *  reconnect, small blocks included. Notifications are not replayed, so a
+   *  command that grew while the socket was down would otherwise keep its
+   *  cached rows and look complete (ADR-y45sp41c). Metadata is read one block
+   *  at a time: small answers still must not become five hundred frames. */
+  private async _revalidateMountedBlockRows(entryIds: string[]): Promise<void> {
+    const ordered = [...entryIds].sort(
+      (a, b) => this._rowReadPriority(a) - this._rowReadPriority(b),
+    )
+    for (const entryId of ordered) {
+      if (this._disposed || !this._active) return
+      // A block with no cached rows is already being read by the reconnect's
+      // own refresh; there is no geometry to compare it with.
+      if (this._storedRowsOf(entryId) === undefined) continue
+      let meta
+      try {
+        meta = await blockRowsMetadataForEntry(this.client, entryId)
+      } catch (err) {
+        log.warn("nocx: a block's durable geometry could not be read", {
+          entry: entryId,
+          error: String(err),
+        })
+        continue
+      }
+      if (meta === null) continue
+      const current = this._rowsGeometryKey(this._storedRowsOf(entryId), meta.version)
+      const durable = this._rangeGeometryKey(meta.version, meta.geometry)
+      if (current !== durable) void this._refreshBlockRows(entryId, false, meta)
+    }
+  }
+
+  /** Fill what the person can see: a block near the viewport whose page has
+   *  not arrived asks for the rows around the visible line. Every block
+   *  already reserves its height from the metadata, so this paints into space
+   *  that was there before the page was and nothing moves (ADR-y45sp41c). */
+  private _loadVisibleBlockRows(): void {
+    const sb = this.scrollback
+    if (!sb || this._disposed) return
+    const area = sb.scrollbackArea
+    const areaRect = area.getBoundingClientRect()
+    const ids = new Set<string>(this._restoredRows.keys())
+    for (const entryId of this._blockIndex.keys()) ids.add(entryId)
+    for (const block of sb.blockManager.blocks) {
+      if (block.attemptId) ids.add(block.attemptId)
+    }
+    for (const entryId of ids) {
+      const rows = this._storedRowsOf(entryId)
+      if (rows === undefined || rows.rowCount === undefined) continue
+      const retained = retainedOutputRanges(rows)
+      const missing = missingRowRanges(retained, loadedRowRanges(rows.lines))
+      if (missing.length === 0) continue
+      const el = this._blockElement(entryId)
+      if (!el) continue
+      const rect = el.getBoundingClientRect()
+      // One viewport of lookahead: a block the person is about to scroll to
+      // is worth one page, and no block further away competes with the
+      // visible one.
+      const margin = areaRect.height
+      if (rect.bottom < areaRect.top - margin || rect.top > areaRect.bottom + margin) continue
+      // The demand loop must not depend on an element the painter may have
+      // removed (ADR-ywzcpbqe). A block with geometry but no body yet still
+      // has a place in the transcript, and its first page is still missing.
+      const output = el.querySelector<HTMLElement>(':scope > .cmd-output')
+      const stated = Number.parseFloat(getComputedStyle(el).getPropertyValue('--term-cell-height'))
+      const pitch = Number.isFinite(stated) && stated > 0 ? stated : 18
+      const first = retained[0]?.from ?? rows.firstRow ?? 0
+      const last = (retained[retained.length - 1]?.to ?? first + 1) - 1
+      const outRect = output?.getBoundingClientRect() ?? el.getBoundingClientRect()
+      const topOffset = Math.max(0, Math.floor((areaRect.top - outRect.top) / pitch))
+      const bottomOffset = Math.max(0, Math.floor((areaRect.bottom - outRect.top) / pitch))
+      // ONE MAPPING between visual position and stream index, the one the
+      // painter lays rows out with: a compressed cap gap maps to the first
+      // row of the tail, not to its visual offset (ADR-ywzcpbqe).
+      const topRow = streamRowAtVisualOffset(rows, topOffset)
+      const bottomRow = streamRowAtVisualOffset(rows, bottomOffset)
+      const loaded = loadedRowRanges(rows.lines)
+      const visibleMissing = missing.find((range) => range.to > topRow && range.from <= bottomRow)
+      const target = Math.max(first, Math.min(last, topRow))
+      if (
+        visibleMissing !== undefined &&
+        (target < visibleMissing.from || target >= visibleMissing.to)
+      ) {
+        // The top of the viewport is over a loaded row but the missing range
+        // below it is what the person can see; ask at its near edge.
+        const page = nextPageForRows(retained, loaded, visibleMissing.from, BLOCK_ROWS_PAGE)
+        if (page === null) continue
+        this._requestBlockRowsPage(entryId, page.fromRow, page.rowLimit)
+        continue
+      }
+      // WHAT IS MISSING, not what is between the first and last loaded row.
+      const page = nextPageForRows(retained, loaded, target, BLOCK_ROWS_PAGE)
+      if (page === null) continue
+      this._requestBlockRowsPage(entryId, page.fromRow, page.rowLimit)
+    }
+  }
+
+  /** Watch the scroller: the transcript's pages follow the person's
+   *  position, so a page is fetched when its block comes near the viewport
+   *  rather than all of them at reconnect. */
+  private _installLazyRows(): void {
+    const area = this.scrollback?.scrollbackArea
+    if (!area) return
+    this._lazyScrollUnsub?.()
+    const onScroll = (): void => {
+      if (this._lazyScrollRaf !== null) return
+      this._lazyScrollRaf = requestAnimationFrame(() => {
+        this._lazyScrollRaf = null
+        this._loadVisibleBlockRows()
+      })
+    }
+    area.addEventListener('scroll', onScroll, { passive: true })
+    this._lazyScrollUnsub = () => {
+      area.removeEventListener('scroll', onScroll)
+      if (this._lazyScrollRaf !== null) {
+        cancelAnimationFrame(this._lazyScrollRaf)
+        this._lazyScrollRaf = null
+      }
+    }
+  }
+
   /** Fetch one entry's stored rows, paint them, and follow the tail —
    *  everything a block.grew/block.closed notification's delivery does.
    *  Repeated growth notifications share one in-flight read and set one
@@ -11587,10 +11769,22 @@ export class TerminalContent extends BasePaneContent {
    *  `_ensureBlockRows` waits for the whole chain instead of reading
    *  `.cmd-output` before the final stored rows are ready. The pending flag
    *  is state, not a timer, so the last growth cannot be dropped. */
-  private _refreshBlockRows(entryId: string, final = false): Promise<void> {
+  private _refreshBlockRows(
+    entryId: string,
+    final = false,
+    known?: BlockRowsMetadata,
+  ): Promise<void> {
     if (final) {
       const closing = this._blockRowsFinalPending.get(entryId)
-      if (closing) return closing
+      if (closing) {
+        // A SECOND close for one block means its stored rows changed after
+        // the read the first one asked for — a late output start written to
+        // an artifact that was already sealed (nocx-4y82c.1.11). The card
+        // must read again, or it keeps the echo it froze; the read in flight
+        // was asked for before that write.
+        this._blockRowsRefreshPending.add(entryId)
+        return closing
+      }
     }
 
     const active = this._blockRowsInFlight.get(entryId)
@@ -11610,87 +11804,105 @@ export class TerminalContent extends BasePaneContent {
     }
 
     this._blockRowsRefreshPending.delete(entryId)
-    const fetch: Promise<void> = blockRowsForEntry(this.client, entryId).then((read) => {
-      if (this._disposed) return
-      const sb = this.scrollback
-      if (!sb) return
-      // `absent` is the store keeping no rows for this block — nothing to
-      // paint, and nothing wrong. `unreadable` is output that did not reach
-      // the pane, and it is SAID, on the block and in the log, never drawn
-      // as an empty body (nocx-2v80t.3.27). Only the newest read for the
-      // entry may say it: an older fetch failing after a newer one was
-      // dispatched is not the block's current truth.
-      if (read.kind === 'absent') return
-      if (read.kind === 'unreadable') {
-        log.warn("nocx: a block's stored rows could not be read", {
-          entry: entryId,
-          reason: read.reason,
-        })
-        if (
-          this._blockRowsInFlight.get(entryId) === tracked &&
-          !this._blockRowsRefreshPending.has(entryId)
-        ) {
-          sb.blockManager.markRowsUnreadable(entryId, read.reason)
+    const current = this._storedRowsOf(entryId)
+    const fetch: Promise<void> = this._readBlockRowsForRefresh(entryId, current, known).then(
+      (read) => {
+        if (this._disposed) return
+        const sb = this.scrollback
+        if (!sb) return
+        // `absent` is the store keeping no rows for this block — nothing to
+        // paint, and nothing wrong. `unreadable` is output that did not reach
+        // the pane, and it is SAID, on the block and in the log, never drawn
+        // as an empty body (nocx-2v80t.3.27). Only the newest read for the
+        // entry may say it: an older fetch failing after a newer one was
+        // dispatched is not the block's current truth.
+        if (read.kind === 'absent') return
+        if (read.kind === 'unreadable') {
+          log.warn("nocx: a block's stored rows could not be read", {
+            entry: entryId,
+            reason: read.reason,
+          })
+          if (
+            this._blockRowsInFlight.get(entryId) === tracked &&
+            !this._blockRowsRefreshPending.has(entryId)
+          ) {
+            sb.blockManager.markRowsUnreadable(entryId, read.reason)
+          }
+          return
         }
-        return
-      }
-      const rows = read.rows
-      if (!this._active) {
-        sb.blockManager.applyStoredRows(entryId, rows)
-        return
-      }
-      // The rows arrive asynchronously, well after the block that owns
-      // them has already been laid out — a running block's own live
-      // growth is followed inline (controller.ts's own height guard), but
-      // this delivery is a SEPARATE mutation the controller does not see
-      // on its own. Without holding the tail around it, a block that grows
-      // once its stream lands pushes the viewport away from the tail a
-      // person was following, silently (nocx-2v80t.3.19).
-      //
-      // ONE DOOR, AND NOTHING ANIMATED (owner, 2026-11-08: "like Warp, no
-      // animation"). A running block's rows land above the live end, where
-      // the push down and the scroll that follows cancel for every row on
-      // screen; a frozen block's late rows land above the fold and cost the
-      // person nothing either. Both are applied and the tail re-pinned in one
-      // task, so the frame that paints shows the new rows where they will
-      // stay — ScrollbackController.settleAtTail is the whole rule.
-      //
-      // A running block's rows are also bounded by the screen this pane has
-      // painted: the record is written when a row leaves the emulator's
-      // screen, and the frame showing it gone can still be in flight, so the
-      // delivery may name rows this pane is still painting in the grid below.
-      // The pending frame is painted first and the rows past it are held
-      // (BlockManager.applyStoredRows's `upTo`), which is what keeps the body
-      // one continuous run of rows.
-      // ONE OWNER OF "WHICH BLOCK HOLDS THE GRID" (nocx-4y82c.1.1): liveBlock
-      // — the block the live container is inside — not the running slot. The
-      // logical freeze clears the slot while the card still owns the grid, and
-      // a delivery landing in that window must still be held against the
-      // painted screen (an unbound running block is that same block, before
-      // its attempt is named).
-      const live = sb.blockManager.liveBlock
-      if (live !== null && (live.attemptId === entryId || live.attemptId === undefined)) {
-        // THE HOLD IS THIS DELIVERY'S ANSWER ABOUT THE LIVE SCREEN, asked
-        // after the frame in flight has been painted, and null when there is
-        // no live screen to answer for (`_rowsTheScreenPassed`) — in which
-        // case the body takes every row the record holds, in this same paint.
-        // e2e/connection-overlay.spec.ts: a record delivered across a daemon
-        // cut used to be held against the screen the pane had before it, and
-        // the block kept the eight rows that screen had passed out of
-        // forty-one for the rest of the command.
-        this._flushPendingPaint()
-        const upTo = this._rowsTheScreenPassed(live)
-        sb.settleAround(() => {
-          sb.blockManager.applyStoredRows(entryId, rows, upTo)
-          sb.scrollToBottomIfFollowing()
-        })
-      } else {
-        sb.settleAround(() => {
+        // A paged read is one WINDOW of the block, never the whole body: join
+        // it with what is already painted so a growth notification that names
+        // the newest rows cannot blank the pages above them (ADR-y45sp41c).
+        const rows = mergeStoredBlockRows(this._storedRowsOf(entryId) ?? current, read.rows)
+        // A RESTORED block has no BlockRecord: applyStoredRows would park its
+        // rows in a queue nothing flushes. It lives in _restoredRows and is
+        // painted through the element's own door (ADR-8rt54tx2).
+        if (sb.blockManager.blockForAttempt(entryId) === null && this._restoredRows.has(entryId)) {
+          this._paintBlockRows(entryId, rows)
+          this._loadVisibleBlockRows()
+          return
+        }
+        if (!this._active) {
           sb.blockManager.applyStoredRows(entryId, rows)
-          sb.scrollToBottomIfFollowing()
-        })
-      }
-    })
+          return
+        }
+        // The rows arrive asynchronously, well after the block that owns
+        // them has already been laid out — a running block's own live
+        // growth is followed inline (controller.ts's own height guard), but
+        // this delivery is a SEPARATE mutation the controller does not see
+        // on its own. Without holding the tail around it, a block that grows
+        // once its stream lands pushes the viewport away from the tail a
+        // person was following, silently (nocx-2v80t.3.19).
+        //
+        // ONE DOOR, AND NOTHING ANIMATED (owner, 2026-11-08: "like Warp, no
+        // animation"). A running block's rows land above the live end, where
+        // the push down and the scroll that follows cancel for every row on
+        // screen; a frozen block's late rows land above the fold and cost the
+        // person nothing either. Both are applied and the tail re-pinned in one
+        // task, so the frame that paints shows the new rows where they will
+        // stay — ScrollbackController.settleAtTail is the whole rule.
+        //
+        // A running block's rows are also bounded by the screen this pane has
+        // painted: the record is written when a row leaves the emulator's
+        // screen, and the frame showing it gone can still be in flight, so the
+        // delivery may name rows this pane is still painting in the grid below.
+        // The pending frame is painted first and the rows past it are held
+        // (BlockManager.applyStoredRows's `upTo`), which is what keeps the body
+        // one continuous run of rows.
+        // ONE OWNER OF "WHICH BLOCK HOLDS THE GRID" (nocx-4y82c.1.1): liveBlock
+        // — the block the live container is inside — not the running slot. The
+        // logical freeze clears the slot while the card still owns the grid, and
+        // a delivery landing in that window must still be held against the
+        // painted screen (an unbound running block is that same block, before
+        // its attempt is named).
+        const live = sb.blockManager.liveBlock
+        if (live !== null && (live.attemptId === entryId || live.attemptId === undefined)) {
+          // THE HOLD IS THIS DELIVERY'S ANSWER ABOUT THE LIVE SCREEN, asked
+          // after the frame in flight has been painted, and null when there is
+          // no live screen to answer for (`_rowsTheScreenPassed`) — in which
+          // case the body takes every row the record holds, in this same paint.
+          // e2e/connection-overlay.spec.ts: a record delivered across a daemon
+          // cut used to be held against the screen the pane had before it, and
+          // the block kept the eight rows that screen had passed out of
+          // forty-one for the rest of the command.
+          this._flushPendingPaint()
+          const upTo = this._rowsTheScreenPassed(live)
+          sb.settleAround(() => {
+            sb.blockManager.applyStoredRows(entryId, rows, upTo)
+            sb.scrollToBottomIfFollowing()
+          })
+        } else {
+          sb.settleAround(() => {
+            sb.blockManager.applyStoredRows(entryId, rows)
+            sb.scrollToBottomIfFollowing()
+          })
+        }
+        // ONE DEMAND LOOP: a growth read that brought only part of the new
+        // rows does not wait for another notification. The viewport decides
+        // what is still missing (ADR-ywzcpbqe).
+        this._loadVisibleBlockRows()
+      },
+    )
     const tracked = fetch.finally(() => {
       if (this._blockRowsInFlight.get(entryId) !== tracked) return
       if (this._blockRowsRefreshPending.delete(entryId)) {
@@ -11742,6 +11954,9 @@ export class TerminalContent extends BasePaneContent {
    *  renderer clamps the text to the wire bound and states how much more
    *  the block holds — never a silent truncation. */
   private _onBlockFrozen(rec: BlockRecord): void {
+    // The freeze REPLACED the running element; the index must point at the
+    // new one or it keeps the detached element (and its rows) alive.
+    if (rec.attemptId !== undefined) this._registerBlock(rec.attemptId, rec.el, rec)
     // A newer freeze is a different owner, and it cannot inherit an ask the
     // person made over the previous one.
     this._pendingAutomaticAttachment = null

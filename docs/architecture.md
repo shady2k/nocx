@@ -107,6 +107,13 @@ Hiding cancels the live painter's pending animation callback; retained rows, not
 and font measurement/repaint wait until the pane is shown. Showing paints the latest
 accepted state. Visible unfocused splits still paint.
 
+Stored-row reads are pages, not whole bodies: one entry-id index names the block
+element or live record, the loader asks for the stream rows in and around the
+viewport, and the painter reserves height from the artifact's retained runs so a
+page never moves it. A refused read waits and retries through the connection's
+priority queue; a restored element and a live record take the same settle door
+(ADR-y45sp41c, ADR-8rt54tx2).
+
 Retained output reconciles rows by ledger position and compact contents, preserving
 unchanged row DOM and invalidating painted rows when geometry or palette changes.
 Output and notices are inserted before the stationary live region: appending output

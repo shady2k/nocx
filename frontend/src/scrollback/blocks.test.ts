@@ -21,7 +21,7 @@ import {
   setBlockWhere,
   type BlockKind,
 } from './blocks'
-import { paintStoredRows } from './block-rows'
+import { paintStoredRows, parseStoredBlockRows } from './block-rows'
 import { restoredBlock } from './restored-block'
 import type { Row } from '../generated/ledger.blockRows'
 import { wireRowOf, type CellSpec } from '../painter/fixtures'
@@ -1131,11 +1131,97 @@ describe('BlockManager', () => {
     expect(liveContainer.parentElement).toBe(rec.el)
   })
 
-  it('finalizes orphaned running block on next start', () => {
+  it('settles a block the next start displaces, instead of leaving it running forever (nocx-evj4b.1.9)', () => {
+    // There is ONE running block. A start that arrives while another block is
+    // still running displaces it — the state a split leaves behind, and the
+    // state the owner met as two blocks at once. The displaced block used to
+    // keep `cmd-block-running` and a stopped ticker, and its own block.closed
+    // was then dropped (the record no longer read `running`), so nothing could
+    // ever settle it. It is not the command that just ended: its completion is
+    // not this start's to carry, so it freezes as unknown, with no exit status.
     const first = manager.startBlock('cmd1', '~', 0)
+    manager.bindAttempt('att-first')
     const second = manager.startBlock('cmd2', '~', 5)
-    expect(first.status).toBe('failure')
+    manager.bindAttempt('att-second')
+
     expect(manager.runningBlock).toBe(second)
+    expect(inner.querySelectorAll('.cmd-block-running')).toHaveLength(1)
+    expect(second.el.classList.contains('cmd-block-running')).toBe(true)
+    expect(first.el.classList.contains('cmd-block-running')).toBe(false)
+    expect(first.status).toBe('unknown')
+    expect(first.exitCode).toBeNull()
+    expect(first.el.dataset.outcome).toBeUndefined()
+    // Its own close still reaches it, and the card is already the frozen one
+    // the transport's row refresh will fill.
+    manager.blockClosed('att-first')
+    expect(first.el.classList.contains('cmd-block-running')).toBe(false)
+    expect(first.el.querySelector('.cmd-header-text')?.textContent).toBe('cmd1')
+  })
+
+  it('a displaced block takes its own later completion — outcome, code and length — and the running block keeps its own (nocx-evj4b.1.9)', () => {
+    // The two carriers are independent (ADR-0074): the next command's start
+    // can outrun the displaced one's completion. The displaced card froze as
+    // unknown ONLY for want of those facts; when its authenticated completion
+    // arrives it belongs to that card, and nothing may reach the new one.
+    const domain = mintDomain({
+      lane: 'test-lane',
+      lifecycle: 'prompt_ready',
+      domain: 'd-top',
+      epoch: 1,
+    }) as IntegrationDomain
+    const first = manager.startBlock('top', '~', 0)
+    manager.bindAttempt('att-top')
+    const second = manager.startBlock('htop', '~', 4)
+    manager.bindAttempt('att-htop')
+    expect(first.status).toBe('unknown')
+    expect(first.el.dataset.outcome).toBeUndefined()
+
+    manager.freezeFromAttempt(
+      {
+        id: 'att-top',
+        domain,
+        state: 'completed',
+        exitCode: 0,
+        fence: 'f'.repeat(64),
+        startedAt: '2026-11-10T10:00:00.000Z',
+        completedAt: '2026-11-10T10:00:03.400Z',
+      },
+      2,
+    )
+
+    expect(first.status).toBe('success')
+    expect(first.exitCode).toBe(0)
+    expect(first.durationMs).toBe(3400)
+    expect(first.el.dataset.outcome).toBe('success')
+    expect(first.el.textContent).toContain('3.4s')
+    // The command that displaced it is untouched: still running, still the
+    // running slot, with no exit code and no outcome of its own.
+    expect(second.status).toBe('running')
+    expect(second.exitCode).toBeNull()
+    expect(second.el.dataset.outcome).toBeUndefined()
+    expect(manager.runningBlock).toBe(second)
+    expect(second.el.classList.contains('cmd-block-running')).toBe(true)
+  })
+
+  it('a new start reclaims a header the alternate seat borrowed from the displaced block (nocx-evj4b.1.9)', () => {
+    const first = manager.startBlock('top', '~', 0)
+    manager.bindAttempt('att-top')
+    const header = first.el.querySelector<HTMLElement>('.cmd-header')!
+    inner.prepend(header)
+
+    manager.startBlock('top', '~', 3)
+
+    // The displaced block keeps its own header — headless is the owner's
+    // "frozen with its header rows gone" — and the new block gets its own,
+    // never the old command's.
+    // The displaced block's card carries its own header again, and nothing
+    // is left seated outside a block for the new one to inherit.
+    expect(header.isConnected).toBe(false)
+    expect(inner.querySelectorAll(':scope > .cmd-header')).toHaveLength(0)
+    const frozenCard = inner.querySelector<HTMLElement>('.cmd-block:not(.cmd-block-running)')
+    expect(frozenCard?.querySelector<HTMLElement>(':scope > .cmd-header')).not.toBeNull()
+    expect(frozenCard?.querySelector('.cmd-header-text')?.textContent).toBe('top')
+    expect(manager.runningBlock?.el.querySelector('.cmd-header-text')?.textContent).toBe('top')
   })
 
   it('opening a block keeps the keyboard in the live grid it seats as its body (nocx-askcb)', () => {
@@ -2018,6 +2104,22 @@ describe('BlockManager attempt projections (ADR-0024 §5, §7 — bead nocx-u7uh
     rows = 24,
   ) => ({ row, screenRevision, bufferKind, bufferInstance, cols, rows })
 
+  it('uses the backend elapsed duration when UTC timestamps step backwards during a command', () => {
+    const rec = manager.startBlock('sleep 2', '~', 0)
+    manager.bindAttempt('att-1')
+    manager.blockClosed('att-1')
+    manager.freezeFromAttempt(
+      attempt({
+        startedAt: '2026-11-11T16:30:47.360Z',
+        completedAt: '2026-11-11T16:30:49.286Z',
+        durationMs: 2024,
+      }),
+      0,
+    )
+    expect(rec.durationMs).toBe(2024)
+    expect(rec.el.querySelector('[title="2024ms"]')).not.toBeNull()
+  })
+
   it('reclaims an alternate-seated header before a deferred visual freeze', () => {
     const rec = manager.startBlock('make', '~', 3)
     manager.bindAttempt('att-1')
@@ -2319,6 +2421,50 @@ describe("the block's close: the completion and the backend's block.closed (nocx
     const frozen = manager.freezeFromAttempt(attempt(), 4)
     expect(frozen).not.toBeNull()
     expect(closedOnScreen('att-1')).toBe(true)
+  })
+
+  it('keeps the leading marker across freezes and moves it when the leading block is cleared', () => {
+    const first = manager.startBlock('first', '~', 0)
+    manager.bindAttempt('first')
+    expect(first.el.dataset.firstEntry).toBe('true')
+    manager.blockClosed('first')
+    manager.freezeFromAttempt(attempt({ id: 'first' }), 0)
+    expect(first.el.dataset.firstEntry).toBe('true')
+
+    const second = manager.startBlock('second', '~', 0)
+    manager.bindAttempt('second')
+    expect(second.el.dataset.firstEntry).toBeUndefined()
+    manager.applyClearBoundary('second')
+    expect(first.el.dataset.firstEntry).toBeUndefined()
+    expect(second.el.dataset.firstEntry).toBe('true')
+    manager.clearAll()
+    expect(second.el.dataset.firstEntry).toBeUndefined()
+    expect(manager.startBlock('third', '~', 0).el.dataset.firstEntry).toBe('true')
+    manager.dispose()
+  })
+
+  it('a pasted burst keeps every early close until its authenticated completion', () => {
+    vi.useFakeTimers()
+    try {
+      const ids = Array.from({ length: 501 }, (_, i) => `burst-${i}`)
+      manager.startBlock(ids[0], '~', 0)
+      manager.bindAttempt(ids[0])
+      for (const id of ids) manager.blockClosed(id)
+      expect(manager.freezeFromAttempt(attempt({ id: ids[0] }), 0)).not.toBeNull()
+      expect(closedOnScreen(ids[0])).toBe(true)
+      for (const id of ids.slice(1)) {
+        manager.startBlock(id, '~', 0)
+        manager.bindAttempt(id)
+        manager.freezeFromAttempt(attempt({ id }), 0)
+        expect(manager.runningBlock).toBeNull()
+        expect(closedOnScreen(id), id).toBe(true)
+      }
+      expect(manager.blocks).toHaveLength(501)
+      expect(vi.getTimerCount(), 'completed commands leave no duration ticker').toBe(0)
+    } finally {
+      manager.dispose()
+      vi.useRealTimers()
+    }
   })
 
   it('a block.closed for a block this pane does not hold, or one already closed, changes nothing', () => {
@@ -4833,6 +4979,30 @@ describe('backend-owned block rows', () => {
     })
     return { inner, manager, liveContainer }
   }
+
+  it('accepts an advancing output mark that removes all echo without accepting its stale predecessor', () => {
+    const { manager, inner } = newManager()
+    const rec = manager.startBlock('echo', '~', 0)
+    manager.bindAttempt('echo-only')
+    const body = [0, 1].map((from) => JSON.stringify({ from, row: { text: 'echo' } })).join('\n')
+    const previous = parseStoredBlockRows(body, { truncated: null, payload: {} }, 'same')
+    const next = parseStoredBlockRows(
+      body,
+      { truncated: null, payload: { outputStartRow: 2 } },
+      'same',
+    )
+    try {
+      manager.applyStoredRows('echo-only', previous)
+      manager.applyStoredRows('echo-only', next)
+      expect(rec.storedRows).toBe(next)
+      expect(rec.el.querySelector('.cmd-output')).toBeNull()
+      manager.applyStoredRows('echo-only', previous)
+      expect(rec.storedRows).toBe(next)
+    } finally {
+      manager.dispose()
+      inner.remove()
+    }
+  })
 
   it('keeps the real input focused without focus transitions while retained output grows', () => {
     const { manager, inner, liveContainer } = newManager()

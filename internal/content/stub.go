@@ -403,6 +403,12 @@ func (s *ledgerStub) RecordBlockRowsFence(_ context.Context, in RecordBlockRowsF
 	return ErrNotImplemented
 }
 
+func (s *ledgerStub) RecordBlockRowsOutputStart(_ context.Context, in RecordBlockRowsOutputStart) error {
+	s.log.Info("content stub: LedgerRepository.RecordBlockRowsOutputStart",
+		"entry", in.EntryID, "artifact", in.ArtifactID, "row", in.Row)
+	return ErrNotImplemented
+}
+
 func (s *ledgerStub) OpenBlockRowsForSession(_ context.Context, sessionID string) (OpenBlockRowsEntry, error) {
 	s.log.Info("content stub: LedgerRepository.OpenBlockRowsForSession", "session", sessionID)
 	// No database behind the stub holds an open block, so the honest
@@ -424,6 +430,11 @@ func (s *ledgerStub) AppendChunk(_ context.Context, artifactID string, seq int, 
 
 func (s *ledgerStub) Artifact(_ context.Context, id string) (*Artifact, error) {
 	s.log.Info("content stub: LedgerRepository.Artifact", "id", id)
+	return nil, ErrNotImplemented
+}
+
+func (s *ledgerStub) ArtifactRange(_ context.Context, id string, fromRow uint64, rowLimit int) (*ArtifactRange, error) {
+	s.log.Info("content stub: LedgerRepository.ArtifactRange", "id", id, "fromRow", fromRow, "rowLimit", rowLimit)
 	return nil, ErrNotImplemented
 }
 
@@ -559,6 +570,11 @@ func (s *layoutStub) RecolourTab(_ context.Context, id string, _ *string) (Tab, 
 
 func (s *layoutStub) PinTab(_ context.Context, id string, pinned bool) (Tab, error) {
 	s.log.Info("content stub: LayoutRepository.PinTab", "id", id, "pinned", pinned)
+	return Tab{}, ErrNotImplemented
+}
+
+func (s *layoutStub) SetTabPanel(_ context.Context, id, view string, collapsed bool) (Tab, error) {
+	s.log.Info("content stub: LayoutRepository.SetTabPanel", "id", id, "view", view, "collapsed", collapsed)
 	return Tab{}, ErrNotImplemented
 }
 

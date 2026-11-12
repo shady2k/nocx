@@ -462,6 +462,14 @@ select:focus-visible {
   display: flex;
   flex-direction: column;
   --default-contextmenu: hide;
+  /* ONE GUTTER FOR EVERYTHING THE PANE SHOWS (ADR-92zzg2y2): ordinary
+     output, blocks, a plain ssh shell and a full-screen program alike. One
+     character cell wide on the left and the right, half a row top and bottom.
+     The renderer publishes the cell metric on this element
+     (controller.cellMetricsChanged), so the gutter scales with the font and
+     the fit and the paint read the same number. */
+  --pane-inline-padding: var(--term-cell-width, 1ch);
+  --pane-block-padding: calc(var(--term-cell-height, 1.2em) / 2);
 }
 
 .pane.active {

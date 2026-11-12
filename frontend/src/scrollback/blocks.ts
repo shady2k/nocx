@@ -7,7 +7,7 @@ import type { CommandSnapshotStore } from '../command-snapshot'
 import type { BlockOutputStart } from '../generated/block.outputStart'
 import type { ScreenSnapshot } from '../cell-model'
 import type { BlockClosed } from '../generated/block.closed'
-import { paintUnreadableRows, type StoredBlockRows } from './block-rows'
+import { loadedRowRanges, paintUnreadableRows, type StoredBlockRows } from './block-rows'
 import { wordRangeIn } from '../word-selection'
 import { insideLiveRegion } from '../live-region'
 import { createSecretChipUnresolved } from '../ui/secret-chip'
@@ -22,9 +22,9 @@ import { commandFragment } from '../command-text'
 import { KIND_LABELS, type SecretKind } from '../secret-kind'
 import type { ExecutionAttempt } from '../lifecycle/state'
 
-/** The block's own length, in milliseconds, from the two backend timestamps its
- *  attempt carries (ADR-tqjt5rkk) — the interval the block's header prints and
- *  the figure the composer's departure is decided on.
+/** The block's own elapsed time, in milliseconds, from the backend's duration
+ *  or its timestamps when no duration was recorded (ADR-tqjt5rkk) — the interval
+ *  the header prints and the figure the composer's departure is decided on.
  *
  *  NOT the renderer's clock: a completion reaches the renderer well after the
  *  command ended, so `performance.now()` between two facts measures the wire,
@@ -34,6 +34,7 @@ import type { ExecutionAttempt } from '../lifecycle/state'
  *  long the command ran prints no duration, and the composer treats it as long
  *  (a composer the product has no evidence to keep must not be kept). */
 export function attemptBlockMs(attempt: ExecutionAttempt): number | null {
+  if (attempt.durationMs !== undefined) return attempt.durationMs
   if (attempt.startedAt === undefined || attempt.completedAt === undefined) return null
   const ms = Date.parse(attempt.completedAt) - Date.parse(attempt.startedAt)
   return Number.isFinite(ms) ? ms : null
@@ -135,11 +136,11 @@ export function copyToClipboard(text: string): Promise<void> {
 // pane has let go of (`settleWithoutBackend` — the session that would say
 // it is gone).
 
-/** Upper bound on remembered block.closed notifications for blocks whose
- *  completion has not arrived yet (`_closedEarly`). Ordinarily one is
- *  consumed within a frame; the bound only keeps a notification for a
- *  block this pane never completes from being held forever. */
-const MAX_CLOSED_EARLY = 8
+/** How many displaced blocks remember their attempt while its completion is
+ *  still in flight (nocx-evj4b.1.9). One per start that outran its
+ *  predecessor's completion; the bound is for a stream that never delivers
+ *  them, and an evicted block keeps the `unknown` it was frozen with. */
+const MAX_DISPLACED = 32
 
 /** Upper bound on rows held for an entry whose block has not bound yet
  *  (`_pendingStoredRows`). A block.grew/closed notification can arrive
@@ -147,7 +148,7 @@ const MAX_CLOSED_EARLY = 8
  *  entry is ordinarily drained the moment binding happens — but binding
  *  never happens for an attempt whose running fact is refused, lost, or
  *  never reaches this pane, and nothing else ever visits the entry to
- *  remove it. A small ring, for the same reason as `_closedEarly`: a
+ *  remove it. A small ring bounds these unbound row pages: a
  *  session has few blocks racing their own binding at once, so bounding it
  *  costs nothing a real session would notice and stops an unbound entry
  *  from being held forever. */
@@ -2091,8 +2092,22 @@ export interface BlockManagerOpts {
    *  backend's block.closed). Fires after afterVisualFreeze, so a waiter that sets
    *  that slot and an observer here never race. */
   onBlockFrozen?: (rec: BlockRecord) => void
+  /** Fired with the elements this manager actually removed from the DOM
+   *  (clearAll, an erase boundary). The caller's entry-id index drops those
+   *  elements; an index that outlives them keeps their rows alive. */
+  onBlocksRemoved?: (elements: readonly HTMLElement[]) => void
+  /** Takes back a header the alternate-screen seat borrowed, through the
+   *  party that bought it (nocx-evj4b.1.9). While a program owns the pane the
+   *  running header is seated out of its block and the CONTROLLER holds that
+   *  reference; a block displaced in that state must not reparent the node
+   *  behind its back, or the controller keeps pointing at it and the next
+   *  fullscreen exit prepends it into whichever block is running then. Absent
+   *  in a bare-bones embedding: nothing was ever seated, and the manager
+   *  prepends nothing. */
+  reclaimSeatedHeader?: () => void
+
   /** Paints rows read from the backend's block artifact. */
-  paintStoredRows?: (block: HTMLElement, rows: StoredBlockRows) => void
+  paintStoredRows?: (block: HTMLElement, rows: StoredBlockRows, reserve?: boolean) => void
   /** Runs a mutation that changes the transcript's shape — the freeze swaps a
    *  block's whole element — and leaves a reader who has scrolled away exactly
    *  where they were (nocx-3wmve). The scroller and the reader's place are the
@@ -2164,6 +2179,7 @@ export class BlockManager {
   private _nextId = 1
   private _now: () => number
   private _onBlockFrozen?: (rec: BlockRecord) => void
+  private _onBlocksRemoved?: (elements: readonly HTMLElement[]) => void
   private _scrollbackInner: HTMLElement
   private _liveContainer: HTMLElement
   private _runningBlock: BlockRecord | null = null
@@ -2172,8 +2188,15 @@ export class BlockManager {
   private _selectedBlockId: number | null = null
   private _snapshotStore: CommandSnapshotStore
   private _onDeferredFreeze?: (rec: BlockRecord) => void
-  private _paintStoredRows?: (block: HTMLElement, rows: StoredBlockRows) => void
+  private _paintStoredRows?: (block: HTMLElement, rows: StoredBlockRows, reserve?: boolean) => void
   private _holdReaderPlace?: (mutate: () => void) => void
+  private _reclaimSeatedHeader?: () => void
+  /** Blocks the next start displaced, by attempt id: their own completion has
+   *  not arrived yet and belongs to that card, not to the one that replaced
+   *  it (nocx-evj4b.1.9; ADR-0074's two independent carriers can deliver the
+   *  start first). Bounded by MAX_DISPLACED; an entry leaves on its own
+   *  completion or abandonment, and an evicted one keeps its `unknown`. */
+  private _displaced = new Map<string, BlockRecord>()
   private _visible = true
   /** Hidden paints belong to their DOM owner, not a second block registry.
    *  Removed/replaced owners can be collected without draining a strong queue. */
@@ -2243,7 +2266,8 @@ export class BlockManager {
   >()
   /** block.closed notifications that arrived BEFORE their completion — the
    *  two cross the socket in either order. Consumed by the completion that
-   *  names the entry; bounded by MAX_CLOSED_EARLY. */
+   *  names the entry, or cleared when the session ends or scrollback clears.
+   *  Burst size cannot retire an entry whose completion is still in flight. */
   private _closedEarly = new Map<string, BlockScreenAnchor | null | undefined>()
   /** WHERE THE NEXT BLOCK THIS MANAGER OPENS BELONGS (ADR-0040).
    *
@@ -2266,8 +2290,10 @@ export class BlockManager {
     this._snapshotStore = opts.snapshotStore
     this._onDeferredFreeze = opts.onDeferredFreeze
     this._onBlockFrozen = opts.onBlockFrozen
+    this._onBlocksRemoved = opts.onBlocksRemoved
     this._paintStoredRows = opts.paintStoredRows
     this._holdReaderPlace = opts.holdReaderPlace
+    this._reclaimSeatedHeader = opts.reclaimSeatedHeader
     this._sessionName = opts.sessionName
     this._answerText = opts.answerText
     this._dump = opts.dump
@@ -2306,15 +2332,20 @@ export class BlockManager {
    *  never carries the leading rule, whether it is the stack's child or a
    *  running block's body (ADR-3kqrem7v), and a block nested inside a turn is not
    *  a TOP-LEVEL entry at all. */
+  private _firstEntry: HTMLElement | null = null
+
   private _refreshFirstEntry(): void {
-    const first = this._scrollbackInner.querySelector<HTMLElement>(
-      ':scope > .cmd-block, :scope > .scrollback-restore-boundary',
-    )
-    for (const marked of this._scrollbackInner.querySelectorAll<HTMLElement>(
-      ':scope > [data-first-entry]',
-    )) {
-      if (marked !== first) delete marked.dataset.firstEntry
+    let first = this._scrollbackInner.firstElementChild as HTMLElement | null
+    while (
+      first &&
+      !first.classList.contains('cmd-block') &&
+      !first.classList.contains('scrollback-restore-boundary')
+    ) {
+      first = first.nextElementSibling as HTMLElement | null
     }
+    if (this._firstEntry === first) return
+    if (this._firstEntry) delete this._firstEntry.dataset.firstEntry
+    this._firstEntry = first
     if (first) first.dataset.firstEntry = 'true'
   }
 
@@ -2943,7 +2974,8 @@ export class BlockManager {
     // full 208 rows while the hold said 207, and the body showed the two rows
     // the grid still had.
     const painted = this._paintableRows(block, rows)
-    this._paintStoredRows?.(block, painted)
+    const live = this._liveContainer.parentElement === block
+    this._paintStoredRows?.(block, painted, live ? false : undefined)
     this._keepLiveBodyLast(block)
   }
 
@@ -2971,12 +3003,30 @@ export class BlockManager {
    *  FALL: a pane that GROWS pulls rows back out of history onto the top of
    *  the screen, and the body must stop painting them again or the joint
    *  shows the same line twice (nocx-4y82c.1.1). */
-  applyStoredRows(entryId: string, rows: StoredBlockRows, upTo?: number | null): void {
+  applyStoredRows(
+    entryId: string,
+    rows: StoredBlockRows,
+    upTo?: number | null,
+    reset = false,
+  ): void {
     const cursor = rows.lines.length > 0 ? rows.lines[rows.lines.length - 1].from : -1
     const seen = this._storedRowsCursor.get(entryId) ?? -1
-    if (cursor < seen) return
-    this._storedRowsCursor.set(entryId, cursor)
+    // `reset` is the reconnect's deliberate give-back (ADR-y45sp41c): the block
+    // keeps its coordinates and height and drops its rows so the visible page
+    // can be read first. It is not an older read, so the cursor does not
+    // reject it.
     const rec = this.blockForAttempt(entryId)
+    const previous = rec?.storedRows ?? this._pendingStoredRows.get(entryId)?.rows
+    const sameArtifact =
+      previous?.artifactVersion !== undefined && previous.artifactVersion === rows.artifactVersion
+    const previousStart = previous?.outputStartRow ?? 0
+    const outputStart = rows.outputStartRow ?? 0
+    if (!reset && sameArtifact && outputStart < previousStart) return
+    // Filtering a newly authenticated echo prefix can lower the loaded cursor
+    // without making this response older. Its predecessor must not restore it.
+    const advancesStart = sameArtifact && outputStart > previousStart
+    if (!reset && cursor < seen && !advancesStart) return
+    this._storedRowsCursor.set(entryId, advancesStart ? Math.max(cursor, seen) : cursor)
     if (!rec) {
       // A NEW entry may push the ring past its bound; re-setting one
       // already held must not — it stays at its original age.
@@ -3014,8 +3064,9 @@ export class BlockManager {
    *  that was handed the full rows cannot paint them. */
   private _paintableRows(block: HTMLElement, rows: StoredBlockRows): StoredBlockRows {
     const rec = this._blocks.find((b) => b.el === block)
+    const live = this._liveContainer.parentElement === block
     if (rec === undefined || rec.storedUpTo === undefined) return rows
-    if (this._liveContainer.parentElement !== block) return rows
+    if (!live) return rows
     return this._heldRows(rows, rec.storedUpTo, rec.outputStreamStart ?? 0)
   }
 
@@ -3032,7 +3083,22 @@ export class BlockManager {
     const boundary = streamStart + Math.max(0, limit)
     const lines = rows.lines.filter((line) => line.from >= streamStart && line.from < boundary)
     if (lines.length === rows.lines.length) return rows
-    return { ...rows, lines }
+    // A HELD BODY RESERVES ONLY WHAT IT MAY PAINT (ADR-y45sp41c). The
+    // coordinates describe the whole artifact, but the rows past the hold are
+    // waiting for the screen — reserving their height here would grow the
+    // block before its rows arrive, which is the "room first, rows later"
+    // frame e2e/output-jitter.spec.ts exists to catch. The hold's rows are
+    // painted, and the block grows with them, exactly as it did before pages.
+    return {
+      ...rows,
+      lines,
+      firstRow: lines[0]?.from ?? rows.firstRow,
+      lastRow: lines[lines.length - 1]?.from ?? rows.lastRow,
+      endRow: (lines[lines.length - 1]?.from ?? rows.firstRow ?? 0) + 1,
+      rowCount: lines.length,
+      retainedRanges: loadedRowRanges(lines),
+      reserve: false,
+    }
   }
 
   /** The part of a block's stored rows its body may paint: all of them,
@@ -3173,7 +3239,7 @@ export class BlockManager {
     startAnchor?: BlockScreenAnchor,
   ): BlockRecord {
     if (this._runningBlock) {
-      this._finalizeRunningUnsafe()
+      this._settleDisplacedRunning()
     }
 
     const id = this._nextId++
@@ -3539,32 +3605,34 @@ export class BlockManager {
    *  coordinator and ends in block.closed (nocx-2v80t.3.29). */
   freezeFromAttempt(attempt: ExecutionAttempt, endLine: number): BlockRecord | null {
     if (attempt.state !== 'completed') return null
+    const displaced = this._displaced.get(attempt.id)
+    if (displaced !== undefined) {
+      // The block this attempt opened was displaced by a later start before
+      // its own completion arrived (ADR-0074's two carriers are independent).
+      // The outcome belongs to THAT card, and the command that replaced it is
+      // not touched: no running slot, no live region, no element of it
+      // (nocx-evj4b.1.9). The card is already the frozen one, so there is no
+      // visual freeze to report.
+      this._displaced.delete(attempt.id)
+      const { code, status } = this._completedStatus(attempt, displaced.stopRequested)
+      // The attempt's own length when its fact carries it; otherwise the
+      // length this manager measured at the displacement (never `now`, which
+      // by this point belongs to the command that replaced it). The fields
+      // land on the DISPLACED record only: `_logicalFreeze` would take the
+      // running slot, and that slot is the new command's now.
+      displaced.durationMs = attemptBlockMs(attempt) ?? displaced.durationMs ?? null
+      displaced.exitCode = code
+      displaced.status = status
+      settleBlockOutcome(displaced.el, 'command', displaced.durationMs ?? 0, {
+        status,
+        exitCode: code,
+      })
+      return null
+    }
     if (this._attemptId !== attempt.id) return null
-    const code = attempt.exitCode ?? null
     const rec = this._runningBlock
     if (!rec) return null
-    // A nonzero exit is a failure UNLESS this block was sent a stop request
-    // through nocx (nocx-9bpeq.19): the backend's own completion fact never
-    // says why the process died — SIGINT's 130 and the escalation ladder's
-    // own 143/137 read exactly like a program's own failure otherwise.
-    //
-    // THE BACKEND'S OWN SETTLEMENT OUTRANKS THE PANE'S GESTURE (nocx-zas0d,
-    // review of 6830b43d, major 2). `stopRequested` is the pane's evidence that
-    // a person asked and the backend ACCEPTED — and for a Stop that arrived
-    // before the shell's start, acceptance is not delivery. The attempt's
-    // `signalDelivery` is the backend saying what actually happened, carried on
-    // the lifecycle fact so it survives a dropped frame and a reconnect: a
-    // notification a reconnect could lose must not be the only thing keeping a
-    // command that ran to its own end from being painted as one the person
-    // stopped. Absent (no Stop was ever accepted for this attempt) is the case
-    // where the pane's own mark is the whole evidence.
-    const stopped =
-      attempt.signalDelivery === 'delivered'
-        ? true
-        : attempt.signalDelivery === 'undelivered'
-          ? false
-          : rec.stopRequested
-    const status = code === 0 ? 'success' : stopped ? 'cancelled' : 'failure'
+    const { code, status } = this._completedStatus(attempt, rec.stopRequested)
 
     // LOGICAL freeze — the authenticated event alone flips the block's
     // status, exit code and duration and frees the running slot.
@@ -3575,6 +3643,40 @@ export class BlockManager {
     this._attemptId = null
 
     return this._closeOnBackend(rec, endLine, terminal) ? rec : null
+  }
+
+  /** What a COMPLETED attempt paints — the exit code, and the status its
+   *  header carries. One owner for the rule, because the running block and a
+   *  displaced one are the same question (nocx-evj4b.1.9).
+   *
+   *  A nonzero exit is a failure UNLESS the block was sent a stop request
+   *  through nocx (nocx-9bpeq.19): the backend's own completion fact never
+   *  says why the process died — SIGINT's 130 and the escalation ladder's own
+   *  143/137 read exactly like a program's own failure otherwise.
+   *
+   *  THE BACKEND'S OWN SETTLEMENT OUTRANKS THE PANE'S GESTURE (nocx-zas0d,
+   *  review of 6830b43d, major 2). `stopRequested` is the pane's evidence that
+   *  a person asked and the backend ACCEPTED — and for a Stop that arrived
+   *  before the shell's start, acceptance is not delivery. The attempt's
+   *  `signalDelivery` is the backend saying what actually happened, carried
+   *  on the lifecycle fact so it survives a dropped frame and a reconnect: a
+   *  notification a reconnect could lose must not be the only thing keeping a
+   *  command that ran to its own end from being painted as one the person
+   *  stopped. Absent (no Stop was ever accepted for this attempt) is the case
+   *  where the pane's own mark is the whole evidence. */
+  private _completedStatus(
+    attempt: ExecutionAttempt,
+    stopRequested: boolean,
+  ): { code: number | null; status: 'success' | 'failure' | 'cancelled' } {
+    const code = attempt.exitCode ?? null
+    const stopped =
+      attempt.signalDelivery === 'delivered'
+        ? true
+        : attempt.signalDelivery === 'undelivered'
+          ? false
+          : stopRequested
+    const status = code === 0 ? 'success' : stopped ? 'cancelled' : 'failure'
+    return { code, status }
   }
 
   /** The backend said this entry's block is closed (block.closed): its rows
@@ -3601,10 +3703,6 @@ export class BlockManager {
     }
     const rec = this.blockForAttempt(entryId)
     if (rec !== null && rec.status !== 'running') return
-    if (!this._closedEarly.has(entryId) && this._closedEarly.size >= MAX_CLOSED_EARLY) {
-      const oldest = this._closedEarly.keys().next().value
-      if (oldest !== undefined) this._closedEarly.delete(oldest)
-    }
     this._closedEarly.set(entryId, screenAnchor)
   }
 
@@ -3621,6 +3719,10 @@ export class BlockManager {
     sessionGone = false,
   ): BlockRecord | null {
     if (attempt.state !== 'unknown') return null
+    // A displaced block already says unknown (it froze for want of its own
+    // completion, and this is the answer that it gets none); its close fills
+    // its rows as usual (nocx-evj4b.1.9).
+    if (this._displaced.delete(attempt.id)) return null
     if (this._attemptId !== attempt.id) return null
     const rec = this._runningBlock
     if (!rec) return null
@@ -4017,6 +4119,7 @@ export class BlockManager {
     this._stopTicker()
     this._awaitingClose.clear()
     this._closedEarly.clear()
+    this._displaced.clear()
     this._pendingStoredRows.clear()
     this._pendingOutputAnchors.clear()
     this._storedRowsCursor.clear()
@@ -4025,9 +4128,12 @@ export class BlockManager {
     // ONE list, because there is one owner: whatever this manager put in
     // the container comes out, whether it was a live block, an answer or a
     // restored one under its boundary (nocx-0zb1m).
+    const removed = [...this._owned]
     for (const rec of this._blocks) rec.header?.remove()
-    for (const el of this._owned) el.remove()
+    for (const el of removed) el.remove()
     this._owned.clear()
+    this._refreshFirstEntry()
+    this._onBlocksRemoved?.(removed)
     this._blocks = []
     this._answerBlocks = []
     this._runningBlock = null
@@ -4091,11 +4197,15 @@ export class BlockManager {
     for (const rec of this._blocks) {
       if (rec.el !== keep) rec.header?.remove()
     }
+    const removed: HTMLElement[] = []
     for (const el of [...this._owned]) {
       if (el === keep) continue
       el.remove()
       this._owned.delete(el)
+      removed.push(el)
     }
+    this._refreshFirstEntry()
+    this._onBlocksRemoved?.(removed)
     this._blocks = this._blocks.filter((b) => b.el === keep)
     this._answerBlocks = this._answerBlocks.filter((b) => b.el === keep)
     if (!keepingRunning) {
@@ -4111,18 +4221,51 @@ export class BlockManager {
     }
   }
 
-  private _finalizeRunningUnsafe(): void {
-    // Note: a block awaiting its block.closed is an ALREADY logically frozen
-    // one, never the running block this finalizes — its close settles it
-    // independently, guarded by the running slot.
-    this._stopTicker()
-    this._clearCommandIndicator()
-    if (!this._runningBlock) return
-    this._runningBlock.status = 'failure'
-    this._runningBlock.exitCode = null
-    this._runningBlock = null
-    this._cmdStartTime = null
+  /**
+   * A block the next start displaces (nocx-evj4b.1.9).
+   *
+   * There is exactly one running block, so a start that arrives while one is
+   * still on screen has to settle it. Leaving it alone — which this used to
+   * do, with a hidden `failure` and no DOM at all — kept the displaced card
+   * wearing `cmd-block-running` and its frozen ticker forever: its own
+   * `block.closed` then found a record whose status was no longer `running`
+   * and returned without closing it, so the pane showed TWO running cards
+   * and no event could ever settle the older one. A person reading the pane
+   * could not tell which command was still going.
+   *
+   * The displaced block is NOT the command that just ended: its attempt is
+   * still open and its own completion is not news this start may carry, so it
+   * freezes as `unknown` — never as a success it never received — and its
+   * stored rows still arrive with its `block.closed`, because the card is
+   * built with its attempt's entry and the transport's close refreshes it.
+   * A header the alternate seat borrowed comes home first: the next block
+   * must not open wearing the displaced command's header while the displaced
+   * one is left headless.
+   */
+  private _settleDisplacedRunning(): void {
+    const rec = this._runningBlock
+    if (!rec) {
+      this._stopTicker()
+      this._clearCommandIndicator()
+      return
+    }
+    // The seat takes its header back BEFORE the running slot is freed: the
+    // controller restores it into the block this start is displacing, and
+    // drops its own reference with it. Reparenting the node here instead
+    // would leave that reference standing, and the next fullscreen exit
+    // would prepend the displaced command's header into the new command's
+    // card (nocx-evj4b.1.9).
+    this._reclaimSeatedHeader?.()
+    const status = this._logicalFreeze(rec, null, 'unknown')
     this._attemptId = null
+    if (rec.attemptId !== undefined) {
+      if (this._displaced.size >= MAX_DISPLACED) {
+        const oldest = this._displaced.keys().next().value
+        if (oldest !== undefined) this._displaced.delete(oldest)
+      }
+      this._displaced.set(rec.attemptId, rec)
+    }
+    this._freezeCard(rec, rec.endLine, status)
   }
 
   dispose(): void {

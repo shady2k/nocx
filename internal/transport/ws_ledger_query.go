@@ -35,6 +35,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -281,8 +282,9 @@ const defaultLedgerPageLimit = defaultHistoryPageLimit
 // LedgerOperation (nil → the content store is not wired) and the Responder;
 // never the *WSServer, and never the connection — a read needs no session.
 type ledgerReadHandlers struct {
-	op capability.LedgerOperation // nil → content store not wired
-	r  Responder
+	op   capability.LedgerOperation // nil → content store not wired
+	r    Responder
+	rows *rowReadFlow // nil in a hand-built handler: no slot policy
 }
 
 func (h ledgerReadHandlers) handleQuery(ctx context.Context, req jsonrpcRequest) {
@@ -443,10 +445,21 @@ func (h ledgerReadHandlers) handleGet(ctx context.Context, req jsonrpcRequest) {
 	_ = h.r.TryResult(req.ID, mustMarshal(out))
 }
 
-// ledgerArtifactParams is the request: one artifact id.
+// ledgerArtifactParams is the request: one artifact id, and optionally the
+// page of a stored-rows artifact the reader wants. Absent range fields are a
+// whole body — the read every existing caller makes — while either range
+// field names a paged stored-row read, which is the path ADR-y45sp41c admits
+// through a slot and may answer with a retry hint.
 type ledgerArtifactParams struct {
-	ID string `json:"id"`
+	ID       string  `json:"id"`
+	FromRow  *uint64 `json:"fromRow,omitempty"`
+	RowLimit *int    `json:"rowLimit,omitempty"`
 }
+
+// paged reports whether this request is a stored-row page rather than a whole
+// body. Either field is enough: fromRow alone asks for the rest of the block,
+// rowLimit alone asks for its first page.
+func (p ledgerArtifactParams) paged() bool { return p.FromRow != nil || p.RowLimit != nil }
 
 // ledgerArtifactResponse is the body and what a reader needs to know about
 // it. Separate from ledger.get because the recall read must not haul bytes
@@ -457,7 +470,37 @@ type ledgerArtifactResponse struct {
 	Body      string  `json:"body"`
 	Truncated *string `json:"truncated"`
 	ByteLen   int64   `json:"byteLen"`
+	// The stored-rows coordinates (nocx-t7xhe). FirstRow/LastRow/RangeStart
+	// are null for a body that is not stored rows and for an empty rows
+	// artifact; RowCount and RangeCount are 0 there. A reader reserves a
+	// block's height from RowCount before any page of it arrives, and pages
+	// with HasMoreBefore/HasMoreAfter.
+	FirstRow *uint64 `json:"firstRow"`
+	LastRow  *uint64 `json:"lastRow"`
+	EndRow   *uint64 `json:"endRow"`
+	RowCount int     `json:"rowCount"`
+	// RetainedRanges is the whole artifact's geometry: the runs of stream rows
+	// the store holds, each [from, to). A reader reserves the FirstRow..EndRow
+	// span once and spends one notice on each gap between these runs, so a page
+	// arriving later never moves the block (ADR-y45sp41c).
+	RetainedRanges []ledgerRowRangeWire `json:"retainedRanges"`
+	RangeStart     *uint64              `json:"rangeStart"`
+	RangeCount     int                  `json:"rangeCount"`
+	HasMoreBefore  bool                 `json:"hasMoreBefore"`
+	HasMoreAfter   bool                 `json:"hasMoreAfter"`
 }
+
+// ledgerRowRangeWire is one retained run on the wire. To is exclusive.
+type ledgerRowRangeWire struct {
+	From uint64 `json:"from"`
+	To   uint64 `json:"to"`
+}
+
+// maxArtifactRowLimit bounds one page of a stored-rows read. It is larger than
+// any viewport — a reader asks for the rows in and around what it shows plus a
+// screen or two — and small enough that a page cannot approach the per-command
+// cap on its own.
+const maxArtifactRowLimit = 10_000
 
 func validateLedgerArtifactRaw(raw json.RawMessage) string {
 	var p ledgerArtifactParams
@@ -466,6 +509,9 @@ func validateLedgerArtifactRaw(raw json.RawMessage) string {
 	}
 	if strings.TrimSpace(p.ID) == "" || utf8.RuneCountInString(p.ID) > maxIDRunes {
 		return "id is required and bounded"
+	}
+	if p.RowLimit != nil && (*p.RowLimit < 1 || *p.RowLimit > maxArtifactRowLimit) {
+		return fmt.Sprintf("rowLimit must be between 1 and %d", maxArtifactRowLimit)
 	}
 	return ""
 }
@@ -491,9 +537,95 @@ func (h ledgerReadHandlers) handleArtifact(ctx context.Context, req jsonrpcReque
 		return
 	}
 
-	var out ledgerArtifactResponse
-	missing := false
+	// THE SLOT IS TAKEN BEFORE THE STORE IS ASKED (ADR-y45sp41c). A whole-body
+	// read is not on this path: the renderer's lazy reader pages every stored
+	// rows artifact, so only a page can grow the response queue without bound.
+	var release func()
+	if p.paged() && h.rows != nil {
+		if !h.rows.tryAcquire() {
+			answerRowReadDeferred(h.r, req)
+			return
+		}
+		release = releaseOnce(h.rows.release)
+		// A failure before the response exists must not keep the slot.
+		defer func() {
+			if release != nil {
+				release()
+			}
+		}()
+	}
+
+	out, missing, notRows, err := h.readArtifact(ctx, p)
+	if err != nil {
+		answerOperationRefusal(h.r, req, err)
+		return
+	}
+	if notRows {
+		h.invalid(req, "an artifact that is not stored rows has no row page")
+		return
+	}
+	if missing {
+		h.invalid(req, "no artifact carries that id")
+		return
+	}
+
+	payload := mustMarshal(out)
+	if release == nil {
+		_ = h.r.TryResult(req.ID, payload)
+		return
+	}
+	// THE SLOT BELONGS TO THE RESPONSE, NEVER TO THIS CALL (ADR-y45sp41c). The
+	// witness runs when the frame has left the socket; if the frame cannot be
+	// queued it runs at once, because there is no delivery left to wait for.
+	sentRelease := release
+	release = nil
+	if sent, ok := h.r.(interface {
+		TryResultSent(id json.RawMessage, result json.RawMessage, sent func()) error
+	}); ok {
+		if err := sent.TryResultSent(req.ID, payload, sentRelease); err != nil {
+			sentRelease()
+		}
+		return
+	}
+	_ = h.r.TryResult(req.ID, payload)
+	sentRelease()
+}
+
+// readArtifact is the two shapes of ledger.artifact, in one place so the
+// response DTO is written once: a whole body, or a page of stored rows.
+func (h ledgerReadHandlers) readArtifact(ctx context.Context, p ledgerArtifactParams) (ledgerArtifactResponse, bool, bool, error) {
+	var (
+		out      ledgerArtifactResponse
+		missing  bool
+		notRows  bool
+		fromRow  uint64
+		rowLimit int
+	)
+	if p.FromRow != nil {
+		fromRow = *p.FromRow
+	}
+	if p.RowLimit != nil {
+		rowLimit = *p.RowLimit
+	}
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.LedgerService) error {
+		if p.paged() {
+			page, err := svc.ArtifactRange(ctx, p.ID, fromRow, rowLimit)
+			if err != nil {
+				if errors.Is(err, content.ErrArtifactNotRows) {
+					notRows = true
+					return nil
+				}
+				return err
+			}
+			if page == nil {
+				missing = true
+				return nil
+			}
+			out = ledgerArtifactResponseOf(page.Artifact, page.FirstRow, page.LastRow, page.EndRow,
+				page.RowCount, page.RetainedRanges, page.RangeStart, page.RangeCount,
+				page.HasMoreBefore, page.HasMoreAfter, page.RowCount > 0)
+			return nil
+		}
 		art, err := svc.Artifact(ctx, p.ID)
 		if err != nil {
 			return err
@@ -502,30 +634,45 @@ func (h ledgerReadHandlers) handleArtifact(ctx context.Context, req jsonrpcReque
 			missing = true
 			return nil
 		}
-		var sb strings.Builder
-		for _, c := range art.Chunks {
-			sb.Write(c)
-		}
-		var truncated *string
-		if art.Truncated != nil {
-			v := string(*art.Truncated)
-			truncated = &v
-		}
-		out = ledgerArtifactResponse{
-			ID: art.ID, MediaType: string(art.MediaType), Body: sb.String(),
-			Truncated: truncated, ByteLen: art.ByteLen,
-		}
+		out = ledgerArtifactResponseOf(art, art.FirstRow, art.LastRow, art.EndRow, art.RowCount,
+			art.RetainedRanges, art.FirstRow, art.RowCount, false, false, art.RowCount > 0)
 		return nil
 	})
-	if err != nil {
-		answerOperationRefusal(h.r, req, err)
-		return
+	return out, missing, notRows, err
+}
+
+// ledgerArtifactResponseOf is the one mapping from an artifact (and its row
+// coordinates) to the wire. A body that is not stored rows carries null
+// coordinates and zero counts; saying anything else would make one field mean
+// two things.
+func ledgerArtifactResponseOf(art *content.Artifact, first, last, end uint64, rowCount int,
+	retained []content.RowRange, rangeStart uint64, rangeCount int, moreBefore, moreAfter, rows bool,
+) ledgerArtifactResponse {
+	var sb strings.Builder
+	for _, c := range art.Chunks {
+		sb.Write(c)
 	}
-	if missing {
-		h.invalid(req, "no artifact carries that id")
-		return
+	var truncated *string
+	if art.Truncated != nil {
+		v := string(*art.Truncated)
+		truncated = &v
 	}
-	_ = h.r.TryResult(req.ID, mustMarshal(out))
+	out := ledgerArtifactResponse{
+		ID: art.ID, MediaType: string(art.MediaType), Body: sb.String(),
+		Truncated: truncated, ByteLen: art.ByteLen,
+		RetainedRanges: []ledgerRowRangeWire{},
+		HasMoreBefore:  moreBefore, HasMoreAfter: moreAfter,
+	}
+	if rows {
+		out.FirstRow, out.LastRow, out.EndRow = &first, &last, &end
+		out.RowCount = rowCount
+		out.RetainedRanges = make([]ledgerRowRangeWire, 0, len(retained))
+		for _, rr := range retained {
+			out.RetainedRanges = append(out.RetainedRanges, ledgerRowRangeWire{From: rr.From, To: rr.To})
+		}
+		out.RangeStart, out.RangeCount = &rangeStart, rangeCount
+	}
+	return out
 }
 
 func (h ledgerReadHandlers) invalid(req jsonrpcRequest, msg string) {

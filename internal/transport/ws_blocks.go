@@ -219,7 +219,10 @@ func (s *WSServer) blockBody(ctx context.Context, ledger content.LedgerRepositor
 				// §7) rather than as an empty output.
 				continue
 			}
-			text, textErr := content.BlockRowsText(art.Chunks)
+			// THE BLOCK'S OUTPUT BEGINS WHERE ITS MARK SAID (nocx-4y82c.1.11):
+			// the rows below that point are the command's own echo and
+			// redraw, which a body read never shows.
+			text, textErr := content.BlockRowsTextAfter(art.Chunks, content.BlockRowsOutputStart(art.Payload))
 			if textErr != nil {
 				return blockBodyResult{}, textErr
 			}

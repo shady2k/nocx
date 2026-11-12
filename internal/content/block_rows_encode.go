@@ -9,8 +9,8 @@ package content
 // codepoint count or column width departs from the default (one codepoint,
 // one column), and style runs measured in columns; a trailing run of
 // ordinary default blank cells is omitted rather than sent, since a stored
-// row carries no frame geometry to pad against and the reader (BlockRowsText,
-// frontend/src/scrollback/block-rows.ts) treats a shorter row as ending
+// row carries no frame geometry to pad against and the readers (BlockRowsTextAfter,
+// frontend/src/scrollback/block-rows.ts) treat a shorter row as ending
 // there.
 //
 // The Go shapes are declared HERE rather than borrowed from
@@ -162,12 +162,38 @@ func appendBlockStyleRun(runs []byte, style emulator.Style, length int) []byte {
 	return append(runs, ']')
 }
 
-// BlockRowsText turns a stored rows artifact into the plain text a block
-// reader needs. Styles are intentionally ignored; a mark's width is read
-// only to tell a spacer head from ordinary text (neither carries text, so
-// both already read as blank once hasText is false), and continuation rows
-// belong to the logical line above.
-func BlockRowsText(chunks [][]byte) (string, error) {
+// BlockRowsOutputStart reads a block rows artifact's recorded output start
+// (nocx-4y82c.1.11) out of its payload: the absolute row a stored line's
+// `from` counts from. Zero means no mark was ever recorded, and then every
+// stored row belongs to the block's body.
+func BlockRowsOutputStart(payload string) uint64 {
+	var p struct {
+		OutputStartRow *uint64 `json:"outputStartRow"`
+	}
+	if strings.TrimSpace(payload) == "" {
+		return 0
+	}
+	if err := json.Unmarshal([]byte(payload), &p); err != nil || p.OutputStartRow == nil {
+		return 0
+	}
+	return *p.OutputStartRow
+}
+
+// BlockRowsTextAfter turns a stored rows artifact into the plain text a
+// block reader needs. Styles are intentionally ignored; a mark's width is
+// read only to tell a spacer head from ordinary text (neither carries text,
+// so both already read as blank once hasText is false), and continuation
+// rows belong to the logical line above.
+//
+// The chunks are decoded in place through one reader instead of being
+// copied into a single buffer first (nocx-4y82c.1.23), and the logical
+// lines are written as they are decoded instead of being grown one
+// concatenation at a time.
+//
+// startRow is the artifact payload's outputStartRow (nocx-4y82c.1.11): the
+// lines below it are the command's own echo and redraw, which no reader
+// shows. startRow 0 is every line, the unchanged read.
+func BlockRowsTextAfter(chunks [][]byte, startRow uint64) (string, error) {
 	readers := make([]io.Reader, len(chunks))
 	for i, chunk := range chunks {
 		readers[i] = bytes.NewReader(chunk)
@@ -178,7 +204,8 @@ func BlockRowsText(chunks [][]byte) (string, error) {
 	decoder := json.NewDecoder(io.MultiReader(readers...))
 	for {
 		var line struct {
-			Row struct {
+			From uint64 `json:"from"`
+			Row  struct {
 				Text         string     `json:"text"`
 				Marks        [][3]int64 `json:"marks"`
 				Continuation bool       `json:"continuation"`
@@ -189,6 +216,9 @@ func BlockRowsText(chunks [][]byte) (string, error) {
 				break
 			}
 			return "", fmt.Errorf("content: block rows: decode stored line: %w", err)
+		}
+		if line.From < startRow {
+			continue
 		}
 		rowText, err := blockRowPlainText(line.Row.Text, line.Row.Marks)
 		if err != nil {
@@ -230,9 +260,9 @@ func blockRowPlainText(text string, marks [][3]int64) (string, error) {
 	return strings.TrimRight(out.String(), " "), nil
 }
 
-// storedCell is the fully expanded (column-indexed) form BlockRowsText and
-// trimStoredTrailingCells's callers read: what decodeStoredRowCells rebuilds
-// from a row's text+marks, spacers synthesised back in.
+// storedCell is the fully expanded (column-indexed) form BlockRowsTextAfter
+// reads: what decodeStoredRowCells rebuilds from a row's text+marks,
+// spacers synthesised back in.
 type storedCell struct {
 	grapheme string
 	width    int
@@ -241,7 +271,7 @@ type storedCell struct {
 
 // decodeStoredRowCells rebuilds the column-indexed cells a stored row's
 // text+marks encode — the read half of encodeBlockRowsLine's write half,
-// used by BlockRowsText. It does not need runs (styles are not part of
+// used by BlockRowsTextAfter. It does not need runs (styles are not part of
 // plain text) and does not pad to any column count: a stored row carries no
 // frame geometry, and nothing here needs the untouched tail a live frame
 // pads back in.

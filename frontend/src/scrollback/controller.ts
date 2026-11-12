@@ -105,8 +105,11 @@ export interface ScrollbackControllerOpts {
    *  fixed in the DOM (nocx-tjppv: the run tool's completion wait reads the
    *  output window from the frozen block). */
   onBlockFrozen?: (rec: BlockRecord) => void
+  /** Elements the block manager actually removed; the caller's index drops
+   *  them and the rows they still hold. */
+  onBlocksRemoved?: (elements: readonly HTMLElement[]) => void
   /** Paints backend-owned rows through the shared row painter. */
-  paintStoredRows?: (block: HTMLElement, rows: StoredBlockRows) => void
+  paintStoredRows?: (block: HTMLElement, rows: StoredBlockRows, reserve?: boolean) => void
   /** What a session is called to a person — passed straight to the block
    *  manager, which hands it to every tool-call line it draws (nocx-vnzek).
    *  This controller neither derives nor caches it. */
@@ -160,11 +163,24 @@ export class ScrollbackController {
   private _blockManager: BlockManager
   private readonly _liveContentHeight: () => number | null
   private readonly _cellMetrics: () => { cellWidth: number; cellHeight: number } | null
+  private readonly _pane: HTMLElement
   private _mode: LiveRegionMode = 'idle'
-  /** The grid on screen is the one a full-screen program was given, kept after
-   *  it left the alternate screen and not yet handed back (ADR-2yzsq8mk
-   *  decision 4; nocx-djx1u). Only the unstructured layout reacts to it. */
-  private _borrowedGrid = false
+  /** Whether this session has a structured layout at all. It is the one fact
+   *  the reserved-header question needs, and it must outlive a screen switch:
+   *  a full-screen program inherits the header the running block had, and a
+   *  markerless shell has none in either buffer (ADR-92zzg2y2). */
+  private _structured = true
+  /** How many whole screen rows the live grid is translated above its box.
+   *  The stored body above the box must paint those rows too, or the row that
+   *  leaves the screen top appears one row lower when it moves from the grid
+   *  to the body (the owner's "output moves down" frame). */
+  private _hiddenScreenRows = 0
+  /** The echo shift the rows currently painted were sized with. A sizing pass
+   *  that has NOT painted rows (an accepted anchor, a box resize) must not
+   *  release it to the new anchor: the grid on screen still holds the echo
+   *  row, and releasing the shift before the frame without it is painted
+   *  exposes that row (nocx-4y82c.1.21). */
+  private _paintedEchoShiftPx = 0
   /** A ready prompt asked for the idle layout while a completed block was
    *  still waiting for its block.closed; applied when the close lands, and
    *  dropped the moment a command owns the live region again. */
@@ -220,6 +236,7 @@ export class ScrollbackController {
     this._onClear = opts.onClear
     this._onModeChanged = opts.onModeChanged
     this._onTailFollow = opts.onTailFollow
+    this._pane = opts.pane
     this.snapshotStore = opts.snapshotStore
     const now = opts.now ?? (() => performance.now())
 
@@ -290,6 +307,12 @@ export class ScrollbackController {
       // move by 30px as it arrives. A reader scrolled into that output is
       // reading those rows (nocx-3wmve).
       holdReaderPlace: (mutate) => this.holdReaderPlace(mutate),
+      // A block displaced by a new start takes a header the alternate seat
+      // borrowed back THROUGH this seat (nocx-evj4b.1.9): the controller is
+      // what holds that reference, so it is what drops it — a reparent by
+      // hand would leave the seat pointing at a header it no longer owns,
+      // and the next fullscreen exit would prepend it into the new block.
+      reclaimSeatedHeader: () => this._restoreRunningHeader(),
       // A DEFERRED freeze landed inside the manager (the backend's
       // block.closed met the completion): settle the block the way a direct
       // freeze does — the pet
@@ -302,6 +325,7 @@ export class ScrollbackController {
         if (this._idleRequested && this._blockManager.runningBlock === null) this.setIdle()
       },
       onBlockFrozen: opts.onBlockFrozen,
+      onBlocksRemoved: opts.onBlocksRemoved,
       paintStoredRows: opts.paintStoredRows,
       sessionName: opts.sessionName,
       answerText: opts.answerText,
@@ -354,7 +378,17 @@ export class ScrollbackController {
     // header's height against a third of the scroller and writes one attribute;
     // there is no scroll, freeze or window trigger left to miss the next path.
     if (typeof ResizeObserver === 'function') {
-      this._sizeObserver = new ResizeObserver(() => this._judgeHeaderSizes())
+      this._sizeObserver = new ResizeObserver((entries) => {
+        if (entries.some((entry) => entry.target === this.scrollbackArea)) {
+          this._judgeHeaderSizes()
+          return
+        }
+        this._judgeHeaderSizes(
+          entries
+            .map((entry) => entry.target as HTMLElement)
+            .filter((header) => this._observedHeaders.has(header)),
+        )
+      })
       this._sizeObserver.observe(this.scrollbackArea)
     }
     if (typeof MutationObserver === 'function') {
@@ -399,7 +433,12 @@ export class ScrollbackController {
       (entries) => {
         for (const e of entries) {
           const was = this._tail.following
-          this._tail.observe(this.scrollbackArea, e.isIntersecting)
+          // A SENTINEL PUSHED OUT BY A ROW IS CONTENT, NOT A GESTURE
+          // (nocx-ouru5.1.18): the live end leaves the root the moment a row
+          // lands below the fold, and the delivery says "the reader cannot see
+          // the end" about a reader who never moved. It is honoured only once
+          // they have moved from where the last pin put them.
+          this._tail.observe(this.scrollbackArea, e.isIntersecting || this._stayedAtPin())
           // The flip, not the delivery: the reader left the live end or
           // returned to it. The live tier's surface drops a stale past and
           // re-arms its paging on the return (nocx-zg3k3.10.4).
@@ -473,6 +512,8 @@ export class ScrollbackController {
     }
     this._idleRequested = false
     this._mode = 'idle'
+    this._structured = true
+    this._hiddenScreenRows = 0
     // Both inline heights have to go: running content height and its clip
     // otherwise outrank the idle/fullscreen mode classes. THE BOX IS PART OF
     // THE TRANSCRIPT'S HEIGHT (nocx-3wmve): a reader scrolled up keeps their
@@ -503,6 +544,7 @@ export class ScrollbackController {
     if (this._mode === 'fullscreen') return
     const entering = this._mode !== 'running'
     this._mode = 'running'
+    this._structured = true
     if (entering) {
       this._settleHeight(() => {
         this.terminalLiveContainer.style.height = ''
@@ -538,6 +580,8 @@ export class ScrollbackController {
   setUnstructured(): void {
     if (this._mode === 'fullscreen') return
     this._mode = 'unstructured'
+    this._structured = false
+    this._hiddenScreenRows = 0
     this.terminalLiveViewport.style.height = ''
     this.terminalLiveContainer.className =
       'terminal-live-container terminal-live-container live-unstructured'
@@ -636,6 +680,7 @@ export class ScrollbackController {
     // every caller has to remember to call (the version that had to be
     // remembered was called exactly twice, at the two mode entries).
     if (this._mode === 'unstructured' || this._mode === 'fullscreen') {
+      this._hiddenScreenRows = 0
       this._fillPane()
       return
     }
@@ -644,7 +689,28 @@ export class ScrollbackController {
     // The backend anchor and its accepted frame decide the echo shift. Apply
     // it before height guards so a frame update can release the shift even
     // when the measured live box does not change.
-    this._applyEchoShift()
+    //
+    // ONLY A PASS THAT PAINTED THE ROWS MAY CHANGE IT. `painted` is the
+    // painter's own call, from the frame those rows were drawn from; every
+    // other caller (an accepted anchor, the box's ResizeObserver) still has
+    // the previous frame on screen. Releasing the echo shift from the new
+    // anchor there uncovered the pre-shrink echo row for as long as the
+    // paint took — and, when the anchor moves above the screen, cleared the
+    // shift entirely while the old row was the first thing in the grid
+    // (nocx-4y82c.1.21: the command's own echo visible in a waiting block
+    // after the pane got shorter).
+    let echoShift: number
+    if (painted) {
+      echoShift = this._echoShiftPx()
+      this._paintedEchoShiftPx = echoShift
+    } else if (this._lastLiveHeightPx === null) {
+      // Nothing has been painted yet: the mode-entry passes have no rows to
+      // protect, and the anchor is the only answer there is.
+      echoShift = this._echoShiftPx()
+    } else {
+      echoShift = this._paintedEchoShiftPx
+    }
+    this._applyShift(echoShift)
     // Null means the accepted grid has no usable metrics; the class fallback
     // height stands. Zero is a grid nobody has written to yet. While the
     // running block still owns its waiting stand-in, keep that fallback:
@@ -668,7 +734,7 @@ export class ScrollbackController {
     // so the flow box must not reserve it. The padding: the block body has
     // it, this region is that body while the command runs, and the cap is a
     // ceiling on the whole box rather than on the rows inside it.
-    const content = Math.min(Math.max(0, height - this._echoShiftPx()), Math.max(0, max - pad))
+    const content = Math.min(Math.max(0, height - echoShift), Math.max(0, max - pad))
     // ONE ARITHMETIC FOR THE BOX AND THE GRID (owner, 2026-11-08: "a row never
     // moves down by a line when the live box grows by one"). The grid is
     // translated by exactly what the box does NOT show — `px - content` —
@@ -679,7 +745,10 @@ export class ScrollbackController {
     // the box grew by only three, and every visible row moved DOWN a line.
     // Derived this way a row's place is `bottom + row·cell - px`: a function
     // of the painted content alone, so releasing the shift cannot move it.
-    this._applyShift(height - content)
+    const shift = height - content
+    this._applyShift(shift)
+    const cell = this._cellMetrics()?.cellHeight ?? 0
+    this._hiddenScreenRows = cell > 0 ? gridRows(shift, cell) : 0
     const box = `${content + pad}px`
     const inner = `${content}px`
     // Keep the block's bottom at the bottom of the view — but only on the
@@ -831,8 +900,17 @@ export class ScrollbackController {
   cellMetricsChanged(): void {
     const metric = this._cellMetrics()
     if (metric === null) return
+    // THE GUTTER IS THE CELL (ADR-92zzg2y2). The frozen rows read the metric
+    // on the stack, and the pane's own `--pane-inline-padding` /
+    // `--pane-block-padding` read the same two numbers one level up, because a
+    // custom property's `var()` is resolved where it is declared and `.pane`
+    // is where the stylesheet declares the gutter. Publishing on the stack
+    // alone left the pane's gutter on its `1ch` fallback — the UI font's
+    // advance, not the terminal's.
     publishCellMetric(this.scrollbackInner, metric.cellWidth)
     publishRowPitch(this.scrollbackInner, metric.cellHeight)
+    this._pane.style.setProperty('--term-cell-width', `${metric.cellWidth}px`)
+    this._pane.style.setProperty('--term-cell-height', `${metric.cellHeight}px`)
   }
 
   /**
@@ -872,41 +950,11 @@ export class ScrollbackController {
     this.scrollbackInner.classList.toggle('inner-fullscreen-mode', on)
   }
 
-  /** The layout's vertical margin is the ledger's — a markerless session keeps
-   *  it too (ADR-2yzsq8mk) — and only the alternate screen starts at the pane's
-   *  own top edge, one row of margin at its bottom instead. Every mode change
-   *  announces itself through here, so the class cannot lag the mode. */
+  /** Every mode change announces itself through here. There is no layout
+   *  exception left to carry: one gutter is the pane's in every mode
+   *  (ADR-92zzg2y2). */
   private _announceMode(): void {
-    this.scrollbackLayout.classList.toggle('inner-pane-program', this._mode === 'fullscreen')
-    // A BORROWED GRID IS THE PANE'S OWN GEOMETRY (nocx-djx1u). A markerless
-    // session has no prompt marker to hand a borrowed grid back, so the rows a
-    // full-screen program left behind are the pane's for as long as it holds
-    // them — and the four-side margin is two rows it cannot show. In the
-    // unstructured mode, and only there, the layout gives the margin up and the
-    // program's own box (no top edge, one row at the bottom) is the pane. The
-    // structured modes keep it: there the block owns the rows and scrolls.
-    this.scrollbackLayout.classList.toggle(
-      'inner-borrowed-grid',
-      this._borrowedGrid && this._mode === 'unstructured',
-    )
     this._onModeChanged?.(this._mode)
-  }
-
-  /**
-   * Say whether the grid on screen is one a program borrowed — the rows a
-   * full-screen program was given, kept after it left the alternate screen
-   * (ADR-2yzsq8mk decision 4) — so the unstructured layout can size the pane
-   * for them instead of for the ledger's margin (nocx-djx1u).
-   */
-  setBorrowedGrid(borrowed: boolean): void {
-    if (this._borrowedGrid === borrowed) return
-    this._borrowedGrid = borrowed
-    this._announceMode()
-  }
-
-  /** Whether the layout is holding the margin back for a borrowed grid. */
-  isBorrowedGrid(): boolean {
-    return this._borrowedGrid && this._mode === 'unstructured'
   }
 
   /** Show the alternate grid beneath the same one-line running header
@@ -914,6 +962,7 @@ export class ScrollbackController {
   enterFullscreen(): void {
     this._idleRequested = false
     this._mode = 'fullscreen'
+    this._hiddenScreenRows = 0
     this.terminalLiveViewport.style.height = ''
     this.terminalLiveContainer.className =
       'terminal-live-container terminal-live-container live-fullscreen'
@@ -954,9 +1003,8 @@ export class ScrollbackController {
   private _fillPane(): void {
     const grid = this.paneFillHeight
     if (grid <= 0) return
-    // The box IS the grid: a markerless session's four-side margin is the
-    // stack's padding, not this box's (ADR-2yzsq8mk), and `paneFillHeight`
-    // already took it out of the rows this box may show.
+    // The box IS the grid. The gutter is on the layout and the rows
+    // (ADR-92zzg2y2), so `paneFillHeight` is the same number the fit reports.
     this.terminalLiveContainer.style.height = `${grid}px`
   }
 
@@ -964,43 +1012,55 @@ export class ScrollbackController {
    * THE HEIGHT OF THE BOX THAT FILLS THE PANE, AND OF THE GRID THAT FILLS IT.
    *
    * One owner, read by two callers: `_fillPane` writes it to the live box, and
-   * `terminal-content`'s `_gridHeight` returns it as the desired grid height
-   * while the program owns the pane. Two expressions — one box that ends on a
-   * row boundary, one grid the PTY is told — is how a markerless session's
-   * full-screen program (vim or top over a plain ssh shell, where there is no
-   * running block to give `_gridHeight` the structured branch) came to be told
-   * the whole scroller while its box showed one row less, and lost its last
-   * row to the clip.
+   * `terminal-content`'s `_gridHeight` returns it as the desired grid height.
+   * One expression, so the box and the grid the PTY is told cannot disagree —
+   * and it is the same in the primary and the alternate screen
+   * (ADR-92zzg2y2): a switch changes presentation, never geometry.
    *
    * Floored to whole rows for the reason `runningLiveCap` is: a box that ends
-   * inside a row shows a sliced one. The alternate screen then gives one of
-   * those rows back — the margin ADR-2yzsq8mk keeps below a program's last row,
-   * which the stylesheet declares as `margin-bottom` — so the box and its
-   * margin together are the pane and no row is clipped for the margin.
+   * inside a row shows a sliced one.
    */
   get paneFillHeight(): number {
     const max = this.paneBoxHeight
     if (max <= 0) return 0
     const cell = this._cellMetrics()?.cellHeight ?? 0
-    const height = cell > 0 && max > cell ? gridRows(max, cell) * cell : max
-    return this._mode === 'fullscreen' && cell > 0 ? Math.max(0, height - cell) : height
+    return cell > 0 && max > cell ? gridRows(max, cell) * cell : max
   }
 
-  /** THE SAME BOX, BEFORE ITS ROWS ARE COUNTED (nocx-djx1u). `paneFillHeight`
-   *  answers in whole rows, which is what a box and a pty are told; the one
-   *  fit that must SUBTRACT a margin from it has to subtract before that
-   *  rounding, or it rounds twice — floor((422 − 48)/17) = 22 rows against
-   *  floor((408 − 48)/17) = 21 — and asks the shell for a grid the pane does
-   *  not have. So the unrounded expression is the one owner, and the floored
-   *  one is derived from it. */
+  /** How many whole rows the live grid is translated above its box. The
+   *  stored body above the box paints them too, so a row leaves the grid and
+   *  enters the body at the same y (ADR-92zzg2y2). */
+  get hiddenScreenRows(): number {
+    return this._hiddenScreenRows
+  }
+
+  /** THE SAME BOX, BEFORE ITS ROWS ARE COUNTED. `paneFillHeight` answers in
+   *  whole rows, which is what a box and a pty are told; anything that has to
+   *  subtract from it must subtract before that rounding. */
   get paneBoxHeight(): number {
-    const max = this._areaHeightPx() - (this._fullscreenHeader ? this.runningHeaderHeightPx : 0)
-    return Math.max(0, max)
+    return Math.max(0, this._areaHeightPx() - this.reservedHeaderHeightPx)
+  }
+
+  /**
+   * THE HEADER THE FIT RESERVES, and the one number that decides whether the
+   * pane has one at all.
+   *
+   * A structured session reserves it at the prompt too, so a command's submit
+   * cannot resize the program after its bytes are delivered (ADR-3kqrem7v).
+   * A markerless session has no running block and no header: reserving one
+   * there would leave a band the terminal cannot paint. In the alternate
+   * screen the header is the running block's own, seated above the grid, so
+   * the same answer holds on both sides of a switch — which is what makes the
+   * terminal's size mode-independent (ADR-92zzg2y2).
+   */
+  get reservedHeaderHeightPx(): number {
+    return this._structured ? this.runningHeaderHeightPx : 0
   }
 
   /** Exit alt-screen: restore normal layout. */
   exitFullscreen(): void {
     this._mode = 'idle'
+    this._hiddenScreenRows = 0
     this.terminalLiveContainer.style.height = ''
     this.terminalLiveViewport.style.height = ''
     this._setFilledPane(false)
@@ -1100,6 +1160,19 @@ export class ScrollbackController {
     return this._tail.intent(this.scrollbackArea)
   }
 
+  /** The scrollTop the last tail pin put the reader at (nocx-ouru5.1.18). */
+  private _pinnedTop: number | null = null
+
+  /** The reader is still standing where the last tail pin put them: nothing of
+   *  their own has moved them, so a gap between them and the end is content
+   *  arriving under a follower — a row committed, a box grown — and the answer
+   *  to "following?" has not changed (nocx-ouru5.1.18). */
+  private _stayedAtPin(): boolean {
+    return (
+      this._pinnedTop !== null && Math.abs(this.scrollbackArea.scrollTop - this._pinnedTop) <= 2
+    )
+  }
+
   /** THE SETTLE'S ANSWER, and it is the position's (nocx-3wmve). The watcher
    *  reports the live end a frame behind the scroll it is about, so on its own
    *  it cannot answer for a mutation landing in that frame: a person who has
@@ -1111,7 +1184,18 @@ export class ScrollbackController {
   private _followsNow(): boolean {
     const area = this.scrollbackArea
     if (area.clientHeight === 0 || area.scrollHeight === 0) return this._tail.following
-    return isAtTail(area)
+    if (isAtTail(area)) return true
+    // ROWS THAT LANDED SINCE THE PIN ARE NOT A GESTURE (nocx-ouru5.1.18). The
+    // program commits a row before anything pins it, so a mutation arriving in
+    // that gap asks "following?" of a scroller exactly one row short of the
+    // end — measured at output-jitter's apt pace over ssh, top 3652 / max 3662
+    // on a 10px pitch. Answering from that gap alone said "the reader scrolled
+    // away", took the place of the ROW at the viewport's top, and pinned it
+    // after the mutation: every visible row moved DOWN by one pitch, which is
+    // the backwards step the spec reports. The reader still stands where the
+    // last pin put them, so the gap is content they have not been moved by
+    // yet; only their own move changes that position.
+    return this._stayedAtPin()
   }
 
   /** At the live end, WITH an end to be at. A scroller whose content fits has
@@ -1147,6 +1231,15 @@ export class ScrollbackController {
       top: this.scrollbackArea.scrollHeight,
       behavior: 'instant',
     })
+    // Where the pin left the reader, for `_followsNow` (nocx-ouru5.1.18): the
+    // distance between it and their position now is theirs, not the content's.
+    // The END it asked for, not the position read back: a browser clamps to the
+    // same number, and a scroller that has not laid out yet must not record the
+    // place it was at as if it were the tail.
+    this._pinnedTop = Math.max(
+      0,
+      this.scrollbackArea.scrollHeight - this.scrollbackArea.clientHeight,
+    )
   }
 
   /**
@@ -1264,8 +1357,14 @@ export class ScrollbackController {
       // block and its logical line, so counting its position among the body's
       // children would walk tens of thousands of siblings on every settle for a
       // number nothing reads.
+      // A SPACER IS A ROW FOR THE ANCHOR (ADR-ywzcpbqe). A page replaces it
+      // with painted rows; its logical line is the only identity that follows
+      // the reader to the same stream row instead of to a neighbouring unit
+      // with the same class.
       const isRow =
-        unit.classList.contains('term-grid-row') && unit.dataset.logicalLine !== undefined
+        (unit.classList.contains('term-grid-row') ||
+          unit.classList.contains('cmd-output-spacer')) &&
+        unit.dataset.logicalLine !== undefined
       if (isRow) {
         return {
           element: unit,
@@ -1452,9 +1551,9 @@ export class ScrollbackController {
       if (place.line === null) return null
       const selector =
         place.blockId === null
-          ? `.cmd-output .term-grid-row[data-logical-line="${place.line}"]`
+          ? `.cmd-output [data-logical-line="${place.line}"]`
           : `.cmd-block[data-entry-id="${place.blockId}"] .cmd-output` +
-            ` .term-grid-row[data-logical-line="${place.line}"]`
+            ` [data-logical-line="${place.line}"]`
       return area.querySelector<HTMLElement>(selector)
     }
     if (place.kind === 'header') {
@@ -1722,9 +1821,9 @@ export class ScrollbackController {
    *  already gives one pinned header -- so a scroll cannot make it stale, and
    *  a header that changes size is re-judged by its own observer. The answer
    *  is one attribute; no box changes. */
-  private _judgeHeaderSizes(): void {
+  private _judgeHeaderSizes(headers: Iterable<HTMLElement> = this._observedHeaders): void {
     const heightPx = this.scrollbackArea.clientHeight
-    for (const header of this._observedHeaders) {
+    for (const header of headers) {
       if (!header.isConnected) continue
       if (headerFitsPinned(header.offsetHeight, heightPx)) header.removeAttribute('data-pinnable')
       else header.setAttribute('data-pinnable', 'false')

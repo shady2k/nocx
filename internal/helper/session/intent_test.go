@@ -721,9 +721,11 @@ func TestInteractiveMouseAndFocusIntentsFollowTheProgramsModes(t *testing.T) {
 	hs, _ := newIntentTestSession(t, proc)
 
 	// No tracking mode: the program never asked to hear about the mouse, so
-	// the click is consumed and writes nothing. That is the ordinary case at
-	// a shell prompt, and it is a refusal rather than an error — a renderer
-	// sends a click to the pane whether or not something in it is listening.
+	// the click writes nothing. That is the ordinary case at a shell prompt,
+	// and it is EXECUTED with no bytes, not refused (nocx-evj4b.1.12): a
+	// refusal is the vocabulary's word for input the program is owed and did
+	// not get, and the renderer keeps a refusal in its queue — an event the
+	// program's own modes can never carry would hold every later key forever.
 	unheard, err := hs.intent(context.Background(), proto.IntentParams{
 		Interactive: true, AccessEpoch: 1, CommitBy: math.MaxInt64,
 		Kind: "mouse", Payload: []byte("press left 2 3"),
@@ -731,12 +733,12 @@ func TestInteractiveMouseAndFocusIntentsFollowTheProgramsModes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mouse intent: %v", err)
 	}
-	if unheard.State != "refused" || unheard.BytesWritten != 0 || len(proc.writtenPayloads()) != 0 {
-		t.Fatalf("mouse with no tracking mode = %+v, writes=%q; want a refusal and no bytes", unheard, proc.writtenPayloads())
+	if unheard.State != "executed" || unheard.BytesWritten != 0 || len(proc.writtenPayloads()) != 0 {
+		t.Fatalf("mouse with no tracking mode = %+v, writes=%q; want executed with no bytes", unheard, proc.writtenPayloads())
 	}
 
 	// Focus is the same state dependence for the third kind: nothing to a
-	// program that did not ask for it.
+	// program that did not ask for it, and nothing owed.
 	unwatched, err := hs.intent(context.Background(), proto.IntentParams{
 		Interactive: true, AccessEpoch: 1, CommitBy: math.MaxInt64,
 		Kind: "focus", Payload: []byte("in"),
@@ -744,8 +746,8 @@ func TestInteractiveMouseAndFocusIntentsFollowTheProgramsModes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("focus intent: %v", err)
 	}
-	if unwatched.State != "refused" || unwatched.BytesWritten != 0 || len(proc.writtenPayloads()) != 0 {
-		t.Fatalf("focus with mode 1004 unset = %+v, writes=%q; want a refusal and no bytes", unwatched, proc.writtenPayloads())
+	if unwatched.State != "executed" || unwatched.BytesWritten != 0 || len(proc.writtenPayloads()) != 0 {
+		t.Fatalf("focus with mode 1004 unset = %+v, writes=%q; want executed with no bytes", unwatched, proc.writtenPayloads())
 	}
 
 	// Normal tracking plus the SGR format, which is what a modern program

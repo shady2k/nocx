@@ -892,8 +892,11 @@ func (s *WSServer) ledgerSpecs(contentSub control.Submission, contentGate contro
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleGet(ctx, req) }
 		}),
 		// Artifact bodies are fetched separately so recall never hauls bytes.
-		regResponder(contentSub, catalog.OpLedgerArtifact, params(validateLedgerArtifactRaw), func(r Responder) handlerFunc {
-			h := ledgerReadHandlers{op: op, r: r}
+		// A stored-row page takes this connection's read slots (ADR-y45sp41c),
+		// so this handler is one of the few read methods that needs the
+		// connection rather than only its Responder.
+		reg(contentSub, catalog.OpLedgerArtifact, params(validateLedgerArtifactRaw), func(w *wsConn, _ *connState, r Responder) handlerFunc {
+			h := ledgerReadHandlers{op: op, r: r, rows: w.rowReads}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleArtifact(ctx, req) }
 		}),
 	}

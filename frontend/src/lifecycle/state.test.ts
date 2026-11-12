@@ -76,6 +76,23 @@ function attemptOf(state: LifecycleState): ExecutionAttempt | null {
 }
 
 describe('the lifecycle kernel (ADR-0024 §6)', () => {
+  it('preserves authoritative elapsed duration for both completed replay and open-to-completed facts', () => {
+    for (const replay of [false, true]) {
+      const k = new LifecycleKernel()
+      k.applyFact(promptReady())
+      if (!replay) k.applyFact(running())
+      k.applyFact(
+        running('d1', 1, {
+          state: 'completed',
+          exitCode: 0,
+          fence: FENCE,
+          durationMs: 2024,
+        }),
+      )
+      expect(attemptOf(k.state)?.durationMs).toBe(2024)
+    }
+  })
+
   it('starts Native with a normal buffer — a conventional terminal, no ownership', () => {
     const k = new LifecycleKernel()
     expect(k.state.kind).toBe('native')

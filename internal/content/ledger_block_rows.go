@@ -68,6 +68,19 @@ type blockRowsPayload struct {
 	UnavailableRows uint64 `json:"unavailableRows,omitempty"`
 	// DroppedRows is written once, at close, derived from the chunks.
 	DroppedRows uint64 `json:"droppedRows,omitempty"`
+	// RowCount is written once, at close: how many stored lines the artifact
+	// holds. It is the block's retained height in rows, and with EndRow and
+	// RetainedRanges it lets a reader reserve the whole block before any page
+	// of it arrives (nocx-t7xhe, ADR-y45sp41c).
+	RowCount uint64 `json:"rowCount,omitempty"`
+	// EndRow is one past the block's whole stream span, fixed at close. Rows
+	// the cap evicted and rows the emulator lost are inside it; the retained
+	// ranges below say which of them the store still holds.
+	EndRow uint64 `json:"endRow,omitempty"`
+	// RetainedRanges are the runs of stream rows the chunks hold, written once
+	// at close. A cap eviction leaves two; nothing a later read returns may
+	// move them, so a block's reserved height is decided here.
+	RetainedRanges []RowRange `json:"retainedRanges,omitempty"`
 	// Appended is the total bytes ever appended, BEFORE any eviction. It is
 	// the stream offset the next delivery begins at, and it is what makes
 	// the eviction walk honest after a previous eviction: the surviving
@@ -79,6 +92,14 @@ type blockRowsPayload struct {
 	// before the end marker seals the block (RecordBlockRowsFence). Every
 	// append carries it forward; the seal drops it with the rest.
 	Fence string `json:"fence,omitempty"`
+	// OutputStartRow is where the block's OUTPUT begins in the same absolute
+	// row coordinate every stored line's `from` uses (nocx-4y82c.1.11). It is
+	// written once, when the helper's ordered output mark applies, and never
+	// again: the rows below it are the command's own echo and redraw — the
+	// screen's rendering of a line the block's header already carries — and a
+	// reader skips them. Nil means no mark ever arrived (a shell with no
+	// integration), and then every stored row is the block's own.
+	OutputStartRow *uint64 `json:"outputStartRow,omitempty"`
 }
 
 func (s *sqliteContent) OpenBlockOutput(ctx context.Context, in OpenBlockOutput) (string, error) {
@@ -479,7 +500,7 @@ func (s *sqliteContent) CloseBlockRows(ctx context.Context, in CloseBlockRows) (
 		// [firstFrom, nextRow), the rows the emulator pruned are subtracted
 		// first (a jump the caller accounted for is loss, not eviction),
 		// and what the chunks hold is what survived the cap.
-		dropped, err := deriveBlockRowsDropped(ctx, tx, in.ArtifactID, state.payload.NextRow, state.payload.LostRows)
+		dropped, stored, ranges, err := deriveBlockRowsDropped(ctx, tx, in.ArtifactID, state.payload.NextRow, state.payload.LostRows)
 		if err != nil {
 			return err
 		}
@@ -493,9 +514,18 @@ func (s *sqliteContent) CloseBlockRows(ctx context.Context, in CloseBlockRows) (
 		log.From(ctx).Debug("block rows close: sealing",
 			"entry", in.EntryID, "artifact", in.ArtifactID, "cursor", state.payload.NextRow,
 			"dropped", dropped, "lost", state.payload.LostRows,
-			"unavailable", state.payload.UnavailableRows)
+			"unavailable", state.payload.UnavailableRows, "rows", stored)
 
-		final := blockRowsPayload{DroppedRows: dropped, LostRows: state.payload.LostRows, UnavailableRows: state.payload.UnavailableRows}
+		// The seal keeps WHERE THE OUTPUT BEGINS and the geometry a reader
+		// that has not fetched a page yet needs: where the block begins, how
+		// far it ever ran, and which runs the store keeps (nocx-4y82c.1.11,
+		// nocx-t7xhe, ADR-y45sp41c).
+		final := blockRowsPayload{
+			DroppedRows: dropped, LostRows: state.payload.LostRows, UnavailableRows: state.payload.UnavailableRows,
+			OutputStartRow: state.payload.OutputStartRow,
+			FirstRow:       state.payload.FirstRow, RowCount: stored,
+			EndRow: state.payload.NextRow, RetainedRanges: ranges,
+		}
 		// The PRIMARY reason, one of them: the cap names rows it dropped by
 		// count, so it wins over a gap it would otherwise hide inside.
 		var truncated any
@@ -537,6 +567,46 @@ func (s *sqliteContent) RecordBlockRowsFence(ctx context.Context, in RecordBlock
 			return txEnd.commit()
 		}
 		state.payload.Fence = in.Fence
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE artifacts SET payload = ? WHERE id = ?`,
+			state.payload.json(), in.ArtifactID); err != nil {
+			return err
+		}
+		return txEnd.commit()
+	})
+}
+
+// RecordBlockRowsOutputStart records where a block's output begins
+// (nocx-4y82c.1.11): the helper's ordered output mark, in the same absolute
+// row coordinate a stored line's `from` uses. It is ONE idempotent write —
+// the first mark wins, a later one is another command's — and a block already
+// sealed has nothing left to delimit, so a mark that arrives after the seal
+// changes nothing.
+func (s *sqliteContent) RecordBlockRowsOutputStart(ctx context.Context, in RecordBlockRowsOutputStart) error {
+	if in.EntryID == "" || in.ArtifactID == "" {
+		return errors.New("content: block rows: entry id and artifact id are required")
+	}
+	return s.run(ctx, func(ctx context.Context) error {
+		tx, txEnd, err := s.beginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+		if err != nil {
+			return err
+		}
+		defer txEnd.rollback()
+		state, err := blockRowsArtifactFor(ctx, tx, in.EntryID, in.ArtifactID)
+		if err != nil {
+			return err
+		}
+		if state.payload.OutputStartRow != nil {
+			// The first mark wins, so a second one — another command's —
+			// changes nothing. A SEALED artifact still takes it: the seal can
+			// land before the mark reaches the coordinator (the end marker and
+			// the seal travel on different carriers), and where the output
+			// begins is metadata beside the sealed span, not part of it
+			// (nocx-4y82c.1.11 review 5).
+			return txEnd.commit()
+		}
+		row := in.Row
+		state.payload.OutputStartRow = &row
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE artifacts SET payload = ? WHERE id = ?`,
 			state.payload.json(), in.ArtifactID); err != nil {
@@ -786,37 +856,54 @@ func evictBlockRowsToCap(ctx context.Context, tx *sql.Tx, artifactID string, cap
 // drop — recomputed from the bytes on the one write that seals it. Loss and
 // eviction are different facts, and a block that reports its loss as a cap
 // verdict sends a user to raise a limit that took nothing.
-func deriveBlockRowsDropped(ctx context.Context, tx *sql.Tx, artifactID string, nextRow, lost uint64) (uint64, error) {
+func deriveBlockRowsDropped(ctx context.Context, tx *sql.Tx, artifactID string, nextRow, lost uint64) (uint64, uint64, []RowRange, error) {
 	rows, err := tx.QueryContext(ctx,
 		`SELECT body FROM artifact_chunks WHERE artifact_id = ? ORDER BY seq`, artifactID)
 	if err != nil {
-		return 0, err
+		return 0, 0, nil, err
 	}
 	defer func() { _ = rows.Close() }()
 	var stored uint64
 	var firstLine []byte
+	var ranges []RowRange
+	var lastFrom uint64
+	haveFrom := false
 	for rows.Next() {
 		var body []byte
 		if err := rows.Scan(&body); err != nil {
-			return 0, err
+			return 0, 0, nil, err
 		}
-		stored += uint64(bytes.Count(body, []byte{'\n'})) //nolint:gosec // line counts, not byte counts
-		if firstLine == nil {
-			if at := bytes.IndexByte(body, '\n'); at >= 0 {
-				firstLine = body[:at]
+		for _, raw := range bytes.Split(body, []byte{'\n'}) {
+			if len(raw) == 0 {
+				continue
 			}
+			if firstLine == nil {
+				firstLine = append([]byte(nil), raw...)
+			}
+			var l blockRowsLine
+			if err := json.Unmarshal(raw, &l); err != nil {
+				return 0, 0, nil, fmt.Errorf("content: block rows: read a stored line of %s: %w", artifactID, err)
+			}
+			stored++
+			if haveFrom && l.From == lastFrom+1 {
+				ranges[len(ranges)-1].To = l.From + 1
+			} else {
+				ranges = append(ranges, RowRange{From: l.From, To: l.From + 1})
+			}
+			lastFrom = l.From
+			haveFrom = true
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return 0, err
+		return 0, 0, nil, err
 	}
 	if firstLine == nil {
 		// Nothing was ever appended: the block is empty, not dropped.
-		return 0, nil
+		return 0, 0, nil, nil
 	}
 	var line blockRowsLine
 	if err := json.Unmarshal(firstLine, &line); err != nil {
-		return 0, fmt.Errorf("content: block rows: read the first stored line of %s: %w", artifactID, err)
+		return 0, 0, nil, fmt.Errorf("content: block rows: read the first stored line of %s: %w", artifactID, err)
 	}
 	span := nextRow - line.From
 	if lost > span {
@@ -836,7 +923,7 @@ func deriveBlockRowsDropped(ctx context.Context, tx *sql.Tx, artifactID string, 
 		// stage review nocx-2v80t.3.15 finding 10) — so a shortfall this
 		// block's own numbers cannot account for is reported as zero
 		// rather than as a lie.
-		return 0, nil
+		return 0, stored, ranges, nil
 	}
-	return expected - stored, nil
+	return expected - stored, stored, ranges, nil
 }

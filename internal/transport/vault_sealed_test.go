@@ -155,6 +155,30 @@ func TestSealedNormalizer_ResultAndNotifyPassThrough(t *testing.T) {
 	}
 }
 
+// TestSealedNormalizerForwardsTheSentWitness: the stored-row slot is released
+// by the outbound write's completion witness. The normalizer is the Responder
+// every production handler receives, so it must forward that optional method;
+// otherwise the handler falls back to releasing at enqueue and the rule exists
+// only in tests with a hand-built responder (ADR-y45sp41c).
+func TestSealedNormalizerForwardsTheSentWitness(t *testing.T) {
+	rec := &artifactResponder{}
+	norm := newSealedNormalizer(rec)
+	var fired bool
+	if err := norm.TryResultSent(json.RawMessage(`1`), json.RawMessage(`{}`), func() { fired = true }); err != nil {
+		t.Fatalf("TryResultSent: %v", err)
+	}
+	if rec.sent == nil {
+		t.Fatal("the normalizer did not forward the sent witness")
+	}
+	if fired {
+		t.Fatal("the witness ran at enqueue")
+	}
+	rec.finishSent()
+	if !fired {
+		t.Fatal("the witness was not forwarded to the underlying responder")
+	}
+}
+
 // TestConnMethods_InstallsTheNormalizer: the seam is installed where handlers
 // are built — the responder a builder receives IS the sealedNormalizer, so a
 // handler cannot write a sealed failure past it. The handler in this test

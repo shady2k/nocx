@@ -38,6 +38,7 @@ import type { PaneIdentity, PaneScreenReading } from './terminal-content'
 import { notifyAiConfigChanged } from './ai-config'
 import type { SessionEffect } from './generated/session.effect'
 import type { Row, SessionFrame } from './generated/session.frame'
+import type { LedgerBlockRowsLine } from './generated/ledger.blockRows'
 import { frameOf, styleOf, wireRowOf, type CellSpec } from './painter/fixtures'
 import type { CellPainter } from './painter/painter'
 import type { CellModel, ScreenSnapshot } from './cell-model'
@@ -88,7 +89,9 @@ import { LifecycleKernel, shouldShowEditor } from './lifecycle/state'
 import { ProfileClient, type SSHProfile } from './profiles'
 import { Dispatcher, RpcError } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
-import type { SessionHandle, SessionRecovery, SessionSize, WSClient } from './ipc'
+import { SessionNotAttachedError } from './ipc'
+import type { SessionHandle, SessionRecovery, WSClient } from './ipc'
+import type { SessionIntent } from './intent-input'
 import type { SessionIntentResult } from './generated/session.intent'
 import type { SessionSignal } from './generated/session.signal'
 import {
@@ -98,7 +101,11 @@ import {
   type BlockRecord,
   type RunningBlockActions,
 } from './scrollback/blocks'
-import { storedBlockRowsForSelection } from './scrollback/block-rows'
+import {
+  parseStoredBlockRows,
+  storedBlockRowsForSelection,
+  type StoredBlockRows,
+} from './scrollback/block-rows'
 import type { AgentRunCompletion } from './run-command'
 import { CommandSnapshotStore } from './command-snapshot'
 import type { ActionFacts, DesiredMode } from './capability'
@@ -508,6 +515,76 @@ describe('TerminalContent geometry follows accepted painter frames', () => {
       })
     } finally {
       teardown()
+      rectSpy.mockRestore()
+      style.remove()
+    }
+  })
+
+  it('keeps the opening columns through first output (nocx-evj4b.1.15)', async () => {
+    const style = document.createElement('style')
+    style.textContent = '.cell-metric-probe { line-height: 17px; }'
+    document.head.append(style)
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLElement) {
+        if (this.classList.contains('cell-metric-probe')) {
+          return { width: 64 * 7, height: 17 } as DOMRect
+        }
+        return Element.prototype.getBoundingClientRect.call(this)
+      })
+    const widthSpy = vi
+      .spyOn(HTMLElement.prototype, 'clientWidth', 'get')
+      .mockImplementation(function (this: HTMLElement) {
+        return this.classList.contains('scrollback-area') ? 974 : 0
+      })
+    // jsdom cannot resolve CSS custom properties. Model the stylesheet's
+    // one-cell gutter: the UI font's 1ch fallback is not the terminal cell.
+    const computed = window.getComputedStyle.bind(window)
+    const computedSpy = vi.spyOn(window, 'getComputedStyle').mockImplementation((el) => {
+      const result = computed(el)
+      if (!el.classList.contains('scrollback-area')) return result
+      const get = result.getPropertyValue.bind(result)
+      result.getPropertyValue = (name) =>
+        name === '--pane-inline-padding'
+          ? el.closest<HTMLElement>('.pane')?.style.getPropertyValue('--term-cell-width') || '1ch'
+          : get(name)
+      return result
+    })
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        attachToDocument: true,
+        viewportBeforeMount: { width: 996, height: 800 },
+      },
+      client,
+    )
+    try {
+      tab.setActive(true)
+      const opening = client.openSession.mock.calls[0][0]
+      expect(opening.cols).toBe(137)
+      const session = sessionOf(content)
+      session.fireScreenFrame(
+        screenFrame(
+          1,
+          Array.from({ length: SCREEN_ROWS }, () => 'x'.repeat(137)),
+          {
+            cols: opening.cols,
+            rows: opening.rows,
+            cellWidthPx: 7,
+            cellHeightPx: 17,
+          },
+        ),
+      )
+      await vi.waitFor(() => expect(paneScreen()?.revision).toBe(1))
+      content.viewportChanged({ width: 996, height: 800 })
+      expect(
+        (content as unknown as { _reportedSize(): { cols: number } })._reportedSize().cols,
+      ).toBe(opening.cols)
+    } finally {
+      teardown()
+      computedSpy.mockRestore()
+      widthSpy.mockRestore()
       rectSpy.mockRestore()
       style.remove()
     }
@@ -2796,7 +2873,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
       await vi.waitFor(() =>
         expect(session.intent.mock.calls).toEqual([
-          ['paste', 'sleep 20'],
+          ['paste', 'sleep 20', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -2839,14 +2916,13 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
     }
   })
 
-  // nocx-evj4b.1.6: a plain sh never reaches prompt_ready, so the startup
-  // composer is the only place its first commands can be typed, and every
-  // Enter there was its own command. The draft used to survive each held
-  // Enter, so the last Enter's plan carried all of them concatenated and
-  // exactly one line ran; every submit after the first was swallowed as a
-  // duplicate of the one in flight. Five submits during startup must be five
-  // lines, in the order the person made them, when the shell settles.
-  it('every submit made while startup is held runs on its own when the shell settles conventional', async () => {
+  // nocx-evj4b.1.6, AS AMENDED BY THE OWNER (2026-11-10; nocx-evj4b.1.8): a
+  // plain sh never reaches prompt_ready, so the startup composer's submits are
+  // held against a prompt that will never come. Every Enter there is still its
+  // own command — the draft empties for each — but the lines are NOT written
+  // into a pty nobody proved ready; they come back to the composer, in order,
+  // and the person submits them at the prompt they can see.
+  it('every submit held during startup comes back to the composer when the shell settles conventional', async () => {
     const session = makeSession({ awaitsIntegration: true })
     const client = makeClient()
     client.openSession.mockResolvedValue(session)
@@ -2881,15 +2957,110 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
         reason: 'unsupported-shell',
         shell: '/bin/sh',
       })
-      await vi.waitFor(() =>
-        expect(session.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual(
-          lines.flatMap((line) => [
+      // THE QUEUE'S PROMISE CANNOT BE KEPT: no prompt is coming, so nothing
+      // is written; the five lines are the person's draft again.
+      await vi.waitFor(() => expect(editor.getDoc()).toBe(lines.join('\n')))
+      expect(session.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([])
+      expect(session.send).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it.each(['before-settlement', 'after-settlement'] as const)(
+    'submits the restored startup draft exactly once with attachment %s',
+    async (attachmentOrder) => {
+      const session = makeSession({ awaitsIntegration: true })
+      const client = makeClient()
+      client.openSession.mockResolvedValue(session)
+      const fireIntegration = integrationHandler(client, session)
+      const { content, ed, view, teardown } = await mountTerminal(makeClipboard(), {}, client)
+      const line = 'echo after-the-prompt'
+      try {
+        content.setVisible(true)
+        fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+        ed.insertText(line)
+        view.contentDOM.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+        )
+        expect(ed.getDoc()).toBe('')
+        expect(session.intent).not.toHaveBeenCalled()
+        if (attachmentOrder === 'before-settlement') session.fireAttachment({ kind: 'attached' })
+        fireIntegration({
+          sessionId: session.sessionId,
+          status: 'conventional',
+          reason: 'unsupported-shell',
+          shell: '/bin/sh',
+        })
+        if (attachmentOrder === 'after-settlement') session.fireAttachment({ kind: 'attached' })
+        expect(ed.getDoc()).toBe(line)
+        expect(ed.isVisible).toBe(true)
+        expect(session.intent).not.toHaveBeenCalled()
+
+        // Invariant: one submitted draft produces one paste and one Enter,
+        // regardless of attachment/startup release ordering. The draft is
+        // already here; typing it again would submit a different, doubled line.
+        view.contentDOM.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+        )
+        await vi.waitFor(() =>
+          expect(session.intent.mock.calls).toEqual([
             ['paste', line],
             ['key', 'enter'],
           ]),
-        ),
+        )
+      } finally {
+        teardown()
+      }
+    },
+  )
+
+  it.each([
+    ['attachment', 'geometry', 'startup'],
+    ['attachment', 'startup', 'geometry'],
+    ['geometry', 'attachment', 'startup'],
+    ['geometry', 'startup', 'attachment'],
+    ['startup', 'attachment', 'geometry'],
+    ['startup', 'geometry', 'attachment'],
+  ])('writes one startup submit once in release order %s, %s, %s', async (...order) => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, ed, view, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    let applyGeometry!: () => void
+    const geometry = new Promise<'applied'>((resolve) => {
+      applyGeometry = () => resolve('applied')
+    })
+    session.resizeApplied.mockReturnValue(geometry)
+    const line = 'echo exactly once'
+    const lifecycle = lifecycleHandler(client, session.sessionId)
+    try {
+      content.setVisible(true)
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/bash' })
+      holdOne(ed, view, line)
+      expect(session.intent).not.toHaveBeenCalled()
+      for (const event of order) {
+        if (event === 'attachment') session.fireAttachment({ kind: 'attached' })
+        if (event === 'geometry') applyGeometry()
+        if (event === 'startup') {
+          lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+        }
+        await Promise.resolve()
+      }
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls).toEqual([
+          ['paste', line, 'bare'],
+          ['key', 'enter'],
+        ]),
       )
+      // Repeated attachment/prompt facts must not present the line again.
+      session.fireAttachment({ kind: 'attached' })
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      await Promise.resolve()
+      expect(session.intent).toHaveBeenCalledTimes(2)
     } finally {
+      applyGeometry()
       teardown()
     }
   })
@@ -2968,6 +3139,496 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
     }
   })
 
+  it('a submit at an integrated prompt is never bracketed pasted (nocx-evj4b.1.2)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const lifecycle = lifecycleHandler(client, session.sessionId)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    attemptScript(client, [
+      () =>
+        Promise.resolve({
+          id: 'att-1',
+          domain: 'd1',
+          state: 'open',
+          command: 'echo hi',
+          cwd: '',
+          host: '',
+          origin: 'app',
+          startedAt: '2026-08-08T12:00:00Z',
+        }),
+    ])
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'integrated', shell: '/bin/bash' })
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      session.intent.mockClear()
+      holdOne(editor, view, 'echo hi')
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls.filter((call) => call[0] === 'paste')).toEqual([
+          ['paste', 'echo hi', 'bare'],
+        ]),
+      )
+    } finally {
+      teardown()
+    }
+  })
+
+  it("a submit to a program inside a block is framed by that program's own mode (nocx-evj4b.1.2)", async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const lifecycle = lifecycleHandler(client, session.sessionId)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'integrated', shell: '/bin/bash' })
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      lifecycle({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-prog', state: 'open', origin: 'shell', command: 'python3', cwd: '' },
+      })
+      session.intent.mockClear()
+      session.send.mockClear()
+      holdOne(editor, view, 'print(1)')
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls.filter((call) => call[0] === 'paste')).toEqual([
+          ['paste', 'print(1)'],
+        ]),
+      )
+    } finally {
+      teardown()
+    }
+  })
+
+  // THE QUEUE IS A PROMISE (owner, 2026-11-10; nocx-evj4b.1.8). A line held
+  // against the prompt a live domain will announce is not delivered when the
+  // startup settles some other way — the far pty is still cooked and its
+  // startup chain can read stdin. It goes back to the person's draft.
+  it('returns a held line to the composer when the startup settles conventional (nocx-evj4b.1.8)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      session.intent.mockClear()
+      session.send.mockClear()
+      holdOne(editor, view, 'echo kept')
+      expect(session.intent).not.toHaveBeenCalled()
+
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(editor.getDoc(), "the line the queue could not deliver is the person's draft").toBe(
+        'echo kept',
+      )
+      expect(session.intent).not.toHaveBeenCalled()
+      expect(session.send).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('restores the reference-intact line, never the resolved secret (nocx-evj4b.1.8)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    client.call.mockImplementation((method: string) => {
+      if (method === 'vault.resolveLine') {
+        return Promise.resolve({
+          line: 'curl -H "Authorization: Bearer s3cr3t"',
+          refs: [{ name: 'token', resolved: true }],
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const lifecycle = lifecycleHandler(client, session.sessionId)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      editor.insertText('curl {{secret:token}}')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      for (let i = 0; i < 10; i++) await Promise.resolve()
+      expect(view.state.doc.toString()).toBe('')
+
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      // THE PERSON'S OWN TEXT. The resolved line is the pty's, never the
+      // draft's: 'curl {{secret:token}}' must come back with the reference
+      // intact, not with the token in clear.
+      await vi.waitFor(() => expect(editor.getDoc()).toBe('curl {{secret:token}}'))
+      expect(editor.getDoc()).not.toContain('s3cr3t')
+
+      // AND A RESUBMIT RECORDS THE SAME TEXT, never the secret.
+      const attempts: unknown[] = []
+      client.dispatcher.call.mockImplementation((method: string, params: unknown) => {
+        if (method !== 'lifecycle.submitAttempt') {
+          return Promise.reject(new Error('no store wired (fake)'))
+        }
+        attempts.push(params)
+        return Promise.resolve({
+          id: 'att-1',
+          domain: 'd1',
+          state: 'open',
+          command: '',
+          cwd: '',
+          host: '',
+          origin: 'app',
+          startedAt: '2026-08-08T12:00:00Z',
+        })
+      })
+      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      await vi.waitFor(() => expect(attempts).toHaveLength(1))
+      expect((attempts[0] as { command?: string }).command).toBe('curl {{secret:token}}')
+      expect(JSON.stringify(attempts[0])).not.toContain('s3cr3t')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a submit whose secret resolves after the startup settled stays in the composer (nocx-evj4b.1.8)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    let releaseResolve!: () => void
+    const resolved = new Promise<void>((resolve) => {
+      releaseResolve = resolve
+    })
+    client.call.mockImplementation((method: string) => {
+      if (method === 'vault.resolveLine') {
+        return resolved.then(() => ({
+          line: 'curl -H "Authorization: Bearer s3cr3t"',
+          refs: [{ name: 'token', resolved: true }],
+        }))
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      session.intent.mockClear()
+      session.send.mockClear()
+      editor.insertText('curl {{secret:token}}')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      // The verdict is in flight and the startup settles without a prompt.
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      releaseResolve()
+      for (let i = 0; i < 10; i++) await Promise.resolve()
+
+      // THE PERSON'S TEXT, STILL THEIRS: the verdict that resolved after the
+      // startup ended is not a licence to write into a pty nobody proved.
+      expect(editor.getDoc()).toBe('curl {{secret:token}}')
+      expect(editor.getDoc()).not.toContain('s3cr3t')
+      expect(session.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([])
+      expect(session.send).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a vetoed reference draft is visible even when focus has moved (nocx-evj4b.1.8)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    let releaseResolve!: () => void
+    const resolved = new Promise<void>((resolve) => {
+      releaseResolve = resolve
+    })
+    client.call.mockImplementation((method: string) => {
+      if (method === 'vault.resolveLine') {
+        return resolved.then(() => ({
+          line: 'curl -H "Authorization: Bearer s3cr3t"',
+          refs: [{ name: 'token', resolved: true }],
+        }))
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      editor.insertText('curl {{secret:token}}')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      // FOCUS MOVES WHILE THE VERDICT IS IN FLIGHT — the window this rule is
+      // for: the line is the person's, but the keyboard is not in the editor.
+      ;(document.activeElement as HTMLElement | null)?.blur()
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      releaseResolve()
+      for (let i = 0; i < 10; i++) await Promise.resolve()
+
+      expect(editor.getDoc()).toBe('curl {{secret:token}}')
+      expect(editor.isVisible, 'the vetoed line is on screen, not in a hidden draft').toBe(true)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a shell draft restored while Ask was active is visible once the shell is shown (nocx-evj4b.1.8)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    const inputTargets = (content as unknown as { inputTargets: { setActive(id: string): void } })
+      .inputTargets
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      holdOne(editor, view, 'echo shell-line')
+      inputTargets.setActive('agent')
+      editor.insertText('what did that print?')
+
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(editor.getDoc()).toBe('what did that print?')
+
+      // BACK TO THE SHELL: the draft is loaded AND the composer comes back
+      // with it. One rule, whichever path restored the draft.
+      inputTargets.setActive('shell')
+      await vi.waitFor(() => expect(editor.getDoc()).toBe('echo shell-line'))
+      expect(editor.isVisible, 'the restored shell draft is on screen').toBe(true)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a live-grid click cannot bypass the restored composer with raw typing', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      holdOne(editor, view, 'echo restored')
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      await vi.waitFor(() => expect(editor.getDoc()).toBe('echo restored'))
+      expect(editor.isVisible).toBe(true)
+      session.intent.mockClear()
+
+      const live = tab.pane.querySelector<HTMLElement>('.terminal-live-container')!
+      expect(live).not.toBeNull()
+      live.dispatchEvent(new MouseEvent('mousedown', { button: 0, bubbles: true }))
+      live.dispatchEvent(new MouseEvent('mouseup', { button: 0, bubbles: true }))
+      live.dispatchEvent(new MouseEvent('click', { button: 0, detail: 1, bubbles: true }))
+      // jsdom has no native character insertion. Deliver the input event only
+      // to the textarea if the real pointer route actually gave it focus.
+      const holder = document.activeElement as HTMLElement
+      holder.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'x', code: 'KeyX', bubbles: true, cancelable: true }),
+      )
+      if (holder instanceof HTMLTextAreaElement) {
+        holder.value = 'x'
+        holder.dispatchEvent(
+          new InputEvent('input', { data: 'x', inputType: 'insertText', bubbles: true }),
+        )
+      }
+      // Wait for the input queue to finish before making a negative assertion.
+      await vi.waitFor(() =>
+        expect((content as unknown as { _sessionCallSending: boolean })._sessionCallSending).toBe(
+          false,
+        ),
+      )
+      expect(editor.getDoc()).toBe('echo restored')
+      expect(session.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([])
+      expect(view.contentDOM.contains(document.activeElement)).toBe(true)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a restored draft keeps the composer on screen until it is submitted or cleared (nocx-evj4b.1.8)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/bash' })
+      holdOne(editor, view, 'echo stays')
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/bash',
+      })
+      await vi.waitFor(() => expect(editor.getDoc()).toBe('echo stays'))
+      // THE PROJECTION THAT HID THE COMPOSER IS THE ONE THAT MUST KEEP IT: a
+      // draft restored without focus was hidden in the same update, and the
+      // person's line vanished into an invisible box.
+      expect(editor.isVisible, 'the restored draft is on screen').toBe(true)
+
+      // A later non-ready fact does not take it away either.
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/bash',
+      })
+      await Promise.resolve()
+      expect(editor.isVisible).toBe(true)
+
+      // The person's own submit empties the draft, and the composer's keep
+      // ends with it.
+      editor.clear()
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/bash',
+      })
+      await Promise.resolve()
+      expect(editor.isVisible).toBe(false)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('restores the held lines ahead of a newer draft, as one draft (nocx-evj4b.1.8)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      holdOne(editor, view, 'echo A')
+      // A NEWER DRAFT, typed while the startup was still settling.
+      editor.insertText('echo B')
+      expect(editor.getDoc()).toBe('echo B')
+
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      await vi.waitFor(() => expect(editor.getDoc()).toBe('echo A\necho B'))
+    } finally {
+      teardown()
+    }
+  })
+
+  it('restores a held shell line into the shell draft, not the question being typed (nocx-evj4b.1.8)', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const fireIntegration = integrationHandler(client, session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    const editor = editorOf(content)
+    const view = editorViewOf(editor)
+    const inputTargets = (content as unknown as { inputTargets: { setActive(id: string): void } })
+      .inputTargets
+    try {
+      fireIntegration({ sessionId: session.sessionId, status: 'starting', shell: '/bin/sh' })
+      holdOne(editor, view, 'echo A')
+      // The person reached for the assistant while the shell was starting.
+      inputTargets.setActive('agent')
+      editor.insertText('what did that print?')
+      expect(editor.getDoc()).toBe('what did that print?')
+
+      fireIntegration({
+        sessionId: session.sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/sh',
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+      // The question's draft is untouched: the shell's line is not a question.
+      expect(editor.getDoc()).toBe('what did that print?')
+
+      inputTargets.setActive('shell')
+      await vi.waitFor(() => expect(editor.getDoc()).toBe('echo A'))
+    } finally {
+      teardown()
+    }
+  })
+
   // REVIEW FINDING 2 (P1): the release started both submissions at once. A's
   // attempt opened and waited; B's was refused because the lane was running,
   // and the refusal wrote B immediately — ahead of A, which then wrote second.
@@ -3016,9 +3677,9 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       })
       await vi.waitFor(() =>
         expect(session.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([
-          ['paste', 'echo A'],
+          ['paste', 'echo A', 'bare'],
           ['key', 'enter'],
-          ['paste', 'echo B'],
+          ['paste', 'echo B', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -3028,10 +3689,12 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
     }
   })
 
-  // REVIEW FINDING 3 (P2): the release read the CURRENTLY active target. A
-  // shell command held during startup, with the person switching to Ask before
-  // the settle, became an assistant question and never reached the shell.
-  it('a held command is delivered to the shell target it was typed for (sequence 3)', async () => {
+  // REVIEW FINDING 3 (P2), AS AMENDED BY THE OWNER (2026-11-10;
+  // nocx-evj4b.1.8): a shell command held during startup is not delivered when
+  // the startup settles conventional — it comes back to the composer — and it
+  // still never becomes an assistant question just because the person opened
+  // Ask meanwhile.
+  it('a held command comes back to the composer, never to another target (sequence 3)', async () => {
     const session = makeSession({ awaitsIntegration: true })
     const client = makeClient()
     client.openSession.mockResolvedValue(session)
@@ -3058,12 +3721,17 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
         reason: 'unsupported-shell',
         shell: '/bin/sh',
       })
-      await vi.waitFor(() =>
-        expect(session.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([
-          ['paste', 'echo for-the-shell'],
-          ['key', 'enter'],
-        ]),
-      )
+      await Promise.resolve()
+      await Promise.resolve()
+      // THE SHELL'S LINE IS NOT A QUESTION (nocx-evj4b.1.8): with Ask active
+      // it goes into the SHELL's draft, not into the editor showing Ask. The
+      // comment's own claim — that a shell command never becomes a question —
+      // is now true of the draft as well as of the wire.
+      const inputTargets = (content as unknown as { inputTargets: { setActive(id: string): void } })
+        .inputTargets
+      inputTargets.setActive('shell')
+      await vi.waitFor(() => expect(editor.getDoc()).toBe('echo for-the-shell'))
+      expect(session.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([])
       // and nothing became a question for the assistant
       expect(client.dispatcher.call.mock.calls.filter((c) => String(c[0]) === 'agent.ask')).toEqual(
         [],
@@ -3182,7 +3850,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       })
       await vi.waitFor(() =>
         expect(session.intent.mock.calls.filter((call) => call[0] === 'paste')).toEqual([
-          ['paste', 'sleep 60'],
+          ['paste', 'sleep 60', 'bare'],
         ]),
       )
       // The next prompt releases nothing: the withdrawn line went with the
@@ -3238,7 +3906,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       })
       await vi.waitFor(() =>
         expect(session.intent.mock.calls.filter((call) => call[0] === 'paste')).toEqual([
-          ['paste', 'sleep 60'],
+          ['paste', 'sleep 60', 'bare'],
         ]),
       )
       session.intent.mockClear()
@@ -3483,13 +4151,14 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
     }
   })
 
-  // CI run 42658168728, e2e/ssh-reconnect.spec.ts: a person who reconnects and
-  // types a command gets no block. The editor is on screen THROUGH the rebind,
+  // CI run 42658168728, e2e/ssh-reconnect.spec.ts, AS AMENDED BY THE OWNER
+  // (2026-11-10; nocx-evj4b.1.8): the editor is on screen THROUGH the rebind,
   // so a submit can land after `_bindGeneration` moved and before
-  // `this.session` became the new one: the origin recorded there mixed the new
-  // generation with the old session id, and every later check called it stale.
-  // Anything typed after the rebind must run in the session it produced.
-  it('a command typed while the rebind is in flight runs in the new session (sequence 11)', async () => {
+  // `this.session` became the new one. The line belongs to the session the
+  // rebind produces — and because that session announces nothing yet, the line
+  // waits, then comes back to the composer when the startup settles without a
+  // prompt. It never runs in the session that is gone.
+  it('a command typed while the rebind is in flight waits for the new session, then returns (sequence 11)', async () => {
     const client = makeClient()
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
     content.setVisible(true)
@@ -3525,20 +4194,17 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       expect(await reopening).toBe(true)
       expect(replacement.sessionId).not.toBe(session.sessionId)
 
-      // The new shell settles (or is already live); either way the line the
-      // person typed must reach it.
+      // The new shell settles conventional: no prompt is coming, so the line
+      // is not written into it — it is the person's draft again.
       integrationHandler(client)({
         sessionId: replacement.sessionId,
         status: 'conventional',
         reason: 'unsupported-shell',
         shell: '/bin/sh',
       })
-      await vi.waitFor(() =>
-        expect(replacement.intent.mock.calls.filter((call) => call[0] !== 'focus')).toHaveLength(2),
-      )
-      expect(
-        replacement.intent.mock.calls.filter((call) => call[0] !== 'focus').map((call) => call[1]),
-      ).toEqual(['echo after-the-reconnect', 'enter'])
+      await vi.waitFor(() => expect(editor.getDoc()).toBe('echo after-the-reconnect'))
+      expect(replacement.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([])
+      expect(replacement.send).not.toHaveBeenCalled()
     } finally {
       teardown()
     }
@@ -3618,11 +4284,12 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
     }
   })
 
-  // REVIEW ROUND 7, FINDING 2 (P2): a raw session never enters the integration
-  // axis, so nothing ever settles it — a command held across its rebind was
-  // held forever. The bind's own completion releases it when no prompt_ready
-  // will ever come.
-  it('a plain command typed during a raw session’s reconnect still runs (sequence 13)', async () => {
+  // REVIEW ROUND 7, FINDING 2 (P2), AS AMENDED BY THE OWNER (2026-11-10;
+  // nocx-evj4b.1.8): a raw session never enters the integration axis, so no
+  // prompt mark will ever prove the shell ready — and a line held across its
+  // rebind is therefore never delivered early. It comes back to the composer,
+  // where the person left it; their next submit is the one that runs.
+  it('a plain command typed during a raw session’s reconnect comes back to the composer (sequence 13)', async () => {
     const client = makeClient()
     const session = makeSession({ awaitsIntegration: false })
     client.openSession.mockResolvedValue(session)
@@ -3657,10 +4324,9 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       next.send.mockClear()
       openNew()
       expect(await reopening).toBe(true)
-      await vi.waitFor(() => expect(next.intent).toHaveBeenCalled())
-      expect(
-        next.intent.mock.calls.filter((call) => call[0] !== 'focus').map((call) => call[1]),
-      ).toEqual(['echo raw-after-reconnect', 'enter'])
+      // Nothing was written into a shell nobody has proved ready.
+      await vi.waitFor(() => expect(editor.getDoc()).toBe('echo raw-after-reconnect'))
+      expect(next.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([])
     } finally {
       teardown()
     }
@@ -3772,19 +4438,17 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       // in for its own, so the command is still held.
       expect(replacement.intent).not.toHaveBeenCalled()
 
-      // The replacement answers in its own time.
+      // The replacement answers in its own time — and the answer is that no
+      // prompt is coming, so the line returns to the composer instead of being
+      // written into a shell nobody proved ready.
       integrationHandler(client)({
         sessionId: replacement.sessionId,
         status: 'conventional',
         reason: 'unsupported-shell',
         shell: '/bin/sh',
       })
-      await vi.waitFor(() =>
-        expect(replacement.intent.mock.calls.filter((call) => call[0] !== 'focus')).toHaveLength(2),
-      )
-      expect(
-        replacement.intent.mock.calls.filter((call) => call[0] !== 'focus').map((call) => call[1]),
-      ).toEqual(['echo waits-for-the-new-verdict', 'enter'])
+      await vi.waitFor(() => expect(editor.getDoc()).toBe('echo waits-for-the-new-verdict'))
+      expect(replacement.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([])
     } finally {
       teardown()
     }
@@ -4028,7 +4692,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       // the whole command, then Enter.
       await vi.waitFor(() =>
         expect(session.intent.mock.calls.filter((call) => call[0] !== 'focus')).toEqual([
-          ['paste', 'echo after-the-reconnect'],
+          ['paste', 'echo after-the-reconnect', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -4040,7 +4704,7 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
     }
   })
 
-  it('releases a held shell submit as a conventional write when startup settles degraded', async () => {
+  it('returns a held shell submit to the composer when startup settles degraded', async () => {
     const session = makeSession({ awaitsIntegration: true })
     const client = makeClient()
     client.openSession.mockResolvedValue(session)
@@ -4068,12 +4732,10 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
         reason: 'unsupported-shell',
         shell: '/bin/bash',
       })
-      await vi.waitFor(() =>
-        expect(session.intent.mock.calls).toEqual([
-          ['paste', 'echo conventional'],
-          ['key', 'enter'],
-        ]),
-      )
+      // NOTHING IS WRITTEN: the verdict is the launcher's word about the
+      // shell, not the shell's own readiness (nocx-evj4b.1.8).
+      await vi.waitFor(() => expect(editor.getDoc()).toBe('echo conventional'))
+      expect(session.intent.mock.calls).toEqual([])
       expect(
         client.dispatcher.call.mock.calls.some((call) => call[0] === 'lifecycle.submitAttempt'),
       ).toBe(false)
@@ -6561,6 +7223,565 @@ describe('the projections consume the kernel through the composition root (ADR-0
     }
   })
 
+  it('asks a growth read up to the end the metadata reports now, not the cached end', async () => {
+    const client = makeClient()
+    const oldRows = Array.from({ length: 500 }, (_, i) =>
+      JSON.stringify({ from: i, row: wireRowOf([[`old-${i}`, 1, true]] as CellSpec[]) }),
+    )
+    const newRows = Array.from({ length: 500 }, (_, i) =>
+      JSON.stringify({
+        from: 500 + i,
+        row: wireRowOf([[`new-${500 + i}`, 1, true]] as CellSpec[]),
+      }),
+    )
+    const artifactParams: Array<{ fromRow?: number; rowLimit?: number }> = []
+    client.call.mockImplementation((method: string, params: unknown) => {
+      if (method === 'ledger.get') {
+        return Promise.resolve({
+          entry: {},
+          edges: [],
+          artifacts: [
+            {
+              id: 'art-rows',
+              mediaType: 'application/x-nocx-rows',
+              payload: { rowCount: 1000, endRow: 1000, retainedRanges: [{ from: 0, to: 1000 }] },
+            },
+          ],
+        })
+      }
+      if (method === 'ledger.artifact') {
+        artifactParams.push(params as { fromRow?: number; rowLimit?: number })
+        return Promise.resolve({
+          id: 'art-rows',
+          mediaType: 'application/x-nocx-rows',
+          body: `${newRows.join('\n')}\n`,
+          truncated: null,
+          byteLen: 1,
+          firstRow: 0,
+          lastRow: 999,
+          endRow: 1000,
+          rowCount: 1000,
+          retainedRanges: [{ from: 0, to: 1000 }],
+          rangeStart: 500,
+          rangeCount: 500,
+          hasMoreBefore: true,
+          hasMoreAfter: false,
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('make')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'make',
+        },
+      })
+      withScrollback.scrollback.blockManager.applyStoredRows('att-1', {
+        lines: oldRows.map((body) => {
+          const parsed = JSON.parse(body) as { from: number; row: LedgerBlockRowsLine['row'] }
+          return { from: parsed.from, row: parsed.row }
+        }),
+        artifactVersion: 'art-rows',
+        droppedRows: 0,
+        lostRows: 0,
+        truncated: null,
+        firstRow: 0,
+        lastRow: 499,
+        endRow: 500,
+        rowCount: 500,
+        retainedRanges: [{ from: 0, to: 500 }],
+        sealed: false,
+      })
+      const refresh = (
+        content as unknown as { _refreshBlockRows(id: string): Promise<void> }
+      )._refreshBlockRows('att-1')
+      await refresh
+      expect(artifactParams).toHaveLength(1)
+      expect(artifactParams[0].fromRow).toBe(500)
+      expect(artifactParams[0].rowLimit).toBe(500)
+    } finally {
+      teardown()
+    }
+  })
+
+  it("keeps a running block's body and reservation across a reconnect", async () => {
+    const client = makeClient()
+    const artifactCalls: unknown[] = []
+    client.call.mockImplementation((method: string) => {
+      if (method === 'ledger.get') {
+        return Promise.resolve({
+          entry: {},
+          edges: [],
+          artifacts: [
+            {
+              id: 'art-rows',
+              mediaType: 'application/x-nocx-rows',
+              payload: { rowCount: 500, endRow: 500, retainedRanges: [{ from: 0, to: 500 }] },
+            },
+          ],
+        })
+      }
+      if (method === 'ledger.artifact') {
+        artifactCalls.push({})
+        return Promise.reject(new Error('a running block must keep its body'))
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('make')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'make',
+        },
+      })
+      const lines = Array.from({ length: 500 }, (_, i) => ({
+        from: i,
+        row: wireRowOf([[`row-${i}`, 1, true]] as CellSpec[]),
+      }))
+      withScrollback.scrollback.blockManager.applyStoredRows('att-1', {
+        lines,
+        artifactVersion: 'art-rows',
+        droppedRows: 0,
+        lostRows: 0,
+        truncated: null,
+        firstRow: 0,
+        lastRow: 499,
+        endRow: 500,
+        rowCount: 500,
+        retainedRanges: [{ from: 0, to: 500 }],
+        sealed: false,
+      })
+      const before = withScrollback.scrollback.scrollbackInner.querySelector('.cmd-output')
+      expect(before?.querySelectorAll('.term-grid-row')).toHaveLength(500)
+
+      client._fireReconnect()
+      await vi.waitFor(() => {
+        expect(
+          withScrollback.scrollback.scrollbackInner
+            .querySelector('.cmd-block')
+            ?.getAttribute('data-rows-reset'),
+        ).not.toBe('true')
+      })
+      const after = withScrollback.scrollback.scrollbackInner.querySelector('.cmd-output')
+      expect(after).not.toBeNull()
+      expect(after?.querySelectorAll('.term-grid-row')).toHaveLength(500)
+      expect(artifactCalls).toHaveLength(0)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('reuses transcript order across row-read decisions while following visible blocks and replacements', async () => {
+    const { content, teardown } = await mountTerminal(makeClipboard(), {
+      attachToDocument: true,
+    })
+    const terminal = content as unknown as {
+      scrollback: ScrollbackController
+      _registerRestoredBlock(id: string, el: HTMLElement): void
+      _rowReadPriority(id: string): number
+    }
+    const sb = terminal.scrollback
+    const blocks = Array.from({ length: 48 }, (_, index) => {
+      const el = document.createElement('article')
+      el.className = 'cmd-block'
+      el.dataset.entryId = `priority-${index}`
+      terminal._registerRestoredBlock(el.dataset.entryId, el)
+      return el
+    })
+    let visible: HTMLElement | null = null
+    const setRect = (el: HTMLElement) => {
+      el.getBoundingClientRect = () =>
+        ({ top: el === visible ? 20 : -40, bottom: el === visible ? 40 : -20 }) as DOMRect
+    }
+    blocks.forEach(setRect)
+    sb.scrollbackArea.getBoundingClientRect = () => ({ top: 0, bottom: 100 }) as DOMRect
+    const scans = vi.spyOn(sb.scrollbackInner, 'querySelectorAll')
+    const decide = () => blocks.map((el) => terminal._rowReadPriority(el.dataset.entryId!))
+    try {
+      // Restore is the real controller path; priorities are the callbacks the
+      // terminal supplies to the connection's row-read queue.
+      sb.restorePast(blocks)
+      for (let round = 0; round < 4; round++) {
+        const priorities = decide()
+        for (let i = 1; i < priorities.length; i++) {
+          expect(priorities[i]).toBeLessThan(priorities[i - 1])
+        }
+      }
+      visible = blocks[3]
+      expect(decide()[3]).toBe(0)
+      visible = blocks[8]
+      expect(decide()[8]).toBe(0)
+      expect(decide()[3]).toBeGreaterThan(0)
+      visible = null
+
+      // Freeze replaces a command's element at the same seat. Removal and
+      // an older restore change the seats synchronously, before observers run.
+      const replacement = blocks[20].cloneNode() as HTMLElement
+      blocks[20].replaceWith(replacement)
+      blocks[20] = replacement
+      setRect(replacement)
+      terminal._registerRestoredBlock(replacement.dataset.entryId!, replacement)
+      expect(decide()[20]).toBeLessThan(decide()[19])
+      blocks[47].remove()
+      expect(terminal._rowReadPriority('priority-47')).toBe(Number.MAX_SAFE_INTEGER)
+      const older = document.createElement('article')
+      older.className = 'cmd-block'
+      older.dataset.entryId = 'priority-older'
+      setRect(older)
+      terminal._registerRestoredBlock('priority-older', older)
+      sb.restorePast([older])
+      expect(terminal._rowReadPriority('priority-older')).toBeGreaterThan(decide()[0])
+      for (let round = 0; round < 4; round++) decide()
+
+      // One transcript-order rebuild per structural change is enough, not
+      // one complete DOM walk per priority evaluation (hundreds above).
+      const orderScans = scans.mock.calls.filter(([selector]) => selector === ':scope > .cmd-block')
+      expect(orderScans.length).toBeLessThanOrEqual(4)
+    } finally {
+      scans.mockRestore()
+      teardown()
+    }
+  })
+
+  it('does not request excluded echo rows after all command output is loaded', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const terminal = content as unknown as {
+      scrollback: ScrollbackController
+      _registerRestoredBlock(id: string, el: HTMLElement, rows: StoredBlockRows): void
+      _loadVisibleBlockRows(): void
+      _requestBlockRowsPage(id: string, from: number, limit: number): void
+    }
+    try {
+      const rows = parseStoredBlockRows(
+        [0, 1, 2, 3]
+          .map((from) => JSON.stringify({ from, row: { text: `row-${from}` } }))
+          .join('\n'),
+        {
+          truncated: null,
+          state: 'sealed',
+          payload: { outputStartRow: 2, retainedRanges: [{ from: 0, to: 4 }] },
+        },
+        'echo-artifact',
+      )
+      const block = document.createElement('article')
+      block.className = 'cmd-block'
+      block.dataset.entryId = 'echo-command'
+      terminal.scrollback.restorePast([block])
+      terminal._registerRestoredBlock('echo-command', block, rows)
+      const requests = vi.spyOn(terminal, '_requestBlockRowsPage').mockImplementation(() => {})
+      terminal._loadVisibleBlockRows()
+      expect(rows.lines.map((line) => line.from)).toEqual([2, 3])
+      expect(requests).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('registers a restored open block whose rows are still empty', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      const el = document.createElement('article')
+      el.className = 'cmd-block'
+      el.dataset.entryId = 'empty-open'
+      const emptyRows = {
+        lines: [],
+        artifactVersion: 'art-empty',
+        droppedRows: 0,
+        lostRows: 0,
+        truncated: null,
+        firstRow: 0,
+        lastRow: 0,
+        endRow: 0,
+        rowCount: 0,
+        retainedRanges: [],
+        sealed: false,
+      } as StoredBlockRows
+      ;(
+        content as unknown as {
+          _registerRestoredBlock(id: string, el: HTMLElement, rows?: StoredBlockRows): void
+          _restoredRows: Map<string, StoredBlockRows>
+        }
+      )._registerRestoredBlock('empty-open', el, emptyRows)
+      expect(
+        (content as unknown as { _restoredRows: Map<string, StoredBlockRows> })._restoredRows.has(
+          'empty-open',
+        ),
+      ).toBe(true)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('finds a restored command nested inside a turn through the block index', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const sb = (content as unknown as { scrollback: ScrollbackController }).scrollback
+    try {
+      const turn = document.createElement('div')
+      turn.className = 'cmd-block'
+      turn.dataset.entryId = 'turn-1'
+      const children = document.createElement('div')
+      children.className = 'cmd-children'
+      const nested = document.createElement('article')
+      nested.className = 'cmd-block'
+      nested.dataset.entryId = 'nested-command'
+      children.appendChild(nested)
+      turn.appendChild(children)
+      sb.scrollbackInner.appendChild(turn)
+
+      const found = (
+        content as unknown as { _blockElement(entryId: string): HTMLElement | null }
+      )._blockElement('nested-command')
+      expect(found).toBe(nested)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('re-validates a restored block and pages when it crossed the lazy threshold', async () => {
+    const client = makeClient()
+    const artifactParams: Array<{ fromRow?: number; rowLimit?: number }> = []
+    const grown = Array.from({ length: 400 }, (_, i) =>
+      JSON.stringify({
+        from: 100 + i,
+        row: wireRowOf([[`grown-${100 + i}`, 1, true]] as CellSpec[]),
+      }),
+    ).join('\n')
+    client.call.mockImplementation((method: string, params: unknown) => {
+      if (method === 'ledger.get') {
+        return Promise.resolve({
+          entry: {},
+          edges: [],
+          artifacts: [
+            {
+              id: 'art-restored',
+              mediaType: 'application/x-nocx-rows',
+              payload: { rowCount: 500, endRow: 500, retainedRanges: [{ from: 0, to: 500 }] },
+            },
+          ],
+        })
+      }
+      if (method === 'ledger.artifact') {
+        artifactParams.push(params as { fromRow?: number; rowLimit?: number })
+        return Promise.resolve({
+          id: 'art-restored',
+          mediaType: 'application/x-nocx-rows',
+          body: `${grown}\n`,
+          truncated: null,
+          byteLen: grown.length,
+          firstRow: 0,
+          lastRow: 499,
+          endRow: 500,
+          rowCount: 500,
+          retainedRanges: [{ from: 0, to: 500 }],
+          rangeStart: 100,
+          rangeCount: 400,
+          hasMoreBefore: true,
+          hasMoreAfter: true,
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const inner = (content as unknown as { scrollback: { scrollbackInner: HTMLElement } })
+      .scrollback.scrollbackInner
+    try {
+      content.setVisible(true)
+      const el = document.createElement('article')
+      el.className = 'cmd-block'
+      el.dataset.entryId = 'entry-restored'
+      inner.appendChild(el)
+      const old = Array.from({ length: 100 }, (_, i) => ({
+        from: i,
+        row: wireRowOf([[`old-${i}`, 1, true]] as CellSpec[]),
+      }))
+      ;(content as unknown as { _restoredRows: Map<string, StoredBlockRows> })._restoredRows.set(
+        'entry-restored',
+        {
+          lines: old,
+          artifactVersion: 'art-restored',
+          droppedRows: 0,
+          lostRows: 0,
+          truncated: null,
+          firstRow: 0,
+          lastRow: 99,
+          endRow: 100,
+          rowCount: 100,
+          retainedRanges: [{ from: 0, to: 100 }],
+          sealed: false,
+        },
+      )
+      const settle = vi.spyOn(
+        (content as unknown as { scrollback: ScrollbackController }).scrollback,
+        'settleAround',
+      )
+      client._fireReconnect()
+      await vi.waitFor(() => {
+        expect(el.querySelector('.cmd-output')?.textContent).toContain('grown')
+      })
+      expect(settle).toHaveBeenCalled()
+      expect(artifactParams).toHaveLength(1)
+      expect(artifactParams[0].fromRow).toBe(100)
+      expect(artifactParams[0].rowLimit).toBe(400)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('re-validates a small block whose durable rows grew while disconnected', async () => {
+    const client = makeClient()
+    const oldLine = JSON.stringify({ from: 0, row: wireRowOf([['old', 1, true]] as CellSpec[]) })
+    const newLine = JSON.stringify({ from: 1, row: wireRowOf([['grown', 1, true]] as CellSpec[]) })
+    let reads = 0
+    client.call.mockImplementation((method: string) => {
+      if (method === 'ledger.get') {
+        reads++
+        return Promise.resolve({
+          entry: {},
+          edges: [],
+          artifacts: [
+            {
+              id: 'art-rows',
+              mediaType: 'application/x-nocx-rows',
+              payload: { rowCount: 2, endRow: 2, retainedRanges: [{ from: 0, to: 2 }] },
+            },
+          ],
+        })
+      }
+      if (method === 'ledger.artifact') {
+        return Promise.resolve({
+          id: 'art-rows',
+          mediaType: 'application/x-nocx-rows',
+          body: `${oldLine}\n${newLine}\n`,
+          truncated: null,
+          byteLen: oldLine.length + newLine.length,
+          firstRow: 0,
+          lastRow: 1,
+          endRow: 2,
+          rowCount: 2,
+          retainedRanges: [{ from: 0, to: 2 }],
+          rangeStart: 0,
+          rangeCount: 2,
+          hasMoreBefore: false,
+          hasMoreAfter: false,
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('make')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'make',
+        },
+      })
+      // The cached body is the pre-outage one row. No notification replays.
+      withScrollback.scrollback.blockManager.applyStoredRows('att-1', {
+        lines: [{ from: 0, row: wireRowOf([['old', 1, true]] as CellSpec[]) }],
+        artifactVersion: 'art-rows',
+        droppedRows: 0,
+        lostRows: 0,
+        truncated: null,
+        firstRow: 0,
+        lastRow: 0,
+        endRow: 1,
+        rowCount: 1,
+        retainedRanges: [{ from: 0, to: 1 }],
+        sealed: false,
+      })
+      client._fireReconnect()
+      await vi.waitFor(() => {
+        const text =
+          withScrollback.scrollback.scrollbackInner.querySelector('.cmd-output')?.textContent
+        expect(text).toContain('grown')
+      })
+      // One metadata read for the comparison; its artifact metadata is
+      // reused for the page, so the refresh does not ask ledger.get again.
+      expect(reads).toBe(1)
+    } finally {
+      teardown()
+    }
+  })
+
   it('follows the tail when a block.grew delivery grows a block after the scroller already settled (nocx-2v80t.3.19)', async () => {
     // block.grew/block.closed only NAME the entry; the rows are a further
     // fetch (ledger.get then ledger.artifact) that resolves well after the
@@ -8489,7 +9710,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // Paste and Enter reach the session in order through the intent queue.
       await vi.waitFor(() =>
         expect(sessionOf(content).intent.mock.calls.slice(-2)).toEqual([
-          ['paste', 'echo hello'],
+          ['paste', 'echo hello', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -8583,7 +9804,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       )
       await vi.waitFor(() =>
         expect(sessionOf(content).intent.mock.calls.slice(-2)).toEqual([
-          ['paste', 'echo again'],
+          ['paste', 'echo again', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -8892,7 +10113,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // had the keyboard never been dropped.
       await vi.waitFor(() =>
         expect(sent()).toEqual([
-          ['paste', 'read x'],
+          ['paste', 'read x', 'bare'],
           ['key', 'enter'],
           ['text', 'hi'],
           ['key', 'enter'],
@@ -8936,7 +10157,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       )
       await vi.waitFor(() =>
         expect(sent()).toEqual([
-          ['paste', 'read x'],
+          ['paste', 'read x', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -8973,7 +10194,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // it is the program being told the keyboard came back.
       await vi.waitFor(() =>
         expect(sent()).toEqual([
-          ['paste', 'read x'],
+          ['paste', 'read x', 'bare'],
           ['key', 'enter'],
           ['text', 'hi'],
           ['key', 'enter'],
@@ -9060,7 +10281,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // already ahead of every key in the queue.
       await vi.waitFor(() =>
         expect(sent()).toEqual([
-          ['paste', 'read x'],
+          ['paste', 'read x', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -9078,7 +10299,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
 
       await vi.waitFor(() =>
         expect(sent()).toEqual([
-          ['paste', 'read x'],
+          ['paste', 'read x', 'bare'],
           ['key', 'enter'],
           ['text', 'hi'],
           ['key', 'enter'],
@@ -9149,7 +10370,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // captured while submit was in flight. All four travel on one queue.
       await vi.waitFor(() =>
         expect(session.intent.mock.calls).toEqual([
-          ['paste', 'read x'],
+          ['paste', 'read x', 'bare'],
           ['key', 'enter'],
           ['text', 'hi'],
           ['key', 'enter'],
@@ -9334,7 +10555,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // Enter intents finish before there is no pending line left for ^C.
       await vi.waitFor(() =>
         expect(session.intent.mock.calls).toEqual([
-          ['paste', 'read x'],
+          ['paste', 'read x', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -9345,7 +10566,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // runtime's decision, never this client's (nocx-zg3k3.3.1).
       await vi.waitFor(() =>
         expect(session.intent.mock.calls).toEqual([
-          ['paste', 'read x'],
+          ['paste', 'read x', 'bare'],
           ['key', 'enter'],
           ['key', 'Ctrl+c'],
         ]),
@@ -9996,7 +11217,9 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       view.contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
-      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('paste', 'read reply'))
+      await vi.waitFor(() =>
+        expect(session.intent).toHaveBeenCalledWith('paste', 'read reply', 'bare'),
+      )
       handler({
         lane: 'lane-1',
         lifecycle: 'running',
@@ -10641,7 +11864,7 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       // Fail-open, unchanged: the refusal did not eat the command.
       await vi.waitFor(() =>
         expect(session.intent.mock.calls.slice(-2)).toEqual([
-          ['paste', 'make deploy'],
+          ['paste', 'make deploy', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -10761,7 +11984,7 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       })
       await vi.waitFor(() =>
         expect(session.intent.mock.calls.slice(-2)).toEqual([
-          ['paste', 'make deploy'],
+          ['paste', 'make deploy', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -10873,7 +12096,7 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       // intents travel on this same seam, so the wait names the paste rather
       // than the tail of the list.
       await vi.waitFor(() =>
-        expect(session.intent.mock.calls).toContainEqual(['paste', 'sleep 30']),
+        expect(session.intent.mock.calls).toContainEqual(['paste', 'sleep 30', 'bare']),
       )
       expect(document.activeElement).toBe(stop)
     } finally {
@@ -10897,7 +12120,7 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       ed.insertText('sleep 30')
       key(view, { key: 'Enter' })
       await vi.waitFor(() =>
-        expect(sessionOf(content).intent).toHaveBeenCalledWith('paste', 'sleep 30'),
+        expect(sessionOf(content).intent).toHaveBeenCalledWith('paste', 'sleep 30', 'bare'),
       )
       const attempt = {
         id: 'att-0',
@@ -11120,7 +12343,7 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       })
       await vi.waitFor(() =>
         expect(session.intent.mock.calls.slice(-2)).toEqual([
-          ['paste', 'make --token=SECRETVALUE'],
+          ['paste', 'make --token=SECRETVALUE', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -11223,7 +12446,7 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       // Enter, the attempt was refused — and the command still runs, whole.
       await vi.waitFor(() =>
         expect(session.intent.mock.calls.slice(-2)).toEqual([
-          ['paste', 'make deploy'],
+          ['paste', 'make deploy', 'bare'],
           ['key', 'enter'],
         ]),
       )
@@ -11605,6 +12828,399 @@ describe('shell submit input intent ordering (nocx-zg3k3.3.1)', () => {
       expect(session.send).not.toHaveBeenCalled()
     } finally {
       releasePaste()
+      teardown()
+    }
+  })
+
+  // ONE SUBMIT, THREE REJECTIONS, THREE REMEDIES (nocx-evj4b.1.14).
+  //
+  // A submit is two intents — the paste and the Enter. The pane's queue used
+  // to log a rejection and move on, so the Enter went alone: bash read a bare
+  // newline, printed a fresh prompt, and the command left no output and no
+  // block. The remedy depends on WHY the call was rejected, and the three
+  // cases are pinned here because guessing wrong is worse than the bug:
+  //
+  //   not attached   nothing was sent, so the line is HELD and written when
+  //                  the pane is attached again — once;
+  //   definitive     a JSON-RPC error answer: refused, nothing written, so the
+  //                  submit ends visibly and the pane keeps working;
+  //   unknown        the connection died: the shell may have the line already,
+  //                  so it is NEVER presented again (that runs `rm` twice) and
+  //                  the person is told it may have gone.
+  /** Queue one submitted line and return what the pane did with it. */
+  async function submitOnce(
+    content: unknown,
+    ed: unknown,
+    session: ReturnType<typeof makeSession>,
+    line: string,
+  ): Promise<void> {
+    ;(content as { setVisible(v: boolean): void }).setVisible(true)
+    ;(ed as { show(): void }).show()
+    ;(ed as { insertText(t: string): void }).insertText(line)
+    viewOf(ed as never).contentDOM.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+    )
+    await vi.waitFor(() => expect(session.intent).toHaveBeenCalled())
+  }
+
+  it.each(['refused', 'failed_partial', 'delivery_unknown', 'cancelled', 'in_progress'] as const)(
+    'discards Enter and type-ahead after a paste resolves %s, then accepts a later submit',
+    async (state) => {
+      const client = makeClient()
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+      const session = sessionOf(content)
+      const success: SessionIntentResult = { state: 'executed', bytesWritten: 1, fenceAfter: 0 }
+      let finish!: (result: SessionIntentResult) => void
+      session.intent.mockImplementationOnce(
+        () =>
+          new Promise<SessionIntentResult>((resolve) => {
+            finish = resolve
+          }),
+      )
+      vi.mocked(showToast).mockClear()
+      try {
+        await submitOnce(content, ed, session, 'echo failed line')
+        typeIntoPane(content, 'queued')
+        finish({
+          state,
+          bytesWritten: state === 'failed_partial' ? 3 : 0,
+          fenceAfter: 0,
+          ...(state === 'refused' ? { refusal: { cause: 'cannot_encode' as const } } : {}),
+        })
+        const drain = content as unknown as { _sessionCallSending: boolean }
+        await vi.waitFor(() => expect(drain._sessionCallSending).toBe(false))
+        expect(session.intent.mock.calls).toEqual([['paste', 'echo failed line']])
+        expect(showToast).toHaveBeenCalled()
+        const notice = vi.mocked(showToast).mock.lastCall?.[0]
+        expect(notice?.level).toBe('danger')
+        expect(notice?.duration).toBe(0)
+        expect(notice?.message).toContain(
+          state === 'refused' ? 'cannot_encode' : 'will not be sent again',
+        )
+
+        session.intent.mockResolvedValue(success)
+        await submitOnce(content, ed, session, 'echo later')
+        await vi.waitFor(() =>
+          expect(session.intent.mock.calls.slice(1)).toEqual([
+            ['paste', 'echo later'],
+            ['key', 'enter'],
+          ]),
+        )
+      } finally {
+        teardown()
+      }
+    },
+  )
+
+  it.each(['reject-before-detach', 'reject-after-detach', 'negative'] as const)(
+    'keeps the unsent submit after an earlier focus call fails (%s)',
+    async (failure) => {
+      const client = makeClient()
+      const { ed, content, teardown } = await mountTerminal(
+        makeClipboard(),
+        { attachToDocument: true },
+        client,
+      )
+      const session = sessionOf(content)
+      const success: SessionIntentResult = { state: 'executed', bytesWritten: 1, fenceAfter: 0 }
+      let rejectFocus!: (err: Error) => void
+      let resolveFocus!: (result: SessionIntentResult) => void
+      const focus = new Promise<SessionIntentResult>((resolve, reject) => {
+        resolveFocus = resolve
+        rejectFocus = reject
+      })
+      let attached = true
+      session.intent.mockImplementation((kind: string) => {
+        if (kind === 'focus') return focus
+        if (!attached)
+          return Promise.reject(new SessionNotAttachedError('Session is not attached.'))
+        return Promise.resolve(success)
+      })
+      vi.mocked(showToast).mockClear()
+      try {
+        content.setVisible(true)
+        intentElementOf(content).dispatchEvent(new FocusEvent('focus'))
+        await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('focus', 'in'))
+        await submitOnce(content, ed, session, 'echo survives focus')
+        const pending = content as unknown as {
+          _sessionCallQueue: Array<{ intent: SessionIntent }>
+          _sessionCallSending: boolean
+        }
+        await vi.waitFor(() =>
+          expect(pending._sessionCallQueue.map((c) => c.intent.payload)).toContain(
+            'echo survives focus',
+          ),
+        )
+        if (failure !== 'reject-before-detach') {
+          attached = false
+          session.fireAttachment({ kind: 'attaching' })
+        }
+        if (failure === 'negative')
+          resolveFocus({ state: 'delivery_unknown', bytesWritten: 0, fenceAfter: 0 })
+        else rejectFocus(new Error('ws closed'))
+        await vi.waitFor(() => expect(pending._sessionCallSending).toBe(false))
+        if (failure !== 'reject-before-detach') {
+          attached = true
+          session.fireAttachment({ kind: 'attached' })
+        }
+        await vi.waitFor(() =>
+          expect(
+            session.intent.mock.calls.filter((c) => c[0] !== 'focus' && c[0] !== 'paste'),
+          ).toEqual([['key', 'enter']]),
+        )
+        expect(session.intent).toHaveBeenCalledWith('paste', 'echo survives focus')
+        expect(showToast).not.toHaveBeenCalled()
+      } finally {
+        resolveFocus(success)
+        teardown()
+      }
+    },
+  )
+
+  it('holds an accepted submit if attachment drops before the lifecycle attempt answers', async () => {
+    const client = makeClient()
+    let resolveAttempt!: (value: unknown) => void
+    const attempt = new Promise<unknown>((resolve) => {
+      resolveAttempt = resolve
+    })
+    const ordinaryCall = client.dispatcher.call.getMockImplementation()!
+    client.dispatcher.call.mockImplementation((method, params) => {
+      if (method === 'lifecycle.submitAttempt') return attempt
+      return ordinaryCall(method, params)
+    })
+    const { ed, content, view, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const session = sessionOf(content)
+    try {
+      content.setVisible(true)
+      lifecycleHandler(client)({
+        lane: 'lane-1',
+        lifecycle: 'prompt_ready',
+        domain: 'd1',
+        epoch: 1,
+      })
+      ed.insertText('echo pre-send-held')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      expect(client.dispatcher.call).toHaveBeenCalledWith(
+        'lifecycle.submitAttempt',
+        expect.objectContaining({ command: 'echo pre-send-held' }),
+      )
+      expect(ed.getDoc()).toBe('')
+      session.fireAttachment({ kind: 'attaching' })
+      resolveAttempt({ id: 'pre-send-attempt' })
+      await attempt
+      // The accepted submit is past its lifecycle round trip, but the same
+      // handle cannot send yet. No private queue state manufactures the hold.
+      await Promise.resolve()
+      expect(session.intent).not.toHaveBeenCalled()
+
+      session.fireAttachment({ kind: 'attached' })
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls).toEqual([
+          ['paste', 'echo pre-send-held', 'bare'],
+          ['key', 'enter'],
+        ]),
+      )
+      session.fireAttachment({ kind: 'attached' })
+      expect(session.intent).toHaveBeenCalledTimes(2)
+      expect(sessionOf(content)).toBe(session)
+    } finally {
+      resolveAttempt({ id: 'pre-send-attempt' })
+      teardown()
+    }
+  })
+
+  it.each(['executed', 'cancelled', 'delivery_unknown'] as const)(
+    'drops the refused submit queued after an interrupt while the stale %s call settles',
+    async (state) => {
+      const client = makeClient()
+      const session = makeSession()
+      client.openSession.mockResolvedValue(session)
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+      const result: SessionIntentResult = { state: 'executed', bytesWritten: 1, fenceAfter: 0 }
+      let releaseFirst!: () => void
+      const firstAnswer = new Promise<SessionIntentResult>((resolve) => {
+        releaseFirst = () => resolve({ ...result, state })
+      })
+      session.intent.mockImplementation((kind: string, payload: string) => {
+        if (kind === 'text' && payload === 'a') return firstAnswer
+        if (kind === 'paste' && payload === 'bad line') {
+          return Promise.reject(new RpcError('invalid session.intent params', -32602))
+        }
+        return Promise.resolve(result)
+      })
+      vi.mocked(showToast).mockClear()
+      try {
+        typeIntoPane(content, 'a')
+        await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('text', 'a'))
+        typeIntoPane(content, '\x03')
+        await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('key', 'Ctrl+c'))
+        expect(session.cancelPendingIntents).toHaveBeenCalled()
+
+        await submitOnce(content, ed, session, 'bad line')
+        const queue = content as unknown as {
+          _sessionCallQueue: Array<{ intent: SessionIntent }>
+          _sessionCallSending: boolean
+        }
+        await vi.waitFor(() =>
+          expect(queue._sessionCallQueue.map((call) => call.intent.payload)).toEqual([
+            'bad line',
+            'enter',
+          ]),
+        )
+        // The cancelled call succeeds after the replacement submit is queued.
+        // Its drain must not suppress the replacement paste's own refusal.
+        releaseFirst()
+        await vi.waitFor(() => {
+          expect(queue._sessionCallQueue).toHaveLength(0)
+          expect(queue._sessionCallSending).toBe(false)
+        })
+        expect(session.intent).toHaveBeenCalledWith('paste', 'bad line')
+        expect(session.intent).not.toHaveBeenCalledWith('key', 'enter')
+        const notices = vi.mocked(showToast).mock.calls
+        const notice = notices[notices.length - 1]?.[0]
+        expect(notice?.message).toContain('invalid session.intent params')
+        expect(notice?.level).toBe('danger')
+        expect(notice?.duration).toBe(0)
+      } finally {
+        releaseFirst()
+        teardown()
+      }
+    },
+  )
+
+  it('holds a command the renderer could not send, and writes it once when the session is attached again', async () => {
+    const client = makeClient()
+    const session = makeSession()
+    client.openSession.mockResolvedValue(session)
+    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const result: SessionIntentResult = { state: 'executed', bytesWritten: 1, fenceAfter: 0 }
+    const delivered: Array<[string, string]> = []
+    let reachable = false
+    session.intent.mockImplementation((kind: string, payload: string) => {
+      if (!reachable) {
+        return Promise.reject(new SessionNotAttachedError('Session is not attached.'))
+      }
+      delivered.push([kind, payload])
+      return Promise.resolve(result)
+    })
+    vi.mocked(showToast).mockClear()
+    try {
+      await submitOnce(content, ed, session, 'echo held')
+
+      // The paste is rejected before any frame; the Enter is NOT presented on
+      // its own — the line is one submission and its text goes first.
+      expect(delivered).toEqual([])
+      const queued = (
+        content as unknown as {
+          _sessionCallQueue: Array<{ intent?: { payload: string }; session?: unknown }>
+        }
+      )._sessionCallQueue
+      expect(queued.map((call) => call.intent?.payload)).toEqual(['echo held', 'enter'])
+
+      // Attached again: the whole line goes, in the order it was made, to the
+      // handle the pane is attached to — `call.session` and the pane's own
+      // session are one object across a reattach (the queue belongs to the
+      // bind, so a replacement session brings a replacement queue).
+      reachable = true
+      session.fireAttachment({ kind: 'attached' })
+      await vi.waitFor(() =>
+        expect(delivered).toEqual([
+          ['paste', 'echo held'],
+          ['key', 'enter'],
+        ]),
+      )
+      // Exactly once: nothing was re-presented, and nothing was said because
+      // nothing went wrong that the person must act on.
+      expect(delivered.filter(([kind]) => kind === 'paste')).toHaveLength(1)
+      expect(showToast).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it.each(['paste', 'key'])(
+    'never re-presents a line whose %s answer was lost, and says it may have gone',
+    async (failedKind) => {
+      const client = makeClient()
+      const session = makeSession()
+      client.openSession.mockResolvedValue(session)
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+      const delivered: Array<[string, string]> = []
+      session.intent.mockImplementation((kind: string, payload: string) => {
+        if (kind === failedKind) return Promise.reject(new Error('ws closed'))
+        delivered.push([kind, payload])
+        return Promise.resolve({ state: 'executed', bytesWritten: 1, fenceAfter: 0 })
+      })
+      vi.mocked(showToast).mockClear()
+      try {
+        await submitOnce(content, ed, session, 'rm -rf build')
+
+        // The submit ends with its paste: the Enter is dropped with it, so the
+        // shell never receives a bare newline instead of the command.
+        await vi.waitFor(() => expect(showToast).toHaveBeenCalled())
+        const sentBeforeFailure = failedKind === 'paste' ? [] : [['paste', 'rm -rf build']]
+        expect(delivered).toEqual(sentBeforeFailure)
+        expect(
+          (
+            content as unknown as { _sessionCallQueue: Array<{ intent?: { payload: string } }> }
+          )._sessionCallQueue.map((call) => call.intent?.payload),
+        ).toEqual([])
+
+        // AND IT IS NOT PRESENTED AGAIN when the session comes back: the shell
+        // may already have run it, and running a person's `rm` twice is worse
+        // than not knowing.
+        session.fireAttachment({ kind: 'attached' })
+        expect(delivered).toEqual(sentBeforeFailure)
+        expect(session.intent).toHaveBeenCalledTimes(failedKind === 'paste' ? 1 : 2)
+        const calls = vi.mocked(showToast).mock.calls
+        expect(String(calls[calls.length - 1]?.[0]?.message)).toContain(
+          'may not have reached the shell',
+        )
+      } finally {
+        teardown()
+      }
+    },
+  )
+
+  it('ends a submit the session refused, names the refusal, and keeps the pane working', async () => {
+    const client = makeClient()
+    const session = makeSession()
+    client.openSession.mockResolvedValue(session)
+    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const delivered: Array<[string, string]> = []
+    session.intent.mockImplementation((kind: string, payload: string) => {
+      if (payload === 'bad line') {
+        return Promise.reject(new RpcError('invalid session.intent params', -32602))
+      }
+      delivered.push([kind, payload])
+      return Promise.resolve({ state: 'executed', bytesWritten: 1, fenceAfter: 0 })
+    })
+    vi.mocked(showToast).mockClear()
+    try {
+      await submitOnce(content, ed, session, 'bad line')
+      await vi.waitFor(() => expect(showToast).toHaveBeenCalled())
+      const calls = vi.mocked(showToast).mock.calls
+      expect(String(calls[calls.length - 1]?.[0]?.message)).toContain(
+        'invalid session.intent params',
+      )
+
+      // NOT WEDGED: the next line the person types is presented, so a refusal
+      // that can never change is not a queue that never moves again.
+      await vi.waitFor(() => expect(delivered).toEqual([]))
+      ed.show()
+      ed.insertText('echo after')
+      viewOf(ed).contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      await vi.waitFor(() =>
+        expect(delivered).toEqual([
+          ['paste', 'echo after'],
+          ['key', 'enter'],
+        ]),
+      )
+    } finally {
       teardown()
     }
   })
@@ -17668,6 +19284,110 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     }
   })
 
+  // AN INTERRUPT DOES NOT TRAVEL THROUGH THE QUEUE AT ALL (nocx-evj4b.1.12).
+  // A backpressured intent holds the head of the pane's serial queue, so the
+  // Ctrl-C is sent on its own path the moment it arrives — and everything typed
+  // before it is cancelled: type-ahead a tty discards on SIGINT. Chasing the
+  // moment instead (release the wait, hope the next answer ends) left two races,
+  // measured in ipc.test.ts's cancellation tests.
+  it('a Ctrl-C is sent immediately, cancelling the intent still being presented', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      const session = sessionOf(content)
+      // The head: a presentation that has not answered yet, which is the state
+      // an interrupt arrives in most often.
+      let release: (() => void) | null = null
+      session.intent.mockImplementation((kind: string, payload: string) => {
+        if (kind === 'text' && payload === 'a') {
+          return new Promise<SessionIntentResult>((resolve) => {
+            release = () =>
+              resolve({
+                state: 'refused',
+                bytesWritten: 0,
+                fenceAfter: 0,
+                refusal: { cause: 'busy' },
+              })
+          })
+        }
+        return Promise.resolve({ state: 'executed', bytesWritten: 1, fenceAfter: 0 })
+      })
+
+      typeIntoPane(content, 'a', '\r')
+      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('text', 'a'))
+
+      typeIntoPane(content, '\x03')
+      // THE INTERRUPT IS PRESENTED WHILE THE HEAD IS STILL UNRESOLVED: nothing
+      // waits, and the Enter queued behind the head is never presented.
+      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('key', 'Ctrl+c'))
+      expect(session.cancelPendingIntents).toHaveBeenCalled()
+      expect(session.intent).not.toHaveBeenCalledWith('key', 'enter')
+
+      ;(release as (() => void) | null)?.()
+      await waitForSessionQueue(content)
+      expect(session.intent).not.toHaveBeenCalledWith('key', 'enter')
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
+  // AND THE SIGNAL FORM OF THE SAME GESTURE: the block's Interrupt/Stop is a
+  // session.signal sent at once, never queued behind an intent.
+  it('an Interrupt signal is sent immediately, cancelling the intent still being presented', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      const session = sessionOf(content)
+      let release: (() => void) | null = null
+      session.intent.mockImplementation((kind: string, payload: string) => {
+        if (kind === 'text' && payload === 'a') {
+          return new Promise<SessionIntentResult>((resolve) => {
+            release = () =>
+              resolve({
+                state: 'refused',
+                bytesWritten: 0,
+                fenceAfter: 0,
+                refusal: { cause: 'busy' },
+              })
+          })
+        }
+        return Promise.resolve({ state: 'executed', bytesWritten: 1, fenceAfter: 0 })
+      })
+
+      ;(content as unknown as { sendIntent(intent: SessionIntent): boolean }).sendIntent({
+        kind: 'text',
+        payload: 'a',
+      })
+      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('text', 'a'))
+      session.signal.mockClear()
+
+      ;(content as unknown as { signalActiveCommand(s: string): void }).signalActiveCommand(
+        'interrupt',
+      )
+      await vi.waitFor(() => expect(signalsSent(content)).toEqual(['interrupt']))
+      expect(session.cancelPendingIntents).toHaveBeenCalled()
+
+      ;(release as (() => void) | null)?.()
+      await waitForSessionQueue(content)
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
   // ── the ⋮ menu, which is what makes both gestures visible ────────────────
 
   /** Open the running block's overflow menu and return its items. */
@@ -17962,7 +19682,13 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
   // asks for: the SAME exit code, through the SAME completion path, reading
   // two different ways depending on whether nocx actually sent the signal.
 
-  it('orders Interrupt after a queued mouse release', async () => {
+  // AN INTERRUPT IS SENT AT ONCE AND THE TYPE-AHEAD GOES (nocx-evj4b.1.12).
+  // The old rule kept it behind the pointer intents already received, which a
+  // serial queue with a retry that has no attempt bound turned into "possibly
+  // never". Now the signal is addressed the moment the gesture happens, and the
+  // intents queued or in flight before it are cancelled — the bytes SIGINT
+  // would have flushed.
+  it('sends Interrupt at once and drops the intents queued before it', async () => {
     const client = makeClient()
     const { content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -18025,16 +19751,20 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       )
       expect(interrupt).not.toBeNull()
       interrupt!.click()
-      expect(events).toEqual(['intent:press left 2 1'])
-
+      await vi.waitFor(() => expect(events).toEqual(['intent:press left 2 1', 'signal:interrupt']))
+      expect(session.cancelPendingIntents).toHaveBeenCalled()
+      // The release that was queued is gone, and releasing the press does not
+      // bring it back.
+      expect(
+        (
+          content as unknown as {
+            _sessionCallQueue: Array<{ intent?: { payload: string } }>
+          }
+        )._sessionCallQueue,
+      ).toHaveLength(0)
       releasePress()
-      await vi.waitFor(() =>
-        expect(events).toEqual([
-          'intent:press left 2 1',
-          'intent:release left 2 1',
-          'signal:interrupt',
-        ]),
-      )
+      await waitForSessionQueue(content)
+      expect(events).toEqual(['intent:press left 2 1', 'signal:interrupt'])
     } finally {
       releasePress()
       restore()
@@ -22341,6 +24071,146 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
     }
   })
 
+  it('a submit waits for the grid it will run at to apply, and its bytes then go out (nocx-evj4b.1.9)', async () => {
+    // The prompt prediction measures the running height at the Enter, but its
+    // report rides the settle timer while the submit's own attempt round trip
+    // is already in flight. On a loaded runner the bytes reached a pty that was
+    // still the prompt's taller grid: `top` drew for the taller screen, and the
+    // resize that followed scrolled its summary off the top — the block's first
+    // rows landed in its body, which is the owner's screenshot. The write waits
+    // for the same receipt the alternate-screen switch's fence waits for.
+    const { content, session, typeCommand, submitCommand, restore } = await paneWithLayout()
+    try {
+      let applied!: () => void
+      session.resizeApplied.mockImplementation(
+        () =>
+          new Promise<'applied'>((resolve) => {
+            applied = () => resolve('applied')
+          }),
+      )
+      typeCommand('top')
+      submitCommand('top')
+      // Nothing of the command is on the wire: the grid it will draw for is
+      // not applied yet. Focus and other intents the handoff itself produces
+      // are not the command's bytes.
+      const bytes = (): unknown[] =>
+        session.intent.mock.calls.filter(([kind]) => kind === 'text' || kind === 'key')
+      expect(bytes()).toEqual([])
+      // The write reached the receipt and is holding on it.
+      await vi.waitFor(() => expect(session.resizeApplied).toHaveBeenCalled())
+      expect(bytes()).toEqual([])
+      typeIntoPane(content, 'x')
+      expect(bytes()).toEqual([])
+      applied()
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls.filter(([kind]) => kind !== 'focus')).toEqual([
+          ['paste', 'top', 'bare'],
+          ['key', 'enter'],
+          ['text', 'x'],
+        ]),
+      )
+    } finally {
+      restore()
+    }
+  })
+
+  function nextDelivery(content: TerminalContent): Promise<void> {
+    const submitter = content as unknown as {
+      submitShellCommand(options: { onDelivered?: () => void }): unknown
+    }
+    const submit = submitter.submitShellCommand.bind(submitter)
+    return new Promise((resolve) => {
+      vi.spyOn(submitter, 'submitShellCommand').mockImplementationOnce((options) =>
+        submit({
+          ...options,
+          onDelivered: () => {
+            options.onDelivered?.()
+            resolve()
+          },
+        }),
+      )
+    })
+  }
+
+  it('a Ctrl-C during submit geometry withdraws the command and held input', async () => {
+    const { content, session, typeCommand, submitCommand, restore } = await paneWithLayout()
+    let applied!: () => void
+    session.resizeApplied.mockImplementation(
+      () =>
+        new Promise<'applied'>((resolve) => {
+          applied = () => resolve('applied')
+        }),
+    )
+    const delivered = nextDelivery(content)
+    try {
+      typeCommand('top')
+      submitCommand('top')
+      await vi.waitFor(() => expect(applied).toBeDefined())
+      typeIntoPane(content, 'x', '\x03')
+      applied()
+      await delivered
+      expect(session.intent.mock.calls.filter(([kind]) => kind !== 'focus')).toEqual([])
+    } finally {
+      restore()
+    }
+  })
+
+  it('an agent withdrawal during submit geometry writes nothing', async () => {
+    const { content, session, restore } = await paneWithLayout()
+    let applied!: () => void
+    session.resizeApplied.mockImplementation(
+      () =>
+        new Promise<'applied'>((resolve) => {
+          applied = () => resolve('applied')
+        }),
+    )
+    const controller = new AbortController()
+    const delivered = nextDelivery(content)
+    try {
+      const pending = content.submitAgentCommand('touch pid', 'geometry-cancel', controller.signal)
+      const rejected = expect(pending).rejects.toThrow('submission expired before execution')
+      await vi.waitFor(() => expect(applied).toBeDefined())
+      controller.abort()
+      applied()
+      await delivered
+      expect(session.intent.mock.calls.filter(([kind]) => kind !== 'focus')).toEqual([])
+      await rejected
+    } finally {
+      restore()
+    }
+  })
+
+  it('a replaced session receives no command or held input from pending geometry', async () => {
+    const { content, session, typeCommand, submitCommand, restore } = await paneWithLayout()
+    let applied!: () => void
+    session.resizeApplied.mockImplementation(
+      () =>
+        new Promise<'applied'>((resolve) => {
+          applied = () => resolve('applied')
+        }),
+    )
+    const delivered = nextDelivery(content)
+    try {
+      typeCommand('top')
+      submitCommand('top')
+      await vi.waitFor(() => expect(applied).toBeDefined())
+      typeIntoPane(content, 'x')
+      const onExit = session.onExit.mock.calls[0][0] as (exit: {
+        sessionId: string
+        cause: 'interrupted'
+      }) => void
+      onExit({ sessionId: session.sessionId, cause: 'interrupted' })
+      expect(await content.reconnect()).toBe(true)
+      const replacement = sessionOf(content)
+      replacement.intent.mockClear()
+      applied()
+      await delivered
+      expect(replacement.intent.mock.calls.filter(([kind]) => kind !== 'focus')).toEqual([])
+    } finally {
+      restore()
+    }
+  })
+
   it('a shell-originated start commits no geometry after its bytes are out (nocx-2v80t.3.50)', async () => {
     // Typed at the shell, not the composer: the echo is on the grid before
     // any running fact could exist, so the block opens AFTER the command
@@ -22400,29 +24270,21 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
     }
   })
 
-  it('gives the alternate screen the pane’s columns and one row less, and keeps them on return', async () => {
+  it('gives the alternate screen the same grid, and keeps it on return', async () => {
     const { content, session, tab, sb, fits, openCommand, resize, restore } = await paneWithLayout()
     try {
       openCommand()
-      const initial = fits()[fits().length - 1]
       const before = fits().length
       expect(tab.pane.querySelector('.ui-process-bar')).toBeNull()
-      // ADR-2yzsq8mk: a normal command is one column, a full-screen program
-      // owns the width and keeps one row of bottom margin — so a switch is a
-      // grid change of exactly that much, and it sends exactly one request.
-      // The pane here is 676px with the 32px header reserved, 644px of rows at
-      // a 16px pitch: 40 rows for the command, 39 for the program.
-      const alternateGrid = { cols: initial.cols, rows: 39, xpixel: 920, ypixel: 624 }
+      // ADR-92zzg2y2: one gutter, one grid, every mode. The pane here is 676px
+      // with the 32px header reserved, 644px of rows at a 16px pitch — 40 rows
+      // for the command and 40 for the program. The switch requests nothing.
       const alternate = screenFrame(10, ['ALT'], { cols: 40, rows: 20 })
       alternate.state.bufferKind = 'alternate'
       session.fireScreenFrame(alternate)
       expect(sb.mode).toBe('fullscreen')
-      // The columns do not move — the switch is not a re-measure of the pane —
-      // and the one row the program gives up is the margin, not a clipped row.
-      expect(session.resizeApplied).toHaveBeenLastCalledWith(alternateGrid)
+      expect(session.resizeApplied).not.toHaveBeenCalled()
       expect(tab.pane.querySelector('.ui-process-bar')).toBeNull()
-      // The request is the fence's own, not a settle report: `sendResize` is
-      // the debounced path and it stays silent.
       expect(fits()).toHaveLength(before)
 
       // Output and the header's new DOM seat are not a real pane resize.
@@ -22432,17 +24294,15 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
       content.viewportChanged({ width: 936, height: 676 })
       expect(fits()).toHaveLength(before)
 
-      // The applied receipt opens the switch fence. A later genuine resize
-      // follows the normal report path, rather than replacing an outstanding
-      // receipt (whose mock does not call sendResize).
+      // There is no fence: a key is the program's at once.
       typeIntoPane(content, 'x')
       await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('text', 'x'))
       resize(776)
       await vi.waitFor(() => expect(fits()).toHaveLength(before + 1))
       const resized = fits()[fits().length - 1]
-      // The pane grew by a hundred pixels: 46 rows fit above the header, and
-      // the program is told 45 of them.
-      expect(resized).toEqual({ cols: 115, rows: 45, xpixel: 920, ypixel: 720 })
+      // The pane grew by a hundred pixels: 744px above the header is 46 rows,
+      // and the program is told all 46 — no margin row is taken from it.
+      expect(resized).toEqual({ cols: 115, rows: 46, xpixel: 920, ypixel: 736 })
       session.fireScreenFrame(screenFrame(12, ['PRIMARY'], { cols: 40, rows: 20 }))
       expect(sb.mode).toBe('running')
       expect(fits()).toHaveLength(before + 1)
@@ -22628,28 +24488,77 @@ describe('the copy chord does not claim plain Ctrl+C (nocx-1ebrs.19.1)', () => {
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
-// The alternate-screen size fence (nocx-1ebrs.10)
+// One gutter, one grid, every mode (ADR-92zzg2y2)
 // ═══════════════════════════════════════════════════════════════════════════
-// The height a full-screen program is told (ADR-2yzsq8mk)
-// ═══════════════════════════════════════════════════════════════════════════
-// ONE OWNER. The controller writes the box that fills the pane and answers its
-// height (`paneFillHeight`); the fit asks for that same number. Two expressions
-// is how a markerless session's program — vim over a plain ssh shell, where
-// there is no running block and none of the structured branches apply — came to
-// be told the whole scroller while its box showed the margin's row less, and
-// lost its last row to the clip.
-describe('a full-screen program is told the box that shows it (ADR-2yzsq8mk)', () => {
+// THE OWNER'S RULE, 2026-11-10: one gutter for everything the pane shows —
+// ordinary output, blocks, a plain ssh shell and a full-screen program alike —
+// one cell wide on the sides and half a row top and bottom. The terminal's size
+// is computed in one place from the pane's content box less that gutter, and it
+// is the same in every mode. A switch to or from the alternate screen is a
+// presentation change: it sends no resize, keeps no borrowed grid and holds no
+// input. These tests state those three facts through the same report the pty
+// receives.
+describe('one gutter, one grid, every mode (ADR-92zzg2y2)', () => {
   const PANE = { width: 800, height: 400 }
+  const COMPOSER = 100
+  const HEADER = 32
   const CELL = { cellWidthPx: 8, cellHeightPx: 16 }
-  /** 400px of pane, no running header to reserve, 25 rows of 16 — less the one
-   *  row the alternate screen keeps as its bottom margin. */
-  const FILLED = { rows: 24, ypixel: 384 }
+  const GUTTER = 8
+  /** The pane less one gutter each side, in whole cells. */
+  const COLS = Math.floor((PANE.width - 2 * GUTTER) / CELL.cellWidthPx)
+  /** The pane less the reserved header, in whole rows. */
+  const ROWS = Math.floor((PANE.height - HEADER) / CELL.cellHeightPx)
 
-  async function markerlessPane() {
+  async function oneGutterPane(markerless = false) {
     const client = makeClient()
     const mounted = await mountTerminal(makeClipboard(), { attachToDocument: true }, client)
     const { content, tab } = mounted
+    const handler = lifecycleHandler(client)
+    const session = sessionOf(content)
+    const inner = content as unknown as {
+      scrollback: ScrollbackController
+      editor: CommandEditor
+    }
+    const sb = inner.scrollback
+    let revision = 0
+    const composerShown = (): boolean =>
+      inner.editor.isVisible && inner.editor.root.dataset.placement !== 'overlay'
+    Object.defineProperty(sb.scrollbackArea, 'clientWidth', {
+      configurable: true,
+      value: PANE.width,
+    })
+    // The composer's pixels are in the scroller whenever it is hidden, which is
+    // why the terminal area — scroller plus in-flow composer — is one number in
+    // both buffers (ADR-92zzg2y2).
+    Object.defineProperty(sb.scrollbackArea, 'clientHeight', {
+      configurable: true,
+      get: () => Math.round(PANE.height - (composerShown() ? COMPOSER : 0)),
+    })
+    const rect = (height: number): DOMRect =>
+      ({
+        height,
+        width: PANE.width,
+        top: 0,
+        left: 0,
+        right: PANE.width,
+        bottom: height,
+        x: 0,
+        y: 0,
+      }) as DOMRect
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoRect = Element.prototype.getBoundingClientRect
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
     const raf = globalThis.requestAnimationFrame
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.getBoundingClientRect = function (this: Element): DOMRect {
+      if (this === sb.scrollbackArea) return rect(PANE.height - (composerShown() ? COMPOSER : 0))
+      if (this === inner.editor.root) return rect(composerShown() ? COMPOSER : 0)
+      if (this.classList.contains('cmd-block')) return rect(HEADER)
+      return rect(0)
+    }
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
     let queued: FrameRequestCallback[] = []
     globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
       queued.push(cb)
@@ -22664,650 +24573,73 @@ describe('a full-screen program is told the box that shows it (ADR-2yzsq8mk)', (
     }
     const teardown = (): void => {
       queued = []
-      globalThis.requestAnimationFrame = raf
-      mounted.teardown()
-    }
-    try {
-      const session = sessionOf(content)
-      const scrollback = scrollbackFor(content)
-      Object.defineProperty(scrollback.scrollbackArea, 'clientWidth', {
-        configurable: true,
-        value: PANE.width,
-      })
-      Object.defineProperty(scrollback.scrollbackArea, 'clientHeight', {
-        configurable: true,
-        value: PANE.height,
-      })
-      content.viewportChanged({ width: PANE.width, height: PANE.height })
-      // A plain ssh shell before its first marker: no blocks, no running
-      // header, the terminal is the pane.
-      scrollback.setUnstructured()
-      session.fireScreenFrame(screenFrame(1, ['$ top'], CELL))
-      flushFrames()
-      return { content, session, scrollback, flushFrames, tab, teardown }
-    } catch (err) {
-      teardown()
-      throw err
-    }
-  }
-
-  it('wears the ledger’s gutter too, because text against the edge is what the decision stops', async () => {
-    const { content, scrollback, teardown } = await markerlessPane()
-    try {
-      const reported = (
-        content as unknown as {
-          _reportedSize(): { cols: number; xpixel: number }
-        }
-      )._reportedSize()
-      // The fit takes the same gutter a running command's rows wear
-      // (ADR-2yzsq8mk §5): with no stylesheet in jsdom the token is zero, so
-      // what this asserts is the ARITHMETIC — the fit goes through the same
-      // one column as every other mode, and the stylesheet contract itself is
-      // asserted in scrollback/trailing-edge.test.ts.
-      expect(reported.cols).toBe(100)
-      expect(reported.xpixel).toBe(PANE.width)
-      expect(scrollback.mode).toBe('unstructured')
-
-      // …and the gutter is one number, taken off BOTH sides.
-      scrollback.scrollbackArea.style.setProperty('--pane-inline-padding', '24px')
-      content.viewportChanged({ width: PANE.width, height: PANE.height })
-      const after = (
-        content as unknown as {
-          _reportedSize(): { cols: number; xpixel: number }
-        }
-      )._reportedSize()
-      expect(after.cols).toBe(Math.floor((PANE.width - 48) / CELL.cellWidthPx))
-    } finally {
-      teardown()
-    }
-  })
-
-  it('keeps the borrowed grid’s rows, and hands the pane back at the first key (nocx-djx1u)', async () => {
-    // THE MARGIN IS THE PANE'S AGAIN, AND THE KEY IS WHERE IT COMES BACK. A
-    // markerless shell has no prompt marker to hand a borrowed grid back, so
-    // the exit cannot be the moment (a resize there is the SIGWINCH the
-    // borrow exists to avoid). The person's own key is the proof something is
-    // at the shell waiting to read it: the margins and the ledger's column
-    // return, one resize, never twice.
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-    const { content, session, scrollback, flushFrames, tab, teardown } = await markerlessPane()
-    try {
-      // The paint batch — where the margin's return is decided — is a visible
-      // pane's work.
-      tab.setActive(true)
-      const alternate = screenFrame(2, ['ALT-READY'], CELL)
-      alternate.state.bufferKind = 'alternate'
-      session.fireScreenFrame(alternate)
-      flushFrames()
-      expect(scrollback.mode).toBe('fullscreen')
-      // The receipt of the switch's own resize lands, so the fence is over.
-      for (let turn = 0; turn < 10; turn++) await Promise.resolve()
-
-      // The program leaves: its rows stay the pane's, and the layout gives the
-      // vertical margin up for them (the four-side margin is two rows shorter
-      // than the box the program had).
-      const thaw = screenFrame(3, ['$ '], CELL)
-      session.fireScreenFrame(thaw)
-      flushFrames()
-      expect(scrollback.scrollbackLayout.classList.contains('inner-borrowed-grid')).toBe(true)
-
-      // The first key: the grid is handed back, and exactly one report goes
-      // out. The MARGIN waits for the paint that proves the rows fit inside it
-      // — the hand-back is a round trip, and flipping the margin at the key
-      // would cut those two rows again for its length.
-      session.sendResize.mockClear()
-      typeIntoPane(content, 'x')
-      expect(scrollback.scrollbackLayout.classList.contains('inner-borrowed-grid')).toBe(true)
-      session.fireScreenFrame(screenFrame(4, ['$ '], CELL))
-      flushFrames()
-      expect(scrollback.scrollbackLayout.classList.contains('inner-borrowed-grid')).toBe(false)
-      vi.advanceTimersByTime(80)
-      expect(session.sendResize).toHaveBeenCalledTimes(1)
-      // …and it is the pane's own grid, not the program's.
-      const report = session.sendResize.mock.calls[0][0]
-      const local = (content as unknown as { lastLocalGridSize: { cols: number; rows: number } })
-        .lastLocalGridSize
-      expect(report.cols).toBe(local.cols)
-      expect(report.rows).toBe(local.rows)
-    } finally {
-      teardown()
-      vi.useRealTimers()
-    }
-  })
-
-  it('gives the program the box less its margin row, from the one owner', async () => {
-    const { content, session, scrollback, flushFrames, teardown } = await markerlessPane()
-    try {
-      const alternate = screenFrame(2, ['ALT-READY'], CELL)
-      alternate.state.bufferKind = 'alternate'
-      session.fireScreenFrame(alternate)
-      expect(scrollback.mode).toBe('fullscreen')
-      flushFrames()
-      const box = parseFloat(scrollback.terminalLiveContainer.style.height)
-      const reported = (
-        content as unknown as { _reportedSize(): { rows: number; ypixel: number } }
-      )._reportedSize()
-      // The box, the fit and the pty are one number.
-      expect(box).toBe(FILLED.ypixel)
-      expect(reported.rows).toBe(FILLED.rows)
-      expect(reported.ypixel).toBe(box)
-      expect(scrollback.paneFillHeight).toBe(box)
-    } finally {
-      teardown()
-    }
-  })
-})
-
-// ═══════════════════════════════════════════════════════════════════════════
-// The hand-back's own rounding (nocx-djx1u)
-// ═══════════════════════════════════════════════════════════════════════════
-// ONE FLOOR, ON THE RAW BOX. The fit that gives the margin back is the only
-// fit that subtracts a margin, and `_gridHeight` answers in whole rows already
-// (`paneFillHeight` is `gridRows` of the box); `fitUsableViewport` floors
-// again. In the independent read's numbers — a 422px box, 17px cells and a
-// 24px margin — the exit's first key asked floor((408 − 48)/17) = 21 rows
-// where the pane has floor((422 − 48)/17) = 22. The returning frame then fit
-// 22, the margin came back, and the ordinary fit asked for 22 again: a second
-// resize with no pane change at all.
-describe('a handed-back grid is measured with one floor (nocx-djx1u)', () => {
-  const PANE = { width: 800, height: 422 }
-  const CELL = { cellWidthPx: 8, cellHeightPx: 17 }
-  /** `--pane-inline-padding`: the gutter and the vertical pair, one token. */
-  const MARGIN = 24
-  /** The scroller's box with the layout's vertical margin on it, and without. */
-  const WITH_MARGIN = PANE.height - 2 * MARGIN
-  /** What the pane holds with its margin: floor((422 − 48) / 17) rows, and
-   *  floor((800 − 48) / 8) columns in the ledger's column. */
-  const PANE_ROWS = 22
-  const PANE_COLS = 94
-
-  async function borrowedPane() {
-    const client = makeClient()
-    const mounted = await mountTerminal(makeClipboard(), { attachToDocument: true }, client)
-    const { content, tab } = mounted
-    const raf = globalThis.requestAnimationFrame
-    let queued: FrameRequestCallback[] = []
-    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
-      queued.push(cb)
-      return queued.length
-    }
-    const flushFrames = (): void => {
-      for (let pass = 0; pass < 50 && queued.length > 0; pass++) {
-        const frame = queued
-        queued = []
-        for (const cb of frame) cb(0)
-      }
-    }
-    const teardown = (): void => {
-      queued = []
+      Element.prototype.getBoundingClientRect = protoRect
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
       globalThis.requestAnimationFrame = raf
       mounted.teardown()
     }
     try {
       tab.setActive(true)
-      const session = sessionOf(content)
-      const scrollback = scrollbackFor(content)
-      const area = scrollback.scrollbackArea
-      area.style.setProperty('--pane-inline-padding', `${MARGIN}px`)
-      Object.defineProperty(area, 'clientWidth', { configurable: true, value: PANE.width })
-      // THE BOX THE REAL LAYOUT HAS — the one thing jsdom does not compute.
-      // `.scrollback-layout` pays the vertical margin as padding; while the
-      // borrowed grid is on, that padding is zero and the scroller IS the
-      // pane. Reading the class here answers what a browser's `clientHeight`
-      // says after each mode change, which is what the double rounding needs
-      // to be visible at all.
-      Object.defineProperty(area, 'clientHeight', {
-        configurable: true,
-        get: () =>
-          scrollback.scrollbackLayout.classList.contains('inner-borrowed-grid')
-            ? PANE.height
-            : WITH_MARGIN,
-      })
+      sb.scrollbackArea.style.setProperty('--pane-inline-padding', `${GUTTER}px`)
       content.viewportChanged({ width: PANE.width, height: PANE.height })
-      // A plain ssh shell before its first marker: no blocks, no running
-      // header, the terminal is the pane.
-      scrollback.setUnstructured()
-      session.fireScreenFrame(screenFrame(1, ['$ vim'], CELL))
-      flushFrames()
-      return { content, session, scrollback, flushFrames, teardown }
-    } catch (err) {
-      teardown()
-      throw err
-    }
-  }
-
-  it('subtracts the margin before the row count, and asks for one size', async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-    const { content, session, scrollback, flushFrames, teardown } = await borrowedPane()
-    try {
-      // Setup's own fit is the shell's; its report is not this test's subject.
-      vi.advanceTimersByTime(80)
-      session.sendResize.mockClear()
-
-      // The program owns the pane, then leaves it while its command runs: the
-      // rows stay, and the layout gives the margin up to hold them.
-      const alternate = screenFrame(2, ['ALT-READY'], CELL)
-      alternate.state.bufferKind = 'alternate'
-      session.fireScreenFrame(alternate)
-      flushFrames()
-      expect(scrollback.mode).toBe('fullscreen')
-      session.fireScreenFrame(screenFrame(3, ['$'], CELL))
-      flushFrames()
-      expect(scrollback.scrollbackLayout.classList.contains('inner-borrowed-grid')).toBe(true)
-
-      // The person's first key hands the grid back: ONE report, and it is the
-      // pane's own grid — 22 rows, not the 21 a second floor asks for.
-      session.sendResize.mockClear()
-      typeIntoPane(content, 'x')
-      vi.advanceTimersByTime(80)
-      expect(session.sendResize).toHaveBeenCalledTimes(1)
-      expect(session.sendResize.mock.calls[0][0]).toMatchObject({
-        cols: PANE_COLS,
-        rows: PANE_ROWS,
-      })
-
-      // The shell redraws at that size — a screenful, so the margin waits for
-      // the resize — and returns on the paint that proves the rows fit inside
-      // it. Every size asked for after the key must be that one size: a
-      // second, different report is a resize with no pane change behind it.
-      session.sendResize.mockClear()
-      session.fireScreenFrame(
-        screenFrame(
-          4,
-          Array.from({ length: PANE_ROWS }, (_, row) => `EXITROW-${row + 1}`),
-          { ...CELL, cols: PANE_COLS, rows: PANE_ROWS },
-        ),
-      )
-      flushFrames()
-      expect(scrollback.scrollbackLayout.classList.contains('inner-borrowed-grid')).toBe(false)
-      vi.advanceTimersByTime(80)
-      const asked = session.sendResize.mock.calls.map((call) => {
-        const size = call[0] as { cols: number; rows: number }
-        return `${size.cols}x${size.rows}`
-      })
-      expect(asked).toEqual([`${PANE_COLS}x${PANE_ROWS}`])
-    } finally {
-      teardown()
-      vi.useRealTimers()
-    }
-  })
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // One question, in whole rows (nocx-djx1u)
-  // ═══════════════════════════════════════════════════════════════════════════
-  // The release asks for ROWS and the shell redraws that many, so "does the
-  // returning frame fit" is a comparison of rows — not of two pixel heights.
-  // Two float comparisons failed here, one read each:
-  //
-  //   - `clientHeight` is rounded to a whole CSS pixel while the fit is not: a
-  //     429.34375px scroller answered 429, the release asked 22 rows
-  //     (381.333px), and `381.333 <= 429 − 48 = 381` was false;
-  //   - and even two unrounded floats disagree at a row boundary: a 552px
-  //     scroller, 24px margins and 28-device-pixel cells at DPR 1.5 make 27
-  //     rows `27 × 18.666… = 504.00000000000006` against an available 504.
-  //
-  // Both leave `inner-borrowed-grid` — and the missing margins — on for the
-  // rest of the session. `gridRows` is the one row computation and its one
-  // epsilon; both sides are counted with it.
-  describe('the hand-back fits in whole rows (nocx-djx1u)', () => {
-    const MARGIN = 24
-    const DPR = 1.5
-
-    interface Case {
-      /** The scroller as the browser lays it out, and as it reports it rounded. */
-      box: number
-      rounded: number
-      cell: { cellWidthPx: number; cellHeightPx: number }
-      rows: number
-      cols: number
-    }
-
-    /** The third read's fractional box, and round 5's float-boundary one. */
-    const CASES: Case[] = [
-      {
-        box: 429.34375,
-        rounded: 429,
-        cell: { cellWidthPx: 12, cellHeightPx: 26 },
-        rows: 22,
-        cols: 94,
-      },
-      {
-        box: 552,
-        rounded: 552,
-        cell: { cellWidthPx: 12, cellHeightPx: 28 },
-        rows: 27,
-        cols: 94,
-      },
-    ]
-
-    async function fractionalPane(box: number, rounded: number, cell: Case['cell']) {
-      const client = makeClient()
-      const mounted = await mountTerminal(makeClipboard(), { attachToDocument: true }, client)
-      const { content, tab } = mounted
-      const raf = globalThis.requestAnimationFrame
-      let queued: FrameRequestCallback[] = []
-      globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
-        queued.push(cb)
-        return queued.length
+      if (markerless) {
+        // A plain ssh shell from the first frame: no OSC 133, no block, the
+        // terminal is the pane. The lifecycle starts Native, which is what
+        // `fallsToConventionalGrid` reads on the way out of the alternate
+        // screen too.
+        sb.setUnstructured()
+      } else {
+        handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
       }
-      const flushFrames = (): void => {
-        for (let pass = 0; pass < 50 && queued.length > 0; pass++) {
-          const frame = queued
-          queued = []
-          for (const cb of frame) cb(0)
-        }
-      }
-      const teardown = (): void => {
-        queued = []
-        globalThis.requestAnimationFrame = raf
-        mounted.teardown()
-      }
-      try {
-        vi.stubGlobal('devicePixelRatio', DPR)
-        tab.setActive(true)
-        const session = sessionOf(content)
-        const scrollback = scrollbackFor(content)
-        const area = scrollback.scrollbackArea
-        area.style.setProperty('--pane-inline-padding', `${MARGIN}px`)
-        const measured = (): boolean =>
-          scrollback.scrollbackLayout.classList.contains('inner-borrowed-grid')
-        // THE BOX A BROWSER LAYS OUT AND THE BOX IT REPORTS (the one thing
-        // jsdom does not do). `getBoundingClientRect` is fractional and is what
-        // the fit reads; `clientHeight` is the same box rounded, as Chromium
-        // and WebKit both answer it. With the borrowed class on, the layout's
-        // padding is zero and the scroller IS the pane; with it off, the margin
-        // is back.
-        Object.defineProperty(area, 'clientWidth', { configurable: true, value: 800 })
-        Object.defineProperty(area, 'clientHeight', {
-          configurable: true,
-          get: () => (measured() ? rounded : rounded - 2 * MARGIN),
-        })
-        Object.defineProperty(area, 'getBoundingClientRect', {
-          configurable: true,
-          value: () => {
-            const height = measured() ? box : box - 2 * MARGIN
-            return {
-              x: 0,
-              y: 0,
-              top: 0,
-              left: 0,
-              right: 800,
-              bottom: height,
-              width: 800,
-              height,
-              toJSON: () => ({}),
-            } as DOMRect
-          },
-        })
-        content.viewportChanged({ width: 800, height: box })
-        scrollback.setUnstructured()
-        session.fireScreenFrame(screenFrame(1, ['$ vim'], cell))
+      session.fireScreenFrame(screenFrame(++revision, ['$ '], CELL))
+      flushFrames()
+      const reported = (): { cols: number; rows: number; xpixel: number; ypixel: number } =>
+        (
+          content as unknown as {
+            _reportedSize(): { cols: number; rows: number; xpixel: number; ypixel: number }
+          }
+        )._reportedSize()
+      const paint = (line: string): void => {
+        session.fireScreenFrame(screenFrame(++revision, [line], CELL))
         flushFrames()
-        return { content, session, scrollback, flushFrames, teardown }
-      } catch (err) {
-        teardown()
-        vi.unstubAllGlobals()
-        throw err
       }
-    }
-
-    for (const { box, rounded, cell, rows, cols } of CASES) {
-      it(`returns the margins on the frame the rows fit — box ${box}`, async () => {
-        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-        const { content, session, scrollback, flushFrames, teardown } = await fractionalPane(
-          box,
-          rounded,
-          cell,
-        )
-        try {
-          // Setup's own fit is the shell's; its report is not the subject.
-          vi.advanceTimersByTime(80)
-          session.sendResize.mockClear()
-
-          const alternate = screenFrame(2, ['ALT-READY'], cell)
-          alternate.state.bufferKind = 'alternate'
-          session.fireScreenFrame(alternate)
-          flushFrames()
-          expect(scrollback.mode).toBe('fullscreen')
-          session.fireScreenFrame(screenFrame(3, ['$'], cell))
-          flushFrames()
-          expect(scrollback.scrollbackLayout.classList.contains('inner-borrowed-grid')).toBe(true)
-
-          // The key: the release asks for the pane's own grid, in rows.
-          session.sendResize.mockClear()
-          typeIntoPane(content, 'x')
-          vi.advanceTimersByTime(80)
-          expect(session.sendResize).toHaveBeenCalledTimes(1)
-          expect(session.sendResize.mock.calls[0][0]).toMatchObject({ cols, rows })
-
-          // The shell redraws at that size — a screenful, so the margin waits
-          // for the resize — and THIS paint is the proof the rows fit.
-          session.fireScreenFrame(
-            screenFrame(
-              4,
-              Array.from({ length: rows }, (_, row) => `EXITROW-${row + 1}`),
-              { ...cell, cols, rows },
-            ),
-          )
-          flushFrames()
-          expect(scrollback.scrollbackLayout.classList.contains('inner-borrowed-grid')).toBe(false)
-
-          // …and the ordinary fit that follows asks for the same size, so the
-          // hand-back stays one resize: the shell's redraw may report through
-          // the frame-geometry path too, and that report is the size the pane
-          // already sent, which the wire drops as identical. A second,
-          // DIFFERENT size is the extra resize.
-          vi.advanceTimersByTime(80)
-          const asked = session.sendResize.mock.calls.map((call) => {
-            const size = call[0] as { cols: number; rows: number }
-            return `${size.cols}x${size.rows}`
-          })
-          expect(asked.length).toBeGreaterThan(0)
-          expect(new Set(asked)).toEqual(new Set([`${cols}x${rows}`]))
-        } finally {
-          teardown()
-          vi.unstubAllGlobals()
-          vi.useRealTimers()
-        }
-      })
-    }
-  })
-})
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Measured on the tree before this fix: the first alternate-screen frames
-// carried the PREVIOUS mode's geometry (192 columns with the pane settled
-// wider; 70 columns in a 1394 px pane), the program read the person's keys
-// while its own stty still reported the old width, and the resize request
-// went out 87–234 ms after the first fullscreen frame and always behind the
-// post-switch input.
-//
-// So the pane now does three things at the switch, and these tests are the
-// three statements: it asks for its own measured grid immediately, it presents
-// the frames that arrive before that request applies on the pane's grid rather
-// than the program's, and it holds what the person produces until the request
-// answers that it APPLIED — never until a frame, which can depend on the input
-// being held.
-describe('an alternate-screen switch holds input for its applied grid (nocx-1ebrs.10)', () => {
-  const PANE = { width: 800, height: 400 }
-  const CELL = { cellWidthPx: 8, cellHeightPx: 16 }
-  /** One pane less the same 32px header in both buffers: 400px of pane, 32px
-   *  of header, 23 rows of 16px. */
-  const FITTED = { cols: 100, rows: 23 }
-  /** ADR-2yzsq8mk: the alternate screen keeps one row of bottom margin, so the
-   *  program owns one row less than the pane holds. The COLUMNS do not change
-   *  here because jsdom loads no stylesheet and computes no gutter — what this
-   *  fixture can state about a switch is the margin row. */
-  const ALT_ROWS = FITTED.rows - 1
-  const ALT_GRID_HEIGHT = ALT_ROWS * CELL.cellHeightPx
-  const GRID_HEIGHT = FITTED.rows * CELL.cellHeightPx
-
-  /** Mount a pane, give it a measured box and a live normal-buffer frame, then
-   * fire the frame that switches to the alternate screen.
-   *
-   * The switch frame carries the geometry the defect recorded: the PREVIOUS
-   * mode's 40 columns in a pane that has measured 100. */
-  async function switchingPane(): Promise<{
-    content: TerminalContent
-    session: SessionFake
-    tab: Pane
-    grid: () => HTMLElement
-    receipt: (outcome: 'applied' | 'superseded' | 'closed') => void
-    /** Answer the request at `index` (0 is the switch's own), for a test that
-     *  needs an OLDER answer to arrive while a newer request is in flight. */
-    receiptAt: (index: number, outcome: 'applied' | 'superseded' | 'closed') => void
-    fail: (error: Error) => void
-    switchFrame: () => SessionFrame
-    drawProgramFrame: (revision: number, cols?: number) => SessionFrame
-    /** Deliver a lifecycle fact — the seam the backend publishes on. */
-    lifecycle: (fact: unknown) => void
-    /** The number of resize requests this pane has issued. */
-    requested: () => number
-    /** Run every animation frame the pane has scheduled, in order. */
-    flushFrames: () => void
-    teardown: () => void
-  }> {
-    const client = makeClient()
-    const mounted = await mountTerminal(makeClipboard(), { attachToDocument: true }, client)
-    const { content, tab } = mounted
-    // The painter's only ordering boundary is an animation frame. The frames
-    // are COLLECTED and run on demand (flushFrames) rather than run inline:
-    // inline would paint inside the frame handler, before the mode change the
-    // same handler makes a moment later — an order the browser never
-    // produces, and the one that hid the real defect (a paint on the fit from
-    // before the switch). Installed after the mount, because the editor
-    // measures through the same frame callback.
-    const raf = globalThis.requestAnimationFrame
-    let queued: FrameRequestCallback[] = []
-    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
-      queued.push(cb)
-      return queued.length
-    }
-    const flushFrames = (): void => {
-      // A callback may schedule the next one (the paint schedules the refit),
-      // so the queue is drained rather than run once. The bound is a guard
-      // against a scheduling loop in the code under test, not a frame count
-      // anything depends on.
-      for (let pass = 0; queued.length > 0 && pass < 50; pass++) {
-        const frame = queued
-        queued = []
-        for (const cb of frame) cb(0)
+      /** A command in flight: the running block's header is the one a
+       *  structured session reserves at the prompt too, so this is the mode
+       *  whose geometry a full-screen program must inherit. */
+      const startCommand = (): void => {
+        handler({
+          lane: 'lane-1',
+          lifecycle: 'running',
+          domain: 'd1',
+          epoch: 1,
+          attempt: { id: 'prog', state: 'open', origin: 'shell', command: 'top' },
+        })
+        paint('$ top')
       }
-    }
-    const teardown = (): void => {
-      queued = []
-      globalThis.requestAnimationFrame = raf
-      mounted.teardown()
-    }
-    try {
-      tab.setActive(true)
-      const session = sessionOf(content)
-      const scrollback = scrollbackFor(content)
-      Object.defineProperty(scrollback.scrollbackArea, 'clientWidth', {
-        configurable: true,
-        value: PANE.width,
-      })
-      Object.defineProperty(scrollback.scrollbackArea, 'clientHeight', {
-        configurable: true,
-        value: PANE.height,
-      })
-      // The pane's own box, delivered the way the presentation host delivers it.
-      content.viewportChanged({ width: PANE.width, height: PANE.height })
-      const lifecycle = lifecycleHandler(client)
-      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
-      lifecycle({
-        lane: 'lane-1',
-        lifecycle: 'running',
-        domain: 'd1',
-        epoch: 1,
-        attempt: { id: 'alt-command', state: 'open', origin: 'shell', command: 'top' },
-      })
-      // A first frame in the normal buffer gives the pane a committed cell
-      // metric, which is what its fit measures with.
-      session.fireScreenFrame(screenFrame(1, ['$ prompt'], CELL))
-      flushFrames()
-      // THE MEASUREMENT IS SYNCHRONOUS, SO THERE IS NOTHING TO WAIT FOR
-      // (nocx-atpw5.1.46). What follows is the report the settle timer would
-      // send 80 ms later. Waiting for that timer through vi.waitFor gives it a
-      // one-second wall-clock budget, and a stopped event loop — a long GC
-      // pause in the whole-suite worker, a preempted runner — holds the timer
-      // past the budget. The wait then reports zero sendResize calls although
-      // flushFrames has already fitted the pane, which is the flake this
-      // fixture caused. `_reportedSize` computes that same report now, from the
-      // fit flushFrames just made, so the assertion keeps its meaning and
-      // loses its clock.
-      const measured = (content as unknown as { _reportedSize(): SessionSize })._reportedSize()
-      expect(measured).toEqual({
-        cols: FITTED.cols,
-        rows: FITTED.rows,
-        xpixel: PANE.width,
-        ypixel: GRID_HEIGHT,
-      })
-      // The settle itself is left armed. Nothing between this point and the
-      // first switch yields to a timer — the switch is the test body's first
-      // act, one microtask away — and the switch's own request cancels it.
-      // THE SETUP'S OWN INTENTS HAVE TO LAND BEFORE THIS BOUNDARY (nocx-atpw5.1.46).
-      // prompt_ready seats the grid's keyboard, and the focus intent that
-      // produces is accepted and queued; the queue delivers over microtasks,
-      // so a clear taken now would let a setup focus land during the test —
-      // which is what a load-sensitive wait for the settle timer used to hide.
-      // Drain the product's own queue in microtasks and hold the boundary to
-      // it: no clock, and a queue that needs anything else fails here once.
-      const callQueue = content as unknown as {
-        _sessionCallQueue: unknown[]
-        _sessionCallSending: boolean
-      }
-      for (
-        let turn = 0;
-        turn < 100 && (callQueue._sessionCallQueue.length > 0 || callQueue._sessionCallSending);
-        turn++
-      ) {
-        await Promise.resolve()
-      }
-      expect(callQueue._sessionCallQueue).toHaveLength(0)
-      expect(callQueue._sessionCallSending).toBe(false)
-      session.sendResize.mockClear()
-      // Setup may seat and focus the program input. Only intents produced
-      // after this boundary belong to the alternate-screen fence under test.
-      session.intent.mockClear()
-      const grid = () => tab.pane.querySelector<HTMLElement>('.term-grid')!
-      const receipts: Array<(outcome: 'applied' | 'superseded' | 'closed') => void> = []
-      const failures: Array<(error: Error) => void> = []
-      session.resizeApplied.mockImplementation(
-        () =>
-          new Promise<'applied' | 'superseded' | 'closed'>((resolve, reject) => {
-            receipts.push(resolve)
-            failures.push(reject)
-          }),
-      )
-      const switchFrame = (): SessionFrame => {
-        const frame = screenFrame(2, ['ALT-READY'], { ...CELL, cols: 40, rows: 20 })
+      const enterAlternate = (): void => {
+        const frame = screenFrame(++revision, ['ALT-READY'], { ...CELL, cols: 40, rows: 20 })
         frame.state.bufferKind = 'alternate'
-        frame.state.mouseTracking = true
         session.fireScreenFrame(frame)
-        return frame
+        flushFrames()
       }
-      const drawProgramFrame = (revision: number, cols = 100): SessionFrame => {
-        const frame = screenFrame(revision, ['ALT-READY'], { ...CELL, cols, rows: 20 })
-        frame.state.bufferKind = 'alternate'
-        frame.state.mouseTracking = true
-        session.fireScreenFrame(frame)
-        return frame
+      const leaveAlternate = (): void => {
+        paint('$ ')
+      }
+      /** A conventional session: no OSC 133 markers, the terminal is the pane. */
+      const native = (): void => {
+        handler({ lane: 'lane-1', lifecycle: 'native' })
       }
       return {
         content,
         session,
-        tab,
-        grid,
-        // `receipt`/`fail` answer the NEWEST request, the way the transport's
-        // newest request owns the pending slot.
-        receipt: (outcome) => receipts[receipts.length - 1]?.(outcome),
-        receiptAt: (index, outcome) => receipts[index]?.(outcome),
-        fail: (error) => failures[failures.length - 1]?.(error),
-        switchFrame,
-        drawProgramFrame,
-        lifecycle,
-        requested: () => receipts.length,
+        sb,
+        paint,
+        native,
+        reported,
+        startCommand,
+        enterAlternate,
+        leaveAlternate,
         flushFrames,
         teardown,
       }
@@ -23317,581 +24649,106 @@ describe('an alternate-screen switch holds input for its applied grid (nocx-1ebr
     }
   }
 
-  it('asks for the pane’s measured grid as the switch is accepted, not the frame’s', async () => {
-    const { session, switchFrame, teardown } = await switchingPane()
+  it('keeps one size across the alternate-screen switch, and sends no resize', async () => {
+    const { session, sb, reported, startCommand, enterAlternate, leaveAlternate, teardown } =
+      await oneGutterPane()
     try {
-      switchFrame()
-      // Synchronously: the switch is a known moment, and there is nothing
-      // to settle. The frame the pane just accepted says 40 columns; the
-      // pane says 100, and the pane is the one that knows its box. The grid
-      // the switch asks for is the full-screen one: the pane's columns, and
-      // one row less for the margin below the program's last row.
-      expect(session.resizeApplied).toHaveBeenCalledWith({
-        cols: FITTED.cols,
-        rows: ALT_ROWS,
-        xpixel: PANE.width,
-        ypixel: ALT_GRID_HEIGHT,
+      startCommand()
+      const running = reported()
+      // ONE GUTTER, ONE EXPRESSION: the columns are the pane less one cell each
+      // side, and the rows are the terminal area less the reserved header.
+      expect(running).toEqual({
+        cols: COLS,
+        rows: ROWS,
+        xpixel: COLS * CELL.cellWidthPx,
+        ypixel: ROWS * CELL.cellHeightPx,
       })
-    } finally {
-      teardown()
-    }
-  })
-
-  it('sends no exit resize from a settle timer armed before the program left (nocx-djx1u)', async () => {
-    // THE TIMER OUTLIVES THE REASON IT WAS ARMED FOR. The settle timer exists
-    // for a pane whose own grid moved; a borrowed command's grid is not this
-    // window's to report, and the scheduler says so (`fitUsableViewport`
-    // skipped it while `_ownedGrid` is set). But a timer armed BEFORE the
-    // program left is not the scheduler: it fires into the exit and sends
-    // whatever `lastLocalGridSize` says by then — the guttered column the
-    // ordinary refit just measured — which is the SIGWINCH the ADR exists to
-    // prevent (decision 4), and it is 94 columns to a pty holding 100.
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-    const { content, session, switchFrame, drawProgramFrame, receipt, flushFrames, teardown } =
-      await switchingPane()
-    try {
-      const scrollback = scrollbackFor(content)
-      // The ledger's column, so the ordinary fit is narrower than the pane's
-      // own width and the two grids are distinguishable.
-      scrollback.scrollbackArea.style.setProperty('--pane-inline-padding', '24px')
-
-      // 1. The switch is over: its receipt applied, the fence is closed.
-      switchFrame()
-      receipt('applied')
-      // The receipt's own handler is a promise continuation, so the fence is
-      // closed one microtask later — drain them rather than a clock.
-      for (let turn = 0; turn < 10; turn++) await Promise.resolve()
-      expect(session.resizeApplied).toHaveBeenCalled()
-      const fence = content as unknown as { _fence: unknown }
-      expect(fence._fence).toBeNull()
-
-      // 2. A frame of the program's own grid arms the settle timer.
-      drawProgramFrame(3, FITTED.cols)
-      flushFrames()
-      const timer = content as unknown as { resizeTimer: number | undefined }
-      expect(timer.resizeTimer).not.toBeUndefined()
-
-      // 3. The program leaves while its command continues. The ordinary refit
-      //    runs in the same turn (the mode change schedules it) and measures
-      //    the guttered column.
-      const thaw = screenFrame(4, ['$ '], { ...CELL, cols: FITTED.cols, rows: ALT_ROWS })
-      session.fireScreenFrame(thaw)
-      flushFrames()
-      const owned = (content as unknown as { lastLocalGridSize: { cols: number } | null })
-        .lastLocalGridSize
-      expect(owned?.cols).toBe(FITTED.cols - 6)
-
-      // 4. The timer fires after the exit: nothing goes out.
       session.sendResize.mockClear()
-      vi.advanceTimersByTime(80)
+      session.resizeApplied.mockClear()
+
+      enterAlternate()
+      expect(sb.mode).toBe('fullscreen')
+      expect(reported()).toEqual(running)
+      // THE SWITCH IS PRESENTATION, NOT GEOMETRY (ADR-92zzg2y2): nothing is
+      // requested and nothing is applied, so the pty never receives a SIGWINCH.
+      expect(session.resizeApplied).not.toHaveBeenCalled()
+      expect(session.sendResize).not.toHaveBeenCalled()
+
+      leaveAlternate()
+      expect(sb.mode).toBe('running')
+      expect(reported()).toEqual(running)
+      expect(session.resizeApplied).not.toHaveBeenCalled()
       expect(session.sendResize).not.toHaveBeenCalled()
     } finally {
       teardown()
-      vi.useRealTimers()
     }
   })
 
-  it('takes the pane’s own rows back at the authenticated prompt, and keeps them (nocx-djx1u)', async () => {
-    // A STRUCTURED SESSION NEVER GAVE THE MARGIN UP, SO THE RELEASE OWES IT
-    // NOTHING (independent read, 2026-11-08). The running block owns the rows
-    // and the four-side margin is on the box the fit reads, so the hand-back
-    // is the ledger's column and ONE report. Holding the margin out of the
-    // height as well took two rows off it, and nothing ever put them back: the
-    // clear lives in the borrowed layout (`_dropBorrowedMarginWhenItFits`
-    // asks `isBorrowedGrid`), which a structured session is never in. Every
-    // later fit stayed short until another alternate exit reset the flag.
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-    const { content, session, switchFrame, receipt, lifecycle, flushFrames, teardown } =
-      await switchingPane()
+  it('keeps one size when a markerless session enters and leaves the alternate screen', async () => {
+    const { session, sb, paint, reported, enterAlternate, leaveAlternate, teardown } =
+      await oneGutterPane(true)
     try {
-      const scrollback = scrollbackFor(content)
-      // The stylesheet's margin, so a fit that subtracts it again is visible.
-      scrollback.scrollbackArea.style.setProperty('--pane-inline-padding', '24px')
-
-      // The program takes the pane and gives it back while its command runs.
-      switchFrame()
-      receipt('applied')
-      for (let turn = 0; turn < 10; turn++) await Promise.resolve()
-      session.fireScreenFrame(
-        screenFrame(4, ['$ '], { ...CELL, cols: FITTED.cols, rows: ALT_ROWS }),
-      )
-      flushFrames()
-      // The premise: the layout never gave the margin up here. Its rows are
-      // held by the running block, not by the markerless pane.
-      expect(scrollback.scrollbackLayout.classList.contains('inner-borrowed-grid')).toBe(false)
-      expect(scrollback.mode).toBe('running')
-
-      // The authenticated prompt is this session's hand-back moment.
-      session.sendResize.mockClear()
-      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
-      vi.advanceTimersByTime(80)
-      // ONE report, and it is the PANE's grid: the ledger's column and the
-      // rows the pane holds with its own margin already on the box.
-      expect(session.sendResize).toHaveBeenCalledTimes(1)
-      expect(session.sendResize.mock.calls[0][0]).toMatchObject({
-        cols: FITTED.cols - 6,
-        rows: FITTED.rows,
+      // A plain ssh shell: no block, no running header, the terminal is the
+      // pane. Its size must still survive the switch.
+      expect(sb.mode).toBe('unstructured')
+      paint('$ ssh host')
+      const shell = reported()
+      expect(shell).toEqual({
+        cols: COLS,
+        rows: Math.floor(PANE.height / CELL.cellHeightPx),
+        xpixel: COLS * CELL.cellWidthPx,
+        ypixel: Math.floor(PANE.height / CELL.cellHeightPx) * CELL.cellHeightPx,
       })
-
-      // AND THE ROWS STAY: a pane that changes size afterwards is measured by
-      // the same pane, not by a flag two rows short that can never clear.
       session.sendResize.mockClear()
-      Object.defineProperty(scrollback.scrollbackArea, 'clientHeight', {
-        configurable: true,
-        value: PANE.height + 64,
-      })
-      content.viewportChanged({ width: PANE.width, height: PANE.height + 64 })
-      vi.advanceTimersByTime(80)
-      expect(session.sendResize).toHaveBeenCalledTimes(1)
-      expect(session.sendResize.mock.calls[0][0]).toMatchObject({ rows: FITTED.rows + 4 })
-    } finally {
-      teardown()
-      vi.useRealTimers()
-    }
-  })
+      session.resizeApplied.mockClear()
 
-  it('a key at a structured command’s own prompt is the prompt’s to hand back (nocx-djx1u)', async () => {
-    // THE KEY IS A MARKERLESS SESSION'S PROMPT, NOT EVERY SESSION'S (independent
-    // read, 2026-11-08). A structured running command's release belongs to its
-    // authenticated prompt: the key path checked neither the buffer nor the
-    // mode, so typing into a running command handed the grid back early and
-    // refitted the pane before anything said the command was done — a second
-    // resize, and the pty told about the column while its program still runs.
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-    const { content, session, switchFrame, receipt, lifecycle, flushFrames, teardown } =
-      await switchingPane()
-    try {
-      const scrollback = scrollbackFor(content)
-      scrollback.scrollbackArea.style.setProperty('--pane-inline-padding', '24px')
-      switchFrame()
-      receipt('applied')
-      for (let turn = 0; turn < 10; turn++) await Promise.resolve()
-      session.fireScreenFrame(
-        screenFrame(4, ['$ '], { ...CELL, cols: FITTED.cols, rows: ALT_ROWS }),
-      )
-      flushFrames()
-
-      // The person types into the running command. Nothing is owed by that
-      // key: the command is still running and its prompt has not come.
-      session.sendResize.mockClear()
-      typeIntoPane(content, 'x')
-      vi.advanceTimersByTime(80)
+      enterAlternate()
+      expect(sb.mode).toBe('fullscreen')
+      expect(reported()).toEqual(shell)
+      leaveAlternate()
+      expect(sb.mode).toBe('unstructured')
+      expect(reported()).toEqual(shell)
+      expect(session.resizeApplied).not.toHaveBeenCalled()
       expect(session.sendResize).not.toHaveBeenCalled()
-
-      // …and the prompt that does come hands the grid back, once.
-      lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
-      vi.advanceTimersByTime(80)
-      expect(session.sendResize).toHaveBeenCalledTimes(1)
-      expect(session.sendResize.mock.calls[0][0]).toMatchObject({ rows: FITTED.rows })
-      // The grid is no longer held: the prompt owned the release, not the key.
-      expect(scrollback.scrollbackLayout.classList.contains('inner-borrowed-grid')).toBe(false)
-    } finally {
-      teardown()
-      vi.useRealTimers()
-    }
-  })
-
-  it('a key inside a program that borrowed the screen again does not release the grid (nocx-djx1u)', async () => {
-    // ENTERING THE ALTERNATE SCREEN RETIRES THE RETAINED GRID (independent read,
-    // 2026-11-08). The exit keeps the program's grid for its remaining command;
-    // a program that walks back into the alternate screen owns the pane again,
-    // and its keys are the program's. Nothing cleared the retained grid on the
-    // way in, so the first key a person pressed inside the program released a
-    // grid it still owned and refitted the pane — one resize with the margin
-    // subtracted twice, under a full-screen program.
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-    const { content, session, switchFrame, drawProgramFrame, receipt, flushFrames, teardown } =
-      await switchingPane()
-    try {
-      const scrollback = scrollbackFor(content)
-      scrollback.scrollbackArea.style.setProperty('--pane-inline-padding', '24px')
-      switchFrame()
-      receipt('applied')
-      for (let turn = 0; turn < 10; turn++) await Promise.resolve()
-      // The exit retains the program's grid while its command runs…
-      session.fireScreenFrame(
-        screenFrame(4, ['$ '], { ...CELL, cols: FITTED.cols, rows: ALT_ROWS }),
-      )
-      flushFrames()
-      // …and the program enters the alternate screen again.
-      drawProgramFrame(5, FITTED.cols)
-      receipt('applied')
-      for (let turn = 0; turn < 10; turn++) await Promise.resolve()
-      flushFrames()
-      expect(scrollback.mode).toBe('fullscreen')
-      const owned = (content as unknown as { lastLocalGridSize: { cols: number; rows: number } })
-        .lastLocalGridSize
-
-      // A key inside the program is the program's key. Nothing is handed back
-      // and no report goes out while it owns the pane.
-      session.sendResize.mockClear()
-      typeIntoPane(content, 'x')
-      vi.advanceTimersByTime(80)
-      expect(session.sendResize).not.toHaveBeenCalled()
-      expect(
-        (content as unknown as { lastLocalGridSize: { cols: number; rows: number } })
-          .lastLocalGridSize,
-      ).toEqual(owned)
-      expect(session.intent).toHaveBeenCalled()
-    } finally {
-      teardown()
-      vi.useRealTimers()
-    }
-  })
-
-  it('holds an intent the mode change itself produces, behind the resize', async () => {
-    // The mode change seats the keyboard surface, and seating it emits a focus
-    // intent. That intent is produced by the switch, so it belongs behind the
-    // resize like everything else the switch produces — which is only true if
-    // the fence is armed BEFORE the mode change, not after it. The real stack
-    // measured the failure this prevents: an intent 3 ms ahead of the request.
-    const { content, session, switchFrame, receipt, teardown } = await switchingPane()
-    try {
-      const input = intentElementOf(content)
-      const scrollback = scrollbackFor(content)
-      /* eslint-disable @typescript-eslint/unbound-method */
-      const enter = scrollback.enterFullscreen
-      /* eslint-enable @typescript-eslint/unbound-method */
-      const seated = vi.spyOn(scrollback, 'enterFullscreen').mockImplementation(() => {
-        enter.call(scrollback)
-        input.dispatchEvent(new FocusEvent('focus'))
-      })
-
-      switchFrame()
-      // The focus intent was produced inside the mode change and did NOT go
-      // out; the resize did.
-      expect(session.intent).not.toHaveBeenCalled()
-      expect(session.resizeApplied).toHaveBeenCalledTimes(1)
-
-      receipt('applied')
-      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('focus', 'in'))
-      expect(seated).toHaveBeenCalledTimes(1)
-      // And in that order on the wire: the resize first, the held intent after.
-      expect(session.resizeApplied.mock.invocationCallOrder[0]).toBeLessThan(
-        session.intent.mock.invocationCallOrder[0],
-      )
     } finally {
       teardown()
     }
   })
 
-  it('derives the alternate grid from the pane, not from its DOM seat or its ancestors’ insets', async () => {
-    const { content, session, tab, grid, switchFrame, flushFrames, teardown } =
-      await switchingPane()
+  it('sends input produced after a switch at once — there is no fence to wait for', async () => {
+    const { content, session, startCommand, enterAlternate, teardown } = await oneGutterPane()
     try {
-      const scrollback = scrollbackFor(content)
-      const block = scrollback.blockManager.runningBlock!
-      const header = block.el.querySelector('.cmd-header')!
-      // Transcript ancestors can retain prose insets. They do not own the
-      // desired grid: the full-screen program is fitted to the pane's own
-      // content width, and seating the active live node elsewhere changes none
-      // of its columns or rows.
-      scrollback.scrollbackInner.style.paddingLeft = '24px'
-      scrollback.scrollbackInner.style.paddingRight = '24px'
-      switchFrame()
-      flushFrames()
-      // The switch's own request, and only it: the pane's columns and one row
-      // less for the margin (ADR-2yzsq8mk).
-      expect(session.resizeApplied).toHaveBeenLastCalledWith({
-        cols: FITTED.cols,
-        rows: ALT_ROWS,
-        xpixel: PANE.width,
-        ypixel: ALT_GRID_HEIGHT,
-      })
-      expect(session.sendResize).not.toHaveBeenCalled()
-      expect(tab.pane.contains(header)).toBe(true)
-      expect(grid().textContent).toContain('ALT-READY')
-      expect(grid().getAttribute('aria-colcount')).toBe(String(FITTED.cols))
-      expect(grid().querySelectorAll('.term-grid-row')).toHaveLength(20)
-    } finally {
-      teardown()
-    }
-  })
-
-  it('presents the switch frame on the pane’s grid, keeping its text and its row count', async () => {
-    const { grid, switchFrame, flushFrames, teardown } = await switchingPane()
-    try {
-      switchFrame()
-      flushFrames()
-      const painted = grid()
-      expect(painted.textContent).toContain('ALT-READY')
-      // The size is the pane's…
-      expect(painted.getAttribute('aria-colcount')).toBe(String(FITTED.cols))
-      // …and only the size: the program's rows are the program's, so no
-      // row is invented to fill the box, and the frame's own rows are all
-      // still there.
-      expect(painted.querySelectorAll('.term-grid-row')).toHaveLength(20)
-    } finally {
-      teardown()
-    }
-  })
-
-  it('holds what the person produces and releases it on the applied receipt', async () => {
-    const { content, session, switchFrame, receipt, teardown } = await switchingPane()
-    try {
-      switchFrame()
+      startCommand()
+      enterAlternate()
+      session.intent.mockClear()
       typeIntoPane(content, 'q')
-      expect(session.intent).not.toHaveBeenCalledWith('text', 'q')
-      expect(session.intent).not.toHaveBeenCalledWith('key', 'q')
-      // The request went out before the input did: the resize is what the
-      // program needs before the key can mean anything.
-      expect(session.resizeApplied.mock.invocationCallOrder[0]).toBeLessThan(
-        session.intent.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
-      )
-
-      receipt('applied')
-      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('text', 'q'))
-      // Delivered ONCE, in the order produced: the queue is replayed, not
-      // re-decided.
-      const delivered = session.intent.mock.calls
-        .map(([kind, payload]) => `${kind}:${String(payload)}`)
-        .filter((call) => call.endsWith(':q'))
-      expect(delivered).toEqual(['text:q'])
-    } finally {
-      teardown()
-    }
-  })
-
-  it('does not release on a painted frame — only on the receipt', async () => {
-    const { content, session, switchFrame, drawProgramFrame, receipt, teardown } =
-      await switchingPane()
-    try {
-      switchFrame()
-      typeIntoPane(content, 'q')
-      // The program repaints at the grid it was told, twice: output is not
-      // an answer to a question about the pty's size.
-      drawProgramFrame(3)
-      drawProgramFrame(4)
-      await Promise.resolve()
-      expect(session.intent).not.toHaveBeenCalledWith('text', 'q')
-
-      receipt('applied')
+      // The old switch held every key until a resize receipt applied; with no
+      // resize there is no receipt, and the key is the program's now.
       await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('text', 'q'))
     } finally {
       teardown()
     }
   })
 
-  it('keeps holding on a superseded receipt and releases on the newer resize', async () => {
-    const { content, session, tab, switchFrame, receipt, flushFrames, teardown } =
-      await switchingPane()
+  it('still reports a real pane resize once, in the alternate screen too', async () => {
+    const { content, session, sb, startCommand, enterAlternate, teardown } = await oneGutterPane()
     try {
-      switchFrame()
-      flushFrames()
-      typeIntoPane(content, 'q')
-      // Superseded is not this pane's failure: a newer resize owns the
-      // session's pending slot, so the grid is still on its way. No toast
-      // (nothing failed) and no retry (a retry is a resize storm).
-      receipt('superseded')
-      await Promise.resolve()
-      expect(session.intent).not.toHaveBeenCalledWith('text', 'q')
-      // No toast: nothing failed, a newer resize is simply in flight.
-      const announced = vi
-        .mocked(showToast)
-        .mock.calls.map(([toast]) => JSON.stringify(toast))
-        .filter((toast) => /resiz/i.test(toast))
-      expect(announced).toEqual([])
-
-      // The pane widens while the switch is still in flight: this is the
-      // newer request, and ITS receipt opens the fence.
-      const scrollback = scrollbackFor(content)
-      Object.defineProperty(scrollback.scrollbackArea, 'clientWidth', {
+      startCommand()
+      enterAlternate()
+      session.sendResize.mockClear()
+      Object.defineProperty(sb.scrollbackArea, 'clientWidth', {
         configurable: true,
         value: 960,
       })
       content.viewportChanged({ width: 960, height: PANE.height })
-      await vi.waitFor(() =>
-        expect(session.resizeApplied).toHaveBeenLastCalledWith({
-          cols: 120,
-          rows: ALT_ROWS,
-          xpixel: 960,
-          ypixel: ALT_GRID_HEIGHT,
-        }),
-      )
-      expect(session.intent).not.toHaveBeenCalledWith('text', 'q')
-
-      receipt('applied')
-      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('text', 'q'))
-      // The pointer and the keyboard both read the grid the receipt named.
-      expect(session.resizeApplied).toHaveBeenLastCalledWith({
-        cols: 120,
-        rows: ALT_ROWS,
-        xpixel: 960,
-        ypixel: ALT_GRID_HEIGHT,
+      await vi.waitFor(() => expect(session.sendResize).toHaveBeenCalledTimes(1), {
+        timeout: 3_000,
       })
-      expect(tab.pane.querySelector('.term-grid')?.textContent).toContain('ALT-READY')
-    } finally {
-      teardown()
-    }
-  })
-
-  it('releases on a failed request rather than holding the keys for a size it cannot get', async () => {
-    const { content, session, switchFrame, fail, teardown } = await switchingPane()
-    try {
-      switchFrame()
-      typeIntoPane(content, 'q')
-      expect(session.intent).not.toHaveBeenCalledWith('text', 'q')
-
-      fail(new Error('the session is no longer attached'))
-      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('text', 'q'))
-    } finally {
-      teardown()
-    }
-  })
-
-  it('releases on a closed session without delivering input to it', async () => {
-    const { content, session, switchFrame, receipt, teardown } = await switchingPane()
-    try {
-      switchFrame()
-      typeIntoPane(content, 'q')
-      receipt('closed')
-      await Promise.resolve()
-      await Promise.resolve()
-      expect(session.intent).not.toHaveBeenCalledWith('text', 'q')
-    } finally {
-      teardown()
-    }
-  })
-
-  it('maps the pointer through the grid the applied receipt reported', async () => {
-    const { content, session, switchFrame, receipt, flushFrames, teardown } = await switchingPane()
-    try {
-      switchFrame()
-      flushFrames()
-      const input = intentElementOf(content)
-      // Column 50 exists in this pane (100 columns) and not in the program's
-      // 40 — the click that landed on empty space before.
-      input.dispatchEvent(
-        new PointerEvent('pointerdown', {
-          bubbles: true,
-          cancelable: true,
-          button: 0,
-          clientX: 50 * CELL.cellWidthPx,
-          clientY: 2 * CELL.cellHeightPx,
-        }),
-      )
-      expect(session.intent).not.toHaveBeenCalledWith('mouse', expect.anything())
-
-      receipt('applied')
-      await vi.waitFor(() =>
-        expect(session.intent).toHaveBeenCalledWith('mouse', 'press left 50 2'),
-      )
-    } finally {
-      teardown()
-    }
-  })
-
-  /** What the person did, in the order the session was told about it. Only the
-   *  input kinds: a `focus` intent is bookkeeping around them. */
-  function deliveredActs(session: SessionFake): string[] {
-    return session.intent.mock.calls
-      .filter(([kind]) => kind === 'text' || kind === 'key')
-      .map(([kind, payload]) => `${kind}:${String(payload)}`)
-  }
-
-  it('releases on its own bound when the receipt never arrives, delivering everything held', async () => {
-    const { content, session, switchFrame, teardown } = await switchingPane()
-    // Fake timers AFTER the mount: the mount's own settle timers must not be
-    // part of this test, and the fence's bound is armed at the switch.
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    try {
-      switchFrame()
-      typeIntoPane(content, 'a', '\r', 'b')
-      expect(deliveredActs(session)).toEqual([])
-
-      // THE INTERVAL'S MISSING END: the socket is alive and the request is
-      // simply never answered. Nothing in the client bounds it — a pending
-      // call is settled by its answer, a socket close or an abort, and the
-      // connection's heartbeat keeps a socket that answers PINGS alive — so
-      // without the fence's own bound this is where the keys would stay.
-      await vi.advanceTimersByTimeAsync(1_499)
-      expect(deliveredActs(session)).toEqual([])
-
-      await vi.advanceTimersByTimeAsync(1)
-      // Delivered, not dropped: a key typed at the old width is a rendering
-      // problem, a key swallowed forever is lost work.
-      expect(deliveredActs(session)).toEqual(['text:a', 'key:enter', 'text:b'])
-      // And the forced release is observable rather than silent.
-      expect(warn).toHaveBeenCalledWith(
-        expect.stringContaining('no resize receipt at an alternate-screen switch'),
-      )
-    } finally {
-      warn.mockRestore()
-      vi.useRealTimers()
-      teardown()
-    }
-  })
-
-  it('delivers a key produced while the release loop runs, once and behind the held ones', async () => {
-    const { content, session, switchFrame, receipt, teardown } = await switchingPane()
-    try {
-      switchFrame()
-      typeIntoPane(content, 'a', '\r', 'b')
-      const input = intentElementOf(content)
-      // A key produced FROM INSIDE the release: the last held intent reaches
-      // the session and the pane is asked for another one before the queue it
-      // was walking has drained. A key that arrived while the release was in
-      // flight must land BEHIND everything that was held, exactly once — the
-      // shape that doubled characters once before.
-      let reentered = false
-      session.intent.mockImplementation((kind, payload) => {
-        if (!reentered && kind === 'text' && payload === 'b') {
-          reentered = true
-          input.dispatchEvent(
-            new KeyboardEvent('keydown', {
-              code: 'ArrowDown',
-              key: 'ArrowDown',
-              bubbles: true,
-              cancelable: true,
-            }),
-          )
-        }
-        return Promise.resolve({ state: 'executed', bytesWritten: 1, fenceAfter: 0 })
+      // The rule is about a presentation change, not about the pane changing
+      // size: a wider window still tells the program once.
+      expect(session.sendResize.mock.calls[0][0]).toMatchObject({
+        cols: Math.floor((960 - 2 * GUTTER) / CELL.cellWidthPx),
       })
-
-      receipt('applied')
-      await vi.waitFor(() => expect(deliveredActs(session)).toHaveLength(4))
-      const acts = deliveredActs(session)
-      // Every act exactly once, and the one that arrived mid-release is
-      // behind the ones that were waiting rather than inside their run.
-      expect(acts).toEqual(['text:a', 'key:enter', 'text:b', 'key:down'])
-      expect(new Set(acts).size).toBe(4)
-    } finally {
-      teardown()
-    }
-  })
-
-  it('keeps a second switch holding after the first switch’s late receipt arrives', async () => {
-    const { content, session, switchFrame, receiptAt, requested, teardown } = await switchingPane()
-    try {
-      switchFrame()
-      typeIntoPane(content, 'a')
-      expect(requested()).toBe(1)
-
-      // The program leaves the alternate screen and comes back — a second
-      // switch, with the first one's receipt still outstanding.
-      const thawed = screenFrame(3, ['$ prompt'], { ...CELL, cols: 40, rows: 20 })
-      session.fireScreenFrame(thawed)
-      await vi.waitFor(() => expect(deliveredActs(session)).toEqual(['text:a']))
-      const resumed = screenFrame(4, ['ALT-READY'], { ...CELL, cols: 40, rows: 20 })
-      resumed.state.bufferKind = 'alternate'
-      session.fireScreenFrame(resumed)
-      expect(requested()).toBe(2)
-      typeIntoPane(content, 'b')
-      await Promise.resolve()
-      expect(deliveredActs(session)).toEqual(['text:a'])
-
-      // The FIRST switch's answer arrives late. It describes a fence that is
-      // gone, and it may not open the one that replaced it.
-      receiptAt(0, 'applied')
-      await Promise.resolve()
-      await Promise.resolve()
-      expect(deliveredActs(session)).toEqual(['text:a'])
-
-      // The second switch's own receipt does.
-      receiptAt(1, 'applied')
-      await vi.waitFor(() => expect(deliveredActs(session)).toEqual(['text:a', 'text:b']))
     } finally {
       teardown()
     }
@@ -24084,6 +24941,71 @@ describe('a slow open states what it is doing in the pane (nocx-q9od5)', () => {
       resolve(makeSession())
       await started
       expect(tab.pane.querySelector('.ui-status-card')).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+})
+
+// A SECOND block.closed for one block means its stored rows changed after the
+// read the first one asked for — a late output start written to an artifact
+// that was already sealed (nocx-4y82c.1.11 review 6). The card has to read
+// again, or it keeps the echo it froze and never hears anything else.
+describe('a repeated block.closed reads the stored rows again', () => {
+  it('queues one more read behind the one in flight', async () => {
+    const client = makeClient()
+    const reads: Array<(value: unknown) => void> = []
+    client.call.mockImplementation((method: string, params?: unknown) => {
+      const id = (params as { id?: string } | undefined)?.id
+      if (method === 'ledger.get' && id === 'late-start-entry') {
+        return Promise.resolve({
+          entry: {},
+          edges: [],
+          artifacts: [{ id: 'late-start-artifact', mediaType: 'application/x-nocx-rows' }],
+        })
+      }
+      if (method === 'ledger.artifact' && id === 'late-start-artifact') {
+        return new Promise((resolve) => {
+          reads.push(resolve)
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const sb = scrollbackFor(content)
+    const refresh = content as unknown as {
+      _refreshBlockRows(entryId: string, final?: boolean): Promise<void>
+    }
+    const artifact = (text: string) => {
+      const body = `${JSON.stringify({
+        from: 0,
+        row: wireRowOf(Array.from(text, (char) => [char, 1, true] as CellSpec)),
+      })}\n`
+      return {
+        id: 'late-start-artifact',
+        mediaType: 'application/x-nocx-rows',
+        body,
+        byteLen: body.length,
+        truncated: null,
+      }
+    }
+    try {
+      const rec = sb.blockManager.startBlock('produce', '~', 0)
+      sb.blockManager.bindAttempt('late-start-entry')
+      const first = refresh._refreshBlockRows('late-start-entry', true)
+      const second = refresh._refreshBlockRows('late-start-entry', true)
+      await vi.waitFor(() => expect(reads).toHaveLength(1))
+      reads[0](artifact('echo'))
+      // The queued follow-up is what makes the second read, and the chain
+      // the first close returned resolves only when that one does.
+      await vi.waitFor(() => expect(reads).toHaveLength(2))
+      reads[1](artifact('echo'))
+      await Promise.all([first, second])
+      await vi.waitFor(() => expect(rec.storedRows?.lines).toHaveLength(1))
     } finally {
       teardown()
     }

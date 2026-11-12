@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://nocx.local/contracts/ledger.blockRows.schema.json",
   "title": "LedgerBlockRowsLine",
-  "description": "The stored form of a streamed block's output (nocx-2v80t.3.7): an artifact of media type application/x-nocx-rows whose body is JSON Lines — ONE line per row that left the screen, each carrying the absolute index the row departed at and the row itself in the SAME cell vocabulary the live screen frame declares (session.frame.schema.json). The row, mark, run, style and color definitions here are an IDENTICAL COPY of session.frame's, not a second vocabulary: a stored row must paint with the same painter and decode against nothing outside itself, which is what lets a block survive without the frame it arrived in. The copy is deliberate — cross-file $refs generate named renderer types the dead-export ratchet counts — and it is guarded by a test that compares the two schemas' definitions canonically, so the copies cannot drift. A client reads a block's rows through the existing read path: ledger.artifact joins the chunks in seq order into this body, and ledger.get carries the artifact's metadata — truncated 'cap' when the per-command cap dropped the middle, or 'gap' when the block's boundary never arrived whole — its completion never reached the helper, or the helper settled it without its fence (nocx-2v80t.3.29), so its closing screen at the least is missing — and a payload sidecar (LedgerBlockRowsSummary) recording how many rows the cap dropped and how many the emulator lost. One line parses on its own; the whole body is the concatenation of its lines, in order. A stored row carries no frame geometry of its own (there is no cols to pad a trailing default run against), so a row's own text+marks name exactly the positions it holds — nothing implied beyond them; a reader that wants a rectangle (frontend/src/scrollback/block-rows.ts) pads to the widest line among the ones it read.",
+  "description": "The stored form of a streamed block's output (nocx-2v80t.3.7): an artifact of media type application/x-nocx-rows whose body is JSON Lines \u2014 ONE line per row that left the screen, each carrying the absolute index the row departed at and the row itself in the SAME cell vocabulary the live screen frame declares (session.frame.schema.json). The row, mark, run, style and color definitions here are an IDENTICAL COPY of session.frame's, not a second vocabulary: a stored row must paint with the same painter and decode against nothing outside itself, which is what lets a block survive without the frame it arrived in. The copy is deliberate \u2014 cross-file $refs generate named renderer types the dead-export ratchet counts \u2014 and it is guarded by a test that compares the two schemas' definitions canonically, so the copies cannot drift. A client reads a block's rows through the existing read path: ledger.artifact joins the chunks in seq order into this body, and ledger.get carries the artifact's metadata \u2014 truncated 'cap' when the per-command cap dropped the middle, or 'gap' when the block's boundary never arrived whole \u2014 its completion never reached the helper, or the helper settled it without its fence (nocx-2v80t.3.29), so its closing screen at the least is missing \u2014 and a payload sidecar (LedgerBlockRowsSummary) recording how many rows the cap dropped and how many the emulator lost. One line parses on its own; the whole body is the concatenation of its lines, in order. A stored row carries no frame geometry of its own (there is no cols to pad a trailing default run against), so a row's own text+marks name exactly the positions it holds \u2014 nothing implied beyond them; a reader that wants a rectangle (frontend/src/scrollback/block-rows.ts) pads to the widest line among the ones it read.",
   "type": "object",
   "additionalProperties": false,
   "required": ["from", "row"],
@@ -10,7 +10,7 @@
     "from": {
       "type": "integer",
       "minimum": 0,
-      "description": "The row's absolute index — rows ever departed in the session, not rows in this block — so a stored block names where each of its rows sits even after the cap has taken a middle stretch. The first line's from is where the block begins, which may be past zero: rows that departed before the command's authenticated start belonged to no block."
+      "description": "The row's absolute index \u2014 rows ever departed in the session, not rows in this block \u2014 so a stored block names where each of its rows sits even after the cap has taken a middle stretch. The first line's from is where the block begins, which may be past zero: rows that departed before the command's authenticated start belonged to no block."
     },
     "row": {
       "$ref": "#/$defs/row"
@@ -21,7 +21,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": [],
-      "description": "The rows artifact's payload sidecar (ledger.get carries it as the artifact's payload). While the block is open it also carries the writer's own cursor and reservation; the fields a READER sees are the two loss counts, written once at close. Absent keys are zero facts, not unknown ones: a block with neither key lost nothing and dropped nothing — which is why `required` is deliberately empty rather than missing (contracts/README.md: additionalProperties:false plus an explicit required, even an empty one, is what makes a schema exact instead of theatre).",
+      "description": "The rows artifact's payload sidecar (ledger.get carries it as the artifact's payload). While the block is open it also carries the writer's own cursor and reservation; the fields a READER sees are the two loss counts, written once at close. Absent keys are zero facts, not unknown ones: a block with neither key lost nothing and dropped nothing \u2014 which is why `required` is deliberately empty rather than missing (contracts/README.md: additionalProperties:false plus an explicit required, even an empty one, is what makes a schema exact instead of theatre).",
       "properties": {
         "droppedRows": {
           "type": "integer",
@@ -32,6 +32,38 @@
           "type": "integer",
           "minimum": 0,
           "description": "How many rows the emulator pruned before the coordinator could read them, carried here because no cap chose it. Present only when non-zero. Loss and eviction are different facts: a reader that reports loss as a cap verdict sends a user to raise a limit that took nothing."
+        },
+        "unavailableRows": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The part of lostRows the coordinator's own absence caused, carried as its own count so a reader can name the cause."
+        },
+        "rowCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many stored lines the artifact holds. A metadata read reports it for a sealed block (written once at close) and for an open block (read from the chunks it already has), so a reader reserves the block's height before any page arrives (nocx-t7xhe, ADR-8rt54tx2)."
+        },
+        "firstRow": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The absolute row index the block's stored span begins at, kept at close so a paged read can place its first page. Absent is row zero."
+        },
+        "endRow": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "One past the block's whole stream span. A metadata read reports it for a sealed block (written at close) and for an open block (from its cursor and chunks). The cap's eviction and the emulator's losses are inside this span; retainedRanges says which parts of it the chunks hold. A reader reserves firstRow..endRow before any page arrives (ADR-y45sp41c, ADR-8rt54tx2)."
+        },
+        "retainedRanges": {
+          "type": "array",
+          "description": "The runs of stream rows the chunks hold, ascending, each [from, to) with to exclusive. A metadata read reports them for a sealed block (written at close) and for an open block (read from its chunks), so the geometry is known before the first page even while the command runs. A cap eviction leaves the head and tail runs apart; a loss can split one. The gap between two runs is one fixed notice, so a block's reserved height cannot change when a page arrives.",
+          "items": {
+            "$ref": "#/$defs/retainedRange"
+          }
+        },
+        "outputStartRow": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Where the block's OUTPUT begins, in the same absolute row coordinate each stored line's `from` uses (nocx-4y82c.1.11). Written once when the helper's ordered output mark applies, the first mark winning; present only when a mark was recorded, so a shell with no integration carries none and every stored row is the block's own. The rows below it are the command's echo and redraw, and a reader drops them: the frozen card, the running body's hold, selection and copy, and the body read all start here. Absent means no mark, not row zero."
         }
       }
     },
@@ -39,21 +71,25 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["text"],
-      "description": "One physical line of the screen (emulator.Row), in the compact text+marks+runs shape (nocx-zg3k3.2.12). A POSITION is one surviving column-owning entry once the spacer that follows a wide cluster is folded away — text and marks are indexed by position. A COLUMN is the grid's own unit — runs are measured in columns, and a wide cluster is one position but two columns. `text`, `marks` and `runs` together decode against nothing outside themselves (self-describing), which is what lets a stored row (scrollback) survive without the frame it arrived in; the ONLY external fact a receiver needs is geometry.cols, to pad the implied trailing default blanks a shorter row does not carry.",
+      "description": "One physical line of the screen (emulator.Row), in the compact text+marks+runs shape (nocx-zg3k3.2.12). A POSITION is one surviving column-owning entry once the spacer that follows a wide cluster is folded away \u2014 text and marks are indexed by position. A COLUMN is the grid's own unit \u2014 runs are measured in columns, and a wide cluster is one position but two columns. `text`, `marks` and `runs` together decode against nothing outside themselves (self-describing), which is what lets a stored row (scrollback) survive without the frame it arrived in; the ONLY external fact a receiver needs is geometry.cols, to pad the implied trailing default blanks a shorter row does not carry.",
       "properties": {
         "text": {
           "type": "string",
-          "description": "The row's clusters, in column order, concatenated: one grapheme per surviving position (a wide cluster's spacer is not repeated, and a position with no text — Cell.HasText false — contributes nothing, an empty string). A receiver splits this back into per-position graphemes using `marks`' codepoint counts (default one codepoint per position) and Unicode CODEPOINTS as the unit — Go's []rune and JavaScript's Array.from agree on that unit without either re-deriving cluster boundaries the runtime already decided (ADR-0065). A trailing run of ordinary default blank positions is not represented here at all: the row's explicit position count (derived from this string's length and `marks`) may be less than geometry.cols, and the remainder is implied."
+          "description": "The row's clusters, in column order, concatenated: one grapheme per surviving position (a wide cluster's spacer is not repeated, and a position with no text \u2014 Cell.HasText false \u2014 contributes nothing, an empty string). A receiver splits this back into per-position graphemes using `marks`' codepoint counts (default one codepoint per position) and Unicode CODEPOINTS as the unit \u2014 Go's []rune and JavaScript's Array.from agree on that unit without either re-deriving cluster boundaries the runtime already decided (ADR-0065). A trailing run of ordinary default blank positions is not represented here at all: the row's explicit position count (derived from this string's length and `marks`) may be less than geometry.cols, and the remainder is implied."
         },
         "marks": {
           "type": "array",
-          "description": "The sparse positions whose codepoint count or column footprint is not the default (one codepoint, one column): [position, codepoints, width] triples, position 0-based into the surviving-position sequence `text` encodes. codepoints is the position's grapheme length in Unicode codepoints — 0 for a cell with no text (Cell.HasText false; its grapheme is the empty string), 2 or more for a cluster built of several codepoints (a combining mark, a ZWJ sequence). width is the cell's column footprint (Cell.Width, emulator.Width): 2 wide (the position occupies this column and the next, whose own spacer contributes no position of its own) or 4 spacerHead (the column a wide cluster would have needed at the end of a soft-wrapped line, carries nothing, is not rendered) — 1 narrow is the default and never appears here, and 3 spacerTail never appears here because a spacer is not a position at all in this vocabulary, only the extra column its preceding wide cluster's mark declares. Absent (or a position it does not name) means (1, 1): one codepoint, one column. A malformed row (a mark whose codepoints exceeds what `text` has left, or two marks for the same position) is malformed at the source.",
-          "items": { "$ref": "#/$defs/mark" }
+          "description": "The sparse positions whose codepoint count or column footprint is not the default (one codepoint, one column): [position, codepoints, width] triples, position 0-based into the surviving-position sequence `text` encodes. codepoints is the position's grapheme length in Unicode codepoints \u2014 0 for a cell with no text (Cell.HasText false; its grapheme is the empty string), 2 or more for a cluster built of several codepoints (a combining mark, a ZWJ sequence). width is the cell's column footprint (Cell.Width, emulator.Width): 2 wide (the position occupies this column and the next, whose own spacer contributes no position of its own) or 4 spacerHead (the column a wide cluster would have needed at the end of a soft-wrapped line, carries nothing, is not rendered) \u2014 1 narrow is the default and never appears here, and 3 spacerTail never appears here because a spacer is not a position at all in this vocabulary, only the extra column its preceding wide cluster's mark declares. Absent (or a position it does not name) means (1, 1): one codepoint, one column. A malformed row (a mark whose codepoints exceeds what `text` has left, or two marks for the same position) is malformed at the source.",
+          "items": {
+            "$ref": "#/$defs/mark"
+          }
         },
         "runs": {
           "type": "array",
-          "description": "The styles of this row as [style, length] tuples, length measured in COLUMNS (a wide cluster's synthesised spacer column counts, and carries the SAME style its cluster's run covers it with — the two are read independently at the source and a run is who says whether they in fact agree). Each run covers that many consecutive columns starting where the previous run ended, and the lengths sum to the row's own explicit column count (positions, plus one more for every wide-marked position) — never geometry.cols, which a shorter row does not reach. Maximal by construction: two adjacent runs never carry the same style, or the sender would have merged them. Absent means the implicit single run: the row's whole explicit width, in the default style (the bare integer 0) — the shortcut a fully unstyled row, or the unstyled remainder of an otherwise-trimmed one, takes. A malformed row (present runs whose lengths do not sum to the explicit column count) is malformed at the source.",
-          "items": { "$ref": "#/$defs/run" }
+          "description": "The styles of this row as [style, length] tuples, length measured in COLUMNS (a wide cluster's synthesised spacer column counts, and carries the SAME style its cluster's run covers it with \u2014 the two are read independently at the source and a run is who says whether they in fact agree). Each run covers that many consecutive columns starting where the previous run ended, and the lengths sum to the row's own explicit column count (positions, plus one more for every wide-marked position) \u2014 never geometry.cols, which a shorter row does not reach. Maximal by construction: two adjacent runs never carry the same style, or the sender would have merged them. Absent means the implicit single run: the row's whole explicit width, in the default style (the bare integer 0) \u2014 the shortcut a fully unstyled row, or the unstyled remainder of an otherwise-trimmed one, takes. A malformed row (present runs whose lengths do not sum to the explicit column count) is malformed at the source.",
+          "items": {
+            "$ref": "#/$defs/run"
+          }
         },
         "wrap": {
           "type": "boolean",
@@ -85,7 +121,7 @@
         {
           "type": "integer",
           "enum": [1, 2, 4],
-          "description": "The cell's column footprint (Cell.Width, emulator.Width): 1 narrow (present only when codepoints alone departs from the default), 2 wide — the cluster occupies this column and the next, whose spacer is not its own position — or 4 spacerHead, the column a wide cluster would have needed at the end of a soft-wrapped line, carrying no text and not rendered. 3 spacerTail never appears: a spacer is not a position in this vocabulary."
+          "description": "The cell's column footprint (Cell.Width, emulator.Width): 1 narrow (present only when codepoints alone departs from the default), 2 wide \u2014 the cluster occupies this column and the next, whose spacer is not its own position \u2014 or 4 spacerHead, the column a wide cluster would have needed at the end of a soft-wrapped line, carrying no text and not rendered. 3 spacerTail never appears: a spacer is not a position in this vocabulary."
         }
       ]
     },
@@ -94,9 +130,11 @@
       "minItems": 2,
       "maxItems": 2,
       "additionalItems": false,
-      "description": "One maximal stretch of adjacent columns that share one style: [style, length], the style first and the number of columns it covers second. Length is at least 1 — a run that covered nothing would be sender noise, and two adjacent runs are never the same style.",
+      "description": "One maximal stretch of adjacent columns that share one style: [style, length], the style first and the number of columns it covers second. Length is at least 1 \u2014 a run that covered nothing would be sender noise, and two adjacent runs are never the same style.",
       "items": [
-        { "$ref": "#/$defs/style" },
+        {
+          "$ref": "#/$defs/style"
+        },
         {
           "type": "integer",
           "minimum": 1,
@@ -105,23 +143,31 @@
       ]
     },
     "style": {
-      "description": "The complete visual style of one run (emulator.Style), shared across every column the run covers rather than repeated per cell. Either the bare integer 0 — every field is the zero value, the terminal's own default colours, no attributes, no underline, by far the common case for plain output — or the 5-element tuple [foreground, background, underlineColor, attributes, underline] when anything departs from that.",
+      "description": "The complete visual style of one run (emulator.Style), shared across every column the run covers rather than repeated per cell. Either the bare integer 0 \u2014 every field is the zero value, the terminal's own default colours, no attributes, no underline, by far the common case for plain output \u2014 or the 5-element tuple [foreground, background, underlineColor, attributes, underline] when anything departs from that.",
       "oneOf": [
-        { "const": 0 },
+        {
+          "const": 0
+        },
         {
           "type": "array",
           "minItems": 5,
           "maxItems": 5,
           "additionalItems": false,
           "items": [
-            { "$ref": "#/$defs/color" },
-            { "$ref": "#/$defs/color" },
-            { "$ref": "#/$defs/color" },
+            {
+              "$ref": "#/$defs/color"
+            },
+            {
+              "$ref": "#/$defs/color"
+            },
+            {
+              "$ref": "#/$defs/color"
+            },
             {
               "type": "integer",
               "minimum": 0,
               "maximum": 255,
-              "description": "The on/off text decorations as one bitset (emulator.Attributes, uint16) — a bitset rather than eight booleans because that is how they are compared, stored and sent, and because the set is closed: a terminal has these eight and no ninth. Bit 0 bold, 1 italic, 2 faint, 3 blink, 4 inverse, 5 invisible, 6 strikethrough, 7 overline."
+              "description": "The on/off text decorations as one bitset (emulator.Attributes, uint16) \u2014 a bitset rather than eight booleans because that is how they are compared, stored and sent, and because the set is closed: a terminal has these eight and no ninth. Bit 0 bold, 1 italic, 2 faint, 3 blink, 4 inverse, 5 invisible, 6 strikethrough, 7 overline."
             },
             {
               "type": "integer",
@@ -135,7 +181,22 @@
     "color": {
       "type": "integer",
       "minimum": 0,
-      "description": "One style colour, packed into a single integer (emulator.Color) rather than a named-field object — the distinction between a palette index, an exact RGB value and the terminal's own default is load-bearing (a palette index repaints when the theme changes, RGB does not), but at a run per style change spelling it as three ranges of one integer costs nothing a receiver cannot undo cheaply. 0 is the terminal's own default colour for the role (emulator.ColorDefault, the zero value an unstyled style holds). 1 through 256 is a palette index plus one (emulator.ColorPalette, the index is the value minus one) — shifted up because 0 is taken by default. 257 and above is an exact colour (emulator.ColorRGB): subtract 257 and read the low 24 bits as r<<16 | g<<8 | b, one byte per channel."
+      "description": "One style colour, packed into a single integer (emulator.Color) rather than a named-field object \u2014 the distinction between a palette index, an exact RGB value and the terminal's own default is load-bearing (a palette index repaints when the theme changes, RGB does not), but at a run per style change spelling it as three ranges of one integer costs nothing a receiver cannot undo cheaply. 0 is the terminal's own default colour for the role (emulator.ColorDefault, the zero value an unstyled style holds). 1 through 256 is a palette index plus one (emulator.ColorPalette, the index is the value minus one) \u2014 shifted up because 0 is taken by default. 257 and above is an exact colour (emulator.ColorRGB): subtract 257 and read the low 24 bits as r<<16 | g<<8 | b, one byte per channel."
+    },
+    "retainedRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to"],
+      "properties": {
+        "from": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "to": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
     }
   }
 }

@@ -2868,6 +2868,10 @@ type wsConn struct {
 	// are constructed with THIS connection's Responder, so the set is
 	// connection-scoped, built once on first control frame.
 	methods map[string]controlMethod
+	// rowReads bounds stored-row responses in flight on this connection — see
+	// ADR-y45sp41c and row_read_slots.go. A slot is held until the response has
+	// left the socket, not until its handler returned.
+	rowReads *rowReadFlow
 }
 
 func newWSConn(s *WSServer, conn *websocket.Conn, id uint64) *wsConn {
@@ -2887,7 +2891,8 @@ func newWSConn(s *WSServer, conn *websocket.Conn, id uint64) *wsConn {
 		requestCancels: newRequestCancels(),
 		// One accounting per connection: the window is the connection's, and
 		// a reconnection is a new peer with a new set of credits.
-		credit: s.credit.forConnection(),
+		credit:   s.credit.forConnection(),
+		rowReads: newRowReadFlow(RowReadSlots),
 	}
 }
 
@@ -2897,6 +2902,15 @@ func newWSConn(s *WSServer, conn *websocket.Conn, id uint64) *wsConn {
 // permit when it returns, for a request withdrawn or failed without an
 // answer; Release is idempotent, so the two owners cannot free one credit
 // twice.
+// TryResultSent is TryResult with a witness on the response leaving the
+// socket. A stored-row read holds its slot until this witness runs (ADR-y45sp41c):
+// enqueueing is not delivery, and the queue depth is exactly what overflowed.
+func (w *wsConn) TryResultSent(id json.RawMessage, result json.RawMessage, sent func()) error {
+	w.mutations.take(id).Answered(catalog.AnsweredResult)
+	w.credit.releaseByID(id)
+	return w.out.TryEnqueueResponseFrameSent(outbound.TextMessage, mustMarshal(newJSONRPCResult(id, result)), sent)
+}
+
 func (w *wsConn) TryResult(id json.RawMessage, result json.RawMessage) error {
 	// THE ONE PLACE A MUTATION'S ANSWER IS LEARNED (ADR-8eej3e66 §4): every
 	// handler answers through this Responder, and a result is the record

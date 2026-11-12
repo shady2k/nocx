@@ -757,7 +757,7 @@ describe('each tab remembers its own right-hand panel', () => {
     const holding = backend.holdCreates()
     manager.newPane()
     await vi.waitFor(() => expect(seen).toHaveLength(1))
-    expect(seen[0]).toEqual({ view: '', collapsed: false })
+    expect(seen[0]).toEqual({ view: '', collapsed: true })
     // The row really is absent: the tab is in front with nothing stored yet.
     expect(backend.rows().tabs).toHaveLength(1)
     holding.release()
@@ -783,7 +783,7 @@ describe('each tab remembers its own right-hand panel', () => {
     await vi.waitFor(() => expect(bar.querySelectorAll('.nocx-tab')).toHaveLength(2))
     expect(backend.rows().tabs).toHaveLength(1)
 
-    expect(manager.activeTabPanel()).toEqual({ view: '', collapsed: false })
+    expect(manager.activeTabPanel()).toEqual({ view: '', collapsed: true })
     manager.setActiveTabPanel({ view: 'ports', collapsed: false })
     expect(manager.activeTabPanel()).toEqual({ view: 'ports', collapsed: false })
 
@@ -1282,5 +1282,127 @@ describe('an inline ssh comes back local, and its blocks still say where they ra
     // THE BLOCK SAYS WHERE IT RAN, not where the pane is now. The pane is
     // this machine again; the command was not run on it.
     expect(location.textContent).toBe('srv-01')
+  })
+})
+
+describe('only an unchosen startup panel receives the default (nocx-peg8e.1.2)', () => {
+  beforeEach(() => {
+    resetSessionCounter()
+    vi.clearAllMocks()
+    applyRestoreOnStartup(true)
+  })
+
+  it('opens Files on a fresh startup, but leaves a later tab with no panel', async () => {
+    const { manager, backend } = await mountPaneManager(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { view: 'files', collapsed: false },
+    )
+    expect(manager.activeTabPanel()).toEqual({ view: 'files', collapsed: false })
+    await vi.waitFor(() => expect(backend.rows().tabs[0].panelView).toBe('files'))
+    manager.newPane()
+    expect(manager.activeTabPanel()).toEqual({ view: '', collapsed: true })
+    await vi.waitFor(() =>
+      expect(backend.rows().tabs.some((tab) => tab.panelView === '' && tab.panelCollapsed)).toBe(
+        true,
+      ),
+    )
+  })
+
+  it('opens Files on an adopted startup tab that never chose a panel', async () => {
+    const backend = await seededBackend({ decorate: false })
+    const { manager } = await mountPaneManager(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { store: makeLayoutStore(backend).store, backend },
+      undefined,
+      undefined,
+      { view: 'files', collapsed: false },
+    )
+    expect(manager.activeTabPanel()).toEqual({ view: 'files', collapsed: false })
+    await vi.waitFor(() =>
+      expect(backend.rows().tabs.find((tab) => tab.panelView === 'files')).toBeDefined(),
+    )
+  })
+
+  it('keeps an explicitly empty startup panel closed', async () => {
+    const backend = await seededBackend({ decorate: false })
+    for (const tab of backend.rows().tabs) await backend.setTabPanel(tab.id, '', true)
+    const { manager } = await mountPaneManager(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { store: makeLayoutStore(backend).store, backend },
+      undefined,
+      undefined,
+      { view: 'files', collapsed: false },
+    )
+    expect(manager.activeTabPanel()).toEqual({ view: '', collapsed: true })
+  })
+
+  it('keeps a later workspace tab closed when it is restored at startup', async () => {
+    workspaceCreateMock.mockResolvedValue({ name: 'work', colour: null })
+    const { manager, backend } = await mountPaneManager(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { view: 'files', collapsed: false },
+    )
+    await manager.newWorkspace()
+    const member = backend
+      .rows()
+      .tabs.find((tab) => tab.workspaceId === manager.currentWorkspaceId())!
+    await vi.waitFor(() =>
+      expect(backend.rows().tabs.find((tab) => tab.id === member.id)).toMatchObject({
+        panelView: '',
+        panelCollapsed: true,
+      }),
+    )
+    const pane = backend.rows().panes.find((row) => row.tabId === member.id)!
+    const state = makeUIStateBackend({ activeTab: pane.id })
+    const restored = await mountPaneManager(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { store: makeLayoutStore(backend).store, backend },
+      state.newClient(),
+      undefined,
+      { view: 'files', collapsed: false },
+    )
+    expect(restored.manager.activeTabPanel()).toEqual({ view: '', collapsed: true })
+  })
+
+  it('opens the default on a clean start without adopting stored tabs', async () => {
+    applyRestoreOnStartup(false)
+    try {
+      const backend = await seededBackend({ decorate: false })
+      const { manager } = await mountPaneManager(
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { store: makeLayoutStore(backend).store, backend },
+        undefined,
+        undefined,
+        { view: 'files', collapsed: false },
+      )
+      expect(manager.paneCount).toBe(1)
+      expect(manager.activeTabPanel()).toEqual({ view: 'files', collapsed: false })
+    } finally {
+      applyRestoreOnStartup(true)
+    }
   })
 })

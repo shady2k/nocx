@@ -1236,14 +1236,14 @@ export class PaneManager {
    *
    *  `initialPaneReady` resolves only from terminal content — a non-terminal
    *  first tab must not be able to report the app healthy. */
-  openInitialPane(): Promise<void> {
+  openInitialPane(initialPanel?: TabPanel): Promise<void> {
     if (this._initialPaneReady) {
       throw new Error('openInitialPane called twice; the composition root calls it exactly once')
     }
     // The promise is assigned SYNCHRONOUSLY even though the work is not: the
     // composition root reads `initialPaneReady` in the same turn it calls
     // this, and that contract predates the read this now waits on.
-    this._initialPaneReady = this.boot()
+    this._initialPaneReady = this.boot(initialPanel)
     return this._initialPaneReady
   }
 
@@ -1267,7 +1267,7 @@ export class PaneManager {
    * that is gone is made again, which is not a resurrection and never looks
    * like one.
    */
-  private async boot(): Promise<void> {
+  private async boot(initialPanel?: TabPanel): Promise<void> {
     this.tabStrip.mount(this.hostFor(this.tabStrip))
     // A CLEAN START, when the person asked for one (nocx-yejir). The chain is
     // still READ — a tab opened in this session must be recorded, or the
@@ -1289,7 +1289,7 @@ export class PaneManager {
     // than the one that was asked for.
     if (!restoreOnStartup()) {
       await this.readLayoutWithoutAdopting()
-      const fresh = this.newPane()
+      const fresh = this.createInitialPane(initialPanel)
       await this.activate(fresh)
       const content = fresh.content
       if (!(content instanceof TerminalContent)) throw new Error('initial pane is not a terminal')
@@ -1320,7 +1320,17 @@ export class PaneManager {
     // (nocx-l21ib), so a pane a person had in front can legitimately be gone
     // by the next launch, and the window still has to open on something.
     const remembered = this.uiState.state.activeTab
-    const front = this.panes.find((p) => p.wireId === remembered) ?? this.panes[0] ?? this.newPane()
+    const front =
+      this.panes.find((p) => p.wireId === remembered) ??
+      this.panes[0] ??
+      this.createInitialPane(initialPanel)
+    const tabId = this.tabIdOfPane(front)
+    const tab = tabId ? this.layout.tab(tabId) : undefined
+    // Empty/expanded is an unchosen row (including a backend replacement).
+    // Empty/collapsed is an explicit no-panel choice and must survive boot.
+    if (initialPanel && tab?.panelView === '' && !tab.panelCollapsed) {
+      this.setPanePanel(front, initialPanel)
+    }
     await this.activate(front)
     const content = front.content
     if (!(content instanceof TerminalContent)) {
@@ -1812,6 +1822,8 @@ export class PaneManager {
       },
       (err: unknown) => {
         this.tabIdOfCreatedPane.delete(opened.paneId)
+        this.unconfirmedPanels.delete(opened.tabId)
+        this.panelsAwaitingRow.delete(opened.tabId)
         const message = err instanceof Error ? err.message : String(err)
         log.error('nocx: the backend refused a new tab', { error: message })
         showToast({ level: 'danger', message: `Could not open a tab: ${message}` })
@@ -1836,6 +1848,13 @@ export class PaneManager {
       outputRecording: () => this.outputRecording?.outputRecording() ?? 'unknown',
       subscribe: (listener) => this.outputRecording?.subscribe(listener) ?? (() => {}),
     }
+  }
+
+  /** A fresh startup tab receives the supplied default before activation. */
+  private createInitialPane(panel?: TabPanel): Pane {
+    const pane = this.buildLocalPane(this.mintPane('local', null), false)
+    if (panel) this.setPanePanel(pane, panel)
+    return pane
   }
 
   /** Create a new local terminal pane and activate it: mint the identity,
@@ -2228,6 +2247,11 @@ export class PaneManager {
     }
     this.attachDisplayChange(pane)
     this.tabStrip.addPane(pane)
+    // Later renderer-created tabs choose no panel, including SSH and duplicates.
+    // Startup builds without activation and supplies its own default instead.
+    if (activateNow && this.tabIdOfCreatedPane.has(wireId)) {
+      this.setPanePanel(pane, { view: '', collapsed: true })
+    }
     if (activateNow) {
       void this.activate(pane)
     } else {
@@ -2661,12 +2685,17 @@ export class PaneManager {
     // handler must reach the chrome, and the chrome cannot be built until
     // the readiness it waits on exists.
     const paneRef = { current: undefined as Pane | undefined }
+    this.tabIdOfCreatedPane.set(made.paneId, made.tabId)
     const registered = made.created.then(
       () => {
         this.registered.add(made.paneId)
+        this.tabIdOfCreatedPane.delete(made.paneId)
         return true
       },
       (err: unknown) => {
+        this.tabIdOfCreatedPane.delete(made.paneId)
+        this.unconfirmedPanels.delete(made.tabId)
+        this.panelsAwaitingRow.delete(made.tabId)
         const message = err instanceof Error ? err.message : String(err)
         log.error('nocx: the backend refused a workspace', { error: message })
         showToast({ level: 'danger', message: `Could not create the workspace: ${message}` })
@@ -3241,7 +3270,10 @@ export class PaneManager {
    */
   setActiveTabPanel(panel: TabPanel): void {
     const pane = this.activePane
-    if (!pane) return
+    if (pane) this.setPanePanel(pane, panel)
+  }
+
+  private setPanePanel(pane: Pane, panel: TabPanel): void {
     const tabId = this.tabIdOfPane(pane)
     if (!tabId) return
     // THE WRITE IS A ROUND TRIP, and a person can switch away and back inside

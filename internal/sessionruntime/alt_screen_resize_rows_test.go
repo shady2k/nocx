@@ -266,20 +266,26 @@ func TestAlternateScreenWidthCommitKeepsPriorBlocksOutOfClosingRows(t *testing.T
 // when the commit itself is deferred until the alternate screen returns.
 func TestGeometryCommitDoesNotRepairARewrittenOutputPrefix(t *testing.T) {
 	for _, alternate := range []bool{false, true} {
-		for _, captured := range []bool{false, true} {
-			name := fmt.Sprintf("alternate=%v/captured=%v", alternate, captured)
+		for _, capture := range []string{"none", "before-rewrite", "after-rewrite"} {
+			captured := capture != "none"
+			name := fmt.Sprintf("alternate=%v/capture=%s", alternate, capture)
 			t.Run(name, func(t *testing.T) {
 				s, rs := streamSession(t, harnessGeometry(80, 24))
 				if err := s.Ingest([]byte("prev-1\r\nprev-2\r\nprev-3\r\n$ cmd\r\n" + outputMarkerFixed)); err != nil {
 					t.Fatal(err)
+				}
+				forged := obsNonce(0x79)
+				if capture == "before-rewrite" {
+					if err := s.SightFence(forged, []byte("unverified")); err != nil {
+						t.Fatal(err)
+					}
 				}
 				// No ED2: the pin survives and only the stands check detects
 				// that the program rewrote the prefix in place.
 				if err := s.Ingest([]byte("\x1b[2A\x1b[2KUP\r\n\x1b[2KOUT\r\n")); err != nil {
 					t.Fatal(err)
 				}
-				forged := obsNonce(0x79)
-				if captured {
+				if capture == "after-rewrite" {
 					if err := s.SightFence(forged, []byte("unverified")); err != nil {
 						t.Fatal(err)
 					}

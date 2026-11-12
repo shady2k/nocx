@@ -10,8 +10,8 @@
  * The cold start is deliberately NOT changed: the window's opening tab is
  * seeded with the app's default panel (Files), which is what the file-manager
  * design §7 and e2e/files.spec.ts have always asserted. A tab the person opens
- * afterwards has no panel and shows the rail collapsed — the seed is once per
- * page load, on the tab the window opens with.
+ * afterwards has no panel and shows the rail collapsed. ADR-5yepvh9j seeds
+ * only an unchosen startup panel; explicit closed choices survive restoration.
  *
  * The spec starts its OWN backend (like e2e/active-tab-restore.spec.ts) so it
  * can restart it mid-test and watch the panel come back through layout.read,
@@ -129,14 +129,35 @@ test.describe('each tab remembers its own right-hand panel (nocx-ouru5.1.18)', (
       wire.close()
     }
 
+    // Restart with the collapsed tab in front, not just the nonempty Ports tab.
+    await page.locator(TAB).first().click()
+    await expect(page.locator(SIDEBAR)).toHaveClass(/collapsed/)
+    const activeWire = await openControlPlane(ep1.port, ep1.token)
+    try {
+      await expect
+        .poll(async () => {
+          const layout = (await activeWire.call('layout.read', {})) as {
+            panes: Array<{ id: string }>
+          }
+          const state = (await activeWire.call('uistate.get', {})) as { activeTab: string }
+          return state.activeTab === layout.panes[0]?.id
+        })
+        .toBe(true)
+    } finally {
+      activeWire.close()
+    }
+
     // The application restarts. Nothing in the first process survives it.
     const ep2 = await backend.restart()
     await bindEndpoint(page, ep2)
     await page.reload()
     await appReadyForInput(page)
 
-    // The same two tabs, the same one in front — and its panel with it.
+    // The collapsed opening tab and its neighbour both keep their choices.
     await expect(page.locator(TAB)).toHaveCount(2, { timeout: 90_000 })
+    await expect(page.locator(TAB).first()).toHaveAttribute('aria-selected', 'true')
+    await expect(page.locator(SIDEBAR)).toHaveClass(/collapsed/)
+    await page.locator(TAB).nth(1).click()
     await expect(page.locator(TAB).nth(1)).toHaveAttribute('aria-selected', 'true')
     await expect(page.locator(SIDEBAR)).not.toHaveClass(/collapsed/)
     await expect(page.locator(PANEL_TITLE)).toHaveText('Ports')
@@ -144,5 +165,53 @@ test.describe('each tab remembers its own right-hand panel (nocx-ouru5.1.18)', (
     // And tab 1's choice came back too: collapsed, not Ports.
     await page.locator(TAB).first().click()
     await expect(page.locator(SIDEBAR)).toHaveClass(/collapsed/)
+  })
+  test('a tab with no panel stays collapsed when it is the tab reopened at startup', async ({
+    page,
+  }) => {
+    const ep1 = await backend.start()
+    await bindEndpoint(page, ep1)
+    await page.goto('/')
+    await promptReady(page)
+    await page.locator(PORTS_BTN).click()
+    await expect(page.locator(PANEL_TITLE)).toHaveText('Ports')
+
+    await page.locator(NEW_TAB).click()
+    await expect(page.locator(TAB)).toHaveCount(2)
+    await expect(page.locator(TAB).nth(1)).toHaveAttribute('aria-selected', 'true')
+    await expect(page.locator(SIDEBAR)).toHaveClass(/collapsed/)
+
+    const wire = await openControlPlane(ep1.port, ep1.token)
+    try {
+      await expect
+        .poll(async () => {
+          const layout = (await wire.call('layout.read', {})) as {
+            tabs: Array<{ id: string; panelView: string; panelCollapsed: boolean }>
+            panes: Array<{ id: string; tabId: string }>
+          }
+          const state = (await wire.call('uistate.get', {})) as { activeTab: string }
+          const active = layout.panes.find((pane) => pane.id === state.activeTab)
+          return (
+            layout.tabs.length === 2 &&
+            layout.tabs.some(
+              (tab) => tab.id === active?.tabId && tab.panelView === '' && tab.panelCollapsed,
+            )
+          )
+        })
+        .toBe(true)
+    } finally {
+      wire.close()
+    }
+
+    const ep2 = await backend.restart()
+    await bindEndpoint(page, ep2)
+    await page.reload()
+    await appReadyForInput(page)
+    await expect(page.locator(TAB)).toHaveCount(2, { timeout: 90_000 })
+    await expect(page.locator(TAB).nth(1)).toHaveAttribute('aria-selected', 'true')
+    await expect(page.locator(SIDEBAR)).toHaveClass(/collapsed/)
+    await page.locator(TAB).first().click()
+    await expect(page.locator(PANEL_TITLE)).toHaveText('Ports')
+    await expect(page.locator(SIDEBAR)).not.toHaveClass(/collapsed/)
   })
 })

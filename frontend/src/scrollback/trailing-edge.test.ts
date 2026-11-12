@@ -197,6 +197,19 @@ describe('rows are full width, and the gutter lives in them (nocx-9bpeq.8)', () 
     expect(shipped('.scrollback-layout.inner-pane-program', 'padding-block')).toBeNull()
   })
 
+  it('a filled pane hangs from the top gutter, and a transcript from the bottom', () => {
+    // WHY THE STACK IS BOTTOM-ANCHORED AT ALL: a short transcript hangs from
+    // the scroller's bottom edge, right above the composer, the way output
+    // leaves a terminal (owner, 2026-09-15). The alternate screen has no
+    // composer above it and its live box is sized from the scroller less the
+    // one running header, floored to whole rows — so the pair is a few pixels
+    // short of the scroller, and the bottom anchor spent that remainder as a
+    // BAND ABOVE THE PINNED HEADER (nocx-4y82c.2: the header sat about a row
+    // below a block's first row). Nothing hangs from the bottom in that mode,
+    // so nothing is anchored there and the header starts on the gutter.
+    expect(shipped('.scrollback-inner', 'margin-top')).toBe('auto')
+    expect(shipped('.scrollback-inner.inner-fullscreen-mode', 'margin-top')).toBe('0')
+  })
   it('a full-screen program wears the same gutter and no extra bottom margin', () => {
     // ADR-92zzg2y2: the alternate screen is not an exception. The row rule
     // above gives its live container the same one-cell gutter, and nothing

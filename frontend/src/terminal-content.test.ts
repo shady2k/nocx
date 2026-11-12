@@ -23598,8 +23598,7 @@ describe('the live region is the painter picture (nocx-zg3k3.2.5)', () => {
       })
       const before = [...live.querySelectorAll('.term-grid-row')]
 
-      // One row changed. The changed row is rebuilt; every unchanged row
-      // keeps its DOM — the node reuse the frame budget is measured on.
+      // Only the changed row's ink is reconciled; every row keeps its DOM.
       session.fireScreenFrame(screenFrame(8, ['PROMPT$ ls', 'NOCX-REUSE-2']))
       await vi.waitFor(() => {
         const second = live.querySelectorAll('.term-grid-row')[1]

@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { closingWorkspaceMessage, nameAtMost, type WorkspaceMember } from './live-work'
+import {
+  closingTabMessage,
+  closingWorkspaceMessage,
+  nameAtMost,
+  type WorkspaceMember,
+} from './live-work'
 
 /** A member tab with nothing running on a local machine — the idle case. */
 function idle(label: string): WorkspaceMember {
@@ -65,6 +70,19 @@ describe('the sentence a workspace close puts to a person (nocx-isoph.6, design 
     expect(message).toContain('2 tabs')
     expect(message).toContain('“make”')
     expect(message).not.toContain('Settings')
+  })
+})
+
+describe('closing one tab', () => {
+  it('does not ask merely because an idle shell is remote', () => {
+    expect(closingTabMessage({ label: '~', command: null, host: 'user@host' })).toBeNull()
+    expect(closingTabMessage({ label: '~', command: '  ', host: 'user@host' })).toBeNull()
+  })
+
+  it('names a running remote command and its host before ending it', () => {
+    const message = closingTabMessage({ label: '~', command: 'sleep 100000', host: 'user@host' })
+    expect(message).toContain('sleep 100000')
+    expect(message).toContain('user@host')
   })
 })
 

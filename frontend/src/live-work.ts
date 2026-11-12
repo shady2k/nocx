@@ -86,6 +86,13 @@ function nameOf(member: WorkspaceMember): string {
   return host === null ? `“${what}”` : `“${what}” on ${host}`
 }
 
+/** A single tab asks only for a running command, not an idle SSH connection. */
+export function closingTabMessage(member: WorkspaceMember): string | null {
+  return present(member.command) !== null
+    ? `Closing this tab ends ${nameOf(member)}. Close it?`
+    : null
+}
+
 /**
  * The question put to a person closing a workspace: how many tabs go, and
  * what is live among them.

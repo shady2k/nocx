@@ -449,6 +449,9 @@ type SpawnParams struct {
 	// OpSetScrollback; this field is only the budget the session was born
 	// with.
 	ScrollbackLines *uint64 `json:"scrollbackLines,omitempty"`
+	// SessionIdleDays is fixed at spawn. Nil means three days; zero disables
+	// expiry while unattached (ADR-v7xk8mq8).
+	SessionIdleDays *int `json:"sessionIdleDays,omitempty"`
 }
 
 // MaxIdempotencyKey bounds the key a caller may mint. The helper keeps one
@@ -698,6 +701,9 @@ type SSHSpawnParams struct {
 	// DefaultScrollbackLines stands in. A change after the spawn rides
 	// OpSetScrollback.
 	ScrollbackLines *uint64 `json:"scrollbackLines,omitempty"`
+	// SessionIdleDays is fixed at spawn. Nil means three days; zero disables
+	// expiry while unattached (ADR-v7xk8mq8).
+	SessionIdleDays *int `json:"sessionIdleDays,omitempty"`
 }
 
 // SessionsParams asks for the inventory. The workspace filter is D15's

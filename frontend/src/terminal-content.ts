@@ -10489,7 +10489,7 @@ export class TerminalContent extends BasePaneContent {
     this.grantController?.setBlocks([])
   }
 
-  dispose(): void {
+  dispose(reason?: 'end-session'): void {
     this._disposed = true
     this._endOpeningStatement()
     this._cancelDeferredShellSubmissions()
@@ -10596,7 +10596,14 @@ export class TerminalContent extends BasePaneContent {
       this._copyChordKeydown = null
     }
     this._endSummon(true)
-    this.session?.detach()
+    if (reason === 'end-session') {
+      this.session?.close(() => {
+        showToast({
+          level: 'danger',
+          message: t('session.close.failed', 'Could not end the session — it may still be running'),
+        })
+      })
+    } else this.session?.detach()
     // The pane stops answering the seam with its death: a dead pane's
     // reader has no model worth reading and no session to be found under.
     if (this.session) {

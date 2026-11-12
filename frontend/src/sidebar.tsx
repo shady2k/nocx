@@ -542,8 +542,12 @@ function SidebarSolid(props: SidebarSolidProps) {
     props.focusReturn.anchor = view.id
     const { collapsed } = props.state.sidebar
     if (collapsed) {
-      props.storeActions.setActiveView(view.id)
-      props.storeActions.toggleSidebar()
+      // ONE CHANGE, ONE WRITE. Showing a view and expanding the rail is one
+      // choice, but it used to be two store updates — two panel writes to the
+      // same tab, issued back to back — and their answers can come back in
+      // either order: measured on a 50× repeat, the superseded write landed
+      // last and the tab's own row ended collapsed on Ports (nocx-ouru5.1.18).
+      props.storeActions.setPanel(view.id, false)
     } else {
       props.storeActions.setActiveView(view.id)
     }

@@ -216,31 +216,22 @@ test('the grid stays inside its box when the running command makes the scroller 
 })
 
 /**
- * AN ALTERNATE-SCREEN PROGRAM GETS THE WHOLE PANE (nocx-1ebrs.10).
+ * AN ALTERNATE-SCREEN PROGRAM WEARS THE SAME ONE GUTTER (ADR-92zzg2y2).
  *
- * The owner's clean-Mac pass: a full-screen TUI drawn by herdr stopped about
- * three columns short of the pane's right edge and left a strip before its own
- * right-hand toolbar, while the same program filled the edge in another
- * terminal. Three columns is 24px at this font, which is exactly one half of
- * `--pane-inline-padding` — the ledger gutter that `nocx-9bpeq.8` moved from
- * `.pane` into `.scrollback-inner > *`, so every row of the stack wears it.
+ * The owner's rule of 2026-11-10: one gutter for everything the pane shows —
+ * ordinary output, blocks, a plain ssh shell and a full-screen program alike.
+ * One character cell wide on each side. The old rule gave a full-screen program
+ * the whole pane and a normal command a 24 px gutter, which is why a switch had
+ * to change the column count; now the program is fitted to the same content box
+ * as every other row.
  *
- * The live region is a child of that stack in EVERY mode, the alternate screen
- * included, so an alt-screen program was fitted inside a gutter that exists for
- * the ledger's prose and not for a program that owns the pane. The strip is the
- * pane's own ground showing past the grid's last column, and the program is told
- * a `cols` three too few — it draws honestly for a width nobody can use.
- *
- * The owner's assertion, and it is stated in CELLS rather than in pixels so it
- * holds at any font size and any display ratio: the program's own columns, at
- * the published cell width, fill the pane's content width within ONE cell —
- * and by no more than one, because a grid that OVERFLOWS is the same defect
- * with the opposite sign. One cell of slack is the remainder of the integer
+ * The assertion is stated in CELLS, so it holds at any font size and display
+ * ratio: the program's own columns, at the published cell width, fill the
+ * pane's content box — the pane less one cell on each side — within ONE cell,
+ * and never overflow it. One cell of slack is the remainder of the integer
  * division, which no terminal can avoid.
  */
-test('an alternate-screen program is fitted to the whole pane, not to the gutter', async ({
-  page,
-}) => {
+test('an alternate-screen program wears the one-cell gutter', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 })
   await page.goto('/')
   await promptReady(page)
@@ -265,23 +256,29 @@ test('an alternate-screen program is fitted to the whole pane, not to the gutter
           ),
         ) || 0
       const cols = Number(grid.getAttribute('aria-colcount'))
+      const paneEl = area.closest<HTMLElement>('.pane')!
+      const gutter =
+        parseFloat(getComputedStyle(paneEl).getPropertyValue('--pane-inline-padding')) || 0
       const cs = getComputedStyle(live)
       const box = area.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)
       const painted = cols * cellWidth
-      // The pane's CONTENT width is the whole box the program may draw in: the
-      // scroller is the pane's own width less the bar it reserves.
+      // The content box the program may draw in: the scroller less one cell on
+      // each side. The painted grid fills it within the integer remainder.
       const panel = area.clientWidth
-      const shortByCells = (panel - painted) / cellWidth
+      const expected = panel - 2 * gutter
+      const shortByCells = (expected - painted) / cellWidth
       const fullscreen = live.classList.contains('live-fullscreen')
       return {
         cols,
         cellWidth: Math.round(cellWidth * 1e3) / 1e3,
+        gutter: Math.round(gutter * 1e3) / 1e3,
         box: Math.round(box),
         panel: Math.round(panel),
+        expected: Math.round(expected),
         painted: Math.round(painted),
         shortByCells: Math.round(shortByCells * 100) / 100,
         fullscreen,
-        settled: fullscreen && cellWidth > 0 && Math.abs(shortByCells) < 1,
+        settled: fullscreen && cellWidth > 0 && gutter > 0 && Math.abs(shortByCells) < 1,
       }
     })
 
@@ -302,9 +299,11 @@ test('an alternate-screen program is fitted to the whole pane, not to the gutter
   }
   const measured = await geometry()
 
-  // One matcher each: a grid that gave the program fewer columns than the pane
-  // could paint, or one that overhangs it.
+  // One matcher each: a grid that gave the program fewer columns than the
+  // content box could paint, or one that overhangs it.
   expect(measured.shortByCells!).toBeLessThan(1)
-  expect(measured.shortByCells!).toBeGreaterThan(-1)
+  expect(measured.shortByCells!).toBeGreaterThanOrEqual(-1)
+  // …and the gutter itself is one cell, not the old flush edge.
+  expect(measured.gutter).toBeCloseTo(measured.cellWidth!, 1)
   await page.keyboard.press('Control+C')
 })

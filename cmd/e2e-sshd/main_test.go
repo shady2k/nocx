@@ -904,3 +904,89 @@ func TestInputLog_RecordsOnlyTheBytesThePtyAccepted(t *testing.T) {
 		t.Fatalf("the second shell channel's log holds %q; it saw no input", other)
 	}
 }
+
+// TestWindowChange_ResizesThePtyOfARunningShell proves the fixture's
+// window-change reaches the child's pty after the shell has started.
+//
+// It did not. startCommand closes the parent's slave copy as soon as the child
+// owns the pty (so the child's exit is an EOF on the master), and the
+// window-change handler then called pty.Setsize on that closed fd. Setsize
+// answered "use of closed file", the error was dropped, and every resize after
+// a shell started left the remote pty at its pty-req size. A client whose
+// window had a different size then painted the program at one width and read
+// it at another — the ssh case of e2e/top-split.spec.ts.
+func TestWindowChange_ResizesThePtyOfARunningShell(t *testing.T) {
+	addr, hostKey, userSigner := startFixture(t)
+	client := dial(t, addr, hostKey, userSigner)
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+
+	stdin, err := sess.StdinPipe()
+	if err != nil {
+		t.Fatalf("stdin: %v", err)
+	}
+	stdout, err := sess.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout: %v", err)
+	}
+	if err = sess.RequestPty("xterm", 137, 43, gossh.TerminalModes{}); err != nil {
+		t.Fatalf("pty-req: %v", err)
+	}
+	if err = sess.Shell(); err != nil {
+		t.Fatalf("shell: %v", err)
+	}
+
+	// ONE reader for the whole session, so a chunk that arrives early is not
+	// lost between two waits.
+	chunks := make(chan string, 64)
+	go func() {
+		buf := make([]byte, 1024)
+		for {
+			n, readErr := stdout.Read(buf)
+			if n > 0 {
+				chunks <- string(buf[:n])
+			}
+			if readErr != nil {
+				close(chunks)
+				return
+			}
+		}
+	}()
+	waitFor := func(want string) {
+		t.Helper()
+		var seen strings.Builder
+		deadline := time.After(10 * time.Second)
+		for {
+			if strings.Contains(seen.String(), want) {
+				return
+			}
+			select {
+			case chunk, ok := <-chunks:
+				if !ok {
+					t.Fatalf("the shell ended before it said %q; saw %q", want, seen.String())
+				}
+				seen.WriteString(chunk)
+			case <-deadline:
+				t.Fatalf("the shell never said %q; saw %q", want, seen.String())
+			}
+		}
+	}
+
+	// A command that has already run is what proves the shell, not merely the
+	// channel, is up; only then does a window-change reach a running pty.
+	if _, err = io.WriteString(stdin, "echo SHELL-READY\n"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	waitFor("SHELL-READY")
+
+	if err = sess.WindowChange(41, 137); err != nil {
+		t.Fatalf("window-change: %v", err)
+	}
+	if _, err = io.WriteString(stdin, "stty size\n"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	waitFor("41 137")
+}

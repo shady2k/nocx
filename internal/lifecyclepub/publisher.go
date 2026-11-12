@@ -102,6 +102,7 @@ type Attempt struct {
 	StartedAt   time.Time  `json:"startedAt,omitempty"`
 	ExitCode    *int       `json:"exitCode,omitempty"`
 	CompletedAt *time.Time `json:"completedAt,omitempty"`
+	DurationMs  *int64     `json:"durationMs,omitempty"`
 	Fence       string     `json:"fence,omitempty"`
 }
 
@@ -187,6 +188,7 @@ func attemptFact(att lifecycle.ExecutionAttempt) *Attempt {
 	}
 	if att.CompletedAt != nil {
 		a.CompletedAt = att.CompletedAt
+		a.DurationMs = att.DurationMs()
 	}
 	if att.Fence != (lifecycle.FenceNonce{}) {
 		a.Fence = hex.EncodeToString(att.Fence[:])

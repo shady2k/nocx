@@ -83,3 +83,33 @@ func TestResponseSentCallbackFiresWhenTheConnectionClosesBeforeTheWrite(t *testi
 		t.Fatal("closing the connection left the sent callback unfired")
 	}
 }
+
+// A successful enqueue and Close are one decision. If enqueue wins, Close must
+// drain the frame and run its witness; if Close wins, the enqueue is refused
+// and the wrapper runs the witness itself. A success whose frame is left in a
+// queue nobody drains would leak the stored-row slot.
+func TestSuccessfulEnqueueRacingCloseAlwaysRunsItsCompletion(t *testing.T) {
+	for i := 0; i < 1500; i++ {
+		c := New(newFakeSocket(false), Config{})
+		sent := make(chan struct{})
+		var success bool
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			success = c.TryEnqueueResponseFrameSent(TextMessage, []byte(`{"jsonrpc":"2.0","id":1,"result":{}}`), func() {
+				close(sent)
+			}) == nil
+		}()
+		go func() {
+			defer wg.Done()
+			c.Close()
+		}()
+		wg.Wait()
+		select {
+		case <-sent:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("iteration %d: enqueue returned success=%v but its completion never ran", i, success)
+		}
+	}
+}

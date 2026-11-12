@@ -175,10 +175,12 @@ func TestMouseModesOnARealPTY(t *testing.T) {
 
 	// The program turns mouse reporting off, and the SAME intent is now
 	// nothing: the emulator declines it rather than this runtime inventing
-	// bytes for a click no program asked about.
+	// bytes for a click no program asked about, and the decline is EXECUTED
+	// with no bytes rather than refused (encode's ErrUnsupported rule,
+	// nocx-evj4b.1.12).
 	p.wait("MOUSE-OFF")
-	if state, err := p.send(IntentKindMouse, []byte("press left 2 3")); state != IntentStateRefused || err == nil {
-		t.Fatalf("a mouse event with tracking off: state=%s err=%v, want refused with an error", intentStateName(state), err)
+	if state, err := p.send(IntentKindMouse, []byte("press left 2 3")); state != IntentStateExecuted || err != nil {
+		t.Fatalf("a mouse event with tracking off: state=%s err=%v, want executed with no bytes", intentStateName(state), err)
 	}
 
 	// The one byte the program is waiting on arrives as itself. Had the refused

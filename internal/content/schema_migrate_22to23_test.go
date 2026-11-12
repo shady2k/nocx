@@ -72,8 +72,8 @@ func TestSchema22PanelMigrationAddsTheColumnsAndKeepsTheRows(t *testing.T) {
 		t.Fatalf("migrated tab panel = %q/%v, want empty/expanded", tabs[0].PanelView, tabs[0].PanelCollapsed)
 	}
 	// And writing one is an ordinary update on the migrated row.
-	if _, setErr := db.Layout().SetTabPanel(context.Background(), "tab-22", "ports", true); setErr != nil {
-		t.Fatalf("SetTabPanel on a migrated row: %v", setErr)
+	if _, err = db.Layout().SetTabPanel(context.Background(), "tab-22", "ports", true); err != nil {
+		t.Fatalf("SetTabPanel on a migrated row: %v", err)
 	}
 
 	// A fresh file and this migrated one are the same shape — the columns

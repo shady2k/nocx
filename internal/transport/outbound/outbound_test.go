@@ -618,3 +618,42 @@ func TestEnqueueOrderedWaitsWithoutDroppingOrJumpingQueue(t *testing.T) {
 		t.Fatalf("writes = %q, %q, %q; want existing frames then gap", writes[0].Data, writes[1].Data, writes[2].Data)
 	}
 }
+
+// A depth-one FIFO repeatedly moves from full to empty while the ordered
+// producer runs. Every observed room generation must cover the capacity
+// check that follows it, or a drain can strand the producer on a newer wake.
+func TestEnqueueOrderedBurstDrainsDepthOneQueue(t *testing.T) {
+	c, f := fillQueue(t, 1)
+	defer c.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	const count = 500
+	go func() {
+		for i := range count {
+			if err := c.EnqueueOrdered(ctx, TextMessage, []byte(fmt.Sprintf("ordered-%d", i))); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+	close(f.release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(waittest.DefaultTimeout):
+		t.Fatal("ordered producer stranded after writer released")
+	}
+	frames := waitWrites(t, f, count+2)
+	for i := range count {
+		if got, want := string(frames[i+2].Data), fmt.Sprintf("ordered-%d", i); got != want {
+			t.Fatalf("frame %d = %q, want %q", i, got, want)
+		}
+	}
+	if c.StallCount() != 0 {
+		t.Fatal("ordered burst took lossy stall path")
+	}
+}

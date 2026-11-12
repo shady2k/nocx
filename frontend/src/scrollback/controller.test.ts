@@ -374,11 +374,13 @@ describe('the live region follows the pane it fills (nocx-liveheight)', () => {
 
   it('re-measures an alt-screen program when the scroller shrinks', () => {
     const { controller } = makeController()
+    // A markerless session: no running block, no reserved header, the terminal
+    // is the pane (ADR-92zzg2y2).
+    controller.setUnstructured()
     controller.enterFullscreen()
-    // ONE ROW LESS THAN THE PANE (ADR-2yzsq8mk): 352px of pane is 22 rows of a
-    // 16px cell, and the program's box gives one of them back to the stylesheet's
-    // bottom margin so its last row never touches the window's edge.
-    expect(controller.terminalLiveContainer.style.height).toBe('336px')
+    // THE SAME BOX AS EVERY OTHER MODE (ADR-92zzg2y2): 352px of pane is 22
+    // rows of a 16px cell, and a full-screen program is no exception.
+    expect(controller.terminalLiveContainer.style.height).toBe('352px')
 
     Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
       value: 200,
@@ -386,8 +388,8 @@ describe('the live region follows the pane it fills (nocx-liveheight)', () => {
     })
     controller.setLiveHeight(null)
 
-    // 200px is 12.5 rows of 16: floored to 12, less the margin row.
-    expect(controller.terminalLiveContainer.style.height).toBe('176px')
+    // 200px is 12.5 rows of 16: floored to 12.
+    expect(controller.terminalLiveContainer.style.height).toBe('192px')
   })
 
   it('the region answers the shared live-region identity, in every mode (ADR-0091)', () => {
@@ -507,8 +509,11 @@ describe('ScrollbackController render-fence rendezvous (nocx-u7uh.8)', () => {
       disconnect(): void {
         this.observed.clear()
       }
-      deliver(): void {
-        this.cb([], this)
+      deliver(targets: Element[]): void {
+        this.cb(
+          targets.map((target) => ({ target }) as ResizeObserverEntry),
+          this,
+        )
       }
     }
     vi.stubGlobal('ResizeObserver', FakeSizeObserver)
@@ -541,15 +546,39 @@ describe('ScrollbackController render-fence rendezvous (nocx-u7uh.8)', () => {
       const block = controller.blockManager.blockForAttempt('att-1')
       const header = block!.el.querySelector<HTMLElement>(':scope > .cmd-header')!
       expect(FakeSizeObserver.latest!.observed.has(header), 'the new header is watched').toBe(true)
+      const otherHeaders = Array.from({ length: 499 }, () => {
+        const blockEl = document.createElement('div')
+        blockEl.className = 'cmd-block'
+        const other = document.createElement('div')
+        other.className = 'cmd-header'
+        blockEl.append(other)
+        controller.scrollbackInner.insertBefore(blockEl, controller.scrollbackInner.firstChild)
+        return other
+      })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      const reads = otherHeaders.map((other) =>
+        vi.spyOn(other, 'offsetHeight', 'get').mockReturnValue(80),
+      )
       Object.defineProperty(header, 'offsetHeight', { value: 400, configurable: true })
-      FakeSizeObserver.latest!.deliver()
+      FakeSizeObserver.latest!.deliver([header])
+      expect(
+        reads.every((read) => read.mock.calls.length === 0),
+        'a duration change does not measure the transcript',
+      ).toBe(true)
       expect(header.getAttribute('data-pinnable'), 'a third of 300 cannot hold 400').toBe('false')
 
       // AND THE OTHER DIRECTION: a header that becomes compact is pinnable
       // again without a scroll, a resize or a freeze.
       Object.defineProperty(header, 'offsetHeight', { value: 80, configurable: true })
-      FakeSizeObserver.latest!.deliver()
+      FakeSizeObserver.latest!.deliver([header])
       expect(header.getAttribute('data-pinnable')).toBeNull()
+
+      FakeSizeObserver.latest!.deliver([controller.scrollbackArea])
+      expect(
+        reads.every((read) => read.mock.calls.length === 1),
+        'a pane resize still measures every header',
+      ).toBe(true)
+      controller.dispose()
     } finally {
       vi.unstubAllGlobals()
       pane.remove()
@@ -715,6 +744,49 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     record.outputAnchorText = 'top - 19:20:15 up 18 days,  1:53,  2 users'
     controller.outputAnchorChanged()
     expect(controller.terminalLiveInner.style.transform).toBe('')
+  })
+
+  it('keeps the painted echo shift until the frame without the echo is painted', () => {
+    // The pane gets shorter: a frame moves the base past the anchor, so the
+    // echo is no longer on the screen, and the anchor notification arrives
+    // BEFORE the paint of that frame. The grid on screen is still the old one
+    // and still holds the echo at its top; releasing the shift here showed it
+    // in the waiting block (nocx-4y82c.1.21). A sizing pass that has not
+    // painted rows keeps the shift the painted rows were sized with.
+    const renderer = rendererWithGeometry()
+    const pane = document.createElement('div')
+    const controller = new ScrollbackController({
+      pane,
+      liveContentHeight: () => renderer.liveContentHeight(),
+      cellMetrics: () => ({ cellWidth: renderer.cellWidth, cellHeight: renderer.cellHeight }),
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
+      value: 360,
+      configurable: true,
+    })
+    controller.scrollbackArea.scrollTo = vi.fn()
+
+    controller.beginBlock('printf OWN-LINE; read x', '~', 0)
+    const record = controller.blockManager.runningBlock!
+    record.outputAnchorOffset = 1
+    record.outputAnchorText = 'prompt printf OWN-LINE; read x'
+    // The first paint: three rows, the echo among them, shifted out.
+    controller.setLiveHeight(3 * 16, true)
+    expect(controller.terminalLiveInner.style.transform).toBe('translateY(-16px)')
+
+    // A shorter frame arrives: its base has moved past the anchor, so the
+    // echo is above the screen and its new offset is zero. The anchor is
+    // applied before the frame is painted; the grid still has the echo.
+    record.outputAnchorOffset = 0
+    record.outputAnchorText = ''
+    controller.outputAnchorChanged()
+    expect(controller.terminalLiveInner.style.transform).toBe('translateY(-16px)')
+
+    // The paint follows: the rows no longer contain the echo, and the shift
+    // becomes whatever the box hides (the cap here).
+    controller.setLiveHeight(24 * 16, true)
+    expect(controller.terminalLiveInner.style.transform).toBe('translateY(-64px)')
   })
 
   it('hides the backend-anchored echo row and sizes the live region without renderer line numbers', () => {
@@ -917,9 +989,9 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     const header = block.el.querySelector('.cmd-header')!
     expect(controller.terminalLiveContainer.style.height).toBe('320px')
     controller.enterFullscreen()
-    // The full-screen box is the pane less the one row of bottom margin
-    // (ADR-2yzsq8mk): same header, same capacity, one row given back to it.
-    expect(controller.terminalLiveContainer.style.height).toBe('304px')
+    // The same header and the same capacity on both sides of the switch
+    // (ADR-92zzg2y2): a presentation change is not a geometry change.
+    expect(controller.terminalLiveContainer.style.height).toBe('320px')
     expect(controller.scrollbackArea.contains(header)).toBe(true)
     controller.exitFullscreen()
     controller.setRunning()
@@ -2441,5 +2513,119 @@ describe('a pinned header is a compact part of the view (nocx-4y82c.1.3, P2)', (
     expect(headerFitsPinned(101, 300), 'one pixel over a third').toBe(false)
     expect(headerFitsPinned(600, 300), 'a header taller than the view').toBe(false)
     expect(headerFitsPinned(20, 0), 'no scrollport yet').toBe(false)
+  })
+})
+
+describe('a follower whose next row lands between pins (nocx-ouru5.1.18)', () => {
+  /** The scroller the output-jitter failure measured: the tail is pinned, then
+   *  the program commits one row (one row pitch, here 30px of three) before
+   *  anything settles. The scroller is now short of the end by exactly that
+   *  row, and `_followsNow` used to read the gap as a gesture — capturing the
+   *  reader's place a row up and pinning it after the mutation. */
+  function scroller(controller: ScrollbackController): {
+    area: HTMLElement
+    grow: (px: number) => void
+    max: () => number
+  } {
+    const area = controller.scrollbackArea
+    let scrollHeight = 1000
+    Object.defineProperty(area, 'clientHeight', { configurable: true, value: 400 })
+    Object.defineProperty(area, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollHeight,
+    })
+    // The reader is at the end to begin with: this is the follower's case.
+    let scrollTop = 600
+    Object.defineProperty(area, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = Math.max(0, Math.min(value, scrollHeight - 400))
+      },
+    })
+    Object.defineProperty(area, 'scrollTo', {
+      configurable: true,
+      value: (options: { top: number }) => {
+        scrollTop = Math.max(0, Math.min(options.top, scrollHeight - 400))
+      },
+    })
+    area.getBoundingClientRect = () => rect(0, 600)
+    return {
+      area,
+      grow: (px: number) => {
+        scrollHeight += px
+      },
+      max: () => scrollHeight - 400,
+    }
+  }
+
+  it('stays at the end instead of pinning the reader one row up', () => {
+    const { controller } = makeController()
+    const at = scroller(controller)
+    // The tail is pinned here: the person is following, at the end.
+    controller.holdReaderPlace(() => {})
+    expect(at.area.scrollTop).toBe(at.max())
+
+    // A row is committed. Nothing has settled yet, so the scroller is one row
+    // short of the end — the state the failure measured (top 3652, max 3662).
+    at.grow(10)
+    expect(at.area.scrollTop).toBe(at.max() - 10)
+
+    // The next structural change arrives. A follower is moved by the END.
+    controller.holdReaderPlace(() => {
+      at.grow(10)
+    })
+    expect(at.area.scrollTop).toBe(at.max())
+  })
+
+  it('does not read a live-end sentinel pushed out by a row as a gesture', () => {
+    // The live end leaves the observer's root the moment a row lands below the
+    // fold. That delivery is about the CONTENT, not about the person.
+    const saved = globalThis.IntersectionObserver
+    const seen: { deliver: ((entries: { isIntersecting: boolean }[]) => void) | null } = {
+      deliver: null,
+    }
+    class FakeObserver {
+      constructor(cb: (entries: { isIntersecting: boolean }[]) => void) {
+        seen.deliver = cb
+      }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+      takeRecords(): never[] {
+        return []
+      }
+    }
+    globalThis.IntersectionObserver = FakeObserver as never
+    try {
+      const { controller } = makeController()
+      const at = scroller(controller)
+      controller.holdReaderPlace(() => {})
+      expect(at.area.scrollTop).toBe(at.max())
+
+      // A row lands and the sentinel falls out of the root.
+      at.grow(10)
+      seen.deliver?.([{ isIntersecting: false }])
+
+      controller.holdReaderPlace(() => {
+        at.grow(10)
+      })
+      expect(at.area.scrollTop).toBe(at.max())
+    } finally {
+      globalThis.IntersectionObserver = saved
+    }
+  })
+
+  it('leaves a reader who moved their own row alone', () => {
+    const { controller } = makeController()
+    const at = scroller(controller)
+    controller.holdReaderPlace(() => {})
+    // Their own gesture: three rows up, which the observer has not reported
+    // yet. This is not content growth, and the anchor must hold it.
+    at.area.scrollTop = at.max() - 30
+    controller.holdReaderPlace(() => {
+      at.grow(10)
+    })
+    expect(at.area.scrollTop).toBe(at.max() - 40)
   })
 })

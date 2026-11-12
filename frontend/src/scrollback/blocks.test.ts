@@ -21,7 +21,7 @@ import {
   setBlockWhere,
   type BlockKind,
 } from './blocks'
-import { paintStoredRows } from './block-rows'
+import { paintStoredRows, parseStoredBlockRows } from './block-rows'
 import { restoredBlock } from './restored-block'
 import type { Row } from '../generated/ledger.blockRows'
 import { wireRowOf, type CellSpec } from '../painter/fixtures'
@@ -2104,6 +2104,22 @@ describe('BlockManager attempt projections (ADR-0024 §5, §7 — bead nocx-u7uh
     rows = 24,
   ) => ({ row, screenRevision, bufferKind, bufferInstance, cols, rows })
 
+  it('uses the backend elapsed duration when UTC timestamps step backwards during a command', () => {
+    const rec = manager.startBlock('sleep 2', '~', 0)
+    manager.bindAttempt('att-1')
+    manager.blockClosed('att-1')
+    manager.freezeFromAttempt(
+      attempt({
+        startedAt: '2026-11-11T16:30:47.360Z',
+        completedAt: '2026-11-11T16:30:49.286Z',
+        durationMs: 2024,
+      }),
+      0,
+    )
+    expect(rec.durationMs).toBe(2024)
+    expect(rec.el.querySelector('[title="2024ms"]')).not.toBeNull()
+  })
+
   it('reclaims an alternate-seated header before a deferred visual freeze', () => {
     const rec = manager.startBlock('make', '~', 3)
     manager.bindAttempt('att-1')
@@ -2405,6 +2421,50 @@ describe("the block's close: the completion and the backend's block.closed (nocx
     const frozen = manager.freezeFromAttempt(attempt(), 4)
     expect(frozen).not.toBeNull()
     expect(closedOnScreen('att-1')).toBe(true)
+  })
+
+  it('keeps the leading marker across freezes and moves it when the leading block is cleared', () => {
+    const first = manager.startBlock('first', '~', 0)
+    manager.bindAttempt('first')
+    expect(first.el.dataset.firstEntry).toBe('true')
+    manager.blockClosed('first')
+    manager.freezeFromAttempt(attempt({ id: 'first' }), 0)
+    expect(first.el.dataset.firstEntry).toBe('true')
+
+    const second = manager.startBlock('second', '~', 0)
+    manager.bindAttempt('second')
+    expect(second.el.dataset.firstEntry).toBeUndefined()
+    manager.applyClearBoundary('second')
+    expect(first.el.dataset.firstEntry).toBeUndefined()
+    expect(second.el.dataset.firstEntry).toBe('true')
+    manager.clearAll()
+    expect(second.el.dataset.firstEntry).toBeUndefined()
+    expect(manager.startBlock('third', '~', 0).el.dataset.firstEntry).toBe('true')
+    manager.dispose()
+  })
+
+  it('a pasted burst keeps every early close until its authenticated completion', () => {
+    vi.useFakeTimers()
+    try {
+      const ids = Array.from({ length: 501 }, (_, i) => `burst-${i}`)
+      manager.startBlock(ids[0], '~', 0)
+      manager.bindAttempt(ids[0])
+      for (const id of ids) manager.blockClosed(id)
+      expect(manager.freezeFromAttempt(attempt({ id: ids[0] }), 0)).not.toBeNull()
+      expect(closedOnScreen(ids[0])).toBe(true)
+      for (const id of ids.slice(1)) {
+        manager.startBlock(id, '~', 0)
+        manager.bindAttempt(id)
+        manager.freezeFromAttempt(attempt({ id }), 0)
+        expect(manager.runningBlock).toBeNull()
+        expect(closedOnScreen(id), id).toBe(true)
+      }
+      expect(manager.blocks).toHaveLength(501)
+      expect(vi.getTimerCount(), 'completed commands leave no duration ticker').toBe(0)
+    } finally {
+      manager.dispose()
+      vi.useRealTimers()
+    }
   })
 
   it('a block.closed for a block this pane does not hold, or one already closed, changes nothing', () => {
@@ -4907,7 +4967,7 @@ describe('backend-owned block rows', () => {
   const row = (text: string): Row =>
     wireRowOf(Array.from(text, (char) => [char, 1, true] as CellSpec))
 
-  function newManager() {
+  function newManager(reserve?: boolean) {
     const inner = document.createElement('div')
     const liveContainer = document.createElement('div')
     inner.appendChild(liveContainer)
@@ -4915,10 +4975,132 @@ describe('backend-owned block rows', () => {
     const manager = new BlockManager(inner, liveContainer, {
       snapshotStore: freshStore(),
       paintStoredRows: (block, rows) =>
-        paintStoredRows(block, rows, { metric: null, palette: DEFAULT_SNAPSHOT }),
+        paintStoredRows(block, rows, { metric: null, palette: DEFAULT_SNAPSHOT, reserve }),
     })
     return { inner, manager, liveContainer }
   }
+
+  it('accepts an advancing output mark that removes all echo without accepting its stale predecessor', () => {
+    const { manager, inner } = newManager()
+    const rec = manager.startBlock('echo', '~', 0)
+    manager.bindAttempt('echo-only')
+    const body = [0, 1].map((from) => JSON.stringify({ from, row: { text: 'echo' } })).join('\n')
+    const previous = parseStoredBlockRows(body, { truncated: null, payload: {} }, 'same')
+    const next = parseStoredBlockRows(
+      body,
+      { truncated: null, payload: { outputStartRow: 2 } },
+      'same',
+    )
+    try {
+      manager.applyStoredRows('echo-only', previous)
+      manager.applyStoredRows('echo-only', next)
+      expect(rec.storedRows).toBe(next)
+      expect(rec.el.querySelector('.cmd-output')).toBeNull()
+      manager.applyStoredRows('echo-only', previous)
+      expect(rec.storedRows).toBe(next)
+    } finally {
+      manager.dispose()
+      inner.remove()
+    }
+  })
+
+  it.each([false, true])(
+    'accepts full retention eviction with unchanged durable end (pending=%s)',
+    (pending) => {
+      const { manager, inner } = newManager()
+      const previous = {
+        lines: [0, 1].map((from) => ({ from, row: row(`retained-${from}`) })),
+        artifactVersion: 'same',
+        droppedRows: 0,
+        lostRows: 0,
+        truncated: null,
+        firstRow: 0,
+        lastRow: 1,
+        endRow: 2,
+        rowCount: 2,
+        retainedRanges: [{ from: 0, to: 2 }],
+      }
+      const evicted = {
+        ...previous,
+        lines: [],
+        firstRow: 0,
+        lastRow: 0,
+        rowCount: 0,
+        retainedRanges: [],
+      }
+      let rec
+      try {
+        if (!pending) {
+          rec = manager.startBlock('stream', '~', 0)
+          manager.bindAttempt('evicted')
+        }
+        manager.applyStoredRows('evicted', previous)
+        if (rec) expect(blockOutputText(rec.el)).toBe('retained-0\nretained-1')
+        manager.applyStoredRows('evicted', evicted)
+        if (!rec) {
+          rec = manager.startBlock('stream', '~', 0)
+          manager.bindAttempt('evicted')
+        }
+        expect(rec.storedRows?.lines).toEqual([])
+        expect(rec.storedRows?.retainedRanges).toEqual([])
+        expect(blockOutputText(rec.el)).toBe('')
+        expect(rec.el.querySelector('.cmd-output')).toBeNull()
+      } finally {
+        manager.dispose()
+        inner.remove()
+      }
+    },
+  )
+
+  it('clears evicted live ink while preserving an unloaded retained body', () => {
+    const { manager, inner } = newManager(false)
+    const rec = manager.startBlock('stream', '~', 0)
+    manager.bindAttempt('unloaded')
+    const previous = {
+      lines: [0, 1].map((from) => ({ from, row: row(`old-${from}`) })),
+      artifactVersion: 'same',
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+      firstRow: 0,
+      lastRow: 1,
+      endRow: 2,
+      rowCount: 2,
+      retainedRanges: [{ from: 0, to: 2 }],
+    }
+    const unloaded = {
+      ...previous,
+      lines: [],
+      firstRow: 2,
+      lastRow: 3,
+      endRow: 4,
+      retainedRanges: [{ from: 2, to: 4 }],
+    }
+    try {
+      manager.applyStoredRows('unloaded', previous)
+      const body = rec.el.querySelector('.cmd-output')
+      expect(body?.textContent).toBe('old-0old-1')
+      manager.applyStoredRows('unloaded', unloaded)
+      expect(rec.el.querySelector('.cmd-output')).toBe(body)
+      expect(body?.textContent).toBe('')
+      expect(body?.getAttribute('data-rows-count')).toBe('2')
+      expect(rec.storedRows?.lines).toEqual([])
+      expect(blockOutputText(rec.el)).toBe('')
+      expect(rec.el.querySelector('[data-output-empty]')).toBeNull()
+      manager.applyStoredRows('unloaded', previous)
+      expect(rec.storedRows?.endRow).toBe(4)
+      expect(body?.textContent).toBe('')
+      manager.applyStoredRows('unloaded', {
+        ...unloaded,
+        lines: [2, 3].map((from) => ({ from, row: row(`new-${from}`) })),
+      })
+      expect(blockOutputText(rec.el)).toBe('new-2\nnew-3')
+      expect(body?.textContent).toBe('new-2new-3')
+    } finally {
+      manager.dispose()
+      inner.remove()
+    }
+  })
 
   it('keeps the real input focused without focus transitions while retained output grows', () => {
     const { manager, inner, liveContainer } = newManager()

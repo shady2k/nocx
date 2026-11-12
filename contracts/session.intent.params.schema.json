@@ -21,6 +21,11 @@
       "description": "Which kind of input the person produced. It is the whole of sessionruntime's intent vocabulary (internal/sessionruntime/contract.go's IntentKind) and not a printable subset: a click and a focus change are input too, and the pane's own renderer is the only source of them (nocx-zg3k3.3.1, design §6.1).",
       "enum": ["key", "text", "paste", "mouse", "focus"]
     },
+    "framing": {
+      "type": "string",
+      "enum": ["auto", "bare"],
+      "description": "How a paste is framed, for kind paste only (nocx-evj4b.1.2). Absent or auto means the runtime's own rule: bracketed only when the program enabled mode 2004. bare means never bracketed — a composer submit to a shell whose integration is live, where the editor is the protection and a mode belief over ssh cannot be trusted. The runtime still owns the encoding (byte stripping, newline to carriage return); the caller only says whether the program's mode may frame it."
+    },
     "payload": {
       "type": "string",
       "contentEncoding": "base64",

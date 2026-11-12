@@ -531,3 +531,68 @@ describe('VerticalTabStrip subagent rows', () => {
     expect(status()).toBe('working')
   })
 })
+
+describe('the actions hold the row still (nocx-4y82c.1.26)', () => {
+  const rectOf = (width: number): DOMRect => ({
+    width,
+    height: 38,
+    top: 0,
+    left: 0,
+    right: width,
+    bottom: 38,
+    x: 0,
+    y: 0,
+    toJSON: () => ({}),
+  })
+
+  it('pins every tab width while the pointer is on the actions, and restores it after the gesture', async () => {
+    const strip = new HorizontalTabStrip()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    strip.mount(container)
+    const first = makePane(1, '~', '')
+    const second = makePane(2, '~', '')
+    strip.addPane(first)
+    strip.addPane(second)
+
+    const tabs = [...container.querySelectorAll<HTMLElement>('.nocx-tab')]
+    expect(tabs).toHaveLength(2)
+    for (const tab of tabs) {
+      Object.defineProperty(tab, 'getBoundingClientRect', {
+        configurable: true,
+        value: () => rectOf(184),
+      })
+    }
+
+    const actions = container.querySelector<HTMLElement>('.tabstrip-actions')
+    expect(actions).not.toBeNull()
+
+    // Coming onto the actions pins the row at the widths a click will be
+    // measured against.
+    actions!.dispatchEvent(new Event('pointerenter'))
+    for (const tab of tabs) {
+      expect(tab.style.width).toBe('184px')
+      expect(tab.style.flex).toBe('0 0 auto')
+    }
+
+    // A label that lands while the click is in flight may not re-lay the row:
+    // that growth is what moved the + 36px under the pointer in CI.
+    strip.refreshPane({ ...second, title: 'a much longer program title' })
+    expect(tabs[1].style.width).toBe('184px')
+
+    // The gesture ends, and the held widths go back to the stylesheet.
+    window.dispatchEvent(new Event('mouseup'))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    for (const tab of tabs) {
+      expect(tab.style.width).toBe('')
+      expect(tab.style.flex).toBe('')
+    }
+
+    // Walking away releases them as well.
+    actions!.dispatchEvent(new Event('pointerenter'))
+    expect(tabs[0].style.width).toBe('184px')
+    actions!.dispatchEvent(new Event('pointerleave'))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(tabs[0].style.width).toBe('')
+  })
+})

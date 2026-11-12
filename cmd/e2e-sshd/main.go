@@ -758,7 +758,7 @@ type sessionState struct {
 	mu      sync.Mutex
 	cols    uint16
 	rows    uint16
-	slave   *os.File
+	master  *os.File
 	started bool
 	// ptyReq records whether a pty-req preceded the command request. sshd
 	// treats the pty as an option on the session: a client that wants a
@@ -824,12 +824,19 @@ func handleSession(ch gossh.Channel, reqs <-chan *gossh.Request) {
 					st.mu.Lock()
 					st.cols = clampU16(w.Cols)
 					st.rows = clampU16(w.Rows)
-					slave := st.slave
+					// THE MASTER, NOT THE SLAVE (nocx-evj4b.1.9). The parent
+					// closes its slave copy the moment the child owns the pty,
+					// so the child's exit is an EOF on the master; an ioctl on
+					// that closed fd answers "use of closed file" and a real
+					// sshd's window-change would silently do nothing. A
+					// running shell would then keep the pty-req's size while
+					// the client's screen had the new one.
+					master := st.master
 					st.mu.Unlock()
-					if slave != nil {
+					if master != nil {
 						rows := clampU16(w.Rows)
 						cols := clampU16(w.Cols)
-						_ = pty.Setsize(slave, &pty.Winsize{Rows: rows, Cols: cols})
+						_ = pty.Setsize(master, &pty.Winsize{Rows: rows, Cols: cols})
 					}
 				}
 				_ = req.Reply(true, nil)
@@ -1049,7 +1056,7 @@ func startCommand(ch gossh.Channel, st *sessionState, command, kind string) {
 		return
 	}
 	st.mu.Lock()
-	st.slave = slave
+	st.master = master
 	cols, rows := st.cols, st.rows
 	st.mu.Unlock()
 	_ = pty.Setsize(slave, &pty.Winsize{Rows: rows, Cols: cols})

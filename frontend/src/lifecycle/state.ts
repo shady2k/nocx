@@ -70,6 +70,8 @@ export interface ExecutionAttempt {
   /** Present exactly when state is completed. */
   readonly exitCode?: number
   readonly completedAt?: string
+  /** Backend elapsed time, independent of wall-clock adjustments. */
+  readonly durationMs?: number
   /** The completion's render fence (decision 7 carve-out): 64 lowercase hex
    *  chars the shell wrote to the pty after the command's output. A fence
    *  with no authenticated event behind it does nothing at all. Present
@@ -529,6 +531,7 @@ export class LifecycleKernel {
         startedAt: a.startedAt,
         exitCode: a.exitCode,
         completedAt: a.completedAt,
+        durationMs: a.durationMs,
         fence: a.fence,
         signalDelivery: deliveryOf(fact),
       }
@@ -557,6 +560,7 @@ export class LifecycleKernel {
       state: 'completed' as const,
       exitCode: a.exitCode,
       completedAt: a.completedAt,
+      durationMs: a.durationMs,
       fence: a.fence,
       // The completion's own word wins over what the open attempt carried: a
       // Stop that LANDED after an earlier one failed is the attempt's outcome

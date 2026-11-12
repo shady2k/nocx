@@ -26,6 +26,9 @@ package app
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -75,7 +78,7 @@ func TestLiveSshd_CarrierBootstrapReachesAcceptedDomain(t *testing.T) {
 		t.Error("the per-epoch capability appeared in the session's own output")
 	}
 
-	endTheSession(t, ch, out)
+	endTheSession(t, ch, out, fx.home)
 	// Nothing installed beyond the bundle, and no file on the far host
 	// holds the capability — including the temp root, which the bootstrap
 	// wrote to and unlinked before writing a byte.
@@ -90,6 +93,16 @@ func TestLiveSshd_CarrierBootstrapReachesAcceptedDomain(t *testing.T) {
 // frame that never came.
 func TestLiveSshd_WithNothingPublishedTheSessionStillReachesAPrompt(t *testing.T) {
 	fx := startLiveSshd(t, true)
+	// A NATIVE LOGIN SHELL WRITES ITS HISTORY ON THE WAY OUT (nocx-evj4b.1.4).
+	// generation-unavailable leaves exactly that shell, and it does not read
+	// the fixture's ~/.bashrc (a login shell reads .bash_profile/.profile), so
+	// it never sees HISTFILE=/dev/null and writes $HOME/.bash_history. Make
+	// that exit take a moment so the race with t.TempDir's RemoveAll is
+	// deterministic rather than a matter of the machine being fast: the writer
+	// is the login bash, and the test must wait for it before cleanup.
+	if err := os.WriteFile(filepath.Join(fx.home, ".bash_logout"), []byte("sleep 0.5\n"), 0o600); err != nil {
+		t.Fatalf("write .bash_logout: %v", err)
+	}
 	kernel := newRecordingKernel()
 	ch, out := fx.connect(t, kernel, ssh.ShellBash)
 
@@ -108,7 +121,7 @@ func TestLiveSshd_WithNothingPublishedTheSessionStillReachesAPrompt(t *testing.T
 		// domain reaching Established with no shell behind it.
 		t.Logf("minted %d domains (the channel is established at connect; the shell never joined it)", minted)
 	}
-	endTheSession(t, ch, out)
+	endTheSession(t, ch, out, fx.home)
 }
 
 // TestLiveSshd_InputIsRefusedUntilTheTerminalOutcome watches the quarantine on
@@ -149,7 +162,7 @@ func TestLiveSshd_InputIsRefusedUntilTheTerminalOutcome(t *testing.T) {
 	if strings.Contains(out.String(), "QUARANTINE_BREACH") {
 		t.Error("a keystroke refused during the bootstrap was delivered later")
 	}
-	endTheSession(t, ch, out)
+	endTheSession(t, ch, out, fx.home)
 }
 
 // The other two live-sshd rows, reproduced with an installer wired. They
@@ -179,7 +192,7 @@ func TestLiveSshd_ForwardingRefusedStillReachesAConventionalPrompt(t *testing.T)
 	if minted != 0 {
 		t.Errorf("refused forwarding still minted %d domain(s)", minted)
 	}
-	endTheSession(t, ch, out)
+	endTheSession(t, ch, out, fx.home)
 }
 
 // TestLiveSshd_ConnectionLossRevokesTheBootstrappedDomain mirrors
@@ -303,7 +316,7 @@ func (p *shellProbe) write() {
 // OUTPUT — the echoed line spells it split (`'SESS”_END_…'`) — so its arrival
 // proves the shell consumed everything before it and is at a fresh prompt.
 // Only then is `exit` written, and it is a line of its own by construction.
-func endTheSession(t *testing.T, ch ssh.Channel, out *sessionOutput) {
+func endTheSession(t *testing.T, ch ssh.Channel, out *sessionOutput, home string) {
 	t.Helper()
 	detail := func() string {
 		return fmt.Sprintf("channel done: %t, %s", doneClosed(ch), terminalTail(out, terminalTailBytes))
@@ -320,6 +333,109 @@ func endTheSession(t *testing.T, ch ssh.Channel, out *sessionOutput) {
 	}
 	waittest.WaitForTimeoutDetail(t, "session end after exit", 20*time.Second, detail,
 		func() bool { return doneClosed(ch) || out.Ended() })
+
+	// THE STREAM ENDING IS NOT THE PROCESS TREE ENDING (nocx-evj4b.1.4).
+	// A native login shell — what generation-unavailable leaves — writes its
+	// history on the way out, after the pane's stream can already look closed.
+	// The writer is a process whose HOME is this fixture's home; waiting on the
+	// process tree is the observable that the writer is gone, and it is what
+	// keeps t.TempDir's RemoveAll out of a race with a file that appears after
+	// the test returned.
+	processDetail := func() string {
+		return fmt.Sprintf("%s; processes still naming %s as HOME: %v",
+			detail(), home, sessionHomeProcesses(home))
+	}
+	waittest.WaitForTimeoutDetail(t, "the session's process tree is gone", 20*time.Second,
+		processDetail, func() bool { return len(sessionHomeProcesses(home)) == 0 })
+
+	// The cleanup runs BEFORE t.TempDir's RemoveAll (it is registered later, so
+	// LIFO makes it first). It is the deterministic assertion the flake needed:
+	// no writer may be alive when the home is about to be removed, and the home
+	// contents are named so a surviving file says who left it.
+	t.Cleanup(func() {
+		if ps := sessionHomeProcesses(home); len(ps) > 0 {
+			t.Errorf("a process outlived the session and is still able to write into its home: %v", ps)
+		}
+		if files := sessionHomeFiles(home); len(files) > 0 {
+			t.Logf("session home at cleanup: %v", files)
+		}
+	})
+}
+
+// sessionHomeProcesses names every process still holding this fixture's HOME:
+// HOME in its environment, or a cwd/file descriptor under it. Those are the
+// processes the session started and the ones that can still write into the
+// home after the pane's stream has ended.
+//
+// Linux only: /proc is the observable. On a host without /proc (macOS) the
+// caller's stream wait is all there is, and this returns nil.
+func sessionHomeProcesses(home string) []string {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+	var out []string
+	own := os.Getpid()
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid == own {
+			continue
+		}
+		// The directory is named by the pid parsed above, never by the entry
+		// name, so the reads below take an integer and a fixed file name.
+		dir := filepath.Join("/proc", strconv.Itoa(pid))
+		cmdline, _ := os.ReadFile(filepath.Join(dir, "cmdline")) //nolint:gosec // G304: /proc/<pid> for the pid parsed above, plus a fixed name.
+		comm, _ := os.ReadFile(filepath.Join(dir, "comm"))       //nolint:gosec // G304: the same entry, read for its command name.
+		describe := fmt.Sprintf("pid %d %s %q", pid,
+			strings.TrimSpace(string(comm)),
+			strings.ReplaceAll(strings.TrimRight(string(cmdline), "\x00"), "\x00", " "))
+		matched := false
+		if env, err := os.ReadFile(filepath.Join(dir, "environ")); err == nil { //nolint:gosec // G304: /proc/<pid> for the pid parsed above, plus a fixed name.
+			for _, kv := range strings.Split(string(env), "\x00") {
+				if kv == "HOME="+home {
+					matched = true
+					break
+				}
+			}
+		}
+		if !matched {
+			if cwd, err := os.Readlink(filepath.Join(dir, "cwd")); err == nil &&
+				(cwd == home || strings.HasPrefix(cwd, home+string(os.PathSeparator))) {
+				matched = true
+			}
+		}
+		if !matched {
+			if fds, err := os.ReadDir(filepath.Join(dir, "fd")); err == nil {
+				for _, fd := range fds {
+					link, err := os.Readlink(filepath.Join(dir, "fd", fd.Name()))
+					if err == nil && (link == home || strings.HasPrefix(link, home+string(os.PathSeparator))) {
+						matched = true
+						break
+					}
+				}
+			}
+		}
+		if matched {
+			out = append(out, describe)
+		}
+	}
+	return out
+}
+
+// sessionHomeFiles lists what is left in the fixture home, relative to it.
+func sessionHomeFiles(home string) []string {
+	var files []string
+	_ = filepath.WalkDir(home, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(home, path)
+		if relErr == nil {
+			files = append(files, rel)
+		}
+		return nil
+	})
+	return files
 }
 
 // doneClosed reports whether a channel has reported its end, without blocking.

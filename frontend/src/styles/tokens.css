@@ -94,16 +94,12 @@ html {
   /* 184px minimum for a horizontal tab (spec §3, §1.10); the existing 220px
      cap is unchanged and lives with the tab strip's own CSS, not here. */
   --terminal-tab-min-width: 184px;
-  /* The ledger's side gutter. Rows carry it (style.css `.scrollback-inner > *`,
-     `.nocx-summon-answers > *`, `.nocx-editor`), not the pane, so a row can paint
-     to the edge (spec 2026-09-14 §4, nocx-9bpeq.8).
-
-     24px (mockup decision 2026-09-15 §1.5, §3): the prior 16px read as edge-
-     to-edge rows in the mockup comparison; every inset (transcript rules,
-     the failure rail's clearance, the pane context strip's padding) is
-     measured from this same gutter so the ledger has one inset, not several
-     coincidentally-equal ones. */
-  --pane-inline-padding: var(--space-6);
+  /* The pane's one gutter is NOT a spacing-scale number any more
+     (ADR-92zzg2y2): it is one terminal cell wide on the sides and half a row
+     top and bottom, so it scales with the font. It is declared on `.pane`
+     (styles/base.css) where the renderer publishes `--term-cell-width` and
+     `--term-cell-height`; a value declared here could not see them, because a
+     custom property's `var()` is resolved where it is declared. */
 
   /* A command block's BODY padding. Named here because two surfaces wear it:
      the frozen `.cmd-output` and the live region that becomes it. They must

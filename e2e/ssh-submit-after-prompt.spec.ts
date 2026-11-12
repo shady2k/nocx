@@ -172,3 +172,137 @@ test('a submit queued during an ssh open waits for the shell’s prompt (nocx-ev
     fixture.proc.kill('SIGKILL')
   }
 })
+
+/**
+ * THE CONVENTIONAL CASE (owner, 2026-11-10; nocx-evj4b.1.8).
+ *
+ * A plain sh on the far side never announces a prompt mark, so the startup
+ * queue's promise cannot be kept. A line submitted while the shell is still
+ * starting stays the person's: it comes back to the composer after the startup
+ * settles, and NOTHING is written into the pty — the far side is still cooked
+ * and its startup chain can read stdin. Only the person's own submit at the
+ * prompt they can see reaches it.
+ */
+test('a submit during a plain sh startup stays in the composer until the person submits at the prompt', async ({
+  page,
+}) => {
+  test.setTimeout(300_000)
+  const logRoot = mkdtempSync(path.join(tmpdir(), 'nocx-conventional-log-'))
+  const hostRoot = mkdtempSync(path.join(tmpdir(), 'nocx-conventional-host-'))
+  const remoteHome = path.join(hostRoot, 'home')
+  mkdirSync(remoteHome, { recursive: true, mode: 0o700 })
+  // The prompt is HELD at the shell: everything before it runs at full speed,
+  // and the spec decides when the shell becomes a running /bin/sh.
+  const holdPath = path.join(hostRoot, 'release-shell')
+  const holdBin = path.join(hostRoot, 'bin', 'sh')
+  mkdirSync(path.dirname(holdBin), { recursive: true })
+  writeFileSync(
+    holdBin,
+    `#!/bin/sh\nwhile [ ! -e '${holdPath}' ]; do sleep 0.01; done\nexec /bin/sh -l\n`,
+    { mode: 0o755 },
+  )
+  const fixture: SshdFixture = await startSshd({
+    home: remoteHome,
+    cwd: remoteHome,
+    args: ['-input-log', logRoot, '-shell', holdBin],
+  })
+  let profileId: string | null = null
+  try {
+    const sshDir = path.join(readStand().home, '.ssh')
+    mkdirSync(sshDir, { recursive: true, mode: 0o700 })
+    writeFileSync(path.join(sshDir, 'known_hosts'), `${fixture.knownHosts}\n`)
+
+    await page.goto('/')
+    await appReadyForInput(page)
+    const info = await resolveBackend(page)
+    const profileName = `e2e-conventional-${Date.now()}`
+    const created = await rpc<{ id: string }>(page, info, 'profiles.create', {
+      type: 'ssh',
+      name: profileName,
+      options: {
+        host: fixture.host,
+        port: fixture.port,
+        user: 'nocx-e2e-long-bound',
+        keyPath: fixture.userKey,
+        desiredMode: 'script',
+      },
+    })
+    profileId = created.id
+
+    await page.keyboard.press('Control+Shift+P')
+    const search = page.locator('.quick-connect__search input')
+    await expect(search).toBeVisible({ timeout: 30_000 })
+    await search.fill(profileName)
+    await expect(page.locator('.quick-connect__item', { hasText: profileName })).toBeVisible({
+      timeout: 30_000,
+    })
+    await page.keyboard.press('Enter')
+
+    const editor = page.locator(EDITOR)
+    const checking = page.getByRole('status', { name: 'Checking this shell…' })
+    await expect(editor).toBeVisible({ timeout: 180_000 })
+    await expect(checking).toBeVisible({ timeout: 30_000 })
+    await editor.click()
+    await editor.pressSequentially(LINE)
+    await expect(editor).toHaveText(LINE)
+    await editor.press('Enter')
+
+    // The shell may start; the queue must not write the line.
+    writeFileSync(holdPath, '')
+
+    const logLine = () => fixture.lines().find((line) => line.startsWith('INPUTLOG=')) ?? ''
+    await expect.poll(logLine, { timeout: 60_000 }).not.toBe('')
+    const logPath = logLine().slice('INPUTLOG='.length).split(' ')[0]
+    // The settled-conventional card: the startup is over.
+    await expect(page.locator(`${PANE} .nocx-integration-notice`)).toBeVisible({ timeout: 60_000 })
+
+    // THE LINE IS STILL THE PERSON'S: no prompt mark is coming, so the queue
+    // returned it to the composer, and the far side read nothing.
+    await expect(editor).toHaveText(LINE)
+    expect(bootstrapFramesEnd(readFileSync(logPath))).not.toBeNull()
+    const framesEnd = bootstrapFramesEnd(readFileSync(logPath))!
+    expect(
+      readFileSync(logPath).subarray(framesEnd).toString('utf8'),
+      'the line reached the far pty before the person submitted after the prompt',
+    ).toBe('')
+
+    // The restored draft owns the keyboard even after a click on live output.
+    // Keep typing as a person would: the suffix must extend that draft, not
+    // bypass it into the shell or replace it during a late restoration.
+    const suffix = ' && echo continued'
+    await page.locator(`${PANE} .terminal-live-container`).click()
+    await page.keyboard.type(suffix)
+    await expect(editor).toHaveText(`${LINE}${suffix}`)
+    expect(readFileSync(logPath).subarray(framesEnd).toString('utf8')).toBe('')
+    await page.keyboard.press('Enter')
+    await expect
+      .poll(() => readFileSync(logPath).subarray(framesEnd).toString('utf8'), {
+        timeout: 60_000,
+        intervals: [200],
+      })
+      .toBe(`${LINE}${suffix}\r`)
+
+    // Once that draft is submitted, the conventional shell owns raw input.
+    await expect(editor).not.toBeVisible()
+    const rawLine = 'echo raw-after-draft'
+    await page.locator(`${PANE} .terminal-live-container`).click()
+    await page.keyboard.type(rawLine)
+    await page.keyboard.press('Enter')
+    await expect
+      .poll(() => readFileSync(logPath).subarray(framesEnd).toString('utf8'), {
+        timeout: 60_000,
+        intervals: [200],
+      })
+      .toBe(`${LINE}${suffix}\r${rawLine}\r`)
+  } finally {
+    try {
+      if (profileId !== null) {
+        const info = await resolveBackend(page)
+        await rpc(page, info, 'profiles.delete', { id: profileId })
+      }
+    } catch {
+      // A cleanup that throws would replace the real failure with its own.
+    }
+    fixture.proc.kill('SIGKILL')
+  }
+})

@@ -2,14 +2,11 @@ package sessionruntime
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"reflect"
 	"strings"
 	"testing"
-
-	"github.com/shady2k/nocx/internal/emulator"
 )
 
 // The real runtime, judged on the six cases this bead's acceptance names
@@ -205,12 +202,19 @@ func TestAMouseEventIsInputOnlyWhenTheProgramAskedForIt(t *testing.T) {
 	ctrl := sessionControl(t, s)
 
 	// No tracking mode: the emulator declines, nothing is written, and the
-	// intent is refused rather than delivered as bytes nobody asked for.
-	if _, state, err := admittedThenExecuted(t, s, ctrl, IntentKindMouse, []byte("press left 2 3")); !errors.Is(err, emulator.ErrUnsupported) || state != IntentStateRefused {
-		t.Fatalf("a mouse event with no tracking mode: state=%s err=%v, want refused and %v", intentStateName(state), err, emulator.ErrUnsupported)
+	// intent is executed with no bytes rather than refused — nothing is owed to
+	// a program that did not ask (encode's ErrUnsupported rule, nocx-evj4b.1.12;
+	// a refusal would keep the renderer's queue retrying an event that can never
+	// be delivered).
+	if _, state, err := admittedThenExecuted(t, s, ctrl, IntentKindMouse, []byte("press left 2 3")); err != nil || state != IntentStateExecuted {
+		t.Fatalf("a mouse event with no tracking mode: state=%s err=%v, want executed with no bytes", intentStateName(state), err)
 	}
-	if got := term.Written(); len(got) != 0 {
-		t.Fatalf("a mouse event no program asked for wrote %q to the PTY", got)
+	// No BYTES — the harness records the runtime's write call, and an executed
+	// intent with nothing to say still records one of zero length.
+	for _, wrote := range term.Written() {
+		if len(wrote) != 0 {
+			t.Fatalf("a mouse event no program asked for wrote %q to the PTY", wrote)
+		}
 	}
 
 	// The program asks for SGR mouse reporting, and the same event now reaches
@@ -221,7 +225,14 @@ func TestAMouseEventIsInputOnlyWhenTheProgramAskedForIt(t *testing.T) {
 	if _, state, err := admittedThenExecuted(t, s, ctrl, IntentKindMouse, []byte("press left 2 3")); err != nil || state != IntentStateExecuted {
 		t.Fatalf("a mouse event the program asked for: state=%s err=%v, want executed", intentStateName(state), err)
 	}
-	written := term.Written()
+	// The empty write the ignored press recorded is not bytes; what reached the
+	// program is the one sequence after it.
+	var written [][]byte
+	for _, wrote := range term.Written() {
+		if len(wrote) != 0 {
+			written = append(written, wrote)
+		}
+	}
 	if len(written) != 1 || string(written[0]) != "\x1b[<0;3;4M" {
 		t.Fatalf("the press at cell (2,3) reached the program as %q, want %q", written, "\x1b[<0;3;4M")
 	}
@@ -264,6 +275,51 @@ func TestAPasteIsFramedByTheProgramsBracketedPasteMode(t *testing.T) {
 	framed := term.Written()
 	if len(framed) != 2 || string(framed[1]) != "\x1b[200~make test\x1b[201~" {
 		t.Fatalf("the same paste with mode 2004 set reached the program as %q, want %q", framed, "\x1b[200~make test\x1b[201~")
+	}
+}
+
+// A CALLER THAT KNOWS BETTER THAN THE MODE (nocx-evj4b.1.2). The composer's
+// submit is a whole line the editor held, so it asks for no framing; the same
+// intent with no framing keeps the mode's answer.
+func TestACallerCanAskForABarePaste(t *testing.T) {
+	s, term, _ := realRuntime(t)
+	ctrl := sessionControl(t, s)
+
+	if err := s.Ingest([]byte("\x1b[?2004h")); err != nil {
+		t.Fatalf("the program enables bracketed paste: %v", err)
+	}
+	// The mode frames an ordinary paste.
+	if _, state, err := admittedThenExecuted(t, s, ctrl, IntentKindPaste, []byte("make test")); err != nil || state != IntentStateExecuted {
+		t.Fatalf("a paste with the mode set: state=%s err=%v, want executed", intentStateName(state), err)
+	}
+	framed := term.Written()
+	if len(framed) != 1 || string(framed[0]) != "\x1b[200~make test\x1b[201~" {
+		t.Fatalf("the mode's paste reached the program as %q, want it framed", framed)
+	}
+
+	// The caller's bare request is not framed, and the newline it carries is
+	// the bare path's carriage return.
+	id, err := s.Admit(Intent{
+		At:      s.Incarnation(),
+		Under:   ctrl.Epoch,
+		By:      ctrl.Holder,
+		Kind:    IntentKindPaste,
+		Payload: []byte("echo a\necho b"),
+		Framing: PasteFramingBare,
+	})
+	if err != nil {
+		t.Fatalf("admit a bare paste: %v", err)
+	}
+	encoded, err := s.Commit(Intent{ID: id}, nil)
+	if err != nil {
+		t.Fatalf("commit a bare paste: %v", err)
+	}
+	if _, writeErr := s.Terminal().Write(encoded); writeErr != nil {
+		t.Fatalf("write a bare paste: %v", writeErr)
+	}
+	bare := term.Written()
+	if len(bare) != 2 || string(bare[1]) != "echo a\recho b" {
+		t.Fatalf("a bare paste reached the program as %q, want %q", bare[1:], "echo a\recho b")
 	}
 }
 

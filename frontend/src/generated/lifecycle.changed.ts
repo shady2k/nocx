@@ -66,13 +66,17 @@ export interface LifecycleChanged {
      */
     origin?: 'app' | 'shell'
     /**
-     * When the attempt was created, RFC 3339 with sub-second precision. The block model derives duration from startedAt and completedAt.
+     * When the attempt was created, RFC 3339 with sub-second precision. Wall-clock time for display; durationMs carries the measured interval.
      */
     startedAt?: string
     /**
      * The exit status, present exactly when state is completed. Set exactly once, only by an authenticated completion.
      */
     exitCode?: number
+    /**
+     * Measured run interval in milliseconds, computed with the kernel clock before timestamp serialization. Present on completion when the interval is known; independent of wall-clock adjustments.
+     */
+    durationMs?: number
     /**
      * When the authenticated completion landed in the kernel, RFC 3339 with sub-second precision. Present exactly when state is completed.
      */

@@ -94,16 +94,24 @@ export class RowReadQueue<T = unknown> {
 
   private pump(): void {
     while (this.active < this.limit) {
-      const next = this.leastUrgentFirst()[0]
+      const next = this.mostUrgent()
       if (!next) return
       this.start(next)
     }
   }
 
-  private leastUrgentFirst(): Job<T>[] {
-    return [...this.jobs.values()]
-      .filter((job) => job.state === 'pending')
-      .sort((a, b) => a.priority() - b.priority())
+  private mostUrgent(): Job<T> | undefined {
+    let next: Job<T> | undefined
+    let bestPriority = Infinity
+    for (const job of this.jobs.values()) {
+      if (job.state !== 'pending') continue
+      const priority = job.priority()
+      if (!next || priority < bestPriority) {
+        next = job
+        bestPriority = priority
+      }
+    }
+    return next
   }
 
   private start(job: Job<T>): void {

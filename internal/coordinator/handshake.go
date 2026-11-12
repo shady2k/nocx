@@ -81,10 +81,38 @@ package coordinator
 // are part of the surface ADR-0104 declares, and a published byte of them
 // moving is a bump.
 //
+// 24 (fix/nocx-evj4b.1-2-submit-framing, over main's 23): session.intent's
+// params gained `framing`. "auto" (or absent) frames a paste by the program's
+// own mode 2004; "bare" never brackets it, for the composer's submit behind a
+// live integration, where the editor holds the whole line and a mode belief the
+// ssh path cannot prove must not decide the encoding (nocx-evj4b.1.2). A window
+// that asks for a bare paste and meets a coordinator built before this field
+// would be answered "invalid session.intent params: unknown field framing",
+// because session.intent's validator is a closed set (internal/transport/
+// ws_intent.go); the two versions do not pair.
+//
+// 25 (fix/nocx-4y82c-1-11-echo-twice, over main's 24): the stored block rows
+// summary carries WHERE A BLOCK'S OUTPUT BEGINS. The `summary` definition of
+// contracts/ledger.blockRows.schema.json declares `outputStartRow`
+// (nocx-4y82c.1.11) — an optional integer beside the dropped and lost counts,
+// so a reader can drop the command's echo — and a declared field is a surface
+// change even when it is optional and its absence means "no mark". Both
+// changes are in this tree: the branch's own 24 was written against a main at
+// 23, while main took 24 for the intent framing, so the merged surface is one
+// above main's and the golden below is written over the MERGED tree.
+//
+// 26 (fix/nocx-ouru5-1-18-panel-per-tab-2, over main's 25): the panel belongs
+// to the tab. `tabs.setPanel` is a new method, the tab shape gained
+// `panelView` and `panelCollapsed` (carried on every tabs.* result and on
+// layout.read), and the UI-state document's `sidebar` lost `collapsed` and
+// `activeViewId` — the window-wide pair it kept until this version. A window
+// built against 25 would read a tab's panel as absent and would send a
+// document refuses, so the two versions do not pair.
+//
 // The number in a stage branch means only that ITS surface moved; this is the
 // number the integrated surface carries, and its golden is the one written by
 // the recipe over all four stages at once.
-const ProtocolVersion = 26
+const ProtocolVersion = 27
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

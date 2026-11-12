@@ -1,6 +1,8 @@
 package transport
 
 import (
+	"context"
+
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/session"
@@ -88,8 +90,10 @@ func historyRecordedParamsFor(data historyRecordedData, connection string, sessi
 	return params
 }
 
-// historyRecordedNotification emits through the current session subscriber.
-func (s *WSServer) historyRecordedNotification(wconn *wsConn, state *connState, data historyRecordedData) {
+// historyRecordedNotification follows its lifecycle fact in the same bounded
+// FIFO. Waiting for the independent writer preserves this terminal receipt
+// without letting it overtake the completion or silently dropping it.
+func (s *WSServer) historyRecordedNotification(ctx context.Context, wconn *wsConn, state *connState, data historyRecordedData) {
 	if wconn == nil || data.SessionID == "" {
 		return
 	}
@@ -98,7 +102,7 @@ func (s *WSServer) historyRecordedNotification(wconn *wsConn, state *connState, 
 		sessionIDs = sessionIDsOf(state)
 	}
 	params := historyRecordedParamsFor(data, connectionID(wconn), sessionIDs, s.captures)
-	if err := wconn.TryNotify("history.recorded", mustMarshal(params)); err != nil {
+	if err := wconn.EnqueueOrderedNotify(ctx, "history.recorded", mustMarshal(params)); err != nil {
 		s.log.Debug("write history.recorded", "attempt", data.AttemptID, "error", err)
 	}
 }

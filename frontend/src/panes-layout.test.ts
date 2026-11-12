@@ -613,6 +613,14 @@ describe('the window reopens on the tab that was in front', () => {
 
 // ── the panel is the tab's (nocx-ouru5.1.18) ─────────────────────────────
 
+/** The store folds a panel answer in the continuation of the promise the fake
+ *  backend handed it, so the whole wait this file needs is for that continuation
+ *  to run: a bounded drain of the microtask queue, never a clock. A fold that
+ *  never happens fails the assertion after it with the value actually held. */
+async function drainsMicrotasks(turns = 128): Promise<void> {
+  for (let turn = 0; turn < turns; turn += 1) await Promise.resolve()
+}
+
 describe('each tab remembers its own right-hand panel', () => {
   beforeEach(() => {
     resetSessionCounter()
@@ -706,24 +714,26 @@ describe('each tab remembers its own right-hand panel', () => {
     expect(answers.map((a) => a.view)).toEqual(['ports', 'git'])
 
     answers[0].resolve() // Ports answers first; Git has not.
-    await vi.waitFor(() => expect(store.tab('tab-a')?.panelView).toBe('ports'))
+    // THE ANSWER THAT LANDED IS THE ROW, even with a newer write outstanding:
+    // the chain holds what Ports asked for, and a cache that skipped it would
+    // disagree with the backend until some later write happened to land.
+    await drainsMicrotasks()
+    expect(
+      store.tab('tab-a')?.panelView,
+      'an answer that lands before the newer one is the row the chain holds',
+    ).toBe('ports')
 
     manager.activateByIndex(1)
-    await vi.waitFor(() => {
-      expect(manager.activeTabPanel()).toEqual({ view: '', collapsed: false })
-    })
+    expect(manager.activeTabPanel()).toEqual({ view: '', collapsed: false })
     manager.activateByIndex(0)
-    await vi.waitFor(() => {
-      expect(manager.activeTabPanel()).toEqual({ view: 'git', collapsed: false })
-    })
+    expect(manager.activeTabPanel()).toEqual({ view: 'git', collapsed: false })
 
     answers[1].resolve()
-    await vi.waitFor(() => expect(store.tab('tab-a')?.panelView).toBe('git'))
+    await drainsMicrotasks()
+    expect(store.tab('tab-a')?.panelView).toBe('git')
     manager.activateByIndex(1)
     manager.activateByIndex(0)
-    await vi.waitFor(() => {
-      expect(manager.activeTabPanel()).toEqual({ view: 'git', collapsed: false })
-    })
+    expect(manager.activeTabPanel()).toEqual({ view: 'git', collapsed: false })
   })
 
   it('applies the tab that comes to the front before its content starts', async () => {

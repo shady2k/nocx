@@ -83,6 +83,61 @@ describe('stored-row read queue', () => {
     expect(order).toEqual(['older-block', 'visible-block', 'older-block'])
   })
 
+  it('measures each pending priority at most once per selection and refreshes ordering when a slot opens', async () => {
+    const queue = new RowReadQueue<string>({ limit: 1 })
+    const blocker = deferred<string>()
+    const blocked = queue.submit(
+      'blocker',
+      () => 0,
+      () => blocker.promise,
+    )
+    const order: string[] = []
+    const jobs = [
+      { key: 'oldest', priority: 40 },
+      { key: 'middle', priority: 20 },
+      { key: 'visible-first', priority: 0 },
+      { key: 'older', priority: 30 },
+      { key: 'visible-second', priority: 0 },
+      { key: 'newest', priority: 10 },
+    ].map((job) => ({ ...job, calls: 0, gate: deferred<string>() }))
+    const reads = new Map(
+      jobs.map((job) => [
+        job.key,
+        queue.submit(
+          job.key,
+          () => {
+            job.calls++
+            return job.priority
+          },
+          () => {
+            order.push(job.key)
+            return job.gate.promise
+          },
+        ),
+      ]),
+    )
+    expect(jobs.map((job) => job.calls)).toEqual(jobs.map(() => 0))
+
+    blocker.resolve('blocker')
+    await blocked
+    const expectedOrder = ['visible-first', 'oldest', 'visible-second', 'newest', 'middle', 'older']
+    for (const [index, key] of expectedOrder.entries()) {
+      expect(order).toEqual(expectedOrder.slice(0, index + 1))
+      for (const job of jobs) {
+        expect
+          .soft(job.calls, `${job.key} priority calls for selection ${index + 1}`)
+          .toBeLessThanOrEqual(1)
+        job.calls = 0
+      }
+      // A formerly offscreen block becomes visible while the slot is held.
+      // The next selection must measure it again, not reuse an earlier score.
+      if (index === 0) jobs[0].priority = -1
+      const selected = jobs.find((job) => job.key === key)!
+      selected.gate.resolve(key)
+      await expect(reads.get(key)).resolves.toBe(key)
+    }
+  })
+
   it('shares one read between callers of the same key', async () => {
     const queue = new RowReadQueue<number>({ limit: 2 })
     const gate = deferred<number>()

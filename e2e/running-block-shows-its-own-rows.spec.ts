@@ -118,10 +118,23 @@ test.describe('a running block', () => {
           committed: window.__nocxPaneScreen?.()?.geometry?.rows ?? -1,
         }
       })
-    const committed = (await settledRows()).committed
+    // BOTH NUMBERS, READ FRESH ON EVERY POLL (nocx-4y82c.1.21). The committed
+    // geometry the prompt had is not the running layout's: submitting removes
+    // the editor, the pane grows, and the fit commits the new row count a
+    // round trip later. Sampling `committed` ONCE before that refit (the
+    // nocx-atpw5.1.23 shape) froze the prompt's 27 and then waited for the
+    // running grid's 35 to become it — 15 s of a correct grid and a stale
+    // baseline. Waiting until the two agree is the running layout's own
+    // geometry, committed and painted.
     await expect
-      .poll(async () => (await settledRows()).painted, { timeout: 15_000 })
-      .toBe(committed)
+      .poll(
+        async () => {
+          const { painted, committed } = await settledRows()
+          return committed > 0 && painted === committed
+        },
+        { timeout: 15_000 },
+      )
+      .toBe(true)
     const before = await gridRows.count()
     const size = page.viewportSize()!
     // Three rows shorter: the emulator pushes the top of the screen into

@@ -143,7 +143,7 @@ func (s *Session) refreshLiveOutputAnchorLocked(snap Snapshot) {
 	// parked at home. Closing-screen capture still ends at its own cursor.
 	scr := ObservationScreen{Lines: snap.Rows, Reported: reported, Cursor: snap.Cursor}
 	scr.Cursor.Y = len(scr.Lines) - 1
-	skip := s.outputStartSkipLocked(o.OutputStartTrack, o.OutputPrefix, o.OutputStartRow, o.OutputMarkDeparted, scr)
+	skip, located := s.outputStartSkipLocatedLocked(o.OutputStartTrack, o.OutputPrefix, o.OutputStartRow, o.OutputMarkDeparted, scr)
 	anchor := ScreenRowAnchor{
 		Row:      snap.BaseRow + uint64(boundaryRowsTop(scr)+skip), // #nosec G115 -- both counts are nonnegative and bounded by the accepted screen rows
 		Revision: snap.Revision,
@@ -151,13 +151,20 @@ func (s *Session) refreshLiveOutputAnchorLocked(snap Snapshot) {
 	}
 	prior := o.OutputScreenAnchor
 	// Rows already attributed to this interval remain its output after they
-	// depart. Scrolling cannot move that start forward; a repaint can only
-	// expand ownership above it within the same screen identity.
+	// depart. A prefix this screen can no longer locate has left it, and its
+	// row still names where the interval began, so the start does not move
+	// forward on that account. A prefix that IS located is trusted: absolute
+	// rows are the shared screen coordinate under scrolling and a height
+	// change, so its row is the same one; when the row moved DOWN it did so
+	// because a WIDTH change re-laid and renumbered the rows — a 32-column
+	// command line wrapped to four rows at ten columns starts its output four
+	// rows down, and keeping the old row would hand the block three rows of
+	// its own echoed command.
 	if prior != nil {
 		sameBuffer := prior.Identity.At == anchor.Identity.At &&
 			prior.Identity.AltScreen == anchor.Identity.AltScreen &&
 			prior.Identity.BufferInstance == anchor.Identity.BufferInstance
-		if sameBuffer && prior.Row < anchor.Row {
+		if sameBuffer && !located && prior.Row < anchor.Row {
 			anchor.Row = prior.Row
 		}
 		if prior.Identity == anchor.Identity && prior.Row == anchor.Row {

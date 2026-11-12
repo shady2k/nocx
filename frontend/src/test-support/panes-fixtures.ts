@@ -1216,6 +1216,7 @@ export async function mountPaneManager(
    *  ordinary case; a restore that must reconnect a stored endpoint through
    *  a saved connection is the test that needs one (nocx-9y4ku). */
   profiles?: SSHProfile[],
+  initialPanel?: import('../panes').TabPanel,
 ): Promise<{
   bar: HTMLElement
   panes: HTMLElement
@@ -1264,7 +1265,7 @@ export async function mountPaneManager(
     ui,
   )
   // Open the initial tab explicitly — the constructor mounts nothing.
-  await manager.openInitialPane()
+  await manager.openInitialPane(initialPanel)
   return {
     bar,
     panes,

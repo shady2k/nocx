@@ -92,6 +92,13 @@ describe('the window shows one workspace at a time (nocx-isoph.5)', () => {
     // tab, and that tab with a pane.
     const member = rows.tabs.find((t) => t.workspaceId === workspace.id)!
     expect(rows.panes.some((p) => p.tabId === member.id)).toBe(true)
+    expect(manager.activeTabPanel()).toEqual({ view: '', collapsed: true })
+    await vi.waitFor(() =>
+      expect(backend.rows().tabs.find((tab) => tab.id === member.id)).toMatchObject({
+        panelView: '',
+        panelCollapsed: true,
+      }),
+    )
     expect(manager.currentWorkspaceId()).toBe(workspace.id)
     // THE HORIZONTAL STRIP SHOWS THE CURRENT WORKSPACE'S TABS AND FOLDS THE
     // NAMED REST. The default's rows are top-level (§4.2 — it draws no pill,

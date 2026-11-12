@@ -5102,6 +5102,33 @@ describe('backend-owned block rows', () => {
     }
   })
 
+  it('paints a replacement artifact that holds fewer rows instead of keeping a stale cache', () => {
+    const { manager, inner } = newManager()
+    const rec = manager.startBlock('stream', '~', 0)
+    manager.bindAttempt('replaced')
+    const artifact = (count: number, label: string, version: string) =>
+      parseStoredBlockRows(
+        Array.from({ length: count }, (_, from) =>
+          JSON.stringify({ from, row: row(`${label}-${from}`) }),
+        ).join('\n'),
+        { state: 'sealed', truncated: null, payload: {} },
+        version,
+      )
+    try {
+      manager.applyStoredRows('replaced', artifact(4, 'old', 'old-artifact'))
+      expect(blockOutputText(rec.el)).toBe('old-0\nold-1\nold-2\nold-3')
+      // A replacement artifact's rows share no index with the cache it
+      // replaces, so a shorter one is what the store holds now — not an older
+      // read of the same rows.
+      manager.applyStoredRows('replaced', artifact(2, 'new', 'new-artifact'))
+      expect(rec.storedRows?.lines.map((line) => line.from)).toEqual([0, 1])
+      expect(blockOutputText(rec.el)).toBe('new-0\nnew-1')
+    } finally {
+      manager.dispose()
+      inner.remove()
+    }
+  })
+
   it('keeps the real input focused without focus transitions while retained output grows', () => {
     const { manager, inner, liveContainer } = newManager()
     const input = document.createElement('textarea')
@@ -5143,11 +5170,24 @@ describe('backend-owned block rows', () => {
     const { manager, inner } = newManager()
     const earlier = {
       lines: [{ from: 0, row: row('earlier') }],
+      artifactVersion: 'grew',
       droppedRows: 0,
       lostRows: 0,
       truncated: null,
+      firstRow: 0,
+      lastRow: 0,
+      endRow: 1,
+      rowCount: 1,
+      retainedRanges: [{ from: 0, to: 1 }],
     }
-    const latest = { ...earlier, lines: [...earlier.lines, { from: 1, row: row('latest') }] }
+    const latest = {
+      ...earlier,
+      lines: [...earlier.lines, { from: 1, row: row('latest') }],
+      lastRow: 1,
+      endRow: 2,
+      rowCount: 2,
+      retainedRanges: [{ from: 0, to: 2 }],
+    }
     try {
       manager.setVisible(false)
       manager.applyStoredRows('entry-hidden', earlier)
@@ -5725,14 +5765,10 @@ describe('backend-owned block rows', () => {
     expect(liveContainer.previousElementSibling).toBe(frozen.el)
   })
 
-  it('never lets a block.grew fetch that resolves late shrink an already-painted block', () => {
-    // terminal-content.ts refetches the whole artifact on every block.grew /
-    // block.closed and applies whatever comes back; two in-flight requests
-    // for the same entry can resolve in either order. Simulated here by
-    // calling applyStoredRows with the LARGER delivery first (as if its
-    // fetch, dispatched second, resolved first) and the smaller one after
-    // (its earlier fetch, resolving late) — the block must keep the rows it
-    // already has.
+  it('never lets a delivery whose durable end is behind the accepted one shrink a painted block', () => {
+    // A block never shrinks below the rows it has accepted: the durable end a
+    // delivery reports is what makes it the newer of the two, so a delivery
+    // whose end is behind the accepted one can only be an older read.
     const { manager } = newManager()
     manager.startBlock('printf rows', '/repo', 0)
     manager.bindAttempt('entry-stream')
@@ -5742,9 +5778,15 @@ describe('backend-owned block rows', () => {
         { from: 0, row: row('first ') },
         { from: 1, row: row('second') },
       ],
+      artifactVersion: 'grew',
       droppedRows: 0,
       lostRows: 0,
       truncated: null,
+      firstRow: 0,
+      lastRow: 1,
+      endRow: 2,
+      rowCount: 2,
+      retainedRanges: [{ from: 0, to: 2 }],
     })
     expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond')
 
@@ -5752,9 +5794,15 @@ describe('backend-owned block rows', () => {
     // had appended.
     manager.applyStoredRows('entry-stream', {
       lines: [{ from: 0, row: row('first ') }],
+      artifactVersion: 'grew',
       droppedRows: 0,
       lostRows: 0,
       truncated: null,
+      firstRow: 0,
+      lastRow: 0,
+      endRow: 1,
+      rowCount: 1,
+      retainedRanges: [{ from: 0, to: 1 }],
     })
 
     expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond')

@@ -337,6 +337,10 @@ export function mergeStoredBlockRows(
   }
   for (const line of next.lines) byFrom.set(line.from, line)
   const merged = [...byFrom.values()].sort((a, b) => a.from - b.from)
+  // A read from the wire always carries geometry (parseStoredBlockRows builds
+  // it from the payload), and an explicitly empty run set is full eviction,
+  // not a missing one: it evicts every cached row. Only a hand-built snapshot
+  // can name no runs at all, and then there is nothing to clip the cache to.
   const retained = next.retainedRanges
   let rangeAt = 0
   const lines =
@@ -346,25 +350,7 @@ export function mergeStoredBlockRows(
           while (rangeAt < retained.length && retained[rangeAt].to <= line.from) rangeAt++
           return rangeAt < retained.length && retained[rangeAt].from <= line.from
         })
-  // An explicitly empty range set is full eviction, not missing geometry.
-  if (retained !== undefined) {
-    return { ...next, lines }
-  }
-  if (previous.retainedRanges === undefined || previous.retainedRanges.length === 0) {
-    return { ...next, lines }
-  }
-  // A legacy read that carried no geometry takes the one already known; the
-  // lines it brought are still added, so a whole-body refresh cannot blank a
-  // page that is already painted.
-  return {
-    ...next,
-    lines,
-    firstRow: previous.firstRow,
-    lastRow: previous.lastRow,
-    endRow: Math.max(next.endRow ?? 0, previous.endRow ?? 0),
-    rowCount: previous.rowCount,
-    retainedRanges: previous.retainedRanges,
-  }
+  return { ...next, lines }
 }
 
 /** A block whose rows have not been fetched yet, with the height it must

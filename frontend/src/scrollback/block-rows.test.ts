@@ -665,17 +665,12 @@ describe('stored block rows', () => {
       expect(storedBlockRowsForSelection(block, 'paged-artifact')?.lines).toEqual([])
     })
 
-    it('replaces a different artifact identity and keeps geometry-less legacy reads additive', () => {
+    it('replaces a different artifact identity instead of merging its rows', () => {
       const previous = page(0, 4, [{ from: 0, to: 4 }])
       const next = page(8, 2, [{ from: 8, to: 10 }], 'replacement-artifact')
       expect(mergeStoredBlockRows(previous, next)).toBe(next)
       expect(mergeStoredBlockRows(undefined, next)).toBe(next)
       expect(mergeStoredBlockRows({ ...previous, artifactVersion: undefined }, next)).toBe(next)
-      const legacy = { ...previous, lines: [{ from: 8, row: { text: 'legacy' } }] }
-      delete legacy.retainedRanges
-      const merged = mergeStoredBlockRows(previous, legacy)
-      expect(merged.lines.map((line) => line.from)).toEqual([0, 1, 2, 3, 8])
-      expect(merged.retainedRanges).toEqual(previous.retainedRanges)
     })
   })
 

@@ -4967,7 +4967,7 @@ describe('backend-owned block rows', () => {
   const row = (text: string): Row =>
     wireRowOf(Array.from(text, (char) => [char, 1, true] as CellSpec))
 
-  function newManager() {
+  function newManager(reserve?: boolean) {
     const inner = document.createElement('div')
     const liveContainer = document.createElement('div')
     inner.appendChild(liveContainer)
@@ -4975,7 +4975,7 @@ describe('backend-owned block rows', () => {
     const manager = new BlockManager(inner, liveContainer, {
       snapshotStore: freshStore(),
       paintStoredRows: (block, rows) =>
-        paintStoredRows(block, rows, { metric: null, palette: DEFAULT_SNAPSHOT }),
+        paintStoredRows(block, rows, { metric: null, palette: DEFAULT_SNAPSHOT, reserve }),
     })
     return { inner, manager, liveContainer }
   }
@@ -4998,6 +4998,131 @@ describe('backend-owned block rows', () => {
       expect(rec.el.querySelector('.cmd-output')).toBeNull()
       manager.applyStoredRows('echo-only', previous)
       expect(rec.storedRows).toBe(next)
+    } finally {
+      manager.dispose()
+      inner.remove()
+    }
+  })
+
+  it.each([false, true])(
+    'accepts full retention eviction with unchanged durable end (pending=%s)',
+    (pending) => {
+      const { manager, inner } = newManager()
+      const previous = {
+        lines: [0, 1].map((from) => ({ from, row: row(`retained-${from}`) })),
+        artifactVersion: 'same',
+        droppedRows: 0,
+        lostRows: 0,
+        truncated: null,
+        firstRow: 0,
+        lastRow: 1,
+        endRow: 2,
+        rowCount: 2,
+        retainedRanges: [{ from: 0, to: 2 }],
+      }
+      const evicted = {
+        ...previous,
+        lines: [],
+        firstRow: 0,
+        lastRow: 0,
+        rowCount: 0,
+        retainedRanges: [],
+      }
+      let rec
+      try {
+        if (!pending) {
+          rec = manager.startBlock('stream', '~', 0)
+          manager.bindAttempt('evicted')
+        }
+        manager.applyStoredRows('evicted', previous)
+        if (rec) expect(blockOutputText(rec.el)).toBe('retained-0\nretained-1')
+        manager.applyStoredRows('evicted', evicted)
+        if (!rec) {
+          rec = manager.startBlock('stream', '~', 0)
+          manager.bindAttempt('evicted')
+        }
+        expect(rec.storedRows?.lines).toEqual([])
+        expect(rec.storedRows?.retainedRanges).toEqual([])
+        expect(blockOutputText(rec.el)).toBe('')
+        expect(rec.el.querySelector('.cmd-output')).toBeNull()
+      } finally {
+        manager.dispose()
+        inner.remove()
+      }
+    },
+  )
+
+  it('clears evicted live ink while preserving an unloaded retained body', () => {
+    const { manager, inner } = newManager(false)
+    const rec = manager.startBlock('stream', '~', 0)
+    manager.bindAttempt('unloaded')
+    const previous = {
+      lines: [0, 1].map((from) => ({ from, row: row(`old-${from}`) })),
+      artifactVersion: 'same',
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+      firstRow: 0,
+      lastRow: 1,
+      endRow: 2,
+      rowCount: 2,
+      retainedRanges: [{ from: 0, to: 2 }],
+    }
+    const unloaded = {
+      ...previous,
+      lines: [],
+      firstRow: 2,
+      lastRow: 3,
+      endRow: 4,
+      retainedRanges: [{ from: 2, to: 4 }],
+    }
+    try {
+      manager.applyStoredRows('unloaded', previous)
+      const body = rec.el.querySelector('.cmd-output')
+      expect(body?.textContent).toBe('old-0old-1')
+      manager.applyStoredRows('unloaded', unloaded)
+      expect(rec.el.querySelector('.cmd-output')).toBe(body)
+      expect(body?.textContent).toBe('')
+      expect(body?.getAttribute('data-rows-count')).toBe('2')
+      expect(rec.storedRows?.lines).toEqual([])
+      expect(blockOutputText(rec.el)).toBe('')
+      expect(rec.el.querySelector('[data-output-empty]')).toBeNull()
+      manager.applyStoredRows('unloaded', previous)
+      expect(rec.storedRows?.endRow).toBe(4)
+      expect(body?.textContent).toBe('')
+      manager.applyStoredRows('unloaded', {
+        ...unloaded,
+        lines: [2, 3].map((from) => ({ from, row: row(`new-${from}`) })),
+      })
+      expect(blockOutputText(rec.el)).toBe('new-2\nnew-3')
+      expect(body?.textContent).toBe('new-2new-3')
+    } finally {
+      manager.dispose()
+      inner.remove()
+    }
+  })
+
+  it('paints a replacement artifact that holds fewer rows instead of keeping a stale cache', () => {
+    const { manager, inner } = newManager()
+    const rec = manager.startBlock('stream', '~', 0)
+    manager.bindAttempt('replaced')
+    const artifact = (count: number, label: string, version: string) =>
+      parseStoredBlockRows(
+        Array.from({ length: count }, (_, from) =>
+          JSON.stringify({ from, row: row(`${label}-${from}`) }),
+        ).join('\n'),
+        { state: 'sealed', truncated: null, payload: {} },
+        version,
+      )
+    try {
+      manager.applyStoredRows('replaced', artifact(4, 'old', 'old-artifact'))
+      expect(blockOutputText(rec.el)).toBe('old-0\nold-1\nold-2\nold-3')
+      // A replacement artifact's rows share no index with the cache it
+      // replaces, so a shorter one is what the store holds now — not an older
+      // read of the same rows.
+      manager.applyStoredRows('replaced', artifact(2, 'new', 'new-artifact'))
+      expect(rec.storedRows?.lines.map((line) => line.from)).toEqual([0, 1])
+      expect(blockOutputText(rec.el)).toBe('new-0\nnew-1')
     } finally {
       manager.dispose()
       inner.remove()
@@ -5045,11 +5170,24 @@ describe('backend-owned block rows', () => {
     const { manager, inner } = newManager()
     const earlier = {
       lines: [{ from: 0, row: row('earlier') }],
+      artifactVersion: 'grew',
       droppedRows: 0,
       lostRows: 0,
       truncated: null,
+      firstRow: 0,
+      lastRow: 0,
+      endRow: 1,
+      rowCount: 1,
+      retainedRanges: [{ from: 0, to: 1 }],
     }
-    const latest = { ...earlier, lines: [...earlier.lines, { from: 1, row: row('latest') }] }
+    const latest = {
+      ...earlier,
+      lines: [...earlier.lines, { from: 1, row: row('latest') }],
+      lastRow: 1,
+      endRow: 2,
+      rowCount: 2,
+      retainedRanges: [{ from: 0, to: 2 }],
+    }
     try {
       manager.setVisible(false)
       manager.applyStoredRows('entry-hidden', earlier)
@@ -5627,14 +5765,10 @@ describe('backend-owned block rows', () => {
     expect(liveContainer.previousElementSibling).toBe(frozen.el)
   })
 
-  it('never lets a block.grew fetch that resolves late shrink an already-painted block', () => {
-    // terminal-content.ts refetches the whole artifact on every block.grew /
-    // block.closed and applies whatever comes back; two in-flight requests
-    // for the same entry can resolve in either order. Simulated here by
-    // calling applyStoredRows with the LARGER delivery first (as if its
-    // fetch, dispatched second, resolved first) and the smaller one after
-    // (its earlier fetch, resolving late) — the block must keep the rows it
-    // already has.
+  it('never lets a delivery whose durable end is behind the accepted one shrink a painted block', () => {
+    // A block never shrinks below the rows it has accepted: the durable end a
+    // delivery reports is what makes it the newer of the two, so a delivery
+    // whose end is behind the accepted one can only be an older read.
     const { manager } = newManager()
     manager.startBlock('printf rows', '/repo', 0)
     manager.bindAttempt('entry-stream')
@@ -5644,9 +5778,15 @@ describe('backend-owned block rows', () => {
         { from: 0, row: row('first ') },
         { from: 1, row: row('second') },
       ],
+      artifactVersion: 'grew',
       droppedRows: 0,
       lostRows: 0,
       truncated: null,
+      firstRow: 0,
+      lastRow: 1,
+      endRow: 2,
+      rowCount: 2,
+      retainedRanges: [{ from: 0, to: 2 }],
     })
     expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond')
 
@@ -5654,9 +5794,15 @@ describe('backend-owned block rows', () => {
     // had appended.
     manager.applyStoredRows('entry-stream', {
       lines: [{ from: 0, row: row('first ') }],
+      artifactVersion: 'grew',
       droppedRows: 0,
       lostRows: 0,
       truncated: null,
+      firstRow: 0,
+      lastRow: 0,
+      endRow: 1,
+      rowCount: 1,
+      retainedRanges: [{ from: 0, to: 1 }],
     })
 
     expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond')

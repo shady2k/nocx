@@ -645,9 +645,10 @@ func (a installFS) Sync(p string) error                     { return a.conn.Sync
 // exposed, and sharing a helper across principals would be an
 // authorization error. Cross-session sharing waits for that seam.
 type helperRegistry struct {
-	lanes   laneProvider
-	install helperInstallProvider
-	source  deploy.ArtifactSource
+	lifetime *sessionLifetimeSetting
+	lanes    laneProvider
+	install  helperInstallProvider
+	source   deploy.ArtifactSource
 	// publishScreen is the coordinator transport's owner of session.frame
 	// metadata; the far-helper attachment forwards each reassembled snapshot
 	// to that existing screen plane rather than deriving CWD a second time.
@@ -1268,7 +1269,8 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 	spawnCtx, cancelSpawn := context.WithTimeout(ctx, farHelperAnswerTimeout)
 	endSpawn := diagnostics.Stage(ctx, diagnostics.StageSpawn)
 	entry, err := c.Spawn(spawnCtx, proto.SpawnParams{
-		Cwd: cfg.Cwd, Cols: cfg.Cols, Rows: cfg.Rows, Lifecycle: lifecycleLaunch,
+		SessionIdleDays: r.lifetime.daysPtr(),
+		Cwd:             cfg.Cwd, Cols: cfg.Cols, Rows: cfg.Rows, Lifecycle: lifecycleLaunch,
 		// THE CLAIM RIDES THE SPAWN, and it is the L7 interval's opening half
 		// rather than a duplicate of the row the open path already wrote
 		// (nocx-50w7p.5). Without it, a coordinator that died between this

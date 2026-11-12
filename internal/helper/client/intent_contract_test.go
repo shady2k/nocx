@@ -172,6 +172,10 @@ func hostedSessionsRecording(t *testing.T) (*client.Client, *recordingConn) {
 
 func hostedSessionsRecordingWithShell(t *testing.T, shell session.Shell) (*client.Client, *recordingConn) {
 	t.Helper()
+	// Contract validation can take longer than the retained snapshot's lifetime.
+	// This fixture tests wire shapes, not expiry: keep the existing service clock
+	// fixed so schema compilation cannot invalidate the resource being checked.
+	now := time.Now()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := session.New(session.Options{
 		Generation: "testhash",
@@ -179,6 +183,7 @@ func hostedSessionsRecordingWithShell(t *testing.T, shell session.Shell) (*clien
 		Inspector:  session.NewInspector(),
 		Log:        log,
 		Limits:     session.DefaultLimits(),
+		Now:        func() time.Time { return now },
 	})
 	t.Cleanup(svc.Close)
 

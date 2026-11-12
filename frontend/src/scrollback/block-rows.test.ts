@@ -508,6 +508,172 @@ describe('stored block rows', () => {
     )
   })
 
+  describe('paged retention', () => {
+    const options = { metric: null, palette: DEFAULT_SNAPSHOT, reserve: false }
+    const page = (
+      from: number,
+      count: number,
+      retainedRanges: { from: number; to: number }[],
+      artifactVersion = 'paged-artifact',
+    ): StoredBlockRows =>
+      parseStoredBlockRows(
+        Array.from({ length: count }, (_, index) =>
+          JSON.stringify({ from: from + index, row: { text: `row ${from + index}` } }),
+        ).join('\n'),
+        {
+          state: 'open',
+          truncated: retainedRanges.length > 1 ? 'cap' : null,
+          payload: {
+            retainedRanges,
+            rowCount: retainedRanges.reduce((total, range) => total + range.to - range.from, 0),
+            endRow: retainedRanges[retainedRanges.length - 1]?.to ?? from,
+          },
+        },
+        artifactVersion,
+      )
+    const rowNumbers = (block: HTMLElement) =>
+      [...block.querySelectorAll<HTMLElement>('.term-grid-row')].map((el) =>
+        Number(el.dataset.logicalLine),
+      )
+
+    it('removes evicted loaded rows from a running body and selection while keeping its head', () => {
+      const block = document.createElement('article')
+      block.dataset.entryId = 'capped-running'
+      const previous = page(0, 4, [{ from: 0, to: 4 }])
+      paintStoredRows(block, previous, options)
+      const head = block.querySelector('.term-grid-row')
+      const next = page(8, 2, [
+        { from: 0, to: 2 },
+        { from: 8, to: 10 },
+      ])
+      const merged = mergeStoredBlockRows(previous, next)
+      paintStoredRows(block, merged, options)
+
+      expect(merged.lines.map((line) => line.from)).toEqual([0, 1, 8, 9])
+      expect(rowNumbers(block)).toEqual([0, 1, 8, 9])
+      expect(block.querySelector('.term-grid-row')).toBe(head)
+      expect(block.querySelectorAll('.cmd-output-gap')).toHaveLength(1)
+      expect(block.querySelector('.cmd-output-gap')?.textContent).toContain('6')
+      expect(storedBlockRowsForSelection(block, 'paged-artifact')?.lines).toEqual(merged.lines)
+      expect(storedBlockRowsText(merged)).not.toContain('row 2')
+      expect(previous.lines.map((line) => line.from)).toEqual([0, 1, 2, 3])
+    })
+
+    it('applies a late output start and cap eviction to the same cached body', () => {
+      const block = document.createElement('article')
+      block.dataset.entryId = 'late-output-start'
+      const previous = page(0, 6, [{ from: 0, to: 6 }])
+      paintStoredRows(block, previous, options)
+      const next = parseStoredBlockRows(
+        [8, 9].map((from) => JSON.stringify({ from, row: { text: `row ${from}` } })).join('\n'),
+        {
+          state: 'open',
+          truncated: 'cap',
+          payload: {
+            outputStartRow: 1,
+            retainedRanges: [
+              { from: 0, to: 3 },
+              { from: 8, to: 10 },
+            ],
+            rowCount: 5,
+            endRow: 10,
+          },
+        },
+        'paged-artifact',
+      )
+      const merged = mergeStoredBlockRows(previous, next)
+      paintStoredRows(block, merged, options)
+
+      expect(rowNumbers(block)).toEqual([1, 2, 8, 9])
+      expect([...block.querySelectorAll('.term-grid-row')].map((row) => row.textContent)).toEqual([
+        'row 1',
+        'row 2',
+        'row 8',
+        'row 9',
+      ])
+      expect(block.querySelectorAll('.cmd-output-gap')).toHaveLength(1)
+      expect(block.querySelector('.cmd-output-gap')?.textContent).toContain('5')
+      expect(storedBlockRowsText(storedBlockRowsForSelection(block, 'paged-artifact')!)).toBe(
+        'row 1\nrow 2\nrow 8\nrow 9',
+      )
+    })
+
+    it('bounds cached and painted rows across many cap-crossing batches', () => {
+      const block = document.createElement('article')
+      block.dataset.entryId = 'capped-batches'
+      let current: StoredBlockRows | undefined
+      for (let from = 0; from < 400; from += 2) {
+        const end = from + 2
+        const ranges =
+          end <= 8
+            ? [{ from: 0, to: end }]
+            : [
+                { from: 0, to: 4 },
+                { from: end - 4, to: end },
+              ]
+        current = mergeStoredBlockRows(current, page(from, 2, ranges))
+        paintStoredRows(block, current, options)
+        const expected =
+          end <= 8
+            ? Array.from({ length: end }, (_, index) => index)
+            : [0, 1, 2, 3, end - 4, end - 3, end - 2, end - 1]
+        expect(current.lines.map((line) => line.from)).toEqual(expected)
+        expect(rowNumbers(block)).toEqual(expected)
+        expect(block.querySelectorAll('.cmd-output-gap')).toHaveLength(end > 8 ? 1 : 0)
+        expect(storedBlockRowsForSelection(block, 'paged-artifact')?.lines).toHaveLength(
+          Math.min(8, end),
+        )
+      }
+    })
+
+    it('preserves loaded pages and unloaded retained ranges, replacing only overlapping rows', () => {
+      const ranges = [{ from: 0, to: 100 }]
+      const previous = mergeStoredBlockRows(page(0, 2, ranges), page(50, 2, ranges))
+      const next = page(98, 2, ranges)
+      const merged = mergeStoredBlockRows(previous, next)
+      expect(merged.lines.map((line) => line.from)).toEqual([0, 1, 50, 51, 98, 99])
+      expect(merged.retainedRanges).toEqual(ranges)
+      expect(missingRowRanges(merged.retainedRanges!, loadedRowRanges(merged.lines))).toEqual([
+        { from: 2, to: 50 },
+        { from: 52, to: 98 },
+      ])
+      const replacement = { from: 50, row: { text: 'updated' } }
+      expect(mergeStoredBlockRows(merged, { ...next, lines: [replacement] }).lines[2]).toBe(
+        replacement,
+      )
+      const block = document.createElement('article')
+      paintStoredRows(block, merged, { ...options, reserve: true })
+      expect(
+        [...block.querySelectorAll<HTMLElement>('.cmd-output-spacer')].map((el) => el.dataset.rows),
+      ).toEqual(['48', '46'])
+      expect(block.querySelectorAll('.cmd-output-gap')).toHaveLength(0)
+    })
+
+    it('honours explicitly empty retained ranges rather than resurrecting previous geometry', () => {
+      const block = document.createElement('article')
+      block.dataset.entryId = 'fully-evicted'
+      const previous = page(0, 4, [{ from: 0, to: 4 }])
+      paintStoredRows(block, previous, options)
+      const next = page(4, 0, [])
+      const merged = mergeStoredBlockRows(previous, next)
+      paintStoredRows(block, merged, options)
+      expect(merged.lines).toEqual([])
+      expect(merged.retainedRanges).toEqual([])
+      expect(merged.rowCount).toBe(0)
+      expect(merged.endRow).toBe(4)
+      expect(block.querySelector('.cmd-output')).toBeNull()
+      expect(storedBlockRowsForSelection(block, 'paged-artifact')?.lines).toEqual([])
+    })
+
+    it('replaces a different artifact identity instead of merging its rows', () => {
+      const previous = page(0, 4, [{ from: 0, to: 4 }])
+      const next = page(8, 2, [{ from: 8, to: 10 }], 'replacement-artifact')
+      expect(mergeStoredBlockRows(previous, next)).toBe(next)
+      expect(mergeStoredBlockRows(undefined, next)).toBe(next)
+      expect(mergeStoredBlockRows({ ...previous, artifactVersion: undefined }, next)).toBe(next)
+    })
+  })
+
   describe('incremental retained output', () => {
     const options = { metric: null, palette: DEFAULT_SNAPSHOT }
     const artifact = (

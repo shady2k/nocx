@@ -580,7 +580,9 @@ test('a full-screen program keeps the half-row bottom gutter', async ({ page }) 
   await page.goto('/')
   await promptReady(page)
   await clickIntoEditor(page)
-  await page.keyboard.type("printf '\\033[?1049h\\033[H'; seq 1 200; sleep 300")
+  await page.keyboard.type(
+    "printf '\\033[?1049h\\033[H'; seq 1 199; printf GUTTER-LAST-ROW; sleep 300",
+  )
   await page.keyboard.press('Enter')
   const geometry = () =>
     page.evaluate(() => {
@@ -594,7 +596,8 @@ test('a full-screen program keeps the half-row bottom gutter', async ({ page }) 
       const pr = pane!.getBoundingClientRect()
       const rows = [...grid.querySelectorAll<HTMLElement>('.term-grid-row')]
       const painted = rows.filter((row) => (row.textContent ?? '').trim() !== '')
-      const last = painted[painted.length - 1]
+      // Blank cells belong to the program too, not to the pane's gutter.
+      const last = rows[rows.length - 1]
       const pitch = parseFloat(getComputedStyle(inner).getPropertyValue('--term-cell-height')) || 0
       const lastBottom = last ? last.getBoundingClientRect().bottom : NaN
       return {
@@ -604,9 +607,19 @@ test('a full-screen program keeps the half-row bottom gutter', async ({ page }) 
         // The gutter between the last painted row and the pane's own bottom
         // edge: half a row plus that remainder.
         paneMargin: Math.round((pr.bottom - lastBottom) * 100) / 100,
+        liveHeight: live.getBoundingClientRect().height,
+        areaHeight: sr.height,
+        gridHeight: grid.getBoundingClientRect().height,
+        rowCount: rows.length,
+        lastText: last?.textContent,
+        paintedBottom: painted[painted.length - 1]?.getBoundingClientRect().bottom,
+        lastBottom,
         pitch: Math.round(pitch * 100) / 100,
         fullscreen: live.classList.contains('live-fullscreen'),
-        settled: live.classList.contains('live-fullscreen') && pitch > 0 && painted.length > 5,
+        settled:
+          live.classList.contains('live-fullscreen') &&
+          pitch > 0 &&
+          (last?.textContent ?? '').includes('GUTTER-LAST-ROW'),
       }
     })
   await expect.poll(async () => (await geometry()).settled, { timeout: 20_000 }).toBe(true)
@@ -615,7 +628,11 @@ test('a full-screen program keeps the half-row bottom gutter', async ({ page }) 
   // HALF A ROW, PLUS THE INTEGER REMAINDER (ADR-92zzg2y2): the same gutter a
   // normal command wears, so a program's last row never touches the window's
   // bottom edge and no extra row is taken from it.
+  expect(g.boxMargin!, said).toBeGreaterThanOrEqual(0)
   expect(g.boxMargin!, said).toBeLessThan(g.pitch! + 1)
+  expect(g.gridHeight!, said).toBeCloseTo(g.rowCount! * g.pitch!, 1)
+  expect(g.liveHeight!, said).toBeCloseTo(g.gridHeight!, 1)
+  expect(g.paintedBottom!, said).toBeCloseTo(g.lastBottom!, 1)
   expect(g.paneMargin!, said).toBeGreaterThanOrEqual(g.pitch! / 2 - 1)
   expect(g.paneMargin!, said).toBeLessThan(g.pitch! * 1.5 + 1)
 })

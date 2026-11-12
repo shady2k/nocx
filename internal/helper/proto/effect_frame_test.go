@@ -161,11 +161,11 @@ func TestCommandSnapshotEffectFrameRoundTripsItsTypedPayload(t *testing.T) {
 // for: the fence's job is to refuse a peer that does not agree about this
 // number, so a bump that nothing asserts is a bump a later edit takes back
 // inside a change about something else. It names the LAST reason the number
-// moved — the `ssh` service's `inflate` op (nocx-evj4b.1.3), whose predecessor
-// was the faint cell on `screenCell` (nocx-xn63t.6.56) at 23.
-func TestHelperProtocolVersionBumpedForTheInflateOp(t *testing.T) {
-	if Version != "24" {
-		t.Fatalf("helper protocol version = %q, want 24", Version)
+// moved — the spawn-time session absence policy (nocx-wkjdb), which a
+// generation predating it cannot honor.
+func TestHelperProtocolVersionBumpedForSessionIdlePolicy(t *testing.T) {
+	if Version != "25" {
+		t.Fatalf("helper protocol version = %q, want 25", Version)
 	}
 }
 

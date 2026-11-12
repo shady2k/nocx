@@ -77,6 +77,63 @@ test('only an open bead quarantines; a closed one protects nothing; an unknown o
   assert.throws(() => readQuarantine('{"schema":2,"tests":[]}', issues), /quarantine/)
 })
 
+// A merged pull request's job is judged by the bead state it ran under
+// (ADR-q0bqxcev): the bead must have existed then and not been closed then.
+// Fixing a flake afterwards must not redden a run that its own CI accepted.
+test('a quarantine asked at a past instant holds only the beads that were open then', () => {
+  const row = (id, status, created_at, closed_at) =>
+    JSON.stringify({ id, status, created_at, ...(closed_at !== undefined ? { closed_at } : {}) })
+  const issues = [
+    row('nocx-already-open', 'open', '2026-10-01T00:00:00Z'),
+    row(
+      'nocx-closed-since',
+      'closed',
+      '2026-10-29T12:26:26.649928208Z',
+      '2026-11-07T20:56:42.865580090Z',
+    ),
+    row('nocx-closed-before', 'closed', '2026-09-01T00:00:00Z', '2026-10-30T03:00:00Z'),
+    row('nocx-created-after', 'open', '2026-11-01T00:00:00Z'),
+    row('nocx-closed-no-time', 'closed', '2026-09-01T00:00:00Z'),
+  ].join('\n')
+  const doc = JSON.stringify({
+    schema: 1,
+    tests: [
+      { test: 'go:TestAlreadyOpen', bead: 'nocx-already-open' },
+      { test: 'go:TestClosedSince', bead: 'nocx-closed-since' },
+      { test: 'go:TestClosedBefore', bead: 'nocx-closed-before' },
+      { test: 'go:TestCreatedAfter', bead: 'nocx-created-after' },
+      { test: 'go:TestClosedNoTime', bead: 'nocx-closed-no-time' },
+    ],
+  })
+  const at = '2026-10-30T03:57:12Z'
+  assert.deepEqual(readQuarantine(doc, issues, at), {
+    'go:TestAlreadyOpen': 'nocx-already-open',
+    'go:TestClosedSince': 'nocx-closed-since',
+  })
+  // Everything else is kept, not dropped, so a refusal can say the file holds
+  // the test and the bead did not protect it then.
+  assert.deepEqual(readQuarantineState(doc, issues, at).closed, {
+    'go:TestClosedBefore': 'nocx-closed-before',
+    'go:TestCreatedAfter': 'nocx-created-after',
+    'go:TestClosedNoTime': 'nocx-closed-no-time',
+  })
+  assert.equal(readQuarantineState(doc, issues, at).at, at)
+  // The instant a bead closed is not open: the run must have happened first.
+  // The bead created later is open by then, which is why the earlier
+  // assertion, and not this one, is what refuses it.
+  assert.deepEqual(readQuarantine(doc, issues, '2026-11-07T20:56:42.865580090Z'), {
+    'go:TestAlreadyOpen': 'nocx-already-open',
+    'go:TestCreatedAfter': 'nocx-created-after',
+  })
+  // Without an instant the question is today's, exactly as a pull request's own
+  // CI asks it: the bead's status, and nothing about when anything happened.
+  assert.deepEqual(readQuarantine(doc, issues), {
+    'go:TestAlreadyOpen': 'nocx-already-open',
+    'go:TestCreatedAfter': 'nocx-created-after',
+  })
+  assert.throws(() => readQuarantine(doc, issues, 'yesterday'), /instant/)
+})
+
 test('the verdict holds a failure only while an open bead owns it, in both callers', () => {
   const quarantine = { 'go:TestA': 'nocx-a', 'job:ci-backend (no-secret-service)#12': 'nocx-b' }
   const held = judgeFailures({ failures: ['go:TestA'], complete: true, quarantine })

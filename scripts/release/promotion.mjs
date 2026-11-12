@@ -239,6 +239,37 @@ function validateQuarantineEvidence(record, name, pull, binding) {
   )
 }
 
+// The moment a merged pull request's job ran: its own start, else its
+// completion, else the run's start. GitHub gives a job both of the first two
+// and a run both of the last two, and a run's start is always there.
+//
+// The moment matters because a PR's CI ran once: the beads that protected its
+// failures are the ones open then, and asking the tracker at promotion time
+// would refuse a run its own gate accepted and make fixing a flake block every
+// release (ADR-q0bqxcev).
+export function jobRanAt(job, run) {
+  return [job?.started_at, job?.completed_at, run?.run_started_at, run?.created_at].find(
+    (value) => typeof value === 'string' && value.trim(),
+  )
+}
+
+// The quarantine a saved job was judged under, read at the moment it ran and
+// kept with the job: evidence is rejudged without the tracker, so a record that
+// does not carry the answer is refused rather than guessed at.
+function quarantineOf(label, job) {
+  const state = job.quarantine
+  requireThat(
+    state !== null &&
+      typeof state === 'object' &&
+      state.open !== null &&
+      typeof state.open === 'object' &&
+      state.closed !== null &&
+      typeof state.closed === 'object',
+    `${label}: ${job.name} carries no quarantine state`,
+  )
+  return state
+}
+
 // Direct product commits need clean suites, not merely API-green quarantines.
 export function cleanCICover(entry) {
   return (
@@ -256,10 +287,13 @@ function verifyGatedJob(entry, label, job, manifests, attempt) {
   })
   for (const step of job.quarantineEvidence.steps) {
     if (step.status === 0) continue
+    const { open, closed, at } = quarantineOf(label, job)
     const verdict = judgeFailures({
       failures: step.failures,
       complete: step.complete,
-      quarantine: entry.quarantine ?? {},
+      quarantine: open,
+      closed,
+      at,
       jobKey: `job:${job.name}#${entry.number}`,
     })
     requireThat(verdict.accepted, `${label}: ${job.name} step ${step.name} ${verdict.reason}`)
@@ -272,10 +306,7 @@ function verifyGatedJob(entry, label, job, manifests, attempt) {
 // same run (a retry that classified an infrastructure flake). Anything else,
 // a cancelled job included, stays red.
 function quarantinedJob(entry, label, name) {
-  requireThat(
-    Array.isArray(entry.attempts) && entry.quarantine && typeof entry.quarantine === 'object',
-    `${label}: ${name} was not green`,
-  )
+  requireThat(Array.isArray(entry.attempts), `${label}: ${name} was not green`)
   const history = entry.attempts.flatMap((attempt) =>
     attempt.jobs.filter((job) => job.name === name),
   )
@@ -287,10 +318,13 @@ function quarantinedJob(entry, label, name) {
     requireThat(job.conclusion === 'failure', `${label}: ${name} was not green`)
     // The verdict is the quarantine's own (scripts/quarantine.mjs), shared with
     // a pull request's own CI so the two cannot answer differently.
+    const { open, closed, at } = quarantineOf(label, job)
     const verdict = judgeFailures({
       failures: job.failures ?? [],
       complete: job.complete === true,
-      quarantine: entry.quarantine,
+      quarantine: open,
+      closed,
+      at,
       jobKey: `job:${name}#${entry.number}`,
       passedInAnotherAttempt: passed,
     })

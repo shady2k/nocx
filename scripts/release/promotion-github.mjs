@@ -3,22 +3,14 @@ import { execFileSync } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { failedTests, readQuarantineState } from '../quarantine.mjs'
 import {
   authorize,
-  ciJobNames,
-  ciStepManifests,
-  cleanCICover,
-  readQuarantineEvidence,
-  jobRanAt,
   prepareStable,
   readKeyring,
-  runBelongsTo,
   signedRunNumber,
   signingKey,
   updateCask,
   verifyCandidate,
-  verifyCI,
   verifyFiles,
   verifySignature,
 } from './promotion.mjs'
@@ -50,194 +42,14 @@ export function githubClient(run = execFileSync) {
   return { gh, api, pages }
 }
 
-export async function collectCI({
-  repo,
-  commits,
-  github,
-  loadWorkflow,
-  touchesProduct,
-  quarantineJson,
-  issuesJsonl,
-  commitFiles,
-  isAncestor,
-}) {
-  fail(commits.length > 0, 'CI: promoted range is empty')
-  // The file is read once before any job, so an entry naming a bead that does
-  // not exist refuses the release even when every job was clean.
-  readQuarantineState(quarantineJson, issuesJsonl)
-  // Each judged job keeps the read made at the moment it ran (ADR-q0bqxcev).
-  // One read per distinct moment, because the tracker export is megabytes.
-  const quarantineStates = new Map()
-  const quarantineAt = (job, run) => {
-    const at = jobRanAt(job, run)
-    fail(at !== undefined, `CI: ${job.name} has no time to judge its quarantine at`)
-    if (!quarantineStates.has(at))
-      quarantineStates.set(at, readQuarantineState(quarantineJson, issuesJsonl, at))
-    return quarantineStates.get(at)
-  }
-  const evidence = []
-  const seen = new Set()
-  for (const commit of commits) {
-    const prs = github.pages(`repos/${repo}/commits/${commit}/pulls`)
-    const merged = prs.filter(
-      (pr) =>
-        pr.merged_at &&
-        pr.merge_commit_sha === commit &&
-        pr.base?.ref === 'main' &&
-        pr.base.repo?.full_name === repo,
-    )
-    // The owner may push to main directly (AGENTS.md). Such a commit has no PR
-    // and no CI run of its own; it is recorded here and judged after the loop,
-    // against the later PRs whose CI ran over it.
-    if (merged.length === 0 && commitFiles) {
-      evidence.push({ direct: true, commit, product: touchesProduct(commitFiles(commit)) })
-      continue
-    }
-    fail(merged.length === 1, `CI: commit ${commit} must map to exactly one merged main PR`)
-    const pr = merged[0]
-    fail(!seen.has(pr.number), `CI: duplicate PR #${pr.number} in promoted range`)
-    seen.add(pr.number)
-    const files = github.pages(`repos/${repo}/pulls/${pr.number}/files`)
-    // GitHub caps this endpoint at 3000 files. Never classify a truncated list as supporting.
-    fail(files.length > 0 && files.length < 3000, `CI: incomplete file list for PR #${pr.number}`)
-    const runs = github.pages(
-      `repos/${repo}/actions/workflows/ci.yml/runs?event=pull_request&head_sha=${pr.head.sha}`,
-      'workflow_runs',
-    )
-    const matching = runs.filter(
-      (run) =>
-        run.head_sha === pr.head.sha &&
-        run.event === 'pull_request' &&
-        run.path === '.github/workflows/ci.yml' &&
-        runBelongsTo(run, pr, repo),
-    )
-    // A failed newer attempt must not be hidden by an older successful run.
-    matching.sort((a, b) => b.id - a.id)
-    fail(matching.length, `CI: no trusted CI run for PR #${pr.number} head ${pr.head.sha}`)
-    const run = matching[0]
-    const jobs = github.pages(
-      `repos/${repo}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs`,
-      'jobs',
-    )
-    const workflow = loadWorkflow(pr.head.sha)
-    const manifests = ciStepManifests(workflow)
-    const gatedJobs = Object.keys(manifests)
-    fail(
-      !workflow.includes('quarantine-gate.mjs') || gatedJobs.length > 0,
-      'CI: cannot locate workflow quarantine gates',
-    )
-    const jobLog = (job) =>
-      github.gh(['api', '--allow-escape-sequences', `repos/${repo}/actions/jobs/${job.id}/logs`])
-    const readGatedJob = (job, attempt) =>
-      gatedJobs.includes(job.name) && job.conclusion === 'success'
-        ? {
-            ...job,
-            quarantineEvidence: readQuarantineEvidence(jobLog(job), job.name, pr.number, {
-              runId: run.id,
-              attempt,
-              expectedSteps: manifests[job.name],
-            }),
-          }
-        : job
-    // A job is judged only when its own CI recorded a failure: a failed job,
-    // or a green gated job whose gate accepted one. That job keeps the
-    // quarantine read at the moment it ran, so the saved evidence can be
-    // rejudged later without the tracker.
-    const judgedJob = (job, attempt) => {
-      const read = readGatedJob(job, attempt)
-      const judged =
-        read.conclusion === 'failure' ||
-        read.quarantineEvidence?.steps.some((step) => step.status !== 0)
-      return judged ? { ...read, quarantine: quarantineAt(read, run) } : read
-    }
-    const recordedJobs = jobs.map((job) => judgedJob(job, run.run_attempt))
-    const entry = {
-      number: pr.number,
-      head: pr.head.sha,
-      headRef: pr.head.ref,
-      headRepo: pr.head.repo?.full_name,
-      product: touchesProduct(files.map((f) => f.filename)),
-      run,
-      jobs: recordedJobs,
-      requiredJobs: ciJobNames(workflow),
-      ...(gatedJobs.length ? { gatedJobs, workflow } : {}),
-    }
-    // Gated reruns also need their earlier records: an API-green attempt can
-    // contain accepted failures even when the newest attempt is truly clean.
-    // Legacy green runs keep their original collection policy.
-    if (
-      run.conclusion !== 'success' ||
-      jobs.some((job) => job.conclusion === 'failure') ||
-      (gatedJobs.length > 0 && run.run_attempt > 1)
-    ) {
-      entry.attempts = []
-      for (let attempt = 1; attempt <= run.run_attempt; attempt++) {
-        const attemptJobs =
-          attempt === run.run_attempt
-            ? recordedJobs
-            : github
-                .pages(`repos/${repo}/actions/runs/${run.id}/attempts/${attempt}/jobs`, 'jobs')
-                .map((job) => judgedJob(job, attempt))
-        entry.attempts.push({
-          attempt,
-          jobs: attemptJobs.map((job) => ({
-            name: job.name,
-            status: job.status,
-            conclusion: job.conclusion,
-            ...(job.quarantineEvidence ? { quarantineEvidence: job.quarantineEvidence } : {}),
-            ...(job.quarantine ? { quarantine: job.quarantine } : {}),
-            ...(job.conclusion === 'failure'
-              ? {
-                  failures: failedTests(jobLog(job)),
-                  // Legacy text names cannot prove a whole command completed.
-                  complete: false,
-                }
-              : {}),
-          })),
-        })
-      }
-    }
-    verifyCI([entry])
-    evidence.push(entry)
-  }
-  // A direct product commit is accepted only when a later PR in the range ran
-  // the full product suites green, with nothing quarantined, on a head that
-  // contains it. A direct supporting commit (tracker rows, documents) owes no
-  // product run, as the classifier already says of a PR.
-  evidence.forEach((entry, index) => {
-    if (!entry.direct || !entry.product) return
-    const cover = evidence
-      .slice(index + 1)
-      .find(
-        (later) =>
-          !later.direct &&
-          later.product &&
-          cleanCICover(later) &&
-          isAncestor(entry.commit, later.head),
-      )
-    fail(cover, `CI: direct commit ${entry.commit} touches product and no later green PR covers it`)
-    entry.coveredBy = cover.number
-  })
-  return evidence
-}
-
-// The tracker export the quarantine is checked against is ~14 MB (2026-10-29),
-// far past execFileSync's 1 MiB default, which throws ENOBUFS rather than
-// truncating. 256 MiB leaves room for growth and still fails loudly beyond it.
+// The candidate's source is read with git, and a step's output is bounded past
+// execFileSync's 1 MiB default, which throws ENOBUFS rather than truncating.
 const git = (...args) =>
   execFileSync('git', args, {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
     maxBuffer: 256 * 1024 * 1024,
   }).trim()
-// The quarantine is optional: a commit with no file quarantines nothing.
-const showIfPresent = (sha, path) => {
-  try {
-    return git('show', `${sha}:${path}`)
-  } catch {
-    return undefined
-  }
-}
 const readJSON = (path) => JSON.parse(readFileSync(path, 'utf8'))
 const saveJSON = (path, value) => writeFileSync(path, JSON.stringify(value, null, 2) + '\n')
 
@@ -253,7 +65,15 @@ function candidateInput(directory) {
   }
 }
 
-async function collect(directory, github) {
+/**
+ * Read the candidate: the owner's authorization, the nightly's signed
+ * provenance and that it is on main, the candidate's README status and notes,
+ * and the exact payload inventory the signature covers. It reads no merged pull
+ * request's CI — the owner promoted a nightly he installed and tried, and that
+ * trial is the release's authority (ADR-gvnw2nv8). `run` is git, injectable so a
+ * test drives the whole read without a network.
+ */
+export async function collect(directory, github, run = git) {
   const {
     GITHUB_ACTOR: actor,
     GITHUB_TRIGGERING_ACTOR: triggeringActor,
@@ -273,16 +93,16 @@ async function collect(directory, github) {
   mkdirSync(source)
   const release = github.api(`repos/${repo}/releases/tags/${tag}`)
   fail(!release.draft && release.prerelease && release.tag_name === tag, 'not a published nightly')
-  git(
+  run(
     'fetch',
     '--no-tags',
     'origin',
     `refs/heads/main:refs/remotes/origin/main`,
     `refs/tags/${tag}:refs/tags/${tag}`,
   )
-  const sha = git('rev-parse', `${tag}^{commit}`)
-  git('merge-base', '--is-ancestor', sha, 'origin/main')
-  const keyringSource = git('show', `${sha}:internal/update/keyring.go`)
+  const sha = run('rev-parse', `${tag}^{commit}`)
+  run('merge-base', '--is-ancestor', sha, 'origin/main')
+  const keyringSource = run('show', `${sha}:internal/update/keyring.go`)
   const keys = readKeyring(keyringSource)
   writeFileSync(join(directory, 'keyring.go'), keyringSource)
   for (const name of ['nightly.json', 'nightly.json.sig'])
@@ -292,7 +112,7 @@ async function collect(directory, github) {
   const nightly = JSON.parse(nightlyBody)
   const runId = signedRunNumber(nightly.runId)
   fail(runId !== undefined, 'invalid nightly workflow run id')
-  const run = github.api(`repos/${repo}/actions/runs/${runId}`)
+  const workflowRun = github.api(`repos/${repo}/actions/runs/${runId}`)
   // Download by an explicit authenticated inventory, never a mutable alias or build output.
   fail(Array.isArray(nightly.artifacts), 'missing nightly artifact inventory')
   for (const { name } of nightly.artifacts) {
@@ -308,73 +128,25 @@ async function collect(directory, github) {
     /^v\d+\.\d+\.\d+$/.test(previous.tag_name) && !previous.draft && !previous.prerelease,
     'latest release is not stable',
   )
-  git(
+  run(
     'fetch',
     '--no-tags',
     'origin',
     `refs/tags/${previous.tag_name}:refs/tags/${previous.tag_name}`,
   )
-  const previousSHA = git('rev-parse', `${previous.tag_name}^{commit}`)
-  git('merge-base', '--is-ancestor', previousSHA, sha)
-  const commits = git('rev-list', '--first-parent', '--reverse', `${previousSHA}..${sha}`)
-    .split('\n')
-    .filter(Boolean)
-  // This is CI's own classifier, shared with nightly (not copied into promotion).
-  const { touchesProduct } = await import('../product-change.mjs')
-  // The tracker is not in the code tree. Read the store's recording of this
-  // revision; a repository whose merge commits were never recorded on a machine
-  // falls back to the published store and says so in the release log.
-  const trackerIssues = (() => {
-    git('fetch', '--no-tags', 'origin', 'refs/tracker/state:refs/tracker/state')
-    try {
-      const recording = JSON.parse(
-        git('show', `refs/tracker/state:.tracker-sync/recordings/${sha}.jsonl`),
-      )
-      return git('show', `${recording.store}:.beads/issues.jsonl`)
-    } catch {
-      process.stderr.write(
-        `promotion: no tracker recording for ${sha}; reading the published store state instead\n`,
-      )
-      return git('show', 'refs/tracker/state:.beads/issues.jsonl')
-    }
-  })()
-  const ci = await collectCI({
-    repo,
-    commits,
-    github,
-    // The file is the candidate's; the read is made per job, at the moment
-    // that job ran, because a merged PR's CI happened once and each of its
-    // failures is held by the beads open then (ADR-q0bqxcev).
-    quarantineJson: showIfPresent(sha, 'docs/testing/quarantine.json'),
-    issuesJsonl: trackerIssues,
-    touchesProduct,
-    loadWorkflow: (head) => {
-      git('fetch', '--no-tags', 'origin', head)
-      return git('show', `${head}:.github/workflows/ci.yml`)
-    },
-    commitFiles: (commit) =>
-      git('diff-tree', '--no-commit-id', '--name-only', '-r', `${commit}^`, commit)
-        .split('\n')
-        .filter(Boolean),
-    isAncestor: (ancestor, head) => {
-      try {
-        git('merge-base', '--is-ancestor', ancestor, head)
-        return true
-      } catch {
-        return false
-      }
-    },
-  })
-  const readme = git('show', `${sha}:README.md`)
+  const previousSHA = run('rev-parse', `${previous.tag_name}^{commit}`)
+  // The candidate carries the last stable's bytes forward: a nightly built
+  // before the stable it follows would publish a downgrade under a new tag.
+  run('merge-base', '--is-ancestor', previousSHA, sha)
+  const readme = run('show', `${sha}:README.md`)
   fail(/^\d+\.\d+\.\d+$/.test(nightly.version), 'invalid nightly version')
-  const notes = git('show', `${sha}:docs/release-notes/v${nightly.version}.md`)
+  const notes = run('show', `${sha}:docs/release-notes/v${nightly.version}.md`)
   const saved = {
     repo,
     tag,
     sha,
     release,
-    run,
-    ci,
+    run: workflowRun,
     readme,
     notes,
     previousVersion: previous.tag_name.slice(1),
@@ -384,7 +156,7 @@ async function collect(directory, github) {
   verifyFiles(source, candidate.inventory)
   writeFileSync(join(directory, 'notes.md'), notes)
   console.log(
-    `Verified tried nightly ${tag} at ${sha} for v${candidate.version}; ${ci.length} PR-head CI runs`,
+    `Verified tried nightly ${tag} at ${sha} for v${candidate.version}: provenance, README, notes and ${candidate.inventory.length} payload digests`,
   )
 }
 

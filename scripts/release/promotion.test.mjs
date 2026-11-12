@@ -9,11 +9,8 @@ import {
   verifyCandidate,
   prepareStable,
   verifyFiles,
-  verifyCI,
   updateCask,
-  runBelongsTo,
   signingKey,
-  jobRanAt,
 } from './promotion.mjs'
 
 const sha = 'a'.repeat(40)
@@ -100,37 +97,6 @@ function fixture(t, { tag = 'nightly-20261027-42' } = {}) {
     artifacts: [...payloads, 'manifest.json', 'manifest.json.sig'].map(describe),
   }
   const nightlyBody = Buffer.from(JSON.stringify(nightly))
-  const ci = [
-    {
-      number: 12,
-      head: 'b'.repeat(40),
-      product: true,
-      run: {
-        id: 9,
-        event: 'pull_request',
-        head_sha: 'b'.repeat(40),
-        path: '.github/workflows/ci.yml',
-        status: 'completed',
-        conclusion: 'success',
-        pull_requests: [{ number: 12 }],
-      },
-      jobs: [
-        'changes',
-        'ci-backlog',
-        'ci-mac',
-        'ci-frontend',
-        'ci-backend (with-secret-service)',
-        'ci-backend (no-secret-service)',
-        'ci-linux (with-secret-service)',
-        'ci-linux (no-secret-service)',
-        'ci-e2e (chromium, 1)',
-        'ci-e2e (chromium, 2)',
-        'ci-e2e (webkit, 1)',
-        'ci-e2e (webkit, 2)',
-      ].map((name) => ({ name, status: 'completed', conclusion: 'success' })),
-    },
-  ]
-  ci[0].requiredJobs = ci[0].jobs.map((job) => job.name)
   const input = {
     repo: 'shady2k/nocx',
     tag,
@@ -153,7 +119,6 @@ function fixture(t, { tag = 'nightly-20261027-42' } = {}) {
     },
     readme: '**Status:** `v0.8.0`, early release. See [notes](docs/release-notes/v0.8.0.md).',
     notes: '# v0.8.0\nA release worth trying.',
-    ci,
     previousVersion: '0.7.2',
   }
   return { input, source, root, nightly, manifest, describe }
@@ -322,42 +287,6 @@ test('unsigned/tampered provenance and manifest, missing payloads and unsafe nam
   assert.throws(() => verifyCandidate(input), /URL/)
 })
 
-test('CI must belong to each merged PR HEAD; drafts/skipped product jobs, missing matrices, empty evidence and wrong workflow fail', (t) => {
-  const { input } = fixture(t)
-  verifyCI(input.ci)
-  for (const change of [
-    (e) => {
-      e.run.head_sha = sha
-    },
-    (e) => {
-      e.run.conclusion = 'failure'
-    },
-    (e) => {
-      e.run.path = '.github/workflows/other.yml'
-    },
-    (e) => {
-      e.run.pull_requests = []
-    },
-    (e) => {
-      e.jobs[2].conclusion = 'skipped'
-    },
-    (e) => {
-      e.jobs.pop()
-    },
-  ]) {
-    const evidence = structuredClone(input.ci)
-    change(evidence[0])
-    assert.throws(() => verifyCI(evidence), /CI/)
-  }
-  assert.throws(() => verifyCI([]), /CI/)
-  const supporting = structuredClone(input.ci)
-  supporting[0].product = false
-  supporting[0].jobs.slice(2).forEach((j) => {
-    j.conclusion = 'skipped'
-  })
-  verifyCI(supporting)
-})
-
 test('stable cask pins the promoted zip and preserves unrelated cask text; malformed templates refuse', () => {
   const text =
     'cask "nocx" do\n  version "0.7.2"\n  sha256 "' +
@@ -498,29 +427,6 @@ test('a substituted signing secret cannot sign a manifest clients of this nightl
   )
 })
 
-test('supporting CI uses real GitHub collapsed skipped matrices, not invented green matrix legs', (t) => {
-  // Observed via GET actions/runs/40295304087/jobs on 2026-10-27.
-  const { input } = fixture(t)
-  const evidence = structuredClone(input.ci)
-  evidence[0].product = false
-  evidence[0].jobs = [
-    'changes',
-    'ci-backlog',
-    'ci-backend',
-    'ci-e2e',
-    'ci-mac',
-    'ci-frontend',
-    'ci-linux',
-  ].map((name) => ({
-    name,
-    status: 'completed',
-    conclusion: ['changes', 'ci-backlog'].includes(name) ? 'success' : 'skipped',
-  }))
-  verifyCI(evidence)
-  evidence[0].product = true
-  assert.throws(() => verifyCI(evidence), /CI/)
-})
-
 test('a signed manifest with wrong platform metadata is refused before stable re-signing', (t) => {
   for (const mutate of [
     (m) => {
@@ -551,137 +457,6 @@ test('a signed manifest with wrong platform metadata is refused before stable re
   }
 })
 
-test('a red required job passes only on quarantined tests or a retry that classified an infrastructure flake', (t) => {
-  // The quarantine's own file and log parse are scripts/quarantine.test.mjs's;
-  // this asks only what verifyCI does with a job that is red.
-  const askKey = 'go:TestQuarantinedFlake'
-  const { input } = fixture(t)
-  const base = structuredClone(input.ci[0])
-  const red = (mutate) => {
-    const entry = structuredClone(base)
-    entry.run.conclusion = 'failure'
-    entry.run.run_attempt = 2
-    const failedIndex = entry.jobs.findIndex((job) => job.name === 'ci-e2e (webkit, 2)')
-    // The quarantine each job was judged under is kept with that job
-    // (ADR-q0bqxcev): here it is a bead open when the job ran.
-    entry.jobs[failedIndex] = {
-      ...entry.jobs[failedIndex],
-      conclusion: 'failure',
-      quarantine: { open: { [askKey]: 'nocx-b' }, closed: {}, at: '2026-10-27T00:00:00Z' },
-    }
-    entry.attempts = [
-      { attempt: 1, jobs: structuredClone(entry.jobs) },
-      { attempt: 2, jobs: structuredClone(entry.jobs) },
-    ]
-    for (const attempt of entry.attempts) {
-      attempt.jobs[failedIndex].failures = [askKey]
-      attempt.jobs[failedIndex].complete = true
-    }
-    mutate(entry, failedIndex)
-    return [entry]
-  }
-  // Every failure is a quarantined test: green.
-  verifyCI(red(() => {}))
-  // A test no open bead owns: red.
-  assert.throws(
-    () =>
-      verifyCI(
-        red((e, i) => {
-          e.attempts[1].jobs[i].failures = [askKey, 'go:TestOther']
-        }),
-      ),
-    /quarantines/,
-  )
-  // A failure that names no test and never passed: red.
-  assert.throws(
-    () =>
-      verifyCI(
-        red((e, i) => {
-          for (const a of e.attempts) a.jobs[i].failures = []
-        }),
-      ),
-    /never passed/,
-  )
-  // The same unnamed failure, but the job passed in another attempt: green.
-  verifyCI(
-    red((e, i) => {
-      e.attempts[0].jobs[i] = { ...e.attempts[0].jobs[i], conclusion: 'success' }
-      delete e.attempts[0].jobs[i].failures
-      e.attempts[1].jobs[i].failures = []
-    }),
-  )
-  // The same nameless failure in every attempt, quarantined for exactly this
-  // job of exactly this PR: green; for another PR's number: red.
-  const nameless = (e, i) => {
-    for (const a of e.attempts) a.jobs[i].failures = []
-  }
-  verifyCI(
-    red((e, i) => {
-      nameless(e, i)
-      for (const a of e.attempts) a.jobs[i].quarantine.open['job:ci-e2e (webkit, 2)#12'] = 'nocx-b'
-    }),
-  )
-  assert.throws(
-    () =>
-      verifyCI(
-        red((e, i) => {
-          nameless(e, i)
-          for (const a of e.attempts)
-            a.jobs[i].quarantine.open['job:ci-e2e (webkit, 2)#13'] = 'nocx-b'
-        }),
-      ),
-    /never passed/,
-  )
-  // A cancelled job is never a flake.
-  assert.throws(
-    () =>
-      verifyCI(
-        red((e, i) => {
-          e.attempts[1].jobs[i].conclusion = 'cancelled'
-        }),
-      ),
-    /not green/,
-  )
-  // Without the attempts the collector reads, a red job stays red.
-  assert.throws(
-    () =>
-      verifyCI(
-        red((e) => {
-          delete e.attempts
-        }),
-      ),
-    /not green/,
-  )
-})
-
 // The moment that judges a saved job's quarantine (ADR-q0bqxcev). GitHub's job
 // carries its own start; a job object without one falls back to the run, which
 // is always there, rather than leaving the question unanswered.
-test('a job is judged at its own start, then its completion, then the run’s start', () => {
-  const run = { run_started_at: '2026-10-30T03:57:00Z', created_at: '2026-10-30T03:56:50Z' }
-  assert.equal(
-    jobRanAt({ started_at: '2026-10-30T03:57:12Z', completed_at: '2026-10-30T04:20:00Z' }, run),
-    '2026-10-30T03:57:12Z',
-  )
-  assert.equal(jobRanAt({ completed_at: '2026-10-30T04:20:00Z' }, run), '2026-10-30T04:20:00Z')
-  assert.equal(jobRanAt({}, run), '2026-10-30T03:57:00Z')
-  assert.equal(jobRanAt({}, { created_at: '2026-10-30T03:56:50Z' }), '2026-10-30T03:56:50Z')
-  assert.equal(jobRanAt({}, {}), undefined)
-})
-
-test('a run is its PR by number, or after the branch is deleted by branch, repository and head', () => {
-  const repo = 'shady2k/nocx'
-  const pr = { number: 529, head: { ref: 'chore/setup-skills-056', repo: { full_name: repo } } }
-  const run = (over) => ({
-    pull_requests: [],
-    head_branch: 'chore/setup-skills-056',
-    head_repository: { full_name: repo },
-    ...over,
-  })
-  assert.equal(runBelongsTo(run({ pull_requests: [{ number: 529 }] }), pr, repo), true)
-  assert.equal(runBelongsTo(run({}), pr, repo), true)
-  assert.equal(runBelongsTo(run({ pull_requests: [{ number: 530 }] }), pr, repo), false)
-  assert.equal(runBelongsTo(run({ head_branch: 'other' }), pr, repo), false)
-  assert.equal(runBelongsTo(run({ head_repository: { full_name: 'fork/nocx' } }), pr, repo), false)
-  assert.equal(runBelongsTo(run({ pull_requests: undefined }), pr, repo), false)
-})

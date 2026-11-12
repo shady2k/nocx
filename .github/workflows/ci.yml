@@ -94,8 +94,9 @@
 #
 # The failure list reaches that check without the API: GitHub serves a job's log
 # only to a token this workflow does not carry, so the job keeps what it already
-# has. The tee'd file is byte-for-byte the step's job log, which is why the
-# promotion and the gate parse it with one function (scripts/quarantine.mjs).
+# has, and the runner evidence is read from that file (scripts/quarantine.mjs).
+# The stable promotion does not read a job log at all: it trusts the owner's
+# trial of a nightly he installed (ADR-gvnw2nv8).
 #
 # Only the jobs that run tests are gated, and a step this file does not route
 # through the helper still fails its job the ordinary way — fail-closed, so a

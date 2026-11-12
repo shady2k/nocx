@@ -24,6 +24,7 @@
 import type { CatalogueEntry } from '../locale-model'
 
 export const en: Readonly<Record<string, CatalogueEntry>> = {
+  'session.close.failed': 'Could not end the session — it may still be running',
   // ── Settings → Interface → Language chrome ──────────────────────────────
   'settings.ui.language.label': 'Language',
   'settings.ui.language.description':

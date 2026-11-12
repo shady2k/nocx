@@ -185,17 +185,23 @@ func BlockRowsOutputStart(payload string) uint64 {
 // so both already read as blank once hasText is false), and continuation
 // rows belong to the logical line above.
 //
+// The chunks are decoded in place through one reader instead of being
+// copied into a single buffer first (nocx-4y82c.1.23), and the logical
+// lines are written as they are decoded instead of being grown one
+// concatenation at a time.
+//
 // startRow is the artifact payload's outputStartRow (nocx-4y82c.1.11): the
 // lines below it are the command's own echo and redraw, which no reader
 // shows. startRow 0 is every line, the unchanged read.
 func BlockRowsTextAfter(chunks [][]byte, startRow uint64) (string, error) {
-	var body bytes.Buffer
-	for _, chunk := range chunks {
-		_, _ = body.Write(chunk)
+	readers := make([]io.Reader, len(chunks))
+	for i, chunk := range chunks {
+		readers[i] = bytes.NewReader(chunk)
 	}
 
-	var lines []string
-	decoder := json.NewDecoder(&body)
+	var out strings.Builder
+	hasRow := false
+	decoder := json.NewDecoder(io.MultiReader(readers...))
 	for {
 		var line struct {
 			From uint64 `json:"from"`
@@ -218,18 +224,11 @@ func BlockRowsTextAfter(chunks [][]byte, startRow uint64) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if line.Row.Continuation && len(lines) > 0 {
-			lines[len(lines)-1] += rowText
-		} else {
-			lines = append(lines, rowText)
-		}
-	}
-	var out bytes.Buffer
-	for i, line := range lines {
-		if i > 0 {
+		if hasRow && !line.Row.Continuation {
 			out.WriteByte('\n')
 		}
-		out.WriteString(line)
+		out.WriteString(rowText)
+		hasRow = true
 	}
 	return out.String(), nil
 }

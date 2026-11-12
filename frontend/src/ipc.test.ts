@@ -129,6 +129,24 @@ afterEach(() => {
   consoleWarn.mockRestore()
 })
 
+describe('ending sessions reports failure', () => {
+  it('reports a rejected close instead of silently claiming termination', async () => {
+    const { client, session, ws } = await connectedSession()
+    const failed = vi.fn()
+    session.close(failed)
+    const request = ws.requests().find((r) => r.method === 'close')!
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: request.id,
+      error: { code: -32000, message: 'hangup failed' },
+    })
+    await vi.waitFor(() =>
+      expect(failed).toHaveBeenCalledWith(expect.objectContaining({ message: 'hangup failed' })),
+    )
+    client.close()
+  })
+})
+
 describe('session.intent', () => {
   it('presents the epoch the open ack seated and returns its typed outcome', async () => {
     const { session, ws } = await connectedSession()

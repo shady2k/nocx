@@ -19,6 +19,7 @@ import type { CatalogueEntry } from '../locale-model'
  * where a translation has not landed yet.
  */
 export const ru: Readonly<Record<string, CatalogueEntry>> = {
+  'session.close.failed': 'Не удалось завершить сессию — она может всё ещё работать',
   // ── Settings → Interface → Language chrome ──────────────────────────────
   'settings.ui.language.label': 'Язык',
   'settings.ui.language.description':

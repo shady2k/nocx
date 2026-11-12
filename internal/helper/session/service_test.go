@@ -92,6 +92,7 @@ type fakeProcess struct {
 	signalPgid int
 	pgid       int
 	sigErr     error
+	closeErr   error
 }
 
 func newFakeProcess() *fakeProcess {
@@ -118,6 +119,9 @@ func (p *fakeProcess) Write(b []byte) (int, error) {
 }
 
 func (p *fakeProcess) Close() error {
+	p.mu.Lock()
+	err := p.closeErr
+	p.mu.Unlock()
 	p.closeOne.Do(func() {
 		p.mu.Lock()
 		p.closed = true
@@ -125,7 +129,7 @@ func (p *fakeProcess) Close() error {
 		_ = p.produce.CloseWithError(io.EOF)
 		close(p.done)
 	})
-	return nil
+	return err
 }
 
 func (p *fakeProcess) Resize(_ context.Context, cols, rows, _, _ uint16) error {

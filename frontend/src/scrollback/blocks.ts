@@ -2198,15 +2198,6 @@ export class BlockManager {
    *  hold paints the whole artifact, and a quiet command never widens it
    *  (nocx-4y82c.1.1). */
   private _pendingStoredRows = new Map<string, { rows: StoredBlockRows; upTo?: number | null }>()
-  /** The highest row cursor `applyStoredRows` has accepted per entry — the
-   *  last stored line's `from` (block.grew.schema.json: absolute row index,
-   *  strictly increasing across deliveries, and never lower after a close,
-   *  which appends the closing rows before sealing). terminal-content.ts
-   *  refetches the WHOLE artifact on every block.grew/block.closed and two
-   *  in-flight fetches for one entry can resolve out of order; this is what
-   *  keeps the later-dispatched-but-earlier-resolving one from being
-   *  overwritten by a smaller delivery that was merely read first. */
-  private _storedRowsCursor = new Map<string, number>()
   /** The tab strip's answer to "what is this session called to a person",
    *  handed to every tool block this manager draws (nocx-vnzek). */
   private _sessionName?: (sessionId: string) => string | null
@@ -2950,12 +2941,9 @@ export class BlockManager {
     upTo?: number | null,
     reset = false,
   ): void {
-    const cursor = rows.lines.length > 0 ? rows.lines[rows.lines.length - 1].from : -1
-    const seen = this._storedRowsCursor.get(entryId) ?? -1
     // `reset` is the reconnect's deliberate give-back (ADR-y45sp41c): the block
     // keeps its coordinates and height and drops its rows so the visible page
-    // can be read first. It is not an older read, so the cursor does not
-    // reject it.
+    // can be read first. It is not an older read, so nothing rejects it.
     const rec = this.blockForAttempt(entryId)
     const previous = rec?.storedRows ?? this._pendingStoredRows.get(entryId)?.rows
     const sameArtifact =
@@ -2963,11 +2951,18 @@ export class BlockManager {
     const previousStart = previous?.outputStartRow ?? 0
     const outputStart = rows.outputStartRow ?? 0
     if (!reset && sameArtifact && outputStart < previousStart) return
-    // Filtering a newly authenticated echo prefix can lower the loaded cursor
-    // without making this response older. Its predecessor must not restore it.
-    const advancesStart = sameArtifact && outputStart > previousStart
-    if (!reset && cursor < seen && !advancesStart) return
-    this._storedRowsCursor.set(entryId, advancesStart ? Math.max(cursor, seen) : cursor)
+    // Loaded lines are a cache, not a revision (ADR-40d9xt5n): retention can
+    // remove the last loaded row while the durable span stays put or grows, so
+    // a smaller cache at an unchanged end is accepted. TerminalContent orders
+    // one entry's reads (pages and refreshes share a chain, ADR-y45sp41c §3);
+    // within one artifact the durable end is the remaining freshness check,
+    // and a replaced artifact is accepted whatever its span, because its rows
+    // share no index with the cache it replaces.
+    const end = rows.endRow
+    const previousEnd = previous?.endRow
+    const behind =
+      sameArtifact && end !== undefined && previousEnd !== undefined && end < previousEnd
+    if (!reset && behind) return
     if (!rec) {
       // A NEW entry may push the ring past its bound; re-setting one
       // already held must not — it stays at its original age.
@@ -4039,7 +4034,6 @@ export class BlockManager {
     this._closedEarly.clear()
     this._pendingStoredRows.clear()
     this._pendingOutputAnchors.clear()
-    this._storedRowsCursor.clear()
     this._deferredStoredPaint = new WeakMap()
     this._clearCommandIndicator()
     // ONE list, because there is one owner: whatever this manager put in
@@ -4107,9 +4101,6 @@ export class BlockManager {
     }
     for (const id of [...this._pendingStoredRows.keys()]) {
       if (id !== keepEntryId) this._pendingStoredRows.delete(id)
-    }
-    for (const id of [...this._storedRowsCursor.keys()]) {
-      if (id !== keepEntryId) this._storedRowsCursor.delete(id)
     }
     for (const rec of this._blocks) {
       if (rec.el !== keep) rec.header?.remove()

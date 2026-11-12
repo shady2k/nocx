@@ -71,6 +71,7 @@ import (
 	"github.com/shady2k/nocx/internal/emulator"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/monoclock"
+	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/sessionruntime"
 )
 
@@ -242,10 +243,12 @@ type inFlightItem struct {
 // field below run() itself is touched by is commented at its own
 // declaration; nothing outside this file may reach into any of them.
 type sessionOwner struct {
-	proc Process
-	rt   *sessionruntime.Session
-	win  *window
-	log  *slog.Logger
+	terminationMu  sync.Mutex
+	terminationErr error
+	proc           Process
+	rt             *sessionruntime.Session
+	win            *window
+	log            *slog.Logger
 
 	// admissionMu fences submit's check-and-enqueue against beginClosing.
 	// After admissionClosed is set, incoming is a finite, immutable backlog
@@ -426,7 +429,7 @@ func (o *sessionOwner) run() {
 			o.deadlineTimer.Stop()
 		}
 	}()
-	defer func() { _ = o.proc.Close() }()
+	defer func() { o.recordTerminationError(o.proc.Close()) }()
 	defer o.cancelReadAndWake()
 
 	go o.runWriter()
@@ -664,8 +667,9 @@ func (o *sessionOwner) requestTermination() {
 	if pgid <= 0 {
 		return
 	}
-	if err := pgs.SignalProcessGroup(pgid, syscall.SIGHUP); err != nil {
-		o.log.Debug("session owner: request termination", "err", err)
+	if err := pgs.SignalProcessGroup(pgid, syscall.SIGHUP); err != nil && !errors.Is(err, pty.ErrNoForeground) {
+		o.recordTerminationError(err)
+		o.log.Warn("session owner: request termination failed", "err", err)
 	}
 }
 
@@ -1397,8 +1401,34 @@ func (o *sessionOwner) stop(graceful bool, deadline time.Time) (tailLost bool) {
 		if _, ok := o.proc.(writeInterrupter); !ok {
 			o.triggerDetach()
 		}
-		_ = o.proc.Close()
+		o.recordTerminationError(o.proc.Close())
 		<-o.stopped
 		return promisedTail
 	}
+}
+
+// recordTerminationError preserves failed hangup/close evidence for the closer.
+func (o *sessionOwner) recordTerminationError(err error) {
+	if err == nil {
+		return
+	}
+	o.terminationMu.Lock()
+	o.terminationErr = errors.Join(o.terminationErr, err)
+	o.terminationMu.Unlock()
+}
+
+func (o *sessionOwner) terminationError() error {
+	o.terminationMu.Lock()
+	defer o.terminationMu.Unlock()
+	return o.terminationErr
+}
+
+// retryTermination is used only after the owner has stopped and a previous
+// attempt failed. The record stays until this attempt succeeds.
+func (o *sessionOwner) retryTermination() {
+	o.terminationMu.Lock()
+	o.terminationErr = nil
+	o.terminationMu.Unlock()
+	o.requestTermination()
+	o.recordTerminationError(o.proc.Close())
 }

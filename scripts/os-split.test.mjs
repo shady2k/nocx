@@ -63,7 +63,24 @@ test('OS constraint derivation excludes testdata, like go list ./...', () => {
       mkdirSync(dirname(path), { recursive: true })
       writeFileSync(path, '//go:build linux\n\npackage example\n')
     }
+    // `ci-os-split` ends by handing the directories it derived to
+    // scripts/mac-only-tests.mjs (nocx-9id74). The real script cannot answer
+    // for this two-file tree: it refuses an empty macOS selection, and it
+    // checks its own LISTED entry against internal/storage, which the fixture
+    // does not carry. So the fixture carries a stand-in at the path the target
+    // runs, as it stands in for `go` below, and records what it was asked —
+    // which is this test's assertion: the derived directories, testdata
+    // excluded.
+    const macCheck = join(root, 'scripts/mac-only-tests.mjs')
+    const macArgs = join(root, 'mac-only-tests-args')
+    mkdirSync(dirname(macCheck), { recursive: true })
+    writeFileSync(
+      macCheck,
+      `import { writeFileSync } from 'node:fs'\nwriteFileSync(${JSON.stringify(macArgs)}, process.argv.slice(2).join(' ') + '\\n')\n`,
+      { mode: 0o755 },
+    )
     assert.match(make(root, ['OS_PKG_DIRS=internal/example', 'OS_EXEMPT=', 'ci-os-split']), /ok$/)
+    assert.equal(readFileSync(macArgs, 'utf8').trim(), 'check internal/example')
   })
 })
 

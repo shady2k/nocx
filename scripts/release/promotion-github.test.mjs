@@ -12,6 +12,38 @@ const head = 'b'.repeat(40)
 const commit = 'a'.repeat(40)
 const workflow =
   'jobs:\n  changes:\n    runs-on: ubuntu-latest\n  ci-backlog:\n    runs-on: ubuntu-latest\n  ci-linux:\n    strategy:\n      matrix:\n        keyring: [with-secret-service, no-secret-service]\n'
+
+// Every fixture job started here. A merged PR's CI ran once, and the promotion
+// judges its failures by the beads open at that moment (ADR-q0bqxcev).
+const jobRanAt = '2026-10-30T03:57:12Z'
+
+// The quarantine file and the tracker rows its beads name, as collectCI reads
+// them. A row is open from 2026-10-01 unless the caller says otherwise.
+function setQuarantine(f, map, rows = {}) {
+  f.options.quarantineJson = JSON.stringify({
+    schema: 1,
+    tests: Object.entries(map).map(([test, bead]) => ({ test, bead })),
+  })
+  f.options.issuesJsonl = [...new Set(Object.values(map))]
+    .map((id) =>
+      JSON.stringify({
+        id,
+        status: 'open',
+        created_at: '2026-10-01T00:00:00Z',
+        ...rows[id],
+      }),
+    )
+    .join('\n')
+}
+
+// The bead behind this repository's real refusal (release run 43292929736): the
+// flake was open when PR #597's job ran and was fixed and closed a week later.
+const ranOpenThenClosed = {
+  status: 'closed',
+  created_at: '2026-10-29T12:26:26.649928208Z',
+  closed_at: '2026-11-07T20:56:42.865580090Z',
+}
+
 function fixture() {
   const pr = {
     number: 12,
@@ -29,11 +61,15 @@ function fixture() {
     conclusion: 'success',
     status: 'completed',
     pull_requests: [{ number: 12 }],
+    run_started_at: jobRanAt,
+    created_at: '2026-10-30T03:56:50Z',
   }
   const jobs = ciJobNames(workflow).map((name) => ({
     name,
     conclusion: 'success',
     status: 'completed',
+    started_at: jobRanAt,
+    completed_at: '2026-10-30T04:20:00Z',
   }))
   const responses = new Map([
     [`repos/${repo}/commits/${commit}/pulls`, [pr]],
@@ -150,9 +186,15 @@ test('a red CI run is read whole: earlier attempts and each failed job log, quar
     logs.push(args.join(' '))
     return '2026-10-29T00:00:00Z setup failed\n'
   }
-  f.options.quarantine = { 'job:changes#12': 'nocx-x' }
+  setQuarantine(f, { 'job:changes#12': 'nocx-x' })
   const [entry] = await collectCI(f.options)
-  assert.deepEqual(entry.quarantine, { 'job:changes#12': 'nocx-x' })
+  // The state a job was judged under is kept with that job: it was read at the
+  // moment that job ran, not at the moment the promotion read everything else.
+  assert.deepEqual(entry.attempts[1].jobs[0].quarantine, {
+    open: { 'job:changes#12': 'nocx-x' },
+    closed: {},
+    at: jobRanAt,
+  })
   assert.deepEqual(
     entry.attempts.map((a) => a.attempt),
     [1, 2],
@@ -387,13 +429,62 @@ test('API-green gated failures are rejudged against the promotion quarantine', a
   await assert.rejects(() => collectCI(f.options), /no open bead quarantines/)
 })
 
+// ADR-q0bqxcev. A merged PR's CI ran once, at a fixed moment, and its own gate
+// judged the failures against the beads open then. The promotion re-reads that
+// record later, so asking the tracker as it is today would refuse a run its own
+// CI accepted — and fixing a flake would make every release impossible.
+test('a past run is judged by the bead state it ran under, not by the tracker as it is now', async () => {
+  const tests = { 'go:TestFlaky': 'nocx-flake' }
+  const collect = (row) => {
+    const f = gatedFixture()
+    setQuarantine(f, tests, { 'nocx-flake': row })
+    return collectCI(f.options)
+  }
+  // Open when the job ran, fixed and closed a week later: the run met an open bead.
+  await collect(ranOpenThenClosed)
+  // Still open: the answer this rule inherits unchanged.
+  await collect({ ...ranOpenThenClosed, status: 'open', closed_at: undefined })
+  // Closed before the job ran: nothing was quarantined when it failed.
+  await assert.rejects(
+    () => collect({ ...ranOpenThenClosed, closed_at: '2026-10-30T03:00:00Z' }),
+    /holds under nocx-flake — that bead was not open when this job ran \(2026-10-30T03:57:12Z\)/,
+  )
+  // Created after it: the bead did not exist to protect anything.
+  await assert.rejects(
+    () =>
+      collect({
+        status: 'open',
+        created_at: '2026-11-01T00:00:00Z',
+        closed_at: undefined,
+      }),
+    /holds under nocx-flake — that bead was not open when this job ran/,
+  )
+})
+
+// The saved evidence is rejudged without the tracker, so each job keeps the
+// read that judged it.
+test('the quarantine a past job was judged under is saved with that job and rechecked', async () => {
+  const f = gatedFixture()
+  setQuarantine(f, { 'go:TestFlaky': 'nocx-flake' }, { 'nocx-flake': ranOpenThenClosed })
+  const [entry] = await collectCI(f.options)
+  const saved = JSON.parse(JSON.stringify(entry))
+  assert.deepEqual(saved.jobs[2].quarantine, {
+    open: { 'go:TestFlaky': 'nocx-flake' },
+    closed: {},
+    at: jobRanAt,
+  })
+  verifyCI([saved])
+  for (const job of saved.jobs.slice(2)) delete job.quarantine
+  assert.throws(() => verifyCI([saved]), /carries no quarantine state/)
+})
+
 test('API-green quarantine evidence is retained, including passing steps, and rejudged on saved verification', async () => {
   const steps = [
     { name: 'go-backend', status: 1, failures: ['go:TestFlaky'], complete: true },
     { name: 'go-local-ssh', status: 0, failures: [], complete: true },
   ]
   const f = gatedFixture(steps)
-  f.options.quarantine = { 'go:TestFlaky': 'nocx-x' }
+  setQuarantine(f, { 'go:TestFlaky': 'nocx-x' })
   const [entry] = await collectCI(f.options)
   assert.equal(f.logs.length, 2)
   assert.deepEqual(
@@ -407,10 +498,10 @@ test('API-green quarantine evidence is retained, including passing steps, and re
   }
   const withoutContract = JSON.parse(JSON.stringify(entry))
   delete withoutContract.gatedJobs
-  withoutContract.quarantine = {}
+  for (const job of withoutContract.jobs.slice(2)) job.quarantine = { open: {}, closed: {} }
   assert.throws(() => verifyCI([withoutContract]), /no open bead quarantines/)
   const saved = JSON.parse(JSON.stringify(entry))
-  saved.quarantine = {}
+  for (const job of saved.jobs.slice(2)) job.quarantine = { open: {}, closed: {} }
   assert.throws(() => verifyCI([saved]), /no open bead quarantines/)
   delete saved.jobs[2].quarantineEvidence
   assert.throws(() => verifyCI([saved]), /evidence/)
@@ -456,7 +547,7 @@ test('a gated quarantine cannot cover a direct product commit, but clean gated s
     f.responses.set(`repos/${repo}/commits/${direct}/pulls`, [])
     f.options.commitFiles = () => ['main.go']
     f.options.isAncestor = () => true
-    f.options.quarantine = { 'go:TestFlaky': 'nocx-x' }
+    setQuarantine(f, { 'go:TestFlaky': 'nocx-x' })
     if (failed) await assert.rejects(() => collectCI(f.options), /no later green PR/)
     else assert.equal((await collectCI(f.options))[0].coveredBy, 12)
   }
@@ -466,7 +557,7 @@ test('a gated named failure with incomplete evidence cannot be quarantined', asy
   const f = gatedFixture([
     { name: 'tests', status: 1, failures: ['go:TestFlaky'], complete: false },
   ])
-  f.options.quarantine = { 'go:TestFlaky': 'nocx-x' }
+  setQuarantine(f, { 'go:TestFlaky': 'nocx-x' })
   await assert.rejects(() => collectCI(f.options), /incomplete|complete/)
 })
 
@@ -476,10 +567,13 @@ test('a failed run still rejudges API-green gated jobs and keeps whole-job excep
   f.jobs[0].conclusion = 'failure'
   const read = f.options.github.gh
   f.options.github.gh = (args) => (args.at(-1).includes('/100/') ? 'setup failed' : read(args))
-  f.options.quarantine = { 'job:changes#12': 'nocx-setup' }
-  for (const job of f.jobs.slice(2)) f.options.quarantine[`job:${job.name}#13`] = 'nocx-wrong-pr'
+  const wrongPR = { 'job:changes#12': 'nocx-setup' }
+  for (const job of f.jobs.slice(2)) wrongPR[`job:${job.name}#13`] = 'nocx-wrong-pr'
+  setQuarantine(f, wrongPR)
   await assert.rejects(() => collectCI(f.options), /never passed/)
-  for (const job of f.jobs.slice(2)) f.options.quarantine[`job:${job.name}#12`] = 'nocx-correct-pr'
+  const rightPR = { 'job:changes#12': 'nocx-setup' }
+  for (const job of f.jobs.slice(2)) rightPR[`job:${job.name}#12`] = 'nocx-correct-pr'
+  setQuarantine(f, rightPR)
   const [entry] = await collectCI(f.options)
   assert.equal(entry.attempts[0].jobs[2].quarantineEvidence.steps[0].status, 1)
 })
@@ -498,14 +592,14 @@ test('legacy named text cannot assert complete failure evidence for promotion', 
   f.jobs[0].conclusion = 'failure'
   f.jobs[0].id = 100
   f.options.github.gh = () => '--- FAIL: TestFlaky (1s)\n'
-  f.options.quarantine = { 'go:TestFlaky': 'nocx-x', 'job:changes#12': 'nocx-job' }
+  setQuarantine(f, { 'go:TestFlaky': 'nocx-x', 'job:changes#12': 'nocx-job' })
   await assert.rejects(() => collectCI(f.options), /incomplete|complete/)
 })
 
 test('older API-green gated attempts are rejudged even when the latest run is green', async () => {
   const f = gatedFixture([{ name: 'tests', status: 0, failures: [], complete: true }])
   f.run.run_attempt = 2
-  f.options.quarantine = { 'job:changes#12': 'nocx-setup' }
+  setQuarantine(f, { 'job:changes#12': 'nocx-setup' })
   f.responses.set(`repos/${repo}/actions/runs/22/attempts/2/jobs`, f.jobs)
   const first = f.jobs.map((job) => ({ ...job, id: job.id + 100 }))
   f.responses.set(`repos/${repo}/actions/runs/22/attempts/1/jobs`, first)

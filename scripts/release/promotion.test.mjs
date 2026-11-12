@@ -13,6 +13,7 @@ import {
   updateCask,
   runBelongsTo,
   signingKey,
+  jobRanAt,
 } from './promotion.mjs'
 
 const sha = 'a'.repeat(40)
@@ -561,8 +562,13 @@ test('a red required job passes only on quarantined tests or a retry that classi
     entry.run.conclusion = 'failure'
     entry.run.run_attempt = 2
     const failedIndex = entry.jobs.findIndex((job) => job.name === 'ci-e2e (webkit, 2)')
-    entry.jobs[failedIndex] = { ...entry.jobs[failedIndex], conclusion: 'failure' }
-    entry.quarantine = { [askKey]: 'nocx-b' }
+    // The quarantine each job was judged under is kept with that job
+    // (ADR-q0bqxcev): here it is a bead open when the job ran.
+    entry.jobs[failedIndex] = {
+      ...entry.jobs[failedIndex],
+      conclusion: 'failure',
+      quarantine: { open: { [askKey]: 'nocx-b' }, closed: {}, at: '2026-10-27T00:00:00Z' },
+    }
     entry.attempts = [
       { attempt: 1, jobs: structuredClone(entry.jobs) },
       { attempt: 2, jobs: structuredClone(entry.jobs) },
@@ -612,7 +618,7 @@ test('a red required job passes only on quarantined tests or a retry that classi
   verifyCI(
     red((e, i) => {
       nameless(e, i)
-      e.quarantine['job:ci-e2e (webkit, 2)#12'] = 'nocx-b'
+      for (const a of e.attempts) a.jobs[i].quarantine.open['job:ci-e2e (webkit, 2)#12'] = 'nocx-b'
     }),
   )
   assert.throws(
@@ -620,7 +626,8 @@ test('a red required job passes only on quarantined tests or a retry that classi
       verifyCI(
         red((e, i) => {
           nameless(e, i)
-          e.quarantine['job:ci-e2e (webkit, 2)#13'] = 'nocx-b'
+          for (const a of e.attempts)
+            a.jobs[i].quarantine.open['job:ci-e2e (webkit, 2)#13'] = 'nocx-b'
         }),
       ),
     /never passed/,
@@ -645,6 +652,21 @@ test('a red required job passes only on quarantined tests or a retry that classi
       ),
     /not green/,
   )
+})
+
+// The moment that judges a saved job's quarantine (ADR-q0bqxcev). GitHub's job
+// carries its own start; a job object without one falls back to the run, which
+// is always there, rather than leaving the question unanswered.
+test('a job is judged at its own start, then its completion, then the run’s start', () => {
+  const run = { run_started_at: '2026-10-30T03:57:00Z', created_at: '2026-10-30T03:56:50Z' }
+  assert.equal(
+    jobRanAt({ started_at: '2026-10-30T03:57:12Z', completed_at: '2026-10-30T04:20:00Z' }, run),
+    '2026-10-30T03:57:12Z',
+  )
+  assert.equal(jobRanAt({ completed_at: '2026-10-30T04:20:00Z' }, run), '2026-10-30T04:20:00Z')
+  assert.equal(jobRanAt({}, run), '2026-10-30T03:57:00Z')
+  assert.equal(jobRanAt({}, { created_at: '2026-10-30T03:56:50Z' }), '2026-10-30T03:56:50Z')
+  assert.equal(jobRanAt({}, {}), undefined)
 })
 
 test('a run is its PR by number, or after the branch is deleted by branch, repository and head', () => {

@@ -36,27 +36,60 @@ export function stepManifestDigest(names) {
 // defect of a check rather than of a test — `job:<job name>#<pull number>`.
 const keyPattern = /^(go:Test\w+|e2e:e2e\/\S+ › .+|job:[^#\n]+#[1-9]\d*)$/
 
+// A tracker row's timestamps carry nanoseconds (`...26.649928208Z`) while the
+// GitHub API's carry whole seconds; both are instants a bead existed between.
+const instantOf = (value) => {
+  if (typeof value !== 'string' || !value.trim()) return undefined
+  const ms = Date.parse(value)
+  return Number.isFinite(ms) ? ms : undefined
+}
+
+// Whether a bead's protection covers `at`. Without an instant the row's status
+// is the whole answer. With one, the bead must have existed by then and not
+// been closed yet: that is the state the run saw, and nothing it did not.
+function heldAt(row, at) {
+  if (at === undefined) return !['closed', 'tombstone'].includes(row.status)
+  const created = instantOf(row.created_at)
+  requireThat(created !== undefined, `quarantine bead ${row.id} has no creation time`)
+  if (created > at) return false
+  const closed = instantOf(row.closed_at)
+  if (closed !== undefined) return closed > at
+  return !['closed', 'tombstone'].includes(row.status)
+}
+
 // A quarantined test is one a flake bead owns (ADR "a flaky test is quarantined
 // by its bead"). Its failure stops blocking only while that bead is open:
 // closing the bead ends the protection without anyone remembering to edit this
 // file.
-export function readQuarantine(json, issuesJsonl) {
-  return readQuarantineState(json, issuesJsonl).open
+//
+// `at` asks the question at a past instant instead of now. A merged pull
+// request's job is judged by the bead state it ran under, because that run
+// happened once and a bead fixed afterwards must not redden it retroactively
+// (ADR-q0bqxcev); a new run always asks about now.
+export function readQuarantine(json, issuesJsonl, at) {
+  return readQuarantineState(json, issuesJsonl, at).open
 }
 
-// The same read, keeping the entries whose bead is closed. A closed bead
-// protects nothing, and the caller that reports a red job needs the difference:
-// "no bead quarantines this" sends the reader to file one, while "the file
-// holds it under a closed bead" sends them to reopen the bead or fix the test.
-export function readQuarantineState(json, issuesJsonl) {
-  if (json === undefined) return { open: {}, closed: {} }
+// The same read, keeping the entries whose bead does not hold the test. A
+// closed bead protects nothing, and the caller that reports a red job needs the
+// difference: "no bead quarantines this" sends the reader to file one, while
+// "the file holds it under a closed bead" sends them to reopen the bead or fix
+// the test.
+//
+// The state carries the instant it answers about, so the caller that judged a
+// job keeps the moment with the answer and can say which moment refused it.
+export function readQuarantineState(json, issuesJsonl, at) {
+  const when = at === undefined ? undefined : instantOf(at)
+  requireThat(at === undefined || when !== undefined, `invalid quarantine instant ${at}`)
+  if (json === undefined)
+    return at === undefined ? { open: {}, closed: {} } : { open: {}, closed: {}, at }
   const doc = JSON.parse(json)
   requireThat(doc?.schema === 1 && Array.isArray(doc.tests), 'invalid test quarantine')
-  const status = new Map()
+  const rows = new Map()
   for (const line of (issuesJsonl ?? '').split('\n')) {
     if (!line.trim()) continue
     const row = JSON.parse(line)
-    status.set(row.id, row.status)
+    rows.set(row.id, row)
   }
   const open = {}
   const closed = {}
@@ -67,12 +100,12 @@ export function readQuarantineState(json, issuesJsonl) {
         typeof entry.bead === 'string',
       `invalid test quarantine entry ${JSON.stringify(entry)}`,
     )
-    const state = status.get(entry.bead)
-    requireThat(state !== undefined, `quarantine ${entry.test}: bead ${entry.bead} does not exist`)
-    if (['closed', 'tombstone'].includes(state)) closed[entry.test] = entry.bead
-    else open[entry.test] = entry.bead
+    const row = rows.get(entry.bead)
+    requireThat(row !== undefined, `quarantine ${entry.test}: bead ${entry.bead} does not exist`)
+    if (heldAt(row, when)) open[entry.test] = entry.bead
+    else closed[entry.test] = entry.bead
   }
-  return { open, closed }
+  return at === undefined ? { open, closed } : { open, closed, at }
 }
 
 // The tests a failed job's log names, in the quarantine's key form. A failure
@@ -268,6 +301,11 @@ export function playwrightEvidence(report) {
 // check itself, never a class. A pull request's own CI has no other attempt, so
 // only the job entry can answer there.
 //
+// `quarantine` and `closed` are one instant's read (`readQuarantineState`);
+// `at` names that instant when it is a past run's, and only the refusal says
+// so. The decision is always the maps': a second reading of the tracker here
+// would be a second answer to the same question.
+//
 // `reason` is phrased for the caller's line prefix, so the promotion's
 // `requireThat` and the CI gate's report refuse in the same words.
 export function judgeFailures({
@@ -275,6 +313,7 @@ export function judgeFailures({
   complete = false,
   quarantine,
   closed = {},
+  at,
   jobKey,
   passedInAnotherAttempt = false,
 }) {
@@ -314,7 +353,9 @@ export function judgeFailures({
     quarantined,
     unquarantined,
     reason: bead
-      ? `failed ${test}, which docs/testing/quarantine.json holds under ${bead} — a closed bead protects nothing`
+      ? at === undefined
+        ? `failed ${test}, which docs/testing/quarantine.json holds under ${bead} — a closed bead protects nothing`
+        : `failed ${test}, which docs/testing/quarantine.json holds under ${bead} — that bead was not open when this job ran (${at})`
       : `failed ${test}, which no open bead quarantines`,
   }
 }

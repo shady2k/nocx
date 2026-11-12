@@ -3,13 +3,14 @@ import { execFileSync } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { failedTests, readQuarantine } from '../quarantine.mjs'
+import { failedTests, readQuarantineState } from '../quarantine.mjs'
 import {
   authorize,
   ciJobNames,
   ciStepManifests,
   cleanCICover,
   readQuarantineEvidence,
+  jobRanAt,
   prepareStable,
   readKeyring,
   runBelongsTo,
@@ -55,11 +56,25 @@ export async function collectCI({
   github,
   loadWorkflow,
   touchesProduct,
-  quarantine = {},
+  quarantineJson,
+  issuesJsonl,
   commitFiles,
   isAncestor,
 }) {
   fail(commits.length > 0, 'CI: promoted range is empty')
+  // The file is read once before any job, so an entry naming a bead that does
+  // not exist refuses the release even when every job was clean.
+  readQuarantineState(quarantineJson, issuesJsonl)
+  // Each judged job keeps the read made at the moment it ran (ADR-q0bqxcev).
+  // One read per distinct moment, because the tracker export is megabytes.
+  const quarantineStates = new Map()
+  const quarantineAt = (job, run) => {
+    const at = jobRanAt(job, run)
+    fail(at !== undefined, `CI: ${job.name} has no time to judge its quarantine at`)
+    if (!quarantineStates.has(at))
+      quarantineStates.set(at, readQuarantineState(quarantineJson, issuesJsonl, at))
+    return quarantineStates.get(at)
+  }
   const evidence = []
   const seen = new Set()
   for (const commit of commits) {
@@ -124,7 +139,18 @@ export async function collectCI({
             }),
           }
         : job
-    const recordedJobs = jobs.map((job) => readGatedJob(job, run.run_attempt))
+    // A job is judged only when its own CI recorded a failure: a failed job,
+    // or a green gated job whose gate accepted one. That job keeps the
+    // quarantine read at the moment it ran, so the saved evidence can be
+    // rejudged later without the tracker.
+    const judgedJob = (job, attempt) => {
+      const read = readGatedJob(job, attempt)
+      const judged =
+        read.conclusion === 'failure' ||
+        read.quarantineEvidence?.steps.some((step) => step.status !== 0)
+      return judged ? { ...read, quarantine: quarantineAt(read, run) } : read
+    }
+    const recordedJobs = jobs.map((job) => judgedJob(job, run.run_attempt))
     const entry = {
       number: pr.number,
       head: pr.head.sha,
@@ -134,7 +160,7 @@ export async function collectCI({
       run,
       jobs: recordedJobs,
       requiredJobs: ciJobNames(workflow),
-      ...(gatedJobs.length ? { gatedJobs, quarantine, workflow } : {}),
+      ...(gatedJobs.length ? { gatedJobs, workflow } : {}),
     }
     // Gated reruns also need their earlier records: an API-green attempt can
     // contain accepted failures even when the newest attempt is truly clean.
@@ -144,7 +170,6 @@ export async function collectCI({
       jobs.some((job) => job.conclusion === 'failure') ||
       (gatedJobs.length > 0 && run.run_attempt > 1)
     ) {
-      entry.quarantine = quarantine
       entry.attempts = []
       for (let attempt = 1; attempt <= run.run_attempt; attempt++) {
         const attemptJobs =
@@ -152,7 +177,7 @@ export async function collectCI({
             ? recordedJobs
             : github
                 .pages(`repos/${repo}/actions/runs/${run.id}/attempts/${attempt}/jobs`, 'jobs')
-                .map((job) => readGatedJob(job, attempt))
+                .map((job) => judgedJob(job, attempt))
         entry.attempts.push({
           attempt,
           jobs: attemptJobs.map((job) => ({
@@ -160,6 +185,7 @@ export async function collectCI({
             status: job.status,
             conclusion: job.conclusion,
             ...(job.quarantineEvidence ? { quarantineEvidence: job.quarantineEvidence } : {}),
+            ...(job.quarantine ? { quarantine: job.quarantine } : {}),
             ...(job.conclusion === 'failure'
               ? {
                   failures: failedTests(jobLog(job)),
@@ -312,15 +338,15 @@ async function collect(directory, github) {
       return git('show', 'refs/tracker/state:.beads/issues.jsonl')
     }
   })()
-  const quarantine = readQuarantine(
-    showIfPresent(sha, 'docs/testing/quarantine.json'),
-    trackerIssues,
-  )
   const ci = await collectCI({
     repo,
     commits,
     github,
-    quarantine,
+    // The file is the candidate's; the read is made per job, at the moment
+    // that job ran, because a merged PR's CI happened once and each of its
+    // failures is held by the beads open then (ADR-q0bqxcev).
+    quarantineJson: showIfPresent(sha, 'docs/testing/quarantine.json'),
+    issuesJsonl: trackerIssues,
     touchesProduct,
     loadWorkflow: (head) => {
       git('fetch', '--no-tags', 'origin', head)

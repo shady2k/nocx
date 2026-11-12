@@ -249,7 +249,7 @@ GhosttyResult nocxMouseShape(GhosttyTerminal terminal,
 /*
  * The running total of grid references this shim has resolved. Resolving is
  * the expensive step — for history it may walk the whole page list — and the
- * count is how the one-resolution-per-row promise of nocxReadRow is kept
+ * count is how the one-resolution-per-row promise of nocxHistoryRow is kept
  * checkable instead of folklore.
  */
 static _Atomic unsigned long long nocx_resolve_count = 0;
@@ -361,12 +361,13 @@ GhosttyResult nocxStyleAt(const GhosttyGridRef *ref, nocxStyleFacts *out) {
 }
 
 /*
- * Count the complete UTF-8 requirement even after the supplied buffer fills.
- * The caller retries the whole row and never observes partial output.
+ * Appends one cell's grapheme codepoints to the row's UTF-8 buffer as UTF-8.
+ * The offset and length land on the cell; GHOSTTY_OUT_OF_SPACE means the row
+ * overflowed the caller's buffer, and the caller retries the whole row.
  */
 static GhosttyResult nocxUtf8Append(const uint32_t *cps, size_t n,
                                     uint8_t *buf, size_t cap, size_t *used,
-                                    size_t *out_off, size_t *out_len) {
+                                    uint32_t *out_off, uint16_t *out_len) {
   size_t start = *used;
   for (size_t i = 0; i < n; i++) {
     uint32_t cp = cps[i];
@@ -387,29 +388,24 @@ static GhosttyResult nocxUtf8Append(const uint32_t *cps, size_t n,
       enc[k++] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F));
       enc[k++] = (uint8_t)(0x80 | (cp & 0x3F));
     }
-    if (*used > SIZE_MAX - k) return GHOSTTY_OUT_OF_MEMORY;
-    if (*used + k <= cap) memcpy(buf + *used, enc, k);
+    if (*used + k > cap) return GHOSTTY_OUT_OF_SPACE;
+    memcpy(buf + *used, enc, k);
     *used += k;
   }
-  *out_off = start;
-  *out_len = *used - start;
+  if (*used - start > UINT16_MAX) return GHOSTTY_OUT_OF_SPACE;
+  *out_off = (uint32_t)start;
+  *out_len = (uint16_t)(*used - start);
   return GHOSTTY_SUCCESS;
 }
 
-GhosttyResult nocxReadRow(GhosttyTerminal terminal, GhosttyPointTag tag,
-                          uint32_t y, uint16_t cols,
-                          nocxRowCellFacts *out_cells, uint8_t *graphemes,
-                          size_t graphemes_cap, size_t max_cluster_bytes,
-                          size_t *out_graphemes_len,
-                          bool *out_wrap, bool *out_continuation) {
-  *out_graphemes_len = 0;
-  if (cols == 0 ||
-      (tag != GHOSTTY_POINT_TAG_ACTIVE && tag != GHOSTTY_POINT_TAG_SCREEN &&
-       tag != GHOSTTY_POINT_TAG_HISTORY))
-    return GHOSTTY_INVALID_VALUE;
-  /* One coordinate resolution for the whole row, in the requested space. */
+GhosttyResult nocxHistoryRow(GhosttyTerminal terminal, uint32_t y,
+                             uint16_t cols, nocxRowCellFacts *out_cells,
+                             uint8_t *graphemes, size_t graphemes_cap,
+                             bool *out_wrap, bool *out_continuation) {
+  /* THE resolution: one walk of the history page list for the whole row. */
   GhosttyGridRef ref;
-  GhosttyResult r = nocxGridRefAt(terminal, tag, 0, y, &ref);
+  GhosttyResult r =
+      nocxGridRefAt(terminal, GHOSTTY_POINT_TAG_HISTORY, 0, y, &ref);
   if (r != GHOSTTY_SUCCESS) return r;
   GhosttyRow row;
   r = ghostty_grid_ref_row(&ref, &row);
@@ -457,8 +453,6 @@ GhosttyResult nocxReadRow(GhosttyTerminal terminal, GhosttyPointTag tag,
         /* A cluster longer than the stack buffer: the library reports the
            size it wants rather than truncating, so one exact allocation and
            one re-read, the same shape the Go side's own grapheme read uses. */
-        if (n == 0) return GHOSTTY_OUT_OF_SPACE;
-        if (n > SIZE_MAX / sizeof(uint32_t)) return GHOSTTY_OUT_OF_MEMORY;
         uint32_t *big = malloc(n * sizeof *big);
         if (big == NULL) return GHOSTTY_OUT_OF_MEMORY;
         size_t bn = n;
@@ -472,12 +466,9 @@ GhosttyResult nocxReadRow(GhosttyTerminal terminal, GhosttyPointTag tag,
                            &out->grapheme_off, &out->grapheme_len);
       }
       if (r != GHOSTTY_SUCCESS) return r;
-      if (max_cluster_bytes != 0 && out->grapheme_len > max_cluster_bytes)
-        return GHOSTTY_OUT_OF_SPACE;
     }
   }
-  *out_graphemes_len = used;
-  return used > graphemes_cap ? GHOSTTY_OUT_OF_SPACE : GHOSTTY_SUCCESS;
+  return GHOSTTY_SUCCESS;
 }
 
 uint64_t nocxGridResolveCount(void) {

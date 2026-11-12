@@ -167,7 +167,7 @@ func driveResizeScenario(t *testing.T, term *terminal, scenario string, cmd int,
 // resizeTopText is the text of the row at the top of the active area: history
 // row h is the first row below the history, which is where a scroll shows.
 func resizeTopText(term *terminal, h int) string {
-	row, err := term.rowAt(pointHistory, h, rowReadPolicy{op: "row"})
+	row, err := term.rowAt(pointHistory, h)
 	if err != nil {
 		return "?"
 	}
@@ -181,7 +181,7 @@ func resizeNewestTexts(term *terminal, h int) string {
 		if y < 0 {
 			continue
 		}
-		row, err := term.rowAt(pointHistory, y, rowReadPolicy{op: "row"})
+		row, err := term.rowAt(pointHistory, y)
 		if err != nil {
 			continue
 		}

@@ -158,11 +158,6 @@ type terminal struct {
 	// C callback cannot carry a Go pointer, so it carries a number instead.
 	id   uintptr
 	geom emulator.Geometry
-	// Row extraction reuses only its geometry-sized starting buffers under mu.
-	// Retry buffers stay local, so an exceptional cluster cannot enlarge retained
-	// scratch. No returned cell or string aliases either buffer.
-	rowCells     []C.nocxRowCellFacts
-	rowGraphemes []byte
 	// replies holds what the program asked to be written back to the PTY. See
 	// the struct doc: only the goroutine holding mu writes it, and the bytes in
 	// it are already copied out of the library's borrowed memory.
@@ -504,12 +499,6 @@ func (t *terminal) Resize(g emulator.Geometry) ([]byte, error) {
 		return nil, fmt.Errorf("ghostty: %w: %dx%d cells, %dx%d px", emulator.ErrOutOfRange,
 			g.Cols, g.Rows, g.CellWidthPx, g.CellHeightPx)
 	}
-	// Resize callbacks may extract rows at either geometry. Drop their scratch
-	// on every exit so a wide former screen is not retained by a narrow one.
-	defer func() {
-		t.rowCells = nil
-		t.rowGraphemes = nil
-	}()
 	// The depth either side of the resize is the debt: a taller screen fills
 	// itself out of history — the depth shrinks by the rows it took — and
 	// those rows must not be reported as departures when they leave the
@@ -1088,6 +1077,25 @@ func (t *terminal) failDeparted(err error) {
 	}
 }
 
+// rowAt reads a line's soft-wrap flags and cells from the coordinate space tag
+// names. Bounds belong to the caller. Departed capture uses historyRow instead,
+// sharing one resolved reference across all columns of each history row.
+func (t *terminal) rowAt(tag C.GhosttyPointTag, y int) (emulator.Row, error) {
+	wrapped, continuation, err := t.rowFlags(tag, y)
+	if err != nil {
+		return emulator.Row{}, err
+	}
+	cells := make([]emulator.Cell, 0, t.geom.Cols)
+	for x := range t.geom.Cols {
+		cell, err := t.readCell(tag, x, y)
+		if err != nil {
+			return emulator.Row{}, err
+		}
+		cells = append(cells, cell)
+	}
+	return emulator.Row{Cells: cells, Wrap: wrapped, Continuation: continuation}, nil
+}
+
 // rebaselineLocked takes fresh baselines after a mutation that reflows
 // rather than scrolls. The active buffer is measured; the hidden one cannot
 // be, so its next measurement starts a fresh baseline instead of a delta —
@@ -1415,7 +1423,7 @@ func (rt *rowTrack) Row() (emulator.Row, error) {
 	default:
 		return emulator.Row{}, resultError("tracked_grid_ref_point", r)
 	}
-	return t.rowAt(pointScreen, int(pt.y), rowReadPolicy{op: "row"})
+	return t.rowAt(pointScreen, int(pt.y))
 }
 
 // ActiveRow resolves the reference in the ACTIVE area, where the library
@@ -1474,7 +1482,7 @@ func (t *terminal) Row(y int) (emulator.Row, error) {
 	if y < 0 || y >= t.geom.Rows {
 		return emulator.Row{}, fmt.Errorf("ghostty: row %d of %d: %w", y, t.geom.Rows, emulator.ErrOutOfRange)
 	}
-	return t.rowAt(pointActive, y, rowReadPolicy{op: "row"})
+	return t.rowAt(pointActive, y)
 }
 
 func (t *terminal) Cell(x, y int) (emulator.Cell, error) {
@@ -1521,8 +1529,8 @@ func (t *terminal) rowFlags(tag C.GhosttyPointTag, y int) (wrapped, continuation
 // never returned.
 //
 // Each position costs its own grid reference, cell fields, style and (for text)
-// grapheme read. Keep this scalar path independent of bulk row extraction.
-// Tag names the coordinate space.
+// grapheme read. Active and tracked-row reads use this path; departed capture
+// uses historyRow's bulk traversal instead. Tag names the coordinate space.
 func (t *terminal) readCell(tag C.GhosttyPointTag, x, y int) (emulator.Cell, error) {
 	var ref C.GhosttyGridRef
 	if r := C.nocxGridRefAt(t.t, tag, C.uint32_t(x), C.uint32_t(y), &ref); r != C.GHOSTTY_SUCCESS {
@@ -1596,77 +1604,39 @@ func (t *terminal) readGrapheme(ref *C.GhosttyGridRef) (string, error) {
 	return sb.String(), nil
 }
 
-// historyRow keeps departed capture's bounded UTF-8 budget and error context.
-// All row consumers share rowAt's traversal; scalar Cell remains independent.
+// historyRow reads one row of the active buffer's scrollback through the
+// bridge's row traversal. The bridge resolves the row ONCE — the page-list
+// walk a history lookup pays — and reads every cell of the row off the
+// resolved reference, so a row of N columns costs one grid-reference
+// resolution and not N. Bounds belong to the caller, as rowAt's do: history
+// is bounded by what has not been evicted, and only the caller knows the
+// range it asked for.
 func (t *terminal) historyRow(y int) (emulator.Row, error) {
-	return t.rowAt(pointHistory, y, rowReadPolicy{
-		op:              "history_row",
-		maxClusterBytes: 1<<16 - 1,
-		maxRowBytes:     t.geom.Cols * maxGraphemeCodepoints * 64,
-	})
-}
-
-// rowReadPolicy belongs to the consumer, independently of coordinate space.
-// Zero limits request complete clusters and an exact-size retry. A bounded
-// consumer keeps the existing fourfold retries up to its row budget.
-type rowReadPolicy struct {
-	op              string
-	maxClusterBytes int
-	maxRowBytes     int
-}
-
-// rowAt reads a complete owned row from ACTIVE, SCREEN, or HISTORY while the
-// caller holds mu. Bounds belong to the caller. The bridge resolves column
-// zero once per attempt, then traverses that same row for cells and wrap flags.
-// The caller supplies extraction limits independently of the coordinate tag.
-func (t *terminal) rowAt(tag C.GhosttyPointTag, y int, policy rowReadPolicy) (emulator.Row, error) {
 	cols := t.geom.Cols
-	if len(t.rowCells) != cols {
-		t.rowCells = make([]C.nocxRowCellFacts, cols)
-	}
-	cells := t.rowCells
+	cells := make([]C.nocxRowCellFacts, cols)
 	var wrap, cont C.bool
-	var used C.size_t
-	// Geometry is uint16-bounded, so these row budgets fit even a 32-bit int.
-	// Retain only the starting budget, smaller than the pinned emulator's
-	// maximum cluster size. Larger complete clusters still use local retries
-	// below; this retention bound never becomes a limit on extracted text.
-	initialBytes := cols * maxGraphemeCodepoints * 4
-	if len(t.rowGraphemes) != initialBytes {
-		t.rowGraphemes = make([]byte, initialBytes)
-	}
-	graphemes := t.rowGraphemes
+	// Clusters ride one row-wide UTF-8 buffer. The first budget is what a
+	// full row of the port's largest clusters costs; a row of clusters past
+	// even that re-runs the whole traversal on a fourfold budget rather than
+	// truncating — the bridge holds no state between attempts, and each
+	// attempt pays its own one resolution.
+	graphemes := make([]byte, cols*maxGraphemeCodepoints*4)
 	for {
-		r := C.nocxReadRow(t.t, tag, C.uint32_t(y), C.uint16_t(cols), &cells[0],
-			(*C.uint8_t)(unsafe.Pointer(&graphemes[0])), C.size_t(len(graphemes)), C.size_t(policy.maxClusterBytes), &used, &wrap, &cont)
+		r := C.nocxHistoryRow(t.t, C.uint32_t(y), C.uint16_t(cols), &cells[0],
+			(*C.uint8_t)(unsafe.Pointer(&graphemes[0])), C.size_t(len(graphemes)), &wrap, &cont)
 		if r == C.GHOSTTY_OUT_OF_SPACE {
-			if policy.maxRowBytes > 0 {
-				if len(graphemes) >= policy.maxRowBytes {
-					return emulator.Row{}, fmt.Errorf("ghostty: %s row %d utf8 budget %d: %w",
-						policy.op, y, len(graphemes), emulator.ErrExhausted)
-				}
-				graphemes = make([]byte, min(len(graphemes)*4, policy.maxRowBytes))
-			} else {
-				if used <= C.size_t(len(graphemes)) {
-					return emulator.Row{}, fmt.Errorf("ghostty: row %d utf8 required %d: %w",
-						y, used, emulator.ErrFailure)
-				}
-				if used > C.size_t(int(^uint(0)>>1)) {
-					return emulator.Row{}, fmt.Errorf("ghostty: row %d utf8 required %d: %w",
-						y, used, emulator.ErrExhausted)
-				}
-				graphemes = make([]byte, int(used))
+			if len(graphemes) >= cols*maxGraphemeCodepoints*64 {
+				return emulator.Row{}, fmt.Errorf("ghostty: history row %d utf8 budget %d: %w",
+					y, len(graphemes), emulator.ErrExhausted)
 			}
+			graphemes = make([]byte, len(graphemes)*4)
 			continue
 		}
 		if r != C.GHOSTTY_SUCCESS {
-			return emulator.Row{}, resultError(policy.op, r)
+			return emulator.Row{}, resultError("history_row", r)
 		}
 		break
 	}
-	// One Go-owned immutable string backs every cluster in this result. It
-	// cannot alias the scratch bytes or any storage a later terminal call edits.
-	text := string(graphemes[:int(used)])
 	out := make([]emulator.Cell, cols)
 	for x := range cols {
 		f := &cells[x]
@@ -1686,7 +1656,7 @@ func (t *terminal) rowAt(tag C.GhosttyPointTag, y int, policy rowReadPolicy) (em
 		}
 		if cell.HasText {
 			off, n := int(f.grapheme_off), int(f.grapheme_len)
-			cell.Grapheme = text[off : off+n]
+			cell.Grapheme = string(graphemes[off : off+n])
 		}
 		out[x] = cell
 	}
@@ -2122,6 +2092,4 @@ func (t *terminal) release() {
 	t.t = nil
 	t.replies = nil
 	t.effects = nil
-	t.rowCells = nil
-	t.rowGraphemes = nil
 }

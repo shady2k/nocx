@@ -65,15 +65,9 @@ func TestDepartedBulkCapturePreservesCellsBeforeErasure(t *testing.T) {
 				departedRetention(t, term, 30)
 			}
 			departedFeed(t, term, line)
-			// The fixture fits one row. Keep its cell oracle independent of
-			// the bulk traversal now shared by active and departed Row reads.
-			want := emulator.Row{Cells: make([]emulator.Cell, 20)}
-			for x := range want.Cells {
-				cell, err := term.Cell(x, 0)
-				if err != nil {
-					t.Fatal(err)
-				}
-				want.Cells[x] = cell
+			want, err := term.Row(0)
+			if err != nil {
+				t.Fatal(err)
 			}
 			if want.Cells[0].Style.Attributes != emulator.AttrBold|emulator.AttrItalic|emulator.AttrFaint|emulator.AttrBlink|emulator.AttrInverse|emulator.AttrInvisible|emulator.AttrStrikethrough|emulator.AttrOverline || want.Cells[0].Style.Underline != emulator.UnderlineCurly {
 				t.Fatalf("fixture lost its decorations: %+v", want.Cells[0])
@@ -92,7 +86,7 @@ func TestDepartedBulkCapturePreservesCellsBeforeErasure(t *testing.T) {
 			}
 			for i, row := range rows {
 				if !reflect.DeepEqual(row, want) {
-					t.Fatalf("row %d differs from scalar cells: got %+v, want %+v", i, row, want)
+					t.Fatalf("row %d differs from the active read: got %+v, want %+v", i, row, want)
 				}
 			}
 			// A subsequent write cannot change any handed-out row or string.

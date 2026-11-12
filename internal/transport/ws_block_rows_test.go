@@ -2504,6 +2504,60 @@ func TestBlockOutputStart_OverTheWireConformsToContract(t *testing.T) {
 	}
 }
 
+func TestRepeatedOutputAnchorPreservesBlockAndStreamCursor_OverTheWireConformsToContract(t *testing.T) {
+	for _, recovered := range []bool{false, true} {
+		name := "fresh"
+		if recovered {
+			name = "recovered"
+		}
+		t.Run(name, func(t *testing.T) {
+			schema := loadSchema(t, "block.outputStart.schema.json")
+			e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+			id := session.ID(sid)
+			e.ws.AttachBlockRows(id)
+			entry := startsACommand(t, e, pub, lane, h, 2, "top")
+			bs := e.ws.blockStream
+			bs.mu.Lock()
+			current := bs.current[id]
+			current.recoveredOutputInterval = recovered
+			current.awaitingOutputReplay = recovered
+			bs.mu.Unlock()
+			revision := uint64(12)
+			for _, row := range []uint64{4, 0, 0} {
+				e.ws.BlockOutputStartRowWithAnchor(id, 0, proto.OutputStartScreenAnchor{
+					Row: row, ScreenRevision: revision, BufferKind: "normal", BufferInstance: "1", Cols: 80, Rows: 24,
+				})
+				params := readNotification(t, e.conn, "block.outputStart", wantWithin)
+				validateJSON(t, schema, params, "repeated block.outputStart params")
+				var got blockOutputStartParams
+				if err := json.Unmarshal(params, &got); err != nil {
+					t.Fatal(err)
+				}
+				if got.EntryID != entry || got.FromRow != 0 || got.Row != row || got.ScreenRevision != revision {
+					t.Fatalf("anchor = %+v", got)
+				}
+				bs.mu.Lock()
+				same := bs.current[id] == current
+				successor := current.successorMarked
+				cursor := current.expectedFirstRow
+				artifact := current.artifactID
+				bs.mu.Unlock()
+				if !same || successor || cursor != 0 || artifact == "" {
+					t.Fatalf("repaint changed block: same=%v successor=%v cursor=%d artifact=%s", same, successor, cursor, artifact)
+				}
+				revision++
+			}
+			if up, ok := e.ws.BlockRowsArrived(id, 0, 0, []emulator.Row{aStreamRow("summary")}, ""); !ok || up != 1 {
+				t.Fatalf("rows = (%d,%v)", up, ok)
+			}
+			rows := streamRows(t, db, entry)
+			if len(rows) != 1 || rows[0].Text != "summary" || rows[0].From != 0 {
+				t.Fatalf("artifact rows = %+v", rows)
+			}
+		})
+	}
+}
+
 func TestBlockOutputStart_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "block.outputStart.schema.json")
 	for _, p := range []blockOutputStartParams{

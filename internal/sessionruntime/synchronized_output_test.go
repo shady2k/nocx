@@ -94,17 +94,17 @@ func tallyFrames(t *testing.T, s *Session) *frameTally {
 
 // take hands over everything held and records it.
 func (f *frameTally) take() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	deliveries := f.c.Take()
 	if len(deliveries) == 0 {
 		return
 	}
-	f.mu.Lock()
 	for _, d := range deliveries {
 		f.bytes = append(f.bytes, d.Bytes)
 	}
 	close(f.notify)
 	f.notify = make(chan struct{})
-	f.mu.Unlock()
 }
 
 // taken decodes what has been taken so far. It runs on whichever goroutine
@@ -142,6 +142,7 @@ func (f *frameTally) settled() []tallyFrame {
 func (f *frameTally) reset() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.c.Take() // Drain frames published before the measurement barrier too.
 	f.bytes = nil
 }
 
@@ -369,6 +370,54 @@ done
 printf '\033[?2026l'
 `
 
+func waitForSynchronizedHold(t *testing.T, p *programSession) {
+	t.Helper()
+	deadline := time.NewTimer(hangLimit)
+	defer deadline.Stop()
+	for {
+		p.s.mu.Lock()
+		held := p.s.syncHold
+		p.s.mu.Unlock()
+		if held {
+			return
+		}
+		select {
+		case _, ok := <-p.changed:
+			if !ok {
+				t.Fatal("program ended before synchronized hold began")
+			}
+		case <-deadline.C:
+			t.Fatal("program never began synchronized hold")
+		}
+	}
+}
+
+func TestSynchronizedOutputMeasurementDropsFramesBeforeCompleteBSU(t *testing.T) {
+	s, _, _ := realRuntime(t, holdBoundOf(time.Hour))
+	tally := &frameTally{t: t, c: s.Consumers().Attach(), notify: make(chan struct{})}
+	for _, chunk := range []string{"ARMED", "\x1b[?2026", "h"} {
+		if err := s.Ingest([]byte(chunk)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.mu.Lock()
+	held := s.syncHold
+	s.mu.Unlock()
+	if !held {
+		t.Fatal("complete BSU did not begin hold")
+	}
+	// Measurement begins at the mode, not at the write that may be split.
+	tally.reset()
+	if err := s.Ingest([]byte("finished\x1b[?2026l")); err != nil {
+		t.Fatal(err)
+	}
+	tally.take()
+	frames := tally.taken()
+	if len(frames) != 1 || !strings.Contains(frames[0].text, "finished") {
+		t.Fatalf("held measurement = %+v, want only the completed frame", frames)
+	}
+}
+
 func TestAScrollInsideSynchronizedOutputIsPublishedOnceOnARealPTY(t *testing.T) {
 	p := startProgram(t, synchronizedScrollProgram, harnessGeometry(80, 24), holdBoundOf(time.Hour))
 	tally := tallyFrames(t, p.s)
@@ -378,9 +427,12 @@ func TestAScrollInsideSynchronizedOutputIsPublishedOnceOnARealPTY(t *testing.T) 
 	// until the hold begins, and the revision read here is the one it begins
 	// at.
 	tally.waitForHolding("ARMED")
-	tally.reset()
 	revBeforeHold := p.s.Revision()
 	p.typed("g")
+	// A PTY read may split BSU itself. Until its final byte is parsed,
+	// an unchanged ARMED frame is legal: the hold has not begun yet.
+	waitForSynchronizedHold(t, p)
+	tally.reset()
 	for range 12 {
 		p.typed("x")
 	}

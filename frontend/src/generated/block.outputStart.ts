@@ -10,7 +10,7 @@
  */
 
 /**
- * Params of the session-scoped block.outputStart notification. `row` is the anchor's screen row; `fromRow` is the block's first output row in the ordered rows stream — the coordinate `from` uses in ledger.blockRows, and the one the renderer places the block in.
+ * Params of the session-scoped block.outputStart notification. `row` is the current backend-owned screen anchor. A running block may receive refreshed anchors when output rewrites rows above its original start. `fromRow` remains the block's original first output row in the ordered rows stream, the coordinate `from` uses in ledger.blockRows; refreshing the screen anchor does not start or complete a block.
  */
 export interface BlockOutputStart {
   entryId: string

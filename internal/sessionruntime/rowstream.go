@@ -50,7 +50,9 @@ type ScreenRowAnchor struct {
 
 // OutputStartAnchorMarker is the richer form of OutputStartMarker used by
 // transports that can carry the screen coordinate alongside the row-stream
-// mark. Older/internal row sinks may continue to implement OutputStartMarker.
+// mark. The screen row may move when a running program rewrites its prefix;
+// the stream position remains the original output start. Older/internal row
+// sinks may continue to implement OutputStartMarker.
 type OutputStartAnchorMarker interface {
 	OutputStartRowWithAnchor(from uint64, anchor ScreenRowAnchor)
 }
@@ -123,6 +125,47 @@ func (s *Session) SetRowStream(r RowStream) {
 	if r != nil && s.observation != nil && s.observation.OutputMarked {
 		s.emitOutputStartLocked(s.observation.OutputStartStreamRow, s.observation.OutputScreenAnchor)
 	}
+}
+
+// refreshLiveOutputAnchorLocked uses the closing-screen prefix owner for the
+// entire visible primary screen. A cursor home is not a command boundary and
+// must not truncate the evidence of output written above the original mark.
+func (s *Session) refreshLiveOutputAnchorLocked(snap Snapshot) {
+	o := s.observation
+	if o == nil || !o.OutputMarked || snap.Identity.AltScreen {
+		return
+	}
+	reported, err := s.emulator.ReportedRowsOnScreen()
+	if err != nil {
+		return
+	}
+	// Use the publication's already-read rows, including those below a cursor
+	// parked at home. Closing-screen capture still ends at its own cursor.
+	scr := ObservationScreen{Lines: snap.Rows, Reported: reported, Cursor: snap.Cursor}
+	scr.Cursor.Y = len(scr.Lines) - 1
+	skip := s.outputStartSkipLocked(o.OutputStartTrack, o.OutputPrefix, o.OutputStartRow, o.OutputMarkDeparted, scr)
+	anchor := ScreenRowAnchor{
+		Row:      snap.BaseRow + uint64(boundaryRowsTop(scr)+skip), // #nosec G115 -- both counts are nonnegative and bounded by the accepted screen rows
+		Revision: snap.Revision,
+		Identity: snap.Identity,
+	}
+	prior := o.OutputScreenAnchor
+	// Rows already attributed to this interval remain its output after they
+	// depart. Scrolling cannot move that start forward; a repaint can only
+	// expand ownership above it within the same screen identity.
+	if prior != nil {
+		sameBuffer := prior.Identity.At == anchor.Identity.At &&
+			prior.Identity.AltScreen == anchor.Identity.AltScreen &&
+			prior.Identity.BufferInstance == anchor.Identity.BufferInstance
+		if sameBuffer && prior.Row < anchor.Row {
+			anchor.Row = prior.Row
+		}
+		if prior.Identity == anchor.Identity && prior.Row == anchor.Row {
+			return
+		}
+	}
+	o.OutputScreenAnchor = &anchor
+	s.emitOutputStartLocked(o.OutputStartStreamRow, o.OutputScreenAnchor)
 }
 
 // emitOutputStartLocked preserves the helper's ordered stream coordinate and,

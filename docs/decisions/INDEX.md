@@ -224,6 +224,8 @@ was left alone.
 
 | 8rt54tx2 | 2026-11-10 | [The sent witness crosses every responder, and a running block keeps its body](8rt54tx2-the-sent-witness-crosses-every-responder.md) | Accepted (owner review of PR #789, round 3, 2026-11-10, `nocx-4y82c.1.18`; refines ADR-y45sp41c and ADR-ywzcpbqe) |
 
+| 23dn5775 | 2026-11-12 | [Only backend lifecycle facts author command blocks](23dn5775-only-backend-lifecycle-facts-author-command-blocks.md) | Accepted (owner decision, `nocx-peg8e.1.1`; extends ADR-0074: screen behaviour never authors a boundary) |
+
 ## Adding one
 
 1. `node .githooks/adr-identifier.mjs` prints an identifier.

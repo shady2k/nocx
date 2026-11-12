@@ -12,10 +12,10 @@ const COLS = 120
 const ROWS = 40
 const SAMPLES = 60
 
-test.describe('procedural suffix frame budget', () => {
-  // Tracing a 9,000-node surface between actions is not part of painter cost.
-  test.use({ trace: { mode: 'retain-on-failure', snapshots: false, screenshots: false } })
+// Tracing a 9,000-node surface between actions is not part of painter cost.
+test.use({ trace: { mode: 'retain-on-failure', snapshots: false, screenshots: false } })
 
+test.describe('procedural suffix frame budget', () => {
   test('retains unchanged ink, exact pixels and the idle display cadence', async ({
     page,
   }, info) => {
@@ -56,6 +56,8 @@ test.describe('procedural suffix frame budget', () => {
         host.append(surface)
         const fit = createCellFit(() => host)
         if (!fit.begin()) throw new Error('the mounted fit has no geometry')
+        await document.fonts.ready
+        if (!fit.begin()) throw new Error('the loaded font has no geometry')
         const options = {
           surface,
           metric: () => metricOf(fit),
@@ -185,6 +187,24 @@ test.describe('procedural suffix frame budget', () => {
       body: JSON.stringify(result, null, 2),
       contentType: 'application/json',
     })
+    console.log(
+      'procedural-suffix-measurements',
+      JSON.stringify({
+        browser: info.project.name,
+        idle: percentile(result.idle, 0.5),
+        runs: Object.fromEntries(
+          Object.entries(result.metrics).map(([name, run]) => [
+            name,
+            {
+              applyP50: percentile(run.apply, 0.5),
+              applyP95: percentile(run.apply, 0.95),
+              rafP50: percentile(run.raf, 0.5),
+              rafP95: percentile(run.raf, 0.95),
+            },
+          ]),
+        ),
+      }),
+    )
     expect(result.immutable).toBe(true)
     expect(result.inkCount).toBe(ROWS)
     expect(result.retained, 'every unchanged SVG survives the suffix update').toBe(true)

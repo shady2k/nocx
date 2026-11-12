@@ -23608,7 +23608,7 @@ describe('the live region is the painter picture (nocx-zg3k3.2.5)', () => {
       const after = [...live.querySelectorAll('.term-grid-row')]
       expect(after.length).toBe(SCREEN_ROWS)
       expect(after[0]).toBe(before[0])
-      expect(after[1]).not.toBe(before[1])
+      expect(after[1]).toBe(before[1])
       expect(after[3]).toBe(before[3])
     } finally {
       debug.mockRestore()

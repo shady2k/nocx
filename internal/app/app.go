@@ -2180,6 +2180,9 @@ func New(opts ...Option) (*App, error) {
 	// helper's rides each spawn, the coordinator's is the transport's for
 	// every session it attaches next; both follow a change for the NEXT
 	// session only.
+	lifetime := newSessionLifetimeSetting(settingsRegistry)
+	localOpener.lifetime = lifetime
+	helperReg.lifetime = lifetime
 	localOpener.rowBuffers = &rowBuffers{}
 	watchRowBuffers(settingsRegistry, localOpener.rowBuffers, tp)
 	// The person's scrollback budget (nocx-zg3k3.10.1): what a pane opened

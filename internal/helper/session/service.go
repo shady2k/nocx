@@ -66,6 +66,7 @@ var (
 	ErrBudget        = errors.New("session: the helper's aggregate window budget is exhausted")
 	ErrSpawn         = errors.New("session: the shell could not be started")
 	ErrSignal        = errors.New("session: signal is invalid or unavailable")
+	ErrBadIdleDays   = errors.New("session: idle days must be at least zero")
 	ErrBadKey        = errors.New("session: the idempotency key is longer than the protocol allows")
 	// ErrReplay is a capture the helper will not feed to an emulator: a
 	// geometry it refuses to allocate, marks it cannot honour, or a chunk the
@@ -135,24 +136,10 @@ type Limits struct {
 	// before it is refused (nocx-isjh4, owner decision 2026-09-15,
 	// amendment 4).
 	BudgetBytes int64
-	// UnclaimedSessionTTL bounds how long an exited session may sit unclaimed
-	// before the helper closes it on its own, budget released, key claim
-	// released — through the same closer eviction and closeSession use. It
-	// exists because one abandoned exited session would otherwise pin its
-	// window budget indefinitely (nocx-isjh4, owner amendment 2026-09-15).
-	//
-	// IT DOES NOT MAKE THE PROCESS EXIT, and nothing else does either — checked
-	// rather than assumed (nocx-isjh4, coordinator review 2026-09-15):
-	// cmd/nocx-helper's serve() runs endpoint.Serve's accept loop until its ctx
-	// is cancelled (SIGINT/SIGTERM) or a fatal bind/accept error, with no read
-	// of the session count anywhere in that loop. So a generation with zero
-	// sessions is memory this closer bounds, not a process anything here
-	// reaps; the process's own lifetime is an external decision (whatever
-	// started it, or a person) both before and after this bead. Compared
-	// against the Service's clock seam (s.now); the SCHEDULE that evaluates it
-	// is a real-time ticker (SweepInterval below) rather than the injectable
-	// clock, because D5 forbids the helper deciding anything about a block's
-	// result, not running a timer — see SweepInterval's own doc.
+	// UnclaimedSessionTTL is the fallback unattached lifetime when spawn carries
+	// no SessionIdleDays. Production uses three days (ADR-v7xk8mq8); tests may
+	// shorten the interval through this existing clock seam. It applies to
+	// live and exited records alike, from spawn or last attachment release.
 	UnclaimedSessionTTL time.Duration
 	// DefaultRowBufferBytes, MinRowBufferBytes and MaxRowBufferBytes are
 	// the row buffer's bounds (nocx-2v80t.3.38): what a spawn naming none
@@ -164,10 +151,8 @@ type Limits struct {
 	MaxRowBufferBytes     int64
 }
 
-// unclaimedSessionTTLDefault is D-amendment 3's number: a session nobody has
-// claimed within a day of its shell exiting is not going to be, and is closed
-// so its budget and the helper's own liveness are not spent on it forever.
-const unclaimedSessionTTLDefault = 24 * time.Hour
+// unclaimedSessionTTLDefault is the three-day absence policy (ADR-v7xk8mq8).
+const unclaimedSessionTTLDefault = 3 * 24 * time.Hour
 
 // DefaultLimits are D8's numbers: a 4 MiB default raised from the coordinator
 // ring's shipped 256 KiB, a floor four times the credit limit, a ceiling that
@@ -300,7 +285,7 @@ type Options struct {
 }
 
 // defaultSweepInterval is how often production runs the scheduled sweep. It
-// is independent of UnclaimedSessionTTL (default 24h): running far more
+// is independent of UnclaimedSessionTTL (default 3 days): running far more
 // often than sessions actually expire costs one cheap map walk apiece, and
 // running less often would let an orphaned session's memory and the
 // process's own liveness (see Service.Close's doc on why the helper cares)
@@ -663,7 +648,7 @@ func (s *Service) Refusal(err error) (string, json.RawMessage) {
 	case errors.Is(err, ErrNoSuchSession):
 		return proto.ErrCodeNoSuchSession, nil
 	case errors.Is(err, ErrNotAttached), errors.Is(err, ErrBadSubscriber),
-		errors.Is(err, ErrAckAhead), errors.Is(err, ErrAckBehind), errors.Is(err, ErrBadKey):
+		errors.Is(err, ErrAckAhead), errors.Is(err, ErrAckBehind), errors.Is(err, ErrBadKey), errors.Is(err, ErrBadIdleDays):
 		return proto.ErrCodeBadParams, nil
 	case errors.Is(err, ErrNoWriter), errors.Is(err, ErrNotTheWriter), errors.Is(err, ErrStaleLease):
 		return proto.ErrCodeWriteRefused, nil
@@ -979,6 +964,9 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 		"cwd", p.Cwd, "cols", p.Cols, "rows", p.Rows,
 		"workspace", p.Workspace, "lifecycle_requested", p.Lifecycle != nil)
 	defer func() { end(err) }()
+	if p.SessionIdleDays != nil && *p.SessionIdleDays < 0 {
+		return proto.SpawnResult{}, ErrBadIdleDays
+	}
 	if len(p.IdempotencyKey) > proto.MaxIdempotencyKey {
 		return proto.SpawnResult{}, fmt.Errorf("%w: %d characters, the limit is %d",
 			ErrBadKey, len(p.IdempotencyKey), proto.MaxIdempotencyKey)
@@ -1100,7 +1088,7 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 	}, spawnShape{
 		sessionID: proto.SessionHex(raw), raw: raw, workspace: p.Workspace, key: p.IdempotencyKey,
 		cols: cols, rows: rows, xpixel: p.XPixel, ypixel: p.YPixel, bound: bound, reserved: reserved,
-		rowBuffer: rowBuffer, scrollback: scrollbackOf(p.ScrollbackLines), lifecycle: p.Lifecycle,
+		idleDays: p.SessionIdleDays, rowBuffer: rowBuffer, scrollback: scrollbackOf(p.ScrollbackLines), lifecycle: p.Lifecycle,
 	}, lg, &spawned)
 }
 
@@ -1146,6 +1134,9 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 		// `err` is the one its deferred end() reports, and a shadowed error
 		// there is a failure whose cause and whose report can disagree.
 		return proto.SpawnResult{}, verr
+	}
+	if p.SessionIdleDays != nil && *p.SessionIdleDays < 0 {
+		return proto.SpawnResult{}, ErrBadIdleDays
 	}
 	if len(p.IdempotencyKey) > proto.MaxIdempotencyKey {
 		return proto.SpawnResult{}, fmt.Errorf("%w: %d characters, the limit is %d",
@@ -1288,7 +1279,7 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 	}, spawnShape{
 		sessionID: proto.SessionHex(raw), raw: raw, workspace: p.Workspace, key: p.IdempotencyKey,
 		cols: cols, rows: rows, xpixel: p.XPixel, ypixel: p.YPixel, bound: bound, reserved: reserved,
-		rowBuffer: rowBuffer, scrollback: scrollbackOf(p.ScrollbackLines), lifecycle: p.Lifecycle,
+		idleDays: p.SessionIdleDays, rowBuffer: rowBuffer, scrollback: scrollbackOf(p.ScrollbackLines), lifecycle: p.Lifecycle,
 	}, lg, &spawned)
 }
 
@@ -1404,6 +1395,7 @@ func (s *Service) fitRowBufferLocked(reserved, want int64) (int64, bool) {
 // reserved, and the lifecycle request (which decides whether a second window is
 // reserved for the descriptor channel).
 type spawnShape struct {
+	idleDays  *int
 	sessionID string
 	// raw is the same id in the data plane's spelling. It travels BESIDE the
 	// hex rather than being derived from it in finishSpawn, because the bytes
@@ -1549,6 +1541,8 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 		workspace:       shape.workspace,
 		key:             shape.key,
 		startedAt:       s.now(),
+		unattachedAt:    s.now(),
+		idleTTL:         sessionIdleTTL(shape.idleDays, s.limits.UnclaimedSessionTTL),
 		proc:            proc,
 		win:             win,
 		runtime:         rt,
@@ -1844,7 +1838,8 @@ func (s *Service) closeSession(p proto.CloseSessionParams) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return s.removeSession(hs, "close-session"), nil
+	drained := s.removeSession(hs, "close-session")
+	return drained, hs.owner.terminationError()
 }
 
 // removeSession is the one closer behind closeSession, the unclaimed-session
@@ -1877,8 +1872,20 @@ func (s *Service) closeSession(p proto.CloseSessionParams) (bool, error) {
 // fires the drain, because only the caller knows whether an answer is still
 // owed to somebody first.
 func (s *Service) removeSession(hs *hostSession, reason string) bool {
+	hs.terminationMu.Lock()
+	defer hs.terminationMu.Unlock()
 	s.log.Info("helper: ending a host session", "session", hs.id.Session, "reason", reason)
+	hs.mu.Lock()
+	alreadyStopped := hs.stopped
+	hs.mu.Unlock()
+	if alreadyStopped && hs.owner.terminationError() != nil {
+		hs.owner.retryTermination()
+	}
 	hs.stop()
+	if err := hs.owner.terminationError(); err != nil {
+		s.log.Warn("helper: session termination failed; retaining record", "session", hs.id.Session, "reason", reason, "err", err)
+		return false
+	}
 
 	s.mu.Lock()
 	removed := false
@@ -1900,39 +1907,37 @@ func (s *Service) removeSession(hs *hostSession, reason string) bool {
 	return shouldDrain
 }
 
-// sweepExpired closes every exited, unattached session whose exit is at
-// least UnclaimedSessionTTL old (nocx-isjh4, owner amendment 3). D5 forbids
-// the helper deciding anything about a block's result, not running a timer
-// (coordinator review, 2026-09-15) — so what "the timer" measures is still
-// only this comparison against s.now(), but WHEN it is evaluated is now
-// twofold: on sweepLoop's own real-time schedule (SweepInterval, started
-// with the Service and stopped by Close) so an unclaimed session is bounded
-// even on a helper nobody ever calls again, and lazily on the two paths a
-// caller can still change something through: the inventory read, and before
-// a spawn's own budget check (which is also evictForBudget's first move, so
-// a spawn that fits once TTL'd sessions are gone never reaches
-// eviction-under-pressure at all). NOT WindowBytesInUse: it has no
-// production caller and exists to observe the budget, so it must not be the
-// thing that changes it — see its own doc.
-//
-// A LIVE shell is never touched: exitInfo reports exited=false for one, and
-// this never calls removeSession for it. Neither is an exited session a
-// coordinator still holds an attachment on — it may be mid-read of the
-// result it came back for, which is exactly the case D5's surviving half
-// exists to protect.
+// sessionIdleTTL resolves the spawn setting without overflowing a duration.
+func sessionIdleTTL(days *int, fallback time.Duration) time.Duration {
+	if days == nil {
+		return fallback
+	}
+	if *days <= 0 {
+		return 0
+	}
+	const day = 24 * time.Hour
+	if uint64(*days) > uint64((1<<63-1)/day) {
+		return time.Duration(1<<63 - 1)
+	}
+	return time.Duration(*days) * day
+}
+
+// sweepExpired uses the same scheduled and lazy entry points for live and
+// exited sessions. Only a real attachment protects a session (ADR-v7xk8mq8).
 func (s *Service) sweepExpired() {
 	now := s.now()
-	ttl := s.limits.UnclaimedSessionTTL
 	s.mu.Lock()
 	candidates := s.live()
 	s.mu.Unlock()
 	for _, hs := range candidates {
-		exited, at, attached := hs.exitInfo()
-		if !exited || attached {
-			continue
+		hs.mu.Lock()
+		due := len(hs.attachments) == 0 && hs.idleTTL > 0 && now.Sub(hs.unattachedAt) >= hs.idleTTL
+		if due {
+			hs.expiring = true
 		}
-		if now.Sub(at) >= ttl {
-			s.lifecycle.fireDrained(s.removeSession(hs, "unclaimed-ttl"))
+		hs.mu.Unlock()
+		if due {
+			s.lifecycle.fireDrained(s.removeSession(hs, "unattached-ttl"))
 		}
 	}
 }

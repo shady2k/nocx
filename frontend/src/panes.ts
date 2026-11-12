@@ -70,7 +70,7 @@ import { uuidv7 } from './layout/uuid7'
 import { restoreOnStartup } from './restore-setting'
 import type { Pane as PaneRow, Workspace as WorkspaceRow } from './generated/layout.read'
 import { leftRunningMessage, liveDescendants, type LineageNode } from './lineage'
-import { closingWorkspaceMessage, type WorkspaceMember } from './live-work'
+import { closingTabMessage, closingWorkspaceMessage, type WorkspaceMember } from './live-work'
 import { log } from './log'
 import { t, tPlural } from './i18n/locale-model'
 import type { TabStrip } from './tab-strip'
@@ -585,7 +585,7 @@ export class Pane implements PaneHost {
     this.content.focus()
   }
 
-  close(): void {
+  close(reason?: 'end-session'): void {
     this._disposed = true
     // Cancel three of §3.4's four: the tab is going, so whatever it was
     // about to say about itself is no longer true. The other three cancels
@@ -594,7 +594,7 @@ export class Pane implements PaneHost {
     this._mountAbort.abort()
     this._viewportObserver?.disconnect()
     this._viewportObserver = null
-    this.content.dispose()
+    this.content.dispose(reason)
   }
   // ── Internals ─────────────────────────────────────────────────────────
 
@@ -2548,8 +2548,12 @@ export class PaneManager {
     if (this.panes.indexOf(pane) === -1) return
 
     const descendants = this.liveDescendantsOf(pane)
-    if (descendants.length > 0) {
-      const proceed = await showConfirm(leftRunningMessage(descendants), 'Close tab', 'Cancel')
+    const workMessage = closingTabMessage(this.liveWorkOf(pane))
+    const message = [workMessage, descendants.length > 0 ? leftRunningMessage(descendants) : null]
+      .filter(Boolean)
+      .join(' ')
+    if (message) {
+      const proceed = await showConfirm(message, 'Close tab', 'Cancel')
       if (!proceed) return
       // The world moved while the modal was open: this pane may already be
       // gone, and closing it twice would take a tab that has since been
@@ -2873,7 +2877,7 @@ export class PaneManager {
     const wasActive = pane === this.activePane
     this.removeFromRecent(pane.id)
 
-    pane.close()
+    pane.close('end-session')
     pane.pane.remove()
     this.tabStrip.removePane(pane.id)
     this.panes.splice(index, 1)

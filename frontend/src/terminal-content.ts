@@ -1902,10 +1902,10 @@ export class TerminalContent extends BasePaneContent {
   private _integrationUnsub: (() => void) | null = null
   /** Backend block-row notification subscriptions for the current pane. */
   private _blockRowsUnsubs: Array<() => void> = []
-  /** One stored-row read chain per entry, keyed by attempt id. Growth
-   *  notifications during a read share it and queue one follow-up; block.closed
-   *  marks that same follow-up final. `_ensureBlockRows` waits for the chain so
-   *  a freeze sees the latest rows without duplicate fetches or paints. */
+  /** One stored-row read chain per entry, shared by viewport pages and refreshes.
+   *  Growth during any read queues one follow-up; block.closed marks that
+   *  follow-up final. `_ensureBlockRows` waits for the chain so a freeze sees
+   *  the latest rows, and an older page cannot overwrite a newer refresh. */
   private readonly _blockRowsInFlight = new Map<string, Promise<void>>()
   /** At least one newer notification arrived during a read. This is state,
    *  not a debounce timer: the next read starts when the current one settles,
@@ -1929,11 +1929,8 @@ export class TerminalContent extends BasePaneContent {
   private _rowReadOrderRoot: HTMLElement | null = null
   private _rowReadOrderObserver: MutationObserver | null = null
   private _rowReadOrderDirty = true
-  /** At most one page read per entry is outstanding; a scroll that fires
-   *  every frame must not turn one visible block into a stream of requests. */
-  private readonly _blockRowsPageInFlight = new Set<string>()
-  /** A request arrived while a page was in flight. It is demand, never a
-   *  reason to skip: the completion recomputes from the viewport. */
+  /** Viewport demand arrived during a page or refresh. The chain's completion
+   *  recomputes it rather than losing a scroll or replaying an obsolete window. */
   private readonly _blockRowsPagePending = new Set<string>()
   /** The scroll listener that fills lazy rows in as they become visible. */
   private _lazyScrollUnsub: (() => void) | null = null
@@ -5361,6 +5358,7 @@ export class TerminalContent extends BasePaneContent {
     this._blockRowsInFlight.clear()
     this._blockRowsRefreshPending.clear()
     this._blockRowsFinalPending.clear()
+    this._blockRowsPagePending.clear()
     // The pane's own parts, which this method uses and never creates. A caller
     // that has not built them is a programming error rather than a state to
     // handle: mount() builds them before the first bind, and a rebind only
@@ -10491,7 +10489,7 @@ export class TerminalContent extends BasePaneContent {
     this.grantController?.setBlocks([])
   }
 
-  dispose(): void {
+  dispose(reason?: 'end-session'): void {
     this._disposed = true
     this._endOpeningStatement()
     this._cancelDeferredShellSubmissions()
@@ -10515,7 +10513,7 @@ export class TerminalContent extends BasePaneContent {
     this._rowReadOrderRoot = null
     this._rowReadOrder.clear()
     this._rowReadOrderDirty = true
-    this._blockRowsPageInFlight.clear()
+    this._blockRowsPagePending.clear()
     this._lazyScrollUnsub?.()
     this._lazyScrollUnsub = null
     this._detachLinks?.detach()
@@ -10598,7 +10596,14 @@ export class TerminalContent extends BasePaneContent {
       this._copyChordKeydown = null
     }
     this._endSummon(true)
-    this.session?.detach()
+    if (reason === 'end-session') {
+      this.session?.close(() => {
+        showToast({
+          level: 'danger',
+          message: t('session.close.failed', 'Could not end the session — it may still be running'),
+        })
+      })
+    } else this.session?.detach()
     // The pane stops answering the seam with its death: a dead pane's
     // reader has no model worth reading and no session to be found under.
     if (this.session) {
@@ -11565,22 +11570,49 @@ export class TerminalContent extends BasePaneContent {
     })
   }
 
-  /** Ask for one page of a restored or live block's rows, around the visible
-   *  stretch (ADR-y45sp41c). One page per entry is outstanding at a time. */
+  /** Finish only the chain this read still owns. A rebind clears ownership,
+   *  so its old completion can neither paint nor release a newer read. */
+  private _finishBlockRowsRead(
+    entryId: string,
+    read: Promise<void>,
+    kind: 'page' | 'refresh',
+    painted = false,
+  ): void | Promise<void> {
+    if (this._blockRowsInFlight.get(entryId) !== read) return
+    this._blockRowsInFlight.delete(entryId)
+    // Alternate sustained growth with viewport demand. A refresh may yield to
+    // one page, whose completion then carries the queued growth forward.
+    if (
+      kind === 'refresh' &&
+      !this._disposed &&
+      this._active &&
+      this._blockRowsPagePending.delete(entryId)
+    ) {
+      this._loadVisibleBlockRows()
+      const page = this._blockRowsInFlight.get(entryId)
+      if (page) return page
+    }
+    if (this._blockRowsRefreshPending.delete(entryId)) {
+      return this._refreshBlockRows(entryId)
+    }
+    const demanded = this._blockRowsPagePending.delete(entryId)
+    if (!this._disposed && this._active && (painted || demanded)) this._loadVisibleBlockRows()
+  }
+
+  /** Ask for one viewport page through the same per-entry owner as refreshes.
+   *  Different entries still share the connection's priority queue. */
   private _requestBlockRowsPage(entryId: string, fromRow: number, rowLimit: number): void {
-    if (this._blockRowsPageInFlight.has(entryId)) {
-      // Demand is recorded, not discarded. The completion below re-reads the
-      // viewport rather than merely clearing a flag (ADR-ywzcpbqe).
+    if (this._blockRowsInFlight.has(entryId)) {
       this._blockRowsPagePending.add(entryId)
       return
     }
-    this._blockRowsPageInFlight.add(entryId)
     let painted = false
-    void blockRowsForEntry(this.client, entryId, { fromRow, rowLimit }, () =>
+    const tracked = blockRowsForEntry(this.client, entryId, { fromRow, rowLimit }, () =>
       this._rowReadPriority(entryId),
     )
       .then((read) => {
-        if (this._disposed || !this._active) return
+        if (this._disposed || !this._active || this._blockRowsInFlight.get(entryId) !== tracked)
+          return
         if (read.kind === 'rows') {
           this._paintBlockRows(
             entryId,
@@ -11594,24 +11626,18 @@ export class TerminalContent extends BasePaneContent {
           })
         }
       })
-      .finally(() => {
-        this._blockRowsPageInFlight.delete(entryId)
-        const demanded = this._blockRowsPagePending.delete(entryId)
-        if (this._disposed || !this._active) return
-        // ONE DEMAND LOOP: every completion recomputes. A page that filled
-        // the old viewport may leave the new one still missing.
-        if (painted || demanded) this._loadVisibleBlockRows()
-      })
+      .finally(() => this._finishBlockRowsRead(entryId, tracked, 'page', painted))
+    this._blockRowsInFlight.set(entryId, tracked)
   }
 
   /** The geometry a loaded block claims, comparable with the metadata a
    *  reconnect reads. A block whose stored rows grew while disconnected has a
    *  different key even when it is small (ADR-y45sp41c). */
-  private _rowsGeometryKey(rows: StoredBlockRows | undefined, version?: string): string | null {
+  private _rowsGeometryKey(rows: StoredBlockRows | undefined): string | null {
     if (rows === undefined || rows.rowCount === undefined) return null
     const ranges = (rows.retainedRanges ?? []).map((rr) => `${rr.from}-${rr.to}`).join(',')
     return [
-      version ?? rows.artifactVersion ?? '',
+      rows.artifactVersion ?? '',
       rows.firstRow ?? 0,
       rows.lastRow ?? 0,
       rows.endRow ?? 0,
@@ -11648,14 +11674,16 @@ export class TerminalContent extends BasePaneContent {
    *  cached rows and look complete (ADR-y45sp41c). Metadata is read one block
    *  at a time: small answers still must not become five hundred frames. */
   private async _revalidateMountedBlockRows(entryIds: string[]): Promise<void> {
+    const origin = this._currentBind()
     const ordered = [...entryIds].sort(
       (a, b) => this._rowReadPriority(a) - this._rowReadPriority(b),
     )
     for (const entryId of ordered) {
-      if (this._disposed || !this._active) return
+      if (this._disposed || !this._active || !this._bindIsCurrent(origin)) return
       // A block with no cached rows is already being read by the reconnect's
       // own refresh; there is no geometry to compare it with.
-      if (this._storedRowsOf(entryId) === undefined) continue
+      const cached = this._storedRowsOf(entryId)
+      if (cached === undefined) continue
       let meta
       try {
         meta = await blockRowsMetadataForEntry(this.client, entryId)
@@ -11666,10 +11694,16 @@ export class TerminalContent extends BasePaneContent {
         })
         continue
       }
+      if (this._disposed || !this._active || !this._bindIsCurrent(origin)) return
       if (meta === null) continue
-      const current = this._rowsGeometryKey(this._storedRowsOf(entryId), meta.version)
+      const latest = this._storedRowsOf(entryId)
+      const current = this._rowsGeometryKey(latest)
       const durable = this._rangeGeometryKey(meta.version, meta.geometry)
-      if (current !== durable) void this._refreshBlockRows(entryId, false, meta)
+      if (current !== durable) {
+        // A concurrent page/refresh may have replaced this metadata's basis.
+        // Re-read instead of giving that newer cache an older geometry hint.
+        void this._refreshBlockRows(entryId, false, latest === cached ? meta : undefined)
+      }
     }
   }
 
@@ -11807,7 +11841,7 @@ export class TerminalContent extends BasePaneContent {
     const current = this._storedRowsOf(entryId)
     const fetch: Promise<void> = this._readBlockRowsForRefresh(entryId, current, known).then(
       (read) => {
-        if (this._disposed) return
+        if (this._disposed || this._blockRowsInFlight.get(entryId) !== tracked) return
         const sb = this.scrollback
         if (!sb) return
         // `absent` is the store keeping no rows for this block — nothing to
@@ -11903,14 +11937,7 @@ export class TerminalContent extends BasePaneContent {
         this._loadVisibleBlockRows()
       },
     )
-    const tracked = fetch.finally(() => {
-      if (this._blockRowsInFlight.get(entryId) !== tracked) return
-      if (this._blockRowsRefreshPending.delete(entryId)) {
-        this._blockRowsInFlight.delete(entryId)
-        return this._refreshBlockRows(entryId)
-      }
-      this._blockRowsInFlight.delete(entryId)
-    })
+    const tracked = fetch.finally(() => this._finishBlockRowsRead(entryId, tracked, 'refresh'))
     this._blockRowsInFlight.set(entryId, tracked)
     if (final) {
       this._blockRowsFinalPending.set(entryId, tracked)

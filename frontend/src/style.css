@@ -497,6 +497,15 @@
   margin-top: auto;
 }
 
+/* A filled pane starts on the top gutter (nocx-4y82c.2). The live box
+   remains exactly the whole-row grid beneath the running header. Only the
+   sub-row fit remainder falls below it, inside the scroller; the layout
+   supplies the same half-row outer gutter on both edges (ADR-92zzg2y2).
+   Blank rows inside that grid belong to the program, not to the gutter. */
+.scrollback-inner.inner-fullscreen-mode {
+  margin-top: 0;
+}
+
 /* EVERY ROW WEARS THE GUTTER, AND THE STACK DOES NOT (nocx-9bpeq.8).
 
    The pane's side gutter moved from `.pane` into the rows so a row can paint

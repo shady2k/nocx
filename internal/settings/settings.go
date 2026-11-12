@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"reflect"
 	"sort"
 	"strconv"
@@ -375,6 +376,8 @@ type StringSpec struct {
 
 // NumberSpec is the declaration site for a numeric setting.
 type NumberSpec struct {
+	// Integer rejects fractional values on every write path.
+	Integer     bool
 	Key         string
 	Section     string
 	Label       string
@@ -525,6 +528,7 @@ func (s *String) toDeclaration() Declaration {
 
 // Number is a typed key for a numeric setting with optional min/max.
 type Number struct {
+	integer     bool
 	key         string
 	section     string
 	label       string
@@ -718,6 +722,7 @@ func MustRegisterNumber(spec NumberSpec) *Number {
 		unit:        spec.Unit,
 		zeroLabel:   spec.ZeroLabel,
 		slider:      spec.Slider,
+		integer:     spec.Integer,
 	}
 	if spec.Slider && (spec.Min == nil || spec.Max == nil) {
 		panic("settings: slider " + spec.Key + " must declare both Min and Max")
@@ -951,6 +956,20 @@ var HistoryOutputCapKB = MustRegisterNumber(NumberSpec{
 	Min:         fp(16),
 	Max:         fp(4096),
 	Unit:        "KB",
+})
+
+// SessionIdleDays is fixed when a session is created, like its output buffer.
+var SessionIdleDays = MustRegisterNumber(NumberSpec{
+	Key:         "sessions.idleDays",
+	Integer:     true,
+	Section:     "Sessions",
+	Label:       "End unattended sessions after",
+	Description: "Ends a session after no nocx window has been attached for this long, even if a program is running. A day is 24 hours. Applies only to newly opened sessions.",
+	DataClass:   PublicConfig,
+	Default:     3,
+	Min:         fp(0),
+	Unit:        "days",
+	ZeroLabel:   "Never end unattended sessions",
 })
 
 // HistoryHelperBufferMB and HistoryCoordinatorBufferMB are the two row
@@ -1693,19 +1712,9 @@ func (r *Registry) GetNumber(n *Number) (float64, error) {
 // SetNumber validates and persists a number setting.
 func (r *Registry) SetNumber(n *Number, value float64) error {
 	r.mu.Lock()
-	if n.min != nil && value < *n.min {
+	if err := validateValue(n, value); err != nil {
 		r.mu.Unlock()
-		return &ValidationError{
-			SettingKey: n.key, Value: value,
-			Message: fmt.Sprintf("value %v below minimum %v", value, *n.min),
-		}
-	}
-	if n.max != nil && value > *n.max {
-		r.mu.Unlock()
-		return &ValidationError{
-			SettingKey: n.key, Value: value,
-			Message: fmt.Sprintf("value %v above maximum %v", value, *n.max),
-		}
+		return err
 	}
 	newValues := copyValues(r.values)
 	newValues[n.key] = value
@@ -1894,6 +1903,9 @@ func validateValue(d Descriptor, value any) error {
 		if !ok {
 			return &ValidationError{SettingKey: d.Key(), Message: "expected number"}
 		}
+		if n, ok := d.(*Number); ok && n.integer && (math.IsNaN(f) || math.IsInf(f, 0) || math.Trunc(f) != f) {
+			return &ValidationError{SettingKey: d.Key(), Value: f, Message: "expected a whole number"}
+		}
 		if min := d.Min(); min != nil && f < *min {
 			return &ValidationError{SettingKey: d.Key(), Message: fmt.Sprintf("minimum is %v", *min)}
 		}
@@ -2047,17 +2059,8 @@ func coerceValue(d Descriptor, value any) (any, error) {
 		if !ok {
 			return nil, &ValidationError{SettingKey: d.Key(), Message: "declared as number but is not a Number key"}
 		}
-		if n.min != nil && f < *n.min {
-			return nil, &ValidationError{
-				SettingKey: d.Key(), Value: f,
-				Message: fmt.Sprintf("value %v below minimum %v", f, *n.min),
-			}
-		}
-		if n.max != nil && f > *n.max {
-			return nil, &ValidationError{
-				SettingKey: d.Key(), Value: f,
-				Message: fmt.Sprintf("value %v above maximum %v", f, *n.max),
-			}
+		if err := validateValue(n, f); err != nil {
+			return nil, err
 		}
 		return f, nil
 	}

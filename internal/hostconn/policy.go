@@ -120,9 +120,16 @@ func (s *Supervisor) guard(l *live, gen uint64) {
 		return
 	}
 	looker, _ := l.link.(Looker)
+	start := guardState{nextProbe: l.nextProbe, wokeAt: l.initialWoke}
+	if l.initialSleep != 0 {
+		// A sleep with no later wake is the published connection's first fact.
+		start.suspendedAt = l.initialSleep
+		start.lastEdge = l.initialSleep
+		l.suspended.Store(true)
+	}
 	g := &prober{
 		sup: s, live: l, gen: gen, clock: s.clock, prober: probe, looker: looker,
-		st: guardState{nextProbe: l.nextProbe, wokeAt: l.initialWoke},
+		st: start,
 	}
 	g.run()
 }
@@ -166,8 +173,9 @@ func (g *prober) run() {
 			// evidence. Timed as the wake mk its due moment so the loop acts
 			// at once.
 			g.st.nextProbe = g.clock.Now()
-		case edge := <-g.live.control:
-			g.applyControl(edge)
+		case <-g.live.controlWake:
+			// The edges themselves are read by drainControl at the top of the
+			// loop, coalesced per kind.
 		case outcome := <-g.st.probeOut:
 			if g.probeResult(outcome) {
 				return
@@ -183,13 +191,8 @@ func (g *prober) run() {
 // they were queued and with the timestamp check that makes an out-of-order
 // arrival harmless.
 func (g *prober) drainControl() {
-	for {
-		select {
-		case edge := <-g.live.control:
-			g.applyControl(edge)
-		default:
-			return
-		}
+	for _, edge := range g.live.takeEdges() {
+		g.applyControl(edge)
 	}
 }
 
@@ -489,12 +492,20 @@ func (s *Supervisor) answered(l *live, gen uint64) {
 // closed for silence, and only the same critical section can promise that.
 func (s *Supervisor) endForSilence(l *live, gen uint64, why string) bool {
 	s.mu.Lock()
-	if s.live != l || s.generation != gen || s.holdsPlainShellLocked() {
+	// ONE HOLD: the holder recheck and the fence are the same critical
+	// section, so a shell (or a rider) acquired between them cannot exist —
+	// an acquire reads `closing` under this same mutex before it increments
+	// anything.
+	if s.live != l || s.generation != gen || s.holdsPlainShellLocked() || !s.fenceLocked(l) {
 		s.mu.Unlock()
 		return false
 	}
+	s.dropRidersLocked(l)
+	s.notifyWaiters(l, ErrLinkLost)
 	s.mu.Unlock()
-	s.retireLive(l, Event{Kind: Lost, Cause: CauseSilence}, why)
+
+	s.finishFenced(l, Event{Kind: Lost, Cause: CauseSilence})
+	s.log.Warn("hostconn: closing a connection that stopped answering", "connection", s.key.String(), "why", why)
 	return true
 }
 

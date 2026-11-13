@@ -19,6 +19,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/hostconn"
 	"github.com/shady2k/nocx/internal/ssh"
+	gossh "golang.org/x/crypto/ssh"
 )
 
 // keepaliveRequest is the request this carrier probes and nudges with. It is
@@ -37,9 +38,10 @@ type link struct {
 	// connection was dialled to. empty means the look is not available for
 	// this connection (a routed one, whose version exchange would have to
 	// happen through a hop this carrier does not dial from here) and the
-	// supervisor is told so by Capabilities... rather, by the error Look
-	// answers.
-	lookAddr string
+	// look is this connection's look-only dial, built by the carrier for the
+	// plan it dialled (a direct look, or one through the first hop of a
+	// route).
+	look func(ctx context.Context) error
 
 	done chan struct{}
 	mu   sync.Mutex
@@ -53,8 +55,8 @@ type link struct {
 // that learns a transport died: x/crypto stores the read error and returns it
 // from every later write, so a connection whose peer is gone looks alive to
 // everyone who is not writing to it.
-func newLink(pool *ssh.PooledConn, lookAddr string) *link {
-	l := &link{pool: pool, lookAddr: lookAddr, done: make(chan struct{})}
+func newLink(pool *ssh.PooledConn, look func(ctx context.Context) error) *link {
+	l := &link{pool: pool, look: look, done: make(chan struct{})}
 	go func() {
 		err := pool.Client().Wait()
 		l.mu.Lock()
@@ -63,25 +65,6 @@ func newLink(pool *ssh.PooledConn, lookAddr string) *link {
 		close(l.done)
 	}()
 	return l
-}
-
-// lookAddress is where a look-only dial for this plan goes: the FIRST endpoint
-// on the route, which for a direct connection is the destination itself.
-//
-// §5.3 asks for the look "on the same route" (review finding 11). A routed
-// destination cannot be spoken to without a key exchange on the bastion, and a
-// look is TCP and the version line and nothing else, so the furthest endpoint
-// this side can ask that way is the first hop: its answer says the path and the
-// bastion are up, which is evidence about the route the connection uses. A host
-// BEHIND the bastion is looked at through the bastion's own session once
-// channels move behind the carrier (design §5.1.2) — claiming otherwise here
-// would be evidence about the wrong machine.
-func lookAddress(plan hostconn.Plan, spec ssh.PooledSpec) string {
-	if len(spec.Route) > 0 {
-		first := spec.Route[0]
-		return net.JoinHostPort(first.Host, strconv.Itoa(first.Port))
-	}
-	return net.JoinHostPort(spec.Host, strconv.Itoa(spec.Port))
 }
 
 // Done is closed when the transport has ended.
@@ -162,32 +145,81 @@ func (l *link) Nudge() error {
 	return nil
 }
 
-// Look makes a look-only dial: TCP and the SSH version exchange on a NEW
-// connection, no key exchange and no sign-in. It answers whether the host
-// accepts new connections, which is evidence about the host and never a verdict
-// on the flow (design §5.3).
+// Look makes a look-only dial, built for this connection by the carrier: a
+// direct connection's is TCP and the version exchange on a NEW connection (no
+// key exchange, no sign-in), and a routed connection's goes through the first
+// hop to the destination (design §5.3; review verification, finding 11).
 func (l *link) Look(ctx context.Context) error {
-	if l == nil || l.lookAddr == "" {
+	if l == nil || l.look == nil {
 		return errors.New("sshconn: no look-only dial is available for this connection")
 	}
-	d := net.Dialer{Timeout: handshakeBound(ctx), KeepAlive: -1}
-	conn, err := d.DialContext(ctx, "tcp", l.lookAddr)
+	return l.look(ctx)
+}
+
+// lookFor answers this connection's look-only dial.
+//
+// §5.3 asks for the look "on the same route", and the review's verification is
+// exact about what that means (finding 11): a look at the first bastion proves
+// nothing about the destination or the rest of the route. So a ROUTED look goes
+// THROUGH the supervised bastion — a direct-tcpip channel to the destination,
+// whose version line the destination sends before any key exchange — and a
+// silent bastion makes the look fail, because the channel never opens.
+func lookFor(spec ssh.PooledSpec, hops []*ssh.PooledConn) func(ctx context.Context) error {
+	dest := net.JoinHostPort(spec.Host, strconv.Itoa(spec.Port))
+	if len(spec.Route) == 0 {
+		return func(ctx context.Context) error { return lookDirect(ctx, dest) }
+	}
+	return func(ctx context.Context) error {
+		if len(hops) == 0 {
+			return errors.New("sshconn: this routed connection holds no first hop to look through")
+		}
+		return lookThrough(ctx, hops[0].Client(), dest)
+	}
+}
+
+// lookThrough opens one direct-tcpip channel through hop and reads the
+// DESTINATION's version line on it. The destination sends it before the key
+// exchange, so nothing here authenticates to the destination or signs in.
+func lookThrough(ctx context.Context, hop *gossh.Client, dest string) error {
+	if hop == nil {
+		return errors.New("sshconn: no hop connection to look through")
+	}
+	conn, err := hop.DialContext(ctx, "tcp", dest)
 	if err != nil {
-		return fmt.Errorf("look %s: %w", l.lookAddr, err)
+		return fmt.Errorf("look %s through the first hop: %w", dest, err)
 	}
 	defer func() { _ = conn.Close() }()
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
 	}
-	// The server speaks FIRST in SSH: the version line is the first thing it
-	// sends, and nothing above the socket can see it without a handshake this
-	// dial deliberately does not start.
 	line, err := readVersionLine(conn)
 	if err != nil {
-		return fmt.Errorf("look %s: %w", l.lookAddr, err)
+		return fmt.Errorf("look %s through the first hop: %w", dest, err)
 	}
 	if len(line) < len("SSH-") || string(line[:len("SSH-")]) != "SSH-" {
-		return fmt.Errorf("look %s: the peer sent %q, which is not an SSH version line", l.lookAddr, line)
+		return fmt.Errorf("look %s through the first hop: the peer sent %q, which is not an SSH version line", dest, line)
+	}
+	return nil
+}
+
+// lookDirect is a direct connection's look: TCP and the server's version line
+// on a new connection.
+func lookDirect(ctx context.Context, addr string) error {
+	d := net.Dialer{Timeout: handshakeBound(ctx), KeepAlive: -1}
+	conn, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return fmt.Errorf("look %s: %w", addr, err)
+	}
+	defer func() { _ = conn.Close() }()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	line, err := readVersionLine(conn)
+	if err != nil {
+		return fmt.Errorf("look %s: %w", addr, err)
+	}
+	if len(line) < len("SSH-") || string(line[:len("SSH-")]) != "SSH-" {
+		return fmt.Errorf("look %s: the peer sent %q, which is not an SSH version line", addr, line)
 	}
 	return nil
 }

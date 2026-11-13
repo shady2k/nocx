@@ -477,7 +477,10 @@ func (f *fixture) serve(conn net.Conn, config *gossh.ServerConfig) {
 			continue
 		}
 		if newChan.ChannelType() == "direct-tcpip" {
-			f.serveDirectTCPIP(newChan, newChan.ExtraData())
+			// CONCURRENTLY, as sshd serves a channel: this handler relays for
+			// the channel's whole life, and a serve loop that waited for it
+			// would never read the next channel on the same connection.
+			go f.serveDirectTCPIP(newChan, newChan.ExtraData())
 			continue
 		}
 		ch, chReqs, aerr := newChan.Accept()

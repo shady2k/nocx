@@ -331,23 +331,27 @@ func (p *PaneListeners) Close() error {
 		if p.sink != nil {
 			_ = p.sink.Close()
 		}
-		// THE POOL REFERENCE GOES BEFORE THE REMOTE CANCEL (design §5.3,
-		// socket-first teardown; review finding 2). Closing the remote
+		// THE POOL REFERENCE GOES FIRST, AND THE REMOTE CANCEL NEVER BLOCKS
+		// THIS CALLER (design §5.3, socket-first teardown; review findings 2
+		// and the verification's "Askable is a snapshot"). Closing the remote
 		// listener sends cancel-tcpip-forward with a reply wanted, and on a
-		// connection whose probe is parked that request waits on the mux's
-		// send lock — so a pane that closed the listener first could wait on a
-		// stuck connection's probe and never reach the release that would end
-		// it. Releasing first also closes the socket when this was the last
-		// holder, and a cancel on a closed listener fails at once.
-		askable := p.pool != nil && p.pool.Askable()
+		// connection whose probe is parked or has not yet reached its deadline
+		// that request waits on the mux's send lock indefinitely. So the
+		// release happens first — closing the socket outright when this was the
+		// last holder — and a cancel is only started for a transport that
+		// outlives this pane, OFF this caller's path: it ends when that
+		// transport does, and a pane's close returns whatever the connection is
+		// doing.
+		ln := p.lifecycleLn
 		if p.pool != nil {
 			_ = p.pool.Close()
+			if ln != nil && !p.pool.Lost() {
+				go func() { _ = ln.Close() }()
+			}
+			return
 		}
-		// A stalled or lost connection is not one to ask: the request would
-		// park, the far side is not answering, and the listener dies with the
-		// transport.
-		if p.lifecycleLn != nil && askable {
-			_ = p.lifecycleLn.Close()
+		if ln != nil {
+			go func() { _ = ln.Close() }()
 		}
 	})
 	return nil

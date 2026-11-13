@@ -176,15 +176,24 @@ func (c *Carrier) Dial(ctx context.Context, plan hostconn.Plan, sink hostconn.Ev
 	spec.Barrier = sup.Probe
 	// EVERY HOP IS A CONNECTION THE SUPERVISOR OWNS (review finding 4): it gets
 	// its own link, watcher, prober and wake probe, and the dialler riding it
-	// holds a lease rather than a bare pool entry nothing watches.
-	spec.HopAcquire = c.acquireHop
+	// holds a lease rather than a bare pool entry nothing watches. The hops are
+	// collected in dial order, so the first one is what a look-only dial goes
+	// through.
+	var hops []*ssh.PooledConn
+	spec.HopAcquire = func(ctx context.Context, hop ssh.PooledHop, prefix []ssh.PooledHop) (*ssh.PooledConn, error) {
+		pooled, err := c.acquireHop(ctx, hop, prefix)
+		if err == nil {
+			hops = append(hops, pooled)
+		}
+		return pooled, err
+	}
 
 	pooled, err := c.client.AcquirePooled(ctx, spec)
 	if err != nil {
 		sink(dialFailure(err))
 		return nil, err
 	}
-	return newLink(pooled, lookAddress(plan, spec)), nil
+	return newLink(pooled, lookFor(spec, hops)), nil
 }
 
 // dialFailure is what the machine is told about a dial that failed. It is the

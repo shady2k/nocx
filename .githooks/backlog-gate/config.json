@@ -127,6 +127,7 @@
     "runMode": "worker-sessions",
     "maxBranchDays": 2,
     "landing": "pull-request",
+    "wayOfWorking": "github-flow",
     "maxWorkers": 3,
     "workersRunTests": true,
     "claims": "one coordinator serializes all readiness-affecting writes with assignments, including dependency edits, container/prerequisite status changes and stage acceptance; workers never self-assign; the holder is the agent under its full actor name <harness>-<role>:<person>@<machine>:<branch>#<session>; br claim_exclusive atomically protects the holder, not the adapter's whole prerequisite snapshot",

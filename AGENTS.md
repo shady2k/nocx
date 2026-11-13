@@ -444,10 +444,13 @@ suite printed (`go:<TestName>` or `e2e:<spec> › <title path>`, no line numbers
 that only adds an entry names the bookkeeping task publishing it, never the flake's bead:
 `merged-but-open` reads a header id as the leaf landing, and the bead must stay open for the
 entry to protect anything ([ADR-h1n5ren6](docs/decisions/h1n5ren6-a-quarantine-commit-names-the-bookkeeping-task.md);
-the rules are in [`docs/testing/quarantine.md`](docs/testing/quarantine.md)). The
-promotion then accepts a red job whose every failed test is quarantined by a bead that is
-still open, and so does the pull request's own CI
-([ADR-0bawnmfg](docs/decisions/0bawnmfg-a-pull-requests-ci-honours-the-test-quarantine.md)):
+the rules are in [`docs/testing/quarantine.md`](docs/testing/quarantine.md)). A pull
+request's own CI then accepts a red job whose every failed test is quarantined by a bead
+that is still open
+([ADR-0bawnmfg](docs/decisions/0bawnmfg-a-pull-requests-ci-honours-the-test-quarantine.md));
+the stable promotion reads no pull request's CI at all, because the owner's trial of the
+nightly is the release's authority
+([ADR-gvnw2nv8](docs/decisions/gvnw2nv8-a-stable-promotion-trusts-the-owners-trial.md)):
 each gated job's last step compares the failures it already printed with this file, passes
 while printing every quarantined one with its bead, and stays red on anything else. Closing
 the bead ends the protection by itself. The entry is not the fix — the bead still has to be

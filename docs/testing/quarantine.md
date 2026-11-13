@@ -19,6 +19,16 @@ pull request's own CI honours the same file
   protection without editing this file, and a bead that does not exist refuses it.
 - The entry is evidence, not a fix. The bead still has to be worked.
 
+## Only a new run asks
+
+A run that is happening now asks the question the file answers today: a bead closed now
+protects nothing, and closing it ends the protection without editing this file. The stable
+promotion no longer re-reads a merged pull request's run at all — the owner promotes by
+hand a nightly he installed and tried, and that trial is the release's authority
+([ADR-gvnw2nv8](../decisions/gvnw2nv8-a-stable-promotion-trusts-the-owners-trial.md)). So this
+file decides a pull request's CI and nothing else, and an entry whose bead has closed may
+stay as the record of why that PR was allowed to merge.
+
 ## Committing an entry
 
 Add the entry with the key the suite printed, then commit it under the **bookkeeping task

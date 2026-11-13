@@ -16,8 +16,9 @@
  * before named test quarantines apply. Printed FAIL text cannot authorize one.
  *
  * The last step emits a compact machine-readable record into the job log even
- * on success. Promotion reads successful job logs too and rejudges this record
- * against its own quarantine state. No expiring workflow artifact is needed.
+ * on success, so a reader of the run can see what was accepted and why. It is
+ * written for that reader: the stable promotion reads no job log at all
+ * (ADR-gvnw2nv8), and needs no expiring workflow artifact either.
  *
  * Every invocation fetches refs/tracker/state. A bead must exist in both the
  * active state and the published store and be nonterminal in both. Failure to
@@ -26,8 +27,8 @@
  *   NOCX_EXPECTED_STEPS   required space-separated positive step manifest
  *   NOCX_TEST_LOG_DIR     the directory the gated steps wrote (required)
  *   NOCX_QUARANTINE_JOB   this job's name as GitHub prints it, e.g.
- *                         `ci-backend (no-secret-service)` — the same name the
- *                         promotion reads from the API, so one entry serves both
+ *                         `ci-backend (no-secret-service)` — the name that job
+ *                         is known by, so a `job:<name>#<PR>` entry names it
  *   NOCX_QUARANTINE_PULL  the pull request number; empty off a pull request,
  *                         where a `job:<name>#<PR>` entry cannot match
  *   NOCX_QUARANTINE_FILE  default docs/testing/quarantine.json

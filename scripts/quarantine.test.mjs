@@ -6,36 +6,20 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { readQuarantineEvidence } from './release/promotion.mjs'
 import { gate } from './quarantine-gate.mjs'
 import {
-  failedTests,
   goTestEvidence,
   playwrightEvidence,
   judgeFailures,
-  readQuarantine,
   readQuarantineState,
   stepManifestDigest,
 } from './quarantine.mjs'
 
-// Real log lines (CI runs 40866954718 and 40893969284, 2026-10-29), with the
-// timestamp prefix the jobs/logs endpoint adds and Playwright's trailing rule.
-const goLog =
-  '2026-10-29T08:51:12.1Z === RUN   TestZshAgentWrapperCancelsTheLaunchOnCtrlC\n' +
-  '2026-10-29T08:51:23.8Z --- FAIL: TestZshAgentWrapperCancelsTheLaunchOnCtrlC (11.67s)\n' +
-  '2026-10-29T08:51:23.8Z     --- FAIL: TestZshAgentWrapperCancelsTheLaunchOnCtrlC/sub (0.1s)\n' +
-  '2026-10-29T08:51:24.0Z FAIL\tgithub.com/shady2k/nocx/internal/app\t300.1s\n'
 const e2eLog =
   '2026-10-29T13:01:02.0Z   1) [webkit] › e2e/ask-attaches-the-frozen-screen.spec.ts:218:5 › the assistant is told the frozen screen came with the question (nocx-hp8p2.4) › summoning over a full-screen program on the alternate screen attaches its screen to the ask ─────────\n' +
   '2026-10-29T13:01:02.1Z     Error: fake-openai: timed out waiting for 2 request(s)\n'
 const askKey =
   'e2e:e2e/ask-attaches-the-frozen-screen.spec.ts › the assistant is told the frozen screen came with the question (nocx-hp8p2.4) › summoning over a full-screen program on the alternate screen attaches its screen to the ask'
-
-test('a failed job log names its failed tests in the quarantine key form, and nothing else', () => {
-  assert.deepEqual(failedTests(goLog), ['go:TestZshAgentWrapperCancelsTheLaunchOnCtrlC'])
-  assert.deepEqual(failedTests(e2eLog), [askKey])
-  assert.deepEqual(failedTests('2026-10-29T00:00:00Z panic: test timed out after 10m0s\n'), [])
-})
 
 test('only an open bead quarantines; a closed one protects nothing; an unknown one refuses', () => {
   const issues = [
@@ -46,9 +30,9 @@ test('only an open bead quarantines; a closed one protects nothing; an unknown o
     .map((row) => JSON.stringify(row))
     .join('\n')
   const doc = (tests) => JSON.stringify({ schema: 1, tests })
-  assert.deepEqual(readQuarantine(undefined, issues), {})
+  assert.deepEqual(readQuarantineState(undefined, issues), { open: {}, closed: {} })
   assert.deepEqual(
-    readQuarantine(
+    readQuarantineState(
       doc([
         { test: 'go:TestA', bead: 'nocx-a' },
         { test: askKey, bead: 'nocx-b' },
@@ -56,7 +40,7 @@ test('only an open bead quarantines; a closed one protects nothing; an unknown o
       ]),
       issues,
     ),
-    { 'go:TestA': 'nocx-a', [askKey]: 'nocx-b' },
+    { open: { 'go:TestA': 'nocx-a', [askKey]: 'nocx-b' }, closed: { 'go:TestC': 'nocx-c' } },
   )
   // The closed entry is kept, not dropped: a red job must be able to say that
   // the file holds the test and its bead is closed, rather than that no bead
@@ -65,16 +49,23 @@ test('only an open bead quarantines; a closed one protects nothing; an unknown o
     readQuarantineState(doc([{ test: 'go:TestC', bead: 'nocx-c' }]), issues).closed,
     { 'go:TestC': 'nocx-c' },
   )
-  assert.throws(() => readQuarantine(doc([{ test: 'go:TestA', bead: 'nocx-z' }]), issues), /exist/)
-  assert.throws(() => readQuarantine(doc([{ test: 'TestA', bead: 'nocx-a' }]), issues), /entry/)
-  assert.deepEqual(readQuarantine(doc([{ test: 'job:ci-backlog#557', bead: 'nocx-a' }]), issues), {
-    'job:ci-backlog#557': 'nocx-a',
-  })
   assert.throws(
-    () => readQuarantine(doc([{ test: 'job:ci-backlog', bead: 'nocx-a' }]), issues),
+    () => readQuarantineState(doc([{ test: 'go:TestA', bead: 'nocx-z' }]), issues),
+    /exist/,
+  )
+  assert.throws(
+    () => readQuarantineState(doc([{ test: 'TestA', bead: 'nocx-a' }]), issues),
     /entry/,
   )
-  assert.throws(() => readQuarantine('{"schema":2,"tests":[]}', issues), /quarantine/)
+  assert.deepEqual(
+    readQuarantineState(doc([{ test: 'job:ci-backlog#557', bead: 'nocx-a' }]), issues).open,
+    { 'job:ci-backlog#557': 'nocx-a' },
+  )
+  assert.throws(
+    () => readQuarantineState(doc([{ test: 'job:ci-backlog', bead: 'nocx-a' }]), issues),
+    /entry/,
+  )
+  assert.throws(() => readQuarantineState('{"schema":2,"tests":[]}', issues), /quarantine/)
 })
 
 test('the verdict holds a failure only while an open bead owns it, in both callers', () => {
@@ -557,11 +548,16 @@ test('the real helper and gate leave rejudgeable evidence even when a quarantine
   })
   assert.equal(code, 0, lines.join('\n'))
   assert.deepEqual(
-    readQuarantineEvidence(lines.join('\n'), 'ci-backend', 12, {
-      runId: '22',
-      attempt: 1,
-      expectedSteps: ['go-backend'],
-    }).steps,
+    // The record the gate leaves in its own log, parsed where it is written:
+    // the promotion no longer reads one, but the job must still say what it
+    // accepted.
+    JSON.parse(
+      lines
+        .join('\n')
+        .split('\n')
+        .find((line) => line.startsWith('NOCX_QUARANTINE_EVIDENCE_V1 '))
+        .slice('NOCX_QUARANTINE_EVIDENCE_V1 '.length),
+    ).steps,
     [{ name: 'go-backend', status: 1, failures: ['go:TestA'], complete: true }],
   )
 })

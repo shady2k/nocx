@@ -44,6 +44,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/helper/sshconn"
 	"github.com/shady2k/nocx/internal/hostconn"
 	"github.com/shady2k/nocx/internal/ssh"
 	gossh "golang.org/x/crypto/ssh"
@@ -473,17 +474,17 @@ func (c *ShellChannel) Close() error {
 // It exists because x/crypto/ssh spells its status differently —
 // *gossh.ExitError answers ExitStatus() and Signal() (a NAME), while every
 // consumer in this repository reads ExitCode() int, which is os/exec's
-// spelling and the one client.ExitStatus mirrors — and translating it here
-// keeps x/crypto's types inside the two packages allowed to see them.
+// spelling and the one client.ExitStatus mirrors — and the carrier translates
+// it (sshconn.Exit) so that the library's exit type is read in one package.
 //
 // A channel that ended without a status (the connection died, the server
 // closed it, we closed it) is code -1, which is the same value
 // SessionExitStatus documents for "killed by a signal or no status could be
 // collected". The distinction that matters to a reader — did the far command
-// say how it ended, or did the stream simply stop — is carried by the error
-// being a *gossh.ExitError or not, and the signal NAME is dropped rather than
-// translated into a number: a name-to-number table would be this package
-// inventing a far kernel's numbering.
+// say how it ended, or did the stream simply stop — is whether the carrier
+// answered a status, and the signal NAME is dropped rather than translated into
+// a number: a name-to-number table would be this package inventing a far
+// kernel's numbering.
 type ShellExit struct {
 	// Err is what the wait returned, nil for a clean zero exit.
 	Err error
@@ -501,14 +502,11 @@ func (e *ShellExit) Error() string {
 func (e *ShellExit) Unwrap() error { return e.Err }
 
 // ExitCode is the far command's status, or -1 when the stream ended without
-// one.
+// one. The translation is the carrier's (sshconn.Exit), so this package reads no
+// x/crypto exit type at all.
 func (e *ShellExit) ExitCode() int {
-	var exit *gossh.ExitError
-	if errors.As(e.Err, &exit) {
-		return exit.ExitStatus()
-	}
-	if e.Err == nil {
-		return 0
+	if status, ok := sshconn.Exit(e.Err); ok {
+		return status
 	}
 	return -1
 }

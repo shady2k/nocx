@@ -53,6 +53,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/endpoint"
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/helper/sshconn"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -95,27 +96,23 @@ func (e *laneEnd) Close() error                { return e.sess.Close() }
 // A non-zero status is NOT an error here (x/crypto's ExitError is the ordinary
 // spelling of one) and a status that never arrives is not an exit status at
 // all: the second case is a transport that died, and the channel reports it as
-// no exit rather than as exit 0.
+// no exit rather than as exit 0. The carrier answers both questions
+// (sshconn.Exit), so this file reads no x/crypto exit type.
 func (e *laneEnd) exitStatus() (int, bool) {
-	err := e.sess.Wait()
-	if err == nil {
-		return 0, true
+	status, ok := sshconn.Exit(e.sess.Wait())
+	if !ok {
+		return 0, false
 	}
-	var exit *gossh.ExitError
-	if errors.As(err, &exit) {
-		status := exit.ExitStatus()
-		if status < 0 || status > maxExitStatus {
-			// A status the wire cannot carry. What the peer sent is whatever
-			// its exit-status message held, and a value outside the POSIX range
-			// is not a status at all: reporting it would put a number nobody
-			// can read into the coordinator's classification, and reporting it
-			// as NO status is the honest answer (the same one a transport that
-			// went gets).
-			return 0, false
-		}
-		return status, true
+	if status < 0 || status > maxExitStatus {
+		// A status the wire cannot carry. What the peer sent is whatever
+		// its exit-status message held, and a value outside the POSIX range
+		// is not a status at all: reporting it would put a number nobody
+		// can read into the coordinator's classification, and reporting it
+		// as NO status is the honest answer (the same one a transport that
+		// went gets).
+		return 0, false
 	}
-	return 0, false
+	return status, true
 }
 
 // maxExitStatus bounds an exit status at the interface: POSIX statuses are 0-255

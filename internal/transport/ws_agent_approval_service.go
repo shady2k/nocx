@@ -130,12 +130,22 @@ func (s approvalService) wait(ctx context.Context, runIDText, tool, reason strin
 	// The wait is recorded BEFORE the question is published: a person can
 	// answer the instant the surface shows it, and an answer that arrives
 	// first must wake this call rather than be told no question is open.
+	if scope, ok := catalog.ScopeFrom(ctx); ok {
+		if !scope.BeginAnswer() {
+			s.handlers.approvals.Withdraw(proposal)
+			return assistant.Unanswered{Err: errors.New("the operation cannot enter its answer phase")}
+		}
+		defer scope.EndAnswer()
+	}
 	wait := newAnswerWait(s.clock, tool, s.limit)
 	wait.binding = proposal
 	s.handlers.beginAnswerWait(runID, wait, reason)
 	defer s.handlers.endAnswerWait(runID, wait)
 
 	wait.begin()
+	defer func() {
+		_ = s.handlers.r.TryNotify("agent.approvalRetired", mustMarshal(agentApprovalRetired{runIDText, proposal.Attempt, proposal.Tool, proposal.CallID, proposal.ArgHash, reason}))
+	}()
 	if err := s.handlers.r.TryNotify("agent.approvalRequested", mustMarshal(question)); err != nil {
 		// Nobody can be asked on this connection: the question is withdrawn,
 		// not left pending for an answer that can no longer reach the call.
@@ -159,6 +169,16 @@ func (s approvalService) wait(ctx context.Context, runIDText, tool, reason strin
 		return svc.TransitionRun(ctx, runID, content.RunStreaming)
 	})
 	return answer
+}
+
+// agentApprovalRetired withdraws one exact question, including its phase.
+type agentApprovalRetired struct {
+	RunID   string `json:"runId"`
+	Attempt int    `json:"attempt"`
+	Tool    string `json:"tool"`
+	CallID  string `json:"callId"`
+	ArgHash string `json:"argHash"`
+	Reason  string `json:"reason"`
 }
 
 // egressQuestion is the agent.approvalRequested notification a screen's
@@ -222,7 +242,6 @@ type answerWait struct {
 	binding assistant.Approval
 
 	answers chan assistant.Answer
-	expired chan struct{}
 	timer   notify.Timer
 
 	mu      sync.Mutex
@@ -235,14 +254,15 @@ func newAnswerWait(clock notify.Clock, tool string, limit time.Duration) *answer
 		tool:    tool,
 		limit:   limit,
 		answers: make(chan assistant.Answer, 1),
-		expired: make(chan struct{}),
 	}
 }
 
 // begin arms the declared limit. It is called before the question is published,
 // so the bound covers the whole wait the person sees.
 func (w *answerWait) begin() {
-	w.timer = w.clock.AfterFunc(w.limit, func() { close(w.expired) })
+	w.timer = w.clock.AfterFunc(w.limit, func() {
+		w.settle(assistant.Declined{Reason: assistant.NoAnswerResult(w.tool, w.limit)})
+	})
 }
 
 // stop disarms the limit. It is safe after the timer fired.
@@ -258,6 +278,11 @@ func (w *answerWait) stop() {
 func (w *answerWait) settle(a assistant.Answer) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	return w.settleLocked(a)
+}
+
+// settleLocked completes a claim while its owner still holds the answer window.
+func (w *answerWait) settleLocked(a assistant.Answer) bool {
 	if w.settled {
 		return false
 	}
@@ -284,9 +309,6 @@ func (w *answerWait) result(ctx context.Context) assistant.Answer {
 	select {
 	case a := <-w.answers:
 		return a
-	case <-w.expired:
-		w.settle(assistant.Declined{Reason: assistant.NoAnswerResult(w.tool, w.limit)})
-		return <-w.answers
 	case <-ctx.Done():
 		w.settle(assistant.Unanswered{Err: ctx.Err()})
 		return <-w.answers
@@ -347,14 +369,22 @@ func (h agentHandlers) endAnswerWait(runID int64, w *answerWait) {
 // this run is not waiting on, and it is refused rather than settled.
 func (h agentHandlers) takeAnswerWait(runID int64, ap assistant.Approval) *answerWait {
 	h.pendingRunsMu.Lock()
-	defer h.pendingRunsMu.Unlock()
 	rc, ok := h.pendingRuns[runID]
 	if !ok || rc.approvalWait == nil || !rc.approvalWait.answersCall(ap) {
+		h.pendingRunsMu.Unlock()
 		return nil
 	}
 	w := rc.approvalWait
 	rc.approvalWait = nil
 	rc.pendingReason = ""
 	h.pendingRuns[runID] = rc
+	h.pendingRunsMu.Unlock()
+	// Hold settlement authority through all policy writes. Expiry takes this
+	// same lock, so a late handler cannot write after expiry has won.
+	w.mu.Lock()
+	if w.settled {
+		w.mu.Unlock()
+		return nil
+	}
 	return w
 }

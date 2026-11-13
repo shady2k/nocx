@@ -4,6 +4,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/shady2k/nocx/internal/operation/catalog"
 )
 
 // Clock is the time source Policy schedules its debounce windows on. The
@@ -20,11 +22,7 @@ type Clock interface {
 }
 
 // Timer is a scheduled call as returned by Clock.AfterFunc.
-type Timer interface {
-	// Stop prevents the scheduled call from running. It reports whether
-	// the call was stopped before it fired.
-	Stop() bool
-}
+type Timer = catalog.Timer
 
 // RealClock is the production clock: time.Now and time.AfterFunc.
 type RealClock struct{}

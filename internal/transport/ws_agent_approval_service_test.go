@@ -17,6 +17,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strconv"
 	"testing"
 	"time"
@@ -298,5 +299,154 @@ func TestAgentApprove_DeclineWakesTheCallWithThePersonsSentence(t *testing.T) {
 	}
 	if err := json.Unmarshal(raw, &state); err != nil || state.State != string(content.RunCompleted) {
 		t.Fatalf("runState = %s (err %v), want completed — a refusal is an answer", raw, err)
+	}
+}
+
+func TestAnswerWait_ExpiryClosesWindowBeforeResultIsRead(t *testing.T) {
+	clock := notify.NewManualClock()
+	w := newAnswerWait(clock, "session.run", answerLimit)
+	w.begin()
+	defer w.stop()
+	clock.Advance(answerLimit)
+	if w.settle(assistant.Approved{}) {
+		t.Fatal("approval accepted after expiry, before result consumed it")
+	}
+	if _, ok := w.result(t.Context()).(assistant.Declined); !ok {
+		t.Fatal("expired wait did not refuse")
+	}
+}
+
+// A client at the real Questioner seam drives the catalogue and answer clocks.
+type clockedQuestioningClient struct {
+	*questioningClient
+	clock   *notify.ManualClock
+	scope   *catalog.Scope
+	service approvalService
+	ready   chan struct{}
+}
+
+func (c *clockedQuestioningClient) Ask(ctx context.Context, p assistant.AskParams, emit func(assistant.AskEvent) error) error {
+	if _, ok := catalog.ScopeFrom(ctx); !ok {
+		return errors.New("run scope missing from question context")
+	}
+	c.scope = catalog.BeginWithClock(ctx, catalog.OpInternalAgentRun, catalog.Invocation{}, c.clock)
+	c.clock.Advance(c.scope.Declaration().Max.Duration() - time.Minute)
+	s, ok := p.Questioner.(approvalService)
+	if !ok {
+		return errors.New("questioner is not the transport approval service")
+	}
+	s.clock = c.clock
+	c.service = s
+	p.Questioner = s
+	close(c.ready)
+	err := c.questioningClient.Ask(catalog.WithScope(ctx, c.scope), p, emit)
+	if !c.scope.Complete() {
+		return errors.New("scope expired while answering")
+	}
+	return err
+}
+
+func TestApprovalService_AnswerNearMaxPausesRealScope(t *testing.T) {
+	c := &clockedQuestioningClient{questioningClient: newQuestioningClient(), clock: notify.NewManualClock(), ready: make(chan struct{})}
+	h := newAskHarness(t, c)
+	h.createEndpoint()
+	sid := openLocalSession(t, h.conn)
+	res, errObj := askOverWire(t, h.conn, map[string]any{"askId": "near-max", "sessionId": sid, "question": "read", "cwd": "/repo"}, 1)
+	if errObj != nil {
+		t.Fatal(errObj)
+	}
+	readNotification(t, h.conn, "agent.approvalRequested", 5*time.Second)
+	<-c.ready
+	c.clock.Advance(10 * time.Minute)
+	if outcome, done := c.scope.Outcome(); done {
+		t.Fatalf("scope settled %v during answer", outcome)
+	}
+	_, errObj = approveOverWire(t, h.conn, map[string]any{"runId": strconv.FormatInt(res.RunID, 10), "attempt": 1, "tool": "session.read", "callId": "call_1", "argHash": "hash-1", "approved": true, "scope": "once"}, 2)
+	if errObj != nil {
+		t.Fatal(errObj)
+	}
+	readNotification(t, h.conn, "agent.runState", 5*time.Second)
+	if outcome, _ := c.scope.Outcome(); outcome != catalog.OutcomeCompleted {
+		t.Fatalf("scope outcome %v", outcome)
+	}
+}
+
+func TestAgentApprove_ExpiredWindowCannotWriteStandingPolicy(t *testing.T) {
+	c := &clockedQuestioningClient{questioningClient: newQuestioningClient(), clock: notify.NewManualClock(), ready: make(chan struct{})}
+	policy := askObserveStore(t)
+	h := newAskHarnessWithOpts(t, c, WithAgentPolicy(policy))
+	h.createEndpoint()
+	sid := openLocalSession(t, h.conn)
+	res, errObj := askOverWire(t, h.conn, map[string]any{"askId": "expired", "sessionId": sid, "question": "read", "cwd": "/repo"}, 1)
+	if errObj != nil {
+		t.Fatal(errObj)
+	}
+	readNotification(t, h.conn, "agent.approvalRequested", 5*time.Second)
+	<-c.ready
+	// Keep the actual service waiting while a separately registered window
+	// expires without a consumer. This exercises handleApprove before result's
+	// cleanup can hide the pending proposal from the late handler.
+	handlers := c.service.handlers
+	handlers.pendingRunsMu.Lock()
+	rc := handlers.pendingRuns[res.RunID]
+	original := rc.approvalWait
+	original.stop()
+	w := newAnswerWait(c.clock, "session.read", answerLimit)
+	w.binding = original.binding
+	rc.approvalWait = w
+	handlers.pendingRuns[res.RunID] = rc
+	handlers.pendingRunsMu.Unlock()
+	w.begin()
+	c.clock.Advance(answerLimit)
+	defer original.settle(assistant.Declined{Reason: "test cleanup"})
+	_, errObj = approveOverWire(t, h.conn, map[string]any{"runId": strconv.FormatInt(res.RunID, 10), "attempt": 1, "tool": "session.read", "callId": "call_1", "argHash": "hash-1", "approved": true, "scope": "always"}, 2)
+	if got := policy.Policy().DecisionFor(content.EffectObserve); got != content.DecisionAsk {
+		t.Fatalf("late answer changed standing policy to %v", got)
+	}
+	if errObj == nil {
+		t.Fatal("late standing approval was accepted")
+	}
+	original.settle(assistant.Declined{Reason: "test cleanup"})
+	if _, ok := (<-c.answered).(assistant.Declined); !ok {
+		t.Fatal("expired call did not receive refusal")
+	}
+}
+
+func TestAgentApprovalRetired_OverTheWireConformsToContract(t *testing.T) {
+	c := newQuestioningClient()
+	h := newAskHarness(t, c)
+	h.createEndpoint()
+	sid := openLocalSession(t, h.conn)
+	res, e := askOverWire(t, h.conn, map[string]any{"askId": "retire", "sessionId": sid, "question": "read", "cwd": "/repo"}, 1)
+	if e != nil {
+		t.Fatal(e)
+	}
+	readNotification(t, h.conn, "agent.approvalRequested", 5*time.Second)
+	params := map[string]any{"runId": strconv.FormatInt(res.RunID, 10), "attempt": 1, "tool": "session.read", "callId": "call_1", "argHash": "hash-1", "approved": true, "scope": "once"}
+	raw, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 2, "method": "agent.approve", "params": params})
+	if err := h.conn.WriteMessage(1, raw); err != nil {
+		t.Fatal(err)
+	}
+	retired := readNotification(t, h.conn, "agent.approvalRetired", 5*time.Second)
+	validateJSON(t, loadSchema(t, "agent.approvalRetired.schema.json"), retired, "real retirement notification")
+	var got struct {
+		RunID  string `json:"runId"`
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(retired, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.RunID != strconv.FormatInt(res.RunID, 10) || got.Reason != "policy" {
+		t.Fatalf("retired wrong phase: %s", retired)
+	}
+}
+
+func TestAgentApprovalRetired_DTOConformsToContract(t *testing.T) {
+	for _, phase := range []string{"policy", "egress"} {
+		raw, err := json.Marshal(agentApprovalRetired{"7", 1, "files.read", "call_1", "hash", phase})
+		if err != nil {
+			t.Fatal(err)
+		}
+		validateJSON(t, loadSchema(t, "agent.approvalRetired.schema.json"), raw, "retirement DTO")
 	}
 }

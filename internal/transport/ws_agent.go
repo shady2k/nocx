@@ -1205,6 +1205,7 @@ func logAgentStreamEnded(logger log.Logger, runID int64, started time.Time, reas
 func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Responder) {
 	opScope := catalog.BeginInternal(log.WithLogger(ctx, h.log), catalog.OpInternalAgentRun)
 	defer opScope.Complete()
+	ctx = catalog.WithScope(ctx, opScope)
 	if rc.leaseDegradation != nil {
 		ctx = assistant.WithRunLeaseDegradation(ctx, rc.leaseDegradation)
 	}
@@ -1723,13 +1724,14 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 		})
 		return
 	}
+	defer wait.mu.Unlock()
 	waitSettled := false
 	waitRestored := false
 	defer func() {
 		if waitSettled || waitRestored {
 			return
 		}
-		wait.settle(assistant.Unanswered{Err: errors.New("the server could not record the answer, so the call was refused")})
+		wait.settleLocked(assistant.Unanswered{Err: errors.New("the server could not record the answer, so the call was refused")})
 	}()
 	if !p.Approved {
 		// "No, and widen it" is not an answer anybody can mean: the widening
@@ -1794,7 +1796,7 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 		// own words, and the model goes on in the same stream — except on the
 		// egress arm, where the pipeline knows a withheld result has nothing
 		// to continue with and ends the run.
-		waitSettled = wait.settle(assistant.Declined{
+		waitSettled = wait.settleLocked(assistant.Declined{
 			Reason: assistant.PersonDeclineResult(p.Tool, declineKindForScope(p.Scope)),
 		})
 		_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunStreaming), Warning: warning}))
@@ -1860,7 +1862,7 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 	}
 	// The call that asked is waiting: the yes reaches IT, and the guards that
 	// follow read the answer and the evidence as they stand now.
-	waitSettled = wait.settle(assistant.Approved{})
+	waitSettled = wait.settleLocked(assistant.Approved{})
 	_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunStreaming), Warning: warning}))
 }
 

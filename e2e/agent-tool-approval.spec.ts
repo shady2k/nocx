@@ -221,6 +221,11 @@ test.describe('a proposed tool reaches the approval prompt (nocx-aospw)', () => 
     const prompt = page.getByRole('dialog', { name: APPROVAL_TITLE })
     await expect(prompt).toBeVisible({ timeout: 20_000 })
     await expect(prompt).toContainText('session.read')
+
+    // A settled question must disappear instead of advertising an answer
+    // the backend can no longer accept. Denying avoids another tool proposal.
+    await prompt.getByRole('button', { name: /^Deny once/ }).click()
+    await expect(prompt).toBeHidden()
   })
 
   // The same question, asked in Russian (nocx-dej6.3.8's review, defect 1).

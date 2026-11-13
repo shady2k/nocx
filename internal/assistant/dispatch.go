@@ -226,10 +226,10 @@ func (endedContext) Decide(ctx context.Context, _ Call) Decision {
 
 // orchestrationMethodNames describes the current worker/orchestration
 // surface, not a general authority allowlist. Applying the reachability gate
-// to every tool was measured to make 11 existing tests fail: git.status and
-// skill mutations deliberately record the execution attempt before
-// capability refusal so the refusal stays auditable, while these methods
-// have no such requirement today. The general case remains undecided; this
+// to every tool was measured to make 11 existing tests fail: git.status
+// deliberately records the execution attempt before capability refusal so
+// the refusal stays auditable, while these methods have no such requirement
+// today. The general case remains undecided; this
 // list must not become a second effect/name policy.
 //
 // Renamed from workerMethodNames (nocx-6q1uh.8, design §4.1): session.read
@@ -527,8 +527,8 @@ func (d *dispatchOperation) prepare(invocation ToolInvocation) (preparedInvocati
 	// The external worker adapter and in-process worker calls require the
 	// declaration projection here. Non-worker model calls intentionally keep
 	// their historical attempt-before-capability behavior (notably
-	// git.status and skill mutations), so this shared operation only applies
-	// the reachability gate to the worker surface in this refactor.
+	// git.status), so this shared operation only applies the reachability
+	// gate to the worker surface in this refactor.
 	if !d.reachableForGrant(prepared.decl.Name, invocation.Grant) {
 		return preparedInvocation{}, fmt.Errorf("%w: %q", ErrUnreachableMethod, prepared.decl.Name)
 	}

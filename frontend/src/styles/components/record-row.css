@@ -256,9 +256,9 @@
    the geometry saying so. It hangs off the trailing edge of the row's action
    region, after whatever the surface put there, so the control's place is the
    row's right edge rather than the sum of the buttons that happen to precede
-   it. The Skills list drew its enable switch first inside a free-form action
-   group and had three row shapes — no buttons, Delete, Re-approve and Delete
-   — so one switch stood in three places down a list a person scans.
+   it. A list that drew its state control first inside a free-form action
+   group had three row shapes — no buttons, Delete, and two buttons — so one
+   switch stood in three places down a list a person scans.
 
    Reordering inside the group was the cheap alternative and record-row.tsx
    says why it is refused: last is an anchor only until something else is

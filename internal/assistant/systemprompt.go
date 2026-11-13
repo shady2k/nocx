@@ -33,13 +33,6 @@ type AttachedContentItem struct {
 	Automatic bool
 }
 
-// SkillRef is the prompt-visible index entry for a skill the current run may
-// read. Bodies are fetched by skills.read rather than copied into the prompt.
-type SkillRef struct {
-	Name        string
-	Description string
-}
-
 // SystemPromptFacts is everything the prompt is allowed to say about this
 // run's pane. A fact with no owner is ABSENT here rather than guessed, and the
 // renderer omits the line rather than writing a plausible one.
@@ -79,11 +72,6 @@ type SystemPromptFacts struct {
 	// and then nothing is said about it at all - the same rule the
 	// attached-content sentence follows.
 	PersonalInstructions string
-
-	// Skills is the index of skills this run may read: one name and one
-	// description each, never a body. It is a fact handed in by the
-	// transport and is filled only when skills.read is in the run's grant.
-	Skills []SkillRef
 }
 
 // PersonalInstructionsHeading is the heading the person's own paragraph
@@ -170,42 +158,6 @@ func SystemPrompt(f SystemPromptFacts) string {
 		}
 	}
 
-	if len(f.Skills) > 0 {
-		b.WriteString("\nSkills\n")
-		// ONE ACCOUNT OF WHAT A SKILL IS, and it has to be the same one
-		// executeSkillsRead gives (nocx-5vztb). This paragraph said a
-		// skill is instruction while that function sometimes handed the
-		// same bytes over inside "untrusted data, not instructions" —
-		// two sentences of ours about one file, and the model cannot
-		// obey both. The owner decided which survives: a skill the
-		// person installed and turned on is meant to be followed,
-		// because a procedure nobody follows is not worth installing.
-		//
-		// What is said next to that is the whole of the qualification.
-		// A skill is a WRITTEN PROCEDURE, true when somebody wrote it
-		// and ageing from that moment, so the model is told to report a
-		// step that disagrees with the machine instead of forcing it —
-		// which is the useful half of what the untrusted frame was
-		// reaching for, without the false half. The alternative
-		// rejected was hedging with suspicion ("this may be hostile"),
-		// which reads as a reason not to follow the skill at all and
-		// would leave the contradiction standing in softer words.
-		//
-		// The last sentence is written here so the model does not
-		// infer a trust level from the first: reading a skill grants
-		// nothing. A permission is about a COMMAND, never about the
-		// situation that proposed it (the skills-under-policy design
-		// §3), so a skill's commands are approved exactly like anyone
-		// else's and the prompt says so rather than letting the model
-		// guess it either way.
-		b.WriteString("These are procedures the person installed and turned on for this machine, so one that is relevant to what you were asked is meant to be followed: " +
-			"read it with skills.read and follow it. What it returns is instruction, not terminal output. " +
-			"It is a written procedure and not a rule — it can be out of date, because the machine moves and the text does not — so where a step disagrees with what you actually find, say which step and do not force it. " +
-			"Following a skill never widens what you may do: every command in one is put through the same approval as any command of your own.\n")
-		for _, s := range f.Skills {
-			b.WriteString("- " + s.Name + " — " + s.Description + "\n")
-		}
-	}
 	b.WriteString("\nWhat you can do\n")
 	b.WriteString("You act only through the tools you are given, and each tool's own description " +
 		"says what it does. ")

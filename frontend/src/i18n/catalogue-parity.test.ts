@@ -87,7 +87,6 @@ const SECTIONS = [
   'instructions',
   'interface',
   'pets',
-  'skills',
   'terminal',
   'updates',
   'worktrees',

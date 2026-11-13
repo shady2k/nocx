@@ -31,7 +31,6 @@ import (
 // stubAssistantClient is the injected engine: it answers Probe exactly as
 // configured, so the tests drive every outcome without a network.
 type stubAssistantClient struct {
-	unauditedClient
 	probe func(ctx context.Context, p assistant.ProbeParams) (assistant.ProbeResult, error)
 }
 

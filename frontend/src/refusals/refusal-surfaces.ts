@@ -272,27 +272,6 @@ export const REFUSAL_SURFACES: readonly RefusalSurface[] = [
       retry: 'the same control',
     },
   },
-  // ── skills
-  {
-    methods: [
-      'skills.list',
-      'skills.file',
-      'skills.files',
-      'skills.audit',
-      'skills.check',
-      'skills.scan',
-      'skills.setEnabled',
-      'skills.setPin',
-      'skills.approve',
-      'skills.remove',
-    ],
-    origin: 'person',
-    report: {
-      kind: 'own-state',
-      where: 'the skills surface’s own error line',
-      retry: 'the same control',
-    },
-  },
   // ── assistant and agent
   {
     methods: [

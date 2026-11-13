@@ -257,8 +257,8 @@ type Declaration struct {
 	// kinds a call may resolve to. The policy checks the resolved resources.
 	ResourceKinds []content.ResourceKind
 	// ScopeFamily is the content sub-scope family a grant must CONTAIN for
-	// this tool to be offered — "note", "snippet", "skill". Empty for a
-	// declaration that needs no sub-scope.
+	// this tool to be offered — "note" or "snippet". Empty for a declaration
+	// that needs no sub-scope.
 	//
 	// It exists because ForGrant used to answer coverage from scope KINDS
 	// alone, so a grant naming one note offered every notes AND snippets
@@ -757,136 +757,6 @@ var declarations = []Declaration{
 		Narrow:           narrowContent,
 	},
 	{
-		Name:             "skills.read",
-		Description:      "Read a skill's instructions by name, or one file inside that skill; reach for this when the index names a skill relevant to the task.",
-		Effect:           []content.Effect{content.EffectObserve},
-		OutputTrust:      OutputTrustTrusted,
-		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
-		Deadline:         30 * time.Second,
-		Cancellation:     CancellationReturnError,
-		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
-		ScopeFamily:      "skill",
-		ResolveResources: skillResource("name"),
-		Executes:         InGo,
-		Params:           "skills.read.schema.json",
-		Narrow:           narrowContent,
-	},
-	{
-		Name:             "skills.create",
-		Description:      "Write a new skill the person asked you to remember; the person approves its exact text before it is stored.",
-		Effect:           []content.Effect{content.EffectMutateReversible},
-		OutputTrust:      OutputTrustUntrusted,
-		ResultBound:      ResultBound{MaxBytes: 8 << 10, Truncation: TruncationDropTail},
-		Deadline:         30 * time.Second,
-		Cancellation:     CancellationReturnError,
-		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
-		ScopeFamily:      "skill",
-		ResolveResources: skillResource("name"),
-		Executes:         InGo,
-		Params:           "skills.create.schema.json",
-		Narrow:           narrowSkillsWrite,
-	},
-	{
-		Name:             "skills.update",
-		Description:      "Replace a managed skill after the person asks you to change how it is remembered; the person approves its exact text before it is stored.",
-		Effect:           []content.Effect{content.EffectMutateReversible},
-		OutputTrust:      OutputTrustUntrusted,
-		ResultBound:      ResultBound{MaxBytes: 8 << 10, Truncation: TruncationDropTail},
-		Deadline:         30 * time.Second,
-		Cancellation:     CancellationReturnError,
-		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
-		ScopeFamily:      "skill",
-		ResolveResources: skillResource("name"),
-		Executes:         InGo,
-		Params:           "skills.update.schema.json",
-		Narrow:           narrowSkillsWrite,
-	},
-	{
-		Name:             "skills.delete",
-		Description:      "Delete a managed skill the person no longer wants remembered; the person approves the removal before it happens.",
-		Effect:           []content.Effect{content.EffectMutateReversible},
-		OutputTrust:      OutputTrustUntrusted,
-		ResultBound:      ResultBound{MaxBytes: 8 << 10, Truncation: TruncationDropTail},
-		Deadline:         30 * time.Second,
-		Cancellation:     CancellationReturnError,
-		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
-		ScopeFamily:      "skill",
-		ResolveResources: skillResource("name"),
-		Executes:         InGo,
-		Params:           "skills.delete.schema.json",
-		Narrow:           narrowSkillsWrite,
-	},
-	{
-		Name:             "skills.resolve",
-		Description:      "Resolve the public address exactly as the person gave it, or as a page named it, into the repository, pinned commit and skills it contains without writing anything; do not judge in advance whether the address is enumerable — call this tool and let it refuse unsupported addresses, then fall back to skills.install.",
-		Effect:           []content.Effect{content.EffectCrossBoundary},
-		OutputTrust:      OutputTrustUntrusted,
-		ResultBound:      ResultBound{MaxBytes: 8 << 10, Truncation: TruncationDropTail},
-		Deadline:         120 * time.Second,
-		Cancellation:     CancellationReturnError,
-		ResourceKinds:    []content.ResourceKind{content.ResourceDestination},
-		ResolveResources: resourceURL("url"),
-		ScopeFamily:      "skill",
-		Executes:         InGo,
-		Params:           "skills.resolve.schema.json",
-		Narrow:           narrowURL,
-	},
-	{
-		Name:        "skills.install",
-		Description: "Adopt a skill somebody has published at a web address: give the address and nocx fetches the document, reads what it says it is, fetches the files it names and shows the person all of it before anything is written. Reach for this when the person points you at a skill to add — a refusal is an answer, and what does land is switched OFF until THE PERSON turns it on from the skill's own tab, which you have no tool for and must not offer to do, so do not treat an install as a skill you can then use.",
-		// TWO CLASSES, AND THEY ARE BOTH REACHED — this is a CONJUNCTION,
-		// not the alternation ADR-0053 describes. session.run declares a set
-		// because `lsblk` and `rm -rf` are alternatives that share a carrier
-		// and exactly one of them happens; here the fetch AND the write both
-		// happen on every successful call, so nothing selects between them.
-		//
-		// Declaring the set anyway is still right, and better than either
-		// singleton. `mutate-reversible` alone would hide that the model
-		// chooses an address off this machine and nocx goes and reads it;
-		// `cross-boundary` alone would hide that bytes from there land on
-		// the person's disk. WorstEffect makes the DECISION on
-		// cross-boundary (the lattice's higher row), which is the strict
-		// reading of a conjunction and the one we want: the person's answer
-		// for the harsher of the two acts governs the pair.
-		//
-		// THE CONJUNCTION IS DECLARED, not left to the enforcement layer to
-		// discover. EffectRelation is what says so, and ForGrant, the policy
-		// decision and the scope check all read it (ADR-0053's 2026-09-07
-		// amendment, nocx-ykjai). Before it, this row was offered when ANY
-		// class was not refused and decided on the worst class alone, so a
-		// policy refusing reversible mutation while permitting cross-boundary
-		// still listed the tool to the model and still asked the person about
-		// a write they had declined.
-		//
-		// The enforcement layer is still the real one (ADR-0028 decision 4):
-		// narrowSkillsInstall builds the capability from BOTH rows and a
-		// refused mutate-reversible row yields a capability that cannot
-		// install anything. What the declaration adds is that the question is
-		// never put at all.
-		Effect: []content.Effect{
-			content.EffectMutateReversible,
-			content.EffectCrossBoundary,
-		},
-		EffectRelation: EffectsConjunctive,
-		OutputTrust:    OutputTrustUntrusted,
-		ResultBound:    ResultBound{MaxBytes: 8 << 10, Truncation: TruncationDropTail},
-		// Longer than fetch.url's minute, because the executor's half of
-		// this call re-acquires the WHOLE bundle — the document plus up to
-		// maxBundleFiles support files — where fetch.url's minute covers one
-		// request. The same bound is applied to the resolution that happens
-		// before the person is asked (internal/assistant/kernel.go), so the
-		// declared deadline governs both halves of the call rather than only
-		// the half that runs after the answer.
-		Deadline:         120 * time.Second,
-		Cancellation:     CancellationReturnError,
-		ResourceKinds:    []content.ResourceKind{content.ResourceDestination, content.ResourceContent},
-		ScopeFamily:      "skill",
-		ResolveResources: skillInstallResources("url"),
-		Executes:         InGo,
-		Params:           "skills.install.schema.json",
-		Narrow:           narrowSkillsInstall,
-	},
-	{
 		Name:        "workers.holdings",
 		Description: "Ask what workers your own session is responsible for, and what each of them is doing — plus which checkouts of the repository you are standing in are left over from workers of yours that are gone (with what each was for, and whether it still holds work). It takes no arguments: the session is the one you are running in. Reach for it at the start of a turn when you have lost track of what you started — nocx has been watching them the whole time, including across a restart of yours — and when you want to know whether earlier work left checkouts standing that a person may want removed.",
 		// Reading a record nocx keeps about this session. It reaches no
@@ -1129,28 +999,6 @@ var declarations = []Declaration{
 // loud.
 func Assemble(fsys fs.FS) (Registry, error) {
 	return assemble(fsys, declarations)
-}
-
-// AssembleWithSkillRoots assembles the registry with the application's
-// filesystem skill roots bound into the three general-purpose file tools.
-// Declarations are cloned so one application profile cannot alter another
-// registry or the package-level declaration table.
-func AssembleWithSkillRoots(fsys fs.FS, skillRoots []string) (Registry, error) {
-	if len(skillRoots) == 0 {
-		return Assemble(fsys)
-	}
-	decls := slices.Clone(declarations)
-	for i := range decls {
-		switch decls[i].Name {
-		case "files.read":
-			decls[i].Narrow = narrowFilesReadWithSkillRoots(skillRoots)
-		case "files.edit":
-			decls[i].Narrow = narrowFilesEditWithSkillRoots(skillRoots)
-		case "files.create":
-			decls[i].Narrow = narrowFilesCreateWithSkillRoots(skillRoots)
-		}
-	}
-	return assemble(fsys, decls)
 }
 
 func assemble(fsys fs.FS, decls []Declaration) (Registry, error) {

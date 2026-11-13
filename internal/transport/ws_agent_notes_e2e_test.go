@@ -143,7 +143,7 @@ func TestAgentAsk_BareTextCreatesAndSearchesNoteThroughProvider(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(provider.handler))
 	defer server.Close()
 
-	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{}, nil)
+	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{})
 	if err != nil {
 		t.Fatalf("assistant.NewClientAndRegistry: %v", err)
 	}

@@ -167,8 +167,8 @@
    with a settings control: the reset affordance's slot, and the gap that
    holds it off the control it undoes. A settings row therefore ends its
    CONTROL 30px short of where it ends its CELL, and anything drawn beside a
-   settings row — the Skills list is the first — ends at the cell's edge and
-   stands 30px out of column with it. Named here so both consumers read the
+   settings row ends at the cell's edge and stands 30px out of column with
+   it. Named here so both consumers read the
    same two values rather than a constant that happens to cancel them today. */
 .ui-settings {
   --settings-reset-slot: 18px;
@@ -213,8 +213,8 @@
 
 /* ── A list's state control sits on the same rail ─────────────────────────
    A page that owns a settings section draws the section's switches above its
-   own content, and on the Skills page that content is a list whose every row
-   carries a switch of exactly the same kind. RecordRow hangs its state cell
+   own content, and that content can be a list whose every row carries a
+   switch of exactly the same kind. RecordRow hangs its state cell
    off the row's trailing edge, which is the page's content edge; a settings
    row's switch stops one reset gutter short of it. Both are right inside
    their own frame, and the result is two identical controls 30px out of

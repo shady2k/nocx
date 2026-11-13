@@ -401,25 +401,13 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 		if approvals == nil {
 			approvals = c.approvals
 		}
-		// The classifier (bead nocx-kpy23): the middleware consults a
-		// SECOND model for every permitted proposal. The engine builds
-		// the classifier over ITS guarded client and the caller's role
-		// resolver — the model call is the engine's (design §6: usage
-		// has an owner); nil without a resolver is the feature off.
-		var classifier CallClassifier
-		if p.Classifier != nil {
-			classifier = newClassifierEngine(askLog, c.http, p.Classifier)
-		}
-		mw, err := newPolicyMiddleware(askLog, grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.SessionID, p.Attempt, p.TurnEntryID, p.Requester, Attachments{AutomaticItems: p.AutomaticSessionItems, MarkedWindows: p.MarkedSessionWindows}, classifier, func(call ToolCall) error {
+		mw, err := newPolicyMiddleware(askLog, grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.SessionID, p.Attempt, p.TurnEntryID, p.Requester, Attachments{AutomaticItems: p.AutomaticSessionItems, MarkedWindows: p.MarkedSessionWindows}, func(call ToolCall) error {
 			return sink(AskEvent{Kind: AskToolCall, Call: &call})
 		}, toolSeams{
 			sessions:          p.SessionSource,
 			screenCapture:     p.ScreenCapture,
 			noteOperation:     p.NoteOperation,
 			snippetOperation:  p.SnippetOperation,
-			skills:            p.Skills,
-			skillDraft:        p.SkillDraft,
-			skillDraftHTTP:    c.http,
 			fetcher:           p.Fetcher,
 			snapshots:         c.snapshots,
 			runID:             p.RunID,

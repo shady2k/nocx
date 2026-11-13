@@ -52,12 +52,6 @@
         "snippets.update",
         "snippets.delete",
         "snippets.reorder",
-        "skills.read",
-        "skills.create",
-        "skills.update",
-        "skills.delete",
-        "skills.resolve",
-        "skills.install",
         "workers.holdings",
         "workers.spawn",
         "workers.say",
@@ -158,30 +152,6 @@
             "reason": { "type": "string" }
           }
         }
-      }
-    },
-    "finding": {
-      "description": "skills.create and skills.update only: the first static scan finding in the bytes being proposed, naming the file it was found in — always SKILL.md, because that is the only file those two write. A skills.install proposal leaves this ABSENT and puts its findings in `install.files[].findings` instead, attached to the file each matched in: that question carries every file's bytes, so a finding is marked on the line it sits on, and a row repeating the first of them would be a second surface owning one fact (nocx-ojfuc.2). The path is stated rather than left out so this finding is the same shape skills.audit and skills.file carry; a surface handed a finding without one has to invent a subject for it.",
-      "type": ["object", "null"],
-      "additionalProperties": false,
-      "required": ["path", "patternId", "line", "lineNumber"],
-      "properties": {
-        "path": { "type": "string", "minLength": 1 },
-        "patternId": { "type": "string", "minLength": 1 },
-        "line": { "type": "string" },
-        "lineNumber": { "type": "integer", "minimum": 1 }
-      }
-    },
-    "classifier": {
-      "description": "Skill write only: the classifier verdict or bounded failure fact.",
-      "type": ["object", "null"],
-      "additionalProperties": false,
-      "required": ["consulted", "reason"],
-      "properties": {
-        "consulted": { "type": "boolean" },
-        "verdict": { "type": "string", "enum": ["clear", "suspect"] },
-        "model": { "type": "string" },
-        "reason": { "type": "string" }
       }
     },
     "wasError": {
@@ -314,7 +284,7 @@
             "type": "string"
           },
           "refusal": {
-            "description": "Why the bytes are not shown. Empty means nothing was refused and `text` is the file. The first three are skills.file's own values, spelled the same because they are the same sentences about the same facts and one viewer draws both. `unreadable` is this notification's own: skills.file answers a REQUEST and can fail it, while a question has nowhere to put an error, so \"there was no file to read\" must arrive as a fact inside the question or not at all. Never null.",
+            "description": "Why the bytes are not shown. Empty means nothing was refused and `text` is the file. `unreadable` is this notification's own: a question has nowhere to put an error, so \"there was no file to read\" must arrive as a fact inside the question or not at all. Never null.",
             "type": "string",
             "enum": ["", "not-text", "too-large", "unreadable"]
           },
@@ -326,103 +296,6 @@
           "reason": {
             "description": "Why an unreadable file was not read, in the words the person reads \u2014 no session, no provider for that machine, a relative path with no directory to resolve it against, a file that is gone, permission refused, the read budget spent. Empty for every other refusal. It travels rather than being composed on the surface for the reason expansion.reason does: these differ in ways that matter to whoever is deciding, and a renderer writing one of its own would put our guess in front of them instead of what happened.",
             "type": "string"
-          }
-        }
-      }
-    },
-    "install": {
-      "description": "skills.install only (nocx-ojfuc.2, widened by nocx-295uk.3): what the proposed address RESOLVED to. The tool's arguments are an address, and an address is not something anybody can decide about — the model was asked to install a skill from a page, and what it resolved that page to is the thing the person is actually deciding. A question naming the ask rather than the answer would let somebody approve a page they read and receive a repository they never saw. So this carries the resolution: the route it travelled, and every skill the answer covers — the name and description each document gives itself, the digest each write is bound to, and EVERY file that will land, with its bytes. Absent for every other proposal. ONE QUESTION CARRIES A SET rather than one question per skill, because 'which one, or all of them?' is a real answer to a repository holding nine: nine dialogues for it are worse than one listing nine, and the person reads the same content either way. A plain URL install is that same shape with a set of one and no route. THE ROUTE FACTS — source, destination, originsDiffer, ref, commit — are shared by every skill in the set because they are properties of the journey, not of a skill, and originsDiffer is stated rather than left to be re-derived: a surface comparing two hosts itself would be a second answer to a question the server already answered. THE BYTES ARE HERE rather than behind a request, because none of these files is on disk yet and must not be until the person answers: skills.file reads an INSTALLED skill, a notification cannot answer a follow-up, and bytes fetched a second time from a mutable server slot would not be the bytes the question was built from. It is the shape `scripts` already has for the file a command names. The size is bounded upstream and not here: internal/skill refuses a bundle over 32 files, over 512 KiB of support text or with a document over 64 KiB before any question can exist.",
-      "type": ["object", "null"],
-      "additionalProperties": false,
-      "required": ["skills"],
-      "properties": {
-        "source": {
-          "description": "The address the person supplied before repository resolution.",
-          "type": "string",
-          "minLength": 1
-        },
-        "destination": {
-          "description": "The canonical repository address reached by resolution.",
-          "type": "string",
-          "minLength": 1
-        },
-        "originsDiffer": {
-          "description": "Whether the source and destination URL hosts differ.",
-          "type": "boolean"
-        },
-        "ref": {
-          "description": "The repository ref pinned by the resolution.",
-          "type": "string",
-          "minLength": 1
-        },
-        "commit": {
-          "description": "The immutable repository commit pinned by the resolution.",
-          "type": "string",
-          "minLength": 1
-        },
-        "skills": {
-          "description": "Every skill covered by this approval. Direct installs contain one item; resolved installs contain the selected candidates.",
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["name", "description", "url", "digest", "files"],
-            "properties": {
-              "path": {
-                "description": "The candidate path inside the resolved repository. Absent for a direct URL install.",
-                "type": "string",
-                "minLength": 1
-              },
-              "name": {
-                "description": "The skill name from its own frontmatter.",
-                "type": "string",
-                "minLength": 1
-              },
-              "description": {
-                "description": "The skill description from its own frontmatter.",
-                "type": "string",
-                "minLength": 1
-              },
-              "url": {
-                "description": "The address fetched for this skill.",
-                "type": "string",
-                "minLength": 1
-              },
-              "digest": {
-                "description": "The sha256 digest over the complete skill bundle.",
-                "type": "string",
-                "minLength": 1
-              },
-              "files": {
-                "description": "Every file that will land, with its exact text and findings.",
-                "type": "array",
-                "minItems": 1,
-                "items": {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": ["path", "text", "findings"],
-                  "properties": {
-                    "path": { "type": "string", "minLength": 1 },
-                    "text": { "type": "string" },
-                    "findings": {
-                      "type": "array",
-                      "items": {
-                        "type": "object",
-                        "additionalProperties": false,
-                        "required": ["path", "patternId", "line", "lineNumber"],
-                        "properties": {
-                          "path": { "type": "string", "minLength": 1 },
-                          "patternId": { "type": "string", "minLength": 1 },
-                          "line": { "type": "string" },
-                          "lineNumber": { "type": "integer", "minimum": 1 }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
           }
         }
       }

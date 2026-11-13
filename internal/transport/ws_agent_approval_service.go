@@ -164,8 +164,7 @@ func policyQuestion(ap *assistant.ApprovalRequest) agentApprovalRequested {
 		RunID:  ap.RunID, Attempt: ap.Attempt, Tool: ap.Tool, CallID: ap.CallID,
 		ArgHash: ap.ArgHash, Arguments: ap.Arguments,
 		Effect: string(ap.Effect), Resource: ap.Resource,
-		Finding: ap.Finding, Classifier: ap.Classifier, Expansion: ap.Expansion,
-		Scripts: ap.Scripts, Install: ap.Install,
+		Expansion: ap.Expansion, Scripts: ap.Scripts,
 	}
 	if ap.OutOfScope != nil {
 		n.OutOfScope = &agentApprovalOutOfScope{

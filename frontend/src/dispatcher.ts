@@ -1296,9 +1296,9 @@ export class Dispatcher {
   // request used to stand the heartbeat down, on the reasoning that a call in
   // flight proves the connection alive: true of the connection, false of the
   // server's deadline, and a pending request is exactly the state in which the
-  // client sends nothing — so a skills.audit, which is a model reading a whole
-  // bundle, died at thirty seconds and took every other call on the socket with
-  // it. A frame the server SENT used to re-arm it for the same reason and with
+  // client sends nothing — so a backup.restore, which writes several
+  // documents, died at thirty seconds and took every other call on the socket
+  // with it. A frame the server SENT used to re-arm it for the same reason and with
   // the same flaw. transport.ping rides the immediate submission and is
   // answered on the read loop, so it comes back while the control lane is busy;
   // there is nothing to stand down for.

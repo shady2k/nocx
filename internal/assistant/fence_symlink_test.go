@@ -172,7 +172,7 @@ func TestAsk_AFenceRefusalAfterApprovalContinuesTheRun(t *testing.T) {
 	f, srv := newFakeOpenAI(reProposingModel("files.read", args))
 	defer srv.Close()
 
-	cl, _, clErr := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
+	cl, _, clErr := NewClientAndRegistry(nil, nil, content.Floor{})
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}

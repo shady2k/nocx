@@ -58,7 +58,6 @@ func assertNoFrameworkWords(t *testing.T, sentence string) {
 // test can assert over the error itself and not only over the sentence it
 // became.
 type recordingClient struct {
-	unauditedClient
 	inner assistant.Client
 	mu    sync.Mutex
 	err   error

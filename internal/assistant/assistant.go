@@ -32,13 +32,11 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/skill"
 )
 
 // Client is the app-facing surface of the assistant engine. Consumers: the
-// endpoint form's Test button (Probe, nocx-edio), the ask transaction (Ask,
-// nocx-x8s2.2 — the run f4s5 prepares is driven here), and the skill card's
-// audit button (AuditSkill, nocx-0bsa4.4).
+// endpoint form's Test button (Probe, nocx-edio) and the ask transaction
+// (Ask, nocx-x8s2.2 — the run f4s5 prepares is driven here).
 type Client interface {
 	// Probe streams one real response from the given endpoint configuration
 	// — the Test button's whole meaning: it probes what will actually be
@@ -79,20 +77,6 @@ type Client interface {
 	// transport can call it from its one terminal funnel without asking
 	// whether the run ever suspended.
 	Discard(runID string)
-	// AuditSkill asks the auditing role's model to CHECK one skill's bundle
-	// and returns its reading — a verdict plus the prose that says why
-	// (design §7, reversed: the refusal to conclude is gone). It is here
-	// beside Probe rather than behind a seam of its own because it is the
-	// same shape: the caller resolves the pair and the credential, the
-	// engine owns the model call.
-	//
-	// It gates nothing and certifies nothing. Nothing in the product
-	// branches on what comes back — a skill is offered to the assistant
-	// when the person's switch is on and the bytes still match, and this
-	// call touches neither. An error means there is no reading, and the
-	// caller must say so rather than showing an empty one: a blank report
-	// reads exactly like a clean report.
-	AuditSkill(ctx context.Context, p SkillAuditParams) (SkillAuditResult, error)
 }
 
 // AskEventKind names which of the three things one Ask event is. A closed
@@ -204,32 +188,6 @@ type Header struct {
 	Value string
 }
 
-// SkillLibrary is the assistant's filesystem-backed skill seam. Read and
-// mutation tools share this one owner so a composition root cannot offer
-// writes with a read-only source.
-type SkillLibrary interface {
-	SkillSource
-	Create(name, description, body string) error
-	Update(name, description, body string) error
-	Delete(name string) error
-	// Preview and Install are the two halves of adopting a skill published
-	// at an address, and they are on THIS interface rather than one of their
-	// own for the reason the writes are: one owner, so a composition root
-	// cannot offer an install whose preview came from somewhere else. The
-	// pair is not two ways to do one thing — Preview fetches and writes
-	// nothing, Install re-fetches and refuses unless the bytes are the ones
-	// Preview showed. What joins them is a digest the store keeps on the
-	// server, which is why neither method takes anything but an address:
-	// there is no field in which a caller could assert what the bytes were.
-	Preview(ctx context.Context, url string) (skill.PreviewResult, error)
-	Install(ctx context.Context, url string) (skill.InstallResult, error)
-	// Resolve enumerates a supported public repository without writing.
-	Resolve(ctx context.Context, address string) (*skill.Resolution, error)
-	// RecordUse notes successful skills.read calls. It returns nothing on
-	// purpose: usage telemetry must never make a read fail.
-	RecordUse(name string)
-}
-
 // AskParams is one ask's model call: the resolved endpoint's facts plus the
 // conversation context (question + referenced frames, design §4.2).
 type AskParams struct {
@@ -327,13 +285,6 @@ type AskParams struct {
 	// them as seams; it never owns a service or a second store implementation.
 	NoteOperation    capability.NoteOperation
 	SnippetOperation capability.SnippetOperation
-	// Skills is the filesystem-backed library for all skill tools. The
-	// transport supplies one owner whose index, reads and writes agree.
-	Skills SkillLibrary
-	// SkillDraft is the run's immutable transcript and summarizing-role seam.
-	// When set, a model-proposed skills.create call uses its cached generated
-	// arguments before validation, policy, approval, or execution.
-	SkillDraft *SkillDraftRequest
 	// Fetcher is the guarded direct-network seam for fetch.url. It is wired
 	// by the composition root; the tool cannot select a pane's connection
 	// route or construct another HTTP client.
@@ -359,14 +310,6 @@ type AskParams struct {
 	// whose tools may execute FAILS without it: the gate must see short
 	// vault values, or a result would leave for the provider unscreened.
 	KnownMaterial KnownMaterial
-	// Classifier resolves the classifier role (bead nocx-kpy23): the
-	// second, cheaper model that judges each permitted proposal and may
-	// only escalate. Nil means the classifier is not wired for this run —
-	// permitted calls run exactly as they do without one (criterion 7's
-	// second end). Non-nil means every call the policy permits is
-	// consulted, and every classification failure escalates. The transport
-	// adapts THE ONE role resolver (e6kn2) and the vault to this seam.
-	Classifier ClassifierResolver
 	// Presentation controls the model-facing lazy tool catalog. It changes
 	// visibility only; the grant and kernel remain the authority boundary.
 	Presentation *agenttools.PresentationConfig
@@ -506,8 +449,8 @@ type ProbeResult struct {
 // NewClientAndRegistry builds the assistant and returns the exact registry
 // used by its engine. The composition root passes that same registry to
 // transport so prompt offers and execution use one declaration table.
-func NewClientAndRegistry(logger log.Logger, recorder WireRecorder, floor content.Floor, skillRoots []string) (Client, agenttools.Registry, error) {
-	reg, err := assembleToolRegistry(tools.Schemas, skillRoots)
+func NewClientAndRegistry(logger log.Logger, recorder WireRecorder, floor content.Floor) (Client, agenttools.Registry, error) {
+	reg, err := assembleToolRegistry(tools.Schemas)
 	if err != nil {
 		return nil, agenttools.Registry{}, err
 	}
@@ -515,16 +458,8 @@ func NewClientAndRegistry(logger log.Logger, recorder WireRecorder, floor conten
 	return newClientWithRegistry(logger, reg, recorder, floor, searchSchema), reg, nil
 }
 
-func assembleToolRegistry(toolsFS fs.FS, skillRoots []string) (agenttools.Registry, error) {
-	var (
-		reg agenttools.Registry
-		err error
-	)
-	if len(skillRoots) == 0 {
-		reg, err = agenttools.Assemble(toolsFS)
-	} else {
-		reg, err = agenttools.AssembleWithSkillRoots(toolsFS, skillRoots)
-	}
+func assembleToolRegistry(toolsFS fs.FS) (agenttools.Registry, error) {
+	reg, err := agenttools.Assemble(toolsFS)
 	if err != nil {
 		return agenttools.Registry{}, fmt.Errorf("assistant: tool registry: %w", err)
 	}

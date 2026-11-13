@@ -466,7 +466,7 @@ func TestTheCatalogueOffersExactlyWhatDispatchAccepts(t *testing.T) {
 			// "Accepted" means dispatch did not refuse the METHOD itself —
 			// unreachable for this grant, or not a declared method at all.
 			// A failure past that gate (invalid args, no renderer wired in
-			// this test harness, no content/skill seam wired) is a fact
+			// this test harness, no content seam wired) is a fact
 			// about the CALL, not about whether the method is offered, and
 			// is deliberately not treated as a mismatch here.
 			accepted := !errors.Is(dispatchErr, ErrUnreachableMethod) && !errors.Is(dispatchErr, ErrUnknownMethod)

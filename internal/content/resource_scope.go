@@ -100,8 +100,9 @@ func (scope GrantScope) Contains(child GrantScope) bool {
 			return false
 		}
 		// Family roots revise the deliberate former hierarchy, which had no
-		// "every note" scope. Positive note+snippet roots are required to
-		// express a skills-off grant without the universal content root.
+		// "every note" scope. Positive note and snippet roots are required to
+		// express a grant over one library without the universal content
+		// root.
 		return parent.id == "" || parent.id == candidate.id
 	case ResourceWorkspace:
 		parent, _ := parseWorkspaceID(scope.ID)

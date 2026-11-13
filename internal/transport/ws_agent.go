@@ -43,7 +43,6 @@ import (
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
-	"github.com/shady2k/nocx/internal/skill"
 	"github.com/shady2k/nocx/internal/transport/control"
 	"github.com/shady2k/nocx/internal/vault"
 )
@@ -418,12 +417,7 @@ type agentApprovalRequested struct {
 	Resource *content.GrantScope       `json:"resource,omitempty"`
 	WasError bool                      `json:"wasError,omitempty"`
 	Findings []assistant.EgressFinding `json:"findings,omitempty"`
-	// Finding is static-scan evidence attached to a proposed skill write —
-	// the scanner's own shape, so the wire spelling has one owner.
-	Finding *skill.Finding `json:"finding,omitempty"`
-	// Classifier is the model gate's verdict or bounded failure fact.
-	Classifier *assistant.ApprovalClassifier `json:"classifier,omitempty"`
-	Standing   agentApprovalStanding         `json:"standing"`
+	Standing agentApprovalStanding     `json:"standing"`
 	// Expansion is what the verbatim command's variables currently read as,
 	// carried BESIDE the verbatim string and never instead of it
 	// (nocx-4h0m7.5, nocx-y47mi SETTLED 1). Every unsafe expansion is left
@@ -446,14 +440,6 @@ type agentApprovalRequested struct {
 	// no file to execute or source, so a proposal with no script draws no
 	// empty affordance.
 	Scripts []assistant.ScriptReading `json:"scripts,omitempty"`
-	// Install is what a skills.install proposal RESOLVED to (nocx-ojfuc.2):
-	// the address that was fetched, the skill's own name and description,
-	// the digest the write is bound to, and every file that will land with
-	// its bytes. The model proposed an ADDRESS, and an address is not
-	// something anybody can decide about — this is the answer that address
-	// resolved to, which is what the person is actually being asked. Absent
-	// for every other proposal.
-	Install *assistant.ApprovalInstall `json:"install,omitempty"`
 }
 
 // agentApprovalOutOfScope is what fell outside, which bound it fell outside,
@@ -617,7 +603,6 @@ type agentHandlers struct {
 	configOp   capability.ConfigOperation
 	noteOp     capability.NoteOperation
 	snippetOp  capability.SnippetOperation
-	skills     assistant.SkillLibrary
 	agentTools agenttools.Registry
 	log        log.Logger
 	// endpointWired is the config handlers' "endpoints not available" gate:
@@ -691,9 +676,6 @@ type agentHandlers struct {
 	// built without it, which is what a unit test constructing the struct
 	// directly has.
 	personalInstructions func() string
-	// skillsEnabled reads the global declaration for each ask; nil preserves
-	// the direct-construction test seam's historical enabled default.
-	skillsEnabled func() bool
 	// sessionPolicy is where "allow in this session" lands and where it
 	// dies (ws_sessionpolicy.go). Never nil: the server constructs one.
 	sessionPolicy *sessionPolicyStore
@@ -706,14 +688,6 @@ type agentHandlers struct {
 	state        *connState
 	clientID     string
 	r            Responder
-}
-
-func (s *WSServer) skillsEnabled() bool {
-	if s.settings == nil {
-		return true
-	}
-	enabled, err := s.settings.GetBool(settings.SkillsEnabled)
-	return err == nil && enabled
 }
 
 // environmentForSession derives the ledger environment from the session's
@@ -759,16 +733,12 @@ func environmentForSession(sess session.Session) content.Environment {
 //     the request path, and handed in — the prompt function never looks a
 //     setting up. Read fresh per ask, so a change on the settings screen
 //     governs the next question with no restart and nothing to invalidate.
-//   - The skills index is supplied by the caller from the registry-granted
-//     skill source; this function records it in prompt facts and does not
-//     derive which skills the run may read.
-func systemPromptFactsFor(cwd string, env content.Environment, attached []assistant.AttachedContentItem, personal string, skills []assistant.SkillRef) assistant.SystemPromptFacts {
+func systemPromptFactsFor(cwd string, env content.Environment, attached []assistant.AttachedContentItem, personal string) assistant.SystemPromptFacts {
 	f := assistant.SystemPromptFacts{
 		Cwd:                  cwd,
 		Env:                  env,
 		AttachedContent:      attached,
 		PersonalInstructions: personal,
-		Skills:               skills,
 	}
 	if env.Kind != content.EnvSSH {
 		f.OS = runtime.GOOS
@@ -823,34 +793,6 @@ func (h agentHandlers) personalParagraph() string {
 		return ""
 	}
 	return h.personalInstructions()
-}
-
-func skillRefsForGrant(grant *content.Grant, source assistant.SkillLibrary, registry agenttools.Registry) []assistant.SkillRef {
-	if grant == nil || source == nil {
-		return nil
-	}
-	offered := false
-	for _, tool := range registry.ForGrant(*grant) {
-		if tool.Name == "skills.read" {
-			offered = true
-			break
-		}
-	}
-	if !offered {
-		return nil
-	}
-	index := source.Index()
-	refs := make([]assistant.SkillRef, 0, len(index))
-	for _, item := range index {
-		child := content.GrantScope{Kind: content.ResourceContent, ID: "skill/" + item.Name}
-		for _, scope := range grant.Scopes {
-			if scope.Contains(child) {
-				refs = append(refs, assistant.SkillRef{Name: item.Name, Description: item.Description})
-				break
-			}
-		}
-	}
-	return refs
 }
 
 // personalInstructionsText reads the person's own paragraph out of the
@@ -1035,10 +977,6 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 
 	// The STREAM runs off the read loop on its own admission (the ask
 	// response is already sent). The task context derives from the
-	skillRefs := []assistant.SkillRef(nil)
-	if h.skillsEnabled == nil || h.skillsEnabled() {
-		skillRefs = skillRefsForGrant(runGrant, h.skills, h.agentTools)
-	}
 	// connection, so a disconnect cancels the stream and the run
 	// terminalizes — a refused socket write never wedges it. A refused
 	// submit (the stream capacity is exhausted) terminalizes the run
@@ -1079,7 +1017,7 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		// this question carried and the ledger recorded with it, the pane's
 		// environment as environmentForSession already derived it, and the
 		// person's own paragraph as the settings document holds it right now.
-		promptFacts:           systemPromptFactsFor(in.Cwd, in.Env, attached, h.personalParagraph(), skillRefs),
+		promptFacts:           systemPromptFactsFor(in.Cwd, in.Env, attached, h.personalParagraph()),
 		automaticSessionItems: automaticSessionItems(attached),
 		markedSessionWindows:  markedSessionWindows(attached),
 	}
@@ -1122,16 +1060,11 @@ func (h agentHandlers) resolveEndpointMaterial(
 }
 
 // resolveEndpointMaterial is the ONE place an endpoint becomes a usable
-// (key, headers) pair. It became a free function when the skill audit needed
-// the same resolution from a handler family that is not the agent's: a second
-// copy would have agreed with this one on every endpoint anybody tried and
-// disagreed the day a header's secret went missing, because only one of them
-// would have been taught the difference between a missing credential and a
-// missing header.
+// (key, headers) pair.
 //
 // The OPERATION is the caller's, and it is the only thing they differ on: it
-// is what the vault shows a person when it raises an unlock, so "answer the
-// ask" and "audit a skill" must not be one string.
+// is what the vault shows a person when it raises an unlock, so two callers
+// must not share one string.
 func resolveEndpointMaterial(
 	ctx context.Context,
 	credentials credential.Resolver,
@@ -1187,50 +1120,6 @@ func resolveEndpointMaterial(
 	return secret, headers, nil
 }
 
-// skillDraftResolver adapts the config operation and endpoint credential
-// resolver to the assistant's summarizing seam. An unassigned summarizing
-// role deliberately spends the answering role's resolved endpoint; all other
-// role refusals remain visible rather than silently changing providers.
-func (h agentHandlers) skillDraftResolver() assistant.SkillDraftResolver {
-	return assistant.SkillDraftResolverFunc(func(ctx context.Context) (assistant.SkillDraftTarget, error) {
-		if h.configOp == nil {
-			return assistant.SkillDraftTarget{}, errors.New("skill draft: config operation is not wired")
-		}
-		var (
-			endpoint profile.Endpoint
-			model    string
-		)
-		err := h.configOp.Run(ctx, func(_ context.Context, svc capability.ConfigService) error {
-			ep, m, resolveErr := svc.ResolveRole(profile.RoleSummarizing)
-			if errors.Is(resolveErr, profile.ErrRoleUnassigned) {
-				ep, m, resolveErr = svc.ResolveRole(profile.RoleAnswering)
-			}
-			if resolveErr != nil {
-				return resolveErr
-			}
-			endpoint, model = ep, m
-			return nil
-		})
-		if err != nil {
-			return assistant.SkillDraftTarget{}, err
-		}
-		// Outside the operation, for the reason resolveAuditModel states in
-		// full (nocx-9fzkk): the config operation holds the vault gate, and
-		// the unlock this read may raise is answered by a vault.unseal that
-		// needs the same gate.
-		key, headers, materialErr := h.resolveEndpointMaterial(ctx, endpoint)
-		if materialErr != nil {
-			return assistant.SkillDraftTarget{}, materialErr
-		}
-		return assistant.SkillDraftTarget{
-			Key:     key,
-			BaseURL: endpoint.BaseURL,
-			Model:   model,
-			Headers: headers,
-		}, nil
-	})
-}
-
 // askRunContext is the durable run identity and non-secret input handed to the
 // stream task. Secret material is resolved by that task and never persisted.
 type askRunContext struct {
@@ -1259,10 +1148,6 @@ type askRunContext struct {
 	// the pendingRuns copy; never wire-facing as a struct.
 	prose    content.ProseBlock
 	question string
-	// draft carries the bounded conversation used by a skills.create trigger.
-	// It crosses approval suspension so the same generated proposal is
-	// validated and approved on resume without a second model call.
-	draft    *assistant.SkillDraftRequest
 	endpoint profile.Endpoint
 	model    string
 	// grant is the run's authority (ADR-0020 decision 5), minted by the
@@ -1451,8 +1336,6 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	// separate from prose inside that message, and is never the tool output.
 	const conversationBudget = 12000
 	priorTurns, priorErr := h.priorTurns(ctx, rc)
-	draftTurns := make([]content.PriorTurn, 0, len(priorTurns)+1)
-	draftTurns = append(draftTurns, priorTurns...)
 	if priorErr != nil {
 		h.log.Warn("the previous conversation could not be read; answering without it",
 			"run", rc.runID, "entry", rc.entryID, "error", priorErr)
@@ -1483,9 +1366,6 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 				total -= len(message.Content)
 			}
 			turnMessages = turnMessages[1:]
-			if len(draftTurns) > 0 {
-				draftTurns = draftTurns[1:]
-			}
 			trimmed = true
 		}
 		if trimmed {
@@ -1498,16 +1378,6 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		}
 	}
 	msgs = append(msgs, assistant.Message{Role: "user", Content: rc.question})
-	draftTurns = append(draftTurns, content.PriorTurn{Question: rc.question})
-	if rc.draft == nil && h.skills != nil && h.configOp != nil {
-		rc.draft = assistant.NewSkillDraftRequest(draftTurns, h.skillDraftResolver())
-		h.pendingRunsMu.Lock()
-		if stored, ok := h.pendingRuns[rc.runID]; ok {
-			stored.draft = rc.draft
-			h.pendingRuns[rc.runID] = stored
-		}
-		h.pendingRunsMu.Unlock()
-	}
 
 	// The deltas continue where the last drive of this run stopped: a
 	// resumed run is one answer, numbered once (see askRunContext.nextSeq).
@@ -1547,8 +1417,6 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		Cwd:              rc.promptFacts.Cwd,
 		NoteOperation:    h.noteOp,
 		SnippetOperation: h.snippetOp,
-		Skills:           h.skills,
-		SkillDraft:       rc.draft,
 		Fetcher:          h.fetcher,
 		KnownMaterial:    h.knownMaterial,
 		Approvals:        h.approvals,
@@ -2957,7 +2825,7 @@ func derefOrEmpty(s *string) string {
 // agentSpecs declares the agent.* control methods on the CONTENT operation
 // queue (the ask transaction is the ledger — ADR-0019's one writer — so it
 // shares the content domain's gate and queue).
-func (s *WSServer) agentSpecs(contentSub control.Submission, contentGate control.Admission, configOp capability.ConfigOperation, endpointWired bool, noteOp capability.NoteOperation, snippetOp capability.SnippetOperation, skills assistant.SkillLibrary, agentTools agenttools.Registry, credentials credential.Resolver, client assistant.Client, askSub control.Submission) []methodSpec {
+func (s *WSServer) agentSpecs(contentSub control.Submission, contentGate control.Admission, configOp capability.ConfigOperation, endpointWired bool, noteOp capability.NoteOperation, snippetOp capability.SnippetOperation, agentTools agenttools.Registry, credentials credential.Resolver, client assistant.Client, askSub control.Submission) []methodSpec {
 	var agentOp capability.AgentOperation
 	if s.contentDB != nil {
 		agentOp = capability.NewAgentOperation(contentGate, s.contentDB)
@@ -2981,15 +2849,15 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, contentGate control
 	buildFor := func(r Responder) agentHandlers {
 		return agentHandlers{
 			op: agentOp, dumpOp: dumpOp, configOp: configOp, endpointWired: endpointWired,
-			noteOp: noteOp, snippetOp: snippetOp, skills: skills, agentTools: agentTools,
+			noteOp: noteOp, snippetOp: snippetOp, agentTools: agentTools,
 			credentials: credentials, client: client, askSub: askSub,
 			fetcher: s.agentFetcher, attemptLedger: attemptLedger, grantFor: s.runGrantFor,
 			requester: s, screenCapture: s, sessions: s, expansions: s, scripts: s, knownMaterial: s.agentKnownMaterial,
 			workerStore: s.workerStore, paneAccessBinder: s.paneAccessBinder,
 			approvals: s.agentApprovals, pendingRuns: s.pendingRuns,
 			pendingRunsMu:        &s.pendingRunsMu,
-			personalInstructions: s.personalInstructionsText, skillsEnabled: s.skillsEnabled,
-			sessionPolicy: s.sessionPolicy, globalPolicy: s.agentPolicy,
+			personalInstructions: s.personalInstructionsText,
+			sessionPolicy:        s.sessionPolicy, globalPolicy: s.agentPolicy,
 			log: s.log, r: r,
 		}
 	}

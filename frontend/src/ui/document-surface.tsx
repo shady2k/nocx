@@ -6,9 +6,10 @@
 // CANVAS and nothing else. It becomes the god-component the moment it owns
 // file loading, bindings, reload, autosave, git state, binary refusals or
 // terminal input — so it owns none of those, and the surfaces that have them
-// keep them. What collapses into this is the canvas of the skill file (the
-// first caller), and later the canvas — only the canvas — of the file
-// viewer, the git diff, the snippet body, the note body and the API bodies.
+// keep them. What collapses into this is the canvas — only the canvas — of
+// the file viewer, the git diff, the snippet body, the note body and the API
+// bodies; this build declares it and its own tests exercise it, and no
+// surface calls it yet.
 // What never collapses in: `editor.ts`, which owns terminal focus,
 // capture-phase keys, a block cursor and a height driven by the terminal
 // grid; and `CodeBlock`/`FileReadout`, which are short machine output with
@@ -107,8 +108,8 @@ interface DocumentCommon {
   /**
    * Stable while this is the same logical document.
    *
-   * A CHANGED key resets the surface: a different file, a different skill,
-   * a different snippet — and with it the selection and the undo history,
+   * A CHANGED key resets the surface: a different file, a different snippet
+   * — and with it the selection and the undo history,
    * because carrying a caret from one document into another is how a person
    * types into the wrong file. The SAME key with different text replaces the
    * contents in place, which is what a re-read of one file is.

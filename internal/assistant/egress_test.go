@@ -21,7 +21,6 @@ import (
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
-	"github.com/shady2k/nocx/internal/skill"
 )
 
 // knownMatcher is the vault-comparison seam whose answer is computed from
@@ -237,36 +236,6 @@ func TestMiddleware_EgressNoFindingReturnsByteForByte(t *testing.T) {
 	}
 }
 
-func TestExecuteSkillsReadReturnsNormalizedPath(t *testing.T) {
-	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "deploy", "references"), 0o700); err != nil {
-		t.Fatalf("mkdir references: %v", err)
-	}
-	writeFile(t, filepath.Join(root, "deploy", "SKILL.md"), "---\nname: deploy\ndescription: deployment instructions\n---\n\nbody")
-	writeFile(t, filepath.Join(root, "deploy", "references", "guide.md"), "guide")
-
-	source := skill.NewStore(skill.OSFileSystem{}, []skill.Root{{Dir: root, Provenance: skill.ProvenanceAuthored}}, nil)
-	cap := agenttools.NewContentScope([]agenttools.ResourceRef{{
-		Kind: content.ResourceContent,
-		ID:   "content",
-	}})
-	got, err := executeSkillsRead(context.Background(), cap, json.RawMessage(`{"name":"deploy","path":"./references/guide.md"}`), toolSeams{skills: source})
-	if err != nil {
-		t.Fatalf("executeSkillsRead: %v", err)
-	}
-
-	var result skillReadResult
-	if err := json.Unmarshal([]byte(got), &result); err != nil {
-		t.Fatalf("decode result: %v", err)
-	}
-	if result.Path != "references/guide.md" {
-		t.Fatalf("result path = %q, want normalized path", result.Path)
-	}
-	if result.Content != "guide" {
-		t.Fatalf("result content = %q, want guide", result.Content)
-	}
-}
-
 // ── criterion 5: no finding ever carries the secret material ──────────────
 
 // TestEgressRequest_NeverCarriesMaterial is acceptance criterion 5: a
@@ -380,7 +349,7 @@ func TestMiddleware_NewPolicyFailsClosedWithoutKnownMaterial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	if _, err := newPolicyMiddleware(nil, grant, reg, &fakeLedger{}, NewApprovalStore(), nil, "run-1", "", 1, "", nil, Attachments{}, nil, nil); err == nil {
+	if _, err := newPolicyMiddleware(nil, grant, reg, &fakeLedger{}, NewApprovalStore(), nil, "run-1", "", 1, "", nil, Attachments{}, nil); err == nil {
 		t.Fatal("newPolicyMiddleware accepted a run with no egress vault comparison")
 	}
 }

@@ -251,23 +251,6 @@ const contentToolSchema = `{
   }}
 }`
 
-const skillsReadSchema = `{
-  "type": "object",
-  "additionalProperties": false,
-  "required": ["name"],
-  "properties": {"name": {"type": "string"}},
-  "$defs": {"result": {
-    "type": "object",
-    "additionalProperties": false,
-    "required": ["name", "path", "content"],
-    "properties": {
-      "name": {"type": "string"},
-      "path": {"type": "string"},
-      "content": {"type": "string"}
-    }
-  }}
-}`
-
 // TestAssemble_MissingSchemaDoesNotAssemble is acceptance criterion 1: a tool
 // whose params schema is absent from contracts/ does not assemble into the
 // set — asserted, not documented in a comment. The tool is omitted and named
@@ -493,12 +476,6 @@ func TestDeclarationsHaveExpectedEffectSets(t *testing.T) {
 		"snippets.update":  {content.EffectMutateReversible},
 		"snippets.delete":  {content.EffectMutateReversible},
 		"snippets.reorder": {content.EffectMutateReversible},
-		"skills.read":      {content.EffectObserve},
-		"skills.create":    {content.EffectMutateReversible},
-		"skills.update":    {content.EffectMutateReversible},
-		"skills.delete":    {content.EffectMutateReversible},
-		"skills.resolve":   {content.EffectCrossBoundary},
-		"skills.install":   {content.EffectMutateReversible, content.EffectCrossBoundary},
 		"workers.holdings": {content.EffectObserve},
 		// DELEGATE for the spawn itself, and MUTATE-REVERSIBLE beside it for
 		// the worktree ask, which creates a branch and a linked checkout
@@ -540,8 +517,8 @@ func TestDeclarationsHaveExpectedEffectSets(t *testing.T) {
 		// or anything that is not one of nocx's own checkouts.
 		"workers.removeCheckout": {content.EffectMutateDestructive},
 	}
-	if len(declarations) != 33 {
-		t.Fatalf("declaration count = %d, want 33", len(declarations))
+	if len(declarations) != 27 {
+		t.Fatalf("declaration count = %d, want 27", len(declarations))
 	}
 	for _, declaration := range declarations {
 		effects, ok := want[declaration.Name]
@@ -605,35 +582,6 @@ func TestForGrantDoesNotOfferSnippetsOnANoteOnlyGrant(t *testing.T) {
 	}
 }
 
-func TestForGrantOffersSkillsReadOnlyOnASkillGrant(t *testing.T) {
-	reg, err := Assemble(mustDirFS(t))
-	if err != nil {
-		t.Fatalf("Assemble: %v", err)
-	}
-	g := content.Grant{
-		Effects: []content.Effect{content.EffectObserve},
-		Scopes:  []content.GrantScope{{Kind: content.ResourceContent, ID: "skill"}},
-	}
-	if !containsName(reg.ForGrant(g), "skills.read") {
-		t.Fatalf("a skill grant must offer skills.read; got %v", toolNames(reg.ForGrant(g)))
-	}
-	mutationGrant := content.Grant{
-		Effects: []content.Effect{content.EffectMutateReversible},
-		Scopes:  []content.GrantScope{{Kind: content.ResourceContent, ID: "skill"}},
-	}
-	for _, name := range []string{"skills.create", "skills.update", "skills.delete"} {
-		if !containsName(reg.ForGrant(mutationGrant), name) {
-			t.Fatalf("a mutation skill grant omitted %q; got %v", name, toolNames(reg.ForGrant(mutationGrant)))
-		}
-	}
-	if containsName(reg.ForGrant(content.Grant{
-		Effects: []content.Effect{content.EffectObserve},
-		Scopes:  []content.GrantScope{{Kind: content.ResourceContent, ID: "note/deploy"}},
-	}), "skills.read") {
-		t.Fatal("a note grant must not offer skills.read")
-	}
-}
-
 func TestForGrant_ExactPermittedSet(t *testing.T) {
 	reg, err := Assemble(schemaFS(t, map[string]string{
 		"files.read.schema.json":             filesReadSchema,
@@ -656,12 +604,6 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 		"snippets.update.schema.json":        contentToolSchema,
 		"snippets.delete.schema.json":        contentToolSchema,
 		"snippets.reorder.schema.json":       contentToolSchema,
-		"skills.read.schema.json":            skillsReadSchema,
-		"skills.create.schema.json":          skillsReadSchema,
-		"skills.update.schema.json":          skillsReadSchema,
-		"skills.delete.schema.json":          skillsReadSchema,
-		"skills.install.schema.json":         skillsReadSchema,
-		"skills.resolve.schema.json":         skillsReadSchema,
 		"workers.holdings.schema.json":       workerHoldingsSchema,
 		"workers.say.schema.json":            workerSaySchema,
 		"workers.close.schema.json":          workerCloseSchema,
@@ -828,12 +770,6 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 		"snippets.update.schema.json":        contentToolSchema,
 		"snippets.delete.schema.json":        contentToolSchema,
 		"snippets.reorder.schema.json":       contentToolSchema,
-		"skills.read.schema.json":            skillsReadSchema,
-		"skills.create.schema.json":          skillsReadSchema,
-		"skills.update.schema.json":          skillsReadSchema,
-		"skills.delete.schema.json":          skillsReadSchema,
-		"skills.install.schema.json":         skillsReadSchema,
-		"skills.resolve.schema.json":         skillsReadSchema,
 		"workers.holdings.schema.json":       workerHoldingsSchema,
 		"workers.say.schema.json":            workerSaySchema,
 		"workers.close.schema.json":          workerCloseSchema,

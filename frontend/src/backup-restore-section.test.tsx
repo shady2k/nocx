@@ -53,7 +53,6 @@ const CREATED: BackupCreateResult = {
     groups: 1,
     snippets: 4,
     notes: 3,
-    skills: 2,
     credentialBindingsRemoved: 1,
     groupCredentialBindingsRemoved: 0,
     groupDefaultKeysOmitted: 0,
@@ -68,7 +67,6 @@ const PREVIEW: RestorePreview = {
   connections: { included: 3, added: 2, updated: 1, removed: 0 },
   groups: { included: 1, added: 0, updated: 1, removed: 0 },
   snippets: { included: 4 },
-  skills: { included: 2 },
   notes: { included: 3 },
   connectionsRequiringCredential: [{ id: 'p1', name: 'My Server' }],
   omissions: {
@@ -80,7 +78,6 @@ const PREVIEW: RestorePreview = {
 
 const RESTORED: RestoreResult = {
   strategy: 'merge',
-  skills: 2,
   settingsChanged: 1,
   settingsReset: 0,
   connectionsAdded: 2,

@@ -612,10 +612,6 @@ func (f *fakeContentDB) SessionOutput() content.SessionOutputRepository { return
 // reconcile and no reconciler to hand out.
 func (f *fakeContentDB) Reconcile() content.SessionReconciler { return nil }
 
-// SkillChecks is unused by these tests: no capability under test reads or
-// writes a skill check.
-func (f *fakeContentDB) SkillChecks() content.SkillCheckRepository { return nil }
-
 func (f *fakeContentDB) WorkerCheckouts() content.WorkerCheckoutRepository { return nil }
 
 // fakeReset is a capability.VaultReset recorder.

@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -133,27 +132,6 @@ func (s *runSnapshots) store(runID, revision string, doc runSnapshot) {
 	s.next++
 	doc.seq = s.next
 	s.docs[runID][revision] = doc
-}
-
-// documents returns everything this run has fetched, oldest first. It is the
-// run's own held evidence and nothing else: a document belonging to another
-// run is another run's, and a run that fetched nothing has none.
-func (s *runSnapshots) documents(runID string) []runSnapshot {
-	if s == nil || runID == "" {
-		return nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	held := s.docs[runID]
-	if len(held) == 0 {
-		return nil
-	}
-	out := make([]runSnapshot, 0, len(held))
-	for _, doc := range held {
-		out = append(out, doc)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].seq < out[j].seq })
-	return out
 }
 
 func (s *runSnapshots) Discard(runID string) {

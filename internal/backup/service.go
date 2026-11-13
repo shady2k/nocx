@@ -17,7 +17,6 @@ import (
 	"github.com/shady2k/nocx/internal/operation/catalog"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/settings"
-	"github.com/shady2k/nocx/internal/skill"
 	"github.com/shady2k/nocx/internal/snippet"
 	"github.com/shady2k/nocx/internal/storage"
 )
@@ -31,7 +30,6 @@ type Service struct {
 	doc         storage.DocumentStore
 	snippets    SnippetStore // nil → the backup has no snippets section
 	notes       NoteStore    // nil → the backup has no notes section
-	skills      SkillStore   // nil → the backup has no skills section
 	// recoveryBudget bounds the rollback of a committed restore. Stage 7 of
 	// ADR-8eej3e66 enforces the catalogue's `recovery` bound for
 	// backup.restore, and the default is READ from the declaration rather
@@ -50,7 +48,6 @@ func NewService(
 	doc storage.DocumentStore,
 	snippets SnippetStore,
 	notes NoteStore,
-	skills SkillStore,
 ) *Service {
 	return &Service{
 		connections:    connections,
@@ -58,7 +55,6 @@ func NewService(
 		doc:            doc,
 		snippets:       snippets,
 		notes:          notes,
-		skills:         skills,
 		recoveryBudget: declaredRestoreRecoveryBudget(),
 	}
 }
@@ -172,7 +168,6 @@ type CreateSummary struct {
 	Groups                         int `json:"groups"`
 	Snippets                       int `json:"snippets"`
 	Notes                          int `json:"notes"`
-	Skills                         int `json:"skills"`
 	CredentialBindingsRemoved      int `json:"credentialBindingsRemoved"`
 	GroupCredentialBindingsRemoved int `json:"groupCredentialBindingsRemoved"`
 	GroupDefaultKeysOmitted        int `json:"groupDefaultKeysOmitted"`
@@ -187,7 +182,6 @@ type RestorePreview struct {
 	Connections                    ConnectionsPreview `json:"connections"`
 	Groups                         GroupsPreview      `json:"groups"`
 	Snippets                       SnippetsPreview    `json:"snippets"`
-	Skills                         SkillsPreview      `json:"skills"`
 	Notes                          NotesPreview       `json:"notes"`
 	ConnectionsRequiringCredential []ProfileRef       `json:"connectionsRequiringCredential"`
 	Omissions                      RestoreOmissions   `json:"omissions"`
@@ -200,11 +194,6 @@ type SnippetsPreview struct {
 
 // NotesPreview carries the note count the preview reports.
 type NotesPreview struct {
-	Included int `json:"included"`
-}
-
-// SkillsPreview carries the skill-tree count the preview reports.
-type SkillsPreview struct {
 	Included int `json:"included"`
 }
 
@@ -247,7 +236,6 @@ type RestoreOmissions struct {
 // RestoreResult is the JSON-RPC result for backup.restore.
 type RestoreResult struct {
 	Strategy                       RestoreStrategy `json:"strategy"`
-	Skills                         int             `json:"skills"`
 	SettingsChanged                int             `json:"settingsChanged"`
 	SettingsReset                  int             `json:"settingsReset"`
 	ConnectionsAdded               int             `json:"connectionsAdded"`
@@ -272,17 +260,6 @@ func (s *Service) loadNotes() ([]note.Note, error) {
 	return s.notes.LoadAllNotes()
 }
 
-func (s *Service) loadSkills() (*skill.Snapshot, error) {
-	if s.skills == nil {
-		return nil, nil
-	}
-	snapshot, err := s.skills.Snapshot()
-	if err != nil {
-		return nil, err
-	}
-	return &snapshot, nil
-}
-
 // ── Create ────────────────────────────────────────────────────────────────
 
 // Create builds a backup document from the current live state.
@@ -300,12 +277,8 @@ func (s *Service) Create() (*CreateResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load notes: %w", err)
 	}
-	skills, err := s.loadSkills()
-	if err != nil {
-		return nil, fmt.Errorf("load skills: %w", err)
-	}
 
-	doc, summary := buildDocument(snap, overrides, snips, notes, skills)
+	doc, summary := buildDocument(snap, overrides, snips, notes)
 	doc.CreatedAt = time.Now().UTC()
 
 	raw, err := json.MarshalIndent(doc, "", "  ")
@@ -348,14 +321,10 @@ func (s *Service) Preview(contents string, strategy RestoreStrategy) (*RestorePr
 
 	preview := computePreview(doc, snap, overrides, strategy, omissions)
 	preview.Strategy = strategy
-	skills, err := s.loadSkills()
-	if err != nil {
-		return nil, fmt.Errorf("load skills: %w", err)
-	}
 
 	preview.CreatedAt = doc.CreatedAt.UTC().Format(time.RFC3339)
 
-	token := computePreviewToken(contents, strategy, snap, overrides, skills)
+	token := computePreviewToken(contents, strategy, snap, overrides)
 	preview.PreviewToken = token
 
 	return preview, nil
@@ -387,12 +356,8 @@ func (s *Service) Restore(contents string, strategy RestoreStrategy, previewToke
 	if err != nil {
 		return nil, fmt.Errorf("load notes: %w", err)
 	}
-	beforeSkills, err := s.loadSkills()
-	if err != nil {
-		return nil, fmt.Errorf("load skills: %w", err)
-	}
 
-	expectedToken := computePreviewToken(contents, strategy, snap, overrides, beforeSkills)
+	expectedToken := computePreviewToken(contents, strategy, snap, overrides)
 	if previewToken != expectedToken {
 		return nil, fmt.Errorf("%w: preview is stale", ErrInvalidDocument)
 	}
@@ -412,16 +377,12 @@ func (s *Service) Restore(contents string, strategy RestoreStrategy, previewToke
 	if writeNotes && s.notes == nil {
 		return nil, fmt.Errorf("restore: backup carries notes but no notes store is wired")
 	}
-	if doc.Skills != nil && s.skills == nil {
-		return nil, fmt.Errorf("restore: backup carries skills but no skill store is wired")
-	}
-
 	beforeSnap := snap
 	beforeOverrides := overrides
 	beforeSnippets := toBackupSnippets(beforeSnips)
 	beforeNotes := toBackupNotes(beforeNotesLib)
 
-	if jerr := writeJournal(s.doc, "prepared", &beforeSnap, &beforeOverrides, beforeSnippets, beforeNotes, beforeSkills); jerr != nil {
+	if jerr := writeJournal(s.doc, "prepared", &beforeSnap, &beforeOverrides, beforeSnippets, beforeNotes); jerr != nil {
 		return nil, fmt.Errorf("journal prepared: %w", jerr)
 	}
 
@@ -465,19 +426,7 @@ func (s *Service) Restore(contents string, strategy RestoreStrategy, previewToke
 		}
 	}
 
-	// The skills write is inside the prepared/committed interval. Its
-	// previous snapshot is journalled before the first rename; a failure
-	// after any rename is rolled back by Recover before the error returns.
-	if doc.Skills != nil {
-		if serr := s.skills.RestoreSnapshot(*doc.Skills); serr != nil {
-			if recErr := s.rollback(); recErr != nil {
-				return nil, fmt.Errorf("replace skills: %w; recovery failed: %w", serr, recErr)
-			}
-			return nil, fmt.Errorf("replace skills: %w", serr)
-		}
-		result.Skills = doc.Skills.TreeCount()
-	}
-	if werr := writeJournal(s.doc, "committed", &beforeSnap, &beforeOverrides, beforeSnippets, beforeNotes, beforeSkills); werr != nil {
+	if werr := writeJournal(s.doc, "committed", &beforeSnap, &beforeOverrides, beforeSnippets, beforeNotes); werr != nil {
 		if recErr := s.rollback(); recErr != nil {
 			return nil, fmt.Errorf("journal committed: %w; recovery failed: %w", werr, recErr)
 		}
@@ -524,11 +473,6 @@ func (s *Service) Recover() error {
 				return fmt.Errorf("%w: rollback notes: %w", ErrRecoveryRequired, err)
 			}
 		}
-		if js.skills != nil && s.skills != nil {
-			if err := s.skills.RestoreSnapshot(*js.skills); err != nil {
-				return fmt.Errorf("%w: rollback skills: %w", ErrRecoveryRequired, err)
-			}
-		}
 		cleanupJournal(s.doc)
 		s.settings.Publish(pn)
 		return nil
@@ -542,7 +486,7 @@ func (s *Service) Recover() error {
 
 // ── Internal: document building ──────────────────────────────────────────
 
-func buildDocument(snap profile.ConnectionSnapshot, overrides map[string]any, snips []snippet.Snippet, notes []note.Note, skills *skill.Snapshot) (Document, CreateSummary) {
+func buildDocument(snap profile.ConnectionSnapshot, overrides map[string]any, snips []snippet.Snippet, notes []note.Note) (Document, CreateSummary) {
 	doc := Document{
 		Format:  Format,
 		Version: Version,
@@ -560,10 +504,6 @@ func buildDocument(snap profile.ConnectionSnapshot, overrides map[string]any, sn
 		Groups:      len(snap.Groups),
 		Snippets:    len(snips),
 		Notes:       len(notes),
-	}
-	if skills != nil {
-		doc.Skills = skills
-		sum.Skills = skills.TreeCount()
 	}
 	// An empty library is omitted entirely (the omitempty on Document
 	// Snippets): a backup without the key predates the section, and restore
@@ -1279,14 +1219,13 @@ func valuesEqual(a, b any) bool {
 
 // ── Internal: preview token ──────────────────────────────────────────────
 
-func computePreviewToken(contents string, strategy RestoreStrategy, snap profile.ConnectionSnapshot, overrides map[string]any, skills *skill.Snapshot) string {
+func computePreviewToken(contents string, strategy RestoreStrategy, snap profile.ConnectionSnapshot, overrides map[string]any) string {
 	h := sha256.New()
 	_, _ = fmt.Fprintf(h, "%d:", len(contents))
 	h.Write([]byte(contents))
 	_, _ = fmt.Fprintf(h, ":%s:", strategy)
 	canonicalize(h, snap)
 	canonicalize(h, overrides)
-	canonicalize(h, skills)
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
@@ -1308,9 +1247,6 @@ func computePreview(doc Document, snap profile.ConnectionSnapshot, overrides map
 	p.Connections.Included = len(doc.Connections.Profiles)
 	p.Groups.Included = len(doc.Connections.Groups)
 	p.Snippets.Included = len(doc.Snippets)
-	if doc.Skills != nil {
-		p.Skills.Included = doc.Skills.TreeCount()
-	}
 	// What a person reads before deciding to restore over what they have.
 	p.Notes.Included = len(doc.Notes)
 

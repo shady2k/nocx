@@ -88,11 +88,10 @@ type watchedCalls struct {
 func middlewareWatchingCalls(t *testing.T, grant content.Grant, ledger AttemptLedger, approvals *ApprovalStore, watch *watchedCalls) *policyMiddleware {
 	t.Helper()
 	reg := realRegistry(t)
-	mw, err := newPolicyMiddleware(nil, grant, reg, ledger, approvals, &fakeKnownMaterial{}, "run-1", "", 1, "", nil, Attachments{}, nil,
-		func(c ToolCall) error {
-			watch.seen = append(watch.seen, c)
-			return nil
-		})
+	mw, err := newPolicyMiddleware(nil, grant, reg, ledger, approvals, &fakeKnownMaterial{}, "run-1", "", 1, "", nil, Attachments{}, func(c ToolCall) error {
+		watch.seen = append(watch.seen, c)
+		return nil
+	})
 	if err != nil {
 		t.Fatalf("newPolicyMiddleware: %v", err)
 	}

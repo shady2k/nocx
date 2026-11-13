@@ -6,31 +6,30 @@
  * already exists in the kit: `FactList` draws the named facts, `CodeBlock`
  * draws preformatted bytes, `StatusCard` draws "a state and the one thing to
  * do about it". What does NOT exist is the decision between them and the
- * SENTENCES that go with it — and those need one owner, because two surfaces
- * want them: the Skills page reads a skill's SKILL.md, and the approval prompt
- * (nocx-872jc.3) shows the same file before a person adopts it. A surface that
+ * SENTENCES that go with it — and those need one owner, because more than one
+ * surface wants them: the approval prompt (nocx-872jc.3) shows a file a
+ * proposed command names, and a surface that
  * composed the three parts itself would be the second author of "this file is
  * not text", and the two copies would agree everywhere anybody looked and
  * disagree the day the budget changed. So the kit grows by one component that
  * owns the wording, and by no new appearance at all: nothing here paints, and
  * everything visible is a kit component this one places.
  *
- * IT KNOWS NOTHING ABOUT SKILLS, deliberately. `facts` is whatever the caller
- * says the file is — the Skills page names the skill, the file and its
- * provenance; the approval prompt will name what it knows. And the outcome
- * union is this component's own four-way answer to "what is on screen",
- * not a second spelling of `skills.file`'s `refusal` field: `maxBytes` exists
+ * IT KNOWS NOTHING ABOUT ITS CALLER'S SUBJECT, deliberately. `facts` is
+ * whatever the caller says the file is — the approval prompt names the
+ * command that named it. And the outcome union is this component's own
+ * four-way answer to "what is on screen", not a second spelling of the wire's
+ * `refusal` field: `maxBytes` exists
  * only on the branch where it means something, and the caller's `switch` over
  * the wire's closed union is checked by the compiler for totality.
  *
  * NOT `src/file-viewer/`, which is the other thing in this product that shows
  * a file and cannot be the one used here. That is a workspace TAB: it is
- * opened into the tab strip (so reading would mean leaving the Skills page),
- * it hosts a CodeMirror editor, and it reads through `files.read` addressed to
- * a live binding on some machine. A builtin skill's bytes are inside the
- * binary and have no path any file provider can open, which is why
- * `skills.file` exists at all; a tab bound to a filesystem could not read the
- * provenance this component's first caller must be able to read.
+ * opened into the tab strip, it hosts a CodeMirror editor, and it reads
+ * through `files.read` addressed to a live binding on some machine. A file a
+ * proposed command names is read by the backend at the moment the question is
+ * asked and travels WITH the question, so there is no binding a tab could be
+ * opened against.
  *
  * A FINDING IS MARKED WHERE IT SITS, and that is the whole reason `marks`
  * lives on the `text` branch of the outcome and nowhere else (nocx-872jc.4).
@@ -45,11 +44,10 @@
  * affordance beside a file nothing read would say "nothing was found", which
  * is a verdict, and nothing here gives verdicts.
  *
- * THE KIT DOES NOT KNOW WHAT A PATTERN IS. A mark is a line number and the
+ * THE KIT DOES NOT KNOW WHAT A MARK MEANS. A mark is a line number and the
  * caller's own words for it, for the reason `facts` is the caller's: the
- * words for a skill scan's pattern ids belong to the surface that has the
- * vocabulary, and a kit that imported them would be the second place a
- * pattern id is turned into English.
+ * words belong to the surface that has the vocabulary, and a kit that
+ * imported them would be the second place a mark is turned into English.
  *
  * THE THREE REFUSALS ARE DRAWN, NEVER THROWN, and they are drawn in two
  * tones because they are two different kinds of true sentence. `not-text` and
@@ -99,7 +97,7 @@ export type FileReadoutOutcome =
 
 export interface FileReadoutProps {
   /**
-   * What this file IS, in the caller's own words — the skill it belongs to,
+   * What this file IS, in the caller's own words — the command that named it,
    * its path, where its bytes came from. Drawn in every state, including the
    * ones with no bytes: a reason is only useful beside the thing it is about.
    */
@@ -119,9 +117,8 @@ export interface FileReadoutProps {
    * Off by default, because the default caller is a page: there the block's
    * 200px cap is what keeps a long file from pushing everything below it off
    * screen. A caller says `fill` when its OWN element is already the scroll
-   * container and holds nothing but this readout — the skill tab's right
-   * column — where the cap instead stops the bytes partway down an empty
-   * column. It is a request to hand the height down, never a height of this
+   * container and holds nothing but this readout, where the cap instead stops
+   * the bytes partway down an empty column. It is a request to hand the height down, never a height of this
    * component's own: what actually fills is CodeBlock's `fill` variant, so
    * there is still exactly one place that knows what a code block's height
    * is.

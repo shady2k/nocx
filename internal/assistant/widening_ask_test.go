@@ -248,7 +248,7 @@ func middlewareForRun(t *testing.T, grant content.Grant, ledger AttemptLedger, a
 			break
 		}
 	}
-	mw, err := newPolicyMiddleware(nil, grant, reg, ledger, approvals, &fakeKnownMaterial{}, runID, sessionID, 1, "", nil, Attachments{}, nil, nil)
+	mw, err := newPolicyMiddleware(nil, grant, reg, ledger, approvals, &fakeKnownMaterial{}, runID, sessionID, 1, "", nil, Attachments{}, nil)
 	if err != nil {
 		t.Fatalf("newPolicyMiddleware: %v", err)
 	}

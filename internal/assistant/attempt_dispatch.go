@@ -151,7 +151,7 @@ func recordAttempt(ctx context.Context, ledger AttemptLedger, grant content.Gran
 	if err := prepareAttemptEnvironment(ctx, ledger); err != nil {
 		return 0, "", err
 	}
-	entryID, err := submitAttemptEntry(ctx, ledger, grant, decl, selectedAttemptEffect(decl), runID, rawArgs, resources, nil)
+	entryID, err := submitAttemptEntry(ctx, ledger, grant, decl, selectedAttemptEffect(decl), runID, rawArgs, resources)
 	if err != nil {
 		return 0, "", err
 	}
@@ -176,7 +176,7 @@ func prepareAttemptEnvironment(ctx context.Context, ledger AttemptLedger) error 
 	return nil
 }
 
-func submitAttemptEntry(ctx context.Context, ledger AttemptLedger, grant content.Grant, decl agenttools.Tool, effect content.Effect, runID, rawArgs string, resources []agenttools.ResourceRef, fact *classifierFact) (string, error) {
+func submitAttemptEntry(ctx context.Context, ledger AttemptLedger, grant content.Grant, decl agenttools.Tool, effect content.Effect, runID, rawArgs string, resources []agenttools.ResourceRef) (string, error) {
 	envID := content.EnvironmentIDFor(content.EnvLocal, "")
 	payloadBody := map[string]any{
 		"tool":   decl.Name,
@@ -192,9 +192,6 @@ func submitAttemptEntry(ctx context.Context, ledger AttemptLedger, grant content
 	}
 	if decl.OpensBlock {
 		payloadBody["opensBlock"] = true
-	}
-	if fact != nil {
-		payloadBody["classifier"] = fact
 	}
 	payload, err := json.Marshal(payloadBody)
 	if err != nil {

@@ -274,8 +274,8 @@ var errNoWorkspace = errors.New("agenttools: this run names no workspace")
 // about, as A11 of the authority model decided it: a participant is addressed
 // as a SUB-SCOPE OF ResourceWorkspace, not as a ninth ResourceKind. The kind
 // set is closed at eight and guarded twice — validResourceKind and the
-// grant_scopes CHECK — and ResourceContent already carries "note/<id>" and
-// "skill/<id>", so sub-scoping inside a kind is the established move.
+// grant_scopes CHECK — and ResourceContent already carries "note/<id>", so
+// sub-scoping inside a kind is the established move.
 //
 // It is the workspace and not the pane, and that is a smaller claim than it
 // looks. What narrows a participant to ITS OWN mailbox is the capability

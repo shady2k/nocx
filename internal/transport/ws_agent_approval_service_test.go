@@ -128,7 +128,6 @@ func TestTheAnswerLimitIsTheDeclaredAnswerPhase(t *testing.T) {
 // was given. It records every Ask it ran, which is how "the answer did not
 // start a new drive" is asserted.
 type questioningClient struct {
-	unauditedClient
 	asked    chan *assistant.ApprovalRequest
 	answered chan assistant.Answer
 	asks     chan struct{}

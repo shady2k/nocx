@@ -11,8 +11,9 @@ import type { JSX } from 'solid-js'
  * needs. Until this module existed the two were concatenated and nothing
  * looked at the join, so a declaration whose section happened to equal a
  * component page's title minted a SECOND rail row under the same name — which
- * is exactly what `skills.enabled` did beside the Skills page, both of them
- * filed under Application, one holding a lone toggle and the other the list.
+ * is exactly what a lone section toggle once did beside the component page
+ * that governed it, both filed under Application, one holding the toggle and
+ * the other the list it controlled.
  *
  * The Go side guards its own half thoroughly — `assertValidKey` refuses a
  * duplicate setting key, `RegisterGroup` a duplicate group id,
@@ -24,9 +25,9 @@ import type { JSX } from 'solid-js'
  *   INTENDED — a component page DECLARES that it owns a section
  *   (`ownsSection`). The section's declarations then render inside that page
  *   and no generated page is minted for it. This is how a surface with both
- *   controls and content keeps them on one screen: Skills owns the section
- *   holding `skills.enabled`, so the switch sits above the list it governs
- *   rather than on a page of its own.
+ *   controls and content keeps them on one screen: a page that owns its
+ *   section renders the section's switch above the list it governs rather
+ *   than leaving it on a page of its own.
  *
  *   UNINTENDED — anything else that leaves two rows answering to one name.
  *   That is a defect in code we ship, not a state a person can reach: both
@@ -82,9 +83,8 @@ function describePage(page: SettingsPage): string {
  * two pages still answer to one name.
  *
  * Matching is on the TITLE, which is what a person reads in the rail, and on
- * the id compared case-insensitively, which is what the Skills pair differed
- * by — `"Skills"` against `'skills'` — and the reason no existing check could
- * see it.
+ * the id compared case-insensitively: the pair that bought this check
+ * differed only by case, which is why no existing check could see it.
  */
 export function reconcileRailPages(pages: SettingsPage[]): SettingsPage[] {
   const owned = new Set<string>()

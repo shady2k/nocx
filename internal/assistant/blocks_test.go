@@ -146,10 +146,9 @@ func toolsDirFS(t *testing.T) fs.FS {
 }
 
 // newClientWithTestToolsFS keeps filesystem-backed schema fixtures on the
-// production client assembly path without restoring a production-only
-// no-skill-roots constructor.
+// production client assembly path.
 func newClientWithTestToolsFS(logger log.Logger, toolsFS fs.FS, recorder WireRecorder, floor content.Floor) (Client, error) {
-	reg, err := assembleToolRegistry(toolsFS, nil)
+	reg, err := assembleToolRegistry(toolsFS)
 	if err != nil {
 		return nil, err
 	}

@@ -27,9 +27,7 @@ import { ConnectionsView } from './connections'
 import { SecretsSection } from './secrets'
 import { EndpointsSection } from './endpoints-section'
 import { SnippetsSection } from './snippets/snippets-settings'
-import { SkillsSection } from './skills-section'
 import { UpdatesSection } from './updates-section'
-import type { SkillsStore } from './skills-store'
 import { reconcileRailPages, type SettingsPage } from './settings-rail-pages'
 import type { SnippetsStore } from './snippets/snippets-store'
 import { RolesSection } from './roles-section'
@@ -126,11 +124,9 @@ const INSTRUCTIONS_SECTION = 'Instructions'
  *  make every future section-level fact a schema change. */
 const HISTORY_SECTION = 'History'
 const PETS_SECTION = 'Pets'
-/** The section `skills.enabled` is declared in, which the Skills page owns. */
 /** The section `worktrees.idleDays` is declared in (internal/settings),
  *  whose control the sweep's degrade contradicts. */
 const WORKTREES_SECTION = 'Worktrees'
-const SKILLS_SECTION = 'Skills'
 const UPDATES_SECTION = 'Updates'
 
 /** The clipboard an embedding without one hands the About page. It refuses
@@ -233,8 +229,6 @@ export interface SettingsComponentProps {
    *  a snippet saved here is in the next fire without a notification on the
    *  wire (design §6). Absent in an embedding with no snippets service. */
   snippetsStore?: SnippetsStore
-  /** The discovered skill library and person-controlled enablement state. */
-  skillsStore?: SkillsStore
   /** Whether durable command history is actually running (nocx-rtg0.15).
    *  The History section's five controls all describe a store, so when
    *  there is no store the section has to say so where the user is looking
@@ -694,34 +688,6 @@ export function SettingsComponent(props: SettingsComponentProps) {
         </Show>
       ),
     }
-    // ASSISTANT, not Application: a skill is something the assistant reads
-    // and acts on, so it belongs beside Roles and Agent policy rather than
-    // beside Backup and Clipboard. And it OWNS its section: `skills.enabled`
-    // is declared in Go under section "Skills" (internal/settings), which
-    // would otherwise mint a second rail row of the same name holding one
-    // switch — see settings-rail-pages.ts. Owning it puts the switch above
-    // the list it governs, which is the only place it means anything.
-    const skillsPage: SettingsPage = {
-      kind: 'component',
-      id: 'skills',
-      title: t('settings.fallback.skills.title', 'Skills'),
-      groupId: 'assistant',
-      scrollMode: 'page',
-      ownsSection: SKILLS_SECTION,
-      renderContent: () => (
-        <Show
-          when={props.skillsStore}
-          fallback={
-            <PageSection title={t('settings.fallback.skills.title', 'Skills')}>
-              {t('settings.fallback.skills.body', 'Skills are not available in this window.')}
-            </PageSection>
-          }
-        >
-          <SkillsSection store={props.skillsStore!} />
-        </Show>
-      ),
-    }
-
     const rolesPage: SettingsPage = {
       kind: 'component',
       id: 'roles',
@@ -919,8 +885,8 @@ export function SettingsComponent(props: SettingsComponentProps) {
 
     // The Updates page OWNS its section: `update.channel` is declared in Go
     // under section "Updates" (internal/settings), which would otherwise
-    // mint a rail row of its own holding one select — the same duplicate the
-    // Skills page refuses. Owning it puts the channel select above what the
+    // mint a rail row of its own holding one select. Owning it puts the
+    // channel select above what the
     // page adds on top: the Linux install-only fact the declaration cannot
     // know (nocx-1ebrs.35.1).
     const updatesPage: SettingsPage = {
@@ -983,9 +949,6 @@ export function SettingsComponent(props: SettingsComponentProps) {
       emittingPage,
       rulesPage,
       calibrationPage,
-      // Last in Assistant, after the two pages that decide what the assistant
-      // may do at all: a skill is what it does once that is settled.
-      skillsPage,
       aboutPage,
     ])
   })
@@ -1883,8 +1846,8 @@ export function SettingsComponent(props: SettingsComponentProps) {
               {/* The section this page OWNS, above the content it governs.
                   A component page with settings of its own used to have two
                   choices, and both were wrong: leave the declarations to mint
-                  a rail row of their own — which is the duplicate Skills row
-                  this fixed — or stop declaring them and lose search, the
+                  a rail row of their own, or stop declaring them and lose
+                  search, the
                   modified dot and backup with them. Owning the section keeps
                   the declaration exactly where it was and moves only where it
                   renders. Same SettingRow as the generated body, so a switch

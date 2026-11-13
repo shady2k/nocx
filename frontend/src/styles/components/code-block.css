@@ -117,9 +117,9 @@
    `max-height: 200px` above is one decision for machine output: a response
    has no length the caller can promise, and a block that grows with it pushes
    the rest of the page off screen. That reasoning has a premise — a page that
-   scrolls — and a caller can be built without it. The skill tab's right
-   column IS the scroll container and holds nothing but the file, so there the
-   cap stops the bytes a fifth of the way down an empty column.
+   scrolls — and a caller can be built without it. A column that IS the
+   scroll container and holds nothing but the file would see the cap stop the
+   bytes a fifth of the way down an empty column.
 
    So the cap is lifted for that caller and for no other, as a variant of this
    component rather than as an `unset` written from the surface's own

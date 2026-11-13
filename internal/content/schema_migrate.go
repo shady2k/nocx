@@ -165,6 +165,7 @@ var schemaLadder = []migrationStep{
 	{from: 20, to: 21, apply: migrateAddClearBoundaries20to21, schemaDigest: "15fb847b32570357ccac15333107a761c38b3d8cc08481e2998de8f07577d4bc"},
 	{from: 21, to: 22, apply: migrateAddEntriesByEndedAt21to22, schemaDigest: "2187c4e3d03e421e2f9b305dd6fcea7d1cb559ce49caffe04118c0a7c4a7f27d"},
 	{from: 22, to: 23, apply: migrateAddTabPanel22to23, schemaDigest: "e14a246a0a8c98ff7f818f4081305a653111bc3adf0c10cfd7abda64b3b243db"},
+	{from: 23, to: 24, apply: migrateRetireSkillChecks23to24, schemaDigest: "69be96d0a97bf1670d22fd1bf49539684180982f01e20b98844036c3b77afbb4"},
 }
 
 // validateLadder validates the shipped ladder against the current schema.
@@ -342,6 +343,10 @@ var schemaShapeDigests = map[int]string{
 	// panel columns on the tabs row on top of this released shape
 	// (nocx-ouru5.1.18).
 	22: "bc3c77308360bf9ae7f9730ca4eac068a54350a95d61de39ad794c86c13bb7ce",
+	// 23 is pinned in the commit that dethrones it: the exact schemaV1 at
+	// e2d552658, frozen as testdata/schema_v23.sql. Schema 24 drops the
+	// skill_checks table with the skill library (ADR-anntnxdj §7).
+	23: "b74fd15629e38d82392d6a99dac1d2e9a64ae50fe176622ba8a0c49dbe86eeea",
 }
 
 var historicalSchemaObjectNames = map[int]map[string]struct{}{
@@ -354,6 +359,7 @@ var historicalSchemaObjectNames = map[int]map[string]struct{}{
 	20: schema20ObjectNames(),
 	21: schema21ObjectNames(),
 	22: schema22ObjectNames(),
+	23: schema23ObjectNames(),
 }
 
 func schema14ObjectNames() map[string]struct{} {
@@ -475,6 +481,12 @@ func schema22ObjectNames() map[string]struct{} {
 	result := schema21ObjectNames()
 	result["index:entries_by_ended_at"] = struct{}{}
 	return result
+}
+
+// schema23ObjectNames is schema22's set: schema 23 adds columns to tabs and
+// no object, and schema 24 only drops skill_checks.
+func schema23ObjectNames() map[string]struct{} {
+	return schema22ObjectNames()
 }
 
 type sqliteSchemaObject struct {
@@ -960,6 +972,17 @@ func migrateAddClearBoundaries20to21(ctx context.Context, tx *sql.Tx) error {
 		`CREATE INDEX IF NOT EXISTS clear_boundaries_by_pane ON clear_boundaries(pane_id, ingest_seq DESC) WHERE pane_id IS NOT NULL`,
 	); err != nil {
 		return fmt.Errorf("add clear_boundaries_by_pane index: %w", err)
+	}
+	return nil
+}
+
+// migrateRetireSkillChecks23to24 drops the table the 16→17 rung added: the
+// skill library and its audit left the product (ADR-anntnxdj §7), so nothing
+// reads or writes a stored check. `IF EXISTS` because a fixture, or a build
+// that crashed before the 16→17 rung committed, need not have one.
+func migrateRetireSkillChecks23to24(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `DROP TABLE IF EXISTS skill_checks`); err != nil {
+		return fmt.Errorf("retire the skill_checks table: %w", err)
 	}
 	return nil
 }

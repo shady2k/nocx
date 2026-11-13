@@ -29,7 +29,7 @@ func TestTheWiredConfigPlanFencesAnOperationStanceRead(t *testing.T) {
 
 	var read error
 	err := op.Run(context.Background(), func(ctx context.Context, _ capability.ConfigService) error {
-		_, read = resolver.Resolve(ctx, "sec:v1:file:endpoint", credential.Operation("audit a skill"))
+		_, read = resolver.Resolve(ctx, "sec:v1:file:endpoint", credential.Operation("answer the ask"))
 		return nil
 	})
 	if err != nil {

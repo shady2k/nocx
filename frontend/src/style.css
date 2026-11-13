@@ -130,7 +130,6 @@
 @import './styles/surfaces/agent-calibration.css';
 @import './styles/surfaces/agent-rules.css';
 @import './styles/surfaces/git.css';
-@import './styles/surfaces/skill-view.css';
 @import './styles/surfaces/command-block.css';
 @import './styles/surfaces/composer.css';
 
@@ -365,8 +364,8 @@
      read grey instead of white. This box spans the whole history + live
      region, including the empty space above bottom-anchored blocks
      (`.scrollback-inner`'s `margin-top: auto`), so painting it here covers
-     that too. `.pane` itself stays on --color-canvas: Settings, the API
-     workbench and the skill view are `.pane-manager`, not this class. */
+     that too. `.pane` itself stays on --color-canvas: Settings and the API
+     workbench are `.pane-manager`, not this class. */
   background: var(--terminal-background);
   /* THE SCROLLBAR IS THE PANE'S TRAILING EDGE, NOT AN OBJECT NEAR IT. The
      pane used to inset its children and this layout cancelled the trailing

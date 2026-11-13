@@ -78,9 +78,6 @@ func (s *WSServer) runGrantFrom(global content.EffectPolicy, sessionID string) *
 		// minted here rather than assumed by the tool.
 		{Kind: content.ResourceEnvironment, ID: content.EnvironmentIDFor(content.EnvLocal, "")},
 	}
-	if s.skillsEnabled() {
-		scopes = append(scopes, content.GrantScope{Kind: content.ResourceContent, ID: "skill"})
-	}
 	g := p.AsGrant(scopes)
 	return &g
 }

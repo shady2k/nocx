@@ -13,7 +13,6 @@ import (
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/settings"
-	"github.com/shady2k/nocx/internal/skill"
 	"github.com/shady2k/nocx/internal/snippet"
 	"github.com/shady2k/nocx/internal/waittest"
 )
@@ -131,35 +130,17 @@ func (s *switchNoteStore) ReplaceNotes(v []note.Note) error {
 	return nil
 }
 
-type switchSkillStore struct {
-	snap   skill.Snapshot
-	calls  int
-	failAt int
-}
-
-func (s *switchSkillStore) Snapshot() (skill.Snapshot, error) { return s.snap, nil }
-
-func (s *switchSkillStore) RestoreSnapshot(v skill.Snapshot) error {
-	s.calls++
-	if s.failAt > 0 && s.calls == s.failAt {
-		return errors.New("injected skills write failure")
-	}
-	s.snap = v
-	return nil
-}
-
 // ── Fixture ────────────────────────────────────────────────────────────
 
 const journalDoc = "backup-restore-journal.json"
 
 type restoreFixture struct {
-	svc    *backup.Service
-	conn   *switchConnStore
-	sett   *switchSettingsStore
-	doc    *fakeDocStore
-	snips  *switchSnippetStore
-	notes  *switchNoteStore
-	skills *switchSkillStore
+	svc   *backup.Service
+	conn  *switchConnStore
+	sett  *switchSettingsStore
+	doc   *fakeDocStore
+	snips *switchSnippetStore
+	notes *switchNoteStore
 }
 
 func newRestoreFixture(budget time.Duration) *restoreFixture {
@@ -168,13 +149,12 @@ func newRestoreFixture(budget time.Duration) *restoreFixture {
 			Profiles: []profile.SSHProfile{{Base: profile.Base{ID: "old", Type: "ssh", Name: "old"}, Options: profile.StoredSSHProfileOptions{Host: "old.example"}}},
 			Groups:   []profile.ProfileGroup{},
 		}},
-		sett:   &switchSettingsStore{overrides: map[string]any{"tab.placement": "old"}},
-		doc:    &fakeDocStore{},
-		snips:  &switchSnippetStore{list: []snippet.Snippet{{ID: "s-old", Title: "old", Body: "old"}}},
-		notes:  &switchNoteStore{list: []note.Note{{ID: "n-old", Body: "old"}}},
-		skills: &switchSkillStore{snap: skill.Snapshot{Authored: []skill.SnapshotTree{{Name: "old", Files: []skill.SnapshotFile{{Path: "SKILL.md", Bytes: "old"}}}}}},
+		sett:  &switchSettingsStore{overrides: map[string]any{"tab.placement": "old"}},
+		doc:   &fakeDocStore{},
+		snips: &switchSnippetStore{list: []snippet.Snippet{{ID: "s-old", Title: "old", Body: "old"}}},
+		notes: &switchNoteStore{list: []note.Note{{ID: "n-old", Body: "old"}}},
 	}
-	f.svc = backup.NewService(f.conn, f.sett, f.doc, f.snips, f.notes, f.skills)
+	f.svc = backup.NewService(f.conn, f.sett, f.doc, f.snips, f.notes)
 	f.svc.SetRecoveryBudget(budget)
 	return f
 }
@@ -191,7 +171,6 @@ func backupFrom(t *testing.T) string {
 	src.sett.overrides = map[string]any{"tab.placement": "new"}
 	src.snips.list = []snippet.Snippet{{ID: "s-new", Title: "new", Body: "new"}}
 	src.notes.list = []note.Note{{ID: "n-new", Body: "new"}}
-	src.skills.snap = skill.Snapshot{Authored: []skill.SnapshotTree{{Name: "new", Files: []skill.SnapshotFile{{Path: "SKILL.md", Bytes: "new"}}}}}
 	created, err := src.svc.Create()
 	if err != nil {
 		t.Fatalf("create the backup document: %v", err)
@@ -225,9 +204,6 @@ func assertOldGeneration(t *testing.T, f *restoreFixture) {
 	if len(f.notes.list) != 1 || f.notes.list[0].ID != "n-old" {
 		t.Fatalf("notes = %+v, want the old generation", f.notes.list)
 	}
-	if f.skills.snap.TreeCount() != 1 || f.skills.snap.Authored[0].Name != "old" {
-		t.Fatalf("skills = %+v, want the old generation", f.skills.snap)
-	}
 	var journal struct {
 		State string `json:"state"`
 	}
@@ -256,7 +232,6 @@ func TestRestore_FailureAtEveryBoundaryLeavesTheOldGeneration(t *testing.T) {
 		{"settings", func(f *restoreFixture) { f.sett.failAt = 1 }, "the settings document"},
 		{"snippets", func(f *restoreFixture) { f.snips.failAt = 1 }, "the snippet library"},
 		{"notes", func(f *restoreFixture) { f.notes.failAt = 1 }, "the notes library"},
-		{"skills", func(f *restoreFixture) { f.skills.failAt = 1 }, "the skill tree"},
 		{"committed-journal", func(f *restoreFixture) { f.doc.failOnWrite = 2 }, "the committed journal entry"},
 	}
 	for _, tc := range cases {
@@ -404,7 +379,7 @@ func TestRecover_CompletesAnInterruptedRestoreAtStartup(t *testing.T) {
 
 	// The restart: a fresh service over the same stores, recovering before it
 	// answers anything.
-	restarted := backup.NewService(f.conn, f.sett, f.doc, f.snips, f.notes, f.skills)
+	restarted := backup.NewService(f.conn, f.sett, f.doc, f.snips, f.notes)
 	if err := restarted.RecoverWithin(context.Background(), 0); err != nil {
 		t.Fatalf("startup recovery failed: %v", err)
 	}

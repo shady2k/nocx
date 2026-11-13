@@ -381,36 +381,6 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"settings.set": {
 			[]byte(`{"key":"clipboard.osc52Suppressed","value":true}`),
 		},
-		"skills.audit": {
-			[]byte(`{"name":"deploy"}`),
-		},
-		"skills.check": {
-			[]byte(`{"name":"deploy"}`),
-		},
-		"skills.file": {
-			[]byte(`{"name":"deploy","path":"references/hosts.md"}`),
-		},
-		"skills.files": {
-			[]byte(`{"name":"deploy"}`),
-		},
-		"skills.scan": {
-			[]byte(`{"name":"deploy"}`),
-		},
-		"skills.list": {
-			[]byte(`{}`),
-		},
-		"skills.remove": {
-			[]byte(`{"name":"deploy"}`),
-		},
-		"skills.setEnabled": {
-			[]byte(`{"name":"deploy","enabled":true}`),
-		},
-		"skills.setPin": {
-			[]byte(`{"name":"deploy","pin":"keepEnabled","on":true}`),
-		},
-		"skills.approve": {
-			[]byte(`{"name":"deploy"}`),
-		},
 		"shell.commandNames": {
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef"}`),
 		},

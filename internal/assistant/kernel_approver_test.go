@@ -61,7 +61,7 @@ func kernelForQuestioner(t *testing.T, grant content.Grant, ledger AttemptLedger
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	k, err := newEffectKernel(nil, grant, reg, ledger, nil, &fakeKnownMaterial{}, "run-1", "", 1, "turn-entry", nil, Attachments{}, nil, nil, toolSeams{questioner: q})
+	k, err := newEffectKernel(nil, grant, reg, ledger, nil, &fakeKnownMaterial{}, "run-1", "", 1, "turn-entry", nil, Attachments{}, nil, toolSeams{questioner: q})
 	if err != nil {
 		t.Fatalf("newEffectKernel: %v", err)
 	}

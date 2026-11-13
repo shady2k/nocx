@@ -77,7 +77,7 @@ func TestUnlockPrompt_ACallerThatGivesUpLeavesTheReasonList(t *testing.T) {
 // operation resume when a client comes back. But an operation with no waiter
 // left is not suspended, it is over: on the same stand the raise loop went on
 // suspending and resuming for minutes after the last press was dead, holding
-// the admission `skills.audit` runs under, which is what answered everything
+// the admission its operation ran under, which is what answered everything
 // else with "Control plane busy".
 func TestUnlockPrompt_TheRaiseStopsWhenTheLastCallerHasGone(t *testing.T) {
 	req := &fakeUnlockRequester{entered: make(chan struct{}, 4)}

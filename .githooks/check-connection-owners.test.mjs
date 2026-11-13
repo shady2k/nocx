@@ -96,6 +96,62 @@ func d(path string) { _, _ = n.Dial("unix", path) }
   assert.deepEqual(rows, [])
 })
 
+// ─── the review's two: a parenthesized callee and a dot import ───────────
+//
+// Both are the SAME identifier as `net.Dial`; only the expression around it
+// differs. The analysis reports the identifier, so neither can hide.
+
+test('a parenthesized callee is the same dial (review: paren)', () => {
+  const rows = analyseOne({
+    'internal/app/second.go': `package app
+
+import "net"
+
+func d(addr string) { _, _ = (net.Dial)("tcp", addr) }
+`,
+  })
+  assert.deepEqual(rulesOf(rows), ['net-dial'])
+  assert.equal(rows[0].object, 'net.Dial')
+})
+
+test('a dot-imported dial is the same dial (review: dot import)', () => {
+  const rows = analyseOne({
+    'internal/app/second.go': `package app
+
+import . "net"
+
+func d(addr string) { _, _ = Dial("tcp", addr) }
+`,
+  })
+  assert.deepEqual(rulesOf(rows), ['net-dial'])
+  assert.equal(rows[0].object, 'net.Dial')
+})
+
+test('a constant-unix dial through a paren is exempt', () => {
+  const rows = analyseOne({
+    'internal/app/second.go': `package app
+
+import "net"
+
+func d(path string) { _, _ = (net.Dial)("unix", path) }
+`,
+  })
+  assert.deepEqual(rows, [])
+})
+
+test('a dot-imported x/crypto object is the same import (review: dot import)', () => {
+  const rows = analyseOne({
+    'internal/app/second.go': `package app
+
+import . "golang.org/x/crypto/ssh"
+
+func f(b []byte) { _, _ = ParsePublicKey(b) }
+`,
+  })
+  assert.deepEqual(rulesOf(rows), ['xcrypto-ssh-import'])
+  assert.equal(rows[0].object, 'golang.org/x/crypto/ssh.ParsePublicKey')
+})
+
 // ─── bypass 2: an aliased exit cause ─────────────────────────────────────
 
 test('an exit cause read through any alias is refused (bypass 2)', () => {

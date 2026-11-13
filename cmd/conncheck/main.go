@@ -142,7 +142,10 @@ func main() {
 			if excluded && strings.Contains(e.Msg, "build constraints exclude all Go files") {
 				continue
 			}
-			loadErrs = append(loadErrs, e.Error())
+			// fmt.Sprint rather than the package error's own text method: the
+			// log-context ratchet reads such a call as a log site, and this is
+			// not one.
+			loadErrs = append(loadErrs, fmt.Sprint(e))
 		}
 		if p.TypesInfo == nil || p.Types == nil || p.Fset == nil {
 			continue
@@ -288,7 +291,9 @@ func candidatePatterns(scopeAbs string) ([]string, error) {
 }
 
 func fail(err error) {
-	fmt.Fprintln(os.Stderr, "conncheck: "+err.Error())
+	// fmt.Sprint rather than the error's own method: the log-context ratchet
+	// reads a `.Error(` call as a log site, and this is not one.
+	fmt.Fprintln(os.Stderr, "conncheck: "+fmt.Sprint(err))
 	os.Exit(2)
 }
 
@@ -331,8 +336,8 @@ func (c *collector) packageFacts(p *packages.Package) {
 				// The signature names objects too: a parameter or result typed
 				// *ssh.Client is a reference to the transport type, and a
 				// function that hands one out propagates the owner.
-				c.visitNode(d.Type, nil, label, rel, p, info)
-				c.visitNode(d.Body, nil, label, rel, p, info)
+				c.visitNode(d.Type, nil, nil, label, rel, p, info)
+				c.visitNode(d.Body, nil, nil, label, rel, p, info)
 			case *ast.GenDecl:
 				c.visitGenDecl(d, rel, p, info)
 			}
@@ -414,10 +419,10 @@ func (c *collector) visitGenDecl(d *ast.GenDecl, rel string, p *packages.Package
 		switch s := spec.(type) {
 		case *ast.ValueSpec:
 			if s.Type != nil {
-				c.visitNode(s.Type, nil, "<package>", rel, p, info)
+				c.visitNode(s.Type, nil, nil, "<package>", rel, p, info)
 			}
 			for _, v := range s.Values {
-				c.visitNode(v, nil, "<package>", rel, p, info)
+				c.visitNode(v, nil, nil, "<package>", rel, p, info)
 			}
 			// The re-export rule: an exported package-level var whose value
 			// is a dial function hands the connection out to every caller.
@@ -437,38 +442,55 @@ func (c *collector) visitGenDecl(d *ast.GenDecl, rel string, p *packages.Package
 				}
 			}
 		case *ast.TypeSpec:
-			c.visitNode(s.Type, nil, "<package>", rel, p, info)
+			c.visitNode(s.Type, nil, nil, "<package>", rel, p, info)
 		}
 	}
 }
 
-// visitNode records the facts at n, then walks its children. The parent is
-// carried so a selector can tell whether it is the callee of a call (where the
-// unix exemption can apply) or a plain reference.
-func (c *collector) visitNode(n ast.Node, parent ast.Node, label, rel string, p *packages.Package, info *types.Info) {
-	if n == nil {
-		return
-	}
+// visitNode walks n and records a fact for every IDENTIFIER that names a
+// target object.
+//
+// The identifier, not the expression around it, is what decides: `net.Dial`,
+// `(net.Dial)(…)`, a dot-imported `Dial(…)`, `x := net.Dial` and
+// `f(net.Dial)` are one reference each, and all four report. The same walk
+// resolves method references (`c.SendRequest`, `d.DialContext`) through the
+// object go/types bound them to, so an alias, a parenthesis or a method value
+// changes nothing.
+//
+// `callee` is the call whose callee subtree this node sits in, or nil. It is
+// the ONLY context a fact needs, because the unix exemption is a property of
+// the call a dial is the callee of — never of the line it is written on.
+func (c *collector) visitNode(n ast.Node, callee *ast.CallExpr, sel *types.Selection, label, rel string, p *packages.Package, info *types.Info) {
 	switch x := n.(type) {
+	case nil:
+		return
 	case *ast.CallExpr:
-		c.callFacts(x, rel, label, p, info)
-		// The callee's own selector was handled by callFacts; walk only the
-		// arguments and any nested selector in them.
+		// The callee subtree carries THIS call; the arguments do not, because
+		// a dial nested in an argument is its own call and gets its own
+		// context when it is visited.
+		c.visitNode(x.Fun, x, nil, label, rel, p, info)
 		for _, arg := range x.Args {
-			c.visitNode(arg, x, label, rel, p, info)
-		}
-		if f, ok := x.Fun.(*ast.FuncLit); ok {
-			c.visitNode(f, x, label, rel, p, info)
+			c.visitNode(arg, nil, nil, label, rel, p, info)
 		}
 		return
 	case *ast.FuncLit:
 		// A closure inherits the enclosing function's label: the baseline is
 		// about WHERE a fact is decided, and a goroutine inside a function is
 		// that function's decision.
-		c.visitNode(x.Body, x, label, rel, p, info)
+		c.visitNode(x.Body, nil, nil, label, rel, p, info)
+		return
+	case *ast.Ident:
+		c.identFact(x, callee, sel, rel, label, p, info)
 		return
 	case *ast.SelectorExpr:
-		c.selectorFact(x, rel, label, p, info)
+		// X may be a package name (a PkgName, not a target object) or an
+		// expression; Sel is the identifier that names the object, and the
+		// SELECTION (when there is one) is where a method's receiver lives —
+		// an interface method's own signature has none.
+		selection, _ := info.Selections[x]
+		c.visitNode(x.X, nil, nil, label, rel, p, info)
+		c.visitNode(x.Sel, callee, selection, label, rel, p, info)
+		return
 	}
 	ast.Inspect(n, func(child ast.Node) bool {
 		if child == nil || child == n {
@@ -477,10 +499,10 @@ func (c *collector) visitNode(n ast.Node, parent ast.Node, label, rel string, p 
 		if _, ok := child.(*ast.FuncDecl); ok {
 			return false
 		}
-		// Delegate real work to visitNode so nested calls and literals keep
-		// their own handling; ast.Inspect is only the traversal here.
+		// Delegate real work to visitNode so calls, selectors and identifiers
+		// keep their own handling; ast.Inspect is only the traversal here.
 		if c.isTracked(child) {
-			c.visitNode(child, n, label, rel, p, info)
+			c.visitNode(child, callee, nil, label, rel, p, info)
 			return false
 		}
 		return true
@@ -491,150 +513,138 @@ func (c *collector) visitNode(n ast.Node, parent ast.Node, label, rel string, p 
 // to visitNode rather than descending blindly).
 func (c *collector) isTracked(n ast.Node) bool {
 	switch n.(type) {
-	case *ast.CallExpr, *ast.SelectorExpr, *ast.FuncLit:
+	case *ast.CallExpr, *ast.SelectorExpr, *ast.FuncLit, *ast.Ident:
 		return true
 	}
 	return false
 }
 
-// callFacts handles a call: the net dial calls (with their unix exemption) and
-// the keepalive rule, both by the OBJECT the call resolves to.
-func (c *collector) callFacts(call *ast.CallExpr, rel, label string, p *packages.Package, info *types.Info) {
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok {
-		return
-	}
-	pos := p.Fset.Position(sel.Sel.Pos())
-
-	// A METHOD selection: the receiver's type decides, not the name.
-	if selection, ok := info.Selections[sel]; ok {
-		fn, ok := selection.Obj().(*types.Func)
-		if !ok {
-			return
-		}
-		recv := selection.Recv()
-		if recv != nil {
-			base := deref(recv)
-			if named, ok := base.(*types.Named); ok && named.Obj() != nil && named.Obj().Pkg() != nil {
-				path, name := named.Obj().Pkg().Path(), named.Obj().Name()
-				if path == netPkg && name == "Dialer" && (fn.Name() == "Dial" || fn.Name() == "DialContext") {
-					arg := 0
-					if fn.Name() == "DialContext" {
-						arg = 1
-					}
-					if c.constantUnix(call, arg, info) {
-						c.unixDials[label]++
-						return
-					}
-					c.nonUnixDials[label]++
-					c.add(Fact{
-						Rule: "net-dial", File: rel, Line: pos.Line, Func: label,
-						Object: "(*net.Dialer)." + fn.Name(),
-					})
-					return
-				}
-				if path == sshPkg && fn.Name() == "SendRequest" && name == "Client" {
-					c.add(Fact{
-						Rule: "keepalive-request", File: rel, Line: pos.Line, Func: label,
-						Object: "(*" + sshPkg + ".Client).SendRequest", Detail: requestName(call, info),
-					})
-					return
-				}
-			}
-			if iface, ok := deref(recv).(*types.Interface); ok && iface != nil && fn.Name() == "SendRequest" {
-				if isConnInterface(fn) {
-					c.add(Fact{
-						Rule: "keepalive-request", File: rel, Line: pos.Line, Func: label,
-						Object: "(" + sshPkg + ".Conn).SendRequest", Detail: requestName(call, info),
-					})
-					return
-				}
-			}
-		}
-		return
-	}
-
-	// A package-qualified call.
-	obj := info.Uses[sel.Sel]
+// identFact records the fact one identifier names, if it names a target object.
+// Everything about the surrounding expression — a parenthesis, a dot import, a
+// call, a method value, an assignment — is irrelevant to whether the object is
+// the transport's; only the call it is the callee of can exempt a dial.
+func (c *collector) identFact(id *ast.Ident, callee *ast.CallExpr, sel *types.Selection, rel, label string, p *packages.Package, info *types.Info) {
+	obj := info.Uses[id]
 	if obj == nil || obj.Pkg() == nil {
 		return
 	}
-	if obj.Pkg().Path() == netPkg && isNetDial(obj.Name()) {
-		if c.constantUnix(call, 0, info) {
-			c.unixDials[label]++
-			return
-		}
-		c.nonUnixDials[label]++
-		c.add(Fact{
-			Rule: "net-dial", File: rel, Line: pos.Line, Func: label,
-			Object: netPkg + "." + obj.Name(),
-		})
-		return
-	}
-	if strings.HasPrefix(obj.Pkg().Path(), sshPkg) {
-		c.add(Fact{
-			Rule: "xcrypto-ssh-import", File: rel, Line: pos.Line, Func: label,
-			Object: objectName(obj),
-		})
-	}
-}
-
-// selectorFact handles a selector that is NOT a call's callee: a type or a
-// value reference.
-func (c *collector) selectorFact(sel *ast.SelectorExpr, rel, label string, p *packages.Package, info *types.Info) {
-	pos := p.Fset.Position(sel.Sel.Pos())
-
-	// A field or method value used without a call: (*ssh.Client).SendRequest
-	// taken as a value is still a prober handed somewhere. Method VALUES are
-	// rare; report the selection so the object identity is visible.
-	if selection, ok := info.Selections[sel]; ok {
-		fn, _ := selection.Obj().(*types.Func)
-		if fn != nil && selection.Recv() != nil {
-			if base, ok := deref(selection.Recv()).(*types.Named); ok && base.Obj() != nil && base.Obj().Pkg() != nil {
-				path, name := base.Obj().Pkg().Path(), base.Obj().Name()
-				if path == netPkg && name == "Dialer" && (fn.Name() == "Dial" || fn.Name() == "DialContext") {
-					c.add(Fact{
-						Rule: "net-dial", File: rel, Line: pos.Line, Func: label,
-						Object: "(*net.Dialer)." + fn.Name(), Detail: "method value",
-					})
-				}
-				if path == sshPkg && name == "Client" && fn.Name() == "SendRequest" {
-					c.add(Fact{
-						Rule: "keepalive-request", File: rel, Line: pos.Line, Func: label,
-						Object: "(*" + sshPkg + ".Client).SendRequest", Detail: "method value",
-					})
-				}
-			}
-		}
-		return
-	}
-
-	obj := info.Uses[sel.Sel]
-	if obj == nil || obj.Pkg() == nil {
-		return
-	}
+	pos := p.Fset.Position(id.Pos())
 	path := obj.Pkg().Path()
-	switch {
-	case path == netPkg && obj.Name() == "Dialer":
-		c.dialerTypes[label] = append(c.dialerTypes[label], len(c.list))
-		c.add(Fact{Rule: "net-dial", File: rel, Line: pos.Line, Func: label, Object: netPkg + ".Dialer"})
-	case path == netPkg && isNetDial(obj.Name()):
-		// net.Dial as a VALUE (var RawDial = net.Dial): reported so the
-		// re-export rule sees it; a plain reference is the same fact.
-		c.add(Fact{
-			Rule: "net-dial", File: rel, Line: pos.Line, Func: label,
-			Object: netPkg + "." + obj.Name(), Detail: "function value",
-		})
-	case strings.HasPrefix(path, sshPkg):
-		if path == sshPkg && obj.Name() == "ExitError" {
+	fn, isFunc := obj.(*types.Func)
+	// A package-level object is one the package itself declares: a function,
+	// type, constant or var. A FIELD or METHOD is an object of the type it
+	// belongs to, and a reference to one (`req.Type`, `ch.Close()`) says
+	// nothing about who owns the connection — the type reference beside it
+	// does. The two method rules above are the exceptions, by identity.
+	pkgLevel := obj.Parent() == obj.Pkg().Scope()
+
+	if path == netPkg {
+		switch {
+		case obj.Name() == "Dialer" && !isFunc:
+			// The type, recorded so an unix-only function can drop it below.
+			c.dialerTypes[label] = append(c.dialerTypes[label], len(c.list))
+			c.add(Fact{Rule: "net-dial", File: rel, Line: pos.Line, Func: label, Object: netPkg + ".Dialer"})
+		case isFunc && isNetDial(obj.Name()) && pkgLevel && fn.Type().(*types.Signature).Recv() == nil:
+			if callee != nil && c.constantUnix(callee, 0, info) {
+				c.unixDials[label]++
+				return
+			}
+			c.nonUnixDials[label]++
+			c.add(Fact{Rule: "net-dial", File: rel, Line: pos.Line, Func: label, Object: netPkg + "." + obj.Name()})
+		case isFunc && isDialerDialMethod(fn):
+			if callee != nil && c.constantUnix(callee, dialerNetworkArg(fn.Name()), info) {
+				c.unixDials[label]++
+				return
+			}
+			c.nonUnixDials[label]++
+			detail := ""
+			if callee == nil {
+				detail = "method value"
+			}
 			c.add(Fact{
-				Rule: "exit-error-read", File: rel, Line: pos.Line, Func: label,
-				Object: sshPkg + ".ExitError",
+				Rule: "net-dial", File: rel, Line: pos.Line, Func: label,
+				Object: "(*net.Dialer)." + fn.Name(), Detail: detail,
+			})
+		}
+		return
+	}
+	if !strings.HasPrefix(path, sshPkg) {
+		return
+	}
+	if path == sshPkg && obj.Name() == "ExitError" && !isFunc && pkgLevel {
+		c.add(Fact{
+			Rule: "exit-error-read", File: rel, Line: pos.Line, Func: label,
+			Object: sshPkg + ".ExitError",
+		})
+		return
+	}
+	if isFunc && fn.Name() == "SendRequest" {
+		if object, ok := sshSendRequestObject(fn, sel); ok {
+			detail := ""
+			if callee == nil {
+				detail = "method value"
+			} else {
+				detail = requestName(callee, info)
+			}
+			c.add(Fact{
+				Rule: "keepalive-request", File: rel, Line: pos.Line, Func: label,
+				Object: object, Detail: detail,
 			})
 			return
 		}
-		c.add(Fact{Rule: "xcrypto-ssh-import", File: rel, Line: pos.Line, Func: label, Object: objectName(obj)})
 	}
+	if !pkgLevel {
+		return
+	}
+	c.add(Fact{Rule: "xcrypto-ssh-import", File: rel, Line: pos.Line, Func: label, Object: objectName(obj)})
+}
+
+// isDialerDialMethod reports whether fn is a dial method of net.Dialer itself
+// (not of some type that happens to have a method with the same name).
+func isDialerDialMethod(fn *types.Func) bool {
+	if fn.Name() != "Dial" && fn.Name() != "DialContext" {
+		return false
+	}
+	sig, ok := fn.Type().(*types.Signature)
+	if !ok || sig.Recv() == nil {
+		return false
+	}
+	named, ok := deref(sig.Recv().Type()).(*types.Named)
+	if !ok || named.Obj() == nil || named.Obj().Pkg() == nil {
+		return false
+	}
+	return named.Obj().Pkg().Path() == netPkg && named.Obj().Name() == "Dialer"
+}
+
+// dialerNetworkArg answers which argument of a dialer method names the network.
+func dialerNetworkArg(name string) int {
+	if name == "DialContext" {
+		return 1
+	}
+	return 0
+}
+
+// sshSendRequestObject names the SendRequest method's owner when it is the
+// connection itself: x/crypto's Client, or its Conn interface. Any other type
+// with a method of that name is ours and is not a prober.
+func sshSendRequestObject(fn *types.Func, sel *types.Selection) (string, bool) {
+	if fn.Pkg() == nil || fn.Pkg().Path() != sshPkg || fn.Name() != "SendRequest" {
+		return "", false
+	}
+	if sel == nil {
+		return "", false
+	}
+	recv := deref(sel.Recv())
+	if named, ok := recv.(*types.Named); ok {
+		obj := named.Obj()
+		if obj != nil && obj.Pkg() != nil && obj.Pkg().Path() == sshPkg && obj.Name() == "Client" {
+			return "(*" + sshPkg + ".Client).SendRequest", true
+		}
+	}
+	if iface, ok := recv.(*types.Interface); ok && iface != nil && iface.NumMethods() > 0 {
+		return "(" + sshPkg + ".Conn).SendRequest", true
+	}
+	return "", false
 }
 
 // dialObject answers the dial function a value expression names, for the

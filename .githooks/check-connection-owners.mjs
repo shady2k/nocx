@@ -53,9 +53,11 @@
  *                        with the supervisor's.
  *   transport-re-export  inside a transport package, an exported package-level
  *                        var holding a net dial function, or an exported func
- *                        returning ssh.Dial/NewClientConn: a helper that hands
- *                        a dial out makes every caller a second owner without
- *                        naming one.
+ *                        whose WHOLE body is a single `return <dial call>`: a
+ *                        helper that hands a dial out makes every caller a
+ *                        second owner without naming one. This is a SHAPE
+ *                        check and it is deliberately not chased further (see
+ *                        the limits below).
  *
  * Scope: every tracked non-test .go file except the transport packages, which
  * are `internal/ssh/`, `internal/helper/sshsvc/` and `internal/sshtest/` (the
@@ -69,9 +71,17 @@
  *   - A dial behind an interface whose implementation lives elsewhere: the
  *     call is a method on an interface, and no static analyser can say what it
  *     becomes. The construction of the concrete dialer is reported instead.
- *   - A value carried into another package through a struct field, a channel
- *     or a callback. (An exported package-level var or func is covered by
- *     transport-re-export; a field is not.)
+ *   - A value carried into another package through a struct field, a method, a
+ *     channel or a callback, and a re-export in any shape other than the two
+ *     the rule names: an exported package-level var holding a dial function is
+ *     reported, and an exported func whose body is a single `return
+ *     <dial call>` is reported; a func that assigns first, returns through a
+ *     helper, stores the dial in a struct and hands that out, or exports a
+ *     method is NOT. That is the STATED LIMIT, not a bug to be closed by
+ *     chasing shapes: the transport packages are the one owner of a
+ *     connection, and what they export is reviewed with them — a second
+ *     heuristic here would grow without bound and still be outrun by the next
+ *     spelling.
  *   - A network named by a variable that is not a constant. A dial with a
  *     computed network string is reported, not exempted: the exemption is the
  *     constant "unix" and nothing else.

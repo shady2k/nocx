@@ -4,20 +4,17 @@ package assistant
 // screened before it leaves for the provider, and a finding REFUSES AND ASKS
 // rather than being silently redacted. One recognizer, two policies — the
 // recognizer is internal/secrets (via the masking service); the durable path
-// masks and continues, this gate suspends and shows what was found.
+// masks and continues, this gate withholds and shows what was found.
 //
 // The finding is this package's contract with the approval surface (the wire
 // worker owns the surface that renders it): its shape, how it is produced,
-// and its presence on the suspension the Client surfaces. A finding carries
-// the facts a person decides on — which detector fired, the kind, where it
+// and its presence on the question the Client puts. A finding carries the
+// facts a person decides on — which detector fired, the kind, where it
 // occurred — and NEVER the secret material itself.
 
 import (
 	"context"
-	"encoding/gob"
 	"fmt"
-
-	"github.com/cloudwego/eino/adk"
 
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/masking"
@@ -64,12 +61,11 @@ type EgressFinding struct {
 }
 
 // EgressRequest is the finding-carrying ask of the egress gate: a tool
-// result — or an error string — contained secret-shaped material, and the
-// run suspended before the bytes leave for the provider. It is the
-// interrupt's info AND its checkpoint state (the inbound ask does the same,
-// ADR-0028: checkpoints are process-lifetime state), so a resume
-// re-validates the exact proposal. It is exported because the transport
-// renders it; the findings are facts, never the material.
+// result — or an error string — contained secret-shaped material, and nothing
+// leaves for the provider until a person answers. It is what the approval
+// surface renders, and the proposal it names is what the answer is bound to.
+// It is exported because the transport renders it; the findings are facts,
+// never the material.
 type EgressRequest struct {
 	// RunID, Attempt, Tool, CallID and Arguments bind the ask to the exact
 	// proposal — the same identity the approval store keys (design §7.2).
@@ -95,27 +91,6 @@ type EgressRequest struct {
 	// because the two read differently ("the tool failed and its failure
 	// mentioned a secret").
 	WasError bool `json:"wasError"`
-}
-
-func init() {
-	gob.Register(EgressRequest{})
-	gob.Register(EgressFinding{})
-}
-
-// EgressRequestedError is what Ask returns when the run suspended at the
-// egress gate: the run is NOT failed — it is awaiting a human's decision
-// about what may leave — and Request is what the approval surface renders
-// and the resume re-validates.
-type EgressRequestedError struct {
-	Request *EgressRequest
-}
-
-func (e *EgressRequestedError) Error() string {
-	if e.Request == nil {
-		return "agent run suspended: a tool result contained secret-shaped material"
-	}
-	return fmt.Sprintf("agent run suspended at the egress gate: %s %s produced %d secret-shaped region(s); nothing was sent",
-		e.Request.Tool, e.Request.CallID, len(e.Request.Findings))
 }
 
 // KnownMatch is one region of text that matches a secret the vault holds:
@@ -177,39 +152,16 @@ func (s egressScreen) Inspect(ctx context.Context, c Call, out Outbound) Verdict
 	if len(findings) == 0 {
 		return Pass{}
 	}
-	ap := s.kernel.proposal(c.Tool(), c.CallID(), string(c.RawParams()))
-	if s.kernel.approvals != nil {
-		if _, _, retained := s.kernel.approvals.RetainedResult(ap); retained {
-			// The approved resume: these are the exact bytes the person
-			// approved sending, and they go as decided. Nothing re-ran.
-			s.kernel.approvals.ClearRetained(ap)
-			return Pass{}
-		}
-		// A finding REFUSES AND ASKS (design §7.1): nothing is sent, the run
-		// suspends carrying the findings, and the bytes are retained so the
-		// approved resume releases exactly these. It never silently masks and
-		// continues — off-machine a miss is invisible and permanent.
-		s.kernel.approvals.Retain(ap, out.Text, out.WasError)
-	}
+	// A finding REFUSES AND ASKS (design §7.1): nothing is sent until a person
+	// decides, and it never silently masks and continues — off-machine a miss
+	// is invisible and permanent. The bytes are not copied anywhere: the call
+	// is blocked on the answer with its own result on the stack, so an
+	// approved question releases exactly the bytes the person was shown, and
+	// the tool does not run a second time (ADR-anntnxdj §2).
 	return Ask{
 		Reason: fmt.Sprintf("%s produced %d secret-shaped region(s), and nothing has been sent", c.Tool(), len(findings)),
 		Egress: &EgressAsk{Findings: findings, WasError: out.WasError},
 	}
-}
-
-// held is the retained result of one exact proposal: the bytes an Ask withheld
-// and a person approved sending. The kernel's executor asks before it runs the
-// tool, so an approved resume releases exactly these and the tool's body is
-// entered once (ADR-anntnxdj §2).
-func (s egressScreen) held(ap Approval) (Outbound, bool) {
-	if s.kernel.approvals == nil {
-		return Outbound{}, false
-	}
-	out, wasError, ok := s.kernel.approvals.RetainedResult(ap)
-	if !ok {
-		return Outbound{}, false
-	}
-	return Outbound{Text: out, WasError: wasError}, true
 }
 
 // findings is the egress gate's one screening of a piece of text: the
@@ -247,21 +199,4 @@ func (s egressScreen) findings(ctx context.Context, text string) ([]EgressFindin
 		return nil, nil
 	}
 	return findings, nil
-}
-
-// egressRequestFrom finds the egress ask among an interrupt event's
-// contexts, mirroring approvalRequestFrom: the asking call carries our
-// *EgressRequest as its info; the latched, deferred calls carry a plain
-// string. The first egress ask is the one the human decides about, and its
-// interrupt ID is the branch a resume continues.
-func egressRequestFrom(info *adk.InterruptInfo) (*EgressRequest, string) {
-	if info == nil {
-		return nil, ""
-	}
-	for _, ic := range info.InterruptContexts {
-		if req, ok := ic.Info.(*EgressRequest); ok {
-			return req, ic.ID
-		}
-	}
-	return nil, ""
 }

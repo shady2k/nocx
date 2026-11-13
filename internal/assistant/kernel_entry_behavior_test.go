@@ -3,6 +3,7 @@ package assistant
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/content"
@@ -43,19 +44,16 @@ func TestKernelEntryPreservesAuthorityOutcomes(t *testing.T) {
 					t.Errorf("permitted result = %+v, want %+v", result, want)
 				}
 			case content.DecisionAsk:
-				var suspended *ApprovalRequestedError
-				if !errors.As(err, &suspended) {
-					t.Fatalf("ask error = %v, want ApprovalRequestedError", err)
+				// A chain with no person to ask refuses the call: the ask is
+				// never left as a question nobody can answer.
+				if err != nil {
+					t.Fatalf("ask error = %v, want the no-approver refusal as the call's answer", err)
 				}
-				if suspended.Request == nil {
-					t.Fatal("suspension lost its approval request")
+				if !strings.Contains(result.text, "nobody could be asked") {
+					t.Errorf("ask result = %+v, want the no-approver refusal", result)
 				}
-				req := suspended.Request
-				if req.Tool != "session.list" || req.CallID != "call-1" || req.Arguments != `{}` || req.Effect != content.EffectObserve {
-					t.Errorf("suspension request lost the proposed call: %+v", req)
-				}
-				if result != (modelResult{}) {
-					t.Errorf("suspended invocation returned a model result: %+v", result)
+				if result.kind != modelNocxMessage {
+					t.Errorf("ask result kind = %v, want a nocx message", result.kind)
 				}
 			}
 			wantCalls := 0

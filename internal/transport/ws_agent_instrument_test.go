@@ -30,9 +30,9 @@ func (l *instrumentLogger) Error(string, ...any)                     {}
 func (l *instrumentLogger) With(...any) log.Logger                   { return l }
 func (l *instrumentLogger) WithContext(_ context.Context) log.Logger { return l }
 
-func TestLogAgentStreamEnded_DistinguishesRequestedExecutedAndResume(t *testing.T) {
+func TestLogAgentStreamEnded_CarriesTheRunsOwnCounts(t *testing.T) {
 	logger := &instrumentLogger{}
-	logAgentStreamEnded(logger, 41, time.Now(), 3, 12, 1, 0, false, "session.run", "mutate-destructive", nil)
+	logAgentStreamEnded(logger, 41, time.Now(), 3, 12, 1, 0, nil)
 	if logger.record.message != "agent ask: the stream ended" {
 		t.Fatalf("message = %q", logger.record.message)
 	}
@@ -42,9 +42,6 @@ func TestLogAgentStreamEnded_DistinguishesRequestedExecutedAndResume(t *testing.
 		"answer":             12,
 		"toolCallsRequested": 1,
 		"toolCallsExecuted":  0,
-		"resume":             false,
-		"suspensionTool":     "session.run",
-		"suspensionEffect":   "mutate-destructive",
 	}
 	got := make(map[string]any)
 	for i := 0; i < len(logger.record.args); i += 2 {
@@ -119,8 +116,8 @@ func TestAuthorisedRun_LogsOneSegmentForTheAnsweredCall(t *testing.T) {
 	if only["toolCallsRequested"] != float64(1) || only["toolCallsExecuted"] != float64(1) {
 		t.Fatalf("segment = %v, want requested=1 executed=1 in one drive", only)
 	}
-	if only["resume"] != false || only["suspensionTool"] != "" || only["suspensionEffect"] != "" {
-		t.Fatalf("segment = %v, want no suspension and no resume", only)
+	if _, ok := only["suspensionTool"]; ok {
+		t.Fatalf("segment = %v, want no suspension — nothing suspends a run any more", only)
 	}
 	if only["outcome"] != "completed" {
 		t.Fatalf("outcome = %v, want completed", only["outcome"])

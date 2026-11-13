@@ -148,22 +148,16 @@ func TestAskSkillsCreateWritesThroughTheSkillLibrarySeam(t *testing.T) {
 			}, nil
 		}),
 	)
-	askErr := client.Ask(context.Background(), params, func(AskEvent) error { return nil })
-	var asked *ApprovalRequestedError
-	if !errors.As(askErr, &asked) || asked.Request == nil {
-		t.Fatalf("Ask error = %v, want the approval-requested suspension", askErr)
+	q := &recordingQuestioner{store: approvals, answer: Approved{}}
+	params.Questioner = q
+	if askErr := client.Ask(context.Background(), params, func(AskEvent) error { return nil }); askErr != nil {
+		t.Fatalf("Ask: %v", askErr)
 	}
-	if got := asked.Request.Arguments; got != `{"body":"Run make release.","description":"Generated release procedure","name":"deploy"}` {
+	if len(q.asked) != 1 {
+		t.Fatalf("the person was asked %d times, want the approval of the skill", len(q.asked))
+	}
+	if got := q.asked[0].Arguments; got != `{"body":"Run make release.","description":"Generated release procedure","name":"deploy"}` {
 		t.Fatalf("approval arguments = %s, want the summarizer's generated fields", got)
-	}
-	if !approvals.Approve(Approval{
-		RunID: asked.Request.RunID, Attempt: asked.Request.Attempt,
-		Tool: asked.Request.Tool, CallID: asked.Request.CallID, ArgHash: asked.Request.ArgHash,
-	}) {
-		t.Fatal("the exact skill proposal was not pending")
-	}
-	if askErr = client.Ask(context.Background(), params, func(AskEvent) error { return nil }); askErr != nil {
-		t.Fatalf("approved resume Ask: %v", askErr)
 	}
 	path := filepath.Join(root, "deploy", "SKILL.md")
 	if _, statErr := os.Stat(path); statErr != nil {
@@ -325,20 +319,13 @@ func TestSkillsWriteResultsConformOnTheProviderSocket(t *testing.T) {
 			params.Approvals = approvals
 			params.KnownMaterial = &fakeKnownMaterial{}
 			params.Skills = &skillsWriteLibrary{}
-			askErr := client.Ask(context.Background(), params, func(AskEvent) error { return nil })
-			var asked *ApprovalRequestedError
-			if !errors.As(askErr, &asked) || asked.Request == nil {
-				t.Fatalf("Ask error = %v, want the approval-requested suspension", askErr)
-			}
-			if !approvals.Approve(Approval{
-				RunID: asked.Request.RunID, Attempt: asked.Request.Attempt,
-				Tool: asked.Request.Tool, CallID: asked.Request.CallID, ArgHash: asked.Request.ArgHash,
-			}) {
-				t.Fatal("the exact skill proposal was not pending")
-			}
-			askErr = client.Ask(context.Background(), params, func(AskEvent) error { return nil })
-			if askErr != nil {
+			q := &recordingQuestioner{store: approvals, answer: Approved{}}
+			params.Questioner = q
+			if askErr := client.Ask(context.Background(), params, func(AskEvent) error { return nil }); askErr != nil {
 				t.Fatalf("Ask: %v", askErr)
+			}
+			if len(q.asked) != 1 {
+				t.Fatalf("the person was asked %d times, want the approval of the skill", len(q.asked))
 			}
 			raw, ok := toolResult.Load().(string)
 			if !ok {

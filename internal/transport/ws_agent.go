@@ -286,11 +286,10 @@ func (c *agentRunControl) beginTerminal() (func(), bool, bool) {
 // agentRunDelta is the agent.runDelta notification (design §7): one chunk
 // of the streamed answer. runId AND entryId are both on every delta because
 // the renderer routes by entryId while the acceptance criterion drives two
-// overlapping asks — "the current answer" is not an identity. seq ascends
-// per run from 0 and is the renderer's ordering key — ACROSS a suspension
-// too: since nocx-igu4y the resume continues the answer rather than
-// re-rolling it, so its deltas are numbered after the ones the question
-// interrupted, never over them.
+// overlapping asks — "the current answer" is not an identity. seq ascends per
+// run from 0 and is the renderer's ordering key; a question blocks the call
+// that asked (ADR-anntnxdj §3), so one drive emits every number and nothing
+// continues an answer on a second one.
 //
 // BlockID is the piece this chunk appends to (ADR-0040): the `text` child of
 // the turn that the backend opened for this run of prose. EntryID still says
@@ -586,10 +585,9 @@ type approveParams struct {
 }
 
 // agentApproveResponse is the agent.approve result: the state the run moved
-// to — streaming (the resumed drive is in flight, for a yes or a policy
-// decline) or failed (the egress decline's terminal close was persisted).
-// The outcome the renderer draws comes from the agent.runState notification
-// either way.
+// to — streaming, because the call the person answered goes on in the drive it
+// was already in. The outcome the renderer draws comes from the
+// agent.runState notification.
 type agentApproveResponse struct {
 	State string `json:"state"`
 	// Warning is the sentence to show when the part of the answer that was
@@ -675,10 +673,10 @@ type agentHandlers struct {
 	// that resumes consult the same decisions, and the source of truth
 	// agent.approve's stale-id answer is checked against.
 	approvals *assistant.ApprovalStore
-	// pendingRuns maps a suspended run's id to the stream context the
-	// resume re-drives (question, references, resolved endpoint material).
-	// Server-scoped — the person answers on the same connection that
-	// rendered the question, and the answer must resume the EXACT run.
+	// pendingRuns maps a run's id to the context its call is blocked in
+	// (question, references, resolved endpoint material). Server-scoped —
+	// the person answers on the same connection that rendered the question,
+	// and the answer must wake the EXACT run.
 	pendingRuns   map[int64]askRunContext
 	pendingRunsMu *sync.Mutex
 	// personalInstructions reads the person's own paragraph from the
@@ -908,9 +906,9 @@ func validateAgentAskRaw(raw json.RawMessage) string {
 	return msg
 }
 
-// detachedRunContext is the context a resumed or streamed run gets: it
-// outlives the frame that started it, so the handler's return must not cancel
-// it, while rpc.cancel and disconnect still do through the request entry.
+// detachedRunContext is the context a streamed run gets: it outlives the
+// frame that started it, so the handler's return must not cancel it, while
+// rpc.cancel and disconnect still do through the request entry.
 func (h agentHandlers) detachedRunContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	parent := context.WithoutCancel(ctx)
 	if conn, ok := connectionContext(ctx); ok {
@@ -1044,9 +1042,9 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	// submit (the stream capacity is exhausted) terminalizes the run
 	// failed with a renderable reason; the run is never left prepared.
 	// The EXCHANGE names itself for everything downstream: this ask, the
-	// approval that suspends it, the resume that finishes it and every
-	// effect any of them run all log under one trace, across the several
-	// wire frames it takes (internal/log).
+	// approval that blocks it, the answer that wakes it and every effect any
+	// of them run all log under one trace, across the several wire frames it
+	// takes (internal/log).
 	// The run outlives this handler: the response is already sent when the
 	// stream starts. Its context must therefore not be the request context,
 	// which is cancelled when the worker returns; it is detached from that
@@ -1068,10 +1066,8 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		offerState: assistant.NewWireToolOfferState(),
 		// attempt is the run's attempt — the ledger inserted the run row at
 		// attempt 1 (SubmitAgentAsk), and it is the value the approval
-		// binding names. The resume passes the SAME attempt, so the
-		// middleware's re-built proposal matches the one the person
-		// approved; the approved call's own execution is the entry's
-		// SUBSEQUENT attempt (attempt 2), recorded by the middleware.
+		// binding names. The approved call's own execution is the proposal
+		// entry's SUBSEQUENT attempt (attempt 2), recorded by the kernel.
 		attempt:          1,
 		sessionID:        sid,
 		leaseDegradation: leaseDegradation,
@@ -1244,24 +1240,11 @@ type askRunContext struct {
 	// anchor is what outlives it (nocx-4em1z). Nil when the session is the
 	// pipe of no recorded pane, which costs the conversation context and
 	// nothing else.
-	paneID *string
-	// prose is the run of prose currently OPEN — the `text` child the next
-	// delta appends to, and the artifact its text lands in (ADR-0040). The
-	// zero value is "no block is open", which is the state a run starts in
-	// and the state a tool call leaves behind: a call that arrives before the
-	// model has said anything must open no empty block.
-	//
-	// It lives on the run context rather than only in runAskStream's frame
-	// because it has to CROSS A SUSPENSION, for the same reason nextSeq does:
-	// the resume continues the answer instead of re-rolling it (nocx-igu4y),
-	// so the prose it writes belongs to the block the question interrupted,
-	// not to a second one opened beside it. Written by suspendForApproval into
-	// the pendingRuns copy; never wire-facing as a struct.
-	prose    content.ProseBlock
+	paneID   *string
 	question string
 	// draft carries the bounded conversation used by a skills.create trigger.
-	// It crosses approval suspension so the same generated proposal is
-	// validated and approved on resume without a second model call.
+	// It is pinned on the run so the same generated proposal is validated and
+	// approved once, never generated a second time behind a question.
 	draft    *assistant.SkillDraftRequest
 	endpoint profile.Endpoint
 	model    string
@@ -1269,27 +1252,22 @@ type askRunContext struct {
 	// workspace policy the composition root named (runGrantFor). Nil: the
 	// run executes no tools — the model is offered none.
 	grant *content.Grant
-	// offerState survives retries and approval resumes so the structural
-	// offer remains once-per-run without process-lifetime run-id storage.
+	// offerState survives retries so the structural offer remains
+	// once-per-run without process-lifetime run-id storage.
 	offerState *assistant.WireToolOfferState
 	// attempt is the run's attempt — the ledger inserted the run row at
 	// attempt 1 (SubmitAgentAsk), and it is the value the approval binding
-	// names. The resume passes the SAME attempt so the middleware's
-	// re-built proposal matches the one the person approved; the approved
-	// call's own execution is the proposal entry's SUBSEQUENT attempt
-	// (attempt 2), which the middleware records.
+	// names. The approved call's own execution is the proposal entry's
+	// SUBSEQUENT attempt (attempt 2), which the middleware records.
 	attempt int
 	// promptFacts is what the standing system prompt says about this pane,
 	// gathered when the ask arrived from the owners that already hold each
 	// fact (systemPromptFactsFor). The FACTS are carried, never the
-	// assembled text: the prompt is rebuilt on every drive of this run, so
-	// there is nothing to go stale and one place that assembles it. Pinned
-	// at ask time for the same reason the grant and the endpoint are — a
-	// resume must re-drive the run the person answered about, not a run
-	// described differently.
+	// assembled text: the prompt is assembled once per run, so there is
+	// nothing to go stale and one place that assembles it.
 	promptFacts assistant.SystemPromptFacts
 	// automaticSessionItems is pinned from the renderer's attached-content
-	// metadata at ask submission and reused on approval resume.
+	// metadata at ask submission.
 	automaticSessionItems []string
 	// markedSessionWindows is the row spans the person marked, pinned from
 	// the same attached-content envelope.
@@ -1301,52 +1279,29 @@ type askRunContext struct {
 	// row and would stop being the session the moment a row is scoped
 	// wider.
 	sessionID session.ID
-	// leaseDegradation crosses every stream drive, including approval
-	// suspension and resume, so terminalize can report bounds the renderer
-	// requester could not arm.
+	// leaseDegradation crosses the stream drive so terminalize can report
+	// bounds the renderer requester could not arm.
 	leaseDegradation *assistant.RunLeaseDegradation
-	// nextSeq is the delta sequence the NEXT drive of this run starts
-	// from — written by suspendForApproval, read by runAskStream.
-	//
-	// It exists because the resume is now a REAL checkpoint resume
-	// (nocx-igu4y): the model is not asked to produce the answer again, so
-	// the deltas that follow the approval are the CONTINUATION of the ones
-	// before it, not a second copy of them. While the resume re-rolled the
-	// whole answer, restarting at 0 was harmless — a retried delta is a
-	// no-op on the store's (artifact_id, seq) key, and the renderer
-	// re-received what it already had. With a real resume it would be a
-	// collision: new text written over the persisted chunks of the text
-	// before the question, and a renderer routing new deltas onto old
-	// numbers. The count must ascend across the whole run, so it crosses
-	// the suspension with the prose checkpoint.
-	nextSeq int
-	// pendingReason is which gate the run is currently suspended on —
-	// "policy" or "egress", empty when it is not suspended. Written by
-	// suspendForApproval into the pendingRuns copy, and read by
-	// agent.approve, which refuses a standing answer to an egress question.
-	// It is a fact about the OPEN QUESTION, not about the proposal; only the
-	// transport knows which of the two gates asked.
+	// pendingReason is which question the run's call is BLOCKED on —
+	// "policy" or "egress", empty when nothing is open. Written by the
+	// approval service's wait, and read by agent.approve, which refuses a
+	// standing answer to an egress question. It is a fact about the OPEN
+	// QUESTION, not about the proposal; only the transport knows which of
+	// the two asked.
 	pendingReason string
 	// approvalWait is the question this run's call is BLOCKED on
 	// (nocx-a62cl.3.1). The approval service records it before it publishes
 	// the question, agent.approve claims it and wakes the very call that
-	// asked, and the service clears it when the wait is over. Nil is every
-	// run with no blocking approver: the adapter's suspension path, whose
-	// answer starts a new drive.
+	// asked, and the service clears it when the wait is over.
 	approvalWait *answerWait
-	// resumed is explicit because a fresh run can also have non-zero
-	// sequencing state after a later refactor; only the resume path sets it.
-	resumed bool
 }
 
-func logAgentStreamEnded(logger log.Logger, runID int64, started time.Time, reasoning, answer, requested, executed int, resumed bool, suspensionTool, suspensionEffect string, streamErr error) {
+func logAgentStreamEnded(logger log.Logger, runID int64, started time.Time, reasoning, answer, requested, executed int, streamErr error) {
 	if logger == nil {
 		return
 	}
 	outcome := "completed"
-	if suspensionTool != "" {
-		outcome = "suspended"
-	} else if streamErr != nil {
+	if streamErr != nil {
 		outcome = "failed"
 	}
 	logger.Info("agent ask: the stream ended",
@@ -1356,9 +1311,6 @@ func logAgentStreamEnded(logger log.Logger, runID int64, started time.Time, reas
 		"answer", answer,
 		"toolCallsRequested", requested,
 		"toolCallsExecuted", executed,
-		"resume", resumed,
-		"suspensionTool", suspensionTool,
-		"suspensionEffect", suspensionEffect,
 		"outcome", outcome)
 }
 
@@ -1384,11 +1336,10 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 			toolCallsRequested.Add(1)
 		}
 	}
-	var suspensionTool, suspensionEffect string
 	var streamErr error
 	emitStreamEnded := func() {
 		logAgentStreamEnded(h.log, rc.runID, streamStarted, int(reasoningChars.Load()), int(answerChars.Load()),
-			int(toolCallsRequested.Load()), int(toolCallsExecuted.Load()), rc.resumed, suspensionTool, suspensionEffect, streamErr)
+			int(toolCallsRequested.Load()), int(toolCallsExecuted.Load()), streamErr)
 	}
 	if rc.control != nil {
 		var finishDrive func()
@@ -1435,8 +1386,8 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	// never reaches for the vault again, so a later seal cannot strand it.
 
 	// Context assembly. The standing prompt (design §1) rides every ask and
-	// is assembled from facts pinned when the ask arrived. It is never stored:
-	// a run resumed after approval rebuilds the same text from the same facts.
+	// is assembled from facts pinned when the ask arrived. It is never
+	// stored: one run assembles it once, from the facts it was given.
 	promptFacts := rc.promptFacts
 	msgs := make([]assistant.Message, 0, 8)
 	msgs = append(msgs, assistant.Message{
@@ -1509,15 +1460,14 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		h.pendingRunsMu.Unlock()
 	}
 
-	// The deltas continue where the last drive of this run stopped: a
-	// resumed run is one answer, numbered once (see askRunContext.nextSeq).
-	seq := rc.nextSeq
-	// And so does the PIECE they are landing in. A resume writes the
-	// continuation of the prose the question interrupted, not a second run of
-	// prose beside it, so the open block crosses the suspension with the
-	// numbering (askRunContext.prose). Empty on a fresh run and after every
-	// tool call: the first delta then opens the next block.
-	prose := rc.prose
+	// One drive, one answer, numbered from zero. A person's question blocks
+	// the call that asked (ADR-anntnxdj §3), so nothing interrupts this
+	// stream and nothing resumes it: the numbering has one owner.
+	seq := 0
+	// The piece of prose the deltas are landing in: empty at the start and
+	// after every tool call, so the first delta opens the next block
+	// (ADR-0040).
+	var prose content.ProseBlock
 	ctx = assistant.WithWireIdentity(ctx, strconv.FormatInt(rc.runID, 10), rc.entryID)
 	ctx = assistant.WithWireToolOfferState(ctx, strconv.FormatInt(rc.runID, 10), rc.grant, rc.offerState)
 	err := h.client.Ask(ctx, assistant.AskParams{
@@ -1558,9 +1508,20 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		// the guards and runs once. It is handed over beside the store, which
 		// is the seam the kernel already received its answers through.
 		Questioner: h.approvalService(rc),
-		RunID:      strconv.FormatInt(rc.runID, 10),
-		SessionID:  string(rc.sessionID),
-		Attempt:    rc.attempt,
+		// And the fresh grant after an answer (ADR-anntnxdj §3): the policy as
+		// it stands when the person answers, minted by the same owner that
+		// minted the run's admission grant — the composition root's, over this
+		// session's overlay — so "allow in this session" reaches the very call
+		// that was just answered.
+		FreshGrant: func() *content.Grant {
+			if h.grantFor == nil {
+				return nil
+			}
+			return h.grantFor(string(rc.sessionID))
+		},
+		RunID:     strconv.FormatInt(rc.runID, 10),
+		SessionID: string(rc.sessionID),
+		Attempt:   rc.attempt,
 		// The turn every entry this run causes is joined to (nocx-h1l4o).
 		// It comes off the SAME askRunContext the run id does — both were
 		// set from one SubmitAgentAsk result — so the relation is written
@@ -1751,26 +1712,6 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	})
 	streamErr = err
 	if err != nil {
-		// A suspension is NOT a failure (criterion 1): the policy or the
-		// egress gate asked a person a question, and the run remains open.
-		var apErr *assistant.ApprovalRequestedError
-		var egErr *assistant.EgressRequestedError
-		if errors.As(err, &apErr) && apErr.Request != nil {
-			suspensionTool = apErr.Request.Tool
-			suspensionEffect = string(apErr.Request.Effect)
-			recordRequested(apErr.Request.CallID)
-			emitStreamEnded()
-			h.suspendForApproval(ctx, rc, r, seq, prose, apErr.Request, nil)
-			return
-		}
-		if errors.As(err, &egErr) && egErr.Request != nil {
-			suspensionTool = egErr.Request.Tool
-			suspensionEffect = string(egErr.Request.Effect)
-			recordRequested(egErr.Request.CallID)
-			emitStreamEnded()
-			h.suspendForApproval(ctx, rc, r, seq, prose, nil, egErr.Request)
-			return
-		}
 		reason, sentence := classifyAskFailure(err, rc.model)
 		h.log.Warn("agent ask: the run failed",
 			"run", rc.runID, "reason", string(reason), "sentence", sentence,
@@ -1781,114 +1722,6 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	}
 	emitStreamEnded()
 	h.terminalize(ctx, rc, content.RunCompleted, content.TermCompleted, "", r)
-}
-
-// suspendForApproval moves the run to awaiting_approval and sends the
-// question. The DURABLE state is the honest part (criterion 4): a
-// reconnecting renderer reads awaiting_approval — distinguishable from a run
-// NOT terminalized: the person's answer resumes it — a yes, or a policy no
-// whose refusal is the call's result (nocx-uvac6.1); only an egress no
-// terminalizes it (agent-declined).
-//
-// The run control owns the live-view drop count across every suspension and
-// resume. nextSeq crosses the same boundary because since nocx-igu4y the
-// resume CONTINUES the answer instead of re-rolling it, so its deltas must be
-// numbered after these, not over them.
-//
-// prose crosses with it, and for the identical reason one step further in
-// (ADR-0040): a resume that continues the answer continues the PIECE of it
-// that was open, so the block the interrupted stream was writing into is
-// handed to the next drive rather than left behind for a second block to be
-// opened beside it. A run suspended before it said anything carries the zero
-// block, which is "nothing is open" — the resume's first delta then opens the
-// first one, exactly as a fresh run would.
-func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext, r Responder, nextSeq int, prose content.ProseBlock, ap *assistant.ApprovalRequest, eg *assistant.EgressRequest) {
-	if rc.control != nil {
-		// Declared HERE and nowhere else, for the reason terminalize's
-		// release is: outside this branch there is no event to release, and
-		// a no-op standing in for one is a release that silently does
-		// nothing the day the branch is restructured.
-		releaseEvent := rc.control.beginEvent()
-		if releaseEvent == nil {
-			h.terminalize(ctx, rc, content.RunCancelled, content.TermUserKilled,
-				"the person stopped this answer", r)
-			return
-		}
-		defer releaseEvent()
-	}
-	if err := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
-		return svc.TransitionRun(ctx, rc.runID, content.RunAwaitingApproval)
-	}); err != nil {
-		// The transition was refused: the run is already terminal (closed
-		// by another path). The question is moot; nothing to render.
-		return
-	}
-	var n agentApprovalRequested
-	if ap != nil {
-		// The same builder the blocking service publishes through, so the
-		// surface cannot tell which ending asked (nocx-a62cl.3.1).
-		n = policyQuestion(ap)
-	} else {
-		n.RunID, n.Attempt, n.Tool, n.CallID, n.ArgHash, n.Arguments = eg.RunID, eg.Attempt, eg.Tool, eg.CallID, eg.ArgHash, eg.Arguments
-		n.Reason, n.WasError, n.Findings = "egress", eg.WasError, eg.Findings
-		// The egress arm fills the same two fields off the same
-		// declaration: the surface ignores them here, but the wire is not
-		// two shapes and the schema requires the effect on both.
-		n.Effect, n.Resource = string(eg.Effect), eg.Resource
-		n.Standing = agentApprovalStanding{Reason: "standing answers are not offered for result disclosure"}
-	}
-	// Carry the gate that asked across the suspension. agent.approve refuses
-	// a standing answer to an egress question, and by then only this record
-	// remembers which of the two gates produced it. Delta drops stay on the
-	// run control, whose lifetime already spans every resume.
-	h.pendingRunsMu.Lock()
-	if stored, ok := h.pendingRuns[rc.runID]; ok {
-		stored.nextSeq = nextSeq
-		stored.prose = prose
-		stored.pendingReason = n.Reason
-		h.pendingRuns[rc.runID] = stored
-	}
-	h.pendingRunsMu.Unlock()
-	// The pending record is the wire's source of truth for criterion 7. The
-	// middleware records it at escalation in the real flow; the transport
-	// records it here when the wire received the question without it (a
-	// suspension that surfaced by any path) — and NEVER overwrites the
-	// middleware's record, which carries the proposal's ledger entry id the
-	// approved resume must run as a subsequent attempt of.
-	proposal := assistant.Approval{
-		RunID: n.RunID, Attempt: n.Attempt, Tool: n.Tool, CallID: n.CallID, ArgHash: n.ArgHash,
-		Effect: content.Effect(n.Effect),
-	}
-	if ap != nil {
-		proposal.Invocation = ap.Invocation
-		proposal.CommandInvocation = ap.CommandInvocation
-		proposal.OutOfScope = ap.OutOfScope
-	}
-	if !h.approvals.IsPending(proposal) {
-		if ap != nil {
-			proposal.EntryID = ap.EntryID
-		}
-		h.approvals.Request(proposal)
-	}
-	// And the effect, unconditionally — including onto the record the
-	// middleware already made, which is the ORDINARY path. The middleware
-	// records the proposal at escalation, where the store call carries the
-	// binding and the ledger entry; the effect only reaches here, off the
-	// same declaration the notification is built from. Noting it inside the
-	// branch above would leave the effect recorded in exactly the flows a
-	// scripted-suspension test exercises and missing in the real one, which
-	// is a green suite over an "always" that writes no row.
-	h.approvals.NoteEffect(proposal)
-	// And the out-of-scope fact, for the same reason and by the same rule: a
-	// suspension that reached the wire without the middleware's own record
-	// would otherwise offer a widening nothing remembers how to apply. A nil
-	// fact notes nothing.
-	h.approvals.NoteOutOfScope(proposal)
-	if ap != nil {
-		invocation, hasInvocation, commandInvocation := h.approvals.InvocationFor(proposal)
-		n.Standing = standingOffer(invocation, hasInvocation, commandInvocation, proposal.Effect)
-	}
-	_ = r.TryNotify("agent.approvalRequested", mustMarshal(n))
 }
 
 // handleCancel stops one prepared, streaming or awaiting-approval assistant
@@ -1946,12 +1779,12 @@ func (h agentHandlers) handleCancel(ctx context.Context, req jsonrpcRequest) {
 }
 
 // handleApprove answers agent.approve — the person's decision on one exact
-// proposal (design §7.2, acceptance criteria 2, 7, 8). Yes resumes the run
-// as a NEW attempt of the same entry (the middleware runs the approved call
-// as the proposal's subsequent attempt); no (nocx-uvac6.1) resumes the run
-// with the refusal as that call's result — except on the egress gate, where
-// a no ends the run as agent-declined. A stale or unknown approval id is
-// answered honestly and resumes nothing.
+// proposal (design §7.2, acceptance criteria 2, 7, 8). The answer WAKES the
+// very call that asked (ADR-anntnxdj §3): a yes lets it go on and run as the
+// proposal's subsequent attempt, and a no (nocx-uvac6.1) is that call's
+// result — except on the egress gate, where the pipeline ends the run because
+// a withheld result has nothing to continue with. A stale or unknown approval
+// id is answered honestly and wakes nothing.
 func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 	if h.op == nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "method not found: content store not wired"})
@@ -1982,9 +1815,6 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: runId must be the backend-minted run id"})
 		return
 	}
-	// The person's answer belongs to the run's exchange, not to a new one:
-	// the resume and everything it drives log under the ask's trace.
-	ctx, _ = log.StartTrace(ctx, runTrace(runID))
 	h.pendingRunsMu.Lock()
 	rc, ok := h.pendingRuns[runID]
 	h.pendingRunsMu.Unlock()
@@ -2014,17 +1844,25 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 	// the only one that may settle the store: the wait is taken BEFORE any
 	// write, and every path that refuses the answer below settles it as
 	// unanswered rather than leaving the call waiting for a decision the
-	// server did not record. A nil wait is the adapter's suspension path —
-	// the answer starts a new drive there, exactly as before.
+	// server did not record. A nil wait names no question this run is
+	// waiting on — a stale binding, or an answer to a question already
+	// answered — and is refused.
 	wait := h.takeAnswerWait(runID, ap)
-	waitSettled := false
-	if wait != nil {
-		defer func() {
-			if !waitSettled {
-				wait.settle(assistant.Unanswered{Err: errors.New("the server could not record the answer, so the call was refused")})
-			}
-		}()
+	if wait == nil {
+		_ = h.r.TryError(req.ID, RPCError{
+			Code:    -32602,
+			Message: "Invalid params: unknown approval — no call is waiting on this binding",
+		})
+		return
 	}
+	waitSettled := false
+	waitRestored := false
+	defer func() {
+		if waitSettled || waitRestored {
+			return
+		}
+		wait.settle(assistant.Unanswered{Err: errors.New("the server could not record the answer, so the call was refused")})
+	}()
 	if !p.Approved {
 		// "No, and widen it" is not an answer anybody can mean: the widening
 		// answer IS an approval. Refused rather than silently read as a
@@ -2044,21 +1882,11 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 		// write, so a responder that loses the race cannot mutate policy or
 		// resume a run it no longer owns.
 		//
-		// The EGRESS gate is the one decline that still ends the run: its
-		// question is whether the withheld result may LEAVE for the
-		// provider, and a no means it never will — there is no result to
-		// continue with. The withheld bytes are dropped and the run closes
-		// as agent-declined, which is what "refuse and ask" (design §7.1)
-		// means at its other end. This is deliberate: the refusal-as-result
-		// contract is for calls that did not run, and an egress decline is
-		// about a result that DID run but will not be sent.
-		if rc.pendingReason == "egress" {
-			h.approvals.ClearRetained(ap)
-			h.terminalize(ctx, rc, content.RunFailed, content.TermAgentDeclined,
-				"the person declined to send the result to the model", h.r)
-			_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunFailed)}))
-			return
-		}
+		// An EGRESS decline is the one no that ENDS the run, and the call
+		// that asked is what ends it: the pipeline's ScreenDeclinedError
+		// reaches the stream, which closes the run as agent-declined. The
+		// answer below settles the wait like any other no; the assistant is
+		// what knows a withheld result has nothing to continue with.
 		if !h.approvals.Decline(ap, declineKindForScope(p.Scope)) {
 			// The pending check passed but the decline lost the race
 			// (another connection answered first). Honest refusal: no
@@ -2094,29 +1922,17 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 		if msg := h.notifyStandingAnswer(ap, p, outcome, rc); msg != "" {
 			warning = msg
 		}
-		if wait != nil {
-			// The call that asked is waiting: the no reaches IT, in the
-			// person's own words, and the model goes on in the same stream.
-			waitSettled = wait.settle(assistant.Declined{
-				Reason: assistant.PersonDeclineResult(p.Tool, declineKindForScope(p.Scope)),
-			})
-			_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunStreaming), Warning: warning}))
-			return
-		}
-		runCtx, cancelRun := h.detachedRunContext(ctx)
-		if rej := h.askSub.TrySubmit(runCtx, control.Task{Run: func(taskCtx context.Context) {
-			defer cancelRun()
-			h.resumeRunDeclined(taskCtx, rc, h.r)
-		}}); rej != nil {
-			cancelRun()
-			h.terminalize(ctx, rc, content.RunFailed, content.TermFailed,
-				"too many answers in flight — try again in a moment", h.r)
-			_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunFailed), Warning: warning}))
-			return
-		}
+		// The call that asked is waiting: the no reaches IT, in the person's
+		// own words, and the model goes on in the same stream — except on the
+		// egress arm, where the pipeline knows a withheld result has nothing
+		// to continue with and ends the run.
+		waitSettled = wait.settle(assistant.Declined{
+			Reason: assistant.PersonDeclineResult(p.Tool, declineKindForScope(p.Scope)),
+		})
 		_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunStreaming), Warning: warning}))
 		return
 	}
+
 	// The offer is what makes the widening answer legitimate, and it is
 	// checked BEFORE the proposal is settled: an answer to a question that
 	// never offered it must leave the question exactly as it was.
@@ -2149,6 +1965,12 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 			// differently if they like — and this is therefore the one
 			// answer that is REFUSED rather than warned about.
 			h.approvals.Revoke(ap)
+			// The question is still OPEN: put the wait back where the call
+			// is blocking on it, so the person answers again rather than
+			// being refused for the store's failure. The call has not been
+			// woken with anything, and no second one can claim this wait.
+			h.restoreAnswerWait(runID, wait, rc.pendingReason)
+			waitRestored = true
 			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: msg})
 			return
 		}
@@ -2168,28 +1990,9 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 			warning = msg
 		}
 	}
-	if wait != nil {
-		// The call that asked is waiting: the yes reaches IT, and the guards
-		// that follow read the answer and the evidence as they stand now.
-		waitSettled = wait.settle(assistant.Approved{})
-		_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunStreaming), Warning: warning}))
-		return
-	}
-	// The resume: the same run, the same stream context, the same binding —
-	// the middleware sees the approval and runs the call as the proposal's
-	// SUBSEQUENT attempt. The approval store is passed again, so the yes
-	// crosses the suspension.
-	runCtx, cancelRun := h.detachedRunContext(ctx)
-	if rej := h.askSub.TrySubmit(runCtx, control.Task{Run: func(taskCtx context.Context) {
-		defer cancelRun()
-		h.resumeRun(taskCtx, rc, h.r)
-	}}); rej != nil {
-		cancelRun()
-		h.terminalize(ctx, rc, content.RunFailed, content.TermFailed,
-			"too many answers in flight — try again in a moment", h.r)
-		_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunFailed), Warning: warning}))
-		return
-	}
+	// The call that asked is waiting: the yes reaches IT, and the guards that
+	// follow read the answer and the evidence as they stand now.
+	waitSettled = wait.settle(assistant.Approved{})
 	_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunStreaming), Warning: warning}))
 }
 
@@ -2424,40 +2227,6 @@ func (h agentHandlers) notifyStandingAnswer(ap assistant.Approval, p approvePara
 // because the turn no longer can.
 const receiptWithoutTurnWarning = "the answer was saved, but this turn could not be told about it — you can see and undo it in Manage permissions"
 
-// resumeRun re-drives a suspended run after the person's yes: the run
-// streams again (awaiting_approval → streaming), the Ask resumes from the
-// engine's checkpoint with the approval stored, and the stream runs to its
-// terminal state like any other.
-//
-// The grant is MINTED AGAIN here (nocx-v94ne), and that is the whole of what
-// makes "allow in this session" mean anything inside the run it was given
-// in. The run's grant was minted once, when the question was asked; the
-// answer that follows writes the session overlay (applyStandingAnswer →
-// sessionPolicyStore), and a grant minted before that write cannot see it.
-// So every further call of the same effect class in the same run asked
-// again — which is exactly what the person's answer said to stop doing.
-//
-// ADR-0020 §5 forbids MUTATING a running grant, and this does not: rc is
-// this function's own copy, nothing running holds it, and the middleware
-// for the resumed attempt is built fresh from the new value. ADR-0028 says
-// it in as many words — approval resumes "as a new attempt with a new
-// grant". The approval BINDING is untouched: its Attempt still names the
-// interrupted proposal, which is what the person answered about.
-func (h agentHandlers) resumeRun(ctx context.Context, rc askRunContext, r Responder) {
-	if h.grantFor != nil {
-		rc.grant = h.grantFor(string(rc.sessionID))
-	}
-	if err := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
-		return svc.TransitionRun(ctx, rc.runID, content.RunStreaming)
-	}); err != nil {
-		// The move was refused: the run is already terminal (closed by
-		// another path). Nothing to resume; the approval stands harmless.
-		return
-	}
-	rc.resumed = true
-	h.runAskStream(ctx, rc, r)
-}
-
 // validateAgentApproveRaw checks agent.approve's params BEFORE the handler
 // runs (registration.go — the ONE place params are checked): the full
 // binding — run, attempt, tool, call id, argument hash — is required and
@@ -2504,29 +2273,6 @@ func validateAgentCancelRaw(raw json.RawMessage) string {
 		return "runId must be the backend-minted run id"
 	}
 	return ""
-}
-
-// resumeRunDeclined is resumeRun for the person's NO (nocx-uvac6.1). The
-// grant is deliberately NOT re-minted here, and that is the point: the
-// standing half of a no has already written the matrix row / session overlay
-// (applyStandingAnswer), and a re-minted grant would REFUSE the effect the
-// suspended call belongs to — which undeclares its tool (ADR-0028 decision
-// 3: a refused effect is never declared), and an undeclared tool is a
-// checkpoint whose branch nobody can restore. The declined record IS the
-// run's authority for the call it was given on — and for a standing no, for
-// every retry of the same effect class in this run (DeclinedEffect) — so
-// the refusal is enforced at the middleware with the person's own sentence,
-// while the written row governs the runs that come after this one.
-func (h agentHandlers) resumeRunDeclined(ctx context.Context, rc askRunContext, r Responder) {
-	if err := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
-		return svc.TransitionRun(ctx, rc.runID, content.RunStreaming)
-	}); err != nil {
-		// The move was refused: the run is already terminal (closed by
-		// another path). Nothing to resume; the decline stands harmless.
-		return
-	}
-	rc.resumed = true
-	h.runAskStream(ctx, rc, r)
 }
 
 // declineKindForScope maps the wire's answer scope to the declined record's
@@ -2577,14 +2323,11 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, state 
 		}
 		state, reason, sentence, wireError = rc.control.cancelOutcome()
 	}
-	// The run is closing: nothing may resume it. Drop the stored stream
-	// context so a late agent.approve finds no pending question — and the
-	// engine's continuation with it (nocx-igu4y). Ask drops its own
-	// checkpoint on every terminal outcome IT returns from; this is the
-	// one funnel for the outcomes it does not — the person declined, the
-	// stream could not be submitted, the run was closed while its question
-	// was still open. A checkpoint nobody may resume is a copy of the
-	// run's messages held for the life of the process.
+	// The run is closing: nothing may wake a call it accepted. Drop the
+	// stored stream context so a late agent.approve finds no open question.
+	// Ask drops its own per-run state on every outcome IT returns from; this
+	// is the one funnel for the outcomes it does not — the run was closed
+	// while its question was still open.
 	h.pendingRunsMu.Lock()
 	delete(h.pendingRuns, rc.runID)
 	h.pendingRunsMu.Unlock()
@@ -2715,6 +2458,14 @@ func classifyAskFailure(err error, model string) (content.TerminationReason, str
 	var toolErr *assistant.ToolFailedError
 	if errors.As(err, &toolErr) {
 		return content.TermFailed, "the assistant's " + toolErr.Tool + " call did not finish: " + toolErr.Message()
+	}
+	// A person's no to a SCREEN's question about a result: the bytes exist
+	// and will not leave, so there is nothing to continue the call with and
+	// the run ends (ADR-anntnxdj §3). It is not a failure of the agent — it
+	// is the person's decision — and the run says so as agent-declined.
+	var declined *assistant.ScreenDeclinedError
+	if errors.As(err, &declined) {
+		return content.TermAgentDeclined, "the person declined to send the result to the model"
 	}
 	// Cause 1c: the egress gate could not inspect a tool result, so the
 	// policy withheld it and failed the run closed. This arm follows the
@@ -3211,8 +2962,8 @@ func (s *WSServer) StopRunsForRevokedAnswer(
 }
 
 // runTrace is the id of one agent exchange — the run — as every log line
-// belonging to it names it. One derivation, so the ask, the approval and
-// the resume cannot disagree about which exchange they are part of.
+// belonging to it names it. One derivation, so the ask, the question and the
+// answer cannot disagree about which exchange they are part of.
 //
 // It is DERIVED rather than minted because the exchange outlives the frame:
 // an ask parks, a person answers eight seconds later on a different request,

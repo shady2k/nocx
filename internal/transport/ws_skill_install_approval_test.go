@@ -39,9 +39,9 @@ const approvalInstallSupport = "Step one. Step two.\n"
 // installSuspension is the question this file is about: a skills.install
 // proposal whose arguments are one address, carrying the resolution the
 // person actually decides on.
-func installSuspension(facts **assistant.ApprovalInstall, url string) func(runID string) error {
-	return func(runID string) error {
-		return &assistant.ApprovalRequestedError{Request: &assistant.ApprovalRequest{
+func installAsk(facts **assistant.ApprovalInstall, url string) func(runID string) approvalAsk {
+	return func(runID string) approvalAsk {
+		return approvalAsk{policy: &assistant.ApprovalRequest{
 			RunID: runID, Attempt: 1, Tool: "skills.install", CallID: "call_1",
 			Arguments: `{"url":"` + url + `"}`,
 			ArgHash:   "hash-a",
@@ -51,9 +51,9 @@ func installSuspension(facts **assistant.ApprovalInstall, url string) func(runID
 	}
 }
 
-func installSetSuspension(facts **assistant.ApprovalInstall, arguments string) func(runID string) error {
-	return func(runID string) error {
-		return &assistant.ApprovalRequestedError{Request: &assistant.ApprovalRequest{
+func installSetAsk(facts **assistant.ApprovalInstall, arguments string) func(runID string) approvalAsk {
+	return func(runID string) approvalAsk {
+		return approvalAsk{policy: &assistant.ApprovalRequest{
 			RunID: runID, Attempt: 1, Tool: "skills.install", CallID: "call_1",
 			Arguments: arguments,
 			ArgHash:   "hash-a",
@@ -154,7 +154,7 @@ func TestAgentApprovalRequested_InstallSetOverTheWireConformsToContract(t *testi
 	schema := loadSchema(t, "agent.approvalRequested.schema.json")
 	facts := resolvedInstallSet(t)
 	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{suspend: installSetSuspension(&facts, `{"handle":"resolution-1","paths":["deploy/SKILL.md"]}`)},
+		{ask: installSetAsk(&facts, `{"handle":"resolution-1","paths":["deploy/SKILL.md"]}`)},
 	}}
 	h := newScriptHarness(t, client)
 
@@ -215,7 +215,7 @@ func TestAgentApprovalRequested_InstallOverTheWireConformsToContract(t *testing.
 	schema := loadSchema(t, "agent.approvalRequested.schema.json")
 	facts, url := resolvedInstall(t)
 	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{suspend: installSuspension(&facts, url)},
+		{ask: installAsk(&facts, url)},
 	}}
 	h := newScriptHarness(t, client)
 
@@ -300,7 +300,7 @@ func TestAgentApprovalRequested_InstallOverTheWireConformsToContract(t *testing.
 func TestAgentApprovalRequested_NoInstallIsNoFieldOnTheWire(t *testing.T) {
 	var none []assistant.ScriptReading
 	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{suspend: scriptSuspension(&none)},
+		{ask: scriptAsk(&none)},
 	}}
 	h := newScriptHarness(t, client)
 	if _, errObj := askOverWire(t, h.conn, map[string]any{

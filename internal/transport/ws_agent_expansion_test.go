@@ -16,9 +16,9 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 )
 
-func expansionSuspension(facts *assistant.ExpansionFacts) func(runID string) error {
-	return func(runID string) error {
-		return &assistant.ApprovalRequestedError{Request: &assistant.ApprovalRequest{
+func expansionAsk(facts *assistant.ExpansionFacts) func(runID string) approvalAsk {
+	return func(runID string) approvalAsk {
+		return approvalAsk{policy: &assistant.ApprovalRequest{
 			RunID: runID, Attempt: 1, Tool: "session.run", CallID: "call_1",
 			Arguments: `{"command":"rm -rf $HOME/x $(id -u)","sessionId":"s"}`,
 			ArgHash:   "hash-a",
@@ -98,7 +98,7 @@ func TestAgentApprovalRequested_ExpansionDTOConformsToContract(t *testing.T) {
 func TestAgentApprovalRequested_ExpansionOverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "agent.approvalRequested.schema.json")
 	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{suspend: expansionSuspension(askedExpansionFacts())},
+		{ask: expansionAsk(askedExpansionFacts())},
 	}}
 	h := newAskHarness(t, client)
 	h.createEndpoint()
@@ -154,7 +154,7 @@ func TestAgentApprovalRequested_ExpansionOverTheWireConformsToContract(t *testin
 // simply been unable to read.
 func TestAgentApprovalRequested_NotAskedIsItsOwnStateOnTheWire(t *testing.T) {
 	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{suspend: expansionSuspension(unaskedExpansionFacts())},
+		{ask: expansionAsk(unaskedExpansionFacts())},
 	}}
 	h := newAskHarness(t, client)
 	h.createEndpoint()

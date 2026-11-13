@@ -60,7 +60,7 @@ type runSnapshot struct {
 // snapshot exists from the first fetch of a URL in a run until that run
 // terminalizes; Discard is the closing event. It is mutex-guarded because one
 // assistant client serves concurrent runs. Nothing is persisted: a restart
-// legitimately loses suspended snapshots, just as it loses checkpoints.
+// legitimately loses the run's snapshots.
 type runSnapshots struct {
 	mu   sync.Mutex
 	next uint64

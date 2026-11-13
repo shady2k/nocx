@@ -58,31 +58,18 @@ func invokeApproved(t *testing.T, library SkillLibrary, tool, callID, args strin
 		t.Fatalf("Assemble: %v", err)
 	}
 	approvals := NewApprovalStore()
-	newKernel := func() *effectKernel {
-		k, kErr := newEffectKernel(nil, grant, reg, &fakeLedger{}, approvals, &fakeKnownMaterial{},
-			"run-tool-failure", "session-tool-failure", 1, "", nil, Attachments{}, nil, nil,
-			toolSeams{skills: library})
-		if kErr != nil {
-			t.Fatalf("newEffectKernel: %v", kErr)
-		}
-		return k
+	q := &recordingQuestioner{store: approvals, answer: Approved{}}
+	k, kErr := newEffectKernel(nil, grant, reg, &fakeLedger{}, approvals, &fakeKnownMaterial{},
+		"run-tool-failure", "session-tool-failure", 1, "", nil, Attachments{}, nil, nil,
+		toolSeams{skills: library, questioner: q})
+	if kErr != nil {
+		t.Fatalf("newEffectKernel: %v", kErr)
 	}
-
-	_, err = newKernel().Invoke(context.Background(), tool, callID, args)
-	var asked *ApprovalRequestedError
-	if !errors.As(err, &asked) || asked.Request == nil {
-		t.Fatalf("first pass error = %v, want the approval suspension %s asks for", err, tool)
+	out, err := k.Invoke(context.Background(), tool, callID, args)
+	if len(q.asked) != 1 {
+		t.Fatalf("the person was asked %d times, want the approval %s asks for", len(q.asked), tool)
 	}
-	if !approvals.Approve(Approval{
-		RunID:   asked.Request.RunID,
-		Attempt: asked.Request.Attempt,
-		Tool:    asked.Request.Tool,
-		CallID:  asked.Request.CallID,
-		ArgHash: asked.Request.ArgHash,
-	}) {
-		t.Fatal("the exact proposal the kernel asked about was not pending")
-	}
-	return newKernel().Invoke(context.Background(), tool, callID, args)
+	return out, err
 }
 
 // A forge that answers 504 is the case skills.resolve's own declaration

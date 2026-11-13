@@ -44,13 +44,13 @@ func readResult(path, text string) string {
 }
 
 // TestAsk_EgressScreensAResultThatFailsItsContract is the coordinator's note
-// on this task: a result that fails its result schema returns from
-// executePrepared before any Screen runs, and the schema diagnostic quotes the
-// result's own property names. Here the extra property IS the vault's value,
-// so the diagnostic reported as it comes would carry the material the screen
-// exists to withhold. The assertions are both ends: the screen sees the
-// invalid bytes first (nothing leaves, the person is asked), and the failure
-// finally reported names the tool and not the result.
+// on the egress screen: a result that fails its result schema must pass the
+// Screens too, and the schema diagnostic quotes the result's own property
+// names. Here the extra property IS the vault's value, so the diagnostic
+// reported as it comes would carry the material the screen exists to withhold.
+// The assertions are both ends: the screen sees the invalid bytes first
+// (nothing leaves until the person answers), and the failure finally reported
+// names the tool and not the result.
 func TestAsk_EgressScreensAResultThatFailsItsContract(t *testing.T) {
 	grant, dir := testDirGrant(t, autonomousMatrix())
 	const secret = "known-secret-value-123"
@@ -78,18 +78,28 @@ func TestAsk_EgressScreensAResultThatFailsItsContract(t *testing.T) {
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
+	q := &recordingQuestioner{store: approvals, answer: Approved{}}
+	q.before = func() {
+		if n := f.requests.Load(); n != 1 {
+			t.Errorf("the model made %d requests while the result was withheld, want 1", n)
+		}
+	}
 	p := askParamsWith(srv.URL, &grant, ledger, approvals, &knownMatcher{value: secret, name: "github-token"}, nil)
 	p.RunID, p.Attempt = "run-1", 1
+	p.Questioner = q
 
-	// Pass 1: the invalid bytes are screened, and the finding suspends the run
-	// before any diagnostic is reported.
+	// The person approves sending those exact bytes; the result still fails
+	// its contract, and the reported failure carries no result content.
 	err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil })
-	var suspended *EgressRequestedError
-	if !errors.As(err, &suspended) {
-		t.Fatalf("Ask error = %v, want the egress suspension — an invalid result must pass the Screens too, not return before them", err)
+	var failed *ToolFailedError
+	if !errors.As(err, &failed) {
+		t.Fatalf("Ask = %v, want the result-contract failure", err)
 	}
-	if len(suspended.Request.Findings) != 1 || suspended.Request.Findings[0].Source != EgressFindingKnown {
-		t.Fatalf("findings = %+v, want the vault's value found in the invalid result", suspended.Request.Findings)
+	if len(q.egressAsked) != 1 {
+		t.Fatalf("the person was asked %d egress questions, want exactly 1", len(q.egressAsked))
+	}
+	if findings := q.egressAsked[0].Findings; len(findings) != 1 || findings[0].Source != EgressFindingKnown {
+		t.Fatalf("findings = %+v, want the vault's value found in the invalid result", findings)
 	}
 	if runs != 1 {
 		t.Fatalf("the tool's body ran %d times, want exactly 1", runs)
@@ -97,35 +107,18 @@ func TestAsk_EgressScreensAResultThatFailsItsContract(t *testing.T) {
 	if n := f.requests.Load(); n != 1 {
 		t.Fatalf("the model made %d requests, want 1 — the invalid result never left for the provider", n)
 	}
-
-	// The person approves sending those exact bytes.
-	ap := Approval{RunID: "run-1", Attempt: 1, Tool: "files.read", CallID: "call_1", ArgHash: canonicalArgHash(args)}
-	if !approvals.Approve(ap) {
-		t.Fatal("the egress proposal was not pending")
-	}
-
-	// Pass 2: the retained bytes are released, they still fail the contract,
-	// and the reported failure carries no result content.
-	err = cl.Ask(context.Background(), p, func(AskEvent) error { return nil })
-	var failed *ToolFailedError
-	if !errors.As(err, &failed) {
-		t.Fatalf("the approved resume = %v, want the result-contract failure", err)
-	}
 	if strings.Contains(err.Error(), secret) {
 		t.Fatalf("the failure carried the result's own content: %v", err)
 	}
 	if strings.Contains(failed.Message(), secret) {
 		t.Fatalf("the model-facing message carried the result's own content: %q", failed.Message())
 	}
-	if runs != 1 {
-		t.Fatalf("the tool's body ran %d times, want 1 — an approval releases the retained bytes and never re-runs the tool", runs)
-	}
 }
 
 // TestAsk_ApprovingAHeldResultReleasesTheExactBytesOnce is the DONE WHEN's
 // second assertion at the model's own seam: the withheld result is released
-// byte for byte to the provider on the approved resume, and the tool's body is
-// entered exactly once across both passes.
+// byte for byte to the provider on the person's yes, and the tool's body is
+// entered exactly once — the question blocks the call, so nothing re-runs.
 func TestAsk_ApprovingAHeldResultReleasesTheExactBytesOnce(t *testing.T) {
 	grant, dir := testDirGrant(t, autonomousMatrix())
 	const secret = "known-secret-value-123"
@@ -157,24 +150,19 @@ func TestAsk_ApprovingAHeldResultReleasesTheExactBytesOnce(t *testing.T) {
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
+	q := &recordingQuestioner{store: approvals, answer: Approved{}}
 	p := askParamsWith(srv.URL, &grant, ledger, approvals, &knownMatcher{value: secret, name: "github-token"}, nil)
 	p.RunID, p.Attempt = "run-1", 1
-
-	err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil })
-	var suspended *EgressRequestedError
-	if !errors.As(err, &suspended) {
-		t.Fatalf("Ask error = %v, want the egress suspension", err)
-	}
-	ap := Approval{RunID: "run-1", Attempt: 1, Tool: "files.read", CallID: "call_1", ArgHash: canonicalArgHash(args)}
-	if !approvals.Approve(ap) {
-		t.Fatal("the egress proposal was not pending")
-	}
+	p.Questioner = q
 
 	if err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); err != nil {
-		t.Fatalf("the approved egress resume failed: %v", err)
+		t.Fatalf("the approved egress call failed: %v", err)
+	}
+	if len(q.egressAsked) != 1 {
+		t.Fatalf("the person was asked %d egress questions, want exactly 1", len(q.egressAsked))
 	}
 	if runs != 1 {
-		t.Fatalf("the tool's body ran %d times, want exactly 1 — the approval releases the retained bytes", runs)
+		t.Fatalf("the tool's body ran %d times, want exactly 1 — the approval releases the exact bytes and never re-runs the tool", runs)
 	}
 	var sent struct {
 		Messages []struct {
@@ -192,10 +180,7 @@ func TestAsk_ApprovingAHeldResultReleasesTheExactBytesOnce(t *testing.T) {
 		}
 	}
 	if !strings.Contains(toolContent, held) {
-		t.Fatalf("the model received %q, want the retained result byte for byte", toolContent)
-	}
-	if _, _, retained := approvals.RetainedResult(ap); retained {
-		t.Fatal("the retained result survived its release")
+		t.Fatalf("the model received %q, want the withheld result byte for byte", toolContent)
 	}
 }
 

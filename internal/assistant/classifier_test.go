@@ -236,16 +236,18 @@ func TestAsk_ClassifierSuspectEscalatesPermittedCall(t *testing.T) {
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
-	err := cl.Ask(context.Background(),
-		askParamsWithClassifier(askParams(ansSrv.URL, &grant, ledger, nil), fixedResolver{classifierTargetAt(clfSrv.URL)}),
-		func(AskEvent) error { return nil })
-
-	var want *ApprovalRequestedError
-	if !errors.As(err, &want) {
-		t.Fatalf("Ask error = %v, want the approval suspension (the classifier escalated)", err)
+	approvals := NewApprovalStore()
+	q := &recordingQuestioner{store: approvals, answer: Declined{Reason: "not this one"}, kind: DeclineCallOnce}
+	p := askParamsWithClassifier(askParams(ansSrv.URL, &grant, ledger, approvals), fixedResolver{classifierTargetAt(clfSrv.URL)})
+	p.Questioner = q
+	if err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); err != nil {
+		t.Fatalf("Ask error = %v, want the person's no to be this call's answer", err)
 	}
-	if want.Request == nil || !strings.Contains(want.Request.Tool, "files.read") {
-		t.Fatalf("the suspension carried no binding ask: %+v", want.Request)
+	if len(q.asked) != 1 {
+		t.Fatalf("the person was asked %d times, want 1 (the classifier escalated)", len(q.asked))
+	}
+	if want := q.asked[0]; !strings.Contains(want.Tool, "files.read") {
+		t.Fatalf("the question carried no binding ask: %+v", want)
 	}
 	if n := clf.requests.Load(); n != 1 {
 		t.Fatalf("the classifier provider received %d requests, want 1", n)
@@ -272,8 +274,8 @@ func TestAsk_ClassifierSuspectEscalatesPermittedCall(t *testing.T) {
 	if !sawProposal {
 		t.Fatalf("the classifier was not asked about the exact proposal: body %s", clfBody)
 	}
-	if n := ans.requests.Load(); n != 1 {
-		t.Fatalf("the answering provider received %d requests, want 1 — the tool never ran", n)
+	if n := ans.requests.Load(); n != 2 {
+		t.Fatalf("the answering provider received %d requests, want 2 — the proposal and the answer written from the refusal, and the tool never ran", n)
 	}
 	if s := ledger.started(); s != 1 {
 		t.Fatalf("ledger opened %d executions, want 1 — the recorded proposal attempt", s)
@@ -318,9 +320,15 @@ func TestClassifier_ClearChangesNothingOnPolicyEscalation(t *testing.T) {
 	grantAsk, dir := testDirGrant(t, askEveryTimeMatrix())
 	writeFile(t, filepath.Join(dir, "a.txt"), "must not run")
 	ledgerAsk := &fakeLedger{}
-	mwAsk := middlewareForWithClassifier(t, grantAsk, ledgerAsk, nil, failIfCalledClassifier{t})
-	if _, err := wrappedEndpoint(mwAsk, "files.read", "call-ask", fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))); err == nil {
-		t.Fatal("the ask-policy call ran under a clear-classifier — its verdict changed the outcome")
+	approvalsAsk := NewApprovalStore()
+	q := &recordingQuestioner{store: approvalsAsk, answer: Declined{Reason: "not this one"}, kind: DeclineCallOnce}
+	mwAsk := middlewareForWithClassifier(t, grantAsk, ledgerAsk, approvalsAsk, failIfCalledClassifier{t})
+	mwAsk.kernel.questioner = q
+	if _, err := wrappedEndpoint(mwAsk, "files.read", "call-ask", fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))); err != nil {
+		t.Fatalf("the ask-policy call = %v, want the person's no as the call's answer", err)
+	}
+	if len(q.asked) != 1 {
+		t.Fatal("the ask-policy call was not asked — its verdict changed the outcome")
 	}
 }
 
@@ -351,15 +359,19 @@ func TestAsk_ClassifierInputKnownMaterialNeverReachesClassifier(t *testing.T) {
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
-	err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil })
-
-	var want *ApprovalRequestedError
-	if !errors.As(err, &want) {
-		t.Fatalf("Ask error = %v, want the approval suspension — the classifier could not be consulted, and the call escalated", err)
+	approvals := NewApprovalStore()
+	q := &recordingQuestioner{store: approvals, answer: Declined{Reason: "not this one"}, kind: DeclineCallOnce}
+	p.Approvals = approvals
+	p.Questioner = q
+	if err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); err != nil {
+		t.Fatalf("Ask error = %v, want the person's no to be this call's answer", err)
+	}
+	if len(q.asked) != 1 {
+		t.Fatalf("the person was asked %d times, want 1 — the classifier could not be consulted, and the call escalated", len(q.asked))
 	}
 	clfCount.assertZero(t) // the material never reached the classifier
-	if n := ans.requests.Load(); n != 1 {
-		t.Fatalf("the answering provider received %d requests, want 1", n)
+	if n := ans.requests.Load(); n != 2 {
+		t.Fatalf("the answering provider received %d requests, want 2 — the proposal and the answer written from the refusal", n)
 	}
 	block := classifierBlock(t, ledger)
 	if block == nil {
@@ -411,20 +423,22 @@ func TestClassifierUnreachableEscalates(t *testing.T) {
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
-	err := cl.Ask(context.Background(),
-		askParamsWithClassifier(askParams(ansSrv.URL, &grant, ledger, nil), fixedResolver{classifierTargetAt("http://127.0.0.1:1")}),
-		func(AskEvent) error { return nil })
-
-	var want *ApprovalRequestedError
-	if !errors.As(err, &want) {
-		t.Fatalf("Ask error = %v, want the escalation (unreachable classifier must escalate)", err)
+	approvals := NewApprovalStore()
+	q := &recordingQuestioner{store: approvals, answer: Declined{Reason: "not this one"}, kind: DeclineCallOnce}
+	p := askParamsWithClassifier(askParams(ansSrv.URL, &grant, ledger, approvals), fixedResolver{classifierTargetAt("http://127.0.0.1:1")})
+	p.Questioner = q
+	if err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); err != nil {
+		t.Fatalf("Ask error = %v, want the person's no to be this call's answer", err)
+	}
+	if len(q.asked) != 1 {
+		t.Fatalf("the person was asked %d times, want 1 — an unreachable classifier must escalate", len(q.asked))
 	}
 	block := classifierBlock(t, ledger)
 	if block == nil || !strings.Contains(fmt.Sprint(block["reason"]), "connection refused") {
 		t.Fatalf("the escalation reason does not name the failure: %v", block)
 	}
-	if n := ans.requests.Load(); n != 1 {
-		t.Fatalf("the answering provider received %d requests, want 1 — the tool never ran", n)
+	if n := ans.requests.Load(); n != 2 {
+		t.Fatalf("the answering provider received %d requests, want 2 — the proposal and the answer written from the refusal, and the tool never ran", n)
 	}
 }
 
@@ -437,9 +451,14 @@ func TestClassifierTimeoutEscalates(t *testing.T) {
 	args := fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))
 
 	ledger := &fakeLedger{}
-	mw := middlewareForWithClassifier(t, grant, ledger, nil, &recordingClassifier{err: context.DeadlineExceeded})
-	_, err := wrappedEndpoint(mw, "files.read", "call_1", args)
-	if err == nil {
+	approvals := NewApprovalStore()
+	q := &recordingQuestioner{store: approvals, answer: Declined{Reason: "not this one"}, kind: DeclineCallOnce}
+	mw := middlewareForWithClassifier(t, grant, ledger, approvals, &recordingClassifier{err: context.DeadlineExceeded})
+	mw.kernel.questioner = q
+	if _, err := wrappedEndpoint(mw, "files.read", "call_1", args); err != nil {
+		t.Fatalf("the escalated call = %v, want the person's no as the call's answer", err)
+	}
+	if len(q.asked) != 1 {
 		t.Fatal("a classifier that timed out cleared the call")
 	}
 	block := classifierBlock(t, ledger)
@@ -467,12 +486,15 @@ func TestAsk_ClassifierUnparseableEscalates(t *testing.T) {
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
-	err := cl.Ask(context.Background(),
-		askParamsWithClassifier(askParams(ansSrv.URL, &grant, ledger, nil), fixedResolver{classifierTargetAt(clfSrv.URL)}),
-		func(AskEvent) error { return nil })
-	var want *ApprovalRequestedError
-	if !errors.As(err, &want) {
-		t.Fatalf("Ask error = %v, want the escalation (unparseable classifier output)", err)
+	approvals := NewApprovalStore()
+	q := &recordingQuestioner{store: approvals, answer: Declined{Reason: "not this one"}, kind: DeclineCallOnce}
+	p := askParamsWithClassifier(askParams(ansSrv.URL, &grant, ledger, approvals), fixedResolver{classifierTargetAt(clfSrv.URL)})
+	p.Questioner = q
+	if err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); err != nil {
+		t.Fatalf("Ask error = %v, want the person's no to be this call's answer", err)
+	}
+	if len(q.asked) != 1 {
+		t.Fatalf("the person was asked %d times, want 1 — an unparseable classifier output must escalate", len(q.asked))
 	}
 	block := classifierBlock(t, ledger)
 	if block == nil || !strings.Contains(fmt.Sprint(block["reason"]), "verdict") {
@@ -495,20 +517,23 @@ func TestClassifierRoleUnassignedEscalates(t *testing.T) {
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
-	err := cl.Ask(context.Background(),
-		askParamsWithClassifier(askParams(ansSrv.URL, &grant, ledger, nil),
-			failingResolver{err: errors.New("classifier role: no model assigned")}),
-		func(AskEvent) error { return nil })
-	var want *ApprovalRequestedError
-	if !errors.As(err, &want) {
-		t.Fatalf("Ask error = %v, want the escalation (role-unassigned must escalate)", err)
+	approvals := NewApprovalStore()
+	q := &recordingQuestioner{store: approvals, answer: Declined{Reason: "not this one"}, kind: DeclineCallOnce}
+	p := askParamsWithClassifier(askParams(ansSrv.URL, &grant, ledger, approvals),
+		failingResolver{err: errors.New("classifier role: no model assigned")})
+	p.Questioner = q
+	if err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); err != nil {
+		t.Fatalf("Ask error = %v, want the person's no to be this call's answer", err)
+	}
+	if len(q.asked) != 1 {
+		t.Fatalf("the person was asked %d times, want 1 — a role-unassigned classifier must escalate", len(q.asked))
 	}
 	block := classifierBlock(t, ledger)
 	if block == nil || !strings.Contains(fmt.Sprint(block["reason"]), "no model assigned") {
 		t.Fatalf("the escalation reason does not name the unassigned role: %v", block)
 	}
-	if n := ans.requests.Load(); n != 1 {
-		t.Fatalf("the answering provider received %d requests, want 1", n)
+	if n := ans.requests.Load(); n != 2 {
+		t.Fatalf("the answering provider received %d requests, want 2 — the proposal and the answer written from the refusal", n)
 	}
 }
 
@@ -526,8 +551,14 @@ func TestClassifier_VerdictRecordedOnTheAttempt(t *testing.T) {
 		writeFile(t, filepath.Join(dir, "a.txt"), "x")
 		args := fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))
 		ledger := &fakeLedger{}
-		mw := middlewareForWithClassifier(t, grant, ledger, nil, classifierWithVerdict{result: Classification{Verdict: ClassifierSuspect, Model: "clf-model"}})
-		if _, err := wrappedEndpoint(mw, "files.read", "call_1", args); err == nil {
+		approvals := NewApprovalStore()
+		q := &recordingQuestioner{store: approvals, answer: Declined{Reason: "not this one"}, kind: DeclineCallOnce}
+		mw := middlewareForWithClassifier(t, grant, ledger, approvals, classifierWithVerdict{result: Classification{Verdict: ClassifierSuspect, Model: "clf-model"}})
+		mw.kernel.questioner = q
+		if _, err := wrappedEndpoint(mw, "files.read", "call_1", args); err != nil {
+			t.Fatalf("the suspect call = %v, want the person's no as the call's answer", err)
+		}
+		if len(q.asked) != 1 {
 			t.Fatal("the suspect call did not escalate")
 		}
 		block := classifierBlock(t, ledger)
@@ -664,18 +695,19 @@ func TestMiddleware_ApprovedClassifierAskSkipsReclassification(t *testing.T) {
 	ledger := &fakeLedger{}
 	approvals := NewApprovalStore()
 	clf := &recordingClassifier{result: Classification{Verdict: ClassifierSuspect}}
+	q := &recordingQuestioner{store: approvals, answer: Approved{}}
 	mw := middlewareForWithClassifier(t, grant, ledger, approvals, clf)
+	mw.kernel.questioner = q
 
-	if _, err := wrappedEndpoint(mw, "files.read", "call_1", args); err == nil {
-		t.Fatal("the suspect call did not escalate")
-	}
-	if n := clf.callCount(); n != 1 {
-		t.Fatalf("the classifier was consulted %d times, want 1", n)
-	}
-	approvals.Approve(Approval{RunID: "run-1", Attempt: 1, Tool: "files.read", CallID: "call_1", ArgHash: canonicalArgHash(args)})
 	out, err := wrappedEndpoint(mw, "files.read", "call_1", args)
 	if err != nil {
 		t.Fatalf("the approved call was refused: %v", err)
+	}
+	if len(q.asked) != 1 {
+		t.Fatal("the suspect call did not escalate")
+	}
+	if n := clf.callCount(); n != 1 {
+		t.Fatalf("the classifier was consulted %d times, want 1 — an approval covers the whole proposal", n)
 	}
 	if !strings.Contains(out, "approved") {
 		t.Fatalf("approved output = %q, want the file's contents", out)
@@ -744,18 +776,20 @@ func TestAsk_ClassifierEscalationCarriesTheEffectAndTheResource(t *testing.T) {
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
-	err := cl.Ask(context.Background(),
-		askParamsWithClassifier(askParams(ansSrv.URL, &grant, &fakeLedger{}, nil), fixedResolver{classifierTargetAt(clfSrv.URL)}),
-		func(AskEvent) error { return nil })
-
-	var want *ApprovalRequestedError
-	if !errors.As(err, &want) || want.Request == nil {
-		t.Fatalf("Ask error = %v, want the approval suspension (the classifier escalated)", err)
+	approvals := NewApprovalStore()
+	q := &recordingQuestioner{store: approvals, answer: Declined{Reason: "not this one"}, kind: DeclineCallOnce}
+	p := askParamsWithClassifier(askParams(ansSrv.URL, &grant, &fakeLedger{}, approvals), fixedResolver{classifierTargetAt(clfSrv.URL)})
+	p.Questioner = q
+	if err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); err != nil {
+		t.Fatalf("Ask error = %v, want the person's no to be this call's answer", err)
 	}
-	if want.Request.Effect != content.EffectObserve {
-		t.Fatalf("effect = %q, want %q — a classifier ask names the same effect a policy ask does", want.Request.Effect, content.EffectObserve)
+	if len(q.asked) != 1 {
+		t.Fatalf("the person was asked %d times, want 1 (the classifier escalated)", len(q.asked))
 	}
-	if want.Request.Resource == nil || want.Request.Resource.Kind != content.ResourcePath || want.Request.Resource.ID != path {
-		t.Fatalf("resource = %+v, want {path %s}", want.Request.Resource, path)
+	if want := q.asked[0]; want.Effect != content.EffectObserve {
+		t.Fatalf("effect = %q, want %q — a classifier ask names the same effect a policy ask does", want.Effect, content.EffectObserve)
+	}
+	if want := q.asked[0]; want.Resource == nil || want.Resource.Kind != content.ResourcePath || want.Resource.ID != path {
+		t.Fatalf("resource = %+v, want {path %s}", want.Resource, path)
 	}
 }

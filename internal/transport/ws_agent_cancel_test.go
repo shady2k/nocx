@@ -428,8 +428,8 @@ func TestAgentCancel_SuspendedApprovalClosesQuestion(t *testing.T) {
 	if err := json.Unmarshal(late, &lateEnv); err != nil {
 		t.Fatalf("decode late approval: %v\nraw: %s", err, late)
 	}
-	if lateEnv.Error == nil || !strings.Contains(lateEnv.Error.Message, "no pending question") {
-		t.Fatalf("late approval = %s, want no pending question", late)
+	if lateEnv.Error == nil || !strings.Contains(lateEnv.Error.Message, "unknown approval") {
+		t.Fatalf("late approval = %s, want the answer refused because no question is open", late)
 	}
 }
 

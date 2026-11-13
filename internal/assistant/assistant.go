@@ -67,17 +67,12 @@ type Client interface {
 	// stream produced no ANSWER text — reasoning alone is not an answer),
 	// and any other Go error when the ask could not run at all.
 	Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) error) error
-	// Discard drops the engine's suspended state for one run — the eino
-	// checkpoint an escalation wrote, and the interrupt it named. A run
-	// that has terminalized has no branch left to continue, and ADR-0028
-	// says a checkpoint is deleted on terminalization.
-	//
-	// Ask already does this for every terminal outcome it returns from.
-	// This is the seam for the ones it does not: the person DECLINED, or
-	// the run was closed by another path while its question was still
-	// open. Discarding a run that holds nothing does nothing, so the
-	// transport can call it from its one terminal funnel without asking
-	// whether the run ever suspended.
+	// Discard drops the process-lifetime state the engine holds for one run.
+	// Ask already does this for every outcome it returns from; this is the
+	// seam for the ones it does not — the run was closed by another path, or
+	// its call was refused while its question was still open. Discarding a
+	// run that holds nothing does nothing, so the transport can call it from
+	// its one terminal funnel without asking what the run ever held.
 	Discard(runID string)
 	// AuditSkill asks the auditing role's model to CHECK one skill's bundle
 	// and returns its reading — a verdict plus the prose that says why
@@ -148,8 +143,7 @@ type ToolCall struct {
 	// Tool is the declared tool name, e.g. "files.read".
 	Tool string
 	// CallID is the model's own id for this call. The renderer keys on it,
-	// so a call that is announced twice — an approved egress resume passes
-	// the same call through the pipeline again — renders once.
+	// so a call that is announced twice renders once.
 	CallID string
 	// Args is what the model asked for, AS VALIDATED against the tool's own
 	// schema — the object the call actually ran on, never the raw string the
@@ -340,17 +334,24 @@ type AskParams struct {
 	Fetcher apifetch.TextFetcher
 	// Approvals is the process-lifetime approval store (design §7.2): the
 	// human's yes to one exact proposal, bound to run, attempt, tool, call
-	// id and a hash of the canonical arguments. Nil disables escalation's
-	// persistence — an ask still suspends, but nothing records the answer.
+	// id and a hash of the canonical arguments. Nil disables the store: an
+	// ask is still put to the person, and the guards that read the answer
+	// find nothing recorded.
 	Approvals *ApprovalStore
 	// Questioner puts a prepared question to a person and returns their
 	// answer (ADR-anntnxdj §3, Questioner in kernel.go). The transport hands
 	// its approval service here, beside the store, and the call then BLOCKS
-	// on the answer instead of suspending: the run rests in awaiting_approval
-	// while it waits, and the answer reaches this very call. Nil is the
-	// framework path's shape — the question leaves as a suspension and an
-	// answer starts a new drive.
+	// on the answer: the run rests in awaiting_approval while it waits, and
+	// the answer reaches this very call. Nil is a caller with no person to
+	// ask, where every ask is refused.
 	Questioner Questioner
+	// FreshGrant mints the run's authority again from the policy as it stands
+	// NOW (ADR-anntnxdj §3, "refreshed after an answer"). The pipeline calls
+	// it after a person answers, and the guards and the capability of that
+	// call read what it returns. Nil is a caller with no mint: a call that
+	// waited runs on the grant minted at admission, and an expired one is
+	// refused with the sentence that says so.
+	FreshGrant func() *content.Grant
 	// KnownMaterial is the egress vault comparison (design §7.1): "the
 	// vault knows the real values, and a comparison beats any pattern." It
 	// is legitimate here precisely because it happens in the backend and
@@ -546,7 +547,6 @@ func newClientWithRegistry(logger log.Logger, reg agenttools.Registry, recorder 
 		searchSchema: schema,
 		floor:        floor,
 		approvals:    NewApprovalStore(),
-		checkpoints:  newRunCheckpoints(),
 		snapshots:    newRunSnapshots(),
 	}
 }
@@ -558,7 +558,6 @@ type client struct {
 	searchSchema []byte
 	floor        content.Floor
 
-	approvals   *ApprovalStore
-	checkpoints *runCheckpoints
-	snapshots   *runSnapshots
+	approvals *ApprovalStore
+	snapshots *runSnapshots
 }

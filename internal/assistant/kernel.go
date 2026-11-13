@@ -8,9 +8,9 @@ package assistant
 // WrapInvokableToolCall — so a second way of proposing an effect had to
 // import the framework or copy the kernel, and AD-8 forbids both in one
 // sentence: a new implementation is added "without editing a switch and
-// without copying lines". Suspension is therefore stated in OUR words —
-// Invoke returns *ApprovalRequestedError or *EgressRequestedError — and the
-// retained declared-call adapter translates that into eino's interrupt.
+// without copying lines". A question is therefore stated in OUR words — the
+// chain's Approver takes an Ask and returns an Answer, and a person's no is a
+// result — so the framework's own vocabulary never reaches this layer.
 // over the RECEIVER: no file declaring a kernel method may import eino.
 //
 // This layer SEQUENCES AND ENFORCES; it does not implement. Masking has an
@@ -36,14 +36,12 @@ package assistant
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/gob"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -240,27 +238,9 @@ func (r modelResult) forModel(frame func(string) string) string {
 	return frame(r.text)
 }
 
-// ApprovalRequestedError is what Ask returns when the run suspended for
-// human approval: the run is NOT failed — it is awaiting_approval, and
-// Request is what the approval surface renders and the resume re-validates.
-// It is exported because the transport renders it (nocx-z9hj4), matching the
-// egress gate's EgressRequestedError: a person meets one kind of question.
-type ApprovalRequestedError struct {
-	Request *ApprovalRequest
-}
-
-func (e *ApprovalRequestedError) Error() string {
-	if e.Request == nil {
-		return "agent run suspended for approval"
-	}
-	return fmt.Sprintf("agent run suspended for approval: %s %s", e.Request.Tool, e.Request.CallID)
-}
-
 // ApprovalRequest is the user-facing ask (design §7.2): what was proposed,
-// bound to the exact proposal. The surface shows it; the resume re-runs the
-// pipeline and the approval record decides. It is also the interrupt state
-// the checkpoint persists, so it is gob-registered: checkpoints are
-// serialized, and an unregistered type fails the run at the suspension.
+// bound to the exact proposal. The surface shows it, and the approval store's
+// record decides whether the same call goes on.
 type ApprovalRequest struct {
 	RunID     string `json:"runId"`
 	Attempt   int    `json:"attempt"`
@@ -285,12 +265,12 @@ type ApprovalRequest struct {
 	// empty for a call whose resources did not fully resolve, whose
 	// unresolved parts are carried with their reasons in Invocation.
 	//
-	// Internal checkpoint state, like Resources above, until the notification
-	// contract grows the shape that carries it to the renderer.
+	// Internal state, like Resources above, until the notification contract
+	// grows the shape that carries it to the renderer.
 	DerivedEffects []content.Effect `json:"-"`
 	// Resources are every resource resolved from the validated call. They are
-	// internal checkpoint state; Resource remains the singular wire projection
-	// until the notification contract grows its multi-resource shape.
+	// internal state; Resource remains the singular wire projection until the
+	// notification contract grows its multi-resource shape.
 	Resources []agenttools.ResourceRef `json:"-"`
 	// Resource is the first resolved resource for the current wire contract,
 	// or nil when the declaration names no resource at all.
@@ -299,7 +279,7 @@ type ApprovalRequest struct {
 	// approved call runs as a SUBSEQUENT attempt of.
 	EntryID string `json:"-"`
 	// Invocation is the parser result used by the effect and rule gates. It
-	// is internal checkpoint state, not renderer input.
+	// is internal state, not renderer input.
 	Invocation content.Invocation `json:"-"`
 	// CommandInvocation preserves command-vs-non-command provenance for the
 	// approval surface, including malformed command parses.
@@ -399,10 +379,6 @@ type ApprovalClassifier struct {
 	Reason    string            `json:"reason"`
 }
 
-func init() {
-	gob.Register(ApprovalRequest{})
-}
-
 // attemptLedger is the slice of the ledger one tool attempt needs (design
 // §6.4 — the attempt is durable, before the call). The full
 // LedgerRepository is not the seam: a test must be able to fail exactly the
@@ -500,10 +476,13 @@ type effectKernel struct {
 	// skills.resolve (nocx-b6stz, routeSourceFromRun).
 	resolutions map[string]*skill.Resolution
 	// questioner is the person, when a service owns asking (ADR-anntnxdj §3).
-	// Nil is the adapter's world: the question leaves as a suspension. Non-nil
-	// is the product's assistant turn: the call blocks on the answer and goes
-	// on from it.
+	// Nil is a caller with no person to ask: every ask is refused.
 	questioner Questioner
+	// order is the order of this run's calls (ADR-anntnxdj §2): one at a time,
+	// in the order the model proposed them, and a call behind a declined one
+	// refused with the same reason. One kernel is one run, so one order is one
+	// turn's.
+	order *TurnOrder
 }
 
 // PaneAccessBinder mints, for ONE run, the DescendantPaneAccess and
@@ -603,6 +582,7 @@ func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools
 		onCall:      onCall,
 		runSeams:    runSeams,
 		questioner:  runSeams.questioner,
+		order:       newTurnOrder(),
 	}
 	for _, t := range registry.All() {
 		v, err := compileToolSchema(t)
@@ -698,23 +678,28 @@ type kernelCall struct {
 }
 
 // authorityChain is the kernel's composition for one call: one policy point,
-// the approver, the guards that can only refuse, and the attempt step. The
-// order is the pipeline's, so a person's answer is followed by the guards that
-// read the grant as it stands then — a file changed while the question was
-// open fails its evidence.
+// the approver, the fresh grant after an answer, the guards that can only
+// refuse, the screens, and the attempt step. The order is the pipeline's, so a
+// person's answer is followed by the guards that read the grant as it stands
+// then — a file changed while the question was open fails its evidence, and a
+// grant that expired while it was open is replaced.
 //
-// The approver is the transport's approval service when one is wired — the
-// call BLOCKS on the person's answer and goes on from it — and the adapter's
-// suspension otherwise. The rest of the chain is the same either way, which is
-// what makes the two endings one authority.
+// The approver is the transport's approval service, and a chain with none has
+// no approver at all: an ask nobody can be shown authorises nothing. The order
+// is the turn's one call at a time (ADR-anntnxdj §2), which replaced eino's
+// batch latch.
 func (k *effectKernel) authorityChain(state *kernelCall) AuthorityChain {
-	approver := Approver(kernelApprover{state: state})
+	var approver Approver
 	if k.questioner != nil {
 		approver = serviceApprover{state: state, questioner: k.questioner}
 	}
 	return AuthorityChain{
 		PreCalls: []PreCall{kernelPolicy{state: state}},
 		Approver: approver,
+		Order:    k.order,
+		MintGrant: func(context.Context, Call) (content.Grant, bool) {
+			return k.mintGrantAfterAnswer()
+		},
 		Guards: []Guard{
 			kernelGrantGuard{kernel: k},
 			kernelFloorGuard{kernel: k},
@@ -729,9 +714,37 @@ func (k *effectKernel) authorityChain(state *kernelCall) AuthorityChain {
 			if err := k.announce(call, state); err != nil {
 				return "", err
 			}
-			return k.runWithRetained(decl, call.CallID(), ctx, capability, raw)
+			return k.run(decl, ctx, capability, raw)
 		},
 	}
+}
+
+// mintGrantAfterAnswer is the fresh grant of ADR-anntnxdj §3: after a person
+// answers, the authority the call goes on under is minted AGAIN from the policy
+// as it stands now. Two facts make that necessary and one makes it safe. A
+// question can be open for ten minutes, and the grant minted at admission has
+// an hour to live; an answer that writes a standing rule ("allow in this
+// session") is written by the very call that answers, so a grant minted before
+// it could not see it. What it does not do is change what the model was
+// OFFERED: the tool declaration is fixed for the run (ADR-anntnxdj §8), and a
+// narrower grant refuses a call rather than hiding a tool.
+//
+// A caller with no mint keeps its admission grant, and an expired one is then
+// refused by kernelGrantGuard with the sentence that says so.
+func (k *effectKernel) mintGrantAfterAnswer() (content.Grant, bool) {
+	if k.runSeams.freshGrant == nil {
+		return content.Grant{}, false
+	}
+	fresh := k.runSeams.freshGrant()
+	if fresh == nil {
+		return content.Grant{}, false
+	}
+	// The run's own grant is REPLACED, never mutated (ADR-0020 §5): the call
+	// that follows the answer is a new unit of work under a new authority,
+	// and the calls after it are minted from the same policy. A run with no
+	// fresh grant is left exactly as it was.
+	k.grant = *fresh
+	return k.grant, true
 }
 
 // announce is the visible tool call: the one place that holds the
@@ -899,41 +912,26 @@ func kernelAskReason(tool string, effect content.Effect, outOfScope *OutOfScopeF
 // awaiting_approval, publishes the question, waits for agent.approve and
 // returns that answer to this same call. No answer — a declared limit passed, a
 // cancelled call, a closed connection — is a refusal, never a yes.
+//
+// Both kinds of question go through it. AskEgress is the screen's question
+// about bytes a call already produced; it is a separate method rather than one
+// carrying either request because the surface's answers differ (an egress
+// answer is never standing), and the service that owns that difference is
+// given the kind rather than asked to sniff it out of a union.
 type Questioner interface {
 	Ask(ctx context.Context, req *ApprovalRequest) Answer
+	AskEgress(ctx context.Context, req *EgressRequest) Answer
 }
 
-// kernelApprover is the ADAPTER for a chain with no service wired: it prepares
-// the question, then returns the same *ApprovalRequestedError eino turns into
-// an interrupt (and trips the batch latch with it). It is what the framework
-// path and every test without a service still reach; the product's assistant
-// turn reaches serviceApprover instead.
-type kernelApprover struct{ state *kernelCall }
-
-func (a kernelApprover) Answer(ctx context.Context, call Call, ask Ask) Answer {
-	if ask.Egress != nil {
-		return a.answerEgress(call, ask.Egress, call.Declaration(), callResources(call))
-	}
-	req, err := a.state.kernel.prepareQuestion(ctx, call, a.state)
-	if err != nil {
-		// A ledger failure is not a suspension: its cause is the run's to
-		// report, so it travels as the unanswered answer's error and fails
-		// the run.
-		return Unanswered{Err: err}
-	}
-	tripLatch(ctx, &ApprovalRequestedError{Request: req})
-	return Unanswered{Err: &ApprovalRequestedError{Request: req}}
-}
-
-// serviceApprover is the chain's Approver when the transport's approval
-// service is wired (nocx-a62cl.3.1). The question is prepared by the SAME
-// builder the adapter uses — the ledger proposal, its file versions, its
-// expansions, the classifier's fact — and the service's answer comes back to
-// this very call, which then goes on through the guards and runs once.
+// serviceApprover is the chain's Approver (ADR-anntnxdj §2, §3): the
+// transport's approval service puts every question to a person and the answer
+// comes back to this very call, which then goes on through the guards and runs
+// once. Both kinds of question go the same way — a policy ask before the call
+// runs, and a screen's ask about the bytes a call already produced — because
+// one person, one surface and one wait answer both.
 //
-// It does NOT trip the batch latch, and that is the shape's point: a call that
-// waited and was allowed is a call that ran, so the next call in the model's
-// response is not stopped by a suspension that did not happen.
+// A chain with no service has no approver at all, and the pipeline refuses
+// every ask: "no approver, or no answer, is a refusal".
 type serviceApprover struct {
 	state      *kernelCall
 	questioner Questioner
@@ -941,24 +939,41 @@ type serviceApprover struct {
 
 func (a serviceApprover) Answer(ctx context.Context, call Call, ask Ask) Answer {
 	if ask.Egress != nil {
-		// The egress question still suspends through the adapter until
-		// nocx-a62cl.3.4 moves it onto the service with the rest of eino's
-		// interrupt: one question at a time, the same shape it had.
-		return kernelApprover{state: a.state}.answerEgress(call, ask.Egress, call.Declaration(), callResources(call))
+		return a.questioner.AskEgress(ctx, a.prepareEgress(call, ask.Egress))
 	}
 	req, err := a.state.kernel.prepareQuestion(ctx, call, a.state)
 	if err != nil {
+		// A ledger failure is not a question: its cause is the run's to
+		// report, so it travels as the unanswered answer's error and fails
+		// the run.
 		return Unanswered{Err: err}
 	}
 	return a.questioner.Ask(ctx, req)
 }
 
+// prepareEgress puts the screen's question in the shape the approval surface
+// renders: the findings, never the material. The proposal is recorded in the
+// store so the answer names the exact call whose bytes were withheld.
+func (a serviceApprover) prepareEgress(call Call, ask *EgressAsk) *EgressRequest {
+	k := a.state.kernel
+	decl := call.Declaration()
+	resources, _ := call.Resources()
+	req := k.egressRequest(decl, call.CallID(), string(call.RawParams()), resources, ask.Findings, ask.WasError)
+	if k.approvals != nil {
+		ap := k.proposal(decl.Name, call.CallID(), string(call.RawParams()))
+		ap.EntryID = a.state.entryID
+		// Egress approval is about bytes that already exist; it does not
+		// authorise another file operation.
+		ap.FileVersionState = FileVersionBindingNotApplicable
+		k.approvals.Request(ap)
+	}
+	return req
+}
+
 // prepareQuestion is the one builder of the question a person is shown: the
 // proposal is recorded in the ledger as an action entry, its file versions and
 // expansion values are bound, the store holds it pending, and the request
-// carries what the surface renders. Both endings — the service's blocking wait
-// and the adapter's suspension — prepare it here, so the two can never ask
-// different questions.
+// carries what the surface renders.
 func (m *effectKernel) prepareQuestion(ctx context.Context, call Call, state *kernelCall) (*ApprovalRequest, error) {
 	decl := call.Declaration()
 	resources, _ := call.Resources()
@@ -973,35 +988,6 @@ func (m *effectKernel) prepareQuestion(ctx context.Context, call Call, state *ke
 	return m.escalate(ctx, decl, callID, rawArgs, call.Arguments(), resources, invocation, state.outOfScope, state.install)
 }
 
-// callResources is the call's resolved resources, for a question that names
-// them; a call whose resources were never resolved names none.
-func callResources(call Call) []agenttools.ResourceRef {
-	resources, _ := call.Resources()
-	return resources
-}
-
-// answerEgress puts the screen's question to the person in the shape the
-// approval surface renders: the findings, never the material. It is the same
-// suspension the policy gate raises — the request is recorded so the approved
-// resume matches the exact proposal, and the returned error is what the
-// adapter turns into an interrupt.
-func (a kernelApprover) answerEgress(call Call, ask *EgressAsk, decl agenttools.Tool, resources []agenttools.ResourceRef) Answer {
-	k := a.state.kernel
-	req := k.egressRequest(decl, call.CallID(), string(call.RawParams()), resources, ask.Findings, ask.WasError)
-	if k.approvals != nil {
-		ap := k.proposal(decl.Name, call.CallID(), string(call.RawParams()))
-		ap.EntryID = a.state.entryID
-		// Egress approval releases an already-retained result; it does not
-		// authorise another file operation.
-		ap.FileVersionState = FileVersionBindingNotApplicable
-		k.approvals.Request(ap)
-	}
-	// A suspension is an Unanswered answer by the pipeline's vocabulary:
-	// nobody has answered yet, and the error underneath is what carries the
-	// request to the surface.
-	return Unanswered{Err: &EgressRequestedError{Request: req}}
-}
-
 // kernelGrantGuard is the grant's own interval: past its deadline there is no
 // authority for any row to read a decision out of. It is a Guard rather than a
 // PreCall because the interval is read AFTER the answer, where ADR-anntnxdj
@@ -1013,7 +999,11 @@ func (a kernelApprover) answerEgress(call Call, ask *EgressAsk, decl agenttools.
 type kernelGrantGuard struct{ kernel *effectKernel }
 
 func (g kernelGrantGuard) Refuse(_ context.Context, call Call) (string, bool) {
-	if !g.kernel.grant.Expired(time.Now()) {
+	// The CALL's grant, not the run's: a call that waited is answered under
+	// the grant the pipeline minted after the answer (ADR-anntnxdj §3,
+	// "refreshed after an answer"), and this guard is what reads it before
+	// the capability is constructed.
+	if !call.Grant().Expired(time.Now()) {
 		return "", false
 	}
 	return refusalResult(call.Tool(), RefusedExpired, ""), true
@@ -1388,13 +1378,13 @@ func (m *effectKernel) bindApprovalScripts(ctx context.Context, req *ApprovalReq
 	req.Scripts = ScriptReadingsFor(ctx, m.runSeams.scripts, m.runCtx.Session, m.runSeams.cwd, invocation)
 }
 
-// ── the ask and the latch ─────────────────────────────────────────────────
+// ── the ask ───────────────────────────────────────────────────────────────
 
 // escalate prepares the question about a call that has not run — the
 // proposal, the ledger entry and attempt that record it, its file versions and
-// expansion values, and the request the surface renders. Whether the run then
-// suspends (the adapter) or the call blocks on the answer (the service) is the
-// approver's ending, not this builder's.
+// expansion values, and the request the surface renders. What the approver
+// does with it — block the call on a person's answer — is the approver's
+// ending, not this builder's.
 //
 // The proposal is RECORDED, not only held in memory (nocx-5dldy): it is an
 // action entry in the ledger with its own interrupted attempt — "the
@@ -1437,13 +1427,12 @@ func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callI
 }
 
 // escalateClassifier is escalate with the classifier's ledger fact: the
-// ask the classifier caused — suspect, failed, or its input withheld by
-// the egress gate — suspends the run BEFORE next, is RECORDED with the
-// classifier block on the proposal (criterion 6: "why was this asked" is
-// answerable from the ledger), and resumes through the SAME approval
-// machinery as a policy ask: the person's yes covers the proposal
-// INCLUDING its classification, and the resume skips a second
-// consultation (the loop property).
+// ask the classifier caused — suspect, failed, or its input withheld by the
+// egress gate — is put BEFORE next, is RECORDED with the classifier block on
+// the proposal (criterion 6: "why was this asked" is answerable from the
+// ledger), and goes through the SAME approval machinery as a policy ask: the
+// person's yes covers the proposal INCLUDING its classification, and the call
+// that goes on skips a second consultation (the loop property).
 func (m *effectKernel) escalateClassifier(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, ask *ApprovalRequest, fact *classifierFact, resources []agenttools.ResourceRef, invocation content.Invocation) (*ApprovalRequest, error) {
 	ap := m.proposalWithInvocation(decl.Name, callID, rawArgs, invocation)
 	ap.CommandInvocation = decl.CommandArg != ""
@@ -1841,15 +1830,15 @@ func runNotWaitingResult(tool string) string {
 
 // ── the attempt ───────────────────────────────────────────────────────────
 
-// recordProposal writes the escalation's ledger facts BEFORE the run
-// suspends (nocx-5dldy: "an escalation is recorded, not only held in
-// memory"): the proposal is an action entry whose payload names the exact
-// binding — tool, effect, arguments, and the run/attempt/callId/argHash the
-// approval store keys — and its own attempt, closed interrupted: the call
-// that is asking has NOT run (the escalation is before next). The approved
-// call runs as a SUBSEQUENT attempt of this same entry. A failed write
-// fails the run: a question whose answer would resume nothing is the hole
-// the thread criterion exists to close.
+// recordProposal writes the escalation's ledger facts BEFORE the question is
+// put (nocx-5dldy: "an escalation is recorded, not only held in memory"): the
+// proposal is an action entry whose payload names the exact binding — tool,
+// effect, arguments, and the run/attempt/callId/argHash the approval store
+// keys — and its own attempt, closed interrupted: the call that is asking has
+// NOT run (the escalation is before next). The approved call runs as a
+// SUBSEQUENT attempt of this same entry. A failed write fails the run: a
+// question whose answer would authorise nothing is the hole the thread
+// criterion exists to close.
 func (m *effectKernel) recordProposal(ctx context.Context, decl agenttools.Tool, rawArgs string, resources []agenttools.ResourceRef, ap Approval, fact *classifierFact) (string, error) {
 	envID := content.EnvironmentIDFor(content.EnvLocal, "")
 	if err := m.ledger.EnsureEnvironment(ctx, content.Environment{ID: envID, Kind: content.EnvLocal}); err != nil {
@@ -1982,23 +1971,6 @@ func (m *effectKernel) openAttempt(ctx context.Context, decl agenttools.Tool, ca
 		return 0, "", err
 	}
 	return execID, entryID, nil
-}
-
-// runWithRetained is the kernel's own runtime for the one execution of a call.
-// It runs the tool, unless the egress screen already HOLDS this exact
-// proposal's result: then the bytes the person approved sending are released
-// as they were, and the tool does not run a second time — a re-run would repeat
-// the effect and could produce a different result than the one approved
-// (ADR-anntnxdj §2). What is retained, and why, is the screen's (egress.go);
-// this runtime only asks it.
-func (m *effectKernel) runWithRetained(decl agenttools.Tool, callID string, ctx context.Context, capability agenttools.Capability, rawArgs []byte) (string, error) {
-	if held, ok := (egressScreen{kernel: m}).held(m.proposal(decl.Name, callID, string(rawArgs))); ok {
-		if held.WasError {
-			return "", errors.New(held.Text)
-		}
-		return held.Text, nil
-	}
-	return m.run(decl, ctx, capability, rawArgs)
 }
 
 // noteCause seats one entry this turn caused under the turn (nocx-h1l4o,
@@ -2146,48 +2118,6 @@ func (m *effectKernel) executeInRenderer(ctx context.Context, decl agenttools.To
 	}
 }
 
-// ── the batch latch ───────────────────────────────────────────────────────
-
-// batchLatch is per-run state shared by every call in one model response:
-// once one call refuses or escalates, the others return without calling
-// next. It lives in the run context, installed by BeforeAgent — which is why
-// a resumed attempt gets a fresh one: the resume is a new attempt.
-type batchLatch struct {
-	mu     sync.Mutex
-	reason error
-}
-
-func (l *batchLatch) trip(reason error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.reason == nil {
-		l.reason = reason
-	}
-}
-
-func (l *batchLatch) tripped() error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.reason
-}
-
-type latchKey struct{}
-
-func withLatch(ctx context.Context, l *batchLatch) context.Context {
-	return context.WithValue(ctx, latchKey{}, l)
-}
-
-func latchFrom(ctx context.Context) *batchLatch {
-	l, _ := ctx.Value(latchKey{}).(*batchLatch)
-	return l
-}
-
-func tripLatch(ctx context.Context, reason error) {
-	if l := latchFrom(ctx); l != nil {
-		l.trip(reason)
-	}
-}
-
 // Invoke runs ONE proposed effect through the whole pipeline and returns what
 // the caller must hand back to whoever proposed it: the framed tool result,
 // or the refusal — which is a RESULT and not an error (nocx-uvac6.1).
@@ -2196,12 +2126,11 @@ func tripLatch(ctx context.Context, reason error) {
 // not eino gets the identical decision, the identical attempt interval and
 // the identical ledger shape, because there is no second copy of any of it.
 //
-// SUSPENSION IS AN ERROR VALUE, in our vocabulary rather than a framework's:
-// *ApprovalRequestedError when a person must answer before the call may run,
-// *EgressRequestedError when the call ran and its result may not leave until
-// a person has seen what was found in it. Both carry the request the surface
-// renders. The retained declared-call adapter translates those values into
-// eino interrupts; that framework detail is not the kernel's business.
+// A PERSON'S ANSWER IS THE PIPELINE'S OWN, in our vocabulary rather than a
+// framework's: the chain's Approver blocks the call on an answer, and what
+// comes back is Allow, a no, or nobody-answered. Nothing here suspends, and
+// nothing here names a framework type — which is what lets a caller that is
+// not eino get the identical decision.
 func (k *effectKernel) Invoke(ctx context.Context, name, callID, rawArgs string) (string, error) {
 	out, err := k.invokeClassified(ctx, name, callID, rawArgs)
 	if err != nil {
@@ -2294,14 +2223,15 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		if errors.As(dispatchErr, &refusal) && refusal.Cause == nil {
 			return modelResult{text: refusal.Reason, kind: modelNocxMessage}, nil
 		}
-		// The egress screen asked: the call RAN and its result is withheld
-		// pending the person's decision, so this pass's attempt closes
-		// interrupted — the approved pass is a subsequent attempt of the same
-		// entry, exactly as a policy approval's is.
-		var egressSuspended *EgressRequestedError
-		if errors.As(dispatchErr, &egressSuspended) {
+		// A person's no to a SCREEN's question is about a result that already
+		// exists, so there is nothing to continue the call with: the run
+		// ends (ADR-anntnxdj §3, "a declined egress ends the run"). The
+		// attempt closes as the person's decision — the effect happened and
+		// its result never left.
+		var screenDeclined *ScreenDeclinedError
+		if errors.As(dispatchErr, &screenDeclined) {
 			if state.execID != 0 {
-				_ = k.closeAttempt(ctx, state.execID, content.TermInterrupted, content.EntryInterrupted)
+				_ = k.closeAttempt(ctx, state.execID, content.TermAgentDeclined, content.EntryInterrupted)
 			}
 			return modelResult{}, dispatchErr
 		}
@@ -2322,6 +2252,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 				"tool", decl.Name, "call", callID, "error", detail)
 			return modelResult{}, &ToolFailedError{Tool: decl.Name, Err: dispatchErr}
 		}
+
 		if errors.Is(dispatchErr, ErrUnknownMethod) || errors.Is(dispatchErr, ErrInvalidParams) {
 			return modelResult{}, fmt.Errorf("%w: tool %q: %v", ErrMalformedModelOutput, name, dispatchErr)
 		}
@@ -2349,10 +2280,10 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 	// BEFORE THE EGRESS GATE, deliberately. Nothing was read, so there is
 	// no result to screen; what would reach the gate is the capability's
 	// error text, whose only content is the path the model already named.
-	// Screening it could suspend the run for a person's decision about
-	// bytes that were never produced. Every other refusal in this pipeline
-	// returns unscreened for the same reason: the sentence is ours, and it
-	// says nothing the policy keeps from the person.
+	// Screening it could put a question to a person about bytes that were
+	// never produced. Every other refusal in this pipeline returns unscreened
+	// for the same reason: the sentence is ours, and it says nothing the
+	// policy keeps from the person.
 	//
 	// The attempt closes here rather than being left open — the interval
 	// ends with a reason, always. TermFailed is the honest existing
@@ -2380,9 +2311,9 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 	// with none. This is that body.
 	//
 	// AFTER THE EGRESS GATE, DELIBERATELY. The gate has already screened
-	// this result and either passed it or suspended the run; recording
+	// this result and either passed it or asked a person about it; recording
 	// before it would put bytes in the store that the gate might still
-	// refuse to let leave. On an APPROVED resume the bytes do carry
+	// refuse to let leave. On an APPROVED question the bytes do carry
 	// findings, which is why the record is masked as well as gated — the
 	// belt matters at exactly the one moment the gate has stood down.
 	//

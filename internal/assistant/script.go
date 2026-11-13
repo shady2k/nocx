@@ -57,8 +57,8 @@ const MaxScriptBytes = 64 << 10
 
 // scriptReadBudget bounds the WHOLE set of readings for one question, not each
 // one. A question that appears late is a worse defect than one whose file is
-// missing from it: the escalation is already holding a suspended run and a
-// person waiting on a modal, so the reads get one shared deadline and whatever
+// missing from it: the escalation is already holding a call blocked on a
+// person's answer, so the reads get one shared deadline and whatever
 // is past it is reported as unread, in words, rather than making the window
 // wait. Two seconds because the remote arm acquires an SFTP lease over the
 // session's own connection before it can read anything, and a local read that

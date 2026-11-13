@@ -37,21 +37,19 @@ func skillsCreateArgs(body string) string {
 
 func approvalFromSkillWrite(t *testing.T, k *effectKernel, tool, args string) *ApprovalRequest {
 	t.Helper()
-	err := func() error {
-		_, invokeErr := k.Invoke(context.Background(), tool, "skill-call", args)
-		return invokeErr
-	}()
-	if err == nil {
+	store := k.approvals
+	if store == nil {
+		store = NewApprovalStore()
+	}
+	q := &recordingQuestioner{store: store, answer: Declined{Reason: "not this one"}, kind: DeclineCallOnce}
+	k.questioner = q
+	if _, err := k.Invoke(context.Background(), tool, "skill-call", args); err != nil {
+		t.Fatalf("%s: %v", tool, err)
+	}
+	if len(q.asked) != 1 {
 		t.Fatalf("%s unexpectedly ran without asking for approval", tool)
 	}
-	var approvalErr *ApprovalRequestedError
-	if !errors.As(err, &approvalErr) {
-		t.Fatalf("Invoke error = %v, want ApprovalRequestedError", err)
-	}
-	if approvalErr.Request == nil {
-		t.Fatal("approval request is nil")
-	}
-	return approvalErr.Request
+	return q.asked[0]
 }
 
 func TestASkillsWriteNeverAutoPermits(t *testing.T) {

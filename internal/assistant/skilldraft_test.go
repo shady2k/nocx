@@ -91,21 +91,25 @@ func TestSkillCreateProposalUsesTheSummarizingDraft(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	k, err := newEffectKernel(nil, grant, reg, &fakeLedger{}, NewApprovalStore(), &fakeKnownMaterial{}, "run-draft", "session-draft", 1, "", nil, Attachments{}, nil, nil, toolSeams{
+	approvals := NewApprovalStore()
+	q := &recordingQuestioner{store: approvals, answer: Declined{Reason: "not this one"}, kind: DeclineCallOnce}
+	k, err := newEffectKernel(nil, grant, reg, &fakeLedger{}, approvals, &fakeKnownMaterial{}, "run-draft", "session-draft", 1, "", nil, Attachments{}, nil, nil, toolSeams{
 		skillDraft:     request,
 		skillDraftHTTP: http.DefaultClient,
+		questioner:     q,
 	})
 	if err != nil {
 		t.Fatalf("newEffectKernel: %v", err)
 	}
 
-	_, err = k.Invoke(context.Background(), "skills.create", "call-draft", `{"name":"wrong","description":"wrong","body":"wrong"}`)
-	var approval *ApprovalRequestedError
-	if !errors.As(err, &approval) {
-		t.Fatalf("Invoke error = %v, want an approval for the generated skill", err)
+	if _, err := k.Invoke(context.Background(), "skills.create", "call-draft", `{"name":"wrong","description":"wrong","body":"wrong"}`); err != nil {
+		t.Fatalf("Invoke error = %v, want the person's no as the call's answer", err)
 	}
-	if approval.Request == nil || approval.Request.Arguments != `{"body":"Run make release.","description":"How we ship","name":"deploy"}` {
-		t.Fatalf("approval = %+v, want the summarizer's exact create arguments", approval.Request)
+	if len(q.asked) != 1 {
+		t.Fatalf("the person was asked %d times, want an approval for the generated skill", len(q.asked))
+	}
+	if approval := q.asked[0]; approval.Arguments != `{"body":"Run make release.","description":"How we ship","name":"deploy"}` {
+		t.Fatalf("approval = %+v, want the summarizer's exact create arguments", approval)
 	}
 }
 
@@ -328,13 +332,16 @@ func TestSkillCreateKeepsBytesThePersonTyped(t *testing.T) {
 	k := draftKernel(t, request)
 
 	proposed := `{"name":"restart-api","description":"How the api is restarted","body":` + strconv.Quote(procedure) + `}`
-	_, err := k.Invoke(context.Background(), "skills.create", "call-verbatim", proposed)
-	var approval *ApprovalRequestedError
-	if !errors.As(err, &approval) {
-		t.Fatalf("Invoke error = %v, want an approval carrying the person's own text", err)
+	q := &recordingQuestioner{store: k.approvals, answer: Declined{Reason: "not this one"}, kind: DeclineCallOnce}
+	k.questioner = q
+	if _, err := k.Invoke(context.Background(), "skills.create", "call-verbatim", proposed); err != nil {
+		t.Fatalf("Invoke error = %v, want the person's no as the call's answer", err)
 	}
-	if approval.Request == nil || approval.Request.Arguments != proposed {
-		t.Fatalf("approval arguments = %+v, want the person's bytes unchanged", approval.Request)
+	if len(q.asked) != 1 {
+		t.Fatalf("the person was asked %d times, want an approval carrying the person's own text", len(q.asked))
+	}
+	if q.asked[0].Arguments != proposed {
+		t.Fatalf("approval arguments = %+v, want the person's bytes unchanged", q.asked[0].Arguments)
 	}
 }
 
@@ -363,15 +370,18 @@ func TestSkillCreateSummarizesWhatThePersonDidNotType(t *testing.T) {
 				Prose:    content.TurnProse{Text: prose},
 			}}, resolver)
 			k := draftKernel(t, request)
+			q := &recordingQuestioner{store: k.approvals, answer: Declined{Reason: "not this one"}, kind: DeclineCallOnce}
+			k.questioner = q
 
-			_, err := k.Invoke(context.Background(), "skills.create", "call-not-verbatim",
-				`{"name":"restart-api","description":"wrong","body":`+strconv.Quote(test.body)+`}`)
-			var approval *ApprovalRequestedError
-			if !errors.As(err, &approval) {
-				t.Fatalf("Invoke error = %v, want an approval for the summarized skill", err)
+			if _, err := k.Invoke(context.Background(), "skills.create", "call-not-verbatim",
+				`{"name":"restart-api","description":"wrong","body":`+strconv.Quote(test.body)+`}`); err != nil {
+				t.Fatalf("Invoke error = %v, want the person's no as the call's answer", err)
 			}
-			if approval.Request == nil || approval.Request.Arguments != `{"body":"Run systemctl restart api.","description":"How we restart","name":"restart-api"}` {
-				t.Fatalf("approval arguments = %+v, want the summarizer's draft", approval.Request)
+			if len(q.asked) != 1 {
+				t.Fatalf("the person was asked %d times, want an approval for the summarized skill", len(q.asked))
+			}
+			if q.asked[0].Arguments != `{"body":"Run systemctl restart api.","description":"How we restart","name":"restart-api"}` {
+				t.Fatalf("approval arguments = %+v, want the summarizer's draft", q.asked[0].Arguments)
 			}
 		})
 	}

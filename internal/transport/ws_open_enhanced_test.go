@@ -31,6 +31,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/ssh"
 )
 
 // recordingPTYFactory captures the pty.Config the session layer builds.
@@ -76,6 +77,75 @@ func openOverWire(t *testing.T, ws *WSServer, params map[string]any) {
 	}
 	if parsed.Error != nil {
 		t.Fatalf("open failed: %s", parsed.Error.Message)
+	}
+}
+
+// An ssh pane asks to be integrated, and the request reaches the party that
+// builds the shell: this machine's helper. It is asserted on the config the
+// helper is handed, because that is where the request now travels — the
+// coordinator dials nothing, so there is no ConnectOptions seam left to read.
+func TestWSServer_Open_SSHProfile_RequestsIntegration(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	reg := newRegWithStub(logger)
+	var handed session.Config
+	opener := stubHelper(reg)
+	opener.onOpen = func(cfg session.Config) { handed = cfg }
+
+	ws := NewWSServer(logger, reg,
+		WithHelperSessionOpener(opener),
+		WithProfileResolver(&fakeResolver{
+			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {
+				return "host.example.com", &ssh.ConnectConfig{User: "test", Port: 22}, nil
+			},
+		}),
+	)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+
+	openOverWire(t, ws, map[string]any{
+		"cols": 80, "rows": 24, "kind": "ssh", "profileId": "ssh:test:1",
+	})
+	if !handed.Enhanced {
+		t.Error("the ssh open did not ask to be integrated: session.Config.Enhanced is false, " +
+			"so the helper builds a command with no domain and the tab can never show blocks")
+	}
+	if handed.Remote == nil {
+		t.Fatal("the ssh open reached the helper with no resolved destination")
+	}
+}
+
+// A direct-host ssh session (an alias typed into the host field, no saved
+// profile) asks for integration too — the same tab, the same expectation.
+func TestWSServer_Open_SSHDirectHost_RequestsIntegration(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	reg := newRegWithStub(logger)
+	var handed session.Config
+	opener := stubHelper(reg)
+	opener.onOpen = func(cfg session.Config) { handed = cfg }
+
+	resolver := newLauncherTestResolver()
+	resolver.add("pi@192.0.2.93", ssh.HostConfig{User: "pi", HostName: "192.0.2.93", Port: 22})
+
+	ws := NewWSServer(logger, reg,
+		WithHelperSessionOpener(opener),
+		WithSSHConfigResolver(resolver, "/nonexistent/config"))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+
+	openOverWire(t, ws, map[string]any{
+		"cols": 80, "rows": 24, "kind": "ssh", "host": "pi@192.0.2.93",
+	})
+	if !handed.Enhanced {
+		t.Error("the direct-host ssh open did not ask to be integrated: session.Config.Enhanced is false")
+	}
+	if handed.Remote == nil {
+		t.Fatal("the direct-host ssh open reached the helper with no resolved destination")
 	}
 }
 

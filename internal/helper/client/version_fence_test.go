@@ -33,9 +33,16 @@ import (
 	"github.com/shady2k/nocx/internal/helper/proto"
 )
 
-// previousGeneration is the protocol version this bump fences off. It is a
-// literal because that is the fact being asserted.
-const previousGeneration = "22"
+// previousGeneration is the protocol version this bump fences off — the one
+// immediately before it, which is the pair a person meets: a helper installed
+// before this app. It is a literal because that is the fact being asserted.
+const previousGeneration = "25"
+
+// olderProtocolGeneration is a generation two bumps back (the frame-set bump
+// before the keepalive type was removed). It is here as well so the fence is
+// pinned for a peer that is not merely one version behind: the refusal must
+// not depend on the distance.
+const olderProtocolGeneration = "22"
 
 // previousHelperPeer answers a hello the way a helper SPEAKING version does: it
 // compares what arrived with its own number, and where the two disagree it
@@ -80,25 +87,30 @@ func previousHelperPeer(version string, received chan<- string) func(io.Reader, 
 	}
 }
 
-// TestA23CoordinatorAndA22HelperRefuseEachOtherAtHello is the direction a
-// person meets first: the coordinator is this build's, and the helper on the
-// host is a generation behind. The helper says nothing on stdout and exits 42;
-// the coordinator answers ErrVersionMismatch, which is a state the product
-// renders ("this machine's helper is older than this app") rather than a
-// generic launch failure.
-func TestA23CoordinatorAndA22HelperRefuseEachOtherAtHello(t *testing.T) {
-	received := make(chan string, 1)
-	conn := newFakeConn(previousHelperPeer(previousGeneration, received))
+// TestThisBuildsCoordinatorAndThePreviousHelperRefuseEachOtherAtHello is the
+// direction a person meets first: the coordinator is this build's (26), and
+// the helper on the host is the previous generation (25). The helper says
+// nothing on stdout and exits 42; the coordinator answers ErrVersionMismatch,
+// which is a state the product renders ("this machine's helper is older than
+// this app") rather than a generic launch failure. The OLDER generation is
+// run through the same assertion: the fence must not depend on the distance.
+func TestThisBuildsCoordinatorAndThePreviousHelperRefuseEachOtherAtHello(t *testing.T) {
+	for _, version := range []string{previousGeneration, olderProtocolGeneration} {
+		t.Run(version, func(t *testing.T) {
+			received := make(chan string, 1)
+			conn := newFakeConn(previousHelperPeer(version, received))
 
-	_, err := client.Dial(context.Background(), client.Config{
-		Exec: conn, Command: "/opt/nocx-helper", ExpectHash: "testhash", SentinelTTL: time.Second,
-	})
-	if !errors.Is(err, client.ErrVersionMismatch) {
-		t.Fatalf("dialling a %s helper answered %v, want ErrVersionMismatch", previousGeneration, err)
-	}
-	if got := <-received; got != proto.Version {
-		t.Fatalf("the %s helper read hello version %q, want %q — the coordinator must say which protocol it speaks",
-			previousGeneration, got, proto.Version)
+			_, err := client.Dial(context.Background(), client.Config{
+				Exec: conn, Command: "/opt/nocx-helper", ExpectHash: "testhash", SentinelTTL: time.Second,
+			})
+			if !errors.Is(err, client.ErrVersionMismatch) {
+				t.Fatalf("dialling a %s helper answered %v, want ErrVersionMismatch", version, err)
+			}
+			if got := <-received; got != proto.Version {
+				t.Fatalf("the %s helper read hello version %q, want %q — the coordinator must say which protocol it speaks",
+					version, got, proto.Version)
+			}
+		})
 	}
 }
 
@@ -109,7 +121,7 @@ func TestA23CoordinatorAndA22HelperRefuseEachOtherAtHello(t *testing.T) {
 // NOTHING to stdout — the sentinel is written only after the version check
 // passes (D5) — so a coordinator cannot read a sentinel and believe it found a
 // helper it agrees with.
-func TestA22CoordinatorAndThisBuildsHelperRefuseEachOtherAtHello(t *testing.T) {
+func TestThePreviousCoordinatorAndThisBuildsHelperRefuseEachOtherAtHello(t *testing.T) {
 	hello := proto.Hello{Version: previousGeneration, Nonce: "n", Corr: "c"}
 	raw, err := json.Marshal(hello)
 	if err != nil {
@@ -141,7 +153,7 @@ func TestA22CoordinatorAndThisBuildsHelperRefuseEachOtherAtHello(t *testing.T) {
 // (the case above), and the hello-ok ECHO names the version too — a peer that
 // printed this build's sentinel and then answered with another generation's
 // number is refused rather than believed.
-func TestA23CoordinatorRefusesAHelloOKThatNamesAnotherGeneration(t *testing.T) {
+func TestThisBuildsCoordinatorRefusesAHelloOKThatNamesAnotherGeneration(t *testing.T) {
 	conn := newFakeConn(func(in io.Reader, out io.Writer) int {
 		answered := false
 		dec := proto.NewDecoder(func(ty proto.FrameType, _, _ uint32, payload []byte) {

@@ -39,6 +39,36 @@ func TestFrameTypeValuesAreUniqueAndRecognized(t *testing.T) {
 	}
 }
 
+// TestTheRemovedKeepaliveTypeIsNotAFrameType pins the removal itself: byte 9
+// carried a keepalive that no peer ever sent, and the closed set a reader
+// switches on is part of the protocol number (Version 26). The byte is not
+// reassigned, and the decoder must treat it as garbage — scanning past it one
+// byte at a time, so a valid frame whose header begins right after the bogus
+// one is still found. Byte 9 is the case that matters here; byte 8 was never
+// assigned.
+func TestTheRemovedKeepaliveTypeIsNotAFrameType(t *testing.T) {
+	if FrameType(9).valid() {
+		t.Fatal("byte 9 is recognized as a frame type: the unsent keepalive was removed in nocx-oalo1.3.2 and left unassigned")
+	}
+	var frames int
+	var gapped int
+	d := NewDecoder(func(FrameType, uint32, uint32, []byte) { frames++ },
+		func(n int) { gapped += n })
+	bogus := make([]byte, HeaderLen)
+	bogus[0] = 9 // the removed keepalive type
+	bogus[12] = 0x64
+	valid := EncodeFrame(TypeHelloOK, 0, 0, []byte(`{}`))
+	if err := d.Feed(append(bogus, valid...)); err != nil {
+		t.Fatalf("feed: %v", err)
+	}
+	if frames != 1 {
+		t.Fatalf("want the valid frame after the removed type delivered, got %d", frames)
+	}
+	if gapped != HeaderLen {
+		t.Fatalf("want %d garbage bytes for the removed type, got %d", HeaderLen, gapped)
+	}
+}
+
 func TestFrameRoundTripPreservesBinaryPayload(t *testing.T) {
 	payload := []byte{0x00, 0x0A, 0x0D, 0x0A, 0xFF, '{', '}'}
 	var gotType FrameType

@@ -115,7 +115,6 @@ var (
 	OpInternalFilesUpload             = methodHandle("internal.files.upload")
 	OpInternalFilesWatchPoll          = methodHandle("internal.files.watchPoll")
 	OpInternalGitProcess              = methodHandle("internal.git.process")
-	OpInternalHelperBootstrap         = methodHandle("internal.helper.bootstrap")
 	OpInternalHelperGitOpen           = methodHandle("internal.helper.gitOpen")
 	OpInternalHelperInstall           = methodHandle("internal.helper.install")
 	OpInternalHelperProbe             = methodHandle("internal.helper.probe")

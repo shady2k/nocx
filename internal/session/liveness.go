@@ -197,12 +197,10 @@ func (r *Reg) Observe(ref Ref, obs Observation) bool {
 
 // ObserveHost is observeHost, exported for a caller outside this package: a
 // helper-hosted ssh session's keepalive prober runs one process away
-// (ADR-0057, nocx-y6fh7 item 6), so what used to be wired in-process here
-// (hostLivenessObserver, still the producer for the coordinator's own
-// non-helper dials) now also has a caller in internal/app, translating a
-// proto.SessionLiveness notification into the same Reachability this
-// function has always taken. One production and one wire-fed producer,
-// both funnelled through the one function that decides what either means.
+// (ADR-0057, nocx-y6fh7 item 6), so its finding arrives as a
+// proto.SessionLiveness notification and internal/app translates it into the
+// same Reachability this function has always taken. One producer, one
+// function that decides what it means.
 func (r *Reg) ObserveHost(host string, reach ssh.Reachability) { r.observeHost(host, reach) }
 
 // observeHost applies what the keepalive prober learned about one machine to
@@ -267,14 +265,6 @@ func (r *Reg) mintLivenessEpoch(ref Ref) (uint64, bool) {
 	// session would be silently dropped.
 	_ = s.Liveness()
 	return s.livenessEpochs.Add(1), true
-}
-
-// hostLivenessObserver binds this registry to one host name, producing the
-// callback the ssh package's keepalive prober calls. The ssh package never
-// learns which host it is talking about — the connection is pooled and belongs
-// to no single session — so the name is captured here, where the open knew it.
-func (r *Reg) hostLivenessObserver(host string) ssh.LivenessObserver {
-	return func(reach ssh.Reachability) { r.observeHost(host, reach) }
 }
 
 // Liveness returns the session's current projection, deriving the terminal

@@ -5,34 +5,14 @@ import (
 	"time"
 )
 
-// The session side of the bootstrap: the byte streams it runs on, and the
-// input quarantine that owns the terminal while it does.
+// The bootstrap seam: the declarations a launcher's command and its frame
+// driver cross, so internal/ssh can carry them without importing
+// internal/shellintegration.
 //
-// internal/ssh knows nothing about frames. It owns the transport — a started
-// session, its stdin and its stdout — and hands both to whoever does know,
-// through the interfaces below. The frame protocol, the deadlines and every
-// outcome name live in internal/shellintegration, and the composition root
-// adapts the two declarations exactly as it does for the launcher.
-
-// The two errors this reader can raise are internal/bootstrapstream's, not
-// this package's. They cross the seam to a consumer that tests them with
-// errors.Is, so there is exactly one value per fact; see that package for the
-// three-sentinel defect this replaced.
-
-// ErrInputQuarantined is returned by Write while the session is
-// bootstrapping. A keystroke in that window is REFUSED, not buffered: a
-// buffered keystroke is a command the user did not knowingly run, executed
-// later, at a prompt they were not looking at (design §5.3).
-//
-// It is a distinct error rather than a silent short write because the session
-// layer logs a failed input write as "the user typed into nothing", and
-// telling that apart from a dead channel is the difference between a warning
-// worth acting on and one that is expected.
-type ErrInputQuarantined struct{}
-
-func (e *ErrInputQuarantined) Error() string {
-	return "ssh channel is bootstrapping: input refused"
-}
+// internal/ssh knows nothing about frames. The frame protocol, the deadlines
+// and every outcome name live in internal/shellintegration, and the
+// composition root adapts these declarations exactly as it does for the
+// launcher.
 
 // BootstrapStream is what the bootstrap driver sees of the session: a line
 // reader with a deadline, and a writer that bypasses the quarantine.

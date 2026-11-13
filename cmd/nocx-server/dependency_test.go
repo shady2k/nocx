@@ -99,10 +99,8 @@ var heldTypes = map[string]bool{"Client": true, "Session": true}
 // rename or a deletion a failure rather than a pass.
 var coordinatorDialFiles = []string{
 	"ssh_dial.go",
-	"ssh_real_dial.go",
 	"pool.go",
 	"ssh_pooled.go",
-	"ssh_channel.go",
 }
 
 func TestTheCoordinatorLinksNoSSHClient(t *testing.T) {

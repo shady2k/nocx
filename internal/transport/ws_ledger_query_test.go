@@ -299,11 +299,6 @@ func TestLedgerQuery_HostRungExcludesTheOtherMachine(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
 	db := newLedgerStore(t)
 	reg := newRegWithStub(logger)
-	reg.WithSSHFactory(&stubSSHFactory{
-		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
-			return ssh.NewStubChannel(logger), nil
-		},
-	})
 	ws := NewWSServer(logger, reg,
 		// The ssh pane is a helper's now (nocx-50w7p.5); this test's subject is
 		// the ledger's host rung, not the route, so the pane gets the helper

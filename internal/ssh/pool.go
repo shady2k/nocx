@@ -12,7 +12,6 @@ import (
 
 	"github.com/shady2k/nocx/internal/log"
 	gossh "golang.org/x/crypto/ssh"
-	agent "golang.org/x/crypto/ssh/agent"
 )
 
 // sshClientConn is the subset of *gossh.Client we need: Close. The real
@@ -64,10 +63,6 @@ type pooledSSHConn struct {
 	// refuse to hand it to anyone else. See isDead.
 	dead atomic.Bool
 
-	// agentForwardOnce guards agent.ForwardToRemote so it is called exactly
-	// once per pooled connection, even when multiple tabs share the client.
-	agentForwardOnce sync.Once
-
 	// fingerprint is the SHA256 fingerprint of the TARGET host's public
 	// key, as presented and verified when this connection was dialed (the
 	// consent design keys consent by it — ADR-0023's route identity was a
@@ -80,22 +75,6 @@ type pooledSSHConn struct {
 // HostKeyFingerprint returns the target host's public-key fingerprint
 // observed at dial time.
 func (c *pooledSSHConn) HostKeyFingerprint() string { return c.fingerprint }
-
-// initAgentForward registers the auth-agent@openssh.com channel handler on
-// the underlying *gossh.Client exactly once per pooled connection. It is a
-// no-op (nil error) when addr is empty or the handler was already registered
-// by a previous tab sharing this connection. addr should be the local SSH
-// agent socket path (os.Getenv("SSH_AUTH_SOCK")).
-func (c *pooledSSHConn) initAgentForward(gclient *gossh.Client, addr string) error {
-	if addr == "" {
-		return nil
-	}
-	var setupErr error
-	c.agentForwardOnce.Do(func() {
-		setupErr = agent.ForwardToRemote(gclient, addr)
-	})
-	return setupErr
-}
 
 func (c *pooledSSHConn) Close() error {
 	var err error
@@ -366,10 +345,10 @@ type poolKey struct {
 // jumpRouteKey renders the jump route into a string component of poolKey.
 // It mirrors poolKey's own identity fields for the bastion hop, so a target
 // reached through two bastions (or the same bastion with two jump
-// credentials) gets two entries. The bastion is itself pooled under its own
-// poolKey (see dialViaJumpHost), so this string is the deduplication that
-// keeps a target-with-jump entry separate from the same target dialed
-// directly or via a different bastion.
+// credentials) gets two entries. A hop is itself pooled under its own
+// poolKey (ssh_pooled.go's acquireHop), so this string is the deduplication
+// that keeps a target-through-a-route entry separate from the same target
+// dialed directly or through a different route.
 func (k poolKey) jumpRouteKey() string {
 	if k.host == "" {
 		return ""
@@ -539,8 +518,8 @@ func (p *ConnPool) AcquireDial(ctx context.Context, key poolKey, dial func(key p
 // if the context cancels before the dialer finishes, the waiter returns
 // ctx.Err() without touching pool state. The first dialer's context is
 // embedded in the dial closure — cancellation there propagates through
-// the dial logic (dialDirect/dialViaJumpHost) and acquire cleans up the
-// dialInProgress slot before waking waiters.
+// the dial logic (ssh_dial.go) and acquire cleans up the dialInProgress slot
+// before waking waiters.
 func (p *ConnPool) acquire(ctx context.Context, key poolKey, dial func(key poolKey) (sshClientConn, error)) (*poolHandle, error) {
 	p.mu.Lock()
 	if entry, ok := p.pool[key]; ok && !connIsDead(entry.conn) {
@@ -750,6 +729,15 @@ func (p *ConnPool) Drain(match func(key poolKey) bool) int {
 		_ = c.Close()
 	}
 	return closed
+}
+
+// Close closes every pooled connection regardless of refcount. It is the
+// client's own shutdown, called by the helper daemon that owns it (sshdial's
+// client.Close); ordinary tab closure releases a single handle via the
+// channel's closeCb and never reaches here.
+func (rc *RealClient) Close() error {
+	rc.dial.pool.CloseAll()
+	return nil
 }
 
 // Count returns the number of pooled connections (for testing/diagnostics).

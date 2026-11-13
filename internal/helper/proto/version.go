@@ -344,4 +344,10 @@ package proto
 // Version 25 adds sessionIdleDays to the closed spawn and spawn-ssh params
 // (nocx-wkjdb, ADR-v7xk8mq8). Older generations retain their previous lifetime
 // policy and cannot negotiate this protocol; no compatibility shim is used.
-const Version = "25"
+// Version 26 REMOVES a frame type: the keepalive frame (9) was handled at both
+// ends of the wire and sent by nobody, so it was deleted rather than left as a
+// handler no producer reaches (nocx-oalo1.3.2). The closed set a reader
+// switches on is part of this number, so the number moves: a 25-generation
+// that still recognised 9 would have no reason to refuse it, and two peers
+// disagreeing about the set is exactly what hello exists to catch.
+const Version = "26"

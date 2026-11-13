@@ -880,17 +880,13 @@ func New(opts ...Option) (*App, error) {
 	// this process's known_hosts, and answer the two seams a caller with no
 	// connection asks (CheckHostKey, SignWithStoredKey).
 	//
-	// THE SESSION REGISTRY IS DELIBERATELY LEFT WITHOUT A FACTORY. It used to
-	// be handed one here (`WithSSHFactory`, over this same client), and that
-	// wiring was the last thing in this process that could have dialed a far
-	// host: `session.Reg.Open`'s remote arm calls it (session.go), and the
-	// transport's own check that an ssh destination is a helper's
-	// (session_open.go) is what made the arm unreachable rather than what
-	// removed it. nocx-50w7p.5 removes it from the composition root, so no
-	// shipped wiring can reach `r.ssh.Connect` at all; the seam itself stays
-	// in internal/session, where the transport's stands legitimately stand in
-	// a channel for a session without a pty (ADR-0057's reasoning: a factory
-	// is a seam, and nothing shipped supplies one).
+	// THE SESSION REGISTRY HAS NO DIAL AND NO WAY TO BE GIVEN ONE. It used to
+	// be handed an ssh factory here, over this same client, and that wiring
+	// was the last thing in this process that could dial a far host. The
+	// factory, the registry's remote arm and the dial they reached were all
+	// deleted (nocx-50w7p.5, nocx-oalo1.3.2), so an ssh open at the registry
+	// is a refusal that names this machine's helper — and there is no field a
+	// future wiring could fill to change that.
 	sshClient, err := ssh.NewReal(logger, ssh.WithConfigResolver(sshCfgResolver))
 	if err != nil {
 		return nil, fmt.Errorf("ssh client: %w", err)

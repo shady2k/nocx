@@ -346,10 +346,9 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 	// readopt's own comment states — a local carrier reports no destination),
 	// so the wire notification never arrives for one and this is a no-op
 	// registration rather than a local/remote branch to keep in step by
-	// hand. ObserveHost is the SAME producer the coordinator's own
-	// non-helper dials have always fed (hostLivenessObserver); a helper's
-	// notification is just a second producer for the one function that
-	// decides what either means.
+	// hand. ObserveHost is the one function that decides what a reachability
+	// finding means, and this is now its only producer: the coordinator's own
+	// dials, which fed it in-process, are gone (nocx-oalo1.3.2).
 	if cfg.Host != "" {
 		attached.OnLiveness(func(responsive bool, roundTripMS int64) {
 			h.registry.ObserveHost(cfg.Host, ssh.Reachability{

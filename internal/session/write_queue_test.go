@@ -85,16 +85,16 @@ func waitForFrames(t *testing.T, ch *recordingChannel, want int) {
 	}
 }
 
-func openWith(t *testing.T, ch ssh.Channel) (*Reg, Session) {
+func openWith(t *testing.T, ch Channel) (*Reg, Session) {
 	t.Helper()
-	reg := launcherReg().WithSSHFactory(&capturingSSHFactory{ch: ch})
-	sess, err := reg.Open(context.Background(), Config{
+	reg := launcherReg()
+	sess, err := reg.Adopt(context.Background(), Config{
 		Kind:   KindRemote,
 		Host:   "example.com",
 		Remote: &ssh.ConnectConfig{},
-	})
+	}, NewID(), ch)
 	if err != nil {
-		t.Fatalf("Open: %v", err)
+		t.Fatalf("Adopt: %v", err)
 	}
 	return reg, sess
 }

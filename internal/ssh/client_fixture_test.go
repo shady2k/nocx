@@ -13,37 +13,10 @@ package ssh
 // untagged half (ssh_real.go).
 
 import (
-	"context"
-	"fmt"
-	"path/filepath"
-	"sync"
 	"testing"
 
-	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 )
-
-// memSecretStore is the in-memory credential.Resolver the auth-chain and
-// prompt tests both stand in for a vault: Create mints an id, and Resolve
-// answers the stored value through Secret.Use like a real one does. It is
-// here, beside the client fixtures and for the same reason — the untagged
-// password_prompt_test.go needs it, and the untagged pass is the build where
-// a tagged file does not exist.
-
-// newTestRealClient builds a RealClient with test-safe defaults.
-func newTestRealClient(t *testing.T) *RealClient {
-	t.Helper()
-	dir := t.TempDir()
-	rc, err := NewReal(
-		log.NewSlogAdapter(nil), // nil handler → slog falls back
-		WithKnownHostsFile(filepath.Join(dir, "known_hosts")),
-		WithConfigResolver(NewStubConfigResolver()),
-	)
-	if err != nil {
-		t.Fatalf("NewReal: %v", err)
-	}
-	return rc
-}
 
 // newTrustClient builds a RealClient whose known_hosts lives at the given
 // path (which may not exist yet).
@@ -64,54 +37,4 @@ func newTrustClient(t *testing.T, khPath string) *RealClient {
 		t.Fatalf("NewReal: %v", err)
 	}
 	return client
-}
-
-type memSecretStore struct {
-	mu   sync.Mutex
-	m    map[credential.SecretID]credential.Secret
-	next int
-}
-
-func (s *memSecretStore) Create(_ context.Context, value credential.Secret) (credential.SecretID, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.next++
-	id := credential.SecretID(fmt.Sprintf("mem-%d", s.next))
-	if s.m == nil {
-		s.m = make(map[credential.SecretID]credential.Secret)
-	}
-	s.m[id] = value
-	return id, nil
-}
-
-func (s *memSecretStore) Get(_ context.Context, id credential.SecretID) (credential.Secret, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	v, ok := s.m[id]
-	if !ok {
-		return credential.Secret{}, nil
-	}
-	return v, nil
-}
-
-func (s *memSecretStore) Resolve(ctx context.Context, id credential.SecretID, why credential.Stance) (credential.Secret, error) {
-	return credential.NewResolver(s, nil, nil).Resolve(ctx, id, why)
-}
-
-func (s *memSecretStore) Delete(_ context.Context, id credential.SecretID) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.m, id)
-	return nil
-}
-
-func (s *memSecretStore) Exists(_ context.Context, id credential.SecretID) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, ok := s.m[id]
-	return ok, nil
-}
-
-func newTestStore() *memSecretStore {
-	return &memSecretStore{}
 }

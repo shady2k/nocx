@@ -4,7 +4,8 @@ package ssh
 
 // What the product must be able to say about a connection, per network
 // condition — stated as tests rather than as prose, over the seam the product
-// actually uses (Connect + WithKeepalive + WithLivenessObserver).
+// actually uses: the pooled connection the local helper dials
+// (AcquirePooled + KeepaliveInterval/KeepaliveCountMax + Liveness).
 //
 // The four conditions and the answer each one demands:
 //
@@ -20,16 +21,14 @@ package ssh
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
 
-	gossh "golang.org/x/crypto/ssh"
-
 	"github.com/shady2k/nocx/internal/log"
+	gossh "golang.org/x/crypto/ssh"
 )
 
 // livenessLog records what the prober told the product, in order.
@@ -60,14 +59,14 @@ func (l *livenessLog) sawUnresponsive() bool {
 	return false
 }
 
-// connectThroughFault opens a real session through a switchable network and
-// returns the channel plus the relay that decides what the network is doing.
+// dialThroughFault opens one pooled connection through a switchable network
+// and returns it plus the relay that decides what the network is doing.
 //
 // The keepalive interval is short so a test states a NUMBER OF PROBES rather
 // than a duration: countMax=3 at 50ms means the give-up is due within ~150ms,
 // and a second of waiting is twenty times that. Nothing here waits on a
 // duration to decide an outcome — every assertion polls for an observable.
-func connectThroughFault(t *testing.T, obs LivenessObserver) (Channel, *faultProxy, *testSSHServer) {
+func dialThroughFault(t *testing.T, obs LivenessObserver) (*PooledConn, *faultProxy, *testSSHServer, <-chan struct{}) {
 	t.Helper()
 	srv := startTestSSHServer(t)
 	t.Cleanup(srv.close)
@@ -79,26 +78,54 @@ func connectThroughFault(t *testing.T, obs LivenessObserver) (Channel, *faultPro
 	}
 	port, _ := strconv.Atoi(portStr)
 
-	client, err := NewReal(log.NewSlogAdapter(nil), WithKnownHostsFile(writeKnownHosts(t, srv, proxy.addr)))
+	client, err := NewReal(log.NewSlogAdapter(nil))
 	if err != nil {
 		t.Fatalf("NewReal: %v", err)
 	}
 	t.Cleanup(func() { _ = client.Close() })
 
-	ch, err := client.Connect(
-		context.Background(), host,
-		WithPort(port),
-		WithUser("test"),
-		WithAuthMethods([]gossh.AuthMethod{gossh.PublicKeys(srv.userSigner)}),
-		WithKeepalive(50*time.Millisecond, 3),
-		WithLivenessObserver(obs),
-		WithTimeout(10*time.Second),
-	)
+	conn, err := client.AcquirePooled(context.Background(), PooledSpec{
+		Host:              host,
+		Port:              port,
+		User:              "test",
+		Identity:          "fault-fixture",
+		KeepaliveInterval: 50 * time.Millisecond,
+		KeepaliveCountMax: 3,
+		Liveness:          obs,
+		Config: &gossh.ClientConfig{
+			User: "test",
+			Auth: []gossh.AuthMethod{gossh.PublicKeys(srv.userSigner)},
+			// The fault tests are about the prober's verdicts, not about
+			// trust: the fixture server is the one this test started.
+			HostKeyCallback: gossh.InsecureIgnoreHostKey(), //nolint:gosec // fixture server started by this test
+			Timeout:         10 * time.Second,
+		},
+	})
 	if err != nil {
-		t.Fatalf("Connect through fault proxy: %v", err)
+		t.Fatalf("AcquirePooled through fault proxy: %v", err)
 	}
-	t.Cleanup(func() { _ = ch.Close() })
-	return ch, proxy, srv
+	t.Cleanup(func() { _ = conn.Close() })
+
+	// THE TRANSPORT'S END is the observable every fault is asserted against:
+	// the client library reports when the connection it holds dies, whether
+	// the prober closed it or the wire broke.
+	ended := make(chan struct{})
+	go func() {
+		_ = conn.Client().Wait()
+		close(ended)
+	}()
+	return conn, proxy, srv, ended
+}
+
+func endedNow(ended <-chan struct{}) func() bool {
+	return func() bool {
+		select {
+		case <-ended:
+			return true
+		default:
+			return false
+		}
+	}
 }
 
 // waitFor polls for an observable rather than sleeping for a duration: a test
@@ -116,17 +143,6 @@ func waitFor(t *testing.T, what string, within time.Duration, cond func() bool) 
 	return false
 }
 
-func channelEnded(ch Channel) func() bool {
-	return func() bool {
-		select {
-		case <-ch.Done():
-			return true
-		default:
-			return false
-		}
-	}
-}
-
 // A healthy link is never reported UNRESPONSIVE. It does report a round trip
 // on every probe, and that is not noise reaching a person: the prober's job is
 // to measure, and internal/session grades the measurement and republishes only
@@ -135,7 +151,7 @@ func channelEnded(ch Channel) func() bool {
 // it is owned; asserting it here would pin the wrong layer.
 func TestTransportFault_HealthyLinkIsNeverCalledUnresponsive(t *testing.T) {
 	var seen livenessLog
-	ch, _, _ := connectThroughFault(t, seen.observe)
+	_, _, _, ended := dialThroughFault(t, seen.observe)
 
 	// Ten intervals of a link nobody is interfering with.
 	time.Sleep(500 * time.Millisecond)
@@ -143,7 +159,7 @@ func TestTransportFault_HealthyLinkIsNeverCalledUnresponsive(t *testing.T) {
 	if seen.sawUnresponsive() {
 		t.Fatalf("a healthy connection was reported unresponsive: %v", seen.snapshot())
 	}
-	if channelEnded(ch)() {
+	if endedNow(ended)() {
 		t.Fatal("a healthy connection ended on its own")
 	}
 }
@@ -156,15 +172,15 @@ func TestTransportFault_HealthyLinkIsNeverCalledUnresponsive(t *testing.T) {
 // so neither half ever happens and the pane sits on a dead pipe in silence.
 func TestTransportFault_SilentDeathIsReportedThenEndsTheSession(t *testing.T) {
 	var seen livenessLog
-	ch, proxy, _ := connectThroughFault(t, seen.observe)
+	_, proxy, _, ended := dialThroughFault(t, seen.observe)
 
 	proxy.blackhole()
 
 	if !waitFor(t, "the host to be reported unresponsive", 5*time.Second, seen.sawUnresponsive) {
 		t.Errorf("a host that stopped answering was never reported unresponsive (reports: %v)", seen.snapshot())
 	}
-	if !waitFor(t, "the session to end", 5*time.Second, channelEnded(ch)) {
-		t.Fatalf("a host that stopped answering never ended the session (reports: %v)", seen.snapshot())
+	if !waitFor(t, "the connection to end", 5*time.Second, endedNow(ended)) {
+		t.Fatalf("a host that stopped answering never ended the connection (reports: %v)", seen.snapshot())
 	}
 }
 
@@ -172,7 +188,7 @@ func TestTransportFault_SilentDeathIsReportedThenEndsTheSession(t *testing.T) {
 // end anything — a tab killed because the far host was busy is lost work.
 func TestTransportFault_SlowServerDoesNotEndTheSession(t *testing.T) {
 	var seen livenessLog
-	ch, proxy, _ := connectThroughFault(t, seen.observe)
+	_, proxy, _, ended := dialThroughFault(t, seen.observe)
 
 	// The delay is applied in EACH direction, so a probe's round trip is
 	// twice it: 60ms against a 50ms interval (late — it cannot finish inside
@@ -181,7 +197,7 @@ func TestTransportFault_SlowServerDoesNotEndTheSession(t *testing.T) {
 	proxy.slow(30 * time.Millisecond)
 	time.Sleep(time.Second)
 
-	if channelEnded(ch)() {
+	if endedNow(ended)() {
 		t.Fatalf("a server that answered late was treated as dead (reports: %v)", seen.snapshot())
 	}
 }
@@ -206,18 +222,18 @@ func TestTransportFault_SlowServerDoesNotEndTheSession(t *testing.T) {
 // the product can say "gone" and cannot say "struggling".
 func TestTransportFault_SilentHostIsNotRecoverableInPlace(t *testing.T) {
 	var seen livenessLog
-	ch, proxy, _ := connectThroughFault(t, seen.observe)
+	_, proxy, _, ended := dialThroughFault(t, seen.observe)
 
 	proxy.blackhole()
-	if !waitFor(t, "the session to end", 5*time.Second, channelEnded(ch)) {
-		t.Fatalf("a silent host never ended the session (reports: %v)", seen.snapshot())
+	if !waitFor(t, "the connection to end", 5*time.Second, endedNow(ended)) {
+		t.Fatalf("a silent host never ended the connection (reports: %v)", seen.snapshot())
 	}
 	proxy.pass()
 
-	// The host answers again; the session stays ended. Nothing revives it,
+	// The host answers again; the connection stays ended. Nothing revives it,
 	// and nothing should: the transport it ran on is closed.
-	if !channelEnded(ch)() {
-		t.Error("a closed session reopened itself when the host came back")
+	if !endedNow(ended)() {
+		t.Error("a closed connection reopened itself when the host came back")
 	}
 }
 
@@ -226,16 +242,14 @@ func TestTransportFault_SilentHostIsNotRecoverableInPlace(t *testing.T) {
 // the prober that breaks it is caught by the same table.
 func TestTransportFault_CutWireEndsTheSession(t *testing.T) {
 	var seen livenessLog
-	ch, proxy, _ := connectThroughFault(t, seen.observe)
+	_, proxy, _, ended := dialThroughFault(t, seen.observe)
 
 	proxy.cut()
 
-	if !waitFor(t, "the session to end", 5*time.Second, channelEnded(ch)) {
-		t.Fatalf("a cut wire did not end the session (reports: %v)", seen.snapshot())
+	if !waitFor(t, "the connection to end", 5*time.Second, endedNow(ended)) {
+		t.Fatalf("a cut wire did not end the connection (reports: %v)", seen.snapshot())
 	}
 }
-
-var _ = fmt.Sprintf
 
 // A SLOW host must be reportable, and the only thing that can report it is
 // the prober: it is the one place in nocx that measures a round trip to the
@@ -252,7 +266,7 @@ func TestTransportFault_SlowHostReportsItsRoundTrip(t *testing.T) {
 			slowest = r.RoundTrip
 		}
 	}
-	ch, proxy, _ := connectThroughFault(t, obs)
+	_, proxy, _, _ := dialThroughFault(t, obs)
 	proxy.slow(30 * time.Millisecond)
 
 	// The delay is applied in each direction, so a probe's round trip is
@@ -268,8 +282,5 @@ func TestTransportFault_SlowHostReportsItsRoundTrip(t *testing.T) {
 		got := slowest
 		mu.Unlock()
 		t.Fatalf("slowest observed round trip = %v, want >= 40ms — the prober is not reporting how long the far end took", got)
-	}
-	if channelEnded(ch)() {
-		t.Error("a slow host lost its session")
 	}
 }

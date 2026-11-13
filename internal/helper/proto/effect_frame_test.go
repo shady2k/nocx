@@ -161,11 +161,11 @@ func TestCommandSnapshotEffectFrameRoundTripsItsTypedPayload(t *testing.T) {
 // for: the fence's job is to refuse a peer that does not agree about this
 // number, so a bump that nothing asserts is a bump a later edit takes back
 // inside a change about something else. It names the LAST reason the number
-// moved — the spawn-time session absence policy (nocx-wkjdb), which a
-// generation predating it cannot honor.
-func TestHelperProtocolVersionBumpedForSessionIdlePolicy(t *testing.T) {
-	if Version != "25" {
-		t.Fatalf("helper protocol version = %q, want 25", Version)
+// moved — the removal of the unsent keepalive frame type (nocx-oalo1.3.2),
+// which changes the closed set a reader switches on.
+func TestHelperProtocolVersionBumpedForTheFrameSet(t *testing.T) {
+	if Version != "26" {
+		t.Fatalf("helper protocol version = %q, want 26", Version)
 	}
 }
 

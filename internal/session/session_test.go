@@ -334,18 +334,8 @@ func TestRealRegistry_RemoteKind_ReturnsError(t *testing.T) {
 }
 
 func TestOwnedProcessPID_UnknownForSSHSession(t *testing.T) {
-	reg := launcherReg().WithSSHFactory(&capturingSSHFactory{ch: &reasonChannel{}})
-	sess, err := reg.Open(context.Background(), Config{
-		Kind:   KindRemote,
-		Host:   "example.test",
-		Remote: &ssh.ConnectConfig{User: "alice"},
-		Cols:   80,
-		Rows:   24,
-	})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer func() { _ = reg.Close(sess.ID()) }()
+	reg := launcherReg()
+	sess := adoptRemote(t, reg, &reasonChannel{}, Config{Host: "example.test", Remote: &ssh.ConnectConfig{User: "alice"}})
 
 	if pid, known := reg.OwnedProcessPID(sess.ID()); known || pid != 0 {
 		t.Fatalf("SSH session process lookup = %d, %v; want absent", pid, known)

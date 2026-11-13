@@ -142,11 +142,6 @@ func (c *blockingRemoteCompleter) Complete(ctx context.Context, _ completion.Req
 func TestShellComplete_JumpRouteDoesNotHoldSessionGate(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
 	reg := newRegWithStub(logger)
-	reg.WithSSHFactory(&stubSSHFactory{
-		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
-			return ssh.NewStubChannel(logger), nil
-		},
-	})
 	remote := &blockingRemoteCompleter{
 		entered: make(chan []ssh.ConnectOption, 1),
 		release: make(chan struct{}),

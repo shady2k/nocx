@@ -2263,31 +2263,6 @@ func (r *openProfileResolver) Resolve(_ string) (string, *ssh.ConnectConfig, err
 	return r.host, &ssh.ConnectConfig{User: "test"}, nil
 }
 
-// openSSHFactory is a session.SSHFactory that records the ConnectOptions the
-// registry built and returns a channel carrying a scripted refusal reason.
-type openSSHFactory struct {
-	channel ssh.Channel
-	host    string
-	opts    []ssh.ConnectOption
-}
-
-func (f *openSSHFactory) Connect(_ context.Context, host string, opts ...ssh.ConnectOption) (ssh.Channel, error) {
-	f.host = host
-	f.opts = append([]ssh.ConnectOption{}, opts...)
-	return f.channel, nil
-}
-
-// reasonChannel overrides the stub channel's reason so the wire actually
-// carries a non-empty refusal.
-type reasonChannel struct {
-	*ssh.StubChannel
-	reason ssh.RefusalReason
-}
-
-func (c *reasonChannel) ShellIntegrationReason() ssh.RefusalReason {
-	return c.reason
-}
-
 // The real method through the real socket: an SSH open with the launcher
 // wired, validated against the schema and asserted to carry the reason the
 // channel reports. Nothing here names a field, so nothing here can omit one;
@@ -2299,14 +2274,14 @@ func TestOpen_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "open.schema.json")
 
 	reg := session.New(log.NewSlogAdapter(nil), &stubPTYFactory{stub: pty.NewStub(log.NewSlogAdapter(nil))})
-	factory := &openSSHFactory{
-		channel: &reasonChannel{StubChannel: ssh.NewStubChannel(log.NewSlogAdapter(nil)), reason: ssh.ReasonNoSecureTemp},
-	}
-	reg = reg.WithSSHFactory(factory)
+	var handed session.Config
+	opener := stubHelper(reg)
+	opener.channel = func() session.Channel { return newScriptedReason(ssh.ReasonNoSecureTemp) }
+	opener.onOpen = func(cfg session.Config) { handed = cfg }
 
 	ws := NewWSServer(
 		log.NewSlogAdapter(nil), reg,
-		sshHelperOpt(reg),
+		WithHelperSessionOpener(opener),
 		WithProfileResolver(&openProfileResolver{host: "host.example.com"}),
 		WithRemoteLauncher(&fakeRemoteLauncher{}),
 	)
@@ -2408,22 +2383,11 @@ func TestOpen_OverTheWireConformsToContract(t *testing.T) {
 	}
 
 	// The launcher the transport option attached must have reached the
-	// registry's ConnectOptions — the exact chain that was dead before.
-	cfg := &ssh.ConnectConfig{}
-	for _, o := range factory.opts {
-		o(cfg)
-	}
-	if cfg.RemoteLauncher == nil {
-		t.Error("WithRemoteLauncher did not reach the ConnectConfig: RemoteLauncher is nil in the options the SSH factory received")
-	}
-	// And the size the SSH CHANNEL was opened at is the session's, not the
-	// renderer's copy: the transport no longer writes the params onto the
-	// ConnectConfig, so the only way this size can be here is the registry
-	// putting it there (AD-1 — the channel is created at its final size,
-	// never spawned-then-resized).
-	opened := sizeResult{Cols: cfg.Cols, Rows: cfg.Rows, XPixel: cfg.XPixel, YPixel: cfg.YPixel}
-	if want := sizeResultOf(sess.EffectiveSize()); opened != want {
-		t.Errorf("ssh channel opened at %+v, want the session's effective size %+v", opened, want)
+	// config the helper is handed — the exact chain that was dead before, and
+	// the only place a launcher can be built now that the coordinator dials
+	// nothing.
+	if handed.Remote == nil || handed.Remote.RemoteLauncher == nil {
+		t.Error("WithRemoteLauncher did not reach the ConnectConfig the helper was handed: RemoteLauncher is nil")
 	}
 }
 
@@ -4776,11 +4740,6 @@ func TestGitOpen_OverTheWireConformsToContract_SSHHelper(t *testing.T) {
 	commitSchema := loadSchema(t, "git.commit.schema.json")
 	logger := log.NewSlogAdapter(nil)
 	reg := newRegWithStub(logger)
-	reg.WithSSHFactory(&stubSSHFactory{
-		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
-			return ssh.NewStubChannel(logger), nil
-		},
-	})
 	helper := newStubGitFactory()
 	ws := NewWSServer(logger, reg,
 		sshHelperOpt(reg),

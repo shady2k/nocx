@@ -31,7 +31,6 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
-	"github.com/shady2k/nocx/internal/ssh"
 )
 
 // recordingPTYFactory captures the pty.Config the session layer builds.
@@ -59,39 +58,6 @@ func (f *recordingPTYFactory) config(t *testing.T) pty.Config {
 	return f.got
 }
 
-// sshConfigRecorder captures the ConnectConfig the dial is given, rebuilt
-// from the options exactly as session.Open assembles them.
-type sshConfigRecorder struct {
-	mu   sync.Mutex
-	got  ssh.ConnectConfig
-	seen bool
-}
-
-func (r *sshConfigRecorder) factory(logger log.Logger) *stubSSHFactory {
-	return &stubSSHFactory{
-		connectFn: func(_ context.Context, _ string, opts ...ssh.ConnectOption) (ssh.Channel, error) {
-			cfg := &ssh.ConnectConfig{}
-			for _, o := range opts {
-				o(cfg)
-			}
-			r.mu.Lock()
-			r.got, r.seen = *cfg, true
-			r.mu.Unlock()
-			return ssh.NewStubChannel(logger), nil
-		},
-	}
-}
-
-func (r *sshConfigRecorder) config(t *testing.T) ssh.ConnectConfig {
-	t.Helper()
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if !r.seen {
-		t.Fatal("no ssh dial happened")
-	}
-	return r.got
-}
-
 // openOverWire sends the open RPC with exactly the params given and fails
 // on a JSON-RPC error. The params deliberately never mention integration.
 func openOverWire(t *testing.T, ws *WSServer, params map[string]any) {
@@ -113,80 +79,9 @@ func openOverWire(t *testing.T, ws *WSServer, params map[string]any) {
 	}
 }
 
-// A profile-backed ssh session asks for integration. This is the path the
-// connection manager uses, and the one the owner reported flat.
-func TestWSServer_Open_SSHProfile_RequestsIntegration(t *testing.T) {
-	logger := log.NewSlogAdapter(nil)
-	reg := newRegWithStub(logger)
-	rec := &sshConfigRecorder{}
-	reg.WithSSHFactory(rec.factory(logger))
-
-	ws := NewWSServer(logger, reg,
-		// The ssh panes this stand's two cases open are this machine's
-		// helper's (nocx-50w7p.5). Both measure the integration REQUEST the
-		// open makes, which is downstream of the pane existing.
-		sshHelperOpt(reg),
-		WithProfileResolver(&fakeResolver{
-			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {
-				return "host.example.com", &ssh.ConnectConfig{User: "test", Port: 22}, nil
-			},
-		}),
-	)
-	ctx := context.Background()
-	if err := ws.Start(ctx); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	t.Cleanup(func() { _ = ws.Stop(ctx) })
-
-	openOverWire(t, ws, map[string]any{
-		"cols": 80, "rows": 24, "kind": "ssh", "profileId": "ssh:test:1",
-	})
-
-	if got := rec.config(t); !got.Enhanced {
-		t.Error("ssh dial did not request integration: ConnectConfig.Enhanced is false, " +
-			"so no lifecycle channel is established and the tab can never show blocks")
-	}
-}
-
-// A direct-host ssh session (an alias typed into the host field, no saved
-// profile) asks for integration too — the same tab, the same expectation.
-func TestWSServer_Open_SSHDirectHost_RequestsIntegration(t *testing.T) {
-	logger := log.NewSlogAdapter(nil)
-	reg := newRegWithStub(logger)
-	rec := &sshConfigRecorder{}
-	reg.WithSSHFactory(rec.factory(logger))
-
-	resolver := newLauncherTestResolver()
-	resolver.add("pi@192.0.2.93", ssh.HostConfig{User: "pi", HostName: "192.0.2.93", Port: 22})
-
-	ws := NewWSServer(logger, reg,
-		// The ssh pane this case opens is this machine's helper's
-		// (nocx-50w7p.5). Its subject is the integration REQUEST a direct-host
-		// open makes, which is downstream of the pane existing. The stand one
-		// test below, which asserts a host SHAPE is refused before any open,
-		// stays unwired.
-		sshHelperOpt(reg),
-		WithSSHConfigResolver(resolver, "/nonexistent/config"))
-	ctx := context.Background()
-	if err := ws.Start(ctx); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	t.Cleanup(func() { _ = ws.Stop(ctx) })
-
-	openOverWire(t, ws, map[string]any{
-		"cols": 80, "rows": 24, "kind": "ssh", "host": "pi@192.0.2.93",
-	})
-
-	if got := rec.config(t); !got.Enhanced {
-		t.Error("direct-host ssh dial did not request integration: ConnectConfig.Enhanced is false")
-	}
-}
-
 func TestWSServer_Open_SSHDirectHost_RejectsOptionLikeHost(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
 	reg := newRegWithStub(logger)
-	rec := &sshConfigRecorder{}
-	reg.WithSSHFactory(rec.factory(logger))
 
 	resolver := newLauncherTestResolver()
 	ws := NewWSServer(logger, reg, WithSSHConfigResolver(resolver, "/nonexistent/config"))
@@ -215,12 +110,9 @@ func TestWSServer_Open_SSHDirectHost_RejectsOptionLikeHost(t *testing.T) {
 	if !strings.Contains(parsed.Error.Message, "host must not begin with a dash") {
 		t.Fatalf("open error = %q, want option-like host rejection", parsed.Error.Message)
 	}
-	rec.mu.Lock()
-	seen := rec.seen
-	rec.mu.Unlock()
-	if seen {
-		t.Fatal("invalid direct host reached the SSH dialer")
-	}
+	// No helper is wired at all, so reaching one would answer the named
+	// refusal instead; the validation message above is what proves the host
+	// never got that far.
 }
 
 // The local session asks for integration without the renderer saying so.

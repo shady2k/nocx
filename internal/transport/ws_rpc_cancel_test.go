@@ -50,11 +50,6 @@ func cancelRig(t *testing.T) (*websocket.Conn, *cancelWatchingCompleter, string)
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
 	reg := newRegWithStub(logger)
-	reg.WithSSHFactory(&stubSSHFactory{
-		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
-			return ssh.NewStubChannel(logger), nil
-		},
-	})
 	remote := newCancelWatchingCompleter()
 	ws := NewWSServer(
 		logger,

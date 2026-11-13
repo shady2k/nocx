@@ -2,17 +2,21 @@
 
 package ssh
 
+// Cancellation on the pool's dial path: a dial that is still inside a TCP
+// connect or an SSH handshake must return the caller's context error rather
+// than outlive it, and the pool must be left with nothing behind.
+//
+// These tests drive AcquirePooled — the seam the local helper's ssh service
+// dials through — rather than a second, coordinator-only dial.
+
 import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"net"
-	"os"
-	"path/filepath"
 	"strconv"
 	"sync"
 	"testing"
@@ -111,36 +115,51 @@ func (bl *blockingListener) close() {
 	bl.connsMu.Unlock()
 }
 
+// poolSpec builds the one-connection spec these tests dial, with the
+// fixture's own host-key answer: trust is not their subject.
+func poolSpec(t *testing.T, addr string, auth []gossh.AuthMethod, route ...PooledHop) PooledSpec {
+	t.Helper()
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("split %q: %v", addr, err)
+	}
+	port, _ := strconv.Atoi(portStr)
+	return PooledSpec{
+		Host:     host,
+		Port:     port,
+		User:     "test",
+		Identity: "cancel-fixture",
+		Config: &gossh.ClientConfig{
+			User:            "test",
+			Auth:            auth,
+			HostKeyCallback: gossh.InsecureIgnoreHostKey(), //nolint:gosec // a fixture server or a listener that never answers
+			Timeout:         30 * time.Second,
+		},
+		Route: route,
+	}
+}
+
 // TestDialCancel_DirectHandshake verifies that cancelling the context during
 // the SSH handshake returns promptly with context.Canceled, not a hung dial.
 // Without the watchdog goroutine in dialDirect, this test hangs until the
-// 5-second timeout expires.
+// timeout expires.
 func TestDialCancel_DirectHandshake(t *testing.T) {
 	bl := startBlockingListener(t)
 	defer bl.close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	client, err := NewReal(
-		log.NewSlogAdapter(nil),
-		WithKnownHostsFile("/dev/null"), // bypass host-key check
-	)
+	client, err := NewReal(log.NewSlogAdapter(nil))
 	if err != nil {
 		t.Fatalf("NewReal: %v", err)
 	}
 	defer func() { _ = client.Close() }()
 
-	// Start Connect in a goroutine — it will block in NewClientConn.
+	spec := poolSpec(t, bl.addr(), []gossh.AuthMethod{gossh.Password("irrelevant")})
+
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := client.Connect(
-			ctx, bl.addr(),
-			WithUser("test"),
-			WithAuthMethods([]gossh.AuthMethod{
-				gossh.Password("irrelevant"),
-			}),
-			WithPTYSize(80, 24, 0, 0),
-		)
+		_, err := client.AcquirePooled(ctx, spec)
 		errCh <- err
 	}()
 
@@ -158,41 +177,77 @@ func TestDialCancel_DirectHandshake(t *testing.T) {
 	}
 }
 
-// TestDialCancel_DirectNewClientConn tests the dialDirect watchdog directly.
-// It dials a blocking listener through dialDirect and cancels the context
-// while gossh.NewClientConn is blocked.
-func TestDialCancel_DirectNewClientConn(t *testing.T) {
+// TestDialCancel_JumpHandshake verifies that cancelling the context during
+// the target's SSH handshake through a jump host returns promptly with
+// context.Canceled. The bastion is a real test SSH server with direct-tcpip
+// support; the target is a blocking TCP listener that accepts but never
+// completes an SSH handshake. Cancellation closes the forwarded connection,
+// unblocking gossh.NewClientConn, and releases the bastion handle.
+func TestDialCancel_JumpHandshake(t *testing.T) {
+	// Generate keys for the bastion.
+	_, privKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	signer, err := gossh.NewSignerFromKey(privKey)
+	if err != nil {
+		t.Fatalf("create signer: %v", err)
+	}
+
+	// Start bastion with direct-tcpip support.
+	bastion := startTestSSHServerWithKey(t, signer)
+	defer bastion.close()
+
+	// Target: a TCP listener that accepts but never does SSH handshake.
 	bl := startBlockingListener(t)
 	defer bl.close()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	d := &dialer{client: &RealClient{
-		log: log.NewSlogAdapter(nil),
-	}}
-
-	cfg := &gossh.ClientConfig{
-		User:            "test",
-		Auth:            []gossh.AuthMethod{gossh.Password("x")},
-		Timeout:         30 * time.Second,
-		HostKeyCallback: gossh.InsecureIgnoreHostKey(), //nolint:gosec // test-only, target is a blocking listener
+	client, err := NewReal(log.NewSlogAdapter(nil))
+	if err != nil {
+		t.Fatalf("NewReal: %v", err)
 	}
+	defer func() { _ = client.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	bastionHost, bastionPortStr, _ := net.SplitHostPort(bastion.addr)
+	bastionPort, _ := strconv.Atoi(bastionPortStr)
+	hop := PooledHop{
+		Host:     bastionHost,
+		Port:     bastionPort,
+		User:     "jumpuser",
+		Identity: "jump-fixture",
+		Config: &gossh.ClientConfig{
+			User:            "jumpuser",
+			Auth:            []gossh.AuthMethod{gossh.PublicKeys(signer)},
+			HostKeyCallback: gossh.InsecureIgnoreHostKey(), //nolint:gosec // fixture server started by this test
+			Timeout:         10 * time.Second,
+		},
+	}
+	spec := poolSpec(t, bl.addr(), []gossh.AuthMethod{gossh.Password("irrelevant")}, hop)
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := d.dialDirect(ctx, bl.addr(), cfg, "testhost", "test")
+		_, err := client.AcquirePooled(ctx, spec)
 		errCh <- err
 	}()
 
+	// Wait for the target connection to reach the blocking listener.
 	<-bl.accepted
 	cancel()
 
 	select {
-	case err := <-errCh:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("expected context.Canceled, got %v", err)
+	case er := <-errCh:
+		if !errors.Is(er, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got %v", er)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("dialDirect did not return after cancellation within 5s")
+	case <-time.After(10 * time.Second):
+		t.Fatal("dial through jump did not return after cancellation within 10s")
+	}
+
+	// Bastion pool entry must be released — no leaked handles.
+	if got := client.dial.pool.Count(); got != 0 {
+		t.Fatalf("pool.Count()=%d after cancelled jump dial, want 0 (bastion handle released)", got)
 	}
 }
 
@@ -343,281 +398,4 @@ func TestPoolAcquire_WaiterCancellationConcurrent(t *testing.T) {
 	if got := pool.Count(); got != 1 {
 		t.Fatalf("pool.Count()=%d after concurrent cancellations, want 1", got)
 	}
-}
-
-// ---------------------------------------------------------------------------
-// Channel Close idempotency tests (closeOnce guards are already present from
-// 9d411ec; these tests verify the guard works).
-// ---------------------------------------------------------------------------
-
-// TestChannelClose_Repeated verifies that calling Close multiple times on the
-// same channel is safe and idempotent — no panic, no double-close of done.
-func TestChannelClose_Repeated(t *testing.T) {
-	srv := startTestSSHServer(t)
-	defer srv.close()
-
-	khPath := writeKnownHosts(t, srv, srv.addr)
-	client, err := NewReal(
-		log.NewSlogAdapter(nil),
-		WithKnownHostsFile(khPath),
-	)
-	if err != nil {
-		t.Fatalf("NewReal: %v", err)
-	}
-	defer func() { _ = client.Close() }()
-
-	ch, err := client.Connect(
-		context.Background(), srv.addr,
-		WithUser("test"),
-		WithAuthMethods([]gossh.AuthMethod{
-			gossh.PublicKeys(srv.userSigner),
-		}),
-		WithPTYSize(80, 24, 0, 0),
-	)
-	if err != nil {
-		t.Fatalf("Connect: %v", err)
-	}
-
-	<-srv.shellReady
-
-	// Close repeatedly — must not panic or error.
-	for i := range 10 {
-		if err := ch.Close(); err != nil {
-			t.Fatalf("Close #%d: %v", i+1, err)
-		}
-	}
-}
-
-// TestChannelClose_Concurrent verifies that concurrent calls to Close from
-// multiple goroutines are safe (no data race, no double-close).
-func TestChannelClose_Concurrent(t *testing.T) {
-	srv := startTestSSHServer(t)
-	defer srv.close()
-
-	khPath := writeKnownHosts(t, srv, srv.addr)
-	client, err := NewReal(
-		log.NewSlogAdapter(nil),
-		WithKnownHostsFile(khPath),
-	)
-	if err != nil {
-		t.Fatalf("NewReal: %v", err)
-	}
-	defer func() { _ = client.Close() }()
-
-	ch, err := client.Connect(
-		context.Background(), srv.addr,
-		WithUser("test"),
-		WithAuthMethods([]gossh.AuthMethod{
-			gossh.PublicKeys(srv.userSigner),
-		}),
-		WithPTYSize(80, 24, 0, 0),
-	)
-	if err != nil {
-		t.Fatalf("Connect: %v", err)
-	}
-
-	<-srv.shellReady
-
-	var wg sync.WaitGroup
-	for range 20 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_ = ch.Close()
-		}()
-	}
-	wg.Wait()
-	// Pass: no panic, no data race.
-}
-
-// ---------------------------------------------------------------------------
-// Resize tests
-// ---------------------------------------------------------------------------
-
-// TestResize_AfterDisconnect verifies that Resize returns *ErrDisconnected
-// after the underlying SSH connection is closed, instead of blocking.
-func TestResize_AfterDisconnect(t *testing.T) {
-	srv := startTestSSHServer(t)
-	defer srv.close()
-
-	khPath := writeKnownHosts(t, srv, srv.addr)
-	client, err := NewReal(
-		log.NewSlogAdapter(nil),
-		WithKnownHostsFile(khPath),
-	)
-	if err != nil {
-		t.Fatalf("NewReal: %v", err)
-	}
-	defer func() { _ = client.Close() }()
-
-	ch, err := client.Connect(
-		context.Background(), srv.addr,
-		WithUser("test"),
-		WithAuthMethods([]gossh.AuthMethod{
-			gossh.PublicKeys(srv.userSigner),
-		}),
-		WithPTYSize(80, 24, 0, 0),
-	)
-	if err != nil {
-		t.Fatalf("Connect: %v", err)
-	}
-
-	<-srv.shellReady
-
-	// Close the server — this triggers session.Wait() → ch.Close() → Done().
-	srv.close()
-
-	// Wait for the channel to detect disconnect.
-	select {
-	case <-ch.Done():
-	case <-time.After(5 * time.Second):
-		t.Fatal("channel did not detect disconnect within 5s")
-	}
-
-	// Resize must return ErrDisconnected, not block.
-	done := make(chan error, 1)
-	go func() {
-		done <- ch.Resize(context.Background(), 100, 40, 0, 0)
-	}()
-
-	select {
-	case err := <-done:
-		var discErr *ErrDisconnected
-		if !errors.As(err, &discErr) {
-			t.Fatalf("expected *ErrDisconnected after disconnect, got %T: %v", err, err)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("Resize blocked after disconnect — should return promptly")
-	}
-}
-
-// TestResize_CancelledContext verifies that a cancelled context makes Resize
-// return promptly even when the transport is healthy. This tests the
-// goroutine watchdog path in Resize.
-func TestResize_CancelledContext(t *testing.T) {
-	srv := startTestSSHServer(t)
-	defer srv.close()
-
-	khPath := writeKnownHosts(t, srv, srv.addr)
-	client, err := NewReal(
-		log.NewSlogAdapter(nil),
-		WithKnownHostsFile(khPath),
-	)
-	if err != nil {
-		t.Fatalf("NewReal: %v", err)
-	}
-	defer func() { _ = client.Close() }()
-
-	ch, err := client.Connect(
-		context.Background(), srv.addr,
-		WithUser("test"),
-		WithAuthMethods([]gossh.AuthMethod{
-			gossh.PublicKeys(srv.userSigner),
-		}),
-		WithPTYSize(80, 24, 0, 0),
-	)
-	if err != nil {
-		t.Fatalf("Connect: %v", err)
-	}
-
-	<-srv.shellReady
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // cancel immediately
-
-	err = ch.Resize(ctx, 100, 40, 0, 0)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected context.Canceled, got %v", err)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Jump-handshake cancellation test
-// ---------------------------------------------------------------------------
-
-// TestDialCancel_JumpHandshake verifies that cancelling the context during
-// the target's SSH handshake through a jump host returns promptly with
-// context.Canceled. The bastion is a real test SSH server with direct-tcpip
-// support; the target is a blocking TCP listener that accepts but never
-// completes an SSH handshake. Cancellation closes the forwarded connection,
-// unblocking gossh.NewClientConn, and releases the jump handle.
-func TestDialCancel_JumpHandshake(t *testing.T) {
-	// Generate keys for the bastion.
-	pubKey, privKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	signer, err := gossh.NewSignerFromKey(privKey)
-	if err != nil {
-		t.Fatalf("create signer: %v", err)
-	}
-
-	// Start bastion with direct-tcpip support.
-	bastion := startTestSSHServerWithKey(t, signer)
-	defer bastion.close()
-
-	// Target: a TCP listener that accepts but never does SSH handshake.
-	bl := startBlockingListener(t)
-	defer bl.close()
-
-	// Write the bastion's private key to a temp file for jump auth.
-	jumpKeyPath := filepath.Join(t.TempDir(), "jump_key")
-	block, err := gossh.MarshalPrivateKey(privKey, "")
-	if err != nil {
-		t.Fatalf("marshal private key: %v", err)
-	}
-	if err = os.WriteFile(jumpKeyPath, pem.EncodeToMemory(block), 0o600); err != nil {
-		t.Fatalf("write jump key: %v", err)
-	}
-
-	khPath := writeKnownHosts(t, bastion, bastion.addr)
-	client, err := NewReal(
-		log.NewSlogAdapter(nil),
-		WithKnownHostsFile(khPath),
-	)
-	if err != nil {
-		t.Fatalf("NewReal: %v", err)
-	}
-	defer func() { _ = client.Close() }()
-
-	ctx, cancel := context.WithCancel(context.Background())
-
-	bastionHost, bastionPortStr, _ := net.SplitHostPort(bastion.addr)
-	bastionPort, _ := strconv.Atoi(bastionPortStr)
-
-	// Connect through the bastion to the blocking target.
-	errCh := make(chan error, 1)
-	go func() {
-		_, err := client.Connect(
-			ctx, bl.addr(),
-			WithUser("targetuser"),
-			WithAuthMethods([]gossh.AuthMethod{
-				gossh.Password("irrelevant"),
-			}),
-			WithPTYSize(80, 24, 0, 0),
-			WithJumpHost(bastionHost, bastionPort, "jumpuser", "publicKey"),
-			func(c *ConnectConfig) { c.JumpKeyFile = jumpKeyPath },
-		)
-		errCh <- err
-	}()
-
-	// Wait for the target connection to reach the blocking listener.
-	<-bl.accepted
-	cancel()
-
-	select {
-	case er := <-errCh:
-		if !errors.Is(er, context.Canceled) {
-			t.Fatalf("expected context.Canceled, got %v", er)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("dial through jump did not return after cancellation within 10s")
-	}
-
-	// Bastion pool entry must be released — no leaked handles.
-	if got := client.dial.pool.Count(); got != 0 {
-		t.Fatalf("pool.Count()=%d after cancelled jump dial, want 0 (bastion handle released)", got)
-	}
-
-	_ = pubKey // used only for key generation
 }

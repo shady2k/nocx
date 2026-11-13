@@ -9,6 +9,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 )
 
@@ -30,37 +31,33 @@ func TestWSServer_OpenPasswordAsk_DoesNotBlockTheReadLoop(t *testing.T) {
 
 	var ws *WSServer
 	var answerUsed string
-	reg.WithSSHFactory(&stubSSHFactory{
-		connectFn: func(ctx context.Context, _ string, opts ...ssh.ConnectOption) (ssh.Channel, error) {
-			// Rebuild the config the way session.Open does (the seam that
-			// previously dropped the requester), then raise the ask exactly
-			// as the prompt rung of the auth ladder does.
-			cfg := &ssh.ConnectConfig{}
-			for _, o := range opts {
-				o(cfg)
-			}
-			if cfg.PasswordRequester == nil {
-				return nil, errors.New("dial saw no password requester")
-			}
-			ans, err := cfg.PasswordRequester.RequestConnectionPassword(ctx, ssh.PasswordRequest{
-				Connection: cfg.ConnectionName,
-				User:       cfg.User,
-				Host:       "host.example.com",
-				Reason:     "no password is stored for this connection",
-			})
-			if err != nil {
-				return nil, err
-			}
-			answerUsed = ans.Password
-			return ssh.NewStubChannel(logger), nil
-		},
-	})
+	opener := stubHelper(reg)
+	opener.open = func(ctx context.Context, cfg session.Config) (HostedSessionOpen, bool, error) {
+		// The helper raises the ask the config names and blocks until a
+		// person answers — exactly what the prompt rung of its ladder does.
+		// The requester being here at all is the seam this pins: the open
+		// path hands it to the helper rather than dropping it.
+		if cfg.Remote == nil || cfg.Remote.PasswordRequester == nil {
+			return HostedSessionOpen{}, true, errors.New("the helper was handed no password requester")
+		}
+		ans, err := cfg.Remote.PasswordRequester.RequestConnectionPassword(ctx, ssh.PasswordRequest{
+			Connection: cfg.Remote.ConnectionName,
+			User:       cfg.Remote.User,
+			Host:       "host.example.com",
+			Reason:     "no password is stored for this connection",
+		})
+		if err != nil {
+			return HostedSessionOpen{}, true, err
+		}
+		answerUsed = ans.Password
+		return opener.adopt(ctx, cfg)
+	}
 
 	ws = NewWSServer(logger, reg,
 		// The ssh pane this test opens is this machine's helper's
 		// (nocx-50w7p.5). Its subject is that the password ASK does not block
 		// the read loop, which is downstream of the pane existing.
-		sshHelperOpt(reg),
+		WithHelperSessionOpener(opener),
 		WithProfileResolver(&fakeResolver{
 			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {
 				return "host.example.com", &ssh.ConnectConfig{
@@ -224,38 +221,33 @@ func TestWSServer_OpenDirectHost_CarriesTheConnectionPasswordAsk(t *testing.T) {
 	var ws *WSServer
 	var answerUsed string
 	var askConnection string
-	reg.WithSSHFactory(&stubSSHFactory{
-		connectFn: func(ctx context.Context, _ string, opts ...ssh.ConnectOption) (ssh.Channel, error) {
-			// Rebuild the config the way a dial does and raise the ask
-			// exactly as the prompt rung does. The requester being here at
-			// all is the assertion: the direct-host branch built this config.
-			cfg := &ssh.ConnectConfig{}
-			for _, o := range opts {
-				o(cfg)
-			}
-			if cfg.PasswordRequester == nil {
-				return nil, errors.New("dial saw no password requester")
-			}
-			ans, err := cfg.PasswordRequester.RequestConnectionPassword(ctx, ssh.PasswordRequest{
-				Connection: cfg.ConnectionName,
-				User:       cfg.User,
-				Host:       "host.example.com",
-				Reason:     "no password is stored for this connection",
-			})
-			if err != nil {
-				return nil, err
-			}
-			askConnection = cfg.ConnectionName
-			answerUsed = ans.Password
-			return ssh.NewStubChannel(logger), nil
-		},
-	})
+	opener := stubHelper(reg)
+	opener.open = func(ctx context.Context, cfg session.Config) (HostedSessionOpen, bool, error) {
+		// The helper raises the ask the config names. The requester being
+		// here at all is the assertion: resolveRemote's direct-host branch
+		// built this config, and without its stamping the ask never exists.
+		if cfg.Remote == nil || cfg.Remote.PasswordRequester == nil {
+			return HostedSessionOpen{}, true, errors.New("the helper was handed no password requester")
+		}
+		ans, err := cfg.Remote.PasswordRequester.RequestConnectionPassword(ctx, ssh.PasswordRequest{
+			Connection: cfg.Remote.ConnectionName,
+			User:       cfg.Remote.User,
+			Host:       "host.example.com",
+			Reason:     "no password is stored for this connection",
+		})
+		if err != nil {
+			return HostedSessionOpen{}, true, err
+		}
+		askConnection = cfg.Remote.ConnectionName
+		answerUsed = ans.Password
+		return opener.adopt(ctx, cfg)
+	}
 
 	resolver := newLauncherTestResolver()
 	resolver.add("host.example.com", ssh.HostConfig{HostName: "host.example.com", User: "tester", Port: 22})
 
 	ws = NewWSServer(logger, reg,
-		sshHelperOpt(reg),
+		WithHelperSessionOpener(opener),
 		WithSSHConfigResolver(resolver, "/nonexistent/config"),
 	)
 

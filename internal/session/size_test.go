@@ -93,26 +93,6 @@ func (f *recordingPtyFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty
 	return f.last, nil
 }
 
-// recordingSSHFactory answers Connect with a stub channel and records the
-// ConnectConfig the options build up to — the remote half of "the channel
-// is created at its final size".
-type recordingSSHFactory struct {
-	cfg ssh.ConnectConfig
-	err error
-}
-
-func (f *recordingSSHFactory) Connect(_ context.Context, _ string, opts ...ssh.ConnectOption) (ssh.Channel, error) {
-	if f.err != nil {
-		return nil, f.err
-	}
-	var cfg ssh.ConnectConfig
-	for _, o := range opts {
-		o(&cfg)
-	}
-	f.cfg = cfg
-	return ssh.NewStubChannel(log.NewSlogAdapter(nil)), nil
-}
-
 // ── the no-client default ──────────────────────────────────────────────
 
 // A session opened with no client attached has a size — the named default —
@@ -172,27 +152,22 @@ func TestOpen_NoClientAttached_RunsAtTheDefaultSizeWithAWorkingChannel(t *testin
 	}
 }
 
-// The remote half of the same question: with no client attached, the SSH
-// channel is opened at the default too, rather than at whatever
-// internal/ssh would have fallen back to on its own.
-func TestOpen_NoClientAttached_RemoteChannelOpensAtTheDefault(t *testing.T) {
-	f := &recordingSSHFactory{}
-	reg := New(log.NewSlogAdapter(nil), &recordingPtyFactory{}).WithSSHFactory(f)
-
-	sess, err := reg.Open(context.Background(), Config{
+// The remote half of the same question: an ssh session with no client
+// attached runs at the default too. The session's own conclusion is what the
+// open carries and what the helper's spawn reads; the channel is created a
+// process away, so what this side can assert is the decision it hands over.
+func TestAdopt_NoClientAttached_RemoteSessionRunsAtTheDefault(t *testing.T) {
+	reg := New(log.NewSlogAdapter(nil), &recordingPtyFactory{})
+	sess, err := reg.Adopt(context.Background(), Config{
 		Kind: KindRemote, Host: "example", Remote: &ssh.ConnectConfig{User: "u"},
-	})
+	}, NewID(), &reasonChannel{})
 	if err != nil {
-		t.Fatalf("Open: %v", err)
+		t.Fatalf("Adopt: %v", err)
 	}
 	defer func() { _ = reg.Close(sess.ID()) }()
 
-	got := Size{Cols: f.cfg.Cols, Rows: f.cfg.Rows, XPixel: f.cfg.XPixel, YPixel: f.cfg.YPixel}
-	if got != DefaultSize() {
-		t.Fatalf("ssh channel opened at %+v, want the default %+v", got, DefaultSize())
-	}
 	if sess.EffectiveSize() != DefaultSize() {
-		t.Fatalf("EffectiveSize = %+v, want %+v", sess.EffectiveSize(), DefaultSize())
+		t.Fatalf("EffectiveSize = %+v, want the default %+v", sess.EffectiveSize(), DefaultSize())
 	}
 }
 
@@ -224,24 +199,22 @@ func TestOpen_ClientReports_TheBackendSetsTheChannelSize(t *testing.T) {
 	}
 }
 
-func TestOpen_ClientReports_RemoteChannelOpensAtTheEffectiveSize(t *testing.T) {
-	sshf := &recordingSSHFactory{}
-	reg := New(log.NewSlogAdapter(nil), &recordingPtyFactory{}).WithSSHFactory(sshf)
+func TestAdopt_ClientReports_RemoteSessionRunsAtTheEffectiveSize(t *testing.T) {
+	reg := New(log.NewSlogAdapter(nil), &recordingPtyFactory{})
 
 	reported := Size{Cols: 100, Rows: 30, XPixel: 800, YPixel: 600}
-	sess, err := reg.Open(context.Background(), Config{
+	sess, err := reg.Adopt(context.Background(), Config{
 		Kind: KindRemote, Host: "example", Remote: &ssh.ConnectConfig{User: "u"},
 		Cols: reported.Cols, Rows: reported.Rows,
 		XPixel: reported.XPixel, YPixel: reported.YPixel,
-	})
+	}, NewID(), &reasonChannel{})
 	if err != nil {
-		t.Fatalf("Open: %v", err)
+		t.Fatalf("Adopt: %v", err)
 	}
 	defer func() { _ = reg.Close(sess.ID()) }()
 
-	got := Size{Cols: sshf.cfg.Cols, Rows: sshf.cfg.Rows, XPixel: sshf.cfg.XPixel, YPixel: sshf.cfg.YPixel}
-	if got != sess.EffectiveSize() {
-		t.Fatalf("ssh channel opened at %+v, want the session's effective size %+v", got, sess.EffectiveSize())
+	if got := sess.EffectiveSize(); got != reported {
+		t.Fatalf("EffectiveSize = %+v, want the reported %+v", got, reported)
 	}
 }
 
@@ -382,46 +355,6 @@ func TestOpen_PTYFactorySucceeds_SessionIsRegisteredWithASize(t *testing.T) {
 	reg := New(log.NewSlogAdapter(nil), &recordingPtyFactory{})
 
 	sess, err := reg.Open(context.Background(), Config{Kind: KindLocal})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer func() { _ = reg.Close(sess.ID()) }()
-
-	if n := len(reg.List()); n != 1 {
-		t.Fatalf("registry holds %d sessions, want 1", n)
-	}
-	if !sess.EffectiveSize().Valid() {
-		t.Fatalf("EffectiveSize = %+v, want a usable grid", sess.EffectiveSize())
-	}
-}
-
-// The remote open's external call, both ways.
-func TestOpen_SSHConnectFails_NothingIsRegistered(t *testing.T) {
-	boom := errors.New("dial refused")
-	reg := New(log.NewSlogAdapter(nil), &recordingPtyFactory{}).
-		WithSSHFactory(&recordingSSHFactory{err: boom})
-
-	_, err := reg.Open(context.Background(), Config{
-		Kind: KindRemote, Host: "example", Remote: &ssh.ConnectConfig{User: "u"},
-	})
-	if err == nil {
-		t.Fatal("Open succeeded with a failing SSH factory")
-	}
-	if !strings.Contains(err.Error(), boom.Error()) {
-		t.Fatalf("Open error = %v, want it to carry %v", err, boom)
-	}
-	if n := len(reg.List()); n != 0 {
-		t.Fatalf("registry holds %d sessions after a failed remote open", n)
-	}
-}
-
-func TestOpen_SSHConnectSucceeds_SessionIsRegisteredWithASize(t *testing.T) {
-	reg := New(log.NewSlogAdapter(nil), &recordingPtyFactory{}).
-		WithSSHFactory(&recordingSSHFactory{})
-
-	sess, err := reg.Open(context.Background(), Config{
-		Kind: KindRemote, Host: "example", Remote: &ssh.ConnectConfig{User: "u"},
-	})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

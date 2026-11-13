@@ -17,7 +17,6 @@ func TestFrameTypeValuesAreUniqueAndRecognized(t *testing.T) {
 		{"notify", TypeNotify},
 		{"cancel", TypeCancel},
 		{"chunk", TypeChunk},
-		{"keep-alive", TypeKeepAlive},
 		{"session-data", TypeSessionData},
 		{"lifecycle-data", TypeLifecycleData},
 		{"channel-data", TypeChannelData},
@@ -127,8 +126,8 @@ func TestOversizeLengthPrefixIsGarbage(t *testing.T) {
 }
 
 // TestUnknownTypeByteIsScannedOneByteAtATime pins the closed-set rule:
-// 0x08 is not a FrameType (TypeChunk is 7, TypeKeepAlive is 9), so its
-// claimed length prefix must not be trusted. The decoder advances one byte
+// 0x08 is not a FrameType (TypeChunk is 7, and 8 and 9 are unassigned), so
+// its claimed length prefix must not be trusted. The decoder advances one byte
 // at a time, so a valid frame whose header begins right after the bogus one
 // is still found — skipping the whole claimed 13+100 bytes would eat it.
 func TestUnknownTypeByteIsScannedOneByteAtATime(t *testing.T) {

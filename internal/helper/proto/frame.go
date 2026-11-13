@@ -32,14 +32,20 @@ import (
 type FrameType uint8
 
 const (
-	TypeHello     FrameType = 1
-	TypeHelloOK   FrameType = 2
-	TypeRequest   FrameType = 3
-	TypeResponse  FrameType = 4
-	TypeNotify    FrameType = 5
-	TypeCancel    FrameType = 6
-	TypeChunk     FrameType = 7
-	TypeKeepAlive FrameType = 9
+	TypeHello    FrameType = 1
+	TypeHelloOK  FrameType = 2
+	TypeRequest  FrameType = 3
+	TypeResponse FrameType = 4
+	TypeNotify   FrameType = 5
+	TypeCancel   FrameType = 6
+	TypeChunk    FrameType = 7
+
+	// 8 and 9 are deliberately unassigned. 9 was a keep-the-transport-warm
+	// frame NOBODY EVER SENT: every generation that carried it handled it and
+	// nothing produced one, so it measured nothing and was deleted
+	// (nocx-oalo1.3.2). The byte is not reused — a closed set is one thing a
+	// reader reasons about, and a type that once meant something on this wire
+	// is cheaper to leave alone than to explain in the compatibility record.
 
 	// TypeSessionData carries raw PTY bytes in both directions, and it is
 	// the helper wire's DATA PLANE: its payload is a fixed binary header
@@ -90,7 +96,7 @@ const (
 // trusting anything after it.
 func (t FrameType) valid() bool {
 	switch t {
-	case TypeHello, TypeHelloOK, TypeRequest, TypeResponse, TypeNotify, TypeCancel, TypeChunk, TypeKeepAlive, TypeSessionData, TypeLifecycleData, TypeChannelData, TypeScreenFrame, TypeSessionEffect, TypeOutputRows, TypeIntervalEnd, TypeClearBoundary, TypeOutputStartRow:
+	case TypeHello, TypeHelloOK, TypeRequest, TypeResponse, TypeNotify, TypeCancel, TypeChunk, TypeSessionData, TypeLifecycleData, TypeChannelData, TypeScreenFrame, TypeSessionEffect, TypeOutputRows, TypeIntervalEnd, TypeClearBoundary, TypeOutputStartRow:
 		return true
 	}
 	return false

@@ -109,6 +109,13 @@
  *     is not known to be the client and `(dispatcher.subscribe as any)(…)` has
  *     no dispatcher signature. `any` is NOT treated as the client, because
  *     then every dynamic index in the tree would be a connection access.
+ *     The repository's typed lint already refuses explicit `any` and unsafe
+ *     member access and calls (typescript-eslint recommendedTypeChecked).
+ *   - `dispatcher.subscribe.call(dispatcher, 'exit', h)` and `.apply(…)`
+ *     resolve to Function's own signatures, not the dispatcher's, so they are
+ *     not seen. Nothing in the tree calls a method that way; the stage's review
+ *     (2026-11-13) found it and the coordinator stopped the rounds there,
+ *     stating it here instead.
  *   - A reference that resolves to a member of an interface IMPLEMENTED by the
  *     ipc client rather than declared in it keeps its declaring symbol; only
  *     the declaration in ipc.ts is the client's. That is the intended reading

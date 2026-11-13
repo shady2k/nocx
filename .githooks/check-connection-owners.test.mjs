@@ -493,8 +493,18 @@ test('the committed baseline is counted, reasoned, and only shrinks', () => {
   }
 })
 
-test('the transport packages are the only ones exempt, and there are three', () => {
-  assert.deepEqual(ALLOWED_DIRS, ['internal/ssh/', 'internal/helper/sshsvc/', 'internal/sshtest/'])
+test('the transport packages are the only ones exempt, and the carrier and the supervisor are two of them', () => {
+  // Five since nocx-oalo1.4.2: the carrier that implements the seam and the
+  // supervisor that owns every connection's state ARE the one owner
+  // ADR-ba6xet1b names, so refusing them for deciding a connection fact would
+  // put the owner outside its own allowlist (design §5.1.1).
+  assert.deepEqual(ALLOWED_DIRS, [
+    'internal/ssh/',
+    'internal/helper/sshsvc/',
+    'internal/helper/sshconn/',
+    'internal/hostconn/',
+    'internal/sshtest/',
+  ])
 })
 
 // ─── the toolchain the analysis runs under ───────────────────────────────

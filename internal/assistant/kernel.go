@@ -685,6 +685,10 @@ type kernelCall struct {
 	classifierFact    *classifierFact
 	outOfScope        *OutOfScopeFact
 	classifierGateErr error
+	// egressGateErr is a screen that could not see. A Verdict can only pass,
+	// refuse or ask, so the kernel records the failure here and reports it as
+	// the run's failure instead of answering the call with the refusal.
+	egressGateErr error
 }
 
 // authorityChain is the kernel's composition for one call: one policy point,
@@ -701,6 +705,10 @@ func (k *effectKernel) authorityChain(state *kernelCall) AuthorityChain {
 			kernelFloorGuard{kernel: k},
 			kernelEvidenceGuard{state: state},
 		},
+		// The egress screen reads the final outbound bytes — the tool's result
+		// and its error — and can only pass, refuse or ask (ADR-anntnxdj §2,
+		// "A screen reads what actually leaves").
+		Screens:  []Screen{egressScreen{kernel: k, state: state}},
 		Attempts: kernelAttempts{state: state},
 		execute: func(ctx context.Context, call Call, decl agenttools.Tool, capability agenttools.Capability, raw []byte) (string, error) {
 			if err := k.announce(call, state); err != nil {
@@ -879,13 +887,16 @@ func kernelAskReason(tool string, effect content.Effect, outOfScope *OutOfScopeF
 // isolated here.
 type kernelApprover struct{ state *kernelCall }
 
-func (a kernelApprover) Answer(ctx context.Context, call Call, _ Ask) Answer {
+func (a kernelApprover) Answer(ctx context.Context, call Call, ask Ask) Answer {
 	k := a.state.kernel
 	decl := call.Declaration()
 	resources, _ := call.Resources()
 	invocation := call.Invocation()
 	callID := call.CallID()
 	rawArgs := string(call.RawParams())
+	if ask.Egress != nil {
+		return a.answerEgress(call, ask.Egress, decl, resources)
+	}
 	var escalation error
 	if a.state.classifierFact != nil {
 		request := k.request(decl, callID, rawArgs, resources, a.state.install)
@@ -902,6 +913,28 @@ func (a kernelApprover) Answer(ctx context.Context, call Call, _ Ask) Answer {
 		return Unanswered{Err: escalation}
 	}
 	return Unanswered{Err: errors.New("the approval escalation returned without a suspension")}
+}
+
+// answerEgress puts the screen's question to the person in the shape the
+// approval surface renders: the findings, never the material. It is the same
+// suspension the policy gate raises — the request is recorded so the approved
+// resume matches the exact proposal, and the returned error is what the
+// adapter turns into an interrupt.
+func (a kernelApprover) answerEgress(call Call, ask *EgressAsk, decl agenttools.Tool, resources []agenttools.ResourceRef) Answer {
+	k := a.state.kernel
+	req := k.egressRequest(decl, call.CallID(), string(call.RawParams()), resources, ask.Findings, ask.WasError)
+	if k.approvals != nil {
+		ap := k.proposal(decl.Name, call.CallID(), string(call.RawParams()))
+		ap.EntryID = a.state.entryID
+		// Egress approval releases an already-retained result; it does not
+		// authorise another file operation.
+		ap.FileVersionState = FileVersionBindingNotApplicable
+		k.approvals.Request(ap)
+	}
+	// A suspension is an Unanswered answer by the pipeline's vocabulary:
+	// nobody has answered yet, and the error underneath is what carries the
+	// request to the surface.
+	return Unanswered{Err: &EgressRequestedError{Request: req}}
 }
 
 // kernelGrantGuard is the grant's own interval: past its deadline there is no
@@ -1536,49 +1569,6 @@ func (m *effectKernel) proposalWithInvocation(toolName, callID, rawArgs string, 
 	return ap
 }
 
-// screenResult runs the egress gate (design §7.1) over one tool's return —
-// the success output or the error string alike — and returns the findings.
-// Two detectors contribute, and both are the gate's, not second
-// implementations (one recognizer, two policies): the masking service's
-// heuristic pass, and the vault comparison through the run's KnownMaterial
-// seam. A detection failure is an error: the caller withholds the result
-// and fails the run — nothing leaves when the gate cannot see.
-func (m *effectKernel) screenResult(ctx context.Context, out string, runErr error) ([]EgressFinding, error) {
-	result := out
-	if runErr != nil {
-		result = runErr.Error()
-	}
-	heuristic, err := masking.Detect(result)
-	if err != nil {
-		return nil, err
-	}
-	findings := make([]EgressFinding, 0, len(heuristic))
-	for _, f := range heuristic {
-		findings = append(findings, EgressFinding{
-			Source: EgressFindingHeuristic,
-			Kind:   f.Kind,
-			Start:  f.Start,
-			End:    f.End,
-		})
-	}
-	known, err := m.known.FindKnown(ctx, result)
-	if err != nil {
-		return nil, err
-	}
-	for _, k := range known {
-		findings = append(findings, EgressFinding{
-			Source:     EgressFindingKnown,
-			SecretName: k.SecretName,
-			Start:      k.Start,
-			End:        k.End,
-		})
-	}
-	if len(findings) == 0 {
-		return nil, nil
-	}
-	return findings, nil
-}
-
 // egressRequest builds the egress ask. It carries the effect and the resource
 // too, off the same declaration and by the same derivation as a policy ask:
 // the surface offers only allow/deny once here, but the notification is ONE
@@ -1909,19 +1899,19 @@ func (m *effectKernel) openAttempt(ctx context.Context, decl agenttools.Tool, ca
 	return execID, entryID, nil
 }
 
-// runWithRetained executes the tool — unless the EXACT proposal's result is
-// retained from an egress suspension (design §7.1): then the withheld bytes
-// the person approved sending are returned instead of re-running the tool,
-// which would repeat the effect and could produce a different result than
-// the one approved.
+// runWithRetained is the kernel's own runtime for the one execution of a call.
+// It runs the tool, unless the egress screen already HOLDS this exact
+// proposal's result: then the bytes the person approved sending are released
+// as they were, and the tool does not run a second time — a re-run would repeat
+// the effect and could produce a different result than the one approved
+// (ADR-anntnxdj §2). What is retained, and why, is the screen's (egress.go);
+// this runtime only asks it.
 func (m *effectKernel) runWithRetained(decl agenttools.Tool, callID string, ctx context.Context, capability agenttools.Capability, rawArgs []byte) (string, error) {
-	if m.approvals != nil {
-		if out, wasError, ok := m.approvals.RetainedResult(m.proposal(decl.Name, callID, string(rawArgs))); ok {
-			if wasError {
-				return "", errors.New(out)
-			}
-			return out, nil
+	if held, ok := (egressScreen{kernel: m}).held(m.proposal(decl.Name, callID, string(rawArgs))); ok {
+		if held.WasError {
+			return "", errors.New(held.Text)
 		}
+		return held.Text, nil
 	}
 	return m.run(decl, ctx, capability, rawArgs)
 }
@@ -2198,22 +2188,53 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		if state.classifierGateErr != nil {
 			return modelResult{}, state.classifierGateErr
 		}
+		// A screen that could not see is the same fact, and it reaches here
+		// as the screen's Refuse: a Verdict cannot carry an error, so the
+		// screen recorded it and the kernel reports it.
+		if state.egressGateErr != nil {
+			var refusal *PipelineRefusal
+			tool := name
+			if errors.As(dispatchErr, &refusal) && refusal.Call.Tool() != "" {
+				tool = refusal.Call.Tool()
+			}
+			return modelResult{}, &EgressScreeningError{Tool: tool, Gate: "egress", Err: state.egressGateErr}
+		}
 		// A point's refusal is an ANSWER (nocx-uvac6.1): the sentence is
 		// ours, it rides the refused call's own slot, and the run continues
 		// until it reaches a terminal state of its own accord. A refusal
-		// that carries a cause is a cancellation, a failure underneath or an
-		// escalation's suspension, and stays an error.
+		// that carries a cause is a cancellation, a failure underneath, an
+		// escalation's suspension or a person's no to a RESULT, and stays an
+		// error.
 		var refusal *PipelineRefusal
 		if errors.As(dispatchErr, &refusal) && refusal.Cause == nil {
 			return modelResult{text: refusal.Reason, kind: modelNocxMessage}, nil
+		}
+		// The egress screen asked: the call RAN and its result is withheld
+		// pending the person's decision, so this pass's attempt closes
+		// interrupted — the approved pass is a subsequent attempt of the same
+		// entry, exactly as a policy approval's is.
+		var egressSuspended *EgressRequestedError
+		if errors.As(dispatchErr, &egressSuspended) {
+			if state.execID != 0 {
+				_ = k.closeAttempt(ctx, state.execID, content.TermInterrupted, content.EntryInterrupted)
+			}
+			return modelResult{}, dispatchErr
 		}
 		if state.execID != 0 {
 			_ = k.closeAttempt(ctx, state.execID, content.TermFailed, content.EntryFailure)
 		}
 		if errors.Is(dispatchErr, ErrInvalidResult) && outcome.prepared != nil {
 			decl := outcome.prepared.decl
+			// The detail is the schema library's own diagnostic, which quotes
+			// the result's property names: it belongs in the log, never in
+			// the message a model or a person reads (ResultContractError).
+			detail := dispatchErr
+			var contract *ResultContractError
+			if errors.As(dispatchErr, &contract) {
+				detail = contract.Detail
+			}
 			k.warn("agent tool: the result does not match its own contract",
-				"tool", decl.Name, "call", callID, "error", dispatchErr)
+				"tool", decl.Name, "call", callID, "error", detail)
 			return modelResult{}, &ToolFailedError{Tool: decl.Name, Err: dispatchErr}
 		}
 		if errors.Is(dispatchErr, ErrUnknownMethod) || errors.Is(dispatchErr, ErrInvalidParams) {
@@ -2223,7 +2244,6 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 	}
 	prepared := outcome.prepared
 	decl := prepared.decl
-	resources := prepared.resources
 	out := outcome.output
 	runErr := outcome.runErr
 	if runErr == nil && decl.Name == "skills.resolve" {
@@ -2259,66 +2279,11 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		return modelResult{text: refusalResult(decl.Name, RefusedOutOfScope, ""), kind: modelNocxMessage}, nil
 	}
 
-	// 7. Result ingest — the egress gate (design §7.1) FIRST, then the
-	// window and the size bound. The gate screens EVERY return path
-	// before the bytes leave for the provider, the success and the
-	// error alike: an error string is output too — it carries paths,
-	// hostnames and names, and a gate that screens successes and not
-	// failures has closed the wide door and left the narrow one open.
-	egress, screenErr := k.screenResult(ctx, out, runErr)
-	if screenErr != nil {
-		// Detection failed: the result is withheld and the run fails —
-		// the masking service's fail-closed contract, and the gate's:
-		// nothing leaves when the gate cannot see.
-		_ = k.closeAttempt(ctx, state.execID, content.TermFailed, content.EntryFailure)
-		return modelResult{}, &EgressScreeningError{Tool: decl.Name, Gate: "egress", Err: screenErr}
-	}
-	if len(egress) > 0 {
-		ap := k.proposal(decl.Name, callID, rawArgs)
-		// The approved egress resume: the EXACT result the person
-		// approved sending is what was screened. Nothing re-ran; the
-		// bytes go as decided and the retention is dropped. An
-		// approval of the POLICY gate is not an approval of this gate —
-		// a call approved at the policy step whose result carries a
-		// finding still suspends here (design §7.3: two gates, one
-		// surface; each asks once).
-		approvedResume := false
-		if k.approvals != nil {
-			if _, _, retained := k.approvals.RetainedResult(ap); retained {
-				k.approvals.ClearRetained(ap)
-				approvedResume = true
-			}
-		}
-		if !approvedResume {
-			// A finding REFUSES AND ASKS (design §7.1): nothing is
-			// sent, the run suspends carrying the findings, and a
-			// person is shown what was found and where. It never
-			// silently masks and continues — off-machine a miss is
-			// invisible and permanent, and an honest redaction that
-			// says nothing is indistinguishable from there having
-			// been nothing to redact (ADR-0021). The ask binds to the
-			// exact proposal through the existing approval machinery;
-			// the run is NOT failed — it is awaiting the decision the
-			// surface renders.
-			req := k.egressRequest(decl, callID, rawArgs, resources, egress, runErr != nil)
-			if k.approvals != nil {
-				ap.EntryID = state.entryID
-				// Egress approval releases an already-retained result; it
-				// does not authorise another file operation.
-				ap.FileVersionState = FileVersionBindingNotApplicable
-				k.approvals.Request(ap)
-				// The withheld result is retained so the approved
-				// resume sends the EXACT bytes the person was shown —
-				// never a re-run's freshly produced ones.
-				k.approvals.Retain(ap, out, runErr != nil)
-			}
-			// The attempt of THIS pass closes as interrupted: the call
-			// ran and its result was withheld pending the decision; the
-			// approved call is a SUBSEQUENT attempt of the same entry.
-			_ = k.closeAttempt(ctx, state.execID, content.TermInterrupted, content.EntryInterrupted)
-			return modelResult{}, &EgressRequestedError{Request: req}
-		}
-	}
+	// The egress screen ran inside the pipeline, after the tool and before
+	// this point (ADR-anntnxdj §2): it read the final outbound bytes — the
+	// result and the error alike — and passed them, withheld them behind a
+	// person's answer, or refused. An approved resume released the retained
+	// bytes there, so what reaches this line is already what may leave.
 
 	// WHAT CAME BACK, RECORDED WHERE IT CAN BE ASKED FOR (nocx-hp8p2.13).
 	// A tool call announced itself and then said nothing about its outcome:
@@ -2411,9 +2376,9 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		// back to skills.install" — a fallback no model can reach if the
 		// failure ends the turn. A forge answering 504 did exactly that.
 		//
-		// The bytes are safe to hand over because screenResult above has
-		// already screened them: the egress gate reads the error string as
-		// well as the result, for the reason stated there.
+		// The bytes are safe to hand over because the pipeline's egress
+		// screen has already read them: it screens the error string as well
+		// as the result (ADR-anntnxdj §2).
 		if failureChangedNothing(decl) {
 			return modelResult{text: toolFailedResult(decl.Name, runErr), kind: modelNocxMessage}, nil
 		}
@@ -2560,7 +2525,7 @@ func (k *effectKernel) proposalApproved(toolName, callID, rawArgs string) bool {
 // The returned ask is the suspension's approval request; the returned fact
 // is what the ledger records. A nil ask means the verdict was clear.
 func (k *effectKernel) classifyProposal(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, args map[string]any, resources []agenttools.ResourceRef, install *ApprovalInstall) (*ApprovalRequest, *classifierFact, error) {
-	findings, err := k.screenResult(ctx, rawArgs, nil)
+	findings, err := (egressScreen{kernel: k}).findings(ctx, rawArgs)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -84,6 +84,12 @@ func dropChainLink(t *testing.T, chain *AuthorityChain, link string) {
 		}
 		chain.execute = nil
 		return
+	case "egress screen":
+		if len(chain.Screens) != 1 {
+			t.Fatalf("the chain carries %d screens, want 1", len(chain.Screens))
+		}
+		chain.Screens = nil
+		return
 	}
 	kept := make([]Guard, 0, len(chain.Guards))
 	removed := false
@@ -399,6 +405,31 @@ func TestEveryLinkOfTheKernelChainIsLoadBearing(t *testing.T) {
 		}
 		if got := ledger.started(); got != 0 {
 			t.Fatalf("without the attempt step the ledger opened %d attempts, want 0 — the tool ran unrecorded", got)
+		}
+	})
+
+	t.Run("egress screen", func(t *testing.T) {
+		grant, dir := testDirGrant(t, autonomousMatrix())
+		const secret = "known-secret-value-123"
+		path := filepath.Join(dir, "a.txt")
+		writeFile(t, path, "deploy key: "+secret)
+		args := fmt.Sprintf(`{"path":%q}`, path)
+
+		k := kernelFor(t, grant, &fakeLedger{})
+		k.approvals = NewApprovalStore()
+		k.known = &knownMatcher{value: secret, name: "github-token"}
+
+		_, err := runKernelCall(t, k, "files.read", "call-1", args, "")
+		var suspended *EgressRequestedError
+		if !errors.As(err, &suspended) {
+			t.Fatalf("the full chain did not withhold the result: %v", err)
+		}
+		out, err := runKernelCall(t, k, "files.read", "call-1", args, "egress screen")
+		if err != nil {
+			t.Fatalf("without the egress screen: %v", err)
+		}
+		if !strings.Contains(out.output, secret) {
+			t.Fatalf("without the egress screen the call returned %q, want the value the screen should have withheld", out.output)
 		}
 	})
 

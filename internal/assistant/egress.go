@@ -20,6 +20,7 @@ import (
 	"github.com/cloudwego/eino/adk"
 
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/masking"
 	"github.com/shady2k/nocx/internal/secrets"
 )
 
@@ -138,6 +139,114 @@ type KnownMaterial interface {
 	// vault holds, and the catalogue name of each matched secret. The
 	// values themselves never cross this seam.
 	FindKnown(ctx context.Context, text string) ([]KnownMatch, error)
+}
+
+// ── the screen ────────────────────────────────────────────────────────────
+
+// egressScreen is the kernel's Screen over what actually leaves (ADR-anntnxdj
+// §2, "A screen reads what actually leaves"): the finding — the recognizer's
+// patterns and the vault's known values — and the retained result. It reads the
+// final outbound bytes, the tool's error included, and answers Pass, Refuse or
+// Ask. It never replaces them: a pass and an approved ask release the exact
+// bytes the tool produced, and a refusal withholds them.
+//
+// It owns BOTH halves of the retention, because they are one decision: the
+// bytes an Ask withheld are the bytes an approval releases, and never a
+// re-run's freshly produced ones — the effect would repeat, and the result
+// could differ from the one the person saw.
+type egressScreen struct {
+	kernel *effectKernel
+	// state is the call's own facts: where a gate that could not see is
+	// recorded for the kernel to fail the run on. held and findings need no
+	// per-call state — the approval is keyed by the proposal — so the kernel's
+	// executor builds the screen without one.
+	state *kernelCall
+}
+
+// Inspect is the Screen point's whole contract: it decides whether the bytes
+// leave, never what they say.
+func (s egressScreen) Inspect(ctx context.Context, c Call, out Outbound) Verdict {
+	findings, err := s.findings(ctx, out.Text)
+	if err != nil {
+		// Nothing leaves when the gate cannot see. The verdict can only say
+		// no; the reason the run must END rather than answer the call is
+		// recorded for the kernel, which reports it as EgressScreeningError.
+		s.state.egressGateErr = err
+		return Refuse{Reason: "the result could not be screened for secret-shaped material, so nothing was sent"}
+	}
+	if len(findings) == 0 {
+		return Pass{}
+	}
+	ap := s.kernel.proposal(c.Tool(), c.CallID(), string(c.RawParams()))
+	if s.kernel.approvals != nil {
+		if _, _, retained := s.kernel.approvals.RetainedResult(ap); retained {
+			// The approved resume: these are the exact bytes the person
+			// approved sending, and they go as decided. Nothing re-ran.
+			s.kernel.approvals.ClearRetained(ap)
+			return Pass{}
+		}
+		// A finding REFUSES AND ASKS (design §7.1): nothing is sent, the run
+		// suspends carrying the findings, and the bytes are retained so the
+		// approved resume releases exactly these. It never silently masks and
+		// continues — off-machine a miss is invisible and permanent.
+		s.kernel.approvals.Retain(ap, out.Text, out.WasError)
+	}
+	return Ask{
+		Reason: fmt.Sprintf("%s produced %d secret-shaped region(s), and nothing has been sent", c.Tool(), len(findings)),
+		Egress: &EgressAsk{Findings: findings, WasError: out.WasError},
+	}
+}
+
+// held is the retained result of one exact proposal: the bytes an Ask withheld
+// and a person approved sending. The kernel's executor asks before it runs the
+// tool, so an approved resume releases exactly these and the tool's body is
+// entered once (ADR-anntnxdj §2).
+func (s egressScreen) held(ap Approval) (Outbound, bool) {
+	if s.kernel.approvals == nil {
+		return Outbound{}, false
+	}
+	out, wasError, ok := s.kernel.approvals.RetainedResult(ap)
+	if !ok {
+		return Outbound{}, false
+	}
+	return Outbound{Text: out, WasError: wasError}, true
+}
+
+// findings is the egress gate's one screening of a piece of text: the
+// recognizer's patterns (masking.Detect) and the vault's known values
+// (KnownMaterial), reported as facts about where each match sits. The values
+// themselves never cross this seam. The classifier's input gate reads the same
+// function, because one recognizer with two readers is one gate.
+func (s egressScreen) findings(ctx context.Context, text string) ([]EgressFinding, error) {
+	heuristic, err := masking.Detect(text)
+	if err != nil {
+		return nil, err
+	}
+	findings := make([]EgressFinding, 0, len(heuristic))
+	for _, f := range heuristic {
+		findings = append(findings, EgressFinding{
+			Source: EgressFindingHeuristic,
+			Kind:   f.Kind,
+			Start:  f.Start,
+			End:    f.End,
+		})
+	}
+	known, err := s.kernel.known.FindKnown(ctx, text)
+	if err != nil {
+		return nil, err
+	}
+	for _, match := range known {
+		findings = append(findings, EgressFinding{
+			Source:     EgressFindingKnown,
+			SecretName: match.SecretName,
+			Start:      match.Start,
+			End:        match.End,
+		})
+	}
+	if len(findings) == 0 {
+		return nil, nil
+	}
+	return findings, nil
 }
 
 // egressRequestFrom finds the egress ask among an interrupt event's

@@ -165,6 +165,21 @@ type Deny struct {
 type Ask struct {
 	Reason string
 	Facts  []string
+	// Egress is a Screen's structured evidence: what was found in the bytes,
+	// where, and whether it was in the tool's error text. It is carried on
+	// the question rather than through Facts for the reason the approval's
+	// scripts are: the surface renders the findings themselves, and a
+	// []string would lose the source, the kind and the span. It is facts,
+	// never the material.
+	Egress *EgressAsk
+}
+
+// EgressAsk is the evidence a Screen put to a person about a result it
+// withheld. One Approver answers both kinds of question, so the kind travels
+// with the question.
+type EgressAsk struct {
+	Findings []EgressFinding
+	WasError bool
 }
 
 func (Allow) decision() {}
@@ -205,6 +220,23 @@ func (Ask) verdict() {}
 
 func (Pass) verdict()   {}
 func (Refuse) verdict() {}
+
+// ScreenDeclinedError is a person's no to a Screen's question, and it is the
+// reason a declined result ENDS THE RUN rather than riding the call's slot as
+// a refusal sentence. A PreCall's Ask is about a call that has not run, so its
+// no is an answer the model can read. A Screen's Ask is about a result that
+// already exists: the result IS what the screen decides about, so a no leaves
+// the call with nothing to continue with (ADR-anntnxdj §3, "a declined egress
+// ends the run"). It travels as the refusal's Cause so no caller mistakes it
+// for an answer.
+type ScreenDeclinedError struct{ Reason string }
+
+func (e *ScreenDeclinedError) Error() string {
+	if e.Reason == "" {
+		return "the person declined to release the result"
+	}
+	return e.Reason
+}
 
 // Outbound is what actually leaves the tool: the result text, or the tool's
 // error text when it failed. An error is output too — it carries paths, hosts
@@ -413,6 +445,14 @@ func (p *Pipeline) run(invocation ToolInvocation, attempt int, callID string) (d
 			return dispatchOutcome{}, refusal
 		}
 	}
+	// The result's own contract is checked AFTER the screens, and reported
+	// only when they passed: an invalid result is still bytes that would have
+	// left, and a screen that never saw it could not withhold material it
+	// carries. What is reported names the tool and not the result
+	// (ResultContractError).
+	if outcome.resultErr != nil {
+		return outcome, outcome.resultErr
+	}
 	return outcome, nil
 }
 
@@ -444,22 +484,14 @@ func (p *Pipeline) decide(ctx context.Context, call Call, asked *Ask, enteredCan
 	return asked, nil
 }
 
-// answer puts one Ask to the chain's approver. No approver, an approver that
-// could not reach anybody, a decline and a context that ended during the wait
-// are all refusals: "no approver, or no answer, is a refusal", and a call that
-// waited ten minutes does not run on a context that ended while it waited.
+// answer puts one PreCall's Ask to the chain's approver. No approver, an
+// approver that could not reach anybody, a decline and a context that ended
+// during the wait are all refusals: "no approver, or no answer, is a refusal",
+// and a call that waited ten minutes does not run on a context that ended while
+// it waited.
 func (p *Pipeline) answer(ctx context.Context, call Call, ask Ask, enteredCancelled bool) error {
-	if refusal := cancelled(ctx, call, enteredCancelled, "before anyone could be asked"); refusal != nil {
-		return refusal
-	}
-	if p.chain.Approver == nil {
-		return &PipelineRefusal{
-			Call:   call,
-			Reason: fmt.Sprintf("nobody could be asked whether this call may run (%s): this chain has no approver, and an unanswered ask is a refusal", ask.Reason),
-		}
-	}
-	given := p.chain.Approver.Answer(ctx, call, ask)
-	if refusal := cancelled(ctx, call, enteredCancelled, "while it waited for an answer"); refusal != nil {
+	given, refusal := p.put(ctx, call, ask, enteredCancelled)
+	if refusal != nil {
 		return refusal
 	}
 	switch answer := given.(type) {
@@ -478,6 +510,28 @@ func (p *Pipeline) answer(ctx context.Context, call Call, ask Ask, enteredCancel
 	}
 }
 
+// put asks the chain's approver one question and returns its answer. A chain
+// with no approver and a context that ended before or during the wait are
+// refusals here, before any answer can be read: an Ask nobody could be shown
+// authorises nothing. What an answer MEANS is the caller's, because a no to a
+// PreCall and a no to a Screen are different facts about the run.
+func (p *Pipeline) put(ctx context.Context, call Call, ask Ask, enteredCancelled bool) (Answer, error) {
+	if refusal := cancelled(ctx, call, enteredCancelled, "before anyone could be asked"); refusal != nil {
+		return nil, refusal
+	}
+	if p.chain.Approver == nil {
+		return nil, &PipelineRefusal{
+			Call:   call,
+			Reason: fmt.Sprintf("nobody could be asked whether this call may run (%s): this chain has no approver, and an unanswered ask is a refusal", ask.Reason),
+		}
+	}
+	given := p.chain.Approver.Answer(ctx, call, ask)
+	if refusal := cancelled(ctx, call, enteredCancelled, "while it waited for an answer"); refusal != nil {
+		return nil, refusal
+	}
+	return given, nil
+}
+
 // inspect runs one screen over the bytes that are about to leave. A screen
 // decides whether they go, never what they say: Pass and an approved Ask release
 // the exact result the tool produced, and Refuse withholds it.
@@ -492,7 +546,28 @@ func (p *Pipeline) inspect(ctx context.Context, call Call, screen Screen, outbou
 		}
 		return &PipelineRefusal{Call: call, Reason: reason}
 	case Ask:
-		return p.answer(ctx, call, verdict, enteredCancelled)
+		given, refusal := p.put(ctx, call, verdict, enteredCancelled)
+		if refusal != nil {
+			return refusal
+		}
+		switch answer := given.(type) {
+		case Approved:
+			return nil
+		case Declined:
+			// The bytes ARE the call's result, and a no means they never
+			// leave. There is nothing to continue the call with, so this
+			// refusal carries a cause and the caller ends the run instead of
+			// answering the call's slot (ScreenDeclinedError says why).
+			reason := answer.Reason
+			if reason == "" {
+				reason = "the person declined to release the result"
+			}
+			return &PipelineRefusal{Call: call, Reason: reason, Cause: &ScreenDeclinedError{Reason: reason}}
+		case Unanswered:
+			return &PipelineRefusal{Call: call, Reason: "nobody answered whether this result may leave: " + errText(answer.Err), Cause: answer.Err}
+		default:
+			return &PipelineRefusal{Call: call, Reason: "nobody answered whether this result may leave, and an unanswered ask is a refusal"}
+		}
 	default:
 		return &PipelineRefusal{Call: call, Reason: fmt.Sprintf("%T answered neither pass, refuse nor ask, and an unanswered verdict is a refusal", screen)}
 	}

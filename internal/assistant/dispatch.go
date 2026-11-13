@@ -50,6 +50,33 @@ var (
 	ErrInvalidResult = errors.New("assistant dispatch: invalid result")
 )
 
+// ResultContractError says a tool's output does not match the result contract
+// it declared. Its message names the tool and NOTHING ELSE: the schema
+// library's diagnostic quotes the offending property names and the decoder
+// quotes the bytes it could not read, and both are the result's own content —
+// which may be material a screen exists to withhold. Detail carries the
+// diagnostic for the log; it never reaches a model or a person.
+//
+// It is the failure the coordinator's note on nocx-a62cl.3.3 asks for: a
+// result that fails its contract is still bytes that would have left, so the
+// screens see it first, and what is reported when they pass says nothing the
+// screens withheld.
+type ResultContractError struct {
+	Tool string
+	// Detail is the schema library's or the decoder's own diagnostic, for the
+	// log. It quotes the result's content, which is why it is a separate
+	// field and never part of the message.
+	Detail error
+}
+
+func (e *ResultContractError) Error() string {
+	return fmt.Sprintf("agent tool %q returned a result its own contract does not allow", e.Tool)
+}
+
+// Unwrap keeps errors.Is(err, ErrInvalidResult) true for every caller that
+// classified the failure by the sentinel.
+func (e *ResultContractError) Unwrap() error { return ErrInvalidResult }
+
 // DispatchRefusalError preserves the method and refusal answer when a model
 // adapter aborts before execution. Callers can classify it without parsing the
 // rendered reason text.
@@ -99,6 +126,11 @@ type dispatchOutcome struct {
 	prepared *preparedInvocation
 	output   string
 	runErr   error
+	// resultErr is the executor's output failing its own declared contract.
+	// It is RECORDED rather than returned from executePrepared so the
+	// pipeline can show the bytes to the screens first: an invalid result is
+	// still bytes that would have left, and its diagnostic quotes them.
+	resultErr error
 }
 
 type dispatchOperation struct {
@@ -434,12 +466,12 @@ func (d *dispatchOperation) executePrepared(prepared *preparedInvocation, call C
 		return outcome, errors.New("assistant dispatch: no executor wired")
 	}
 	output, runErr := executor(prepared.request.Context, call, prepared.decl, capability, prepared.request.RawParams)
-	if runErr == nil {
-		if err := validateToolResult(d.results, prepared.decl.Name, output); err != nil {
-			return outcome, err
-		}
-	}
 	outcome.output, outcome.runErr = output, runErr
+	if runErr == nil {
+		// Recorded, not returned: the pipeline screens the bytes before this
+		// failure is reported (see dispatchOutcome.resultErr).
+		outcome.resultErr = validateToolResult(d.results, prepared.decl.Name, output)
+	}
 	return outcome, nil
 }
 
@@ -542,10 +574,10 @@ func validateToolResult(results map[string]*jsonschema.Schema, tool, output stri
 	decoder := json.NewDecoder(strings.NewReader(output))
 	decoder.UseNumber()
 	if err := decoder.Decode(&document); err != nil {
-		return fmt.Errorf("%w: agent tool %q returned something that is not JSON: %v", ErrInvalidResult, tool, err)
+		return &ResultContractError{Tool: tool, Detail: fmt.Errorf("the result is not JSON: %w", err)}
 	}
 	if err := validator.Validate(document); err != nil {
-		return fmt.Errorf("%w: agent tool %q returned a result its own contract does not allow: %v", ErrInvalidResult, tool, err)
+		return &ResultContractError{Tool: tool, Detail: err}
 	}
 	return nil
 }

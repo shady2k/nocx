@@ -24,6 +24,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // approvalAsk is what one scripted step puts to the person: exactly one of the
@@ -554,6 +555,7 @@ func TestAgentApprove_TheEgressNoReachesTheCallThatAsked(t *testing.T) {
 	if n := client.askCount(); n != 1 {
 		t.Fatalf("engine received %d asks, want 1 — a declined egress send never starts a second drive", n)
 	}
+	waittest.WaitFor(t, "the answer to reach the waiting call", func() bool { return len(client.answersGiven()) == 1 })
 	answers := client.answersGiven()
 	if len(answers) != 1 {
 		t.Fatalf("the approval service answered %d questions, want 1", len(answers))

@@ -102,8 +102,9 @@ func TestAParkedProbeIsNotDoubledByAWake(t *testing.T) {
 	waittest.WaitFor(t, "the stall", func() bool { return sup.Current().Kind == hostconn.Stalled })
 
 	wake.Wake()
-	// Give the guard the signal and let it act on it, then check the count.
-	waitABit()
+	// The guard is made to go round its loop (the probe ask) so the count is
+	// read after the wake was certainly applied.
+	syncGuard(t, sup)
 	if calls := link.probeCalls.Load(); calls != 1 {
 		t.Fatalf("%d probes after a wake with one parked, want 1: a second would queue behind the mux's send lock", calls)
 	}

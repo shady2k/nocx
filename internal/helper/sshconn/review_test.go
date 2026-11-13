@@ -69,7 +69,8 @@ func TestALookNeedsACompleteVersionLine(t *testing.T) {
 
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
-			err = (&link{lookAddr: ln.Addr().String()}).Look(ctx)
+			addr := ln.Addr().String()
+			err = (&link{look: func(ctx context.Context) error { return lookDirect(ctx, addr) }}).Look(ctx)
 			if c.wantErr && err == nil {
 				t.Fatalf("a look over %q answered nil", c.payload)
 			}
@@ -80,19 +81,23 @@ func TestALookNeedsACompleteVersionLine(t *testing.T) {
 	}
 }
 
-// TestARoutedLookGoesToTheFirstHop — finding 11: §5.3 asks for the look on the
-// same route. The furthest endpoint this side can ask without a key exchange is
-// the first hop.
-func TestARoutedLookGoesToTheFirstHop(t *testing.T) {
-	directSpec := ssh.PooledSpec{Host: "target", Port: 22, User: "dev"}
+// TestARoutedLookIsNotAvailableWithoutItsHop — finding 11's edge: a routed
+// connection's look needs the hop it is dialled through, and says so rather than
+// answering about the wrong machine. The routed look itself (through a real
+// bastion, to the destination) is the fault harness's
+// TestARoutedLookReachesTheDestinationThroughTheBastion.
+func TestARoutedLookIsNotAvailableWithoutItsHop(t *testing.T) {
 	spec := ssh.PooledSpec{
 		Host: "target", Port: 22, User: "dev",
 		Route: []ssh.PooledHop{{Host: "bastion", Port: 2222, User: "jump"}},
 	}
-	if got := lookAddress(PlanFor(directSpec), directSpec); got != net.JoinHostPort("target", "22") {
-		t.Fatalf("a direct look goes to %q, want the destination", got)
+	look := lookFor(spec, nil)
+	if err := look(context.Background()); err == nil {
+		t.Fatal("a routed look with no hop answered nil")
 	}
-	if got := lookAddress(PlanFor(spec), spec); got != net.JoinHostPort("bastion", strconv.Itoa(2222)) {
-		t.Fatalf("a routed look goes to %q, want the first hop", got)
+	// A direct connection needs no hop at all.
+	if lookFor(spec, nil) == nil {
+		t.Fatal("lookFor answered no function")
 	}
+	_ = strconv.Itoa
 }

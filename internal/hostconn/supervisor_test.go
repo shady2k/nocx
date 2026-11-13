@@ -22,10 +22,14 @@ import (
 
 // memoryLink is one connection a test ends on cue.
 type memoryLink struct {
-	done      chan struct{}
-	closeOnce sync.Once
-	mu        sync.Mutex
-	err       error
+	done chan struct{}
+	// closeStarted is closed the moment Close is entered, so a test can hold a
+	// teardown at its physical step and ask what admission does meanwhile.
+	closeStarted chan struct{}
+	closeGate    chan struct{}
+	closeOnce    sync.Once
+	mu           sync.Mutex
+	err          error
 	// The far side's behaviour, scripted per test: nil answers at once and the
 	// look is answered by the host.
 	probe   func() (time.Duration, error)
@@ -38,7 +42,7 @@ type memoryLink struct {
 }
 
 func newMemoryLink() *memoryLink {
-	return &memoryLink{done: make(chan struct{})}
+	return &memoryLink{done: make(chan struct{}), closeStarted: make(chan struct{})}
 }
 
 func (l *memoryLink) Done() <-chan struct{} { return l.done }
@@ -50,7 +54,13 @@ func (l *memoryLink) Err() error {
 }
 
 func (l *memoryLink) Close() error {
-	l.closeOnce.Do(func() { close(l.done) })
+	l.closeOnce.Do(func() {
+		close(l.closeStarted)
+		if l.closeGate != nil {
+			<-l.closeGate
+		}
+		close(l.done)
+	})
 	return nil
 }
 
@@ -281,8 +291,9 @@ func TestARefusedSignInFailsWithNoRetry(t *testing.T) {
 		t.Fatalf("a refused sign-in reads %v, want failed(auth-rejected)", got)
 	}
 	// NOTHING RETRIED, and the refusal stays: a supervisor that retried a
-	// rejected credential is how a person's host locks them out.
-	waitABit()
+	// rejected credential is how a person's host locks them out. There is no
+	// retry loop to wait out — the states are asserted where the attempt left
+	// them, which is the observable.
 	if carrier.dialCount() != 1 {
 		t.Fatalf("a refused sign-in was retried: %d dials", carrier.dialCount())
 	}
@@ -305,7 +316,6 @@ func TestAChangedHostKeyFailsWithNoRetry(t *testing.T) {
 	if got := sup.Current(); got.Kind != hostconn.Failed || got.Cause != hostconn.CauseHostKeyChanged {
 		t.Fatalf("a changed host key reads %v, want failed(host-key-changed)", got)
 	}
-	waitABit()
 	if carrier.dialCount() != 1 {
 		t.Fatalf("a changed host key was retried: %d dials", carrier.dialCount())
 	}
@@ -442,8 +452,6 @@ func last(states []hostconn.State) hostconn.State {
 	}
 	return states[len(states)-1]
 }
-
-func waitABit() { time.Sleep(20 * time.Millisecond) }
 
 // TestTwoIdentitiesOnOneHostDoNotShareAState is nocx-oalo1.4.4's third sentence:
 // the connection is the key, not the host name. Two principals on one endpoint

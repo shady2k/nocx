@@ -8,10 +8,12 @@ package ssh
 
 import (
 	"context"
+	"net"
 	"sync/atomic"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // deadEntry answers a pool entry holding ONE connection whose own end marker
@@ -75,4 +77,40 @@ func TestABastionsExtraReferencesDoNotLetTheCorpseBeReacquired(t *testing.T) {
 	if p.Count() != 0 {
 		t.Fatalf("%d entries after the fresh reference was released, want 0", p.Count())
 	}
+}
+
+// blockingCloseConn is a net.Conn whose Close waits on a gate, so a test can
+// ask what the dead mark says while the physical close is still in progress.
+type blockingCloseConn struct {
+	net.Conn
+	gate  chan struct{}
+	begun atomic.Bool
+}
+
+func (c *blockingCloseConn) Close() error {
+	c.begun.Store(true)
+	<-c.gate
+	return nil
+}
+
+// TestTheDeadMarkPrecedesThePhysicalClose — the verification's finding 5: the
+// mark must be set BEFORE the underlying close, or admission can see a socket
+// that is closed while its connection still reads alive.
+func TestTheDeadMarkPrecedesThePhysicalClose(t *testing.T) {
+	gate := make(chan struct{})
+	inner := &blockingCloseConn{gate: gate}
+	ended := &atomic.Bool{}
+	marked := &endMarked{Conn: inner, ended: ended}
+
+	done := make(chan struct{})
+	go func() {
+		_ = marked.Close()
+		close(done)
+	}()
+	waittest.WaitFor(t, "the physical close to be entered", inner.begun.Load)
+	if !ended.Load() {
+		t.Fatal("the dead mark was not set before the underlying close")
+	}
+	close(gate)
+	<-done
 }

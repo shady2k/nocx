@@ -9,6 +9,8 @@ package sshsvc_test
 
 import (
 	"context"
+	"net"
+	"strconv"
 	"testing"
 	"time"
 
@@ -261,4 +263,137 @@ func TestAHopIsASupervisedConnection(t *testing.T) {
 		probes, _ := target.keepalivesSeen()
 		return probes >= 1
 	})
+}
+
+// lookOf answers the look-only dial of a connection the test holds: the Link
+// interface is the supervisor's, and Look is the carrier's optional capability.
+func lookOf(t *testing.T, lease *hostconn.Lease) hostconn.Looker {
+	t.Helper()
+	looker, ok := lease.Link().(hostconn.Looker)
+	if !ok {
+		t.Fatalf("the connection's link offers no look-only dial (%T)", lease.Link())
+	}
+	return looker
+}
+
+// TestPaneCloseWithAParkedProbeBeforeItsDeadlineReturns — the verification's
+// finding 2: `Askable` was a snapshot, so with another plain-shell holder and a
+// probe parked BEFORE its deadline it read connected and the remote cancel
+// parked on the mux's send lock. The cancel now runs off the caller's path, so
+// the close returns whatever the connection is doing.
+func TestPaneCloseWithAParkedProbeBeforeItsDeadlineReturns(t *testing.T) {
+	const password = "correct horse battery staple"
+	f := newFixture(t, password, newSigner(t))
+	proxy := sshtest.NewFaultProxy(t, f.addr)
+	clock := hostconntest.New()
+	stand := newStandOnClock(t, &coordinator{
+		password: password, verdict: proto.HostKeyTrusted, fingerprint: f.hostKeyFingerprint(),
+	}, discardLogger(), clock)
+	destination := destinationAt(t, proxy.Addr())
+
+	pane, err := stand.paneAt(t, destination)
+	if err != nil {
+		t.Fatalf("open a pane: %v", err)
+	}
+	// The sibling that keeps the transport alive after this pane releases, and
+	// the reader for the connection's state (an acquire during the stall would
+	// wait — correctly — so it is taken before it).
+	_ = stand.openShell(t, destination)
+	reader, err := stand.carrier.Acquire(context.Background(), supervisedSpec(t, f, destination, false))
+	if err != nil {
+		t.Fatalf("hold the connection: %v", err)
+	}
+	t.Cleanup(reader.Release)
+
+	// The probe is parked, and NOT past its deadline: the state still reads
+	// connected, which is the window the snapshot missed.
+	proxy.SilenceEstablished()
+	clock.Advance(hostconn.ProbeInterval)
+	waittest.WaitFor(t, "the probe to be consumed and held", func() bool {
+		return proxy.HeldChunks() > 0
+	})
+	if got := lastState(reader.States()).Kind; got == hostconn.Stalled {
+		t.Fatalf("the probe is already past its deadline (%v); the window this test is about has gone", got)
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		_ = pane.Close()
+		close(closed)
+	}()
+	waittest.WaitFor(t, "the pane's close to return with a parked probe", func() bool {
+		select {
+		case <-closed:
+			return true
+		default:
+			return false
+		}
+	})
+}
+
+// TestARoutedLookReachesTheDestinationThroughTheBastion — the verification's
+// finding 11: the look on a route is the ROUTE TO THE DESTINATION, not the first
+// bastion. It opens a direct-tcpip channel through the supervised bastion and
+// reads the destination's version line; a silent bastion makes it fail.
+func TestARoutedLookReachesTheDestinationThroughTheBastion(t *testing.T) {
+	const password = "correct horse battery staple"
+	target := newFixture(t, password, newSigner(t))
+	bastion := newFixture(t, password, newSigner(t))
+	proxy := sshtest.NewFaultProxy(t, bastion.addr)
+	clock := hostconntest.New()
+	stand := newStandOnClock(t, &coordinator{
+		password: password, verdict: proto.HostKeyTrusted, fingerprint: target.hostKeyFingerprint(),
+	}, discardLogger(), clock)
+
+	targetHost, targetPort := target.hostPort(t)
+	proxyHost, proxyPortStr, err := net.SplitHostPort(proxy.Addr())
+	if err != nil {
+		t.Fatalf("split the bastion address: %v", err)
+	}
+	proxyPort, err := strconv.Atoi(proxyPortStr)
+	if err != nil {
+		t.Fatalf("bastion port: %v", err)
+	}
+	spec := ssh.PooledSpec{
+		Host: targetHost, Port: targetPort, User: "test", Identity: "routed-look",
+		Config: &gossh.ClientConfig{
+			User: "test", Auth: []gossh.AuthMethod{gossh.PublicKeys(target.userSigner)},
+			HostKeyCallback: gossh.InsecureIgnoreHostKey(), //nolint:gosec // fixture server started by this test
+			Timeout:         10 * time.Second,
+		},
+		Route: []ssh.PooledHop{{
+			Host: proxyHost, Port: proxyPort, User: "test", Identity: "hop",
+			Config: &gossh.ClientConfig{
+				User: "test", Auth: []gossh.AuthMethod{gossh.PublicKeys(bastion.userSigner)},
+				HostKeyCallback: gossh.InsecureIgnoreHostKey(), //nolint:gosec // fixture server started by this test
+				Timeout:         10 * time.Second,
+			},
+		}},
+	}
+	lease, err := stand.carrier.Acquire(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Acquire through the bastion: %v", err)
+	}
+	t.Cleanup(lease.Release)
+
+	// The look reaches the DESTINATION through the bastion: a direct-tcpip
+	// channel, and the destination's own version line on it.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := lookOf(t, lease).Look(ctx); err != nil {
+		t.Fatalf("a routed look through a healthy bastion: %v (bastion saw %v, targets %v, connections bastion=%d target=%d)", err, bastion.observed(), bastion.directTargetsSeen(), bastion.connections(), target.connections())
+	}
+	seen := bastion.directTargetsSeen()
+	if len(seen) == 0 {
+		t.Fatal("the bastion was never asked for a direct-tcpip channel: the look did not go through the route")
+	}
+
+	// The bastion goes silent: the look's channel cannot open, so the look
+	// fails instead of answering about the bastion alone.
+	proxy.SilenceEstablished()
+	blocked, cancelBlocked := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancelBlocked()
+	if err := lookOf(t, lease).Look(blocked); err == nil {
+		t.Fatal("a look through a silent bastion answered")
+	}
 }

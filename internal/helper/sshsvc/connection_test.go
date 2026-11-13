@@ -397,10 +397,10 @@ func TestASilentConnectionReadsStalledWithinThirtySeconds(t *testing.T) {
 
 	// TEN MINUTES OF BLACKHOLE, and the shell is still there: silence ends
 	// nothing on a connection that carries a plain shell (design §5.3).
+	// Ten simulated minutes pass; the observable is the supervision that
+	// would close a helper-owned connection at five, and a ride on the shell's
+	// own write below. The advance itself is not an event.
 	clock.Advance(10 * time.Minute)
-	waittest.WaitFor(t, "the clock to be seen", func() bool {
-		return clock.Now() > 0
-	})
 	if got := lastState(holder.States()).Kind; got != hostconn.Stalled {
 		t.Fatalf("a plain-shell connection reads %v after ten minutes of silence, want stalled", got)
 	}
@@ -734,18 +734,16 @@ func TestAPlainShellConnectionSurvivesAWake(t *testing.T) {
 // rides one supervisor, every holder's connection is probed, and a finding
 // reaches every shell on the connection and no other.
 
-// TestAFarHelperLaneAloneOnAConnectionReadsStalled is the survey's own list —
-// lane, channel, forward, tool socket, pane, probe lease — reduced to the
-// case that used to have no prober at all: a connection whose only holder is a
-// far helper's LANE. Nothing on it is a shell, and it still reads stalled when
-// the link goes deaf.
-func TestAFarHelperLaneAloneOnAConnectionReadsStalled(t *testing.T) {
+// TestAPaneIsToldItsConnectionStalledThroughItsOwnObserver — the verification's
+// finding 14: proving a guard exists is not proving the PANE reports. The
+// observer the pane registers (the shell's own, the same one every session
+// reports through) is what receives the finding; the lane beside it is the
+// helper-owned holder the survey lists.
+func TestAPaneIsToldItsConnectionStalledThroughItsOwnObserver(t *testing.T) {
 	const password = "correct horse battery staple"
 	f := newFixture(t, password, newSigner(t))
 	hold := make(chan struct{})
 	f.execPeer = func(in io.Reader, out io.Writer) int {
-		// The far helper's lane stays open for the test's duration: its bytes
-		// are not what this test is about.
 		<-hold
 		return 0
 	}
@@ -758,7 +756,7 @@ func TestAFarHelperLaneAloneOnAConnectionReadsStalled(t *testing.T) {
 	}, discardLogger(), clock)
 	destination := destinationAt(t, proxy.Addr())
 
-	// The lane the far helper runs, through the same destination a pane uses.
+	// The far helper's lane: its own holder, no shell.
 	if _, err := stand.lane(t, proto.LaneParams{
 		Destination: destination,
 		Machine:     proto.Machine{Dir: laneDir()},
@@ -767,22 +765,26 @@ func TestAFarHelperLaneAloneOnAConnectionReadsStalled(t *testing.T) {
 		t.Fatalf("open a lane: %v", err)
 	}
 
-	// The same connection, read: the lease the test holds IS a holder of it,
-	// and its path is the supervisor's.
-	holder, err := stand.carrier.Acquire(context.Background(), supervisedSpec(t, f, destination, false))
-	if err != nil {
-		t.Fatalf("hold the lane's connection: %v", err)
-	}
-	t.Cleanup(holder.Release)
-	if got := f.connections(); got != 1 {
-		t.Fatalf("the lane and the holder made %d connections, want 1", got)
-	}
+	// The pane, and the observer it registers.
+	reports := make(chan ssh.Reachability, 8)
+	_ = stand.openShellWith(t, destination, func(r ssh.Reachability) {
+		select {
+		case reports <- r:
+		default:
+		}
+	})
 
 	proxy.SilenceEstablished()
 	clock.Advance(hostconn.ProbeInterval)
 	clock.Advance(hostconn.ProbeDeadline)
-	waittest.WaitFor(t, "a lane-only connection to read stalled", func() bool {
-		return lastState(holder.States()).Kind == hostconn.Stalled
+
+	waittest.WaitFor(t, "the pane to be told its connection stopped answering", func() bool {
+		select {
+		case r := <-reports:
+			return !r.Responsive
+		default:
+			return false
+		}
 	})
 }
 

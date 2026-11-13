@@ -42,6 +42,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/shady2k/nocx/internal/connkey"
@@ -103,16 +104,27 @@ type PooledSpec struct {
 	// read happened": the wrapper forwards every byte untouched, and no part of
 	// this package inspects what it carries (AD-6).
 	WrapConn func(net.Conn) net.Conn
-	// AllowSilentClose, when set, is asked before this connection is closed
-	// because it stopped answering. It is a function value rather than a field
-	// the pool interprets for the reason LivenessObserver was one: the pool may
-	// not import the connection manager, and the answer — may this be closed? —
-	// belongs to the party that counts holders.
+	// HopAcquire, when set, dials ONE hop of Route and answers a borrowed
+	// reference to it. The connection manager supplies it, so a hop is a
+	// SUPERVISED connection like any other — its own link, watcher, prober and
+	// wake probe — instead of a bare pool entry nothing owns (design §5.1.1's
+	// second trap; review finding 4). It receives the route BEFORE the hop, in
+	// dial order, because a hop is itself reached through the ones above it.
 	//
-	// A nil hook means "nobody is counting": the pool then behaves as it always
-	// has for a barrier that cannot get an answer, which is to close. The
-	// helper always sets it.
-	AllowSilentClose func() bool
+	// Nil keeps this package's own pooling of hops, which is what a probe's
+	// unpooled dial and the tests use.
+	HopAcquire func(ctx context.Context, hop PooledHop, prefix []PooledHop) (*PooledConn, error)
+	// Barrier, when set, asks the connection manager for evidence that the far
+	// side is answering, bounded by the context: the release barrier's wait
+	// between the two attempts newSession makes. It is a function value
+	// because the pool may not import the connection manager, and the answer —
+	// one probe, reused if one is already parked — belongs to the party that
+	// owns the connection's one prober.
+	//
+	// Nil means this connection has no prober to ask (a direct dial, a test
+	// fake), and the barrier then fails the channel's open rather than sending
+	// a second keepalive.
+	Barrier func(ctx context.Context) error
 }
 
 // PooledHop is one intermediate host a connection is dialed through. It is the
@@ -211,6 +223,18 @@ func routeKeyOf(route []PooledHop) string {
 	return strings.Join(parts, ">")
 }
 
+// Borrow answers a borrowed reference over an existing client, whose Close runs
+// release instead of a pool release.
+//
+// It is how a hop's reference is handed to the dialler that rides it: the hop's
+// pooled reference belongs to its own supervisor (the connection manager owns
+// the hop as a connection), and what the dialler releases when it closes is its
+// lease. A nil client is refused by the same callers that refuse a nil
+// connection anywhere else.
+func Borrow(client *gossh.Client, release func()) *PooledConn {
+	return &PooledConn{client: client, release: release}
+}
+
 // PooledConn is a borrowed reference to a pooled connection: the caller may
 // open channels on Client() for as long as it holds this, and MUST call Close
 // when it is done — the connection itself closes when the last reference is
@@ -235,6 +259,11 @@ type PooledConn struct {
 	// mechanism exists for.
 	taint       func()
 	taintReason func() string
+	// dead and tainted are the transport's own facts, read synchronously:
+	// whether the library has closed the socket, and whether the pool has
+	// retired this connection from new admission.
+	dead    func() bool
+	tainted func() bool
 	// newSession is newSession on the pooledSSHConn this handle borrows: the
 	// session-open act with the far side's release of the previous session
 	// awaited first. Nil for a connection dialed outside the pool (DialAuth),
@@ -285,6 +314,26 @@ func (p *PooledConn) Fingerprint() string {
 
 // Client is the underlying connection.
 func (p *PooledConn) Client() *gossh.Client { return p.client }
+
+// Dead reports whether the transport has ended. It is answered synchronously
+// from the marker the library's own close sets, not from a watcher: admission
+// must refuse a connection that has ended even in the window before any
+// goroutine runs (review finding 5).
+func (p *PooledConn) Dead() bool {
+	if p == nil || p.dead == nil {
+		return false
+	}
+	return p.dead()
+}
+
+// Tainted reports whether the pool has retired this connection from new
+// admission (a detached writer's cap, a credential rotation).
+func (p *PooledConn) Tainted() bool {
+	if p == nil || p.tainted == nil {
+		return false
+	}
+	return p.tainted()
+}
 
 // NewSession opens a session channel on this connection, re-asking once when
 // the far side refuses the request because it is still holding the session this
@@ -377,12 +426,12 @@ func (rc *RealClient) AcquirePooled(ctx context.Context, spec PooledSpec) (*Pool
 		conn, err := rc.dialRoute(ctx, spec.Route, routeHop{
 			host: spec.Host, port: spec.Port, user: spec.User, identity: spec.Identity, config: &cfg,
 			wrap: spec.WrapConn,
-		})
+		}, spec.HopAcquire)
 		if err != nil {
 			return nil, err
 		}
 		conn.fingerprint = fingerprint
-		conn.allowSilentClose = spec.AllowSilentClose
+		conn.barrier = spec.Barrier
 		return conn, nil
 	}
 
@@ -473,11 +522,15 @@ func validateEndpoint(host string, port int, user string, cfg *gossh.ClientConfi
 // the same bastion finds it already there. The reference the destination holds
 // releases the hop's, which releases the one before it — the same ownership
 // chain the coordinator's own jump dial keeps, one caller out.
-func (rc *RealClient) dialRoute(ctx context.Context, route []PooledHop, last routeHop) (*pooledSSHConn, error) {
+func (rc *RealClient) dialRoute(ctx context.Context, route []PooledHop, last routeHop, hopAcquire func(context.Context, PooledHop, []PooledHop) (*PooledConn, error)) (*pooledSSHConn, error) {
 	var upstream *PooledConn
 	if len(route) > 0 {
 		var err error
-		upstream, err = rc.acquireHop(ctx, route)
+		if hopAcquire != nil {
+			upstream, err = hopAcquire(ctx, route[len(route)-1], route[:len(route)-1])
+		} else {
+			upstream, err = rc.acquireHop(ctx, route)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -486,7 +539,7 @@ func (rc *RealClient) dialRoute(ctx context.Context, route []PooledHop, last rou
 	if upstream != nil {
 		upClient = upstream.Client()
 	}
-	client, err := rc.dialEndpoint(ctx, upClient, last)
+	client, ended, err := rc.dialEndpoint(ctx, upClient, last)
 	if err != nil {
 		if upstream != nil {
 			_ = upstream.Close()
@@ -497,7 +550,7 @@ func (rc *RealClient) dialRoute(ctx context.Context, route []PooledHop, last rou
 	if upstream != nil {
 		release = func() { _ = upstream.Close() }
 	}
-	return &pooledSSHConn{client: client, release: release}, nil
+	return &pooledSSHConn{client: client, release: release, ended: ended}, nil
 }
 
 // acquireHop answers a pooled reference to the LAST hop of route.
@@ -506,7 +559,9 @@ func (rc *RealClient) acquireHop(ctx context.Context, route []PooledHop) (*Poole
 	hopEndpoint := hop.routeHop()
 	key := poolKeyOf(RouteKeys(route)[len(route)-1])
 	dial := func(poolKey) (sshClientConn, error) {
-		return rc.dialRoute(ctx, route[:len(route)-1], hopEndpoint)
+		// A hop's own prefix is pooled, not supervised: this is the path a
+		// caller that did not supply HopAcquire takes (a probe, a test).
+		return rc.dialRoute(ctx, route[:len(route)-1], hopEndpoint, nil)
 	}
 	handle, err := rc.dial.pool.AcquireDial(ctx, key, dial)
 	if err != nil {
@@ -519,7 +574,7 @@ func (rc *RealClient) acquireHop(ctx context.Context, route []PooledHop) (*Poole
 // answers a client whose release closes the destination and every hop under it.
 func (rc *RealClient) dialRouteOnce(ctx context.Context, route []PooledHop, last routeHop) (*gossh.Client, func(), error) {
 	if len(route) == 0 {
-		client, err := rc.dialEndpoint(ctx, nil, last)
+		client, _, err := rc.dialEndpoint(ctx, nil, last)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -529,7 +584,7 @@ func (rc *RealClient) dialRouteOnce(ctx context.Context, route []PooledHop, last
 	if err != nil {
 		return nil, nil, err
 	}
-	client, err := rc.dialEndpoint(ctx, upClient, last)
+	client, _, err := rc.dialEndpoint(ctx, upClient, last)
 	if err != nil {
 		closeUpstream()
 		return nil, nil, err
@@ -543,29 +598,52 @@ func (rc *RealClient) dialRouteOnce(ctx context.Context, route []PooledHop, last
 // dialEndpoint performs the TCP dial and the handshake for ONE endpoint: to the
 // address directly when there is no upstream, and through the network of the
 // connection before it when there is.
-func (rc *RealClient) dialEndpoint(ctx context.Context, upstream *gossh.Client, ep routeHop) (*gossh.Client, error) {
+//
+// It answers the connection's own END MARKER with the client: every network
+// connection the library will close is wrapped so that the close sets the
+// marker at the instant it happens — inside x/crypto's teardown, before its
+// Wait returns — which is what lets admission refuse a transport that has ended
+// without waiting for any goroutine (nocx-oalo1.4.6, review finding 5).
+func (rc *RealClient) dialEndpoint(ctx context.Context, upstream *gossh.Client, ep routeHop) (*gossh.Client, *atomic.Bool, error) {
+	ended := &atomic.Bool{}
 	d := &dialer{client: rc}
 	if upstream == nil {
-		return d.dialDirect(ctx, ep.addr(), ep.config, ep.host, ep.user, ep.wrap)
+		client, err := d.dialDirect(ctx, ep.addr(), ep.config, ep.host, ep.user, ep.wrap, ended)
+		return client, ended, err
 	}
 	conn, err := upstream.DialContext(ctx, "tcp", ep.addr())
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, nil, ctx.Err()
 		}
-		return nil, fmt.Errorf("dial %s through the host before it: %w", ep.addr(), err)
+		return nil, nil, fmt.Errorf("dial %s through the host before it: %w", ep.addr(), err)
 	}
 	if ep.wrap != nil {
 		conn = ep.wrap(conn)
 	}
+	conn = &endMarked{Conn: conn, ended: ended}
 	client, err := d.handshakeOver(ctx, conn, ep.addr(), ep.config)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, nil, ctx.Err()
 		}
-		return nil, fmt.Errorf("ssh client conn through a hop: %w", err)
+		return nil, nil, fmt.Errorf("ssh client conn through a hop: %w", err)
 	}
-	return client, nil
+	return client, ended, nil
+}
+
+// endMarked is the network connection the library closes, with the pool's
+// dead mark attached to that close. It reads nothing and changes nothing on the
+// wire; it is the moment the transport ends, made observable synchronously.
+type endMarked struct {
+	net.Conn
+	ended *atomic.Bool
+}
+
+func (c *endMarked) Close() error {
+	err := c.Conn.Close()
+	c.ended.Store(true)
+	return err
 }
 
 // borrowPooled wraps a pool handle as the borrowed reference callers hold. A
@@ -596,5 +674,7 @@ func (rc *RealClient) borrowPooled(handle *poolHandle) (*PooledConn, error) {
 		// The session-open act, so every caller that opens one goes through
 		// the connection's own record of what it has already carried.
 		newSession: client.newSession,
+		dead:       client.isDead,
+		tainted:    client.Tainted,
 	}, nil
 }

@@ -35,16 +35,24 @@ type RealClock struct{}
 func (RealClock) Now() monoclock.Nanos { return monoclock.Now() }
 
 // After is a timer's channel, carrying the reading at which it fired.
+//
+// It is a runtime timer, not a goroutine parked on one: a guard that ends with
+// a five-minute timer pending leaves the timer to expire into a buffered
+// channel nobody reads, rather than a goroutine alive for five minutes (review
+// comment). Go's timer heap makes that cheap and the channel's size makes the
+// late send harmless.
 func (RealClock) After(d time.Duration) <-chan monoclock.Nanos {
 	ch := make(chan monoclock.Nanos, 1)
+	fire := func() {
+		select {
+		case ch <- monoclock.Now():
+		default:
+		}
+	}
 	if d <= 0 {
-		ch <- monoclock.Now()
+		fire()
 		return ch
 	}
-	timer := time.NewTimer(d)
-	go func() {
-		<-timer.C
-		ch <- monoclock.Now()
-	}()
+	time.AfterFunc(d, fire)
 	return ch
 }

@@ -322,19 +322,32 @@ func (p *PaneListeners) LifecyclePort() int { return p.port }
 // teardown, which is where it is called from.
 func (p *PaneListeners) Close() error {
 	p.closeOne.Do(func() {
-		if p.lifecycleLn != nil {
-			_ = p.lifecycleLn.Close()
-		}
+		// THE LOCAL ENDS FIRST: the session's carrier and its far end are what
+		// the session service reads, and ending them is what tells a reader no
+		// more bytes will arrive.
 		if p.carrier != nil {
 			_ = p.carrier.Close()
 		}
 		if p.sink != nil {
 			_ = p.sink.Close()
 		}
-		// THE POOL IS LAST: it is the pane's own reference, and it is released
-		// once, after everything riding it has been closed.
+		// THE POOL REFERENCE GOES BEFORE THE REMOTE CANCEL (design §5.3,
+		// socket-first teardown; review finding 2). Closing the remote
+		// listener sends cancel-tcpip-forward with a reply wanted, and on a
+		// connection whose probe is parked that request waits on the mux's
+		// send lock — so a pane that closed the listener first could wait on a
+		// stuck connection's probe and never reach the release that would end
+		// it. Releasing first also closes the socket when this was the last
+		// holder, and a cancel on a closed listener fails at once.
+		askable := p.pool != nil && p.pool.Askable()
 		if p.pool != nil {
 			_ = p.pool.Close()
+		}
+		// A stalled or lost connection is not one to ask: the request would
+		// park, the far side is not answering, and the listener dies with the
+		// transport.
+		if p.lifecycleLn != nil && askable {
+			_ = p.lifecycleLn.Close()
 		}
 	})
 	return nil

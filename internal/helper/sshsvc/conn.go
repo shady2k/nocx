@@ -79,6 +79,17 @@ func (c *pooledConn) TaintReason() string {
 	return c.pool.TaintReason()
 }
 
+// Askable reports whether the connection is answering now: connected and not
+// stalled. A caller about to send a request that waits for a reply uses it to
+// avoid parking behind a probe the supervisor already has in flight (design
+// §5.3: no channel is asked of a stalled connection).
+func (c *pooledConn) Askable() bool {
+	if c == nil || c.lease == nil {
+		return false
+	}
+	return c.lease.Current().Kind == hostconn.Connected && !c.Lost()
+}
+
 // Lost reports whether the transport this reference rides has ended. It is the
 // supervisor's fact, read from the lease, and it is what keeps a dead
 // connection from being reported as the far side refusing something.

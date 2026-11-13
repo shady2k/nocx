@@ -38,6 +38,7 @@
 package sshtest
 
 import (
+	"errors"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -84,6 +85,10 @@ type FaultProxy struct {
 	t        testing.TB
 	upstream string
 	addr     string
+	// done is closed when the proxy itself is over, so a paced or slowed
+	// delivery can stop waiting instead of sleeping out its budget while
+	// Close waits for it.
+	done chan struct{}
 
 	mode    atomic.Int32
 	delayNS atomic.Int64
@@ -106,7 +111,7 @@ func NewFaultProxy(t testing.TB, upstream string) *FaultProxy {
 	if err != nil {
 		t.Fatalf("fault proxy: listen: %v", err)
 	}
-	p := &FaultProxy{t: t, upstream: upstream, addr: ln.Addr().String()}
+	p := &FaultProxy{t: t, upstream: upstream, addr: ln.Addr().String(), done: make(chan struct{})}
 	p.listen(ln)
 	t.Cleanup(p.Close)
 	return p
@@ -200,6 +205,37 @@ func (p *FaultProxy) Release() {
 	}
 }
 
+// Reboot stages a host that lost the flow's state without saying so. Bytes
+// already held by SilenceEstablished are discarded, nothing more is forwarded,
+// and the NEXT write from the client is answered with a reset — what a host
+// that was rebooted behind a flow does to a byte it no longer has state for.
+// New connections still pass, because the rebooted host accepts them; that is
+// what makes the look-only dial evidence and the nudge the thing that provokes
+// the reset (design §5.3).
+func (p *FaultProxy) Reboot() {
+	for _, r := range p.snapshotRelays() {
+		r.silent.Store(false)
+		r.reboot.Store(true)
+		r.mu.Lock()
+		r.pending = nil
+		r.mu.Unlock()
+	}
+}
+
+// HeldChunks answers how many chunks the current silence has queued and not
+// delivered. It is the observable a test waits for when it needs "the peer's
+// bytes have been consumed and are being withheld" — the parked probe the
+// design's nudge is evidence about — rather than a duration.
+func (p *FaultProxy) HeldChunks() int {
+	total := 0
+	for _, r := range p.snapshotRelays() {
+		r.mu.Lock()
+		total += len(r.pending)
+		r.mu.Unlock()
+	}
+	return total
+}
+
 // Reset destroys every relayed connection with a TCP reset, so both peers see
 // a dead flow rather than an orderly end of file: the shape of a host that was
 // rebooted behind a connection that was never closed.
@@ -226,6 +262,7 @@ func (p *FaultProxy) Close() {
 	if ln != nil {
 		_ = ln.Close()
 	}
+	close(p.done)
 	p.destroy(false)
 	p.wg.Wait()
 }
@@ -375,36 +412,101 @@ type relay struct {
 	// discarded while the flow itself stays open, and a connection made after
 	// the call is not marked. Read per chunk, like every other switch here.
 	silent atomic.Bool
+	// reboot marks a flow whose host has lost its state: the next byte from
+	// the client is answered with a reset.
+	reboot atomic.Bool
 
 	// mu serialises this direction's deliveries, so the order a hold kept is
 	// the order Release replays, and a pipe never writes to dst while a
 	// release is writing to it.
 	mu      sync.Mutex
 	pending [][]byte
-	pacedTo time.Time
 }
 
 // deliver forwards one chunk, or keeps it while the hold is raised.
+//
+// The PACING HAPPENS OUTSIDE THE MUTEX (review finding 15): a slow or
+// bandwidth-limited chunk used to sleep while holding r.mu, and Close waits for
+// the relays — so a sufficiently low rate could hold test cleanup for the whole
+// budget, and no socket close could interrupt it. The lock now covers only the
+// decision and the write.
 func (r *relay) deliver(chunk []byte) error {
+	if r.reboot.Load() {
+		// The host lost this flow's state: the byte is answered with a reset.
+		r.p.resetFlow(r.src, r.dst)
+		return errRelayReset
+	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.p.held.Load() || r.silent.Load() {
 		r.pending = append(r.pending, append([]byte(nil), chunk...))
+		r.mu.Unlock()
 		return nil
 	}
+	if len(r.pending) > 0 {
+		// The hold was lifted a moment ago and older bytes are still queued:
+		// they go first, in order, or a reader would see the stream reordered.
+		r.pending = append(r.pending, append([]byte(nil), chunk...))
+		err := r.flushLocked()
+		r.mu.Unlock()
+		return err
+	}
+	r.mu.Unlock()
+
+	r.pace(len(chunk))
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.pending) > 0 {
+		r.pending = append(r.pending, append([]byte(nil), chunk...))
+		return r.flushLocked()
+	}
 	return r.write(chunk)
+}
+
+// errRelayReset ends one direction of a flow the host answered with a reset.
+var errRelayReset = errors.New("sshtest: the flow was reset")
+
+// pace waits out this chunk's delay, interrupted by the proxy closing.
+func (r *relay) pace(n int) {
+	var wait time.Duration
+	switch linkMode(r.p.mode.Load()) {
+	case linkSlow:
+		wait = time.Duration(r.p.delayNS.Load())
+	case linkBandwidth:
+		if bps := r.p.bps.Load(); bps > 0 {
+			wait = time.Duration(int64(n) * int64(time.Second) / bps)
+		}
+	}
+	if wait <= 0 {
+		return
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-r.p.done:
+	}
 }
 
 // flush delivers everything a hold kept, in the order it arrived.
 func (r *relay) flush() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	_ = r.flushLocked()
+}
+
+// flushLocked is flush for a caller that holds the mutex. Callers hold it so a
+// chunk arriving as the hold lifts cannot overtake the older ones.
+func (r *relay) flushLocked() error {
+	var firstErr error
 	for _, chunk := range r.pending {
 		if err := r.write(chunk); err != nil {
+			firstErr = err
 			break
 		}
 	}
 	r.pending = nil
+	return firstErr
 }
 
 // write applies the current condition to one chunk and writes what survives.
@@ -419,20 +521,22 @@ func (r *relay) write(chunk []byte) error {
 		if r.dir == Direction(r.p.lossDir.Load()) {
 			return nil
 		}
-	case linkSlow:
-		time.Sleep(time.Duration(r.p.delayNS.Load()))
-	case linkBandwidth:
-		if bps := r.p.bps.Load(); bps > 0 {
-			now := time.Now()
-			if r.pacedTo.Before(now) {
-				r.pacedTo = now
-			}
-			r.pacedTo = r.pacedTo.Add(time.Duration(int64(len(chunk)) * int64(time.Second) / bps))
-			if wait := time.Until(r.pacedTo); wait > 0 {
-				time.Sleep(wait)
-			}
-		}
 	}
+	// Slow and bandwidth waits happened in pace, outside this lock.
 	_, err := r.dst.Write(chunk)
 	return err
+}
+
+// resetFlow answers a byte on a flow the host no longer holds with a TCP reset,
+// which is what a rebooted host does: both sockets go with linger 0 so the
+// peer learns by reset rather than by an orderly end of file.
+func (p *FaultProxy) resetFlow(conns ...net.Conn) {
+	for _, c := range conns {
+		if tcp, ok := c.(*net.TCPConn); ok {
+			_ = tcp.SetLinger(0)
+		}
+	}
+	for _, c := range conns {
+		_ = c.Close()
+	}
 }

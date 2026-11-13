@@ -477,6 +477,33 @@ than removed. `agent.dump` goes with the wire capture. `PriorTurns` goes (decisi
 
 `internal/toolendpoint`, `internal/mcpstdio` and the tool executors stay: they are the boundary.
 
+### 8. The cache prefix is kept, and usage is recorded
+
+A provider's prompt cache matches the exact bytes of a request from its start: tools, then the system
+prompt, then the history. Losing it costs most of what a conversation spends, so nothing nocx controls
+may change those bytes from one turn to the next (owner, 2026-11-13).
+
+- **nocx's system prompt is the same bytes on every turn.** It holds nothing that varies: no time, cwd,
+  host, pane state or run id. What belongs to one turn (the pane, its host, the marked rows, the screen)
+  goes into that turn's user message. The prompt changes only when the person edits their instructions.
+- **The MCP tool list is the same on every turn**: the same tools, in the same order, with the same
+  schemas and descriptions. A grant, the matrix or a host without the helper never hides a tool; the
+  pipeline refuses the call and says why. A turn's bearer and anything else per turn stay out of every
+  description.
+- **The history is only appended to.** nocx does not rebuild, edit or trim it; the agent holds it. A
+  cancel adds nothing, and a steer or a message during an approval goes at the end. Compaction is the
+  agent's, and rare.
+- **A conversation keeps its model.** A role's new choice applies from the next conversation; the one
+  under way finishes on the model it started with, and the block says so.
+- **A connector reproduces the previous request.** A process per turn costs the cache nothing, because the
+  cache is the provider's and keyed by bytes, provided the agent rebuilds the same request from its
+  session on disk. That is checked, not assumed (Constraints).
+
+**Usage is recorded on every run.** A connector reports what its agent states (input, output, cache read,
+cache write, per model call), `RunFacts` carries it, the ledger keeps it, and the block shows how much of
+the input came from the cache. nocx records none of this today; it is new with the swap. An agent that
+states no usage says so, and the block shows nothing rather than a zero.
+
 ## Constraints
 
 Each is a requirement with its check.
@@ -503,6 +530,9 @@ Each is a requirement with its check.
 | The assistant has no file path of its own                                    | A test on the composition root: the files.* narrowing takes the pane's provider from the files binding the Files panel takes; `local.New()` is not reached from `agenttools`                                    |
 | A person with no agent lands in the agent section                            | e2e on the headless backend: no agent, ask from a pane                                                                                                                                                          |
 | A connector is only supported once it passes                                 | One conformance suite runs against the fake agent in CI and against each declared real agent at release                                                                                                         |
+| The cache prefix survives a turn                                             | Conformance run against each real agent with a fake model behind it: the request of turn N+1 begins with the bytes of turn N's, across a change of pane host, a refused call, a cancelled turn and a steer      |
+| nocx's system prompt and tool list do not vary                               | Contract suite: two turns from different panes and hosts, one with a narrowed grant, send byte-identical system prompts and tool lists                                                                          |
+| Usage reaches the block                                                      | Contract suite: the fake agent's stated usage, cache read included, is on the run's facts in the ledger and in the block; an agent stating none shows none                                                      |
 | No code outside a connector names an agent                                   | A source test: only `internal/harness/<connector>` and `internal/app` import a connector, and no other package holds an agent's name or flags                                                                   |
 | A connector's stated tool boundary is true                                   | The conformance run against each real agent asks it to call a built-in tool: a connector stating "nocx's tools only" shows no such tool declared and nothing executed                                           |
 | The chosen model is the one that answers, and a vanished one is not replaced | Contract suite on the fake agent: the turn carries the role's model; a model absent from the catalogue refuses the turn and names it                                                                            |
@@ -567,7 +597,7 @@ and `ws.go`, and owns the file provider stage 8 consumes. Whoever merges second 
 4. **Cancel and progress** at the boundary, with `nocx-98qho`.
 5. **The swap, as one change:** the contract with its shared base, the fake agent, the conformance suite,
    the pi connector, the third way in, nocx's system prompt with the person's instructions, the agent
-   section with the `answering` role picked from pi's catalogue, readiness. `Client.Ask` runs through the
+   section with the `answering` role picked from pi's catalogue, readiness, and usage on the run's facts. `Client.Ask` runs through the
    harness, and eino, endpoints and Probe leave in the same change. `go.mod` loses eino here.
 6. **Steer** in the composer and the running answer.
 7. **The other connectors, one stage each, in this order:** omp on the pi connector; Claude Code; Codex;

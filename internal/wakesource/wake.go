@@ -11,7 +11,7 @@
 // unnoticed after a lid is opened, and why the design asks for a wake signal
 // rather than a shorter interval.
 //
-// # Two inputs, one owner
+// # Two inputs, one owner, one order
 //
 // ONE source owns the fact "the machine slept", and it merges the two things a
 // process can know about a suspend:
@@ -28,13 +28,24 @@
 //     both platforms.
 //
 // The events are the precise input: they say "about to sleep" before it
-// happens, and they distinguish a full wake from a DARK wake (Power Nap and its
-// peers), which is not a wake at all and must not make every connection probe.
+// happens, and — where the platform's PUBLIC API can say so — they distinguish a
+// full wake from a DARK wake (Power Nap and its peers), which is not a wake at
+// all and must not make every connection probe. Darwin's public IOKit API
+// cannot make that distinction and says so in iokit_darwin.go; Linux's logind
+// gives no dark-wake edge either, so on the shipped builds EventDarkWoke is the
+// merge's stated rule with no producer, and every wake it sees is a full one.
 // The clocks are the fallback: they catch a sleep no event reported — a machine
 // with no logind, a missed signal, a helper that started while the machine was
 // already away. ONE resume yields ONE wake signal, whichever input saw it
 // first; while a dark wake is the last thing the OS said, the clock input is
 // suppressed, because the gap it sees is the power nap and not a resume.
+//
+// The two inputs are merged in ONE serialized step (decide.step), and the events
+// that have already arrived are applied BEFORE the clocks are compared. That
+// order is deliberate: a clock tick must never emit a wake while a dark wake
+// that has arrived is still waiting to be applied, because applying the dark
+// event afterwards cannot retract a wake already emitted (nocx-oalo1.4 review,
+// finding 10).
 //
 // # What it cannot see
 //
@@ -98,25 +109,90 @@ type Event struct {
 	At   monoclock.Nanos
 }
 
+// outcome is what one serialized step of the merge decided to report.
+type outcome struct {
+	slept, woke     bool
+	sleepAt, wakeAt monoclock.Nanos
+}
+
+// decide is the merge's rule and all of its state: one resume is one wake, a
+// dark wake is not a wake and suppresses the clocks. It touches nothing outside
+// itself and starts no goroutine, so the rule is exercised one step at a time,
+// with no clock to wait on and no scheduler to hope for.
+type decide struct {
+	gap, window time.Duration
+	lastWake    monoclock.Nanos
+	dark        bool
+}
+
+func newDecide(gap, window time.Duration) *decide {
+	return &decide{gap: gap, window: window}
+}
+
+// step is ONE serialized step of the merge: the events that have already
+// arrived, in the order they arrived, and the clock pair. The order is fixed
+// here — events first, then the clocks — and is the whole answer to "a tick must
+// not outrun an event that has arrived": a dark wake is in the state before the
+// clocks are compared, so it suppresses them.
+func (d *decide) step(events []Event, prev, cur monoclock.Readings, now monoclock.Nanos) outcome {
+	var o outcome
+	for _, ev := range events {
+		switch ev.Kind {
+		case EventWillSleep:
+			d.dark = false
+			o.slept, o.sleepAt = true, ev.At
+		case EventWoke:
+			d.dark = false
+			if d.woke(ev.At) {
+				o.woke, o.wakeAt = true, ev.At
+			}
+		case EventDarkWoke:
+			d.dark = true
+		}
+	}
+	// The clocks act LAST, on the state the events above just set. Reversing
+	// these two is finding 10: a tick would emit a wake for the resume while a
+	// dark wake that had already arrived was still unapplied.
+	if slept(prev, cur, d.gap) && !d.dark {
+		if d.woke(now) {
+			o.woke, o.wakeAt = true, now
+		}
+	}
+	return o
+}
+
+// woke records one resume and answers whether it is a new one: the event input
+// and the clock input are two views of the same resume, and whichever sees it
+// first is the signal.
+func (d *decide) woke(at monoclock.Nanos) bool {
+	if d.lastWake != 0 && at >= d.lastWake && at-d.lastWake < monoclock.Nanos(d.window) {
+		return false
+	}
+	d.lastWake = at
+	return true
+}
+
 // Source merges the OS's sleep/wake events with the clock comparison, and is the
 // one owner of "the machine slept".
 type Source struct {
-	log   log.Logger
-	read  func() monoclock.Readings
-	every time.Duration
-	gap   time.Duration
-	merge time.Duration
-	// events is the OS input, nil when this machine has none.
+	log    log.Logger
+	read   func() monoclock.Readings
+	gap    time.Duration
 	events <-chan Event
+	// ticks says "compare the clocks now". Production answers PollEvery's
+	// ticker; a test answers its own channel, so nothing here waits on
+	// elapsed time.
+	ticks <-chan time.Time
+	// ticker is non-nil only when this Source made the ticker itself, and is
+	// what Stop stops.
+	ticker *time.Ticker
+	merge  *decide
 
 	wakes  chan monoclock.Nanos
 	sleeps chan monoclock.Nanos
 	done   chan struct{}
 
 	stopOnce sync.Once
-	// The merge's own state, touched only by its goroutine.
-	lastWake monoclock.Nanos
-	dark     bool
 }
 
 // New starts the process's wake detector: the platform's OS events (when the
@@ -124,17 +200,20 @@ type Source struct {
 // absent OS input is reported once, here.
 func New(logger log.Logger) *Source {
 	events, err := osEvents()
-	s := newSource(monoclock.Read, PollEvery, SleepGap, events, logger)
+	ticker := time.NewTicker(PollEvery)
+	s := newSource(monoclock.Read, SleepGap, events, ticker.C, logger)
+	s.ticker = ticker
 	if err != nil {
-		logger.Warn("wakesource: this machine has no operating-system sleep/wake events; the clock comparison is the only input",
+		s.log.Warn("wakesource: this machine has no operating-system sleep/wake events; the clock comparison is the only input",
 			"why", err)
 	}
 	return s
 }
 
-// newSource is the detector on an injected clock pair and injected events,
-// which is how a test states an OS input: a channel it feeds.
-func newSource(read func() monoclock.Readings, every, gap time.Duration, events <-chan Event, logger log.Logger) *Source {
+// newSource is the detector on injected inputs: the clock pair, the OS events,
+// and the ticks that ask for a comparison. Every interval is the caller's —
+// PollEvery in New, a test's own tick in a test.
+func newSource(read func() monoclock.Readings, gap time.Duration, events <-chan Event, ticks <-chan time.Time, logger log.Logger) *Source {
 	if read == nil {
 		read = monoclock.Read
 	}
@@ -144,10 +223,10 @@ func newSource(read func() monoclock.Readings, every, gap time.Duration, events 
 	s := &Source{
 		log:    logger,
 		read:   read,
-		every:  every,
 		gap:    gap,
-		merge:  MergeWindow,
 		events: events,
+		ticks:  ticks,
+		merge:  newDecide(gap, MergeWindow),
 		// One pending signal is enough: the supervisor sends one probe per
 		// connection per wake, and two wakes nobody has read yet are one fact
 		// for every connection that has not answered the first.
@@ -170,27 +249,35 @@ func (s *Source) Wakes() <-chan monoclock.Nanos { return s.wakes }
 func (s *Source) Sleeps() <-chan monoclock.Nanos { return s.sleeps }
 
 // Stop ends the poll loop. Idempotent.
-func (s *Source) Stop() { s.stopOnce.Do(func() { close(s.done) }) }
+func (s *Source) Stop() {
+	s.stopOnce.Do(func() {
+		if s.ticker != nil {
+			s.ticker.Stop()
+		}
+		close(s.done)
+	})
+}
 
-// poll is the merge. It is the only writer of the merge's state (lastWake,
-// dark) and of the two channels.
+// poll reads the inputs and hands each turn to the merge. It is the merge's only
+// caller and the only writer of the two channels.
 func (s *Source) poll() {
-	ticker := time.NewTicker(s.every)
-	defer ticker.Stop()
-	prev := s.read()
 	events := s.events
+	prev := s.read()
 	for {
 		select {
 		case <-s.done:
 			return
-		case <-ticker.C:
-			cur := s.read()
-			if slept(prev, cur, s.gap) && !s.dark {
-				// The clock's own evidence of a suspend. Suppressed while the
-				// last thing the OS said was a dark wake: the gap is the
-				// power nap, not a resume.
-				s.wake(monoclock.Now())
+		case <-s.ticks:
+			// Everything already delivered is applied before the clocks are
+			// read, so the step sees the OS's latest word and the clock pair
+			// together rather than in whatever order the scheduler picked.
+			pending, next, ended := drain(events)
+			events = next
+			if ended {
+				s.log.Warn("wakesource: the operating system's sleep/wake input ended; the clock comparison is the only input")
 			}
+			cur := s.read()
+			s.report(s.merge.step(pending, prev, cur, monoclock.Now()))
 			prev = cur
 		case ev, ok := <-events:
 			if !ok {
@@ -200,38 +287,43 @@ func (s *Source) poll() {
 				events = nil
 				continue
 			}
-			s.mergeEvent(ev)
+			s.report(s.merge.step([]Event{ev}, prev, prev, monoclock.Now()))
 		}
 	}
 }
 
-// mergeEvent applies one OS event.
-func (s *Source) mergeEvent(ev Event) {
-	switch ev.Kind {
-	case EventWillSleep:
-		s.dark = false
+// drain answers every event already delivered, in order, without waiting, and
+// the channel to read next — nil once the input has ended.
+func drain(events <-chan Event) ([]Event, <-chan Event, bool) {
+	var pending []Event
+	for events != nil {
 		select {
-		case s.sleeps <- ev.At:
+		case ev, ok := <-events:
+			if !ok {
+				return pending, nil, true
+			}
+			pending = append(pending, ev)
+		default:
+			return pending, events, false
+		}
+	}
+	return pending, events, false
+}
+
+// report delivers what one step decided, without blocking: a signal nobody has
+// read yet is already the fact this one would say.
+func (s *Source) report(o outcome) {
+	if o.slept {
+		select {
+		case s.sleeps <- o.sleepAt:
 		default:
 		}
-	case EventWoke:
-		s.dark = false
-		s.wake(ev.At)
-	case EventDarkWoke:
-		s.dark = true
 	}
-}
-
-// wake reports one resume, once: the event input and the clock input are two
-// views of the same resume, and whichever sees it first is the signal.
-func (s *Source) wake(at monoclock.Nanos) {
-	if s.lastWake != 0 && at >= s.lastWake && at-s.lastWake < monoclock.Nanos(s.merge) {
-		return
-	}
-	s.lastWake = at
-	select {
-	case s.wakes <- at:
-	default:
+	if o.woke {
+		select {
+		case s.wakes <- o.wakeAt:
+		default:
+		}
 	}
 }
 

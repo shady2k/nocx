@@ -2,7 +2,7 @@
 
 - **Status:** accepted (2026-11-06)
 - **Date:** 2026-11-06
-- **Taken from** `nocx-a62cl`, the owner's decisions of 2026-11-05 and 2026-11-06
+- **Taken from** `nocx-a62cl`, the owner's decisions of 2026-11-05, 2026-11-06 and 2026-11-13
 - **Supersedes ADR-0028 and ADR-0030.** Parts of other records move, mapped under "What happens to
   other records" below. ADR-0020's grant and ADR-0019's ledger stand.
 
@@ -17,6 +17,13 @@ for: the terminal's context, and tools over its panes with authority over those 
 So the assistant stays and its engine leaves. A person still asks from a pane, in the same block.
 An agent installed on their computer does the thinking. nocx ships no agent.
 
+**The agent always runs where `nocx-server` runs, and acts on the pane's host only through nocx's
+tools** (owner, 2026-11-13). A person connected to a server who asks for help configuring it gets
+an agent that reads, edits and runs on that server, while its process, its model key and its
+installation stay on their own computer. Nothing is installed on a remote host for the assistant,
+and an agent's own built-in tools, which would act on the wrong machine for an SSH pane, are off.
+That is also what makes nocx's tools the one boundary: no action on a host bypasses it.
+
 Read at `bd16c0268`, the following decide the shape:
 
 - `agent.ask`, with its three entries (composer, summon over a program, marked rows), is the only
@@ -29,6 +36,12 @@ Read at `bd16c0268`, the following decide the shape:
   holds one today. A person is asked once per executable at enrolment, never per call.
 - The endpoint offers 10 of the 33 declared tools, admits only a process inside a watched pane's
   tree or a remote helper, sends no progress, and a cancelled call goes on running (`nocx-98qho`).
+- Read at `04b45bbf4`: the `session.*` tools already act on the pane's host, because a command is
+  typed into the pane and its screen is read through the helper. `files.read`, `files.edit` and
+  `files.create` do not: their capabilities are built on `local.New()`
+  (`internal/agenttools/narrow.go`), so on an SSH pane they read and write the local disk. No tool
+  searches file contents or lists a directory. v0-9's charter moves Files to the helper only, with
+  SFTP removed, and ADR-akhhb098 gives each host one supervisor in the local helper.
 - An approval suspends a run by returning an error and resuming through eino's checkpoint. Nothing
   can block a call on a person.
 - `dispatch(invocation, transform, gate, …)` already takes steps as parameters. That is the seam
@@ -89,6 +102,10 @@ Quality scenarios, each with its measure:
    `interrupted`, as it does today. Measure: no agent process or MCP bridge outlives the turn, no
    approval survives, and a later question continues the conversation with no effect replayed.
 8. A person with no agent invokes any AI function → the agent section of Settings opens.
+9. A person in an SSH pane asks for help configuring that server → the agent reads, searches and
+   edits the server's files and runs commands in that pane, and every edit and every command waits
+   for the person as on a local pane. Measure: the file changed on the remote host, the local disk
+   untouched, and nothing installed on the host for the assistant.
 
 Constraints and their sources:
 
@@ -290,8 +307,21 @@ does not change. The links are compiled in; nobody asked for loading at runtime.
 - **Failures the agent cannot overrule.** A declined egress ends the run today, and it still does: nocx cancels the
   turn. An agent that ignores a tool's error and reports success does not make the attempt succeed, and the block shows
   the attempt as it was.
-- **The tools.** The first version offers the assistant's present tools except `skills.*`, through
-  `session.run` and its lease. When something must give, a tool is cut before a check.
+- **The tools act on the pane's host.** The first version offers the assistant's present tools except
+  `skills.*`, through `session.run` and its lease, and every tool acts where the pane is. `files.*`
+  stop building on `local.New()` and take the pane's `filesystem.Provider` through the files binding
+  the Files panel takes (`internal/filesystem/binding.go`), adapted at the composition root: the
+  local filesystem for a local pane, the helper-backed provider for a remote one (v0-9 charter, its
+  Files stage `nocx-oalo1.6`; ADR-akhhb098). The assistant gets no file path and no resolver of its
+  own. Writes go through the existing `ScopedEditor` and its revision check (`edit.go`), which the
+  helper-backed provider honours, so file-version evidence holds on a remote file exactly as on a
+  local one. A content search and a recursive listing join them as one optional interface in
+  `internal/filesystem`, beside `DomainNamer`, implemented by the local and the helper-backed
+  providers after the latter lands. Where the pane's host has no helper, the file tools say why, as
+  the panels do, and `session.*` still work.
+- **When something must give, a tool is cut before a check.** That still holds tool by tool; it does
+  not make remote file tools optional, because without them the assistant cannot help on a server,
+  which is the case the feature exists for.
 
 ### 4. The person steers and cancels the turn
 
@@ -359,27 +389,29 @@ connector stage.
 
 Each is a requirement with its check.
 
-| Constraint                                                          | Check                                                                                                                                                                  |
-| ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Nothing reaches a model from nocx's own process                     | `go.mod` has no eino or OpenAI client; the source test that today keeps eino out of kernel files widens to the whole tree                                              |
-| An unanswered `Ask` runs nothing                                    | Pipeline test with planted policies: no approver, approver erroring, cancelled wait; the tool's body is never entered                                                  |
-| A guard cannot allow; no point can skip, repeat or replace the tool | The types offer no allow result and no continuation; a test with a refusing guard beside every other link; the tool's body counted once                                |
-| Schema precedes policy; the attempt spans the call                  | Pipeline test observing the order, with a failing tool, a cancelled call and a panicking tool                                                                          |
-| An answer does not outlive what it answered                         | A file changed during the wait is refused with no effect; a widening reaches the capability; a declined egress releases nothing and runs nothing again                 |
-| Calls of one turn run in order, one pending question at most        | Two concurrent calls on one turn against a blocked approver: the second has not started; declining settles both                                                        |
-| A late call cannot reach another turn                               | A bearer retired by a cancelled turn is refused when a new turn is under way, and an in-flight call on it ends                                                         |
-| An assistant run's chain holds policy, approval and the screen      | A test on the composition root's assistant chain; a removed link fails it                                                                                              |
-| An agent in a pane behaves as before                                | The existing endpoint tests pass unchanged, and a test proves an `ask` row is refused there                                                                            |
-| A ten-minute wait does not break                                    | e2e on the fake agent with the clock under test control, plus a measured run on pi outside CI                                                                          |
-| Cancel stops the agent within a second, with no event after         | Contract suite in both orders against a blocked tool; a tool whose context ended records its cancel; a pane command is judged by the lease's own existing test         |
-| A message during a pending approval settles the call at once        | e2e on the fake agent: steer during approval, the attempt records a decline carrying the text                                                                          |
-| A vault secret in a result never reaches the agent                  | e2e with known material in a tool result, asserting on every byte the fake agent received                                                                              |
-| A failure is never a success or silence                             | Contract suite: crash, dead key, provider error, a process that closes stdout                                                                                          |
-| No process outlives its turn                                        | Contract suite counting descendants, including the MCP bridge, after end, cancel, crash and a closed connection; no effect replays on the next question                |
-| No process outlives the backend                                     | The conformance suite kills `nocx-server` with `SIGKILL` during a stream and during a blocked tool, on Linux and macOS, and watches the agent and the bridge disappear |
-| A person with no agent lands in the agent section                   | e2e on the headless backend: no agent, ask from a pane                                                                                                                 |
-| A connector is only supported once it passes                        | One conformance suite runs against the fake agent in CI and against each declared real agent at release                                                                |
-| Every new operation is catalogued with its lifetime                 | ADR-8eej3e66's own checks                                                                                                                                              |
+| Constraint                                                          | Check                                                                                                                                                                        |
+| ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Nothing reaches a model from nocx's own process                     | `go.mod` has no eino or OpenAI client; the source test that today keeps eino out of kernel files widens to the whole tree                                                    |
+| An unanswered `Ask` runs nothing                                    | Pipeline test with planted policies: no approver, approver erroring, cancelled wait; the tool's body is never entered                                                        |
+| A guard cannot allow; no point can skip, repeat or replace the tool | The types offer no allow result and no continuation; a test with a refusing guard beside every other link; the tool's body counted once                                      |
+| Schema precedes policy; the attempt spans the call                  | Pipeline test observing the order, with a failing tool, a cancelled call and a panicking tool                                                                                |
+| An answer does not outlive what it answered                         | A file changed during the wait is refused with no effect; a widening reaches the capability; a declined egress releases nothing and runs nothing again                       |
+| Calls of one turn run in order, one pending question at most        | Two concurrent calls on one turn against a blocked approver: the second has not started; declining settles both                                                              |
+| A late call cannot reach another turn                               | A bearer retired by a cancelled turn is refused when a new turn is under way, and an in-flight call on it ends                                                               |
+| An assistant run's chain holds policy, approval and the screen      | A test on the composition root's assistant chain; a removed link fails it                                                                                                    |
+| An agent in a pane behaves as before                                | The existing endpoint tests pass unchanged, and a test proves an `ask` row is refused there                                                                                  |
+| A ten-minute wait does not break                                    | e2e on the fake agent with the clock under test control, plus a measured run on pi outside CI                                                                                |
+| Cancel stops the agent within a second, with no event after         | Contract suite in both orders against a blocked tool; a tool whose context ended records its cancel; a pane command is judged by the lease's own existing test               |
+| A message during a pending approval settles the call at once        | e2e on the fake agent: steer during approval, the attempt records a decline carrying the text                                                                                |
+| A vault secret in a result never reaches the agent                  | e2e with known material in a tool result, asserting on every byte the fake agent received                                                                                    |
+| A failure is never a success or silence                             | Contract suite: crash, dead key, provider error, a process that closes stdout                                                                                                |
+| No process outlives its turn                                        | Contract suite counting descendants, including the MCP bridge, after end, cancel, crash and a closed connection; no effect replays on the next question                      |
+| No process outlives the backend                                     | The conformance suite kills `nocx-server` with `SIGKILL` during a stream and during a blocked tool, on Linux and macOS, and watches the agent and the bridge disappear       |
+| A file tool on an SSH pane acts on that host                        | e2e on the headless backend with a remote host behind the helper: read, search and an approved edit change the remote file and leave the local path untouched                |
+| The assistant has no file path of its own                           | A test on the composition root: the files.* narrowing takes the pane's provider from the files binding the Files panel takes; `local.New()` is not reached from `agenttools` |
+| A person with no agent lands in the agent section                   | e2e on the headless backend: no agent, ask from a pane                                                                                                                       |
+| A connector is only supported once it passes                        | One conformance suite runs against the fake agent in CI and against each declared real agent at release                                                                      |
+| Every new operation is catalogued with its lifetime                 | ADR-8eej3e66's own checks                                                                                                                                                    |
 
 ## Consequences
 
@@ -396,6 +428,9 @@ Harder, and accepted:
 - Closing the window ends the turn, as today.
 - Only nocx's tools are under nocx's authority. For pi the launch removes the rest; for an agent that
   cannot be restricted, its own tools are not controlled and the product says so.
+- The assistant is only as capable on a server as nocx's tools are there. Remote file tools wait for
+  the SSH foundation's helper-backed provider, and a host without the helper gets commands and the
+  screen but no file tools.
 - What an agent sends to a model from its own context is not screened. The egress screen covers tool
   results.
 - A lost session means the model forgets while the blocks stay visible.
@@ -415,9 +450,10 @@ and the first stage must). A person's agent is trusted as a program, since it al
 
 ## Migration
 
-The order keeps one path in `main` at each step, on short branches, and starts after the busy-terminal
-milestone closes. Its stage 2 shares `ws.go` and neighbouring files, which is why code does not run beside it.
-The bug-fixing milestone follows this one, so that nobody fixes what is about to be deleted.
+The order keeps one path in `main` at each step, on short branches. It runs in v0-9 beside the SSH
+foundation (`nocx-oalo1`; owner, 2026-11-13), which shares the composition root, `internal/transport`
+and `ws.go`, and owns the file provider stage 8 consumes. Whoever merges second rebases, and a change to
+`internal/app` wiring or `ws.go` is announced to the other line before it is pushed.
 
 1. **The pipeline.** `dispatch` gains the named points, and the endpoint's gate becomes a guard. Behaviour
    does not change.
@@ -432,6 +468,15 @@ The bug-fixing milestone follows this one, so that nobody fixes what is about to
    roles and Probe leave in the same change. `go.mod` loses eino here.
 6. **Steer** in the composer and the running answer.
 7. **The ACP connector**, proved on omp and prime-agent.
+8. **Tools on the pane's host.** `files.*` take the pane's provider through the files binding, after the
+   SSH foundation's Files stage (`nocx-oalo1.6`) lands; then the search and listing interface, in the
+   local and the helper-backed providers. It depends on that stage, not on stages 1 to 7, and may run
+   before them.
+
+**Not in this record.** An agent that starts children, and children on a remote host started over
+nocx's connections, are the next part of the feature (`nocx-dkawo`, `nocx-cxq7d`). Here the assistant
+itself always runs beside `nocx-server`; a child placed on a host by an orchestrator is that part's
+decision, and nothing above forecloses it.
 
 ## What happens to other records
 

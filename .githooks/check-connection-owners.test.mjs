@@ -152,6 +152,58 @@ func f(b []byte) { _, _ = ParsePublicKey(b) }
   assert.equal(rows[0].object, 'golang.org/x/crypto/ssh.ParsePublicKey')
 })
 
+// ─── the whole node, not half of it ──────────────────────────────────────
+//
+// A function literal is a TYPE and a body. The walk used to visit only the
+// body, so `var open = func(c *ssh.Client) { … }` named the transport in its
+// signature and produced nothing.
+
+test("a function literal's signature is part of the walk (review: func literal)", () => {
+  const rows = analyseOne({
+    'internal/app/second.go': `package app
+
+import "golang.org/x/crypto/ssh"
+
+var open = func(c *ssh.Client) {
+	_, _ = c.Dial("tcp", "host:22")
+}
+`,
+  })
+  assert.deepEqual(rulesOf(rows), ['xcrypto-ssh-import'])
+  assert.equal(rows[0].object, 'golang.org/x/crypto/ssh.Client')
+  assert.equal(rows[0].func, '<package>', 'a package-level literal is decided at the package')
+})
+
+test('a func literal in an allowlisted file is judged by its objects', () => {
+  const rows = analyseOne({
+    'internal/transport/ws.go': `package transport
+
+import "golang.org/x/crypto/ssh"
+
+var parse = func(b []byte) *ssh.PassphraseMissingError {
+	_, _ = ssh.ParseRawPrivateKey(b)
+	return nil
+}
+`,
+  })
+  assert.deepEqual(rows, [])
+})
+
+test("a generic type's constraint is part of the walk (review: other partial nodes)", () => {
+  const rows = analyseOne({
+    'internal/app/second.go': `package app
+
+import "golang.org/x/crypto/ssh"
+
+type K[T ssh.PublicKey] struct{}
+
+var _ K[ssh.PublicKey]
+`,
+  })
+  assert.deepEqual(rulesOf(rows), ['xcrypto-ssh-import'])
+  assert.equal(rows[0].count, 2, 'the constraint and the instantiation are two references')
+})
+
 // ─── bypass 2: an aliased exit cause ─────────────────────────────────────
 
 test('an exit cause read through any alias is refused (bypass 2)', () => {

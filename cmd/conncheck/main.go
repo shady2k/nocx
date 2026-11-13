@@ -333,9 +333,14 @@ func (c *collector) packageFacts(p *packages.Package) {
 			case *ast.FuncDecl:
 				label := funcLabel(p, d)
 				c.reexportFunc(d, rel, p, info)
-				// The signature names objects too: a parameter or result typed
-				// *ssh.Client is a reference to the transport type, and a
-				// function that hands one out propagates the owner.
+				// The signature names objects too — parameters, results AND
+				// the receiver, which is the third half of a method's type
+				// and was the one left out. A plain func's receiver is a nil
+				// *ast.FieldList, and a nil pointer in an interface is not a
+				// nil interface: visiting it panics the walker.
+				if d.Recv != nil {
+					c.visitNode(d.Recv, nil, nil, label, rel, p, info)
+				}
 				c.visitNode(d.Type, nil, nil, label, rel, p, info)
 				c.visitNode(d.Body, nil, nil, label, rel, p, info)
 			case *ast.GenDecl:
@@ -442,6 +447,12 @@ func (c *collector) visitGenDecl(d *ast.GenDecl, rel string, p *packages.Package
 				}
 			}
 		case *ast.TypeSpec:
+			// A generic type's constraints are part of its declaration; a
+			// non-generic type's TypeParams is a nil *ast.FieldList, whose
+			// interface is non-nil and cannot be walked.
+			if s.TypeParams != nil {
+				c.visitNode(s.TypeParams, nil, nil, "<package>", rel, p, info)
+			}
 			c.visitNode(s.Type, nil, nil, "<package>", rel, p, info)
 		}
 	}
@@ -474,9 +485,13 @@ func (c *collector) visitNode(n ast.Node, callee *ast.CallExpr, sel *types.Selec
 		}
 		return
 	case *ast.FuncLit:
-		// A closure inherits the enclosing function's label: the baseline is
-		// about WHERE a fact is decided, and a goroutine inside a function is
+		// The WHOLE literal: its signature names objects as readily as its
+		// body does, and skipping one half is how `var open = func(c
+		// *ssh.Client) { … }` used to produce no fact at all. A closure
+		// inherits the enclosing function's label, because the baseline is
+		// about WHERE a fact is decided and a goroutine inside a function is
 		// that function's decision.
+		c.visitNode(x.Type, nil, nil, label, rel, p, info)
 		c.visitNode(x.Body, nil, nil, label, rel, p, info)
 		return
 	case *ast.Ident:

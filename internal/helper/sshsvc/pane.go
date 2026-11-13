@@ -60,6 +60,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/helper/sshdial"
+	"github.com/shady2k/nocx/internal/hostconn"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 )
 
@@ -189,7 +190,7 @@ func (p *PaneListeners) openLifecycle(pool *pooledConn) error {
 		// to a conventional session: the caller asked for an authenticated
 		// channel, and a launch carrying a port nobody listens on is a shell
 		// that blocks until its hello budget runs out.
-		return fmt.Errorf("the far side refused the lifecycle listener: %w", classifyChannelError(err))
+		return lifecycleListenFailure(pool, err)
 	}
 	port, err := listenerPort(ln)
 	if err != nil {
@@ -204,6 +205,39 @@ func (p *PaneListeners) openLifecycle(pool *pooledConn) error {
 	p.lifecycleLn, p.port, p.carrier, p.sink = ln, port, carrier, sink
 	go p.acceptLifecycle()
 	return nil
+}
+
+// lifecycleListenFailure is what a pane is told when the far side would not give
+// it a listener, and the sentence it is told in is the fact the owner met on
+// 2026-11-13: "the far side refused the lifecycle listener: read tcp <local> ->
+// <host>:22: read: operation timed out" on every attempt on a saved host.
+//
+// Nothing refused anything. The connection the helper was holding had ENDED —
+// its transport's read failed once, and x/crypto answers every later request
+// with that stored error — and calling that a refusal sends a person to look at
+// a host that is healthy. So a refusal is decided by EVIDENCE a refusal leaves:
+// the `false` answer sshdial types, or a channel open the server rejected.
+// A transport failure is none of those, whatever its text, and the supervisor's
+// fact is used only to name the cause when it is already known — never to
+// decide that the far side refused.
+func lifecycleListenFailure(held *pooledConn, err error) error {
+	// THE ONLY REFUSAL is the far side answering `false`, which sshdial types
+	// (ErrForwardRefused). Everything else — a transport that ended, a write
+	// that failed on a socket somebody closed — is this side's connection
+	// failing, and the sentence says that instead.
+	if errors.Is(err, sshdial.ErrForwardRefused) {
+		return fmt.Errorf("the far side refused the lifecycle listener: %w", classifyChannelError(err))
+	}
+	classified := classifyChannelError(err)
+	if held.Lost() {
+		// The supervisor has already read the transport's end. It is a second
+		// signal and never the discriminator: x/crypto unparks a parked
+		// request a moment before its Wait returns, so a lost link can reach
+		// here with Lost() still false — and the sentence above is right in
+		// that case too. This branch only names the cause when it is known.
+		return fmt.Errorf("%w: %w", hostconn.ErrLinkLost, classified)
+	}
+	return fmt.Errorf("the lifecycle listener could not be opened: %w", classified)
 }
 
 // acceptLifecycle gives the first connection the far shell makes to the

@@ -208,6 +208,17 @@ type fixture struct {
 	// POOLED connection, so the number is what says whether a lease kept one or
 	// whether every probe paid for its own handshake.
 	dials int
+	// peerPorts is the source port each accepted connection arrived from, in
+	// order. A fresh dial gets a fresh one, which is what makes "the next pane
+	// dialled again" visible as the thing the owner saw missing: the same
+	// local port in every failed attempt (nocx-oalo1.4.6).
+	peerPorts []int
+	// closeOnForward closes the connection instead of answering a
+	// `tcpip-forward` request: a host that dies exactly when it is asked for a
+	// listener. It is the transport-error counterpart of allowForward's
+	// `false`, and the two are the pair this package's lost-versus-refused
+	// assertions are built on.
+	closeOnForward bool
 }
 
 // observed is every event this host saw, in order.
@@ -231,6 +242,13 @@ func (f *fixture) note(event string) {
 // reports.
 func (f *fixture) noteLocked(event string) {
 	f.events = append(f.events, event)
+}
+
+// connectionPorts is the source port of each accepted connection, in order.
+func (f *fixture) connectionPorts() []int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int(nil), f.peerPorts...)
 }
 
 // connections is how many times this host was dialed.
@@ -387,6 +405,9 @@ func newFixtureAccepting(t *testing.T, password string, acceptedKey gossh.Signer
 func (f *fixture) serve(conn net.Conn, config *gossh.ServerConfig) {
 	f.mu.Lock()
 	f.dials++
+	if tcp, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
+		f.peerPorts = append(f.peerPorts, tcp.Port)
+	}
 	f.mu.Unlock()
 	defer func() { _ = conn.Close() }()
 	sconn, chans, reqs, err := gossh.NewServerConn(conn, config)
@@ -443,6 +464,16 @@ func (f *fixture) serve(conn net.Conn, config *gossh.ServerConfig) {
 func (f *fixture) serveGlobalRequests(sconn *gossh.ServerConn, reqs <-chan *gossh.Request) {
 	for req := range reqs {
 		f.note("global:" + req.Type)
+		f.mu.Lock()
+		closeOnForward := f.closeOnForward
+		f.mu.Unlock()
+		if closeOnForward && (req.Type == "tcpip-forward" || req.Type == "streamlocal-forward@openssh.com") {
+			// No reply at all: the connection is gone, which is what a client
+			// sees when the far side dies mid-request (and what the owner met
+			// as a stored read error afterwards).
+			_ = sconn.Close()
+			return
+		}
 		switch req.Type {
 		case "tcpip-forward":
 			f.handleForward(sconn, req)

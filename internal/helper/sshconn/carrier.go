@@ -96,13 +96,6 @@ func PlanFor(spec ssh.PooledSpec) hostconn.Plan {
 	}
 }
 
-// Supervisor answers the connection's state for a destination, creating it if
-// this is the first time anybody asked: the same supervisor a later reconnect
-// reaches.
-func (c *Carrier) Supervisor(spec ssh.PooledSpec) *hostconn.Supervisor {
-	return c.conns.Supervisor(PlanFor(spec).Key)
-}
-
 // Dial opens one connection and reports its stages. It is hostconn.Carrier's
 // one method, called by the supervisor.
 func (c *Carrier) Dial(ctx context.Context, plan hostconn.Plan, sink hostconn.EventSink) (hostconn.Link, error) {

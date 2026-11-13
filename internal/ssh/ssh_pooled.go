@@ -82,11 +82,16 @@ type PooledSpec struct {
 	// coordinator's answers, one hop at a time, exactly as they are for the
 	// destination.
 	Route []PooledHop
-	// KeepaliveInterval and KeepaliveCountMax arm the same prober the
-	// coordinator's own connections carry, so a pooled connection that has
-	// gone quiet is noticed on this side of the wire too. Zero disables it.
-	KeepaliveInterval time.Duration
-	KeepaliveCountMax int
+	// ProbeInterval is how often the connection should be asked to answer, or
+	// zero for the connection manager's default (15 s). It is a request for
+	// the one prober's cadence, not an arming: a zero never means "do not
+	// probe" (design §5.3, nocx-oalo1.4.3).
+	ProbeInterval time.Duration
+	// HoldsPlainShell is what this acquire declares: the connection carries
+	// the person's terminal, so silence may never end it (design §5.3). Every
+	// other holder — sftp, a lane, a forward, a lease — declares false, and the
+	// supervisor counts what it is told.
+	HoldsPlainShell bool
 	// WrapConn, when non-nil, wraps the DESTINATION's network connection after
 	// the TCP dial and before the SSH version exchange. It is the seam a caller
 	// observes the handshake's stages through (design §5.3): x/crypto has no
@@ -95,16 +100,16 @@ type PooledSpec struct {
 	// read happened": the wrapper forwards every byte untouched, and no part of
 	// this package inspects what it carries (AD-6).
 	WrapConn func(net.Conn) net.Conn
-	// Liveness receives what the prober armed by KeepaliveInterval learns,
-	// exactly as ConnectConfig.Liveness does for the coordinator's own
-	// non-pooled dials (nocx-y6fh7 item 6: sshsvc's shell channel is the
-	// first pooled caller to actually want one — every other caller of
-	// AcquirePooled still passes nil, unchanged). Read only on a cache MISS,
-	// along with the interval and the count: a caller that joins an
-	// already-dialed pooled connection joins whatever prober (or none) the
-	// first caller armed, because there is one connection and therefore one
-	// prober, not one per reference.
-	Liveness LivenessObserver
+	// AllowSilentClose, when set, is asked before this connection is closed
+	// because it stopped answering. It is a function value rather than a field
+	// the pool interprets for the reason LivenessObserver was one: the pool may
+	// not import the connection manager, and the answer — may this be closed? —
+	// belongs to the party that counts holders.
+	//
+	// A nil hook means "nobody is counting": the pool then behaves as it always
+	// has for a barrier that cannot get an answer, which is to close. The
+	// helper always sets it.
+	AllowSilentClose func() bool
 }
 
 // PooledHop is one intermediate host a connection is dialed through. It is the
@@ -193,30 +198,12 @@ type PooledConn struct {
 	// mechanism exists for.
 	taint       func()
 	taintReason func() string
-	// arm is armKeepalive on the pooledSSHConn this handle shares (nil for a
-	// connection dialed outside the pool, DialAuth): ANY holder may call
-	// ArmKeepalive, cache hit or miss, and the connection's own Once decides
-	// whose settings win (nocx-y6fh7 item 6).
-	arm func(interval time.Duration, countMax int, observe LivenessObserver)
 	// newSession is newSession on the pooledSSHConn this handle borrows: the
 	// session-open act with the far side's release of the previous session
 	// awaited first. Nil for a connection dialed outside the pool (DialAuth),
 	// which is exclusive to its one caller and holds no second caller's
 	// session history — see PooledConn.NewSession.
 	newSession func() (*gossh.Session, error)
-}
-
-// ArmKeepalive starts this connection's prober if nothing has already,
-// exactly as a fresh dial's own KeepaliveInterval would have — but callable
-// by ANY holder of a reference, at any time, not only the one that happened
-// to dial (see armKeepalive's own comment on why dial order is not caller
-// intent under AD-4 sharing). interval <= 0 is a no-op: a caller with
-// nothing configured must never claim the one arming slot a connection has.
-func (p *PooledConn) ArmKeepalive(interval time.Duration, countMax int, observe LivenessObserver) {
-	if p == nil || p.arm == nil {
-		return
-	}
-	p.arm(interval, countMax, observe)
 }
 
 // Taint marks this borrowed connection so the pool hands it to no new
@@ -364,11 +351,7 @@ func (rc *RealClient) AcquirePooled(ctx context.Context, spec PooledSpec) (*Pool
 			return nil, err
 		}
 		conn.fingerprint = fingerprint
-		// NOT armed here (nocx-y6fh7 item 6): the dial closure only runs on a
-		// cache MISS, and the caller that happens to be first to dial a
-		// destination is not necessarily the caller that wants a prober —
-		// see armKeepalive's own comment. Arming happens below, for every
-		// caller, cache hit or miss alike.
+		conn.allowSilentClose = spec.AllowSilentClose
 		return conn, nil
 	}
 
@@ -376,17 +359,7 @@ func (rc *RealClient) AcquirePooled(ctx context.Context, spec PooledSpec) (*Pool
 	if err != nil {
 		return nil, err
 	}
-	pc, err := rc.borrowPooled(handle)
-	if err != nil {
-		return nil, err
-	}
-	// ARMED HERE, for every caller — cache hit or the miss that just dialed
-	// (nocx-y6fh7 item 6). A caller with nothing configured (KeepaliveInterval
-	// <= 0) is a no-op through ArmKeepalive's own guard, which is what lets a
-	// probe or a publish leasing this destination first leave the one arming
-	// slot open for whichever caller's interval is actually non-zero.
-	pc.ArmKeepalive(spec.KeepaliveInterval, spec.KeepaliveCountMax, spec.Liveness)
-	return pc, nil
+	return rc.borrowPooled(handle)
 }
 
 // DialAuth dials a resolved spec ONCE and hands back the connection, without
@@ -594,16 +567,7 @@ func (rc *RealClient) borrowPooled(handle *poolHandle) (*PooledConn, error) {
 		// both could apply; either is a name for "this connection died for
 		// a reason a sibling's own Wait() cannot see", and there is exactly
 		// one at a time in practice (nocx-y6fh7 item 6, round 3).
-		taintReason: func() string {
-			if reason := handle.closeReason(); reason != "" {
-				return reason
-			}
-			if client.KeepaliveLost() {
-				return ReasonKeepaliveLost
-			}
-			return ""
-		},
-		arm: client.armKeepalive,
+		taintReason: handle.closeReason,
 		// The session-open act, so every caller that opens one goes through
 		// the connection's own record of what it has already carried.
 		newSession: client.newSession,

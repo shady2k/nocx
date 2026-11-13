@@ -45,12 +45,19 @@ type Carrier struct {
 	conns  *hostconn.Manager
 }
 
-// New builds the carrier over this machine's ssh client: the same client the
-// helper already holds, because the pool in it is the connection table and a
-// second client would be a second pool (AD-4).
+// New builds the carrier over this machine's ssh client, on the process's
+// clock: the same client the helper already holds, because the pool in it is the
+// connection table and a second client would be a second pool (AD-4).
 func New(client *ssh.RealClient, logger log.Logger) *Carrier {
+	return NewWithClock(client, logger, hostconn.RealClock{})
+}
+
+// NewWithClock is New on an injected clock. The fault harness states "within
+// 30 s" and "after ten minutes" by advancing time, not by waiting for it
+// (design §10), and the policy being asserted is the supervisor's.
+func NewWithClock(client *ssh.RealClient, logger log.Logger, clock hostconn.Clock) *Carrier {
 	c := &Carrier{client: client, log: logger}
-	c.conns = hostconn.NewManager(c, logger)
+	c.conns = hostconn.NewManager(c, logger, hostconn.WithClock(clock))
 	return c
 }
 
@@ -83,7 +90,7 @@ func (c *Carrier) Acquire(ctx context.Context, spec ssh.PooledSpec) (*hostconn.L
 // and route — because a supervisor keyed by anything else would either split
 // one connection into two states or merge two principals into one.
 func PlanFor(spec ssh.PooledSpec) hostconn.Plan {
-	return hostconn.Plan{
+	plan := hostconn.Plan{
 		Carrier: CarrierName,
 		Key: hostconn.Key{
 			Host:     spec.Host,
@@ -92,8 +99,36 @@ func PlanFor(spec ssh.PooledSpec) hostconn.Plan {
 			Identity: spec.Identity,
 			Route:    spec.RouteIdentity(),
 		},
-		Material: spec,
+		Material:      spec,
+		ProbeInterval: spec.ProbeInterval,
 	}
+	if spec.HoldsPlainShell {
+		plan.Holds = hostconn.HoldsPlainShell
+	}
+	// A HOP CARRIES WHAT RIDES IT (design §5.1.1's second trap): a plain
+	// shell on this connection is a plain shell on every hop it is dialled
+	// through, and the hop's own closing policy may no more end under it than
+	// this connection's may.
+	for i, hop := range spec.Route {
+		plan.Route = append(plan.Route, hostconn.Key{
+			Host:     hop.Host,
+			Port:     hop.Port,
+			User:     hop.User,
+			Identity: hop.Identity,
+			Route:    routeIdentityOf(spec.Route[:i]),
+		})
+	}
+	return plan
+}
+
+// routeIdentityOf renders a hop's own route the way the pool does, so a hop's
+// supervisor and the pool entry it describes are the same connection.
+func routeIdentityOf(route []ssh.PooledHop) string {
+	if len(route) == 0 {
+		return ""
+	}
+	spec := ssh.PooledSpec{Route: route}
+	return spec.RouteIdentity()
 }
 
 // Dial opens one connection and reports its stages. It is hostconn.Carrier's
@@ -131,12 +166,20 @@ func (c *Carrier) Dial(ctx context.Context, plan hostconn.Plan, sink hostconn.Ev
 		return &versionExchange{Conn: conn, sink: sink}
 	}
 
+	// THE CLOSING POLICY'S ONE INPUT FROM THIS SIDE: may a connection that has
+	// stopped answering be closed? Not while a plain shell rides it — that is
+	// the person's choice (design §5.3). The pool's release barrier asks this
+	// before it closes anything for silence, and the answer comes from the
+	// supervisor, which is the party that counts holders.
+	kept := c.conns.Supervisor(plan.Key)
+	spec.AllowSilentClose = func() bool { return !kept.HoldsPlainShell() }
+
 	pooled, err := c.client.AcquirePooled(ctx, spec)
 	if err != nil {
 		sink(dialFailure(err))
 		return nil, err
 	}
-	return newLink(pooled), nil
+	return newLink(pooled, lookAddress(plan, spec)), nil
 }
 
 // dialFailure is what the machine is told about a dial that failed. It is the

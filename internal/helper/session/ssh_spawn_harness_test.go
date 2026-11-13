@@ -122,14 +122,6 @@ type sshFixture struct {
 	// dropExit makes the next command's end close the channel with no
 	// exit-status request at all: the far side going away mid-session.
 	dropExit bool
-	// dropKeepalive makes serveGlobalRequests answer NOTHING to
-	// keepalive@openssh.com — true silence, rather than the default case's
-	// ordinary fast, explicit "false" (which x/crypto/ssh's SendRequest
-	// reports as a SUCCESSFUL round trip regardless of the reply's own
-	// boolean: sendProbe only inspects err, never the "ok" x/crypto/ssh
-	// itself hands back — nocx-y6fh7 item 6's own finding, needed to build a
-	// server this prober actually grades unresponsive at all).
-	dropKeepalive bool
 	// neverReadShellNum, when non-zero, names WHICH shell request (the Nth,
 	// counted from 1 against f.shells) this fixture never calls ch.Read for
 	// — a per-session selector, not a fixture-wide one, so a test can leave
@@ -344,18 +336,6 @@ func (f *sshFixture) directTargetsSeen() []string {
 // wants to be the far side's process dials the port this grants.
 func (f *sshFixture) serveGlobalRequests(sconn *gossh.ServerConn, reqs <-chan *gossh.Request) {
 	for req := range reqs {
-		if req.Type == "keepalive@openssh.com" {
-			f.mu.Lock()
-			silent := f.dropKeepalive
-			f.mu.Unlock()
-			if silent {
-				// Dropped, on purpose: no Reply at all. An explicit false
-				// (the default case below, for every OTHER unrecognised
-				// type) is still a completed round trip to sendProbe, which
-				// reads only err — this is the one way to make it time out.
-				continue
-			}
-		}
 		switch req.Type {
 		case "tcpip-forward":
 			var p struct {
@@ -969,16 +949,6 @@ func (f *sshFixture) armsSilentEnd() {
 	f.mu.Unlock()
 }
 
-// silenceKeepalive makes this fixture answer NOTHING to
-// keepalive@openssh.com, so the prober's own budget times out
-// (errProbeSilent) instead of receiving the ordinary fast, explicit "false"
-// every other unrecognised global request gets (nocx-y6fh7 item 6).
-func (f *sshFixture) silenceKeepalive() {
-	f.mu.Lock()
-	f.dropKeepalive = true
-	f.mu.Unlock()
-}
-
 // shellsSeen and execsSeen are the two commands this fixture was asked to run,
 // in order: what the helper actually sent to the far host.
 func (f *sshFixture) shellsSeen() int {
@@ -1178,30 +1148,6 @@ func (w *exitWatcher) SendNotification(n proto.Notification) error {
 		}
 	}
 	return nil
-}
-
-// waitLiveness waits for the helper to report SOME liveness observation for
-// session and answers the first one seen — nocx-y6fh7 item 6's own proof
-// that the prober's finding actually crosses the wire, on the same idiom
-// waitExit already uses for the terminal half of the same fact.
-func (w *exitWatcher) waitLiveness(t *testing.T, session proto.HostSessionID) proto.SessionLiveness {
-	t.Helper()
-	deadline := time.After(paneWait)
-	for {
-		w.mu.Lock()
-		for _, l := range w.liveness {
-			if l.Session == session {
-				w.mu.Unlock()
-				return l
-			}
-		}
-		w.mu.Unlock()
-		select {
-		case <-w.livenessW:
-		case <-deadline:
-			t.Fatalf("the helper never reported liveness for session %s", session.Session)
-		}
-	}
 }
 
 // waitExit waits for the helper to report a session ending and answers the

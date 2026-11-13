@@ -44,6 +44,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/hostconn"
 	"github.com/shady2k/nocx/internal/ssh"
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -99,16 +100,16 @@ type ShellSpec struct {
 	// session service's own default has already been applied by the caller.
 	Cols uint16
 	Rows uint16
-	// KeepaliveInterval and KeepaliveCountMax arm this channel's own pooled
-	// connection prober (nocx-y6fh7 item 6), on the terms
-	// ssh.PooledSpec's own fields already state. Zero disables it — the
-	// caller's honest default, never this package's.
-	KeepaliveInterval time.Duration
-	KeepaliveCountMax int
-	// OnLiveness receives every reachability change the prober reports for
-	// as long as the pooled connection this channel opened (or joined) is
-	// this channel's own — see acquirePooled's own note on what that means
-	// under AD-4 sharing. Nil is ordinary.
+	// ProbeInterval is how often the connection this channel rides should be
+	// probed, or zero for the connection manager's default (15 s). It is a
+	// REQUEST, not an arming: the connection has one prober and it belongs to
+	// the supervisor, so a zero never means "do not probe" (design §5.3).
+	ProbeInterval time.Duration
+	// OnLiveness receives what the connection's probe finds while this
+	// channel holds it: whether the far side answered, and how long it took.
+	// There is ONE prober per connection and it is the supervisor's (design
+	// §5.3, nocx-oalo1.4.3); this channel is told what it learns rather than
+	// arming a second one. Nil is ordinary.
 	OnLiveness ssh.LivenessObserver
 }
 
@@ -150,35 +151,6 @@ type ShellChannel struct {
 // failure.
 var ErrDetachedWriterCap = errors.New("sshsvc: detached_writer_cap")
 
-// keepaliveLostError names a channel's end as connection loss from this
-// connection's own keepalive prober giving up, rather than an anonymous
-// closed transport (nocx-y6fh7 item 6, round 3).
-//
-// It implements ExitCause() string rather than being checked with
-// errors.Is, because the reader that needs the cause —
-// internal/helper/session's exit-status mapping — is compiled into EVERY
-// helper build, including the untagged one that must never link this
-// package (internal/helper/deploy's dependency test). An optional-interface
-// probe is the same idiom that reader already uses for ExitCode() and
-// Signal(), and it costs no import at all.
-type keepaliveLostError struct{ err error }
-
-func (e *keepaliveLostError) Error() string {
-	if e.err == nil {
-		return "sshsvc: the connection's own keepalive prober gave up and closed it"
-	}
-	return fmt.Sprintf("sshsvc: the connection's own keepalive prober gave up and closed it: %v", e.err)
-}
-
-// Unwrap keeps the original wait error reachable — a caller that checks for
-// a specific exit shape (a *gossh.ExitError, say) still finds one if the
-// mux teardown happened to produce it, exactly as ErrDetachedWriterCap's
-// wrapping does.
-func (e *keepaliveLostError) Unwrap() error { return e.err }
-
-// ExitCause names this as the wire's keepalive-lost cause.
-func (e *keepaliveLostError) ExitCause() string { return string(proto.ExitCauseKeepaliveLost) }
-
 // ErrShellClosed is what a read or write on a channel that has ended returns.
 // It is not ErrChannelClosed (that is the proxied plane's own sentinel, and
 // the two are read by different callers); it is here so a session's failure
@@ -211,10 +183,19 @@ func (s *Service) OpenShell(ctx context.Context, spec ShellSpec) (*ShellChannel,
 		return nil, err
 	}
 
-	pool, err := s.acquirePooled(ctx, conn, spec.Destination, spec.AcceptOnTrust, spec.HostKeyFingerprint,
-		spec.KeepaliveInterval, spec.KeepaliveCountMax, spec.OnLiveness)
+	// THE PANE'S TERMINAL DECLARES A PLAIN SHELL: losing it loses the person's
+	// work, whatever runs on it, so silence may never end this connection
+	// (design §5.3). Reattaching an integrated pane is stage 5's work; until
+	// then every shell is the person's.
+	pool, err := s.acquirePooled(ctx, conn, spec.Destination, spec.AcceptOnTrust, spec.HostKeyFingerprint, true, spec.ProbeInterval)
 	if err != nil {
 		return nil, err
+	}
+	if spec.OnLiveness != nil {
+		observer := spec.OnLiveness
+		pool.observe(func(o hostconn.Observation) {
+			observer(ssh.Reachability{Responsive: o.Answered, RoundTrip: o.RoundTrip})
+		})
 	}
 
 	sess, err := pool.NewSession()
@@ -465,15 +446,6 @@ func (c *ShellChannel) wait() {
 		} else {
 			err = fmt.Errorf("%w: the connection closed clean but under the cap", ErrDetachedWriterCap)
 		}
-	case ssh.ReasonKeepaliveLost:
-		// This connection's OWN prober gave up and closed it — connection
-		// loss, not a process exit (nocx-y6fh7 item 6, round 3). Wrapped
-		// rather than left as whatever the mux teardown produced, so
-		// internal/helper/session's exit mapping can name the cause on the
-		// wire through the SAME optional-interface probe it already uses
-		// for ExitCode()/Signal(), without importing this ssh-tagged
-		// package — which the untagged deployed helper must never link.
-		err = &keepaliveLostError{err: err}
 	}
 	c.exitMu.Lock()
 	c.exitErr = shellExit(err)

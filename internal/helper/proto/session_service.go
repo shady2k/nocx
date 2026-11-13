@@ -689,11 +689,6 @@ type SSHSpawnParams struct {
 	// ssh-reconnect.spec.ts's silent-death and slow-host journeys had nothing
 	// left probing at all.
 	KeepaliveIntervalMS int64 `json:"keepaliveIntervalMs,omitempty"`
-	// KeepaliveCountMax is the number of consecutive keepalive failures this
-	// helper tolerates before it gives up on the channel, on the same terms
-	// ssh.ConnectConfig.KeepaliveCountMax already states for the coordinator's
-	// own (non-helper) dials. Meaningless when KeepaliveIntervalMS is zero.
-	KeepaliveCountMax int `json:"keepaliveCountMax,omitempty"`
 	// ScrollbackLines is the session's scrollback budget in physical lines,
 	// on exactly the terms SpawnParams states (nocx-zg3k3.10.1): a pointer
 	// because zero is a value — a session that keeps no history — and nil

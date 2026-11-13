@@ -32,33 +32,12 @@ type pooledSSHConn struct {
 	release   func() // releases the jump handle, nil for direct conns
 	closeOnce sync.Once
 
-	// mu guards stopKeepalive, which is written after construction (see
-	// setKeepaliveStop) and read by Close from another goroutine.
+	// mu guards allowSilentClose, which is written after construction and read
+	// by Close from another goroutine.
 	mu sync.Mutex
-	// stopKeepalive cancels the keepalive goroutine when non-nil. Set by
-	// the dial factory when KeepaliveInterval > 0; called from Close before
-	// closing the transport so the ticker stops before the connection goes
-	// away (proved in TestKeepaliveTickerStopsOnClose). Nil when keepalive is
-	// disabled or this is a test fake.
-	stopKeepalive func()
-	// keepaliveArmOnce guards armKeepalive (nocx-y6fh7 item 6): AD-4 shares
-	// one connection across every caller for the same destination+identity,
-	// and dial order among them is NOT the caller that wants a prober — a
-	// pane's own shell channel and an unrelated lease (a probe, an sftp
-	// publish) race for the same pool entry, and measurement found the
-	// publish consistently winning the race for an INTEGRATED pane (it runs
-	// before the spawn by design, nocx-50w7p.21), silently discarding
-	// keepalive settings that were only ever captured at dial time. Arming
-	// is therefore a SEPARATE act any holder may request, idempotent via
-	// this guard, so whichever caller actually wants a prober gets to start
-	// it — a caller that never asks (interval zero) never fires it at all,
-	// which is what lets the one that does win regardless of who dialed.
-	keepaliveArmOnce sync.Once
-	// keepaliveLost records that THIS connection's own prober is the party
-	// closing it, set BEFORE the close so a sibling reading it back through
-	// PooledConn.TaintReason (ReasonKeepaliveLost) never observes the close
-	// without the reason (nocx-y6fh7 item 6, round 3).
-	keepaliveLost atomic.Bool
+	// allowSilentClose is the closing policy's answer for this connection: may
+	// a barrier that cannot get an answer close it? Nil means nobody counts.
+	allowSilentClose func() bool
 	// dead records that this connection has been closed, so the pool can
 	// refuse to hand it to anyone else. See isDead.
 	dead atomic.Bool
@@ -85,12 +64,6 @@ func (c *pooledSSHConn) Close() error {
 		// transport that still reads as live for the length of its own
 		// teardown is exactly the window a new tab falls into.
 		c.dead.Store(true)
-		c.mu.Lock()
-		stop := c.stopKeepalive
-		c.mu.Unlock()
-		if stop != nil {
-			stop()
-		}
 		err = c.client.Close()
 		if c.release != nil {
 			c.release()
@@ -232,57 +205,35 @@ func (c *pooledSSHConn) awaitSessionRelease(gclient *gossh.Client) error {
 	}
 	// A peer that answered NOTHING inside the budget is not one to ask for a
 	// session: gossh.Client.NewSession takes no context and no deadline, so the
-	// request would park with nothing left to end it. The answer is the one the
-	// keepalive prober already gives this state, for the same measured reason —
-	// closing the transport is the only thing that unparks the call — and the
-	// wait that follows is bounded by that close rather than by the budget
-	// (sendProbe's own comment: the probe stays parked until the connection
-	// goes away, and a caller that returns without closing leaks the goroutine
-	// instead).
-	_ = c.Close()
-	<-finished
-	return fmt.Errorf("ssh: the far side did not answer before the session was re-asked: %w", err)
-}
-
-// armKeepalive starts this connection's prober at most once, with whichever
-// caller's (interval, countMax, observe) reaches here first — see
-// keepaliveArmOnce's own comment for why "first" is a caller that actually
-// asks, not a caller that happened to dial. Interval <= 0 is a caller that
-// wants no prober and must not consume the one slot a connection has: it is
-// checked BEFORE the Once fires, so a probe or a publish leasing the same
-// destination ahead of a pane's own shell channel leaves the slot open for
-// whichever caller's interval is the first non-zero one.
-func (c *pooledSSHConn) armKeepalive(interval time.Duration, countMax int, observe LivenessObserver) {
-	if interval <= 0 {
-		return
+	// request would park with nothing left to end it.
+	//
+	// THE CLOSER OBEYS THE ONE CLOSING POLICY (design §5.3, "Every closer that
+	// answers silence obeys this rule"). Closing the transport is the only
+	// thing that unparks the request — and it is also the one thing that would
+	// end a plain shell somebody is working in because ANOTHER channel met
+	// MaxSessions. So the policy is asked first: on a connection carrying a
+	// plain shell this channel's open fails and the connection stays, and the
+	// barrier's parked probe is the same parked probe the policy already owns.
+	if c.silentCloseAllowed() {
+		_ = c.Close()
+		<-finished
+		return fmt.Errorf("ssh: the far side did not answer before the session was re-asked: %w", err)
 	}
-	c.keepaliveArmOnce.Do(func() {
-		stop, _ := startKeepalive(c, interval, countMax, observe)
-		c.setKeepaliveStop(stop)
-	})
+	return fmt.Errorf("ssh: the far side did not answer before the session was re-asked, and this connection carries a plain shell a close would end: %w", err)
 }
 
-// markKeepaliveLost records that this connection's own prober is the one
-// closing it, before it does — the same "reason before close" order
-// CloseTainted keeps for its own cap. It is unexported because only the
-// prober started against this connection may set it: nothing else may claim
-// a connection died on that authority.
-func (c *pooledSSHConn) markKeepaliveLost() { c.keepaliveLost.Store(true) }
-
-// KeepaliveLost reports whether this connection's own keepalive prober is
-// the one that closed it (nocx-y6fh7 item 6, round 3), read back by
-// PooledConn.TaintReason.
-func (c *pooledSSHConn) KeepaliveLost() bool { return c.keepaliveLost.Load() }
-
-// setKeepaliveStop arms the prober's cancel after the connection exists. The
-// prober is started with this connection as the thing it closes when it gives
-// up, so the two are constructed in that order and the field is written after
-// the goroutine is already running — under the mutex, because Close reads it
-// from whichever goroutine gets there first.
-func (c *pooledSSHConn) setKeepaliveStop(stop func()) {
+// silentCloseAllowed asks the closing policy whether this connection may be
+// closed for silence. A connection with no policy (dialled outside the pool, or
+// a test fake) answers true, which is what every caller did before the policy
+// existed.
+func (c *pooledSSHConn) silentCloseAllowed() bool {
 	c.mu.Lock()
-	c.stopKeepalive = stop
+	policy := c.allowSilentClose
 	c.mu.Unlock()
+	if policy == nil {
+		return true
+	}
+	return policy()
 }
 
 // isDead reports whether this connection has been closed. It is a MARK, never
@@ -440,16 +391,6 @@ const maxDetachedWriters = 8
 // sshsvc.ShellChannel via *PooledConn) use, so there is exactly one spelling
 // of this cause (AGENTS.md, "Look for the existing answer").
 const ReasonDetachedWriterCap = "detached_writer_cap"
-
-// ReasonKeepaliveLost is why a sibling channel's session ends when this
-// connection's OWN keepalive prober gave up and closed it (nocx-y6fh7 item
-// 6, round 3) — a connection loss the prober itself declared, read back the
-// same way ReasonDetachedWriterCap is, through PooledConn.TaintReason, so
-// every session sharing the connection reports the SAME cause: the prober
-// watches the connection, not any one session's channel, and no single
-// channel's own Wait() could otherwise learn why the transport under it
-// went away.
-const ReasonKeepaliveLost = "keepalive_lost"
 
 // poolEntry holds a connection and its ref count.
 type poolEntry struct {
@@ -752,4 +693,46 @@ func (p *ConnPool) Count() int {
 // real gossh.Dial (direct or via a jump host acquired from this pool).
 func (p *ConnPool) defaultDial(key poolKey) (sshClientConn, error) {
 	return nil, fmt.Errorf("pool dial not configured for %s@%s:%d", key.user, key.host, key.port)
+}
+
+// errProbeSilent is returned when a probe did not come back inside its budget.
+// It is not one more failure: see the comment at its only use.
+var errProbeSilent = errors.New("ssh: probe did not return")
+
+// sendProbe sends one keepalive and waits at most budget for it.
+//
+// WHY A GOROUTINE AT ALL. x/crypto's SendRequest takes no context and no
+// deadline: it writes the global request and then blocks on a bare channel
+// receive, holding globalSentMu for the whole wait. The probe therefore has to
+// be watchable from outside, and a caller that gives up on it can still wait
+// for the goroutine rather than leak it — that is what the returned channel is
+// for. It is the release barrier's use, where the ANSWER is the ordering fact
+// and the budget is only a backstop; the connection's own liveness is the
+// supervisor's prober and not this function (design §5.3).
+//
+// WHAT COUNTS AS ALIVE. Any answer, whatever it says. A server replies
+// SSH_MSG_REQUEST_FAILURE to keepalive@openssh.com because the request type is
+// not one it implements — that is what x/crypto's own DiscardRequests does and
+// what OpenSSH's server does — so `ok` is false on a perfectly healthy link and
+// OpenSSH's client counts any reply as proof of life for the same reason.
+func sendProbe(target interface {
+	SendRequest(name string, wantReply bool, payload []byte) (bool, []byte, error)
+}, budget time.Duration,
+) (<-chan struct{}, error) {
+	type result struct{ err error }
+	res := make(chan result, 1)
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		_, _, err := target.SendRequest("keepalive@openssh.com", true, nil)
+		res <- result{err: err}
+	}()
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case r := <-res:
+		return finished, r.err
+	case <-timer.C:
+		return finished, errProbeSilent
+	}
 }

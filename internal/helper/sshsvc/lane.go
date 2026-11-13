@@ -171,7 +171,7 @@ func (s *Service) openLane(ctx context.Context, p proto.LaneParams) (proto.OpenC
 	// decision, not with a key: its verdict is the coordinator's own, taken
 	// through the reverse registry on the handshake, and pinning a second
 	// answer here would be a second place for the decision to live.
-	pool, err := s.acquirePooled(ctx, conn, p.Destination, false, "", 0, 0, nil)
+	pool, err := s.acquirePooled(ctx, conn, p.Destination, false, "", false, 0)
 	if err != nil {
 		return proto.OpenChannelResult{}, err
 	}

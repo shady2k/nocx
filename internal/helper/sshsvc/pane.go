@@ -163,7 +163,7 @@ func (s *Service) OpenPaneListeners(ctx context.Context, spec PaneSpec) (*PaneLi
 	p := &PaneListeners{
 		log: s.log,
 	}
-	pool, err := s.acquirePooled(ctx, conn, spec.Destination, spec.AcceptOnTrust, spec.HostKeyFingerprint, 0, 0, nil)
+	pool, err := s.acquirePooled(ctx, conn, spec.Destination, spec.AcceptOnTrust, spec.HostKeyFingerprint, false, 0)
 	if err != nil {
 		return nil, err
 	}

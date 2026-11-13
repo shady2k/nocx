@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/monoclock"
@@ -57,6 +58,27 @@ type Plan struct {
 	Carrier  string
 	Key      Key
 	Material any
+	// Holds is what the holder that is acquiring declares about itself — a
+	// plain shell or nothing. The supervisor counts it, because nobody else
+	// can: the closing policy may not end a shell that would die with the
+	// connection, and the package that knows what a shell is imports the one
+	// that dials (design §5.1.1's trap 2).
+	Holds Holds
+	// ProbeInterval is how often this connection should be asked to answer, or
+	// zero for the default. The profile's setting reaches here and the policy
+	// uses it; the deadline, the look cadence and the grace are the design's
+	// numbers and not a profile's to change.
+	//
+	// The FIRST holder to dial sets it, and a later holder's request is not
+	// applied: one connection has one prober, and a cadence that changed with
+	// whoever acquired last would be two answers to "how often" (nocx-oalo1.4.4
+	// is where the holders' requests are unified).
+	ProbeInterval time.Duration
+	// Route is the hops this connection is dialled through, in dial order.
+	// A connection that carries a plain shell makes every one of them carry
+	// one too: a hop's plain shells are its own plus those of everything
+	// riding it.
+	Route []Key
 }
 
 // Step is one state a supervisor passed through, and when.
@@ -80,13 +102,33 @@ type Step struct {
 type Manager struct {
 	carrier Carrier
 	log     log.Logger
+	clock   Clock
 	mu      sync.Mutex
 	sups    map[Key]*Supervisor
 }
 
+// Option configures a Manager.
+type Option func(*Manager)
+
+// WithClock is the option that makes time the caller's. The tests that state
+// "within 30 s" or "after ten minutes" need it to be theirs (design §10): a
+// policy whose only clock is time.Now cannot be asserted without waiting for
+// it, and waiting is what the fault harness may not do.
+func WithClock(clock Clock) Option {
+	return func(m *Manager) {
+		if clock != nil {
+			m.clock = clock
+		}
+	}
+}
+
 // NewManager builds the manager over one carrier.
-func NewManager(carrier Carrier, logger log.Logger) *Manager {
-	return &Manager{carrier: carrier, log: logger, sups: make(map[Key]*Supervisor)}
+func NewManager(carrier Carrier, logger log.Logger, opts ...Option) *Manager {
+	m := &Manager{carrier: carrier, log: logger, clock: RealClock{}, sups: make(map[Key]*Supervisor)}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
 }
 
 // Acquire answers a held reference to the connection described by plan,
@@ -103,7 +145,7 @@ func (m *Manager) Supervisor(key Key) *Supervisor {
 	defer m.mu.Unlock()
 	sup := m.sups[key]
 	if sup == nil {
-		sup = &Supervisor{key: key, carrier: m.carrier, log: m.log}
+		sup = &Supervisor{key: key, carrier: m.carrier, log: m.log, clock: m.clock, mgr: m}
 		m.sups[key] = sup
 	}
 	return sup
@@ -114,6 +156,8 @@ type Supervisor struct {
 	key     Key
 	carrier Carrier
 	log     log.Logger
+	clock   Clock
+	mgr     *Manager
 
 	mu sync.Mutex
 	// state is the current point of the machine.
@@ -132,6 +176,11 @@ type Supervisor struct {
 	// generation is bumped for every link, so a watcher belonging to a link
 	// that has since been replaced cannot move the state of the new one.
 	generation uint64
+	// riders is how many connections carrying a plain shell are dialled
+	// THROUGH this one. It is the hop half of the count: a hop's plain shells
+	// are its own plus those of everything riding it, and a hop with a rider
+	// may no more be closed for silence than a connection with a shell.
+	riders int
 }
 
 // live is one connection under the supervisor, and the count that decides when
@@ -140,8 +189,31 @@ type Supervisor struct {
 // because the holders of the connection that died are not holders of the one
 // that replaced it.
 type live struct {
-	link    Link
-	holders int
+	link        Link
+	holders     int
+	plainShells int
+	route       []Key
+	// stop ends this connection's guard: its probe cadence, its looks and any
+	// parked probe's reporting. It is closed once.
+	stop     chan struct{}
+	stopOnce sync.Once
+	// nextProbe is when the guard asks this connection to answer. It is set
+	// when the connection becomes live rather than when the goroutine happens
+	// to start: the cadence belongs to the connection, and a guard scheduled a
+	// moment late must not move it.
+	nextProbe monoclock.Nanos
+	// probeInterval is this connection's probe cadence: the plan's, or the
+	// design's default.
+	probeInterval time.Duration
+	// observers are the holders that asked to be told what a probe finds.
+	// They are per lease because they are per shell: the app's liveness
+	// surface is keyed by the session that asked for it.
+	observers map[*Lease]func(Observation)
+}
+
+// stopGuard ends this connection's prober work.
+func (l *live) stopGuard() {
+	l.stopOnce.Do(func() { close(l.stop) })
 }
 
 const maxSteps = 32
@@ -173,7 +245,13 @@ func (s *Supervisor) Acquire(ctx context.Context, plan Plan) (*Lease, error) {
 			default:
 			}
 			s.live.holders++
-			lease := &Lease{sup: s, held: s.live, link: s.live.link}
+			if plan.Holds&HoldsPlainShell != 0 {
+				s.live.plainShells++
+				if s.live.plainShells == 1 {
+					s.rideLocked(1)
+				}
+			}
+			lease := &Lease{sup: s, held: s.live, link: s.live.link, holds: plan.Holds}
 			s.mu.Unlock()
 			return lease, nil
 		}
@@ -204,14 +282,30 @@ func (s *Supervisor) Acquire(ctx context.Context, plan Plan) (*Lease, error) {
 			s.mu.Unlock()
 			return nil, err
 		}
-		s.live = &live{link: link, holders: 1}
+		probeInterval := plan.ProbeInterval
+		if probeInterval <= 0 {
+			probeInterval = ProbeInterval
+		}
+		live := &live{
+			link: link, holders: 1, route: plan.Route, probeInterval: probeInterval,
+			nextProbe: s.clock.Now() + span(probeInterval),
+			stop:      make(chan struct{}), observers: make(map[*Lease]func(Observation)),
+		}
+		if plan.Holds&HoldsPlainShell != 0 {
+			live.plainShells = 1
+		}
+		s.live = live
 		s.generation++
 		gen := s.generation
 		s.advance(Event{Kind: SignedIn})
-		lease := &Lease{sup: s, held: s.live, link: link}
+		if live.plainShells > 0 {
+			s.rideLocked(1)
+		}
+		lease := &Lease{sup: s, held: live, link: link, holds: plan.Holds}
 		s.mu.Unlock()
 
 		go s.watch(link, gen)
+		go s.guard(live, gen)
 		return lease, nil
 	}
 }
@@ -239,7 +333,11 @@ func (s *Supervisor) advance(event Event) {
 	if next == s.state {
 		return
 	}
+	moved := !samePoint(next, s.state)
 	s.state = next
+	if !moved {
+		return
+	}
 	if len(s.steps) == maxSteps {
 		copy(s.steps, s.steps[1:])
 		s.steps = s.steps[:maxSteps-1]
@@ -279,12 +377,20 @@ func (s *Supervisor) watch(link Link, gen uint64) {
 
 // release gives one holder's reference back, and closes the connection when it
 // was the last reference to THAT connection.
-func (s *Supervisor) release(held *live, link Link) {
+func (s *Supervisor) release(lease *Lease) {
+	held := lease.held
 	var last bool
 	s.mu.Lock()
 	if held.holders > 0 {
 		held.holders--
 	}
+	if lease.holds&HoldsPlainShell != 0 && held.plainShells > 0 {
+		held.plainShells--
+		if held.plainShells == 0 {
+			s.rideLocked(-1)
+		}
+	}
+	delete(held.observers, lease)
 	last = held.holders == 0
 	if last {
 		switch {
@@ -302,7 +408,74 @@ func (s *Supervisor) release(held *live, link Link) {
 	}
 	s.mu.Unlock()
 	if last {
-		_ = link.Close()
+		held.stopGuard()
+		_ = lease.link.Close()
+	}
+}
+
+// rideLocked tells the hops this connection is dialled through that a plain
+// shell rides them, or that the last one has left. Called with the mutex held;
+// `delta` is +1 or -1.
+func (s *Supervisor) rideLocked(delta int) {
+	if s.mgr == nil || s.live == nil {
+		return
+	}
+	for _, hop := range s.live.route {
+		s.mgr.Supervisor(hop).addRider(delta)
+	}
+}
+
+// addRider counts one connection carrying a plain shell that is dialled through
+// this one. A hop with a rider may not be closed for silence, exactly as a
+// connection with a shell may not (design §5.1.1's second trap).
+func (s *Supervisor) addRider(delta int) {
+	s.mu.Lock()
+	s.riders += delta
+	if s.riders < 0 {
+		s.riders = 0
+	}
+	s.mu.Unlock()
+}
+
+// HoldsPlainShell reports whether some holder of this connection — its own or
+// a connection riding it — carries a plain shell. It is what the closing policy
+// asks, and the answer is never allowed to end one.
+func (s *Supervisor) HoldsPlainShell() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.riders > 0 {
+		return true
+	}
+	return s.live != nil && s.live.plainShells > 0
+}
+
+// Observe asks to be told what each probe of this connection finds. The
+// registration belongs to the lease that made it and ends with it.
+func (l *Lease) Observe(fn func(Observation)) {
+	if l == nil || fn == nil {
+		return
+	}
+	l.sup.mu.Lock()
+	if l.sup.live == l.held {
+		l.held.observers[l] = fn
+	}
+	l.sup.mu.Unlock()
+}
+
+// observe reports one probe result to every holder that asked.
+func (s *Supervisor) observe(held *live, obs Observation) {
+	s.mu.Lock()
+	fns := make([]func(Observation), 0, len(held.observers))
+	for _, fn := range held.observers {
+		fns = append(fns, fn)
+	}
+	current := s.live == held
+	s.mu.Unlock()
+	if !current {
+		return
+	}
+	for _, fn := range fns {
+		fn(obs)
 	}
 }
 
@@ -339,10 +512,11 @@ func (s *Supervisor) Current() State {
 // literally — the count that decides when a connection closes belongs to the
 // connection, not to each caller's chance of being first to release it.
 type Lease struct {
-	sup  *Supervisor
-	held *live
-	link Link
-	once sync.Once
+	sup   *Supervisor
+	held  *live
+	link  Link
+	holds Holds
+	once  sync.Once
 }
 
 // Link is the connection this lease rides.
@@ -360,7 +534,7 @@ func (l *Lease) Release() {
 		return
 	}
 	l.once.Do(func() {
-		l.sup.release(l.held, l.link)
+		l.sup.release(l)
 	})
 }
 

@@ -243,8 +243,7 @@ func (p *sshSpawner) SpawnSSH(ctx context.Context, req SSHSpawnRequest) (Process
 		Command:            command,
 		Cols:               req.Cols,
 		Rows:               req.Rows,
-		KeepaliveInterval:  req.KeepaliveInterval,
-		KeepaliveCountMax:  req.KeepaliveCountMax,
+		ProbeInterval:      req.KeepaliveInterval,
 		OnLiveness:         onLiveness,
 	})
 	if err != nil {

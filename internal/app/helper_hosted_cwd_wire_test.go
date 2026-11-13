@@ -20,6 +20,7 @@ import (
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/host"
 	helpersession "github.com/shady2k/nocx/internal/helper/session"
+	"github.com/shady2k/nocx/internal/helper/sshconn"
 	"github.com/shady2k/nocx/internal/helper/sshdial"
 	"github.com/shady2k/nocx/internal/helper/sshsvc"
 	"github.com/shady2k/nocx/internal/lifecycle"
@@ -76,7 +77,7 @@ func TestARealRemoteCDReachesTheAttachedRendererAsCwdMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sshdial.New: %v", err)
 	}
-	sshService := sshsvc.New(dialer, logger)
+	sshService := sshsvc.New(sshconn.New(dialer, log.NewSlogAdapter(logger)), logger)
 	sessions := helpersession.New(helpersession.Options{
 		Generation: filesFixtureGenera,
 		Spawner:    &scriptedSpawner{},

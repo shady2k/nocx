@@ -61,6 +61,7 @@ import (
 	helperlocal "github.com/shady2k/nocx/internal/helper/local"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	helpersession "github.com/shady2k/nocx/internal/helper/session"
+	"github.com/shady2k/nocx/internal/helper/sshconn"
 	"github.com/shady2k/nocx/internal/helper/sshdial"
 	"github.com/shady2k/nocx/internal/helper/sshsvc"
 	"github.com/shady2k/nocx/internal/log"
@@ -174,7 +175,7 @@ func startFilesStand(t *testing.T, srv *pwSSHServer, secrets credential.Resolver
 	if err != nil {
 		t.Fatalf("sshdial.New: %v", err)
 	}
-	svc := sshsvc.New(sshdialClient, logger)
+	svc := sshsvc.New(sshconn.New(sshdialClient, log.NewSlogAdapter(logger)), logger)
 	engine := host.New(helperEnd, helperEnd, filesFixtureGenera, "instance-1", logger)
 	engine.Register(svc)
 	sessions := helpersession.New(helpersession.Options{

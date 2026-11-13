@@ -89,6 +89,16 @@ func (c *pooledConn) Lost() bool {
 	return c.lease.Lost()
 }
 
+// observe asks the connection's supervisor to report every probe to fn. It is
+// what a shell's OnLiveness is now: the connection's ONE prober already runs,
+// and a holder listens to it rather than arming a second.
+func (c *pooledConn) observe(fn func(hostconn.Observation)) {
+	if c == nil || c.lease == nil {
+		return
+	}
+	c.lease.Observe(fn)
+}
+
 // Close gives this holder's reference back. The connection itself closes when
 // the LAST holder's does, through the supervisor.
 func (c *pooledConn) Close() error {

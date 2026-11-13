@@ -296,7 +296,7 @@ func (s *Service) toolSocket(ctx context.Context, p proto.ToolSocketParams) (pro
 		return proto.ToolSocketResult{}, err
 	}
 
-	pool, err := s.acquirePooled(ctx, conn, p.Destination, p.AcceptOnTrust, p.HostKeyFingerprint, 0, 0, nil)
+	pool, err := s.acquirePooled(ctx, conn, p.Destination, p.AcceptOnTrust, p.HostKeyFingerprint, false, 0)
 	if err != nil {
 		return proto.ToolSocketResult{}, err
 	}

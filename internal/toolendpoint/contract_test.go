@@ -166,23 +166,26 @@ func contractWorkerParticipants() []workers.Participant {
 }
 
 func contractGrant() content.Grant {
-	return content.Grant{
-		Effects: []content.Effect{
-			content.EffectObserve,
-			content.EffectMutateDestructive,
-			content.EffectDelegate,
-		},
-		Scopes: []content.GrantScope{
-			{Kind: content.ResourceSession, ID: "session-1"},
-			{Kind: content.ResourceEnvironment, ID: content.EnvironmentIDFor(content.EnvLocal, "")},
-			// The workspace sub-scope a coordinator's grant carries since
-			// nocx-luqz9.2: it is what offers workers.inbox, whose declaration
-			// names that kind (A11) and whose narrow resolves its resource from
-			// the run's own workspace. Without it the case below would be
-			// refused by the reachability gate before it ever reached a socket.
-			{Kind: content.ResourceWorkspace, ID: agenttools.ParticipantWorkspaceScopeID(contractWorkspace)},
-		},
-	}
+	permit := content.EffectRow{Decision: content.DecisionPermit}
+	refuse := content.EffectRow{Decision: content.DecisionRefuse}
+	return content.EffectPolicy{
+		Observe:           permit,
+		MutateDestructive: permit,
+		Delegate:          permit,
+		MutateReversible:  refuse,
+		PrivilegeChange:   refuse,
+		Disclose:          refuse,
+		CrossBoundary:     refuse,
+	}.AsGrant([]content.GrantScope{
+		{Kind: content.ResourceSession, ID: "session-1"},
+		{Kind: content.ResourceEnvironment, ID: content.EnvironmentIDFor(content.EnvLocal, "")},
+		// The workspace sub-scope a coordinator's grant carries since
+		// nocx-luqz9.2: it is what offers workers.inbox, whose declaration
+		// names that kind (A11) and whose narrow resolves its resource from
+		// the run's own workspace. Without it the case below would be
+		// refused by the reachability gate before it ever reached a socket.
+		{Kind: content.ResourceWorkspace, ID: agenttools.ParticipantWorkspaceScopeID(contractWorkspace)},
+	})
 }
 
 // contractWorkspace is the workspace every grant here names, and the one the

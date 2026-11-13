@@ -41,19 +41,21 @@ var instructionToolName = regexp.MustCompile(`workers\.[a-z][a-z0-9]*(?:\.[a-z][
 // with: the coordinator's four calls need session and environment kinds, and
 // spawning is what Delegate is (internal/app/worker_auth.go's callerGrant).
 func coordinatorGrantForTest() content.Grant {
-	return content.Grant{
-		Effects: []content.Effect{
-			content.EffectObserve,
-			content.EffectMutateReversible,
-			content.EffectMutateDestructive,
-			content.EffectDelegate,
-		},
-		Scopes: []content.GrantScope{
-			{Kind: content.ResourceSession, ID: "session-1"},
-			{Kind: content.ResourceEnvironment, ID: content.EnvironmentIDFor(content.EnvLocal, "")},
-			{Kind: content.ResourceWorkspace, ID: agenttools.ParticipantWorkspaceScopeID(contractWorkspace)},
-		},
-	}
+	permit := content.EffectRow{Decision: content.DecisionPermit}
+	refuse := content.EffectRow{Decision: content.DecisionRefuse}
+	return content.EffectPolicy{
+		Observe:           permit,
+		MutateReversible:  permit,
+		MutateDestructive: permit,
+		Delegate:          permit,
+		PrivilegeChange:   refuse,
+		Disclose:          refuse,
+		CrossBoundary:     refuse,
+	}.AsGrant([]content.GrantScope{
+		{Kind: content.ResourceSession, ID: "session-1"},
+		{Kind: content.ResourceEnvironment, ID: content.EnvironmentIDFor(content.EnvLocal, "")},
+		{Kind: content.ResourceWorkspace, ID: agenttools.ParticipantWorkspaceScopeID(contractWorkspace)},
+	})
 }
 
 // workerGrantForTest is what a worker is admitted with: Observe alone, and a

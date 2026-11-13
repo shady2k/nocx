@@ -67,7 +67,7 @@
     },
     {
       "test": "e2e:e2e/load-no-busy.spec.ts › a person never sees busy under load",
-      "bead": "nocx-nqmjq.2"
+      "bead": "nocx-l5b5f"
     }
   ]
 }

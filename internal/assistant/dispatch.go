@@ -65,19 +65,15 @@ func (e *DispatchRefusalError) Error() string {
 
 func (e *DispatchRefusalError) Unwrap() error { return e.Cause }
 
-func dispatchAbortedError(invocation ToolInvocation, result *modelResult) error {
+func dispatchAbortedError(invocation ToolInvocation, result *modelResult, causes ...error) error {
 	reason := ""
 	if result != nil {
 		reason = result.text
 	}
-	return &DispatchRefusalError{Method: invocation.Method, Reason: reason}
+	return &DispatchRefusalError{Method: invocation.Method, Reason: reason, Cause: errors.Join(causes...)}
 }
 
-type (
-	dispatchExecutor  func(context.Context, agenttools.Tool, agenttools.Capability, []byte) (string, error)
-	dispatchTransform func(*preparedInvocation) error
-	dispatchGate      func(*preparedInvocation) (bool, *modelResult, error)
-)
+type dispatchExecutor func(context.Context, agenttools.Tool, agenttools.Capability, []byte) (string, error)
 
 type preparedInvocation struct {
 	request             ToolInvocation
@@ -108,6 +104,7 @@ type dispatchOperation struct {
 	results    map[string]*jsonschema.Schema
 	executor   dispatchExecutor
 	allowed    map[string]struct{}
+	chain      AuthorityChain
 }
 
 func compileDispatchSchemas(registry agenttools.Registry) (map[string]*jsonschema.Schema, map[string]*jsonschema.Schema, error) {
@@ -155,6 +152,13 @@ func NewToolDispatcher(registry agenttools.Registry, workerStore WorkerRecord, e
 		validators: validators,
 		results:    results,
 		allowed:    allowed,
+		chain: AuthorityChain{
+			decide: endpointEffectDecision,
+			preparedGuards: func(prepared *preparedInvocation) []Guard {
+				return []Guard{endpointEffectGate{rows: endpointRows(prepared)}}
+			},
+			// No Approver: a pane caller's Ask is an unanswered refusal.
+		},
 		executor: func(ctx context.Context, decl agenttools.Tool, cap agenttools.Capability, raw []byte) (string, error) {
 			return runDeclaredTool(ctx, decl, cap, raw, toolSeams{
 				sessions:          readSources.Sessions,
@@ -234,54 +238,75 @@ func isOrchestrationMethod(name string) bool {
 }
 
 func (d *dispatchOperation) Dispatch(invocation ToolInvocation) (string, error) {
-	outcome, err := d.dispatch(invocation, nil, d.endpointEffectGate, nil, nil)
+	pipeline, err := NewPipeline(d, d.chain)
 	if err != nil {
 		return "", err
 	}
-	if outcome.aborted != nil {
-		return "", dispatchAbortedError(invocation, outcome.aborted)
+	output, err := pipeline.Dispatch(invocation, 0, "")
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return output, err
 	}
-	if outcome.runErr != nil {
-		return "", outcome.runErr
+	var refusal *PipelineRefusal
+	if errors.As(err, &refusal) {
+		return "", dispatchAbortedError(invocation, &modelResult{text: refusal.Reason}, refusal)
 	}
-	return outcome.output, nil
+	return output, err
 }
 
-// endpointEffectGate is the tool endpoint's half of the per-call effect
-// question. The kernel's own dispatcher answers it through the verdict
-// machinery, where an ask can become a question to a person; this dispatcher
-// serves the product's minted coordinators, whose grants decide permit or
-// refuse and carry no ask machinery at all — so a row the grant refuses
-// refuses the call here, before any capability is constructed and before any
-// side effect exists. The relation's own question applies (ADR-0053 as
-// amended): one refusal refuses a conjunction whole, because there is nothing
-// to move to execution, while an alternative set survives on any row that is
-// not refused — its offer-time answer carried to execution. The declared set
-// stands when the declaration derives no per-call shape.
-func (d *dispatchOperation) endpointEffectGate(prepared *preparedInvocation) (bool, *modelResult, error) {
+// endpointEffectRows is the prepared call's effect reading, shared by the
+// policy step and its grant guard. The relation is derived once by prepare.
+type endpointEffectRows struct {
+	method                  string
+	effects, refused, asked []content.Effect
+	stops                   bool
+}
+
+func endpointRows(prepared *preparedInvocation) endpointEffectRows {
 	effects := prepared.invocationEffects
 	if effects == nil {
 		effects = prepared.decl.Declaration.Effect
 	}
-	if len(effects) == 0 {
-		return true, nil, nil
-	}
-	refused := make([]content.Effect, 0, len(effects))
+	rows := endpointEffectRows{method: prepared.decl.Name, effects: append([]content.Effect(nil), effects...)}
 	for _, effect := range effects {
-		if prepared.request.Grant.Policy.DecisionFor(effect) == content.DecisionRefuse {
-			refused = append(refused, effect)
+		switch prepared.request.Grant.Policy.DecisionFor(effect) {
+		case content.DecisionRefuse:
+			rows.refused = append(rows.refused, effect)
+		case content.DecisionAsk:
+			rows.asked = append(rows.asked, effect)
 		}
 	}
-	if len(refused) == 0 {
-		return true, nil, nil
+	if prepared.decl.EffectRelation == agenttools.EffectsConjunctive {
+		rows.stops = len(rows.refused) > 0
+	} else {
+		rows.stops = len(effects) > 0 && len(rows.refused) == len(effects)
+		if len(rows.refused)+len(rows.asked) < len(effects) {
+			rows.asked = nil // a permitted alternative needs no answer
+		}
 	}
-	if prepared.decl.EffectRelation != agenttools.EffectsConjunctive && len(refused) < len(effects) {
-		return true, nil, nil
+	return rows
+}
+
+// endpointEffectDecision uses the pipeline's prepared-policy seam, as the
+// kernel does. Refusals belong to the Guard, questions to the Approver.
+func endpointEffectDecision(_ context.Context, _ Call, prepared *preparedInvocation) (Decision, error) {
+	rows := endpointRows(prepared)
+	if rows.stops || len(rows.asked) == 0 {
+		return Allow{}, nil
 	}
-	return false, &modelResult{
-		text: fmt.Sprintf("%s reaches %s on this call, and this run's grant refuses %s — the call is refused before anything runs.",
-			prepared.decl.Name, effectNames(effects), effectNames(refused)),
-	}, nil
+	return Ask{Reason: fmt.Sprintf("%s reaches %s on this call, and this run's grant asks about %s",
+		rows.method, effectNames(rows.effects), effectNames(rows.asked))}, nil
+}
+
+// endpointEffectGate can only refuse. A conjunction stops on any refused row;
+// alternatives stop only when every row is refused. It cannot approve an Ask.
+type endpointEffectGate struct{ rows endpointEffectRows }
+
+func (g endpointEffectGate) Refuse(_ context.Context, _ Call) (string, bool) {
+	if !g.rows.stops {
+		return "", false
+	}
+	return fmt.Sprintf("%s reaches %s on this call, and this run's grant refuses %s — the call is refused before anything runs.",
+		g.rows.method, effectNames(g.rows.effects), effectNames(g.rows.refused)), true
 }
 
 // effectNames renders an effect set for a refusal sentence: the row ids are
@@ -355,48 +380,46 @@ func (d *dispatchOperation) acceptsMethod(name string, grant content.Grant) bool
 	return d.methodAllowed(name) && d.reachableForGrant(name, grant)
 }
 
-func (d *dispatchOperation) dispatch(invocation ToolInvocation, transform dispatchTransform, gate dispatchGate, beforeExecute func(*preparedInvocation, agenttools.Capability) error, executor dispatchExecutor) (dispatchOutcome, error) {
-	prepared, err := d.prepare(invocation, transform)
-	if err != nil {
-		return dispatchOutcome{}, err
-	}
-	if gate != nil {
-		continueExecution, result, gateErr := gate(&prepared)
-		if gateErr != nil {
-			return dispatchOutcome{}, gateErr
-		}
-		if !continueExecution {
-			return dispatchOutcome{prepared: &prepared, aborted: result}, nil
-		}
-	}
+// executePrepared narrows the declaration to the capability this exact call may
+// hold and runs the tool exactly once. It is the half of every call that happens
+// after every policy decision, and the authority pipeline (pipeline.go) is its
+// only caller, so what "the tool runs once" means and how its result is checked
+// against its own contract are decided in one place.
+func (d *dispatchOperation) executePrepared(prepared *preparedInvocation, beforeExecute func(*preparedInvocation, agenttools.Capability) error, executor dispatchExecutor) (dispatchOutcome, error) {
+	outcome := dispatchOutcome{prepared: prepared}
 	if prepared.decl.Narrow == nil {
-		return dispatchOutcome{prepared: &prepared}, fmt.Errorf("%w: %q has no capability constructor", ErrUnreachableMethod, prepared.decl.Name)
+		return outcome, fmt.Errorf("%w: %q has no capability constructor", ErrUnreachableMethod, prepared.decl.Name)
 	}
 	capability, err := prepared.decl.Narrow(prepared.request.Grant, prepared.resources, prepared.request.RunContext)
 	if err != nil {
-		return dispatchOutcome{prepared: &prepared}, fmt.Errorf("tool %q: construct capability: %w", prepared.decl.Name, err)
+		return outcome, fmt.Errorf("tool %q: construct capability: %w", prepared.decl.Name, err)
 	}
 	if beforeExecute != nil {
-		if err := beforeExecute(&prepared, capability); err != nil {
-			return dispatchOutcome{prepared: &prepared}, err
+		if err := beforeExecute(prepared, capability); err != nil {
+			return outcome, err
 		}
 	}
 	if executor == nil {
 		executor = d.executor
 	}
 	if executor == nil {
-		return dispatchOutcome{prepared: &prepared}, errors.New("assistant dispatch: no executor wired")
+		return outcome, errors.New("assistant dispatch: no executor wired")
 	}
 	output, runErr := executor(prepared.request.Context, prepared.decl, capability, prepared.request.RawParams)
 	if runErr == nil {
 		if err := validateToolResult(d.results, prepared.decl.Name, output); err != nil {
-			return dispatchOutcome{prepared: &prepared}, err
+			return outcome, err
 		}
 	}
-	return dispatchOutcome{prepared: &prepared, output: output, runErr: runErr}, nil
+	outcome.output, outcome.runErr = output, runErr
+	return outcome, nil
 }
 
-func (d *dispatchOperation) prepare(invocation ToolInvocation, transform dispatchTransform) (preparedInvocation, error) {
+// prepare resolves and validates a call's declaration, arguments and resources.
+// refine is the caller's own refinement of the declaration, run after the schema
+// accepts the arguments and before the call's facts are derived from them (the
+// kernel's command classification); nil means the caller has none.
+func (d *dispatchOperation) prepare(invocation ToolInvocation, refine func(*preparedInvocation) error) (preparedInvocation, error) {
 	decl, ok := d.registry.Lookup(invocation.Method)
 	if !ok {
 		return preparedInvocation{}, fmt.Errorf("%w: %q", ErrUnknownMethod, invocation.Method)
@@ -412,9 +435,9 @@ func (d *dispatchOperation) prepare(invocation ToolInvocation, transform dispatc
 		return preparedInvocation{}, fmt.Errorf("%w: tool %q: %v", ErrInvalidParams, decl.Name, err)
 	}
 	prepared := preparedInvocation{request: invocation, decl: decl, args: args}
-	if transform != nil {
-		if transformErr := transform(&prepared); transformErr != nil {
-			return preparedInvocation{}, transformErr
+	if refine != nil {
+		if refineErr := refine(&prepared); refineErr != nil {
+			return preparedInvocation{}, refineErr
 		}
 	}
 	// The per-call shape (ADR-0053 as amended): arguments may raise a call

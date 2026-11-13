@@ -2008,22 +2008,63 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		Grant:      k.grant,
 		RawParams:  []byte(rawArgs),
 	}
-	outcome, dispatchErr := k.dispatcher.dispatch(request, transform, gate, func(prepared *preparedInvocation, _ agenttools.Capability) error {
-		if k.onCall == nil {
-			return nil
-		}
-		return k.onCall(ToolCall{
-			Tool:       prepared.decl.Name,
-			CallID:     callID,
-			Args:       prepared.args,
-			EntryID:    entryID,
-			Effect:     prepared.decl.Effect,
-			Resource:   matchedResource(prepared.resources),
-			OpensBlock: prepared.decl.OpensBlock,
-		})
-	}, func(runCtx context.Context, decl agenttools.Tool, capability agenttools.Capability, raw []byte) (string, error) {
-		return k.runWithRetained(decl, callID, runCtx, capability, raw)
+	// The call runs through the authority pipeline (nocx-a62cl.2.3). Its own
+	// steps are the pipeline's links for now: the transform prepares the
+	// declaration, the gate is the policy decision, the pre-execute step
+	// announces the call after Narrow, and the executor is the kernel's
+	// retained-result wrapper. None of them is a point yet — taking the kernel
+	// apart is stage 2 — and the chain carries no PreCall, approver, guard or
+	// screen, so a refusal here is still the gate's answer and an escalation
+	// still suspends through the kernel's own error.
+	var aborted *modelResult
+	pipeline, pipelineErr := NewPipeline(k.dispatcher, AuthorityChain{
+		prepare: transform,
+		decide: func(_ context.Context, _ Call, prepared *preparedInvocation) (Decision, error) {
+			continueExecution, result, gateErr := gate(prepared)
+			if gateErr != nil {
+				return nil, gateErr
+			}
+			if !continueExecution {
+				aborted = result
+				reason := ""
+				if result != nil {
+					reason = result.text
+				}
+				return Deny{Reason: reason}, nil
+			}
+			return Allow{}, nil
+		},
+		beforeTool: func(_ context.Context, _ Call, prepared *preparedInvocation, _ agenttools.Capability) error {
+			if k.onCall == nil {
+				return nil
+			}
+			return k.onCall(ToolCall{
+				Tool:       prepared.decl.Name,
+				CallID:     callID,
+				Args:       prepared.args,
+				EntryID:    entryID,
+				Effect:     prepared.decl.Effect,
+				Resource:   matchedResource(prepared.resources),
+				OpensBlock: prepared.decl.OpensBlock,
+			})
+		},
+		execute: func(runCtx context.Context, decl agenttools.Tool, capability agenttools.Capability, raw []byte) (string, error) {
+			return k.runWithRetained(decl, callID, runCtx, capability, raw)
+		},
+		// The run lease ends the run's context as an OUTCOME to record, not as
+		// a reason to skip the call: a timed-out lease must still reach the
+		// executor and have its result, error and cause recorded.
+		callerOwnsCancellation: true,
 	})
+	if pipelineErr != nil {
+		return modelResult{}, pipelineErr
+	}
+	outcome, dispatchErr := pipeline.run(request, k.attempt, callID)
+	// The gate's refusal is an answer, exactly as it was before the pipeline:
+	// its own modelResult, in the call's slot, with the run continuing.
+	if aborted != nil {
+		return *aborted, nil
+	}
 	if dispatchErr != nil {
 		if outcome.prepared != nil && execID != 0 {
 			_ = k.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)

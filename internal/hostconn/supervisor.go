@@ -271,8 +271,13 @@ func (s *Supervisor) Acquire(ctx context.Context, plan Plan) (*Lease, error) {
 				s.live = nil
 				s.generation++
 				s.advance(Event{Kind: Lost, Cause: CauseLostLink})
-				s.mu.Unlock()
+				// THE POOL ENTRY GOES BEFORE THE LOCK DOES. A caller that
+				// arrives once this connection is out of `live` dials, and
+				// the pool would still be holding this transport until Close
+				// runs — handing the dying connection to the next pane, which
+				// is the defect nocx-oalo1.4.6 exists for, one window later.
 				_ = stale.link.Close()
+				s.mu.Unlock()
 				continue
 			default:
 			}
@@ -399,13 +404,14 @@ func (s *Supervisor) watch(link Link, gen uint64) {
 		s.live = nil
 		s.advance(Event{Kind: Lost, Cause: CauseLostLink})
 		// The holders' leases keep pointing at this link so they can say the
-		// link is lost; the supervisor's own reference ends here.
+		// link is lost; the supervisor's own reference ends here, and it ends
+		// BEFORE the lock does — see Acquire's stale branch: a caller that
+		// arrives once the connection is out of `live` must not find it still
+		// in the pool.
+		_ = link.Close()
 		s.log.Warn("hostconn: the connection's transport ended", "connection", s.key.String(), "error", link.Err())
 	}
 	s.mu.Unlock()
-	// Leaving the pool is Close's whole job for the carrier (sshconn's link
-	// closes the pooled reference), and it is idempotent.
-	_ = link.Close()
 }
 
 // release gives one holder's reference back, and closes the connection when it
@@ -439,11 +445,14 @@ func (s *Supervisor) release(lease *Lease) {
 			s.advance(Event{Kind: Closed, Cause: CauseReleased})
 		}
 	}
-	s.mu.Unlock()
 	if last {
 		held.stopGuard()
+		// The pool reference goes under the lock, for the same reason as the
+		// other two closers: the next acquire must not be handed a transport
+		// this supervisor has already let go of.
 		_ = lease.link.Close()
 	}
+	s.mu.Unlock()
 }
 
 // rideLocked tells the hops this connection is dialled through that a plain

@@ -126,6 +126,16 @@ func (g *prober) run() {
 		now := g.clock.Now()
 		wait := g.next(now)
 		if now >= wait {
+			// AN ANSWER ALREADY IN HAND WINS THE BOUNDARY. A probe whose
+			// result is waiting when its deadline is due answered within the
+			// deadline; without this the select below could take the timer
+			// first and read silence into an answer the loop had already been
+			// given (measured: a connection that answers in microseconds
+			// reading stalled because the clock crossed the deadline in the
+			// same instant).
+			if g.drainReady() {
+				return
+			}
 			if g.due(wait) {
 				return
 			}
@@ -145,6 +155,28 @@ func (g *prober) run() {
 		case <-g.clock.After(time.Duration(wait - now)):
 		}
 	}
+}
+
+// drainReady applies any probe or look result that has already arrived, and
+// reports whether the guard should end. It is checked before a due move, so a
+// result that is in hand is never turned into silence by a deadline the loop
+// reached in the same instant.
+func (g *prober) drainReady() bool {
+	if g.st.probeOut != nil {
+		select {
+		case outcome := <-g.st.probeOut:
+			return g.probeResult(outcome)
+		default:
+		}
+	}
+	if g.st.lookOut != nil {
+		select {
+		case err := <-g.st.lookOut:
+			g.lookResult(err)
+		default:
+		}
+	}
+	return false
 }
 
 // next answers when the policy next has something to do.
@@ -370,9 +402,12 @@ func (s *Supervisor) endForSilence(l *live, gen uint64, why string) bool {
 	s.live = nil
 	s.generation++
 	s.advance(Event{Kind: Lost, Cause: CauseSilence})
+	// The pool reference goes BEFORE the lock does: a caller that acquires
+	// once the state reads reconnecting must dial, and the pool must already
+	// have forgotten this transport (see Acquire's stale branch).
+	_ = l.link.Close()
 	s.mu.Unlock()
 	s.log.Warn("hostconn: closing a connection that stopped answering", "connection", s.key.String(), "why", why)
-	_ = l.link.Close()
 	return true
 }
 

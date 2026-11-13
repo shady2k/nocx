@@ -613,6 +613,12 @@ func TestAWakeOverAParkedProbeReadsStalledInFiveSecondsAndIsNotDoubled(t *testin
 	// answered, and a look-only dial has nowhere to get its version line from.
 	proxy.HoldBanner()
 	stand.wake.Wake()
+	// The probe is IN FLIGHT — consumed by the proxy and held — before the
+	// second signal is sent: a signal after the answer is a new proof and
+	// would rightly probe again (`HeldChunks` is the observable, not a wait).
+	waittest.WaitFor(t, "the wake's probe to be in flight", func() bool {
+		return proxy.HeldChunks() > 0
+	})
 	clock.Advance(hostconn.WakeProbeDeadline)
 	waittest.WaitFor(t, "the connection to read stalled within the wake's five seconds", func() bool {
 		return lastState(holder.States()).Kind == hostconn.Stalled
@@ -794,6 +800,15 @@ func TestTheSecondPaneKeepsReportingAfterTheFirstCloses(t *testing.T) {
 	destination := destinationAt(t, proxy.Addr())
 
 	var firstReports atomic.Int32
+	// A helper-owned holder that exists before the silence: the state reader.
+	// An acquire during a stall would wait (design §5.3: no channel is asked of
+	// a stalled connection), which is the behaviour, not a test device.
+	reader, err := stand.carrier.Acquire(context.Background(), supervisedSpec(t, f, destination, false))
+	if err != nil {
+		t.Fatalf("hold the connection: %v", err)
+	}
+	t.Cleanup(reader.Release)
+
 	first := stand.openShellWith(t, destination, func(ssh.Reachability) { firstReports.Add(1) })
 	secondReports := make(chan bool, 8)
 	_ = stand.openShellWith(t, destination, func(r ssh.Reachability) {
@@ -830,21 +845,9 @@ func TestTheSecondPaneKeepsReportingAfterTheFirstCloses(t *testing.T) {
 	if firstReports.Load() != 0 {
 		t.Fatalf("the closed pane's observer fired %d times after it closed", firstReports.Load())
 	}
-	if got := lastStateFrom(t, stand, destination, f); got != hostconn.Stalled {
+	if got := lastState(reader.States()).Kind; got != hostconn.Stalled {
 		t.Fatalf("the connection reads %v, want stalled", got)
 	}
-}
-
-// lastStateFrom reads the stand's own supervisor for a destination: the state
-// the panes on that connection are being told about.
-func lastStateFrom(t *testing.T, stand *stand, destination proto.SSHDestination, f *fixture) hostconn.Kind {
-	t.Helper()
-	lease, err := stand.carrier.Acquire(context.Background(), supervisedSpec(t, f, destination, false))
-	if err != nil {
-		return hostconn.Connected
-	}
-	defer lease.Release()
-	return lastState(lease.States()).Kind
 }
 
 // TestASingleHealthyPaneStillReports is the paired success: one pane on one

@@ -243,6 +243,9 @@ func (d *dispatchOperation) Dispatch(invocation ToolInvocation) (string, error) 
 		return "", err
 	}
 	output, err := pipeline.Dispatch(invocation, 0, "")
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return output, err
+	}
 	var refusal *PipelineRefusal
 	if errors.As(err, &refusal) {
 		return "", dispatchAbortedError(invocation, &modelResult{text: refusal.Reason}, refusal)

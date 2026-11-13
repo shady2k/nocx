@@ -89,7 +89,15 @@ func TestAgentAsk_SealFailureDoesNotCountToolAsExecuted(t *testing.T) {
 	}
 }
 
-func TestAuthorisedRun_LogsSuspendedAndResumedSegments(t *testing.T) {
+// TestAuthorisedRun_LogsOneSegmentForTheAnsweredCall replaces the suspended
+// and resumed pair this check used to assert (nocx-a62cl.3.1). The pair was the
+// OLD shape's fingerprint: the question ended the drive ("suspended", executed
+// 0) and the answer started a second one ("resumed", executed 1). With the
+// approval service the call blocks on the answer and runs in the SAME drive, so
+// there is one segment — and the property worth keeping is the one the pair was
+// there to prove: the call was requested and executed exactly once, and the log
+// says so without a suspension it did not have.
+func TestAuthorisedRun_LogsOneSegmentForTheAnsweredCall(t *testing.T) {
 	h, _, _, _ := driveOneAuthorisedRun(t)
 	var records []map[string]any
 	for _, line := range strings.Split(strings.TrimSpace(h.logs.String()), "\n") {
@@ -104,18 +112,17 @@ func TestAuthorisedRun_LogsSuspendedAndResumedSegments(t *testing.T) {
 			records = append(records, record)
 		}
 	}
-	if len(records) != 2 {
-		t.Fatalf("stream-ended records = %d, want suspended and resumed: %s", len(records), h.logs.String())
+	if len(records) != 1 {
+		t.Fatalf("stream-ended records = %d, want one — the answer reaches the call that asked, so the drive never ends at the question: %s", len(records), h.logs.String())
 	}
-	first := records[0]
-	if first["toolCallsRequested"] != float64(1) || first["toolCallsExecuted"] != float64(0) ||
-		first["resume"] != false || first["suspensionTool"] != "session.run" ||
-		first["suspensionEffect"] != "observe" {
-		t.Fatalf("first segment = %v, want requested=1 executed=0 suspended session.run/observe", first)
+	only := records[0]
+	if only["toolCallsRequested"] != float64(1) || only["toolCallsExecuted"] != float64(1) {
+		t.Fatalf("segment = %v, want requested=1 executed=1 in one drive", only)
 	}
-	second := records[1]
-	if second["toolCallsRequested"] != float64(1) || second["toolCallsExecuted"] != float64(1) ||
-		second["resume"] != true || second["suspensionTool"] != "" || second["suspensionEffect"] != "" {
-		t.Fatalf("resumed segment = %v, want requested=1 executed=1 resume=true", second)
+	if only["resume"] != false || only["suspensionTool"] != "" || only["suspensionEffect"] != "" {
+		t.Fatalf("segment = %v, want no suspension and no resume", only)
+	}
+	if only["outcome"] != "completed" {
+		t.Fatalf("outcome = %v, want completed", only["outcome"])
 	}
 }

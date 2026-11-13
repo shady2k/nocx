@@ -499,6 +499,11 @@ type effectKernel struct {
 	// the documents this run fetched, not from what the caller passed to
 	// skills.resolve (nocx-b6stz, routeSourceFromRun).
 	resolutions map[string]*skill.Resolution
+	// questioner is the person, when a service owns asking (ADR-anntnxdj §3).
+	// Nil is the adapter's world: the question leaves as a suspension. Non-nil
+	// is the product's assistant turn: the call blocks on the answer and goes
+	// on from it.
+	questioner Questioner
 }
 
 // PaneAccessBinder mints, for ONE run, the DescendantPaneAccess and
@@ -597,6 +602,7 @@ func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools
 		results:     make(map[string]*jsonschema.Schema, len(registry.All())),
 		onCall:      onCall,
 		runSeams:    runSeams,
+		questioner:  runSeams.questioner,
 	}
 	for _, t := range registry.All() {
 		v, err := compileToolSchema(t)
@@ -692,14 +698,23 @@ type kernelCall struct {
 }
 
 // authorityChain is the kernel's composition for one call: one policy point,
-// the approval adapter, the guards that can only refuse, and the attempt step.
-// The order is the pipeline's, so a person's answer is followed by the guards
-// that read the grant as it stands then — a file changed while the question
-// was open fails its evidence, and an approved widening reaches the capability.
+// the approver, the guards that can only refuse, and the attempt step. The
+// order is the pipeline's, so a person's answer is followed by the guards that
+// read the grant as it stands then — a file changed while the question was
+// open fails its evidence.
+//
+// The approver is the transport's approval service when one is wired — the
+// call BLOCKS on the person's answer and goes on from it — and the adapter's
+// suspension otherwise. The rest of the chain is the same either way, which is
+// what makes the two endings one authority.
 func (k *effectKernel) authorityChain(state *kernelCall) AuthorityChain {
+	approver := Approver(kernelApprover{state: state})
+	if k.questioner != nil {
+		approver = serviceApprover{state: state, questioner: k.questioner}
+	}
 	return AuthorityChain{
 		PreCalls: []PreCall{kernelPolicy{state: state}},
-		Approver: kernelApprover{state: state},
+		Approver: approver,
 		Guards: []Guard{
 			kernelGrantGuard{kernel: k},
 			kernelFloorGuard{kernel: k},
@@ -877,42 +892,92 @@ func kernelAskReason(tool string, effect content.Effect, outOfScope *OutOfScopeF
 	return reason
 }
 
-// kernelApprover is the ADAPTER that keeps the kernel's own suspension exactly
-// as it was: the proposal is recorded in the ledger, its file versions and
-// expansions are bound, the approval store holds the pending question, and the
-// call returns the same *ApprovalRequestedError eino turns into an interrupt
-// (the adapter trips the batch latch with it). nocx-a62cl.3.4 replaces this
-// type with a service that blocks the call on the person's answer; nothing
-// else about the kernel's points changes then, which is why it stays small and
-// isolated here.
+// Questioner puts one prepared question to a person and returns their answer
+// (ADR-anntnxdj §3). It is the kernel's authority seam to the transport's
+// approval service, handed over exactly where the approval store is
+// (AskParams.Questioner), and it BLOCKS: the service moves the run to
+// awaiting_approval, publishes the question, waits for agent.approve and
+// returns that answer to this same call. No answer — a declared limit passed, a
+// cancelled call, a closed connection — is a refusal, never a yes.
+type Questioner interface {
+	Ask(ctx context.Context, req *ApprovalRequest) Answer
+}
+
+// kernelApprover is the ADAPTER for a chain with no service wired: it prepares
+// the question, then returns the same *ApprovalRequestedError eino turns into
+// an interrupt (and trips the batch latch with it). It is what the framework
+// path and every test without a service still reach; the product's assistant
+// turn reaches serviceApprover instead.
 type kernelApprover struct{ state *kernelCall }
 
 func (a kernelApprover) Answer(ctx context.Context, call Call, ask Ask) Answer {
-	k := a.state.kernel
+	if ask.Egress != nil {
+		return a.answerEgress(call, ask.Egress, call.Declaration(), callResources(call))
+	}
+	req, err := a.state.kernel.prepareQuestion(ctx, call, a.state)
+	if err != nil {
+		// A ledger failure is not a suspension: its cause is the run's to
+		// report, so it travels as the unanswered answer's error and fails
+		// the run.
+		return Unanswered{Err: err}
+	}
+	tripLatch(ctx, &ApprovalRequestedError{Request: req})
+	return Unanswered{Err: &ApprovalRequestedError{Request: req}}
+}
+
+// serviceApprover is the chain's Approver when the transport's approval
+// service is wired (nocx-a62cl.3.1). The question is prepared by the SAME
+// builder the adapter uses — the ledger proposal, its file versions, its
+// expansions, the classifier's fact — and the service's answer comes back to
+// this very call, which then goes on through the guards and runs once.
+//
+// It does NOT trip the batch latch, and that is the shape's point: a call that
+// waited and was allowed is a call that ran, so the next call in the model's
+// response is not stopped by a suspension that did not happen.
+type serviceApprover struct {
+	state      *kernelCall
+	questioner Questioner
+}
+
+func (a serviceApprover) Answer(ctx context.Context, call Call, ask Ask) Answer {
+	if ask.Egress != nil {
+		// The egress question still suspends through the adapter until
+		// nocx-a62cl.3.4 moves it onto the service with the rest of eino's
+		// interrupt: one question at a time, the same shape it had.
+		return kernelApprover{state: a.state}.answerEgress(call, ask.Egress, call.Declaration(), callResources(call))
+	}
+	req, err := a.state.kernel.prepareQuestion(ctx, call, a.state)
+	if err != nil {
+		return Unanswered{Err: err}
+	}
+	return a.questioner.Ask(ctx, req)
+}
+
+// prepareQuestion is the one builder of the question a person is shown: the
+// proposal is recorded in the ledger as an action entry, its file versions and
+// expansion values are bound, the store holds it pending, and the request
+// carries what the surface renders. Both endings — the service's blocking wait
+// and the adapter's suspension — prepare it here, so the two can never ask
+// different questions.
+func (m *effectKernel) prepareQuestion(ctx context.Context, call Call, state *kernelCall) (*ApprovalRequest, error) {
 	decl := call.Declaration()
 	resources, _ := call.Resources()
 	invocation := call.Invocation()
 	callID := call.CallID()
 	rawArgs := string(call.RawParams())
-	if ask.Egress != nil {
-		return a.answerEgress(call, ask.Egress, decl, resources)
+	if state.classifierFact != nil {
+		request := m.request(decl, callID, rawArgs, resources, state.install)
+		request.OutOfScope = state.outOfScope
+		return m.escalateClassifier(ctx, decl, callID, rawArgs, request, state.classifierFact, resources, invocation)
 	}
-	var escalation error
-	if a.state.classifierFact != nil {
-		request := k.request(decl, callID, rawArgs, resources, a.state.install)
-		request.OutOfScope = a.state.outOfScope
-		escalation = k.escalateClassifier(ctx, decl, callID, rawArgs, request, a.state.classifierFact, resources, invocation)
-	} else {
-		escalation = k.escalate(ctx, decl, callID, rawArgs, call.Arguments(), resources, invocation, a.state.outOfScope, a.state.install)
-	}
-	if escalation != nil {
-		// A suspension is an Unanswered answer by the pipeline's vocabulary:
-		// nobody has answered yet, and the error underneath is what carries
-		// the request to the surface. A ledger failure travels the same way
-		// and fails the run, because its cause is not a suspension.
-		return Unanswered{Err: escalation}
-	}
-	return Unanswered{Err: errors.New("the approval escalation returned without a suspension")}
+	return m.escalate(ctx, decl, callID, rawArgs, call.Arguments(), resources, invocation, state.outOfScope, state.install)
+}
+
+// callResources is the call's resolved resources, for a question that names
+// them; a call whose resources were never resolved names none.
+func callResources(call Call) []agenttools.ResourceRef {
+	resources, _ := call.Resources()
+	return resources
 }
 
 // answerEgress puts the screen's question to the person in the shape the
@@ -1325,17 +1390,19 @@ func (m *effectKernel) bindApprovalScripts(ctx context.Context, req *ApprovalReq
 
 // ── the ask and the latch ─────────────────────────────────────────────────
 
-// escalate suspends the run BEFORE next — the call that is asking has not
-// run, and no call after it in this model response will. The escalation is
-// RECORDED, not only held in memory (nocx-5dldy): the proposal put to a
-// person is an action entry in the ledger with its own interrupted attempt —
-// "the proposal, the decision, the attempt and the result are one readable
+// escalate prepares the question about a call that has not run — the
+// proposal, the ledger entry and attempt that record it, its file versions and
+// expansion values, and the request the surface renders. Whether the run then
+// suspends (the adapter) or the call blocks on the answer (the service) is the
+// approver's ending, not this builder's.
+//
+// The proposal is RECORDED, not only held in memory (nocx-5dldy): it is an
+// action entry in the ledger with its own interrupted attempt — "the
+// proposal, the decision, the attempt and the result are one readable
 // thread" — and the approved call runs as a SUBSEQUENT attempt of that same
 // entry (ADR-0020 decision 4: a retry after approval is an execution of the
-// same intent, never a new intent). The persisted interrupt state is the
-// proposal itself: the resume re-runs the pipeline and the approval record
-// decides whether the exact proposal may execute.
-func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, args map[string]any, resources []agenttools.ResourceRef, invocation content.Invocation, outOfScope *OutOfScopeFact, install *ApprovalInstall) error {
+// same intent, never a new intent).
+func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, args map[string]any, resources []agenttools.ResourceRef, invocation content.Invocation, outOfScope *OutOfScopeFact, install *ApprovalInstall) (*ApprovalRequest, error) {
 	ap := m.proposalWithInvocation(decl.Name, callID, rawArgs, invocation)
 	ap.CommandInvocation = decl.CommandArg != ""
 	// The pending record carries the fact too: the answer arrives on another
@@ -1347,7 +1414,7 @@ func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callI
 	if m.ledger != nil {
 		id, err := m.recordProposal(ctx, decl, rawArgs, resources, ap, nil)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		entryID = id
 	}
@@ -1358,16 +1425,15 @@ func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callI
 	req.DerivedEffects = commandSelection(invocation, decl.Declaration.Effect).Candidates
 	req.ArgHash = ap.ArgHash
 	req.EntryID = entryID
-	// After the ledger record and before the latch: the person is shown the
+	// After the ledger record and before the answer: the person is shown the
 	// values, and the SAME values are what the record binds.
 	m.bindApprovalExpansions(ctx, &ap, req, decl, rawArgs)
 	m.bindApprovalScripts(ctx, req, invocation)
-	tripLatch(ctx, &ApprovalRequestedError{Request: req})
 	if m.approvals != nil {
 		ap.EntryID = entryID
 		m.approvals.Request(ap)
 	}
-	return &ApprovalRequestedError{Request: req}
+	return req, nil
 }
 
 // escalateClassifier is escalate with the classifier's ledger fact: the
@@ -1378,7 +1444,7 @@ func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callI
 // machinery as a policy ask: the person's yes covers the proposal
 // INCLUDING its classification, and the resume skips a second
 // consultation (the loop property).
-func (m *effectKernel) escalateClassifier(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, ask *ApprovalRequest, fact *classifierFact, resources []agenttools.ResourceRef, invocation content.Invocation) error {
+func (m *effectKernel) escalateClassifier(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, ask *ApprovalRequest, fact *classifierFact, resources []agenttools.ResourceRef, invocation content.Invocation) (*ApprovalRequest, error) {
 	ap := m.proposalWithInvocation(decl.Name, callID, rawArgs, invocation)
 	ap.CommandInvocation = decl.CommandArg != ""
 	ap.OutOfScope = ask.OutOfScope
@@ -1387,7 +1453,7 @@ func (m *effectKernel) escalateClassifier(ctx context.Context, decl agenttools.T
 	if m.ledger != nil {
 		id, err := m.recordProposal(ctx, decl, rawArgs, resources, ap, fact)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		entryID = id
 	}
@@ -1403,7 +1469,7 @@ func (m *effectKernel) escalateClassifier(ctx context.Context, decl agenttools.T
 		ap.EntryID = entryID
 		m.approvals.Request(ap)
 	}
-	return &ApprovalRequestedError{Request: ask}
+	return ask, nil
 }
 
 // request builds the ask BOTH escalation sites send — the policy arm and the
@@ -1682,6 +1748,25 @@ func refusalResult(tool string, reason PolicyRefusalReason, kind DeclineKind, de
 	default: // RefusedByDecision — the matrix row, standing by nature
 		return "REFUSED: nocx did not run your call to " + tool + ": this kind of action is refused by the policy this question runs under, and that refusal stands. Do not propose it again, or try a different spelling of the same call."
 	}
+}
+
+// PersonDeclineResult is the sentence a person's NO puts in the refused
+// call's own slot. It is exported because the answer now arrives through the
+// transport's approval service (nocx-a62cl.3.1), which must hand the pipeline
+// the same words a resumed refusal used to produce — one spelling of "the
+// person said no", wherever the answer came from.
+func PersonDeclineResult(tool string, kind DeclineKind) string {
+	return refusalResult(tool, RefusedByPerson, kind)
+}
+
+// NoAnswerResult is the sentence an ask's declared limit puts in the call's
+// slot when nobody answered. It is a refusal — no answer is never a yes — and
+// it is written here, beside every other refusal sentence, so the model reads
+// one vocabulary. The limit is stated because a person who walked away and came
+// back should be able to tell "refused" from "nobody was there".
+func NoAnswerResult(tool string, limit time.Duration) string {
+	minutes := int(limit.Round(time.Minute) / time.Minute)
+	return fmt.Sprintf("REFUSED: nocx did not run your call to %s: nobody answered within %d minutes, so the question was closed. Say what you needed in words instead.", tool, minutes)
 }
 
 // leaseResult is the model-visible answer for a run lease outcome.

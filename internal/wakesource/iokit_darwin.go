@@ -10,37 +10,93 @@ package wakesource
 // helper therefore never links this, which TestDeployedHelperDependencyGraphHas
 // NoSSHClient and its siblings enforce.
 //
-// WHAT IOKIT GIVES
+// # Every symbol below is declared by the public SDK
 //
-// IORegisterForSystemPower delivers the sleep and wake edges a process can act
-// on:
+// The header and the declaration are named beside each use, because this file
+// is compiled only on macOS and a symbol the public headers do not declare
+// cannot be caught by a Linux build:
 //
-//   - kIOMessageSystemWillSleep — the machine is going to sleep NOW. The system
-//     waits for IOAllowPowerChange before it does, so the supervisors are told
-//     first and the change is allowed at once.
-//   - kIOMessageSystemHasPoweredOn — the machine has woken. THIS IS NOT ALWAYS A
-//     WAKE FOR A PERSON: a dark wake (Power Nap, maintenance, a network
-//     daemon) powers the CPU and the network without the display or the user's
-//     session. IOKit answers the distinction through IOPMCopyCurrentCapabilities:
-//     kIOPMSystemCapabilityGraphics is set on a full wake and cleared on a dark
-//     one, so that bit is what this file reads. A dark wake is reported as such
-//     and produces no wake signal, and it suppresses the clock input (the gap
-//     a power nap leaves between the two clocks is the nap, not a resume).
-//   - kIOMessageSystemWillPowerOn — the machine is coming back but is not
-//     usable yet; the powered-on edge above is the wake.
-//   - kIOMessageSystemWillNotSleep — the sleep was cancelled. For a connection
-//     it is the same fact as a wake: one proof of life and the probe cadence
-//     resumes.
+//	IOKit/pwr_mgt/IOPMLib.h
+//	  io_connect_t IORegisterForSystemPower(void *refcon, IONotificationPortRef *thePortRef,
+//	                                        IOServiceInterestCallback callback, io_object_t *notifier)
+//	                              AVAILABLE_MAC_OS_X_VERSION_10_0_AND_LATER;
+//	  IOReturn IOAllowPowerChange(io_connect_t kernelPort, intptr_t notificationID)
+//	                              AVAILABLE_MAC_OS_X_VERSION_10_0_AND_LATER;
 //
-// The callback runs on a CFRunLoop that this file owns, on a thread locked to
-// it. It never blocks: it hands the event to a buffered Go channel and, for
-// kIOMessageSystemWillSleep, answers IOKit immediately.
+//	IOKit/IOMessage.h
+//	  #define kIOMessageCanSystemSleep     iokit_common_msg(0x270)
+//	  #define kIOMessageSystemWillNotSleep iokit_common_msg(0x290)
+//	  #define kIOMessageSystemWillSleep    iokit_common_msg(0x280)
+//	  #define kIOMessageSystemWillPowerOn  iokit_common_msg(0x320)
+//	  #define kIOMessageSystemHasPoweredOn iokit_common_msg(0x300)
+//
+//	IOKit/IOKitLib.h
+//	  typedef void (*IOServiceInterestCallback)(void *refcon, io_service_t service,
+//	                                            uint32_t messageType, void *messageArgument);
+//	  CFRunLoopSourceRef IONotificationPortGetRunLoopSource(IONotificationPortRef notify);
+//
+// # What the messages mean, in the public header's own words
+//
+// IOPMLib.h on IORegisterForSystemPower: "kIOMessageSystemWillSleep is delivered
+// at the point the system is initiating a non-abortable sleep. Callers MUST
+// acknowledge this event by calling IOAllowPowerChange"; and "Caller must
+// acknowledge kIOMessageCanSystemSleep by calling IOAllowPowerChange or
+// IOCancelPowerChange". Both are answered here, because a client that answers
+// only one leaves the system waiting on it: a missing acknowledgement to
+// kIOMessageSystemWillSleep costs a 30-second timeout per sleep, and a missing
+// one to kIOMessageCanSystemSleep the same on every idle-sleep proposal.
+//
+//   - kIOMessageCanSystemSleep (0x270) — an idle sleep is being pondered.
+//     Allowed: nocx never vetoes a system sleep, so the answer is
+//     IOAllowPowerChange (IOCancelPowerChange is the veto, "the app vetoes the
+//     idle sleep request"). It is NOT reported as a sleep edge: the sleep may
+//     still be cancelled, and kIOMessageSystemWillSleep is the edge supervisors
+//     act on.
+//   - kIOMessageSystemWillSleep (0x280) — the machine sleeps now. Reported as
+//     EventWillSleep, then allowed at once: nothing here has anything left to
+//     do, and telling the supervisors costs no time.
+//   - kIOMessageSystemHasPoweredOn (0x300) — the machine is awake. Reported as
+//     a full wake; see the limit below.
+//   - kIOMessageSystemWillNotSleep (0x290) — a sleep was cancelled. For a
+//     connection that is the same fact as a wake: the machine never left, so
+//     one proof of life and the probe cadence resumes.
+//   - kIOMessageSystemWillPowerOn (0x320) — powered but not usable yet; the
+//     powered-on edge above is the wake. Nothing to report.
+//
+// # The limit, stated: this bridge cannot tell a full wake from a DARK wake
+//
+// A dark wake (Power Nap, maintenance, a network daemon) powers the CPU and the
+// network without the display or the user's session, and the design says it must
+// not make every connection probe. The API that tells them apart is a
+// CAPABILITY set, and it is NOT in the public SDK: IOPMCapabilityBits,
+// IOPMIsADarkWake, IOPMIsASilentWake and IOPMConnectionCreate are declared in
+// IOPMLibPrivate.h (Apple's SPI header, not shipped as API), and the function an
+// earlier draft of this file called — IOPMCopyCurrentCapabilities — is not
+// declared in the public IOPMLib.h at all, or anywhere in the current
+// IOPMLibPrivate.h. Nothing else in IOPMLib.h reports the current capability
+// set; the header mentions dark wake only in the discussion of two assertion
+// types ("This assertion has no effect if the system is in Dark Wake").
+//
+// So every kIOMessageSystemHasPoweredOn is reported as a full wake, and this is
+// what that costs: a dark wake makes every supervisor probe once, and the clock
+// comparison is not suppressed while the machine is dark, so a nap's gap
+// between the two clocks also reads as a resume. The cost is one small probe
+// per connection per dark wake on a link that is usually healthy. It cannot
+// close a shell: a probe is evidence, never a verdict, and silence closes only
+// under the policy in design §5.3. Taking the distinction from IOPMLibPrivate.h
+// is the alternative, and a private API is not something a shipped helper may
+// link against.
+//
+// The callback runs on a CFRunLoop this file owns, on a thread locked to it. It
+// never blocks: it hands the event to a buffered Go channel and answers IOKit
+// immediately.
 
 /*
 #cgo LDFLAGS: -framework IOKit -framework CoreFoundation
 
-#include <IOKit/pwr_mgt/IOPMLib.h>
+#include <IOKit/IOKitLib.h>
 #include <IOKit/IOMessage.h>
+#include <IOKit/pwr_mgt/IOPMLib.h>
 #include <CoreFoundation/CoreFoundation.h>
 
 // The Go side, defined in this file's //export below.
@@ -50,29 +106,22 @@ static io_connect_t nocxPowerRootPort;
 static IONotificationPortRef nocxPowerNotifyPort;
 static io_object_t nocxPowerNotifier;
 
-// nocxIsFullWake answers whether the system is fully up. IOKit clears the
-// Graphics capability for a dark wake and sets it on a full one.
-static int nocxIsFullWake(void) {
-	IOPMCapabilityBits caps = IOPMCopyCurrentCapabilities();
-	return (caps & kIOPMSystemCapabilityGraphics) != 0;
-}
-
 // nocxPowerCallback runs on the run loop this file starts. It must never
-// block: the sleep edge is answered at once, and the Go side only queues.
-static void nocxPowerCallback(void *refcon, io_service_t service, natural_t messageType, void *messageArgument) {
+// block, and it answers every message the public header says needs an answer.
+static void nocxPowerCallback(void *refcon, io_service_t service, uint32_t messageType, void *messageArgument) {
+	(void)refcon;
+	(void)service;
 	switch (messageType) {
+	case kIOMessageCanSystemSleep:
+		// Pondering an idle sleep. Allow it: nocx never vetoes a system sleep.
+		IOAllowPowerChange(nocxPowerRootPort, (intptr_t)messageArgument);
+		break;
 	case kIOMessageSystemWillSleep:
 		nocxWakeEvent(0); // EventWillSleep
-		// The system waits for every client to allow the change; nothing here
-		// has anything left to do, and telling the supervisors costs no time.
-		IOAllowPowerChange(nocxPowerRootPort, (long)messageArgument);
+		IOAllowPowerChange(nocxPowerRootPort, (intptr_t)messageArgument);
 		break;
 	case kIOMessageSystemHasPoweredOn:
-		if (nocxIsFullWake()) {
-			nocxWakeEvent(1); // EventWoke
-		} else {
-			nocxWakeEvent(2); // EventDarkWoke
-		}
+		nocxWakeEvent(1); // EventWoke
 		break;
 	case kIOMessageSystemWillNotSleep:
 		// Cancelled: the machine never left. A wake for every connection.
@@ -91,6 +140,8 @@ static void nocxPowerCallback(void *refcon, io_service_t service, natural_t mess
 static int nocxRegisterPower(void) {
 	nocxPowerRootPort = IORegisterForSystemPower(NULL, &nocxPowerNotifyPort, nocxPowerCallback, &nocxPowerNotifier);
 	if (nocxPowerRootPort == MACH_PORT_NULL) {
+		// IOPMLib.h: IORegisterForSystemPower "Returns a io_connect_t session
+		// for the IOPMrootDomain or IO_OBJECT_NULL if request failed."
 		return 1;
 	}
 	CFRunLoopAddSource(
@@ -122,6 +173,10 @@ var powerEvents chan Event
 // nothing here may block, and a full queue drops the edge rather than stalling
 // the system's power machine.
 //
+// The kinds are the EventKind values this package's callback contract fixes:
+// 0 EventWillSleep, 1 EventWoke. The Darwin bridge never reports EventDarkWoke,
+// for the reason in the file's comment above.
+//
 //export nocxWakeEvent
 func nocxWakeEvent(kind C.int) {
 	events := powerEvents
@@ -137,7 +192,9 @@ func nocxWakeEvent(kind C.int) {
 
 // osEvents registers for system power notifications and answers the channel
 // they arrive on. Registration happens on a thread locked to a run loop that
-// then blocks for the life of the process.
+// then blocks for the life of the process; that is the source's stated
+// lifetime, so nothing deregisters (IODeregisterForSystemPower plus
+// IONotificationPortDestroy would be the pair, in that order).
 func osEvents() (<-chan Event, error) {
 	events := make(chan Event, 8)
 	powerEvents = events

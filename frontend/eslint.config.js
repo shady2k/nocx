@@ -12,6 +12,7 @@ import { readFileSync, existsSync } from 'node:fs'
 import { relative, resolve, basename } from 'node:path'
 import { createHash } from 'node:crypto'
 import { scanKitIdentities } from './lint-fixtures/scan-kit-identities.mjs'
+import { connectionOwnerRules } from './lint-fixtures/connection-owners.mjs'
 
 // ─── Baseline loader (ADR-0014 §"The guard") ───────────────────────────────────────
 // Per-violation baseline: each raw-control violation still present in application
@@ -797,6 +798,12 @@ const nocxPlugin = {
         }
       },
     },
+    // The renderer's half of the connection-owner record (ADR-ba6xet1b):
+    // no decision from an error's text, no connection notification outside
+    // src/connection/, no open or reconnect outside it, no loss minted here.
+    // lint-fixtures/connection-owners.mjs holds the rules, the tables they
+    // read and the shrink-only baseline; the block below wires them.
+    ...connectionOwnerRules,
   },
 }
 
@@ -878,6 +885,33 @@ export const lifecycleBoundaryBlocks = [
           ],
         },
       ],
+    },
+  },
+]
+
+// ─── ADR-ba6xet1b — the renderer's half of the connection-owner ban ───────────────
+// A fact about an SSH connection has one owner: the backend's connection
+// manager. The renderer draws its answer and never decides, opens or
+// reconnects — and never learns a connection fact by matching an error's text
+// (`.githooks/check-connection-owners.mjs` is the Go half of the same record;
+// nocx-oalo1.3.5 is this half).
+//
+// The four rules and the tables they read live in
+// lint-fixtures/connection-owners.mjs; this block only wires them, so the
+// fixture gate (src/connection-owner-gate.test.ts) can lint the exact same
+// object. The exceptions — tests, test-support, the generated contracts tree
+// and *-fixtures.ts — are the rule's own scope (isScopedFile), one list in one
+// place, not a second glob here that could drift from it.
+export const connectionOwnerBlocks = [
+  {
+    files: ['src/**/*.{ts,tsx}'],
+    languageOptions: { parser: tseslint.parser },
+    plugins: { nocx: nocxPlugin },
+    rules: {
+      'nocx/no-error-text-match': 'error',
+      'nocx/no-connection-subscription': 'error',
+      'nocx/no-connection-open': 'error',
+      'nocx/no-connection-loss': 'error',
     },
   },
 ]
@@ -1012,5 +1046,7 @@ export default tseslint.config(
   // Rule 9 — lifecycle/renderer boundary (ADR-0024). Defined above as
   // lifecycleBoundaryBlocks so the fixture gate lints the exact same fragment.
   ...lifecycleBoundaryBlocks,
+  // ADR-ba6xet1b — the connection owner's renderer half.
+  ...connectionOwnerBlocks,
   prettier,
 )

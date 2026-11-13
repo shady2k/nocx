@@ -882,6 +882,20 @@ func (rp *readoptPass) readopt(
 		if rp.publishEffect != nil {
 			attached.OnEffect(func(effect proto.EffectFrame) { rp.publishEffect(sid, effect) })
 		}
+		// THE CONNECTION'S STATE REACHES A RESTORED PANE TOO (nocx-oalo1.4.4).
+		// The helper's prober never stopped while this coordinator was away —
+		// the supervisor belongs to the helper process, not to the pane — and
+		// the finding arrives on this attachment like any other session event.
+		// It is applied to THIS session, never fanned out over the host
+		// string; the previous coordinator's absence is not the connection's.
+		if cfg.Host != "" {
+			attached.OnLiveness(func(responsive bool, roundTripMS int64) {
+				rp.registry.registry.ObserveSession(sid, ssh.Reachability{
+					Responsive: responsive,
+					RoundTrip:  time.Duration(roundTripMS) * time.Millisecond,
+				})
+			})
+		}
 		if entry.Exit != nil {
 			// The window frontier travels WITH the exit status (nocx-isjh4):
 			// entry.Window.Written is the offset this stream can never

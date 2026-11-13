@@ -3113,7 +3113,7 @@ func (a endpointAttestation) canonical() string {
 
 // appendRouteHops walks the jump chain in connection order — the first
 // bastion first, the target last — the same route the ssh package's dial
-// follows (jumpRouteKey walks the same chain for the pool key). Each hop
+// follows (routeComponent walks the same chain for the pool key). Each hop
 // carries the configured user and port: the recursive JumpConfig when the
 // resolver populated it, the flat Jump* fields otherwise (ssh.ConnectConfig
 // documents both as populated for compatibility).

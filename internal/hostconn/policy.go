@@ -68,7 +68,7 @@ type guardState struct {
 	// probeOut is non-nil while a probe is outstanding. There is at most one: a
 	// parked SendRequest holds the mux's send lock, so a second probe would
 	// queue behind it and measure nothing.
-	probeOut chan error
+	probeOut chan probeOutcome
 	// probedAt is when the outstanding probe was SENT, and silentSince is the
 	// moment silence began (the send of the probe that did not come back). Zero
 	// silentSince means the connection is not stalled.
@@ -136,8 +136,8 @@ func (g *prober) run() {
 			return
 		case at := <-g.live.wake:
 			g.woke(at)
-		case err := <-g.st.probeOut:
-			if g.probeResult(err) {
+		case outcome := <-g.st.probeOut:
+			if g.probeResult(outcome) {
 				return
 			}
 		case err := <-g.st.lookOut:
@@ -235,9 +235,16 @@ func (g *prober) due(at monoclock.Nanos) bool {
 	return false
 }
 
+// probeOutcome is one probe's answer: how long the far side took, measured by
+// the carrier over the wire, and its error if it did not come back.
+type probeOutcome struct {
+	roundTrip time.Duration
+	err       error
+}
+
 // startProbe asks the connection to answer, as of `at`.
 func (g *prober) startProbe(at monoclock.Nanos) {
-	out := make(chan error, 1)
+	out := make(chan probeOutcome, 1)
 	g.st.probeOut = out
 	g.st.probedAt = at
 	g.st.nextProbe = at + span(g.live.probeInterval)
@@ -246,8 +253,8 @@ func (g *prober) startProbe(at monoclock.Nanos) {
 		// inside the library, holding the mux's send lock. That is the design's
 		// own state (design §5.3: "the parked probe"), and it is why the
 		// deadline is the supervisor's and not the call's.
-		_, err := g.prober.Probe(context.Background())
-		out <- err
+		roundTrip, err := g.prober.Probe(context.Background())
+		out <- probeOutcome{roundTrip: roundTrip, err: err}
 	}()
 }
 
@@ -283,16 +290,19 @@ func (g *prober) woke(at monoclock.Nanos) {
 
 // probeResult applies one probe's answer or failure; it reports whether the
 // guard should end.
-func (g *prober) probeResult(err error) bool {
+func (g *prober) probeResult(outcome probeOutcome) bool {
 	g.st.probeOut = nil
-	if err != nil {
+	if outcome.err != nil {
 		// The transport has ended under the probe. The watcher on Done reports
 		// it, and it is a fact rather than an inference (design §5.3: "A
 		// transport error closes at once").
 		return true
 	}
 	g.sup.answered(g.live, g.gen)
-	g.sup.observe(g.live, Observation{Answered: true, RoundTrip: time.Duration(g.clock.Now() - g.st.probedAt)})
+	// The round trip is the CARRIER's measurement, over the wire: the clock the
+	// supervisor is handed may be the test's, and it certainly cannot see the
+	// packet.
+	g.sup.observe(g.live, Observation{Answered: true, RoundTrip: outcome.roundTrip})
 	// The cadence is measured from the probe's SEND, not from the moment this
 	// loop got to the answer: a host that answers late must not also be asked
 	// late.

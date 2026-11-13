@@ -138,7 +138,7 @@ func TestLiveness_AHostThatStoppedRespondingIsUnknownNotDead(t *testing.T) {
 	s := openRemote(t, r, "srv-01")
 	before := s.Liveness()
 
-	r.observeHost("srv-01", ssh.Reachability{})
+	r.ObserveSession(s.ID(), ssh.Reachability{})
 
 	st := s.Liveness()
 	if st.Liveness == LivenessDead {
@@ -166,9 +166,9 @@ func TestLiveness_AHostThatAnswersAgainIsAliveAgain(t *testing.T) {
 	r := livenessReg(t)
 	s := openRemote(t, r, "srv-01")
 
-	r.observeHost("srv-01", ssh.Reachability{})
+	r.ObserveSession(s.ID(), ssh.Reachability{})
 	unknownAt := s.Liveness()
-	r.observeHost("srv-01", ssh.Reachability{Responsive: true})
+	r.ObserveSession(s.ID(), ssh.Reachability{Responsive: true})
 
 	st := s.Liveness()
 	if st.Liveness != LivenessAlive {
@@ -179,16 +179,25 @@ func TestLiveness_AHostThatAnswersAgainIsAliveAgain(t *testing.T) {
 	}
 }
 
-// A session on another host is untouched: an observation is about the host it
-// names, and marking every session unknown because one machine went quiet
-// would make the state worthless.
-func TestLiveness_AnObservationDoesNotReachAnotherHost(t *testing.T) {
+// An observation reaches the session it names and no other — not even a
+// session on the same host (nocx-oalo1.4.4: a finding is about a CONNECTION, and
+// two connections to one machine are two principals, two routes and two states).
+func TestLiveness_AnObservationReachesOnlyItsOwnSession(t *testing.T) {
 	r := livenessReg(t)
+	observed := openRemote(t, r, "srv-01")
+	// The same host, a different connection.
+	sameHost := openRemote(t, r, "srv-01")
 	elsewhere := openRemote(t, r, "srv-02")
 	local := openRoot(t, r)
 
-	r.observeHost("srv-01", ssh.Reachability{})
+	r.ObserveSession(observed.ID(), ssh.Reachability{})
 
+	if got := observed.Liveness().Liveness; got != LivenessUnknown {
+		t.Errorf("the observed session reads %q, want %q", got, LivenessUnknown)
+	}
+	if got := sameHost.Liveness().Liveness; got != LivenessAlive {
+		t.Errorf("a sibling on the same host reads %q, want %q: one connection's silence is not another's", got, LivenessAlive)
+	}
 	if got := elsewhere.Liveness().Liveness; got != LivenessAlive {
 		t.Errorf("srv-02 session liveness = %q, want %q", got, LivenessAlive)
 	}
@@ -203,7 +212,7 @@ func TestLiveness_AnObservationDoesNotReachAnotherHost(t *testing.T) {
 func TestLiveness_ALateObservationDoesNotOverwriteACurrentRecord(t *testing.T) {
 	r := livenessReg(t)
 	s := openRemote(t, r, "srv-01")
-	r.observeHost("srv-01", ssh.Reachability{})
+	r.ObserveSession(s.ID(), ssh.Reachability{})
 	current := s.Liveness()
 
 	stale := Observation{Liveness: LivenessAlive, Epoch: current.Epoch - 1, ObservedAt: time.Now()}
@@ -302,12 +311,12 @@ func TestLiveness_TheObserverIsToldOnChangeAndNotOtherwise(t *testing.T) {
 	var changes []Ref
 	r.SetLivenessObserver(func(ref Ref) { changes = append(changes, ref) })
 
-	r.observeHost("srv-01", ssh.Reachability{Responsive: true}) // already alive — no change
+	r.ObserveSession(s.ID(), ssh.Reachability{Responsive: true}) // already alive — no change
 	if len(changes) != 0 {
 		t.Errorf("%d notifications for an unchanged value, want 0", len(changes))
 	}
 
-	r.observeHost("srv-01", ssh.Reachability{})
+	r.ObserveSession(s.ID(), ssh.Reachability{})
 	if len(changes) != 1 {
 		t.Fatalf("%d notifications after alive→unknown, want 1", len(changes))
 	}
@@ -315,7 +324,7 @@ func TestLiveness_TheObserverIsToldOnChangeAndNotOtherwise(t *testing.T) {
 		t.Errorf("notified about %+v, want this session's own incarnation", changes[0])
 	}
 
-	r.observeHost("srv-01", ssh.Reachability{}) // still unknown — no second notification
+	r.ObserveSession(s.ID(), ssh.Reachability{}) // still unknown — no second notification
 	if len(changes) != 1 {
 		t.Errorf("%d notifications for a repeated observation, want 1", len(changes))
 	}
@@ -328,7 +337,7 @@ func TestLiveness_ObservationsWorkWithNoObserverWired(t *testing.T) {
 	r := livenessReg(t)
 	s := openRemote(t, r, "srv-01")
 
-	r.observeHost("srv-01", ssh.Reachability{})
+	r.ObserveSession(s.ID(), ssh.Reachability{})
 
 	if got := s.Liveness().Liveness; got != LivenessUnknown {
 		t.Errorf("liveness = %q with no observer wired, want %q", got, LivenessUnknown)

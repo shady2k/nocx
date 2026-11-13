@@ -176,8 +176,11 @@ func TestASleepEdgeNewerThanAWakeIsNotUndone(t *testing.T) {
 	waittest.WaitFor(t, "the suspension", lease.Suspended)
 
 	// A wake from BEFORE the sleep arrives late: it must not resume anything.
+	// The guard is made to go round its loop (the probe ask), so "still
+	// suspended" is read after the edge was certainly applied, not after a
+	// pause.
 	sup.Wake(base + monoclock.Nanos(time.Second))
-	waitABit()
+	syncGuard(t, sup)
 	if !lease.Suspended() {
 		t.Fatal("an older wake cleared a newer sleep edge")
 	}
@@ -185,6 +188,17 @@ func TestASleepEdgeNewerThanAWakeIsNotUndone(t *testing.T) {
 	// A wake after the sleep does resume it.
 	sup.Wake(base + monoclock.Nanos(3*time.Second))
 	waittest.WaitFor(t, "the resume", func() bool { return !lease.Suspended() })
+}
+
+// syncGuard makes the guard complete one loop, so a test that asserts the
+// ABSENCE of an effect reads it after the edge was certainly applied. The ask
+// is the connection's own door; its short deadline is what makes the wait
+// bounded, and the assertion that follows is about state, never about time.
+func syncGuard(t *testing.T, sup *hostconn.Supervisor) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_ = sup.Probe(ctx)
 }
 
 // TestAnAnswerDoesNotClearALaterSleep — finding 9: a probe sent before the
@@ -300,4 +314,174 @@ func TestTheReleaseBarrierReusesTheOneProber(t *testing.T) {
 	if held.Lost() {
 		t.Fatal("the barrier closed the connection it could not get an answer from")
 	}
+}
+
+// TestAnAcquireDuringTheLastReleaseWaits — the verification's last-release
+// race: the fence and the decrement happen under ONE hold of the admission
+// mutex, so an acquire that arrives while the teardown is in progress waits for
+// it instead of joining a connection nobody holds (and being closed with it).
+func TestAnAcquireDuringTheLastReleaseWaits(t *testing.T) {
+	clock := hostconntest.New()
+	var mu sync.Mutex
+	var links []*quietLink
+	carrier := &memoryCarrier{dial: func(hostconn.EventSink) (hostconn.Link, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		l := newQuietLink()
+		links = append(links, l)
+		return l, nil
+	}}
+	_, logger := logtest.New(t)
+	mgr := hostconn.NewManager(carrier, logger, hostconn.WithClock(clock))
+	held := acquire(t, mgr, hostconn.HoldsNone)
+	link, _ := held.Link().(*quietLink)
+	link.closeGate = make(chan struct{})
+
+	released := make(chan struct{})
+	go func() {
+		held.Release()
+		close(released)
+	}()
+	// The teardown is physically in progress: Close has been entered and is
+	// held at its gate.
+	select {
+	case <-link.closeStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the release never reached the physical close")
+	}
+
+	// An acquire now must NOT be handed that connection.
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if lease, err := mgr.Acquire(ctx, plan()); err == nil {
+		lease.Release()
+		t.Fatal("an acquire joined a connection whose last release was tearing it down")
+	}
+
+	close(link.closeGate)
+	<-released
+
+	// And once it is gone, a fresh acquire dials.
+	next, err := mgr.Acquire(context.Background(), plan())
+	if err != nil {
+		t.Fatalf("Acquire after the teardown: %v", err)
+	}
+	t.Cleanup(next.Release)
+	mu.Lock()
+	dials := len(links)
+	mu.Unlock()
+	if dials != 2 {
+		t.Fatalf("%d dials, want a fresh connection after the teardown", dials)
+	}
+}
+
+// TestATaintedConnectionKeepsItsExistingSiblings — the verification's taint
+// regression: taint means "no new holder", never "kill the holders you have".
+func TestATaintedConnectionKeepsItsExistingSiblings(t *testing.T) {
+	clock := hostconntest.New()
+	var mu sync.Mutex
+	var links []*quietLink
+	carrier := &memoryCarrier{dial: func(hostconn.EventSink) (hostconn.Link, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		l := newQuietLink()
+		links = append(links, l)
+		return l, nil
+	}}
+	_, logger := logtest.New(t)
+	mgr := hostconn.NewManager(carrier, logger, hostconn.WithClock(clock))
+	sibling := acquire(t, mgr, hostconn.HoldsPlainShell)
+
+	links[0].tainted.Store(true)
+	fresh, err := mgr.Acquire(context.Background(), plan())
+	if err != nil {
+		t.Fatalf("Acquire after taint: %v", err)
+	}
+	t.Cleanup(fresh.Release)
+	if fresh.Link() == sibling.Link() {
+		t.Fatal("a tainted connection took a new holder")
+	}
+	// The sibling is untouched by the decision about admission.
+	if sibling.Lost() {
+		t.Fatal("a tainted connection's transport was closed under its existing holder")
+	}
+	if got := last(sibling.States()).Kind; got == hostconn.Ended {
+		t.Fatalf("the tainted connection reads %v while it still has a holder", got)
+	}
+
+	// It closes at ITS last release, as the pool's taint always promised.
+	sibling.Release()
+	waittest.WaitFor(t, "the tainted connection to close at its last release", sibling.Lost)
+}
+
+// TestACoalescedBurstKeepsTheLastWake — the control queue coalesces per kind
+// and never drops an edge: after any burst, the newest wake is what the guard
+// applies.
+func TestACoalescedBurstKeepsTheLastWake(t *testing.T) {
+	clock := hostconntest.New()
+	link, _, mgr, sup := wakeStand(t, clock)
+	lease := acquire(t, mgr, hostconn.HoldsPlainShell)
+
+	// Each edge is stamped at the reading it was seen; the clock moves between
+	// them so every reading is honest and the burst really is four edges.
+	sup.Suspend(clock.Now())
+	clock.Advance(time.Second)
+	sup.Wake(clock.Now())
+	clock.Advance(time.Second)
+	sup.Suspend(clock.Now())
+	clock.Advance(time.Second)
+	sup.Wake(clock.Now())
+
+	// The newest edge is a wake: the connection is not suspended, and it proves
+	// itself at once.
+	waittest.WaitFor(t, "the final wake to be applied", func() bool { return !lease.Suspended() })
+	waittest.WaitFor(t, "the wake's probe", func() bool { return link.probeCalls.Load() == 1 })
+}
+
+// TestASleepDuringTheDialPublishesSuspended — the control queue's other half:
+// a sleep edge that arrives while the connection is being dialled is honoured
+// by the published guard, which then asks a sleeping machine nothing.
+func TestASleepDuringTheDialPublishesSuspended(t *testing.T) {
+	clock := hostconntest.New()
+	link := newQuietLink()
+	released := make(chan struct{})
+	carrier := &memoryCarrier{dial: func(hostconn.EventSink) (hostconn.Link, error) {
+		<-released
+		return link, nil
+	}}
+	_, logger := logtest.New(t)
+	mgr := hostconn.NewManager(carrier, logger, hostconn.WithClock(clock))
+	sup := mgr.Supervisor(plan().Key)
+
+	acquired := make(chan *hostconn.Lease, 1)
+	go func() {
+		lease, err := mgr.Acquire(context.Background(), plan())
+		if err == nil {
+			acquired <- lease
+		}
+	}()
+
+	clock.Advance(time.Second)
+	sup.Suspend(clock.Now())
+	close(released)
+
+	var lease *hostconn.Lease
+	waittest.WaitFor(t, "the dial to publish", func() bool {
+		select {
+		case lease = <-acquired:
+			return true
+		default:
+			return false
+		}
+	})
+	t.Cleanup(lease.Release)
+
+	waittest.WaitFor(t, "the published connection to read suspended", lease.Suspended)
+	clock.Advance(10 * time.Minute)
+	if calls := link.probeCalls.Load(); calls != 0 {
+		t.Fatalf("%d probes were sent to a machine that is asleep", calls)
+	}
+	sup.Wake(clock.Now())
+	waittest.WaitFor(t, "the wake", func() bool { return !lease.Suspended() })
+	waittest.WaitFor(t, "the wake's probe", func() bool { return link.probeCalls.Load() == 1 })
 }

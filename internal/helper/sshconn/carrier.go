@@ -107,14 +107,8 @@ func (c *Carrier) Acquire(ctx context.Context, spec ssh.PooledSpec) (*hostconn.L
 // one connection into two states or merge two principals into one.
 func PlanFor(spec ssh.PooledSpec) hostconn.Plan {
 	plan := hostconn.Plan{
-		Carrier: CarrierName,
-		Key: hostconn.Key{
-			Host:     spec.Host,
-			Port:     spec.Port,
-			User:     spec.User,
-			Identity: spec.Identity,
-			Route:    spec.RouteIdentity(),
-		},
+		Carrier:       CarrierName,
+		Key:           spec.Key(),
 		Material:      spec,
 		ProbeInterval: spec.ProbeInterval,
 	}
@@ -125,26 +119,8 @@ func PlanFor(spec ssh.PooledSpec) hostconn.Plan {
 	// shell on this connection is a plain shell on every hop it is dialled
 	// through, and the hop's own closing policy may no more end under it than
 	// this connection's may.
-	for i, hop := range spec.Route {
-		plan.Route = append(plan.Route, hostconn.Key{
-			Host:     hop.Host,
-			Port:     hop.Port,
-			User:     hop.User,
-			Identity: hop.Identity,
-			Route:    routeIdentityOf(spec.Route[:i]),
-		})
-	}
+	plan.Route = ssh.RouteKeys(spec.Route)
 	return plan
-}
-
-// routeIdentityOf renders a hop's own route the way the pool does, so a hop's
-// supervisor and the pool entry it describes are the same connection.
-func routeIdentityOf(route []ssh.PooledHop) string {
-	if len(route) == 0 {
-		return ""
-	}
-	spec := ssh.PooledSpec{Route: route}
-	return spec.RouteIdentity()
 }
 
 // Dial opens one connection and reports its stages. It is hostconn.Carrier's

@@ -13,10 +13,10 @@ package hostconn
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"time"
 
+	"github.com/shady2k/nocx/internal/connkey"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/monoclock"
 )
@@ -30,22 +30,10 @@ import (
 // different next moves.
 var ErrLinkLost = errors.New("hostconn: the connection this reference rides has ended")
 
-// Key identifies one connection, and it is deliberately the same five
-// components AD-4's pool key carries: the endpoint, the account, the
-// credential principal and the route. A supervisor keyed by less would merge
-// two principals into one state; keyed by more (a channel, a pane) it would
-// split one connection into several answers.
-type Key struct {
-	Host     string
-	Port     int
-	User     string
-	Identity string
-	Route    string
-}
-
-func (k Key) String() string {
-	return fmt.Sprintf("%s@%s:%d/%s", k.User, k.Host, k.Port, k.Identity)
-}
+// Key identifies one connection. It IS internal/connkey's key — one type, one
+// derivation (internal/ssh's PooledSpec.Key), so the pool's table and the
+// supervisor's state cannot disagree about which connections are one.
+type Key = connkey.Key
 
 // Plan is one attempt through a carrier: the identity the supervisor keeps
 // the state under, the carrier's name, and the carrier's own request.

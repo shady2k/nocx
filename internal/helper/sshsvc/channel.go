@@ -644,13 +644,14 @@ func validateTarget(t proto.ChannelTarget) error {
 	return nil
 }
 
-// identityKey is the pool key's credential component for a destination.
-//
-// It follows poolKeyFor's rule rather than inventing one, because two
-// derivations of "which principal is this" would eventually disagree about the
-// one pair of destinations that matters: a stored credential is identified by
-// the COORDINATOR's reference (which is reminted when the material rotates, so
-// a rotated credential cannot reuse a transport authenticated with the old
+// identityKey is the credential component of a destination's connection
+// identity, and the ONLY place "which principal is this" is decided
+// (nocx-oalo1.4.4). The connection key itself is derived once, in
+// ssh.PooledSpec.Key, from this string plus the endpoint and the route; two
+// derivations of the component would eventually disagree about the one pair of
+// destinations that matters: a stored credential is identified by the
+// COORDINATOR's reference (which is reminted when the material rotates, so a
+// rotated credential cannot reuse a transport authenticated with the old
 // secret), and an inline key by the fingerprint of the public half that rides
 // in the identity — never by a path, which the helper does not have anyway.
 //

@@ -290,21 +290,25 @@ type poolKey struct {
 	port      int
 	user      string
 	identity  string // SecretID, public-key SHA256 fingerprint, or empty for agent/prompt auth
-	jumpRoute string // resolved jump identity (see jumpRouteKey), "" for direct
+	jumpRoute string // the rendered route (see routeComponent), "" for direct
 }
 
-// jumpRouteKey renders the jump route into a string component of poolKey.
-// It mirrors poolKey's own identity fields for the bastion hop, so a target
-// reached through two bastions (or the same bastion with two jump
-// credentials) gets two entries. A hop is itself pooled under its own
-// poolKey (ssh_pooled.go's acquireHop), so this string is the deduplication
-// that keeps a target-through-a-route entry separate from the same target
-// dialed directly or through a different route.
-func (k poolKey) jumpRouteKey() string {
-	if k.host == "" {
+// routeComponent renders ONE hop into the route component of a connection key:
+// its own identity, the same sentence a key's String uses with the route left
+// out. It is the one spelling — a route's component is these joined by ">"
+// (ssh_pooled.go's routeKeyOf), and a hop's own key uses it too — so the
+// rendering is never rewritten wherever a hop is named.
+//
+// The values are the hop's own identity fields, so a target reached through two
+// bastions (or the same bastion with two jump credentials) gets two keys. A hop
+// is itself pooled under its own key (ssh_pooled.go's acquireHop), so this
+// string is the deduplication that keeps a target-through-a-route entry
+// separate from the same target dialled directly or through a different route.
+func routeComponent(host string, port int, user, identity string) string {
+	if host == "" {
 		return ""
 	}
-	return fmt.Sprintf("%s@%s:%d/%s", k.user, k.host, k.port, k.identity)
+	return fmt.Sprintf("%s@%s:%d/%s", user, host, port, identity)
 }
 
 // refCount tracks how many tabs (channels) reference a pooled connection.

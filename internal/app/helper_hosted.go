@@ -341,17 +341,22 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		attached.OnFirstOutput(lifecycleAdapter.ObserveShellOutput)
 	}
 
-	// THE HELPER'S OWN KEEPALIVE PROBER, RELAYED (nocx-y6fh7 item 6). A local
-	// pane has no far end to probe (cfg.Host is empty, by the same rule
+	// THE HELPER'S OWN PROBER, RELAYED (nocx-y6fh7 item 6, nocx-oalo1.4.4). A
+	// local pane has no far end to probe (cfg.Host is empty, by the same rule
 	// readopt's own comment states — a local carrier reports no destination),
 	// so the wire notification never arrives for one and this is a no-op
-	// registration rather than a local/remote branch to keep in step by
-	// hand. ObserveHost is the one function that decides what a reachability
-	// finding means, and this is now its only producer: the coordinator's own
-	// dials, which fed it in-process, are gone (nocx-oalo1.3.2).
+	// registration rather than a local/remote branch to keep in step by hand.
+	//
+	// The finding is applied to THIS session, not fanned out over the host
+	// string: the helper probes a connection (endpoint, account, principal,
+	// route) and reports against the session that rides it, so a second
+	// connection to the same machine — another credential, another route — is
+	// not marked by this one's silence. Every other pane on the same
+	// connection is told by its own session's report.
+	livenessSid := session.ID(entry.HostSessionID.Session)
 	if cfg.Host != "" {
 		attached.OnLiveness(func(responsive bool, roundTripMS int64) {
-			h.registry.ObserveHost(cfg.Host, ssh.Reachability{
+			h.registry.ObserveSession(livenessSid, ssh.Reachability{
 				Responsive: responsive,
 				RoundTrip:  time.Duration(roundTripMS) * time.Millisecond,
 			})

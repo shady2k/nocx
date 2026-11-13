@@ -29,8 +29,10 @@ package ssh
 // repository's coordinator path calls it: the consumers reach FSConn,
 // TunnelConn and their siblings, and each of those is being re-pointed at the
 // helper's proxied channels rather than at this (epic nocx-50w7p, plan §3).
-// This is the pool the helper's `ssh` service acquires from, which is why the
-// key derivation below mirrors poolKeyFor and NOT a new one.
+// This is the pool the helper's `ssh` service acquires from, and the identity a
+// connection is shared under is derived in ONE place below (PooledSpec.Key and
+// RouteKeys), used by the pool's own table and passed to the connection
+// supervisor unchanged (nocx-oalo1.4.4).
 
 import (
 	"context"
@@ -42,6 +44,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shady2k/nocx/internal/connkey"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -147,12 +150,48 @@ func (h PooledHop) routeHop() routeHop {
 // addr is the dial address of one endpoint.
 func (h routeHop) addr() string { return net.JoinHostPort(h.host, strconv.Itoa(h.port)) }
 
-// RouteIdentity renders this spec's route into the component the pool key
-// carries for it. It is routeKeyOf, exported for the one caller that keys a
-// connection by the same identity outside this package (the helper's
-// connection supervisor, which must agree with the pool or two answers would
-// name one connection).
-func (s PooledSpec) RouteIdentity() string { return routeKeyOf(s.Route) }
+// Key answers the identity this spec's connection is shared under — THE one
+// derivation (nocx-oalo1.4.4). The pool keys its table by it, the supervisor
+// keys its state by it, and the carrier passes it across without reassembling
+// it, so "which connections are one" has exactly one answer.
+//
+// The components are the documented rule of poolKey's field list: the resolved
+// endpoint, the account, the credential principal and the rendered route. Two
+// connections differing in any of them are two connections.
+func (s PooledSpec) Key() connkey.Key {
+	return connkey.Key{
+		Host:     s.Host,
+		Port:     s.Port,
+		User:     s.User,
+		Identity: s.Identity,
+		Route:    routeKeyOf(s.Route),
+	}
+}
+
+// RouteKeys answers the identity of every hop of a route, in dial order: each
+// hop's own endpoint plus the route before it, which is exactly the key
+// acquireHop has always pooled a hop under. It is the same derivation as Key's,
+// applied to each hop.
+func RouteKeys(route []PooledHop) []connkey.Key {
+	keys := make([]connkey.Key, 0, len(route))
+	for i, hop := range route {
+		keys = append(keys, connkey.Key{
+			Host:     hop.Host,
+			Port:     hop.Port,
+			User:     hop.User,
+			Identity: hop.Identity,
+			Route:    routeKeyOf(route[:i]),
+		})
+	}
+	return keys
+}
+
+// poolKeyOf is the pool's table key for a derived identity. It is a field
+// mapping and carries no rule: the rules — which components, how a route is
+// rendered — are PooledSpec.Key's and RouteKeys'.
+func poolKeyOf(k connkey.Key) poolKey {
+	return poolKey{host: k.Host, port: k.Port, user: k.User, identity: k.Identity, jumpRoute: k.Route}
+}
 
 // routeKeyOf renders an ordered route into the pool key's route component.
 //
@@ -167,9 +206,7 @@ func routeKeyOf(route []PooledHop) string {
 	}
 	parts := make([]string, 0, len(route))
 	for _, hop := range route {
-		parts = append(parts, poolKey{
-			host: hop.Host, port: hop.Port, user: hop.User, identity: hop.Identity,
-		}.jumpRouteKey())
+		parts = append(parts, routeComponent(hop.Host, hop.Port, hop.User, hop.Identity))
 	}
 	return strings.Join(parts, ">")
 }
@@ -312,13 +349,7 @@ func (rc *RealClient) AcquirePooled(ctx context.Context, spec PooledSpec) (*Pool
 		return nil, err
 	}
 
-	key := poolKey{
-		host:      spec.Host,
-		port:      spec.Port,
-		user:      spec.User,
-		identity:  spec.Identity,
-		jumpRoute: routeKeyOf(spec.Route),
-	}
+	key := poolKeyOf(spec.Key())
 
 	dial := func(poolKey) (sshClientConn, error) {
 		// The TARGET host's fingerprint is captured here, at the one place a
@@ -473,13 +504,7 @@ func (rc *RealClient) dialRoute(ctx context.Context, route []PooledHop, last rou
 func (rc *RealClient) acquireHop(ctx context.Context, route []PooledHop) (*PooledConn, error) {
 	hop := route[len(route)-1]
 	hopEndpoint := hop.routeHop()
-	key := poolKey{
-		host:      hop.Host,
-		port:      hop.Port,
-		user:      hop.User,
-		identity:  hop.Identity,
-		jumpRoute: routeKeyOf(route[:len(route)-1]),
-	}
+	key := poolKeyOf(RouteKeys(route)[len(route)-1])
 	dial := func(poolKey) (sshClientConn, error) {
 		return rc.dialRoute(ctx, route[:len(route)-1], hopEndpoint)
 	}

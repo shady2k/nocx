@@ -23,6 +23,7 @@ package sshsvc_test
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"strconv"
 	"strings"
@@ -317,10 +318,18 @@ func supervisedSpec(t *testing.T, f *fixture, destination proto.SSHDestination, 
 // itself as one.
 func (s *stand) openShell(t *testing.T, destination proto.SSHDestination) *sshsvc.ShellChannel {
 	t.Helper()
+	return s.openShellWith(t, destination, nil)
+}
+
+// openShellWith is openShell with the liveness observer a coordinator session
+// registers: what every shell on a connection is told.
+func (s *stand) openShellWith(t *testing.T, destination proto.SSHDestination, onLiveness ssh.LivenessObserver) *sshsvc.ShellChannel {
+	t.Helper()
 	ctx := host.WithConnection(context.Background(), s.helper)
 	shell, err := s.service.OpenShell(ctx, sshsvc.ShellSpec{
 		Destination: destination,
 		Cols:        80, Rows: 24,
+		OnLiveness: onLiveness,
 	})
 	if err != nil {
 		t.Fatalf("open a shell: %v", err)
@@ -710,5 +719,169 @@ func TestAPlainShellConnectionSurvivesAWake(t *testing.T) {
 	proxy.Pass()
 	waittest.WaitFor(t, "the connection to answer again", func() bool {
 		return lastState(holder.States()).Kind == hostconn.Connected
+	})
+}
+
+// ─── one connection, one identity, one prober (nocx-oalo1.4.4) ────────────
+//
+// The connection is the key, not the host name and not the pane: every holder
+// rides one supervisor, every holder's connection is probed, and a finding
+// reaches every shell on the connection and no other.
+
+// TestAFarHelperLaneAloneOnAConnectionReadsStalled is the survey's own list —
+// lane, channel, forward, tool socket, pane, probe lease — reduced to the
+// case that used to have no prober at all: a connection whose only holder is a
+// far helper's LANE. Nothing on it is a shell, and it still reads stalled when
+// the link goes deaf.
+func TestAFarHelperLaneAloneOnAConnectionReadsStalled(t *testing.T) {
+	const password = "correct horse battery staple"
+	f := newFixture(t, password, newSigner(t))
+	hold := make(chan struct{})
+	f.execPeer = func(in io.Reader, out io.Writer) int {
+		// The far helper's lane stays open for the test's duration: its bytes
+		// are not what this test is about.
+		<-hold
+		return 0
+	}
+	t.Cleanup(func() { close(hold) })
+
+	proxy := sshtest.NewFaultProxy(t, f.addr)
+	clock := hostconntest.New()
+	stand := newStandOnClock(t, &coordinator{
+		password: password, verdict: proto.HostKeyTrusted, fingerprint: f.hostKeyFingerprint(),
+	}, discardLogger(), clock)
+	destination := destinationAt(t, proxy.Addr())
+
+	// The lane the far helper runs, through the same destination a pane uses.
+	if _, err := stand.lane(t, proto.LaneParams{
+		Destination: destination,
+		Machine:     proto.Machine{Dir: laneDir()},
+		Generation:  proto.GenerationID(laneGeneration),
+	}); err != nil {
+		t.Fatalf("open a lane: %v", err)
+	}
+
+	// The same connection, read: the lease the test holds IS a holder of it,
+	// and its path is the supervisor's.
+	holder, err := stand.carrier.Acquire(context.Background(), supervisedSpec(t, f, destination, false))
+	if err != nil {
+		t.Fatalf("hold the lane's connection: %v", err)
+	}
+	t.Cleanup(holder.Release)
+	if got := f.connections(); got != 1 {
+		t.Fatalf("the lane and the holder made %d connections, want 1", got)
+	}
+
+	proxy.SilenceEstablished()
+	clock.Advance(hostconn.ProbeInterval)
+	clock.Advance(hostconn.ProbeDeadline)
+	waittest.WaitFor(t, "a lane-only connection to read stalled", func() bool {
+		return lastState(holder.States()).Kind == hostconn.Stalled
+	})
+}
+
+// TestTheSecondPaneKeepsReportingAfterTheFirstCloses is the survey's "stops when
+// the arming pane closes": every shell registers its own observer on the one
+// connection, so closing one leaves the other being told.
+func TestTheSecondPaneKeepsReportingAfterTheFirstCloses(t *testing.T) {
+	const password = "correct horse battery staple"
+	f := newFixture(t, password, newSigner(t))
+	proxy := sshtest.NewFaultProxy(t, f.addr)
+	clock := hostconntest.New()
+	stand := newStandOnClock(t, &coordinator{
+		password: password, verdict: proto.HostKeyTrusted, fingerprint: f.hostKeyFingerprint(),
+	}, discardLogger(), clock)
+	destination := destinationAt(t, proxy.Addr())
+
+	var firstReports atomic.Int32
+	first := stand.openShellWith(t, destination, func(ssh.Reachability) { firstReports.Add(1) })
+	secondReports := make(chan bool, 8)
+	_ = stand.openShellWith(t, destination, func(r ssh.Reachability) {
+		select {
+		case secondReports <- r.Responsive:
+		default:
+		}
+	})
+
+	if got := f.connections(); got != 1 {
+		t.Fatalf("two shells on one host made %d connections, want 1", got)
+	}
+	// The first pane closes; its observer goes with its lease.
+	if err := first.Close(); err != nil {
+		t.Fatalf("close the first pane: %v", err)
+	}
+
+	proxy.SilenceEstablished()
+	clock.Advance(hostconn.ProbeInterval)
+	clock.Advance(hostconn.ProbeDeadline)
+
+	// The survivor is still being told, and the finding is silence.
+	waittest.WaitFor(t, "the second pane to be told the connection stopped answering", func() bool {
+		select {
+		case responsive := <-secondReports:
+			if responsive {
+				t.Fatalf("the second pane was told the silent connection is responsive")
+			}
+			return true
+		default:
+			return false
+		}
+	})
+	if firstReports.Load() != 0 {
+		t.Fatalf("the closed pane's observer fired %d times after it closed", firstReports.Load())
+	}
+	if got := lastStateFrom(t, stand, destination, f); got != hostconn.Stalled {
+		t.Fatalf("the connection reads %v, want stalled", got)
+	}
+}
+
+// lastStateFrom reads the stand's own supervisor for a destination: the state
+// the panes on that connection are being told about.
+func lastStateFrom(t *testing.T, stand *stand, destination proto.SSHDestination, f *fixture) hostconn.Kind {
+	t.Helper()
+	lease, err := stand.carrier.Acquire(context.Background(), supervisedSpec(t, f, destination, false))
+	if err != nil {
+		return hostconn.Connected
+	}
+	defer lease.Release()
+	return lastState(lease.States()).Kind
+}
+
+// TestASingleHealthyPaneStillReports is the paired success: one pane on one
+// connection, a wake, and the answer reaches the coordinator exactly as it did
+// before this change.
+func TestASingleHealthyPaneStillReports(t *testing.T) {
+	const password = "correct horse battery staple"
+	f := newFixture(t, password, newSigner(t))
+	proxy := sshtest.NewFaultProxy(t, f.addr)
+	clock := hostconntest.New()
+	stand := newStandOnClock(t, &coordinator{
+		password: password, verdict: proto.HostKeyTrusted, fingerprint: f.hostKeyFingerprint(),
+	}, discardLogger(), clock)
+	destination := destinationAt(t, proxy.Addr())
+
+	reports := make(chan ssh.Reachability, 8)
+	stand.openShellWith(t, destination, func(r ssh.Reachability) {
+		select {
+		case reports <- r:
+		default:
+		}
+	})
+
+	// A wake makes the probe happen now, so the test does not wait an interval.
+	stand.wake.Wake()
+	waittest.WaitFor(t, "the pane to be told its connection answered", func() bool {
+		select {
+		case r := <-reports:
+			if !r.Responsive {
+				t.Fatalf("a healthy connection was reported unresponsive: %+v", r)
+			}
+			if r.RoundTrip <= 0 {
+				t.Fatalf("an answered probe carried no round trip: %+v", r)
+			}
+			return true
+		default:
+			return false
+		}
 	})
 }

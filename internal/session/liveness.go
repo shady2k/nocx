@@ -195,30 +195,29 @@ func (r *Reg) Observe(ref Ref, obs Observation) bool {
 	return applied
 }
 
-// ObserveHost is observeHost, exported for a caller outside this package: a
-// helper-hosted ssh session's keepalive prober runs one process away
-// (ADR-0057, nocx-y6fh7 item 6), so its finding arrives as a
-// proto.SessionLiveness notification and internal/app translates it into the
-// same Reachability this function has always taken. One producer, one
-// function that decides what it means.
-func (r *Reg) ObserveHost(host string, reach ssh.Reachability) { r.observeHost(host, reach) }
-
-// observeHost applies what the keepalive prober learned about one machine to
-// every session running on it. It is the production producer of `unknown`.
+// ObserveSession applies what a probe learned about ONE session's connection to
+// that session, and to no other. It is the production producer of `unknown`.
 //
-// The granularity is the host, deliberately. A keepalive failure is evidence
-// about a MACHINE — the transport to it stopped answering — and the pooled
-// connection it rides is shared by every tab to the same principal (AD-4), so
-// there is no single session it belongs to. Marking every session on that host
-// unknown claims exactly what the evidence supports and no more, which is what
-// `unknown` is for; a session elsewhere is untouched.
+// The granularity is the CONNECTION a session rides, never the machine it is
+// on (nocx-oalo1.4.4). The helper's prober runs per connection — host, port,
+// account, credential principal and route — and reports against the session
+// that rides it; two tabs on one host under different credentials are two
+// connections, and a finding about one says nothing about the other. Until this
+// change the coordinator fanned a finding out by host STRING, which marked a
+// second connection to the same machine and stopped at whatever the helper
+// happened to arm. The session that REPORTED is the one the evidence belongs
+// to; every other pane on the same connection is told separately, by its own
+// session's report.
+//
+// What this still cannot do is stated rather than hidden: a pane that is not a
+// shell — a readopted pane, a far-helper pane, a panel — has no session here to
+// attach a finding to. The connection-keyed state that reaches those is
+// `pane.connection` (design §5.6), which is stage 3's contract, and nothing
+// here invents it.
 //
 // The epoch is minted per session, from that session's own counter, at the
 // moment the observation is made.
-func (r *Reg) observeHost(host string, reach ssh.Reachability) {
-	if host == "" {
-		return
-	}
+func (r *Reg) ObserveSession(id ID, reach ssh.Reachability) {
 	value := LivenessUnknown
 	if reach.Responsive {
 		value = LivenessAlive
@@ -226,24 +225,21 @@ func (r *Reg) observeHost(host string, reach ssh.Reachability) {
 	at := time.Now()
 
 	r.mu.Lock()
-	refs := make([]Ref, 0, len(r.sessions))
-	for _, s := range r.sessions {
-		if s.host == host {
-			refs = append(refs, Ref{ID: s.id, Identity: s.identity})
-		}
+	s, ok := r.sessions[id]
+	if !ok {
+		r.mu.Unlock()
+		return
 	}
+	ref := Ref{ID: s.id, Identity: s.identity}
 	r.mu.Unlock()
 
-	for _, ref := range refs {
-		// Minting inside the loop, through Observe's own path, keeps one
-		// route into the record: this function decides WHAT it saw, never how
-		// the record is written.
-		epoch, ok := r.mintLivenessEpoch(ref)
-		if !ok {
-			continue
-		}
-		r.Observe(ref, Observation{Liveness: value, Epoch: epoch, ObservedAt: at, RoundTrip: reach.RoundTrip})
+	// Through Observe's own path, so there is one route into the record: this
+	// function decides WHAT it saw, never how the record is written.
+	epoch, ok := r.mintLivenessEpoch(ref)
+	if !ok {
+		return
 	}
+	r.Observe(ref, Observation{Liveness: value, Epoch: epoch, ObservedAt: at, RoundTrip: reach.RoundTrip})
 }
 
 // mintLivenessEpoch takes the next epoch from the named session's counter, or

@@ -70,3 +70,43 @@ func TestAFailedDialIsNotRefusedWithoutEvidence(t *testing.T) {
 		t.Fatalf("an unclassified transport failure reads as a refusal: %v", got)
 	}
 }
+
+// TestThePlanKeyIsThePoolsOwnDerivation is nocx-oalo1.4.4's "one function
+// derives the connection key": the value the supervisor keys its state by IS
+// the value the pool keys its table by, for the destination and for every hop.
+func TestThePlanKeyIsThePoolsOwnDerivation(t *testing.T) {
+	spec := ssh.PooledSpec{
+		Host: "target.example", Port: 2222, User: "dev", Identity: "cred-7",
+		Route: []ssh.PooledHop{
+			{Host: "bastion.example", Port: 22, User: "jump", Identity: "jump-key"},
+			{Host: "inner.example", Port: 22, User: "hop", Identity: "hop-key"},
+		},
+	}
+	plan := PlanFor(spec)
+	if plan.Key != spec.Key() {
+		t.Fatalf("the supervisor keys by %+v and the pool by %+v: two derivations of one connection", plan.Key, spec.Key())
+	}
+	want := ssh.RouteKeys(spec.Route)
+	if len(plan.Route) != len(want) {
+		t.Fatalf("the plan carries %d hop keys, want %d", len(plan.Route), len(want))
+	}
+	for i := range want {
+		if plan.Route[i] != want[i] {
+			t.Fatalf("hop %d: the supervisor keys by %+v and the pool by %+v", i, plan.Route[i], want[i])
+		}
+	}
+
+	// And the components are the ones that decide "same connection": the same
+	// endpoint and account, a different principal, is a different key.
+	other := spec
+	other.Identity = "cred-8"
+	if other.Key() == spec.Key() {
+		t.Fatal("two principals on one endpoint derive one key: a connection would be shared across credentials")
+	}
+	// A different route is a different key too.
+	routed := spec
+	routed.Route = spec.Route[:1]
+	if routed.Key() == spec.Key() {
+		t.Fatal("two routes to one endpoint derive one key: a connection would be shared across bastions")
+	}
+}

@@ -1173,11 +1173,12 @@ type SessionExit struct {
 // It names the session rather than the destination the way SessionExit does,
 // for the same reason: this is a fact about a PROCESS this generation is
 // answerable for, not about a host in the abstract. A helper that shares one
-// pooled connection across several sessions (AD-4) reports against whichever
-// session's own spawn armed the prober; nothing here claims the fact for
-// every session on that connection, which is the coordinator's own concern
-// to fan out if it chooses to (session.Reg.ObserveHost already does, keyed
-// by host, for the sessions it is told about).
+// pooled connection across several sessions (AD-4) reports against each
+// session that rides it — since nocx-oalo1.4.3 every ssh shell registers its
+// own observer on the connection, so a finding reaches every pane on that
+// connection and, deliberately, no other: the coordinator applies it to the
+// session it names (session.Reg.ObserveSession), never fanning out by host
+// string (nocx-oalo1.4.4).
 type SessionLiveness struct {
 	Session HostSessionID `json:"session"`
 	// Responsive is this round's verdict: the far end answered a keepalive

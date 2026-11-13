@@ -502,7 +502,7 @@ func (c *collector) visitNode(n ast.Node, callee *ast.CallExpr, sel *types.Selec
 		// expression; Sel is the identifier that names the object, and the
 		// SELECTION (when there is one) is where a method's receiver lives —
 		// an interface method's own signature has none.
-		selection, _ := info.Selections[x]
+		selection := info.Selections[x]
 		c.visitNode(x.X, nil, nil, label, rel, p, info)
 		c.visitNode(x.Sel, callee, selection, label, rel, p, info)
 		return
@@ -559,7 +559,7 @@ func (c *collector) identFact(id *ast.Ident, callee *ast.CallExpr, sel *types.Se
 			// The type, recorded so an unix-only function can drop it below.
 			c.dialerTypes[label] = append(c.dialerTypes[label], len(c.list))
 			c.add(Fact{Rule: "net-dial", File: rel, Line: pos.Line, Func: label, Object: netPkg + ".Dialer"})
-		case isFunc && isNetDial(obj.Name()) && pkgLevel && fn.Type().(*types.Signature).Recv() == nil:
+		case isFunc && isNetDial(obj.Name()) && pkgLevel && receiverType(fn) == nil:
 			if callee != nil && c.constantUnix(callee, 0, info) {
 				c.unixDials[label]++
 				return
@@ -620,15 +620,26 @@ func isDialerDialMethod(fn *types.Func) bool {
 	if fn.Name() != "Dial" && fn.Name() != "DialContext" {
 		return false
 	}
-	sig, ok := fn.Type().(*types.Signature)
-	if !ok || sig.Recv() == nil {
-		return false
-	}
-	named, ok := deref(sig.Recv().Type()).(*types.Named)
+	named, ok := deref(receiverType(fn)).(*types.Named)
 	if !ok || named.Obj() == nil || named.Obj().Pkg() == nil {
 		return false
 	}
 	return named.Obj().Pkg().Path() == netPkg && named.Obj().Name() == "Dialer"
+}
+
+// receiverType answers the type a function object is declared on, or nil for a
+// function: net.Dial and a (*T).Dial method share a name and nothing else, and
+// this is the one place the difference is read.
+//
+// types.Func.Type is a *types.Signature for every function object, so the
+// assertion cannot fail; it is checked because an unchecked one is a lint
+// error here (errcheck), and the tree does not buy green by suppressing it.
+func receiverType(fn *types.Func) types.Type {
+	sig, ok := fn.Type().(*types.Signature)
+	if !ok || sig.Recv() == nil {
+		return nil
+	}
+	return sig.Recv().Type()
 }
 
 // dialerNetworkArg answers which argument of a dialer method names the network.
@@ -721,22 +732,6 @@ func isNetDial(name string) bool {
 		return true
 	}
 	return false
-}
-
-// isConnInterface reports whether fn is the SendRequest method of the ssh.Conn
-// interface (as opposed to some other interface's method of the same name).
-func isConnInterface(fn *types.Func) bool {
-	sig, ok := fn.Type().(*types.Signature)
-	if !ok || sig.Recv() == nil {
-		return false
-	}
-	iface, ok := sig.Recv().Type().Underlying().(*types.Interface)
-	if !ok {
-		return false
-	}
-	// The method's receiver type is the interface itself only for interface
-	// methods; compare the object's name and package.
-	return fn.Pkg() != nil && fn.Pkg().Path() == sshPkg && fn.Name() == "SendRequest" && iface.NumMethods() > 0
 }
 
 func objectName(obj types.Object) string {

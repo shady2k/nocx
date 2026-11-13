@@ -369,31 +369,42 @@ func (d *dispatchOperation) dispatch(invocation ToolInvocation, transform dispat
 			return dispatchOutcome{prepared: &prepared, aborted: result}, nil
 		}
 	}
+	return d.executePrepared(&prepared, beforeExecute, executor)
+}
+
+// executePrepared narrows the declaration to the capability this exact call may
+// hold and runs the tool exactly once. It is the half of a call that happens
+// after every policy decision, shared by dispatch's ad-hoc steps and by the
+// authority pipeline (pipeline.go), so the two cannot drift on what "the tool
+// runs once" means or on how its result is checked against its own contract.
+func (d *dispatchOperation) executePrepared(prepared *preparedInvocation, beforeExecute func(*preparedInvocation, agenttools.Capability) error, executor dispatchExecutor) (dispatchOutcome, error) {
+	outcome := dispatchOutcome{prepared: prepared}
 	if prepared.decl.Narrow == nil {
-		return dispatchOutcome{prepared: &prepared}, fmt.Errorf("%w: %q has no capability constructor", ErrUnreachableMethod, prepared.decl.Name)
+		return outcome, fmt.Errorf("%w: %q has no capability constructor", ErrUnreachableMethod, prepared.decl.Name)
 	}
 	capability, err := prepared.decl.Narrow(prepared.request.Grant, prepared.resources, prepared.request.RunContext)
 	if err != nil {
-		return dispatchOutcome{prepared: &prepared}, fmt.Errorf("tool %q: construct capability: %w", prepared.decl.Name, err)
+		return outcome, fmt.Errorf("tool %q: construct capability: %w", prepared.decl.Name, err)
 	}
 	if beforeExecute != nil {
-		if err := beforeExecute(&prepared, capability); err != nil {
-			return dispatchOutcome{prepared: &prepared}, err
+		if err := beforeExecute(prepared, capability); err != nil {
+			return outcome, err
 		}
 	}
 	if executor == nil {
 		executor = d.executor
 	}
 	if executor == nil {
-		return dispatchOutcome{prepared: &prepared}, errors.New("assistant dispatch: no executor wired")
+		return outcome, errors.New("assistant dispatch: no executor wired")
 	}
 	output, runErr := executor(prepared.request.Context, prepared.decl, capability, prepared.request.RawParams)
 	if runErr == nil {
 		if err := validateToolResult(d.results, prepared.decl.Name, output); err != nil {
-			return dispatchOutcome{prepared: &prepared}, err
+			return outcome, err
 		}
 	}
-	return dispatchOutcome{prepared: &prepared, output: output, runErr: runErr}, nil
+	outcome.output, outcome.runErr = output, runErr
+	return outcome, nil
 }
 
 func (d *dispatchOperation) prepare(invocation ToolInvocation, transform dispatchTransform) (preparedInvocation, error) {

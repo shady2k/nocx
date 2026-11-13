@@ -702,12 +702,15 @@ func classifyChannelError(err error) error {
 	if errors.As(err, &refusal) {
 		return refusal
 	}
-	// The two channel-shaped refusals come first, because they are not dial
+	// The channel-shaped refusals come first, because they are not dial
 	// outcomes and no classifier for a handshake knows them: the server would
-	// not open the channel at all, or it would not start the subsystem on the
-	// one it did open.
+	// not open the channel at all, it would not start the subsystem on the one
+	// it did open, or it answered a forward request with `false`.
 	var openErr *gossh.OpenChannelError
 	if errors.As(err, &openErr) {
+		return &proto.Refusal{Code: proto.ErrCodeChannelRefused, Message: err.Error()}
+	}
+	if errors.Is(err, sshdial.ErrForwardRefused) {
 		return &proto.Refusal{Code: proto.ErrCodeChannelRefused, Message: err.Error()}
 	}
 	// x/crypto/ssh answers a refused subsystem request with a fixed sentence

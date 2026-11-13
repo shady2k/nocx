@@ -246,6 +246,7 @@ func (p *Pipeline) Dispatch(invocation ToolInvocation, attempt int, callID strin
 // error apart from a refusal, which the kernel's caller needs to record the
 // attempt's outcome. The tool endpoint sees only Dispatch.
 func (p *Pipeline) run(invocation ToolInvocation, attempt int, callID string) (dispatchOutcome, error) {
+	invocation.RawParams = append([]byte(nil), invocation.RawParams...)
 	ctx := invocation.Context
 	prepared, err := p.operation.prepare(invocation, p.chain.prepare)
 	if err != nil {
@@ -275,7 +276,7 @@ func (p *Pipeline) run(invocation ToolInvocation, attempt int, callID string) (d
 		case Deny:
 			return dispatchOutcome{prepared: &prepared}, &PipelineRefusal{Call: call, Reason: answer.Reason}
 		case Ask:
-			asked = &answer
+			asked = &Ask{Reason: answer.Reason, Facts: append([]string(nil), answer.Facts...)}
 		default:
 			return dispatchOutcome{}, &PipelineRefusal{Call: call, Reason: fmt.Sprintf("%T answered neither allow, deny nor ask, and an unanswered decision is a refusal", p.chain.decide)}
 		}
@@ -308,11 +309,16 @@ func (p *Pipeline) run(invocation ToolInvocation, attempt int, callID string) (d
 			return dispatchOutcome{}, refusal
 		}
 	}
-	var beforeExecute func(*preparedInvocation, agenttools.Capability) error
-	if p.chain.beforeTool != nil {
-		beforeExecute = func(prepared *preparedInvocation, capability agenttools.Capability) error {
-			return p.chain.beforeTool(ctx, call, prepared, capability)
+	beforeExecute := func(prepared *preparedInvocation, capability agenttools.Capability) error {
+		if p.chain.beforeTool != nil {
+			if beforeErr := p.chain.beforeTool(ctx, call, prepared, capability); beforeErr != nil {
+				return beforeErr
+			}
 		}
+		if !p.chain.callerOwnsCancellation {
+			return cancelled(ctx, call, "immediately before execution")
+		}
+		return nil
 	}
 	outcome, err := p.operation.executePrepared(&prepared, beforeExecute, p.chain.execute)
 	if err != nil {
@@ -330,10 +336,9 @@ func (p *Pipeline) run(invocation ToolInvocation, attempt int, callID string) (d
 	return outcome, nil
 }
 
-// decide runs every PreCall in order. A Deny refuses the call at once. The first
-// Ask is remembered and the remaining PreCalls still run, because a later point
-// may refuse the call outright and a question nobody needs to answer is worse
-// than none — at most one question is put to a person for one call.
+// decide runs every PreCall in order. A Deny refuses the call at once. Every
+// pending Ask contributes its reason and facts to one approval request, so an
+// approval answers all questions rather than silently losing later questions.
 func (p *Pipeline) decide(ctx context.Context, call Call, asked *Ask) (*Ask, error) {
 	for _, precall := range p.chain.PreCalls {
 		switch decision := precall.Decide(ctx, call).(type) {
@@ -347,7 +352,10 @@ func (p *Pipeline) decide(ctx context.Context, call Call, asked *Ask) (*Ask, err
 			return nil, &PipelineRefusal{Call: call, Reason: reason}
 		case Ask:
 			if asked == nil {
-				asked = &decision
+				asked = &Ask{Reason: decision.Reason, Facts: append([]string(nil), decision.Facts...)}
+			} else {
+				asked.Reason += "\n" + decision.Reason
+				asked.Facts = append(asked.Facts, decision.Facts...)
 			}
 		default:
 			return nil, &PipelineRefusal{Call: call, Reason: fmt.Sprintf("%T answered neither allow, deny nor ask, and an unanswered decision is a refusal", precall)}

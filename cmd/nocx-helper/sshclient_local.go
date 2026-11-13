@@ -7,8 +7,10 @@ import (
 
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/session"
+	"github.com/shady2k/nocx/internal/helper/sshconn"
 	"github.com/shady2k/nocx/internal/helper/sshdial"
 	"github.com/shady2k/nocx/internal/helper/sshsvc"
+	nocxlog "github.com/shady2k/nocx/internal/log"
 )
 
 // holdSSHClient opens the ssh client this daemon holds and answers the seam
@@ -38,7 +40,11 @@ func holdSSHClient(log *slog.Logger) (sshSeam, error) {
 	if err != nil {
 		return sshSeam{}, err
 	}
-	svc := sshsvc.New(client, log)
+	// THE CARRIER, and the one place it is chosen (design §5.1.2): the
+	// service asks a connection supervisor for every pooled connection, and
+	// what that supervisor dials is this line. A second transport is a package
+	// and a different constructor here.
+	svc := sshsvc.New(sshconn.New(client, nocxlog.NewSlogAdapter(log)), log)
 	log.Info("ssh service: this helper dials; the artifact it came from was built with nocx_local_ssh")
 	return sshSeam{
 		register: func(h *host.Host) { h.Register(svc) },

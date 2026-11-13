@@ -38,6 +38,7 @@ import (
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/helper/sshconn"
 	"github.com/shady2k/nocx/internal/helper/sshsvc"
 	"github.com/shady2k/nocx/internal/helper/tunnelchan"
 	"github.com/shady2k/nocx/internal/log"
@@ -471,7 +472,7 @@ func newStand(t *testing.T, f *fixture, coord *coordinator) *stand {
 	}
 	t.Cleanup(func() { _ = realClient.Close() })
 
-	svc := sshsvc.New(realClient, discardLogger())
+	svc := sshsvc.New(sshconn.New(realClient, log.NewSlogAdapter(discardLogger())), discardLogger())
 	s.host = host.New(helperEnd, helperEnd, testHash, "instance-1", discardLogger())
 	s.host.Register(svc)
 

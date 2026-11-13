@@ -61,7 +61,6 @@ import (
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/helper/sshdial"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
-	"github.com/shady2k/nocx/internal/ssh"
 )
 
 // lifecycleBindHost is the far-side address the lifecycle listener is bound
@@ -121,7 +120,7 @@ type PaneSpec struct {
 // set before OpenPaneListeners returns except what the far side produces
 // later.
 type PaneListeners struct {
-	pool *ssh.PooledConn
+	pool *pooledConn
 	log  *slog.Logger
 
 	lifecycleLn net.Listener
@@ -183,14 +182,13 @@ func (s *Service) OpenPaneListeners(ctx context.Context, spec PaneSpec) (*PaneLi
 
 // openLifecycle asks the far side for the loopback listener and starts
 // accepting on it.
-func (p *PaneListeners) openLifecycle(pool *ssh.PooledConn) error {
+func (p *PaneListeners) openLifecycle(pool *pooledConn) error {
 	ln, err := sshdial.ListenRemoteTCP(pool.Client(), net.JoinHostPort(lifecycleBindHost, "0"))
 	if err != nil {
-		// The far side refused a listener, and there is no lifecycle channel
-		// without one. It is NOT degraded to a conventional session: the
-		// caller asked for an authenticated channel, and a launch carrying a
-		// port nobody listens on is a shell that blocks until its hello
-		// budget runs out.
+		// There is no lifecycle channel without a listener. It is NOT degraded
+		// to a conventional session: the caller asked for an authenticated
+		// channel, and a launch carrying a port nobody listens on is a shell
+		// that blocks until its hello budget runs out.
 		return fmt.Errorf("the far side refused the lifecycle listener: %w", classifyChannelError(err))
 	}
 	port, err := listenerPort(ln)

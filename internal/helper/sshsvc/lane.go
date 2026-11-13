@@ -53,7 +53,6 @@ import (
 	"github.com/shady2k/nocx/internal/helper/endpoint"
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
-	"github.com/shady2k/nocx/internal/ssh"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -207,7 +206,7 @@ func (s *Service) openLane(ctx context.Context, p proto.LaneParams) (proto.OpenC
 // startLane opens a session on the pooled connection and starts ONE command on
 // it, with no pty-req: a pty applies line discipline and would corrupt the
 // frame protocol the bridge carries (D19).
-func (s *Service) startLane(pool *ssh.PooledConn, host string, command string) (*laneEnd, error) {
+func (s *Service) startLane(pool *pooledConn, host string, command string) (*laneEnd, error) {
 	sess, err := pool.NewSession()
 	if err != nil {
 		return nil, err

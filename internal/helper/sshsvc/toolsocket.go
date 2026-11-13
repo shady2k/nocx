@@ -51,7 +51,6 @@ import (
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/helper/sshdial"
-	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/toolendpoint/panebind"
 )
 
@@ -82,7 +81,7 @@ type toolSocket struct {
 	// pool is the pooled reference taken for the listener's connection. The
 	// listener and the streams on it are one resource, so the reference is
 	// released when the listener ends and never per connection.
-	pool    *ssh.PooledConn
+	pool    *pooledConn
 	path    string
 	target  string
 	session string
@@ -97,7 +96,7 @@ type toolSocket struct {
 // not created here: which connection it was bound on is the caller's decision
 // (a pane's pooled connection, or the op's), and a constructor that dialed
 // would be a second place that knows how to ask.
-func newToolSocket(lg *slog.Logger, ln net.Listener, pool *ssh.PooledConn, path, target, session string) *toolSocket {
+func newToolSocket(lg *slog.Logger, ln net.Listener, pool *pooledConn, path, target, session string) *toolSocket {
 	return &toolSocket{log: lg, ln: ln, pool: pool, path: path, target: target, session: session}
 }
 

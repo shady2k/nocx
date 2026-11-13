@@ -121,7 +121,7 @@ type ShellSpec struct {
 // nobody closed keeps the transport alive, which is the caller's business and
 // not a leak for this object to collect.
 type ShellChannel struct {
-	pool   *ssh.PooledConn
+	pool   *pooledConn
 	sess   *gossh.Session
 	stdin  io.WriteCloser
 	stdout io.Reader

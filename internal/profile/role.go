@@ -7,14 +7,14 @@ import (
 
 // ModelRole is a NAMED model assignment — one (endpoint, model) pair a
 // feature asks for by name (bead nocx-e6kn2). A feature never names a model
-// id: the assistant asks for the answering role, the classifier bead
-// (nocx-kpy23) will ask for the classifier role, and the assignment changes
+// id: the assistant asks for the answering role, a later feature will ask
+// for one of the declared-but-unresolved roles, and the assignment changes
 // in ONE place — the roles surface — while the consumers stay ignorant.
 //
 // The set is CLOSED and defined by the product, never by the user: a role
 // is requested by a feature, and a feature only knows the names compiled
 // into it, so a user-invented role name would have nobody to ask for it.
-// Adding a third role is one const here plus the feature that consumes it.
+// Adding a role is one const here plus the feature that consumes it.
 type ModelRole string
 
 const (

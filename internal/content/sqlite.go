@@ -493,8 +493,9 @@ func closeUnanchoredEntries(ctx context.Context, conn *sql.Conn, logger log.Logg
 // That is a decision and its argument is in schema_migrate.go under "ONE
 // COUNTER, FOR ONE FILE" (nocx-lmb6v.3); 16 is the version that made it true,
 // by folding the `api_run*` tables in and retiring the private counter they
-// used to carry (nocx-lmb6v.5). 18 widened the executions.termination_reason CHECK so a run
-// stopped by a revoked answer has a reason of its own (nocx-4yjwk.7); 19
+// used to carry (nocx-lmb6v.5). 18 widened the
+// executions.termination_reason CHECK so a run stopped by a revoked answer
+// has a reason of its own (nocx-4yjwk.7); 19
 // added the worker_checkouts table, the durable half of the checkouts
 // workers.spawn's worktree ask creates (nocx-xn63t.1.4).
 // 20 widened artifacts.media_type for row blocks, 21 added clear_boundaries,

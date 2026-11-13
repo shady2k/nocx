@@ -1213,7 +1213,7 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'git.noGit.desc':
     'Установите git (или добавьте в PATH) и обновите — панель запускает бинарник git.',
 
-  // ── Skills, notes, snippets, roles & agent sections ──────────────────────
+  // ── Notes, snippets, roles & agent sections ──────────────────────────────
   'notes.new.title': 'Новая заметка',
   'notes.search.ph': 'Поиск по заметкам…',
   'notes.search.aria': 'Поиск по заметкам',

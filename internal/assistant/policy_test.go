@@ -86,9 +86,8 @@ type fakeCause struct {
 }
 
 // fakeSubmission is one Submit the ledger recorded: the intent and the
-// kind payload as submitted. The attempts' payloads carry the classifier
-// block (bead nocx-kpy23 — "why was this asked" is answerable from the
-// ledger), so the classifier tests read them back through this capture.
+// kind payload as submitted. The tests that assert what an escalation
+// recorded read the payload back through this capture.
 type fakeSubmission struct {
 	intent  string
 	payload string
@@ -733,8 +732,8 @@ func TestAsk_FailedAttemptWritePreventsExecution(t *testing.T) {
 
 // TestAsk_EscalationSuspendsBeforeDomain is acceptance criterion 5's first
 // half: under ask-every-time the run SUSPENDS before the domain is touched —
-// Ask returns the approval request (not a failure, and not a tool result),
-// and no second model request is made. The escalation IS recorded (nocx-5dldy
+// Ask returns the approval request (not a failure, and not a tool result).
+// The escalation IS recorded (nocx-5dldy
 // — the proposal is a ledger fact): exactly one attempt, closed interrupted,
 // the call that is asking has NOT run.
 func TestAsk_EscalationSuspendsBeforeDomain(t *testing.T) {

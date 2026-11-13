@@ -1443,7 +1443,7 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'git.noGit.desc':
     'Install git (or add it to PATH) and refresh — the panel runs the same git your terminal would.',
 
-  // ── Skills, notes, snippets, roles & agent sections ──────────────────────
+  // ── Notes, snippets, roles & agent sections ──────────────────────────────
   'notes.new.title': 'New note',
   'notes.search.ph': 'Search notes…',
   'notes.search.aria': 'Search notes',

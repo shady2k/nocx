@@ -1525,8 +1525,8 @@ func WithAssistantClient(ac assistant.Client) WSServerOption {
 	return func(ws *WSServer) { ws.assistantClient = ac }
 }
 
-// WithAgentToolRegistry attaches the registry used by the assistant engine.
-// Prompt indexing asks this registry which declarations the grant permits.
+// WithAgentToolRegistry attaches the registry used by the assistant engine:
+// the one declaration table that decides which tools a run may be offered.
 func WithAgentToolRegistry(reg agenttools.Registry) WSServerOption {
 	return func(ws *WSServer) { ws.agentTools = reg }
 }

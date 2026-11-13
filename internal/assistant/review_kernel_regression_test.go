@@ -50,6 +50,36 @@ func TestReviewEgressRefreshesAuthority(t *testing.T) {
 	}
 }
 
+func TestReviewEgressRefreshReachesLaterScreensAndOutcome(t *testing.T) {
+	fresh := workerGrantForTest()
+	fresh.Scopes = []content.GrantScope{{ID: "fresh-after-egress"}}
+	observed := false
+	pipeline, planted := pipelineForTest(t, AuthorityChain{
+		Screens: []Screen{
+			screenFunc(func(context.Context, Call, Outbound) Verdict { return Ask{Reason: "release"} }),
+			screenFunc(func(_ context.Context, call Call, _ Outbound) Verdict {
+				observed = true
+				if got := call.Grant().Scopes; len(got) != 1 || got[0].ID != "fresh-after-egress" {
+					t.Errorf("later screen received stale authority: %+v", got)
+				}
+				return Pass{}
+			}),
+		},
+		Approver:  approverFunc(func(context.Context, Call, Ask) Answer { return Approved{} }),
+		MintGrant: func(context.Context, Call) (content.Grant, bool) { return fresh, true },
+	})
+	outcome, err := pipeline.run(pipelineInvocationForTest(), 1, "c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !observed || planted.runs != 1 {
+		t.Fatalf("observed=%v executions=%d, want true and 1", observed, planted.runs)
+	}
+	if got := outcome.prepared.request.Grant.Scopes; len(got) != 1 || got[0].ID != "fresh-after-egress" {
+		t.Fatalf("outcome retained stale authority: %+v", got)
+	}
+}
+
 type reviewBrokenKnown struct{}
 
 func (reviewBrokenKnown) FindKnown(context.Context, string) ([]KnownMatch, error) {

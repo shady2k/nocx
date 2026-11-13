@@ -507,7 +507,10 @@ func (p *Pipeline) runOrdered(invocation ToolInvocation, attempt int, callID str
 		outbound.Text = outcome.runErr.Error()
 	}
 	for _, screen := range p.chain.Screens {
-		if refusal := p.inspect(ctx, call, screen, outbound, enteredCancelled); refusal != nil {
+		var refusal error
+		call, refusal = p.inspect(ctx, call, screen, outbound, enteredCancelled)
+		prepared.request.Grant = call.Grant()
+		if refusal != nil {
 			return dispatchOutcome{}, refusal
 		}
 	}
@@ -607,20 +610,20 @@ func (p *Pipeline) put(ctx context.Context, call Call, ask Ask, enteredCancelled
 // inspect runs one screen over the bytes that are about to leave. A screen
 // decides whether they go, never what they say: Pass and an approved Ask release
 // the exact result the tool produced, and Refuse withholds it.
-func (p *Pipeline) inspect(ctx context.Context, call Call, screen Screen, outbound Outbound, enteredCancelled bool) error {
+func (p *Pipeline) inspect(ctx context.Context, call Call, screen Screen, outbound Outbound, enteredCancelled bool) (Call, error) {
 	switch verdict := screen.Inspect(ctx, call, outbound).(type) {
 	case Pass:
-		return nil
+		return call, nil
 	case Refuse:
 		reason := verdict.Reason
 		if reason == "" {
 			reason = "a screen refused the result and gave no reason"
 		}
-		return &PipelineRefusal{Call: call, Reason: reason}
+		return call, &PipelineRefusal{Call: call, Reason: reason}
 	case Ask:
 		given, refusal := p.put(ctx, call, verdict, enteredCancelled)
 		if refusal != nil {
-			return refusal
+			return call, refusal
 		}
 		switch answer := given.(type) {
 		case Approved:
@@ -632,9 +635,9 @@ func (p *Pipeline) inspect(ctx context.Context, call Call, screen Screen, outbou
 			if attempts, ok := p.chain.Attempts.(interface {
 				Continue(context.Context, Call) error
 			}); ok {
-				return attempts.Continue(ctx, call)
+				return call, attempts.Continue(ctx, call)
 			}
-			return nil
+			return call, nil
 		case Declined:
 			// The bytes ARE the call's result, and a no means they never
 			// leave. There is nothing to continue the call with, so this
@@ -647,14 +650,14 @@ func (p *Pipeline) inspect(ctx context.Context, call Call, screen Screen, outbou
 			if p.chain.Order != nil {
 				p.chain.Order.declinedBy(answer)
 			}
-			return &PipelineRefusal{Call: call, Reason: reason, Cause: &ScreenDeclinedError{Reason: reason}}
+			return call, &PipelineRefusal{Call: call, Reason: reason, Cause: &ScreenDeclinedError{Reason: reason}}
 		case Unanswered:
-			return &PipelineRefusal{Call: call, Reason: "nobody answered whether this result may leave: " + errText(answer.Err), Cause: answer.Err}
+			return call, &PipelineRefusal{Call: call, Reason: "nobody answered whether this result may leave: " + errText(answer.Err), Cause: answer.Err}
 		default:
-			return &PipelineRefusal{Call: call, Reason: "nobody answered whether this result may leave, and an unanswered ask is a refusal"}
+			return call, &PipelineRefusal{Call: call, Reason: "nobody answered whether this result may leave, and an unanswered ask is a refusal"}
 		}
 	default:
-		return &PipelineRefusal{Call: call, Reason: fmt.Sprintf("%T answered neither pass, refuse nor ask, and an unanswered verdict is a refusal", screen)}
+		return call, &PipelineRefusal{Call: call, Reason: fmt.Sprintf("%T answered neither pass, refuse nor ask, and an unanswered verdict is a refusal", screen)}
 	}
 }
 

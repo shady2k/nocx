@@ -165,9 +165,13 @@ type AuthorityChain struct {
 	// beforeTool announces the call after the declaration is narrowed. Each is
 	// called at the place the pipeline owns, and none receives a continuation,
 	// so none can skip, repeat or replace the execution.
-	prepare    func(*preparedInvocation) error
-	decide     func(context.Context, Call, *preparedInvocation) (Decision, error)
-	beforeTool func(context.Context, Call, *preparedInvocation, agenttools.Capability) error
+	// preparedGuards binds grant facts after preparation, per call, without
+	// storing mutable call state on a shared dispatcher or changing Call's
+	// identity. The returned links still have only Guard's refusal power.
+	preparedGuards func(*preparedInvocation) []Guard
+	prepare        func(*preparedInvocation) error
+	decide         func(context.Context, Call, *preparedInvocation) (Decision, error)
+	beforeTool     func(context.Context, Call, *preparedInvocation, agenttools.Capability) error
 	// execute is the caller's own runtime for the one tool call. Nil uses the
 	// operation's executor, which is what the tool endpoint wants.
 	execute dispatchExecutor
@@ -285,7 +289,11 @@ func (p *Pipeline) run(invocation ToolInvocation, attempt int, callID string) (d
 			return dispatchOutcome{}, refusal
 		}
 	}
-	for _, guard := range p.chain.Guards {
+	guards := p.chain.Guards
+	if p.chain.preparedGuards != nil {
+		guards = append(append([]Guard(nil), guards...), p.chain.preparedGuards(&prepared)...)
+	}
+	for _, guard := range guards {
 		reason, refused := guard.Refuse(ctx, call)
 		if !refused {
 			continue

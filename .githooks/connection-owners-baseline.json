@@ -5,71 +5,68 @@
     "",
     "Every entry is a site OUTSIDE the SSH transport (internal/ssh,",
     "internal/helper/sshsvc, internal/sshtest) that decides a fact about an SSH",
-    "connection: it imports x/crypto/ssh, dials a network, reads an ExitError or",
-    "sends a keepalive. ADR-ba6xet1b says one owner exists — the backend connection",
-    "manager behind the Carrier interface — and the stages of nocx-oalo1 remove",
-    "these. The list may only SHRINK; the updater refuses growth without",
-    "--allow-growth, and an entry with no reason fails the check.",
+    "connection: it names an x/crypto/ssh object, dials a network, reads an",
+    "ExitError or sends a keepalive. ADR-ba6xet1b says one owner exists \u2014 the",
+    "backend connection manager behind the Carrier interface \u2014 and the stages of",
+    "nocx-oalo1 remove these. The list may only SHRINK or stay level; the updater",
+    "refuses growth without --allow-growth, and an entry with no reason fails the",
+    "check.",
     "",
-    "Keyed on rule + file + the trimmed line, not a line number, so an unrelated",
-    "edit above a baselined line does not make this file churn — the tradeoff",
-    "check-log-context.mjs makes for its own baseline. A line that changes its",
-    "text is a new site and needs its reason carried over by hand."
+    "Keyed on rule + file + enclosing function + the object referenced, never on a",
+    "line, so an unrelated edit above a baselined site does not churn this file.",
+    "`count` is how many times that function decides the fact: a second identical",
+    "call is a second decision, and a count that GROWS fails the check until the",
+    "baseline is updated deliberately. A count that SHRINKS is a stale licence and",
+    "fails too, so running the updater is the only way this file moves."
   ],
   "violations": [
     {
       "rule": "exit-error-read",
       "file": "internal/session/session.go",
-      "text": "var se *gossh.ExitError",
-      "reason": "the session registry decides a remote shell's exit cause; design §5.1.2 moves it into the x/crypto carrier, which answers a neutral cause (nocx-oalo1 stages 2-3)"
-    },
-    {
-      "rule": "net-dial",
-      "file": "internal/apisend/client.go",
-      "text": "conn, err := r.Route.DialContext(ctx, network, addr)",
-      "reason": "the tracing decorator on an API-testing request's route, which may be the SSH lease below; channels behind the carrier are design §5.1.2's later work"
-    },
-    {
-      "rule": "net-dial",
-      "file": "internal/apisend/routes.go",
-      "text": "return NewSSHDialer(lease, 0).DialContext(ctx, network, addr)",
-      "reason": "an API-testing request dialled on the far side through an SSH lease: the connection fact the carrier's Channels will carry (design §5.1.2), in a later stage"
+      "func": "github.com/shady2k/nocx/internal/session.realSession.ExitOutcome",
+      "object": "golang.org/x/crypto/ssh.ExitError",
+      "count": 1,
+      "reason": "the session registry decides a remote shell's exit cause; design \u00a75.1.2 moves it into the x/crypto carrier, which answers a neutral cause (nocx-oalo1 stages 2-3)"
     },
     {
       "rule": "net-dial",
       "file": "internal/assistant/httpguard.go",
-      "text": "route := httppolicy.NewRoute(resolver, &net.Dialer{}, httppolicy.EnvironmentProxy)",
+      "func": "github.com/shady2k/nocx/internal/assistant.newGuardedHTTPClient",
+      "object": "net.Dialer",
+      "count": 1,
       "reason": "the assistant's model HTTP route, in the family that also carries SSH leases; it leaves with the agent replacement (nocx-a62cl)"
     },
     {
       "rule": "net-dial",
       "file": "internal/httppolicy/dial.go",
-      "text": "return NewRoute(SystemResolver(), &net.Dialer{}, EnvironmentProxy)",
-      "reason": "the local Route constructor every request dials through, the SSH lease included; it leaves when the carrier owns channels (design §5.1.2)"
-    },
-    {
-      "rule": "net-dial",
-      "file": "internal/httppolicy/policy.go",
-      "text": "conn, err := t.route.DialContext(ctx, network, net.JoinHostPort(ip.String(), spec.port))",
-      "reason": "the address-checking decorator on a Route: it dials through whichever route it holds, the SSH lease included"
-    },
-    {
-      "rule": "net-dial",
-      "file": "internal/httppolicy/policy.go",
-      "text": "return t.route.DialContext(ctx, network, addr)",
-      "reason": "the same decorator's second dial path, one owner with the line above"
+      "func": "github.com/shady2k/nocx/internal/httppolicy.Local",
+      "object": "net.Dialer",
+      "count": 1,
+      "reason": "the local Route constructor every request dials through, the SSH lease included; it leaves when the carrier owns channels (design \u00a75.1.2)"
     },
     {
       "rule": "xcrypto-ssh-import",
       "file": "internal/helper/sshdial/sshdial.go",
-      "text": "gossh \"golang.org/x/crypto/ssh\"",
-      "reason": "the helper's channel dialer (direct-tcpip and remote listens): a transport use that internal/helper/sshconn's carrier takes over (design §5.1.1)"
+      "func": "github.com/shady2k/nocx/internal/helper/sshdial.DialDirectTCP",
+      "object": "golang.org/x/crypto/ssh.Client",
+      "count": 1,
+      "reason": "the helper's channel dialer (direct-tcpip and remote listens): a transport use that internal/helper/sshconn's carrier takes over (design \u00a75.1.1)"
     },
     {
       "rule": "xcrypto-ssh-import",
-      "file": "internal/session/session.go",
-      "text": "gossh \"golang.org/x/crypto/ssh\"",
-      "reason": "imported for the ExitError read above and nothing else; it goes when that does"
+      "file": "internal/helper/sshdial/sshdial.go",
+      "func": "github.com/shady2k/nocx/internal/helper/sshdial.ListenRemoteTCP",
+      "object": "golang.org/x/crypto/ssh.Client",
+      "count": 1,
+      "reason": "the helper's channel dialer (direct-tcpip and remote listens): a transport use that internal/helper/sshconn's carrier takes over (design \u00a75.1.1)"
+    },
+    {
+      "rule": "xcrypto-ssh-import",
+      "file": "internal/helper/sshdial/sshdial.go",
+      "func": "github.com/shady2k/nocx/internal/helper/sshdial.ListenRemoteUnix",
+      "object": "golang.org/x/crypto/ssh.Client",
+      "count": 1,
+      "reason": "the helper's channel dialer (direct-tcpip and remote listens): a transport use that internal/helper/sshconn's carrier takes over (design \u00a75.1.1)"
     }
   ]
 }

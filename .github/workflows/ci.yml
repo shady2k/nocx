@@ -205,6 +205,15 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
+      # The connection-owner ratchet below is a TYPE-CHECKED analysis since the
+      # review of nocx-oalo1.3.4 (aliases, constants and object identity are
+      # what decide it, not spelling), so this job needs the Go toolchain the
+      # module is built with. It loads the tree with CGO_ENABLED=0 and only the
+      # packages that can carry a fact, so no native archives are needed here.
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          cache: true
       - name: Workflow decision and refusal tests
         run: |
           node --test scripts/publish-nightly.test.mjs scripts/product-change.test.mjs scripts/quarantine.test.mjs scripts/changed-tests.test.mjs scripts/import-branch-beads.test.mjs scripts/workflow-wiring.test.mjs scripts/helper-hashes.test.mjs scripts/build-identity.test.mjs
@@ -213,9 +222,10 @@ jobs:
       # THE CONNECTION-OWNER RATCHET, on this tree (ADR-ba6xet1b). The hook runs
       # it on a commit that touches Go; this runs it on every pull request, so a
       # branch whose Go commit was made with --no-verify is still refused here.
-      # It reads tracked source text through git — no Go toolchain, no cgo
-      # archives, no build — which is why it can live in this job rather than in
-      # the product ones, and why it costs about a quarter of a second.
+      # It type-checks the packages that import net or x/crypto (go/packages,
+      # CGO_ENABLED=0) and decides by object identity, so it needs the Go
+      # toolchain and nothing else: no cgo archives, no webkit, no build of the
+      # product. Its own step is seconds after the module cache is warm.
       - name: The connection-owner ratchet
         run: node .githooks/check-connection-owners.mjs
       - name: Promotion and cask fixtures by path

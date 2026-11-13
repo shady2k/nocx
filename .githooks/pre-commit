@@ -293,13 +293,16 @@ else
     ok "operation-scope ratchet — skipped (no Go changes staged)"
 fi
 
-# --- 3d3. connection-owner ratchet (Go changes only, same reasoning: a regex
-# over the tree, ~0.25 s over 2,516 tracked .go files). ADR-ba6xet1b says a fact
+# --- 3d3. connection-owner ratchet (Go changes only). ADR-ba6xet1b says a fact
 # about an SSH connection has one owner, the backend's connection manager, and
 # the renderer draws its answer rather than deciding one; this refuses a NEW
-# import of x/crypto/ssh, network dial, ExitError read or keepalive outside the
-# transport packages, against a baseline that may only shrink. Its renderer
-# half is nocx-oalo1.3.5. Regenerate:
+# use of x/crypto/ssh, network dial, ExitError read or keepalive outside the
+# transport packages, against a baseline that may only shrink. Since the review
+# of nocx-oalo1.3.4 it is a TYPE-CHECKED analysis (cmd/conncheck: go/packages
+# with CGO_ENABLED=0 over the packages that import net or x/crypto), so an
+# aliased import, a constant network or a re-exporting helper is decided by
+# identity rather than spelling: ~4 s warm, ~1 min on a cold module cache. Its
+# renderer half is nocx-oalo1.3.5. Regenerate:
 # node .githooks/update-connection-owners-baseline.mjs ----------------------
 if [ "$RUN_GO" = 1 ]; then
     host_gate "connection-owner ratchet" node .githooks/check-connection-owners.mjs

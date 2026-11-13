@@ -10,57 +10,82 @@
  * The owner's decision of 2026-11-13 makes that a check rather than a review:
  * "there must be an architectural ban on second surfaces".
  *
- * The survey of origin/main 04b45bbf4 found ten backend facts with more than
- * one owner before this check existed — the dead `ssh.Connect` stack among
- * them — and every stage of nocx-oalo1 removes one of them. This ratchet is
- * what stops a new one appearing while they do: the list of today's
- * violations is committed and may only SHRINK.
+ * # Identity, not spelling
+ *
+ * This check does not read lines. It asks `cmd/conncheck`, a small Go program
+ * that loads the tree with golang.org/x/tools/go/packages and reports every
+ * REFERENCE to a connection object, resolved by package path and name through
+ * go/types. A reviewer's round found seven ways the previous line-regex
+ * passed a second owner — an aliased `net` import, an aliased x/crypto import,
+ * a SendRequest with any name, a `// "unix"` comment on the dial's line, a
+ * helper package re-exporting `net.Dial`, an allowlisted file that also
+ * dialled, and a baseline keyed by text — and each is now a fixture in
+ * check-connection-owners.test.mjs that FAILS.
  *
  * WHAT IT REFUSES, by rule id (the baseline and the failure message name the
  * rule, so an entry says what it is):
  *
- *   xcrypto-ssh-import   an import of golang.org/x/crypto/ssh, or its agent
- *                        or knownhosts subpackage, outside the transport. The
- *                        library IS the transport; a second package importing
- *                        it is a second place that can dial, sign or probe.
- *   net-dial             net.Dial(, net.DialTimeout(, net.Dialer{ or
- *                        .DialContext( outside the transport, where the
- *                        network is not the literal "unix" — a unix socket is
- *                        not an SSH connection (the MCP bridge's, the
- *                        coordinator's, the helper endpoint's).
- *   exit-error-read      gossh.ExitError / ssh.ExitError outside the transport:
- *                        the exit cause of a remote process, decided away from
- *                        the connection that carried it. Design §5.1.2 moves
- *                        it into the x/crypto carrier, which maps it to a
- *                        neutral cause.
- *   keepalive-request    SendRequest("keepalive…") outside the transport: a
- *                        second prober on a connection that already has one —
- *                        design §5.3 replaces the keepalive verdict with the
- *                        supervisor's.
+ *   xcrypto-ssh-import   a reference to an object of golang.org/x/crypto/ssh
+ *                        or its agent/knownhosts subpackages outside the
+ *                        transport, EXCEPT the key-format objects listed for
+ *                        that file in ALLOWLIST below. The library IS the
+ *                        transport; a second package reaching into it is a
+ *                        second place that can dial, sign or probe. The
+ *                        allowlist names OBJECTS, not files: a dial added to
+ *                        an allowlisted file is still reported.
+ *   net-dial             a reference to net.Dial, DialTimeout, DialUDP,
+ *                        DialTCP, DialIP, DialUnix, the net.Dialer type, or a
+ *                        dial method of it, where the network is not the
+ *                        CONSTANT "unix" — the constant is evaluated by
+ *                        go/types, so a comment saying unix exempts nothing.
+ *                        A unix socket is not an SSH connection (the MCP
+ *                        bridge's, the coordinator's, the helper endpoint's).
+ *   exit-error-read      a reference to the ssh.ExitError TYPE outside the
+ *                        transport, whatever the import is called: the exit
+ *                        cause of a remote process, decided away from the
+ *                        connection that carried it. Design §5.1.2 moves it
+ *                        into the x/crypto carrier, which maps it to a neutral
+ *                        cause.
+ *   keepalive-request    a call of SendRequest on an *ssh.Client or an
+ *                        ssh.Conn outside the transport, WHATEVER the request
+ *                        name is: a second prober on a connection that already
+ *                        has one — design §5.3 replaces the keepalive verdict
+ *                        with the supervisor's.
+ *   transport-re-export  inside a transport package, an exported package-level
+ *                        var holding a net dial function, or an exported func
+ *                        returning ssh.Dial/NewClientConn: a helper that hands
+ *                        a dial out makes every caller a second owner without
+ *                        naming one.
  *
- * Scope: every tracked non-test .go file except the transport packages,
- * which are `internal/ssh/`, `internal/helper/sshsvc/` and `internal/sshtest/`
- * (the last does not exist yet; it is where the fault proxy lands, and it
- * speaks SSH because it must).
+ * Scope: every tracked non-test .go file except the transport packages, which
+ * are `internal/ssh/`, `internal/helper/sshsvc/` and `internal/sshtest/` (the
+ * last does not exist yet; it is where the fault proxy lands, and it speaks
+ * SSH because it must). The tree is analysed TWICE — as the coordinator is
+ * built, and with -tags nocx_local_ssh — because the helper's dial half exists
+ * only in the second, and a file behind a build tag is still a second owner.
  *
  * WHAT IT CANNOT SEE, the same admission the sibling ratchets make:
  *
- *   - It is a regex over source text, not a type checker. It cannot follow a
- *     value: `d := net.Dialer{…}` then `d.Dial(…)` two lines later, a dial
- *     behind an interface, a network named by a constant, or a call whose
- *     arguments sit on the next line. `net.Dialer{` is reported where it is
- *     constructed, which is the site a person would edit.
- *   - A receiver spelled anything but `net` or `.DialContext(` is invisible,
- *     and an alias other than `gossh`/`ssh` does not match the exit-error
- *     rule. Both are why the rule set is small and named rather than clever.
- *   - It cannot tell an SSH dial from an HTTP one. That is what the allowlist
- *     below and the baseline are for: the allowlist is a site that is not an
- *     SSH connection by nature and never will be; the baseline is a site that
- *     IS a second owner today and leaves with a stage or a bead named on its
- *     entry's reason. Neither list tells you which, so both are kept short.
- *   - The renderer is not read at all. nocx-oalo1.3.5 extends the record this
- *     check enforces with its half: connection state, open and reconnect only
- *     through frontend/src/connection/, and no match on error text.
+ *   - A dial behind an interface whose implementation lives elsewhere: the
+ *     call is a method on an interface, and no static analyser can say what it
+ *     becomes. The construction of the concrete dialer is reported instead.
+ *   - A value carried into another package through a struct field, a channel
+ *     or a callback. (An exported package-level var or func is covered by
+ *     transport-re-export; a field is not.)
+ *   - A network named by a variable that is not a constant. A dial with a
+ *     computed network string is reported, not exempted: the exemption is the
+ *     constant "unix" and nothing else.
+ *   - A tree that does not compile. A load error fails the check: a tree that
+ *     cannot be analysed cannot be proven clean.
+ *   - The renderer, which nocx-oalo1.3.5 owns and checks itself.
+ *   - Comments and prose: nothing here reads a line of text, which is why
+ *     `// net.Dialer never performs the lookup` is no longer a false finding.
+ *
+ * COST. The analysis is a type-checked load, so its first run after a cold
+ * checkout pays for the module's export data (~50 s on the 4-core CI-class
+ * VM this was developed on, with cgo) and every later run is ~3 s. The
+ * pre-commit hook runs it after golangci-lint, whose build has already warmed
+ * the same cache.
  *
  * Invocation: node .githooks/check-connection-owners.mjs   (from the repo root)
  * Regenerate: node .githooks/update-connection-owners-baseline.mjs
@@ -80,12 +105,20 @@ export const ALLOWED_DIRS = ['internal/ssh/', 'internal/helper/sshsvc/', 'intern
 
 /**
  * Sites that are not an SSH connection and never become one, each with its
- * reason. A file named here is exempt from ONE rule, and only that rule.
+ * reason. `objects` names the x/crypto objects ONE file may use — the check
+ * reads what those files actually reference, so an entry is exact and a new
+ * object in the same file is a new finding.
  */
 export const ALLOWLIST = [
   {
     rule: 'xcrypto-ssh-import',
     file: 'internal/transport/ws.go',
+    objects: [
+      'golang.org/x/crypto/ssh.ParseRawPrivateKey',
+      'golang.org/x/crypto/ssh.NewSignerFromKey',
+      'golang.org/x/crypto/ssh.FingerprintSHA256',
+      'golang.org/x/crypto/ssh.PassphraseMissingError',
+    ],
     reason:
       'reads a vault key as a KEY FORMAT for the secrets panel (ParseRawPrivateKey, ' +
       'NewSignerFromKey, FingerprintSHA256): it opens no connection',
@@ -93,6 +126,7 @@ export const ALLOWLIST = [
   {
     rule: 'xcrypto-ssh-import',
     file: 'internal/transport/ws_secrets.go',
+    objects: ['golang.org/x/crypto/ssh.ParsePrivateKeyWithPassphrase'],
     reason:
       'checks a stored key with a passphrase (ParsePrivateKeyWithPassphrase): a key ' +
       'format, not a transport',
@@ -100,6 +134,11 @@ export const ALLOWLIST = [
   {
     rule: 'xcrypto-ssh-import',
     file: 'internal/app/helper_reverse.go',
+    objects: [
+      'golang.org/x/crypto/ssh.ParsePublicKey',
+      'golang.org/x/crypto/ssh.PublicKey',
+      'golang.org/x/crypto/ssh.FingerprintSHA256',
+    ],
     reason:
       'parses the helper host key and prints its fingerprint for consent (ADR-0034), ' +
       'and dials nothing',
@@ -107,6 +146,23 @@ export const ALLOWLIST = [
   {
     rule: 'xcrypto-ssh-import',
     file: 'cmd/e2e-sshd/main.go',
+    objects: [
+      'golang.org/x/crypto/ssh.NewSignerFromKey',
+      'golang.org/x/crypto/ssh.Signer',
+      'golang.org/x/crypto/ssh.MarshalPrivateKey',
+      'golang.org/x/crypto/ssh/knownhosts.Line',
+      'golang.org/x/crypto/ssh.ServerConfig',
+      'golang.org/x/crypto/ssh.NewServerConn',
+      'golang.org/x/crypto/ssh.UnknownChannelType',
+      'golang.org/x/crypto/ssh.ConnectionFailed',
+      'golang.org/x/crypto/ssh.DiscardRequests',
+      'golang.org/x/crypto/ssh.Conn',
+      'golang.org/x/crypto/ssh.Channel',
+      'golang.org/x/crypto/ssh.Request',
+      'golang.org/x/crypto/ssh.NewChannel',
+      'golang.org/x/crypto/ssh.Marshal',
+      'golang.org/x/crypto/ssh.Unmarshal',
+    ],
     reason: 'the e2e stand SSH SERVER: the peer a test connects to, never a connection nocx holds',
   },
   {
@@ -117,7 +173,7 @@ export const ALLOWLIST = [
   {
     rule: 'net-dial',
     file: 'internal/mcpstdio/mcpstdio.go',
-    reason: 'the MCP bridge over a unix socket: its one dial passes the literal "unix"',
+    reason: 'the MCP bridge over a unix socket: its one dial passes the constant "unix"',
   },
   {
     rule: 'net-dial',
@@ -141,29 +197,8 @@ export const RULES = {
     "reads x/crypto's ExitError, so decides a remote exit away from its connection",
   'keepalive-request':
     'sends a keepalive outside the transport, where the connection has one prober',
-}
-
-/** An import line, with an optional alias: `gossh "golang.org/x/crypto/ssh"`. */
-const XCRYPTO_IMPORT_RE =
-  /^\s*(?:import\s+)?(?:[A-Za-z_.]\w*\s+)?"golang\.org\/x\/crypto\/ssh(?:\/[a-z0-9_]+)*"\s*(?:\/\/.*)?$/
-
-const NET_DIAL_RE = /\bnet\.Dial\(|\bnet\.DialTimeout\(|\bnet\.Dialer\s*\{|\.DialContext\(/
-const UNIX_NETWORK_RE = /"unix"/
-const EXIT_ERROR_RE = /\b(?:gossh|ssh)\.ExitError\b/
-const KEEPALIVE_RE = /\.SendRequest\(\s*"keepalive/
-
-/** repo-relative, tracked, non-test *.go files, '/'-separated. */
-export function trackedGoFiles() {
-  const out = execFileSync('git', ['ls-files', '-z', '--', '*.go'], {
-    cwd: PROJECT_ROOT,
-    encoding: 'utf8',
-    maxBuffer: 64 * 1024 * 1024,
-  })
-  return out
-    .split('\0')
-    .filter((f) => f !== '')
-    .filter((f) => !f.endsWith('_test.go'))
-    .filter((f) => !f.startsWith('.claude/')) // nested worktree, as pre-commit notes
+  'transport-re-export':
+    'hands a dial function out of a transport package, where every caller becomes an owner',
 }
 
 /** Whether `file` is one of the transport packages. */
@@ -171,63 +206,143 @@ export function isTransportFile(file) {
   return ALLOWED_DIRS.some((dir) => file.startsWith(dir))
 }
 
-function allowlisted(rule, file) {
-  return ALLOWLIST.some((entry) => entry.rule === rule && entry.file === file)
+function allowlisted(rule, file, object) {
+  return ALLOWLIST.some((entry) => {
+    if (entry.rule !== rule || entry.file !== file) return false
+    if (!entry.objects) return true // a site-level exemption (the net-dial entries)
+    return entry.objects.includes(object)
+  })
+}
+
+// ─── the analysed facts ──────────────────────────────────────────────────
+
+/**
+ * Run cmd/conncheck for one build-tag set and answer its facts. `opts.module`
+ * and `opts.scope` exist for the tests: a fixture is a package inside the
+ * module with its own root, so its file labels come out as the real product
+ * paths and the policy applies unchanged.
+ */
+export function analyze(opts = {}) {
+  const module = opts.module ?? PROJECT_ROOT
+  const scope = opts.scope ?? module
+  const args = ['run', './cmd/conncheck', '-module', module, '-scope', scope]
+  if (opts.tags) args.push('-tags', opts.tags)
+  if (opts.pkgs) args.push('-pkgs', opts.pkgs)
+  let out
+  try {
+    out = execFileSync('go', args, {
+      cwd: module,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+  } catch (err) {
+    const detail = (err.stderr ?? '').toString().trim() || err.message
+    throw new Error(
+      'the connection-owner analyser could not run (cmd/conncheck). It needs the Go ' +
+        `toolchain the module is built with.\n${detail}`,
+    )
+  }
+  return JSON.parse(out).facts ?? []
+}
+
+/** Facts from both build configurations, deduplicated by position and object. */
+export function collectFacts() {
+  const seen = new Map()
+  for (const tags of ['', 'nocx_local_ssh']) {
+    for (const f of analyze({ tags })) {
+      const key = `${f.rule}:${f.file}:${f.line}:${f.func}:${f.object}:${f.detail ?? ''}`
+      if (!seen.has(key)) seen.set(key, f)
+    }
+  }
+  return [...seen.values()]
 }
 
 /**
- * Violations in Go source text already read into memory, decoupled from the
- * filesystem and from git so a test can hand it a fixture directly. `file` is
- * only ever the label on the returned records, and decides the scope.
+ * The policy: drop the transport's own use of the library (except a
+ * re-export), and drop the exact allowlisted object sites. Everything else is
+ * a violation.
  */
-export function violationsInText(file, text) {
-  if (isTransportFile(file)) return []
-  const violations = []
-  text.split('\n').forEach((line, idx) => {
-    const trimmed = line.trim()
-    if (trimmed === '' || trimmed.startsWith('//')) return
-    const found = []
-    if (XCRYPTO_IMPORT_RE.test(trimmed)) found.push('xcrypto-ssh-import')
-    if (NET_DIAL_RE.test(trimmed) && !UNIX_NETWORK_RE.test(trimmed)) found.push('net-dial')
-    if (EXIT_ERROR_RE.test(trimmed)) found.push('exit-error-read')
-    if (KEEPALIVE_RE.test(trimmed)) found.push('keepalive-request')
-    for (const rule of found) {
-      if (allowlisted(rule, file)) continue
-      violations.push({ file, rule, line: idx + 1, text: trimmed })
-    }
+export function violationsFromFacts(facts) {
+  return (facts ?? []).filter((f) => {
+    if (isTransportFile(f.file)) return f.rule === 'transport-re-export'
+    return !allowlisted(f.rule, f.file, f.object)
   })
-  return violations
 }
 
-/** Every violation across the scanned tree. */
-export function collectViolations() {
-  const violations = []
-  for (const file of trackedGoFiles()) {
-    violations.push(...violationsInText(file, readFileSync(resolve(PROJECT_ROOT, file), 'utf8')))
-  }
-  return violations
-}
-
-/** Stable key: rule + file + the trimmed line. A line number would churn on
- * every unrelated edit above it — the tradeoff check-log-context.mjs makes. */
+/** Stable key: rule + file + enclosing function + the object referenced. */
 export function violationKey(v) {
-  return `${v.rule}:${v.file}:${v.text}`
+  return `${v.rule}:${v.file}:${v.func}:${v.object}`
 }
 
-/** Load the committed baseline: {violations: [{rule, file, text, reason}]}. */
+/**
+ * Group facts into baseline rows: one row per key, with the number of
+ * occurrences and the first line that carries one. A second identical site in
+ * one function is a second occurrence, which the count makes visible — the
+ * previous baseline was a set keyed by text and could not see it.
+ */
+export function aggregate(violations) {
+  const rows = new Map()
+  for (const v of violations) {
+    const key = violationKey(v)
+    const row = rows.get(key)
+    if (row) {
+      row.count += 1
+      continue
+    }
+    rows.set(key, {
+      rule: v.rule,
+      file: v.file,
+      func: v.func,
+      object: v.object,
+      count: 1,
+      line: v.line,
+      detail: v.detail ?? '',
+    })
+  }
+  return [...rows.values()].sort((a, b) => violationKey(a).localeCompare(violationKey(b)))
+}
+
+/** Every violation across the scanned tree, aggregated and sorted. */
+export function collectViolations() {
+  return aggregate(violationsFromFacts(collectFacts()))
+}
+
+/** Load the committed baseline: {violations: [{rule,file,func,object,count,reason}]}. */
 export function loadBaseline(path = BASELINE_PATH) {
   const data = JSON.parse(readFileSync(path, 'utf8'))
   return data.violations
 }
 
-/** Split violations into baselined matches and new ones. */
-export function partition(violations, baseline) {
-  const known = new Set(baseline.map((entry) => violationKey(entry)))
+/**
+ * Split the current rows against the baseline:
+ *   - `fresh`: a key the baseline does not hold, or one whose count GREW;
+ *   - `stale`: a key whose count SHRANK, or one the tree no longer has.
+ * Both fail the check. Growth is a new second owner; shrinkage or absence
+ * means the baseline still licenses a site that is gone, and a licence nobody
+ * uses is how a stale exemption hides the next real one.
+ */
+export function evaluate(rows, baseline) {
+  const previous = new Map(baseline.map((entry) => [violationKey(entry), entry]))
+  const current = new Map(rows.map((row) => [violationKey(row), row]))
   const fresh = []
-  for (const v of violations) {
-    if (!known.has(violationKey(v))) fresh.push(v)
+  const stale = []
+  for (const row of rows) {
+    const before = previous.get(violationKey(row))
+    if (!before) fresh.push(row)
+    else if (row.count > before.count) fresh.push({ ...row, was: before.count })
   }
-  return fresh
+  for (const before of baseline) {
+    const row = current.get(violationKey(before))
+    if (!row) stale.push({ ...before, now: 0 })
+    else if (row.count < before.count) stale.push({ ...before, now: row.count })
+  }
+  return { fresh, stale }
+}
+
+/** The keys a baseline no longer justifies (kept for the updater's callers). */
+export function staleEntries(rows, baseline) {
+  return evaluate(rows, baseline).stale
 }
 
 /** A baseline entry with no reason is an unexplained exception: it names a
@@ -246,6 +361,12 @@ export function allowlistProblems() {
     if (!Object.hasOwn(RULES, entry.rule)) {
       problems.push(`${entry.file} is allowlisted for an unknown rule ${entry.rule}`)
     }
+    if (entry.rule === 'xcrypto-ssh-import' && !Array.isArray(entry.objects)) {
+      problems.push(
+        `${entry.file} allowlists x/crypto with no object list: the library is allowed ` +
+          'object by object, so that a dial added to the same file is still reported',
+      )
+    }
   }
   return problems
 }
@@ -261,7 +382,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const unreasoned = unreasonedEntries(baseline)
   if (unreasoned.length > 0) {
     for (const entry of unreasoned) {
-      console.error(`baseline: ${entry.rule}: ${entry.file}: ${entry.text} — no reason written`)
+      console.error(`baseline: ${violationKey(entry)} — no reason written`)
     }
     console.error(
       '.githooks/connection-owners-baseline.json is a list of sites that decide a connection ' +
@@ -269,7 +390,24 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     )
     process.exit(1)
   }
-  const fresh = partition(collectViolations(), baseline)
+  let rows
+  try {
+    rows = collectViolations()
+  } catch (err) {
+    console.error(err.message)
+    process.exit(2)
+  }
+  const { fresh, stale } = evaluate(rows, baseline)
+  if (stale.length > 0) {
+    console.error(
+      `${stale.length} baselined site(s) no longer decide a connection fact, or decide it ` +
+        'fewer times. A baseline entry that nothing uses is a stale exemption, and it must be ' +
+        'dropped deliberately: node .githooks/update-connection-owners-baseline.mjs',
+    )
+    for (const entry of stale) {
+      console.error(`  STALE ${violationKey(entry)}  (baseline ${entry.count}, now ${entry.now})`)
+    }
+  }
   if (fresh.length > 0) {
     console.error(
       `${fresh.length} new site(s) decide a connection fact outside the SSH transport ` +
@@ -278,12 +416,15 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
         'through the transport, or add it deliberately: ' +
         'node .githooks/update-connection-owners-baseline.mjs --allow-growth',
     )
-    for (const v of fresh) {
-      console.error(`  NEW ${v.rule}: ${v.file}:${v.line}  ${v.text}`)
+    for (const row of fresh) {
+      const line = row.line === undefined ? '' : `:${row.line}`
+      const grew = row.was === undefined ? '' : ` (baseline ${row.was}, now ${row.count})`
+      console.error(`  NEW ${row.rule}: ${row.file}${line} ${row.func} → ${row.object}${grew}`)
     }
-    process.exit(1)
   }
+  if (fresh.length > 0 || stale.length > 0) process.exit(1)
   console.log(
-    `OK — connection-owner ratchet: ${baseline.length} baselined site(s) outside the transport, 0 new`,
+    `OK — connection-owner ratchet: ${baseline.length} baselined site(s) outside the transport, ` +
+      '0 new, 0 stale',
   )
 }

@@ -1,186 +1,396 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import {
   ALLOWED_DIRS,
-  partition,
+  ALLOWLIST,
+  RULES,
+  aggregate,
+  allowlistProblems,
+  analyze,
+  evaluate,
+  loadBaseline,
   unreasonedEntries,
-  violationsInText,
+  violationKey,
+  violationsFromFacts,
 } from './check-connection-owners.mjs'
 import { planBaselineUpdate } from './update-connection-owners-baseline.mjs'
 
 /**
  * The connection-owner ratchet (nocx-oalo1.3.4) refuses a NEW Go site outside
- * the SSH transport that decides a fact about an SSH connection. These
- * fixtures are the rules themselves, one import, one dial and one exit cause
- * at a time, plus the two directions the baseline is allowed to move: a site
- * taken through the transport shrinks it, and a new second owner cannot be
- * added by accident.
+ * the SSH transport that decides a fact about an SSH connection.
+ *
+ * These fixtures are the SEVEN BYPASSES a review found in the previous,
+ * textual version of this check — an aliased import, an aliased exit cause, a
+ * keepalive spelled differently, `// "unix"` as a comment, a re-exporting
+ * helper, an allowlisted file that also dials, and a text-keyed baseline —
+ * each failing the check as it now stands, with its paired case passing.
+ *
+ * Each fixture is a real package inside this module (under a dot-directory,
+ * so `./...` never sees it) because identity is the point: the analyser has
+ * to RESOLVE `net` and `golang.org/x/crypto/ssh`, and that means the real
+ * module's dependency graph.
  */
 
-const OUTSIDE = 'internal/app/second_owner.go'
-const rules = (src, file = OUTSIDE) => violationsInText(file, src).map((v) => v.rule)
+const PROJECT_ROOT = fileURLToPath(new URL('..', import.meta.url))
+let fixtureSeq = 0
 
-test('an x/crypto/ssh import outside the transport fails the check', () => {
-  const src = `package app
-
-import (
-	gossh "golang.org/x/crypto/ssh"
-)
-
-var _ = gossh.Dial
-`
-  const violations = violationsInText(OUTSIDE, src)
-  assert.equal(violations.length, 1)
-  assert.equal(violations[0].rule, 'xcrypto-ssh-import')
-  assert.equal(violations[0].text, 'gossh "golang.org/x/crypto/ssh"')
-})
-
-test('the transport packages are where x/crypto belongs, and are not reported', () => {
-  const src = `package ssh
-
-import (
-	gossh "golang.org/x/crypto/ssh"
-)
-`
-  for (const dir of ALLOWED_DIRS) {
-    assert.deepEqual(rules(src, `${dir}anything.go`), [], dir)
+/**
+ * analyseOne writes one fixture package and answers the violations the polic
+ * finds in it. `files` maps a path INSIDE the fixture to its source, so a
+ * fixture can occupy `internal/transport/ws.go` and be labelled exactly as
+ * the product's own file is.
+ */
+function analyseOne(files, opts = {}) {
+  const name = `f${process.pid}-${++fixtureSeq}`
+  const dir = join(PROJECT_ROOT, '.githooks', '.fixtures', name)
+  try {
+    for (const [path, src] of Object.entries(files)) {
+      const full = join(dir, path)
+      mkdirSync(join(full, '..'), { recursive: true })
+      writeFileSync(full, src)
+    }
+    // The package is the directory holding the fixture's files; the scope is
+    // the fixture root, so the labels read as product paths.
+    const pkgDir = Object.keys(files)[0].split('/').slice(0, -1).join('/')
+    const pkgs = './.githooks/.fixtures/' + name + '/' + pkgDir
+    const facts = analyze({ module: PROJECT_ROOT, scope: dir, pkgs, tags: opts.tags })
+    return aggregate(violationsFromFacts(facts))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
   }
+}
+
+const rulesOf = (rows) => rows.map((r) => r.rule)
+
+// ─── bypass 1: an aliased net import ─────────────────────────────────────
+
+test('an aliased net import is the same dial (bypass 1)', () => {
+  const rows = analyseOne({
+    'internal/app/second.go': `package app
+
+import n "net"
+
+func d(addr string) { _, _ = n.Dial("tcp", addr) }
+`,
+  })
+  assert.deepEqual(rulesOf(rows), ['net-dial'])
+  assert.equal(rows[0].object, 'net.Dial')
 })
 
-test("x/crypto's agent and knownhosts subpackages are the same rule", () => {
-  for (const path of ['golang.org/x/crypto/ssh/agent', 'golang.org/x/crypto/ssh/knownhosts']) {
-    assert.deepEqual(rules(`package app\n\nimport "${path}"\n`), ['xcrypto-ssh-import'], path)
-  }
+test('an aliased net import is still exempt for the constant unix', () => {
+  const rows = analyseOne({
+    'internal/app/second.go': `package app
+
+import n "net"
+
+func d(path string) { _, _ = n.Dial("unix", path) }
+`,
+  })
+  assert.deepEqual(rows, [])
 })
 
-test('a TCP dial outside the transport fails the check', () => {
-  assert.deepEqual(rules('package app\n\nfunc f() { _, _ = net.Dial("tcp", addr) }\n'), [
-    'net-dial',
-  ])
+// ─── bypass 2: an aliased exit cause ─────────────────────────────────────
+
+test('an exit cause read through any alias is refused (bypass 2)', () => {
+  const rows = analyseOne({
+    'internal/app/second.go': `package app
+
+import x "golang.org/x/crypto/ssh"
+
+var se *x.ExitError
+`,
+  })
+  assert.deepEqual(rulesOf(rows), ['exit-error-read'])
+  assert.equal(rows[0].object, 'golang.org/x/crypto/ssh.ExitError')
 })
 
-test('a unix-socket dial is not an SSH connection and passes', () => {
-  assert.deepEqual(rules('package app\n\nfunc f() { _, _ = net.Dial("unix", sock) }\n'), [])
-  assert.deepEqual(
-    rules('package app\n\nfunc f() { _, _ = d.DialContext(ctx, "unix", path) }\n'),
-    [],
-  )
+test('a key-format object through an alias, in an allowlisted file, passes', () => {
+  const rows = analyseOne({
+    'internal/transport/ws.go': `package transport
+
+import x "golang.org/x/crypto/ssh"
+
+func parse(b []byte) { _, _ = x.ParseRawPrivateKey(b) }
+`,
+  })
+  assert.deepEqual(rows, [])
 })
 
-test('a dialer built or used outside the transport fails the check', () => {
-  assert.deepEqual(rules('package app\n\nvar d = net.Dialer{Timeout: t}\n'), ['net-dial'])
-  assert.deepEqual(rules('package app\n\nvar c = net.DialTimeout("tcp", a, t)\n'), ['net-dial'])
-  assert.deepEqual(rules('package app\n\nfunc f() { _, _ = r.Route.DialContext(ctx, n, a) }\n'), [
-    'net-dial',
-  ])
-})
+// ─── bypass 3: a keepalive under another name ────────────────────────────
 
-test('reading a remote exit cause outside the transport fails the check', () => {
-  assert.deepEqual(rules('package app\n\nvar se *gossh.ExitError\n'), ['exit-error-read'])
-  assert.deepEqual(rules('package app\n\nvar se *ssh.ExitError\n'), ['exit-error-read'])
-})
-
-test('a second keepalive prober outside the transport fails the check', () => {
-  assert.deepEqual(
-    rules(
-      'package app\n\nfunc f() { _, _, _ = t.SendRequest("keepalive@openssh.com", true, nil) }\n',
-    ),
-    ['keepalive-request'],
-  )
-})
-
-test('comments and prose names are not calls', () => {
-  const src = `package app
-
-// golang.org/x/crypto/ssh gives no per-channel interrupt.
-// net.Dialer never performs the lookup httptrace's DNS hooks report.
-func f() {}
-`
-  assert.deepEqual(rules(src), [])
-})
-
-test('an allowlisted key-format site passes, and is still held to the other rules', () => {
-  const keyFormat = `package transport
+test('SendRequest on a client is a second prober whatever it is named (bypass 3)', () => {
+  const rows = analyseOne({
+    'internal/app/second.go': `package app
 
 import "golang.org/x/crypto/ssh"
 
-var _ = ssh.ParsePublicKey
-`
-  assert.deepEqual(rules(keyFormat, 'internal/transport/ws.go'), [])
-  // The allowlist names ONE rule for that file; the others still apply.
-  assert.deepEqual(
-    rules('package transport\n\nvar se *gossh.ExitError\n', 'internal/transport/ws.go'),
-    ['exit-error-read'],
-  )
+func f(c *ssh.Client) { _, _, _ = c.SendRequest("whatever", true, nil) }
+`,
+  })
+  // The type reference in the signature is an x/crypto fact too, so the
+  // signature names the library as well; what matters is the CALL.
+  assert.deepEqual(rows.map((r) => r.rule).sort(), ['keepalive-request', 'xcrypto-ssh-import'])
+  const keepalive = rows.find((r) => r.rule === 'keepalive-request')
+  assert.equal(keepalive.object, '(*golang.org/x/crypto/ssh.Client).SendRequest')
+  assert.equal(keepalive.detail, 'whatever')
 })
 
-test('the allowlist entry that is not a connection at all', () => {
-  assert.deepEqual(
-    rules('package mcpstdio\n\nvar d = &net.Dialer{}\n', 'internal/mcpstdio/mcpstdio.go'),
-    [],
-  )
-  assert.deepEqual(
-    rules(
-      'package tunnel\n\nfunc f() { _, _ = net.Dial("tcp", addr) }\n',
-      'internal/tunnel/remote.go',
-    ),
-    [],
-  )
+test('a SendRequest on a type of our own is not a prober', () => {
+  const rows = analyseOne({
+    'internal/app/second.go': `package app
+
+type fake struct{}
+
+func (fake) SendRequest(string, bool, []byte) (bool, []byte, error) { return false, nil, nil }
+
+func f(x fake) { _, _, _ = x.SendRequest("keepalive@openssh.com", true, nil) }
+`,
+  })
+  assert.deepEqual(rows, [])
 })
 
-test('a baselined site passes, and removing it passes the check and shrinks the baseline', () => {
-  const text = 'conn, err := r.Route.DialContext(ctx, network, addr)'
+// ─── bypass 4: unix as a comment ─────────────────────────────────────────
+
+test('a comment saying unix is not the constant (bypass 4)', () => {
+  const rows = analyseOne({
+    'internal/app/second.go': `package app
+
+import "net"
+
+func d(addr string) { _, _ = net.Dial("tcp", addr) } // "unix" is not this argument
+`,
+  })
+  assert.deepEqual(rulesOf(rows), ['net-dial'])
+})
+
+test('the constant unix, even through a const, is exempt', () => {
+  const rows = analyseOne({
+    'internal/app/second.go': `package app
+
+import "net"
+
+const network = "unix"
+
+func d(path string) { _, _ = net.Dial(network, path) }
+`,
+  })
+  assert.deepEqual(rows, [])
+})
+
+// ─── bypass 5: a transport helper that hands the dial out ────────────────
+
+test('an exported var re-exporting net.Dial is refused (bypass 5)', () => {
+  const rows = analyseOne({
+    'internal/sshtest/raw.go': `package sshtest
+
+import "net"
+
+var RawDial = net.Dial
+`,
+  })
+  assert.deepEqual(rulesOf(rows), ['transport-re-export'])
+  assert.equal(rows[0].object, 'net.Dial')
+})
+
+test('an exported func whose body is a dial is refused too', () => {
+  const rows = analyseOne({
+    'internal/sshtest/raw.go': `package sshtest
+
+import "golang.org/x/crypto/ssh"
+
+func DialIt(addr string) (*ssh.Client, error) {
+	return ssh.Dial("tcp", addr, nil)
+}
+`,
+  })
+  assert.deepEqual(rulesOf(rows), ['transport-re-export'])
+  assert.equal(rows[0].object, 'golang.org/x/crypto/ssh.Dial')
+})
+
+test('an unexported helper inside the transport is the transport itself', () => {
+  const rows = analyseOne({
+    'internal/sshtest/raw.go': `package sshtest
+
+import "net"
+
+var rawDial = net.Dial
+`,
+  })
+  assert.deepEqual(rows, [])
+})
+
+// ─── bypass 6: the allowlisted file that also dials ──────────────────────
+
+test('a dial added to an allowlisted file is still refused (bypass 6)', () => {
+  const rows = analyseOne({
+    'internal/transport/ws.go': `package transport
+
+import "golang.org/x/crypto/ssh"
+
+func f(addr string) { _, _ = ssh.Dial("tcp", addr, nil) }
+`,
+  })
+  assert.deepEqual(rulesOf(rows), ['xcrypto-ssh-import'])
+  assert.equal(rows[0].object, 'golang.org/x/crypto/ssh.Dial')
+})
+
+test('the same file keeping to its key format passes', () => {
+  const rows = analyseOne({
+    'internal/transport/ws.go': `package transport
+
+import "golang.org/x/crypto/ssh"
+
+func f(b []byte) { _, _ = ssh.ParseRawPrivateKey(b) }
+`,
+  })
+  assert.deepEqual(rows, [])
+})
+
+// ─── bypass 7: the text-keyed baseline ───────────────────────────────────
+
+test('a second identical site in one function is a second occurrence (bypass 7)', () => {
+  const rows = analyseOne({
+    'internal/app/second.go': `package app
+
+import "net"
+
+func d(a, b string) {
+	_, _ = net.Dial("tcp", a)
+	_, _ = net.Dial("tcp", b)
+}
+`,
+  })
+  assert.equal(rows.length, 1, 'one function, one object, one key')
+  assert.equal(rows[0].count, 2, 'and two occurrences behind it')
+
   const baseline = [
-    { rule: 'net-dial', file: OUTSIDE, text, reason: 'the HTTP route, leaves with the agent' },
+    {
+      rule: 'net-dial',
+      file: 'internal/app/second.go',
+      func: rows[0].func,
+      object: 'net.Dial',
+      count: 1,
+      reason: 'x',
+    },
   ]
-  const present = violationsInText(OUTSIDE, `package app\n\nfunc f() {\n\t${text}\n}\n`)
-  assert.equal(partition(present, baseline).length, 0, 'a baselined line is not new')
-
-  // The site moved to the transport: the violation is gone, the check passes,
-  // and the updater drops the entry instead of keeping a licence nobody uses.
-  const removed = violationsInText(OUTSIDE, 'package app\n\nfunc f() {}\n')
-  assert.equal(partition(removed, baseline).length, 0)
-  const shrunk = planBaselineUpdate({ violations: removed, old: baseline })
-  assert.deepEqual(shrunk.entries, [])
-  assert.deepEqual(shrunk.dropped, baseline)
+  const { fresh, stale } = evaluate(rows, baseline)
+  assert.equal(fresh.length, 1, 'a count that grew is new')
+  assert.equal(fresh[0].was, 1)
+  assert.equal(stale.length, 0)
 })
 
-test('a new second owner cannot be added to the baseline without its flag', () => {
-  const site = {
+test('a baselined site that vanished, or shrank, is stale and fails', () => {
+  const key = {
     rule: 'net-dial',
-    file: OUTSIDE,
-    text: 'conn, err := net.Dial("tcp", addr)',
+    file: 'internal/app/gone.go',
+    func: 'app.d',
+    object: 'net.Dial',
+    count: 1,
+    reason: 'x',
+  }
+  assert.equal(evaluate([], [key]).stale.length, 1, 'gone is stale')
+
+  const rows = [
+    { rule: 'net-dial', file: 'internal/app/gone.go', func: 'app.d', object: 'net.Dial', count: 1 },
+  ]
+  const bigger = { ...key, count: 2 }
+  const shrunk = evaluate(rows, [bigger])
+  assert.equal(shrunk.stale.length, 1, 'a shrink is stale too')
+  assert.equal(shrunk.stale[0].now, 1)
+})
+
+test('no growth without the flag; with it, an entry starts unreasoned', () => {
+  const row = {
+    rule: 'net-dial',
+    file: 'internal/app/x.go',
+    func: 'app.d',
+    object: 'net.Dial',
+    count: 1,
   }
   assert.throws(
-    () => planBaselineUpdate({ violations: [site], old: [] }),
-    /REFUSING to update baseline: 1 site/,
+    () => planBaselineUpdate({ violations: [row], old: [] }),
+    /REFUSING to update baseline/,
   )
-  const grown = planBaselineUpdate({ violations: [site], old: [], allowGrowth: true })
-  assert.equal(grown.entries.length, 1)
-  assert.equal(grown.entries[0].reason, '', 'a grown entry starts with no reason')
+  const plan = planBaselineUpdate({ violations: [row], old: [], allowGrowth: true })
+  assert.equal(plan.entries.length, 1)
+  assert.equal(plan.entries[0].reason, '')
+  assert.equal(plan.entries[0].count, 1)
+  // A baseline entry with no reason is refused, not silently honoured.
+  assert.equal(unreasonedEntries(plan.entries).length, 1)
 })
 
-test('an existing reason survives a rebuild of the baseline', () => {
-  const text = 'var se *gossh.ExitError'
-  const old = [{ rule: 'exit-error-read', file: OUTSIDE, text, reason: 'stage 3 maps it' }]
-  const violations = violationsInText(OUTSIDE, `package app\n\n${text}\n`)
-  const plan = planBaselineUpdate({ violations, old })
-  assert.deepEqual(plan.entries, old)
-  assert.deepEqual(plan.growth, [])
+test('an existing reason survives a rebuild, and a count change does not lose it', () => {
+  const old = [
+    {
+      rule: 'exit-error-read',
+      file: 'internal/app/x.go',
+      func: 'app.d',
+      object: 'golang.org/x/crypto/ssh.ExitError',
+      count: 1,
+      reason: 'stage 3 maps it',
+    },
+  ]
+  const grown = [
+    {
+      rule: 'exit-error-read',
+      file: 'internal/app/x.go',
+      func: 'app.d',
+      object: 'golang.org/x/crypto/ssh.ExitError',
+      count: 2,
+    },
+  ]
+  const plan = planBaselineUpdate({ violations: grown, old, allowGrowth: true })
+  assert.equal(plan.entries[0].reason, 'stage 3 maps it')
+  assert.equal(plan.entries[0].count, 2)
+
+  const shrunk = planBaselineUpdate({
+    violations: [{ ...grown[0], count: 1 }],
+    old: [{ ...old[0], count: 2 }],
+  })
+  assert.equal(shrunk.entries[0].count, 1)
+  assert.equal(shrunk.entries[0].reason, 'stage 3 maps it')
+  assert.equal(shrunk.shrunk.length, 1)
 })
 
-test('a baseline entry with no reason is refused, not silently honoured', () => {
-  const baseline = [{ rule: 'net-dial', file: OUTSIDE, text: 'x', reason: '  ' }]
-  assert.equal(unreasonedEntries(baseline).length, 1)
-  assert.equal(unreasonedEntries([{ ...baseline[0], reason: 'a unix-socket default' }]).length, 0)
+// ─── the lists themselves ────────────────────────────────────────────────
+
+test('the allowlist is reasoned, known, and exact about x/crypto objects', () => {
+  assert.deepEqual(allowlistProblems(), [])
+  for (const entry of ALLOWLIST) {
+    assert.ok(Object.hasOwn(RULES, entry.rule), entry.file)
+  }
+  // The three key-format files are allowed OBJECTS, never the dialect.
+  for (const entry of ALLOWLIST.filter((e) => e.rule === 'xcrypto-ssh-import')) {
+    assert.ok(Array.isArray(entry.objects) && entry.objects.length > 0, entry.file)
+    assert.ok(!entry.objects.includes('golang.org/x/crypto/ssh.Dial'), entry.file)
+  }
+})
+
+test('the committed baseline is counted, reasoned, and only shrinks', () => {
+  const baseline = loadBaseline()
+  assert.ok(baseline.length > 0)
+  for (const entry of baseline) {
+    assert.equal(typeof entry.count, 'number', violationKey(entry))
+    assert.ok(entry.count > 0, violationKey(entry))
+    assert.ok(entry.func.length > 0, violationKey(entry))
+    assert.ok(entry.object.length > 0, violationKey(entry))
+    assert.ok(entry.reason.trim().length > 0, violationKey(entry))
+  }
+})
+
+test('the transport packages are the only ones exempt, and there are three', () => {
+  assert.deepEqual(ALLOWED_DIRS, ['internal/ssh/', 'internal/helper/sshsvc/', 'internal/sshtest/'])
 })
 
 test('the unchanged tree passes the check', () => {
   const out = execFileSync('node', ['.githooks/check-connection-owners.mjs'], {
-    cwd: fileURLToPath(new URL('..', import.meta.url)),
+    cwd: PROJECT_ROOT,
     encoding: 'utf8',
   })
   assert.match(out, /connection-owner ratchet/)
+  assert.match(out, /0 new, 0 stale/)
 })

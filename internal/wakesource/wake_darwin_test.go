@@ -60,7 +60,7 @@ func (f *fakeClocks) set(r monoclock.Readings) {
 func TestTheDarwinSourceDeliversAWakeEvent(t *testing.T) {
 	clocks := &fakeClocks{}
 	clocks.set(monoclock.Readings{Awake: monoclock.Nanos(100), Continuous: monoclock.Nanos(500)})
-	src := newSource(clocks.read, time.Millisecond, SleepGap)
+	src := newSource(clocks.read, time.Millisecond, SleepGap, nil, nil)
 	t.Cleanup(src.Stop)
 
 	// A second of ordinary time first: no signal.
@@ -85,7 +85,7 @@ func TestTheDarwinSourceIsSilentWithoutASuspend(t *testing.T) {
 	clocks := &fakeClocks{}
 	base := monoclock.Readings{Awake: monoclock.Nanos(100), Continuous: monoclock.Nanos(500)}
 	clocks.set(base)
-	src := newSource(clocks.read, time.Millisecond, SleepGap)
+	src := newSource(clocks.read, time.Millisecond, SleepGap, nil, nil)
 	t.Cleanup(src.Stop)
 
 	for i := 1; i <= 20; i++ {

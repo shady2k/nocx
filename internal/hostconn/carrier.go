@@ -119,6 +119,20 @@ type WakeSource interface {
 	Wakes() <-chan monoclock.Nanos
 }
 
+// SleepSource is what a wake source offers when the operating system also says
+// that the machine is GOING to sleep. It is optional: a source that cannot see
+// the edge simply never sends one, and the wake signal is then the only news.
+//
+// The supervisor uses it to stop asking its connections for answers before the
+// machine freezes. Nothing will be heard while it is away, so a probe sent into
+// the sleep would be the first thing to answer on resume, and the silence it
+// spent parked is not evidence of anything.
+type SleepSource interface {
+	// Sleeps answers the channel that receives once when the machine is about
+	// to sleep, with the clock reading at which it was said.
+	Sleeps() <-chan monoclock.Nanos
+}
+
 // Prober is what a carrier offers when it can ask the far side a question.
 // Optional, found by capability: a carrier without it never reads stalled.
 type Prober interface {

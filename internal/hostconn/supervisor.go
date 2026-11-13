@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/shady2k/nocx/internal/connkey"
@@ -131,8 +132,33 @@ func NewManager(carrier Carrier, logger log.Logger, opts ...Option) *Manager {
 	}
 	if m.wake != nil {
 		go m.watchWakes()
+		if sleeps, ok := m.wake.(SleepSource); ok {
+			go m.watchSleeps(sleeps)
+		}
 	}
 	return m
+}
+
+// watchSleeps tells every supervisor when the machine is going to sleep. It
+// runs for the life of the manager, which is the life of the helper process.
+func (m *Manager) watchSleeps(src SleepSource) {
+	for at := range src.Sleeps() {
+		m.sleepAll(at)
+	}
+}
+
+// sleepAll marks every connection with the moment the machine is about to
+// sleep. A supervisor with no connection has nothing to mark.
+func (m *Manager) sleepAll(at monoclock.Nanos) {
+	m.mu.Lock()
+	sups := make([]*Supervisor, 0, len(m.sups))
+	for _, sup := range m.sups {
+		sups = append(sups, sup)
+	}
+	m.mu.Unlock()
+	for _, sup := range sups {
+		sup.Suspend(at)
+	}
 }
 
 // watchWakes fans one wake signal out to every supervisor. It runs for the life
@@ -229,6 +255,12 @@ type live struct {
 	// pending signal: two wakes nobody has read yet are one fact for a
 	// connection that has not answered the first.
 	wake chan monoclock.Nanos
+	// sleep carries the machine's "about to sleep" edge, the same way.
+	sleep chan monoclock.Nanos
+	// suspended is set by the guard when the machine is going to sleep and
+	// cleared by the wake. The guard writes it; a holder and the journal read
+	// it ("my connection is paused because the machine is asleep").
+	suspended atomic.Bool
 	// nextProbe is when the guard asks this connection to answer. It is set
 	// when the connection becomes live rather than when the goroutine happens
 	// to start: the cadence belongs to the connection, and a guard scheduled a
@@ -326,7 +358,7 @@ func (s *Supervisor) Acquire(ctx context.Context, plan Plan) (*Lease, error) {
 		live := &live{
 			link: link, holders: 1, route: plan.Route, probeInterval: probeInterval,
 			nextProbe: s.clock.Now() + span(probeInterval),
-			stop:      make(chan struct{}), wake: make(chan monoclock.Nanos, 1),
+			stop:      make(chan struct{}), wake: make(chan monoclock.Nanos, 1), sleep: make(chan monoclock.Nanos, 1),
 			observers: make(map[*Lease]func(Observation)),
 		}
 		if plan.Holds&HoldsPlainShell != 0 {
@@ -538,6 +570,33 @@ func (s *Supervisor) Wake(at monoclock.Nanos) {
 	}
 }
 
+// Suspended reports whether the machine is known to be going to sleep and this
+// connection has not been woken since. It is the fact a connection's journal
+// records and a surface will draw (stage 3); today the guard and the tests read
+// it.
+func (s *Supervisor) Suspended() bool {
+	s.mu.Lock()
+	live := s.live
+	s.mu.Unlock()
+	return live != nil && live.suspended.Load()
+}
+
+// Suspend tells this connection the machine is about to sleep. The guard stops
+// asking for answers until a wake arrives: a probe sent into the sleep would
+// park across it and its silence would be evidence of nothing.
+func (s *Supervisor) Suspend(at monoclock.Nanos) {
+	s.mu.Lock()
+	live := s.live
+	s.mu.Unlock()
+	if live == nil {
+		return
+	}
+	select {
+	case live.sleep <- at:
+	default:
+	}
+}
+
 // States answers the states this supervisor has passed through, oldest first.
 func (s *Supervisor) States() []State {
 	steps := s.Steps()
@@ -595,6 +654,15 @@ func (l *Lease) Release() {
 	l.once.Do(func() {
 		l.sup.release(l)
 	})
+}
+
+// Suspended reports whether the connection this lease rides is paused because
+// the machine is going to sleep.
+func (l *Lease) Suspended() bool {
+	if l == nil || l.held == nil {
+		return false
+	}
+	return l.held.suspended.Load()
 }
 
 // Lost reports whether the transport under this lease has ended.

@@ -62,7 +62,7 @@ type Options struct {
 // second pool (AD-4), and the two clocks the helper itself cannot read any
 // other way (design §5.3, "On a wake signal").
 func New(client *ssh.RealClient, logger log.Logger) *Carrier {
-	return NewWithOptions(client, logger, Options{Wake: wakesource.New()})
+	return NewWithOptions(client, logger, Options{Wake: wakesource.New(logger)})
 }
 
 // NewWithOptions is New with the clock and the wake source decided by the

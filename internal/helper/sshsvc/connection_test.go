@@ -885,3 +885,51 @@ func TestASingleHealthyPaneStillReports(t *testing.T) {
 		}
 	})
 }
+
+// ─── the OS's own sleep/wake edges (nocx-oalo1.4.5 follow-up) ──────────────
+
+// TestASleepIsNotSilenceAndTheWakeProvesTheConnection is the pre-sleep edge's
+// job: while the machine is going to sleep the supervisor asks nothing of its
+// connections, so the sleep never reads as a fault; the wake makes the
+// connection prove itself in the wake's five seconds.
+func TestASleepIsNotSilenceAndTheWakeProvesTheConnection(t *testing.T) {
+	const password = "correct horse battery staple"
+	f := newFixture(t, password, newSigner(t))
+	proxy := sshtest.NewFaultProxy(t, f.addr)
+	clock := hostconntest.New()
+	stand := newStandOnClock(t, &coordinator{
+		password: password, verdict: proto.HostKeyTrusted, fingerprint: f.hostKeyFingerprint(),
+	}, discardLogger(), clock)
+	destination := destinationAt(t, proxy.Addr())
+
+	holder, err := stand.carrier.Acquire(context.Background(), supervisedSpec(t, f, destination, false))
+	if err != nil {
+		t.Fatalf("hold the connection: %v", err)
+	}
+	t.Cleanup(holder.Release)
+
+	// THE MACHINE IS GOING TO SLEEP: ten simulated minutes pass, and not one
+	// probe is asked for. A probe sent into the sleep would be the first thing
+	// to answer on resume and its parked silence would be evidence of nothing.
+	stand.wake.Sleep()
+	waittest.WaitFor(t, "the sleep edge to be applied", holder.Suspended)
+	clock.Advance(10 * time.Minute)
+	if probes, _ := f.keepalivesSeen(); probes != 0 {
+		t.Fatalf("%d probes were sent while the machine was going to sleep", probes)
+	}
+	if got := lastState(holder.States()).Kind; got != hostconn.Connected {
+		t.Fatalf("a sleeping machine's connection reads %v, want connected: the sleep is not silence", got)
+	}
+
+	// The far side is dead behind the sleep (the shape the owner met); the
+	// wake makes the connection prove itself, and the five seconds run out.
+	proxy.SilenceEstablished()
+	stand.wake.Wake()
+	clock.Advance(hostconn.WakeProbeDeadline)
+	waittest.WaitFor(t, "the connection to read stalled after the wake", func() bool {
+		return lastState(holder.States()).Kind == hostconn.Stalled
+	})
+	if got := lastState(holder.States()).Silent; got != hostconn.WakeProbeDeadline {
+		t.Fatalf("stalled reports %v of silence, want %v", got, hostconn.WakeProbeDeadline)
+	}
+}

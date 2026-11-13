@@ -40,8 +40,9 @@ export interface HostProfileRow {
 }
 
 /** A live ~/.ssh/config alias after the saved-profile dedup, as both
- *  surfaces list it. */
-export interface HostAliasRow {
+ *  surfaces list it. Named by nothing outside this module: the rows reach the
+ *  picker and completion through `aliasRows`'s own return type. */
+interface HostAliasRow {
   /** `__ssh_alias:<alias>` — the stable identity completion dedups on. */
   readonly id: string
   /** `user@alias` when the alias has a user, else `alias`. */
@@ -132,7 +133,7 @@ export function aliasRows(input: {
  * line has been matched to the profile (nocx-typed-ssh-profile). Resolved
  * from the profile list — never constructed by the parser — and the -J value
  * is already resolved through the jump profile the source names. Values are
- * raw settings; the planner quotes them before they reach the line.
+ * raw settings, in the form the profile stores them.
  */
 export interface SshProfileOverlay {
   /** The matching profile's id. */

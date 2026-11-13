@@ -95,11 +95,6 @@
     },
     {
       "kind": "exports",
-      "file": "src/ssh-transition.ts",
-      "symbol": "isSshPlan"
-    },
-    {
-      "kind": "exports",
       "file": "src/state/index.ts",
       "symbol": "AcceptedSnapshot"
     },
@@ -510,11 +505,6 @@
     },
     {
       "kind": "types",
-      "file": "src/input-target.ts",
-      "symbol": "SubmitContext"
-    },
-    {
-      "kind": "types",
       "file": "src/profiles.ts",
       "symbol": "Base"
     },
@@ -565,11 +555,6 @@
     },
     {
       "kind": "types",
-      "file": "src/quick-connect-assembly.ts",
-      "symbol": "HostAliasRow"
-    },
-    {
-      "kind": "types",
       "file": "src/quick-connect.tsx",
       "symbol": "DrillChoice"
     },
@@ -617,16 +602,6 @@
       "kind": "types",
       "file": "src/shell-highlight.ts",
       "symbol": "CommandVerdict"
-    },
-    {
-      "kind": "types",
-      "file": "src/ssh-transition.ts",
-      "symbol": "SshOption"
-    },
-    {
-      "kind": "types",
-      "file": "src/ssh-transition.ts",
-      "symbol": "SshRefusal"
     },
     {
       "kind": "types",

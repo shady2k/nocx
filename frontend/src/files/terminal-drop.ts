@@ -227,11 +227,11 @@ function carriesFiles(transfer: DataTransfer | null): boolean {
 /**
  * Quote one name for a shell.
  *
- * A third private copy of four characters of regex: `ssh-transition.ts` and
- * `integration/status.ts` each hold one and neither exports it. Extracting
- * the one answer is right and is a change to two modules this gesture does
- * not touch — recorded rather than done here, because a silent third copy
- * is how the count reaches four.
+ * A second private copy of four characters of regex: `integration/status.ts`
+ * holds the first and does not export it. Extracting the one answer is right
+ * and is a change to a module this gesture does not touch — recorded rather
+ * than done here, because a silent second copy is how the count reaches
+ * three.
  */
 function shellQuote(s: string): string {
   if (/^[\w@%+=:,./-]+$/.test(s)) return s

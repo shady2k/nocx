@@ -299,6 +299,22 @@ func streamToolCalls(w http.ResponseWriter, calls ...toolCallSpec) {
 // callThenAnswer answers the FIRST completion with the tool calls and every
 // later one with the ordinary streamed "ok" — the shape of a run that
 // executes its tools and then finishes.
+// reProposingModel is a provider that keeps proposing the same call until it
+// sees the tool's result, minting a new call id each time — what an
+// OpenAI-compatible endpoint does.
+func reProposingModel(name, args string) func(w http.ResponseWriter, r *http.Request) {
+	var n int
+	return func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), `"role":"tool"`) {
+			streamOK(w)
+			return
+		}
+		n++
+		streamToolCalls(w, toolCallSpec{name: name, args: args, id: fmt.Sprintf("call_%d", n)})
+	}
+}
+
 func callThenAnswer(calls ...toolCallSpec) func(w http.ResponseWriter, r *http.Request) {
 	var n int
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -653,20 +669,20 @@ func TestAsk_RefusedCallIsOneCallsAnswerNotTheBatchs(t *testing.T) {
 	}
 }
 
-// TestAsk_EscalationOnSecondCallPreventsThird is acceptance criterion 2's
-// escalation half: three calls in one model response under ask-every-time —
-// the first escalates, so the second and third must not run, and the batch
-// must SUSPEND cleanly (the latched calls return an interrupt, not a plain
-// error, or the run would fail instead of awaiting approval). Asserted by
-// what the ledger records: exactly one execution — the first call's recorded
-// proposal attempt, closed interrupted, never run.
-func TestAsk_EscalationOnSecondCallPreventsThird(t *testing.T) {
+// TestAsk_OneDeclineRefusesTheCallsQueuedBehindIt is acceptance criterion 2's
+// escalation half, on the blocking path: three calls in one model response
+// under ask-every-time — the first is asked about, the person says no, and the
+// second and third are refused with that same reason rather than started
+// (ADR-anntnxdj §2, the per-turn order). Asserted by what the ledger records:
+// exactly one execution, the first call's recorded proposal, closed
+// interrupted — no call ran.
+func TestAsk_OneDeclineRefusesTheCallsQueuedBehindIt(t *testing.T) {
 	grant, dir := testDirGrant(t, askEveryTimeMatrix())
 	writeFile(t, filepath.Join(dir, "a.txt"), "first")
 	writeFile(t, filepath.Join(dir, "b.txt"), "third")
 
 	ledger := &fakeLedger{}
-	_, srv := newFakeOpenAI(callThenAnswer(
+	f, srv := newFakeOpenAI(callThenAnswer(
 		toolCallSpec{name: "files.read", args: fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))},
 		toolCallSpec{name: "files.read", args: fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))},
 		toolCallSpec{name: "files.read", args: fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "b.txt"))},
@@ -677,13 +693,21 @@ func TestAsk_EscalationOnSecondCallPreventsThird(t *testing.T) {
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
-	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, nil), func(AskEvent) error { return nil })
-	var want *ApprovalRequestedError
-	if !errors.As(err, &want) {
-		t.Fatalf("Ask error = %v, want the approval-requested suspension", err)
+	q, err := withPerson(t, cl, askParams(srv.URL, &grant, ledger, nil), Declined{Reason: "not this one"}, DeclineCallOnce)
+	if err != nil {
+		t.Fatalf("Ask error = %v, want the person's no as the first call's answer", err)
+	}
+	if len(q.asked) != 1 {
+		t.Fatalf("the person was asked %d times, want exactly 1 — the calls behind a declined one are refused, not asked", len(q.asked))
 	}
 	if s := ledger.started(); s != 1 {
-		t.Fatalf("ledger opened %d executions, want exactly 1 — the first call's recorded proposal; the latched calls must not run", s)
+		t.Fatalf("ledger opened %d executions, want exactly 1 — the first call's recorded proposal; the queued calls must not run", s)
+	}
+	// All three calls were answered, and the two behind the first carry the
+	// SAME sentence the person's no produced.
+	body := f.body()
+	if n := strings.Count(body, "not this one"); n != 3 {
+		t.Fatalf("the model received the refusal %d times, want 3 — every accepted call settles, and the queued ones carry the same reason: %s", n, body)
 	}
 }
 
@@ -730,18 +754,17 @@ func TestAsk_FailedAttemptWritePreventsExecution(t *testing.T) {
 
 // ── criterion 5: escalation suspends, and binds to the exact proposal ────
 
-// TestAsk_EscalationSuspendsBeforeDomain is acceptance criterion 5's first
-// half: under ask-every-time the run SUSPENDS before the domain is touched —
-// Ask returns the approval request (not a failure, and not a tool result).
-// The escalation IS recorded (nocx-5dldy
-// — the proposal is a ledger fact): exactly one attempt, closed interrupted,
-// the call that is asking has NOT run.
-func TestAsk_EscalationSuspendsBeforeDomain(t *testing.T) {
+// TestAsk_AnAskWithholdsTheCallBeforeTheDomain is acceptance criterion 5's
+// first half: under ask-every-time the call does not touch the domain until the
+// person answers. The person says no, so the file is never read: the model's
+// next request carries the refusal, never the contents. The escalation IS
+// recorded (nocx-5dldy — the proposal is a ledger fact): exactly one attempt,
+// closed interrupted, and no call attempt at all.
+func TestAsk_AnAskWithholdsTheCallBeforeTheDomain(t *testing.T) {
 	grant, dir := testDirGrant(t, askEveryTimeMatrix())
 	writeFile(t, filepath.Join(dir, "a.txt"), "must not be read yet")
 
 	ledger := &fakeLedger{}
-	approvals := NewApprovalStore()
 	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))}))
 	defer srv.Close()
 
@@ -749,19 +772,21 @@ func TestAsk_EscalationSuspendsBeforeDomain(t *testing.T) {
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
-	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, approvals), func(AskEvent) error { return nil })
-	var want *ApprovalRequestedError
-	if !errors.As(err, &want) {
-		t.Fatalf("Ask error = %v, want the approval-requested suspension", err)
+	q, err := withPerson(t, cl, askParams(srv.URL, &grant, ledger, NewApprovalStore()), Declined{Reason: "not this one"}, DeclineCallOnce)
+	if err != nil {
+		t.Fatalf("Ask error = %v, want the person's no as the call's answer", err)
 	}
-	if want.Request == nil || want.Request.Tool != "files.read" || !strings.Contains(want.Request.Arguments, "a.txt") {
-		t.Fatalf("approval request = %+v, want files.read on a.txt", want.Request)
+	if len(q.asked) != 1 {
+		t.Fatalf("the person was asked %d times, want exactly 1", len(q.asked))
 	}
-	if n := f.requests.Load(); n != 1 {
-		t.Fatalf("the engine made %d model requests after the suspension, want exactly 1", n)
+	if asked := q.asked[0]; asked.Tool != "files.read" || !strings.Contains(asked.Arguments, "a.txt") {
+		t.Fatalf("question = %+v, want files.read on a.txt", asked)
+	}
+	if body := f.body(); strings.Contains(body, "must not be read yet") {
+		t.Fatalf("the file's contents reached the model: %s", body)
 	}
 	if s := ledger.started(); s != 1 {
-		t.Fatalf("ledger opened %d executions, want exactly 1 — the recorded proposal attempt; the call that is asking has not run", s)
+		t.Fatalf("ledger opened %d executions, want exactly 1 — the recorded proposal attempt; the call that was refused never ran", s)
 	}
 	for _, c := range ledger.calls() {
 		if strings.HasPrefix(c, "finish:") && !strings.Contains(c, "interrupted") {
@@ -787,22 +812,19 @@ func TestMiddleware_ApprovalBindsToExactArguments(t *testing.T) {
 	argsA := fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))
 	argsB := fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "b.txt"))
 
-	// First call: escalates before the domain is touched, and the
-	// escalation is RECORDED — one proposal attempt, closed interrupted.
-	if _, err := wrappedEndpoint(mw, "files.read", "call_1", argsA); err == nil {
-		t.Fatal("the ask-every-time call was not escalated")
-	}
-	if s := ledger.started(); s != 1 {
-		t.Fatalf("ledger opened %d executions after the escalation, want 1 — the recorded proposal attempt", s)
-	}
-
-	// Approve the exact proposal, then the same call runs — as a
+	// The exact proposal is approved by the person, and the call runs — as a
 	// SUBSEQUENT attempt of the proposal's own entry (ADR-0020 decision 4):
 	// the escalation's record plus the approved call's execution.
-	approvals.Approve(Approval{
-		RunID: "run-1", Attempt: 1, Tool: "files.read", CallID: "call_1",
-		ArgHash: canonicalArgHash(argsA),
-	})
+	q := &recordingQuestioner{store: approvals, answer: Approved{}}
+	q.before = func() {
+		if len(q.asked) != 1 {
+			return // only the first question is the escalation this asserts
+		}
+		if s := ledger.started(); s != 1 {
+			t.Errorf("ledger opened %d executions after the escalation, want 1 — the recorded proposal attempt", s)
+		}
+	}
+	mw.kernel.questioner = q
 	out, err := wrappedEndpoint(mw, "files.read", "call_1", argsA)
 	if err != nil {
 		t.Fatalf("the approved call was refused: %v", err)
@@ -814,13 +836,18 @@ func TestMiddleware_ApprovalBindsToExactArguments(t *testing.T) {
 		t.Fatalf("ledger opened %d executions, want 2 — the proposal record plus the approved call's own execution", s)
 	}
 
-	// A CHANGED argument does not resume under the old approval: it
-	// escalates again (recording a NEW proposal), and the tool does not run.
-	if _, err := wrappedEndpoint(mw, "files.read", "call_1", argsB); err == nil {
+	// A CHANGED argument does not run under the old approval: it is a new
+	// proposal and asks again. The question is the assertion — the person is
+	// asked about the changed bytes, never covered by the yes to the old ones.
+	askedBefore := len(q.asked)
+	if _, err := wrappedEndpoint(mw, "files.read", "call_1", argsB); err != nil {
+		t.Fatalf("the changed-argument call = %v, want the person's answer as its result", err)
+	}
+	if len(q.asked) != askedBefore+1 {
 		t.Fatal("the changed-argument call ran under the old approval")
 	}
-	if s := ledger.started(); s != 3 {
-		t.Fatalf("ledger opened %d executions, want 3 — the changed call recorded a NEW proposal and nothing ran under the old approval", s)
+	if got := q.asked[len(q.asked)-1].ArgHash; got != canonicalArgHash(argsB) {
+		t.Fatalf("the new question binds %q, want the changed arguments' hash", got)
 	}
 }
 
@@ -857,11 +884,17 @@ func TestMiddleware_DeclinedProposalReturnsRefusalInsteadOfReasking(t *testing.T
 		t.Fatalf("one-off refusal = %q, must not claim a standing refusal", out)
 	}
 	// A retry with a NEW call id is a different proposal: the matrix still
-	// asks, so it escalates rather than running — a one-off no is not
-	// standing. The escalation surfaces as the interrupt error, the same
-	// shape TestMiddleware_ApprovalBindsToExactArguments asserts.
-	if retryOut, retryErr := wrappedEndpoint(mw, "files.read", "call_2", args); retryErr == nil {
-		t.Fatalf("the retry RAN after a one-off decline (result %q) — a one-off no must not be standing", retryOut)
+	// asks, so it is put to the person again — a one-off no is not standing.
+	// (The turn's order refuses the calls queued BEHIND a declined one; a
+	// retry the model proposes after seeing the refusal is a new turn step
+	// and is asked about, which is what a one-off no means.)
+	fresh := middlewareFor(t, grant, &fakeLedger{}, approvals)
+	q := &recordingQuestioner{store: approvals, answer: Declined{Reason: "not this one"}, kind: DeclineCallOnce}
+	fresh.kernel.questioner = q
+	if retryOut, retryErr := wrappedEndpoint(fresh, "files.read", "call_2", args); retryErr != nil {
+		t.Fatalf("the retry = %v, want the person's no as its answer", retryErr)
+	} else if len(q.asked) != 1 {
+		t.Fatalf("the retry ran after a one-off decline (result %q) — a one-off no must not be standing", retryOut)
 	}
 }
 
@@ -911,8 +944,12 @@ func TestMiddleware_StandingDeclineDoesNotLeakAcrossRuns(t *testing.T) {
 	if mwErr != nil {
 		t.Fatalf("newPolicyMiddleware(run-2): %v", mwErr)
 	}
-	if out2, err2 := wrappedEndpoint(mw2, "files.read", "call_1", args); err2 == nil {
-		t.Fatalf("run 2's call returned %q with no error — run 1's standing decline leaked across runs; run 2 must decide for itself", out2)
+	q := &recordingQuestioner{store: approvals, answer: Declined{Reason: "not this one"}, kind: DeclineCallOnce}
+	mw2.kernel.questioner = q
+	if out2, err2 := wrappedEndpoint(mw2, "files.read", "call_1", args); err2 != nil {
+		t.Fatalf("run 2's call = %v, want the person's no as its answer", err2)
+	} else if len(q.asked) != 1 {
+		t.Fatalf("run 2's call returned %q without asking — run 1's standing decline leaked across runs; run 2 must decide for itself", out2)
 	}
 }
 
@@ -932,35 +969,23 @@ func TestAsk_DeclinedProposalResumesWithRefusalAndContinues(t *testing.T) {
 		t.Fatalf("newClient: %v", clErr)
 	}
 
-	// 1. The ask suspends: the person is asked about the first roll's call.
-	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, approvals), func(AskEvent) error { return nil })
-	var asked *ApprovalRequestedError
-	if !errors.As(err, &asked) || asked.Request == nil {
-		t.Fatalf("Ask error = %v, want the approval-requested suspension", err)
-	}
-
-	// 2. The person says no to exactly that proposal — what
-	//    agent.approve(approved:false) puts in the store.
-	approvals.Decline(Approval{
-		RunID: asked.Request.RunID, Attempt: asked.Request.Attempt, Tool: asked.Request.Tool,
-		CallID: asked.Request.CallID, ArgHash: asked.Request.ArgHash,
-	}, DeclineCallOnce)
-
-	// 3. The resume: the run continues with the refusal as that call's
-	//    result, and the model answers in words.
+	// The person says no to exactly that proposal — what
+	// agent.approve(approved:false) puts in the store — and the call that
+	// asked goes on with the refusal as its own result.
+	q := &recordingQuestioner{store: approvals, answer: Declined{Reason: PersonDeclineResult("files.read", DeclineCallOnce)}, kind: DeclineCallOnce}
+	p := askParams(srv.URL, &grant, ledger, approvals)
+	p.Questioner = q
 	var got strings.Builder
-	err = cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, approvals), func(e AskEvent) error {
+	if err := cl.Ask(context.Background(), p, func(e AskEvent) error {
 		if e.Kind == AskAnswer {
 			got.WriteString(e.Text)
 		}
 		return nil
-	})
-	var again *ApprovalRequestedError
-	if errors.As(err, &again) {
-		t.Fatalf("the resume asked the SAME question again after the decline (call id %q): a person can never get past it", again.Request.CallID)
+	}); err != nil {
+		t.Fatalf("Ask error = %v, want the refusal to be answered", err)
 	}
-	if err != nil {
-		t.Fatalf("resume Ask error = %v, want the refusal to be answered", err)
+	if len(q.asked) != 1 {
+		t.Fatalf("the person was asked %d times, want exactly 1 — a declined call is not re-asked", len(q.asked))
 	}
 	if !strings.Contains(got.String(), "ok") {
 		t.Fatalf("answer = %q, want the model's reply after the refusal", got.String())
@@ -1017,39 +1042,21 @@ func TestAsk_StandingRefusalTellsTheModelTheSecondTime(t *testing.T) {
 		t.Fatalf("newClient: %v", clErr)
 	}
 
-	// The ask suspends on the first proposal.
-	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, approvals), func(AskEvent) error { return nil })
-	var asked *ApprovalRequestedError
-	if !errors.As(err, &asked) || asked.Request == nil {
-		t.Fatalf("Ask error = %v, want the approval-requested suspension", err)
-	}
-
-	// "Deny always": the decline is recorded against the exact proposal
+	// "Deny always": the person's no is recorded against the exact proposal
 	// WITH its effect class (the transport notes the effect when the
-	// question reaches the person), and the standing part lands in the
-	// matrix the runs AFTER this one are minted from (the transport's
-	// applyStandingAnswer). The DECLINED resume itself keeps the grant the
-	// question was asked under — resumeRunDeclined — so the suspended
-	// call's tool stays declared and the checkpoint restores.
-	declined := Approval{
-		RunID: asked.Request.RunID, Attempt: asked.Request.Attempt, Tool: asked.Request.Tool,
-		CallID: asked.Request.CallID, ArgHash: asked.Request.ArgHash,
-	}
-	approvals.NoteEffect(Approval{
-		RunID: asked.Request.RunID, Attempt: asked.Request.Attempt, Tool: asked.Request.Tool,
-		CallID: asked.Request.CallID, ArgHash: asked.Request.ArgHash,
-		Effect: content.EffectObserve,
-	})
-	approvals.Decline(declined, DeclineCallAlways)
-
-	// The resume, under the ORIGINAL grant: the declined call is answered
-	// with the standing refusal, the model retries, and the retry — a fresh
-	// call id of the same effect class — is refused by the DECLINED record
+	// question reaches the person), so the declined call is answered with
+	// the standing refusal, the model retries, and the retry — a fresh call
+	// id of the same effect class — is refused by the DECLINED record
 	// itself, told the second time that the refusal is standing. Then the
 	// model answers.
-	resumed := askParams(srv.URL, &grant, ledger, approvals)
-	if askErr := cl.Ask(context.Background(), resumed, func(AskEvent) error { return nil }); askErr != nil {
-		t.Fatalf("the resumed run failed: %v", askErr)
+	q := &recordingQuestioner{store: approvals, answer: Declined{Reason: PersonDeclineResult("files.read", DeclineCallAlways)}, kind: DeclineCallAlways}
+	p := askParams(srv.URL, &grant, ledger, approvals)
+	p.Questioner = q
+	if askErr := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); askErr != nil {
+		t.Fatalf("the run failed: %v", askErr)
+	}
+	if len(q.asked) != 1 {
+		t.Fatalf("the person was asked %d times, want exactly 1 — the retry is refused by the standing no, not asked again", len(q.asked))
 	}
 	// The last request the provider received carries the SECOND refusal
 	// (the retry's), and it says the refusal is standing.
@@ -1576,22 +1583,25 @@ func TestAsk_PolicyEscalationCarriesTheEffectAndTheResource(t *testing.T) {
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
-	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, &fakeLedger{}, NewApprovalStore()), func(AskEvent) error { return nil })
-	var want *ApprovalRequestedError
-	if !errors.As(err, &want) || want.Request == nil {
-		t.Fatalf("Ask error = %v, want the approval-requested suspension", err)
+	q, err := withPerson(t, cl, askParams(srv.URL, &grant, &fakeLedger{}, NewApprovalStore()), Declined{Reason: "not this one"}, DeclineCallOnce)
+	if err != nil {
+		t.Fatalf("Ask error = %v, want the person's no as the call's answer", err)
 	}
-	if want.Request.Effect != content.EffectObserve {
-		t.Fatalf("effect = %q, want %q — files.read's declared class, decided by the gate", want.Request.Effect, content.EffectObserve)
+	if len(q.asked) != 1 {
+		t.Fatalf("the person was asked %d times, want exactly 1", len(q.asked))
 	}
-	if want.Request.Resource == nil {
+	asked := q.asked[0]
+	if asked.Effect != content.EffectObserve {
+		t.Fatalf("effect = %q, want %q — files.read's declared class, decided by the gate", asked.Effect, content.EffectObserve)
+	}
+	if asked.Resource == nil {
 		t.Fatal("resource is nil, want the path the call named")
 	}
-	if want.Request.Resource.Kind != content.ResourcePath || want.Request.Resource.ID != path {
-		t.Fatalf("resource = %+v, want {path %s}", want.Request.Resource, path)
+	if asked.Resource.Kind != content.ResourcePath || asked.Resource.ID != path {
+		t.Fatalf("resource = %+v, want {path %s}", asked.Resource, path)
 	}
-	if n := f.requests.Load(); n != 1 {
-		t.Fatalf("the engine made %d model requests after the suspension, want exactly 1", n)
+	if n := f.requests.Load(); n != 2 {
+		t.Fatalf("the engine made %d model requests, want 2 — the proposal and the answer written from the refusal", n)
 	}
 }
 
@@ -1623,15 +1633,16 @@ func TestMiddleware_RunCommandClassifiesTheCallEffect(t *testing.T) {
 			if err != nil {
 				t.Fatalf("newClient: %v", err)
 			}
-			err = cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, NewApprovalStore()), func(AskEvent) error {
-				return nil
-			})
-			var asked *ApprovalRequestedError
+			var q *recordingQuestioner
+			err = func() error {
+				q, err = withPerson(t, cl, askParams(srv.URL, &grant, ledger, NewApprovalStore()), Declined{Reason: "not this one"}, DeclineCallOnce)
+				return err
+			}()
 			if tc.floorRefusal {
 				if err != nil {
 					t.Fatalf("run %q error = %v, want completed refusal answer", tc.command, err)
 				}
-				if errors.As(err, &asked) {
+				if len(q.asked) != 0 {
 					t.Fatalf("run %q requested approval despite floor refusal", tc.command)
 				}
 				if len(ledger.submissions) != 0 {
@@ -1647,11 +1658,14 @@ func TestMiddleware_RunCommandClassifiesTheCallEffect(t *testing.T) {
 				}
 				return
 			}
-			if !errors.As(err, &asked) || asked.Request == nil {
-				t.Fatalf("run %q error = %v, want approval request", tc.command, err)
+			if err != nil {
+				t.Fatalf("run %q error = %v, want the person's no as the call's answer", tc.command, err)
 			}
-			if asked.Request.Effect != tc.effect {
-				t.Fatalf("run %q effect = %q, want %q", tc.command, asked.Request.Effect, tc.effect)
+			if len(q.asked) != 1 {
+				t.Fatalf("run %q asked %d questions, want 1", tc.command, len(q.asked))
+			}
+			if q.asked[0].Effect != tc.effect {
+				t.Fatalf("run %q effect = %q, want %q", tc.command, q.asked[0].Effect, tc.effect)
 			}
 			if len(ledger.submissions) != 1 {
 				t.Fatalf("proposal submissions = %d, want 1", len(ledger.submissions))
@@ -1770,24 +1784,27 @@ func TestAsk_EscalationWithoutAResourceResolverCarriesNoResource(t *testing.T) {
 	defer srv.Close()
 
 	cl := newClientWithRegistry(nil, reg, nil, content.Floor{})
-	err = cl.Ask(context.Background(), askParams(srv.URL, &grant, &fakeLedger{}, NewApprovalStore()), func(AskEvent) error { return nil })
-	var want *ApprovalRequestedError
-	if !errors.As(err, &want) || want.Request == nil {
-		t.Fatalf("Ask error = %v, want the approval-requested suspension", err)
+	q, err := withPerson(t, cl, askParams(srv.URL, &grant, &fakeLedger{}, NewApprovalStore()), Declined{Reason: "not this one"}, DeclineCallOnce)
+	if err != nil {
+		t.Fatalf("Ask error = %v, want the person's no as the call's answer", err)
 	}
-	if want.Request.Effect != content.EffectObserve {
-		t.Fatalf("effect = %q, want %q", want.Request.Effect, content.EffectObserve)
+	if len(q.asked) != 1 {
+		t.Fatalf("the person was asked %d times, want exactly 1", len(q.asked))
 	}
-	if want.Request.Resource != nil {
-		t.Fatalf("resource = %+v, want nil — session.list names no resource in this synthetic declaration", want.Request.Resource)
+	if q.asked[0].Effect != content.EffectObserve {
+		t.Fatalf("effect = %q, want %q", q.asked[0].Effect, content.EffectObserve)
+	}
+	if q.asked[0].Resource != nil {
+		t.Fatalf("resource = %+v, want nil — session.list names no resource in this synthetic declaration", q.asked[0].Resource)
 	}
 }
 
-// TestAsk_EgressSuspensionCarriesTheEffectAndTheResource keeps the wire ONE
-// shape: the egress ask fills the same two fields from the same declaration,
-// even though the surface offers only allow/deny once there. Two shapes on
-// one notification is how a required field becomes absent on one path.
-func TestAsk_EgressSuspensionCarriesTheEffectAndTheResource(t *testing.T) {
+// TestAsk_EgressQuestionCarriesTheEffectAndTheResource keeps the wire ONE
+// shape: the egress question fills the same two fields from the same
+// declaration, even though the surface offers only allow/deny once there. Two
+// shapes on one notification is how a required field becomes absent on one
+// path.
+func TestAsk_EgressQuestionCarriesTheEffectAndTheResource(t *testing.T) {
 	grant, dir := testDirGrant(t, autonomousMatrix())
 	const secret = "known-secret-value-123"
 	path := filepath.Join(dir, "a.txt")
@@ -1800,18 +1817,19 @@ func TestAsk_EgressSuspensionCarriesTheEffectAndTheResource(t *testing.T) {
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
-	err := cl.Ask(context.Background(),
-		askParamsWith(srv.URL, &grant, &fakeLedger{}, nil, &knownMatcher{value: secret, name: "github-token"}, nil),
-		func(AskEvent) error { return nil })
-	var want *EgressRequestedError
-	if !errors.As(err, &want) || want.Request == nil {
-		t.Fatalf("Ask error = %v, want the egress suspension", err)
+	p := askParamsWith(srv.URL, &grant, &fakeLedger{}, nil, &knownMatcher{value: secret, name: "github-token"}, nil)
+	q, err := withPerson(t, cl, p, Declined{Reason: "do not send that"}, DeclineCallOnce)
+	if err == nil {
+		t.Fatal("the run went on after the person refused to send the result")
 	}
-	if want.Request.Effect != content.EffectObserve {
-		t.Fatalf("effect = %q, want %q", want.Request.Effect, content.EffectObserve)
+	if len(q.egressAsked) != 1 {
+		t.Fatalf("the person was asked %d egress questions, want exactly 1", len(q.egressAsked))
 	}
-	if want.Request.Resource == nil || want.Request.Resource.ID != path {
-		t.Fatalf("resource = %+v, want {path %s}", want.Request.Resource, path)
+	if q.egressAsked[0].Effect != content.EffectObserve {
+		t.Fatalf("effect = %q, want %q", q.egressAsked[0].Effect, content.EffectObserve)
+	}
+	if q.egressAsked[0].Resource == nil || q.egressAsked[0].Resource.ID != path {
+		t.Fatalf("resource = %+v, want {path %s}", q.egressAsked[0].Resource, path)
 	}
 }
 
@@ -1983,14 +2001,14 @@ func TestPolicy_DistinguishesReadPermitFromExecuteAskOnOnePath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new execute client: %v", err)
 	}
-	err = executeClient.Ask(context.Background(), askParams(executeServer.URL, &grant, &fakeLedger{}, NewApprovalStore()), func(AskEvent) error {
-		return nil
-	})
-	var asked *ApprovalRequestedError
-	if !errors.As(err, &asked) || asked.Request == nil {
-		t.Fatalf("execute of the script error = %v, want a Delegate approval request", err)
+	q, err := withPerson(t, executeClient, askParams(executeServer.URL, &grant, &fakeLedger{}, NewApprovalStore()), Declined{Reason: "not this one"}, DeclineCallOnce)
+	if err != nil {
+		t.Fatalf("execute of the script error = %v, want the person's no as the call's answer", err)
 	}
-	if asked.Request.Effect != content.EffectDelegate {
-		t.Fatalf("execute of the script effect = %q, want %q", asked.Request.Effect, content.EffectDelegate)
+	if len(q.asked) != 1 {
+		t.Fatalf("the person was asked %d times, want exactly 1 — a Delegate approval request", len(q.asked))
+	}
+	if q.asked[0].Effect != content.EffectDelegate {
+		t.Fatalf("execute of the script effect = %q, want %q", q.asked[0].Effect, content.EffectDelegate)
 	}
 }

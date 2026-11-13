@@ -37,7 +37,7 @@ func TestOperationHoldingTheAnsweringGateFencesAMaterialRead(t *testing.T) {
 
 	var got error
 	if err := op.Run(context.Background(), func(ctx context.Context, _ capability.ConfigService) error {
-		_, got = resolver.Resolve(ctx, "sec:v1:file:endpoint", credential.Operation("audit a skill"))
+		_, got = resolver.Resolve(ctx, "sec:v1:file:endpoint", credential.Operation("answer the ask"))
 		return nil
 	}); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -67,7 +67,7 @@ func TestTheSameReadAfterTheOperationSucceeds(t *testing.T) {
 	if err := op.Run(ctx, func(context.Context, capability.ConfigService) error { return nil }); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if _, err := resolver.Resolve(ctx, "sec:v1:file:endpoint", credential.Operation("audit a skill")); err != nil {
+	if _, err := resolver.Resolve(ctx, "sec:v1:file:endpoint", credential.Operation("answer the ask")); err != nil {
 		t.Fatalf("Resolve after the operation: %v", err)
 	}
 	if store.ensureCalls != 1 {

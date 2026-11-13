@@ -51,8 +51,7 @@ type scopeHarness struct {
 func suspendedRun(t *testing.T, policy assistant.GlobalPolicy) *scopeHarness {
 	t.Helper()
 	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{suspend: policySuspension("files.read", "call_1", `{"path":"/repo/a.txt"}`, "hash-a")},
-		{deltas: []string{"done"}},
+		{ask: policyAsk("files.read", "call_1", `{"path":"/repo/a.txt"}`, "hash-a"), after: []string{"done"}},
 	}}
 	return suspendedRunWith(t, policy, client)
 }
@@ -62,16 +61,15 @@ func suspendedRun(t *testing.T, policy assistant.GlobalPolicy) *scopeHarness {
 func suspendedNonCommandRun(t *testing.T, policy assistant.GlobalPolicy) *scopeHarness {
 	t.Helper()
 	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{suspend: func(runID string) error {
-			return &assistant.ApprovalRequestedError{Request: &assistant.ApprovalRequest{
+		{ask: func(runID string) approvalAsk {
+			return approvalAsk{policy: &assistant.ApprovalRequest{
 				RunID: runID, Attempt: 1, Tool: "session.read", CallID: "call_1",
 				Arguments: `{"sessionId":"session-a"}`, ArgHash: "hash-a",
 				Effect:   content.EffectObserve,
 				Resource: &content.GrantScope{Kind: content.ResourceSession, ID: "session-a"},
 				EntryID:  proposalEntryID,
 			}}
-		}},
-		{deltas: []string{"done"}},
+		}, after: []string{"done"}},
 	}}
 	return suspendedRunWith(t, policy, client)
 }
@@ -81,8 +79,8 @@ func suspendedNonCommandRun(t *testing.T, policy assistant.GlobalPolicy) *scopeH
 func suspendedUnshowableRun(t *testing.T, policy assistant.GlobalPolicy) *scopeHarness {
 	t.Helper()
 	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{suspend: func(runID string) error {
-			return &assistant.ApprovalRequestedError{Request: &assistant.ApprovalRequest{
+		{ask: func(runID string) approvalAsk {
+			return approvalAsk{policy: &assistant.ApprovalRequest{
 				RunID: runID, Attempt: 1, Tool: "session.run", CallID: "call_1",
 				Arguments: `{"command":"echo hi"}`, ArgHash: "hash-a",
 				Effect:            content.EffectObserve,
@@ -91,8 +89,7 @@ func suspendedUnshowableRun(t *testing.T, policy assistant.GlobalPolicy) *scopeH
 				CommandInvocation: true,
 				EntryID:           proposalEntryID,
 			}}
-		}},
-		{deltas: []string{"done"}},
+		}, after: []string{"done"}},
 	}}
 	return suspendedRunWith(t, policy, client)
 }
@@ -111,8 +108,8 @@ func suspendedUnshowableRun(t *testing.T, policy assistant.GlobalPolicy) *scopeH
 func suspendedCommandRun(t *testing.T, policy assistant.GlobalPolicy, invocation content.Invocation) *scopeHarness {
 	t.Helper()
 	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{suspend: func(runID string) error {
-			return &assistant.ApprovalRequestedError{Request: &assistant.ApprovalRequest{
+		{ask: func(runID string) approvalAsk {
+			return approvalAsk{policy: &assistant.ApprovalRequest{
 				RunID: runID, Attempt: 1, Tool: "files.read", CallID: "call_1",
 				Arguments: `{"path":"/repo/a.txt"}`, ArgHash: "hash-a",
 				Effect:     content.EffectObserve,
@@ -120,8 +117,7 @@ func suspendedCommandRun(t *testing.T, policy assistant.GlobalPolicy, invocation
 				Invocation: invocation,
 				EntryID:    proposalEntryID,
 			}}
-		}},
-		{deltas: []string{"done"}},
+		}, after: []string{"done"}},
 	}}
 	return suspendedRunWith(t, policy, client)
 }
@@ -136,8 +132,8 @@ const proposalEntryID = "action-entry-1"
 func suspendedEgressRun(t *testing.T, policy assistant.GlobalPolicy) *scopeHarness {
 	t.Helper()
 	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{suspend: func(runID string) error {
-			return &assistant.EgressRequestedError{Request: &assistant.EgressRequest{
+		{ask: func(runID string) approvalAsk {
+			return approvalAsk{egress: &assistant.EgressRequest{
 				RunID: runID, Attempt: 1, Tool: "files.read", CallID: "call_1",
 				Arguments: `{"path":"/repo/a.txt"}`, ArgHash: "hash-a",
 				Effect:   content.EffectObserve,
@@ -147,8 +143,7 @@ func suspendedEgressRun(t *testing.T, policy assistant.GlobalPolicy) *scopeHarne
 					Start: 11, End: 43,
 				}},
 			}}
-		}},
-		{deltas: []string{"done"}},
+		}, after: []string{"done"}},
 	}}
 	return suspendedRunWith(t, policy, client)
 }

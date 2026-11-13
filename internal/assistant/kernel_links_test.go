@@ -121,8 +121,19 @@ func TestTheKernelChainComposesEveryLink(t *testing.T) {
 	if _, ok := chain.PreCalls[0].(kernelPolicy); !ok {
 		t.Fatalf("policy point is %T, want kernelPolicy", chain.PreCalls[0])
 	}
-	if _, ok := chain.Approver.(kernelApprover); !ok {
-		t.Fatalf("approver is %T, want kernelApprover", chain.Approver)
+	if chain.Approver != nil {
+		t.Fatalf("approver is %T, want none — this kernel has no service to ask through, and an ask nobody can be shown authorises nothing", chain.Approver)
+	}
+	if chain.Order == nil {
+		t.Fatal("the chain carries no turn order — the calls of one turn would run concurrently")
+	}
+	if chain.MintGrant == nil {
+		t.Fatal("the chain carries no fresh grant after an answer")
+	}
+	withService := k.authorityChain(&kernelCall{kernel: k})
+	withService.Approver = serviceApprover{state: &kernelCall{kernel: k}, questioner: &recordingQuestioner{answer: Approved{}}}
+	if _, ok := withService.Approver.(serviceApprover); !ok {
+		t.Fatalf("approver is %T, want serviceApprover", withService.Approver)
 	}
 	wantGuards := []string{"grant guard", "floor guard", "evidence guard"}
 	if len(chain.Guards) != len(wantGuards) {
@@ -153,24 +164,18 @@ func TestAFileChangedBetweenTheQuestionAndTheAnswerIsRefusedWithNoEffect(t *test
 
 	ledger := &fakeLedger{}
 	approvals := NewApprovalStore()
-	k := kernelFor(t, grant, ledger)
+	q := &recordingQuestioner{store: approvals, answer: Approved{}}
+	// The wait is the window: the file is replaced while the question is
+	// open, from the approver's own seam — the only moment at which the
+	// proposal exists and the call has not run.
+	q.before = func() {
+		if got := ledger.started(); got != 1 {
+			t.Errorf("ledger opened %d attempts before the answer, want the proposal's one", got)
+		}
+		writeFile(t, path, "the bytes nobody agreed to")
+	}
+	k := kernelForQuestioner(t, grant, ledger, q)
 	k.approvals = approvals
-
-	_, err := k.Invoke(context.Background(), "files.read", "call-1", args)
-	var asked *ApprovalRequestedError
-	if !errors.As(err, &asked) || asked.Request == nil {
-		t.Fatalf("Invoke error = %v, want the approval suspension", err)
-	}
-	proposal := Approval{RunID: "run-1", Attempt: 1, Tool: "files.read", CallID: "call-1", ArgHash: canonicalArgHash(args)}
-	if !approvals.Approve(proposal) {
-		t.Fatal("the proposal the kernel asked about was not pending")
-	}
-	if got := ledger.started(); got != 1 {
-		t.Fatalf("ledger opened %d attempts before the answer, want the proposal's one", got)
-	}
-
-	// The wait is the window: the file is replaced while the question is open.
-	writeFile(t, path, "the bytes nobody agreed to")
 
 	out, err := k.Invoke(context.Background(), "files.read", "call-1", args)
 	if err != nil {
@@ -185,7 +190,7 @@ func TestAFileChangedBetweenTheQuestionAndTheAnswerIsRefusedWithNoEffect(t *test
 	if got := ledger.started(); got != 1 {
 		t.Fatalf("ledger opened %d attempts, want only the proposal's — a refused call never becomes an attempt", got)
 	}
-	if !approvals.IsApproved(proposal) {
+	if !approvals.IsApproved(Approval{RunID: "run-1", Attempt: 1, Tool: "files.read", CallID: "call-1", ArgHash: canonicalArgHash(args)}) {
 		t.Fatal("the refusal consumed the person's yes — the evidence changed, not their answer")
 	}
 }
@@ -215,38 +220,43 @@ func TestAnApprovedWideningReachesTheCapability(t *testing.T) {
 
 	ledger := &fakeLedger{}
 	approvals := NewApprovalStore()
-	k := kernelFor(t, grant, ledger)
+	var widened content.Grant
+	q := &recordingQuestioner{store: approvals, answer: Approved{}}
+	// The answer: the row grows by the resource the question named, and the
+	// grant the call goes on under is minted from the policy as it now
+	// stands — what the transport's applyStandingAnswer and its fresh mint
+	// do, in one step.
+	q.before = func() {
+		if len(q.asked) != 1 || q.asked[0].OutOfScope == nil {
+			t.Error("the widening question carried no out-of-scope fact")
+			return
+		}
+		fact := q.asked[0].OutOfScope
+		if fact.Cause != content.OutOfScopeRowScope {
+			t.Errorf("question out-of-scope fact = %+v, want the editable row scope", fact)
+			return
+		}
+		if fact.Resource != (content.GrantScope{Kind: content.ResourcePath, ID: outside}) {
+			t.Errorf("question names %+v, want the resource the row would have to cover", fact.Resource)
+			return
+		}
+		next, err := WidenRowScope(policy, content.EffectObserve, fact.Resource)
+		if err != nil {
+			t.Errorf("widen the row: %v", err)
+			return
+		}
+		widened = next.AsGrant(fence)
+	}
+	k := kernelForQuestioner(t, grant, ledger, q)
 	k.approvals = approvals
-
-	_, err := k.Invoke(context.Background(), "files.read", "call-1", args)
-	var asked *ApprovalRequestedError
-	if !errors.As(err, &asked) || asked.Request == nil {
-		t.Fatalf("Invoke error = %v, want the widening question", err)
-	}
-	fact := asked.Request.OutOfScope
-	if fact == nil || fact.Cause != content.OutOfScopeRowScope {
-		t.Fatalf("question out-of-scope fact = %+v, want the editable row scope", fact)
-	}
-	if fact.Resource != (content.GrantScope{Kind: content.ResourcePath, ID: outside}) {
-		t.Fatalf("question names %+v, want the resource the row would have to cover", fact.Resource)
+	k.runSeams.freshGrant = func() *content.Grant {
+		if widened.Version == 0 {
+			return nil
+		}
+		return &widened
 	}
 
-	// The answer: the row grows by that resource, and the exact proposal is
-	// approved — what agent.approve does, in the store the transport owns.
-	widened, err := WidenRowScope(policy, content.EffectObserve, fact.Resource)
-	if err != nil {
-		t.Fatalf("widen the row: %v", err)
-	}
-	proposal := Approval{RunID: "run-1", Attempt: 1, Tool: "files.read", CallID: "call-1", ArgHash: canonicalArgHash(args)}
-	if !approvals.Approve(proposal) {
-		t.Fatal("the widening question was not pending")
-	}
-
-	// The resumed run holds the widened grant, exactly as the transport mints
-	// one per run from the policy it just wrote.
-	resumed := kernelFor(t, widened.AsGrant(fence), ledger)
-	resumed.approvals = approvals
-	out, err := resumed.Invoke(context.Background(), "files.read", "call-1", args)
+	out, err := k.Invoke(context.Background(), "files.read", "call-1", args)
 	if err != nil {
 		t.Fatalf("the approved widening did not reach the call: %v", err)
 	}
@@ -266,12 +276,20 @@ func TestEveryLinkOfTheKernelChainIsLoadBearing(t *testing.T) {
 		writeFile(t, path, "the policy point asked first")
 		args := fmt.Sprintf(`{"path":%q}`, path)
 
+		decline := func(k *effectKernel) {
+			k.approvals = NewApprovalStore()
+			k.questioner = &recordingQuestioner{store: k.approvals, answer: Declined{Reason: "not this one"}, kind: DeclineCallOnce}
+		}
 		k := kernelFor(t, grant, &fakeLedger{})
-		k.approvals = NewApprovalStore()
+		decline(k)
 		if _, err := runKernelCall(t, k, "files.read", "call-1", args, ""); err == nil {
 			t.Fatal("the full chain ran a call the policy asks about")
 		}
-		out, err := runKernelCall(t, k, "files.read", "call-1", args, "policy")
+		// A fresh turn: the first call's decline is this turn's answer for
+		// the calls behind it, and this run is about the policy point alone.
+		dropped := kernelFor(t, grant, &fakeLedger{})
+		decline(dropped)
+		out, err := runKernelCall(t, dropped, "files.read", "call-1", args, "policy")
 		if err != nil {
 			t.Fatalf("without the policy point: %v — the call was still stopped", err)
 		}
@@ -286,15 +304,20 @@ func TestEveryLinkOfTheKernelChainIsLoadBearing(t *testing.T) {
 		writeFile(t, path, "must not run")
 		args := fmt.Sprintf(`{"path":%q}`, path)
 
-		k := kernelFor(t, grant, &fakeLedger{})
-		k.approvals = NewApprovalStore()
-		_, err := runKernelCall(t, k, "files.read", "call-1", args, "")
-		var asked *ApprovalRequestedError
-		if !errors.As(err, &asked) {
-			t.Fatalf("the full chain did not suspend: %v", err)
+		decline := func(k *effectKernel) {
+			k.approvals = NewApprovalStore()
+			k.questioner = &recordingQuestioner{store: k.approvals, answer: Declined{Reason: "not this one"}, kind: DeclineCallOnce}
 		}
-		_, err = runKernelCall(t, k, "files.read", "call-1", args, "approver")
+		k := kernelFor(t, grant, &fakeLedger{})
+		decline(k)
+		_, err := runKernelCall(t, k, "files.read", "call-1", args, "")
 		var refusal *PipelineRefusal
+		if !errors.As(err, &refusal) || !strings.Contains(refusal.Reason, "not this one") {
+			t.Fatalf("the full chain did not put the question to the person: %v", err)
+		}
+		dropped := kernelFor(t, grant, &fakeLedger{})
+		decline(dropped)
+		_, err = runKernelCall(t, dropped, "files.read", "call-1", args, "approver")
 		if !errors.As(err, &refusal) || !strings.Contains(refusal.Reason, "no approver") {
 			t.Fatalf("without the approver = %v, want the pipeline's unanswered Ask", err)
 		}
@@ -307,6 +330,8 @@ func TestEveryLinkOfTheKernelChainIsLoadBearing(t *testing.T) {
 		args := fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))
 
 		k := kernelFor(t, grant, &fakeLedger{})
+		k.approvals = NewApprovalStore()
+		k.questioner = &recordingQuestioner{store: k.approvals, answer: Approved{}}
 		_, err := runKernelCall(t, k, "files.read", "call-1", args, "")
 		var refusal *PipelineRefusal
 		if !errors.As(err, &refusal) || !strings.Contains(refusal.Reason, "expired") {
@@ -357,15 +382,10 @@ func TestEveryLinkOfTheKernelChainIsLoadBearing(t *testing.T) {
 
 		ledger := &fakeLedger{}
 		approvals := NewApprovalStore()
-		k := kernelFor(t, grant, ledger)
+		q := &recordingQuestioner{store: approvals, answer: Approved{}}
+		q.before = func() { writeFile(t, path, "after") }
+		k := kernelForQuestioner(t, grant, ledger, q)
 		k.approvals = approvals
-		if _, err := k.Invoke(context.Background(), "files.read", "call-1", args); err == nil {
-			t.Fatal("the full chain ran the call without asking")
-		}
-		if !approvals.Approve(Approval{RunID: "run-1", Attempt: 1, Tool: "files.read", CallID: "call-1", ArgHash: canonicalArgHash(args)}) {
-			t.Fatal("the proposal was not pending")
-		}
-		writeFile(t, path, "after")
 
 		_, err := runKernelCall(t, k, "files.read", "call-1", args, "")
 		var refusal *PipelineRefusal
@@ -415,16 +435,22 @@ func TestEveryLinkOfTheKernelChainIsLoadBearing(t *testing.T) {
 		writeFile(t, path, "deploy key: "+secret)
 		args := fmt.Sprintf(`{"path":%q}`, path)
 
+		decline := func(k *effectKernel) {
+			k.approvals = NewApprovalStore()
+			k.known = &knownMatcher{value: secret, name: "github-token"}
+			k.questioner = &recordingQuestioner{store: k.approvals, answer: Declined{Reason: "do not send that"}, kind: DeclineCallOnce}
+		}
 		k := kernelFor(t, grant, &fakeLedger{})
-		k.approvals = NewApprovalStore()
-		k.known = &knownMatcher{value: secret, name: "github-token"}
+		decline(k)
 
 		_, err := runKernelCall(t, k, "files.read", "call-1", args, "")
-		var suspended *EgressRequestedError
-		if !errors.As(err, &suspended) {
+		var declined *ScreenDeclinedError
+		if !errors.As(err, &declined) {
 			t.Fatalf("the full chain did not withhold the result: %v", err)
 		}
-		out, err := runKernelCall(t, k, "files.read", "call-1", args, "egress screen")
+		dropped := kernelFor(t, grant, &fakeLedger{})
+		decline(dropped)
+		out, err := runKernelCall(t, dropped, "files.read", "call-1", args, "egress screen")
 		if err != nil {
 			t.Fatalf("without the egress screen: %v", err)
 		}

@@ -5,17 +5,13 @@ package assistant
 // the canonical arguments — so approving one thing never authorises a changed
 // thing. The approved call runs as its own SUBSEQUENT attempt of the
 // proposal's own entry (ADR-0020 decision 4: a retry after approval is an
-// execution of the same intent, never a new intent), and the store is what
-// carries the yes across the checkpoint, because the checkpoint itself is
-// process-lifetime state (ADR-0028 decision: checkpoints are not records).
-// Process-lifetime like the checkpoint: approval does not survive a restart,
-// which is already what the recovery rule says.
+// execution of the same intent, never a new intent).
 //
-// The store also carries the egress gate's retained result (design §7.1 —
-// "send it as it is"): the withheld bytes of the finding that suspended the
-// run, keyed by the same proposal. A resume that re-ran the tool would repeat
-// the effect, so the gate retains the exact result the person was shown and
-// the approved resume sends THAT, never a newly produced one.
+// It is process-lifetime state: approval does not survive a restart, which is
+// already what the recovery rule says. Since a call now BLOCKS on the answer
+// (ADR-anntnxdj §3), the store is also how the guards that run after the answer
+// learn what the person decided — the wait is on the call's own stack, so there
+// is no suspension for the decision to cross.
 
 import (
 	"fmt"
@@ -127,18 +123,9 @@ type declinedEntry struct {
 	fileVersions      []FileVersion
 }
 
-// retainedValue is the withheld result of an egress finding (design §7.1):
-// the exact bytes — or the exact error string — the person was shown, never a
-// re-run's freshly produced ones.
-type retainedValue struct {
-	out      string
-	wasError bool
-}
-
 // ApprovalStore keeps the pending requests (what the human is being asked),
-// the approvals (what the human said yes to), the declined proposals (what
-// the human said no to) and the retained egress results (what was withheld
-// pending the decision). All keyed by the exact proposal.
+// the approvals (what the human said yes to) and the declined proposals (what
+// the human said no to). All keyed by the exact proposal.
 // wideningKey is what the widening bound counts: one RUN, one effect row, one
 // resource. Not the proposal key — two different calls naming the same
 // out-of-scope resource are one question to a person, and asking it twice is
@@ -196,7 +183,6 @@ type ApprovalStore struct {
 	approved map[approvalKey]approvalEntry
 	declined map[approvalKey]declinedEntry
 	pending  map[approvalKey]approvalEntry
-	retained map[approvalKey]retainedValue
 
 	wideningAsked    map[wideningKey]bool
 	wideningDeclined map[wideningKey]bool
@@ -213,7 +199,6 @@ func NewApprovalStore() *ApprovalStore {
 		approved: make(map[approvalKey]approvalEntry),
 		declined: make(map[approvalKey]declinedEntry),
 		pending:  make(map[approvalKey]approvalEntry),
-		retained: make(map[approvalKey]retainedValue),
 
 		wideningAsked:    make(map[wideningKey]bool),
 		wideningDeclined: make(map[wideningKey]bool),
@@ -702,36 +687,6 @@ func sameInvocation(a, b content.Invocation) bool {
 		}
 	}
 	return true
-}
-
-// Retain holds the withheld result of an egress finding (design §7.1) so the
-// approved resume can send the EXACT bytes the person was shown — a resume
-// that re-ran the tool would repeat the effect and could produce a different
-// result than the one approved. The result is bounded by the ingest bound
-// (maxToolResultBytes); it is process-lifetime, like every other piece of the
-// approval machinery, and dies with the restart.
-func (s *ApprovalStore) Retain(ap Approval, out string, wasError bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.retained[keyOf(ap)] = retainedValue{out: out, wasError: wasError}
-}
-
-// RetainedResult returns the withheld result of an egress finding for the
-// exact proposal, when one is retained. The approved resume returns it
-// instead of re-running the tool.
-func (s *ApprovalStore) RetainedResult(ap Approval) (string, bool, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	v, ok := s.retained[keyOf(ap)]
-	return v.out, v.wasError, ok
-}
-
-// ClearRetained drops the retained result: the approved resume has sent it,
-// or the run has terminalized — the bytes are no longer needed.
-func (s *ApprovalStore) ClearRetained(ap Approval) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.retained, keyOf(ap))
 }
 
 // keyOf is the binding and ONLY the binding: EntryID and Effect are carriers

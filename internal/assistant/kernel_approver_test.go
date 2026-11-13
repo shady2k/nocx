@@ -11,7 +11,6 @@ package assistant
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,11 +27,12 @@ import (
 // answers with the same value — optionally doing something in between, which is
 // how "while the question was open" is expressed without a clock.
 type recordingQuestioner struct {
-	store  *ApprovalStore
-	asked  []*ApprovalRequest
-	answer Answer
-	kind   DeclineKind
-	before func()
+	store       *ApprovalStore
+	asked       []*ApprovalRequest
+	egressAsked []*EgressRequest
+	answer      Answer
+	kind        DeclineKind
+	before      func()
 }
 
 func (q *recordingQuestioner) Ask(_ context.Context, req *ApprovalRequest) Answer {
@@ -51,6 +51,41 @@ func (q *recordingQuestioner) Ask(_ context.Context, req *ApprovalRequest) Answe
 		q.before()
 	}
 	return q.answer
+}
+
+// AskEgress is the same answer for a screen's question about bytes that already
+// exist. The store decision is recorded the same way, because that is what
+// agent.approve does before it wakes the call.
+func (q *recordingQuestioner) AskEgress(_ context.Context, req *EgressRequest) Answer {
+	q.egressAsked = append(q.egressAsked, req)
+	proposal := Approval{
+		RunID: req.RunID, Attempt: req.Attempt, Tool: req.Tool, CallID: req.CallID,
+		ArgHash: req.ArgHash, Effect: req.Effect,
+	}
+	switch q.answer.(type) {
+	case Approved:
+		q.store.Approve(proposal)
+	case Declined:
+		q.store.Decline(proposal, q.kind)
+	}
+	if q.before != nil {
+		q.before()
+	}
+	return q.answer
+}
+
+// withPerson runs one Ask with a person answering every question with the
+// given answer, and returns the questions they were asked. The store decision
+// the transport writes is recorded first, exactly as agent.approve does before
+// it wakes the call.
+func withPerson(t *testing.T, cl Client, p AskParams, answer Answer, kind DeclineKind) (*recordingQuestioner, error) {
+	t.Helper()
+	if p.Approvals == nil {
+		p.Approvals = NewApprovalStore()
+	}
+	q := &recordingQuestioner{store: p.Approvals, answer: answer, kind: kind}
+	p.Questioner = q
+	return q, cl.Ask(context.Background(), p, func(AskEvent) error { return nil })
 }
 
 // kernelForQuestioner builds the kernel with the service wired through the
@@ -178,14 +213,15 @@ func TestTheServicesNoIsTheCallsResultAndNothingRuns(t *testing.T) {
 	}
 }
 
-// TestTheChainApproverIsTheServiceWhenOneIsWired: the composition is the seam's
-// proof. A wired service is the chain's Approver; without one the adapter is,
-// and its suspension is unchanged.
-func TestTheChainApproverIsTheServiceWhenOneIsWired(t *testing.T) {
+// TestAChainWithNoServiceHasNoApprover: the composition is the seam's proof. A
+// wired service is the chain's Approver; without one there is NO approver, and
+// an ask is refused — "no approver, or no answer, is a refusal" (ADR-anntnxdj
+// §2).
+func TestAChainWithNoServiceHasNoApprover(t *testing.T) {
 	grant, _ := testDirGrant(t, autonomousMatrix())
 	k := kernelFor(t, grant, &fakeLedger{})
-	if _, ok := k.authorityChain(&kernelCall{kernel: k}).Approver.(kernelApprover); !ok {
-		t.Fatalf("approver without a service = %T, want the kernelApprover adapter", k.authorityChain(&kernelCall{kernel: k}).Approver)
+	if got := k.authorityChain(&kernelCall{kernel: k}).Approver; got != nil {
+		t.Fatalf("approver without a service = %T, want none", got)
 	}
 	k.questioner = &recordingQuestioner{answer: Approved{}}
 	if _, ok := k.authorityChain(&kernelCall{kernel: k}).Approver.(serviceApprover); !ok {
@@ -193,26 +229,30 @@ func TestTheChainApproverIsTheServiceWhenOneIsWired(t *testing.T) {
 	}
 }
 
-// TestWithNoServiceTheSuspensionIsUnchanged keeps the adapter's path honest:
-// the question is still recorded, still prepared the same way, and still leaves
-// as the framework's suspension — which is the path nocx-a62cl.3.3 and 3.4
-// still serve.
-func TestWithNoServiceTheSuspensionIsUnchanged(t *testing.T) {
+// TestWithNoServiceAnAskIsRefused: a chain nobody can be asked through runs
+// nothing. The refusal is the call's answer, the file is never read, and no
+// question is left in the store for an answer that could not reach a call.
+func TestWithNoServiceAnAskIsRefused(t *testing.T) {
 	grant, dir := testDirGrant(t, askEveryTimeMatrix())
 	path := filepath.Join(dir, "a.txt")
 	writeFile(t, path, "not yet")
 	args := fmt.Sprintf(`{"path":%q}`, path)
 	approvals := NewApprovalStore()
-	k := kernelFor(t, grant, &fakeLedger{})
+	ledger := &fakeLedger{}
+	k := kernelFor(t, grant, ledger)
 	k.approvals = approvals
 
-	_, err := k.Invoke(context.Background(), "files.read", "call-1", args)
-	var asked *ApprovalRequestedError
-	if !errors.As(err, &asked) || asked.Request == nil {
-		t.Fatalf("Invoke error = %v, want the adapter's suspension", err)
+	out, err := k.Invoke(context.Background(), "files.read", "call-1", args)
+	if err != nil {
+		t.Fatalf("Invoke error = %v, want the refusal as the call's answer", err)
 	}
-	proposal := Approval{RunID: "run-1", Attempt: 1, Tool: "files.read", CallID: "call-1", ArgHash: canonicalArgHash(args)}
-	if !approvals.IsPending(proposal) {
-		t.Fatal("the question was not recorded in the store the person's answer is checked against")
+	if !strings.Contains(out, "nobody could be asked") {
+		t.Fatalf("result = %q, want the no-approver refusal", out)
+	}
+	if strings.Contains(out, "not yet") {
+		t.Fatal("a call nobody was asked about read the file")
+	}
+	if got := ledger.started(); got != 0 {
+		t.Fatalf("ledger opened %d attempts, want none — the call never ran", got)
 	}
 }

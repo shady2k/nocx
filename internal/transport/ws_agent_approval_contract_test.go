@@ -59,7 +59,7 @@ func TestAgentApprovalRequested_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "agent.approvalRequested.schema.json")
 	const args = `{"path":"/repo/a.txt"}`
 	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{suspend: policySuspension("files.read", "call_1", args, "hash-a")},
+		{ask: policyAsk("files.read", "call_1", args, "hash-a")},
 	}}
 	h := newAskHarness(t, client)
 	h.createEndpoint()
@@ -79,8 +79,7 @@ func TestAgentApprove_ParamsOverTheSocketConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "agent.approve.schema.json")
 	const args = `{"path":"/repo/a.txt"}`
 	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{suspend: policySuspension("files.read", "call_1", args, "hash-a")},
-		{deltas: []string{"done"}},
+		{ask: policyAsk("files.read", "call_1", args, "hash-a"), after: []string{"done"}},
 	}}
 	h := newAskHarness(t, client)
 	h.createEndpoint()
@@ -229,8 +228,8 @@ func TestAgentApprovalRequested_RealEscalationOverTheWireNamesItsEffect(t *testi
 func TestAgentApprovalRequested_EgressArmOverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "agent.approvalRequested.schema.json")
 	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{suspend: func(runID string) error {
-			return &assistant.EgressRequestedError{Request: &assistant.EgressRequest{
+		{ask: func(runID string) approvalAsk {
+			return approvalAsk{egress: &assistant.EgressRequest{
 				RunID: runID, Attempt: 1, Tool: "files.read", CallID: "call_1",
 				Arguments: `{"path":"/repo/a.txt"}`, ArgHash: "hash-a",
 				Effect:   content.EffectObserve,

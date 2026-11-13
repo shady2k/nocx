@@ -24,6 +24,7 @@ import (
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/capability"
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/httppolicy"
 	"github.com/shady2k/nocx/internal/note"
@@ -123,11 +124,17 @@ type toolSeams struct {
 	// descendant refused rather than guessed at.
 	paneAccessBinder PaneAccessBinder
 	// questioner is the authority seam to the approval service (Questioner,
-	// kernel.go): when it is set, an Ask blocks the call on the person's
-	// answer instead of leaving as a suspension. Nil is every caller that is
-	// not the product's assistant turn — the framework adapter's suspension
-	// is what they get, unchanged.
+	// kernel.go): an Ask blocks the call on the person's answer. Nil is a
+	// caller with no person to ask, where every ask is refused.
 	questioner Questioner
+	// freshGrant mints the run's authority again from the policy as it stands
+	// NOW (ADR-anntnxdj §3, "refreshed after an answer"). The pipeline calls
+	// it once, on a call a person was asked about, and the call goes on under
+	// what it returns — the guards and the capability read the fresh grant,
+	// not the one minted when the run was admitted. Nil is a caller with no
+	// mint: a call that waited runs on its admission grant, and an expired one
+	// is refused.
+	freshGrant func() *content.Grant
 }
 
 type noteSearchRow struct {

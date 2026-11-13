@@ -19,12 +19,11 @@ package transport
 // answer is never a yes — and none of them leaves a question behind that a
 // later agent.approve could settle.
 //
-// What this replaces, on the paths it serves: the question used to be published
-// only after the kernel's suspension unwound the whole drive, and a yes started
-// a NEW drive from eino's checkpoint. Both change here. The suspension still
-// exists for the paths this service does not serve — the egress gate
-// (nocx-a62cl.3.3) and any chain with no service wired — and
-// nocx-a62cl.3.4 deletes it once nothing reaches it.
+// What this replaced: the question used to be published only after a
+// suspension unwound the whole drive, and a yes started a NEW drive from eino's
+// checkpoint. Both are gone (nocx-a62cl.3.4) — eino runs the loop and nothing
+// suspends it, and a chain with no service wired has no approver at all, so an
+// ask there is refused rather than suspended.
 
 import (
 	"context"
@@ -76,17 +75,46 @@ func (h agentHandlers) approvalService(rc askRunContext) approvalService {
 	return approvalService{handlers: h, rc: rc, clock: notify.RealClock{}, limit: answerLimit}
 }
 
-// Ask puts one prepared question to the person and blocks until it is settled.
-// It implements assistant.Questioner, so it is the value the kernel's chain
-// calls from inside the model's tool invocation.
+// Ask puts one prepared policy question to the person and blocks until it is
+// settled. It implements assistant.Questioner, so it is the value the kernel's
+// chain calls from inside the model's tool invocation.
 func (s approvalService) Ask(ctx context.Context, req *assistant.ApprovalRequest) assistant.Answer {
-	if s.handlers.op == nil {
+	proposal := approvalOf(req)
+	// The two facts only the transport holds: the matrix row the answer is
+	// about, and the bound a widening would have to cover. The kernel recorded
+	// the proposal itself, with the ledger entry and the file versions.
+	proposal.OutOfScope = req.OutOfScope
+	s.handlers.approvals.NoteEffect(proposal)
+	s.handlers.approvals.NoteOutOfScope(proposal)
+	question := policyQuestion(req)
+	invocation, hasInvocation, commandInvocation := s.handlers.approvals.InvocationFor(proposal)
+	question.Standing = standingOffer(invocation, hasInvocation, commandInvocation, req.Effect)
+	return s.wait(ctx, req.RunID, req.Tool, "policy", proposal, question)
+}
+
+// AskEgress puts the screen's question about a result that already exists to
+// the person and blocks until it is settled. It is the same wait as Ask — one
+// person, one surface, one open question at a time — and only the notification
+// and the answers the surface offers differ: an egress decision covers this
+// result only, so it is never a standing one.
+func (s approvalService) AskEgress(ctx context.Context, req *assistant.EgressRequest) assistant.Answer {
+	proposal := assistant.Approval{
+		RunID: req.RunID, Attempt: req.Attempt, Tool: req.Tool, CallID: req.CallID,
+		ArgHash: req.ArgHash, Effect: req.Effect,
+	}
+	s.handlers.approvals.NoteEffect(proposal)
+	return s.wait(ctx, req.RunID, req.Tool, "egress", proposal, egressQuestion(req))
+}
+
+// wait is the one wait both questions go through: the run rests in
+// awaiting_approval, the question is published, the call blocks, and the
+// person's answer — or the declared limit, or the call's own cancellation —
+// settles it.
+func (s approvalService) wait(ctx context.Context, runIDText, tool, reason string, proposal assistant.Approval, question agentApprovalRequested) assistant.Answer {
+	if s.handlers.op == nil || s.handlers.approvals == nil {
 		return assistant.Unanswered{Err: errApprovalServiceNotWired}
 	}
-	if s.handlers.approvals == nil {
-		return assistant.Unanswered{Err: errApprovalServiceNotWired}
-	}
-	runID, err := strconv.ParseInt(req.RunID, 10, 64)
+	runID, err := strconv.ParseInt(runIDText, 10, 64)
 	if err != nil || runID <= 0 {
 		return assistant.Unanswered{Err: errors.New("the question names no run, so nobody can be asked about it")}
 	}
@@ -99,25 +127,14 @@ func (s approvalService) Ask(ctx context.Context, req *assistant.ApprovalRequest
 		return assistant.Unanswered{Err: err}
 	}
 
-	proposal := approvalOf(req)
-	// The two facts only the transport holds: the matrix row the answer is
-	// about, and the bound a widening would have to cover. The kernel recorded
-	// the proposal itself, with the ledger entry and the file versions.
-	proposal.OutOfScope = req.OutOfScope
-	s.handlers.approvals.NoteEffect(proposal)
-	s.handlers.approvals.NoteOutOfScope(proposal)
-
 	// The wait is recorded BEFORE the question is published: a person can
 	// answer the instant the surface shows it, and an answer that arrives
 	// first must wake this call rather than be told no question is open.
-	wait := newAnswerWait(s.clock, req.Tool, s.limit)
+	wait := newAnswerWait(s.clock, tool, s.limit)
 	wait.binding = proposal
-	s.handlers.beginAnswerWait(runID, wait)
+	s.handlers.beginAnswerWait(runID, wait, reason)
 	defer s.handlers.endAnswerWait(runID, wait)
 
-	question := policyQuestion(req)
-	invocation, hasInvocation, commandInvocation := s.handlers.approvals.InvocationFor(proposal)
-	question.Standing = standingOffer(invocation, hasInvocation, commandInvocation, req.Effect)
 	wait.begin()
 	if err := s.handlers.r.TryNotify("agent.approvalRequested", mustMarshal(question)); err != nil {
 		// Nobody can be asked on this connection: the question is withdrawn,
@@ -144,6 +161,24 @@ func (s approvalService) Ask(ctx context.Context, req *assistant.ApprovalRequest
 	return answer
 }
 
+// egressQuestion is the agent.approvalRequested notification a screen's
+// question becomes: the findings and whether they were in the tool's error
+// text, never the material, and no standing answer — sending secret-shaped
+// material to the model provider is never a decision anyone makes by clicking
+// a button beside five others.
+func egressQuestion(req *assistant.EgressRequest) agentApprovalRequested {
+	return agentApprovalRequested{
+		RunID: req.RunID, Attempt: req.Attempt, Tool: req.Tool, CallID: req.CallID,
+		ArgHash: req.ArgHash, Arguments: req.Arguments,
+		Reason: "egress", WasError: req.WasError, Findings: req.Findings,
+		// The surface ignores the effect on this arm, but the wire is not two
+		// shapes and its schema requires it on both.
+		Effect:   string(req.Effect),
+		Resource: req.Resource,
+		Standing: agentApprovalStanding{Reason: "standing answers are not offered for result disclosure"},
+	}
+}
+
 // approvalOf is the store binding a question names. It is the SAME five fields
 // agent.approve echoes back (approvals.go's key), plus the effect the matrix
 // row is read from; the entry id, the invocation and the out-of-scope fact are
@@ -156,8 +191,7 @@ func approvalOf(req *assistant.ApprovalRequest) assistant.Approval {
 }
 
 // policyQuestion is the agent.approvalRequested notification one policy
-// question becomes. ONE builder, so the surface cannot tell which ending asked:
-// the service's blocking wait and the adapter's suspension send the same shape.
+// question becomes. ONE builder, so the surface has one shape to render.
 func policyQuestion(ap *assistant.ApprovalRequest) agentApprovalRequested {
 	n := agentApprovalRequested{
 		Reason: "policy",
@@ -265,7 +299,7 @@ func (w *answerWait) result(ctx context.Context) assistant.Answer {
 // registry is the owner because the question belongs to the run: one run has at
 // most one call in flight, and every connection's agent.approve finds the same
 // record.
-func (h agentHandlers) beginAnswerWait(runID int64, w *answerWait) {
+func (h agentHandlers) beginAnswerWait(runID int64, w *answerWait, reason string) {
 	h.pendingRunsMu.Lock()
 	defer h.pendingRunsMu.Unlock()
 	rc, ok := h.pendingRuns[runID]
@@ -273,7 +307,23 @@ func (h agentHandlers) beginAnswerWait(runID int64, w *answerWait) {
 		return
 	}
 	rc.approvalWait = w
-	rc.pendingReason = "policy"
+	rc.pendingReason = reason
+	h.pendingRuns[runID] = rc
+}
+
+// restoreAnswerWait puts a claimed wait back on the run: an answer the server
+// REFUSED before it settled anything leaves the question exactly as it was, so
+// the person answers it again rather than the call being refused for a store
+// that would not take their decision.
+func (h agentHandlers) restoreAnswerWait(runID int64, w *answerWait, reason string) {
+	h.pendingRunsMu.Lock()
+	defer h.pendingRunsMu.Unlock()
+	rc, ok := h.pendingRuns[runID]
+	if !ok {
+		return
+	}
+	rc.approvalWait = w
+	rc.pendingReason = reason
 	h.pendingRuns[runID] = rc
 }
 
@@ -293,9 +343,8 @@ func (h agentHandlers) endAnswerWait(runID int64, w *answerWait) {
 }
 
 // takeAnswerWait claims the pending question agent.approve is answering. A nil
-// result means no call is blocked on this binding — the adapter's suspension
-// path, an egress question, or an answer for a proposal this run is not waiting
-// on — and the caller must behave exactly as it did before the service existed.
+// result means no call is blocked on this binding: the answer names a question
+// this run is not waiting on, and it is refused rather than settled.
 func (h agentHandlers) takeAnswerWait(runID int64, ap assistant.Approval) *answerWait {
 	h.pendingRunsMu.Lock()
 	defer h.pendingRunsMu.Unlock()

@@ -79,39 +79,30 @@ func fenceSymlink(t *testing.T) (grant content.Grant, link, beyond string) {
 
 // TEST — the capability's refusal is the call's answer, and the run goes on.
 //
-// The person is asked, answers yes, and the resumed call meets the fence at
-// execution. The assertions are the shape of the outcome, not its absence:
-// the refusal is OUR sentence in the call's own slot, no error escapes the
-// kernel, and the bytes the fence protects are nowhere in it.
-func TestResume_AFenceRefusalAfterApprovalAnswersInsteadOfEndingTheRun(t *testing.T) {
+// The person is asked and answers yes; the call then meets the fence at
+// execution. The assertions are the shape of the outcome, not its absence: the
+// refusal is OUR sentence in the call's own slot, no error escapes the kernel,
+// and the bytes the fence protects are nowhere in it.
+func TestAnApprovedCallThatMeetsTheFenceAnswersInsteadOfEndingTheRun(t *testing.T) {
 	grant, link, beyond := fenceSymlink(t)
 	args := fmt.Sprintf(`{"path":%q}`, link)
 
 	ledger := &fakeLedger{}
 	approvals := NewApprovalStore()
+	q := &recordingQuestioner{store: approvals, answer: Approved{}}
 	mw := middlewareFor(t, grant, ledger, approvals)
-	run := &resumeRun{t: t}
+	mw.kernel.questioner = q
 
-	out, req := run.invoke(mw, "call_1", args)
-	if req == nil {
-		t.Fatalf("the symlink inside the fence did not raise a question; it answered %q — there would be no approval to refuse through", out)
-	}
-	proposal := approveExactly(t, approvals, req)
-
-	// The resume: the same run, the same call, the person's yes on record.
-	// Today the capability's ErrOutOfScope leaves the kernel as a
-	// *ToolFailedError and the run ends here.
 	out, err := mw.kernel.Invoke(context.Background(), "files.read", "call_1", args)
 	if err != nil {
 		var failed *ToolFailedError
 		if errors.As(err, &failed) {
 			t.Fatalf("the fenced call ended the run with %v — the capability's refusal must reach the model as the call's own result, not as a fault", err)
 		}
-		t.Fatalf("the resumed call returned %v, want the out-of-scope refusal as a result", err)
+		t.Fatalf("the call returned %v, want the out-of-scope refusal as a result", err)
 	}
 	if want := refusalResult("files.read", RefusedOutOfScope, ""); out != want {
-		t.Fatalf("the fenced call answered\n  %q\nwant the out-of-scope refusal\n  %q\n— a refusal for the wrong reason reads identically to one for the right reason",
-			out, want)
+		t.Fatalf("the fenced call answered %q, want the out-of-scope refusal %q", out, want)
 	}
 
 	// The refusal is not permission: nothing was read, and nothing about the
@@ -123,31 +114,30 @@ func TestResume_AFenceRefusalAfterApprovalAnswersInsteadOfEndingTheRun(t *testin
 		t.Fatalf("the refusal speaks the capability's words rather than ours: %q", out)
 	}
 
-	// The partial state after "approved, then refused": the attempt exists
-	// and is closed — the escalation's, then the approved execution's — and
-	// the yes is still on record, so the fence never consumed it.
+	// The partial state after "approved, then refused": the escalation's
+	// attempt and the approved execution's are both closed, and the yes is
+	// still on record, so the fence never consumed it.
 	if got := ledger.started(); got != 2 {
 		t.Fatalf("the ledger opened %d attempts (%v), want 2 — the escalation and the approved call that met the fence", got, ledger.calls())
 	}
 	if got := strings.Count(strings.Join(ledger.calls(), " "), "finish:"); got != 2 {
 		t.Fatalf("the ledger closed %d attempts (%v), want both — an attempt is an interval and it closes on the refusal too", got, ledger.calls())
 	}
-	if !approvals.IsApproved(proposal) {
+	if !approvals.IsApproved(Approval{RunID: "run-1", Attempt: 1, Tool: "files.read", CallID: "call_1", ArgHash: canonicalArgHash(args)}) {
 		t.Fatal("the fenced refusal consumed the approval — the fence is not an answer to the person's yes")
 	}
 	// The read did not happen: no body was recorded for this call, and a
-	// recorded body is the only thing a tool call that produced bytes
-	// leaves behind (nocx-hp8p2.13). A refusal-as-answer must not become a
+	// recorded body is the only thing a tool call that produced bytes leaves
+	// behind (nocx-hp8p2.13). A refusal-as-answer must not become a
 	// refusal-as-permission.
 	if got := ledger.recordedCaptures(); len(got) != 0 {
 		t.Fatalf("the fenced call recorded %d result bodies (%+v), want none — nothing was read", len(got), got)
 	}
-	if run.asks != 1 {
-		t.Fatalf("the person was asked %d times, want exactly the one question the approval answered", run.asks)
+	if len(q.asked) != 1 {
+		t.Fatalf("the person was asked %d times, want exactly the one question the approval answered", len(q.asked))
 	}
 
-	// And the next attempt sees the same thing: the refusal is standing in
-	// the only sense that matters here — the fence has not moved, so a
+	// And the next attempt sees the same thing: the fence has not moved, so a
 	// second identical call is refused identically rather than re-asked.
 	again, againErr := mw.kernel.Invoke(context.Background(), "files.read", "call_1", args)
 	if againErr != nil {
@@ -177,36 +167,24 @@ func TestAsk_AFenceRefusalAfterApprovalContinuesTheRun(t *testing.T) {
 		t.Fatalf("newClient: %v", clErr)
 	}
 
-	// 1. The ask suspends on the symlink the lexical predicate let through.
-	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, approvals), func(AskEvent) error { return nil })
-	var asked *ApprovalRequestedError
-	if !errors.As(err, &asked) || asked.Request == nil {
-		t.Fatalf("Ask error = %v, want the approval-requested suspension", err)
-	}
-
-	// 2. The person says yes to exactly that proposal.
-	if !approvals.Approve(Approval{
-		RunID: asked.Request.RunID, Attempt: asked.Request.Attempt, Tool: asked.Request.Tool,
-		CallID: asked.Request.CallID, ArgHash: asked.Request.ArgHash,
-	}) {
-		t.Fatalf("the exact proposal the kernel asked about (%s %s) was not pending", asked.Request.Tool, asked.Request.CallID)
-	}
-
-	// 3. The resume: the fence refuses the approved call, and the run must
-	//    reach a terminal state of its own accord — an ANSWER.
+	// The ask blocks on the symlink the lexical predicate let through, and
+	// the person says yes to exactly that proposal. The fence then refuses
+	// the approved call, and the run must reach a terminal state of its own
+	// accord — an ANSWER.
+	q := &recordingQuestioner{store: approvals, answer: Approved{}}
+	p := askParams(srv.URL, &grant, ledger, approvals)
+	p.Questioner = q
 	var answer strings.Builder
-	err = cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, approvals), func(e AskEvent) error {
+	if err := cl.Ask(context.Background(), p, func(e AskEvent) error {
 		if e.Kind == AskAnswer {
 			answer.WriteString(e.Text)
 		}
 		return nil
-	})
-	var again *ApprovalRequestedError
-	if errors.As(err, &again) {
-		t.Fatalf("the resume asked about %s again after the person approved it", again.Request.CallID)
+	}); err != nil {
+		t.Fatalf("Ask error = %v — the fence's refusal ended the run instead of answering it", err)
 	}
-	if err != nil {
-		t.Fatalf("resume Ask error = %v — the fence's refusal ended the run instead of answering it", err)
+	if len(q.asked) != 1 {
+		t.Fatalf("the person was asked %d times, want exactly 1", len(q.asked))
 	}
 	if !strings.Contains(answer.String(), "ok") {
 		t.Fatalf("answer = %q, want the model's reply after the refusal — a run that ends quietly is not a run that answered", answer.String())

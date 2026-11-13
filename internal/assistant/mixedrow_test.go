@@ -1,8 +1,6 @@
 package assistant
 
 import (
-	"context"
-	"errors"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/content"
@@ -51,18 +49,19 @@ func TestAsk_MixedResourceCommandAsksInTheRowItBelongsIn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}
-	err = cl.Ask(context.Background(), askParams(srv.URL, &grant, &fakeLedger{}, NewApprovalStore()), func(AskEvent) error {
-		return nil
-	})
-	var asked *ApprovalRequestedError
-	if !errors.As(err, &asked) || asked.Request == nil {
-		t.Fatalf("Ask error = %v, want an approval request", err)
+	q, err := withPerson(t, cl, askParams(srv.URL, &grant, &fakeLedger{}, NewApprovalStore()), Declined{Reason: "not this one"}, DeclineCallOnce)
+	if err != nil {
+		t.Fatalf("Ask error = %v, want the person's no as the call's answer", err)
 	}
-	if asked.Request.Effect != content.EffectCrossBoundary {
+	if len(q.asked) != 1 {
+		t.Fatalf("the person was asked %d times, want exactly 1", len(q.asked))
+	}
+	asked := q.asked[0]
+	if asked.Effect != content.EffectCrossBoundary {
 		t.Fatalf("the ask is headed %q, want %q — the row this command belongs in",
-			asked.Request.Effect, content.EffectCrossBoundary)
+			asked.Effect, content.EffectCrossBoundary)
 	}
-	if asked.Request.Effect == content.EffectDelegate {
+	if asked.Effect == content.EffectDelegate {
 		t.Fatal("the ask still says work was handed to another agent")
 	}
 }
@@ -85,27 +84,28 @@ func TestAsk_MixedResourceCommandCarriesEveryDerivedEffect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}
-	err = cl.Ask(context.Background(), askParams(srv.URL, &grant, &fakeLedger{}, NewApprovalStore()), func(AskEvent) error {
-		return nil
-	})
-	var asked *ApprovalRequestedError
-	if !errors.As(err, &asked) || asked.Request == nil {
-		t.Fatalf("Ask error = %v, want an approval request", err)
+	q, err := withPerson(t, cl, askParams(srv.URL, &grant, &fakeLedger{}, NewApprovalStore()), Declined{Reason: "not this one"}, DeclineCallOnce)
+	if err != nil {
+		t.Fatalf("Ask error = %v, want the person's no as the call's answer", err)
 	}
-	if len(asked.Request.DerivedEffects) != 2 {
+	if len(q.asked) != 1 {
+		t.Fatalf("the person was asked %d times, want exactly 1", len(q.asked))
+	}
+	asked := q.asked[0]
+	if len(asked.DerivedEffects) != 2 {
 		t.Fatalf("derived effects = %v, want exactly the two the command derived",
-			asked.Request.DerivedEffects)
+			asked.DerivedEffects)
 	}
 	for _, want := range []content.Effect{content.EffectCrossBoundary, content.EffectMutateReversible} {
 		var found bool
-		for _, candidate := range asked.Request.DerivedEffects {
+		for _, candidate := range asked.DerivedEffects {
 			if candidate == want {
 				found = true
 			}
 		}
 		if !found {
 			t.Errorf("derived effects = %v, want %q among them — the person is not told what the call does",
-				asked.Request.DerivedEffects, want)
+				asked.DerivedEffects, want)
 		}
 	}
 }
@@ -126,20 +126,21 @@ func TestAsk_SingleResourceCommandCarriesItsOneDerivedEffect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}
-	err = cl.Ask(context.Background(), askParams(srv.URL, &grant, &fakeLedger{}, NewApprovalStore()), func(AskEvent) error {
-		return nil
-	})
-	var asked *ApprovalRequestedError
-	if !errors.As(err, &asked) || asked.Request == nil {
-		t.Fatalf("Ask error = %v, want an approval request", err)
+	q, err := withPerson(t, cl, askParams(srv.URL, &grant, &fakeLedger{}, NewApprovalStore()), Declined{Reason: "not this one"}, DeclineCallOnce)
+	if err != nil {
+		t.Fatalf("Ask error = %v, want the person's no as the call's answer", err)
 	}
-	if asked.Request.Effect != content.EffectCrossBoundary {
-		t.Fatalf("effect = %q, want %q", asked.Request.Effect, content.EffectCrossBoundary)
+	if len(q.asked) != 1 {
+		t.Fatalf("the person was asked %d times, want exactly 1", len(q.asked))
 	}
-	if len(asked.Request.DerivedEffects) != 1 ||
-		asked.Request.DerivedEffects[0] != content.EffectCrossBoundary {
+	asked := q.asked[0]
+	if asked.Effect != content.EffectCrossBoundary {
+		t.Fatalf("effect = %q, want %q", asked.Effect, content.EffectCrossBoundary)
+	}
+	if len(asked.DerivedEffects) != 1 ||
+		asked.DerivedEffects[0] != content.EffectCrossBoundary {
 		t.Fatalf("derived effects = %v, want exactly [%q]",
-			asked.Request.DerivedEffects, content.EffectCrossBoundary)
+			asked.DerivedEffects, content.EffectCrossBoundary)
 	}
 }
 
@@ -161,22 +162,23 @@ func TestAsk_UnresolvedCommandCarriesNoDerivedEffect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}
-	err = cl.Ask(context.Background(), askParams(srv.URL, &grant, &fakeLedger{}, NewApprovalStore()), func(AskEvent) error {
-		return nil
-	})
-	var asked *ApprovalRequestedError
-	if !errors.As(err, &asked) || asked.Request == nil {
-		t.Fatalf("Ask error = %v, want an approval request", err)
+	q, err := withPerson(t, cl, askParams(srv.URL, &grant, &fakeLedger{}, NewApprovalStore()), Declined{Reason: "not this one"}, DeclineCallOnce)
+	if err != nil {
+		t.Fatalf("Ask error = %v, want the person's no as the call's answer", err)
 	}
-	if want := content.WorstEffect(runEffects); asked.Request.Effect != want {
+	if len(q.asked) != 1 {
+		t.Fatalf("the person was asked %d times, want exactly 1", len(q.asked))
+	}
+	asked := q.asked[0]
+	if want := content.WorstEffect(runEffects); asked.Effect != want {
 		t.Fatalf("effect = %q, want the declared worst %q — uncertainty still tightens",
-			asked.Request.Effect, want)
+			asked.Effect, want)
 	}
-	if len(asked.Request.DerivedEffects) != 0 {
+	if len(asked.DerivedEffects) != 0 {
 		t.Fatalf("derived effects = %v, want none for a command that did not fully resolve",
-			asked.Request.DerivedEffects)
+			asked.DerivedEffects)
 	}
-	if len(asked.Request.Invocation.Resources.Unresolved) == 0 {
+	if len(asked.Invocation.Resources.Unresolved) == 0 {
 		t.Fatal("the unresolved part is not carried either, so the ask says nothing about it")
 	}
 }

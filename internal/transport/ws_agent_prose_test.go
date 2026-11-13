@@ -31,7 +31,6 @@ import (
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
-	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // ── reading the rows ─────────────────────────────────────────────────────
@@ -568,105 +567,6 @@ func TestProseBlocksAreNotAnchoredToThePane(t *testing.T) {
 }
 
 // ── acceptance 4: a resume continues the block it was suspended in ───────
-
-// TestAgentApprove_TheResumeContinuesTheOpenProseBlock: a run says something,
-// the EGRESS gate suspends it, a person approves, and the prose that follows
-// lands in the block the question interrupted — not in a second one opened
-// beside it.
-//
-// This is the delta numbering's rule one level in. Since nocx-igu4y the resume
-// is a real checkpoint resume: the model is not asked to produce the answer
-// again, so the text after the approval is the CONTINUATION of the text before
-// it. Numbering it from 0 again would collide; opening a second `text` block
-// for it would cut one sentence in half at a place nothing happened — which is
-// the defect ADR-0040 exists to remove, arriving by the one door the ADR does
-// not close.
-//
-// The suspension is scripted rather than driven through a real tool, and that
-// is faithful to what is under test: the middleware's own egress arm withholds
-// the tool RESULT and retains it for the approved resume (internal/assistant,
-// runWithRetained) — it never touches the answer stream. What the transport
-// must get right is that the run context it re-drives still names the block
-// the interrupted stream had open, and a scripted suspension exercises exactly
-// that seam with nothing else in the way.
-func TestAgentApprove_TheResumeContinuesTheOpenProseBlock(t *testing.T) {
-	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{
-			deltas: []string{"let me", " look"},
-			suspend: func(runID string) error {
-				return &assistant.EgressRequestedError{Request: &assistant.EgressRequest{
-					RunID: runID, Attempt: 1, Tool: "files.read", CallID: "call_1",
-					Arguments: `{"path":"/repo/a.txt"}`, ArgHash: "hash-a",
-					Effect:   content.EffectObserve,
-					Resource: &content.GrantScope{Kind: content.ResourcePath, ID: "/repo/a.txt"},
-					Findings: []assistant.EgressFinding{{
-						Source: assistant.EgressFindingHeuristic, Kind: "openai-api-key",
-						Start: 11, End: 43,
-					}},
-				}}
-			},
-		},
-		{deltas: []string{" — it says", " hello"}},
-	}}
-	h := suspendedRunWith(t, askPolicyStore(t), client)
-
-	// Before the answer: one block, holding what was said before the gate
-	// stopped the run. If this were already two, the assertion after the
-	// resume could not tell a continued block from a lucky count.
-	led := h.db.Ledger()
-	turn := turnOfRun(t, led, h.runID)
-	before := proseUnder(t, led, turn)
-	if len(before) != 1 || before[0].text != "let me look" {
-		t.Fatalf("at the suspension the turn holds %+v, want the one block it had written", before)
-	}
-
-	// "once", and it has to be: an egress decision covers this result only —
-	// secret-shaped material going to the provider is never a standing answer
-	// (design §7.3), and agent.approve refuses the wider scope.
-	h.approve(t, "once")
-	waittest.WaitForTimeout(t, "the resume to drive the engine", 5*time.Second, func() bool { return client.askCount() == 2 })
-	readNotification(t, h.conn, "agent.runState", 5*time.Second)
-
-	after := proseUnder(t, led, turn)
-	if len(after) != 1 {
-		t.Fatalf("the resume left %d prose blocks, want the ONE it was suspended in: %+v", len(after), after)
-	}
-	if after[0].entryID != before[0].entryID {
-		t.Fatalf("the resume wrote into block %q; the question interrupted %q",
-			after[0].entryID, before[0].entryID)
-	}
-	if after[0].text != "let me look — it says hello" {
-		t.Errorf("the continued block reads %q, want the whole answer in one piece", after[0].text)
-	}
-	if after[0].state != content.ArtifactSealed {
-		t.Errorf("the block is %q after the run terminalized, want sealed", after[0].state)
-	}
-}
-
-// turnOfRun answers "which entry is this run an attempt of" off the store.
-// The scope harness hands back the run id; the prose hangs off the TURN, and
-// executions.entry_id is the one mapping between them — the same one
-// internal/assistant's middleware documents rather than re-derives.
-func turnOfRun(t *testing.T, led content.LedgerRepository, runID int64) string {
-	t.Helper()
-	page, err := led.ListEntries(context.Background(), 100)
-	if err != nil {
-		t.Fatalf("ListEntries: %v", err)
-	}
-	for _, row := range page {
-		entry, entryErr := led.Entry(context.Background(), row.ID)
-		if entryErr != nil || entry == nil {
-			continue
-		}
-		for _, ex := range entry.Executions {
-			if ex.ID == runID {
-				return entry.ID
-			}
-		}
-	}
-	t.Fatalf("no entry carries run %d", runID)
-	return ""
-}
 
 // ── the model can still read back an earlier answer ──────────────────────
 

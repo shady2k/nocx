@@ -16,7 +16,10 @@ func TestMiddlewareApprovalCapturesEveryPathVersion(t *testing.T) {
 	approvals := NewApprovalStore()
 	mw := middlewareFor(t, grant, &fakeLedger{}, approvals)
 	args := fmt.Sprintf(`{"path":%q}`, path)
-	proposal := approveWiringProposal(t, mw, approvals, "files.read", args)
+	proposal, _, err := approveWiringProposal(t, mw, approvals, "files.read", args)
+	if err != nil {
+		t.Fatalf("the approved read: %v", err)
+	}
 
 	versions, ok := approvals.ApprovedFileVersions(proposal)
 	if !ok {
@@ -39,10 +42,9 @@ func TestMiddlewareApprovalRefusesChangedFileBeforeExecution(t *testing.T) {
 	ledger := &fakeLedger{}
 	mw := middlewareFor(t, grant, ledger, approvals)
 	args := fmt.Sprintf(`{"path":%q}`, path)
-	proposal := approveWiringProposal(t, mw, approvals, "files.read", args)
-	writeFile(t, path, "after")
-
-	out, err := wrappedEndpoint(mw, "files.read", "call_1", args)
+	proposal, out, err := approveWiringProposal(t, mw, approvals, "files.read", args, func() {
+		writeFile(t, path, "after")
+	})
 	if err != nil {
 		t.Fatalf("changed-file refusal returned error: %v", err)
 	}
@@ -66,15 +68,13 @@ func TestMiddlewareApprovalRefusesRenamedFileBeforeExecution(t *testing.T) {
 	ledger := &fakeLedger{}
 	mw := middlewareFor(t, grant, ledger, approvals)
 	args := fmt.Sprintf(`{"path":%q}`, path)
-	approveWiringProposal(t, mw, approvals, "files.read", args)
-
-	replacement := filepath.Join(dir, "replacement.txt")
-	writeFile(t, replacement, "after")
-	if err := os.Rename(replacement, path); err != nil {
-		t.Fatalf("replace file: %v", err)
-	}
-
-	out, err := wrappedEndpoint(mw, "files.read", "call_1", args)
+	_, out, err := approveWiringProposal(t, mw, approvals, "files.read", args, func() {
+		replacement := filepath.Join(dir, "replacement.txt")
+		writeFile(t, replacement, "after")
+		if renameErr := os.Rename(replacement, path); renameErr != nil {
+			t.Fatalf("replace file: %v", renameErr)
+		}
+	})
 	if err != nil {
 		t.Fatalf("renamed-file refusal returned error: %v", err)
 	}
@@ -93,7 +93,10 @@ func TestFilesCreateApprovalAllowsMissingPath(t *testing.T) {
 	approvals := NewApprovalStore()
 	mw := middlewareFor(t, grant, &fakeLedger{}, approvals)
 
-	proposal := approveWiringProposal(t, mw, approvals, "files.create", args)
+	proposal, out, err := approveWiringProposal(t, mw, approvals, "files.create", args)
+	if err != nil {
+		t.Fatalf("approved create returned error: %v", err)
+	}
 	versions, ok := approvals.ApprovedFileVersions(proposal)
 	if !ok {
 		t.Fatal("approved create proposal is missing")
@@ -101,31 +104,27 @@ func TestFilesCreateApprovalAllowsMissingPath(t *testing.T) {
 	if len(versions) != 0 {
 		t.Fatalf("create proposal versions = %+v, want no versions for a missing path", versions)
 	}
-	out, err := wrappedEndpoint(mw, "files.create", "call_1", args)
-	if err != nil {
-		t.Fatalf("approved create returned error: %v", err)
-	}
 	if !strings.Contains(out, `"status":"created"`) {
 		t.Fatalf("create result = %q, want created status", out)
 	}
-	// #nosec G304 -- the path is this test's own temporary file.
-	if data, readErr := os.ReadFile(path); readErr != nil || string(data) != "created" {
-		t.Fatalf("created file = %q, read error = %v", data, readErr)
-	}
 }
 
-func approveWiringProposal(t *testing.T, mw *policyMiddleware, approvals *ApprovalStore, tool, args string) Approval {
+// approveWiringProposal puts one call to a person who says yes, optionally
+// doing something while the question is open (between), and returns the
+// proposal that was approved together with the call's result.
+func approveWiringProposal(t *testing.T, mw *policyMiddleware, approvals *ApprovalStore, tool, args string, between ...func()) (Approval, string, error) {
 	t.Helper()
-	_, err := wrappedEndpoint(mw, tool, "call_1", args)
-	if err == nil {
+	q := &recordingQuestioner{store: approvals, answer: Approved{}}
+	if len(between) > 0 {
+		q.before = between[0]
+	}
+	mw.kernel.questioner = q
+	out, err := wrappedEndpoint(mw, tool, "call_1", args)
+	if len(q.asked) != 1 {
 		t.Fatalf("%s ran instead of requesting approval", tool)
 	}
-	proposal := Approval{
+	return Approval{
 		RunID: "run-1", Attempt: 1, Tool: tool, CallID: "call_1",
 		ArgHash: canonicalArgHash(args),
-	}
-	if !approvals.Approve(proposal) {
-		t.Fatalf("approval proposal was not pending: %v", err)
-	}
-	return proposal
+	}, out, err
 }

@@ -141,6 +141,23 @@ func (c Call) RawParams() []byte {
 	return append([]byte(nil), c.facts.rawParams...)
 }
 
+// withGrant restates the same call under a freshly minted grant, and it is the
+// ONE field of a call the pipeline changes after the call entered it: the
+// authority a call runs under is read after the answer, because a person's
+// answer can write the policy it is read from and because a long wait can
+// outlive the grant minted at admission (ADR-anntnxdj §3). Everything a person
+// answered about — the tool, the arguments, the resources, the call id — is the
+// same value.
+func (c Call) withGrant(grant content.Grant) Call {
+	facts := callFacts{}
+	if c.facts != nil {
+		facts = *c.facts
+	}
+	facts.grant = grant
+	c.facts = &facts
+	return c
+}
+
 // Decision is a PreCall's answer about one call. The interface is sealed, so
 // the set is exactly Allow, Deny and Ask: no package outside this one can add a
 // fourth answer that the pipeline would have to guess at.
@@ -295,13 +312,24 @@ type Attempts interface {
 type AuthorityChain struct {
 	PreCalls []PreCall
 	Approver Approver
-	Guards   []Guard
-	Screens  []Screen
-	Attempts Attempts
+	// Order is the turn's order when this chain serves a turn's calls: one
+	// call at a time, in order, and a call behind a declined one refused with
+	// the same reason (ADR-anntnxdj §2). Nil is a caller with no turn to
+	// order — the tool endpoint, whose callers are independent.
+	Order *TurnOrder
+	// MintGrant mints the authority a call goes on under AFTER a person's
+	// answer (ADR-anntnxdj §3, "refreshed after an answer"). The pipeline
+	// calls it only on a call that was asked about, and the guards and the
+	// capability that follow read what it returns. Nil leaves the call on the
+	// grant it was admitted with.
+	MintGrant func(ctx context.Context, c Call) (content.Grant, bool)
+	Guards    []Guard
+	Screens   []Screen
+	Attempts  Attempts
 
 	// execute is the caller's own runtime for the one tool call — the kernel's
-	// retained-result path, the tool endpoint's declared executors. Nil uses
-	// the operation's executor.
+	// announcing runtime, the tool endpoint's declared executors. Nil uses the
+	// operation's executor.
 	execute dispatchExecutor
 }
 
@@ -345,9 +373,10 @@ func (e *PipelineRefusal) Error() string {
 // Unwrap exposes the cause to errors.Is and errors.As.
 func (e *PipelineRefusal) Unwrap() error { return e.Cause }
 
-// Dispatch runs one call through the chain, in the only order there is: schema
-// and the call's facts, PreCall*, the approver on an Ask, Guard*, the attempt,
-// the declaration's Narrow, the tool exactly once, Screen*.
+// Dispatch runs one call through the chain, in the only order there is: the
+// turn's order, schema and the call's facts, PreCall*, the approver on an Ask,
+// the fresh grant after an answer, Guard*, the attempt, the declaration's
+// Narrow, the tool exactly once, Screen*.
 //
 // A call whose context ended BEFORE it entered the pipeline is its caller's
 // own business: the caller may still need the call's outcome recorded — the
@@ -374,6 +403,30 @@ func (p *Pipeline) Dispatch(invocation ToolInvocation, attempt int, callID strin
 func (p *Pipeline) run(invocation ToolInvocation, attempt int, callID string) (dispatchOutcome, error) {
 	invocation.RawParams = append([]byte(nil), invocation.RawParams...)
 	ctx := invocation.Context
+	// The turn's order comes first: a call that is not this turn's turn has
+	// not started, and a call queued behind a declined one is refused with
+	// that decline rather than run on its own (ADR-anntnxdj §2).
+	if p.chain.Order != nil {
+		release, declined, err := p.chain.Order.enter(ctx)
+		if err != nil {
+			return dispatchOutcome{}, &PipelineRefusal{
+				Call:   Call{runID: invocation.RunContext.RunID, tool: invocation.Method},
+				Reason: "the call was cancelled while it waited for its turn: " + errText(err),
+				Cause:  err,
+			}
+		}
+		defer release()
+		if declined != nil {
+			reason := declined.Reason
+			if reason == "" {
+				reason = "a person declined the call before this one"
+			}
+			return dispatchOutcome{}, &PipelineRefusal{
+				Call:   Call{runID: invocation.RunContext.RunID, tool: invocation.Method},
+				Reason: reason,
+			}
+		}
+	}
 	prepared, err := p.operation.prepare(invocation)
 	if err != nil {
 		return dispatchOutcome{}, err
@@ -409,6 +462,15 @@ func (p *Pipeline) run(invocation ToolInvocation, attempt int, callID string) (d
 	if asked != nil {
 		if refusal := p.answer(ctx, call, *asked, enteredCancelled); refusal != nil {
 			return dispatchOutcome{}, refusal
+		}
+		// A person's answer is not the last word (ADR-anntnxdj §2): the
+		// authority the call goes on under is minted again from the policy as
+		// it stands now, and the guards and the capability below read it.
+		if p.chain.MintGrant != nil {
+			if fresh, ok := p.chain.MintGrant(ctx, call); ok {
+				call = call.withGrant(fresh)
+				prepared.request.Grant = fresh
+			}
 		}
 	}
 	for _, guard := range p.chain.Guards {
@@ -502,6 +564,12 @@ func (p *Pipeline) answer(ctx context.Context, call Call, ask Ask, enteredCancel
 		if reason == "" {
 			reason = "the person declined the call"
 		}
+		// The calls queued behind this one are refused with the same reason
+		// rather than started: a person who said no to this call did not say
+		// yes to the next (ADR-anntnxdj §2).
+		if p.chain.Order != nil {
+			p.chain.Order.declinedBy(answer)
+		}
 		return &PipelineRefusal{Call: call, Reason: reason}
 	case Unanswered:
 		return &PipelineRefusal{Call: call, Reason: "nobody answered whether this call may run: " + errText(answer.Err), Cause: answer.Err}
@@ -561,6 +629,9 @@ func (p *Pipeline) inspect(ctx context.Context, call Call, screen Screen, outbou
 			reason := answer.Reason
 			if reason == "" {
 				reason = "the person declined to release the result"
+			}
+			if p.chain.Order != nil {
+				p.chain.Order.declinedBy(answer)
 			}
 			return &PipelineRefusal{Call: call, Reason: reason, Cause: &ScreenDeclinedError{Reason: reason}}
 		case Unanswered:

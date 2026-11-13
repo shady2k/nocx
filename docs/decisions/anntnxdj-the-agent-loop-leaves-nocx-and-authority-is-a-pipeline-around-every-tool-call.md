@@ -414,8 +414,13 @@ does not change. The links are compiled in; nobody asked for loading at runtime.
   `os.Stat` and `os.ReadFile` (`fileversion.go`). So the `Handle` gains guarded capabilities beside its
   reads: `Canonical`, the revision-checked snapshot, edit and create (hashline over the provider's
   bytes, not over a local path), the evidence read, and the content search and recursive listing as
-  one optional interface beside `DomainNamer`. The helper-backed provider implements them; the
-  revision check is part of its DONE WHEN (agreed with the SSH foundation). A remote file changed
+  one optional interface beside `DomainNamer`. The helper-backed provider supplies the primitives
+  they stand on, in its DONE WHEN (agreed with the SSH foundation, `nocx-oalo1.6`): stat, list,
+  canonical, a whole-file read with its version (size, mtime, sha256), and one atomic write whose
+  optional precondition is checked by the helper on the host at the rename, refusing a file changed
+  since it was read. The revision check is a read, an in-memory patch and that conditional write, so
+  no check in the backend leaves a window open. The Files panel does not use the `ScopedEditor`; this
+  is the assistant's part. A remote file changed
   while its approval was pending is refused, and its local namesake is never read or touched. Where
   the pane's host has no helper, the file tools say why, as the panels do, and `session.*` still
   work.

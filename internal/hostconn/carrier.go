@@ -13,6 +13,8 @@ package hostconn
 import (
 	"context"
 	"time"
+
+	"github.com/shady2k/nocx/internal/monoclock"
 )
 
 // Capabilities says what a carrier can do, so that no surface has to test a
@@ -93,6 +95,28 @@ const (
 type Observation struct {
 	Answered  bool
 	RoundTrip time.Duration
+}
+
+// WakeSource reports that the machine has woken from sleep.
+//
+// The interface is the seam the design asks for (§5.3, "On a wake signal"): the
+// supervisor says "prove yourself now" and knows nothing about how the wake was
+// seen. The helper's implementation is internal/wakesource — the two kernel
+// clocks on macOS and Linux — and a test source is the fault harness's.
+type WakeSource interface {
+	// Wakes answers the channel that receives once per wake, carrying the
+	// reading of the supervisor's own clock at the moment the wake was SEEN.
+	//
+	// The moment travels with the signal and is not taken when the supervisor
+	// gets to it: a fan-out that is a moment late must still measure the
+	// policy's five seconds from the signal, or a slow scheduler would buy a
+	// connection extra time it has not earned. The reading is monoclock's, the
+	// clock every supervisor interval is measured on.
+	//
+	// The channel is the source's to own and is never closed while the process
+	// runs; a source with nothing to report answers a channel that never
+	// receives.
+	Wakes() <-chan monoclock.Nanos
 }
 
 // Prober is what a carrier offers when it can ask the far side a question.

@@ -103,12 +103,25 @@ type Manager struct {
 	carrier Carrier
 	log     log.Logger
 	clock   Clock
+	wake    WakeSource
 	mu      sync.Mutex
 	sups    map[Key]*Supervisor
 }
 
 // Option configures a Manager.
 type Option func(*Manager)
+
+// WithWakeSource is the option that gives the manager the machine's wake
+// signal. Every supervisor is told about every wake: each connection proves
+// itself, and one that is already proving itself is not asked twice (design
+// §5.3).
+func WithWakeSource(src WakeSource) Option {
+	return func(m *Manager) {
+		if src != nil {
+			m.wake = src
+		}
+	}
+}
 
 // WithClock is the option that makes time the caller's. The tests that state
 // "within 30 s" or "after ten minutes" need it to be theirs (design §10): a
@@ -128,7 +141,33 @@ func NewManager(carrier Carrier, logger log.Logger, opts ...Option) *Manager {
 	for _, opt := range opts {
 		opt(m)
 	}
+	if m.wake != nil {
+		go m.watchWakes()
+	}
 	return m
+}
+
+// watchWakes fans one wake signal out to every supervisor. It runs for the life
+// of the manager, which is the life of the helper process.
+func (m *Manager) watchWakes() {
+	for at := range m.wake.Wakes() {
+		m.wakeAll(at)
+	}
+}
+
+// wakeAll tells every connection the machine has woken, at the moment the signal
+// names. A supervisor with no connection has nothing to prove, and its Wake is a
+// no-op.
+func (m *Manager) wakeAll(at monoclock.Nanos) {
+	m.mu.Lock()
+	sups := make([]*Supervisor, 0, len(m.sups))
+	for _, sup := range m.sups {
+		sups = append(sups, sup)
+	}
+	m.mu.Unlock()
+	for _, sup := range sups {
+		sup.Wake(at)
+	}
 }
 
 // Acquire answers a held reference to the connection described by plan,
@@ -197,6 +236,11 @@ type live struct {
 	// parked probe's reporting. It is closed once.
 	stop     chan struct{}
 	stopOnce sync.Once
+	// wake carries the machine's wake signal to this connection's guard, from
+	// the manager's one fan-out, with the moment it was seen. It holds one
+	// pending signal: two wakes nobody has read yet are one fact for a
+	// connection that has not answered the first.
+	wake chan monoclock.Nanos
 	// nextProbe is when the guard asks this connection to answer. It is set
 	// when the connection becomes live rather than when the goroutine happens
 	// to start: the cadence belongs to the connection, and a guard scheduled a
@@ -289,7 +333,8 @@ func (s *Supervisor) Acquire(ctx context.Context, plan Plan) (*Lease, error) {
 		live := &live{
 			link: link, holders: 1, route: plan.Route, probeInterval: probeInterval,
 			nextProbe: s.clock.Now() + span(probeInterval),
-			stop:      make(chan struct{}), observers: make(map[*Lease]func(Observation)),
+			stop:      make(chan struct{}), wake: make(chan monoclock.Nanos, 1),
+			observers: make(map[*Lease]func(Observation)),
 		}
 		if plan.Holds&HoldsPlainShell != 0 {
 			live.plainShells = 1
@@ -476,6 +521,23 @@ func (s *Supervisor) observe(held *live, obs Observation) {
 	}
 	for _, fn := range fns {
 		fn(obs)
+	}
+}
+
+// Wake tells this connection the machine has woken from sleep: prove yourself
+// now, in the policy's five seconds from `at`. With no connection there is
+// nothing to prove, and a signal already waiting for the guard is not queued
+// twice.
+func (s *Supervisor) Wake(at monoclock.Nanos) {
+	s.mu.Lock()
+	live := s.live
+	s.mu.Unlock()
+	if live == nil {
+		return
+	}
+	select {
+	case live.wake <- at:
+	default:
 	}
 }
 

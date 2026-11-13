@@ -47,6 +47,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/sshconn"
 	"github.com/shady2k/nocx/internal/helper/sshsvc"
 	"github.com/shady2k/nocx/internal/hostconn"
+	"github.com/shady2k/nocx/internal/hostconn/hostconntest"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/ssh"
 	gossh "golang.org/x/crypto/ssh"
@@ -214,6 +215,12 @@ type fixture struct {
 	// dialled again" visible as the thing the owner saw missing: the same
 	// local port in every failed attempt (nocx-oalo1.4.6).
 	peerPorts []int
+	// keepaliveProbes and keepaliveNudges count the keepalive requests this host
+	// saw, split by whether a reply was wanted: a probe wants one and a nudge
+	// does not (design §5.3). The pair is how a test says "one probe in
+	// flight" and "one nudge after the look" from the far end's own record.
+	keepaliveProbes int
+	keepaliveNudges int
 	// closeOnForward closes the connection instead of answering a
 	// `tcpip-forward` request: a host that dies exactly when it is asked for a
 	// listener. It is the transport-error counterpart of allowForward's
@@ -243,6 +250,14 @@ func (f *fixture) note(event string) {
 // reports.
 func (f *fixture) noteLocked(event string) {
 	f.events = append(f.events, event)
+}
+
+// keepalivesSeen reports the keepalive requests this host answered, split into
+// probes (a reply wanted) and nudges (none).
+func (f *fixture) keepalivesSeen() (probes, nudges int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.keepaliveProbes, f.keepaliveNudges
 }
 
 // connectionPorts is the source port of each accepted connection, in order.
@@ -465,6 +480,15 @@ func (f *fixture) serve(conn net.Conn, config *gossh.ServerConfig) {
 func (f *fixture) serveGlobalRequests(sconn *gossh.ServerConn, reqs <-chan *gossh.Request) {
 	for req := range reqs {
 		f.note("global:" + req.Type)
+		if req.Type == "keepalive@openssh.com" {
+			f.mu.Lock()
+			if req.WantReply {
+				f.keepaliveProbes++
+			} else {
+				f.keepaliveNudges++
+			}
+			f.mu.Unlock()
+		}
 		f.mu.Lock()
 		closeOnForward := f.closeOnForward
 		f.mu.Unlock()
@@ -1152,7 +1176,10 @@ type stand struct {
 	// is also what a test asks for a connection's state: production has one
 	// carrier per helper (cmd/nocx-helper), and a test that built a second one
 	// beside the service would be measuring a supervisor nobody uses.
-	carrier   *sshconn.Carrier
+	carrier *sshconn.Carrier
+	// wake is the stand's wake source: the machine's suspend is the test's to
+	// report (design §10, nocx-oalo1.4.5), because no CI machine can sleep.
+	wake      *hostconntest.WakeSource
 	toHelper  *recorder
 	toCoord   *recorder
 	cancel    context.CancelFunc
@@ -1198,7 +1225,11 @@ func newStandOnClock(t *testing.T, c *coordinator, logger *slog.Logger, clock ho
 	if clock == nil {
 		clock = hostconn.RealClock{}
 	}
-	s.carrier = sshconn.NewWithClock(realClient, log.NewSlogAdapter(logger), clock)
+	s.wake = hostconntest.NewWakeSource(clock)
+	s.carrier = sshconn.NewWithOptions(realClient, log.NewSlogAdapter(logger), sshconn.Options{
+		Clock: clock,
+		Wake:  s.wake,
+	})
 	s.service = sshsvc.New(s.carrier, logger)
 	s.helper = host.New(s.toHelper, s.toHelper, testHash, "instance-1", discardLogger())
 	s.helper.Register(s.service)

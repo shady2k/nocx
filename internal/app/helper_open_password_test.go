@@ -39,6 +39,7 @@ import (
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/remoteprobe"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/storage/storagetest"
 	gossh "golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
@@ -582,10 +583,15 @@ func (s *pwSSHServer) awaitConns(want int) int {
 // production has no need to name a path, so a test that wants its own store
 // gives the client its own home, exactly as a person has one (nocx-oalo1.3.2).
 // The directory is created; the file is the caller's to write.
+//
+// The home comes from storagetest.SetHome rather than t.TempDir plus t.Setenv,
+// because the go command resolves its module cache from HOME by default and
+// writes it read-only — a test home that holds one cannot be removed, and a
+// stand that builds the helper does exactly that (nocx-oalo1.3.2).
 func homeForKnownHosts(t *testing.T) (home, khPath string) {
 	t.Helper()
 	home = t.TempDir()
-	t.Setenv("HOME", home)
+	storagetest.SetHome(t, home)
 	return home, knownHostsIn(t, home)
 }
 

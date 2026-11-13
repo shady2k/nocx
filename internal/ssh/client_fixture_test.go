@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/storage/storagetest"
 )
 
 // sshHome gives this test its own $HOME and answers where the product's client
@@ -31,13 +32,28 @@ import (
 // caller's to write, or TrustHostKey's.
 func sshHome(t *testing.T) string {
 	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := sshTestHome(t)
 	dir := filepath.Join(home, ".ssh")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("prepare %s: %v", dir, err)
 	}
 	return filepath.Join(dir, "known_hosts")
+}
+
+// sshTestHome gives this test its own $HOME, for a caller that needs only a
+// home and never reads a host key: a client whose bindings refuse before any
+// dial, a client that is only constructed.
+//
+// It is the one place a test in this package moves HOME, and it moves it
+// through storagetest.SetHome so that the go command's module cache stays in
+// the caller's directories. `go build` under a moved HOME writes GOPATH and
+// GOMODCACHE into the test's home and makes them read-only, which is a home
+// nothing can remove and a failure a test did not ask for (nocx-oalo1.3.2).
+func sshTestHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	storagetest.SetHome(t, home)
+	return home
 }
 
 // newTrustClient builds a RealClient over the $HOME sshHome gave this test.

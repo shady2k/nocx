@@ -521,7 +521,7 @@ func newTestStore() *memSecretStore {
 // resolver, and its own $HOME so its known_hosts is a file nobody shares.
 func newTestRealClient(t *testing.T) *RealClient {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	sshTestHome(t)
 	rc, err := NewReal(
 		log.NewSlogAdapter(nil), // nil handler → slog falls back
 		WithConfigResolver(NewStubConfigResolver()),

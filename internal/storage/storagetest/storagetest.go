@@ -14,9 +14,11 @@ package storagetest
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -96,9 +98,56 @@ func IsolateWithHome(t *testing.T) string {
 		t.Fatalf("create the disposable home: %v", err)
 	}
 	t.Cleanup(func() { removeUnderTempDir(t, home) })
-	t.Setenv("HOME", home)
+	SetHome(t, home)
 	return home
 }
+
+// SetHome points this test's HOME at home and keeps the go command's own
+// directories where the caller had them: GOPATH, GOMODCACHE and GOCACHE.
+//
+// A test home is a directory the test owns. A module cache is not, and by
+// default the two are the same place: `go build` under a moved HOME writes
+// GOPATH=$HOME/go and GOMODCACHE=$HOME/go/pkg/mod into the test's home, and
+// the go command makes every file in a module cache read-only — so the
+// removal cannot unlink them (`unlinkat ...: permission denied`) and a test
+// fails over a cache it never asked for. CI took that as a cleanup failure of
+// a live-ssh test that builds the helper (nocx-oalo1.3.2).
+//
+// The three are ASKED OF THE go COMMAND rather than derived here, and once:
+// each has a default that depends on HOME and on the OS — GOCACHE is
+// ~/Library/Caches/go-build on macOS and ~/.cache/go-build elsewhere — so a
+// copy of those rules in this package would drift from the toolchain. Asked
+// lazily, so a test binary that never moves HOME pays nothing, and before
+// HOME moves, which is what makes the answer the caller's.
+func SetHome(t *testing.T, home string) {
+	t.Helper()
+	dirs, err := goToolchainDirs()
+	if err != nil {
+		t.Fatalf("resolve the go command's directories, so this test's home %q cannot hold a module cache: %v", home, err)
+	}
+	for name, dir := range dirs {
+		t.Setenv(name, dir)
+	}
+	t.Setenv("HOME", home)
+}
+
+// goToolchainDirs answers GOPATH, GOMODCACHE and GOCACHE by asking the go
+// command itself, once per test binary.
+var goToolchainDirs = sync.OnceValues(func() (map[string]string, error) {
+	out, err := exec.Command("go", "env", "GOPATH", "GOMODCACHE", "GOCACHE").Output()
+	if err != nil {
+		return nil, fmt.Errorf("go env GOPATH GOMODCACHE GOCACHE: %w", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+	if len(lines) != 3 {
+		return nil, fmt.Errorf("go env answered %d lines for three directories: %q", len(lines), out)
+	}
+	return map[string]string{
+		"GOPATH":     lines[0],
+		"GOMODCACHE": lines[1],
+		"GOCACHE":    lines[2],
+	}, nil
+})
 
 // SocketDir is a short directory under the same disposable root as
 // [IsolateWithHome], for a test that binds a unix socket directly — a

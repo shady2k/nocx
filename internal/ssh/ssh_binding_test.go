@@ -55,7 +55,7 @@ func newBindingClient(t *testing.T) *RealClient {
 
 func newBindingClientWith(t *testing.T, resolver ConfigResolver) *RealClient {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	sshTestHome(t)
 	c, err := NewReal(log.NewSlogAdapter(nil), WithConfigResolver(resolver))
 	if err != nil {
 		t.Fatalf("NewReal: %v", err)

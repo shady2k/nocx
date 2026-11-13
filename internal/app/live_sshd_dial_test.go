@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/shady2k/nocx/internal/storage/storagetest"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
 
@@ -36,7 +37,7 @@ func newLiveSshdDial() liveSshdDial { return liveSshdDial{} }
 func (fx *liveSshd) knownHostsPath(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	storagetest.SetHome(t, home)
 	dir := filepath.Join(home, ".ssh")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("prepare %s: %v", dir, err)

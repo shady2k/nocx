@@ -303,8 +303,7 @@ func TestTrustHostKey_CreatesMissingParent0700(t *testing.T) {
 	defer srv.close()
 
 	// A home with no .ssh yet: the store must be created, not refused.
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := sshTestHome(t)
 	sshDir := filepath.Join(home, ".ssh")
 	client := newTrustClient(t)
 

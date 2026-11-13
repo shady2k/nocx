@@ -530,8 +530,7 @@ func fsTestClient(t *testing.T, srv *fsTestServer) *RealClient {
 // wants to read it back.
 func fsWriteKnownHosts(t *testing.T, srv *fsTestServer, addr string) string {
 	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := sshTestHome(t)
 	line := knownhosts.Line([]string{addr}, srv.hostSigner.PublicKey())
 	dir := filepath.Join(home, ".ssh")
 	if err := os.MkdirAll(dir, 0o700); err != nil {

@@ -2,8 +2,7 @@ package wakesource
 
 // The merge: one owner of "the machine slept", fed by the OS's events and by
 // the two clocks, with the rules the design states — one wake per resume
-// whichever input saw it first, a dark wake is not a wake and suppresses the
-// clocks, and an absent input is said once.
+// whichever input saw it first, and an absent input is said once.
 //
 // Every test here drives ONE STEP of the merge directly, or an injected tick
 // through the poll loop: the OS input is a channel the test writes, the tick is
@@ -140,60 +139,33 @@ func TestTwoResumesApartAreTwoWakes(t *testing.T) {
 	}
 }
 
-func TestADarkWakeIsNotAWakeAndSuppressesTheClocks(t *testing.T) {
-	m := newDecide(SleepGap, MergeWindow)
-	if got := m.step([]Event{{Kind: EventDarkWoke, At: 100}}, normal(100), normal(100), 100); got.woke {
-		t.Fatalf("a dark wake produced a wake signal: %v", got.wakeAt)
+// TestDrainAnswersEveryDeliveredEventInOrder is the poll loop's half of the
+// step's ordering rule: a tick cannot read the clocks before it has taken
+// everything the input has already delivered, and an input that has ended says
+// so exactly once rather than on every turn.
+func TestDrainAnswersEveryDeliveredEventInOrder(t *testing.T) {
+	events := make(chan Event, 2)
+	events <- Event{Kind: EventWillSleep, At: 1}
+	events <- Event{Kind: EventWoke, At: 2}
+
+	pending, next, ended := drain(events)
+	if ended {
+		t.Fatal("a live input was reported as ended")
 	}
-	// The power nap's gap reaches the clocks; it must not be a wake.
-	if got := m.step(nil, normal(100), afterGap(100), 200); got.woke {
-		t.Fatalf("a dark wake produced a wake signal from the clocks: %v", got.wakeAt)
+	if next != events {
+		t.Fatal("drain changed the channel to read next on a live input")
+	}
+	if len(pending) != 2 || pending[0].Kind != EventWillSleep || pending[1].At != 2 {
+		t.Fatalf("drain answered %+v, want both events in the order they arrived", pending)
 	}
 
-	// The full wake still does.
-	if got := m.step([]Event{{Kind: EventWoke, At: 200}}, normal(100), afterGap(100), 200); !got.woke {
-		t.Fatal("the full wake after the dark one produced no wake")
+	close(events)
+	pending, next, ended = drain(next)
+	if !ended || next != nil {
+		t.Fatalf("a closed input answers (ended=%v, next=%v), want (true, nil): a channel read again reports the end forever", ended, next)
 	}
-}
-
-// TestAnArrivedDarkWakeIsAppliedBeforeTheClockTick is finding 10's regression:
-// both inputs are ready in the SAME step, and the event is applied first, so the
-// clock sees the dark state and emits nothing. What the event says afterwards
-// cannot retract a wake the clocks already emitted, which is why the order is a
-// property of the step and not of the scheduler.
-func TestAnArrivedDarkWakeIsAppliedBeforeTheClockTick(t *testing.T) {
-	m := newDecide(SleepGap, MergeWindow)
-	got := m.step(
-		[]Event{{Kind: EventDarkWoke, At: 100}},
-		normal(100), afterGap(100),
-		100,
-	)
-	if got.woke {
-		t.Fatalf("a dark wake that had arrived produced a clock wake for the same resume: %v", got.wakeAt)
-	}
-}
-
-// TestATickNeverOutrunsAPendingEvent is the same rule for the poll loop: the
-// dark event is already in the input channel when the tick arrives, and the
-// clock gap is the same resume's. The scripted clock pair counts its reads, so
-// "the tick ran" is an observable state and not a sleep.
-func TestATickNeverOutrunsAPendingEvent(t *testing.T) {
-	clocks := newClocks(normal(100), afterGap(100))
-	events := make(chan Event, 1)
-	ticks := make(chan time.Time, 1)
-	src := newSource(clocks.read, SleepGap, events, ticks, nil)
-	t.Cleanup(src.Stop)
-
-	events <- Event{Kind: EventDarkWoke, At: 100}
-	ticks <- time.Now()
-	// Two reads: the construction's, then the tick's. When the second has
-	// happened the tick's step is decided.
-	waittest.WaitFor(t, "the tick to read the clocks", func() bool { return clocks.reads.Load() >= 2 })
-
-	select {
-	case at := <-src.Wakes():
-		t.Fatalf("a tick emitted a wake while a dark wake was waiting: %v", at)
-	default:
+	if len(pending) != 0 {
+		t.Fatalf("a closed input answered %d events, want none", len(pending))
 	}
 }
 

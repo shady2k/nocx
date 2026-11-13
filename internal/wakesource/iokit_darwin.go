@@ -77,15 +77,14 @@ package wakesource
 // set; the header mentions dark wake only in the discussion of two assertion
 // types ("This assertion has no effect if the system is in Dark Wake").
 //
-// So every kIOMessageSystemHasPoweredOn is reported as a full wake, and this is
-// what that costs: a dark wake makes every supervisor probe once, and the clock
-// comparison is not suppressed while the machine is dark, so a nap's gap
-// between the two clocks also reads as a resume. The cost is one small probe
-// per connection per dark wake on a link that is usually healthy. It cannot
-// close a shell: a probe is evidence, never a verdict, and silence closes only
-// under the policy in design §5.3. Taking the distinction from IOPMLibPrivate.h
-// is the alternative, and a private API is not something a shipped helper may
-// link against.
+// So every kIOMessageSystemHasPoweredOn is reported as a wake, a dark wake reads
+// as a wake, and this package has no second state for it because there is
+// nothing that could feed one. What that costs: one small probe per connection
+// per dark wake, on a link that is usually healthy. It cannot close a shell — a
+// probe is evidence and never a verdict, and silence closes only under the
+// policy in design §5.3. Taking the distinction from IOPMLibPrivate.h is the
+// alternative, and a private API is not something a shipped helper may link
+// against.
 //
 // The callback runs on a CFRunLoop this file owns, on a thread locked to it. It
 // never blocks: it hands the event to a buffered Go channel and answers IOKit
@@ -174,8 +173,8 @@ var powerEvents chan Event
 // the system's power machine.
 //
 // The kinds are the EventKind values this package's callback contract fixes:
-// 0 EventWillSleep, 1 EventWoke. The Darwin bridge never reports EventDarkWoke,
-// for the reason in the file's comment above.
+// 0 EventWillSleep, 1 EventWoke. There is no third one to send: the public API
+// has no dark-wake edge, as the file's comment above sets out.
 //
 //export nocxWakeEvent
 func nocxWakeEvent(kind C.int) {

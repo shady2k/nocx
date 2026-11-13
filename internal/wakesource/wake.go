@@ -28,24 +28,28 @@
 //     both platforms.
 //
 // The events are the precise input: they say "about to sleep" before it
-// happens, and — where the platform's PUBLIC API can say so — they distinguish a
-// full wake from a DARK wake (Power Nap and its peers), which is not a wake at
-// all and must not make every connection probe. Darwin's public IOKit API
-// cannot make that distinction and says so in iokit_darwin.go; Linux's logind
-// gives no dark-wake edge either, so on the shipped builds EventDarkWoke is the
-// merge's stated rule with no producer, and every wake it sees is a full one.
-// The clocks are the fallback: they catch a sleep no event reported — a machine
-// with no logind, a missed signal, a helper that started while the machine was
-// already away. ONE resume yields ONE wake signal, whichever input saw it
-// first; while a dark wake is the last thing the OS said, the clock input is
-// suppressed, because the gap it sees is the power nap and not a resume.
+// happens. The clocks are the fallback: they catch a sleep no event reported — a
+// machine with no logind, a missed signal, a helper that started while the
+// machine was already away. ONE resume yields ONE wake signal, whichever input
+// saw it first.
 //
 // The two inputs are merged in ONE serialized step (decide.step), and the events
-// that have already arrived are applied BEFORE the clocks are compared. That
-// order is deliberate: a clock tick must never emit a wake while a dark wake
-// that has arrived is still waiting to be applied, because applying the dark
-// event afterwards cannot retract a wake already emitted (nocx-oalo1.4 review,
-// finding 10).
+// that have already arrived are applied BEFORE the clocks are compared, so a
+// tick decides on the OS's latest word and on the clock pair together. One
+// resume stays one wake whichever input names it, and the answer is the same
+// whichever case the runtime's select happened to pick — the scheduler is out of
+// the decision.
+//
+// # What no shipped build can say: a dark wake
+//
+// A dark wake — Power Nap, maintenance, a network daemon — powers the CPU and
+// the network without the display or the user's session, and design §5.3 says
+// it must not make every connection probe. No public API tells it from a full
+// wake: macOS's capability set (IOPMCapabilityBits, IOPMIsADarkWake,
+// IOPMConnectionCreate) is declared in IOPMLibPrivate.h, which is SPI, and
+// logind has no such edge. So a dark wake reads as a wake here: one probe per
+// connection, which is evidence and never a verdict and closes nothing.
+// iokit_darwin.go states the same limit beside the code that would need it.
 //
 // # What it cannot see
 //
@@ -92,15 +96,9 @@ const (
 	// supervisors use it to stop asking their connections to answer: nothing
 	// will be heard until the machine returns.
 	EventWillSleep EventKind = iota
-	// EventWoke is a full wake: the machine is back and every connection must
+	// EventWoke is a wake: the machine is back and every connection must
 	// prove itself.
 	EventWoke
-	// EventDarkWoke is a wake with the display and the user's session still
-	// down — Power Nap and its peers. The machine did not come back to a
-	// person, so it is not a wake for any connection: no probe, and the clock
-	// input is suppressed while this is the last state, because the gap it
-	// would see is the nap.
-	EventDarkWoke
 )
 
 // Event is one thing an OS input said, seen at At.
@@ -115,14 +113,13 @@ type outcome struct {
 	sleepAt, wakeAt monoclock.Nanos
 }
 
-// decide is the merge's rule and all of its state: one resume is one wake, a
-// dark wake is not a wake and suppresses the clocks. It touches nothing outside
-// itself and starts no goroutine, so the rule is exercised one step at a time,
-// with no clock to wait on and no scheduler to hope for.
+// decide is the merge's rule and all of its state: one resume is one wake,
+// whichever input saw it first. It touches nothing outside itself and starts no
+// goroutine, so the rule is exercised one step at a time, with no clock to wait
+// on and no scheduler to hope for.
 type decide struct {
 	gap, window time.Duration
 	lastWake    monoclock.Nanos
-	dark        bool
 }
 
 func newDecide(gap, window time.Duration) *decide {
@@ -130,30 +127,23 @@ func newDecide(gap, window time.Duration) *decide {
 }
 
 // step is ONE serialized step of the merge: the events that have already
-// arrived, in the order they arrived, and the clock pair. The order is fixed
-// here — events first, then the clocks — and is the whole answer to "a tick must
-// not outrun an event that has arrived": a dark wake is in the state before the
-// clocks are compared, so it suppresses them.
+// arrived, in the order they arrived, and the clock pair. Events first, then the
+// clocks, so the pair is compared against the state the events just set (see
+// "one order" in the package comment).
 func (d *decide) step(events []Event, prev, cur monoclock.Readings, now monoclock.Nanos) outcome {
 	var o outcome
 	for _, ev := range events {
 		switch ev.Kind {
 		case EventWillSleep:
-			d.dark = false
 			o.slept, o.sleepAt = true, ev.At
 		case EventWoke:
-			d.dark = false
 			if d.woke(ev.At) {
 				o.woke, o.wakeAt = true, ev.At
 			}
-		case EventDarkWoke:
-			d.dark = true
 		}
 	}
-	// The clocks act LAST, on the state the events above just set. Reversing
-	// these two is finding 10: a tick would emit a wake for the resume while a
-	// dark wake that had already arrived was still unapplied.
-	if slept(prev, cur, d.gap) && !d.dark {
+	// The clocks act LAST, on the resume the events above may have just named.
+	if slept(prev, cur, d.gap) {
 		if d.woke(now) {
 			o.woke, o.wakeAt = true, now
 		}

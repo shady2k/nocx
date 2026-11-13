@@ -60,10 +60,11 @@
  *                        the limits below).
  *
  * Scope: every tracked non-test .go file except the transport packages, which
- * are `internal/ssh/`, `internal/helper/sshsvc/`, `internal/helper/sshconn/`
- * (the carrier), `internal/hostconn/` (the supervisor that owns every
- * connection's state) and `internal/sshtest/` (the fault proxy, which speaks
- * SSH because it must). The tree is analysed TWICE — as the coordinator is
+ * are `internal/ssh/`, `internal/helper/sshsvc/` (which serves the carrier over
+ * the helper protocol), `internal/helper/sshconn/` (the carrier) and
+ * `internal/sshtest/` (the fault proxy, which speaks SSH because it must). The
+ * supervisor, `internal/hostconn/`, is deliberately NOT among them: it is
+ * carrier-neutral and may not name x/crypto at all. The tree is analysed TWICE — as the coordinator is
  * built, and with -tags nocx_local_ssh — because the helper's dial half exists
  * only in the second, and a file behind a build tag is still a second owner.
  *
@@ -115,17 +116,24 @@ export const BASELINE_PATH = resolve(__dirname, 'connection-owners-baseline.json
  * The SSH transport: the only packages allowed to speak x/crypto at all.
  *
  * `internal/helper/sshconn` is the carrier — the one implementation of
- * hostconn.Carrier — and `internal/hostconn` is the supervisor that owns every
- * connection's life and state (design §5.1.1, ADR-ba6xet1b). They are here
- * because they ARE the one owner the ban names: a package that implements the
- * transport's own seam decides a connection fact by definition, and refusing it
- * for doing its job would leave the owner outside its own allowlist.
+ * hostconn.Carrier — and `internal/helper/sshsvc` serves it over the helper
+ * protocol. They are here because they ARE the one owner the ban names: a
+ * package that implements the transport's own seam decides a connection fact by
+ * definition, and refusing it for doing its job would leave the owner outside
+ * its own allowlist.
+ *
+ * `internal/hostconn` is NOT here, and stage 2 had added it: design §5.1.1 gives
+ * the supervisor `monoclock` and `log` and forbids it `internal/ssh` and
+ * `x/crypto`, because it is carrier-neutral — the seam exists so that the next
+ * transport is a package and one line at the composition root. An allowlist that
+ * held the y would license exactly the second transport the seam is for, and the
+ * review refused the set for widening where the requirement was to narrow
+ * (nocx-oalo1.4 review, finding 13).
  */
 export const ALLOWED_DIRS = [
   'internal/ssh/',
   'internal/helper/sshsvc/',
   'internal/helper/sshconn/',
-  'internal/hostconn/',
   'internal/sshtest/',
 ]
 

@@ -47,6 +47,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/helper/sshconn"
 	"github.com/shady2k/nocx/internal/remoteprobe"
 )
 
@@ -391,13 +392,15 @@ func (s *Service) runProbeOn(ctx context.Context, lease *probeLease, command str
 	}
 	// The exit status is an ANSWER, not a failure: 127 means the tool is
 	// missing, 1 from lsof means nothing matched, and a policy wrapper may exit
-	// anything at all. Only a failure to run AT ALL is a refusal.
-	var exitErr *gossh.ExitError
+	// anything at all. Only a failure to run AT ALL is a refusal. "Did the peer
+	// report a status" is the carrier's question (sshconn.Exit), asked once for
+	// the whole helper.
+	status, exited := sshconn.Exit(runErr)
 	switch {
 	case runErr == nil:
 		return result, nil
-	case errors.As(runErr, &exitErr):
-		result.ExitStatus = exitErr.ExitStatus()
+	case exited:
+		result.ExitStatus = status
 		return result, nil
 	case errors.Is(runErr, errProbeOutputCapped), capFired:
 		// We stopped it ourselves, so whatever Run reports afterwards is a

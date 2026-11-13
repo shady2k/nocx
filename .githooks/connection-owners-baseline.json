@@ -33,7 +33,7 @@
       "func": "github.com/shady2k/nocx/internal/session.realSession.ExitOutcome",
       "object": "golang.org/x/crypto/ssh.ExitError",
       "count": 1,
-      "reason": "the session registry decides a remote shell's exit cause; design §5.1.2 moves it into the x/crypto carrier, which answers a neutral cause (nocx-oalo1 stages 2-3)"
+      "reason": "the coordinator's session registry decides a session's exit cause from whatever channel carried it — a session fact, not a connection fact — and its *gossh.ExitError branch predates helper-hosted sessions: no WaitErr the coordinator holds answers one today (LocalPty answers *exec.ExitError, the helper client its ExitStatus DTO), so whether that branch is reachable is stage 4's to settle. The helper's own reads moved into sshconn.Exit (nocx-oalo1.4.2)."
     },
     {
       "rule": "net-dial",

@@ -905,7 +905,19 @@ export const lifecycleBoundaryBlocks = [
 export const connectionOwnerBlocks = [
   {
     files: ['src/**/*.{ts,tsx}'],
-    languageOptions: { parser: tseslint.parser },
+    languageOptions: {
+      parser: tseslint.parser,
+      // The identity rules ask the checker (ADR-ba6xet1b): the client's member
+      // is a symbol, and the subscription's argument is a literal type, which
+      // no name can answer. The same three projects the type-checked config
+      // above names; the fixture gate replaces this with the program it builds
+      // from the fixture text, which is the only way a file that exists
+      // nowhere can be type-checked.
+      parserOptions: {
+        project: ['./tsconfig.json', './tsconfig.test.json', './tsconfig.node.json'],
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
     plugins: { nocx: nocxPlugin },
     rules: {
       'nocx/no-error-text-match': 'error',

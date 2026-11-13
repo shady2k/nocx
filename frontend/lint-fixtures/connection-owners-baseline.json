@@ -6,274 +6,378 @@
     "Every entry is a renderer site that decides a fact about an SSH connection: it",
     "matches an error message or a refusal reason string, subscribes to a connection",
     "notification, opens or reconnects a session, or mints a lost session. ADR-ba6xet1b",
-    "says one owner exists — the backend connection manager behind the Carrier",
-    "interface — and the stages of nocx-oalo1 remove these. The list may only SHRINK;",
+    "says one owner exists \u2014 the backend connection manager behind the Carrier",
+    "interface \u2014 and the stages of nocx-oalo1 remove these. The list may only SHRINK;",
     "the updater refuses growth without --allow-growth, and an entry with no reason",
     "fails the check.",
     "",
-    "Keyed on rule + file + the site's own source text, not a line number, so an",
-    "unrelated edit above a baselined site does not make this file churn — the tradeoff",
-    ".githooks/check-connection-owners.mjs makes for its own baseline. A site that is",
-    "reformatted, or a file moved, is a new key and its reason has to be carried over",
-    "by hand."
+    "Keyed on rule + file + the enclosing function or method (symbol, `<module>` at the",
+    "top level) + the resolved member or literal (target), with an OCCURRENCE COUNT. Never",
+    "a line number, so an unrelated edit above a baselined site does not make this file",
+    "churn. The count is the exemption: a key allows exactly N occurrences, so a second",
+    "`subscribe('exit', \u2026)` under an old key is growth and fails. A site that is",
+    "reformatted costs nothing; a site that moves to another function is a new key and its",
+    "reason has to be carried over by hand."
   ],
   "violations": [
     {
       "rule": "nocx/no-connection-loss",
       "file": "frontend/src/ipc.ts",
-      "text": "cause: 'interrupted'",
-      "reason": "the client mints a loss itself, twice: from an exit whose cause it could not read (the handler at ipc.ts:1085) and from a failed attach (_loseSession). Whether a session is gone is the connection manager's answer — nocx-oalo1.5 replaces both with pane.connection"
+      "symbol": "WSClient._loseSession",
+      "target": "interrupted",
+      "count": 1,
+      "reason": "the client mints a loss itself, twice: from an exit whose cause it could not read (the handler at ipc.ts:1085) and from a failed attach (_loseSession). Whether a session is gone is the connection manager's answer \u2014 nocx-oalo1.5 replaces both with pane.connection"
+    },
+    {
+      "rule": "nocx/no-connection-loss",
+      "file": "frontend/src/ipc.ts",
+      "symbol": "WSClient.constructor.<anonymous>",
+      "target": "interrupted",
+      "count": 1,
+      "reason": "the client mints a loss itself, twice: from an exit whose cause it could not read (the handler at ipc.ts:1085) and from a failed attach (_loseSession). Whether a session is gone is the connection manager's answer \u2014 nocx-oalo1.5 replaces both with pane.connection"
     },
     {
       "rule": "nocx/no-connection-open",
       "file": "frontend/src/ipc.ts",
-      "text": "openSSHSession",
-      "reason": "the client's own open by saved profile, one of the seven entry paths the design's §2 counts. nocx-oalo1.9 routes every open through one backend resolver; nocx-oalo1.5 moves this state into frontend/src/connection/"
-    },
-    {
-      "rule": "nocx/no-connection-open",
-      "file": "frontend/src/ipc.ts",
-      "text": "openSSHSessionByHost",
-      "reason": "the client's own open by host or alias, the second of the seven entry paths. Same owner as openSSHSession: nocx-oalo1.9 (one resolver), nocx-oalo1.5 (src/connection/)"
-    },
-    {
-      "rule": "nocx/no-connection-open",
-      "file": "frontend/src/ipc.ts",
-      "text": "retryAttach",
+      "symbol": "SessionHandle.retryAttach",
+      "target": "retryAttach",
+      "count": 1,
       "reason": "the session handle's own retry of an attach, called by the pane. nocx-oalo1.5: an attach is the connection manager's operation, and the renderer asks once"
     },
     {
       "rule": "nocx/no-connection-open",
       "file": "frontend/src/ipc.ts",
-      "text": "retrySessionAttach",
+      "symbol": "SessionHandle.retryAttach",
+      "target": "retrySessionAttach",
+      "count": 1,
+      "reason": "the client claims the same session again itself, with its own backoff and its own reading of the outcome. nocx-oalo1.5 and nocx-oalo1.7 move reattachment behind the backend"
+    },
+    {
+      "rule": "nocx/no-connection-open",
+      "file": "frontend/src/ipc.ts",
+      "symbol": "WSClient.openSSHSession",
+      "target": "openSSHSession",
+      "count": 1,
+      "reason": "the client's own open by saved profile, one of the seven entry paths the design's \u00a72 counts. nocx-oalo1.9 routes every open through one backend resolver; nocx-oalo1.5 moves this state into frontend/src/connection/"
+    },
+    {
+      "rule": "nocx/no-connection-open",
+      "file": "frontend/src/ipc.ts",
+      "symbol": "WSClient.openSSHSessionByHost",
+      "target": "openSSHSessionByHost",
+      "count": 1,
+      "reason": "the client's own open by host or alias, the second of the seven entry paths. Same owner as openSSHSession: nocx-oalo1.9 (one resolver), nocx-oalo1.5 (src/connection/)"
+    },
+    {
+      "rule": "nocx/no-connection-open",
+      "file": "frontend/src/ipc.ts",
+      "symbol": "WSClient.retrySessionAttach",
+      "target": "retrySessionAttach",
+      "count": 1,
       "reason": "the client claims the same session again itself, with its own backoff and its own reading of the outcome. nocx-oalo1.5 and nocx-oalo1.7 move reattachment behind the backend"
     },
     {
       "rule": "nocx/no-connection-open",
       "file": "frontend/src/terminal-content.ts",
-      "text": "openSSHSession",
-      "reason": "the pane opens its own SSH session (_bindSession's open, design §5.2). nocx-oalo1.9 makes open one backend entry; until then the pane holds the last caller"
-    },
-    {
-      "rule": "nocx/no-connection-open",
-      "file": "frontend/src/terminal-content.ts",
-      "text": "openSSHSessionByHost",
-      "reason": "the pane opens a host or alias itself, alongside the profile path above. Same owner: nocx-oalo1.9 (one resolver), and nocx-oalo1.5 deletes the pane's connection state"
-    },
-    {
-      "rule": "nocx/no-connection-open",
-      "file": "frontend/src/terminal-content.ts",
-      "text": "reconnect",
-      "reason": "the pane's own reconnect: _maybeAutoReconnect spends three backed-off attempts and reconnect() rebinds the session. nocx-oalo1.7 makes a dropped connection come back by itself, from the backend"
-    },
-    {
-      "rule": "nocx/no-connection-open",
-      "file": "frontend/src/terminal-content.ts",
-      "text": "retryAttach",
+      "symbol": "TerminalContent._syncAttachOffer.<anonymous>",
+      "target": "retryAttach",
+      "count": 1,
       "reason": "the pane retries an attach from the attach card. The same entry the handle calls retryAttach; nocx-oalo1.5 gives the pane one published state instead"
+    },
+    {
+      "rule": "nocx/no-connection-open",
+      "file": "frontend/src/terminal-content.ts",
+      "symbol": "TerminalContent.openRequestedSession",
+      "target": "openSSHSession",
+      "count": 1,
+      "reason": "the pane opens its own SSH session (_bindSession's open, design \u00a75.2). nocx-oalo1.9 makes open one backend entry; until then the pane holds the last caller"
+    },
+    {
+      "rule": "nocx/no-connection-open",
+      "file": "frontend/src/terminal-content.ts",
+      "symbol": "TerminalContent.openRequestedSession",
+      "target": "openSSHSessionByHost",
+      "count": 1,
+      "reason": "the pane opens a host or alias itself, alongside the profile path above. Same owner: nocx-oalo1.9 (one resolver), and nocx-oalo1.5 deletes the pane's connection state"
     },
     {
       "rule": "nocx/no-connection-subscription",
       "file": "frontend/src/ipc.ts",
-      "text": "'exit'",
+      "symbol": "WSClient.constructor",
+      "target": "exit",
+      "count": 1,
       "reason": "the exit handler that turns a cause it cannot read into `interrupted` (ipc.ts:1085-1114). Loss is not a second reading of an exit: nocx-oalo1.5 has one subscriber in src/connection/ and the pane draws its answer"
     },
     {
       "rule": "nocx/no-connection-subscription",
       "file": "frontend/src/ipc.ts",
-      "text": "'session.liveness'",
+      "symbol": "WSClient.constructor",
+      "target": "session.liveness",
+      "count": 1,
       "reason": "the client folds the backend's reachability belief into per-session state that connection-condition.ts then derives again, and the tab mark a third time. nocx-oalo1.5 publishes one condition from src/connection/"
     },
     {
       "rule": "nocx/no-error-text-match",
       "file": "frontend/src/api/folder-view.tsx",
-      "text": "reason.includes('folder variables file is malformed')",
+      "symbol": "readDescription",
+      "target": "includes:\"folder variables file is malformed\"",
+      "count": 1,
       "reason": "the API view picks a sentence by matching a backend refusal's prose. Not a connection fact and no nocx-oalo1 stage reads this file; it leaves when the API view's refusals are typed on the result"
     },
     {
       "rule": "nocx/no-error-text-match",
       "file": "frontend/src/api/malformed-reason.ts",
-      "text": "reason === 'not a regular file; symlinks are not followed'",
+      "symbol": "malformedReason",
+      "target": "===:\"not a regular file; symlinks are not followed\"",
+      "count": 1,
       "reason": "translates a refusal that is already a person's sentence, passed through the wire. Prose by necessity until the decoder's answer is typed; not connection code"
     },
     {
       "rule": "nocx/no-error-text-match",
       "file": "frontend/src/api/malformed-reason.ts",
-      "text": "reason === 'trailing content after the JSON document'",
-      "reason": "the second already-a-sentence refusal this translator passes through unchanged. One owner with the entry above"
+      "symbol": "malformedReason",
+      "target": "===:\"trailing content after the JSON document\"",
+      "count": 1,
+      "reason": "the second already-a-sentence refusal this translator passes through unchanged. Same owner as the 'not a regular file' entry"
     },
     {
       "rule": "nocx/no-error-text-match",
       "file": "frontend/src/api/malformed-reason.ts",
-      "text": "reason === 'unexpected end of JSON input'",
+      "symbol": "malformedReason",
+      "target": "===:\"unexpected end of JSON input\"",
+      "count": 1,
       "reason": "recognises Go's json decoder sentence, which reaches the renderer as text. An external decoder has no reason channel to type, so this is prose by necessity; not connection code"
     },
     {
       "rule": "nocx/no-error-text-match",
       "file": "frontend/src/backup-restore-section.tsx",
-      "text": "msg.includes('preview is stale')",
+      "symbol": "handleRestore",
+      "target": "includes:\"preview is stale\"",
+      "count": 1,
       "reason": "the backup panel recognises a stale preview by its sentence. Leaves when that refusal carries a typed reason; not connection code"
     },
     {
       "rule": "nocx/no-error-text-match",
       "file": "frontend/src/connections.tsx",
-      "text": "err.data.reason === 'invalid-key'",
+      "symbol": "saveGroup",
+      "target": "===:\"invalid-key\"",
+      "count": 1,
+      "reason": "the connection editor decides which field to mark by reading a refusal off the error's payload. The code is declared, but it is still read from the failure channel; a typed result would say which field. Leaves with the connections editor's refusals"
+    },
+    {
+      "rule": "nocx/no-error-text-match",
+      "file": "frontend/src/connections.tsx",
+      "symbol": "saveProfile",
+      "target": "===:\"invalid-key\"",
+      "count": 1,
       "reason": "the connection editor decides which field to mark by reading a refusal off the error's payload. The code is declared, but it is still read from the failure channel; a typed result would say which field. Leaves with the connections editor's refusals"
     },
     {
       "rule": "nocx/no-error-text-match",
       "file": "frontend/src/dispatcher.ts",
-      "text": "error.data.reason !== 'vault-sealed'",
-      "reason": "the RPC layer maps the vault's sealed refusal to an outcome of its own by reading err.data.reason. Vault work replaces these with the refusal's own type"
+      "symbol": "Dispatcher.errorFor",
+      "target": "===:\"vault-operation-cancelled\"",
+      "count": 1,
+      "reason": "the second vault refusal the RPC layer reads off the error to decide what a caller sees. Same owner as Dispatcher.retrySealed"
     },
     {
       "rule": "nocx/no-error-text-match",
       "file": "frontend/src/dispatcher.ts",
-      "text": "error.data.reason === 'vault-operation-cancelled'",
-      "reason": "the second vault refusal the RPC layer reads off the error to decide what a caller sees. One owner with the entry above"
+      "symbol": "Dispatcher.retrySealed",
+      "target": "!==:\"vault-sealed\"",
+      "count": 1,
+      "reason": "the RPC layer maps the vault's sealed refusal to an outcome of its own by reading err.data.reason. Vault work replaces these with the refusal's own type"
     },
     {
       "rule": "nocx/no-error-text-match",
       "file": "frontend/src/git/git-panel.tsx",
-      "text": "/not connected|ws closed|closed|connection (lost|closed|reset|refused)/.test(r)",
-      "reason": "the Git panel decides the connection was lost by matching the transport's sentence. nocx-oalo1.6: Git answers its availability from the backend's answer, and this mapper goes with it"
-    },
-    {
-      "rule": "nocx/no-error-text-match",
-      "file": "frontend/src/git/git-panel.tsx",
-      "text": "r.includes('belongs to session')",
+      "symbol": "mutationFailureMessage",
+      "target": "includes:\"belongs to session\"",
+      "count": 1,
       "reason": "the Git panel picks a sentence, and a retry, by matching a refusal's prose. nocx-oalo1.6 replaces the whole mapper with the backend's answer"
     },
     {
       "rule": "nocx/no-error-text-match",
       "file": "frontend/src/git/git-panel.tsx",
-      "text": "r.includes('cannot amend')",
+      "symbol": "mutationFailureMessage",
+      "target": "includes:\"cannot amend\"",
+      "count": 1,
       "reason": "one of the Git panel's prose-matched refusals: nothing to amend. nocx-oalo1.6"
     },
     {
       "rule": "nocx/no-error-text-match",
       "file": "frontend/src/git/git-panel.tsx",
-      "text": "r.includes('conflicted')",
+      "symbol": "mutationFailureMessage",
+      "target": "includes:\"conflicted\"",
+      "count": 1,
       "reason": "one of the Git panel's prose-matched refusals: an unresolved merge. nocx-oalo1.6"
     },
     {
       "rule": "nocx/no-error-text-match",
       "file": "frontend/src/git/git-panel.tsx",
-      "text": "r.includes('disconnected')",
+      "symbol": "mutationFailureMessage",
+      "target": "includes:\"disconnected\"",
+      "count": 1,
       "reason": "the Git panel's connection-loss sentence, matched from an error's prose. nocx-oalo1.6: the panel draws the backend's answer, and nocx-oalo1.5 gives it one condition to draw"
     },
     {
       "rule": "nocx/no-error-text-match",
       "file": "frontend/src/git/git-panel.tsx",
-      "text": "r.includes('handle released')",
+      "symbol": "mutationFailureMessage",
+      "target": "includes:\"handle released\"",
+      "count": 1,
       "reason": "one of the Git panel's prose-matched refusals: the repository's handle was released. nocx-oalo1.6"
     },
     {
       "rule": "nocx/no-error-text-match",
       "file": "frontend/src/git/git-panel.tsx",
-      "text": "r.includes('not available')",
+      "symbol": "mutationFailureMessage",
+      "target": "includes:\"not available\"",
+      "count": 1,
       "reason": "one of the Git panel's prose-matched refusals. nocx-oalo1.6"
     },
     {
       "rule": "nocx/no-error-text-match",
       "file": "frontend/src/git/git-panel.tsx",
-      "text": "r.includes('nothing is staged')",
+      "symbol": "mutationFailureMessage",
+      "target": "includes:\"nothing is staged\"",
+      "count": 1,
       "reason": "one of the Git panel's prose-matched refusals, and the one a person can act on. nocx-oalo1.6 replaces it with a typed refusal"
     },
     {
       "rule": "nocx/no-error-text-match",
-      "file": "frontend/src/ipc.ts",
-      "text": "claimRefusalReason(err) === 'unknown-session'",
-      "reason": "isProvenSessionAbsence: the ONE reading of a typed claim verdict, which decides that a session is gone from a refused claim's string. nocx-oalo1.5 makes the connection manager say the session is absent instead of the renderer reading the refusal"
+      "file": "frontend/src/git/git-panel.tsx",
+      "symbol": "mutationFailureMessage",
+      "target": "test:/not connected|ws closed|closed|connection (lost|closed|reset|refused)/",
+      "count": 1,
+      "reason": "the Git panel decides the connection was lost by matching the transport's sentence. nocx-oalo1.6: Git answers its availability from the backend's answer, and this mapper goes with it"
     },
     {
       "rule": "nocx/no-error-text-match",
       "file": "frontend/src/ipc.ts",
-      "text": "FOREIGN_BINDING_REFUSALS.has(reason)",
+      "symbol": "WSClient._reattachSession.<anonymous>",
+      "target": "has:reason",
+      "count": 1,
       "reason": "the client decides to re-adopt a session by testing a refusal code read off a failed attach against a set. Same owner as isProvenSessionAbsence: nocx-oalo1.5"
     },
     {
       "rule": "nocx/no-error-text-match",
+      "file": "frontend/src/ipc.ts",
+      "symbol": "isProvenSessionAbsence",
+      "target": "===:\"unknown-session\"",
+      "count": 1,
+      "reason": "isProvenSessionAbsence: the ONE reading of a typed claim verdict, which decides that a session is gone from a refused claim's string. nocx-oalo1.5 makes the connection manager say the session is absent instead of the renderer reading the refusal"
+    },
+    {
+      "rule": "nocx/no-error-text-match",
       "file": "frontend/src/key-material-input.tsx",
-      "text": "e.data.reason === 'invalid-key-passphrase'",
+      "symbol": "save",
+      "target": "===:\"invalid-key-passphrase\"",
+      "count": 1,
       "reason": "the key editor marks the passphrase field by reading the RPC refusal off the error. Leaves when the key check answers a typed verdict; not connection code"
     },
     {
       "rule": "nocx/no-error-text-match",
       "file": "frontend/src/main.tsx",
-      "text": "/address already in use|EADDRINUSE/i.test(msg)",
+      "symbol": "openForward",
+      "target": "test:/address already in use|EADDRINUSE/i",
+      "count": 1,
       "reason": "reads a bind failure's message to tell a taken port from another failure. A local socket, not an SSH connection; leaves when the forward reports a typed cause"
     },
     {
       "rule": "nocx/no-error-text-match",
       "file": "frontend/src/ports.tsx",
-      "text": "/address already in use|EADDRINUSE/i.test(msg)",
+      "symbol": "forward",
+      "target": "test:/address already in use|EADDRINUSE/i",
+      "count": 1,
       "reason": "the Ports panel's copy of the same bind-failure match. One owner with main.tsx: a typed cause on the forward result"
     },
     {
       "rule": "nocx/no-error-text-match",
       "file": "frontend/src/ports.tsx",
-      "text": "/not connected|ws closed|closed|connection (lost|closed|reset|refused)/.test(r)",
-      "reason": "the Ports panel decides the connection was lost by matching the transport's sentence. nocx-oalo1.6: Ports answers its availability from the backend's answer"
-    },
-    {
-      "rule": "nocx/no-error-text-match",
-      "file": "frontend/src/ports.tsx",
-      "text": "r.includes('disconnected')",
+      "symbol": "listingFailureMessage",
+      "target": "includes:\"disconnected\"",
+      "count": 1,
       "reason": "the Ports panel's connection-loss sentence, matched from an error's prose. nocx-oalo1.6, with nocx-oalo1.5's one condition beneath it"
     },
     {
       "rule": "nocx/no-error-text-match",
       "file": "frontend/src/ports.tsx",
-      "text": "r.includes('discovery scheduler')",
+      "symbol": "listingFailureMessage",
+      "target": "includes:\"discovery scheduler\"",
+      "count": 1,
       "reason": "the Ports panel picks a sentence by matching a backend refusal's prose. nocx-oalo1.6"
     },
     {
       "rule": "nocx/no-error-text-match",
       "file": "frontend/src/ports.tsx",
-      "text": "r.includes('invalid params')",
+      "symbol": "listingFailureMessage",
+      "target": "includes:\"invalid params\"",
+      "count": 1,
       "reason": "the Ports panel's malformed-request sentence, matched from prose. nocx-oalo1.6"
     },
     {
       "rule": "nocx/no-error-text-match",
       "file": "frontend/src/ports.tsx",
-      "text": "r.includes('not available')",
-      "reason": "the Ports panel's other 'not available' match, one entry with the line above it. nocx-oalo1.6"
+      "symbol": "listingFailureMessage",
+      "target": "includes:\"not available\"",
+      "count": 1,
+      "reason": "the Ports panel decides what to show by matching a refusal's prose. nocx-oalo1.6 replaces the mapper with the backend's answer"
+    },
+    {
+      "rule": "nocx/no-error-text-match",
+      "file": "frontend/src/ports.tsx",
+      "symbol": "listingFailureMessage",
+      "target": "test:/not connected|ws closed|closed|connection (lost|closed|reset|refused)/",
+      "count": 1,
+      "reason": "the Ports panel decides the connection was lost by matching the transport's sentence. nocx-oalo1.6: Ports answers its availability from the backend's answer"
     },
     {
       "rule": "nocx/no-error-text-match",
       "file": "frontend/src/profiles.ts",
-      "text": "String(e).includes('profile already exists')",
+      "symbol": "ProfileClient.importSSHConfig",
+      "target": "includes:\"profile already exists\"",
+      "count": 1,
       "reason": "the profile save decides 'already exists' by matching the backend's sentence. Leaves when the save answers a typed refusal; not connection code"
     },
     {
       "rule": "nocx/no-error-text-match",
       "file": "frontend/src/update-degrade.ts",
-      "text": "text.includes(phrase)",
+      "symbol": "shouldAnnounceUpdateStateFailure.<anonymous>",
+      "target": "includes:phrase",
+      "count": 1,
       "reason": "the updater recognises the reasons a build has no updater at all by matching a list of phrases from the backend. The build's own answer, not a connection fact"
     },
     {
       "rule": "nocx/no-error-text-match",
       "file": "frontend/src/update-failure.ts",
-      "text": "text.includes(message)",
+      "symbol": "updateFailureMessage.<anonymous>",
+      "target": "includes:message",
+      "count": 1,
       "reason": "the updater classifies a failed update by the updater's own text, which includes the external CLI's stderr. An external tool has no reason channel to type"
     },
     {
       "rule": "nocx/no-error-text-match",
       "file": "frontend/src/vault.tsx",
-      "text": "rpcReason === 'vault-changed'",
+      "symbol": "attempt.<anonymous>",
+      "target": "===:\"vault-changed\"",
+      "count": 1,
       "reason": "the vault save reads the RPC refusal off err.data to decide whether to retry once. Leaves when the vault operation answers a typed outcome"
     },
     {
       "rule": "nocx/no-error-text-match",
       "file": "frontend/src/vault.tsx",
-      "text": "rpcReason === 'vault-sealed'",
-      "reason": "the vault save decides to re-unseal by reading the refusal off the error. Same owner as the entry above"
+      "symbol": "attempt.<anonymous>",
+      "target": "===:\"vault-sealed\"",
+      "count": 1,
+      "reason": "the vault save decides to re-unseal by reading the refusal off the error. One owner with the other vault-refusal reads in this file"
     },
     {
       "rule": "nocx/no-error-text-match",
       "file": "frontend/src/vault.tsx",
-      "text": "rpcReason === 'vault-uninitialized'",
+      "symbol": "attempt.<anonymous>",
+      "target": "===:\"vault-uninitialized\"",
+      "count": 1,
       "reason": "the vault save decides to set the vault up by reading the refusal off the error. Same owner"
     }
   ]

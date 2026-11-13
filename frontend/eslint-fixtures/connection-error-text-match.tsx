@@ -27,3 +27,11 @@ function portsFailure(reason: string): string {
 export function verdict(err: { data?: { reason?: string } }): string {
   return err.data?.reason === 'unknown-session' ? 'lost' : 'unknown'
 }
+
+// A computed access names the same property: `err['message']` is `err.message`,
+// and skipping computed members would let it through untouched.
+export function computedMessage(err: unknown): string {
+  const e = err as { message: string }
+  if (e['message'].includes('disconnected')) return 'the connection was lost'
+  return 'the change could not be made'
+}

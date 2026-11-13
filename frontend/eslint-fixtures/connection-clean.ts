@@ -27,3 +27,9 @@ export function reconnectPolicy(choice: 'ask' | 'auto' | 'never'): string {
       return 'Ask'
   }
 }
+
+// A cause that is not `interrupted` is an ordinary exit, not a loss, and must
+// stay silent (ADR-ba6xet1b): the rule asks for the literal, not for a cause.
+export function cleanExit(): { cause: 'exited'; status: number } {
+  return { cause: 'exited', status: 0 }
+}

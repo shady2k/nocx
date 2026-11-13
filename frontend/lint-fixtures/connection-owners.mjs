@@ -12,6 +12,26 @@
  * record names as nocx-oalo1.3.5, and it enforces the same owner decision:
  * "there must be an architectural ban on second surfaces", not a review.
  *
+ * IDENTITY, NOT SPELLING. A name decides nothing on its own: any
+ * `reconnect(` is not an open, and a subscription is not a string at the call
+ * site. A rule that reads names reports an unrelated type's method and misses
+ * the same member reached another way — `client.openSSHSession.bind(client)`,
+ * `const event = 'exit'; client.subscribe(event, …)`, `err['message']`.
+ * The rules therefore ask the TypeScript checker (the repo already runs typed
+ * eslint, so the program exists and costs nothing extra):
+ *
+ *   - open/reconnect: the member's DECLARING symbol must belong to a class or
+ *     interface declared in frontend/src/ipc.ts — the client surface. Any
+ *     reference counts: a call, `.bind`, a property read, a destructuring
+ *     binding, a class member declaration.
+ *   - subscribe: the FIRST ARGUMENT'S TYPE must be, or include, the literal
+ *     `session.liveness` or `exit` — whether written inline or through a const.
+ *   - error text: the shape stays syntactic (`x['message']` now reads like
+ *     `x.message`; every error text is a string, so the type cannot tell it
+ *     from prose), and the method/comparison list is unchanged.
+ *   - loss: a `cause` property whose VALUE'S TYPE is the literal
+ *     `interrupted`, inline or through a const.
+ *
  * WHAT IT REFUSES, by rule id (the baseline and every failure message name the
  * rule, so an entry says what it is):
  *
@@ -29,23 +49,26 @@
  *       to be told from a lost one (`'unknown-session'`).
  *   nocx/no-connection-subscription
  *       `.subscribe('session.liveness', …)` or `.subscribe('exit', …)`
- *       outside frontend/src/connection/. Those two are the connection's own
- *       answers: the backend's measurement of reaching a host, and a session's
- *       end, from which ipc.ts mints an `interrupted` exit. lifecycle.changed
- *       is deliberately NOT here: it is the authenticated execution lifecycle
- *       (ADR-0024), whose owner is src/lifecycle/, and rule 9 already fences
- *       that boundary.
+ *       outside frontend/src/connection/, by the argument's TYPE. Those two
+ *       are the connection's own answers: the backend's measurement of
+ *       reaching a host, and a session's end, from which ipc.ts mints an
+ *       `interrupted` exit. lifecycle.changed is deliberately NOT here: it is
+ *       the authenticated execution lifecycle (ADR-0024), whose owner is
+ *       src/lifecycle/, and rule 9 already fences that boundary.
  *   nocx/no-connection-open
- *       A call to, or a class member declaring, one of the open/reconnect
- *       entries: openSSHSession, openSSHSessionByHost, retrySessionAttach,
- *       retryAttach, reconnect. Seven entry paths into one open is what the
- *       design's §2 counts; stage 7 of nocx-oalo1 collapses them into one.
+ *       A reference to a member of the ipc client type — openSSHSession,
+ *       openSSHSessionByHost, retrySessionAttach, retryAttach, reconnect —
+ *       outside frontend/src/connection/. Seven entry paths into one open is
+ *       what the design's §2 counts; stage 7 of nocx-oalo1 collapses them into
+ *       one. A same-named method on another type is not a connection entry and
+ *       is not reported.
  *   nocx/no-connection-loss
- *       An object literal minting `cause: 'interrupted'` — the renderer
- *       declaring a session lost. `interrupted` is the one exit cause that
- *       means a loss, and it is the connection manager's verdict, not the
- *       renderer's: ipc.ts invents it twice today, once from an exit whose
- *       cause was not a shell exit and once from a failed attach.
+ *       An object literal minting `cause: 'interrupted'` (including through a
+ *       const whose type is that literal) — the renderer declaring a session
+ *       lost. `interrupted` is the one exit cause that means a loss, and it is
+ *       the connection manager's verdict, not the renderer's: ipc.ts invents it
+ *       twice today, once from an exit whose cause was not a shell exit and
+ *       once from a failed attach.
  *
  * Scope: every .ts and .tsx under frontend/src. Tests (`*.test.ts(x)`,
  * `*.spec.ts(x)`), `src/test-support/`, `*-fixtures.ts` and `src/generated/`
@@ -58,33 +81,32 @@
  *
  * WHAT IT CANNOT SEE, stated because a ratchet that overclaims is worse than
  * none:
- *   - It is an AST over one file, not a type checker. A string is not
- *     distinguishable from "error text" by its type — every one of them
- *     arrives as `string` — so the error-text rule recognises the SHAPES above
- *     and the NAMES an author chose. `const x = failure(); if (x.includes(…))`
- *     is invisible: the shape stops at a function call whose name does not say
- *     reason/message. A value that crossed a module boundary has no shape at
- *     all.
- *   - It follows the plumbing a person actually writes — a local bound to
- *     err.message, a param named reason, .toLowerCase() — but not a value
- *     returned through an interface, an alias passed by reference, or a
- *     decision written as a map, a differently-named Set, or a regex held in
- *     an object property.
+ *   - The error-text rule is a same-file AST over names and shapes, not types:
+ *     every error text arrives as `string`, so a value that crossed a module
+ *     boundary has no shape and a differently-named local is invisible.
+ *     `const x = failure(); if (x.includes(…))` is not reported.
+ *   - A reference that resolves to a member of an interface IMPLEMENTED by the
+ *     ipc client rather than declared in it keeps its declaring symbol; only
+ *     the declaration in ipc.ts is the client's. That is the intended reading
+ *     — a second type with the same member is a second type, not this owner.
  *   - It reads no Go. A new backend owner is the other half's business
  *     (.githooks/check-connection-owners.mjs).
- *   - A `reconnect()` on something that is not an SSH connection (a socket, a
- *     device) would be refused by name. That is why the names are a closed
- *     list rather than a shape, and why adding one is a decision.
  *
  * THE BASELINE, and why it is a file rather than eslint-disable comments:
  * `lint-fixtures/connection-owners-baseline.json` is today's list, keyed
- * `rule:file:text` where the text is the reported site's own source text with
- * whitespace collapsed — never a line number, so an unrelated edit above a
- * baselined site costs nothing. It may only SHRINK: the updater refuses growth
- * without --allow-growth, an added entry starts with an empty reason, and this
- * check refuses an empty one. Stages 3, 4 and 7 of nocx-oalo1 empty it. An
- * eslint-disable comment would be invisible to that list and would outlive the
- * stage that owes the removal, which is the whole point of keeping it here.
+ * `rule:file:symbol:target` where `symbol` is the enclosing function or method
+ * (`<module>` at top level) and `target` is the resolved member or literal
+ * (`openSSHSession`, `exit`, `includes:'disconnected'`), with an OCCURRENCE
+ * COUNT. Never a line number, so an unrelated edit above a baselined site
+ * costs nothing. The check fails when a key's count grows, a new key appears,
+ * or a key shrinks or disappears without the baseline updated: an entry
+ * exempts N occurrences, not a sentence, which is what stops two new
+ * `client.subscribe('exit', …)` calls from hiding behind one old entry. The
+ * updater refuses growth without --allow-growth and preserves every reason;
+ * an added entry starts with an empty reason, and this check refuses an empty
+ * one. Stages 3, 4 and 7 of nocx-oalo1 empty it. An eslint-disable comment
+ * would be invisible to that list and would outlive the stage that owes the
+ * removal, which is the whole point of keeping it here.
  *
  * Invocation: node lint-fixtures/connection-owners.mjs   (from frontend/)
  * It is also `npm run lint`'s third rule set: eslint.config.js imports
@@ -98,6 +120,7 @@ import { dirname, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Linter } from 'eslint'
 import tseslint from 'typescript-eslint'
+import ts from 'typescript'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const FRONTEND_DIR = resolve(__dirname, '..')
@@ -106,6 +129,11 @@ export const BASELINE_PATH = resolve(__dirname, 'connection-owners-baseline.json
 
 /** The one directory allowed to decide a connection fact in the renderer. */
 export const CONNECTION_DIR = 'frontend/src/connection/'
+
+/** The module whose classes are the ipc client surface. A member is an owner
+ *  entry when its DECLARING symbol lives here, whatever it is called on the
+ *  receiving end. */
+export const IPC_MODULE = resolve(FRONTEND_DIR, 'src/ipc.ts')
 
 export const RULES = {
   'nocx/no-error-text-match': 'decides a fact by matching an error or a refusal text',
@@ -137,8 +165,10 @@ export const CONNECTION_ENTRIES = {
   openSSHSessionByHost: 'opens an SSH session by host or alias',
   retrySessionAttach: "claims the same session again — the client's own retry",
   retryAttach: "the session handle's name for the same claim",
-  reconnect: "the pane's own reconnect loop entry (terminal-content.ts)",
+  reconnect: 'reconnects a connection the ipc client holds',
 }
+
+const OPEN_NAMES = new Set(Object.keys(CONNECTION_ENTRIES))
 
 // ─── Scope ───────────────────────────────────────────────────────────────────
 /** Repo-relative, '/'-separated path of the file being linted. */
@@ -159,6 +189,198 @@ export function isScopedFile(rel) {
 
 export function isConnectionFile(rel) {
   return rel.startsWith(CONNECTION_DIR)
+}
+
+// ─── The AST shapes both halves share ────────────────────────────────────────
+function staticName(node) {
+  if (!node) return null
+  if (node.type === 'Identifier') return node.name
+  if (node.type === 'PrivateIdentifier') return `#${node.name}`
+  if (node.type === 'Literal' && typeof node.value === 'string') return node.value
+  return null
+}
+
+/** The property an expression reads, when it reads a static one. A computed
+ *  access with a string literal names the same property as the dot form:
+ *  `x['message']` decides exactly what `x.message` decides, and an author who
+ *  wrote it that way meant the same thing. */
+function propertyName(node) {
+  if (!node || node.type !== 'MemberExpression') return null
+  if (!node.computed) return staticName(node.property)
+  const p = unwrap(node.property)
+  if (!p) return null
+  if (p.type === 'Literal' && typeof p.value === 'string') return p.value
+  if (p.type === 'TemplateLiteral' && p.expressions.length === 0) {
+    return p.quasis[0].value.cooked ?? null
+  }
+  return null
+}
+
+function unwrap(node) {
+  let n = node
+  while (
+    n &&
+    (n.type === 'ChainExpression' ||
+      n.type === 'TSNonNullExpression' ||
+      n.type === 'TSAsExpression' ||
+      n.type === 'TSTypeAssertion' ||
+      n.type === 'TSSatisfiesExpression' ||
+      n.type === 'ParenthesizedExpression')
+  ) {
+    n = n.expression
+  }
+  return n
+}
+
+/** A site's own source text, collapsed to one line, for the report a person
+ *  reads. It is NOT the baseline key: the key is the resolved identity below. */
+export function collapseSiteText(text) {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+function siteTextAt(sourceCode, loc) {
+  const start = sourceCode.getIndexFromLoc(loc.start)
+  const end = sourceCode.getIndexFromLoc(loc.end)
+  return collapseSiteText(sourceCode.text.slice(start, end))
+}
+
+// ─── The enclosing symbol, which is half of a baseline key ───────────────────
+function classNameOf(classNode) {
+  if (!classNode) return '<class>'
+  if (classNode.id?.name) return classNode.id.name
+  const parent = classNode.parent
+  if (parent?.type === 'VariableDeclarator' && parent.id.type === 'Identifier')
+    return parent.id.name
+  return '<class>'
+}
+
+/**
+ * The name of the function or method a node sits in: `WSClient._connect`,
+ * `Listing`, `default.handler`, or `<module>` at the top of a file. Anonymous
+ * callbacks are qualified by the symbol that encloses them, so two callbacks
+ * with the same literal in one file do not share a count by accident.
+ */
+export function enclosingSymbol(node) {
+  return enclosing(node, 0)
+}
+
+function enclosing(node, depth) {
+  if (!node || depth > 40) return '<module>'
+  switch (node.type) {
+    case 'MethodDefinition':
+    case 'PropertyDefinition': {
+      const cls = node.parent?.type === 'ClassBody' ? node.parent.parent : node.parent
+      return `${classNameOf(cls)}.${staticName(node.key) ?? '<computed>'}`
+    }
+    case 'FunctionDeclaration':
+      return node.id?.name ?? '<module>'
+    case 'FunctionExpression':
+    case 'ArrowFunctionExpression': {
+      const p = node.parent
+      if (p?.type === 'MethodDefinition' || p?.type === 'PropertyDefinition') {
+        const cls = p.parent?.type === 'ClassBody' ? p.parent.parent : p.parent
+        return `${classNameOf(cls)}.${staticName(p.key) ?? '<computed>'}`
+      }
+      if (p?.type === 'VariableDeclarator' && p.id.type === 'Identifier') return p.id.name
+      if (p?.type === 'Property' && !p.computed) {
+        const key = staticName(p.key)
+        const obj = p.parent?.parent
+        if (key === null) return `${enclosing(p, depth + 1)}.<anonymous>`
+        if (obj?.type === 'VariableDeclarator' && obj.id.type === 'Identifier') {
+          return `${obj.id.name}.${key}`
+        }
+        return key
+      }
+      return `${enclosing(p, depth + 1)}.<anonymous>`
+    }
+    case 'Program':
+      return '<module>'
+    default:
+      return enclosing(node.parent, depth + 1)
+  }
+}
+
+// ─── The TypeScript checker, when the lint run has one ───────────────────────
+/**
+ * typescript-eslint's parser services for this file. Production and the CLI
+ * below run typed (`parserOptions.project`), so this is the ordinary path; a
+ * scoped file WITHOUT a program is an error, not a silent weakening — the
+ * identity rules cannot answer without it.
+ */
+function typeServices(context) {
+  const services = context.sourceCode?.parserServices ?? context.parserServices
+  if (!services?.program || !services.esTreeNodeToTSNodeMap) return null
+  return services
+}
+
+function tsNodeOf(services, node) {
+  if (!node) return null
+  return services.esTreeNodeToTSNodeMap.get(node) ?? null
+}
+
+/** A class or interface member declared in frontend/src/ipc.ts: the client
+ *  surface. The symbol, not the name, is what makes it an owner entry. */
+function declaredOnIpcType(checker, symbol) {
+  if (!symbol) return false
+  let sym = symbol
+  try {
+    if (sym.flags & ts.SymbolFlags.Alias) sym = checker.getAliasedSymbol(sym)
+  } catch {
+    // An alias that cannot be resolved is not a declaration we can name.
+  }
+  for (const decl of sym.declarations ?? []) {
+    const parent = decl.parent
+    if (!parent) continue
+    if (
+      !ts.isClassDeclaration(parent) &&
+      !ts.isClassExpression(parent) &&
+      !ts.isInterfaceDeclaration(parent)
+    ) {
+      continue
+    }
+    if (resolve(decl.getSourceFile().fileName) === IPC_MODULE) return true
+  }
+  return false
+}
+
+/** The symbol a reference to `name` resolves to, through an alias if needed. */
+function referencedSymbol(checker, services, node) {
+  const tsNode = tsNodeOf(services, node)
+  if (!tsNode) return null
+  return checker.getSymbolAtLocation(tsNode) ?? null
+}
+
+/** The property a binding pattern names, resolved on the pattern's own type. */
+function propertyOfPattern(checker, services, typeNode, name) {
+  const tsNode = tsNodeOf(services, typeNode)
+  if (!tsNode) return null
+  const type = checker.getTypeAtLocation(tsNode)
+  const from = (t) => {
+    if (t.isUnion?.()) {
+      for (const part of t.types) {
+        const found = from(part)
+        if (found) return found
+      }
+      return null
+    }
+    return checker.getPropertyOfType(t, name) ?? null
+  }
+  return from(type)
+}
+
+/** The string-literal values a type carries, flattened through a union. */
+function literalStrings(type) {
+  const values = []
+  const walk = (t) => {
+    if (!t) return
+    if (t.isStringLiteral?.()) {
+      values.push(t.value)
+      return
+    }
+    if (t.isUnion?.()) for (const part of t.types) walk(part)
+  }
+  walk(type)
+  return values
 }
 
 // ─── Error text: the shapes and the names ────────────────────────────────────
@@ -183,20 +405,6 @@ const TEXT_QUERIES = new Set(['includes', 'startsWith', 'endsWith'])
  *  message: `err.data.reason`, `err.cause`, `err.details`. */
 const ERROR_PAYLOAD_MEMBERS = new Set(['data', 'details', 'cause', 'error', 'body'])
 
-function staticName(node) {
-  if (!node) return null
-  if (node.type === 'Identifier') return node.name
-  if (node.type === 'PrivateIdentifier') return `#${node.name}`
-  if (node.type === 'Literal' && typeof node.value === 'string') return node.value
-  return null
-}
-
-/** The property an expression reads, when it reads a static one. */
-function propertyName(node) {
-  if (!node || node.type !== 'MemberExpression' || node.computed) return null
-  return staticName(node.property)
-}
-
 /** A function call whose NAME says it answers error text: claimRefusalReason,
  *  failureMessage … The call is not followed; only its name is read, which is
  *  the one thing a same-file AST can know about it. */
@@ -209,22 +417,6 @@ function isErrorAnswerCall(node) {
         ? staticName(node.callee.property)
         : null
   return name !== null && /(?:Reason|Refusal|Message|Msg|Failure|Error)$/.test(name)
-}
-
-function unwrap(node) {
-  let n = node
-  while (
-    n &&
-    (n.type === 'ChainExpression' ||
-      n.type === 'TSNonNullExpression' ||
-      n.type === 'TSAsExpression' ||
-      n.type === 'TSTypeAssertion' ||
-      n.type === 'TSSatisfiesExpression' ||
-      n.type === 'ParenthesizedExpression')
-  ) {
-    n = n.expression
-  }
-  return n
 }
 
 /** The variable an identifier names, from the scope it is written in. */
@@ -370,45 +562,57 @@ function isProseLiteral(node) {
   return false
 }
 
+/** The literal a decision names, in a form a person can read in the baseline:
+ *  `'disconnected'`, `/not connected|closed/`. */
+function literalTarget(sourceCode, node) {
+  const n = unwrap(node)
+  if (!n) return ''
+  if (n.type === 'Literal') {
+    if (typeof n.value === 'string') return JSON.stringify(n.value)
+    if (n.regex) return `/${n.regex.pattern}/${n.regex.flags}`
+    return null
+  }
+  if (n.type === 'TemplateLiteral' && n.expressions.length === 0) {
+    return JSON.stringify(n.quasis[0].value.cooked ?? '')
+  }
+  return collapseSiteText(sourceCode.getText(n))
+}
+
 // ─── The rules ───────────────────────────────────────────────────────────────
-/** Collapse a site's source text to one line, so the baseline key survives an
- *  unrelated reformat of the site and reads as what a person would grep. */
-export function collapseSiteText(text) {
-  return text.replace(/\s+/g, ' ').trim()
-}
+/** Every rule reads the committed baseline once per process, and spends one
+ *  credit per report: an entry exempts its COUNT, never the sentence. */
+let baselineCounts = null
+let baselineUsed = null
 
-/** The site text of a report, from its own coordinates — the same derivation
- *  the collector below makes from a lint message, so the eslint run and
- *  `node lint-fixtures/connection-owners.mjs` can never disagree about what a
- *  site is called. */
-function siteTextAt(sourceCode, loc) {
-  const start = sourceCode.getIndexFromLoc(loc.start)
-  const end = sourceCode.getIndexFromLoc(loc.end)
-  return collapseSiteText(sourceCode.text.slice(start, end))
-}
-
-/** Every rule reads the committed baseline once per process. */
-let baselineKeys = null
-function isBaselined(ruleId, rel, text) {
-  if (baselineKeys === null) baselineKeys = new Set(loadBaseline().map(violationKey))
-  return baselineKeys.has(`${ruleId}:${rel}:${text}`)
+function baselineCredit(key) {
+  if (baselineCounts === null) {
+    baselineCounts = new Map(loadBaseline().map((entry) => [violationKey(entry), entry.count]))
+    baselineUsed = new Map()
+  }
+  const allowed = baselineCounts.get(key) ?? 0
+  const used = baselineUsed.get(key) ?? 0
+  if (used >= allowed) return false
+  baselineUsed.set(key, used + 1)
+  return true
 }
 
 /**
- * Report one site, unless it is in the baseline. `baseline: 'ignore'` is the
- * collector's mode (and the updater's): every site is reported so today's list
- * can be regenerated. The production rules pass no options and read the
- * baseline.
+ * Report one site, unless the baseline still has an occurrence of its key to
+ * spend. `baseline: 'ignore'` is the collector's mode (and the updater's):
+ * every site is reported so today's list can be regenerated.
  */
 function report(pluginContext, info) {
   const options = pluginContext.options?.[0] ?? {}
   const rel = repoPathOf(pluginContext.filename)
-  const text = siteTextAt(pluginContext.sourceCode, info.node.loc)
-  if (options.baseline !== 'ignore' && isBaselined(info.ruleId, rel, text)) return
+  const symbol = info.symbol ?? enclosingSymbol(info.node)
+  const target = info.target
+  const site = siteTextAt(pluginContext.sourceCode, info.node.loc)
+  const key = violationKey({ rule: info.ruleId, file: rel, symbol, target })
+  if (options.baseline !== 'ignore' && baselineCredit(key)) return
   pluginContext.report({
     node: info.node,
     messageId: info.messageId,
-    data: { ...info.data, site: text },
+    data: { ...info.data, site, symbol, target },
   })
 }
 
@@ -446,37 +650,43 @@ function errorTextMatchRule() {
       const rel = repoPathOf(context.filename)
       if (!isScopedFile(rel)) return {}
       const sourceCode = context.sourceCode
-      const flag = (node) =>
-        report(context, { ruleId: ERROR_TEXT_RULE, node, messageId: 'errorTextMatch' })
+      const flag = (node, target) =>
+        report(context, { ruleId: ERROR_TEXT_RULE, node, messageId: 'errorTextMatch', target })
       return {
         CallExpression(node) {
           const callee = unwrap(node.callee)
-          if (!callee || callee.type !== 'MemberExpression' || callee.computed) return
-          const method = staticName(callee.property)
+          if (!callee || callee.type !== 'MemberExpression') return
+          const method = propertyName(callee)
           if (method === null) return
           // The text is the receiver in E.includes(…) and the argument in
           // RE.test(E) — either way it is being matched.
           if (TEXT_QUERIES.has(method) || method === 'indexOf' || method === 'lastIndexOf') {
-            if (
-              isErrorText(sourceCode, callee.object) ||
-              isErrorText(sourceCode, node.arguments[0])
-            ) {
-              flag(node)
-            }
+            const subject = isErrorText(sourceCode, callee.object)
+              ? callee.object
+              : isErrorText(sourceCode, node.arguments[0])
+                ? node.arguments[0]
+                : null
+            if (subject) flag(node, `${method}:${literalTarget(sourceCode, node.arguments[0])}`)
             return
           }
           if (method === 'match') {
-            if (isErrorText(sourceCode, callee.object)) flag(node)
+            if (isErrorText(sourceCode, callee.object)) {
+              flag(node, `match:${literalTarget(sourceCode, node.arguments[0])}`)
+            }
             return
           }
           if (method === 'test') {
-            if (isErrorText(sourceCode, node.arguments[0])) flag(node)
+            if (isErrorText(sourceCode, node.arguments[0])) {
+              flag(node, `test:${literalTarget(sourceCode, callee.object)}`)
+            }
             return
           }
           // `REFUSALS.has(reason)` — a set of refusal strings whose contents
           // are not in this file, so the set's name is what can be read.
           if (method === 'has' && /REFUSAL|REASON/.test(staticName(callee.object) ?? '')) {
-            if (isErrorText(sourceCode, node.arguments[0])) flag(node)
+            if (isErrorText(sourceCode, node.arguments[0])) {
+              flag(node, `has:${collapseSiteText(sourceCode.getText(node.arguments[0]))}`)
+            }
           }
         },
         BinaryExpression(node) {
@@ -484,15 +694,24 @@ function errorTextMatchRule() {
           const decided = (literal, other) =>
             (isTextLiteral(literal) && isErrorText(sourceCode, other, new Set(), true)) ||
             (isProseLiteral(literal) && isErrorText(sourceCode, other))
-          if (decided(node.left, node.right) || decided(node.right, node.left)) flag(node)
+          if (decided(node.left, node.right)) {
+            flag(node, `${node.operator}:${literalTarget(sourceCode, node.left)}`)
+          } else if (decided(node.right, node.left)) {
+            flag(node, `${node.operator}:${literalTarget(sourceCode, node.right)}`)
+          }
         },
         SwitchStatement(node) {
           if (isErrorText(sourceCode, node.discriminant, new Set(), true)) {
-            flag(node.discriminant)
+            flag(
+              node.discriminant,
+              `switch:${collapseSiteText(sourceCode.getText(node.discriminant))}`,
+            )
             return
           }
-          const proseCase = node.cases.some((c) => c.test && isProseLiteral(c.test))
-          if (proseCase && isErrorText(sourceCode, node.discriminant)) flag(node.discriminant)
+          const proseCase = node.cases.find((c) => c.test && isProseLiteral(c.test))
+          if (proseCase && isErrorText(sourceCode, node.discriminant)) {
+            flag(node.discriminant, `switch:${literalTarget(sourceCode, proseCase.test)}`)
+          }
         },
       }
     },
@@ -514,25 +733,37 @@ function connectionSubscriptionRule() {
           '(frontend/src/connection/, nocx-oalo1 stages 3-4). Fold it there and draw what it ' +
           'publishes: a second subscriber decides a connection fact away from its owner ' +
           '(ADR-ba6xet1b).',
+        noTypeInfo:
+          'The connection-owner rules need the TypeScript checker and this lint run did not ' +
+          'provide one. Point parserOptions at the project (frontend/tsconfig.json); a check ' +
+          'that silently stops resolving identity is worse than none (ADR-ba6xet1b).',
       },
     },
     create(context) {
       const rel = repoPathOf(context.filename)
       if (!isScopedFile(rel) || isConnectionFile(rel)) return {}
+      const services = typeServices(context)
+      if (!services) return { Program: () => reportNoTypeInfo(context) }
+      const checker = services.program.getTypeChecker()
       return {
         CallExpression(node) {
           const callee = unwrap(node.callee)
-          if (!callee || callee.type !== 'MemberExpression' || callee.computed) return
-          if (staticName(callee.property) !== 'subscribe') return
-          const arg = unwrap(node.arguments[0])
-          if (!arg || arg.type !== 'Literal' || typeof arg.value !== 'string') return
-          const name = arg.value
-          if (!Object.hasOwn(CONNECTION_NOTIFICATIONS, name)) return
+          if (!callee || callee.type !== 'MemberExpression' || propertyName(callee) !== 'subscribe')
+            return
+          const arg = node.arguments[0]
+          if (!arg) return
+          const tsArg = tsNodeOf(services, arg)
+          if (!tsArg) return
+          const names = literalStrings(checker.getTypeAtLocation(tsArg))
+            .filter((name) => Object.hasOwn(CONNECTION_NOTIFICATIONS, name))
+            .sort()
+          if (names.length === 0) return
           report(context, {
             ruleId: SUBSCRIPTION_RULE,
             node: arg,
             messageId: 'subscription',
-            data: { name },
+            target: names.join('+'),
+            data: { name: names.map((n) => `'${n}'`).join(' and ') },
           })
         },
       }
@@ -554,36 +785,65 @@ function connectionOpenRule() {
           '"{{name}}": {{what}}. There is one entry: send intent to the connection owner and draw ' +
           'its answer (ADR-ba6xet1b). Until frontend/src/connection/ exists (nocx-oalo1 stages 3 ' +
           'and 7) the decision belongs to the backend and that one seam, not here.',
+        noTypeInfo:
+          'The connection-owner rules need the TypeScript checker and this lint run did not ' +
+          'provide one. Point parserOptions at the project (frontend/tsconfig.json); a check ' +
+          'that silently stops resolving identity is worse than none (ADR-ba6xet1b).',
       },
     },
     create(context) {
       const rel = repoPathOf(context.filename)
       if (!isScopedFile(rel) || isConnectionFile(rel)) return {}
-      const checkName = (nameNode) => {
-        const name = staticName(nameNode)
-        if (name === null || !Object.hasOwn(CONNECTION_ENTRIES, name)) return
+      const services = typeServices(context)
+      if (!services) return { Program: () => reportNoTypeInfo(context) }
+      const checker = services.program.getTypeChecker()
+
+      const flag = (node, name) =>
         report(context, {
           ruleId: OPEN_RULE,
-          node: nameNode,
+          node,
           messageId: 'open',
+          target: name,
           data: { name, what: CONNECTION_ENTRIES[name] },
         })
+
+      /** Report a member reference node (property name, key, or binding name)
+       *  when the symbol it names is declared on the ipc client type. */
+      const flagReference = (nameNode) => {
+        const name = staticName(nameNode)
+        if (name === null || !OPEN_NAMES.has(name)) return
+        if (declaredOnIpcType(checker, referencedSymbol(checker, services, nameNode))) {
+          flag(nameNode, name)
+        }
       }
+
       return {
-        CallExpression(node) {
-          const callee = unwrap(node.callee)
-          if (!callee) return
-          if (callee.type === 'MemberExpression') checkName(callee.property)
-          else if (callee.type === 'Identifier') checkName(callee)
+        // A call, `.bind`, an optional read — every one of them is a property
+        // access, and the symbol at the property is the declaration.
+        MemberExpression(node) {
+          if (node.object.type === 'Super') return
+          flagReference(node.property)
         },
-        // A class member IS the entry, even where nothing calls it yet: the
-        // implementation is the second surface. Interface signatures are not
-        // read — a type describes the seam, it does not decide anything.
+        // The declaration on the client type is the entry itself: the
+        // implementation is the second surface, even where nothing calls it.
         MethodDefinition(node) {
-          checkName(node.key)
+          flagReference(node.key)
         },
         PropertyDefinition(node) {
-          checkName(node.key)
+          flagReference(node.key)
+        },
+        // `const { openSSHSession } = client` — the binding names the member,
+        // and the pattern's own type is the client, so the property resolves
+        // through the checker rather than through the local binding.
+        ObjectPattern(node) {
+          for (const property of node.properties) {
+            if (property.type !== 'Property') continue
+            const name = staticName(property.key)
+            if (name === null || !OPEN_NAMES.has(name)) continue
+            if (declaredOnIpcType(checker, propertyOfPattern(checker, services, node, name))) {
+              flag(property.key, name)
+            }
+          }
         },
       }
     },
@@ -604,24 +864,60 @@ function connectionLossRule() {
           'This mints a lost session in the renderer ("{{site}}"). Whether a session is gone, and ' +
           "why, is the connection owner's answer: draw it, do not construct it " +
           '(ADR-ba6xet1b; frontend/src/connection/ from nocx-oalo1 stage 3).',
+        noTypeInfo:
+          'The connection-owner rules need the TypeScript checker and this lint run did not ' +
+          'provide one. Point parserOptions at the project (frontend/tsconfig.json); a check ' +
+          'that silently stops resolving identity is worse than none (ADR-ba6xet1b).',
       },
     },
     create(context) {
       const rel = repoPathOf(context.filename)
       if (!isScopedFile(rel) || isConnectionFile(rel)) return {}
+      const services = typeServices(context)
+      if (!services) return { Program: () => reportNoTypeInfo(context) }
+      const checker = services.program.getTypeChecker()
+      const flag = (node) =>
+        report(context, {
+          ruleId: LOSS_RULE,
+          node,
+          messageId: 'loss',
+          target: 'interrupted',
+        })
       return {
         Property(node) {
-          if (node.computed || staticName(node.key) !== 'cause') return
-          const value = unwrap(node.value)
+          // `cause: x`, `'cause': x` and `['cause']: x` all mint the same
+          // member; the computed spelling must not be a way around the rule.
+          let name = null
+          if (!node.computed) name = staticName(node.key)
+          else {
+            const key = unwrap(node.key)
+            if (key?.type === 'Literal' && typeof key.value === 'string') name = key.value
+          }
+          if (name !== 'cause') return
+          const tsValue = tsNodeOf(services, node.value)
+          if (!tsValue) return
           // `interrupted` is the one Exit cause that means a loss
           // (contracts/exit.schema.json): a renderer that writes it has decided
-          // the session is gone.
-          if (!value || value.type !== 'Literal' || value.value !== 'interrupted') return
-          report(context, { ruleId: LOSS_RULE, node, messageId: 'loss' })
+          // the session is gone. The TYPE is what is asked, so a const named
+          // anything at all still counts.
+          const type = checker.getTypeAtLocation(tsValue)
+          // The literal type, not a union that merely includes it: a log line
+          // writing `cause: exit.cause` carries the whole closed set, and
+          // printing a cause is not minting one.
+          if (type.isStringLiteral?.() && type.value === 'interrupted') flag(node)
         },
       }
     },
   }
+}
+
+/** A scoped file whose lint run carries no type program: report it once, at
+ *  the top of the file, instead of silently weakening three rules. */
+function reportNoTypeInfo(context) {
+  context.report({
+    loc: { start: { line: 1, column: 0 }, end: { line: 1, column: 1 } },
+    messageId: 'noTypeInfo',
+  })
 }
 
 /** The rules, as eslint.config.js's `nocx` plugin carries them. */
@@ -633,8 +929,11 @@ export const connectionOwnerRules = {
 }
 
 // ─── Baseline ────────────────────────────────────────────────────────────────
+/** The key of one baselined site: what decides (`rule`), where (`file`), in
+ *  which function (`symbol`), and the resolved member or literal (`target`).
+ *  The COUNT lives on the entry and is not part of its key. */
 export function violationKey(v) {
-  return `${v.rule}:${v.file}:${v.text}`
+  return `${v.rule}:${v.file}:${v.symbol}:${v.target}`
 }
 
 /** Load the committed baseline. A missing file is an empty list, not a crash:
@@ -660,36 +959,99 @@ export function unknownRuleEntries(baseline = loadBaseline()) {
   return baseline.filter((entry) => !Object.hasOwn(RULES, entry.rule))
 }
 
-// ─── Collection (shared by the CLI, the updater and the fixture gate) ────────
-/** The site text of a report, derived the way the rules derive it. */
-function siteTextOfMessage(source, message) {
-  const lines = source.split('\n')
-  const offset = (line, column) => {
-    let index = 0
-    for (let i = 0; i < line - 1; i += 1) index += lines[i].length + 1
-    return index + column - 1
+/** Every key with the number of sites the rule reports for it. */
+export function countsByKey(violations) {
+  const counts = new Map()
+  for (const v of violations) {
+    const key = violationKey(v)
+    counts.set(key, (counts.get(key) ?? 0) + 1)
   }
-  const start = offset(message.line, message.column)
-  const end =
-    message.endLine !== undefined && message.endColumn !== undefined
-      ? offset(message.endLine, message.endColumn)
-      : start
-  return collapseSiteText(source.slice(start, end))
+  return counts
 }
 
-const COLLECTOR_CONFIG = [
-  {
-    files: ['**/*.{ts,tsx}'],
-    languageOptions: { parser: tseslint.parser },
-    plugins: { nocx: { rules: connectionOwnerRules } },
-    rules: Object.fromEntries(
-      Object.keys(connectionOwnerRules).map((name) => [
-        `nocx/${name}`,
-        ['error', { baseline: 'ignore' }],
-      ]),
-    ),
-  },
-]
+/**
+ * The comparison the CLI fails on. A key's count may not grow, a key the
+ * baseline does not have is new, and a count that SHRANK or a key that
+ * disappeared is stale — the baseline may only move when the updater moves it,
+ * so a shrink is noticed rather than silently leaving slack in the exemption.
+ */
+export function compareToBaseline(current, baseline = loadBaseline()) {
+  const found = countsByKey(current)
+  const known = new Map(baseline.map((entry) => [violationKey(entry), entry]))
+  const fresh = []
+  const grew = []
+  const shrank = []
+  const stale = []
+  for (const [key, count] of found) {
+    const entry = known.get(key)
+    if (!entry) {
+      fresh.push({ key, count })
+      continue
+    }
+    const allowed = entry.count ?? 1
+    if (count > allowed) grew.push({ entry, count })
+    else if (count < allowed) shrank.push({ entry, count })
+  }
+  for (const [key, entry] of known) {
+    if (!found.has(key)) stale.push(entry)
+  }
+  return { fresh, grew, shrank, stale }
+}
+
+// ─── Collection (shared by the CLI, the updater and the fixture gate) ────────
+const COLLECTOR_PARSER_OPTIONS = {
+  project: ['./tsconfig.json'],
+  tsconfigRootDir: FRONTEND_DIR,
+}
+
+/**
+ * The collector runs the SAME rule objects through a wrapper that records the
+ * structured report instead of formatting it. A LintMessage carries a string;
+ * a baseline key needs the symbol and target the rule resolved, and re-deriving
+ * either here would be a second implementation of the question. The wrapper
+ * intercepts exactly what `report()` was handed, so the two entry points cannot
+ * disagree about what a site is called.
+ */
+function collectionConfig(sink, parserOptions) {
+  const wrapped = {}
+  for (const [name, rule] of Object.entries(connectionOwnerRules)) {
+    wrapped[name] = {
+      meta: rule.meta,
+      create(context) {
+        // A facade, not a proxy over the context: ESLint's `report` is a
+        // non-configurable own property, and a proxy that answers it with
+        // anything else violates the proxy invariant. The facade delegates
+        // every read and replaces only `report`.
+        const facade = new Proxy(
+          {},
+          {
+            get(_target, prop) {
+              if (prop === 'report') {
+                return (descriptor) => sink.push({ rule: `nocx/${name}`, ...descriptor })
+              }
+              const value = context[prop]
+              return typeof value === 'function' ? value.bind(context) : value
+            },
+            has(_target, prop) {
+              return prop in context
+            },
+          },
+        )
+        return rule.create(facade)
+      },
+    }
+  }
+  return [
+    {
+      files: ['**/*.{ts,tsx}'],
+      languageOptions: { parser: tseslint.parser, parserOptions },
+      plugins: { nocx: { rules: wrapped } },
+      rules: Object.fromEntries(
+        Object.keys(wrapped).map((name) => [`nocx/${name}`, ['error', { baseline: 'ignore' }]]),
+      ),
+    },
+  ]
+}
 
 const collectorLinter = new Linter({ configType: 'flat' })
 
@@ -697,23 +1059,42 @@ const collectorLinter = new Linter({ configType: 'flat' })
  * Violations in one file's source, decoupled from the filesystem and from git
  * so a test can hand it a fixture directly. `file` is only ever the label on
  * the returned records, and decides the scope.
+ *
+ * `parserOptions` is the test seam: a fixture's path does not exist on disk,
+ * so it is linted against a program the test built from the fixture text.
+ * Production callers pass nothing and the tsconfig project is used.
  */
-export function violationsInText(file, text) {
+export function violationsInText(file, text, parserOptions) {
   if (!isScopedFile(file)) return []
-  const messages = collectorLinter.verify(text, COLLECTOR_CONFIG, {
-    filename: resolve(REPO_ROOT, file),
-  })
-  const violations = []
-  for (const message of messages) {
-    if (typeof message.ruleId !== 'string' || !Object.hasOwn(RULES, message.ruleId)) continue
-    violations.push({
-      rule: message.ruleId,
-      file,
-      text: siteTextOfMessage(text, message),
-      line: message.line,
-    })
+  const filename = resolve(REPO_ROOT, file)
+  const sink = []
+  const messages = collectorLinter.verify(
+    text,
+    collectionConfig(sink, parserOptions ?? COLLECTOR_PARSER_OPTIONS),
+    { filename },
+  )
+  const fatal = messages.find((message) => message.fatal)
+  if (fatal) {
+    throw new Error(
+      `linting ${file} failed before the connection-owner rules ran: ${fatal.message}`,
+    )
   }
-  return violations
+  return sink.map(({ rule, node, data }) => {
+    if (!data?.symbol || !data?.target) {
+      throw new Error(
+        `${rule} reported ${file}:${node?.loc?.start?.line ?? 0} without a symbol/target ` +
+          'identity. The collector cannot key a site it cannot resolve (ADR-ba6xet1b).',
+      )
+    }
+    return {
+      rule,
+      file,
+      symbol: data.symbol,
+      target: data.target,
+      text: data.site,
+      line: node?.loc?.start?.line ?? 0,
+    }
+  })
 }
 
 /**
@@ -733,7 +1114,7 @@ export function trackedSources() {
   return out.split('\0').filter((f) => f !== '' && /\.tsx?$/.test(f) && isScopedFile(f))
 }
 
-/** Every violation across the scanned tree. */
+/** Every violation across the scanned tree, with its identity. */
 export function collectViolations() {
   const violations = []
   for (const file of trackedSources()) {
@@ -746,10 +1127,13 @@ export function collectViolations() {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const baseline = loadBaseline()
   const problems = [
-    ...unknownRuleEntries(baseline).map((e) => `unknown rule ${e.rule}: ${e.file}: ${e.text}`),
+    ...unknownRuleEntries(baseline).map((e) => `unknown rule ${e.rule}: ${e.file}: ${e.target}`),
     ...unreasonedEntries(baseline).map(
-      (e) => `no reason written for ${e.rule}: ${e.file}: ${e.text}`,
+      (e) => `no reason written for ${e.rule}: ${e.file}: ${e.symbol}: ${e.target}`,
     ),
+    ...baseline
+      .filter((e) => !Number.isInteger(e.count) || e.count < 1)
+      .map((e) => `bad occurrence count ${e.count} for ${e.rule}: ${e.file}: ${e.target}`),
   ]
   if (problems.length > 0) {
     for (const p of problems) console.error(`baseline: ${p}`)
@@ -764,24 +1148,11 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const current = collectViolations()
   const printAll = process.env.NOCX_BASELINE_UPDATE === '1'
   if (printAll) {
-    for (const v of current)
-      console.log(JSON.stringify({ rule: v.rule, file: v.file, text: v.text }))
+    for (const v of current) console.log(JSON.stringify(v))
   }
 
-  const known = new Set(baseline.map(violationKey))
-  const found = new Set(current.map(violationKey))
-  const fresh = current.filter((v) => !known.has(violationKey(v)))
-  const stale = baseline.filter((e) => !found.has(violationKey(e)))
-
-  if (stale.length > 0) {
-    console.error(
-      `${stale.length} baseline entr${stale.length === 1 ? 'y is' : 'ies are'} no longer a site in ` +
-        'the tree. The list may only shrink, and a stale entry hides that it did: run ' +
-        '`node lint-fixtures/update-connection-owners-baseline.mjs` to drop it.',
-    )
-    for (const e of stale) console.error(`  STALE ${e.rule}: ${e.file}: ${e.text}`)
-    process.exitCode = 1
-  }
+  const { fresh, grew, shrank, stale } = compareToBaseline(current, baseline)
+  const occurrences = baseline.reduce((sum, entry) => sum + entry.count, 0)
 
   if (fresh.length > 0) {
     console.error(
@@ -791,11 +1162,44 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
         'add it deliberately: node lint-fixtures/update-connection-owners-baseline.mjs ' +
         '--allow-growth, and write its reason.',
     )
-    for (const v of fresh) console.error(`  NEW ${v.rule}: ${v.file}:${v.line}  ${v.text}`)
+    for (const { key, count } of fresh) console.error(`  NEW  ${key} x${count}`)
+  }
+  if (grew.length > 0) {
+    console.error(
+      `${grew.length} baselined key(s) occur more often than their entry allows. An entry ` +
+        'exempts a COUNT, not a sentence: a second site with an old name is still a second owner ' +
+        '(ADR-ba6xet1b). Remove the new occurrence, or raise the count deliberately with ' +
+        '`node lint-fixtures/update-connection-owners-baseline.mjs --allow-growth` and say why.',
+    )
+    for (const { entry, count } of grew) {
+      console.error(`  GREW ${violationKey(entry)} — ${count} now, ${entry.count} baselined`)
+    }
+  }
+  if (shrank.length > 0) {
+    console.error(
+      `${shrank.length} baselined key(s) occur less often than their entry says. The list may ` +
+        'only shrink, and a stale count hides that it did: run ' +
+        '`node lint-fixtures/update-connection-owners-baseline.mjs`.',
+    )
+    for (const { entry, count } of shrank) {
+      console.error(`  SHRANK ${violationKey(entry)} — ${count} now, ${entry.count} baselined`)
+    }
+  }
+  if (stale.length > 0) {
+    console.error(
+      `${stale.length} baseline entr${stale.length === 1 ? 'y is' : 'ies are'} no longer a site ` +
+        'in the tree. The list may only shrink, and a stale entry hides that it did: run ' +
+        '`node lint-fixtures/update-connection-owners-baseline.mjs` to drop it.',
+    )
+    for (const e of stale) console.error(`  STALE ${violationKey(e)}`)
+  }
+
+  if (fresh.length + grew.length + shrank.length + stale.length > 0) {
     process.exitCode = 1
-  } else if (stale.length === 0) {
+  } else {
     console.log(
-      `OK — renderer connection-owner ratchet: ${baseline.length} baselined site(s), 0 new, 0 stale`,
+      `OK — renderer connection-owner ratchet: ${baseline.length} baselined key(s), ` +
+        `${occurrences} occurrence(s), 0 new, 0 stale`,
     )
   }
 }

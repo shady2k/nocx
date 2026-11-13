@@ -394,7 +394,7 @@ Reconnect is the head button:
 
 ### 5.7 The resolver and typed `ssh`
 
-Input is a `profileId` or a typed plan from `ssh-transition.ts` (which keeps its refusals). The output:
+Input is a `profileId` or a typed line. The renderer no longer builds a typed plan: `planSsh` and its refusal reasons were deleted with the rest of its dead rewrite (nocx-oalo1.3.3), and `ssh-transition.test.ts`'s refusal table is the specification the backend resolver ports into `plain{reason}`. The output:
 
 - `ours{config, profileId?}`
 - `plain{reason}` when the line or `ssh -G` names what our transport cannot do: a typed option outside the honoured set, ProxyCommand, ProxyJump unresolvable to a profile, CertificateFile, PKCS11Provider, IdentityAgent, or a `sk-` identity file. The tab says so; nothing is silent.

@@ -86,6 +86,11 @@ type guardState struct {
 	// not answered since; zero once it has. It shortens the probe's deadline
 	// and bounds the close.
 	wokeAt monoclock.Nanos
+	// suspendedAt is the moment the OS said the machine is going to sleep,
+	// while no wake has been seen since. The guard asks nothing of a connection
+	// on a sleeping machine: the process is frozen, and a probe sent into the
+	// sleep would park and answer first thing on resume.
+	suspendedAt monoclock.Nanos
 }
 
 // prober drives one live connection's probe cadence and closing policy.
@@ -123,6 +128,12 @@ func (s *Supervisor) guard(l *live, gen uint64) {
 // machine that had been left alone would have.
 func (g *prober) run() {
 	for {
+		// A CONTROL EDGE IN HAND WINS THE NEXT MOVE, for the same reason an
+		// answer does: "the machine is going to sleep" is a fact the guard has
+		// already been told, and a due probe or a due deadline must not act as
+		// if it were not. The senders are non-blocking, so at most one of each
+		// is pending.
+		g.drainControl()
 		now := g.clock.Now()
 		wait := g.next(now)
 		if now >= wait {
@@ -144,6 +155,8 @@ func (g *prober) run() {
 		select {
 		case <-g.live.stop:
 			return
+		case at := <-g.live.sleep:
+			g.suspend(at)
 		case at := <-g.live.wake:
 			g.woke(at)
 		case outcome := <-g.st.probeOut:
@@ -154,6 +167,20 @@ func (g *prober) run() {
 			g.lookResult(err)
 		case <-g.clock.After(time.Duration(wait - now)):
 		}
+	}
+}
+
+// drainControl applies any sleep or wake edge that has already arrived.
+func (g *prober) drainControl() {
+	select {
+	case at := <-g.live.sleep:
+		g.suspend(at)
+	default:
+	}
+	select {
+	case at := <-g.live.wake:
+		g.woke(at)
+	default:
 	}
 }
 
@@ -182,6 +209,12 @@ func (g *prober) drainReady() bool {
 // next answers when the policy next has something to do.
 func (g *prober) next(now monoclock.Nanos) monoclock.Nanos {
 	st := &g.st
+	if st.suspendedAt != 0 {
+		// The machine is going to sleep. No probe is started and no silence is
+		// judged until a wake arrives; a result that is already in flight still
+		// arrives through the select.
+		return now + span(SilenceCloseBudget)
+	}
 	switch {
 	case st.probeOut != nil && st.silentSince == 0:
 		if st.wokeAt != 0 {
@@ -228,6 +261,9 @@ func (g *prober) nextStalled(now monoclock.Nanos) monoclock.Nanos {
 // should end.
 func (g *prober) due(at monoclock.Nanos) bool {
 	st := &g.st
+	if st.suspendedAt != 0 {
+		return false
+	}
 	now := g.clock.Now()
 	switch {
 	case st.probeOut == nil && st.silentSince == 0:
@@ -303,12 +339,22 @@ func (g *prober) startLook(at monoclock.Nanos) {
 	}()
 }
 
+// suspend marks the connection as going to sleep at `at`. Whatever probe was
+// already outstanding stays — it is the evidence that will answer on resume —
+// and nothing new is asked.
+func (g *prober) suspend(at monoclock.Nanos) {
+	g.st.suspendedAt = at
+	g.live.suspended.Store(true)
+}
+
 // woke starts the connection's proof of life after a wake signal seen at `at`.
 //
 // The moment is the signal's, not this loop's: a fan-out that ran a moment late
 // must still measure the five seconds from the signal, or a slow scheduler
 // would buy the connection time it has not earned.
 func (g *prober) woke(at monoclock.Nanos) {
+	g.st.suspendedAt = 0
+	g.live.suspended.Store(false)
 	g.st.wokeAt = at
 	if g.st.probeOut == nil {
 		// The probe a wake sends is due at the signal: the loop's next pass
@@ -339,6 +385,8 @@ func (g *prober) probeResult(outcome probeOutcome) bool {
 	// loop got to the answer: a host that answers late must not also be asked
 	// late.
 	g.st.nextProbe = g.st.probedAt + span(g.live.probeInterval)
+	g.st.suspendedAt = 0
+	g.live.suspended.Store(false)
 	g.st.silentSince, g.st.lookAnswered, g.st.nudged = 0, false, false
 	g.st.lookOut, g.st.lookAt, g.st.lookSent, g.st.wokeAt = nil, 0, 0, 0
 	return false

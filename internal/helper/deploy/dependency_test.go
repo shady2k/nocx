@@ -45,6 +45,10 @@ var forbiddenSSHPackages = []string{
 	"github.com/shady2k/nocx/internal/ssh",
 	"github.com/shady2k/nocx/internal/helper/sshconn",
 	"github.com/shady2k/nocx/internal/hostconn",
+	// The wake source is the local helper's OS bridge: Darwin's half is cgo
+	// against IOKit, and the artifact written to somebody else's host must
+	// link neither it nor anything that would.
+	"github.com/shady2k/nocx/internal/wakesource",
 }
 
 // TestDeployedHelperDependencyGraphHasNoSSHClient is half (a) of the pair: the

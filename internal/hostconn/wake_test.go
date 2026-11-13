@@ -76,6 +76,7 @@ func TestAWakeOverASilentConnectionReadsStalledWithinFiveSeconds(t *testing.T) {
 	acquire(t, mgr, hostconn.HoldsPlainShell)
 
 	wake.Wake()
+	waittest.WaitFor(t, "the supervisor to be marked awake", func() bool { return !sup.Suspended() })
 	waittest.WaitFor(t, "the wake's probe", func() bool { return link.probeCalls.Load() == 1 })
 	clock.Advance(hostconn.WakeProbeDeadline)
 
@@ -121,6 +122,7 @@ func TestAHelperOwnedConnectionWithoutAnAnswerAfterAWakeReconnects(t *testing.T)
 	lease := acquire(t, mgr, hostconn.HoldsNone)
 
 	wake.Wake()
+	waittest.WaitFor(t, "the supervisor to be marked awake", func() bool { return !sup.Suspended() })
 	waittest.WaitFor(t, "the wake's probe", func() bool { return link.probeCalls.Load() == 1 })
 	clock.Advance(hostconn.WakeProbeDeadline)
 	waittest.WaitFor(t, "the stall", func() bool { return sup.Current().Kind == hostconn.Stalled })
@@ -145,6 +147,7 @@ func TestAPlainShellConnectionStaysOpenAfterAWake(t *testing.T) {
 	lease := acquire(t, mgr, hostconn.HoldsPlainShell)
 
 	wake.Wake()
+	waittest.WaitFor(t, "the supervisor to be marked awake", func() bool { return !sup.Suspended() })
 	waittest.WaitFor(t, "the wake's probe", func() bool { return link.probeCalls.Load() == 1 })
 	clock.Advance(hostconn.WakeProbeDeadline)
 	waittest.WaitFor(t, "the stall", func() bool { return sup.Current().Kind == hostconn.Stalled })
@@ -197,5 +200,35 @@ func TestAWakeIsFanOutToEveryConnection(t *testing.T) {
 			}
 		}
 		return len(links) == 2
+	})
+}
+
+// TestAPreSleepEdgePausesTheProberUntilTheWake — the OS's pre-sleep edge lets
+// the supervisor stop asking its connections for answers before the machine
+// freezes. Nothing is heard while it is away, so a probe sent into the sleep
+// would be the first thing to answer on resume, and the silence it spent parked
+// is not evidence of anything.
+func TestAPreSleepEdgePausesTheProberUntilTheWake(t *testing.T) {
+	clock := hostconntest.New()
+	link, wake, mgr, sup := wakeStand(t, clock)
+	lease := acquire(t, mgr, hostconn.HoldsNone)
+
+	wake.Sleep()
+	waittest.WaitFor(t, "the supervisor to be marked asleep", lease.Suspended)
+	clock.Advance(10 * time.Minute)
+	if calls := link.probeCalls.Load(); calls != 0 {
+		t.Fatalf("%d probes were sent while the machine was going to sleep", calls)
+	}
+	if got := sup.Current().Kind; got != hostconn.Connected {
+		t.Fatalf("a sleeping machine's connection reads %v, want connected: the sleep is not silence", got)
+	}
+
+	// The wake ends the pause and the connection proves itself at once.
+	wake.Wake()
+	waittest.WaitFor(t, "the supervisor to be marked awake", func() bool { return !sup.Suspended() })
+	waittest.WaitFor(t, "the wake's probe", func() bool { return link.probeCalls.Load() == 1 })
+	clock.Advance(hostconn.WakeProbeDeadline)
+	waittest.WaitFor(t, "the stall", func() bool {
+		return sup.Current().Kind == hostconn.Stalled
 	})
 }

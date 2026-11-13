@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -94,8 +95,15 @@ func TestConnSignal_FiresForAClientThatOffersNoPublicKey(t *testing.T) {
 
 	fired := make(chan struct{}, 1)
 	var once sync.Once
-	config := buildConfig(userSigner, nil, hostSigner, "banner", "the-password", modernPubkeyAlgorithms, func() {
-		once.Do(func() { fired <- struct{}{} })
+	config := buildConfig(connConfig{
+		userSigner: userSigner,
+		hostSigner: hostSigner,
+		banner:     "banner",
+		password:   "the-password",
+		algorithms: modernPubkeyAlgorithms,
+		onAuthAttempt: func() {
+			once.Do(func() { fired <- struct{}{} })
+		},
 	})
 
 	go func() {
@@ -364,7 +372,7 @@ func dialFixture(t *testing.T) *gossh.Client {
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 
-	config := buildConfig(userSigner, nil, hostSigner, "", "", modernPubkeyAlgorithms, func() {})
+	config := buildConfig(connConfig{userSigner: userSigner, hostSigner: hostSigner, algorithms: modernPubkeyAlgorithms, onAuthAttempt: func() {}})
 	go func() {
 		for {
 			conn, acceptErr := ln.Accept()
@@ -526,22 +534,30 @@ func startFixture(t *testing.T) (addr string, hostKey gossh.PublicKey, userSigne
 	if err != nil {
 		t.Fatalf("user signer: %v", err)
 	}
+	return serveFixture(t, hostSigner, userSigner, serverFaults{}), hostSigner.PublicKey(), userSigner
+}
+
+// serveFixture serves the fixture on an ephemeral loopback address through the
+// accept loop run() uses, presenting hostSigner and accepting exactly
+// userSigner, with f staged. It returns the address; the listener is closed by
+// the test's cleanup.
+func serveFixture(t *testing.T, hostSigner, userSigner gossh.Signer, f serverFaults) string {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			config := buildConfig(userSigner, nil, hostSigner, "", "", modernPubkeyAlgorithms, func() {})
-			go serveConn(conn, config)
-		}
-	}()
-	return ln.Addr().String(), hostSigner.PublicKey(), userSigner
+	go acceptor(ln, f, func(net.Conn) *gossh.ServerConfig {
+		return buildConfig(connConfig{
+			userSigner:    userSigner,
+			hostSigner:    hostSigner,
+			algorithms:    modernPubkeyAlgorithms,
+			faults:        f,
+			onAuthAttempt: func() {},
+		})
+	})
+	return ln.Addr().String()
 }
 
 // dial opens a client connection to the fixture, trusting exactly the host
@@ -989,4 +1005,144 @@ func TestWindowChange_ResizesThePtyOfARunningShell(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	waitFor("41 137")
+}
+
+// -drop-after-accept stages what a real sshd does at MaxStartups: the TCP
+// connection is ACCEPTED and then closed before a single SSH byte, so a client
+// sees its dial succeed and its handshake die. The next attempt is served
+// normally, because the shape being staged is one dropped connection and not a
+// host that is gone — the distinction a reconnect path has to make.
+func TestDropAfterAccept_ResetsTheNextConnectionAndThenServes(t *testing.T) {
+	hostSigner, _, _, err := signer()
+	if err != nil {
+		t.Fatalf("host signer: %v", err)
+	}
+	userSigner, _, _, err := signer()
+	if err != nil {
+		t.Fatalf("user signer: %v", err)
+	}
+	addr := serveFixture(t, hostSigner, userSigner, serverFaults{dropAfterAccept: 1})
+
+	// What the client sees is a connection that is reset and never carries a
+	// handshake. Whether the reset lands before connect(2) returns or on the
+	// first read afterwards is a race the kernel decides — a server that
+	// accepts and resets at once can win either — so both are accepted here.
+	// A REFUSAL is not: that would be a host that was never listening, which
+	// is a different condition and a different fault.
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		if !errors.Is(err, syscall.ECONNRESET) {
+			t.Fatalf("dial: %v, want a reset connection", err)
+		}
+	} else {
+		defer func() { _ = conn.Close() }()
+		if dlErr := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); dlErr != nil {
+			t.Fatalf("set read deadline: %v", dlErr)
+		}
+		var one [1]byte
+		_, err = conn.Read(one[:])
+		if err == nil {
+			t.Fatal("the dropped connection sent an SSH version byte; a host at MaxStartups sends nothing at all")
+		}
+		if !errors.Is(err, syscall.ECONNRESET) {
+			t.Fatalf("read after the drop = %v, want a connection reset", err)
+		}
+	}
+
+	// And the drop is bounded: the next connection authenticates and opens a
+	// session.
+	client := dial(t, addr, hostSigner.PublicKey(), userSigner)
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("NewSession on the connection after the drop: %v", err)
+	}
+	_ = sess.Close()
+}
+
+// -changed-host-key presents a key other than the one the fixture's
+// KNOWNHOSTS= line names, which is the shape of a host whose key changed under
+// a client that trusts its own record. A client that trusts the advertised key
+// must be refused, and the refusal must be about the key — not a timeout, and
+// not a successful connection to a host somebody else is now answering as.
+func TestChangedHostKey_RefusesAClientTrustingTheAdvertisedKey(t *testing.T) {
+	advertised, _, _, err := signer()
+	if err != nil {
+		t.Fatalf("advertised signer: %v", err)
+	}
+
+	unchanged, err := presentedHostKey(false, advertised)
+	if err != nil {
+		t.Fatalf("presentedHostKey(false): %v", err)
+	}
+	if !bytes.Equal(unchanged.PublicKey().Marshal(), advertised.PublicKey().Marshal()) {
+		t.Fatal("without -changed-host-key the fixture presents a key its KNOWNHOSTS= line does not name")
+	}
+	presented, err := presentedHostKey(true, advertised)
+	if err != nil {
+		t.Fatalf("presentedHostKey(true): %v", err)
+	}
+	if bytes.Equal(presented.PublicKey().Marshal(), advertised.PublicKey().Marshal()) {
+		t.Fatal("with -changed-host-key the fixture presents the same key, so no client can see a change")
+	}
+
+	userSigner, _, _, err := signer()
+	if err != nil {
+		t.Fatalf("user signer: %v", err)
+	}
+	addr := serveFixture(t, presented, userSigner, serverFaults{})
+
+	changed := errors.New("test: the host key differs from the record")
+	_, err = gossh.Dial("tcp", addr, &gossh.ClientConfig{
+		User: "e2e",
+		Auth: []gossh.AuthMethod{gossh.PublicKeys(userSigner)},
+		HostKeyCallback: func(_ string, _ net.Addr, key gossh.PublicKey) error {
+			if !bytes.Equal(key.Marshal(), advertised.PublicKey().Marshal()) {
+				return changed
+			}
+			return nil
+		},
+		Timeout: 10 * time.Second,
+	})
+	if err == nil {
+		t.Fatal("a client trusting the advertised key was let in, so the fixture presented that key after all")
+	}
+	if !errors.Is(err, changed) {
+		t.Fatalf("dial error = %v, want the host-key refusal", err)
+	}
+}
+
+// -sign-in-delay holds the answer to a real userauth attempt, so a person
+// waits at the prompt on a host that is slow rather than broken. The delay is
+// asserted as a floor, and only a floor: the connection must ALSO authenticate
+// and open a session, which is the half that says "late" and not "refused".
+func TestSignInDelay_HoldsTheSignInWithoutRefusingIt(t *testing.T) {
+	hostSigner, _, _, err := signer()
+	if err != nil {
+		t.Fatalf("host signer: %v", err)
+	}
+	userSigner, _, _, err := signer()
+	if err != nil {
+		t.Fatalf("user signer: %v", err)
+	}
+	const delay = 200 * time.Millisecond
+	addr := serveFixture(t, hostSigner, userSigner, serverFaults{signInDelay: delay})
+
+	started := time.Now()
+	client := dial(t, addr, hostSigner.PublicKey(), userSigner)
+	elapsed := time.Since(started)
+
+	// The dial's work is the TCP connection, the version exchange and the
+	// sign-in: nowhere near a fifth of a second by itself, so a connection
+	// that came back faster than most of the hold was not held. The floor is
+	// under the delay rather than at it, which is what keeps a slow machine
+	// from tripping a test that only means to prove the hold happens.
+	if elapsed < delay/4*3 {
+		t.Fatalf("sign-in through -sign-in-delay=%v completed in %v, want at least %v", delay, elapsed, delay/4*3)
+	}
+
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("NewSession after a delayed sign-in: %v", err)
+	}
+	_ = sess.Close()
 }

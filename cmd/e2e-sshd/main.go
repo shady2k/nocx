@@ -61,6 +61,22 @@
 //	                        criterion is that a pane and Files on one host
 //	                        share ONE connection (nocx-50w7p.6).
 //	READY
+//
+// Fault switches, for the tests that need the far side to be the broken thing:
+//
+//	-drop-after-accept <n>  reset the next <n> accepted connections before a
+//	                        single SSH byte is sent, then serve normally: the
+//	                        shape a real sshd produces at MaxStartups, where
+//	                        the dial succeeds and the handshake never starts.
+//	                        The client's connection is reset, not refused.
+//	-changed-host-key       present a host key other than the one the
+//	                        KNOWNHOSTS= line names, so a client that trusts
+//	                        its own record of the host meets a host whose key
+//	                        changed.
+//	-sign-in-delay <d>      hold every real userauth answer by <d> (a Go
+//	                        duration, such as 2s): a host that lets a person in
+//	                        late but does let them in, which is not the same
+//	                        condition as one that refuses them.
 package main
 
 import (
@@ -173,6 +189,9 @@ func run() error {
 	flag.StringVar(&sftpSlowUntil, "sftp-slow-until", "", "while this path does not exist, SFTP uploads are read at -sftp-upload-bps: a link slow enough for a spec to watch a helper install for as long as it needs, ended by creating the file")
 	flag.StringVar(&inputLogDir, "input-log", "", "record the bytes each shell channel receives into <dir>/shell-<n>.bytes, announced as INPUTLOG=<path>: the far program's own account of what arrived")
 	flag.IntVar(&sftpUploadBps, "sftp-upload-bps", 0, "bytes per second SFTP uploads are read at while -sftp-slow-until is absent; 0 disables pacing")
+	dropAfterAccept := flag.Int("drop-after-accept", 0, "reset this many newly accepted connections before any SSH byte is sent, then serve normally: a real sshd at MaxStartups (0 disables)")
+	changedHostKey := flag.Bool("changed-host-key", false, "present a host key other than the one KNOWNHOSTS= names: a host whose key changed under a client that trusts its own record")
+	signInDelay := flag.Duration("sign-in-delay", 0, "hold every real userauth answer this long (a Go duration such as 2s): a host that lets a person in late")
 	flag.Parse()
 	if fixtureLoginShell != "" {
 		resolved, err := exec.LookPath(fixtureLoginShell)
@@ -199,7 +218,21 @@ func run() error {
 		*repo = abs
 	}
 
-	hostSigner, _, _, err := signer()
+	f := serverFaults{
+		dropAfterAccept: *dropAfterAccept,
+		changedHostKey:  *changedHostKey,
+		signInDelay:     *signInDelay,
+	}
+
+	advertisedHostSigner, _, _, err := signer()
+	if err != nil {
+		return err
+	}
+	// The key the KNOWNHOSTS= line names and the key the server presents are
+	// normally the same one. -changed-host-key is what separates them: the
+	// client keeps a record of a host it used to know, and this host no
+	// longer holds the private half of it.
+	hostSigner, err := presentedHostKey(f.changedHostKey, advertisedHostSigner)
 	if err != nil {
 		return err
 	}
@@ -252,7 +285,7 @@ func run() error {
 	if rsaKeyPath != "" {
 		printLine("RSAKEY=" + rsaKeyPath)
 	}
-	printLine("KNOWNHOSTS=" + knownhosts.Line([]string{ln.Addr().String()}, hostSigner.PublicKey()))
+	printLine("KNOWNHOSTS=" + knownhosts.Line([]string{ln.Addr().String()}, advertisedHostSigner.PublicKey()))
 
 	if *repo != "" {
 		marker, hostile, err := seedRepo(*repo)
@@ -267,27 +300,110 @@ func run() error {
 	}
 	printLine("READY")
 
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			return nil // listener closed
-		}
+	acceptor(ln, f, func(conn net.Conn) *gossh.ServerConfig {
 		// CONN= is per connection: printed when the client's first userauth
 		// attempt reaches the server — key exchange done, one response before
 		// the client renders the password prompt. The journey waits for it
 		// before typing the password; without it the run is timed, not
 		// deterministic.
 		var once sync.Once
-		config := buildConfig(userSigner, rsaUserSigner, hostSigner, *banner, *password, *algorithms, func() {
-			once.Do(func() { printLine("CONN=" + conn.RemoteAddr().String()) })
+		return buildConfig(connConfig{
+			userSigner:    userSigner,
+			rsaUserSigner: rsaUserSigner,
+			hostSigner:    hostSigner,
+			banner:        *banner,
+			password:      *password,
+			algorithms:    *algorithms,
+			faults:        f,
+			onAuthAttempt: func() {
+				once.Do(func() { printLine("CONN=" + conn.RemoteAddr().String()) })
+			},
 		})
-		go serveConn(conn, config)
+	})
+	return nil // the listener was closed
+}
+
+// serverFaults are the conditions only the server can produce, because they
+// happen to a connection the sshd process itself has accepted. The wire faults
+// a test can stage from outside the server — a black hole, a one-way loss, a
+// reset mid-flow — belong to internal/sshtest's proxy instead.
+type serverFaults struct {
+	// dropAfterAccept resets this many newly accepted connections before any
+	// SSH byte is sent. A real sshd does it at MaxStartups: the TCP
+	// connection is accepted and then closed, so a client sees the dial
+	// succeed and the handshake die.
+	dropAfterAccept int
+	// changedHostKey makes the fixture present a host key other than the one
+	// its KNOWNHOSTS= line names: a host whose key changed under a client
+	// that trusts its own record of it.
+	changedHostKey bool
+	// signInDelay holds every real userauth answer by this much: the host is
+	// slow to let a person in, and still lets them in.
+	signInDelay time.Duration
+}
+
+// acceptor runs the fixture's accept loop: it drops what the faults say to
+// drop and serves the rest, building one ServerConfig per connection. It
+// returns when the listener is closed.
+func acceptor(ln net.Listener, f serverFaults, newConfig func(conn net.Conn) *gossh.ServerConfig) {
+	dropped := 0
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		if dropped < f.dropAfterAccept {
+			dropped++
+			dropNewConnection(conn)
+			continue
+		}
+		go serveConn(conn, newConfig(conn))
 	}
 }
 
-// buildConfig assembles the ServerConfig for one connection. onAuthAttempt
-// fires on the client's first userauth attempt by any method, after key
-// exchange and before the password prompt.
+// dropNewConnection ends a connection the fixture has just accepted without
+// saying anything on it. The reset rather than an orderly close is deliberate:
+// a client that only saw an end of file could not tell this from a server that
+// answered and hung up mid-protocol, and the condition being staged is one
+// where the dial itself was fine.
+func dropNewConnection(conn net.Conn) {
+	if tcp, ok := conn.(*net.TCPConn); ok {
+		_ = tcp.SetLinger(0)
+	}
+	_ = conn.Close()
+}
+
+// presentedHostKey is the host key the fixture actually presents. With
+// changedKey it mints a fresh one, so the KNOWNHOSTS= line stays the record of
+// a host this process no longer holds the private half of.
+func presentedHostKey(changedKey bool, advertised gossh.Signer) (gossh.Signer, error) {
+	if !changedKey {
+		return advertised, nil
+	}
+	other, _, _, err := signer()
+	if err != nil {
+		return nil, fmt.Errorf("changed host key: %w", err)
+	}
+	return other, nil
+}
+
+// connConfig is everything one connection's ServerConfig is built from. A
+// struct rather than positional parameters because the fault switches keep
+// arriving, and a call site that swaps two strings still compiles.
+type connConfig struct {
+	userSigner    gossh.Signer
+	rsaUserSigner gossh.Signer
+	hostSigner    gossh.Signer
+	banner        string
+	password      string
+	algorithms    string
+	// faults are the server-side faults staged on this connection.
+	faults serverFaults
+	// onAuthAttempt fires on the client's first userauth attempt by any
+	// method, after key exchange and before the password prompt.
+	onAuthAttempt func()
+}
+
 // modernPubkeyAlgorithms is what an OpenSSH 8.8 and later sshd accepts for a
 // public key, and the ABSENCE of `ssh-rsa` is the whole point: since 8.8 it is
 // excluded from `PubkeyAcceptedAlgorithms` by default because it is SHA-1.
@@ -296,22 +412,24 @@ func run() error {
 // `signature algorithm ssh-rsa not in PubkeyAcceptedAlgorithms`).
 const modernPubkeyAlgorithms = "ssh-ed25519,rsa-sha2-256,rsa-sha2-512,ecdsa-sha2-nistp256"
 
-func buildConfig(userSigner, rsaUserSigner, hostSigner gossh.Signer, banner, password, algorithms string, onAuthAttempt func()) *gossh.ServerConfig {
+// buildConfig assembles the ServerConfig for one connection.
+func buildConfig(c connConfig) *gossh.ServerConfig {
 	config := &gossh.ServerConfig{}
-	if algorithms != "" {
+	if c.algorithms != "" {
 		// ADVERTISED (the `server-sig-algs` extension) and ENFORCED (on the
 		// signature that arrives), which is both halves of a real host's
 		// `PubkeyAcceptedAlgorithms`.
-		config.PublicKeyAuthAlgorithms = strings.Split(algorithms, ",")
+		config.PublicKeyAuthAlgorithms = strings.Split(c.algorithms, ",")
 	}
-	if password != "" {
+	if c.password != "" {
 		// Password-auth fixture (the journey's hand-typed `ssh` must be
 		// prompted): the fixture's own key is REFUSED so the client has no
 		// publickey path, and the callback accepts exactly the one password.
 		// A wrong password is an auth failure with the client's own exit
 		// status — the journey's fail-open assertion.
 		config.PasswordCallback = func(_ gossh.ConnMetadata, pass []byte) (*gossh.Permissions, error) {
-			if string(pass) == password {
+			holdSignIn(c.faults.signInDelay)
+			if string(pass) == c.password {
 				return nil, nil
 			}
 			return nil, fmt.Errorf("e2e-sshd: wrong password")
@@ -321,15 +439,16 @@ func buildConfig(userSigner, rsaUserSigner, hostSigner gossh.Signer, banner, pas
 		}
 	} else {
 		config.PublicKeyCallback = func(_ gossh.ConnMetadata, key gossh.PublicKey) (*gossh.Permissions, error) {
+			holdSignIn(c.faults.signInDelay)
 			// Compare the wire blob (algorithm + key), not the raw key: the
 			// client sends key.Marshal(), which for ed25519 carries the
 			// algorithm string ahead of the 32-byte key.
-			if string(key.Marshal()) == string(userSigner.PublicKey().Marshal()) {
+			if string(key.Marshal()) == string(c.userSigner.PublicKey().Marshal()) {
 				return nil, nil
 			}
 			// A SECOND accepted key, when the fixture minted one: two shapes in
 			// one host, which is what a spec storing both in the vault needs.
-			if rsaUserSigner != nil && string(key.Marshal()) == string(rsaUserSigner.PublicKey().Marshal()) {
+			if c.rsaUserSigner != nil && string(key.Marshal()) == string(c.rsaUserSigner.PublicKey().Marshal()) {
 				return nil, nil
 			}
 			return nil, fmt.Errorf("e2e-sshd: unknown public key")
@@ -362,14 +481,24 @@ func buildConfig(userSigner, rsaUserSigner, hostSigner gossh.Signer, banner, pas
 		if method == "none" {
 			return
 		}
-		onAuthAttempt()
+		c.onAuthAttempt()
 	}
-	if banner != "" {
-		b := banner
+	if c.banner != "" {
+		b := c.banner
 		config.BannerCallback = func(_ gossh.ConnMetadata) string { return b }
 	}
-	config.AddHostKey(hostSigner)
+	config.AddHostKey(c.hostSigner)
 	return config
+}
+
+// holdSignIn is -sign-in-delay. It runs inside the auth callbacks, so the
+// delay lands on the one exchange a person waits through — the answer to their
+// method — and not on the key exchange or the version line before it. Zero
+// holds nothing.
+func holdSignIn(d time.Duration) {
+	if d > 0 {
+		time.Sleep(d)
+	}
 }
 
 func signer() (gossh.Signer, ed25519.PrivateKey, ed25519.PublicKey, error) {

@@ -278,9 +278,15 @@ type live struct {
 	// stop ends this connection's guard.
 	stop     chan struct{}
 	stopOnce sync.Once
-	// control carries the OS's sleep and wake edges to the guard, in the
-	// order the manager received them.
-	control chan controlEdge
+	// controlWake nudges the guard when an OS edge is waiting, and the two
+	// readings beside it ARE the waiting edges: one newest per kind, coalesced
+	// under controlMu. Coalescing rather than a channel means an edge is never
+	// dropped — a final wake always arrives — and a burst becomes the newest
+	// fact, which is all a probe policy needs.
+	controlWake chan struct{}
+	controlMu   sync.Mutex
+	sleepEdge   monoclock.Nanos
+	wakeEdge    monoclock.Nanos
 	// ask asks the guard for one probe now, for a caller that needs the far
 	// side's own ordering (the pool's release barrier).
 	ask chan struct{}
@@ -296,6 +302,7 @@ type live struct {
 	// not lost between a successful dial and its publication.
 	nextProbe     monoclock.Nanos
 	initialWoke   monoclock.Nanos
+	initialSleep  monoclock.Nanos
 	probeInterval time.Duration
 	// observers are the holders that asked to be told what a probe finds.
 	observers map[*Lease]func(Observation)
@@ -318,10 +325,12 @@ const maxSteps = 32
 func (s *Supervisor) Acquire(ctx context.Context, plan Plan) (*Lease, error) {
 	for {
 		var (
-			fenced  chan struct{}
-			retire  *live
-			cause   Cause
-			changed chan struct{}
+			fenced   chan struct{}
+			retire   *live
+			cause    Cause
+			detach   *live
+			detached bool
+			changed  chan struct{}
 		)
 		s.mu.Lock()
 		if l := s.live; l != nil {
@@ -338,10 +347,15 @@ func (s *Supervisor) Acquire(ctx context.Context, plan Plan) (*Lease, error) {
 				// the socket, so this window is not "before the goroutine ran".
 				retire, cause = l, CauseLostLink
 			case linkTainted(l.link):
-				// The pool has retired this connection from new admission (a
-				// detached writer's cap, a credential rotation). The supervisor
-				// honours that fact rather than holding a second opinion.
-				retire, cause = l, CauseTainted
+				// THE POOL HAS RETIRED THIS CONNECTION FROM NEW ADMISSION, and
+				// that is all it means: the holders already on it — a plain
+				// shell among them — keep their connection until their last
+				// release (the pool's own behaviour, except the explicit cap
+				// escalation, which closes at once and whose dead mark this
+				// supervisor sees). So the connection is DETACHED here, not
+				// retired: a new caller dials afresh, and nobody's session is
+				// killed by a decision about admission.
+				detach = l
 			default:
 				select {
 				case <-l.link.Done():
@@ -349,7 +363,15 @@ func (s *Supervisor) Acquire(ctx context.Context, plan Plan) (*Lease, error) {
 				default:
 				}
 			}
-			if retire == nil && fenced == nil {
+			if detach != nil {
+				// Detached under this hold, so no acquire can join it, and its
+				// transport is left to its holders.
+				s.live = nil
+				s.generation++
+				s.advance(Event{Kind: Lost, Cause: CauseTainted})
+				detached = true
+			}
+			if retire == nil && fenced == nil && !detached {
 				if s.state.Kind == Stalled {
 					// NO CHANNEL IS ASKED OF A STALLED CONNECTION (design
 					// §5.3): NewSession takes no deadline and would park. The
@@ -428,7 +450,7 @@ func (s *Supervisor) Acquire(ctx context.Context, plan Plan) (*Lease, error) {
 			nextProbe:     s.clock.Now() + span(probeInterval),
 			stop:          make(chan struct{}),
 			closed:        make(chan struct{}),
-			control:       make(chan controlEdge, 4),
+			controlWake:   make(chan struct{}, 1),
 			ask:           make(chan struct{}, 1),
 			waiters:       make(map[chan error]struct{}),
 			observers:     make(map[*Lease]func(Observation)),
@@ -436,12 +458,15 @@ func (s *Supervisor) Acquire(ctx context.Context, plan Plan) (*Lease, error) {
 		if plan.Holds&HoldsPlainShell != 0 {
 			live.plainShells = 1
 		}
-		// A WAKE THAT ARRIVED WHILE THIS CONNECTION WAS BEING DIALED IS NOT
-		// LOST (design §5.3): the connection proves itself at once, with the
-		// wake's own five seconds, instead of waiting for the ordinary cadence.
-		if s.wakeAt != 0 && s.wakeAt >= dialStarted {
+		// AN EDGE THAT ARRIVED WHILE THIS CONNECTION WAS BEING DIALED IS NOT
+		// LOST (design §5.3): a wake makes it prove itself at once, with the
+		// wake's own five seconds; a sleep with no later wake publishes the
+		// connection suspended, so it asks a sleeping machine nothing.
+		if s.wakeAt != 0 && s.wakeAt >= dialStarted && s.wakeAt >= s.sleepAt {
 			live.initialWoke = s.wakeAt
 			live.nextProbe = s.clock.Now()
+		} else if s.sleepAt != 0 && s.sleepAt >= dialStarted {
+			live.initialSleep = s.sleepAt
 		}
 		s.live = live
 		s.generation++
@@ -459,31 +484,50 @@ func (s *Supervisor) Acquire(ctx context.Context, plan Plan) (*Lease, error) {
 	}
 }
 
-// retireLive ends one connection: admission is fenced under the mutex, the
-// transport is closed OUTSIDE it — the library's own close waits for its
-// key-exchange loop, and that loop's host-key callback must never find this
-// mutex held (a rekey would deadlock) — and only then is the state published
-// and the generation dropped.
-func (s *Supervisor) retireLive(l *live, event Event, why string) {
-	if l == nil || !l.closing.CompareAndSwap(false, true) {
-		return
-	}
-	l.stopGuard()
-	s.mu.Lock()
-	s.notifyWaiters(l, ErrLinkLost)
-	s.mu.Unlock()
+// fenceLocked marks one connection as closing, and reports whether THIS caller
+// did it. It must be called with the admission mutex held, by every closer:
+// once it returns true no acquire can join the connection, because Acquire
+// reads `closing` under the same mutex it increments holders under.
+func (s *Supervisor) fenceLocked(l *live) bool {
+	return l != nil && l.closing.CompareAndSwap(false, true)
+}
 
+// finishFenced tears a connection down after its fence: the physical close runs
+// OUTSIDE the supervisor mutex — the library's own close waits for its
+// key-exchange loop, and that loop's host-key callback must never find this
+// mutex held (a rekey would deadlock) — and the connection is then cleared and
+// its `closed` fence announced, under one hold. The live stays in `s.live` with
+// `closing` set for the whole physical close, so an acquire that arrives during
+// it waits on `closed` instead of dialing into a pool that still holds the
+// transport.
+func (s *Supervisor) finishFenced(l *live, event Event) {
+	l.stopGuard()
 	_ = l.link.Close()
 
 	s.mu.Lock()
-	close(l.closed)
-	s.dropRidersLocked(l)
 	if s.live == l {
 		s.live = nil
 		s.generation++
 		s.advance(event)
 	}
+	close(l.closed)
 	s.mu.Unlock()
+}
+
+// retireLive ends one connection: the fence happens under the admission mutex,
+// the transport is closed outside it, and the connection is cleared and
+// announced after.
+func (s *Supervisor) retireLive(l *live, event Event, why string) {
+	s.mu.Lock()
+	if !s.fenceLocked(l) {
+		s.mu.Unlock()
+		return
+	}
+	s.dropRidersLocked(l)
+	s.notifyWaiters(l, ErrLinkLost)
+	s.mu.Unlock()
+
+	s.finishFenced(l, event)
 	if why != "" {
 		s.log.Warn("hostconn: closing a connection", "connection", s.key.String(), "why", why)
 	}
@@ -573,23 +617,26 @@ func (s *Supervisor) release(lease *Lease) {
 	}
 	delete(held.observers, lease)
 	last = held.holders == 0
-	switch {
-	case !last:
-	case s.live == held:
-		// The last holder of the live connection lets go: retire it, outside
-		// the mutex, through the same fence everything else uses.
-		s.mu.Unlock()
-		held.stopGuard()
-		s.retireLive(held, Event{Kind: Closed, Cause: CauseReleased}, "")
-		return
-	case s.live == nil && s.state.Kind == Reconnecting:
-		// The transport ended while this holder still had it, and now the
-		// last one has let go: there is nothing left to reconnect for.
-		s.advance(Event{Kind: Closed, Cause: CauseReleased})
+	// THE FENCE HAPPENS UNDER THIS SAME HOLD (review verification, the
+	// last-release race). Decrementing to zero, unlocking, and only then
+	// marking the connection closing left a window in which an acquire joined
+	// a connection nobody held — and the release it had already committed to
+	// then closed it under the new holder.
+	fenced := last && s.fenceLocked(held)
+	if fenced {
+		s.dropRidersLocked(held)
+		s.notifyWaiters(held, ErrLinkLost)
+		if s.live == nil && s.state.Kind == Reconnecting {
+			// The transport ended while this holder still had it, and now the
+			// last one has let go: there is nothing left to reconnect for.
+			s.advance(Event{Kind: Closed, Cause: CauseReleased})
+		}
 	}
 	s.mu.Unlock()
-	if last {
-		held.stopGuard()
+	if fenced {
+		// The live stays in s.live (closing) through the physical close, so an
+		// acquire in that window waits on its `closed` fence.
+		s.finishFenced(held, Event{Kind: Closed, Cause: CauseReleased})
 	}
 }
 
@@ -705,10 +752,42 @@ func (s *Supervisor) control(edge controlEdge) {
 	if live == nil || closing {
 		return
 	}
+	live.queue(edge)
+}
+
+// queue keeps the NEWEST edge of its kind and nudges the guard. Nothing is
+// dropped: a wake that arrives after a sleep replaces the sleep's kind's
+// pending value, and the last wake of a burst is what the guard applies.
+func (l *live) queue(edge controlEdge) {
+	l.controlMu.Lock()
+	if edge.sleep {
+		if edge.at >= l.sleepEdge {
+			l.sleepEdge = edge.at
+		}
+	} else if edge.at >= l.wakeEdge {
+		l.wakeEdge = edge.at
+	}
+	l.controlMu.Unlock()
 	select {
-	case live.control <- edge:
+	case l.controlWake <- struct{}{}:
 	default:
 	}
+}
+
+// takeEdges answers the edges waiting, oldest kind first, and clears them.
+func (l *live) takeEdges() []controlEdge {
+	l.controlMu.Lock()
+	defer l.controlMu.Unlock()
+	var edges []controlEdge
+	if l.sleepEdge != 0 {
+		edges = append(edges, controlEdge{sleep: true, at: l.sleepEdge})
+		l.sleepEdge = 0
+	}
+	if l.wakeEdge != 0 {
+		edges = append(edges, controlEdge{at: l.wakeEdge})
+		l.wakeEdge = 0
+	}
+	return edges
 }
 
 // Wake tells this connection the machine has woken from sleep: prove yourself

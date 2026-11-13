@@ -641,9 +641,12 @@ type endMarked struct {
 }
 
 func (c *endMarked) Close() error {
-	err := c.Conn.Close()
+	// THE MARK GOES FIRST (review verification, finding 5): between the
+	// physical close and the store, admission would otherwise see a socket
+	// that is closed but a connection that is not. Marking first means the
+	// honest answer is never later than the true one.
 	c.ended.Store(true)
-	return err
+	return c.Conn.Close()
 }
 
 // borrowPooled wraps a pool handle as the borrowed reference callers hold. A

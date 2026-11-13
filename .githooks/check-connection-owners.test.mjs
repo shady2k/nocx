@@ -1,18 +1,21 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import {
   ALLOWED_DIRS,
   ALLOWLIST,
+  ANALYSIS_TOOLCHAIN,
   RULES,
   aggregate,
+  analysisEnv,
   allowlistProblems,
   analyze,
   evaluate,
   loadBaseline,
+  toolchainForGoMod,
   unreasonedEntries,
   violationKey,
   violationsFromFacts,
@@ -384,6 +387,38 @@ test('the committed baseline is counted, reasoned, and only shrinks', () => {
 
 test('the transport packages are the only ones exempt, and there are three', () => {
   assert.deepEqual(ALLOWED_DIRS, ['internal/ssh/', 'internal/helper/sshsvc/', 'internal/sshtest/'])
+})
+
+// ─── the toolchain the analysis runs under ───────────────────────────────
+
+test('the analysis runs under the toolchain go.mod declares, not the host go', () => {
+  const goMod = readFileSync(join(PROJECT_ROOT, 'go.mod'), 'utf8')
+  const declared = /^toolchain (\S+)\s*$/m.exec(goMod)
+  assert.ok(
+    declared,
+    'go.mod names no `toolchain` line: the analysis would run under whatever go the host ' +
+      'happens to have, and a host newer than the module cannot read its own export data',
+  )
+  // THE TEST THIS GUARD EXISTS FOR: a hardcoded or host-derived toolchain that
+  // drifts from go.mod fails here. Bumping go.mod's toolchain line is the one
+  // edit that moves the analysis with it.
+  assert.equal(ANALYSIS_TOOLCHAIN, declared[1])
+  assert.equal(analysisEnv().GOTOOLCHAIN, declared[1])
+  assert.equal(analysisEnv({ GOTOOLCHAIN: 'local' }).GOTOOLCHAIN, declared[1])
+})
+
+test('a go.mod with no toolchain line, or one on another language line, is refused', () => {
+  assert.throws(
+    () => toolchainForGoMod('module x\n\ngo 1.26\n'),
+    /no `toolchain` line/,
+    'the go directive names a language version, not a toolchain to run',
+  )
+  assert.throws(
+    () => toolchainForGoMod('module x\n\ngo 1.26\n\ntoolchain go1.27.3\n'),
+    /Go 1\.27 but its go directive says 1\.26/,
+    'a toolchain on another language line is not derived from the go directive',
+  )
+  assert.equal(toolchainForGoMod('module x\n\ngo 1.26\n\ntoolchain go1.26.5\n'), 'go1.26.5')
 })
 
 test('the unchanged tree passes the check', () => {

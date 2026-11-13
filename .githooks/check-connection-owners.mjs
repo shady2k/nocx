@@ -214,6 +214,70 @@ function allowlisted(rule, file, object) {
   })
 }
 
+// ─── the toolchain the analysis runs under ───────────────────────────────
+//
+// The analysis is a TYPE-CHECKED load, and the reader inside
+// golang.org/x/tools understands export data only up to the Go release it was
+// written for. On a host whose `go` is newer than that release (1.27 today) the
+// load fails with "export data version N greater than maximum supported
+// version M" — so a check that inherited the developer's `go` would be green or
+// red depending on the machine, which is not a check at all.
+//
+// The toolchain is therefore PINNED BY THE MODULE and the host is irrelevant:
+// `go.mod` names it in `toolchain`, one line, and a bump of the language
+// version moves it with the same edit. The `go` directive alone is not enough
+// to run under: it names a language version (`1.26`) and GOTOOLCHAIN refuses a
+// version without a patch ("go1.26 is a language version but not a toolchain
+// version"). A go.mod that names no toolchain, or one on another language line,
+// is refused rather than guessed at.
+
+/**
+ * toolchainForGoMod answers the `toolchain` value a go.mod declares, refusing
+ * one that is missing or that sits on a different language line than the
+ * `go` directive.
+ */
+export function toolchainForGoMod(text) {
+  const goLine = /^go\s+(\d+\.\d+(?:\.\d+)?)\s*$/m.exec(text)
+  if (!goLine) throw new Error('go.mod names no `go` directive')
+  const tcLine = /^toolchain\s+(\S+)\s*$/m.exec(text)
+  if (!tcLine) {
+    throw new Error(
+      'go.mod names no `toolchain` line. The connection-owner analysis runs under the ' +
+        "module's own toolchain, and `go 1.26` is a language version with no patch to run: " +
+        'add `toolchain go1.26.x` beside it, so a host whose go is newer cannot change the answer.',
+    )
+  }
+  const tc = tcLine[1]
+  const tcMatch = /^go(\d+\.\d+)\.\d+$/.exec(tc)
+  if (!tcMatch) {
+    throw new Error(
+      `go.mod's toolchain ${JSON.stringify(tc)} is not a go<major>.<minor>.<patch> version`,
+    )
+  }
+  const goMinor = goLine[1].split('.').slice(0, 2).join('.')
+  if (tcMatch[1] !== goMinor) {
+    throw new Error(
+      `go.mod's toolchain ${tc} is Go ${tcMatch[1]} but its go directive says ${goLine[1]}: ` +
+        'the analysis would run under a language version the module does not declare',
+    )
+  }
+  return tc
+}
+
+/** The toolchain this repository's analysis runs under. */
+export const ANALYSIS_TOOLCHAIN = toolchainForGoMod(
+  readFileSync(resolve(PROJECT_ROOT, 'go.mod'), 'utf8'),
+)
+
+/**
+ * The environment every analyser invocation gets. `GOTOOLCHAIN` is the
+ * module's, never the host's: that is the whole of the fix for a developer
+ * whose go is newer than the one the analysis can read export data from.
+ */
+export function analysisEnv(env = process.env) {
+  return { ...env, GOTOOLCHAIN: ANALYSIS_TOOLCHAIN }
+}
+
 // ─── the analysed facts ──────────────────────────────────────────────────
 
 /**
@@ -235,6 +299,7 @@ export function analyze(opts = {}) {
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,
       stdio: ['ignore', 'pipe', 'pipe'],
+      env: analysisEnv(),
     })
   } catch (err) {
     const detail = (err.stderr ?? '').toString().trim() || err.message

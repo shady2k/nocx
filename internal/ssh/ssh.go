@@ -7,23 +7,8 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/credential"
-	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/profile"
 	gossh "golang.org/x/crypto/ssh"
 )
-
-type Channel interface {
-	io.ReadWriteCloser
-	Resize(ctx context.Context, cols, rows, xpixel, ypixel uint16) error
-	// Done returns a channel closed when the remote shell exits or the
-	// underlying connection is lost — the Disconnected signal from AD-7.
-	Done() <-chan struct{}
-	// ShellIntegrationReason reports why shell integration did not happen
-	// for this channel (nocx-r52q). ReasonNone means integration succeeded
-	// or was never attempted — a plain shell is the default. The transport
-	// carries this value to the UI; it must never be log-only.
-	ShellIntegrationReason() RefusalReason
-}
 
 // RemoteInstaller puts the shell integration bundle on a remote host and
 // takes it away again. Defined here (not in shellintegration) to avoid a
@@ -59,18 +44,6 @@ type RemoteInstaller interface {
 	// EnsureInstalledRemote publishes the bundle into the remote account's
 	// home, as the far side reports it.
 	EnsureInstalledRemote(ctx context.Context, host string, opts ...ConnectOption) error
-}
-
-// modeAllowsIntegration reports whether the resolved destination mode
-// (nocx-mlm7) permits open-time integration. The rule lives on the axis
-// itself (profile.DesiredMode.DeliversScripts) because it had a second
-// reader in internal/transport that spelled it differently; this is the
-// same question, asked of the one thing that owns it (AD-8).
-//
-// The mode arrives here as a string because ConnectConfig carries it as
-// one, stamped by the profile resolver.
-func modeAllowsIntegration(mode string) bool {
-	return profile.DesiredMode(mode).DeliversScripts()
 }
 
 // ---------------------------------------------------------------------------
@@ -463,11 +436,6 @@ type RemoteLauncher interface {
 	Prepare(shell ShellKind, opts LaunchOptions) (digest string, run BootstrapRun, gate BootstrapGate, ok bool)
 }
 
-type SSH interface {
-	Connect(ctx context.Context, host string, opts ...ConnectOption) (Channel, error)
-	Close() error
-}
-
 type ConnectOption func(*ConnectConfig)
 
 type ConnectConfig struct {
@@ -475,10 +443,6 @@ type ConnectConfig struct {
 	Port         int
 	KeyFile      string
 	UseAgent     bool
-	Cols         uint16
-	Rows         uint16
-	XPixel       uint16
-	YPixel       uint16
 	AuthMethods  []gossh.AuthMethod
 	KeyExchanges []string
 	// RemoteInstaller publishes the integration bundle on the far host, over
@@ -541,8 +505,8 @@ type ConnectConfig struct {
 	// JumpHost is the first hop's hostname or IP. When JumpConfig is also set
 	// (set by the resolver for multi-hop), JumpConfig carries the full
 	// recursive hop configuration and this flat field is the first hop's host.
-	// For backward compatibility, both fields are populated: acquireJumpHost
-	// prefers JumpConfig when non-nil.
+	// Both shapes are populated: jumpConnectConfig reads JumpConfig when it
+	// is non-nil and falls back to these flat fields for a single hop.
 	JumpHost string
 	// JumpPort is the port of the first jump server (0 means use default 22).
 	JumpPort int
@@ -555,9 +519,9 @@ type ConnectConfig struct {
 	// multi-hop routes. When the resolver builds the config for a target
 	// accessed through a chain of bastions, JumpConfig is the recursive
 	// ConnectConfig of the first hop, which itself may have JumpConfig set
-	// for the next hop, and so on. This is nil for direct connections.
-	// acquireJumpHost reads this field preferentially; the flat Jump* fields
-	// are populated as well for backward compatibility.
+	// for the next hop, and so on. This is nil for direct connections. The
+	// resolver reads this field preferentially; the flat Jump* fields are
+	// populated for the one-hop case.
 	JumpConfig *ConnectConfig
 
 	// AuthorizedEndpoint carries the endpoint identity that a linked credential
@@ -632,13 +596,6 @@ type ConnectConfig struct {
 	// closes the connection.
 	KeepaliveCountMax int
 
-	// Liveness receives what the keepalive prober learns about the far end
-	// (nocx-iarf9): a probe that failed while retries remain, and the probe
-	// that answers again afterwards. Nil disables the reporting without
-	// changing anything else the prober does. Only meaningful when
-	// KeepaliveInterval > 0 — with no prober there is nothing observing.
-	Liveness LivenessObserver
-
 	// ReadyTimeout is the maximum time to wait for the SSH TCP dial and
 	// handshake to complete. Zero means use the default of 30 seconds.
 	ReadyTimeout time.Duration
@@ -673,17 +630,6 @@ func WithAgent() ConnectOption {
 	return func(c *ConnectConfig) { c.UseAgent = true }
 }
 
-// WithPTYSize sets the initial PTY dimensions for the shell channel.
-// Per AD-1/AD-7 the channel is created at this size, never spawned-then-resized.
-func WithPTYSize(cols, rows, xpixel, ypixel uint16) ConnectOption {
-	return func(c *ConnectConfig) {
-		c.Cols = cols
-		c.Rows = rows
-		c.XPixel = xpixel
-		c.YPixel = ypixel
-	}
-}
-
 // WithKeepalive sets the keepalive interval and consecutive-failure limit.
 // A zero interval disables keepalive. Negative countMax means a single
 // failure closes the connection.
@@ -692,14 +638,6 @@ func WithKeepalive(interval time.Duration, countMax int) ConnectOption {
 		c.KeepaliveInterval = interval
 		c.KeepaliveCountMax = countMax
 	}
-}
-
-// WithLivenessObserver routes the keepalive prober's findings to obs
-// (nocx-iarf9). The session registry sets this on every remote open, so a host
-// that stops answering marks its sessions unknown instead of leaving them
-// looking alive until the connection finally dies.
-func WithLivenessObserver(obs LivenessObserver) ConnectOption {
-	return func(c *ConnectConfig) { c.Liveness = obs }
 }
 
 // WithTimeout sets the connect timeout for the TCP dial and SSH handshake.
@@ -725,23 +663,11 @@ func WithAgentForward() ConnectOption {
 	return func(c *ConnectConfig) { c.AgentForward = true }
 }
 
-// WithAuthMethods injects explicit ssh.AuthMethod values, bypassing the
-// default key-discovery logic. Used primarily in tests.
-func WithAuthMethods(auths []gossh.AuthMethod) ConnectOption {
-	return func(c *ConnectConfig) { c.AuthMethods = auths }
-}
-
 // WithRemoteLauncher injects the launcher that builds the start command for
 // an integrated remote shell (nocx-xs1d). When it declines, openShell falls
 // back to a plain shell and the refusal reason is surfaced on the channel.
 func WithRemoteLauncher(l RemoteLauncher) ConnectOption {
 	return func(c *ConnectConfig) { c.RemoteLauncher = l }
-}
-
-// WithSessionID binds the backend-assigned session ID (AD-7) to the
-// connection; the launcher embeds it as NOCX_SESSION_ID.
-func WithSessionID(id string) ConnectOption {
-	return func(c *ConnectConfig) { c.SessionID = id }
 }
 
 // WithDesiredMode sets the resolved destination mode (raw|script|helper,
@@ -750,12 +676,6 @@ func WithSessionID(id string) ConnectOption {
 // open a plain shell and publish nothing.
 func WithDesiredMode(mode string) ConnectOption {
 	return func(c *ConnectConfig) { c.DesiredMode = mode }
-}
-
-// WithEnhanced requests the marker-only prompt mode (ADR-0006) for the
-// remote shell.
-func WithEnhanced() ConnectOption {
-	return func(c *ConnectConfig) { c.Enhanced = true }
 }
 
 // WithShell pins the far shell the launcher must target, winning over the
@@ -894,70 +814,9 @@ func WithJumpAuthorizedEndpoint(endpoint string) ConnectOption {
 // WithJumpConfig forwards the full recursive jump host configuration. The
 // resolver builds JumpConfig with the bastion's own Secrets, SecretID,
 // PassphraseSecretID, KeyFile, AuthMode and nested JumpConfig for the next
-// hop. Without this option the session→ssh seam drops it, and
-// acquireJumpHost falls back to flat fields that lack KeySecretID and
-// PasswordRequester — producing an empty auth chain and "attempted methods
-// [none]" (nocx-8b1v).
+// hop. Without this option the session→ssh seam drops it, and a route
+// resolves from flat fields that lack KeySecretID and PasswordRequester —
+// producing an empty auth chain and "attempted methods [none]" (nocx-8b1v).
 func WithJumpConfig(jump *ConnectConfig) ConnectOption {
 	return func(c *ConnectConfig) { c.JumpConfig = jump }
-}
-
-type Stub struct {
-	log log.Logger
-}
-
-func NewStub(logger log.Logger) *Stub {
-	return &Stub{log: logger}
-}
-
-func (s *Stub) Connect(ctx context.Context, host string, opts ...ConnectOption) (Channel, error) {
-	s.log.Info("ssh stub: Connect called (not implemented)", "host", host)
-	return NewStubChannel(s.log), nil
-}
-
-func (s *Stub) Close() error {
-	s.log.Debug("ssh stub: Close called")
-	return nil
-}
-
-type StubChannel struct {
-	log  log.Logger
-	done chan struct{}
-}
-
-func NewStubChannel(logger log.Logger) *StubChannel {
-	return &StubChannel{log: logger, done: make(chan struct{})}
-}
-
-func (c *StubChannel) Read(p []byte) (int, error) {
-	return 0, io.EOF
-}
-
-func (c *StubChannel) Write(p []byte) (int, error) {
-	return len(p), nil
-}
-
-func (c *StubChannel) Close() error {
-	c.onceClose()
-	return nil
-}
-
-func (c *StubChannel) onceClose() {
-	select {
-	case <-c.done:
-	default:
-		close(c.done)
-	}
-}
-
-func (c *StubChannel) Done() <-chan struct{} {
-	return c.done
-}
-
-func (c *StubChannel) Resize(_ context.Context, cols, rows, xpixel, ypixel uint16) error {
-	return nil
-}
-
-func (c *StubChannel) ShellIntegrationReason() RefusalReason {
-	return ReasonNone
 }

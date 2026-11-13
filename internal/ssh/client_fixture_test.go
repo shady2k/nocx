@@ -13,40 +13,50 @@ package ssh
 // untagged half (ssh_real.go).
 
 import (
-	"context"
-	"fmt"
+	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 
-	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/storage/storagetest"
 )
 
-// memSecretStore is the in-memory credential.Resolver the auth-chain and
-// prompt tests both stand in for a vault: Create mints an id, and Resolve
-// answers the stored value through Secret.Use like a real one does. It is
-// here, beside the client fixtures and for the same reason — the untagged
-// password_prompt_test.go needs it, and the untagged pass is the build where
-// a tagged file does not exist.
-
-// newTestRealClient builds a RealClient with test-safe defaults.
-func newTestRealClient(t *testing.T) *RealClient {
+// sshHome gives this test its own $HOME and answers where the product's client
+// reads its host keys: $HOME/.ssh/known_hosts.
+//
+// That is the ONLY seam there is, and it is deliberate rather than a
+// convenience: the client resolves its own home, production has no need to
+// name a path, and an option for it would be a test hook living in the product
+// (nocx-oalo1.3.2). A test that wants its own store gives the client its own
+// home, exactly as a person has one. The directory is created; the file is the
+// caller's to write, or TrustHostKey's.
+func sshHome(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	rc, err := NewReal(
-		log.NewSlogAdapter(nil), // nil handler → slog falls back
-		WithKnownHostsFile(filepath.Join(dir, "known_hosts")),
-		WithConfigResolver(NewStubConfigResolver()),
-	)
-	if err != nil {
-		t.Fatalf("NewReal: %v", err)
+	home := sshTestHome(t)
+	dir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("prepare %s: %v", dir, err)
 	}
-	return rc
+	return filepath.Join(dir, "known_hosts")
 }
 
-// newTrustClient builds a RealClient whose known_hosts lives at the given
-// path (which may not exist yet).
+// sshTestHome gives this test its own $HOME, for a caller that needs only a
+// home and never reads a host key: a client whose bindings refuse before any
+// dial, a client that is only constructed.
+//
+// It is the one place a test in this package moves HOME, and it moves it
+// through storagetest.SetHome so that the go command's module cache stays in
+// the caller's directories. `go build` under a moved HOME writes GOPATH and
+// GOMODCACHE into the test's home and makes them read-only, which is a home
+// nothing can remove and a failure a test did not ask for (nocx-oalo1.3.2).
+func sshTestHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	storagetest.SetHome(t, home)
+	return home
+}
+
+// newTrustClient builds a RealClient over the $HOME sshHome gave this test.
 //
 // It registers no cleanup, and the reason is the split rather than an
 // oversight: RealClient.Close is the TAGGED half's (it closes the pool), so a
@@ -54,64 +64,11 @@ func newTestRealClient(t *testing.T) *RealClient {
 // for it to close — the coordinator's client holds no connection. The tagged
 // tests that dial through this client close what they dialed (probeOnce closes
 // the one connection it opens), so nothing survives them either.
-func newTrustClient(t *testing.T, khPath string) *RealClient {
+func newTrustClient(t *testing.T) *RealClient {
 	t.Helper()
-	client, err := NewReal(
-		log.NewSlogAdapter(nil),
-		WithKnownHostsFile(khPath),
-	)
+	client, err := NewReal(log.NewSlogAdapter(nil))
 	if err != nil {
 		t.Fatalf("NewReal: %v", err)
 	}
 	return client
-}
-
-type memSecretStore struct {
-	mu   sync.Mutex
-	m    map[credential.SecretID]credential.Secret
-	next int
-}
-
-func (s *memSecretStore) Create(_ context.Context, value credential.Secret) (credential.SecretID, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.next++
-	id := credential.SecretID(fmt.Sprintf("mem-%d", s.next))
-	if s.m == nil {
-		s.m = make(map[credential.SecretID]credential.Secret)
-	}
-	s.m[id] = value
-	return id, nil
-}
-
-func (s *memSecretStore) Get(_ context.Context, id credential.SecretID) (credential.Secret, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	v, ok := s.m[id]
-	if !ok {
-		return credential.Secret{}, nil
-	}
-	return v, nil
-}
-
-func (s *memSecretStore) Resolve(ctx context.Context, id credential.SecretID, why credential.Stance) (credential.Secret, error) {
-	return credential.NewResolver(s, nil, nil).Resolve(ctx, id, why)
-}
-
-func (s *memSecretStore) Delete(_ context.Context, id credential.SecretID) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.m, id)
-	return nil
-}
-
-func (s *memSecretStore) Exists(_ context.Context, id credential.SecretID) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, ok := s.m[id]
-	return ok, nil
-}
-
-func newTestStore() *memSecretStore {
-	return &memSecretStore{}
 }

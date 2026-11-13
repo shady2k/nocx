@@ -35,17 +35,11 @@ import (
 	"time"
 
 	pkgsftp "github.com/pkg/sftp"
-	helperclient "github.com/shady2k/nocx/internal/helper/client"
-	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/helper/deploy"
-	"github.com/shady2k/nocx/internal/helper/proto"
-	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/remoteprobe"
-	"github.com/shady2k/nocx/internal/session"
-
 	"github.com/shady2k/nocx/internal/ssh"
-	"github.com/shady2k/nocx/internal/storage"
+	"github.com/shady2k/nocx/internal/storage/storagetest"
 	gossh "golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
@@ -550,59 +544,6 @@ func (f *openPasswordPTYFactory) NewPTY(context.Context, pty.Config) (pty.Pty, e
 	return f.stub, nil
 }
 
-// TestOpenPath_PasswordAskFiresOncePerOpen drives the open path in the order
-// the transport drives it — the helper selection first, then the registry's
-// own open when the selection declines — against a destination whose only
-// credential is a password the user must type.
-//
-// It asserts the whole interval: one ask raised, and the password that ask
-// returned is the one the server authenticated. Two asks means the second
-// prompt is standing in front of a user who has already answered, and the
-// open blocks behind it.
-func TestOpenPath_PasswordAskFiresOncePerOpen(t *testing.T) {
-	srv := startPasswordSSHServer(t)
-	reg, helperReg := openPasswordStack(t, srv, noLocalHelperProbes{t: t})
-
-	asker := &countingPasswordRequester{answer: openPasswordFixturePassword}
-	cfg := openPasswordConfig(srv, &ssh.ConnectConfig{
-		User:              "e2euser",
-		AuthMode:          "password",
-		ConnectionName:    "Password Proof",
-		PasswordRequester: asker,
-	})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if _, selected, err := helperReg.OpenHosted(ctx, cfg, ""); selected {
-		t.Fatalf("the helper selected a destination it ships no artifact for")
-	} else if err != nil {
-		t.Fatalf("OpenHosted declined with an error: %v", err)
-	}
-
-	sess, err := reg.Open(ctx, cfg)
-	if err != nil {
-		t.Fatalf("the session did not open: %v", err)
-	}
-	t.Cleanup(func() { _ = reg.Close(sess.ID()) })
-
-	if got := asker.count(); got != 1 {
-		t.Errorf("the user was asked for the connection password %d times, want exactly 1", got)
-	}
-	attempts := srv.authAttempts()
-	if len(attempts) == 0 {
-		t.Fatal("the server authenticated no password at all: the answer never reached authentication")
-	}
-	for i, pw := range attempts {
-		if pw != openPasswordFixturePassword {
-			t.Errorf("auth attempt %d sent %q, want the password the user supplied", i, pw)
-		}
-	}
-}
-
-// writeKnownHostsFor records every given fixture's host key in ONE file, which
-// is what a coordinator with more than one destination to dial has (a second
-// host, a bastion on the route). One host is the ordinary call.
 func writeKnownHostsFor(t *testing.T, path string, srvs ...*pwSSHServer) {
 	t.Helper()
 	var b strings.Builder
@@ -611,182 +552,6 @@ func writeKnownHostsFor(t *testing.T, path string, srvs ...*pwSSHServer) {
 	}
 	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
 		t.Fatalf("write known_hosts: %v", err)
-	}
-}
-
-// TestOpenPath_ProbeStillRunsOnARememberedPassword is the other end of the
-// same rule, and the reason the suppression is narrow. A destination whose
-// password has been remembered (ADR-0017: the profile references a vault
-// secret) resolves without interrupting anyone, so the platform probe must
-// still be ENTERED and still be handed the destination — only the rung that
-// would stop a person is off.
-//
-// Without this, "the probe must not prompt" could be satisfied by a probe that
-// no longer probes. What the probe then DOES with that credential — authenticating
-// against the far side and running the uname command — is the helper's half, and
-// it is asserted where a helper exists: internal/helper/sshsvc's probe tests
-// drive a real ssh server with a password only the scripted coordinator has.
-func TestOpenPath_ProbeStillRunsOnARememberedPassword(t *testing.T) {
-	srv := startPasswordSSHServer(t)
-	probes := &recordingProbeSource{}
-	reg, helperReg := openPasswordStack(t, srv, probes)
-
-	asker := &countingPasswordRequester{answer: "the ask must never fire"}
-	cfg := openPasswordConfig(srv, &ssh.ConnectConfig{
-		User:           "e2euser",
-		AuthMode:       "password",
-		ConnectionName: "Password Proof",
-		Secrets:        rememberedPassword{value: openPasswordFixturePassword},
-		SecretID:       "sec:remembered:1",
-		// The credential may only be spent on the endpoint its profile
-		// identifies; the resolver stamps this, so the test does too.
-		AuthorizedEndpoint: srv.addr,
-		PasswordRequester:  asker,
-	})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if _, selected, err := helperReg.OpenHosted(ctx, cfg, ""); selected {
-		t.Fatalf("the helper selected a destination it ships no artifact for")
-	} else if err != nil {
-		t.Fatalf("OpenHosted declined with an error: %v", err)
-	}
-
-	sess, err := reg.Open(ctx, cfg)
-	if err != nil {
-		t.Fatalf("the session did not open: %v", err)
-	}
-	t.Cleanup(func() { _ = reg.Close(sess.ID()) })
-
-	if got := asker.count(); got != 0 {
-		t.Errorf("a remembered password still raised %d ask(s); the open must be silent", got)
-	}
-	asked := probes.asked()
-	if len(asked) != 1 {
-		t.Fatalf("the platform probe was entered %d time(s), want 1: the suppression stopped the probe, not just the prompt", len(asked))
-	}
-	if asked[0].User != "e2euser" || net.JoinHostPort(asked[0].Host, strconv.Itoa(asked[0].Port)) != srv.addr {
-		t.Errorf("the probe was handed %+v, want the destination the profile resolved (%s)", asked[0], srv.addr)
-	}
-	if asked[0].Identity.Credential.Ref == "" {
-		t.Error("the probe was handed no credential reference: a probe that cannot authenticate is not a probe")
-	}
-}
-
-// openPasswordStack builds the real composition the open path runs through —
-// the session registry over a real ssh.RealClient, and the helper registry
-// whose selection runs before it. The only double is the artifact source.
-func openPasswordStack(t *testing.T, srv *pwSSHServer, probes probeHelperSource) (*session.Reg, *helperRegistry) {
-	t.Helper()
-	logger := log.NewSlogAdapter(discardLogger(t))
-
-	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
-	writeKnownHostsFor(t, knownHosts, srv)
-
-	client, err := ssh.NewReal(logger,
-		ssh.WithKnownHostsFile(knownHosts),
-		ssh.WithConfigResolver(reachResolver{}),
-	)
-	if err != nil {
-		t.Fatalf("ssh.NewReal: %v", err)
-	}
-	t.Cleanup(func() { _ = client.Close() })
-
-	reg := session.New(logger, &openPasswordPTYFactory{stub: pty.NewStub(logger)}).
-		WithSSHFactory(&coordinatorDialFactory{client: client})
-
-	consentStore := consent.NewStore(logger, storage.NewDocumentStore(t.TempDir()), "consent.json")
-	installStore := consent.NewInstallStore(logger, storage.NewDocumentStore(t.TempDir()), "installs.json")
-	// Every lease this dispatch serves is this machine's helper's, and this
-	// stack has no local daemon — so the lease half is the failing double
-	// above. Nothing in this test's path opens one (it drives the AUTH ladder
-	// of a pane open), which is what makes the substitution unreachable code
-	// with a name rather than a weakened assertion.
-	lanes := installLeaseRoutes{
-		viaLocal: noLocalHelperLease{t: t},
-		// The platform probe is this machine's helper's now (nocx-50w7p.9).
-		// This stack has no daemon, so the route is the caller's: a test that
-		// asserts the probe RUNS passes a recording source, and one that only
-		// drives the pane's auth ladder passes the failing default.
-		probes: &helperProbes{local: probes, resolve: client},
-	}
-	_, helperReg := helperGitFactory(lanes, refusingArtifactSource{}, consentStore, installStore, discardLogger(t))
-	helperReg.registry = reg
-	return reg, helperReg
-}
-
-// noLocalHelperLease is this machine's helper for a stack that has none: the
-// install lease, the file panel's and the git factory's exec lane. It FAILS the
-// test if it is ever reached, which is the honest shape — a stand-in that
-// answered would hide the day the pane-open path starts needing a helper lease,
-// and this test's subject is the auth ladder, not the install, the files or the
-// lane.
-type noLocalHelperLease struct{ t *testing.T }
-
-func (n noLocalHelperLease) HelperInstallConn(context.Context, string, ...ssh.ConnectOption) (ssh.HelperInstallConn, error) {
-	n.t.Error("this stack has no local helper, so no install lease can be acquired")
-	return nil, errors.New("no local helper in this stack")
-}
-
-func (n noLocalHelperLease) FSConn(context.Context, string, ...ssh.ConnectOption) (ssh.FSConn, error) {
-	n.t.Error("this stack has no local helper, so no sftp lease can be acquired")
-	return nil, errors.New("no local helper in this stack")
-}
-
-func (n noLocalHelperLease) LaneConn(context.Context, string, proto.Machine, proto.GenerationID, ...ssh.ConnectOption) (helperclient.HelperConn, error) {
-	n.t.Error("this stack has no local helper, so no lane can be opened")
-	return nil, errors.New("no local helper in this stack")
-}
-
-// noLocalHelperProbes is the probe half of a stack that has no daemon: no
-// helper, so no lease. It fails the test if it is reached, which is the honest
-// shape for a test whose subject is the pane's auth ladder — a stand-in that
-// answered would hide the day that path starts needing a probe.
-type noLocalHelperProbes struct{ t *testing.T }
-
-func (n noLocalHelperProbes) probeHelper(context.Context) (probeHelper, error) {
-	n.t.Error("this stack has no local helper, so no probe lease can be acquired")
-	return nil, errors.New("no local helper in this stack")
-}
-
-// recordingProbeSource stands where this machine's helper stands, and records
-// what it was asked.
-//
-// The platform probe answers a credential question the COORDINATOR resolves and
-// the helper presents (the suppression travels with the resolution), and the
-// assertion this source serves is about that pair: the probe is ENTERED with a
-// remembered password and no ask. Whether the far side then authenticates is the
-// helper's half of the same criterion, and it is asserted where a helper exists
-// — internal/helper/sshsvc's probe tests drive a real server with a password
-// only the scripted coordinator has.
-type recordingProbeSource struct {
-	mu      sync.Mutex
-	targets []proto.SSHDestination
-}
-
-func (r *recordingProbeSource) probeHelper(context.Context) (probeHelper, error) { return r, nil }
-
-func (r *recordingProbeSource) AcquireProbeLease(_ context.Context, params proto.LeaseParams) (probeCommands, error) {
-	r.mu.Lock()
-	r.targets = append(r.targets, params.Destination)
-	r.mu.Unlock()
-	return &fakeProbeCommands{}, nil
-}
-
-func (r *recordingProbeSource) asked() []proto.SSHDestination {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]proto.SSHDestination(nil), r.targets...)
-}
-
-func openPasswordConfig(srv *pwSSHServer, remote *ssh.ConnectConfig) session.Config {
-	return session.Config{
-		Kind:      session.KindRemote,
-		Host:      srv.addr,
-		ProfileID: "ssh:password-proof",
-		Cols:      80, Rows: 24,
-		Remote: remote,
 	}
 }
 
@@ -809,4 +574,35 @@ func (s *pwSSHServer) awaitConns(want int) int {
 			return s.connCount()
 		}
 	}
+}
+
+// homeForKnownHosts gives this test its own $HOME and answers the path the
+// coordinator's ssh client reads its host keys from: $HOME/.ssh/known_hosts.
+//
+// That is the only seam there is. RealClient resolves its own home and
+// production has no need to name a path, so a test that wants its own store
+// gives the client its own home, exactly as a person has one (nocx-oalo1.3.2).
+// The directory is created; the file is the caller's to write.
+//
+// The home comes from storagetest.SetHome rather than t.TempDir plus t.Setenv,
+// because the go command resolves its module cache from HOME by default and
+// writes it read-only — a test home that holds one cannot be removed, and a
+// stand that builds the helper does exactly that (nocx-oalo1.3.2).
+func homeForKnownHosts(t *testing.T) (home, khPath string) {
+	t.Helper()
+	home = t.TempDir()
+	storagetest.SetHome(t, home)
+	return home, knownHostsIn(t, home)
+}
+
+// knownHostsIn answers the product's known_hosts path under a home the test
+// already owns, and makes sure its directory exists. The file itself is the
+// caller's to write.
+func knownHostsIn(t *testing.T, home string) string {
+	t.Helper()
+	dir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("prepare %s: %v", dir, err)
+	}
+	return filepath.Join(dir, "known_hosts")
 }

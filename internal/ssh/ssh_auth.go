@@ -4,150 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 
 	"github.com/shady2k/nocx/internal/credential"
-	"github.com/shady2k/nocx/internal/vault"
 	gossh "golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/agent"
 )
 
 // readFileFn abstracts os.ReadFile for test injection. Tests replace this
 // with a spy to assert that no file I/O occurs when the vault key path is
 // taken (KeySecretID set).
 var readFileFn = os.ReadFile
-
-// ---------------------------------------------------------------------------
-// Auth fallback chain (Tabby-parity)
-// ---------------------------------------------------------------------------
-
-// authMethodKind labels a bucket in the fallback chain.
-type authMethodKind int
-
-const (
-	kindNone authMethodKind = iota
-	kindPublicKey
-	kindAgent
-	kindSavedPassword
-	kindKeyboardInteractive
-	kindPromptPassword
-	kindHostbased
-)
-
-// authChainEntry is one bucket in the ordered fallback chain.
-type authChainEntry struct {
-	kind   authMethodKind
-	method gossh.AuthMethod
-	// secret holds a stored password/passphrase for late-bind auth buckets.
-	// It is a credential.Secret so it cannot leak via logging or marshaling;
-	// auth methods read it through Use at auth time only (see
-	// passwordCallbackFromSecret).
-	secret credential.Secret
-}
-
-// buildAuthChain builds the ordered auth fallback chain, porting Tabby's
-// SSHSession.init(). Order: none → publicKey(s) → agent → savedPassword →
-// keyboard-interactive → promptPassword → hostbased.
-func (rc *RealClient) buildAuthChain(ctx context.Context, resolved *resolvedConfig, cfg *ConnectConfig) ([]authChainEntry, error) {
-	if len(cfg.AuthMethods) > 0 {
-		chain := make([]authChainEntry, 0, len(cfg.AuthMethods))
-		for _, m := range cfg.AuthMethods {
-			chain = append(chain, authChainEntry{kind: kindPublicKey, method: m})
-		}
-		return chain, nil
-	}
-
-	mode := cfg.AuthMode
-	var chain []authChainEntry
-
-	chain = append(chain, authChainEntry{kind: kindNone})
-	if mode == "" || mode == "publicKey" {
-		if err := rc.addPublicKeyMethods(ctx, &chain, resolved, cfg); err != nil {
-			return nil, err
-		}
-	}
-	if (mode == "" || mode == "agent") && rc.agentAvailable() {
-		rc.addAgentMethods(&chain)
-	}
-
-	if mode == "" || mode == "password" {
-		if err := rc.addPasswordMethods(ctx, &chain, cfg); err != nil {
-			return nil, err
-		}
-	}
-
-	if mode == "" || mode == "keyboardInteractive" {
-		if err := rc.addKeyboardInteractiveMethods(ctx, &chain, cfg); err != nil {
-			return nil, err
-		}
-	}
-
-	if mode == "" || mode == "password" {
-		chain = append(chain, authChainEntry{
-			kind:   kindPromptPassword,
-			method: rc.promptPasswordMethod(ctx, cfg, resolved, hasStoredPasswordRung(chain)),
-		})
-	}
-
-	chain = append(chain, authChainEntry{kind: kindHostbased})
-
-	return chain, nil
-}
-
-func (rc *RealClient) addPublicKeyMethods(ctx context.Context, chain *[]authChainEntry, resolved *resolvedConfig, cfg *ConnectConfig) error {
-	// Vault-stored key material path. When KeySecretID is set, load key
-	// bytes from the SecretStore exclusively — no file-based fallback.
-	if cfg.KeySecretID != "" {
-		// Guard: KeySecretID and KeyFile are mutually exclusive. If both
-		// are set upstream it is a bug that must be loud, not silently
-		// resolved by precedence.
-		if cfg.KeyFile != "" {
-			return fmt.Errorf("both KeySecretID and KeyFile are set; vault-key path refused — this is a bug")
-		}
-		if cfg.Secrets == nil {
-			return fmt.Errorf("KeySecretID set but no SecretStore configured")
-		}
-		return rc.addVaultKeyMethod(ctx, chain, cfg)
-	}
-
-	// The identity files, in OpenSSH's own order: the `identityfile` lines of
-	// the resolved configuration — which is ssh's default list when the config
-	// names none, so this is the default key discovery as well, from ONE
-	// answer rather than from this list plus a hard-coded second one. A file
-	// that does not exist, or that is encrypted with a passphrase nobody
-	// stored, is skipped: ssh offers the next key, and it does not stop to ask
-	// for a passphrase a profile never named.
-	for _, path := range resolved.identityFiles {
-		signer, err := rc.loadKey(ctx, path, cfg)
-		if err != nil {
-			var encKeyErr *ErrEncryptedKey
-			if errors.As(err, &encKeyErr) {
-				rc.log.Debug("skipping encrypted key in chain", "path", path)
-			}
-			continue
-		}
-		*chain = append(*chain, authChainEntry{kind: kindPublicKey, method: gossh.PublicKeys(signer)})
-	}
-
-	return nil
-}
-
-// addVaultKeyMethod loads private key bytes from the SecretStore by
-// KeySecretID and builds the signer. When PassphraseSecretID is also set,
-// the passphrase is loaded and used to decrypt the key. Key bytes never
-// touch disk.
-//
-// Any error — vault sealed, secret missing, malformed key material — is
-// propagated to the caller. There is no silent fallback to file-based keys.
-func (rc *RealClient) addVaultKeyMethod(ctx context.Context, chain *[]authChainEntry, cfg *ConnectConfig) error {
-	signer, err := rc.storedKeySigner(ctx, cfg)
-	if err != nil {
-		return err
-	}
-	*chain = append(*chain, authChainEntry{kind: kindPublicKey, method: gossh.PublicKeys(signer)})
-	return nil
-}
 
 // storedKeySigner loads the private key material a config's KeySecretID names
 // — with PassphraseSecretID when the key is encrypted — and answers the
@@ -210,86 +76,6 @@ func (rc *RealClient) storedKeySigner(ctx context.Context, cfg *ConnectConfig) (
 	return signer, nil
 }
 
-func (rc *RealClient) addAgentMethods(chain *[]authChainEntry) {
-	if am := rc.agentMethods(); len(am) > 0 {
-		for _, m := range am {
-			*chain = append(*chain, authChainEntry{kind: kindAgent, method: m})
-		}
-	}
-}
-
-// passwordCallbackFromSecret builds a gossh.PasswordCallback that
-// materializes the plaintext through Secret.Use only when the SSH server
-// challenges for it — so the password lives in memory for the duration of
-// the callback, not for the lifetime of the chain. An empty secret returns
-// ("", nil), matching the previous empty-string behaviour.
-func passwordCallbackFromSecret(s credential.Secret) gossh.AuthMethod {
-	return gossh.PasswordCallback(func() (string, error) {
-		var pw string
-		if err := s.Use(func(b []byte) error { pw = string(b); return nil }); err != nil {
-			return "", err
-		}
-		return pw, nil
-	})
-}
-
-// A LOCKED VAULT IS NOT "no password is stored" (nocx-…). The connection
-// names a secret; the vault simply cannot be read yet. Swallowing that
-// distinction is what put the product in a loop nobody could get out of:
-// the rung was skipped, the ladder fell through to the prompt rung, and the
-// prompt told the user "no password is stored for this connection" — about a
-// connection whose password had been saved several times. Answering it with
-// Remember then needs the vault to WRITE, so the sealed error surfaced there
-// instead, the renderer raised the unlock, the open was re-sent — and the
-// re-sent open asked for the password again, because nothing had been bound.
-//
-// So the lookup's sealed error is PROPAGATED, before the dial. The transport
-// maps it to the canonical vault-sealed error, the renderer raises the unlock
-// it already owns, and the dispatcher re-sends the open once the vault
-// answers (ADR-0032). That open finds the stored password and asks nothing.
-// Every other lookup failure is still a skipped rung: a secret that is gone
-// or a provider that is broken leaves the prompt as the honest last resort.
-func vaultUnreadable(err error) bool {
-	return errors.Is(err, vault.ErrVaultSealed) || errors.Is(err, vault.ErrVaultUninitialized)
-}
-
-func (rc *RealClient) addPasswordMethods(ctx context.Context, chain *[]authChainEntry, cfg *ConnectConfig) error {
-	if cfg.Secrets == nil || cfg.SecretID == "" {
-		return nil
-	}
-	stored, err := rc.getSecretWithUnlock(ctx, cfg, cfg.SecretID, "read the stored password")
-	if err != nil {
-		if vaultUnreadable(err) {
-			return err
-		}
-		rc.log.Debug("secret lookup failed", "secretID", cfg.SecretID, "error", err)
-		return nil
-	}
-	if stored.IsEmpty() {
-		return nil
-	}
-	*chain = append(*chain, authChainEntry{
-		kind:   kindSavedPassword,
-		method: passwordCallbackFromSecret(stored),
-		secret: stored,
-	})
-	return nil
-}
-
-func (rc *RealClient) addKeyboardInteractiveMethods(ctx context.Context, chain *[]authChainEntry, cfg *ConnectConfig) error {
-	if cfg.Secrets != nil && cfg.SecretID != "" {
-		stored, err := rc.getSecretWithUnlock(ctx, cfg, cfg.SecretID, "read the stored secret")
-		switch {
-		case err != nil && vaultUnreadable(err):
-			return err
-		case err == nil && !stored.IsEmpty():
-			*chain = append(*chain, authChainEntry{kind: kindKeyboardInteractive, secret: stored})
-		}
-	}
-	*chain = append(*chain, authChainEntry{kind: kindKeyboardInteractive})
-	return nil
-}
-
 // lookupKeyPassphrase resolves a private-key passphrase through the mandatory
 // operation stance.
 func (rc *RealClient) lookupKeyPassphrase(ctx context.Context, resolver credential.Resolver, id credential.SecretID) (credential.Secret, error) {
@@ -301,16 +87,6 @@ func (rc *RealClient) lookupKeyPassphrase(ctx context.Context, resolver credenti
 
 func (rc *RealClient) getSecretWithUnlock(ctx context.Context, cfg *ConnectConfig, id credential.SecretID, reason string) (credential.Secret, error) {
 	return cfg.Secrets.Resolve(ctx, id, credential.Operation(reason))
-}
-
-func authMethodsFromChain(chain []authChainEntry) []gossh.AuthMethod {
-	var methods []gossh.AuthMethod
-	for _, entry := range chain {
-		if entry.method != nil {
-			methods = append(methods, entry.method)
-		}
-	}
-	return methods
 }
 
 // agentAvailable checks whether SSH_AUTH_SOCK is set.
@@ -361,28 +137,4 @@ func (rc *RealClient) loadKey(ctx context.Context, path string, cfg *ConnectConf
 		return withPw, nil
 	}
 	return signer, nil
-}
-
-func (rc *RealClient) agentMethods() []gossh.AuthMethod {
-	sock := os.Getenv("SSH_AUTH_SOCK")
-	if sock == "" {
-		return nil
-	}
-
-	conn, err := net.Dial("unix", sock)
-	if err != nil {
-		return nil
-	}
-	_ = conn.Close()
-
-	return []gossh.AuthMethod{
-		gossh.PublicKeysCallback(func() ([]gossh.Signer, error) {
-			conn, err := net.Dial("unix", sock)
-			if err != nil {
-				return nil, err
-			}
-			defer func() { _ = conn.Close() }()
-			return agent.NewClient(conn).Signers()
-		}),
-	}
 }

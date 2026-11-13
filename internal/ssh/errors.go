@@ -167,13 +167,3 @@ func (e *ErrCredentialAuthorizationFailed) Error() string {
 		e.CredentialID, e.Expected, hop, e.ResolvedHost, e.ResolvedPort,
 	)
 }
-
-// ErrDisconnected is returned when an operation is attempted on a channel
-// whose underlying SSH connection has been closed. It is distinguishable
-// from a transient network error — this channel is permanently dead.
-// Callers can check for it with errors.As.
-type ErrDisconnected struct{}
-
-func (e *ErrDisconnected) Error() string {
-	return "ssh channel disconnected"
-}

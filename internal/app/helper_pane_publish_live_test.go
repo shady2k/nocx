@@ -87,9 +87,9 @@ func startPaneJourneyWithSecrets(t *testing.T, srv *pwSSHServer, secrets credent
 	logger := discardLogger(t)
 	sshLog := log.NewSlogAdapter(logger)
 
-	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	_, khPath := homeForKnownHosts(t)
 	writeKnownHostsFor(t, khPath, srv)
-	rc, err := ssh.NewReal(sshLog, ssh.WithKnownHostsFile(khPath))
+	rc, err := ssh.NewReal(sshLog)
 	if err != nil {
 		t.Fatalf("ssh.NewReal: %v", err)
 	}

@@ -152,9 +152,9 @@ func startFilesStand(t *testing.T, srv *pwSSHServer, secrets credential.Resolver
 	// The coordinator's client: it RESOLVES and it answers host-key questions.
 	// It never dials for the Files lease, and the fixture's authentication
 	// count is what says so.
-	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	_, khPath := homeForKnownHosts(t)
 	writeKnownHostsFor(t, khPath, append([]*pwSSHServer{srv}, extra...)...)
-	rc, err := ssh.NewReal(sshLog, ssh.WithKnownHostsFile(khPath))
+	rc, err := ssh.NewReal(sshLog)
 	if err != nil {
 		t.Fatalf("ssh.NewReal: %v", err)
 	}

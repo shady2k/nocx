@@ -1,14 +1,15 @@
 package transport
 
-// The transport suite's ONE helper route for an ssh pane (nocx-50w7p.5).
+// The transport suite's ONE helper route for an ssh pane (nocx-50w7p.5, and
+// the dial stack's removal in nocx-oalo1.3.2).
 //
 // # Why this exists
 //
-// An ssh pane is opened by a helper now, and a helper that cannot be reached is
-// a NAMED REFUSAL rather than a fallback: `session_open.go` answers "SSH
-// sessions are opened by this machine's helper (no helper opener is wired)" for
-// a remote destination no opener claimed. That is the production behaviour and
-// it is asserted by its own test.
+// An ssh pane is opened by a helper, and a helper that cannot be reached is a
+// NAMED REFUSAL rather than a fallback: `session_open.go` answers "SSH sessions
+// are opened by this machine's helper (no helper opener is wired)" for a remote
+// destination no opener claimed. That is the production behaviour and it is
+// asserted by its own test.
 //
 // What it also means is that every test whose SUBJECT is something else — a
 // resize race, a ledger query, a forward replay, a wire contract — must still
@@ -18,11 +19,13 @@ package transport
 //
 // # What it is, and what it deliberately is not
 //
-// It is a stand-in, and it says so: it adopts the session the registry already
-// opens, relabelled as the helper's. That keeps every assertion those tests
-// already make — which options reached the ssh factory, which size the registry
-// chose, which channel the session holds — because the registry does exactly
-// what it did before.
+// It is a stand-in, and it says so: it ADOPTS a session the way the shipped
+// helper route does — the helper mints the id and the channel, and the
+// registry adopts both (ADR-7). What a test can script is the three things a
+// helper decides: whether it answers at all and with what error, which channel
+// it hands over, and what it was asked (the resolved config, which is the ready
+// half of the assertions that used to read ConnectOptions off the registry's
+// deleted dial).
 //
 // What it does NOT do is assert the ROUTE. "The pane is this machine's helper's"
 // is asserted where it is true: ws_helper_open_test.go drives a real
@@ -32,10 +35,12 @@ package transport
 
 import (
 	"context"
+	"io"
 	"strings"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 )
@@ -48,6 +53,20 @@ import (
 // with it keeps opening local panes through the registry's local seam.
 type stubHelperOpener struct {
 	reg *session.Reg
+	// open, when set, is the helper's whole answer: it may block (a dial in
+	// flight) and may fail (the refusal a real helper reports). Nil adopts a
+	// session over channel below.
+	open func(ctx context.Context, cfg session.Config) (HostedSessionOpen, bool, error)
+	// channel answers the pane's channel when open is nil; nil means a pty
+	// stub, which is a session with no output.
+	channel func() session.Channel
+	// onOpen, when set, sees the resolved config the open handed the helper.
+	onOpen func(cfg session.Config)
+}
+
+// stubHelper builds the opener so a test can script its answer.
+func stubHelper(reg *session.Reg) *stubHelperOpener {
+	return &stubHelperOpener{reg: reg}
 }
 
 // OpenHosted is the shipped interface, with the stand-in's own answer.
@@ -55,13 +74,27 @@ func (o *stubHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, _
 	if o == nil || o.reg == nil || cfg.Kind != session.KindRemote {
 		return HostedSessionOpen{}, false, nil
 	}
-	sess, err := o.reg.Open(ctx, cfg)
+	if o.onOpen != nil {
+		o.onOpen(cfg)
+	}
+	if o.open != nil {
+		return o.open(ctx, cfg)
+	}
+	return o.adopt(ctx, cfg)
+}
+
+// adopt is the ordinary answer: the helper mints the id and the channel, and
+// the registry adopts both. A test that scripts the first half of the helper's
+// work calls it once its own half is done.
+func (o *stubHelperOpener) adopt(ctx context.Context, cfg session.Config) (HostedSessionOpen, bool, error) {
+	var ch session.Channel = pty.NewStub(log.NewSlogAdapter(nil))
+	if o.channel != nil {
+		ch = o.channel()
+	}
+	sess, err := o.reg.Adopt(ctx, cfg, session.NewID(), ch)
 	if err != nil {
 		return HostedSessionOpen{}, true, err
 	}
-	// The route back, shaped like the local opener's answer for a remote
-	// destination: Host/Account name the DESTINATION, Generation names the id
-	// space, and the rest is what the readopt pass reads.
 	return HostedSessionOpen{
 		Session:    sess,
 		Host:       cfg.Host,
@@ -84,26 +117,46 @@ func remoteUser(cfg session.Config) string {
 // sshHelperOpt wires the helper route into one server, so a call site reads as
 // "this server has a helper" rather than repeating the opener's construction.
 func sshHelperOpt(reg *session.Reg) WSServerOption {
-	return WithHelperSessionOpener(&stubHelperOpener{reg: reg})
+	return WithHelperSessionOpener(stubHelper(reg))
 }
 
-// TestAnSSHOpenWithNoHelperOpenerIsANamedRefusal is the OTHER END of the rule
+// scriptedReason is a helper-handover channel whose ShellIntegrationReason is
+// scripted — the fact the renderer reads off the open, and one only a channel
+// can carry.
+type scriptedReason struct {
+	done   chan struct{}
+	reason ssh.RefusalReason
+}
+
+func newScriptedReason(reason ssh.RefusalReason) *scriptedReason {
+	return &scriptedReason{done: make(chan struct{}), reason: reason}
+}
+
+func (c *scriptedReason) Read([]byte) (int, error) { return 0, io.EOF }
+func (c *scriptedReason) Write(p []byte) (int, error) {
+	return len(p), nil
+}
+
+func (c *scriptedReason) Close() error {
+	select {
+	case <-c.done:
+	default:
+		close(c.done)
+	}
+	return nil
+}
+func (c *scriptedReason) Done() <-chan struct{}                             { return c.done }
+func (c *scriptedReason) Resize(_ context.Context, _, _, _, _ uint16) error { return nil }
+func (c *scriptedReason) ShellIntegrationReason() ssh.RefusalReason         { return c.reason }
+
+// TestAnSSHOpenWithNoHelperOpenerIsANamedRefusal is the other end of the rule
 // this file's fixture serves, and it is the assertion the epic turns on: a
 // remote destination no helper claims is REFUSED BY NAME rather than dialed
-// from this process (nocx-50w7p.5, ADR-0057's "no Tier A fallback").
-//
-// THE SSH FACTORY IS WIRED ON PURPOSE. The refusal must come from the ROUTE
-// being gone, not from there being nothing to dial with — so this registry can
-// dial, and the test would fail if the deleted fallback came back, because the
-// open would then succeed and this assertion would have nothing to match.
+// from this process (nocx-50w7p.5, ADR-0057's "no Tier A fallback", and
+// nocx-oalo1.3.2, which removed the last dial that could have answered it).
 func TestAnSSHOpenWithNoHelperOpenerIsANamedRefusal(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
 	reg := newRegWithStub(logger)
-	reg.WithSSHFactory(&stubSSHFactory{
-		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
-			return ssh.NewStubChannel(logger), nil
-		},
-	})
 	// No WithHelperSessionOpener: this machine has no helper, and that is the
 	// condition under test.
 	ws := NewWSServer(logger, reg, WithProfileResolver(&fakeResolver{

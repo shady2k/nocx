@@ -2,22 +2,21 @@
 
 package app
 
-// The epic's one end-to-end check (design §0, bead nocx-m8jwn.8).
+// §0's end-to-end check for the TYPED `ssh` path (design §10, bead
+// nocx-m8jwn.8), restored after nocx-oalo1.3.2 deleted it along with the
+// standing that could not compile.
 //
 // What a user can do that they could not before:
 //
 //	A host reached by typing `ssh` by hand comes up integrated, through a
-//	connection nocx owns — and no session, typed or saved, puts the
-//	integration bundle or a session secret into the SSH command.
+//	connection nocx owns — and the typed session puts neither the
+//	integration bundle nor a session secret into the SSH command.
 //
-// §0's own paragraph is the check, and every clause of it is an assertion
-// here:
-//
-//	over a fixture sshd, a typed `ssh` and a saved connection both reach an
-//	integrated prompt; the exec request recorded for each is under 1 KiB and
-//	contains neither generation data nor a secret; and with the fixture's
-//	MaxSessions at 1 both still reach a working prompt, un-integrated, with a
-//	named reason and exactly one authentication.
+// Every clause of §0 is an assertion here: over a fixture sshd, a typed `ssh`
+// reaches an integrated prompt; the exec request recorded for it is under
+// 1 KiB and contains neither generation data nor a secret; and with the
+// fixture's MaxSessions at 1 the person still gets a working prompt,
+// un-integrated, with a NAMED reason and exactly one authentication.
 //
 // Plus the epic's sharper half, §11 assertion 7: a taint canary placed in the
 // capability and the recovery fence appears in NONE of the emitted command,
@@ -26,6 +25,18 @@ package app
 // SURFACE, because "it is not in the combined output" hides which surface
 // leaked.
 //
+// # Why this file is only the typed path
+//
+// It used to carry a saved-connection case too, and that case opened its
+// session with `ssh.RealClient.Connect` — the coordinator's own dial stack,
+// deleted in nocx-oalo1.3.2. A saved pane is this machine's helper's now, so
+// the case came back to nothing rather than being restored: there is no
+// honest way to drive it from this test without building a second helper
+// harness beside the one internal/helper/session already owns
+// (ssh_spawn_harness_test.go, which drives the REAL spawn path). The typed
+// path never touched that stack — the user's own `ssh` is the connection —
+// which is why it survives verbatim.
+//
 // # Why the canary is a canary and not the real value
 //
 // The bearers are minted through the production RequestDomain from a reader
@@ -33,26 +44,25 @@ package app
 // capability and the fence, and nothing else the kernel reads. So the marker
 // is INSIDE the secret rather than beside it, and a surface is searched for
 // the marker in every encoding a leak could take it through (raw bytes, hex,
-// base64) as well as for the two bearers verbatim. The real random value
-// alone would be found only in the one encoding the test happened to guess.
+// base64) as well as for the bearer verbatim. The real random value alone
+// would be found only in the one encoding the test happened to guess.
 //
 // # What this file is NOT
 //
-// It is not a reading of the implementation. Each path is driven through the
-// seam a person reaches — a domain_request from a shell that typed `ssh`, or
-// a saved profile's Connect — against a REAL OpenSSH server, and what is
-// asserted afterwards is what a person would see: a prompt that works, a
-// command that runs there, and a named reason when it does not.
+// It is not a reading of the implementation. The path is driven through the
+// seam a person reaches — a shell that typed `ssh` — against a REAL OpenSSH
+// server, and what is asserted afterwards is what a person would see: a
+// prompt that works, a command that runs there, and a named reason when it
+// does not.
 //
 // It extends the fixtures that already exist (live_sshd_test.go,
 // ssh_child_assembly_test.go) rather than standing up a second harness; the
-// three seams it needed — a capturable product logger, an injectable kernel
-// randomness, and a recordable launcher — are fields on those fixtures,
+// seams it needs — a capturable product logger, an injectable kernel
+// randomness, and a far-side recorder — are fields on those fixtures,
 // default-off, so every existing caller composes exactly as it did.
 
 import (
 	"bytes"
-	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -70,19 +80,11 @@ import (
 	crand "crypto/rand"
 
 	"github.com/shady2k/nocx/internal/lifecycle"
-	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/shellintegration"
-	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/waittest"
 )
 
-// ---------------------------------------------------------------------------
-// The taint canary.
-
-// canaryTag is the marker minted INTO the capability and the recovery fence.
-// It names nothing and nobody: a canary that carried a real name would put
-// that name into every artifact this repository keeps.
 const canaryTag = "NOCX-P8-TAINT-CANARY"
 
 // canaryRand is the kernel's randomness with the tag stamped into every
@@ -105,7 +107,6 @@ func (canaryRand) Read(p []byte) (int, error) {
 
 // canaryProbe is the per-surface scanner. It holds every form a leak could
 // take the marker through, plus the two bearers verbatim where the test could
-// learn them.
 type canaryProbe struct {
 	needles []canaryNeedle
 }
@@ -235,45 +236,9 @@ func captureProductLogs(t *testing.T) (*logSink, log.Logger) {
 // saved-connection path. The product deliberately never logs it (it used to
 // carry both bearers), so recording at the seam is the only way to hold the
 // exact bytes the server received.
-type recordingLauncher struct {
-	inner ssh.RemoteLauncher
-	mu    sync.Mutex
-	cmds  []string
-}
-
-func (r *recordingLauncher) StartCommand(shell ssh.ShellKind, opts ssh.LaunchOptions) (string, ssh.RefusalReason, bool) {
-	cmd, reason, ok := r.inner.StartCommand(shell, opts)
-	r.mu.Lock()
-	r.cmds = append(r.cmds, cmd)
-	r.mu.Unlock()
-	return cmd, reason, ok
-}
-
-func (r *recordingLauncher) Prepare(shell ssh.ShellKind, opts ssh.LaunchOptions) (string, ssh.BootstrapRun, ssh.BootstrapGate, bool) {
-	return r.inner.Prepare(shell, opts)
-}
-
-// only returns the single command this session emitted, failing when there
-// was not exactly one: §11 assertion 5 says the same carrier goes out
-// whatever the publish did, and more than one emission would mean the
-// session re-decided.
-func (r *recordingLauncher) only(t *testing.T) string {
-	t.Helper()
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if len(r.cmds) != 1 {
-		t.Fatalf("the session emitted %d remote commands, want exactly 1: %q", len(r.cmds), r.cmds)
-	}
-	return r.cmds[0]
-}
-
-// hex64 finds a 64-hex run — the shape of both bearers and of the stage-1
-// digest. Every one found in an exec request has to be the digest.
 var hex64 = regexp.MustCompile(`[0-9a-f]{64}`)
 
 // assertExecRequest is §0's middle clause, for one path: under 1 KiB, no
-// secret, no generation data. The numbers are logged because §0 is a
-// measurement and "it fits" is not one.
 func assertExecRequest(t *testing.T, probe canaryProbe, path, cmd, bundleRoot string, forbiddenHex ...string) {
 	t.Helper()
 	if cmd == "" {
@@ -401,84 +366,6 @@ func (fx *liveSshd) recording(t *testing.T, name, what string) string {
 // newCanaryKernel is newRecordingKernel with the tainted randomness: the same
 // kernel → publisher → acking-emitter composition production wires, minting
 // bearers that carry the marker.
-func newCanaryKernel() *recordingKernel {
-	k := lifecycle.New(lifecycle.Options{Rand: canaryRand{}})
-	pub := lifecyclepub.New(k)
-	pub.SetEmitter(ackingEmitter{})
-	return &recordingKernel{Publisher: pub}
-}
-
-// ---------------------------------------------------------------------------
-// Clause 1 and 2, saved connection: an integrated prompt, and neither bearer
-// on any surface.
-
-func TestEpicE2E_ASavedConnectionComesUpIntegratedAndLeaksNeitherBearer(t *testing.T) {
-	logs, logger := captureProductLogs(t)
-	fx := startLiveSshd(t, true, withFarSideRecording())
-	fx.logger = logger
-	rec := &recordingLauncher{inner: &remoteLauncherAdapter{
-		inner: shellintegration.NewRemoteLauncher(), logger: logger,
-	}}
-	fx.launcher = rec
-
-	kernel := newCanaryKernel()
-	installer := liveBundleCarrier(t, fx)
-	ch, out := fx.connect(t, kernel, ssh.ShellBash, installer)
-	t.Cleanup(func() {
-		if t.Failed() {
-			t.Logf("session terminal:\n%s", out.String())
-			t.Logf("sshd log:\n%s", fx.logBuf.String())
-		}
-	})
-
-	// §0 clause 1: an INTEGRATED prompt. The domain is established, and a
-	// line typed at that prompt runs there and reports its own fence — which
-	// is what makes it integrated rather than merely connected.
-	waittest.WaitForTimeout(t, "the saved connection's domain established", 30*time.Second, func() bool {
-		kernel.mu.Lock()
-		defer kernel.mu.Unlock()
-		if kernel.minted != 1 {
-			return false
-		}
-		d, ok := kernel.Domain(kernel.domain)
-		return ok && d.State == lifecycle.DomainEstablished
-	})
-	att := runLine(t, ch, kernel, "printf 'P8_SAVED_PROMPT\\n'; sleep 0.3", 0)
-	fence := fmt.Sprintf("\x1b]1337;NOCX_FENCE;%x\x07", att.Fence)
-	waittest.WaitForTimeout(t, "the typed line's output and its fence", 20*time.Second, func() bool {
-		return strings.Contains(out.String(), "P8_SAVED_PROMPT") && strings.Contains(out.String(), fence)
-	})
-
-	capHex, fenceHex := kernel.capabilityHex(), kernel.recoveryHex()
-	probe := newCanaryProbe(t, capHex, fenceHex)
-
-	// The far shell's own environment, brought onto the terminal so the
-	// ENVIRONMENT surface is a thing this test read rather than assumed.
-	dumpFarEnvironment(t, ch, out, "P8_SAVED_ENV_DONE")
-
-	// §0 clause 2, for this path.
-	assertExecRequest(t, probe, "the saved connection", rec.only(t),
-		filepath.Join(fx.home, ".nocx"), capHex, fenceHex)
-
-	// End the session so the far side's history and temp cleanup have run.
-	if _, err := ch.Write([]byte("exit\n")); err != nil {
-		t.Fatalf("write exit: %v", err)
-	}
-	waittest.WaitForTimeout(t, "session end after exit", 30*time.Second, func() bool {
-		select {
-		case <-ch.Done():
-			return true
-		default:
-			return false
-		}
-	})
-
-	assertEverySurface(t, fx, probe, "the saved connection", out.String(), logs)
-}
-
-// ---------------------------------------------------------------------------
-// Clause 1 and 2, typed `ssh`: the whole point of the epic.
-
 func TestEpicE2E_ATypedSSHComesUpIntegratedAndLeaksNeitherBearer(t *testing.T) {
 	logs, logger := captureProductLogs(t)
 	fx := startLiveSshd(t, true, withFarSideRecording())
@@ -605,21 +492,6 @@ func containsWordWith(argv []string, want string) bool {
 	return false
 }
 
-// dumpFarEnvironment brings the far shell's environment onto the terminal so
-// the environment surface is read rather than assumed, and waits for the
-// marker that says the dump finished — an observable state change, never a
-// duration.
-func dumpFarEnvironment(t *testing.T, ch ssh.Channel, out *sessionOutput, marker string) {
-	t.Helper()
-	line := "env; cat /proc/$$/environ | tr '\\000' '\\n'; printf '" + marker + "\\n'\n"
-	if _, err := ch.Write([]byte(line)); err != nil {
-		t.Fatalf("dump the far environment: %v", err)
-	}
-	waittest.WaitForTimeout(t, "the far environment on the terminal", 30*time.Second, func() bool {
-		return strings.Contains(out.String(), marker)
-	})
-}
-
 // assertEverySurface is §11 assertion 7, per surface and named per surface.
 func assertEverySurface(t *testing.T, fx *liveSshd, probe canaryProbe, path, terminal string, logs *logSink) {
 	t.Helper()
@@ -663,12 +535,109 @@ func assertEverySurface(t *testing.T, fx *liveSshd, probe canaryProbe, path, ter
 	probe.scan(t, path+": the session's terminal output", terminal)
 }
 
+func assertNamedRefusal(t *testing.T, terminal string) {
+	t.Helper()
+	// The prefix inside the private OSC the loader emits it in, and the BEL
+	// that ends it: a marker is one control string with no newline in it, so a
+	// parse that stopped at the first newline read the terminator into the
+	// token ("generation-unavailable\a") and then reported a vocabulary
+	// mismatch for a refusal the product had named correctly
+	// (nocx-1ebrs.22). Both halves come from the constants that own them.
+	prefix := shellintegration.MarkerOSCOpen + shellintegration.OutcomePrefix
+	i := strings.Index(terminal, prefix)
+	if i < 0 {
+		t.Fatalf("the far side named no terminal outcome at all; §0 requires a NAMED reason.\nterminal:\n%s", terminal)
+	}
+	rest := terminal[i+len(prefix):]
+	if end := strings.IndexAny(rest, shellintegration.MarkerOSCClose+"\n"); end >= 0 {
+		rest = rest[:end]
+	}
+	token := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(rest), "\r"))
+	outcome, known := shellintegration.OutcomeForToken(token)
+	if !known {
+		t.Fatalf("the far side named %q, which is not in the outcome vocabulary", token)
+	}
+	if outcome == shellintegration.OutcomeBootstrapAccepted {
+		t.Fatalf("the far side named %s: the session integrated where §0 says it must not", outcome)
+	}
+	t.Logf("MEASURED the named reason: %s", outcome)
+}
+
+// TestAssertNamedRefusalReadsThePrivateOSC pins the parse against the exact
+// bytes the far side emits, without an sshd: the loader names its outcome
+// inside one OSC, so there is no newline to cut at and the terminator must be
+// cut instead. Before this, the token came back as "generation-unavailable\a"
+// and a refusal the product had named perfectly was reported as vocabulary it
+// does not have (nocx-1ebrs.22).
+func TestAssertNamedRefusalReadsThePrivateOSC(t *testing.T) {
+	terminal := shellintegration.MarkerOSCOpen + shellintegration.LoaderReadyToken + shellintegration.MarkerOSCClose +
+		shellintegration.MarkerOSCOpen + shellintegration.StageReadyToken + shellintegration.MarkerOSCClose +
+		shellintegration.MarkerOSCOpen + shellintegration.OutcomePrefix +
+		shellintegration.OutcomeToken(shellintegration.OutcomeGenerationUnavailable) + shellintegration.MarkerOSCClose
+	assertNamedRefusal(t, terminal)
+
+	// And the refusal that must never be read as a success still is one.
+	accepted := shellintegration.MarkerOSCOpen + shellintegration.OutcomePrefix +
+		shellintegration.OutcomeToken(shellintegration.OutcomeBootstrapAccepted) + shellintegration.MarkerOSCClose
+	if !strings.Contains(accepted, shellintegration.OutcomeToken(shellintegration.OutcomeBootstrapAccepted)) {
+		t.Fatal("fixture is wrong")
+	}
+}
+
+// reasonRecorder captures what the launcher adapter reports to the session
+// integration axis — the product's own seam for "why did this session not
+// integrate", and the one a renderer reads.
+var childCapRe = regexp.MustCompile(`(?m)^([0-9a-f]{64})$`)
+
+// capability returns the per-epoch capability out of the secret frame the
+// delivery wrote, waiting for it to be written.
+//
+// It FAILS rather than returning false, which is not what it did before the
+// sleep sweep: this returned (zero, false) and each caller owned the sentence
+// it failed with. Those sentences differ — one is about frame 2 never carrying
+// the typed session's secret, the other about the late-hello proof needing a
+// capability — so `what` stays the caller's rather than being collapsed into
+// one message here. The bytes the child did write are the same question on
+// both paths, so the detail is this function's: whether nothing arrived or
+// something malformed did is what the timeout has to answer, and nothing else
+// on this path can.
+func (w *harnessWindow) capability(t *testing.T, what string) lifecycle.Capability {
+	t.Helper()
+	var cap lifecycle.Capability
+	waittest.WaitForTimeoutDetail(t, what,
+		60*time.Second,
+		func() string {
+			w.mu.Lock()
+			defer w.mu.Unlock()
+			return fmt.Sprintf("written=%q", string(w.written))
+		},
+		func() bool {
+			w.mu.Lock()
+			m := childCapRe.FindStringSubmatch(string(w.written))
+			w.mu.Unlock()
+			if m == nil {
+				return false
+			}
+			raw, err := hex.DecodeString(m[1])
+			if err != nil {
+				t.Fatalf("frame 2 capability %q does not decode: %v", m[1], err)
+			}
+			if len(raw) != len(cap) {
+				t.Fatalf("frame 2 capability is %d bytes, want %d", len(raw), len(cap))
+			}
+			copy(cap[:], raw)
+			return true
+		})
+	return cap
+}
+
 // ---------------------------------------------------------------------------
 // Clause 3: MaxSessions 1.
 
 // TestEpicE2E_MaxSessions1LeavesAWorkingUnintegratedPrompt is §0's last
-// clause: with the fixture's MaxSessions at 1 both paths still reach a
-// working prompt, with a named reason and no login bought by a refused call.
+// clause on the typed path: with the fixture's MaxSessions at 1 the person
+// still reaches a working prompt, with a named reason and no login bought by
+// a refused call.
 //
 // One session slot means the interactive session takes it and every auxiliary
 // channel is refused. D3 is what makes that survivable: the adapter is
@@ -676,24 +645,12 @@ func assertEverySurface(t *testing.T, fx *liveSshd, probe canaryProbe, path, ter
 // opens a connection — which is the difference between losing integration and
 // costing the user a second password or a second 2FA prompt.
 //
-// # ONE CASE'S ANSWER CHANGED, and the name is about the other one
-//
-// The TYPED case is what the name describes and it is unchanged: the publish
-// rides the user's own mux, that connection's one slot is the shell's, and the
-// far side reports generation-unavailable.
-//
-// The SAVED case's answer is now the carrier's (nocx-50w7p.15): the publish is
-// this machine's helper's, on a connection of its own, so the pane's one slot
-// was never in play. It is measured per build and asserted only on what holds
-// everywhere (a working prompt, a delegated publish naming the pane's own
-// destination, a terminal outcome reported at all); the route's own verdict is
-// asserted where the route exists —
-// TestLiveSshd_OneSessionPerConnectionStillIntegratesOverTheHelper.
-//
-// The name is NOT renamed for that: nocx-650le cites this test by name for a
-// TempDir cleanup race of its own, and a bead's evidence pointing at a test
-// that no longer exists is worse than a name that describes one of its two
-// cases and says so here.
+// The saved-connection case this test used to carry is gone with the
+// coordinator's dial (see this file's header): a saved pane is this machine's
+// helper's, on a connection of its own, so the pane's one slot was never in
+// play for it. The name is NOT renamed: nocx-650le cites this test by name
+// for a TempDir cleanup race of its own, and a bead's evidence pointing at a
+// test that no longer exists is worse than a name that describes one case.
 func TestEpicE2E_MaxSessions1LeavesAWorkingUnintegratedPrompt(t *testing.T) {
 	t.Run("a typed ssh", func(t *testing.T) {
 		logs, logger := captureProductLogs(t)
@@ -752,284 +709,4 @@ func TestEpicE2E_MaxSessions1LeavesAWorkingUnintegratedPrompt(t *testing.T) {
 		}
 		t.Logf("MEASURED a typed ssh under MaxSessions 1: %d authentication(s)", fx.authCount())
 	})
-
-	t.Run("a saved connection", func(t *testing.T) {
-		logs, logger := captureProductLogs(t)
-		fx := startLiveSshd(t, true, withSshdConfig("MaxSessions 1"))
-		fx.logger = logger
-
-		// ONE SESSION PER CONNECTION, and this is the case nocx-50w7p.15
-		// rewrote the answer to. The publish used to run an auxiliary session
-		// channel on the PANE's connection, so under MaxSessions 1 it was the
-		// publish that lost the slot — and the cost was a session that could
-		// never integrate, which is what this subtest used to assert. The
-		// publish is this machine's helper's now: its home probe and its sftp
-		// channel are channels on a connection of the helper's OWN, so the
-		// pane's one slot belongs to the user's shell and nocx's auxiliary
-		// work cannot spend it.
-		//
-		// What this asserts, therefore, is the delegation (the engine hands
-		// the carrier a destination and no client) and the surviving session —
-		// not the refusal that no longer happens.
-		installer := &recordingCarrier{inner: liveBundleCarrier(t, fx)}
-
-		// The named reason on THIS path is not on the terminal and must not
-		// be looked for there: the bootstrap conversation happens on the SSH
-		// channel, not on the user's pty, so the loader's outcome token never
-		// reaches it. The product's own seam for it is the launcher adapter's
-		// reportBootstrapOutcome, which is what feeds the session integration
-		// axis the renderer reads — so that is what this asserts.
-		outcomes := &reasonRecorder{}
-		fx.launcher = &recordingLauncher{inner: &remoteLauncherAdapter{
-			inner:                  shellintegration.NewRemoteLauncher(),
-			logger:                 logger,
-			reportBootstrapOutcome: outcomes.record,
-		}}
-
-		kernel := newCanaryKernel()
-		ch, out := fx.connect(t, kernel, ssh.ShellBash, installer)
-		t.Cleanup(func() {
-			if t.Failed() {
-				t.Logf("session terminal:\n%s", out.String())
-				t.Logf("product log:\n%s", logs.String())
-			}
-		})
-
-		// A WORKING prompt. The first write may be refused while the
-		// bootstrap still owns the input (the quarantine), so the write is
-		// retried until it is ACCEPTED once — and then the answer is waited
-		// for, never re-typed.
-		waittest.WaitForTimeout(t, "the session's input to leave the bootstrap quarantine", 90*time.Second, func() bool {
-			_, err := ch.Write([]byte("printf 'P8_MAXSESS%s\\n' _SAVED_OK\n"))
-			return err == nil
-		})
-		waittest.WaitForTimeout(t, "a working prompt over the saved connection", 60*time.Second, func() bool {
-			return strings.Contains(out.String(), "P8_MAXSESS_SAVED_OK")
-		})
-
-		// The publish was DELEGATED, with the address the pane dialed: the
-		// engine's whole statement to a carrier, and the fact that puts the
-		// bundle on this machine's helper's connection rather than on the
-		// user's.
-		calls, host := installer.delegation()
-		if calls == 0 {
-			t.Fatal("the publish was never delegated, so nothing measured here is about the new route")
-		}
-		if host != fx.addr {
-			t.Errorf("the publish was handed destination %q, want the address the pane dialed (%q)", host, fx.addr)
-		}
-
-		// The outcome the far side reports is asserted where the ROUTE is
-		// known: what this build's carrier publishes over decides what a
-		// one-slot bound means for the session (integrated over this machine's
-		// helper, refused for the untagged fixture's own connection), and a
-		// test that accepted either here would pin nothing. What holds in BOTH
-		// builds is below and above: the user has a working prompt, the
-		// publish was delegated with the pane's own destination, and the far
-		// side reported a terminal outcome at all — the clause ADR-0004 and
-		// §0 make absolute.
-		reason, named := outcomes.await(t)
-		if !named {
-			t.Fatal("the bootstrap never reported an outcome to the session integration axis; " +
-				"§0 requires a NAMED reason, and a reason only the log carries is the " +
-				"log-only degrade AGENTS.md forbids")
-		}
-		t.Logf("MEASURED the terminal outcome under one slot per connection: %q", reason)
-
-		// The far sshd's own count. Three logins are expected and each is
-		// named: the pane's session, this HARNESS's lifecycle transport lease
-		// (its own pool identity by construction — liveSshd.tunnelLease says
-		// why), and now the publish, which dials its own connection like any
-		// other consumer until the PANE moves onto this machine's helper too
-		// (nocx-50w7p.5). What must not appear is a login per CHANNEL: the
-		// helper's connection carries the home probe and the sftp channel
-		// together (asserted one process over, in helper_bundle_acceptance_test.go).
-		if n := fx.authCount(); n != 3 {
-			t.Errorf("the server accepted %d authentications, want 3 — the pane's session, this "+
-				"harness's lifecycle transport, and this machine's helper dialing for the publish", n)
-		}
-		t.Logf("MEASURED a saved connection under MaxSessions 1: %d authentication(s)", fx.authCount())
-
-		if _, err := ch.Write([]byte("exit\n")); err != nil {
-			t.Fatalf("write exit: %v", err)
-		}
-	})
-}
-
-// assertNamedRefusal fails unless the far side named a terminal outcome from
-// the closed vocabulary, and that outcome is not acceptance. The token is on
-// the terminal because the loader puts it there before it execs the native
-// shell — a degrade the user cannot see is the log-only degrade AGENTS.md
-// forbids.
-func assertNamedRefusal(t *testing.T, terminal string) {
-	t.Helper()
-	// The prefix inside the private OSC the loader emits it in, and the BEL
-	// that ends it: a marker is one control string with no newline in it, so a
-	// parse that stopped at the first newline read the terminator into the
-	// token ("generation-unavailable\a") and then reported a vocabulary
-	// mismatch for a refusal the product had named correctly
-	// (nocx-1ebrs.22). Both halves come from the constants that own them.
-	prefix := shellintegration.MarkerOSCOpen + shellintegration.OutcomePrefix
-	i := strings.Index(terminal, prefix)
-	if i < 0 {
-		t.Fatalf("the far side named no terminal outcome at all; §0 requires a NAMED reason.\nterminal:\n%s", terminal)
-	}
-	rest := terminal[i+len(prefix):]
-	if end := strings.IndexAny(rest, shellintegration.MarkerOSCClose+"\n"); end >= 0 {
-		rest = rest[:end]
-	}
-	token := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(rest), "\r"))
-	outcome, known := shellintegration.OutcomeForToken(token)
-	if !known {
-		t.Fatalf("the far side named %q, which is not in the outcome vocabulary", token)
-	}
-	if outcome == shellintegration.OutcomeBootstrapAccepted {
-		t.Fatalf("the far side named %s: the session integrated where §0 says it must not", outcome)
-	}
-	t.Logf("MEASURED the named reason: %s", outcome)
-}
-
-// TestAssertNamedRefusalReadsThePrivateOSC pins the parse against the exact
-// bytes the far side emits, without an sshd: the loader names its outcome
-// inside one OSC, so there is no newline to cut at and the terminator must be
-// cut instead. Before this, the token came back as "generation-unavailable\a"
-// and a refusal the product had named perfectly was reported as vocabulary it
-// does not have (nocx-1ebrs.22).
-func TestAssertNamedRefusalReadsThePrivateOSC(t *testing.T) {
-	terminal := shellintegration.MarkerOSCOpen + shellintegration.LoaderReadyToken + shellintegration.MarkerOSCClose +
-		shellintegration.MarkerOSCOpen + shellintegration.StageReadyToken + shellintegration.MarkerOSCClose +
-		shellintegration.MarkerOSCOpen + shellintegration.OutcomePrefix +
-		shellintegration.OutcomeToken(shellintegration.OutcomeGenerationUnavailable) + shellintegration.MarkerOSCClose
-	assertNamedRefusal(t, terminal)
-
-	// And the refusal that must never be read as a success still is one.
-	accepted := shellintegration.MarkerOSCOpen + shellintegration.OutcomePrefix +
-		shellintegration.OutcomeToken(shellintegration.OutcomeBootstrapAccepted) + shellintegration.MarkerOSCClose
-	if !strings.Contains(accepted, shellintegration.OutcomeToken(shellintegration.OutcomeBootstrapAccepted)) {
-		t.Fatal("fixture is wrong")
-	}
-}
-
-// reasonRecorder captures what the launcher adapter reports to the session
-// integration axis — the product's own seam for "why did this session not
-// integrate", and the one a renderer reads.
-type reasonRecorder struct {
-	mu     sync.Mutex
-	got    bool
-	reason ssh.RefusalReason
-}
-
-func (r *reasonRecorder) record(_ string, reason ssh.RefusalReason) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.got = true
-	r.reason = reason
-}
-
-// await blocks until an outcome has been reported. The bootstrap always
-// reaches a terminal outcome (design §7, assertion 26), so this waits on that
-// event rather than on a duration; the deadline exists only so a session left
-// in `starting` reports rather than hangs.
-func (r *reasonRecorder) await(t *testing.T) (ssh.RefusalReason, bool) {
-	t.Helper()
-	var reason ssh.RefusalReason
-	waittest.WaitForTimeout(t, "the bootstrap outcome", 90*time.Second, func() bool {
-		r.mu.Lock()
-		defer r.mu.Unlock()
-		if !r.got {
-			return false
-		}
-		reason = r.reason
-		return true
-	})
-	return reason, true
-}
-
-// recordingCarrier is the production carrier with the DELEGATION recorded: it
-// is handed a destination and no client, which is the whole of what
-// internal/ssh says to a carrier since nocx-50w7p.15, and what a test can
-// observe about the publish from this process.
-//
-// Its predecessor recorded the first FAR-SIDE call (the home question, then run
-// over the pane's own connection) and held it until the test released it. Both
-// halves of that are gone by construction: the publish's far side is this
-// machine's helper's, and no channel of nocx's is opened on the pane's
-// connection to race the user's.
-type recordingCarrier struct {
-	inner ssh.RemoteInstaller
-	mu    sync.Mutex
-	host  string
-	calls int
-}
-
-func (g *recordingCarrier) EnsureInstalledRemote(ctx context.Context, host string, opts ...ssh.ConnectOption) error {
-	g.mu.Lock()
-	g.calls++
-	g.host = host
-	g.mu.Unlock()
-	return g.inner.EnsureInstalledRemote(ctx, host, opts...)
-}
-
-// There is no UninstallRemote here any more (nocx-50w7p.5): the removal left
-// ssh.RemoteInstaller when it moved onto this machine's helper, so this
-// delegation double records the publish and nothing else. The removal's
-// behaviour is asserted where it now lives, in
-// helper_bundle_acceptance_test.go's uninstall acceptance.
-
-// delegation reports that the publish was delegated at all, and the destination
-// it was handed.
-func (g *recordingCarrier) delegation() (int, string) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.calls, g.host
-}
-
-// childCapRe finds a per-epoch capability. It is no longer looked for in
-// the composed LINE — ADR-0049 took both bearers out of the command, and
-// requestChild now asserts their absence — but in FRAME 2, which the
-// delivery writes onto the parent's terminal after ownership of the
-// multiplex socket has been proven. That is where the harness learns the
-// child's capability, by watching exactly what the product delivers.
-var childCapRe = regexp.MustCompile(`(?m)^([0-9a-f]{64})$`)
-
-// capability returns the per-epoch capability out of the secret frame the
-// delivery wrote, waiting for it to be written.
-//
-// It FAILS rather than returning false, which is not what it did before the
-// sleep sweep: this returned (zero, false) and each caller owned the sentence
-// it failed with. Those sentences differ — one is about frame 2 never carrying
-// the typed session's secret, the other about the late-hello proof needing a
-// capability — so `what` stays the caller's rather than being collapsed into
-// one message here. The bytes the child did write are the same question on
-// both paths, so the detail is this function's: whether nothing arrived or
-// something malformed did is what the timeout has to answer, and nothing else
-// on this path can.
-func (w *harnessWindow) capability(t *testing.T, what string) lifecycle.Capability {
-	t.Helper()
-	var cap lifecycle.Capability
-	waittest.WaitForTimeoutDetail(t, what,
-		60*time.Second,
-		func() string {
-			w.mu.Lock()
-			defer w.mu.Unlock()
-			return fmt.Sprintf("written=%q", string(w.written))
-		},
-		func() bool {
-			w.mu.Lock()
-			m := childCapRe.FindStringSubmatch(string(w.written))
-			w.mu.Unlock()
-			if m == nil {
-				return false
-			}
-			raw, err := hex.DecodeString(m[1])
-			if err != nil {
-				t.Fatalf("frame 2 capability %q does not decode: %v", m[1], err)
-			}
-			if len(raw) != len(cap) {
-				t.Fatalf("frame 2 capability is %d bytes, want %d", len(raw), len(cap))
-			}
-			copy(cap[:], raw)
-			return true
-		})
-	return cap
 }

@@ -755,11 +755,6 @@ func newDropEnv(t *testing.T) *dropEnv {
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
 	reg := newRegWithStub(logger)
-	reg.WithSSHFactory(&stubSSHFactory{
-		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
-			return ssh.NewStubChannel(logger), nil
-		},
-	})
 	ws := NewWSServer(logger, reg,
 		// The ssh pane this environment opens is this machine's helper's
 		// (nocx-50w7p.5). Every test built on this env measures what a drop

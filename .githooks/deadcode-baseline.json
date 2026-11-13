@@ -151,10 +151,6 @@
       "func": "MustRegisterSecret"
     },
     {
-      "file": "internal/settings/settings.go",
-      "func": "MustRegisterString"
-    },
-    {
       "file": "internal/shellintegration/publish_fs.go",
       "func": "NewOSFS"
     },
@@ -193,74 +189,6 @@
     {
       "file": "internal/shellintegration/publisher.go",
       "func": "Publisher.Verify"
-    },
-    {
-      "file": "internal/shellintegration/publisher.go",
-      "func": "Publisher.verifyFile"
-    },
-    {
-      "file": "internal/ssh/ssh_real.go",
-      "func": "WithKnownHostsFile"
-    },
-    {
-      "file": "internal/ssh/ssh.go",
-      "func": "NewStub"
-    },
-    {
-      "file": "internal/ssh/ssh.go",
-      "func": "NewStubChannel"
-    },
-    {
-      "file": "internal/ssh/ssh.go",
-      "func": "Stub.Close"
-    },
-    {
-      "file": "internal/ssh/ssh.go",
-      "func": "Stub.Connect"
-    },
-    {
-      "file": "internal/ssh/ssh.go",
-      "func": "StubChannel.Close"
-    },
-    {
-      "file": "internal/ssh/ssh.go",
-      "func": "StubChannel.Done"
-    },
-    {
-      "file": "internal/ssh/ssh.go",
-      "func": "StubChannel.onceClose"
-    },
-    {
-      "file": "internal/ssh/ssh.go",
-      "func": "StubChannel.Read"
-    },
-    {
-      "file": "internal/ssh/ssh.go",
-      "func": "StubChannel.Resize"
-    },
-    {
-      "file": "internal/ssh/ssh.go",
-      "func": "StubChannel.ShellIntegrationReason"
-    },
-    {
-      "file": "internal/ssh/ssh.go",
-      "func": "StubChannel.Write"
-    },
-    {
-      "file": "internal/ssh/ssh.go",
-      "func": "WithAgentForward"
-    },
-    {
-      "file": "internal/ssh/ssh.go",
-      "func": "WithAuthMethods"
-    },
-    {
-      "file": "internal/ssh/ssh.go",
-      "func": "WithKeepalive"
-    },
-    {
-      "file": "internal/ssh/ssh.go",
-      "func": "WithTimeout"
     },
     {
       "file": "internal/transport/transport.go",
@@ -333,10 +261,6 @@
     {
       "file": "internal/transport/ws.go",
       "func": "WithCaptureRegistry"
-    },
-    {
-      "file": "internal/transport/ws.go",
-      "func": "WithFilesRevealer"
     },
     {
       "file": "internal/transport/ws.go",

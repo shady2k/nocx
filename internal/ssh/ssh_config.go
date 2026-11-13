@@ -25,15 +25,6 @@ type resolvedConfig struct {
 	// keys an agent holds are offered only where an identity file names them.
 	identitiesOnly bool
 	keyAlgos       []string
-	cols           uint16
-	rows           uint16
-	xpixel         uint16
-	ypixel         uint16
-	// remoteCommand is the destination's RemoteCommand directive, empty when
-	// unset. When non-empty, OpenSSH refuses a command-line remote command
-	// alongside it, so openShell runs it as-is and never sends a launcher
-	// (spec §4.2, nocx-r52q).
-	remoteCommand string
 }
 
 // resolveConfig merges ~/.ssh/config values (via the injected ConfigResolver)
@@ -53,8 +44,6 @@ func (rc *RealClient) resolveConfig(ctx context.Context, host string, cfg *Conne
 		hostName: resolvedHost,
 		user:     currentUser(),
 		port:     resolvedPort,
-		cols:     80,
-		rows:     24,
 	}
 
 	// Resolve ~/.ssh/config directives via the injected resolver. On error, the
@@ -79,9 +68,6 @@ func (rc *RealClient) resolveConfig(ctx context.Context, host string, cfg *Conne
 			resolved.identityFiles = append([]string(nil), hostCfg.IdentityFiles...)
 		}
 		resolved.identitiesOnly = hostCfg.IdentitiesOnly
-		if hostCfg.RemoteCommand != "" {
-			resolved.remoteCommand = hostCfg.RemoteCommand
-		}
 	}
 
 	// Apply explicit ConnectOptions (highest precedence).
@@ -93,18 +79,6 @@ func (rc *RealClient) resolveConfig(ctx context.Context, host string, cfg *Conne
 	}
 	if cfg.KeyFile != "" {
 		resolved.identityFiles = []string{cfg.KeyFile}
-	}
-	if cfg.Cols > 0 {
-		resolved.cols = cfg.Cols
-	}
-	if cfg.Rows > 0 {
-		resolved.rows = cfg.Rows
-	}
-	if cfg.XPixel > 0 {
-		resolved.xpixel = cfg.XPixel
-	}
-	if cfg.YPixel > 0 {
-		resolved.ypixel = cfg.YPixel
 	}
 	if len(cfg.KeyExchanges) > 0 {
 		resolved.keyAlgos = cfg.KeyExchanges

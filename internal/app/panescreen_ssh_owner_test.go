@@ -62,7 +62,7 @@ func TestAnSSHPaneOpenedByThisMachinesHelperAnswersItsScreen(t *testing.T) {
 	lg := discardLogger(t)
 	reg := session.New(logger, &reachPTYFactory{stub: pty.NewStub(logger)})
 	endSessionsOnCleanup(t, reg)
-	rc, err := ssh.NewReal(logger, ssh.WithKnownHostsFile(home+"/known_hosts"))
+	rc, err := ssh.NewReal(logger)
 	if err != nil {
 		t.Fatalf("ssh.NewReal: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestReAdoptingAnSSHPaneKeepsItsDestinationAndAnswersItsScreen(t *testing.T)
 	logger := log.NewSlogAdapter(discardLogger(t))
 	lg := discardLogger(t)
 	newOpener := func(reg *session.Reg) *localHelperOpener {
-		rc, err := ssh.NewReal(logger, ssh.WithKnownHostsFile(home+"/known_hosts"))
+		rc, err := ssh.NewReal(logger)
 		if err != nil {
 			t.Fatalf("ssh.NewReal: %v", err)
 		}
@@ -325,7 +325,7 @@ func TestReAdoptingABindingTheDaemonNoLongerHoldsIsALossNotAnOwnership(t *testin
 	lg := discardLogger(t)
 	reg := session.New(logger, &reachPTYFactory{stub: pty.NewStub(logger)})
 	endSessionsOnCleanup(t, reg)
-	rc, rerr := ssh.NewReal(logger, ssh.WithKnownHostsFile(home+"/known_hosts"))
+	rc, rerr := ssh.NewReal(logger)
 	if rerr != nil {
 		t.Fatalf("ssh.NewReal: %v", rerr)
 	}
@@ -383,7 +383,7 @@ func TestASessionThatEndsLeavesTheOpenersSet(t *testing.T) {
 	lg := discardLogger(t)
 	reg := session.New(logger, &reachPTYFactory{stub: pty.NewStub(logger)})
 	endSessionsOnCleanup(t, reg)
-	rc, rerr := ssh.NewReal(logger, ssh.WithKnownHostsFile(home+"/known_hosts"))
+	rc, rerr := ssh.NewReal(logger)
 	if rerr != nil {
 		t.Fatalf("ssh.NewReal: %v", rerr)
 	}

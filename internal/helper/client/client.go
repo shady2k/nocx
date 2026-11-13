@@ -476,8 +476,6 @@ func (c *Client) onFrame(ty proto.FrameType, payload []byte) {
 		c.serveReverse(payload)
 	case proto.TypeChunk:
 		c.deliverChunk(payload)
-	case proto.TypeKeepAlive:
-		// nothing to answer; keepalives keep the transport warm
 	case proto.TypeNotify:
 		c.sessionNotify(payload)
 	case proto.TypeSessionData:

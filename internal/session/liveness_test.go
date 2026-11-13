@@ -26,44 +26,43 @@ import (
 	"github.com/shady2k/nocx/internal/ssh"
 )
 
-// livenessReg builds a registry whose ssh factory hands out a channel the test
-// controls, so a remote session can be opened without a host.
-func livenessReg(t *testing.T, ch *waitErrChannel) *Reg {
+// livenessReg builds a registry and a controllable channel the test decides
+// the timing of, so a remote session can be adopted without a host — the way
+// this machine's helper registers one.
+func livenessReg(t *testing.T) *Reg {
 	t.Helper()
-	r := New(log.NewSlogAdapter(nil), &stubPTYFactory{stub: pty.NewStub(log.NewSlogAdapter(nil))})
-	return r.WithSSHFactory(&livenessSSHFactory{ch: ch})
-}
-
-type livenessSSHFactory struct{ ch *waitErrChannel }
-
-func (f *livenessSSHFactory) Connect(context.Context, string, ...ssh.ConnectOption) (ssh.Channel, error) {
-	if f.ch != nil {
-		return &livenessRemoteChannel{waitErrChannel: f.ch}, nil
-	}
-	return ssh.NewStubChannel(log.NewSlogAdapter(nil)), nil
-}
-
-// livenessRemoteChannel is the test's controllable channel wearing the one
-// extra method ssh.Channel has over session.Channel, so a remote session can
-// be opened over an end the test decides the timing of.
-type livenessRemoteChannel struct {
-	*waitErrChannel
-}
-
-func (c *livenessRemoteChannel) ShellIntegrationReason() ssh.RefusalReason {
-	return ssh.ReasonNone
+	return New(log.NewSlogAdapter(nil), &stubPTYFactory{stub: pty.NewStub(log.NewSlogAdapter(nil))})
 }
 
 func openRemote(t *testing.T, r *Reg, host string) Session {
 	t.Helper()
-	s, err := r.Open(context.Background(), Config{
+	return openRemoteWith(t, r, &waitErrChannel{}, host)
+}
+
+// openRemoteWith adopts a remote session over the caller's own channel, for
+// the tests that decide when (and how) its end arrives.
+func openRemoteWith(t *testing.T, r *Reg, ch *waitErrChannel, host string) Session {
+	t.Helper()
+	s, err := r.Adopt(context.Background(), Config{
 		Kind: KindRemote, Host: host, Cols: 80, Rows: 24,
 		Remote: &ssh.ConnectConfig{User: "test"},
-	})
+	}, NewID(), &remoteLivenessChannel{waitErrChannel: ch})
 	if err != nil {
-		t.Fatalf("open remote: %v", err)
+		t.Fatalf("adopt remote: %v", err)
 	}
 	return s
+}
+
+// remoteLivenessChannel is the test's controllable channel wearing the one
+// extra method a remote channel carries (the shell-integration reason), so an
+// adopted remote session can be driven over an end the test decides the timing
+// of.
+type remoteLivenessChannel struct {
+	*waitErrChannel
+}
+
+func (c *remoteLivenessChannel) ShellIntegrationReason() ssh.RefusalReason {
+	return ssh.ReasonNone
 }
 
 // A session that has just been opened is alive, and the projection is stamped:
@@ -135,7 +134,7 @@ func TestLiveness_UnrecordedTeardownIsInterrupted(t *testing.T) {
 // ended — the channel is open, no exit was reported — so the session is
 // neither alive nor dead. It reads unknown, and it says when.
 func TestLiveness_AHostThatStoppedRespondingIsUnknownNotDead(t *testing.T) {
-	r := livenessReg(t, nil)
+	r := livenessReg(t)
 	s := openRemote(t, r, "srv-01")
 	before := s.Liveness()
 
@@ -164,7 +163,7 @@ func TestLiveness_AHostThatStoppedRespondingIsUnknownNotDead(t *testing.T) {
 // And back: a host that answers again returns the session to alive, at a fresh
 // epoch. Unknown is a state we can leave, not a terminal one.
 func TestLiveness_AHostThatAnswersAgainIsAliveAgain(t *testing.T) {
-	r := livenessReg(t, nil)
+	r := livenessReg(t)
 	s := openRemote(t, r, "srv-01")
 
 	r.observeHost("srv-01", ssh.Reachability{})
@@ -184,7 +183,7 @@ func TestLiveness_AHostThatAnswersAgainIsAliveAgain(t *testing.T) {
 // names, and marking every session unknown because one machine went quiet
 // would make the state worthless.
 func TestLiveness_AnObservationDoesNotReachAnotherHost(t *testing.T) {
-	r := livenessReg(t, nil)
+	r := livenessReg(t)
 	elsewhere := openRemote(t, r, "srv-02")
 	local := openRoot(t, r)
 
@@ -202,7 +201,7 @@ func TestLiveness_AnObservationDoesNotReachAnotherHost(t *testing.T) {
 // overwrite a current record. Without this a delayed "alive" from before the
 // host went quiet would revive a session nobody can reach.
 func TestLiveness_ALateObservationDoesNotOverwriteACurrentRecord(t *testing.T) {
-	r := livenessReg(t, nil)
+	r := livenessReg(t)
 	s := openRemote(t, r, "srv-01")
 	r.observeHost("srv-01", ssh.Reachability{})
 	current := s.Liveness()
@@ -229,7 +228,7 @@ func TestLiveness_ALateObservationDoesNotOverwriteACurrentRecord(t *testing.T) {
 // and must not touch this record — the same refusal the parent edge makes, by
 // the same owner (SameIncarnation).
 func TestLiveness_AnObservationForAnotherIncarnationIsRefused(t *testing.T) {
-	r := livenessReg(t, nil)
+	r := livenessReg(t)
 	s := openRemote(t, r, "srv-01")
 	current := s.Liveness()
 
@@ -254,7 +253,7 @@ func TestLiveness_AnObservationForAnotherIncarnationIsRefused(t *testing.T) {
 // session's own terminal event and from nothing else — an observation claiming
 // either is refused, whatever epoch it carries.
 func TestLiveness_NoObservationMayAssertATerminalState(t *testing.T) {
-	r := livenessReg(t, nil)
+	r := livenessReg(t)
 	s := openRemote(t, r, "srv-01")
 	current := s.Liveness()
 
@@ -274,8 +273,8 @@ func TestLiveness_NoObservationMayAssertATerminalState(t *testing.T) {
 // thing anyone says about it.
 func TestLiveness_ATerminalStateIsFinal(t *testing.T) {
 	ch := &waitErrChannel{done: make(chan struct{})}
-	r := livenessReg(t, ch)
-	s := openRemote(t, r, "srv-01")
+	r := livenessReg(t)
+	s := openRemoteWith(t, r, ch, "srv-01")
 
 	ch.waitErr = errors.New("ssh: connection lost")
 	ch.waitSet = true
@@ -297,7 +296,7 @@ func TestLiveness_ATerminalStateIsFinal(t *testing.T) {
 // The projection tells its watcher when the VALUE changes, and only then: a
 // keepalive that keeps succeeding must not publish a notification per tick.
 func TestLiveness_TheObserverIsToldOnChangeAndNotOtherwise(t *testing.T) {
-	r := livenessReg(t, nil)
+	r := livenessReg(t)
 	s := openRemote(t, r, "srv-01")
 
 	var changes []Ref
@@ -326,7 +325,7 @@ func TestLiveness_TheObserverIsToldOnChangeAndNotOtherwise(t *testing.T) {
 // this path before the composition root wires one, and an observation must not
 // panic or be lost because nobody is listening.
 func TestLiveness_ObservationsWorkWithNoObserverWired(t *testing.T) {
-	r := livenessReg(t, nil)
+	r := livenessReg(t)
 	s := openRemote(t, r, "srv-01")
 
 	r.observeHost("srv-01", ssh.Reachability{})

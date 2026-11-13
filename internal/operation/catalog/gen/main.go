@@ -4,6 +4,12 @@
 // deadline table is generated from.
 //
 // Run from the repository root: go run ./internal/operation/catalog/gen
+//
+// REMOVING a declaration takes one step first. The stale handle left in
+// handles_gen.go makes the package panic at init ("handle for undeclared
+// operation …") before this command can run, so delete the generated file and
+// let this write it back: `rm internal/operation/catalog/handles_gen.go`.
+// Deleting a generated file is not editing it.
 package main
 
 import (

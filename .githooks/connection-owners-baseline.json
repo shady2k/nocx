@@ -1,0 +1,79 @@
+{
+  "//": [
+    "DO NOT EDIT MANUALLY except for a new entry's reason. Regenerate with",
+    "`node .githooks/update-connection-owners-baseline.mjs`.",
+    "",
+    "Every entry is a site OUTSIDE the SSH transport (internal/ssh,",
+    "internal/helper/sshsvc, internal/sshtest) that decides a fact about an SSH",
+    "connection: it names an x/crypto/ssh object, dials a network, reads an",
+    "ExitError or sends a keepalive. ADR-ba6xet1b says one owner exists — the",
+    "backend connection manager behind the Carrier interface — and the stages of",
+    "nocx-oalo1 remove these. The list may only SHRINK or stay level; the updater",
+    "refuses growth without --allow-growth, and an entry with no reason fails the",
+    "check.",
+    "",
+    "Keyed on rule + file + enclosing function + the object referenced, never on a",
+    "line, so an unrelated edit above a baselined site does not churn this file.",
+    "",
+    "transport-re-export is a SHAPE check: an exported package-level var holding a",
+    "dial function, or an exported func whose whole body is one `return <dial call>`.",
+    "A dial handed out any other way (through a field, a method, a channel, a",
+    "multi-statement func) is not chased. The transport packages are the one owner of",
+    "a connection, and what they export is reviewed with them; a shape heuristic here",
+    "would grow without bound and still be outrun by the next spelling.",
+    "`count` is how many times that function decides the fact: a second identical",
+    "call is a second decision, and a count that GROWS fails the check until the",
+    "baseline is updated deliberately. A count that SHRINKS is a stale licence and",
+    "fails too, so running the updater is the only way this file moves."
+  ],
+  "violations": [
+    {
+      "rule": "exit-error-read",
+      "file": "internal/session/session.go",
+      "func": "github.com/shady2k/nocx/internal/session.realSession.ExitOutcome",
+      "object": "golang.org/x/crypto/ssh.ExitError",
+      "count": 1,
+      "reason": "the session registry decides a remote shell's exit cause; design §5.1.2 moves it into the x/crypto carrier, which answers a neutral cause (nocx-oalo1 stages 2-3)"
+    },
+    {
+      "rule": "net-dial",
+      "file": "internal/assistant/httpguard.go",
+      "func": "github.com/shady2k/nocx/internal/assistant.newGuardedHTTPClient",
+      "object": "net.Dialer",
+      "count": 1,
+      "reason": "the assistant's model HTTP route, in the family that also carries SSH leases; it leaves with the agent replacement (nocx-a62cl)"
+    },
+    {
+      "rule": "net-dial",
+      "file": "internal/httppolicy/dial.go",
+      "func": "github.com/shady2k/nocx/internal/httppolicy.Local",
+      "object": "net.Dialer",
+      "count": 1,
+      "reason": "the local Route constructor every request dials through, the SSH lease included; it leaves when the carrier owns channels (design §5.1.2)"
+    },
+    {
+      "rule": "xcrypto-ssh-import",
+      "file": "internal/helper/sshdial/sshdial.go",
+      "func": "github.com/shady2k/nocx/internal/helper/sshdial.DialDirectTCP",
+      "object": "golang.org/x/crypto/ssh.Client",
+      "count": 1,
+      "reason": "the helper's channel dialer (direct-tcpip and remote listens): a transport use that internal/helper/sshconn's carrier takes over (design §5.1.1)"
+    },
+    {
+      "rule": "xcrypto-ssh-import",
+      "file": "internal/helper/sshdial/sshdial.go",
+      "func": "github.com/shady2k/nocx/internal/helper/sshdial.ListenRemoteTCP",
+      "object": "golang.org/x/crypto/ssh.Client",
+      "count": 1,
+      "reason": "the helper's channel dialer (direct-tcpip and remote listens): a transport use that internal/helper/sshconn's carrier takes over (design §5.1.1)"
+    },
+    {
+      "rule": "xcrypto-ssh-import",
+      "file": "internal/helper/sshdial/sshdial.go",
+      "func": "github.com/shady2k/nocx/internal/helper/sshdial.ListenRemoteUnix",
+      "object": "golang.org/x/crypto/ssh.Client",
+      "count": 1,
+      "reason": "the helper's channel dialer (direct-tcpip and remote listens): a transport use that internal/helper/sshconn's carrier takes over (design §5.1.1)"
+    }
+  ]
+}

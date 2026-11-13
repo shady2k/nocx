@@ -32,6 +32,12 @@ type fakeHistoryDB struct {
 	calls    int
 }
 
+// CreateSession and DeleteSession are no-ops: this fake serves history
+// queries, and a pane's ledger claim is written and released through the same
+// interface by an open.
+func (f *fakeHistoryDB) CreateSession(context.Context, content.Session) error { return nil }
+func (f *fakeHistoryDB) DeleteSession(context.Context, string) error          { return nil }
+
 func (f *fakeHistoryDB) Conversations() content.ConversationRepository { return nil }
 func (f *fakeHistoryDB) Backup(_ context.Context, _ string) error      { return content.ErrNotImplemented }
 func (f *fakeHistoryDB) Close() error                                  { return nil }

@@ -68,8 +68,8 @@ func TestTrustHostKey_UnknownKeyAccept_SecondProbeSucceeds(t *testing.T) {
 	srv := startTestSSHServer(t)
 	defer srv.close()
 
-	khPath := filepath.Join(t.TempDir(), "known_hosts")
-	client := newTrustClient(t, khPath)
+	sshHome(t)
+	client := newTrustClient(t)
 
 	// First contact: no known_hosts file at all.
 	err := probeOnce(t, client, srv)
@@ -108,12 +108,12 @@ func TestTrustHostKey_ChangedKeyAccept_SecondProbeSucceeds(t *testing.T) {
 
 	// known_hosts records a DIFFERENT key for the same host.
 	wrongKey := generateSigner(t)
-	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	khPath := sshHome(t)
 	line := knownhosts.Line([]string{srv.addr}, wrongKey.PublicKey())
 	if err := os.WriteFile(khPath, []byte(line+"\n"), 0o600); err != nil {
 		t.Fatalf("write known_hosts: %v", err)
 	}
-	client := newTrustClient(t, khPath)
+	client := newTrustClient(t)
 
 	err := probeOnce(t, client, srv)
 	if err == nil {
@@ -164,12 +164,12 @@ func TestHostKeyCallback_JumpRouteCoexistsWithDirectRoute(t *testing.T) {
 	const targetAddr = "db.example.com:22"
 	directKey := generateSigner(t).PublicKey()
 	jumpKey := generateSigner(t).PublicKey()
-	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	khPath := sshHome(t)
 	directLine := knownhosts.Line([]string{targetAddr}, directKey)
 	if err := os.WriteFile(khPath, []byte(directLine+"\n"), 0o600); err != nil {
 		t.Fatalf("write direct known_hosts entry: %v", err)
 	}
-	client := newTrustClient(t, khPath)
+	client := newTrustClient(t)
 	remote := &net.TCPAddr{IP: net.ParseIP("192.0.2.10"), Port: 22}
 
 	directCB, err := client.hostKeyCallbackFor("")
@@ -302,9 +302,10 @@ func TestTrustHostKey_CreatesMissingParent0700(t *testing.T) {
 	srv := startTestSSHServer(t)
 	defer srv.close()
 
-	sshDir := filepath.Join(t.TempDir(), ".ssh")
-	khPath := filepath.Join(sshDir, "known_hosts")
-	client := newTrustClient(t, khPath)
+	// A home with no .ssh yet: the store must be created, not refused.
+	home := sshTestHome(t)
+	sshDir := filepath.Join(home, ".ssh")
+	client := newTrustClient(t)
 
 	if _, err := client.TrustHostKey(srv.addr, srv.hostSigner.PublicKey().Marshal()); err != nil {
 		t.Fatalf("TrustHostKey: %v", err)
@@ -323,8 +324,8 @@ func TestTrustHostKey_CreatesMissingFile0600(t *testing.T) {
 	srv := startTestSSHServer(t)
 	defer srv.close()
 
-	khPath := filepath.Join(t.TempDir(), "known_hosts")
-	client := newTrustClient(t, khPath)
+	khPath := sshHome(t)
+	client := newTrustClient(t)
 
 	key := srv.hostSigner.PublicKey()
 	if _, err := client.TrustHostKey(srv.addr, key.Marshal()); err != nil {
@@ -356,11 +357,11 @@ func TestTrustHostKey_ExistingFileKeepsModeAndAppends(t *testing.T) {
 		knownhosts.Line([]string{"existing.host"}, newTestHostKey(t)),
 		"# nocx trust test — existing line 3",
 	}
-	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	khPath := sshHome(t)
 	if err := os.WriteFile(khPath, []byte(strings.Join(existing, "\n")+"\n"), 0o644); err != nil { //nolint:gosec // the point of the test is that a mode we did not choose survives
 		t.Fatalf("write known_hosts: %v", err)
 	}
-	client := newTrustClient(t, khPath)
+	client := newTrustClient(t)
 
 	key := srv.hostSigner.PublicKey()
 	if _, err := client.TrustHostKey(srv.addr, key.Marshal()); err != nil {
@@ -398,7 +399,7 @@ func TestTrustHostKey_ExistingFileKeepsModeAndAppends(t *testing.T) {
 // TestTrustHostKey_NonDefaultPortWritesBracketedAddr pins the known_hosts
 // address convention: host:2222 is stored as [host]:2222, never host:2222.
 func TestTrustHostKey_NonDefaultPortWritesBracketedAddr(t *testing.T) {
-	client := newTrustClient(t, filepath.Join(t.TempDir(), "known_hosts"))
+	client := newTrustClient(t)
 
 	key := generateSigner(t).PublicKey()
 	if _, err := client.TrustHostKey("db.example.com:2222", key.Marshal()); err != nil {
@@ -417,8 +418,8 @@ func TestTrustHostKey_NonDefaultPortWritesBracketedAddr(t *testing.T) {
 // TestTrustHostKey_InvalidKeyWritesNothing pins that a key that does not
 // parse is refused and no file is created.
 func TestTrustHostKey_InvalidKeyWritesNothing(t *testing.T) {
-	khPath := filepath.Join(t.TempDir(), "known_hosts")
-	client := newTrustClient(t, khPath)
+	khPath := sshHome(t)
+	client := newTrustClient(t)
 
 	_, err := client.TrustHostKey("host.example.com:22", []byte("not-a-key"))
 	if err == nil {

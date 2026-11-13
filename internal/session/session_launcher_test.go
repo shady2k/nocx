@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/log"
@@ -10,16 +11,9 @@ import (
 	"github.com/shady2k/nocx/internal/ssh"
 )
 
-// capturingSSHFactory records the ConnectOptions it receives and returns a
-// scripted channel (or error).
-type capturingSSHFactory struct {
-	opts []ssh.ConnectOption
-	ch   ssh.Channel
-	err  error
-}
-
-// fakeLauncher satisfies ssh.RemoteLauncher; the session layer only needs to
-// carry it through to Connect, never to call it.
+// fakeLauncher satisfies ssh.RemoteLauncher. The registry carries it into the
+// session's SSH options and never calls it: the command is built where the
+// shell is spawned (the helper), from the destination it was handed.
 type fakeLauncher struct{}
 
 func (f *fakeLauncher) StartCommand(_ ssh.ShellKind, _ ssh.LaunchOptions) (string, ssh.RefusalReason, bool) {
@@ -32,15 +26,9 @@ func (f *fakeLauncher) Prepare(_ ssh.ShellKind, _ ssh.LaunchOptions) (string, ss
 	return "", nil, nil, false
 }
 
-func (f *capturingSSHFactory) Connect(_ context.Context, _ string, opts ...ssh.ConnectOption) (ssh.Channel, error) {
-	f.opts = append(f.opts, opts...)
-	if f.err != nil {
-		return nil, f.err
-	}
-	return f.ch, nil
-}
-
-// reasonChannel is an ssh.Channel whose ShellIntegrationReason is scripted.
+// reasonChannel is a session.Channel whose ShellIntegrationReason is scripted.
+// It stands in for the helper's attached channel, which is the only channel a
+// remote session has now.
 type reasonChannel struct {
 	reason ssh.RefusalReason
 }
@@ -58,8 +46,9 @@ func (c *reasonChannel) ShellIntegrationReason() ssh.RefusalReason {
 	return c.reason
 }
 
-// fingerprintChannel is an ssh.Channel whose HostKeyFingerprint is
-// scripted — the shape the real RealChannel carries after a capturing dial.
+// fingerprintChannel is a channel whose HostKeyFingerprint is scripted — the
+// shape a coordinator-dialed channel used to carry after a capturing dial. It
+// survives as a fake so the session's fallback order can be asserted.
 type fingerprintChannel struct {
 	reasonChannel
 	fingerprint string
@@ -71,19 +60,57 @@ func launcherReg() *Reg {
 	return New(log.NewSlogAdapter(nil), &stubPTYFactory{stub: pty.NewStub(log.NewSlogAdapter(nil))})
 }
 
-func TestRemoteSession_SurfacesShellIntegrationReason(t *testing.T) {
-	factory := &capturingSSHFactory{ch: &reasonChannel{reason: ssh.ReasonRemoteCommand}}
-	reg := launcherReg().WithSSHFactory(factory)
+// adoptRemote registers a remote session the way this machine's helper does:
+// the helper mints the id and creates the channel, and the registry adopts
+// both (ADR-7).
+func adoptRemote(t *testing.T, reg *Reg, ch Channel, cfg Config) Session {
+	t.Helper()
+	cfg.Kind = KindRemote
+	sess, err := reg.Adopt(context.Background(), cfg, NewID(), ch)
+	if err != nil {
+		t.Fatalf("Adopt: %v", err)
+	}
+	t.Cleanup(func() { _ = reg.Close(sess.ID()) })
+	return sess
+}
 
-	sess, err := reg.Open(context.Background(), Config{
+// sshOptionsOf rebuilds the ConnectConfig a session's options describe — the
+// same translation a helper open feeds the destination with.
+func sshOptionsOf(sess Session) *ssh.ConnectConfig {
+	cfg := &ssh.ConnectConfig{}
+	for _, o := range sess.SSHOptions() {
+		o(cfg)
+	}
+	return cfg
+}
+
+// TestOpen_RefusesARemoteSession is the structural boundary left by
+// nocx-oalo1.3.2: an ssh destination is opened by this machine's helper, so
+// the registry has no dial of its own to reach. The refusal NAMES the route
+// (a caller told only "unavailable" would try again the same way), and a
+// refused open registers nothing.
+func TestOpen_RefusesARemoteSession(t *testing.T) {
+	reg := launcherReg()
+
+	_, err := reg.Open(context.Background(), Config{
 		Kind:   KindRemote,
 		Host:   "example.com",
 		Remote: &ssh.ConnectConfig{},
 	})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
+	if err == nil {
+		t.Fatal("Open opened an ssh session; the registry must have no dial of its own")
 	}
-	defer func() { _ = reg.Close(sess.ID()) }()
+	if !strings.Contains(err.Error(), "helper") {
+		t.Fatalf("refusal = %q, want it to name the helper route", err)
+	}
+	if got := len(reg.List()); got != 0 {
+		t.Errorf("a refused open registered %d session(s), want 0", got)
+	}
+}
+
+func TestRemoteSession_SurfacesShellIntegrationReason(t *testing.T) {
+	reg := launcherReg()
+	sess := adoptRemote(t, reg, &reasonChannel{reason: ssh.ReasonRemoteCommand}, Config{Host: "example.com"})
 
 	if got := sess.ShellIntegrationReason(); got != ssh.ReasonRemoteCommand {
 		t.Errorf("ShellIntegrationReason = %q, want %q", got, ssh.ReasonRemoteCommand)
@@ -95,18 +122,8 @@ func TestRemoteSession_SurfacesShellIntegrationReason(t *testing.T) {
 // §3.2). A channel that does not expose one answers "", which never keys a
 // consent answer.
 func TestRemoteSession_SurfacesHostKeyFingerprint(t *testing.T) {
-	factory := &capturingSSHFactory{ch: &fingerprintChannel{fingerprint: "SHA256:captured"}}
-	reg := launcherReg().WithSSHFactory(factory)
-
-	sess, err := reg.Open(context.Background(), Config{
-		Kind:   KindRemote,
-		Host:   "example.com",
-		Remote: &ssh.ConnectConfig{},
-	})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer func() { _ = reg.Close(sess.ID()) }()
+	reg := launcherReg()
+	sess := adoptRemote(t, reg, &fingerprintChannel{fingerprint: "SHA256:captured"}, Config{Host: "example.com"})
 
 	if got := sess.HostKeyFingerprint(); got != "SHA256:captured" {
 		t.Errorf("HostKeyFingerprint = %q, want %q", got, "SHA256:captured")
@@ -135,18 +152,8 @@ func TestLocalSession_HasNoHostKeyFingerprint(t *testing.T) {
 // session after the fact, the same way RecordOwnedProcessPID already lets a
 // launch fact arrive once the session already exists.
 func TestRecordHostKeyFingerprint_AnswersOverAChannelThatCarriesNone(t *testing.T) {
-	factory := &capturingSSHFactory{ch: &reasonChannel{}}
-	reg := launcherReg().WithSSHFactory(factory)
-
-	sess, err := reg.Open(context.Background(), Config{
-		Kind:   KindRemote,
-		Host:   "example.com",
-		Remote: &ssh.ConnectConfig{},
-	})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer func() { _ = reg.Close(sess.ID()) }()
+	reg := launcherReg()
+	sess := adoptRemote(t, reg, &reasonChannel{}, Config{Host: "example.com"})
 
 	if got := sess.HostKeyFingerprint(); got != "" {
 		t.Fatalf("before recording, HostKeyFingerprint = %q, want \"\"", got)
@@ -162,21 +169,11 @@ func TestRecordHostKeyFingerprint_AnswersOverAChannelThatCarriesNone(t *testing.
 // TestRecordHostKeyFingerprint_RecordedValueOutranksTheChannels proves the
 // order HostKeyFingerprint checks: a RECORDED fact wins even when the
 // channel itself could also answer, because the recorded fact is the
-// coordinator's own verified verdict and a channel's own answer (a direct,
-// non-helper dial) is the fallback for when nothing was ever recorded.
+// coordinator's own verified verdict and a channel's own answer is the
+// fallback for when nothing was ever recorded.
 func TestRecordHostKeyFingerprint_RecordedValueOutranksTheChannels(t *testing.T) {
-	factory := &capturingSSHFactory{ch: &fingerprintChannel{fingerprint: "SHA256:fromchannel"}}
-	reg := launcherReg().WithSSHFactory(factory)
-
-	sess, err := reg.Open(context.Background(), Config{
-		Kind:   KindRemote,
-		Host:   "example.com",
-		Remote: &ssh.ConnectConfig{},
-	})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer func() { _ = reg.Close(sess.ID()) }()
+	reg := launcherReg()
+	sess := adoptRemote(t, reg, &fingerprintChannel{fingerprint: "SHA256:fromchannel"}, Config{Host: "example.com"})
 
 	if err := reg.RecordHostKeyFingerprint(sess.ID(), "SHA256:recorded"); err != nil {
 		t.Fatalf("RecordHostKeyFingerprint: %v", err)
@@ -193,18 +190,8 @@ func TestRecordHostKeyFingerprint_RecordedValueOutranksTheChannels(t *testing.T)
 // never a silent overwrite of evidence a consent decision may already be
 // keyed by.
 func TestRecordHostKeyFingerprint_RefusesADifferentValueForTheSameSession(t *testing.T) {
-	factory := &capturingSSHFactory{ch: &reasonChannel{}}
-	reg := launcherReg().WithSSHFactory(factory)
-
-	sess, err := reg.Open(context.Background(), Config{
-		Kind:   KindRemote,
-		Host:   "example.com",
-		Remote: &ssh.ConnectConfig{},
-	})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer func() { _ = reg.Close(sess.ID()) }()
+	reg := launcherReg()
+	sess := adoptRemote(t, reg, &reasonChannel{}, Config{Host: "example.com"})
 
 	if err := reg.RecordHostKeyFingerprint(sess.ID(), "SHA256:first"); err != nil {
 		t.Fatalf("first RecordHostKeyFingerprint: %v", err)
@@ -227,65 +214,29 @@ func TestRecordHostKeyFingerprint_RefusesAnUnknownSession(t *testing.T) {
 	}
 }
 
-func TestRemoteSession_SessionIDMatchesAndLauncherWired(t *testing.T) {
+// TestAdoptedRemoteSession_CarriesTheLauncherAndTheMode: the helper is the
+// party that builds a shell command now, so what the registry owes it is the
+// destination's resolved material — launcher, mode, shell pin — reachable
+// through the session's options for whoever asks (a probe, a forward, a
+// readopt).
+func TestAdoptedRemoteSession_CarriesTheLauncherAndTheMode(t *testing.T) {
 	launcher := &fakeLauncher{}
-	factory := &capturingSSHFactory{ch: &reasonChannel{reason: ssh.ReasonNone}}
-	reg := launcherReg().WithSSHFactory(factory)
-
-	sess, err := reg.Open(context.Background(), Config{
-		Kind:     KindRemote,
-		Host:     "example.com",
-		Enhanced: true,
-		Remote:   &ssh.ConnectConfig{RemoteLauncher: launcher},
+	reg := launcherReg()
+	sess := adoptRemote(t, reg, &reasonChannel{reason: ssh.ReasonNone}, Config{
+		Host: "example.com",
+		Remote: &ssh.ConnectConfig{
+			RemoteLauncher: launcher,
+			DesiredMode:    "raw",
+			Shell:          ssh.ShellZsh,
+		},
 	})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer func() { _ = reg.Close(sess.ID()) }()
 
-	// The ID the session was registered under is the ID the launcher options
-	// carried — the same pre-connect ID, not an empty string.
-	cfg := &ssh.ConnectConfig{}
-	for _, o := range factory.opts {
-		o(cfg)
-	}
-	if cfg.SessionID != string(sess.ID()) {
-		t.Errorf("ConnectConfig.SessionID = %q, want the session ID %q", cfg.SessionID, sess.ID())
-	}
-	if cfg.SessionID == "" {
-		t.Error("ConnectConfig.SessionID is empty: the launcher would embed no NOCX_SESSION_ID")
-	}
-	if !cfg.Enhanced {
-		t.Error("ConnectConfig.Enhanced = false, want true (Config.Enhanced requested marker-only mode)")
-	}
+	cfg := sshOptionsOf(sess)
 	if cfg.RemoteLauncher == nil {
-		t.Error("ConnectConfig.RemoteLauncher is nil: the wired launcher did not reach Connect")
+		t.Error("ConnectConfig.RemoteLauncher is nil: the wired launcher did not reach the session's options")
 	}
-}
-
-// TestRemoteSession_ShellPin_ReachesConnect pins the regression the whole
-// seam exists for (nocx-pu4.1): a ConnectConfig.Shell must ride
-// sshOptionsFromConfig into the Connect options, or the pin dies before the
-// launcher and the far shell is detected instead of named. The launcher's
-// own mapping (empty → ShellAuto) is the ssh package's contract
-// (ssh_real.go), tested there; here the pin must simply arrive.
-func TestRemoteSession_ShellPin_ReachesConnect(t *testing.T) {
-	factory := &capturingSSHFactory{ch: &reasonChannel{reason: ssh.ReasonNone}}
-	reg := launcherReg().WithSSHFactory(factory)
-
-	sess, err := reg.Open(context.Background(), Config{
-		Kind:   KindRemote,
-		Host:   "example.com",
-		Remote: &ssh.ConnectConfig{Shell: ssh.ShellZsh},
-	})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer func() { _ = reg.Close(sess.ID()) }()
-
-	cfg := &ssh.ConnectConfig{}
-	for _, o := range factory.opts {
-		o(cfg)
+	if cfg.DesiredMode != "raw" {
+		t.Errorf("ConnectConfig.DesiredMode = %q, want raw", cfg.DesiredMode)
 	}
 	if cfg.Shell != ssh.ShellZsh {
 		t.Errorf("ConnectConfig.Shell = %q, want the pinned %q", cfg.Shell, ssh.ShellZsh)
@@ -296,42 +247,11 @@ func TestRemoteSession_ShellPin_ReachesConnect(t *testing.T) {
 // contract: an unpinned config must NOT invent a shell — the launcher's
 // empty → ShellAuto mapping is the detect default (nocx-6rj0).
 func TestRemoteSession_NoShellPin_LeavesShellEmpty(t *testing.T) {
-	factory := &capturingSSHFactory{ch: &reasonChannel{reason: ssh.ReasonNone}}
-	reg := launcherReg().WithSSHFactory(factory)
+	reg := launcherReg()
+	sess := adoptRemote(t, reg, &reasonChannel{reason: ssh.ReasonNone}, Config{Host: "example.com"})
 
-	sess, err := reg.Open(context.Background(), Config{
-		Kind:   KindRemote,
-		Host:   "example.com",
-		Remote: &ssh.ConnectConfig{},
-	})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer func() { _ = reg.Close(sess.ID()) }()
-
-	cfg := &ssh.ConnectConfig{}
-	for _, o := range factory.opts {
-		o(cfg)
-	}
-	if cfg.Shell != "" {
+	if cfg := sshOptionsOf(sess); cfg.Shell != "" {
 		t.Errorf("ConnectConfig.Shell = %q, want empty (detect default)", cfg.Shell)
-	}
-}
-
-func TestRemoteSession_ConnectError_NoSessionRegistered(t *testing.T) {
-	factory := &capturingSSHFactory{err: io.ErrClosedPipe}
-	reg := launcherReg().WithSSHFactory(factory)
-
-	_, err := reg.Open(context.Background(), Config{
-		Kind:   KindRemote,
-		Host:   "example.com",
-		Remote: &ssh.ConnectConfig{},
-	})
-	if err == nil {
-		t.Fatal("Open with failing SSH factory: expected error, got nil")
-	}
-	if got := len(reg.List()); got != 0 {
-		t.Errorf("failed connect registered %d session(s), want 0", got)
 	}
 }
 
@@ -353,41 +273,27 @@ func TestLocalSession_ShellIntegrationReasonIsNone(t *testing.T) {
 	}
 }
 
-// TestRemoteSession_JumpConfig_ReachesConnect pins the regression the whole
-// seam exists for (nocx-8b1v): a ConnectConfig.JumpConfig must ride
-// sshOptionsFromConfig into the Connect options, or the bastion's auth
-// material is dropped and the dial offers no methods. The vault unlock no
-// longer rides this path — a sealed vault is a sealed-vault failure the
-// transport's dispatcher seam normalizes into the canonical error, and the
-// renderer raises the prompt (ADR-0032).
-func TestRemoteSession_JumpConfig_ReachesConnect(t *testing.T) {
-	factory := &capturingSSHFactory{ch: &reasonChannel{reason: ssh.ReasonNone}}
-	reg := launcherReg().WithSSHFactory(factory)
-
+// TestRemoteSession_JumpConfig_ReachesTheSessionOptions pins the regression
+// the seam exists for (nocx-8b1v): a ConnectConfig.JumpConfig must ride
+// sshOptionsFromConfig into the session's options, or the bastion's auth
+// material is dropped and the helper's dial offers no methods.
+func TestRemoteSession_JumpConfig_ReachesTheSessionOptions(t *testing.T) {
 	jumpCfg := &ssh.ConnectConfig{
 		User:     "jumpuser",
 		Port:     2222,
 		AuthMode: "publicKey",
 		KeyFile:  "/home/user/.ssh/jump_key",
 	}
-
-	sess, err := reg.Open(context.Background(), Config{
-		Kind: KindRemote,
+	reg := launcherReg()
+	sess := adoptRemote(t, reg, &reasonChannel{reason: ssh.ReasonNone}, Config{
 		Host: "example.com",
 		Remote: &ssh.ConnectConfig{
 			JumpHost:   "bastion.example.com",
 			JumpConfig: jumpCfg,
 		},
 	})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer func() { _ = reg.Close(sess.ID()) }()
 
-	cfg := &ssh.ConnectConfig{}
-	for _, o := range factory.opts {
-		o(cfg)
-	}
+	cfg := sshOptionsOf(sess)
 	if cfg.JumpConfig == nil {
 		t.Fatal("ConnectConfig.JumpConfig is nil: the recursive jump config was dropped at the session→ssh seam")
 	}

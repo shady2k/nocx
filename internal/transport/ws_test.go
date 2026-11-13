@@ -1654,33 +1654,25 @@ func TestWSServer_CloseSessionTearsDownRing(t *testing.T) {
 	}
 }
 
-type stubSSHFactory struct {
-	connectFn func(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.Channel, error)
-}
-
-func (f *stubSSHFactory) Connect(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.Channel, error) {
-	return f.connectFn(ctx, host, opts...)
-}
-
 // TestWSServer_OpenSSHError_ClassifiedError verifies that when the SSH
 // factory returns a typed SSH error, handleOpen classifies it through the
 // same taxonomy the probe uses instead of returning "Internal error".
 func TestWSServer_OpenSSHError_ClassifiedError(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
 	reg := newRegWithStub(logger)
-	reg.WithSSHFactory(&stubSSHFactory{
-		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
-			return nil, &ssh.ErrAuthFailed{User: "test", Host: "host.example.com", Err: errors.New("bad password")}
-		},
-	})
+	opener := stubHelper(reg)
+	opener.open = func(_ context.Context, _ session.Config) (HostedSessionOpen, bool, error) {
+		return HostedSessionOpen{}, true, &ssh.ErrAuthFailed{User: "test", Host: "host.example.com", Err: errors.New("bad password")}
+	}
 
 	ws := NewWSServer(
 		logger, reg,
 		// The ssh pane this test opens is this machine's helper's
-		// (nocx-50w7p.5), and the FACTORY's error must still be the subject:
-		// the helper route reaches the same factory the direct route did, so
-		// the classified error on the wire is unchanged.
-		sshHelperOpt(reg),
+		// (nocx-50w7p.5), and the HELPER's error must be the subject: a
+		// refused credential reaches the wire as the same typed error the
+		// coordinator's own dial used to raise, and the taxonomy must not
+		// have changed with the route.
+		WithHelperSessionOpener(opener),
 		WithProfileResolver(&fakeResolver{
 			resolveFn: func(profileID string) (string, *ssh.ConnectConfig, error) {
 				return "host.example.com", &ssh.ConnectConfig{User: "test", Port: 22}, nil
@@ -1730,14 +1722,6 @@ func TestWSServer_OpenEmptyHost_NoDialAttempt(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
 	reg := newRegWithStub(logger)
 
-	dialCount := 0
-	reg.WithSSHFactory(&stubSSHFactory{
-		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
-			dialCount++
-			return nil, errors.New("should not be reached")
-		},
-	})
-
 	ws := NewWSServer(
 		logger, reg,
 		WithProfileResolver(&fakeResolver{
@@ -1780,9 +1764,6 @@ func TestWSServer_OpenEmptyHost_NoDialAttempt(t *testing.T) {
 	}
 	if !strings.Contains(r.Error.Message, "host is required") {
 		t.Errorf("expected message mentioning host required, got %q", r.Error.Message)
-	}
-	if dialCount != 0 {
-		t.Fatalf("expected no dial attempt, got %d", dialCount)
 	}
 }
 
@@ -2707,11 +2688,6 @@ func newReplayHarness(t *testing.T, forwards []profile.ForwardSpec) *replayHarne
 	t.Helper()
 	srv := startTunnelTestSSHServer(t)
 	reg := newRegWithStub(log.NewSlogAdapter(nil))
-	reg.WithSSHFactory(&stubSSHFactory{
-		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
-			return ssh.NewStubChannel(log.NewSlogAdapter(nil)), nil
-		},
-	})
 
 	ps := profile.NewJSONStore(filepath.Join(t.TempDir(), "p.json"))
 	fwds := forwards
@@ -2862,29 +2838,29 @@ func TestOpen_ReplayOneRowFailure_StopsNoOther(t *testing.T) {
 	roundTrip(t, bindAddr(rows[0].Actual()))
 }
 
-// shellCaptureHarness wires a WSServer whose SSH factory records the
-// ConnectOptions the registry built — the seam where a pin either rides or
-// dies before the launcher.
-func shellCaptureHarness(t *testing.T) (*websocket.Conn, func() []ssh.ConnectOption) {
+// shellCaptureHarness wires a WSServer whose helper records the resolved
+// destination it was handed — the seam where a shell pin either rides or dies
+// before the far side builds its command.
+func shellCaptureHarness(t *testing.T) (*websocket.Conn, func() *ssh.ConnectConfig) {
 	t.Helper()
 	reg := newRegWithStub(log.NewSlogAdapter(nil))
 	var mu sync.Mutex
-	var captured []ssh.ConnectOption
-	reg.WithSSHFactory(&stubSSHFactory{
-		connectFn: func(_ context.Context, _ string, opts ...ssh.ConnectOption) (ssh.Channel, error) {
-			mu.Lock()
-			captured = append([]ssh.ConnectOption{}, opts...)
-			mu.Unlock()
-			return ssh.NewStubChannel(log.NewSlogAdapter(nil)), nil
-		},
-	})
+	var captured ssh.ConnectConfig
+	opener := stubHelper(reg)
+	opener.onOpen = func(cfg session.Config) {
+		mu.Lock()
+		defer mu.Unlock()
+		if cfg.Remote != nil {
+			captured = *cfg.Remote
+		}
+	}
 	ws := NewWSServer(
 		log.NewSlogAdapter(nil), reg,
 		// The ssh pane this harness opens is this machine's helper's
-		// (nocx-50w7p.5). Its subject is the ConnectOptions the registry built,
-		// where a shell pin either rides or does not — which is downstream of
-		// the pane existing.
-		sshHelperOpt(reg),
+		// (nocx-50w7p.5). Its subject is the resolved destination the helper is
+		// handed, where a shell pin either rides or does not — which is
+		// downstream of the pane existing.
+		WithHelperSessionOpener(opener),
 		WithProfileResolver(&fakeResolver{
 			resolveFn: func(profileID string) (string, *ssh.ConnectConfig, error) {
 				return "host.example.com", &ssh.ConnectConfig{User: "test"}, nil
@@ -2898,10 +2874,11 @@ func shellCaptureHarness(t *testing.T) (*websocket.Conn, func() []ssh.ConnectOpt
 	conn := connectWS(t, ws)
 	t.Cleanup(func() { _ = conn.Close() })
 	t.Cleanup(func() { _ = ws.Stop(ctx) })
-	return conn, func() []ssh.ConnectOption {
+	return conn, func() *ssh.ConnectConfig {
 		mu.Lock()
 		defer mu.Unlock()
-		return append([]ssh.ConnectOption{}, captured...)
+		got := captured
+		return &got
 	}
 }
 
@@ -2936,10 +2913,7 @@ func TestOpen_ShellPin_ReachesConnectOptions(t *testing.T) {
 	conn, captured := shellCaptureHarness(t)
 	openSSHWithShell(t, conn, string(ssh.ShellZsh))
 
-	cfg := &ssh.ConnectConfig{}
-	for _, o := range captured() {
-		o(cfg)
-	}
+	cfg := captured()
 	if cfg.Shell != ssh.ShellZsh {
 		t.Errorf("ConnectConfig.Shell = %q, want the pinned %q", cfg.Shell, ssh.ShellZsh)
 	}
@@ -2952,10 +2926,7 @@ func TestOpen_NoShellPin_LeavesDetectDefault(t *testing.T) {
 	conn, captured := shellCaptureHarness(t)
 	openSSHWithShell(t, conn, "")
 
-	cfg := &ssh.ConnectConfig{}
-	for _, o := range captured() {
-		o(cfg)
-	}
+	cfg := captured()
 	if cfg.Shell != "" {
 		t.Errorf("ConnectConfig.Shell = %q, want empty (launcher maps it to ShellAuto)", cfg.Shell)
 	}
@@ -2968,10 +2939,7 @@ func TestOpen_UnknownShellPin_IgnoredWithWarn(t *testing.T) {
 	conn, captured := shellCaptureHarness(t)
 	openSSHWithShell(t, conn, "fish")
 
-	cfg := &ssh.ConnectConfig{}
-	for _, o := range captured() {
-		o(cfg)
-	}
+	cfg := captured()
 	if cfg.Shell != "" {
 		t.Errorf("ConnectConfig.Shell = %q, want empty for an unknown pin", cfg.Shell)
 	}

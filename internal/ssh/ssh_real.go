@@ -19,11 +19,6 @@ import (
 // RealClientOption configures the RealClient constructor.
 type RealClientOption func(*RealClient)
 
-// WithKnownHostsFile sets an explicit known_hosts path.
-func WithKnownHostsFile(path string) RealClientOption {
-	return func(rc *RealClient) { rc.knownHostsFile = path }
-}
-
 // WithConfigResolver sets the SSH config resolver for the RealClient.
 // When set, ~/.ssh/config HostName resolution and config merging use the
 // injected resolver instead of running ssh -G internally. Tests use a
@@ -70,6 +65,12 @@ type RealClient struct {
 }
 
 // NewReal creates a RealClient with the given options.
+//
+// The host-key store is $HOME/.ssh/known_hosts, resolved here and never
+// passed in: this process's home is the answer production has, and a path
+// option existed only for tests — a test hook living in the product, deleted
+// with the rest of the dead code (nocx-oalo1.3.2). A test that wants its own
+// store gives the client its own $HOME, as a person does.
 func NewReal(logger log.Logger, opts ...RealClientOption) (*RealClient, error) {
 	rc := &RealClient{
 		log: logger.With("module", "ssh"),
@@ -511,44 +512,3 @@ func validateTrustWrite(path, content, addr string, key gossh.PublicKey, authori
 	}
 	return nil
 }
-
-// shellStartCommand decides what the remote session runs and whether shell
-// integration happened. Precedence:
-//
-//  1. A RemoteCommand configured for the destination wins outright: OpenSSH
-//     refuses a command-line remote command alongside it ("Cannot execute
-//     command-line and remote command"), so the configured command runs
-//     as-is and no launcher or installer is consulted (spec §4.2).
-//  2. The desired mode (nocx-mlm7) gates everything else: raw publishes
-//     nothing and opens a plain shell; auto (the default), script and
-//     helper — or empty, the direct-host default — publish and integrate.
-//     The tiers are additive: helper allows the deployed binary and never
-//     withholds the scripts (§5.2, nocx-7k8ma).
-//  3. In script mode the bundle is published over SFTP through the
-//     RemoteInstaller, CONCURRENTLY with the loader (design §6.1 step 2,
-//     §7). Its outcome is REPORTED AND NOT CONSULTED for which command is
-//     emitted: the same carrier goes out whether the publish succeeded,
-//     failed, or was never attempted. That is the carrier design's first
-//     decision, and it is what the old shape got wrong — the command used to
-//     begin with a far-side test of installation state, which on a first
-//     contact fails while the publish that would have satisfied it is still
-//     in flight. The far side stays the owner of "is this installation
-//     valid"; that verification runs after the bootstrap settles, inside
-//     stage-1. What the outcome DOES gate is the mint: §6.1 step 5 puts the
-//     publish's terminal outcome ahead of the pair, to close the mutation
-//     race where stage-1 verifies a manifest microseconds before an atomic
-//     commit. It was sequential and inline until P5, which is why the
-//     deadline arithmetic did not close: 3 + 3 + 10 is 16 against a 15 s
-//     deadline, and concurrent it is 13.
-//  4. The launcher builds the carrier: a bounded loader carrying no bundle
-//     bytes and neither secret (shellintegration/carrier.go). A profile pin
-//     (cfg.Shell) is still passed — a user who says "this host runs zsh"
-//     knows something the detector cannot (nocx-6rj0) — though the carrier
-//     is the same for every kind, because the far side dispatches after
-//     stage-1 rather than in the command. A decline (or a
-//     contract-violating result) falls back to a plain shell with the
-//     reason: an ordinary, usable terminal with a visible native prompt is
-//     absolute, no failure path may suppress it.
-//  5. No launcher wired: a plain shell, reason none. There is deliberately
-//     no installer-supplied command any more — a session either runs the
-//     carrier or runs nothing at all.

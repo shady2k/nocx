@@ -6,7 +6,6 @@ import (
 	"crypto/rsa"
 	"net"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -85,11 +84,11 @@ func readHostsFile(t *testing.T, path string) string {
 // deleting it would silently revoke trust for every sibling the pattern was
 // written to cover.
 func TestTrustHostKey_WildcardLineIsNarrowedNotDeleted(t *testing.T) {
-	kh := filepath.Join(t.TempDir(), "known_hosts")
+	kh := sshHome(t)
 	old, accepted := newTestHostKey(t), newTestHostKey(t)
 	writeHostsFile(t, kh, knownhosts.Line([]string{"*.example.com"}, old)+"\n")
 
-	client := newTrustClient(t, kh)
+	client := newTrustClient(t)
 	if _, err := client.TrustHostKey("db.example.com:22", accepted.Marshal()); err != nil {
 		t.Fatalf("TrustHostKey: %v", err)
 	}
@@ -108,13 +107,13 @@ func TestTrustHostKey_WildcardLineIsNarrowedNotDeleted(t *testing.T) {
 // The negation has to be written in the form the matcher compares against:
 // port is matched exactly, so a bracketed address needs a bracketed negation.
 func TestTrustHostKey_WildcardNarrowedAtNonDefaultPort(t *testing.T) {
-	kh := filepath.Join(t.TempDir(), "known_hosts")
+	kh := sshHome(t)
 	old, accepted := newTestHostKey(t), newTestHostKey(t)
 	writeHostsFile(t, kh,
 		knownhosts.Line([]string{"[*.example.com]:2222"}, old)+"\n"+
 			knownhosts.Line([]string{"*.example.com"}, old)+"\n")
 
-	client := newTrustClient(t, kh)
+	client := newTrustClient(t)
 	if _, err := client.TrustHostKey("db.example.com:2222", accepted.Marshal()); err != nil {
 		t.Fatalf("TrustHostKey: %v", err)
 	}
@@ -135,12 +134,12 @@ func TestTrustHostKey_WildcardNarrowedAtNonDefaultPort(t *testing.T) {
 // A line naming several hosts exactly is narrowed too. Deleting it would take
 // web.example.com's trust with it.
 func TestTrustHostKey_MultiHostLineIsNarrowedNotDeleted(t *testing.T) {
-	kh := filepath.Join(t.TempDir(), "known_hosts")
+	kh := sshHome(t)
 	old, accepted := newTestHostKey(t), newTestHostKey(t)
 	writeHostsFile(t, kh,
 		knownhosts.Line([]string{"db.example.com", "web.example.com"}, old)+"\n")
 
-	client := newTrustClient(t, kh)
+	client := newTrustClient(t)
 	if _, err := client.TrustHostKey("db.example.com:22", accepted.Marshal()); err != nil {
 		t.Fatalf("TrustHostKey: %v", err)
 	}
@@ -157,11 +156,11 @@ func TestTrustHostKey_MultiHostLineIsNarrowedNotDeleted(t *testing.T) {
 // `db.example.com,!db.example.com` behind would be dead text in the user's
 // file.
 func TestTrustHostKey_SingleHostLineIsRemoved(t *testing.T) {
-	kh := filepath.Join(t.TempDir(), "known_hosts")
+	kh := sshHome(t)
 	old, accepted := newTestHostKey(t), newTestHostKey(t)
 	writeHostsFile(t, kh, knownhosts.Line([]string{"db.example.com"}, old)+"\n")
 
-	client := newTrustClient(t, kh)
+	client := newTrustClient(t)
 	if _, err := client.TrustHostKey("db.example.com:22", accepted.Marshal()); err != nil {
 		t.Fatalf("TrustHostKey: %v", err)
 	}
@@ -177,13 +176,13 @@ func TestTrustHostKey_SingleHostLineIsRemoved(t *testing.T) {
 // A hashed entry names exactly one host, so it is removed like any other
 // single-host line — and a hashed entry for a different host is not touched.
 func TestTrustHostKey_HashedEntryForTheHostIsRemoved(t *testing.T) {
-	kh := filepath.Join(t.TempDir(), "known_hosts")
+	kh := sshHome(t)
 	old, other, accepted := newTestHostKey(t), newTestHostKey(t), newTestHostKey(t)
 	writeHostsFile(t, kh,
 		knownhosts.Line([]string{knownhosts.HashHostname("db.example.com")}, old)+"\n"+
 			knownhosts.Line([]string{knownhosts.HashHostname("api.example.com")}, other)+"\n")
 
-	client := newTrustClient(t, kh)
+	client := newTrustClient(t)
 	if _, err := client.TrustHostKey("db.example.com:22", accepted.Marshal()); err != nil {
 		t.Fatalf("TrustHostKey: %v", err)
 	}
@@ -201,14 +200,14 @@ func TestTrustHostKey_HashedEntryForTheHostIsRemoved(t *testing.T) {
 // whoever holds the old key of another algorithm still passes — the same
 // attack the mismatch warning exists to stop.
 func TestTrustHostKey_RevokesEveryAlgorithmForTheHost(t *testing.T) {
-	kh := filepath.Join(t.TempDir(), "known_hosts")
+	kh := sshHome(t)
 	oldEd, accepted := newTestHostKey(t), newTestHostKey(t)
 	oldRSA := newTestRSAHostKey(t)
 	writeHostsFile(t, kh,
 		knownhosts.Line([]string{"db.example.com"}, oldEd)+"\n"+
 			knownhosts.Line([]string{"db.example.com"}, oldRSA)+"\n")
 
-	client := newTrustClient(t, kh)
+	client := newTrustClient(t)
 	if _, err := client.TrustHostKey("db.example.com:22", accepted.Marshal()); err != nil {
 		t.Fatalf("TrustHostKey: %v", err)
 	}
@@ -226,13 +225,13 @@ func TestTrustHostKey_RevokesEveryAlgorithmForTheHost(t *testing.T) {
 // trust write that deletes one re-enables a key somebody deliberately banned,
 // everywhere.
 func TestTrustHostKey_RevokedLineSurvivesByteForByte(t *testing.T) {
-	kh := filepath.Join(t.TempDir(), "known_hosts")
+	kh := sshHome(t)
 	banned, old, accepted := newTestHostKey(t), newTestHostKey(t), newTestHostKey(t)
 	revoked := "@revoked " + knownhosts.Line([]string{"db.example.com"}, banned)
 	writeHostsFile(t, kh,
 		revoked+"\n"+knownhosts.Line([]string{"db.example.com"}, old)+"\n")
 
-	client := newTrustClient(t, kh)
+	client := newTrustClient(t)
 	if _, err := client.TrustHostKey("db.example.com:22", accepted.Marshal()); err != nil {
 		t.Fatalf("TrustHostKey: %v", err)
 	}
@@ -248,13 +247,13 @@ func TestTrustHostKey_RevokedLineSurvivesByteForByte(t *testing.T) {
 // @cert-authority authorises host certificates. It is a different trust
 // mechanism from a raw host key and is not what the user rejected.
 func TestTrustHostKey_CertAuthorityLineSurvivesByteForByte(t *testing.T) {
-	kh := filepath.Join(t.TempDir(), "known_hosts")
+	kh := sshHome(t)
 	ca, old, accepted := newTestHostKey(t), newTestHostKey(t), newTestHostKey(t)
 	authority := "@cert-authority " + knownhosts.Line([]string{"*.example.com"}, ca)
 	writeHostsFile(t, kh,
 		authority+"\n"+knownhosts.Line([]string{"db.example.com"}, old)+"\n")
 
-	client := newTrustClient(t, kh)
+	client := newTrustClient(t)
 	if _, err := client.TrustHostKey("db.example.com:22", accepted.Marshal()); err != nil {
 		t.Fatalf("TrustHostKey: %v", err)
 	}
@@ -267,14 +266,14 @@ func TestTrustHostKey_CertAuthorityLineSurvivesByteForByte(t *testing.T) {
 // Comments, blank lines and unrelated hosts are the user's file and survive a
 // rewrite untouched.
 func TestTrustHostKey_UnrelatedContentSurvives(t *testing.T) {
-	kh := filepath.Join(t.TempDir(), "known_hosts")
+	kh := sshHome(t)
 	old, other, accepted := newTestHostKey(t), newTestHostKey(t), newTestHostKey(t)
 	content := "# my hosts\n\n" +
 		knownhosts.Line([]string{"db.example.com"}, old) + "\n" +
 		knownhosts.Line([]string{"unrelated.internal"}, other) + "\n"
 	writeHostsFile(t, kh, content)
 
-	client := newTrustClient(t, kh)
+	client := newTrustClient(t)
 	if _, err := client.TrustHostKey("db.example.com:22", accepted.Marshal()); err != nil {
 		t.Fatalf("TrustHostKey: %v", err)
 	}
@@ -292,12 +291,12 @@ func TestTrustHostKey_UnrelatedContentSurvives(t *testing.T) {
 // about. Appending to it would claim a trust we cannot establish, so the
 // write refuses and says which line to fix — and changes nothing.
 func TestTrustHostKey_UnparseableFileRefusesAndChangesNothing(t *testing.T) {
-	kh := filepath.Join(t.TempDir(), "known_hosts")
+	kh := sshHome(t)
 	accepted := newTestHostKey(t)
 	content := "db.example.com ssh-ed25519 not-base64!!\n"
 	writeHostsFile(t, kh, content)
 
-	client := newTrustClient(t, kh)
+	client := newTrustClient(t)
 	_, err := client.TrustHostKey("db.example.com:22", accepted.Marshal())
 	if err == nil {
 		t.Fatal("expected a refusal for a known_hosts file that does not parse")
@@ -311,12 +310,12 @@ func TestTrustHostKey_UnparseableFileRefusesAndChangesNothing(t *testing.T) {
 // host field on either, or a tab-separated line ends up with its key swallowed
 // into the pattern list and covers nothing at all.
 func TestTrustHostKey_NarrowsATabSeparatedLine(t *testing.T) {
-	kh := filepath.Join(t.TempDir(), "known_hosts")
+	kh := sshHome(t)
 	old, accepted := newTestHostKey(t), newTestHostKey(t)
 	tabbed := strings.Replace(knownhosts.Line([]string{"*.example.com"}, old), " ", "\t", 1)
 	writeHostsFile(t, kh, tabbed+"\n")
 
-	client := newTrustClient(t, kh)
+	client := newTrustClient(t)
 	if _, err := client.TrustHostKey("db.example.com:22", accepted.Marshal()); err != nil {
 		t.Fatalf("TrustHostKey: %v", err)
 	}

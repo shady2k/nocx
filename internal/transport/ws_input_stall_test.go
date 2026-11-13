@@ -117,29 +117,28 @@ func sendData(t *testing.T, conn *websocket.Conn, sid, payload string) {
 	}
 }
 
-// stallServer wires a WSServer whose SSH factory hands out the given channels
-// in order, one per open.
-func stallServer(t *testing.T, channels ...ssh.Channel) *WSServer {
+// stallServer wires a WSServer whose helper hands out the given channels in
+// order, one per open.
+func stallServer(t *testing.T, channels ...session.Channel) *WSServer {
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
 	reg := newRegWithStub(logger)
 	var mu sync.Mutex
 	next := 0
-	reg.WithSSHFactory(&stubSSHFactory{
-		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
-			mu.Lock()
-			defer mu.Unlock()
-			ch := channels[next]
-			next++
-			return ch, nil
-		},
-	})
+	opener := stubHelper(reg)
+	opener.channel = func() session.Channel {
+		mu.Lock()
+		defer mu.Unlock()
+		ch := channels[next]
+		next++
+		return ch
+	}
 	ws := NewWSServer(logger, reg,
 		// The ssh panes every test on this stand opens are this machine's
 		// helper's (nocx-50w7p.5). These tests measure resize admission, close
 		// lanes and input flow — all downstream of the pane existing — so the
 		// pane is given the route it has in production.
-		sshHelperOpt(reg),
+		WithHelperSessionOpener(opener),
 		WithProfileResolver(&fakeResolver{
 			resolveFn: func(string) (string, *ssh.ConnectConfig, error) {
 				return "host.example.com", &ssh.ConnectConfig{User: "test", Port: 22}, nil

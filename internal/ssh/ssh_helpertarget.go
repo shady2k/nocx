@@ -189,7 +189,7 @@ func (rc *RealClient) ResolveTarget(ctx context.Context, host string, opts ...Co
 	for _, o := range opts {
 		o(cfg)
 	}
-	endpoint, err := rc.resolveDialEndpoint(ctx, host, cfg, cfg.AuthorizedEndpoint, cfg.SecretID)
+	endpoint, err := rc.resolveDialEndpoint(ctx, host, cfg, cfg.AuthorizedEndpoint, cfg.SecretID, false)
 	if err != nil {
 		return DialTarget{}, err
 	}
@@ -210,7 +210,7 @@ func (rc *RealClient) ResolveTarget(ctx context.Context, host string, opts ...Co
 // flat Jump* fields carry that binding for the one-hop case.
 func (rc *RealClient) resolveDialEndpoint(
 	ctx context.Context, host string, cfg *ConnectConfig,
-	authorizedEndpoint string, secretID credential.SecretID,
+	authorizedEndpoint string, secretID credential.SecretID, jump bool,
 ) (DialEndpoint, error) {
 	resolved, err := rc.resolveConfig(ctx, host, cfg)
 	if err != nil {
@@ -222,7 +222,7 @@ func (rc *RealClient) resolveDialEndpoint(
 	// that is to run the check rather than to describe it.
 	if cfg.Secrets != nil {
 		resolvedAuthz := rc.resolveAuthzEndpoint(ctx, authorizedEndpoint)
-		if authErr := checkAuthorization(resolvedAuthz, resolved, string(secretID), false); authErr != nil {
+		if authErr := checkAuthorization(resolvedAuthz, resolved, string(secretID), jump); authErr != nil {
 			return DialEndpoint{}, authErr
 		}
 	}
@@ -243,11 +243,10 @@ func (rc *RealClient) resolveDialEndpoint(
 	if err := rc.resolveCredential(ctx, resolved, cfg, &endpoint); err != nil {
 		return DialEndpoint{}, err
 	}
-	// The storage identity is the coordinator's own derivation, run over the
-	// same inputs its dial path runs it over (dialForConnect and
-	// dialJumpForConnect both call knownHostsTargetAddr), so the key a helper's
-	// handshake is checked against is the key a coordinator's own handshake
-	// would have been checked against.
+	// The storage identity is this package's own derivation, over the same
+	// inputs every dial here uses (knownHostsTargetAddr), so the key a helper's
+	// handshake is checked against is the key this process's own trust
+	// decision (CheckHostKey) was made against.
 	endpoint.KnownHostsAddr = knownHostsTargetAddr(
 		net.JoinHostPort(resolved.hostName, strconv.Itoa(resolved.port)), cfg)
 	return endpoint, nil
@@ -678,10 +677,10 @@ func WireIdentity(ep DialEndpoint) proto.SSHIdentity {
 // A route reaches this package in two shapes and they mean the same thing: the
 // recursive JumpConfig the connection resolver builds for a chain of profiles,
 // and the flat Jump* fields a single-hop profile sets. This is the ONE place
-// that reading happens — acquireJumpHost dials through it and ResolveTarget
-// resolves through it — because two readings would eventually disagree about
-// the one hop that matters, and a helper would then dial a different account
-// or a different credential than the coordinator's own path would have.
+// that reading happens — route resolution and hop resolution both go through
+// it — because two readings would eventually disagree about the one hop that
+// matters, and a helper would then dial a different account or a different
+// credential than the coordinator resolved.
 func jumpConnectConfig(parent *ConnectConfig) *ConnectConfig {
 	if parent.JumpConfig != nil {
 		return parent.JumpConfig
@@ -699,10 +698,9 @@ func jumpConnectConfig(parent *ConnectConfig) *ConnectConfig {
 
 // resolveRoute flattens the jump chain into the ordered hops a helper dials.
 //
-// It walks the same chain acquireJumpHost walks, in the same order and with the
-// same reading of the two shapes a route can arrive in: the recursive
-// JumpConfig the connection resolver builds, and the flat Jump* fields a
-// single-hop profile sets. Each hop is resolved by resolveDialEndpoint, so a
+// It walks the chain in dial order, with the one reading of the two shapes a
+// route can arrive in: the recursive JumpConfig the connection resolver builds,
+// and the flat Jump* fields a single-hop profile sets. Each hop is resolved by resolveDialEndpoint, so a
 // hop's credential goes through exactly the resolution the destination's does —
 // a bastion key is read, parsed and signed for here, and never crosses.
 func (rc *RealClient) resolveRoute(ctx context.Context, cfg *ConnectConfig) ([]DialEndpoint, error) {
@@ -711,22 +709,21 @@ func (rc *RealClient) resolveRoute(ctx context.Context, cfg *ConnectConfig) ([]D
 		hopCfg := jumpConnectConfig(parent)
 		// A hop's host is the PARENT's JumpHost, in both shapes a route
 		// arrives in: the resolver sets it from the hop profile's own Host
-		// (connection.buildConfig) and the connection path reads it from the
-		// same field (acquireJumpHost resolves cfg.JumpHost with jumpCfg's
-		// options). A chain whose parent names no host is malformed, and
-		// resolving it against some other field would dial an address nobody
-		// chose.
+		// (connection.buildConfig), and this walk reads it from the same field
+		// with the hop's options. A chain whose parent names no host is
+		// malformed, and resolving it against some other field would dial an
+		// address nobody chose.
 		if parent.JumpHost == "" {
 			return nil, errors.New("ssh: a jump hop names no host")
 		}
-		// The binding the hop's credential is checked against, with
-		// acquireJumpHost's own precedence: the hop's own reference, and the
-		// parent's flat JumpSecretID only where the hop names none.
+		// The binding the hop's credential is checked against: the hop's own
+		// reference, and the parent's flat JumpSecretID only where the hop
+		// names none.
 		hopSecretID := hopCfg.SecretID
 		if hopSecretID == "" {
 			hopSecretID = parent.JumpSecretID
 		}
-		hop, err := rc.resolveDialEndpoint(ctx, parent.JumpHost, hopCfg, parent.JumpAuthorizedEndpoint, hopSecretID)
+		hop, err := rc.resolveDialEndpoint(ctx, parent.JumpHost, hopCfg, parent.JumpAuthorizedEndpoint, hopSecretID, true)
 		if err != nil {
 			return nil, fmt.Errorf("resolve jump host %s: %w", parent.JumpHost, err)
 		}

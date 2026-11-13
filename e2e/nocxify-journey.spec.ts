@@ -231,8 +231,7 @@ function seedRemoteHome(): Record<string, Buffer> {
  *  fixture's key is explicit (-i), the host key is accepted without a
  *  known_hosts file (-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null),
  *  the port is explicit (-p), and NumberOfPasswordPrompts=1 makes one wrong
- *  password exit deterministically (the old config's alias carried it).
- *  planSsh must accept this line: every option is in VALUE_LETTERS. */
+ *  password exit deterministically (the old config's alias carried it). */
 function typedSshLine(f: Fixture): string {
   return (
     `ssh -i ${f.userKey}` +

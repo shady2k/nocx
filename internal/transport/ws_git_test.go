@@ -340,11 +340,6 @@ func (e *gitTestEnv) gitBindingCount(sid string) int {
 func TestGitOpen_RemoteSessionWithoutHelperSelectionIsNotAvailable(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
 	reg := newRegWithStub(logger)
-	reg.WithSSHFactory(&stubSSHFactory{
-		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
-			return ssh.NewStubChannel(logger), nil
-		},
-	})
 	factory := newStubGitFactory()
 	ws := NewWSServer(logger, reg,
 		// The ssh pane this test opens is this machine's helper's
@@ -424,11 +419,6 @@ func TestGitOpen_RemoteSessionWithoutHelperSelectionIsNotAvailable(t *testing.T)
 func TestGitOpen_RemoteSessionResolvesThroughTheHelperFactory(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
 	reg := newRegWithStub(logger)
-	reg.WithSSHFactory(&stubSSHFactory{
-		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
-			return ssh.NewStubChannel(logger), nil
-		},
-	})
 	local := newStubGitFactory()
 	helper := newStubGitFactory()
 	ws := NewWSServer(logger, reg,
@@ -497,11 +487,6 @@ func TestGitOpen_RemoteSessionResolvesThroughTheHelperFactory(t *testing.T) {
 func TestGitOpen_RemoteSessionRefusedByTheSelectionAnswersTheError(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
 	reg := newRegWithStub(logger)
-	reg.WithSSHFactory(&stubSSHFactory{
-		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
-			return ssh.NewStubChannel(logger), nil
-		},
-	})
 	factory := newStubGitFactory()
 	ws := NewWSServer(logger, reg,
 		// The ssh pane this test opens is this machine's helper's
@@ -583,11 +568,6 @@ func TestGitOpen_SSHSelectionRefusalsAreResultStates(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			logger := log.NewSlogAdapter(nil)
 			reg := newRegWithStub(logger)
-			reg.WithSSHFactory(&stubSSHFactory{
-				connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
-					return ssh.NewStubChannel(logger), nil
-				},
-			})
 			factory := newStubGitFactory()
 			r := refusal
 			ws := NewWSServer(logger, reg,
@@ -656,11 +636,6 @@ func TestGitOpen_SSHSelectionRefusalsAreResultStates(t *testing.T) {
 func TestGitOpen_HelperVersionMismatchIsAStateFromTheFactory(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
 	reg := newRegWithStub(logger)
-	reg.WithSSHFactory(&stubSSHFactory{
-		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
-			return ssh.NewStubChannel(logger), nil
-		},
-	})
 	local := newStubGitFactory()
 	helper := &stubGitFactory{
 		mkRepo: nil,

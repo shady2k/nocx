@@ -492,7 +492,6 @@ func mintInstanceID(r io.Reader) (InstanceID, error) {
 type Reg struct {
 	log          log.Logger
 	ptf          PTYFactory
-	ssh          SSHFactory
 	mu           sync.Mutex
 	sessions     map[ID]*realSession
 	usageTracker ProfileUsageTracker
@@ -511,12 +510,6 @@ type Reg struct {
 	// of its own — the sessions-map insert takes r.mu, but the mint must be
 	// safe whether or not the open later fails.
 	epochCounter atomic.Uint64
-}
-
-// SSHFactory creates SSH connections (AD-4). Injected at the composition
-// root so tests can stub it.
-type SSHFactory interface {
-	Connect(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.Channel, error)
 }
 
 // New builds a registry with crypto/rand as its entropy source. It cannot
@@ -549,12 +542,6 @@ func newReg(logger log.Logger, ptf PTYFactory, entropy io.Reader) (*Reg, error) 
 	}, nil
 }
 
-// WithSSHFactory injects an SSH factory, enabling KindRemote sessions.
-func (r *Reg) WithSSHFactory(f SSHFactory) *Reg {
-	r.ssh = f
-	return r
-}
-
 // WithProfileUsageTracker injects a ProfileUsageTracker, enabling last-used
 // persistence and the sessions.status RPC (nocx-uxs5.4). A nil tracker is a
 // no-op — Open and Close work without it.
@@ -564,19 +551,31 @@ func (r *Reg) WithProfileUsageTracker(t ProfileUsageTracker) *Reg {
 }
 
 func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
-	// Mint the session ID BEFORE any connect: the remote launcher embeds it
-	// as NOCX_SESSION_ID in the start command (nocx-r52q), so the ID the
-	// session is later registered under must already exist while Connect
-	// runs. A failed connect registers nothing — the ID is simply unused.
+	// AN SSH SESSION IS NOT OPENED HERE (ADR-0057, nocx-50w7p.5).
+	//
+	// Every ssh connection this product makes is this machine's helper's: the
+	// coordinator resolves and authorizes the destination and the helper dials
+	// it. A registry that could also dial would be a second owner of one
+	// connection, and the second dial stack that made that possible survived
+	// only through its own tests (nocx-oalo1.3.2). The refusal names the ROUTE
+	// rather than a missing seam, because the route is what a caller has to
+	// use: a fallback here is exactly the rarely executed path that diverges
+	// silently (ADR-0057).
+	if cfg.Kind == KindRemote {
+		return nil, errors.New("ssh sessions are opened by this machine's helper, not by the session registry")
+	}
+
+	// Mint the session ID before anything is created: a refused open
+	// registers nothing and the ID is simply unused.
 	id := NewID()
 	// Mint the session's epoch up front, like the id: the record the id
 	// names is (instance, epoch), and the identity is immutable from the
 	// moment the session exists.
 	epoch := r.epochCounter.Add(1)
-	// The parent edge is checked BEFORE anything is spawned or dialed
-	// (nocx-9hu9d): a claim that cannot be true must not cost the user a shell
-	// or an ssh handshake, and a refused open must leave nothing behind for a
-	// later session to inherit. A zero Ref is a root session and skips it.
+	// The parent edge is checked BEFORE anything is spawned (nocx-9hu9d): a
+	// claim that cannot be true must not cost the user a shell, and a refused
+	// open must leave nothing behind for a later session to inherit. A zero
+	// Ref is a root session and skips it.
 	if !cfg.Parent.Zero() {
 		if err := r.validateParent(id, cfg.Parent); err != nil {
 			return nil, err
@@ -584,79 +583,39 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 	}
 
 	// THE size decision, made once, before anything is created (nocx-eidfb.1).
-	// Both arms below create their channel at exactly this size and neither
-	// resizes it afterwards, which is AD-1's "created at that size — never
-	// spawned-then-resized" with the chooser changed from the client to the
-	// backend. A config that reported nothing lands on DefaultSize here, so
-	// there is no path from this point on where a session has no size.
+	// The channel is created at exactly this size and never resized afterwards,
+	// which is AD-1's "created at that size — never spawned-then-resized" with
+	// the chooser changed from the client to the backend. A config that
+	// reported nothing lands on DefaultSize here, so there is no path from this
+	// point on where a session has no size.
 	eff := effectiveSize(cfg.clientSize())
 
-	var ch Channel
-	var err error
-	var opts []ssh.ConnectOption
-
-	if cfg.Kind == KindRemote {
-		if r.ssh == nil {
-			return nil, fmt.Errorf("SSH sessions not available (no SSH factory wired)")
-		}
-		if cfg.Remote == nil {
-			return nil, fmt.Errorf("remote session requires ConnectConfig")
-		}
-		opts = sshOptionsFromConfig(cfg.Remote)
-		// The size is appended HERE rather than read off the ConnectConfig,
-		// because the registry is the one that decided it. sshOptionsFromConfig
-		// translates what the caller supplied; this is the backend's own
-		// conclusion, and it is supplied on every remote open — including the
-		// one with no client — so internal/ssh's own 80x24 fallback
-		// (ssh_config.go) can no longer be what decides a session's geometry.
-		opts = append(opts, ssh.WithPTYSize(eff.Cols, eff.Rows, eff.XPixel, eff.YPixel))
-		opts = append(opts, ssh.WithSessionID(string(id)))
-		// The keepalive prober's findings come back here (nocx-iarf9): it is
-		// the one mechanism that already notices a host has stopped answering
-		// while the session is still open, and without this the knowledge was
-		// spent entirely on the decision to close the connection. Bound to
-		// the host name THIS open used, because the connection underneath is
-		// pooled and belongs to no single session.
-		opts = append(opts, ssh.WithLivenessObserver(r.hostLivenessObserver(cfg.Host)))
-		if cfg.Enhanced {
-			opts = append(opts, ssh.WithEnhanced())
-		}
-		ch, err = r.ssh.Connect(ctx, cfg.Host, opts...)
-		if err != nil {
-			return nil, fmt.Errorf("ssh connect: %w", err)
-		}
-	} else {
-		// A LOCAL SESSION IS NOT OPENED HERE ANY MORE, and this says so in the
-		// same words the line above says it about ssh (nocx-ie23r.3). On this
-		// machine the pane belongs to the helper: the daemon owns the PTY, the
-		// coordinator adopts what the helper minted, and the shipped
-		// composition root supplies no local PTY factory at all — so there is
-		// exactly one constructor of a local PTY in the repository and it is
-		// not reachable from here.
-		//
-		// It is a refusal rather than a fallback, deliberately (ADR-0057):
-		// opening the pane by a second route would be the rarely executed path
-		// that diverges silently, and the person would get a terminal that
-		// looks like nocx and behaves differently in ways nobody chose. The
-		// factory survives as a SEAM because the registry is a general one and
-		// a test may legitimately supply a channel; nothing shipped does.
-		if r.ptf == nil {
-			return nil, fmt.Errorf("local sessions are opened by this machine's helper, not by the session registry (no local PTY factory wired)")
-		}
-		pt, perr := r.ptf.NewPTY(ctx, pty.Config{
-			Cwd:       cfg.Cwd,
-			Cols:      eff.Cols,
-			Rows:      eff.Rows,
-			XPixel:    eff.XPixel,
-			YPixel:    eff.YPixel,
-			Enhanced:  cfg.Enhanced,
-			SessionID: string(id),
-		})
-		if perr != nil {
-			return nil, fmt.Errorf("open session: %w", perr)
-		}
-		ch = pt
+	// A LOCAL SESSION IS NOT OPENED HERE IN A SHIPPED BUILD, and this says so
+	// (nocx-ie23r.3). On this machine the pane belongs to the helper: the
+	// daemon owns the PTY, the coordinator adopts what the helper minted, and
+	// the shipped composition root supplies no local PTY factory at all — so
+	// there is exactly one constructor of a local PTY in the repository and it
+	// is not reachable from here.
+	//
+	// It is a refusal rather than a fallback, deliberately (ADR-0057). The
+	// factory survives as a SEAM because the registry is a general one and a
+	// test may legitimately supply a channel; nothing shipped does.
+	if r.ptf == nil {
+		return nil, errors.New("local sessions are opened by this machine's helper, not by the session registry (no local PTY factory wired)")
 	}
+	pt, perr := r.ptf.NewPTY(ctx, pty.Config{
+		Cwd:       cfg.Cwd,
+		Cols:      eff.Cols,
+		Rows:      eff.Rows,
+		XPixel:    eff.XPixel,
+		YPixel:    eff.YPixel,
+		Enhanced:  cfg.Enhanced,
+		SessionID: string(id),
+	})
+	if perr != nil {
+		return nil, fmt.Errorf("open session: %w", perr)
+	}
+	var ch Channel = pt
 
 	s := &realSession{
 		id:           id,
@@ -669,7 +628,6 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 		paneID:       cfg.PaneID,
 		profileID:    cfg.ProfileID,
 		credentialID: cfg.CredentialID,
-		sshOpts:      opts,
 		ch:           ch,
 		size:         eff,
 		// THE SESSION KEEPS THE EXCHANGE THAT OPENED IT (nocx-n14oo.3). A
@@ -1009,12 +967,12 @@ func kindName(k Kind) string {
 
 // sshOptionsFromConfig converts a ssh.ConnectConfig into ConnectOptions.
 //
-// It deliberately does NOT translate the config's Cols/Rows/XPixel/YPixel
-// (removed in nocx-eidfb.1). The channel's size is the registry's decision,
-// not the caller's, so Open appends WithPTYSize itself with the size it
-// concluded; translating the caller's copy here as well would be a second
-// answer to one question, and the two would part company the first time a
-// session ran at a size no client had reported.
+// It deliberately does NOT translate a size. The channel's size is the
+// registry's decision, not the caller's (nocx-eidfb.1), and the open that
+// reaches a helper carries it in its own spawn params — a size written onto
+// the ConnectConfig as well would be a second answer to one question, and the
+// two would part company the first time a session ran at a size no client had
+// reported.
 func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	var opts []ssh.ConnectOption
 	if cfg.User != "" {

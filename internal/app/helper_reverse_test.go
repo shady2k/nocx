@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
-	"path/filepath"
 	"sync"
 	"testing"
 
@@ -30,6 +29,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/storage/storagetest"
 	"github.com/shady2k/nocx/internal/transport"
 	"github.com/shady2k/nocx/internal/vault"
 	gossh "golang.org/x/crypto/ssh"
@@ -77,8 +77,8 @@ type reverseFixture struct {
 
 func newReverseFixture(t *testing.T, material map[credential.SecretID][]byte) *reverseFixture {
 	t.Helper()
-	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
-	client, err := ssh.NewReal(log.NewSlogAdapter(nil), ssh.WithKnownHostsFile(knownHosts))
+	storagetest.SetHome(t, t.TempDir())
+	client, err := ssh.NewReal(log.NewSlogAdapter(nil))
 	if err != nil {
 		t.Fatalf("ssh.NewReal: %v", err)
 	}

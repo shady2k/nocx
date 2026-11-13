@@ -503,14 +503,14 @@ func TestConflictingMutationsSameProtectionOneAndTwoSockets(t *testing.T) {
 			close(releaseResolve)
 		}
 	})
-	reg.WithSSHFactory(&stubSSHFactory{
-		connectFn: func(ctx context.Context, host string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
-			return nil, &ssh.ErrAuthFailed{User: "test", Host: host, Err: errors.New("blocked then refused")}
-		},
-	})
+	opener := stubHelper(reg)
+	opener.open = func(_ context.Context, cfg session.Config) (HostedSessionOpen, bool, error) {
+		return HostedSessionOpen{}, true, &ssh.ErrAuthFailed{User: "test", Host: cfg.Host, Err: errors.New("blocked then refused")}
+	}
 
 	ps := profile.NewJSONStore(t.TempDir() + "/p.json")
 	srv := NewWSServer(logger, reg,
+		WithHelperSessionOpener(opener),
 		WithProfileRepository(ps),
 		WithGroupRepository(ps),
 		WithContentDB(&fakeHistoryDB{}),
@@ -684,14 +684,14 @@ func TestAConflictingCallWaitsAndThenRuns(t *testing.T) {
 			close(releaseResolve)
 		}
 	})
-	reg.WithSSHFactory(&stubSSHFactory{
-		connectFn: func(ctx context.Context, host string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
-			return nil, &ssh.ErrAuthFailed{User: "test", Host: host, Err: errors.New("blocked")}
-		},
-	})
+	opener := stubHelper(reg)
+	opener.open = func(_ context.Context, cfg session.Config) (HostedSessionOpen, bool, error) {
+		return HostedSessionOpen{}, true, &ssh.ErrAuthFailed{User: "test", Host: cfg.Host, Err: errors.New("blocked")}
+	}
 
 	ps := profile.NewJSONStore(t.TempDir() + "/p.json")
 	srv := NewWSServer(logger, reg,
+		WithHelperSessionOpener(opener),
 		WithProfileRepository(ps),
 		WithGroupRepository(ps),
 		WithProfileResolver(&fakeResolver{
@@ -765,13 +765,13 @@ func TestAWaitEndsWhenTheHoldingOperationReleases(t *testing.T) {
 	var released sync.Once
 	release := func() { released.Do(func() { close(releaseResolve) }) }
 	t.Cleanup(release)
-	reg.WithSSHFactory(&stubSSHFactory{
-		connectFn: func(ctx context.Context, host string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
-			return nil, &ssh.ErrAuthFailed{User: "test", Host: host, Err: errors.New("blocked")}
-		},
-	})
+	opener := stubHelper(reg)
+	opener.open = func(_ context.Context, cfg session.Config) (HostedSessionOpen, bool, error) {
+		return HostedSessionOpen{}, true, &ssh.ErrAuthFailed{User: "test", Host: cfg.Host, Err: errors.New("blocked")}
+	}
 	ps := profile.NewJSONStore(t.TempDir() + "/p.json")
 	srv := NewWSServer(logger, reg,
+		WithHelperSessionOpener(opener),
 		WithProfileRepository(ps),
 		WithGroupRepository(ps),
 		WithProfileResolver(&fakeResolver{
@@ -855,15 +855,14 @@ func TestDialInFlightRefusesNothing(t *testing.T) {
 			close(releaseDial)
 		}
 	})
-	reg.WithSSHFactory(&stubSSHFactory{
-		connectFn: func(ctx context.Context, host string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
-			if dials.Add(1) == 1 {
-				close(dialStarted)
-				<-releaseDial
-			}
-			return nil, &ssh.ErrAuthFailed{User: "test", Host: host, Err: errors.New("no auth in this test")}
-		},
-	})
+	opener := stubHelper(reg)
+	opener.open = func(_ context.Context, cfg session.Config) (HostedSessionOpen, bool, error) {
+		if dials.Add(1) == 1 {
+			close(dialStarted)
+			<-releaseDial
+		}
+		return HostedSessionOpen{}, true, &ssh.ErrAuthFailed{User: "test", Host: cfg.Host, Err: errors.New("no auth in this test")}
+	}
 
 	ps := profile.NewJSONStore(t.TempDir() + "/p.json")
 	srv := NewWSServer(logger, reg,
@@ -871,7 +870,7 @@ func TestDialInFlightRefusesNothing(t *testing.T) {
 		// (nocx-50w7p.5). Its subject is that a second open reaches its own
 		// dial while the first is in flight — downstream of the pane existing,
 		// and about the DIAL LANE rather than how the dial was reached.
-		sshHelperOpt(reg),
+		WithHelperSessionOpener(opener),
 		WithProfileRepository(ps),
 		WithGroupRepository(ps),
 		WithProfileResolver(&fakeResolver{

@@ -16,11 +16,8 @@ import (
 // prompt can name the connection (nocx-s8jn).
 func TestRemoteSession_CarriesPasswordAskAcrossConfigBoundary(t *testing.T) {
 	asker := &fakePasswordRequester{}
-	factory := &capturingSSHFactory{ch: &reasonChannel{reason: ssh.ReasonNone}}
-	reg := launcherReg().WithSSHFactory(factory)
-
-	_, err := reg.Open(context.Background(), Config{
-		Kind: KindRemote,
+	reg := launcherReg()
+	sess := adoptRemote(t, reg, &reasonChannel{reason: ssh.ReasonNone}, Config{
 		Host: "web.example.com",
 		Remote: &ssh.ConnectConfig{
 			User:              "deploy",
@@ -29,16 +26,10 @@ func TestRemoteSession_CarriesPasswordAskAcrossConfigBoundary(t *testing.T) {
 			PasswordRequester: asker,
 		},
 	})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
 
-	// Rebuild the config from the options the factory received and check
-	// the ask survived the round trip.
-	rebuilt := &ssh.ConnectConfig{}
-	for _, opt := range factory.opts {
-		opt(rebuilt)
-	}
+	// Rebuild the config from the session's options and check the ask
+	// survived the round trip.
+	rebuilt := sshOptionsOf(sess)
 	if rebuilt.ConnectionName != "prod-web" {
 		t.Errorf("connection name lost across the config boundary: %q", rebuilt.ConnectionName)
 	}

@@ -79,9 +79,9 @@ func startBundleStand(t *testing.T, srv *pwSSHServer, secrets *askRecorder) *bun
 	// The coordinator's client: it RESOLVES, it answers host-key questions,
 	// and it dials nothing for this publish — the fixture's authentication
 	// count is what says so.
-	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	_, khPath := homeForKnownHosts(t)
 	writeKnownHostsFor(t, khPath, srv)
-	rc, err := ssh.NewReal(sshLog, ssh.WithKnownHostsFile(khPath))
+	rc, err := ssh.NewReal(sshLog)
 	if err != nil {
 		t.Fatalf("ssh.NewReal: %v", err)
 	}

@@ -300,8 +300,6 @@ func (h *Host) frame(ctx context.Context, ty proto.FrameType, payload []byte) {
 		h.reverseResponse(payload)
 	case proto.TypeCancel:
 		h.cancel(payload)
-	case proto.TypeKeepAlive:
-		// nothing to answer; keepalives keep the transport warm
 	case proto.TypeSessionData:
 		h.sessionData(ctx, payload)
 	case proto.TypeLifecycleData:

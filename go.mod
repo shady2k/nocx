@@ -2,6 +2,8 @@ module github.com/shady2k/nocx
 
 go 1.26
 
+toolchain go1.26.5
+
 require (
 	github.com/cloudwego/eino v0.9.13
 	github.com/cloudwego/eino-ext/components/model/openai v0.1.13

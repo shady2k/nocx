@@ -509,10 +509,15 @@ func (s *fsTestServer) serveSFTPFiltered(ch gossh.Channel, filter func(typ byte,
 
 // fsTestClient builds a RealClient pointed at the test server, cleaned up
 // with the test (clone of tunnelTestClient, which is typed to testSSHServer).
+//
+// Its known_hosts is the product's own: $HOME/.ssh/known_hosts, under a home
+// this test owns, because RealClient has no path option and production needs
+// none.
 func fsTestClient(t *testing.T, srv *fsTestServer) *RealClient {
 	t.Helper()
 	khPath := fsWriteKnownHosts(t, srv, srv.addr)
-	client, err := NewReal(log.NewSlogAdapter(nil), WithKnownHostsFile(khPath))
+	_ = khPath
+	client, err := NewReal(log.NewSlogAdapter(nil))
 	if err != nil {
 		t.Fatalf("NewReal: %v", err)
 	}
@@ -520,10 +525,17 @@ func fsTestClient(t *testing.T, srv *fsTestServer) *RealClient {
 	return client
 }
 
+// fsWriteKnownHosts gives this test its own $HOME and writes the server's key
+// where the client reads host keys. It answers that path for a caller that
+// wants to read it back.
 func fsWriteKnownHosts(t *testing.T, srv *fsTestServer, addr string) string {
 	t.Helper()
+	home := sshTestHome(t)
 	line := knownhosts.Line([]string{addr}, srv.hostSigner.PublicKey())
-	dir := t.TempDir()
+	dir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("prepare %s: %v", dir, err)
+	}
 	path := filepath.Join(dir, "known_hosts")
 	if err := os.WriteFile(path, []byte(line+"\n"), 0o600); err != nil {
 		t.Fatalf("write known_hosts: %v", err)

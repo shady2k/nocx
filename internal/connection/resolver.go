@@ -282,9 +282,10 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 			return nil, fmt.Errorf("jump host %s: %w", jumpHostID, err)
 		}
 
-		// Populate flat fields for backward compatibility and JumpConfig
-		// for multi-hop support. JumpConfig carries the full recursive
-		// config so acquireJumpHost can follow the chain.
+		// Populate flat fields for single-hop readers and JumpConfig for
+		// multi-hop support: JumpConfig carries the full recursive config, so
+		// whoever resolves a route can follow the chain without a second
+		// reading of the flat fields.
 		cfg.JumpHost = jumpProf.Options.Host
 		cfg.JumpPort = jumpCfg.Port
 		cfg.JumpUser = jumpCfg.User

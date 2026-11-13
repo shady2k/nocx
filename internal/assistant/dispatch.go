@@ -73,10 +73,7 @@ func dispatchAbortedError(invocation ToolInvocation, result *modelResult, causes
 	return &DispatchRefusalError{Method: invocation.Method, Reason: reason, Cause: errors.Join(causes...)}
 }
 
-type (
-	dispatchExecutor  func(context.Context, agenttools.Tool, agenttools.Capability, []byte) (string, error)
-	dispatchTransform func(*preparedInvocation) error
-)
+type dispatchExecutor func(context.Context, agenttools.Tool, agenttools.Capability, []byte) (string, error)
 
 type preparedInvocation struct {
 	request             ToolInvocation
@@ -381,10 +378,10 @@ func (d *dispatchOperation) acceptsMethod(name string, grant content.Grant) bool
 }
 
 // executePrepared narrows the declaration to the capability this exact call may
-// hold and runs the tool exactly once. It is the half of a call that happens
-// after every policy decision, shared by dispatch's ad-hoc steps and by the
-// authority pipeline (pipeline.go), so the two cannot drift on what "the tool
-// runs once" means or on how its result is checked against its own contract.
+// hold and runs the tool exactly once. It is the half of every call that happens
+// after every policy decision, and the authority pipeline (pipeline.go) is its
+// only caller, so what "the tool runs once" means and how its result is checked
+// against its own contract are decided in one place.
 func (d *dispatchOperation) executePrepared(prepared *preparedInvocation, beforeExecute func(*preparedInvocation, agenttools.Capability) error, executor dispatchExecutor) (dispatchOutcome, error) {
 	outcome := dispatchOutcome{prepared: prepared}
 	if prepared.decl.Narrow == nil {
@@ -415,7 +412,11 @@ func (d *dispatchOperation) executePrepared(prepared *preparedInvocation, before
 	return outcome, nil
 }
 
-func (d *dispatchOperation) prepare(invocation ToolInvocation, transform dispatchTransform) (preparedInvocation, error) {
+// prepare resolves and validates a call's declaration, arguments and resources.
+// refine is the caller's own refinement of the declaration, run after the schema
+// accepts the arguments and before the call's facts are derived from them (the
+// kernel's command classification); nil means the caller has none.
+func (d *dispatchOperation) prepare(invocation ToolInvocation, refine func(*preparedInvocation) error) (preparedInvocation, error) {
 	decl, ok := d.registry.Lookup(invocation.Method)
 	if !ok {
 		return preparedInvocation{}, fmt.Errorf("%w: %q", ErrUnknownMethod, invocation.Method)
@@ -431,9 +432,9 @@ func (d *dispatchOperation) prepare(invocation ToolInvocation, transform dispatc
 		return preparedInvocation{}, fmt.Errorf("%w: tool %q: %v", ErrInvalidParams, decl.Name, err)
 	}
 	prepared := preparedInvocation{request: invocation, decl: decl, args: args}
-	if transform != nil {
-		if transformErr := transform(&prepared); transformErr != nil {
-			return preparedInvocation{}, transformErr
+	if refine != nil {
+		if refineErr := refine(&prepared); refineErr != nil {
+			return preparedInvocation{}, refineErr
 		}
 	}
 	// The per-call shape (ADR-0053 as amended): arguments may raise a call

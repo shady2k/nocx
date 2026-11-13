@@ -1211,7 +1211,6 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 		// when it was silently dropped once already); a profile with none
 		// configured sends zero, honestly, and this helper starts no prober.
 		KeepaliveIntervalMS: cfg.Remote.KeepaliveInterval.Milliseconds(),
-		KeepaliveCountMax:   cfg.Remote.KeepaliveCountMax,
 	}
 	// The spawn and the adoption are staged INSIDE hostedSpawn.run, which both
 	// routes share: a second pair here would name one wait twice.

@@ -12,7 +12,10 @@ package hostconn
 // The state names are the design's own: opening(stage), waiting_person(kind),
 // connected, stalled, reconnecting(attempt), failed(cause), ended(cause).
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // Kind is one of the transport's states.
 type Kind uint8
@@ -100,6 +103,11 @@ const (
 	CauseLostLink Cause = "lost-link"
 	// CauseReleased is the last holder letting go.
 	CauseReleased Cause = "released"
+	// CauseSilence is the closing policy ending a connection that stopped
+	// answering and carried nothing whose loss a reattach could not undo
+	// (design §5.3). A connection carrying a plain shell is never ended this
+	// way: that is the person's choice.
+	CauseSilence Cause = "silence"
 )
 
 // State is one point of the machine. Only the fields its Kind names are set;
@@ -113,6 +121,18 @@ type State struct {
 	// resumes where it stopped rather than at the beginning.
 	Attempt int   // Reconnecting: how many attempts have been made since it last worked.
 	Cause   Cause // Failed, Ended: why.
+	// Silent is how long a Stalled connection has gone without an answer. It is
+	// a MEASUREMENT carried by the state, not a state of its own: a stalled
+	// connection that stays stalled has not changed what it is, only how long it
+	// has been it (design §5.3's `stalled(silentMs)`).
+	Silent time.Duration
+}
+
+// samePoint reports whether two states say the same thing about the connection,
+// ignoring a measurement that only grew. The history and the log are a path,
+// and a connection that is still stalled has not moved along it.
+func samePoint(a, b State) bool {
+	return a.Kind == b.Kind && a.Stage == b.Stage && a.Wait == b.Wait && a.Attempt == b.Attempt && a.Cause == b.Cause
 }
 
 func (s State) String() string {
@@ -121,6 +141,8 @@ func (s State) String() string {
 		return "opening(" + string(s.Stage) + ")"
 	case WaitingPerson:
 		return "waiting_person(" + string(s.Wait) + ")"
+	case Stalled:
+		return fmt.Sprintf("stalled(%s)", s.Silent)
 	case Reconnecting:
 		return fmt.Sprintf("reconnecting(%d)", s.Attempt)
 	case Failed:
@@ -145,7 +167,7 @@ const (
 	// usable. It is the carrier's word, and the only way into Connected.
 	SignedIn
 	// Silent: a probe has not come back inside its deadline. Evidence of a
-	// problem, never a verdict.
+	// problem, never a verdict. Silent carries how long the silence has lasted.
 	Silent
 	// Answered: a probe came back on a connection that was stalled.
 	Answered
@@ -165,10 +187,11 @@ const (
 
 // Event is one fact the supervisor feeds the machine.
 type Event struct {
-	Kind  EventKind
-	Stage Stage
-	Wait  WaitKind
-	Cause Cause
+	Kind   EventKind
+	Stage  Stage
+	Wait   WaitKind
+	Cause  Cause
+	Silent time.Duration
 }
 
 // Next is the whole machine: one state and one event in, one state out.
@@ -225,7 +248,7 @@ func Next(state State, event Event) State {
 	case Connected:
 		switch event.Kind {
 		case Silent:
-			return State{Kind: Stalled, Attempt: state.Attempt}
+			return State{Kind: Stalled, Attempt: state.Attempt, Silent: event.Silent}
 		case Lost:
 			return State{Kind: Reconnecting, Attempt: state.Attempt + 1, Cause: event.Cause}
 		case Closed:
@@ -234,6 +257,10 @@ func Next(state State, event Event) State {
 
 	case Stalled:
 		switch event.Kind {
+		case Silent:
+			// Still silent, and for longer: the same state, a newer
+			// measurement.
+			return State{Kind: Stalled, Attempt: state.Attempt, Silent: event.Silent}
 		case Answered:
 			return State{Kind: Connected, Attempt: state.Attempt}
 		case Lost:

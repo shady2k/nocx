@@ -45,6 +45,7 @@ import (
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/helper/sshconn"
 	"github.com/shady2k/nocx/internal/helper/sshdial"
 	"github.com/shady2k/nocx/internal/helper/sshsvc"
 	"github.com/shady2k/nocx/internal/log"
@@ -95,7 +96,7 @@ func startBundleStand(t *testing.T, srv *pwSSHServer, secrets *askRecorder) *bun
 	if err != nil {
 		t.Fatalf("sshdial.New: %v", err)
 	}
-	svc := sshsvc.New(sshdialClient, logger)
+	svc := sshsvc.New(sshconn.New(sshdialClient, log.NewSlogAdapter(logger)), logger)
 	engine := host.New(helperEnd, helperEnd, filesFixtureGenera, "instance-1", logger)
 	engine.Register(svc)
 	ctx, cancel := context.WithCancel(context.Background())

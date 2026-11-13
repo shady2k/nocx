@@ -26,6 +26,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,8 +34,10 @@ import (
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/helper/sshsvc"
 	"github.com/shady2k/nocx/internal/hostconn"
+	"github.com/shady2k/nocx/internal/hostconn/hostconntest"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/sshtest"
+	"github.com/shady2k/nocx/internal/waittest"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -279,5 +282,260 @@ func TestATransportErrorIsNeverCalledARefusal(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "refused") {
 		t.Fatalf("a transport error is reported as the far side refusing: %v", err)
+	}
+}
+
+// ─── silence and closing (nocx-oalo1.4.3) ────────────────────────────────
+//
+// The policy's time is the injected clock's: these tests advance it, and never
+// sleep. What they assert is the design's own sentences — stalled within 30 s,
+// a plain shell that stays, a helper-owned connection closed on the evidence,
+// and a reboot behind a silent flow that ends as a transport error.
+
+// supervisedSpec is the same connection the service acquires for the
+// destination, taken through the carrier the stand's service dials through — so
+// the lease and the service's own references are ONE connection and one
+// supervisor (identityKey answers the credential reference for a password
+// destination, which is what makes the two meet).
+func supervisedSpec(t *testing.T, f *fixture, destination proto.SSHDestination, holds bool) ssh.PooledSpec {
+	t.Helper()
+	return ssh.PooledSpec{
+		Host: destination.Host, Port: destination.Port, User: destination.User,
+		Identity:        wantRef,
+		HoldsPlainShell: holds,
+		Config: &gossh.ClientConfig{
+			User:            "test",
+			Auth:            []gossh.AuthMethod{gossh.PublicKeys(f.userSigner)},
+			HostKeyCallback: gossh.InsecureIgnoreHostKey(), //nolint:gosec // fixture server started by this test
+			Timeout:         10 * time.Second,
+		},
+	}
+}
+
+// openShell opens a real plain shell on the stand's service: the shipped path a
+// pane takes, which is the only thing that can prove a pane's terminal declares
+// itself as one.
+func (s *stand) openShell(t *testing.T, destination proto.SSHDestination) *sshsvc.ShellChannel {
+	t.Helper()
+	ctx := host.WithConnection(context.Background(), s.helper)
+	shell, err := s.service.OpenShell(ctx, sshsvc.ShellSpec{
+		Destination: destination,
+		Cols:        80, Rows: 24,
+	})
+	if err != nil {
+		t.Fatalf("open a shell: %v", err)
+	}
+	t.Cleanup(func() { _ = shell.Close() })
+	return shell
+}
+
+// advanceUntil moves the injected clock one step at a time until cond holds.
+// The policy's time is simulated, so "how long" is the test's; the loop exists
+// only to let the guard see each step, and its outer bound is waittest's.
+func advanceUntil(t *testing.T, clock *hostconntest.Clock, step time.Duration, what string, cond func() bool) {
+	t.Helper()
+	waittest.WaitFor(t, what, func() bool {
+		if cond() {
+			return true
+		}
+		clock.Advance(step)
+		return false
+	})
+}
+
+// lastState is the state a connection ended at, or the zero state when it has
+// no history.
+func lastState(states []hostconn.State) hostconn.State {
+	if len(states) == 0 {
+		return hostconn.State{}
+	}
+	return states[len(states)-1]
+}
+
+// TestASilentConnectionReadsStalledWithinThirtySeconds is Q3 through the shipped
+// path: a working connection whose flow goes deaf is reported stalled fifteen
+// seconds after the probe that did not come back, and a plain shell keeps it
+// open for ten more minutes.
+func TestASilentConnectionReadsStalledWithinThirtySeconds(t *testing.T) {
+	const password = "correct horse battery staple"
+	f := newFixture(t, password, newSigner(t))
+	proxy := sshtest.NewFaultProxy(t, f.addr)
+	clock := hostconntest.New()
+	stand := newStandOnClock(t, &coordinator{
+		password: password, verdict: proto.HostKeyTrusted, fingerprint: f.hostKeyFingerprint(),
+	}, discardLogger(), clock)
+	destination := destinationAt(t, proxy.Addr())
+
+	shell := stand.openShell(t, destination)
+	holder, err := stand.carrier.Acquire(context.Background(), supervisedSpec(t, f, destination, false))
+	if err != nil {
+		t.Fatalf("hold the connection: %v", err)
+	}
+	t.Cleanup(holder.Release)
+	if got := f.connections(); got != 1 {
+		t.Fatalf("the shell and the holder made %d connections, want 1", got)
+	}
+
+	proxy.SilenceEstablished()
+	clock.Advance(30 * time.Second)
+
+	waittest.WaitFor(t, "the connection to read stalled", func() bool {
+		return lastState(holder.States()).Kind == hostconn.Stalled
+	})
+	if got := lastState(holder.States()).Silent; got != 15*time.Second {
+		t.Fatalf("stalled reports %v of silence, want 15s: the probe that was sent at 15s and never answered", got)
+	}
+
+	// TEN MINUTES OF BLACKHOLE, and the shell is still there: silence ends
+	// nothing on a connection that carries a plain shell (design §5.3).
+	clock.Advance(10 * time.Minute)
+	waittest.WaitFor(t, "the clock to be seen", func() bool {
+		return clock.Now() > 0
+	})
+	if got := lastState(holder.States()).Kind; got != hostconn.Stalled {
+		t.Fatalf("a plain-shell connection reads %v after ten minutes of silence, want stalled", got)
+	}
+	if holder.Lost() {
+		t.Fatal("a plain-shell connection was closed for silence")
+	}
+	// The terminal the person is in is still usable as far as the helper is
+	// concerned: writing to it does not fail.
+	if _, err := shell.Write([]byte("still here\n")); err != nil {
+		t.Fatalf("a plain shell refused a write after ten minutes of silence: %v", err)
+	}
+
+	// And the host comes back: the parked probe answers, the state is
+	// connected, and the shell's bytes reach the far side again.
+	proxy.Pass()
+	waittest.WaitFor(t, "the connection to answer again", func() bool {
+		return lastState(holder.States()).Kind == hostconn.Connected
+	})
+	if _, err := shell.Write([]byte("back\n")); err != nil {
+		t.Fatalf("the plain shell did not survive the silence: %v", err)
+	}
+}
+
+// TestAHelperOwnedConnectionClosesThirtySecondsAfterAnAnsweredLook is the other
+// half: nothing is lost by closing a connection whose shells are all
+// helper-owned, so a host that still answers new connections plus the grace
+// ends it.
+func TestAHelperOwnedConnectionClosesThirtySecondsAfterAnAnsweredLook(t *testing.T) {
+	const password = "correct horse battery staple"
+	f := newFixture(t, password, newSigner(t))
+	proxy := sshtest.NewFaultProxy(t, f.addr)
+	clock := hostconntest.New()
+	stand := newStandOnClock(t, &coordinator{
+		password: password, verdict: proto.HostKeyTrusted, fingerprint: f.hostKeyFingerprint(),
+	}, discardLogger(), clock)
+	destination := destinationAt(t, proxy.Addr())
+
+	holder, err := stand.carrier.Acquire(context.Background(), supervisedSpec(t, f, destination, false))
+	if err != nil {
+		t.Fatalf("hold the connection: %v", err)
+	}
+	t.Cleanup(holder.Release)
+
+	proxy.SilenceEstablished()
+	clock.Advance(30 * time.Second)
+	waittest.WaitFor(t, "the connection to read stalled", func() bool {
+		return lastState(holder.States()).Kind == hostconn.Stalled
+	})
+
+	// The look dials a NEW connection, which this proxy lets through: that is
+	// the host answering while the flow stays deaf, and it is the evidence the
+	// grace is measured from.
+	advanceUntil(t, clock, time.Second, "the host to answer a look-only dial", func() bool {
+		return f.connections() >= 2
+	})
+	// Thirty seconds of grace later, the policy closes it: nothing is riding
+	// this connection whose loss a reattach could not undo.
+	advanceUntil(t, clock, time.Second, "the connection to be closed for silence", func() bool {
+		return holder.Lost()
+	})
+	waittest.WaitFor(t, "the close to be reported as reconnecting", func() bool {
+		state := lastState(holder.States())
+		return state.Kind == hostconn.Reconnecting && state.Cause == hostconn.CauseSilence
+	})
+}
+
+// TestARebootBehindASilentFlowReadsAsATransportErrorAndReconnects is Q5's
+// detection half, through the proxy: the flow was silent, the host came back at
+// the network layer by resetting the state it no longer holds, and the
+// supervisor reads a transport error rather than a longer silence.
+func TestARebootBehindASilentFlowReadsAsATransportErrorAndReconnects(t *testing.T) {
+	const password = "correct horse battery staple"
+	f := newFixture(t, password, newSigner(t))
+	proxy := sshtest.NewFaultProxy(t, f.addr)
+	clock := hostconntest.New()
+	stand := newStandOnClock(t, &coordinator{
+		password: password, verdict: proto.HostKeyTrusted, fingerprint: f.hostKeyFingerprint(),
+	}, discardLogger(), clock)
+	destination := destinationAt(t, proxy.Addr())
+
+	holder, err := stand.carrier.Acquire(context.Background(), supervisedSpec(t, f, destination, false))
+	if err != nil {
+		t.Fatalf("hold the connection: %v", err)
+	}
+	t.Cleanup(holder.Release)
+
+	proxy.SilenceEstablished()
+	clock.Advance(30 * time.Second)
+	waittest.WaitFor(t, "the connection to read stalled", func() bool {
+		return lastState(holder.States()).Kind == hostconn.Stalled
+	})
+
+	// The reboot: the host holds no state for this flow, so the next thing it
+	// says is a reset. On a real host the nudge is what provokes it (a request
+	// with no reply wanted passes the parked probe); the proxy stages the
+	// outcome the client sees, which is the fact this test is about.
+	proxy.Reset()
+	waittest.WaitFor(t, "the transport's end", func() bool { return holder.Lost() })
+	waittest.WaitFor(t, "the loss to be reported as reconnecting", func() bool {
+		state := lastState(holder.States())
+		return state.Kind == hostconn.Reconnecting && state.Cause == hostconn.CauseLostLink
+	})
+}
+
+// TestAHealthyConnectionNeverReadsStalledOverTenMinutes is the paired success:
+// a connection that answers is never reported as silent, for forty probes.
+func TestAHealthyConnectionNeverReadsStalledOverTenMinutes(t *testing.T) {
+	const password = "correct horse battery staple"
+	f := newFixture(t, password, newSigner(t))
+	proxy := sshtest.NewFaultProxy(t, f.addr)
+	clock := hostconntest.New()
+	stand := newStandOnClock(t, &coordinator{
+		password: password, verdict: proto.HostKeyTrusted, fingerprint: f.hostKeyFingerprint(),
+	}, discardLogger(), clock)
+	destination := destinationAt(t, proxy.Addr())
+
+	holder, err := stand.carrier.Acquire(context.Background(), supervisedSpec(t, f, destination, false))
+	if err != nil {
+		t.Fatalf("hold the connection: %v", err)
+	}
+	t.Cleanup(holder.Release)
+
+	// The probe's ANSWER is the observable that has to happen before the clock
+	// moves again: the deadline is fifteen simulated seconds, and advancing
+	// without waiting for the answer would be asking the policy to judge a
+	// probe the far side has not been given the chance to answer.
+	var answered atomic.Int32
+	holder.Observe(func(o hostconn.Observation) {
+		if o.Answered {
+			answered.Add(1)
+		}
+	})
+	for i := 0; i < 40; i++ {
+		clock.Advance(hostconn.ProbeInterval)
+		waittest.WaitFor(t, "the probe to be answered", func() bool {
+			return answered.Load() >= int32(i+1)
+		})
+		if got := lastState(holder.States()).Kind; got != hostconn.Connected {
+			t.Fatalf("a healthy connection reads %v after %v", got, time.Duration(i+1)*hostconn.ProbeInterval)
+		}
+	}
+	for _, state := range holder.States() {
+		if state.Kind == hostconn.Stalled {
+			t.Fatalf("a healthy connection was reported stalled: %v", holder.States())
+		}
 	}
 }

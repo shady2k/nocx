@@ -42,6 +42,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/host"
 	helperlocal "github.com/shady2k/nocx/internal/helper/local"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/helper/sshconn"
 	"github.com/shady2k/nocx/internal/helper/sshsvc"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -171,7 +172,7 @@ func startProbeStackWithStore(t *testing.T, srv *pwSSHServer, store credential.R
 		t.Fatalf("serving this machine's endpoint: %v", err)
 	}
 
-	svc := sshsvc.New(helperClient, discardLogger(t))
+	svc := sshsvc.New(sshconn.New(helperClient, log.NewSlogAdapter(discardLogger(t))), discardLogger(t))
 	wire := &wireLog{}
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {

@@ -46,6 +46,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/helper/sshconn"
 	"github.com/shady2k/nocx/internal/helper/sshsvc"
+	"github.com/shady2k/nocx/internal/hostconn"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/ssh"
 	gossh "golang.org/x/crypto/ssh"
@@ -692,7 +693,30 @@ func (p *forwardPayloadReader) u32() (uint32, bool) {
 // wrong subsystem fails where it asked instead of hanging.
 func (f *fixture) serveChannel(ch gossh.Channel, reqs <-chan *gossh.Request) {
 	for req := range reqs {
-		// The lane's request comes FIRST, before the subsystem guard below: an
+		// A PANE'S TERMINAL. A real host answers a pty request and then starts
+		// the shell or the command; this fixture answers in the same order and
+		// has no process behind the shell, so the channel stays open and echoes
+		// — which is all a test of the CONNECTION's policy needs of a shell,
+		// and the only way to hold a plain-shell reference through the shipped
+		// service path (design §5.3, nocx-oalo1.4.3).
+		switch req.Type {
+		case "pty-req", "env", "signal", "window-change":
+			if req.WantReply {
+				_ = req.Reply(true, nil)
+			}
+			continue
+		case "shell":
+			f.note("shell")
+			if req.WantReply {
+				_ = req.Reply(true, nil)
+			}
+			go func() {
+				_, _ = io.Copy(ch, ch)
+				_ = ch.Close()
+			}()
+			continue
+		}
+		// The lane's request comes NEXT, before the subsystem guard below: an
 		// exec is not a subsystem, so a fixture that reached that guard first
 		// would refuse every lane with "not a subsystem" — which is how this
 		// branch was written the first time.
@@ -1147,6 +1171,14 @@ func newStand(t *testing.T, c *coordinator) *stand {
 // algorithm lines nocx-1ebrs.18 asks for are written there.
 func newStandLogging(t *testing.T, c *coordinator, logger *slog.Logger) *stand {
 	t.Helper()
+	return newStandOnClock(t, c, logger, nil)
+}
+
+// newStandOnClock is newStandLogging on an injected clock: the closing policy's
+// "within 30 s" and "after ten minutes" are asserted by advancing time, not by
+// waiting for it (design §10, nocx-oalo1.4.3). A nil clock is the process's.
+func newStandOnClock(t *testing.T, c *coordinator, logger *slog.Logger, clock hostconn.Clock) *stand {
+	t.Helper()
 
 	helperEnd, coordEnd := net.Pipe()
 	s := &stand{
@@ -1163,7 +1195,10 @@ func newStandLogging(t *testing.T, c *coordinator, logger *slog.Logger) *stand {
 	}
 	t.Cleanup(func() { _ = realClient.Close() })
 
-	s.carrier = sshconn.New(realClient, log.NewSlogAdapter(logger))
+	if clock == nil {
+		clock = hostconn.RealClock{}
+	}
+	s.carrier = sshconn.NewWithClock(realClient, log.NewSlogAdapter(logger), clock)
 	s.service = sshsvc.New(s.carrier, logger)
 	s.helper = host.New(s.toHelper, s.toHelper, testHash, "instance-1", discardLogger())
 	s.helper.Register(s.service)

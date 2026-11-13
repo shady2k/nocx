@@ -23,6 +23,13 @@ type memoryLink struct {
 	closeOnce sync.Once
 	mu        sync.Mutex
 	err       error
+	// The far side's behaviour, scripted per test: nil answers at once and the
+	// look is answered by the host.
+	probe  func() (time.Duration, error)
+	nudge  func() error
+	look   func() error
+	looks  int
+	nudges int
 }
 
 func newMemoryLink() *memoryLink {
@@ -40,6 +47,44 @@ func (l *memoryLink) Err() error {
 func (l *memoryLink) Close() error {
 	l.closeOnce.Do(func() { close(l.done) })
 	return nil
+}
+
+// Probe, Nudge and Look make this link a Prober and a Looker: the supervisor
+// finds them by type, so a test says what the far side does by setting them.
+func (l *memoryLink) Probe(context.Context) (time.Duration, error) {
+	if l.probe == nil {
+		return 0, nil
+	}
+	return l.probe()
+}
+
+func (l *memoryLink) Nudge() error {
+	l.mu.Lock()
+	l.nudges++
+	fn := l.nudge
+	l.mu.Unlock()
+	if fn != nil {
+		return fn()
+	}
+	return nil
+}
+
+func (l *memoryLink) Look(context.Context) error {
+	l.mu.Lock()
+	l.looks++
+	fn := l.look
+	l.mu.Unlock()
+	if fn != nil {
+		return fn()
+	}
+	return nil
+}
+
+// counters reads what the supervisor asked this link to do.
+func (l *memoryLink) counters() (looks, nudges int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.looks, l.nudges
 }
 
 // end is the network dying, rather than the holder closing it: the case the
@@ -97,6 +142,14 @@ func manager(t *testing.T, c *memoryCarrier) (*hostconn.Manager, *hostconn.Super
 	t.Helper()
 	_, logger := logtest.New(t)
 	m := hostconn.NewManager(c, logger)
+	return m, m.Supervisor(plan().Key)
+}
+
+// managerOn puts the same pair on a clock the test advances.
+func managerOn(t *testing.T, c *memoryCarrier, clock hostconn.Clock) (*hostconn.Manager, *hostconn.Supervisor) {
+	t.Helper()
+	_, logger := logtest.New(t)
+	m := hostconn.NewManager(c, logger, hostconn.WithClock(clock))
 	return m, m.Supervisor(plan().Key)
 }
 

@@ -2,14 +2,30 @@
 
 package sshconn
 
-// The connection, as the supervisor holds it.
+// The connection, as the supervisor holds it: one pooled reference, the
+// transport's end, and the three things the closing policy asks of a live
+// connection — a probe, a nudge, and a look at the host.
 
 import (
+	"bufio"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"strconv"
 	"sync"
+	"time"
 
 	"github.com/shady2k/nocx/internal/hostconn"
 	"github.com/shady2k/nocx/internal/ssh"
 )
+
+// keepaliveRequest is the request this carrier probes and nudges with. It is
+// OpenSSH's own keepalive name: a server answers it with a failure message,
+// which is still an answer (liveness is "it replied"), and a nudge sends it
+// with no reply wanted.
+const keepaliveRequest = "keepalive@openssh.com"
 
 // link is one pooled connection under a supervisor. It owns the ONE pooled
 // reference the supervisor holds; holders get a lease on the supervisor and do
@@ -17,6 +33,13 @@ import (
 // that decides when a connection closes belongs to the connection).
 type link struct {
 	pool *ssh.PooledConn
+	// lookAddr is where a look-only dial goes: the same destination this
+	// connection was dialled to. empty means the look is not available for
+	// this connection (a routed one, whose version exchange would have to
+	// happen through a hop this carrier does not dial from here) and the
+	// supervisor is told so by Capabilities... rather, by the error Look
+	// answers.
+	lookAddr string
 
 	done chan struct{}
 	mu   sync.Mutex
@@ -30,8 +53,8 @@ type link struct {
 // that learns a transport died: x/crypto stores the read error and returns it
 // from every later write, so a connection whose peer is gone looks alive to
 // everyone who is not writing to it.
-func newLink(pool *ssh.PooledConn) *link {
-	l := &link{pool: pool, done: make(chan struct{})}
+func newLink(pool *ssh.PooledConn, lookAddr string) *link {
+	l := &link{pool: pool, lookAddr: lookAddr, done: make(chan struct{})}
 	go func() {
 		err := pool.Client().Wait()
 		l.mu.Lock()
@@ -40,6 +63,18 @@ func newLink(pool *ssh.PooledConn) *link {
 		close(l.done)
 	}()
 	return l
+}
+
+// lookAddress is where a look-only dial for this plan goes, or "" when this
+// carrier will not make one. A routed destination is the case: reaching it
+// without a key exchange means going through the hop, which is a connection of
+// its own, and claiming the destination answered while the hop is the thing
+// that did would be evidence about the wrong machine.
+func lookAddress(plan hostconn.Plan, spec ssh.PooledSpec) string {
+	if len(plan.Route) > 0 {
+		return ""
+	}
+	return net.JoinHostPort(spec.Host, strconv.Itoa(spec.Port))
 }
 
 // Done is closed when the transport has ended.
@@ -65,6 +100,90 @@ func (l *link) Close() error {
 	}
 	l.closeOne.Do(func() { l.closeErr = l.pool.Close() })
 	return l.closeErr
+}
+
+// Probe asks the far side to answer, and reports how long it took.
+//
+// It takes no context and no deadline ON PURPOSE. x/crypto's SendRequest holds
+// the mux's send lock for the whole wait and offers no way to interrupt it, so
+// a probe that stops answering can only stay parked; the supervisor's soft
+// deadline reports `stalled` while the call remains the evidence that will
+// notice the answer (design §5.3). A context that timed out here would abandon
+// a goroutine holding the lock and leave the next probe queued behind a call
+// nobody can see.
+func (l *link) Probe(context.Context) (time.Duration, error) {
+	started := time.Now()
+	_, _, err := l.pool.Client().SendRequest(keepaliveRequest, true, nil)
+	if err != nil {
+		return 0, err
+	}
+	return time.Since(started), nil
+}
+
+// Nudge sends the keepalive with NO reply wanted: it does not take the mux's
+// send lock, so it passes a parked probe, and a host that was rebooted answers
+// it with a reset — a transport error, and an unaided reconnect. A host that
+// still holds the flow acknowledges it and nothing changes, so a nudge can end
+// no live shell (design §5.3).
+func (l *link) Nudge() error {
+	_, _, err := l.pool.Client().SendRequest(keepaliveRequest, false, nil)
+	if err != nil {
+		return fmt.Errorf("nudge: %w", err)
+	}
+	return nil
+}
+
+// Look makes a look-only dial: TCP and the SSH version exchange on a NEW
+// connection, no key exchange and no sign-in. It answers whether the host
+// accepts new connections, which is evidence about the host and never a verdict
+// on the flow (design §5.3).
+func (l *link) Look(ctx context.Context) error {
+	if l == nil || l.lookAddr == "" {
+		return errors.New("sshconn: no look-only dial is available for this connection")
+	}
+	d := net.Dialer{Timeout: handshakeBound(ctx), KeepAlive: -1}
+	conn, err := d.DialContext(ctx, "tcp", l.lookAddr)
+	if err != nil {
+		return fmt.Errorf("look %s: %w", l.lookAddr, err)
+	}
+	defer func() { _ = conn.Close() }()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	// The server speaks FIRST in SSH: the version line is the first thing it
+	// sends, and nothing above the socket can see it without a handshake this
+	// dial deliberately does not start.
+	line, err := readVersionLine(conn)
+	if err != nil {
+		return fmt.Errorf("look %s: %w", l.lookAddr, err)
+	}
+	if len(line) < len("SSH-") || string(line[:len("SSH-")]) != "SSH-" {
+		return fmt.Errorf("look %s: the peer sent %q, which is not an SSH version line", l.lookAddr, line)
+	}
+	return nil
+}
+
+// readVersionLine reads one CRLF-terminated version line, bounded the way the
+// protocol bounds it: a peer that sends a novel instead of a version string has
+// not answered the look.
+func readVersionLine(conn net.Conn) ([]byte, error) {
+	r := bufio.NewReader(io.LimitReader(conn, 512))
+	line, err := r.ReadBytes('\n')
+	if err != nil && len(line) == 0 {
+		return nil, err
+	}
+	return line, nil
+}
+
+// handshakeBound answers how long a look may take when the caller's context
+// carries no deadline of its own.
+func handshakeBound(ctx context.Context) time.Duration {
+	if deadline, ok := ctx.Deadline(); ok {
+		if d := time.Until(deadline); d > 0 {
+			return d
+		}
+	}
+	return 15 * time.Second
 }
 
 // Pooled answers the pooled connection behind a link, for the channel kinds

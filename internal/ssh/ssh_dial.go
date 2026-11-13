@@ -87,7 +87,14 @@ func (d *dialer) dialDirect(ctx context.Context, addr string, cfg *gossh.ClientC
 func (d *dialer) dialWithCtx(ctx context.Context, network, addr string, timeout time.Duration) (net.Conn, error) {
 	scope := catalog.BeginInternal(ctx, catalog.OpInternalSshDial)
 	defer scope.Complete()
-	netDialer := &net.Dialer{Timeout: timeout}
+	// KeepAlive is OFF, and that is the one closing policy's requirement
+	// (design §5.3). Go's default is 15 s idle + 15 s between probes + 9
+	// unanswered, about 150 s and then the socket errors — which would end a
+	// plain shell at two and a half minutes on a link where only the path is
+	// down, while the design says it waits until the person chooses. The
+	// supervisor's prober already covers detection, and the kernel's own
+	// keepalive would be a second prober with a second policy.
+	netDialer := &net.Dialer{Timeout: timeout, KeepAlive: -1}
 	return netDialer.DialContext(ctx, network, addr)
 }
 

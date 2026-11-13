@@ -1237,7 +1237,6 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 		// carries it from there. This sink is for the non-terminal half —
 		// the far end answering late or not yet — which has no exit to ride.
 		KeepaliveInterval: time.Duration(p.KeepaliveIntervalMS) * time.Millisecond,
-		KeepaliveCountMax: p.KeepaliveCountMax,
 		OnLiveness: func(responsive bool, roundTrip time.Duration) {
 			s.notifyLiveness(hostID, responsive, roundTrip)
 		},

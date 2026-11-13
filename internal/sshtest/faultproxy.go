@@ -118,8 +118,36 @@ func (p *FaultProxy) Addr() string { return p.addr }
 
 // Pass forwards both directions unchanged, and resumes accepting if Refuse
 // closed the listener. It does not end a HoldBanner hold: Release does that,
-// because a hold is a gate and not a condition of the wire.
-func (p *FaultProxy) Pass() { p.setMode(linkPass) }
+// because a hold is a gate and not a condition of the wire. It DOES end a
+// SilenceEstablished silence: the established flows speak again.
+func (p *FaultProxy) Pass() {
+	silenced := p.snapshotRelays()
+	for _, r := range silenced {
+		r.silent.Store(false)
+	}
+	p.setMode(linkPass)
+	for _, r := range silenced {
+		r.flush()
+	}
+}
+
+// SilenceEstablished holds everything on every connection that is open NOW,
+// while connections made afterwards pass untouched — the shape of a session
+// process starved behind a flow that was never closed: the established
+// connection answers nothing and the same host still answers a new one. It is
+// what a look-only dial is evidence ABOUT, so it has to be a per-connection
+// condition and not the wire-wide Blackhole.
+//
+// The held bytes are KEPT, not dropped, and Pass delivers them in order: a host
+// that was busy and comes back answers the probe it was still holding, which is
+// the "and then it answers" half the policy needs. Nothing is asserted about
+// when; the senders' writes succeed throughout, exactly as they do through a
+// starved peer.
+func (p *FaultProxy) SilenceEstablished() {
+	for _, r := range p.snapshotRelays() {
+		r.silent.Store(true)
+	}
+}
 
 // Blackhole keeps both sockets open and forwards nothing.
 func (p *FaultProxy) Blackhole() { p.setMode(linkBlackhole) }
@@ -343,6 +371,11 @@ type relay struct {
 	src net.Conn
 	dst net.Conn
 
+	// silent is SilenceEstablished's mark on THIS connection: its bytes are
+	// discarded while the flow itself stays open, and a connection made after
+	// the call is not marked. Read per chunk, like every other switch here.
+	silent atomic.Bool
+
 	// mu serialises this direction's deliveries, so the order a hold kept is
 	// the order Release replays, and a pipe never writes to dst while a
 	// release is writing to it.
@@ -355,7 +388,7 @@ type relay struct {
 func (r *relay) deliver(chunk []byte) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.p.held.Load() {
+	if r.p.held.Load() || r.silent.Load() {
 		r.pending = append(r.pending, append([]byte(nil), chunk...))
 		return nil
 	}

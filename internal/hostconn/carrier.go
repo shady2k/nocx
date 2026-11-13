@@ -70,6 +70,31 @@ type Link interface {
 	Close() error
 }
 
+// Holds is what a holder declares about the connection it acquires. It exists
+// because silence must never end a shell that would die with the connection
+// (design §5.3), and the supervisor cannot ask who holds a shell without
+// importing the package that knows (helper/session, whose import of sshsvc
+// would close a cycle): so the holder says so itself, at the moment it takes
+// its reference.
+type Holds uint8
+
+const (
+	// HoldsNone is a channel that loses nothing a reattach could not bring
+	// back: an sftp stream, a lane, a tunnel, a probe lease.
+	HoldsNone Holds = 0
+	// HoldsPlainShell is the person's terminal — the shell the far side runs
+	// for them. Its death loses work.
+	HoldsPlainShell Holds = 1 << 0
+)
+
+// Observation is what one probe found: whether the far side answered and how
+// long it took. It is the supervisor's own vocabulary, not x/crypto's, so a
+// carrier that cannot measure liveness simply never reports one.
+type Observation struct {
+	Answered  bool
+	RoundTrip time.Duration
+}
+
 // Prober is what a carrier offers when it can ask the far side a question.
 // Optional, found by capability: a carrier without it never reads stalled.
 type Prober interface {

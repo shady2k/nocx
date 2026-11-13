@@ -141,7 +141,7 @@ func (s *Service) lease(ctx context.Context, p proto.LeaseParams) (proto.LeaseRe
 	if err := validateDestinationAddress(p.Destination); err != nil {
 		return proto.LeaseResult{}, err
 	}
-	pool, err := s.acquirePooled(ctx, conn, p.Destination, p.AcceptOnTrust, "", 0, 0, nil)
+	pool, err := s.acquirePooled(ctx, conn, p.Destination, p.AcceptOnTrust, "", false, 0)
 	if err != nil {
 		// THE DIAL'S OWN ANSWER, typed (nocx-1ebrs.18). A lease that failed
 		// because the server refused the credential used to leave here as a

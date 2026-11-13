@@ -95,7 +95,7 @@ func (s *Service) forward(ctx context.Context, p proto.ForwardParams) (proto.For
 		return proto.ForwardResult{}, err
 	}
 
-	pool, err := s.acquirePooled(ctx, conn, p.Destination, p.AcceptOnTrust, "", 0, 0, nil)
+	pool, err := s.acquirePooled(ctx, conn, p.Destination, p.AcceptOnTrust, "", false, 0)
 	if err != nil {
 		return proto.ForwardResult{}, err
 	}

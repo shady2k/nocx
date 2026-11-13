@@ -173,6 +173,53 @@ func TestFaultProxy_BlackholeDeliversNothingEitherWay(t *testing.T) {
 	roundTrip(t, client, server, []byte("back"))
 }
 
+// TestFaultProxy_SilenceEstablishedDeafensOnlyTheFlowsOpenNow is the condition
+// a look-only dial is evidence about: the established connection stops
+// answering while the same host still accepts a new one. Blackhole cannot stage
+// it — it silences the new connection too, which is a host that is gone rather
+// than one whose session process was starved.
+func TestFaultProxy_SilenceEstablishedDeafensOnlyTheFlowsOpenNow(t *testing.T) {
+	up := startUpstream(t)
+	p := NewFaultProxy(t, up.addr)
+	client, server := dialPair(t, p, up)
+	roundTrip(t, client, server, []byte("alive"))
+
+	p.SilenceEstablished()
+
+	// The established flow is deaf in both directions, and both writers still
+	// succeed — what a starved session process looks like from this side.
+	if _, err := client.Write([]byte("ping")); err != nil {
+		t.Fatalf("a silenced flow refused the client's write: %v", err)
+	}
+	if _, err := server.Write([]byte("pong")); err != nil {
+		t.Fatalf("a silenced flow refused the server's write: %v", err)
+	}
+	expectSilence(t, client, "the client heard the silenced server")
+	expectSilence(t, server, "the server heard the silenced client")
+
+	// A connection made AFTER the call is not silenced: this is the same host,
+	// still answering, which is the whole reason the established flow is the
+	// evidence and not a verdict.
+	lateClient, lateServer := dialPair(t, p, up)
+	roundTrip(t, lateClient, lateServer, []byte("late"))
+
+	// The first flow stays deaf while the second speaks.
+	if _, err := client.Write([]byte("again")); err != nil {
+		t.Fatalf("the silenced flow refused a write: %v", err)
+	}
+	expectSilence(t, server, "the first flow spoke while silenced")
+
+	// Pass delivers everything the silence kept, in the order it was written:
+	// the client's two writes reach the server, and the server's reply reaches
+	// the client. That is the "and then the host answers" half a probe needs.
+	p.Pass()
+	mustRead(t, server, []byte("pingagain"), "the bytes the silence kept from the client")
+	mustRead(t, client, []byte("pong"), "the bytes the silence kept from the server")
+
+	// And the flow is a working one again.
+	roundTrip(t, client, server, []byte("back"))
+}
+
 func TestFaultProxy_LossOneWayDeliversOnlyTheOtherDirection(t *testing.T) {
 	up := startUpstream(t)
 	p := NewFaultProxy(t, up.addr)

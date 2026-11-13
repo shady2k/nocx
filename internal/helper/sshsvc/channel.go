@@ -266,7 +266,7 @@ func (s *Service) takeChannel(id proto.ChannelID) *openChannel {
 // returning, so a refused subsystem does not leave a pool entry behind that
 // nothing owns.
 func (s *Service) dialChannel(ctx context.Context, conn *host.Host, p proto.OpenChannelParams) (*pooledConn, remoteEnd, error) {
-	pool, err := s.acquirePooled(ctx, conn, p.Destination, p.AcceptOnTrust, "", 0, 0, nil)
+	pool, err := s.acquirePooled(ctx, conn, p.Destination, p.AcceptOnTrust, "", false, 0)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -315,7 +315,7 @@ func (s *Service) dialChannel(ctx context.Context, conn *host.Host, p proto.Open
 // shell channel is the one caller that ever passes a non-nil onLiveness;
 // every other caller passes zero and nil, which is a no-op through
 // ArmKeepalive's own guard and never claims the connection's one prober.
-func (s *Service) acquirePooled(ctx context.Context, conn *host.Host, d proto.SSHDestination, acceptOnTrust bool, fingerprint string, keepalive time.Duration, keepaliveCountMax int, onLiveness ssh.LivenessObserver) (*pooledConn, error) {
+func (s *Service) acquirePooled(ctx context.Context, conn *host.Host, d proto.SSHDestination, acceptOnTrust bool, fingerprint string, holdsPlainShell bool, probeInterval time.Duration) (*pooledConn, error) {
 	ep := endpointOf(d)
 	cfg, err := s.clientConfig(ctx, conn, ep, acceptOnTrust)
 	if err != nil {
@@ -329,15 +329,14 @@ func (s *Service) acquirePooled(ctx context.Context, conn *host.Host, d proto.SS
 		return nil, err
 	}
 	lease, err := s.client.Acquire(ctx, ssh.PooledSpec{
-		Host:              ep.Host,
-		Port:              ep.Port,
-		User:              ep.User,
-		Identity:          identityKey(d.Identity),
-		Config:            cfg,
-		Route:             route,
-		KeepaliveInterval: keepalive,
-		KeepaliveCountMax: keepaliveCountMax,
-		Liveness:          onLiveness,
+		Host:            ep.Host,
+		Port:            ep.Port,
+		User:            ep.User,
+		Identity:        identityKey(d.Identity),
+		Config:          cfg,
+		Route:           route,
+		HoldsPlainShell: holdsPlainShell,
+		ProbeInterval:   probeInterval,
 	})
 	if err != nil {
 		return nil, classifyChannelError(err)

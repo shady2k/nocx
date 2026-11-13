@@ -1,18 +1,21 @@
 // A network between the app and a fixture that can be made to misbehave on cue.
 //
-// This is the e2e twin of `internal/ssh/netfault_test.go`, and it exists as a
-// second implementation for a reason worth stating rather than discovering.
-// That one is a Go type in a `_test.go` file: `faultProxy` is unexported, it is
-// compiled into no non-test binary, and `newFaultProxy` takes a `*testing.T`
-// and registers `t.Cleanup`. There is no export, flag or build tag that would
-// let a Playwright spec reach it — the spec is a different process in a
-// different language. So the choice was to write this, or to add an exported
-// relay package plus a control protocol on `cmd/e2e-sshd`; a fifty-line Node
-// server beside the specs that use it is the smaller thing to own.
+// This is the e2e twin of the Go test proxy in `internal/sshtest`
+// (faultproxy.go), and it exists as a second implementation for a reason worth
+// stating rather than discovering. That one is a Go package reached from a
+// `*testing.T`: it registers `t.Cleanup`, it lives inside the test binary, and
+// there is no export, flag or build tag that would let a Playwright spec reach
+// it — the spec is a different process in a different language. So the choice
+// was to write this, or to add an exported relay plus a control protocol on
+// `cmd/e2e-sshd`; a fifty-line Node server beside the specs that use it is the
+// smaller thing to own.
 //
 // The VOCABULARY is deliberately identical — pass, blackhole, slow, cut — so
-// the two read as one concept in two places rather than as two ideas. If the
-// Go one grows a mode, this is where the same mode belongs.
+// the two read as one concept in two places rather than as two ideas. The Go
+// one also stages hold-banner, one-way loss, reset, refuse and bandwidth; none
+// of those is written here yet because no spec needs one. A spec that does is
+// where the same mode belongs, and its assertion is the spec's business: this
+// file only has to make the wire behave the way the Go one makes it behave.
 //
 // It forwards BYTES, not packets, so it stages the application's view: a write
 // that returns success and a reply that never arrives. That is what an SSH

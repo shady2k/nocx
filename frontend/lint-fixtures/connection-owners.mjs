@@ -23,14 +23,24 @@
  *   - open/reconnect: the member's DECLARING symbol must belong to a class or
  *     interface declared in frontend/src/ipc.ts — the client surface. Any
  *     reference counts: a call, `.bind`, a property read, a destructuring
- *     binding, a class member declaration.
- *   - subscribe: the FIRST ARGUMENT'S TYPE must be, or include, the literal
- *     `session.liveness` or `exit` — whether written inline or through a const.
- *   - error text: the shape stays syntactic (`x['message']` now reads like
- *     `x.message`; every error text is a string, so the type cannot tell it
- *     from prose), and the method/comparison list is unchanged.
- *   - loss: a `cause` property whose VALUE'S TYPE is the literal
- *     `interrupted`, inline or through a const.
+ *     binding, a class member declaration. A computed reference is decided by
+ *     its KEY'S TYPE: a literal (including `const k = 'openSSHSession'` and
+ *     `` [`openSSHSession`] ``) names that entry, and a key that is not a
+ *     string literal at all is REPORTED on an ipc client — the unknown is
+ *     refused, not skipped because no name could be read.
+ *   - subscribe: the CALL is the signature it resolves to — the dispatcher's
+ *     `subscribe` in frontend/src/dispatcher.ts, however it is reached (a
+ *     member, a destructured binding, an alias) — and the FIRST ARGUMENT'S
+ *     TYPE must be a literal union naming `session.liveness`/`exit`. An
+ *     argument whose type is not a literal union is REPORTED, because it may
+ *     be either.
+ *   - error text: for a named key the shape stays syntactic; a COMPUTED key is
+ *     resolved by literal type (`err[k]` with `const k = 'message'` is
+ *     `err.message`), and a key that is not a literal on an Error/refusal value
+ *     is REPORTED directly.
+ *   - loss: a `cause` property — by name, or a computed key whose literal type
+ *     is `'cause'` — whose VALUE'S TYPE is the literal `interrupted`, inline,
+ *     through a const, or through `as const`.
  *
  * WHAT IT REFUSES, by rule id (the baseline and every failure message name the
  * rule, so an entry says what it is):
@@ -81,10 +91,24 @@
  *
  * WHAT IT CANNOT SEE, stated because a ratchet that overclaims is worse than
  * none:
- *   - The error-text rule is a same-file AST over names and shapes, not types:
- *     every error text arrives as `string`, so a value that crossed a module
- *     boundary has no shape and a differently-named local is invisible.
- *     `const x = failure(); if (x.includes(…))` is not reported.
+ *   - The error-text rule still reads names and shapes for a NAMED key: every
+ *     error text arrives as `string`, so a value that crossed a module
+ *     boundary with no `message`/`reason` and a generic name is invisible.
+ *     `const x = failure(); if (x.includes(…))` is not reported. A computed
+ *     key is the exception, because the key's type and the value's type are
+ *     both askable.
+ *   - A non-literal computed key is refused only on a value that is a failure:
+ *     an Error, an object with `message`/`reason`, a catch binding, or a name
+ *     in the narrow failure set. `record[key]` on ordinary bookkeeping is not
+ *     a connection or error fact. That means a failure carried in a generically
+ *     named value of a non-failure type can still hide its key.
+ *   - A subscription is recognised by the SIGNATURE it resolves to. A wrapper
+ *     that takes a handler and forwards it under a dynamic name has no call to
+ *     the dispatcher's `subscribe` in this file, so it is not seen.
+ *   - A cast to `any` erases the type every rule asks for: `(client as any)[k]`
+ *     is not known to be the client and `(dispatcher.subscribe as any)(…)` has
+ *     no dispatcher signature. `any` is NOT treated as the client, because
+ *     then every dynamic index in the tree would be a connection access.
  *   - A reference that resolves to a member of an interface IMPLEMENTED by the
  *     ipc client rather than declared in it keeps its declaring symbol; only
  *     the declaration in ipc.ts is the client's. That is the intended reading
@@ -134,6 +158,12 @@ export const CONNECTION_DIR = 'frontend/src/connection/'
  *  entry when its DECLARING symbol lives here, whatever it is called on the
  *  receiving end. */
 export const IPC_MODULE = resolve(FRONTEND_DIR, 'src/ipc.ts')
+
+/** The module that declares the dispatcher whose `subscribe` carries every
+ *  notification. A call is identified by its resolved signature, not by the
+ *  callee's spelling, so a destructured or aliased `subscribe` is the same
+ *  call. */
+export const DISPATCHER_MODULE = resolve(FRONTEND_DIR, 'src/dispatcher.ts')
 
 export const RULES = {
   'nocx/no-error-text-match': 'decides a fact by matching an error or a refusal text',
@@ -368,19 +398,151 @@ function propertyOfPattern(checker, services, typeNode, name) {
   return from(type)
 }
 
-/** The string-literal values a type carries, flattened through a union. */
-function literalStrings(type) {
+/** A type's names: every string-literal constituent, and whether any part is
+ *  NOT a string literal. `dynamic` is the class this check refuses — a key or
+ *  an event name the checker cannot reduce to words. An `any` or `unknown`
+ *  type is dynamic; a union of literals is not. */
+function typeKeyInfo(type) {
   const values = []
+  let dynamic = false
   const walk = (t) => {
-    if (!t) return
+    if (!t) {
+      dynamic = true
+      return
+    }
     if (t.isStringLiteral?.()) {
       values.push(t.value)
       return
     }
-    if (t.isUnion?.()) for (const part of t.types) walk(part)
+    if (t.isUnion?.()) {
+      for (const part of t.types) walk(part)
+      return
+    }
+    dynamic = true
   }
   walk(type)
-  return values
+  return { values, dynamic }
+}
+
+/**
+ * The key expression a computed member, binding or object property names,
+ * resolved through the checker: `k`, `'exit' + ''` and a substitution-free
+ * template all arrive here. Without a program the AST can still name a literal
+ * or a template with nothing in it; anything else is dynamic, which is the
+ * answer that must never be silent.
+ */
+function keyTypeInfo(types, node) {
+  if (types) {
+    const tsNode = tsNodeOf(types.services, node)
+    if (tsNode) return typeKeyInfo(types.checker.getTypeAtLocation(tsNode))
+  }
+  const n = unwrap(node)
+  if (n?.type === 'Literal' && typeof n.value === 'string') {
+    return { values: [n.value], dynamic: false }
+  }
+  if (n?.type === 'TemplateLiteral' && n.expressions.length === 0) {
+    return { values: [n.quasis[0].value.cooked ?? ''], dynamic: false }
+  }
+  return { values: [], dynamic: true }
+}
+
+/** A type symbol declared in frontend/src/ipc.ts — the module that owns the
+ *  client surface (WSClient, SessionHandle). */
+function symbolDeclaredInIpc(symbol) {
+  return (symbol?.declarations ?? []).some(
+    (decl) => resolve(decl.getSourceFile().fileName) === IPC_MODULE,
+  )
+}
+
+/** Whether a type (or a union/intersection member, or a constraint) is an ipc
+ *  client type. The type symbol covers `WSClient`; the property fallback covers
+ *  a structurally typed value whose entry members resolve to the ipc
+ *  declarations. */
+function typeIsIpcClient(checker, type, seen = new Set()) {
+  if (!type || seen.has(type)) return false
+  seen.add(type)
+  if (type.isUnion?.() || type.isIntersection?.()) {
+    return type.types.some((part) => typeIsIpcClient(checker, part, seen))
+  }
+  if (type.isTypeParameter?.()) return typeIsIpcClient(checker, type.getConstraint?.(), seen)
+  if (symbolDeclaredInIpc(type.getSymbol?.())) return true
+  for (const name of OPEN_NAMES) {
+    const property = checker.getPropertyOfType(type, name)
+    if (property && declaredOnIpcType(checker, property)) return true
+  }
+  return false
+}
+
+/** A property symbol on a type, looked through a union/intersection: a client
+ *  typed `WSClient | null` still has the entry on its client half. */
+function propertyOn(checker, type, name) {
+  if (!type) return null
+  if (type.isUnion?.() || type.isIntersection?.()) {
+    for (const part of type.types) {
+      const found = propertyOn(checker, part, name)
+      if (found) return found
+    }
+    return null
+  }
+  return checker.getPropertyOfType(type, name) ?? null
+}
+
+/** Whether a type is an Error or carries a refusal's `message`/`reason`. Used
+ *  only where a computed key is not a literal: a name cannot be trusted there,
+ *  and the TYPE must say whether the value is a failure rather than arbitrary
+ *  bookkeeping that happens to be called `e`. */
+function typeLooksLikeError(checker, type, seen = new Set()) {
+  if (!type || seen.has(type)) return false
+  seen.add(type)
+  if (type.isUnion?.() || type.isIntersection?.()) {
+    return type.types.some((part) => typeLooksLikeError(checker, part, seen))
+  }
+  if (type.isTypeParameter?.()) return typeLooksLikeError(checker, type.getConstraint?.(), seen)
+  if (type.getSymbol?.()?.getName?.() === 'Error') return true
+  if (type.getBaseTypes?.()?.some((base) => base.getSymbol?.()?.getName?.() === 'Error'))
+    return true
+  return Boolean(
+    checker.getPropertyOfType(type, 'message') || checker.getPropertyOfType(type, 'reason'),
+  )
+}
+
+/** Names that say "this value is a failure" when the TYPE cannot: an unknown
+ *  `err`, a catch binding, a refusal's reason. `e` and `ex` are deliberately
+ *  absent — `e[k] = errors[k]` building a record is exactly the false positive
+ *  this rule must not produce; a caught `e` is recognised by its catch
+ *  binding, and a typed `{ message }` by its type. */
+const ERROR_VALUE_NAME = /^(?:err|error|caught|cause|failure|refusal|reason)$/
+
+/** Whether the expression is an Error/refusal VALUE — the thing whose
+ *  computed key cannot be trusted. */
+function isErrorValue(sourceCode, types, node) {
+  const n = unwrap(node)
+  if (!n) return false
+  if (n.type === 'Identifier') {
+    const variable = resolveVariable(sourceCode, n)
+    if (variable?.defs.some((def) => def.type === 'CatchClause')) return true
+    if (ERROR_VALUE_NAME.test(n.name)) return true
+  }
+  if (n.type === 'MemberExpression' && ERROR_PAYLOAD_MEMBERS.has(propertyName(n))) {
+    return isErrorValue(sourceCode, types, n.object)
+  }
+  if (!types) return false
+  const tsNode = tsNodeOf(types.services, n)
+  if (!tsNode) return false
+  return typeLooksLikeError(types.checker, types.checker.getTypeAtLocation(tsNode))
+}
+
+/** Whether a call invokes the dispatcher's `subscribe`, whatever the callee is
+ *  called: a member, a destructured binding, an alias. The resolved
+ *  signature's declaration is the method in frontend/src/dispatcher.ts. */
+function isDispatcherSubscribe(checker, services, callNode) {
+  const tsCall = tsNodeOf(services, callNode)
+  if (!tsCall) return false
+  const declaration = checker.getResolvedSignature(tsCall)?.declaration
+  if (!declaration) return false
+  if (!ts.isMethodDeclaration(declaration) && !ts.isMethodSignature(declaration)) return false
+  if (!ts.isIdentifier(declaration.name) || declaration.name.text !== 'subscribe') return false
+  return resolve(declaration.getSourceFile().fileName) === DISPATCHER_MODULE
 }
 
 // ─── Error text: the shapes and the names ────────────────────────────────────
@@ -474,7 +636,7 @@ function isNamedErrorText(node) {
  *     the type cannot tell from an error's, and `reason.includes('disconnected')`
  *     is the defect this rule exists for.
  */
-export function isErrorText(sourceCode, node, seen = new Set(), strict = false) {
+export function isErrorText(sourceCode, node, seen = new Set(), strict = false, types = null) {
   const n = unwrap(node)
   if (!n) return false
   switch (n.type) {
@@ -491,7 +653,7 @@ export function isErrorText(sourceCode, node, seen = new Set(), strict = false) 
           if (!strict && name !== null && ERROR_TEXT_NAME.test(name)) return true
         }
         if (def.type === 'Variable' && def.node.init) {
-          if (isErrorText(sourceCode, def.node.init, seen, strict)) return true
+          if (isErrorText(sourceCode, def.node.init, seen, strict, types)) return true
           // `const data = err.data` — a local bound to the refusal's payload
           const init = unwrap(def.node.init)
           if (
@@ -507,26 +669,45 @@ export function isErrorText(sourceCode, node, seen = new Set(), strict = false) 
       return false
     }
     case 'MemberExpression': {
+      const rooted = isErrorRooted(sourceCode, n.object)
+      // A computed key is resolved by its TYPE: `err[k]` with
+      // `const k = 'message'` IS `err.message`, and a key that is not a string
+      // literal at all could be any of the members, so on a failure it is
+      // error text and the access is reported separately.
+      if (n.computed) {
+        const key = keyTypeInfo(types, n.property)
+        if (key.dynamic) {
+          return rooted || isErrorValue(sourceCode, types, n.object)
+        }
+        for (const prop of key.values) {
+          if (prop === 'message' || prop === 'reason') {
+            if (rooted || (!strict && isNamedErrorText(n.object))) return true
+            continue
+          }
+          if (ERROR_PAYLOAD_MEMBERS.has(prop) && rooted) return true
+        }
+        return false
+      }
       const prop = propertyName(n)
       if (prop === 'message' || prop === 'reason') {
-        return isErrorRooted(sourceCode, n.object) || (!strict && isNamedErrorText(n.object))
+        return rooted || (!strict && isNamedErrorText(n.object))
       }
       if (prop !== null && ERROR_PAYLOAD_MEMBERS.has(prop)) {
-        return isErrorRooted(sourceCode, n.object)
+        return rooted
       }
       return false
     }
     case 'CallExpression': {
       const prop = propertyName(n.callee)
       if (prop !== null && NORMALISERS.has(prop) && n.arguments.length === 0) {
-        return isErrorText(sourceCode, n.callee.object, seen, strict)
+        return isErrorText(sourceCode, n.callee.object, seen, strict, types)
       }
       if (
         n.callee.type === 'Identifier' &&
         n.callee.name === 'String' &&
         n.arguments.length === 1
       ) {
-        return isErrorText(sourceCode, n.arguments[0], seen, strict)
+        return isErrorText(sourceCode, n.arguments[0], seen, strict, types)
       }
       return isErrorAnswerCall(n)
     }
@@ -644,15 +825,41 @@ function errorTextMatchRule() {
           'to read: ask the backend for the state it produced (a typed reason on the result, ' +
           'pane.connection) instead of matching a message or a refusal string (ADR-ba6xet1b; ' +
           'nocx-oalo1.3.5).',
+        unknownKey:
+          'This reads a failure by a key the checker cannot resolve to a literal ("{{site}}"). ' +
+          'The key may be `message` or `reason`, which is error text the check cannot follow: ' +
+          'name the field, or read the typed reason the result carries (ADR-ba6xet1b).',
       },
     },
     create(context) {
       const rel = repoPathOf(context.filename)
       if (!isScopedFile(rel)) return {}
       const sourceCode = context.sourceCode
-      const flag = (node, target) =>
-        report(context, { ruleId: ERROR_TEXT_RULE, node, messageId: 'errorTextMatch', target })
+      // This rule also works without a program (its shapes are syntactic); the
+      // checker is used where it exists, to resolve a computed key's type.
+      const services = typeServices(context)
+      const types = services ? { services, checker: services.program.getTypeChecker() } : null
+      const flag = (node, target, messageId = 'errorTextMatch') =>
+        report(context, { ruleId: ERROR_TEXT_RULE, node, messageId, target })
+
+      /** An access this rule already reported on its own: a decision that
+       *  consumes the same node would report one site twice. */
+      const isReportedUnknownAccess = (node) => {
+        const n = unwrap(node)
+        if (!n || n.type !== 'MemberExpression' || !n.computed) return false
+        return keyTypeInfo(types, n.property).dynamic && isErrorValue(sourceCode, types, n.object)
+      }
+
       return {
+        // A computed key that is not a literal on a failure is reported
+        // directly: it may name `message` or `reason`, and the rule cannot
+        // follow a key the checker cannot reduce to words.
+        MemberExpression(node) {
+          if (!node.computed) return
+          if (!keyTypeInfo(types, node.property).dynamic) return
+          if (!isErrorValue(sourceCode, types, node.object)) return
+          flag(node, '<dynamic-key>', 'unknownKey')
+        },
         CallExpression(node) {
           const callee = unwrap(node.callee)
           if (!callee || callee.type !== 'MemberExpression') return
@@ -661,22 +868,29 @@ function errorTextMatchRule() {
           // The text is the receiver in E.includes(…) and the argument in
           // RE.test(E) — either way it is being matched.
           if (TEXT_QUERIES.has(method) || method === 'indexOf' || method === 'lastIndexOf') {
-            const subject = isErrorText(sourceCode, callee.object)
-              ? callee.object
-              : isErrorText(sourceCode, node.arguments[0])
-                ? node.arguments[0]
-                : null
-            if (subject) flag(node, `${method}:${literalTarget(sourceCode, node.arguments[0])}`)
+            const receiver = isErrorText(sourceCode, callee.object, new Set(), false, types)
+            const argument = isErrorText(sourceCode, node.arguments[0], new Set(), false, types)
+            const subject = receiver ? callee.object : argument ? node.arguments[0] : null
+            if (subject && !isReportedUnknownAccess(subject)) {
+              flag(node, `${method}:${literalTarget(sourceCode, node.arguments[0])}`)
+            }
             return
           }
           if (method === 'match') {
-            if (isErrorText(sourceCode, callee.object)) {
+            if (
+              isErrorText(sourceCode, callee.object, new Set(), false, types) &&
+              !isReportedUnknownAccess(callee.object)
+            ) {
               flag(node, `match:${literalTarget(sourceCode, node.arguments[0])}`)
             }
             return
           }
           if (method === 'test') {
-            if (isErrorText(sourceCode, node.arguments[0])) {
+            const subject = node.arguments[0]
+            if (
+              isErrorText(sourceCode, subject, new Set(), false, types) &&
+              !isReportedUnknownAccess(subject)
+            ) {
               flag(node, `test:${literalTarget(sourceCode, callee.object)}`)
             }
             return
@@ -684,16 +898,21 @@ function errorTextMatchRule() {
           // `REFUSALS.has(reason)` — a set of refusal strings whose contents
           // are not in this file, so the set's name is what can be read.
           if (method === 'has' && /REFUSAL|REASON/.test(staticName(callee.object) ?? '')) {
-            if (isErrorText(sourceCode, node.arguments[0])) {
-              flag(node, `has:${collapseSiteText(sourceCode.getText(node.arguments[0]))}`)
+            const subject = node.arguments[0]
+            if (isErrorText(sourceCode, subject, new Set(), false, types)) {
+              flag(node, `has:${collapseSiteText(sourceCode.getText(subject))}`)
             }
           }
         },
         BinaryExpression(node) {
           if (node.operator !== '===' && node.operator !== '!==') return
-          const decided = (literal, other) =>
-            (isTextLiteral(literal) && isErrorText(sourceCode, other, new Set(), true)) ||
-            (isProseLiteral(literal) && isErrorText(sourceCode, other))
+          const decided = (literal, other) => {
+            if (isReportedUnknownAccess(other)) return false
+            return (
+              (isTextLiteral(literal) && isErrorText(sourceCode, other, new Set(), true, types)) ||
+              (isProseLiteral(literal) && isErrorText(sourceCode, other, new Set(), false, types))
+            )
+          }
           if (decided(node.left, node.right)) {
             flag(node, `${node.operator}:${literalTarget(sourceCode, node.left)}`)
           } else if (decided(node.right, node.left)) {
@@ -701,16 +920,18 @@ function errorTextMatchRule() {
           }
         },
         SwitchStatement(node) {
-          if (isErrorText(sourceCode, node.discriminant, new Set(), true)) {
-            flag(
-              node.discriminant,
-              `switch:${collapseSiteText(sourceCode.getText(node.discriminant))}`,
-            )
-            return
-          }
-          const proseCase = node.cases.find((c) => c.test && isProseLiteral(c.test))
-          if (proseCase && isErrorText(sourceCode, node.discriminant)) {
-            flag(node.discriminant, `switch:${literalTarget(sourceCode, proseCase.test)}`)
+          if (!isReportedUnknownAccess(node.discriminant)) {
+            if (isErrorText(sourceCode, node.discriminant, new Set(), true, types)) {
+              flag(
+                node.discriminant,
+                `switch:${collapseSiteText(sourceCode.getText(node.discriminant))}`,
+              )
+              return
+            }
+            const proseCase = node.cases.find((c) => c.test && isProseLiteral(c.test))
+            if (proseCase && isErrorText(sourceCode, node.discriminant, new Set(), false, types)) {
+              flag(node.discriminant, `switch:${literalTarget(sourceCode, proseCase.test)}`)
+            }
           }
         },
       }
@@ -733,6 +954,11 @@ function connectionSubscriptionRule() {
           '(frontend/src/connection/, nocx-oalo1 stages 3-4). Fold it there and draw what it ' +
           'publishes: a second subscriber decides a connection fact away from its owner ' +
           '(ADR-ba6xet1b).',
+        subscriptionUnknown:
+          'This subscribes by a name the checker cannot resolve to a literal ("{{site}}"). An ' +
+          "unknown name may be session.liveness or exit — the connection's own answers — so it " +
+          'is refused outside frontend/src/connection/. Write the literal, or take the ' +
+          'subscription through the owner (ADR-ba6xet1b).',
         noTypeInfo:
           'The connection-owner rules need the TypeScript checker and this lint run did not ' +
           'provide one. Point parserOptions at the project (frontend/tsconfig.json); a check ' +
@@ -745,16 +971,27 @@ function connectionSubscriptionRule() {
       const services = typeServices(context)
       if (!services) return { Program: () => reportNoTypeInfo(context) }
       const checker = services.program.getTypeChecker()
+      const types = { services, checker }
       return {
+        // The call is identified by the signature it resolves to — the
+        // dispatcher's subscribe — not by the callee's spelling, so a
+        // destructured or aliased `subscribe` is the same call. A different
+        // store's `subscribe(handler)` is not this method and is not read.
         CallExpression(node) {
-          const callee = unwrap(node.callee)
-          if (!callee || callee.type !== 'MemberExpression' || propertyName(callee) !== 'subscribe')
-            return
+          if (!isDispatcherSubscribe(checker, services, node)) return
           const arg = node.arguments[0]
           if (!arg) return
-          const tsArg = tsNodeOf(services, arg)
-          if (!tsArg) return
-          const names = literalStrings(checker.getTypeAtLocation(tsArg))
+          const key = keyTypeInfo(types, arg)
+          if (key.dynamic) {
+            report(context, {
+              ruleId: SUBSCRIPTION_RULE,
+              node: arg,
+              messageId: 'subscriptionUnknown',
+              target: '<dynamic>',
+            })
+            return
+          }
+          const names = [...new Set(key.values)]
             .filter((name) => Object.hasOwn(CONNECTION_NOTIFICATIONS, name))
             .sort()
           if (names.length === 0) return
@@ -763,7 +1000,7 @@ function connectionSubscriptionRule() {
             node: arg,
             messageId: 'subscription',
             target: names.join('+'),
-            data: { name: names.map((n) => `'${n}'`).join(' and ') },
+            data: { name: names.map((name) => `'${name}'`).join(' and ') },
           })
         },
       }
@@ -785,6 +1022,14 @@ function connectionOpenRule() {
           '"{{name}}": {{what}}. There is one entry: send intent to the connection owner and draw ' +
           'its answer (ADR-ba6xet1b). Until frontend/src/connection/ exists (nocx-oalo1 stages 3 ' +
           'and 7) the decision belongs to the backend and that one seam, not here.',
+        openSet:
+          'This reaches the connection client by a key typed {{names}}. Each is an open/reconnect ' +
+          'entry, and there is one entry: send intent to the owner and draw its answer ' +
+          '(ADR-ba6xet1b).',
+        openUnknown:
+          'This reaches the connection client by a key the checker cannot resolve to a literal ' +
+          '("{{site}}"). Outside frontend/src/connection/ that is a connection access the owner ' +
+          'cannot see: name the member, or take it through the owner (ADR-ba6xet1b).',
         noTypeInfo:
           'The connection-owner rules need the TypeScript checker and this lint run did not ' +
           'provide one. Point parserOptions at the project (frontend/tsconfig.json); a check ' +
@@ -797,6 +1042,7 @@ function connectionOpenRule() {
       const services = typeServices(context)
       if (!services) return { Program: () => reportNoTypeInfo(context) }
       const checker = services.program.getTypeChecker()
+      const types = { services, checker }
 
       const flag = (node, name) =>
         report(context, {
@@ -806,6 +1052,37 @@ function connectionOpenRule() {
           target: name,
           data: { name, what: CONNECTION_ENTRIES[name] },
         })
+
+      const flagUnknown = (node) =>
+        report(context, {
+          ruleId: OPEN_RULE,
+          node,
+          messageId: 'openUnknown',
+          target: '<dynamic>',
+        })
+
+      /** One report for a key that names one entry, and one for a key typed as
+       *  several: the site is one access either way. */
+      const flagNames = (node, names) => {
+        const unique = [...new Set(names)].sort()
+        if (unique.length === 0) return
+        if (unique.length === 1) {
+          flag(node, unique[0])
+          return
+        }
+        report(context, {
+          ruleId: OPEN_RULE,
+          node,
+          messageId: 'openSet',
+          target: unique.join('+'),
+          data: { names: unique.map((name) => `'${name}'`).join(', ') },
+        })
+      }
+
+      const typeOf = (node) => {
+        const tsNode = tsNodeOf(services, node)
+        return tsNode ? checker.getTypeAtLocation(tsNode) : null
+      }
 
       /** Report a member reference node (property name, key, or binding name)
        *  when the symbol it names is declared on the ipc client type. */
@@ -817,12 +1094,38 @@ function connectionOpenRule() {
         }
       }
 
+      /**
+       * An element access is decided by its KEY'S TYPE, never by its spelling.
+       * A literal (including a const and a substitution-free template) names an
+       * entry, and the property's declaring symbol says whether it is the ipc
+       * client's. A key that is not a string literal AT ALL could name any
+       * entry, so on an ipc client it is reported — the unknown is refused, not
+       * waved through because the filter could not read it.
+       */
+      const flagElementAccess = (node) => {
+        const objectType = typeOf(node.object)
+        if (!objectType) return
+        const key = keyTypeInfo(types, node.property)
+        if (key.dynamic) {
+          if (typeIsIpcClient(checker, objectType)) flagUnknown(node)
+          return
+        }
+        const names = key.values.filter(
+          (name) =>
+            OPEN_NAMES.has(name) &&
+            declaredOnIpcType(checker, propertyOn(checker, objectType, name)),
+        )
+        flagNames(node, names)
+      }
+
       return {
         // A call, `.bind`, an optional read — every one of them is a property
-        // access, and the symbol at the property is the declaration.
+        // access, and the symbol at the property is the declaration. A computed
+        // access is not a name to look up in a table; it is a type question.
         MemberExpression(node) {
           if (node.object.type === 'Super') return
-          flagReference(node.property)
+          if (node.computed) flagElementAccess(node)
+          else flagReference(node.property)
         },
         // The declaration on the client type is the entry itself: the
         // implementation is the second surface, even where nothing calls it.
@@ -834,10 +1137,25 @@ function connectionOpenRule() {
         },
         // `const { openSSHSession } = client` — the binding names the member,
         // and the pattern's own type is the client, so the property resolves
-        // through the checker rather than through the local binding.
+        // through the checker rather than through the local binding. A computed
+        // key goes through the same type question as an element access.
         ObjectPattern(node) {
           for (const property of node.properties) {
             if (property.type !== 'Property') continue
+            if (property.computed) {
+              const key = keyTypeInfo(types, property.key)
+              if (key.dynamic) {
+                if (typeIsIpcClient(checker, typeOf(node))) flagUnknown(property.key)
+                continue
+              }
+              const names = key.values.filter(
+                (name) =>
+                  OPEN_NAMES.has(name) &&
+                  declaredOnIpcType(checker, propertyOfPattern(checker, services, node, name)),
+              )
+              flagNames(property.key, names)
+              continue
+            }
             const name = staticName(property.key)
             if (name === null || !OPEN_NAMES.has(name)) continue
             if (declaredOnIpcType(checker, propertyOfPattern(checker, services, node, name))) {
@@ -876,6 +1194,7 @@ function connectionLossRule() {
       const services = typeServices(context)
       if (!services) return { Program: () => reportNoTypeInfo(context) }
       const checker = services.program.getTypeChecker()
+      const types = { services, checker }
       const flag = (node) =>
         report(context, {
           ruleId: LOSS_RULE,
@@ -885,16 +1204,19 @@ function connectionLossRule() {
         })
       return {
         Property(node) {
-          // `cause: x`, `'cause': x` and `['cause']: x` all mint the same
-          // member; the computed spelling must not be a way around the rule.
-          let name = null
-          if (!node.computed) name = staticName(node.key)
+          // `cause: x`, `'cause': x`, `['cause']: x` and `` [`cause`]: x ``
+          // all mint the same member. A computed key is resolved by its TYPE,
+          // so the spelling is not a way around the rule.
+          let isCause = false
+          if (!node.computed) isCause = staticName(node.key) === 'cause'
           else {
-            const key = unwrap(node.key)
-            if (key?.type === 'Literal' && typeof key.value === 'string') name = key.value
+            const key = keyTypeInfo(types, node.key)
+            isCause = !key.dynamic && key.values.includes('cause')
           }
-          if (name !== 'cause') return
-          const tsValue = tsNodeOf(services, node.value)
+          if (!isCause) return
+          // `'interrupted' as const` is the same literal; unwrap the assertion.
+          const value = unwrap(node.value)
+          const tsValue = tsNodeOf(services, value) ?? tsNodeOf(services, node.value)
           if (!tsValue) return
           // `interrupted` is the one Exit cause that means a loss
           // (contracts/exit.schema.json): a renderer that writes it has decided

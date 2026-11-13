@@ -3,12 +3,14 @@
 // them does it through a const — a rule that reads literals at the call site
 // cannot see it.
 //
+// The call is made on the REAL dispatcher: the rule identifies it by the
+// signature it resolves to, so a fixture with its own `subscribe` interface
+// would prove nothing about the surface the renderer actually uses.
+//
 // The SAME source is linted inside src/connection/ by the fixture gate, where
 // the owner is allowed to subscribe.
 
-interface Dispatcher {
-  subscribe(name: 'exit' | 'session.liveness', handler: () => void): void
-}
+import { Dispatcher } from './dispatcher'
 
 const CONNECTION_EVENT = 'exit'
 

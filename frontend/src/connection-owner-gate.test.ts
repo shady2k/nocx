@@ -125,9 +125,11 @@ function virtualPathFor(fixture: string, place: Place): string {
  *  and nothing else about the code changes. */
 function sourceFor(fixture: string, virtualPath: string): string {
   const source = readFileSync(join(FIXTURE_DIR, fixture), 'utf8')
-  return virtualPath.startsWith('src/connection/')
-    ? source.replaceAll("from './ipc'", "from '../ipc'")
-    : source
+  if (!virtualPath.startsWith('src/connection/')) return source
+  // One fixture is linted at both depths; only the relative import changes.
+  return source
+    .replaceAll("from './ipc'", "from '../ipc'")
+    .replaceAll("from './dispatcher'", "from '../dispatcher'")
 }
 
 const FIXTURE_PROGRAM = (() => {
@@ -262,6 +264,85 @@ describe('ADR-ba6xet1b — the renderer decides no connection fact', () => {
     )
   })
 
+  it('a computed client key is decided by its type, and an unknown key is refused', () => {
+    const messages = reported(
+      lintFixture('connection-open-element.ts', 'src/connection-open-element.ts'),
+    )
+    expect(messages.map((m) => m.ruleId)).toEqual([
+      'nocx/no-connection-open',
+      'nocx/no-connection-open',
+      'nocx/no-connection-open',
+    ])
+    const text = messages.map((m) => m.message).join('\n')
+    expect((text.match(/"openSSHSession"/g) ?? []).length).toBe(2)
+    expect(text).toContain('cannot resolve to a literal')
+  })
+
+  it('the same computed client accesses inside src/connection/ pass', () => {
+    expect(
+      ruleIds('connection-open-element.ts', 'src/connection/connection-open-element.ts'),
+    ).toEqual([])
+  })
+
+  it('a destructured dispatcher subscribe is the same call, and an unknown event name is refused', () => {
+    const messages = reported(
+      lintFixture('connection-subscription-reached.ts', 'src/connection-subscription-reached.ts'),
+    )
+    expect(messages.map((m) => m.ruleId)).toEqual([
+      'nocx/no-connection-subscription',
+      'nocx/no-connection-subscription',
+      'nocx/no-connection-subscription',
+      'nocx/no-connection-subscription',
+    ])
+    const text = messages.map((m) => m.message).join('\n')
+    expect(text).toContain("'exit'")
+    expect(text).toContain("'session.liveness'")
+    expect((text.match(/cannot resolve to a literal/g) ?? []).length).toBe(2)
+  })
+
+  it('the same reached subscriptions inside src/connection/ pass', () => {
+    expect(
+      ruleIds(
+        'connection-subscription-reached.ts',
+        'src/connection/connection-subscription-reached.ts',
+      ),
+    ).toEqual([])
+  })
+
+  it("another type's subscribe with a dynamic name is not the dispatcher's", () => {
+    expect(
+      ruleIds('connection-subscription-unrelated.ts', 'src/connection-subscription-unrelated.ts'),
+    ).toEqual([])
+  })
+
+  it('a computed error key resolves by type, and an unknown key on a failure is reported', () => {
+    const messages = reported(
+      lintFixture('connection-error-computed.ts', 'src/connection-error-computed.ts'),
+    )
+    expect(messages.map((m) => m.ruleId)).toEqual([
+      'nocx/no-error-text-match',
+      'nocx/no-error-text-match',
+    ])
+    const text = messages.map((m) => m.message).join('\n')
+    expect(text).toContain('matching error text')
+    expect(text).toContain('cannot resolve to a literal')
+    expect(text).toContain("e[FIELD].includes('disconnected')")
+    expect(text).toContain('e[dynamicField]')
+  })
+
+  it('a computed cause key and an as-const value mint the same loss', () => {
+    const messages = reported(
+      lintFixture('connection-loss-computed.ts', 'src/connection-loss-computed.ts'),
+    )
+    expect(messages.map((m) => m.ruleId)).toEqual(['nocx/no-connection-loss'])
+  })
+
+  it('the same computed loss inside src/connection/ passes', () => {
+    expect(
+      ruleIds('connection-loss-computed.ts', 'src/connection/connection-loss-computed.ts'),
+    ).toEqual([])
+  })
+
   it('a file with no connection code reports nothing', () => {
     expect(ruleIds('connection-clean.ts', 'src/connection-clean.ts')).toEqual([])
   })
@@ -319,7 +400,11 @@ describe('ADR-ba6xet1b — the collector the CLI runs sees the same sites', () =
       ['connection-error-text-match.tsx', 'src/connection-error-text-match.tsx'],
       ['connection-open-call.ts', 'src/connection-open-call.ts'],
       ['connection-subscription-const.ts', 'src/connection-subscription-const.ts'],
+      ['connection-subscription-reached.ts', 'src/connection-subscription-reached.ts'],
       ['connection-loss-const.ts', 'src/connection-loss-const.ts'],
+      ['connection-loss-computed.ts', 'src/connection-loss-computed.ts'],
+      ['connection-open-element.ts', 'src/connection-open-element.ts'],
+      ['connection-error-computed.ts', 'src/connection-error-computed.ts'],
     ] as const) {
       const fromEslint = reported(lintFixture(fixture, virtualPath))
       const fromCollector = owners.violationsInText(

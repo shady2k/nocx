@@ -33,3 +33,14 @@ export function reconnectPolicy(choice: 'ask' | 'auto' | 'never'): string {
 export function cleanExit(): { cause: 'exited'; status: number } {
   return { cause: 'exited', status: 0 }
 }
+
+// A dynamic key on ordinary bookkeeping is not a failure and not a connection:
+// the error-text rule refuses an unknown key only on an Error/refusal value,
+// and the loss rule refuses only a key whose type is `cause`.
+export function fieldOf(record: Record<string, string>, key: string): string {
+  return record[key]
+}
+
+export function otherCause(key: string): Record<string, string> {
+  return { [key]: 'interrupted' as const }
+}

@@ -245,7 +245,10 @@ func (s *Supervisor) advance(event Event) {
 		s.steps = s.steps[:maxSteps-1]
 	}
 	s.steps = append(s.steps, Step{State: next, At: monoclock.Now()})
-	s.log.Info("hostconn: connection state",
+	// Debug: a stage path is diagnostic detail, and the wire carries the state
+	// a person sees (design §5.6, stage 3). A lost connection is a Warn below
+	// — that one is about a person's session, not about a dial's progress.
+	s.log.Debug("hostconn: connection state",
 		"connection", s.key.String(), "carrier", s.carrier.Name(), "state", next.String())
 }
 

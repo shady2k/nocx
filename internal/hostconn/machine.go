@@ -100,8 +100,6 @@ const (
 	CauseLostLink Cause = "lost-link"
 	// CauseReleased is the last holder letting go.
 	CauseReleased Cause = "released"
-	// CauseCancelled is the caller giving up on the dial.
-	CauseCancelled Cause = "cancelled"
 )
 
 // State is one point of the machine. Only the fields its Kind names are set;

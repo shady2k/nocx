@@ -1,7 +1,7 @@
 # The SSH foundation — design
 
 - **Feature:** nocx-oalo1. **Task:** nocx-oalo1.2. **Decision record:** [ADR-akhhb098](../../docs/decisions/akhhb098-an-ssh-connection-has-one-owner-and-the-shell-comes-first.md) (proposed).
-- **Status:** design, reviewed by another model (see the end). No code until the busy-terminal milestone has finished.
+- **Status:** design, reviewed by another model (see the end). Building since 2026-11-13 under milestone v0-9 in eight stages (section 11); the survey of that day (section 2, last subsection) and the owner's decisions of that day amend it where they differ.
 - **Read at:** `c89b9f1b9`. `[R]` is read in the source, `[H]` is a hypothesis with what settles it. Nothing here was run.
 
 ## 1. Frame (owner-confirmed, 2026-11-06)
@@ -65,6 +65,33 @@ A failed install, far spawn or far attach fails the whole open (`openFarHelper`,
 - The far helper keeps its shell (unclaimed TTL 24 h), but only coordinator start re-adopts it (`Readopt`). A network drop reads as lost.
 - A file-based `sk-` key cannot parse on `x/crypto` (`keys.go`: unhandled key type) and discovery skips it at debug level. Agent-held should work and is unexercised `[H: delayed-agent fixture plus the owner's key]`.
 - Our transport ignores ProxyCommand, ProxyJump from `ssh -G`, CertificateFile, PKCS11Provider and IdentityAgent.
+
+### Survey of second surfaces, 2026-11-13 `[R]`
+
+Read at `04b45bbf4` before the stages were cut, on the owner's request ("before breaking anything down, analyse the current architecture and look for second surfaces"). Line numbers are of that revision. A **second surface** is a second place that holds, derives or decides the same fact about a connection.
+
+**Backend.** Ten facts have more than one owner:
+
+| Fact                           | Owners                                                                                                                                                                                                                                |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Dial and route                 | `ssh_pooled.go:451` `dialRoute` (live, in the local helper); `ssh_dial.go:184` `dialForConnect`, `:388` `dialViaJumpHost`, `:510` `acquireJumpHost` (the `Connect` stack: no shipped wiring reaches it, `app.go:884-893`)             |
+| Handshake timeout              | `sshsvc/service.go:97` `ProbeTimeout` 30 s; `ssh_dial.go:216` profile `ReadyTimeout` (Connect only); `connection/resolver.go:185` computes it and nothing carries it to the helper                                                    |
+| Lane open                      | `helper_git.go:2064` `connectLocked`; `:2147` `hostHelper.open`                                                                                                                                                                       |
+| Prober start                   | `pool.go:276` `armKeepalive`; `ssh_dial.go:245`, `:440` (Connect only). Only `sshsvc/shell.go:214` arms one; `lane.go:175`, `channel.go:260`, `forward.go:99`, `toolsocket.go:300`, `pane.go:166`, `probeops.go:145` pass `0, 0, nil` |
+| Connection dead                | `ssh_keepalive.go:215`; `pool.go:263` release barrier; `pool.go:695` `CloseTainted`; `ssh_fsconn.go:169` `ErrFSDead`; `typed_owner.go:218` (500 ms poll); the kernel's own keepalive (`ssh_dial.go:386`)                              |
+| A panel's "lost"               | `ssh_fsconn.go:162`; `helper_git.go:2065` `hostHelper.dead`; `discovery/schedule.go:536` `connDead`; `tunnelchan/lease.go:82` (watches the helper link, not SSH); `helper/client/probes.go:309` (a timeout reads as lost)             |
+| Liveness producer              | `session/liveness.go:276` (dead in the shipped build); `helper_hosted.go:354`                                                                                                                                                         |
+| Exit status from a wait error  | `session/session.go:1575`; `helper/session/session.go:612`; `sshsvc/shell.go:534`; `lane.go:105`; `probeops.go:396`                                                                                                                   |
+| Pool identity                  | `ssh_dial.go:55` `poolKeyFor`; `sshsvc/channel.go:614` `identityKey`                                                                                                                                                                  |
+| Which panes share a connection | pool key; host string (`liveness.go:233`); profile id (`schedule.go:32`)                                                                                                                                                              |
+
+**Renderer.** Twenty-one places decide connection state. Among them: `ipc.ts:1102-1114` and `:1756-1781` invent an `interrupted` exit (from an unknown cause, and from a refusal string through `isProvenSessionAbsence`, `ipc.ts:179`); `terminal-content.ts` keeps seven fields for one question (`_sessionLost` `:1760`, `_sessionExited`, `_liveness`, `_connection`, `_reconnecting`, `_attachment`, `_autoAttempts`/`_autoTimer`); the fold runs twice (`connection-condition.ts:44`, `connection-mark.tsx:38`); the tab mark ranks states itself (`terminal-content.ts:2267-2281`); input is disabled on the renderer's own inference (`:2106`); the reconnect policy and its three attempts live in `reconnect-setting.ts:18-42` and `terminal-content.ts:2050`, `:5209`; `ports.tsx:308-315` and `git/git-panel.tsx:144-151` match error text with a regex; `main.tsx:894-905`, `:1103-1130` keep their own registries of live bindings; three host-to-profile matchers disagree on the user (`quick-connect-assembly.ts:167`, `terminal-content.ts:12484`, `panes.ts:3502`).
+
+**Open paths.** Seven entries open a connection: a saved profile, a host or alias, a typed `ssh`, restore, reconnect, duplicate, and the panels (Files, Git, Ports, tunnels, API, completion, `connections.test`, footprint, the far tool socket). Helper consent is decided in six places (`consent.go:107` called from `helper_git.go:142`, `:1007`, `session_readopt.go:269`, `:349`, plus `helper_git.go:1060`, `:265`); script or raw in five (`DeliversScripts` from `helper_local.go:996`, `:1064`, `:1308`, `ws.go:4112`, `spawn_ssh.go:139`); the profile for a host in seven.
+
+**Defects found on the way.** `Automatically` never runs (`_maybeAutoReconnect` calls only itself) and `never` behaves as `ask`; liveness fans out by host string across connections, stops when the arming pane closes, and never reaches far-helper or readopted panes; a host or alias open loses its port (`OpenSpec` has no port) and runs `ssh -G` a second time on the resolved name (nocx-u0yy1); a tunnel reads a dropped helper link as a lost SSH connection; no backend observes wake.
+
+**The owner's decisions of 2026-11-13** (translated): all dead code is deleted now ("under no circumstances do we keep it"); the ban on second surfaces is architectural, a check and not a review ("there must be an architectural ban on second surfaces"); the renderer holds no connection logic and takes connection state and opening entirely from the backend. They supersede this design wherever it kept a renderer fold that decides, or left panels out.
 
 ### What already decided this ground
 
@@ -236,7 +263,7 @@ type Capabilities struct {
 
 **Channels come behind the seam later, as work of their own, not in this feature (owner, 2026-11-06: "we will do that later; do not inflate this rework").** Replacing the SSH implementation means replacing what Files, Git, ports, tunnels and the helper's install ride, not only the shell. The code is closer to this than it looks: `FSConn`, `TunnelConn`, `DiscoveryConn` and `HelperInstallConn` already carry no `x/crypto` type, and consumers such as `filesystem/sftp`, `transfer` and `tunnel` use those interfaces. What ties them down: the interfaces live in `internal/ssh`, consumers take `ssh.ConnectOption` and `ssh.ConnectConfig`, and `ConnectConfig.AuthMethods` is `[]gossh.AuthMethod` (`internal/ssh/ssh.go:482`). So a neutral `internal/remote` takes the interfaces, a `Link` with `Channels` answers them, and `x/crypto` remains in the carrier and in reading a key for a vault entry or checking a host key, where it is a key format and not a transport (`internal/transport/ws.go:4645`, `ws_secrets.go:376`, `internal/app/helper_reverse.go`). A carrier without `Channels` has those panels say they are unavailable or reach them through a far helper. Consent stays keyed by a host-key fingerprint (ADR-0034), so a carrier for a protocol with no host key needs a decision of its own.
 
-**Also later: panels read the connection instead of guessing it.** `frontend/src/ports.tsx:311` and `frontend/src/git/git-panel.tsx:148` decide a connection is gone by matching `'disconnected'` in an error string, and Files keeps its own `refreshState`. Reading the one fold would pause them with the head's reason while `stalled`. This feature changes no panel, and the deferred Files and Git issues were not read for this design.
+**Panels read the backend's answer (owner, 2026-11-12/13; this replaces the earlier "this feature changes no panel").** `frontend/src/ports.tsx:308` and `frontend/src/git/git-panel.tsx:144` decide a connection is gone by matching error text, and the backend keeps a lost state per panel (section 2's survey). Git, Files and Ports work only through the helper; the backend answers per panel available or unavailable because ..., with at most one action; Files over SFTP, port discovery over `exec` and every panel's own lost state are removed. Stage 4.
 
 **The proof is a third implementation in the tests:** an in-memory carrier drives the machine, the supervisor and the driver through the fault scenarios with no sshd (C19). If those tests need anything from `internal/ssh`, the seam is wrong. This proves the policy and the seam's shape, and nothing about TCP, the pool or OpenSSH: those stay with the fault harness and the `live_sshd` suites (§10).
 
@@ -503,16 +530,18 @@ Per connection: stage entered and left with durations, server version, chosen al
 
 ## 11. Hand to stages
 
-Sketch for `to-stages`, leaves carrying the checks above:
+Agreed with the owner on 2026-11-13 ("Yes", translated), after the survey in section 2; the earlier six-stage sketch is replaced. Each stage lands as its own pull request; the checks of section 10 travel with the stage named here.
 
-1. **Supervisor in the helper:** connection table, states, prober rewrite, wake, journal events, arming on every connection.
-2. **Contract and fold:** `pane.connection`, driver skeleton, `open` answering early, heads and tab mark; `session.liveness` and `_liveness` go. **This is when the empty screen ends.**
-3. **Reconnect:** auto default and backoff, reattach through the far helper, divider, head button; the auto loop and three-attempt cap go.
-4. **Open order:** delayed fallback, install out of the open path, type-ahead.
-5. **Resolver:** one entry, `plain` reasons, `profileId` on pane rows; `resolveSshProfileOverlay` and the string match go.
-6. **Typed on our transport:** prototype first (a pane holding two sessions), then the AD-7 amendment, the rebind and the block. ADR-akhhb098 is accepted here; if the prototype fails, the owner decides.
+1. **nocx-oalo1.3 — the dead connection code is gone and a check refuses any new second owner of a connection fact.** Preparatory. The `Connect` stack, the registry's SSH factory, the unsent helper keepalive frame and the renderer's dead rewrite are deleted; an ADR and a pre-commit/CI check with a shrink-only baseline fence the rest.
+2. **nocx-oalo1.4 — one connection manager owns every SSH connection's state.** `internal/hostconn` behind `Carrier`, the x/crypto carrier in the helper, one pool identity, a prober on every connection, one closing policy, the wake observer, the fault harness. Checks: `-whylive`, C3, C4, C5, C6, C13, C21, Q2, Q3, Q4, Q5 detection.
+3. **nocx-oalo1.5 — an SSH tab shows its stage from the first second, and the renderer holds no connection logic.** `pane.connection`, `open` answering early, the reconnect policy in the backend; the renderer's fields, folds, loops and inferences go. **The empty screen ends here.** Checks: C1, C10, Q1.
+4. **nocx-oalo1.6 — Git, Files and Ports answer their availability from the backend and work only through the helper.** Parallel to stage 5.
+5. **nocx-oalo1.7 — reconnect by itself**, reattach through the far helper, stop on a changed key. Checks: Q5, Q6, Q8, C16, far-helper reattach with a marker count.
+6. **nocx-oalo1.8 — open order**: delayed fallback, install out of the open path, type-ahead. Checks: C2 race, C9, C15, MaxSessions, Q7, Q10.
+7. **nocx-oalo1.9 — one entry**: every open path through one resolver, consent and mode decided once, `profileId` on pane rows. Checks: C7, C12.
+8. **nocx-oalo1.10 — typed `ssh` on our transport**: prototype first, then the AD-7 amendment; ADR-akhhb098 is accepted here, and if the prototype fails the owner decides. Checks: C8, C14, Q9.
 
-Stages 1–3 stand alone if later ones slip. Harness work lands with stage 1.
+Stages 1–5 stand alone if later ones slip.
 
 ## 12. Review
 

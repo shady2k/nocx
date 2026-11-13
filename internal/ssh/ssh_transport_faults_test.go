@@ -16,8 +16,9 @@ package ssh
 //	wire cut                  → end the session; no prober involved
 //
 // The middle three are the ones this file exists for. They were unstageable
-// before faultProxy, and every one of them is a shape a person hits: a laptop
-// that suspended, a host under load, a NAT that dropped the flow.
+// before the switchable proxy in internal/sshtest, and every one of them is a
+// shape a person hits: a laptop that suspended, a host under load, a NAT that
+// dropped the flow.
 
 import (
 	"context"
@@ -28,6 +29,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/sshtest"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -66,13 +68,13 @@ func (l *livenessLog) sawUnresponsive() bool {
 // than a duration: countMax=3 at 50ms means the give-up is due within ~150ms,
 // and a second of waiting is twenty times that. Nothing here waits on a
 // duration to decide an outcome — every assertion polls for an observable.
-func dialThroughFault(t *testing.T, obs LivenessObserver) (*PooledConn, *faultProxy, *testSSHServer, <-chan struct{}) {
+func dialThroughFault(t *testing.T, obs LivenessObserver) (*PooledConn, *sshtest.FaultProxy, *testSSHServer, <-chan struct{}) {
 	t.Helper()
 	srv := startTestSSHServer(t)
 	t.Cleanup(srv.close)
 
-	proxy := newFaultProxy(t, srv.addr)
-	host, portStr, err := net.SplitHostPort(proxy.addr)
+	proxy := sshtest.NewFaultProxy(t, srv.addr)
+	host, portStr, err := net.SplitHostPort(proxy.Addr())
 	if err != nil {
 		t.Fatalf("split proxy addr: %v", err)
 	}
@@ -174,7 +176,7 @@ func TestTransportFault_SilentDeathIsReportedThenEndsTheSession(t *testing.T) {
 	var seen livenessLog
 	_, proxy, _, ended := dialThroughFault(t, seen.observe)
 
-	proxy.blackhole()
+	proxy.Blackhole()
 
 	if !waitFor(t, "the host to be reported unresponsive", 5*time.Second, seen.sawUnresponsive) {
 		t.Errorf("a host that stopped answering was never reported unresponsive (reports: %v)", seen.snapshot())
@@ -194,7 +196,7 @@ func TestTransportFault_SlowServerDoesNotEndTheSession(t *testing.T) {
 	// twice it: 60ms against a 50ms interval (late — it cannot finish inside
 	// its own tick) and well inside the 150ms budget (alive). That gap is the
 	// whole statement: slow is not gone.
-	proxy.slow(30 * time.Millisecond)
+	proxy.Slow(30 * time.Millisecond)
 	time.Sleep(time.Second)
 
 	if endedNow(ended)() {
@@ -224,11 +226,11 @@ func TestTransportFault_SilentHostIsNotRecoverableInPlace(t *testing.T) {
 	var seen livenessLog
 	_, proxy, _, ended := dialThroughFault(t, seen.observe)
 
-	proxy.blackhole()
+	proxy.Blackhole()
 	if !waitFor(t, "the connection to end", 5*time.Second, endedNow(ended)) {
 		t.Fatalf("a silent host never ended the connection (reports: %v)", seen.snapshot())
 	}
-	proxy.pass()
+	proxy.Pass()
 
 	// The host answers again; the connection stays ended. Nothing revives it,
 	// and nothing should: the transport it ran on is closed.
@@ -244,7 +246,7 @@ func TestTransportFault_CutWireEndsTheSession(t *testing.T) {
 	var seen livenessLog
 	_, proxy, _, ended := dialThroughFault(t, seen.observe)
 
-	proxy.cut()
+	proxy.Cut()
 
 	if !waitFor(t, "the connection to end", 5*time.Second, endedNow(ended)) {
 		t.Fatalf("a cut wire did not end the connection (reports: %v)", seen.snapshot())
@@ -267,7 +269,7 @@ func TestTransportFault_SlowHostReportsItsRoundTrip(t *testing.T) {
 		}
 	}
 	_, proxy, _, _ := dialThroughFault(t, obs)
-	proxy.slow(30 * time.Millisecond)
+	proxy.Slow(30 * time.Millisecond)
 
 	// The delay is applied in each direction, so a probe's round trip is
 	// about 60ms. Anything materially above one interval proves the number

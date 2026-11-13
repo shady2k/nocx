@@ -5,8 +5,8 @@
  *
  * The epic shipped in PR #139 proven entirely on fakes: reconnect-setting
  * covers the ask/auto/never policy, terminal-content rebinds against a fake
- * session, and internal/ssh's netfault table stages the transport faults
- * backend-side. Nothing watched a person do it end to end, which is the
+ * session, and the transport-fault table in internal/ssh (over the proxy in
+ * internal/sshtest) stages them backend-side. Nothing watched a person do it end to end, which is the
  * nocx-rtg0 shape AGENTS.md rule 2 was bought by — every unit correct, the
  * user's journey unproven.
  *
@@ -18,7 +18,7 @@
  * flow — where the socket stays open, writes succeed and nothing ever comes
  * back. Only the keepalive prober can notice that, so only a silent death
  * exercises what was built. `e2e/fault-proxy.ts` stages it, and its header
- * says why it is a second implementation of internal/ssh/netfault_test.go
+ * says why it is a second implementation of the Go proxy in internal/sshtest
  * rather than a reuse of it.
  *
  * ## Why the second test says `slow` and not `unreachable`

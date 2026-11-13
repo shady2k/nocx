@@ -87,6 +87,14 @@ type PooledSpec struct {
 	// gone quiet is noticed on this side of the wire too. Zero disables it.
 	KeepaliveInterval time.Duration
 	KeepaliveCountMax int
+	// WrapConn, when non-nil, wraps the DESTINATION's network connection after
+	// the TCP dial and before the SSH version exchange. It is the seam a caller
+	// observes the handshake's stages through (design §5.3): x/crypto has no
+	// stage callback, and the connection's first bytes are the first boundary
+	// it offers — the server's version line. Nothing is read here beyond "a
+	// read happened": the wrapper forwards every byte untouched, and no part of
+	// this package inspects what it carries (AD-6).
+	WrapConn func(net.Conn) net.Conn
 	// Liveness receives what the prober armed by KeepaliveInterval learns,
 	// exactly as ConnectConfig.Liveness does for the coordinator's own
 	// non-pooled dials (nocx-y6fh7 item 6: sshsvc's shell channel is the
@@ -121,6 +129,10 @@ type routeHop struct {
 	user     string
 	identity string
 	config   *gossh.ClientConfig
+	// wrap is set on the DESTINATION only: a hop's version exchange is not a
+	// stage a person is shown, and reporting one would move the stage path
+	// backwards.
+	wrap func(net.Conn) net.Conn
 }
 
 func (h PooledHop) routeHop() routeHop {
@@ -129,6 +141,13 @@ func (h PooledHop) routeHop() routeHop {
 
 // addr is the dial address of one endpoint.
 func (h routeHop) addr() string { return net.JoinHostPort(h.host, strconv.Itoa(h.port)) }
+
+// RouteIdentity renders this spec's route into the component the pool key
+// carries for it. It is routeKeyOf, exported for the one caller that keys a
+// connection by the same identity outside this package (the helper's
+// connection supervisor, which must agree with the pool or two answers would
+// name one connection).
+func (s PooledSpec) RouteIdentity() string { return routeKeyOf(s.Route) }
 
 // routeKeyOf renders an ordered route into the pool key's route component.
 //
@@ -339,6 +358,7 @@ func (rc *RealClient) AcquirePooled(ctx context.Context, spec PooledSpec) (*Pool
 		}
 		conn, err := rc.dialRoute(ctx, spec.Route, routeHop{
 			host: spec.Host, port: spec.Port, user: spec.User, identity: spec.Identity, config: &cfg,
+			wrap: spec.WrapConn,
 		})
 		if err != nil {
 			return nil, err
@@ -397,6 +417,7 @@ func (rc *RealClient) DialAuth(ctx context.Context, spec PooledSpec) (*PooledCon
 	}
 	client, release, err := rc.dialRouteOnce(ctx, spec.Route, routeHop{
 		host: spec.Host, port: spec.Port, user: spec.User, identity: spec.Identity, config: &cfg,
+		wrap: spec.WrapConn,
 	})
 	if err != nil {
 		return nil, err
@@ -527,7 +548,7 @@ func (rc *RealClient) dialRouteOnce(ctx context.Context, route []PooledHop, last
 func (rc *RealClient) dialEndpoint(ctx context.Context, upstream *gossh.Client, ep routeHop) (*gossh.Client, error) {
 	d := &dialer{client: rc}
 	if upstream == nil {
-		return d.dialDirect(ctx, ep.addr(), ep.config, ep.host, ep.user)
+		return d.dialDirect(ctx, ep.addr(), ep.config, ep.host, ep.user, ep.wrap)
 	}
 	conn, err := upstream.DialContext(ctx, "tcp", ep.addr())
 	if err != nil {
@@ -535,6 +556,9 @@ func (rc *RealClient) dialEndpoint(ctx context.Context, upstream *gossh.Client, 
 			return nil, ctx.Err()
 		}
 		return nil, fmt.Errorf("dial %s through the host before it: %w", ep.addr(), err)
+	}
+	if ep.wrap != nil {
+		conn = ep.wrap(conn)
 	}
 	client, err := d.handshakeOver(ctx, conn, ep.addr(), ep.config)
 	if err != nil {

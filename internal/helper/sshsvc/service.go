@@ -57,6 +57,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/hostconn"
 	"github.com/shady2k/nocx/internal/ssh"
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -83,10 +84,11 @@ type Client interface {
 	// one — and answers a borrowed connection the caller must close. It is the
 	// probe's dial: nothing is pooled, so closing it closes the hops too.
 	DialAuth(ctx context.Context, spec ssh.PooledSpec) (*ssh.PooledConn, error)
-	// AcquirePooled borrows a reference to the pooled connection for a
-	// resolved destination, dialing it if this is the first reference. The
-	// caller owns the reference and must Close it.
-	AcquirePooled(ctx context.Context, spec ssh.PooledSpec) (*ssh.PooledConn, error)
+	// Acquire borrows a reference to the connection for a resolved
+	// destination, dialing it if the supervisor holds none. The caller owns
+	// the reference and must Close it; the connection itself closes when the
+	// last reference does.
+	Acquire(ctx context.Context, spec ssh.PooledSpec) (*hostconn.Lease, error)
 }
 
 // ProbeTimeout bounds one probe's handshake. It is the same number the

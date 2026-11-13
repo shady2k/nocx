@@ -61,7 +61,10 @@ import (
 
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/helper/sshconn"
 	"github.com/shady2k/nocx/internal/helper/sshdial"
+	"github.com/shady2k/nocx/internal/hostconn"
+	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/ssh"
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -72,6 +75,12 @@ import (
 // here). A larger read would produce a frame EncodeFrame PANICS on, so the
 // bound is the smaller of the two and never the frame bound itself.
 const channelReadBuf = proto.MaxChannelPayloadBytes
+
+// errNoChannelCarrier is a connection whose carrier cannot open the channel
+// kinds this service serves. It is a capability answer, not a failure: the
+// seam's channels are later work (design §5.1.2), and until then only the
+// x/crypto carrier speaks them.
+var errNoChannelCarrier = errors.New("this connection's carrier offers no channels")
 
 // errBadChannelParams is an open this helper will not perform: a request that
 // does not name a destination, a credential, or a kind it implements.
@@ -112,7 +121,7 @@ type openChannel struct {
 	// keeps the transport alive, and taking a second one per accepted
 	// connection would make the listener's death and a stream's death two
 	// states where the caller has one.
-	pool *ssh.PooledConn
+	pool *pooledConn
 	// end is the far side of this channel: a subsystem's stream, or a
 	// connection dialed for a direct-tcpip open, or an accepted forwarded
 	// connection. Whichever it is, the bytes on it move the same way.
@@ -256,7 +265,7 @@ func (s *Service) takeChannel(id proto.ChannelID) *openChannel {
 // channel on it. On any failure the pooled reference is released before
 // returning, so a refused subsystem does not leave a pool entry behind that
 // nothing owns.
-func (s *Service) dialChannel(ctx context.Context, conn *host.Host, p proto.OpenChannelParams) (*ssh.PooledConn, remoteEnd, error) {
+func (s *Service) dialChannel(ctx context.Context, conn *host.Host, p proto.OpenChannelParams) (*pooledConn, remoteEnd, error) {
 	pool, err := s.acquirePooled(ctx, conn, p.Destination, p.AcceptOnTrust, "", 0, 0, nil)
 	if err != nil {
 		return nil, nil, err
@@ -306,7 +315,7 @@ func (s *Service) dialChannel(ctx context.Context, conn *host.Host, p proto.Open
 // shell channel is the one caller that ever passes a non-nil onLiveness;
 // every other caller passes zero and nil, which is a no-op through
 // ArmKeepalive's own guard and never claims the connection's one prober.
-func (s *Service) acquirePooled(ctx context.Context, conn *host.Host, d proto.SSHDestination, acceptOnTrust bool, fingerprint string, keepalive time.Duration, keepaliveCountMax int, onLiveness ssh.LivenessObserver) (*ssh.PooledConn, error) {
+func (s *Service) acquirePooled(ctx context.Context, conn *host.Host, d proto.SSHDestination, acceptOnTrust bool, fingerprint string, keepalive time.Duration, keepaliveCountMax int, onLiveness ssh.LivenessObserver) (*pooledConn, error) {
 	ep := endpointOf(d)
 	cfg, err := s.clientConfig(ctx, conn, ep, acceptOnTrust)
 	if err != nil {
@@ -319,7 +328,7 @@ func (s *Service) acquirePooled(ctx context.Context, conn *host.Host, d proto.SS
 	if err != nil {
 		return nil, err
 	}
-	pool, err := s.client.AcquirePooled(ctx, ssh.PooledSpec{
+	lease, err := s.client.Acquire(ctx, ssh.PooledSpec{
 		Host:              ep.Host,
 		Port:              ep.Port,
 		User:              ep.User,
@@ -333,7 +342,48 @@ func (s *Service) acquirePooled(ctx context.Context, conn *host.Host, d proto.SS
 	if err != nil {
 		return nil, classifyChannelError(err)
 	}
-	return pool, nil
+	pooled, ok := sshconn.Pooled(lease.Link())
+	if !ok {
+		// A carrier that offers no channels yet is a transport this service
+		// cannot serve Files, Git, ports or tunnels over (design §5.1.2 defers
+		// them); saying so is better than a nil dereference one call later.
+		lease.Release()
+		return nil, fmt.Errorf("%w: this connection's carrier offers no channels", errNoChannelCarrier)
+	}
+	held := &pooledConn{lease: lease, pool: pooled}
+	// THE ONE READER the supervisor's state has until the wire carries it
+	// (stage 3): which steps this connection passed, and how long it took. It
+	// is Debug because it is per acquisition, and it is the line a developer
+	// reads when a host is slow rather than broken.
+	steps := lease.Steps()
+	if len(steps) > 0 {
+		log.From(ctx).Debug("ssh: pooled connection acquired",
+			"host", ep.Host, "port", ep.Port, "user", ep.User,
+			"path", stepPath(steps), "elapsed_ms", stepElapsed(steps))
+	}
+	return held, nil
+}
+
+// stepPath renders the connection's state path as the sentence a person reads:
+// "opening(resolve) -> opening(tcp) -> connected".
+func stepPath(steps []hostconn.Step) string {
+	var b strings.Builder
+	for i, step := range steps {
+		if i > 0 {
+			b.WriteString(" -> ")
+		}
+		b.WriteString(step.State.String())
+	}
+	return b.String()
+}
+
+// stepElapsed is the whole path's duration, in milliseconds, from the
+// monotonic readings the supervisor recorded.
+func stepElapsed(steps []hostconn.Step) int64 {
+	if len(steps) < 2 {
+		return 0
+	}
+	return int64(steps[len(steps)-1].At-steps[0].At) / int64(time.Millisecond)
 }
 
 // openSubsystemStream opens a session channel and starts one subsystem on it.
@@ -342,7 +392,7 @@ func (s *Service) acquirePooled(ctx context.Context, conn *host.Host, d proto.SS
 // in the switch: the session is left open until the subsystem request is
 // answered, because closing it while the request is in flight would turn a
 // refusal into a transport error.
-func openSubsystemStream(pool *ssh.PooledConn, subsystem string) (*subsystemEnd, error) {
+func openSubsystemStream(pool *pooledConn, subsystem string) (*subsystemEnd, error) {
 	sess, err := pool.NewSession()
 	if err != nil {
 		return nil, err
@@ -652,10 +702,10 @@ func classifyChannelError(err error) error {
 	if errors.As(err, &refusal) {
 		return refusal
 	}
-	// The two channel-shaped refusals come first, because they are not
-	// dial outcomes and no classifier for a handshake knows them: the server
-	// would not open the get channel at all, or it would not start the
-	// subsystem on the one it did open.
+	// The two channel-shaped refusals come first, because they are not dial
+	// outcomes and no classifier for a handshake knows them: the server would
+	// not open the channel at all, or it would not start the subsystem on the
+	// one it did open.
 	var openErr *gossh.OpenChannelError
 	if errors.As(err, &openErr) {
 		return &proto.Refusal{Code: proto.ErrCodeChannelRefused, Message: err.Error()}

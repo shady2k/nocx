@@ -43,6 +43,8 @@ var forbiddenSSHPackages = []string{
 	"golang.org/x/crypto/ssh/knownhosts",
 	"github.com/pkg/sftp",
 	"github.com/shady2k/nocx/internal/ssh",
+	"github.com/shady2k/nocx/internal/helper/sshconn",
+	"github.com/shady2k/nocx/internal/hostconn",
 }
 
 // TestDeployedHelperDependencyGraphHasNoSSHClient is half (a) of the pair: the

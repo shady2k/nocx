@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/helper/sshconn"
 	"github.com/shady2k/nocx/internal/helper/sshsvc"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -270,7 +271,7 @@ func TestAProbeWithNoCoordinatorConnectionIsRefusedByName(t *testing.T) {
 		t.Fatalf("ssh.NewReal: %v", err)
 	}
 	t.Cleanup(func() { _ = realClient.Close() })
-	svc := sshsvc.New(realClient, discardLogger())
+	svc := sshsvc.New(sshconn.New(realClient, log.NewSlogAdapter(discardLogger())), discardLogger())
 
 	params := proto.ProbeParams{
 		Destination: proto.SSHDestination{
@@ -459,7 +460,7 @@ func TestAKeyboardInteractiveProbeWithNoCoordinatorConnectionIsRefusedByName(t *
 		t.Fatalf("ssh.NewReal: %v", err)
 	}
 	t.Cleanup(func() { _ = realClient.Close() })
-	svc := sshsvc.New(realClient, discardLogger())
+	svc := sshsvc.New(sshconn.New(realClient, log.NewSlogAdapter(discardLogger())), discardLogger())
 
 	params := proto.ProbeParams{
 		Destination: proto.SSHDestination{

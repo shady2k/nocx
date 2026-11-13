@@ -48,7 +48,6 @@ import (
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/remoteprobe"
-	"github.com/shady2k/nocx/internal/ssh"
 )
 
 // errBadLeaseParams is a probe this helper will not run: a request that names
@@ -65,7 +64,7 @@ var errBadLeaseParams = errors.New("probe lease params are incomplete")
 // auxiliary session is the only thing that stops a remote exec.
 type probeLease struct {
 	id          proto.LeaseID
-	pool        *ssh.PooledConn
+	pool        *pooledConn
 	fingerprint string
 
 	mu       sync.Mutex

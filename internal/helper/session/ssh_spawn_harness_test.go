@@ -47,6 +47,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/helper/session"
+	"github.com/shady2k/nocx/internal/helper/sshconn"
 	"github.com/shady2k/nocx/internal/helper/sshsvc"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -1351,7 +1352,7 @@ func newSSHStandFull(t *testing.T, f *sshFixture, coord *sshCoordinator, withSSH
 	}
 	t.Cleanup(func() { _ = realClient.Close() })
 
-	s.sshsvc = sshsvc.New(realClient, standLog())
+	s.sshsvc = sshsvc.New(sshconn.New(realClient, log.NewSlogAdapter(standLog())), standLog())
 	var sshSpawner session.SSHSpawner
 	if withSSHSpawner {
 		sshSpawner = session.NewSSHSpawner(s.sshsvc, standLog())

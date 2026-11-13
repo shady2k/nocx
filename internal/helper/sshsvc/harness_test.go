@@ -44,6 +44,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/helper/sshconn"
 	"github.com/shady2k/nocx/internal/helper/sshsvc"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -1089,9 +1090,14 @@ func (c *coordinator) trusted() []proto.TrustHostKeyParams {
 // stand is one helper connection: a host with the ssh service on it, a client
 // with a scripted coordinator behind it, and the bytes each side sent.
 type stand struct {
-	client    *client.Client
-	helper    *host.Host
-	service   *sshsvc.Service
+	client  *client.Client
+	helper  *host.Host
+	service *sshsvc.Service
+	// carrier is the one transport this stand's service dials through, which
+	// is also what a test asks for a connection's state: production has one
+	// carrier per helper (cmd/nocx-helper), and a test that built a second one
+	// beside the service would be measuring a supervisor nobody uses.
+	carrier   *sshconn.Carrier
 	toHelper  *recorder
 	toCoord   *recorder
 	cancel    context.CancelFunc
@@ -1126,7 +1132,8 @@ func newStandLogging(t *testing.T, c *coordinator, logger *slog.Logger) *stand {
 	}
 	t.Cleanup(func() { _ = realClient.Close() })
 
-	s.service = sshsvc.New(realClient, logger)
+	s.carrier = sshconn.New(realClient, log.NewSlogAdapter(logger))
+	s.service = sshsvc.New(s.carrier, logger)
 	s.helper = host.New(s.toHelper, s.toHelper, testHash, "instance-1", discardLogger())
 	s.helper.Register(s.service)
 

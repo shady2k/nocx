@@ -38,7 +38,7 @@ type dialer struct {
 // unblocks the handshake. The goroutine is drain-safe because the buffered
 // channel (size 1) ensures the send always succeeds. The caller sees
 // ctx.Err(), not an incidental "use of closed network connection" error.
-func (d *dialer) dialDirect(ctx context.Context, addr string, cfg *gossh.ClientConfig, host, user string) (*gossh.Client, error) {
+func (d *dialer) dialDirect(ctx context.Context, addr string, cfg *gossh.ClientConfig, host, user string, wrap func(net.Conn) net.Conn) (*gossh.Client, error) {
 	d.client.log.Info("Dialing directly", "addr", addr, "user", cfg.User)
 
 	netConn, err := d.dialWithCtx(ctx, "tcp", addr, cfg.Timeout)
@@ -47,6 +47,11 @@ func (d *dialer) dialDirect(ctx context.Context, addr string, cfg *gossh.ClientC
 			return nil, ctx.Err()
 		}
 		return nil, err
+	}
+	// The wrapper goes on HERE and not earlier: it reports that the TCP dial
+	// succeeded, which is the first thing it knows that the caller does not.
+	if wrap != nil {
+		netConn = wrap(netConn)
 	}
 
 	type hsResult struct {

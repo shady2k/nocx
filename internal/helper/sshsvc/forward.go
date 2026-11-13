@@ -53,14 +53,13 @@ import (
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/helper/sshdial"
-	"github.com/shady2k/nocx/internal/ssh"
 )
 
 // openForward is one live listener on the far side.
 type openForward struct {
 	id   proto.ForwardID
 	conn *host.Host
-	pool *ssh.PooledConn
+	pool *pooledConn
 	ln   net.Listener
 	// bind is what the SERVER answered, which is what the coordinator is
 	// told: a requested port 0 comes back allocated, and a non-loopback host

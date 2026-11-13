@@ -122,8 +122,10 @@ package coordinator
 // loses everything a primary-screen program painted above it. A contract's
 // text is part of the surface ADR-0104 declares, so this is a bump.
 //
-// Version 29 carries the refreshed live output anchor on block.outputStart.
-const ProtocolVersion = 29
+// 30 (nocx-a62cl.3.5): skills.* contracts are removed, agent approval
+// shapes change, and exact approval retirement is published. A window using
+// the previous surface must not pair with this coordinator.
+const ProtocolVersion = 30
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

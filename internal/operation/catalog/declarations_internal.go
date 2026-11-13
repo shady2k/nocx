@@ -140,10 +140,20 @@ var internalDeclarations = []Declaration{
 		MergeNone, nil,
 		"Checking the model endpoint", RowNever, ExpiredRetryRead),
 	decl("internal.agent.run", KindInternal, OwnerSession,
-		[]Phase{ph("run", []Resource{{Kind: ResourceSession, Name: "", Mode: ModeKey}, {Kind: ResourceStore, Name: "content", Mode: ModeKey}}, []Domain{DomainSession, DomainContent, DomainModel, DomainConfig})},
+		[]Phase{
+			ph("run", []Resource{{Kind: ResourceSession, Name: "", Mode: ModeKey}, {Kind: ResourceStore, Name: "content", Mode: ModeKey}}, []Domain{DomainSession, DomainContent, DomainModel, DomainConfig}),
+			// The wait on a person's answer (nocx-a62cl.3.1, ADR-anntnxdj §3,
+			// ADR-8eej3e66 §2): an `answer` phase pauses max, holds NO
+			// execution capacity and no resource chain — those are taken after
+			// the answer, like any operation with phases — and is bounded by
+			// its own limit, below. Progress never renews it.
+			ph("answer", nil, nil),
+		},
 		d(1000, BasisRead, "the operation waits on its owner’s resources; the smallest non-zero turn is declared until the resource scheduler lands"),
 		d(1800000, BasisRead, "read: an agent run has its own run lease but no wall-clock bound today"),
-		within(120000, BasisRead, "declared model progress bound; present behaviour has none"), none(), none(),
+		within(120000, BasisRead, "declared model progress bound; present behaviour has none"),
+		within(900000, BasisRead, "read: the engine’s suspension has no answer bound today; ADR-anntnxdj §3 requires at least ten minutes, and fifteen keeps an answer at the ten-minute measure inside the limit (nocx-a62cl.3.1)"),
+		none(),
 		MergeNone, nil,
 		"Running the agent", RowAlways, ExpiredOutcomeUnknown),
 	decl("internal.lifecycle.reconcile", KindInternal, OwnerSession,

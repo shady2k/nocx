@@ -6509,6 +6509,11 @@
             "model",
             "config"
           ]
+        },
+        {
+          "name": "answer",
+          "resources": [],
+          "dependencies": []
         }
       ],
       "turn": {
@@ -6528,10 +6533,10 @@
         "note": "declared model progress bound; present behaviour has none"
       },
       "answer": {
-        "kind": "none",
-        "millis": 0,
-        "basis": "",
-        "note": ""
+        "kind": "deadline",
+        "millis": 900000,
+        "basis": "read",
+        "note": "read: the engine’s suspension has no answer bound today; ADR-anntnxdj §3 requires at least ten minutes, and fifteen keeps an answer at the ten-minute measure inside the limit (nocx-a62cl.3.1)"
       },
       "recovery": {
         "kind": "none",

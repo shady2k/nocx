@@ -498,6 +498,23 @@ func (s *ApprovalStore) DeclinedEffect(runID string, effect content.Effect) (Dec
 	return "", false
 }
 
+// Withdraw drops a question nobody answered: the ask's declared limit passed,
+// the call was cancelled, or the connection that asked is gone
+// (nocx-a62cl.3.1). It records NO decision — the person gave none — so the
+// proposal is neither approved nor declined, and a later agent.approve for it
+// is honestly refused as "nothing pending" rather than reading as a no the
+// person never said. It returns false when the proposal was not pending, which
+// is the race with an answer that already settled it.
+func (s *ApprovalStore) Withdraw(ap Approval) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.pending[keyOf(ap)]; !ok {
+		return false
+	}
+	delete(s.pending, keyOf(ap))
+	return true
+}
+
 // IsPending reports whether the human is CURRENTLY being asked about this
 // exact proposal — the source of truth a stale or unknown approval id is
 // answered against (acceptance criterion 7): an id that is not pending was

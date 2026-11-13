@@ -343,6 +343,14 @@ type AskParams struct {
 	// id and a hash of the canonical arguments. Nil disables escalation's
 	// persistence — an ask still suspends, but nothing records the answer.
 	Approvals *ApprovalStore
+	// Questioner puts a prepared question to a person and returns their
+	// answer (ADR-anntnxdj §3, Questioner in kernel.go). The transport hands
+	// its approval service here, beside the store, and the call then BLOCKS
+	// on the answer instead of suspending: the run rests in awaiting_approval
+	// while it waits, and the answer reaches this very call. Nil is the
+	// framework path's shape — the question leaves as a suspension and an
+	// answer starts a new drive.
+	Questioner Questioner
 	// KnownMaterial is the egress vault comparison (design §7.1): "the
 	// vault knows the real values, and a comparison beats any pattern." It
 	// is legitimate here precisely because it happens in the backend and

@@ -1327,6 +1327,13 @@ type askRunContext struct {
 	// It is a fact about the OPEN QUESTION, not about the proposal; only the
 	// transport knows which of the two gates asked.
 	pendingReason string
+	// approvalWait is the question this run's call is BLOCKED on
+	// (nocx-a62cl.3.1). The approval service records it before it publishes
+	// the question, agent.approve claims it and wakes the very call that
+	// asked, and the service clears it when the wait is over. Nil is every
+	// run with no blocking approver: the adapter's suspension path, whose
+	// answer starts a new drive.
+	approvalWait *answerWait
 	// resumed is explicit because a fresh run can also have non-zero
 	// sequencing state after a later refactor; only the resume path sets it.
 	resumed bool
@@ -1545,9 +1552,15 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		Fetcher:          h.fetcher,
 		KnownMaterial:    h.knownMaterial,
 		Approvals:        h.approvals,
-		RunID:            strconv.FormatInt(rc.runID, 10),
-		SessionID:        string(rc.sessionID),
-		Attempt:          rc.attempt,
+		// The approval service is this run's Approver (nocx-a62cl.3.1): an
+		// ask moves the run to awaiting_approval, publishes the question and
+		// blocks THIS call on the person's answer, which then goes on through
+		// the guards and runs once. It is handed over beside the store, which
+		// is the seam the kernel already received its answers through.
+		Questioner: h.approvalService(rc),
+		RunID:      strconv.FormatInt(rc.runID, 10),
+		SessionID:  string(rc.sessionID),
+		Attempt:    rc.attempt,
 		// The turn every entry this run causes is joined to (nocx-h1l4o).
 		// It comes off the SAME askRunContext the run id does — both were
 		// set from one SubmitAgentAsk result — so the relation is written
@@ -1810,21 +1823,11 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 		// by another path). The question is moot; nothing to render.
 		return
 	}
-	n := agentApprovalRequested{Reason: "policy"}
+	var n agentApprovalRequested
 	if ap != nil {
-		n.RunID, n.Attempt, n.Tool, n.CallID, n.ArgHash, n.Arguments = ap.RunID, ap.Attempt, ap.Tool, ap.CallID, ap.ArgHash, ap.Arguments
-		n.Effect, n.Resource = string(ap.Effect), ap.Resource
-		n.Finding, n.Classifier = ap.Finding, ap.Classifier
-		n.Expansion = ap.Expansion
-		if ap.OutOfScope != nil {
-			n.OutOfScope = &agentApprovalOutOfScope{
-				Cause:    string(ap.OutOfScope.Cause),
-				Resource: ap.OutOfScope.Resource,
-				Widening: wideningOffer(ap.OutOfScope.Cause),
-			}
-		}
-		n.Scripts = ap.Scripts
-		n.Install = ap.Install
+		// The same builder the blocking service publishes through, so the
+		// surface cannot tell which ending asked (nocx-a62cl.3.1).
+		n = policyQuestion(ap)
 	} else {
 		n.RunID, n.Attempt, n.Tool, n.CallID, n.ArgHash, n.Arguments = eg.RunID, eg.Attempt, eg.Tool, eg.CallID, eg.ArgHash, eg.Arguments
 		n.Reason, n.WasError, n.Findings = "egress", eg.WasError, eg.Findings
@@ -2006,6 +2009,22 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 		})
 		return
 	}
+	// THE CLAIM (nocx-a62cl.3.1). A call blocked in the approval service is
+	// waiting for exactly one answer, so the handler that claims the wait is
+	// the only one that may settle the store: the wait is taken BEFORE any
+	// write, and every path that refuses the answer below settles it as
+	// unanswered rather than leaving the call waiting for a decision the
+	// server did not record. A nil wait is the adapter's suspension path —
+	// the answer starts a new drive there, exactly as before.
+	wait := h.takeAnswerWait(runID, ap)
+	waitSettled := false
+	if wait != nil {
+		defer func() {
+			if !waitSettled {
+				wait.settle(assistant.Unanswered{Err: errors.New("the server could not record the answer, so the call was refused")})
+			}
+		}()
+	}
 	if !p.Approved {
 		// "No, and widen it" is not an answer anybody can mean: the widening
 		// answer IS an approval. Refused rather than silently read as a
@@ -2075,6 +2094,15 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 		if msg := h.notifyStandingAnswer(ap, p, outcome, rc); msg != "" {
 			warning = msg
 		}
+		if wait != nil {
+			// The call that asked is waiting: the no reaches IT, in the
+			// person's own words, and the model goes on in the same stream.
+			waitSettled = wait.settle(assistant.Declined{
+				Reason: assistant.PersonDeclineResult(p.Tool, declineKindForScope(p.Scope)),
+			})
+			_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunStreaming), Warning: warning}))
+			return
+		}
 		runCtx, cancelRun := h.detachedRunContext(ctx)
 		if rej := h.askSub.TrySubmit(runCtx, control.Task{Run: func(taskCtx context.Context) {
 			defer cancelRun()
@@ -2139,6 +2167,13 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 		if msg := h.notifyStandingAnswer(ap, p, outcome, rc); msg != "" {
 			warning = msg
 		}
+	}
+	if wait != nil {
+		// The call that asked is waiting: the yes reaches IT, and the guards
+		// that follow read the answer and the evidence as they stand now.
+		waitSettled = wait.settle(assistant.Approved{})
+		_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunStreaming), Warning: warning}))
+		return
 	}
 	// The resume: the same run, the same stream context, the same binding —
 	// the middleware sees the approval and runs the call as the proposal's

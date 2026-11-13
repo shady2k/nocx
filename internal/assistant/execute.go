@@ -142,6 +142,12 @@ type toolSeams struct {
 	// that never wired one, which leaves every sessionId naming a
 	// descendant refused rather than guessed at.
 	paneAccessBinder PaneAccessBinder
+	// questioner is the authority seam to the approval service (Questioner,
+	// kernel.go): when it is set, an Ask blocks the call on the person's
+	// answer instead of leaving as a suspension. Nil is every caller that is
+	// not the product's assistant turn — the framework adapter's suspension
+	// is what they get, unchanged.
+	questioner Questioner
 }
 
 type noteSearchRow struct {

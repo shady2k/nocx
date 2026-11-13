@@ -429,6 +429,7 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 			scripts:           p.Scripts,
 			cwd:               p.Cwd,
 			paneAccessBinder:  p.PaneAccessBinder,
+			questioner:        p.Questioner,
 		})
 		if err != nil {
 			return err

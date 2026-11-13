@@ -191,10 +191,6 @@
       "func": "Publisher.Verify"
     },
     {
-      "file": "internal/ssh/ssh_real.go",
-      "func": "WithKnownHostsFile"
-    },
-    {
       "file": "internal/transport/transport.go",
       "func": "NewStub"
     },

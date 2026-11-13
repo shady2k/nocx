@@ -19,11 +19,6 @@ import (
 // RealClientOption configures the RealClient constructor.
 type RealClientOption func(*RealClient)
 
-// WithKnownHostsFile sets an explicit known_hosts path.
-func WithKnownHostsFile(path string) RealClientOption {
-	return func(rc *RealClient) { rc.knownHostsFile = path }
-}
-
 // WithConfigResolver sets the SSH config resolver for the RealClient.
 // When set, ~/.ssh/config HostName resolution and config merging use the
 // injected resolver instead of running ssh -G internally. Tests use a
@@ -70,6 +65,12 @@ type RealClient struct {
 }
 
 // NewReal creates a RealClient with the given options.
+//
+// The host-key store is $HOME/.ssh/known_hosts, resolved here and never
+// passed in: this process's home is the answer production has, and a path
+// option existed only for tests — a test hook living in the product, deleted
+// with the rest of the dead code (nocx-oalo1.3.2). A test that wants its own
+// store gives the client its own $HOME, as a person does.
 func NewReal(logger log.Logger, opts ...RealClientOption) (*RealClient, error) {
 	rc := &RealClient{
 		log: logger.With("module", "ssh"),

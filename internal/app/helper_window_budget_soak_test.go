@@ -422,7 +422,7 @@ func startSoakStand(t *testing.T) *soakStand {
 	logger := discardLogger(t)
 	slogger := log.NewSlogAdapter(logger)
 	reg := session.New(slogger, &reachPTYFactory{stub: pty.NewStub(slogger)})
-	rc, err := ssh.NewReal(slogger, ssh.WithKnownHostsFile(home+"/known_hosts"))
+	rc, err := ssh.NewReal(slogger)
 	if err != nil {
 		t.Fatalf("ssh.NewReal: %v", err)
 	}

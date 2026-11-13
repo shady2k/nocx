@@ -107,7 +107,7 @@ func startPaneStand(t *testing.T) *paneStand {
 
 	slogger := log.NewSlogAdapter(discardLogger(t))
 	reg := session.New(slogger, &reachPTYFactory{stub: pty.NewStub(slogger)})
-	rc, err := ssh.NewReal(slogger, ssh.WithKnownHostsFile(home+"/known_hosts"))
+	rc, err := ssh.NewReal(slogger)
 	if err != nil {
 		t.Fatalf("ssh.NewReal: %v", err)
 	}

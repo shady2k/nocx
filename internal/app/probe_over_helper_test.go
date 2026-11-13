@@ -32,7 +32,6 @@ import (
 	"errors"
 	"net"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -149,8 +148,8 @@ func startProbeStackWithStore(t *testing.T, srv *pwSSHServer, store credential.R
 	// credential resolver's authority, and the resolver of the destination. It
 	// dials NOTHING in this file — a dial would mean the migration had not
 	// happened.
-	khPath := filepath.Join(t.TempDir(), "known_hosts")
-	coordinatorClient, err := ssh.NewReal(logger, ssh.WithKnownHostsFile(khPath))
+	khPath := knownHostsIn(t, home)
+	coordinatorClient, err := ssh.NewReal(logger)
 	if err != nil {
 		t.Fatalf("coordinator ssh client: %v", err)
 	}
@@ -220,8 +219,8 @@ func noHelperStack(t *testing.T) *probeStack {
 	t.Helper()
 	home := storagetest.IsolateWithHome(t)
 	logger := log.NewSlogAdapter(discardLogger(t))
-	khPath := filepath.Join(t.TempDir(), "known_hosts")
-	client, err := ssh.NewReal(logger, ssh.WithKnownHostsFile(khPath))
+	khPath := knownHostsIn(t, home)
+	client, err := ssh.NewReal(logger)
 	if err != nil {
 		t.Fatalf("coordinator ssh client: %v", err)
 	}

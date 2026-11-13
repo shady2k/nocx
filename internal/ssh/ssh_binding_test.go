@@ -46,14 +46,17 @@ func (s *credStub) Delete(_ context.Context, _ credential.SecretID) error       
 func (s *credStub) Exists(_ context.Context, _ credential.SecretID) (bool, error) { return true, nil }
 
 // newBindingClient builds a RealClient with an empty stub resolver so
-// resolution is deterministic (alias lookups use the StubConfigResolver).
+// resolution is deterministic (alias lookups use the StubConfigResolver), over
+// this test's own $HOME — the client reads $HOME/.ssh/known_hosts and takes no
+// path option, because production never needs one.
 func newBindingClient(t *testing.T) *RealClient {
+	return newBindingClientWith(t, NewStubConfigResolver())
+}
+
+func newBindingClientWith(t *testing.T, resolver ConfigResolver) *RealClient {
 	t.Helper()
-	c, err := NewReal(
-		log.NewSlogAdapter(nil),
-		WithConfigResolver(NewStubConfigResolver()),
-		WithKnownHostsFile(writeSSHConfig(t, "")),
-	)
+	t.Setenv("HOME", t.TempDir())
+	c, err := NewReal(log.NewSlogAdapter(nil), WithConfigResolver(resolver))
 	if err != nil {
 		t.Fatalf("NewReal: %v", err)
 	}
@@ -104,12 +107,7 @@ func TestBinding_AliasResolves(t *testing.T) {
 	stub := NewStubConfigResolver()
 	stub.AddEntry("victim", HostConfig{HostName: "target.example.com", Port: 2222})
 
-	client, err := NewReal(log.NewSlogAdapter(nil), WithConfigResolver(stub),
-		WithKnownHostsFile(writeSSHConfig(t, "")))
-	if err != nil {
-		t.Fatalf("NewReal: %v", err)
-	}
-	defer func() { _ = client.Close() }()
+	client := newBindingClientWith(t, stub)
 
 	store := &credStub{pw: "x"}
 
@@ -137,16 +135,11 @@ func TestBinding_AliasDriftRefused(t *testing.T) {
 
 	driftStub := NewStubConfigResolver()
 	driftStub.AddEntry("victim", HostConfig{HostName: "evil.example.com", Port: 2222})
-	client, err := NewReal(log.NewSlogAdapter(nil), WithConfigResolver(driftStub),
-		WithKnownHostsFile(writeSSHConfig(t, "")))
-	if err != nil {
-		t.Fatalf("NewReal: %v", err)
-	}
-	defer func() { _ = client.Close() }()
+	client := newBindingClientWith(t, driftStub)
 
 	// The authorized endpoint is the value the OLD resolution produced; the
 	// alias now resolves elsewhere, so the credential is not spent.
-	_, err = client.ResolveTarget(
+	_, err := client.ResolveTarget(
 		context.Background(), "victim",
 		WithUser("test"),
 		WithCredentials(store, credential.SecretID("test-id")),
@@ -171,16 +164,11 @@ func TestBinding_AliasDriftRefused(t *testing.T) {
 func TestBinding_JumpHostRefused(t *testing.T) {
 	stub := NewStubConfigResolver()
 	stub.AddEntry("jumphost", HostConfig{HostName: "bastion.example.com", Port: 22})
-	client, err := NewReal(log.NewSlogAdapter(nil), WithConfigResolver(stub),
-		WithKnownHostsFile(writeSSHConfig(t, "")))
-	if err != nil {
-		t.Fatalf("NewReal: %v", err)
-	}
-	defer func() { _ = client.Close() }()
+	client := newBindingClientWith(t, stub)
 
 	store := &credStub{pw: "x"}
 
-	_, err = client.ResolveTarget(
+	_, err := client.ResolveTarget(
 		context.Background(), "target.example.com",
 		WithUser("test"),
 		WithCredentials(store, credential.SecretID("test-id")),
@@ -209,19 +197,14 @@ func TestBinding_JumpHostRefused(t *testing.T) {
 func TestBinding_PortFromAlias(t *testing.T) {
 	stub := NewStubConfigResolver()
 	stub.AddEntry("portalias", HostConfig{HostName: "target.example.com", Port: 2222})
-	client, err := NewReal(log.NewSlogAdapter(nil), WithConfigResolver(stub),
-		WithKnownHostsFile(writeSSHConfig(t, "")))
-	if err != nil {
-		t.Fatalf("NewReal: %v", err)
-	}
-	defer func() { _ = client.Close() }()
+	client := newBindingClientWith(t, stub)
 
 	store := &credStub{pw: "x"}
 
 	// Bound to the right host but port 22 — the alias resolves to 2222. A
 	// binding that names a port is a stricter claim than the endpoint, and it
 	// must be refused.
-	_, err = client.ResolveTarget(
+	_, err := client.ResolveTarget(
 		context.Background(), "portalias",
 		WithUser("test"),
 		WithCredentials(store, credential.SecretID("test-id")),
@@ -265,12 +248,7 @@ func TestBinding_UnboundRefused(t *testing.T) {
 }
 
 func TestBinding_HostAnyPortWhenPortUnset(t *testing.T) {
-	client, err := NewReal(log.NewSlogAdapter(nil), WithConfigResolver(NewStubConfigResolver()),
-		WithKnownHostsFile(writeSSHConfig(t, "")))
-	if err != nil {
-		t.Fatalf("NewReal: %v", err)
-	}
-	defer func() { _ = client.Close() }()
+	client := newBindingClient(t)
 
 	store := &credStub{pw: "x"}
 
@@ -287,12 +265,7 @@ func TestBinding_HostAnyPortWhenPortUnset(t *testing.T) {
 }
 
 func TestBinding_InlineAuthNotChecked(t *testing.T) {
-	client, err := NewReal(log.NewSlogAdapter(nil), WithConfigResolver(NewStubConfigResolver()),
-		WithKnownHostsFile(writeSSHConfig(t, "")))
-	if err != nil {
-		t.Fatalf("NewReal: %v", err)
-	}
-	defer func() { _ = client.Close() }()
+	client := newBindingClient(t)
 
 	// Inline auth has no linked credential and so nothing to bind: only a
 	// stored secret names an endpoint a credential may be spent on. The key is

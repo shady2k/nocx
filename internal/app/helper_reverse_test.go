@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
-	"path/filepath"
 	"sync"
 	"testing"
 
@@ -77,8 +76,8 @@ type reverseFixture struct {
 
 func newReverseFixture(t *testing.T, material map[credential.SecretID][]byte) *reverseFixture {
 	t.Helper()
-	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
-	client, err := ssh.NewReal(log.NewSlogAdapter(nil), ssh.WithKnownHostsFile(knownHosts))
+	t.Setenv("HOME", t.TempDir())
+	client, err := ssh.NewReal(log.NewSlogAdapter(nil))
 	if err != nil {
 		t.Fatalf("ssh.NewReal: %v", err)
 	}

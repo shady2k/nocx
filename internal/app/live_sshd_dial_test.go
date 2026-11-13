@@ -27,12 +27,20 @@ type liveSshdDial struct{}
 
 func newLiveSshdDial() liveSshdDial { return liveSshdDial{} }
 
-// knownHostsPath writes the fixture's host key where a client will look for it.
-// It is the coordinator's own trust answer for this server, and the live
-// helper-journey stands still need it when they resolve a destination.
+// knownHostsPath gives this test its own $HOME and writes the fixture's host
+// key where the coordinator's client looks for it. It is the coordinator's own
+// trust answer for this server, and the live helper-journey stands still need
+// it when they resolve a destination. The path is the product's default,
+// because the client takes no other.
 func (fx *liveSshd) knownHostsPath(t *testing.T) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "known_hosts")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("prepare %s: %v", dir, err)
+	}
+	path := filepath.Join(dir, "known_hosts")
 	line := knownhosts.Line([]string{fx.addr}, fx.hostKey)
 	if err := os.WriteFile(path, []byte(line+"\n"), 0o600); err != nil {
 		t.Fatalf("write known_hosts: %v", err)

@@ -60,7 +60,10 @@ func TestARealRemoteCDReachesTheAttachedRendererAsCwdMetadata(t *testing.T) {
 		t.Fatalf("marshal fixture key: %v", err)
 	}
 	key := liveFixtureKeyResolver{pem: pem.EncodeToMemory(signerBlock)}
-	rc, err := ssh.NewReal(sshLog, ssh.WithKnownHostsFile(fx.knownHostsPath(t)))
+	// The fixture's host key goes where the client looks for it: this test's
+	// own $HOME, written by the fixture itself.
+	fx.knownHostsPath(t)
+	rc, err := ssh.NewReal(sshLog)
 	if err != nil {
 		t.Fatalf("ssh.NewReal: %v", err)
 	}

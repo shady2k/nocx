@@ -11,8 +11,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
-	"path/filepath"
 	"strconv"
 	"sync"
 	"testing"
@@ -460,17 +458,6 @@ func generateSigner(t *testing.T) gossh.Signer {
 	return signer
 }
 
-// writeSSHConfig writes an ssh_config file and returns the path.
-func writeSSHConfig(t *testing.T, content string) string {
-	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config")
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatalf("write ssh_config: %v", err)
-	}
-	return path
-}
-
 // memSecretStore is the in-memory credential.Resolver the auth-chain and
 // prompt tests both stand in for a vault: Create mints an id, and Resolve
 // answers the stored value through Secret.Use like a real one does. It is
@@ -530,13 +517,13 @@ func newTestStore() *memSecretStore {
 	return &memSecretStore{}
 }
 
-// newTestRealClient builds a RealClient with test-safe defaults.
+// newTestRealClient builds a RealClient with test-safe defaults — a stub
+// resolver, and its own $HOME so its known_hosts is a file nobody shares.
 func newTestRealClient(t *testing.T) *RealClient {
 	t.Helper()
-	dir := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
 	rc, err := NewReal(
 		log.NewSlogAdapter(nil), // nil handler → slog falls back
-		WithKnownHostsFile(filepath.Join(dir, "known_hosts")),
 		WithConfigResolver(NewStubConfigResolver()),
 	)
 	if err != nil {

@@ -13,13 +13,34 @@ package ssh
 // untagged half (ssh_real.go).
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/log"
 )
 
-// newTrustClient builds a RealClient whose known_hosts lives at the given
-// path (which may not exist yet).
+// sshHome gives this test its own $HOME and answers where the product's client
+// reads its host keys: $HOME/.ssh/known_hosts.
+//
+// That is the ONLY seam there is, and it is deliberate rather than a
+// convenience: the client resolves its own home, production has no need to
+// name a path, and an option for it would be a test hook living in the product
+// (nocx-oalo1.3.2). A test that wants its own store gives the client its own
+// home, exactly as a person has one. The directory is created; the file is the
+// caller's to write, or TrustHostKey's.
+func sshHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("prepare %s: %v", dir, err)
+	}
+	return filepath.Join(dir, "known_hosts")
+}
+
+// newTrustClient builds a RealClient over the $HOME sshHome gave this test.
 //
 // It registers no cleanup, and the reason is the split rather than an
 // oversight: RealClient.Close is the TAGGED half's (it closes the pool), so a
@@ -27,12 +48,9 @@ import (
 // for it to close — the coordinator's client holds no connection. The tagged
 // tests that dial through this client close what they dialed (probeOnce closes
 // the one connection it opens), so nothing survives them either.
-func newTrustClient(t *testing.T, khPath string) *RealClient {
+func newTrustClient(t *testing.T) *RealClient {
 	t.Helper()
-	client, err := NewReal(
-		log.NewSlogAdapter(nil),
-		WithKnownHostsFile(khPath),
-	)
+	client, err := NewReal(log.NewSlogAdapter(nil))
 	if err != nil {
 		t.Fatalf("NewReal: %v", err)
 	}

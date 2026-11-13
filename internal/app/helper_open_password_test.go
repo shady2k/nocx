@@ -27,6 +27,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -572,4 +573,30 @@ func (s *pwSSHServer) awaitConns(want int) int {
 			return s.connCount()
 		}
 	}
+}
+
+// homeForKnownHosts gives this test its own $HOME and answers the path the
+// coordinator's ssh client reads its host keys from: $HOME/.ssh/known_hosts.
+//
+// That is the only seam there is. RealClient resolves its own home and
+// production has no need to name a path, so a test that wants its own store
+// gives the client its own home, exactly as a person has one (nocx-oalo1.3.2).
+// The directory is created; the file is the caller's to write.
+func homeForKnownHosts(t *testing.T) (home, khPath string) {
+	t.Helper()
+	home = t.TempDir()
+	t.Setenv("HOME", home)
+	return home, knownHostsIn(t, home)
+}
+
+// knownHostsIn answers the product's known_hosts path under a home the test
+// already owns, and makes sure its directory exists. The file itself is the
+// caller's to write.
+func knownHostsIn(t *testing.T, home string) string {
+	t.Helper()
+	dir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("prepare %s: %v", dir, err)
+	}
+	return filepath.Join(dir, "known_hosts")
 }

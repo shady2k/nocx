@@ -20,9 +20,18 @@ An agent installed on their computer does the thinking. nocx ships no agent.
 **The agent always runs where `nocx-server` runs, and acts on the pane's host only through nocx's
 tools** (owner, 2026-11-13). A person connected to a server who asks for help configuring it gets
 an agent that reads, edits and runs on that server, while its process, its model key and its
-installation stay on their own computer. Nothing is installed on a remote host for the assistant,
-and an agent's own built-in tools, which would act on the wrong machine for an SSH pane, are off.
-That is also what makes nocx's tools the one boundary: no action on a host bypasses it.
+installation stay on their own computer. Nothing is installed on a remote host for the assistant.
+An agent's own built-in tools act on the machine its process runs on, which for an SSH pane is the
+wrong one, so they are switched off wherever the agent allows it; where it does not, nocx's system
+prompt directs the agent to nocx's tools, and the product says that agent's own tools are outside
+nocx's authority (owner, 2026-11-13).
+
+**The agents come first by name, and each is an implementation of one abstraction** (owner,
+2026-11-13): Claude Code, Codex, pi, omp and prime-agent. Everything nocx does with an agent goes
+through one contract; an agent is added by implementing it, never by a branch in the core. pi is
+built first, because everything the contract needs of it is measured below. No throwaway prototype
+precedes the others: each connector is built for real and is supported once it passes the
+conformance suite.
 
 Read at `bd16c0268`, the following decide the shape:
 
@@ -72,13 +81,32 @@ and against a fake one whose requests could be read:
 Not measured: the real endpoint, a person's own extensions and MCP servers against the `--tools`
 filter, whether `abort` closes the stream to the provider, and a long wait against a real model.
 
+Read from each agent's own `--help` on 2026-11-13 (claude 2.1.321, codex 0.167.1, pi 1.5.2, omp
+18.18.5, prime-agent 0.10.2), not measured:
+
+- Claude Code has a documented headless mode, `-p --input-format stream-json --output-format
+stream-json`, with `--tools`, `--mcp-config` plus `--strict-mcp-config`, `--model`, `--session-id`,
+  `--resume` and `--append-system-prompt`.
+- Codex has `codex app-server` (JSON-RPC), `-m`, `-c` overrides for MCP servers, and a `shell_tool`
+  feature flag. Whether every built-in tool can be removed is not known.
+- omp is a fork of pi: `--mode rpc`, `--tools`, `-e`, `--model`, `--session-dir`, and `omp acp`.
+- prime-agent has `--mode rpc|acp`, `--model`, `--session-dir` and `--append-system-prompt`, no tool
+  allowlist and a built-in Python REPL.
+
+Read from two products that drive these agents, on 2026-11-13: agent-of-empires reaches Claude,
+Codex and pi through ACP adapters it pins and installs (`claude-agent-acp`, `codex-acp`, `pi-acp`), and
+its changelog raises the Claude adapter's version floor seven times, from 0.37 to 0.103. paseo reaches
+Claude through its SDK, Codex through `app-server` and pi through `--mode rpc` with a generated
+extension carrying its MCP server and a bearer, keeps ACP for the long tail, and excludes `pi-acp`
+deliberately.
+
 ## Decision drivers
 
 The owner confirmed this frame on 2026-11-06. For a developer asking from a pane, and for us, who no
 longer maintain an engine. **Authority over panes outranks features: when something must give, tools
 are cut, not checks.** Main path: ask, streamed answer, tool call, a person's approval, result in the
 same block, the conversation goes on, and the person can steer or cancel at any point. Signal: the
-same question works through pi with no model settings in nocx, and no new bug needs knowledge of
+same question works through pi with no provider settings in nocx, and no new bug needs knowledge of
 providers.
 
 Quality scenarios, each with its measure:
@@ -102,6 +130,8 @@ Quality scenarios, each with its measure:
    `interrupted`, as it does today. Measure: no agent process or MCP bridge outlives the turn, no
    approval survives, and a later question continues the conversation with no effect replayed.
 8. A person with no agent invokes any AI function → the agent section of Settings opens.
+   A person whose chosen model has left the agent's catalog is told so, and no neighbouring model is
+   substituted.
 9. A person in an SSH pane asks for help configuring that server → the agent reads, searches and
    edits the server's files and runs commands in that pane, and each call is decided by the person's
    permission matrix exactly as on a local pane: a permitted effect runs, an `ask` row waits for
@@ -112,6 +142,10 @@ Quality scenarios, each with its measure:
 Constraints and their sources:
 
 - No agent is shipped or embedded (owner, 2026-11-05).
+- Claude Code, Codex, pi, omp and prime-agent are the agents to support, each behind one abstraction
+  (owner, 2026-11-13).
+- The permission matrix, the standing answers, the person's own instructions and the role table
+  stay (owner, 2026-11-13).
 - One surface: no parallel path behind a setting, and the old engine does not live beside the new
   one (owner, 2026-11-06).
 - Authority plugs into the chain; modules stay isolated behind extension points (owner, 2026-11-06;
@@ -145,13 +179,16 @@ do would be a matter of review rather than of its type.
 
 **How an agent is reached.**
 
-**E. A connector per protocol behind one contract, pi over RPC first, ACP second.** Chosen. RPC is
-pi's documented interface for other languages, needs nothing installed beyond pi, and gives flags and
-models directly.
+**E. One contract, and a connector per agent family speaking that family's own documented
+interface: pi's RPC (pi, omp), Claude Code's stream-json, Codex's app-server, and ACP for prime-agent
+and every later agent.** Chosen. Each is the vendor's interface for programs rather than a third
+party's translation of it, needs nothing installed beyond the agent, and gives its flags directly.
 
-**F. ACP only, reaching pi through the `pi-acp` adapter.** One protocol. Rejected for now: three
-things to install, no `session/request_permission`, the launch flags are out of our hands, and its
-author calls it an MVP. ACP stays the way to every other agent.
+**F. ACP for every agent, through adapters for those without it** (`claude-agent-acp`, `codex-acp`,
+`pi-acp`). One protocol. Rejected: each adapter is one more thing to install, its launch flags are
+out of our hands, and its version moves under us, as agent-of-empires' seven version floors for one
+adapter show; paseo, which has both, keeps ACP for the long tail only. `pi-acp` in particular has no
+`session/request_permission` and its author calls it an MVP.
 
 **Options that reject the shared assumption.**
 
@@ -173,7 +210,7 @@ the contract.
 ```go
 type Harness interface {
     Readiness(ctx context.Context) Readiness // not installed | not configured | ready, and what to tell a person
-    Run(ctx context.Context, t TurnSpec) (Turn, error) // one turn: conversation id, text, the turn's MCP admission
+    Run(ctx context.Context, t TurnSpec) (Turn, error) // one turn: conversation id, text, model, nocx's system prompt, the turn's MCP admission
 }
 
 type Turn interface {
@@ -182,9 +219,42 @@ type Turn interface {
     Wait(ctx context.Context) (Outcome, error) // the process and its bridge are gone when this returns
 }
 
-// Optional, stated by a connector and never assumed.
-type Steerer interface { Steer(ctx context.Context, text string) error }
+// Capabilities: optional, implemented by a connector or not, and asked of it — never assumed, and
+// never inferred from the agent's name.
+type Steerer interface   { Steer(ctx context.Context, text string) error }
+type Cataloguer interface { Models(ctx context.Context) ([]Model, error) } // what this agent can run, for the role picker
 ```
+
+**Every agent is an implementation of this contract, and the core knows nothing else.** The
+pipeline, the transport, the renderer and Settings see `Harness`, `Turn` and the capabilities; no
+code outside a connector names an agent. What differs between agents is a capability a connector
+has or lacks, or a fact it states (below), never a condition in the core. What every connector needs
+is written once beside the contract and used by each: starting the process with its pipes, the
+turn's lifetime, the MCP bridge with its bearer, and nocx's system prompt. A connector adds only
+what its agent's interface requires, and a family shares one: omp is pi's connector with omp's
+launch, not a second copy of it.
+
+The connectors, in the order they are built:
+
+| Connector   | Agents             | Interface                                           |
+| ----------- | ------------------ | --------------------------------------------------- |
+| pi family   | pi, then omp       | `--mode rpc`, MCP through a `-e` extension          |
+| Claude Code | Claude Code        | `-p` with stream-json in and out, `--mcp-config`    |
+| Codex       | Codex              | `codex app-server`                                  |
+| ACP         | prime-agent, later | ACP over stdio, MCP through `session/new`'s servers |
+
+prime-agent goes through the pi family instead if its `--mode rpc` is pi's protocol; its connector stage
+reads that first.
+
+**Each connector states facts the product shows**, rather than leaving them to be discovered:
+
+- its **tool boundary**: _nocx's tools only_, where the agent's own tools are switched off at launch
+  (pi, omp, and Claude Code through `--tools`); or _nocx's tools by instruction_, where they cannot
+  be, and nocx's system prompt directs the agent to nocx's tools for anything on a pane or its host.
+  A person is told which, and that in the second case the agent's own tools are not under nocx's
+  matrix (owner, 2026-11-13);
+- whether it **continues a conversation** by id; one that cannot answers each question alone;
+- what it needs **installed and signed in**, which `Readiness` reports.
 
 **One agent process per turn, one conversation on disk.** The turn is the unit of everything: its process,
 its MCP connection, its bearer, its grant, its lifetime. That is what removes a late call from a cancelled
@@ -193,28 +263,39 @@ turn ending closes all of it. It costs 0.4 to 0.6 s at the start of each questio
 reload a conversation (`loadSession` absent in ACP, as on prime-agent today) answers each question alone, and
 its connector says so.
 
-Choosing a model stays in the agent's own configuration. The contract reports the model used, and a choice in
-nocx can be added later without touching this shape.
+**The model comes from the agent, and the person chooses it per role** (owner, 2026-11-13). nocx
+holds no provider, endpoint or key. A connector with `Cataloguer` lists the models its agent can run;
+the person picks one for a role in Settings, and the turn carries it. A chosen model the catalogue no
+longer lists is reported as such, never repaired into a neighbour, as `roles.list` already rules. A
+role with no choice runs on the agent's own default, and the block says which model answered. A
+connector without `Cataloguer` runs on the agent's default, and the picker says it cannot choose.
+Handing an agent a provider of nocx's own is not excluded: it would be one more source of models for
+the connectors that can accept one, with no change to this shape.
 
-A connector also states its **tool boundary**: only nocx's tools, its own under approval, or not
-controlled. A person is told which. The vocabulary is ACP's (session, prompt, update, cancel), so an
-ACP connector is nearly transparent. Success is never read from one event: a connector reports a
-failure as a failure, which is why `agent_settled` alone is not an answer on pi.
+**The person's own instructions stay** (`assistant.personalInstructions`), and reach the agent inside
+nocx's system prompt, which also carries what `systemprompt.go` tells the model today about panes,
+blocks and tools. A connector passes it by its agent's means (`--append-system-prompt`, the
+extension, the session's prompt), appending to the agent's own prompt rather than replacing it.
 
-A connector is the thinnest thing that satisfies the contract. **Only pi has its own connector**;
-every other agent goes through the ACP connector with a data record in `internal/agentrecord`: how to
-launch it, how to restrict its tools, what must be installed. An agent a record cannot make honest
-carries "not controlled" or "not supported", and no per-agent code is written in nocx to rescue it.
+The vocabulary is ACP's (session, prompt, update, cancel), so an ACP connector is nearly transparent.
+Success is never read from one event: a connector reports a failure as a failure, which is why
+`agent_settled` alone is not an answer on pi.
+
+A connector is the thinnest thing that satisfies the contract. An agent the ACP connector reaches is a
+data record in `internal/agentrecord` (how to launch it, what must be installed) rather than code, and
+one a record cannot make honest carries "not supported".
 
 The pi connector runs:
 
 ```
-pi --mode rpc --session-dir <nocx data> --session-id <conversation> --no-builtin-tools --tools 'mcp__nocx__*' -e <nocx extension>
+pi --mode rpc --session-dir <nocx data> --session-id <conversation> --no-builtin-tools --tools 'mcp__nocx__*' [--model <chosen>] -e <nocx extension>
 ```
 
 The extension is one file embedded in the binary and written to nocx's data directory. It registers
-the MCP server for that session and does nothing else. Nothing is written to `~/.pi`, and a person's
-pi is unchanged outside this launch.
+the MCP server for that session and appends nocx's system prompt, and does nothing else; the prompt goes
+through the extension rather than `--append-system-prompt`, which would displace a person's own
+`APPEND_SYSTEM.md` (paseo's note). Nothing is written to `~/.pi`, and a person's pi is unchanged outside
+this launch.
 
 ### 2. Authority is a pipeline with named points
 
@@ -368,22 +449,31 @@ whose agent survives this does not pass the conformance suite.
 
 ### 6. Settings detect what is installed
 
-An agent section replaces the endpoints and roles pages. It lists what is installed, found through the
-login shell's `PATH` because the app's own is not a person's (`nocx-4d6uf`). Agents with a connector can be
-chosen; the rest say "not supported yet". "pi found, no provider configured" is its own state, and a dead
-key found during a turn leads to the same place. **Any AI function with no agent ready opens this section**,
-through the one readiness owner. Assistant permissions, agent access and agent records stay.
+An agent section replaces the endpoints page and takes the roles page into it. It lists what is
+installed, found through the login shell's `PATH` because the app's own is not a person's
+(`nocx-4d6uf`). Agents with a connector can be chosen; the rest say "not supported yet". "pi found, no
+provider configured" is its own state, and a dead key found during a turn leads to the same place.
+**Any AI function with no agent ready opens this section**, through the one readiness owner.
+
+Under the chosen agent, the **role table** stays as it is shaped today, a closed set the product
+defines, and each role's model is picked from that agent's catalogue instead of from an endpoint
+(owner, 2026-11-13). The first version resolves one role, `answering`. The roles that serve nothing
+yet stay declared and unresolved, so a feature that asks for one later adds its resolution rather
+than the table. A choice is held per agent, since one agent's model ids mean nothing to another.
+
+What stays as it is: assistant permissions with the policy matrix and the standing answers, the
+person's own instructions, agent access, agent records, rules and calibration.
 
 ### 7. What leaves
 
 Eino and everything that reaches a model from nocx's own process: `engine.go`, `einoadapter.go`,
 `answer_order.go`, `carrier.go`, `checkpoints.go`, `connection.go`, `headers.go`, `httpguard.go`,
-`presentation.go`, `probe.go`, `endpoint_error.go`, `systemprompt.go`, `wiretap.go`. Endpoints and roles, with
-their contracts, pages and stores. The classifier, which no production path reaches today. The whole skill
-library with its audit and drafts (owner, 2026-11-06). `nocx-ga29v`, the assistant's own MCP client, never
-reached `main`, so it is closed rather than removed. `agent.dump` goes with the wire capture, and
-`assistant.personalInstructions` is decided when the contract's system prompt is settled in the first
-connector stage.
+`presentation.go`, `probe.go`, `endpoint_error.go`, `wiretap.go`. `systemprompt.go`'s model call goes, and
+what it says about panes, blocks and tools becomes nocx's system prompt. Endpoints, with their contracts,
+page and store, and Probe; the roles stay (decision 6). The classifier's model call, which no production
+path reaches today; its role stays declared. The whole skill library with its audit and drafts (owner,
+2026-11-06). `nocx-ga29v`, the assistant's own MCP client, never reached `main`, so it is closed rather
+than removed. `agent.dump` goes with the wire capture. `PriorTurns` goes (decision 5).
 
 `internal/toolendpoint`, `internal/mcpstdio` and the tool executors stay: they are the boundary.
 
@@ -391,64 +481,74 @@ connector stage.
 
 Each is a requirement with its check.
 
-| Constraint                                                          | Check                                                                                                                                                                                                           |
-| ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Nothing reaches a model from nocx's own process                     | `go.mod` has no eino or OpenAI client; the source test that today keeps eino out of kernel files widens to the whole tree                                                                                       |
-| An unanswered `Ask` runs nothing                                    | Pipeline test with planted policies: no approver, approver erroring, cancelled wait; the tool's body is never entered                                                                                           |
-| A guard cannot allow; no point can skip, repeat or replace the tool | The types offer no allow result and no continuation; a test with a refusing guard beside every other link; the tool's body counted once                                                                         |
-| Schema precedes policy; the attempt spans the call                  | Pipeline test observing the order, with a failing tool, a cancelled call and a panicking tool                                                                                                                   |
-| An answer does not outlive what it answered                         | A file changed during the wait is refused with no effect; a widening reaches the capability; a declined egress releases nothing and runs nothing again                                                          |
-| Calls of one turn run in order, one pending question at most        | Two concurrent calls on one turn against a blocked approver: the second has not started; declining settles both                                                                                                 |
-| A late call cannot reach another turn                               | A bearer retired by a cancelled turn is refused when a new turn is under way, and an in-flight call on it ends                                                                                                  |
-| An assistant run's chain holds policy, approval and the screen      | A test on the composition root's assistant chain; a removed link fails it                                                                                                                                       |
-| An agent in a pane behaves as before                                | The existing endpoint tests pass unchanged, and a test proves an `ask` row is refused there                                                                                                                     |
-| A ten-minute wait does not break                                    | e2e on the fake agent with the clock under test control, plus a measured run on pi outside CI                                                                                                                   |
-| Cancel stops the agent within a second, with no event after         | Contract suite in both orders against a blocked tool; a tool whose context ended records its cancel; a pane command is judged by the lease's own existing test                                                  |
-| A message during a pending approval settles the call at once        | e2e on the fake agent: steer during approval, the attempt records a decline carrying the text                                                                                                                   |
-| A vault secret in a result never reaches the agent                  | e2e with known material in a tool result, asserting on every byte the fake agent received                                                                                                                       |
-| A failure is never a success or silence                             | Contract suite: crash, dead key, provider error, a process that closes stdout                                                                                                                                   |
-| No process outlives its turn                                        | Contract suite counting descendants, including the MCP bridge, after end, cancel, crash and a closed connection; no effect replays on the next question                                                         |
-| No process outlives the backend                                     | The conformance suite kills `nocx-server` with `SIGKILL` during a stream and during a blocked tool, on Linux and macOS, and watches the agent and the bridge disappear                                          |
-| A file tool on an SSH pane acts on that host                        | e2e on the headless backend with a remote host behind the helper: read, search, an edit under a `permit` row and one under an `ask` row once approved change the remote file and leave the local path untouched |
-| The assistant has no file path of its own                           | A test on the composition root: the files.* narrowing takes the pane's provider from the files binding the Files panel takes; `local.New()` is not reached from `agenttools`                                    |
-| A person with no agent lands in the agent section                   | e2e on the headless backend: no agent, ask from a pane                                                                                                                                                          |
-| A connector is only supported once it passes                        | One conformance suite runs against the fake agent in CI and against each declared real agent at release                                                                                                         |
-| Every new operation is catalogued with its lifetime                 | ADR-8eej3e66's own checks                                                                                                                                                                                       |
+| Constraint                                                                   | Check                                                                                                                                                                                                           |
+| ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Nothing reaches a model from nocx's own process                              | `go.mod` has no eino or OpenAI client; the source test that today keeps eino out of kernel files widens to the whole tree                                                                                       |
+| An unanswered `Ask` runs nothing                                             | Pipeline test with planted policies: no approver, approver erroring, cancelled wait; the tool's body is never entered                                                                                           |
+| A guard cannot allow; no point can skip, repeat or replace the tool          | The types offer no allow result and no continuation; a test with a refusing guard beside every other link; the tool's body counted once                                                                         |
+| Schema precedes policy; the attempt spans the call                           | Pipeline test observing the order, with a failing tool, a cancelled call and a panicking tool                                                                                                                   |
+| An answer does not outlive what it answered                                  | A file changed during the wait is refused with no effect; a widening reaches the capability; a declined egress releases nothing and runs nothing again                                                          |
+| Calls of one turn run in order, one pending question at most                 | Two concurrent calls on one turn against a blocked approver: the second has not started; declining settles both                                                                                                 |
+| A late call cannot reach another turn                                        | A bearer retired by a cancelled turn is refused when a new turn is under way, and an in-flight call on it ends                                                                                                  |
+| An assistant run's chain holds policy, approval and the screen               | A test on the composition root's assistant chain; a removed link fails it                                                                                                                                       |
+| An agent in a pane behaves as before                                         | The existing endpoint tests pass unchanged, and a test proves an `ask` row is refused there                                                                                                                     |
+| A ten-minute wait does not break                                             | e2e on the fake agent with the clock under test control, plus a measured run on pi outside CI                                                                                                                   |
+| Cancel stops the agent within a second, with no event after                  | Contract suite in both orders against a blocked tool; a tool whose context ended records its cancel; a pane command is judged by the lease's own existing test                                                  |
+| A message during a pending approval settles the call at once                 | e2e on the fake agent: steer during approval, the attempt records a decline carrying the text                                                                                                                   |
+| A vault secret in a result never reaches the agent                           | e2e with known material in a tool result, asserting on every byte the fake agent received                                                                                                                       |
+| A failure is never a success or silence                                      | Contract suite: crash, dead key, provider error, a process that closes stdout                                                                                                                                   |
+| No process outlives its turn                                                 | Contract suite counting descendants, including the MCP bridge, after end, cancel, crash and a closed connection; no effect replays on the next question                                                         |
+| No process outlives the backend                                              | The conformance suite kills `nocx-server` with `SIGKILL` during a stream and during a blocked tool, on Linux and macOS, and watches the agent and the bridge disappear                                          |
+| A file tool on an SSH pane acts on that host                                 | e2e on the headless backend with a remote host behind the helper: read, search, an edit under a `permit` row and one under an `ask` row once approved change the remote file and leave the local path untouched |
+| The assistant has no file path of its own                                    | A test on the composition root: the files.* narrowing takes the pane's provider from the files binding the Files panel takes; `local.New()` is not reached from `agenttools`                                    |
+| A person with no agent lands in the agent section                            | e2e on the headless backend: no agent, ask from a pane                                                                                                                                                          |
+| A connector is only supported once it passes                                 | One conformance suite runs against the fake agent in CI and against each declared real agent at release                                                                                                         |
+| No code outside a connector names an agent                                   | A source test: only `internal/harness/<connector>` and `internal/app` import a connector, and no other package holds an agent's name or flags                                                                   |
+| A connector's stated tool boundary is true                                   | The conformance run against each real agent asks it to call a built-in tool: a connector stating "nocx's tools only" shows no such tool declared and nothing executed                                           |
+| The chosen model is the one that answers, and a vanished one is not replaced | Contract suite on the fake agent: the turn carries the role's model; a model absent from the catalogue refuses the turn and names it                                                                            |
+| The person's instructions reach the agent                                    | Contract suite: the fake agent receives nocx's system prompt with the person's paragraph in it, appended to its own                                                                                             |
+| Every new operation is catalogued with its lifetime                          | ADR-8eej3e66's own checks                                                                                                                                                                                       |
 
 ## Consequences
 
-Easier: no bug needs knowledge of providers, models, context or compaction; a new agent costs a record;
+Easier: no bug needs knowledge of providers, models, context or compaction; a new agent costs a connector
+or, through ACP, a record, and never a change to the core;
 a new rule costs a link; an assistant turn through the endpoint is under the full authority contract, while
 pane callers keep their reduced chain on purpose; a view such as a trajectory of a turn can be built later over
 the ledger with no change to the chain.
 
 Harder, and accepted:
 
-- With no agent installed there is no assistant. "Paste a key and it works" is gone.
+- With no agent installed there is no assistant. "Paste a key and it works" is gone, and a provider is
+  configured in the agent, not in nocx.
+- Four connectors are four interfaces to follow as their vendors change them. Each is caught by the
+  conformance run at release, and an adapter in between would add a fifth party, not remove one.
 - Each question costs about half a second to start the agent, on pi.
 - Tool calls of one turn never run in parallel, as today. A model that asks for several waits for each.
 - Closing the window ends the turn, as today.
-- Only nocx's tools are under nocx's authority. For pi the launch removes the rest; for an agent that
-  cannot be restricted, its own tools are not controlled and the product says so.
+- Only nocx's tools are under nocx's authority. For pi, omp and Claude Code the launch removes the
+  rest. For an agent that cannot be restricted, its own tools stay, nocx's system prompt steers it to
+  nocx's tools, and its own tools act on the local machine outside the matrix, which the product says.
+  An instruction is not a boundary: a model can ignore it.
 - The assistant is only as capable on a server as nocx's tools are there. Remote file tools wait for
   the SSH foundation's helper-backed provider, and a host without the helper gets commands and the
   screen but no file tools.
 - What an agent sends to a model from its own context is not screened. The egress screen covers tool
   results.
 - A lost session means the model forgets while the blocks stay visible.
-- pi's RPC can change, which the release's conformance run catches. pi requires Node, on the person's
-  machine rather than in our package.
+- pi requires Node, on the person's machine rather than in our package.
 - `docs/vision.md` promised "any AI model"; that now holds through the agent, and its text changes with
   the first stage.
 - 24 e2e specs and most of 56 transport test files assert the present engine, and they are most of the
   volume. The e2e path moves from a fake provider to a fake agent speaking the contract.
 
 Would make this worth revisiting: `--no-builtin-tools` stopping to hold in pi; a long wait failing on a real
-agent in a way progress cannot fix; or ACP gaining what would make the pi connector unnecessary, which would
-retire it.
+agent in a way progress cannot fix; or ACP gaining, natively in an agent, what makes its own connector
+necessary, which would retire that connector.
 
 Assumptions: the `--tools` filter holds against a person's own extensions and MCP servers (not yet measured,
-and the first stage must). A person's agent is trusted as a program, since it already runs as them.
+and the pi connector's stage must). What the table in decision 1 says of Claude Code, Codex, omp and
+prime-agent is read from their help, and each connector's stage measures it before relying on it. A person's agent is trusted as a program, since it already runs as them.
 
 ## Migration
 
@@ -465,11 +565,14 @@ and `ws.go`, and owns the file provider stage 8 consumes. Whoever merges second 
    checkpoint go while eino still runs the loop, and the batch latch becomes the per-turn order.
 3. **What leaves without a replacement.** The classifier, then the skill library, audit and drafts.
 4. **Cancel and progress** at the boundary, with `nocx-98qho`.
-5. **The swap, as one change:** the contract, the fake agent, the conformance suite, the pi connector, the
-   third way in, the agent section, readiness. `Client.Ask` runs through the harness, and eino, endpoints,
-   roles and Probe leave in the same change. `go.mod` loses eino here.
+5. **The swap, as one change:** the contract with its shared base, the fake agent, the conformance suite,
+   the pi connector, the third way in, nocx's system prompt with the person's instructions, the agent
+   section with the `answering` role picked from pi's catalogue, readiness. `Client.Ask` runs through the
+   harness, and eino, endpoints and Probe leave in the same change. `go.mod` loses eino here.
 6. **Steer** in the composer and the running answer.
-7. **The ACP connector**, proved on omp and prime-agent.
+7. **The other connectors, one stage each, in this order:** omp on the pi connector; Claude Code; Codex;
+   prime-agent, through the pi family or through ACP as its stage finds. Each lands when it passes the
+   conformance suite, and changes nothing outside its connector.
 8. **Tools on the pane's host.** `files.*` take the pane's provider through the files binding, after the
    SSH foundation's Files stage (`nocx-oalo1.6`) lands; then the search and listing interface, in the
    local and the helper-backed providers. It depends on that stage, not on stages 1 to 7, and may run

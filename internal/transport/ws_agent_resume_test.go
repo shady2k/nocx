@@ -20,7 +20,6 @@ import (
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
-	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // TestAgentApprove_TheRunCarriesTheFreshGrantAfterAnAnswer: one run, one
@@ -28,22 +27,30 @@ import (
 // after the answer PERMITS that effect class, so the call that was answered
 // and every call after it in the same run do not ask again.
 func TestAgentApprove_TheRunCarriesTheFreshGrantAfterAnAnswer(t *testing.T) {
-	var afterAnswer *content.Grant
+	answered := make(chan *content.Grant, 1)
 	client := &scriptedApprovalClient{script: []approvalScriptStep{
 		{ask: policyAsk("files.read", "call_1", `{"path":"/repo/a.txt"}`, "hash-a"), after: []string{"done"}},
 	}}
 	// The seam is read where the pipeline reads it: after the answer.
 	client.onAnswer = func(p assistant.AskParams) {
 		if p.FreshGrant == nil {
-			t.Error("the run carried no fresh-grant seam")
+			answered <- nil
 			return
 		}
-		afterAnswer = p.FreshGrant()
+		answered <- p.FreshGrant()
 	}
 	h := suspendedRunWith(t, askPolicyStore(t), client)
 
 	h.approve(t, "session")
-	waittest.WaitForTimeout(t, "the answer to reach the call", 5*time.Second, func() bool { return afterAnswer != nil })
+	var afterAnswer *content.Grant
+	select {
+	case afterAnswer = <-answered:
+		if afterAnswer == nil {
+			t.Fatal("the run carried no fresh-grant seam")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the answer did not reach the call")
+	}
 
 	got := client.params()
 	if len(got) != 1 {

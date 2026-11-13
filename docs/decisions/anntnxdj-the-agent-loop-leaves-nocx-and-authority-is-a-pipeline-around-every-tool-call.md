@@ -103,9 +103,11 @@ Quality scenarios, each with its measure:
    approval survives, and a later question continues the conversation with no effect replayed.
 8. A person with no agent invokes any AI function → the agent section of Settings opens.
 9. A person in an SSH pane asks for help configuring that server → the agent reads, searches and
-   edits the server's files and runs commands in that pane, and every edit and every command waits
-   for the person as on a local pane. Measure: the file changed on the remote host, the local disk
-   untouched, and nothing installed on the host for the assistant.
+   edits the server's files and runs commands in that pane, and each call is decided by the person's
+   permission matrix exactly as on a local pane: a permitted effect runs, an `ask` row waits for
+   them, a refused one runs nothing. Measure: the file changed on the remote host, the local disk
+   untouched, the matrix's decision recorded on each attempt, and nothing installed on the host for
+   the assistant.
 
 Constraints and their sources:
 
@@ -389,29 +391,29 @@ connector stage.
 
 Each is a requirement with its check.
 
-| Constraint                                                          | Check                                                                                                                                                                        |
-| ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Nothing reaches a model from nocx's own process                     | `go.mod` has no eino or OpenAI client; the source test that today keeps eino out of kernel files widens to the whole tree                                                    |
-| An unanswered `Ask` runs nothing                                    | Pipeline test with planted policies: no approver, approver erroring, cancelled wait; the tool's body is never entered                                                        |
-| A guard cannot allow; no point can skip, repeat or replace the tool | The types offer no allow result and no continuation; a test with a refusing guard beside every other link; the tool's body counted once                                      |
-| Schema precedes policy; the attempt spans the call                  | Pipeline test observing the order, with a failing tool, a cancelled call and a panicking tool                                                                                |
-| An answer does not outlive what it answered                         | A file changed during the wait is refused with no effect; a widening reaches the capability; a declined egress releases nothing and runs nothing again                       |
-| Calls of one turn run in order, one pending question at most        | Two concurrent calls on one turn against a blocked approver: the second has not started; declining settles both                                                              |
-| A late call cannot reach another turn                               | A bearer retired by a cancelled turn is refused when a new turn is under way, and an in-flight call on it ends                                                               |
-| An assistant run's chain holds policy, approval and the screen      | A test on the composition root's assistant chain; a removed link fails it                                                                                                    |
-| An agent in a pane behaves as before                                | The existing endpoint tests pass unchanged, and a test proves an `ask` row is refused there                                                                                  |
-| A ten-minute wait does not break                                    | e2e on the fake agent with the clock under test control, plus a measured run on pi outside CI                                                                                |
-| Cancel stops the agent within a second, with no event after         | Contract suite in both orders against a blocked tool; a tool whose context ended records its cancel; a pane command is judged by the lease's own existing test               |
-| A message during a pending approval settles the call at once        | e2e on the fake agent: steer during approval, the attempt records a decline carrying the text                                                                                |
-| A vault secret in a result never reaches the agent                  | e2e with known material in a tool result, asserting on every byte the fake agent received                                                                                    |
-| A failure is never a success or silence                             | Contract suite: crash, dead key, provider error, a process that closes stdout                                                                                                |
-| No process outlives its turn                                        | Contract suite counting descendants, including the MCP bridge, after end, cancel, crash and a closed connection; no effect replays on the next question                      |
-| No process outlives the backend                                     | The conformance suite kills `nocx-server` with `SIGKILL` during a stream and during a blocked tool, on Linux and macOS, and watches the agent and the bridge disappear       |
-| A file tool on an SSH pane acts on that host                        | e2e on the headless backend with a remote host behind the helper: read, search and an approved edit change the remote file and leave the local path untouched                |
-| The assistant has no file path of its own                           | A test on the composition root: the files.* narrowing takes the pane's provider from the files binding the Files panel takes; `local.New()` is not reached from `agenttools` |
-| A person with no agent lands in the agent section                   | e2e on the headless backend: no agent, ask from a pane                                                                                                                       |
-| A connector is only supported once it passes                        | One conformance suite runs against the fake agent in CI and against each declared real agent at release                                                                      |
-| Every new operation is catalogued with its lifetime                 | ADR-8eej3e66's own checks                                                                                                                                                    |
+| Constraint                                                          | Check                                                                                                                                                                                                           |
+| ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Nothing reaches a model from nocx's own process                     | `go.mod` has no eino or OpenAI client; the source test that today keeps eino out of kernel files widens to the whole tree                                                                                       |
+| An unanswered `Ask` runs nothing                                    | Pipeline test with planted policies: no approver, approver erroring, cancelled wait; the tool's body is never entered                                                                                           |
+| A guard cannot allow; no point can skip, repeat or replace the tool | The types offer no allow result and no continuation; a test with a refusing guard beside every other link; the tool's body counted once                                                                         |
+| Schema precedes policy; the attempt spans the call                  | Pipeline test observing the order, with a failing tool, a cancelled call and a panicking tool                                                                                                                   |
+| An answer does not outlive what it answered                         | A file changed during the wait is refused with no effect; a widening reaches the capability; a declined egress releases nothing and runs nothing again                                                          |
+| Calls of one turn run in order, one pending question at most        | Two concurrent calls on one turn against a blocked approver: the second has not started; declining settles both                                                                                                 |
+| A late call cannot reach another turn                               | A bearer retired by a cancelled turn is refused when a new turn is under way, and an in-flight call on it ends                                                                                                  |
+| An assistant run's chain holds policy, approval and the screen      | A test on the composition root's assistant chain; a removed link fails it                                                                                                                                       |
+| An agent in a pane behaves as before                                | The existing endpoint tests pass unchanged, and a test proves an `ask` row is refused there                                                                                                                     |
+| A ten-minute wait does not break                                    | e2e on the fake agent with the clock under test control, plus a measured run on pi outside CI                                                                                                                   |
+| Cancel stops the agent within a second, with no event after         | Contract suite in both orders against a blocked tool; a tool whose context ended records its cancel; a pane command is judged by the lease's own existing test                                                  |
+| A message during a pending approval settles the call at once        | e2e on the fake agent: steer during approval, the attempt records a decline carrying the text                                                                                                                   |
+| A vault secret in a result never reaches the agent                  | e2e with known material in a tool result, asserting on every byte the fake agent received                                                                                                                       |
+| A failure is never a success or silence                             | Contract suite: crash, dead key, provider error, a process that closes stdout                                                                                                                                   |
+| No process outlives its turn                                        | Contract suite counting descendants, including the MCP bridge, after end, cancel, crash and a closed connection; no effect replays on the next question                                                         |
+| No process outlives the backend                                     | The conformance suite kills `nocx-server` with `SIGKILL` during a stream and during a blocked tool, on Linux and macOS, and watches the agent and the bridge disappear                                          |
+| A file tool on an SSH pane acts on that host                        | e2e on the headless backend with a remote host behind the helper: read, search, an edit under a `permit` row and one under an `ask` row once approved change the remote file and leave the local path untouched |
+| The assistant has no file path of its own                           | A test on the composition root: the files.* narrowing takes the pane's provider from the files binding the Files panel takes; `local.New()` is not reached from `agenttools`                                    |
+| A person with no agent lands in the agent section                   | e2e on the headless backend: no agent, ask from a pane                                                                                                                                                          |
+| A connector is only supported once it passes                        | One conformance suite runs against the fake agent in CI and against each declared real agent at release                                                                                                         |
+| Every new operation is catalogued with its lifetime                 | ADR-8eej3e66's own checks                                                                                                                                                                                       |
 
 ## Consequences
 

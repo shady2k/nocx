@@ -1805,6 +1805,23 @@ func TestFilesPoll_ArmsTimerAfterPoll(t *testing.T) {
 	}
 }
 
+// TestFilesPoll_DispatchesOnePathPerDispatch asserts the unit of a dispatch:
+// one due path is listed, never the whole watch set.
+//
+// THE DISPATCHES ARE THIS TEST'S OWN, and the watch is created HIDDEN to make
+// that true (nocx-urkin). A visible watcher has a poll loop of its own, and
+// that loop is a second dispatcher: filesPollInterval is an hour, but the
+// loop arms its first timer from the state it reads when it gets scheduled,
+// so an arm that lands after the catch-up mark below dispatches from the same
+// catch-up set this test is driving. And takeDue drops a catch-up entry
+// before the listing that path owes returns, so the other dispatcher can pick
+// that same path again through the earliest-due branch while its first
+// listing is in flight — two listings of one path inside one of the test's
+// windows, which is the CI report exactly (`dispatch 2 listed .../three 2
+// times, want at most once`). A hidden watcher performs no dispatch at all by
+// construction (filesPollLoop arms a full interval out and ignores every
+// wake), while the catch-up state it holds is exactly what a becoming-visible
+// edge installs, which is the dispatch under test.
 func TestFilesPoll_DispatchesOnePathPerDispatch(t *testing.T) {
 	e, count := newCountingFilesEnv(t)
 	e.ws.filesPollInterval = time.Hour
@@ -1821,7 +1838,8 @@ func TestFilesPoll_DispatchesOnePathPerDispatch(t *testing.T) {
 		}
 	}
 	bid := e.openBinding(t, sid, root, 2)
-	w := e.watchDir(t, bid, dirs, 3)
+	e.setVisible(t, bid, false, 3)
+	w := e.watchDir(t, bid, dirs, 4)
 
 	w.mu.Lock()
 	w.markVisibleCatchUpLocked(time.Now())

@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/shady2k/nocx/internal/agenttools"
-	"github.com/shady2k/nocx/internal/content"
 )
 
 func TestPipelineApprovalIncludesEveryQuestion(t *testing.T) {
@@ -56,7 +55,7 @@ func TestPipelineExecutesTheApprovedArgumentSnapshot(t *testing.T) {
 		}),
 	})
 	runs := 0
-	pipeline.operation.executor = func(_ context.Context, _ agenttools.Tool, _ agenttools.Capability, raw []byte) (string, error) {
+	pipeline.operation.executor = func(_ context.Context, _ Call, _ agenttools.Tool, _ agenttools.Capability, raw []byte) (string, error) {
 		runs++
 		executed = string(raw)
 		return `{}`, nil
@@ -75,24 +74,28 @@ func TestPipelineExecutesTheApprovedArgumentSnapshot(t *testing.T) {
 	}
 }
 
-func TestPipelineCancellationAfterCapabilityConstructionRunsNothing(t *testing.T) {
-	for _, step := range []string{"narrow", "beforeTool"} {
+func TestPipelineCancellationBeforeExecutionRunsNothing(t *testing.T) {
+	// The cancellation happens after every point that could have refused, and
+	// before the tool: the pipeline's own observation of the context refuses
+	// it, and the planted tool's body is never entered. (A context that had
+	// ALREADY ended when the call arrived is a different case, and the
+	// pipeline leaves it to the caller — see TestPipeline... and
+	// endedContext in dispatch.go.)
+	for _, step := range []string{"guard", "attempt"} {
 		t.Run(step, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			chain := AuthorityChain{}
-			if step == "narrow" {
-				chain.prepare = func(p *preparedInvocation) error {
-					narrow := p.decl.Narrow
-					p.decl.Narrow = func(grant content.Grant, resources []agenttools.ResourceRef, run agenttools.RunContext) (agenttools.Capability, error) {
-						cap, err := narrow(grant, resources, run)
-						cancel()
-						return cap, err
-					}
-					return nil
-				}
+			if step == "guard" {
+				chain.Guards = []Guard{guardFunc(func(context.Context, Call) (string, bool) {
+					cancel()
+					return "", false
+				})}
 			} else {
-				chain.beforeTool = func(context.Context, Call, *preparedInvocation, agenttools.Capability) error { cancel(); return nil }
+				chain.Attempts = attemptFunc(func(context.Context, Call) error {
+					cancel()
+					return nil
+				})
 			}
 			pipeline, planted := pipelineForTest(t, chain)
 			invocation := pipelineInvocationForTest()

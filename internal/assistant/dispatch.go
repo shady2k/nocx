@@ -73,7 +73,11 @@ func dispatchAbortedError(invocation ToolInvocation, result *modelResult, causes
 	return &DispatchRefusalError{Method: invocation.Method, Reason: reason, Cause: errors.Join(causes...)}
 }
 
-type dispatchExecutor func(context.Context, agenttools.Tool, agenttools.Capability, []byte) (string, error)
+// dispatchExecutor runs one narrowed call. It receives the Call as well as the
+// declaration, because a caller's own runtime announces what is about to run
+// (the kernel's visible tool call) and must announce the same immutable facts
+// every point decided on.
+type dispatchExecutor func(context.Context, Call, agenttools.Tool, agenttools.Capability, []byte) (string, error)
 
 type preparedInvocation struct {
 	request             ToolInvocation
@@ -95,7 +99,6 @@ type dispatchOutcome struct {
 	prepared *preparedInvocation
 	output   string
 	runErr   error
-	aborted  *modelResult
 }
 
 type dispatchOperation struct {
@@ -153,13 +156,17 @@ func NewToolDispatcher(registry agenttools.Registry, workerStore WorkerRecord, e
 		results:    results,
 		allowed:    allowed,
 		chain: AuthorityChain{
-			decide: endpointEffectDecision,
-			preparedGuards: func(prepared *preparedInvocation) []Guard {
-				return []Guard{endpointEffectGate{rows: endpointRows(prepared)}}
+			PreCalls: []PreCall{
+				// A call whose context had already ended when it arrived is
+				// refused here, with the context's own error as its cause: a
+				// cancelled call must answer as cancelled, not as a policy no.
+				endedContext{},
+				endpointEffectPolicy{},
 			},
+			Guards: []Guard{endpointEffectGate{}},
 			// No Approver: a pane caller's Ask is an unanswered refusal.
 		},
-		executor: func(ctx context.Context, decl agenttools.Tool, cap agenttools.Capability, raw []byte) (string, error) {
+		executor: func(ctx context.Context, _ Call, decl agenttools.Tool, cap agenttools.Capability, raw []byte) (string, error) {
 			return runDeclaredTool(ctx, decl, cap, raw, toolSeams{
 				sessions:          readSources.Sessions,
 				screenCapture:     readSources.ScreenCapture,
@@ -168,6 +175,21 @@ func NewToolDispatcher(registry agenttools.Registry, workerStore WorkerRecord, e
 			})
 		},
 	}, nil
+}
+
+// endedContext refuses a call whose context has already ended. The pipeline
+// leaves such a call to its caller (a caller may still need its outcome
+// recorded), so a chain that wants it refused — every chain whose caller is
+// not recording an outcome — states that here. The context's own error travels
+// as the denial's cause, so the caller still classifies the answer as a
+// cancellation rather than as a policy refusal.
+type endedContext struct{}
+
+func (endedContext) Decide(ctx context.Context, _ Call) Decision {
+	if err := ctx.Err(); err != nil {
+		return Deny{Reason: fmt.Sprintf("the call was cancelled before any policy decided it: %v", err), Cause: err}
+	}
+	return Allow{}
 }
 
 // orchestrationMethodNames describes the current worker/orchestration
@@ -253,29 +275,32 @@ func (d *dispatchOperation) Dispatch(invocation ToolInvocation) (string, error) 
 	return output, err
 }
 
-// endpointEffectRows is the prepared call's effect reading, shared by the
-// policy step and its grant guard. The relation is derived once by prepare.
+// endpointEffectRows is the call's effect reading, shared by the policy point
+// and its grant guard: one derivation, read by both, so the question and the
+// refusal cannot disagree about which rows the call reaches.
 type endpointEffectRows struct {
 	method                  string
 	effects, refused, asked []content.Effect
 	stops                   bool
 }
 
-func endpointRows(prepared *preparedInvocation) endpointEffectRows {
-	effects := prepared.invocationEffects
+func endpointRows(call Call) endpointEffectRows {
+	decl := call.Declaration()
+	effects := call.InvocationEffects()
 	if effects == nil {
-		effects = prepared.decl.Declaration.Effect
+		effects = decl.Declaration.Effect
 	}
-	rows := endpointEffectRows{method: prepared.decl.Name, effects: append([]content.Effect(nil), effects...)}
+	rows := endpointEffectRows{method: decl.Name, effects: append([]content.Effect(nil), effects...)}
+	policy := call.Grant().Policy
 	for _, effect := range effects {
-		switch prepared.request.Grant.Policy.DecisionFor(effect) {
+		switch policy.DecisionFor(effect) {
 		case content.DecisionRefuse:
 			rows.refused = append(rows.refused, effect)
 		case content.DecisionAsk:
 			rows.asked = append(rows.asked, effect)
 		}
 	}
-	if prepared.decl.EffectRelation == agenttools.EffectsConjunctive {
+	if decl.EffectRelation == agenttools.EffectsConjunctive {
 		rows.stops = len(rows.refused) > 0
 	} else {
 		rows.stops = len(effects) > 0 && len(rows.refused) == len(effects)
@@ -286,27 +311,30 @@ func endpointRows(prepared *preparedInvocation) endpointEffectRows {
 	return rows
 }
 
-// endpointEffectDecision uses the pipeline's prepared-policy seam, as the
-// kernel does. Refusals belong to the Guard, questions to the Approver.
-func endpointEffectDecision(_ context.Context, _ Call, prepared *preparedInvocation) (Decision, error) {
-	rows := endpointRows(prepared)
+// endpointEffectPolicy asks about the rows the grant asks about; refusals
+// belong to the Guard, questions to the Approver.
+type endpointEffectPolicy struct{}
+
+func (endpointEffectPolicy) Decide(_ context.Context, call Call) Decision {
+	rows := endpointRows(call)
 	if rows.stops || len(rows.asked) == 0 {
-		return Allow{}, nil
+		return Allow{}
 	}
 	return Ask{Reason: fmt.Sprintf("%s reaches %s on this call, and this run's grant asks about %s",
-		rows.method, effectNames(rows.effects), effectNames(rows.asked))}, nil
+		rows.method, effectNames(rows.effects), effectNames(rows.asked))}
 }
 
 // endpointEffectGate can only refuse. A conjunction stops on any refused row;
 // alternatives stop only when every row is refused. It cannot approve an Ask.
-type endpointEffectGate struct{ rows endpointEffectRows }
+type endpointEffectGate struct{}
 
-func (g endpointEffectGate) Refuse(_ context.Context, _ Call) (string, bool) {
-	if !g.rows.stops {
+func (endpointEffectGate) Refuse(_ context.Context, call Call) (string, bool) {
+	rows := endpointRows(call)
+	if !rows.stops {
 		return "", false
 	}
 	return fmt.Sprintf("%s reaches %s on this call, and this run's grant refuses %s — the call is refused before anything runs.",
-		g.rows.method, effectNames(g.rows.effects), effectNames(g.rows.refused)), true
+		rows.method, effectNames(rows.effects), effectNames(rows.refused)), true
 }
 
 // effectNames renders an effect set for a refusal sentence: the row ids are
@@ -385,7 +413,7 @@ func (d *dispatchOperation) acceptsMethod(name string, grant content.Grant) bool
 // after every policy decision, and the authority pipeline (pipeline.go) is its
 // only caller, so what "the tool runs once" means and how its result is checked
 // against its own contract are decided in one place.
-func (d *dispatchOperation) executePrepared(prepared *preparedInvocation, beforeExecute func(*preparedInvocation, agenttools.Capability) error, executor dispatchExecutor) (dispatchOutcome, error) {
+func (d *dispatchOperation) executePrepared(prepared *preparedInvocation, call Call, beforeExecute func(*preparedInvocation, agenttools.Capability) error, executor dispatchExecutor) (dispatchOutcome, error) {
 	outcome := dispatchOutcome{prepared: prepared}
 	if prepared.decl.Narrow == nil {
 		return outcome, fmt.Errorf("%w: %q has no capability constructor", ErrUnreachableMethod, prepared.decl.Name)
@@ -405,7 +433,7 @@ func (d *dispatchOperation) executePrepared(prepared *preparedInvocation, before
 	if executor == nil {
 		return outcome, errors.New("assistant dispatch: no executor wired")
 	}
-	output, runErr := executor(prepared.request.Context, prepared.decl, capability, prepared.request.RawParams)
+	output, runErr := executor(prepared.request.Context, call, prepared.decl, capability, prepared.request.RawParams)
 	if runErr == nil {
 		if err := validateToolResult(d.results, prepared.decl.Name, output); err != nil {
 			return outcome, err
@@ -415,11 +443,14 @@ func (d *dispatchOperation) executePrepared(prepared *preparedInvocation, before
 	return outcome, nil
 }
 
-// prepare resolves and validates a call's declaration, arguments and resources.
-// refine is the caller's own refinement of the declaration, run after the schema
-// accepts the arguments and before the call's facts are derived from them (the
-// kernel's command classification); nil means the caller has none.
-func (d *dispatchOperation) prepare(invocation ToolInvocation, refine func(*preparedInvocation) error) (preparedInvocation, error) {
+// prepare resolves and validates a call's declaration, arguments and resources,
+// and derives the facts every point reads. Command classification is one of
+// those facts: which effect a command-carrying declaration actually reaches is
+// a pure function of the validated command, so it is derived here, once,
+// before any policy looks at it — exactly as the resources are. A point that
+// reads the classified effect is the policy point, and it reads the same
+// derivation every later point and guard reads.
+func (d *dispatchOperation) prepare(invocation ToolInvocation) (preparedInvocation, error) {
 	decl, ok := d.registry.Lookup(invocation.Method)
 	if !ok {
 		return preparedInvocation{}, fmt.Errorf("%w: %q", ErrUnknownMethod, invocation.Method)
@@ -435,10 +466,11 @@ func (d *dispatchOperation) prepare(invocation ToolInvocation, refine func(*prep
 		return preparedInvocation{}, fmt.Errorf("%w: tool %q: %v", ErrInvalidParams, decl.Name, err)
 	}
 	prepared := preparedInvocation{request: invocation, decl: decl, args: args}
-	if refine != nil {
-		if refineErr := refine(&prepared); refineErr != nil {
-			return preparedInvocation{}, refineErr
-		}
+	prepared.decl, prepared.invocation = classifyCall(prepared.decl, prepared.args)
+	if prepared.decl.CommandArg == "" {
+		// A declaration that names no command has nothing to parse, and its
+		// policy is its declared rows rather than an unreadable command.
+		prepared.invocation.Parsed = true
 	}
 	// The per-call shape (ADR-0053 as amended): arguments may raise a call
 	// past the declared reading — workers.spawn's worktree ask reaches

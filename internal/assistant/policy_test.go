@@ -450,7 +450,7 @@ func TestPolicyNarrowRowAsksOutsideItsSelectorAndRefusesOutsideTheFence(t *testi
 		Effect:      content.EffectObserve,
 	}
 	decide := func(path string) (policyOutcome, PolicyRefusalReason) {
-		outcome, reason, _, _ := kernel.decideInvocationWithReason(tool, []agenttools.ResourceRef{{
+		outcome, reason, _ := kernel.decideInvocationWithReason(tool, []agenttools.ResourceRef{{
 			Kind: content.ResourcePath,
 			ID:   path,
 		}}, true, content.Invocation{Parsed: true})

@@ -667,6 +667,329 @@ func classifyCall(decl agenttools.Tool, args map[string]any) (agenttools.Tool, c
 	return decl, invocation
 }
 
+// ── the kernel's points ───────────────────────────────────────────────────
+
+// kernelCall is the state ONE call's points share. The kernel composes its
+// chain per call — it always has, because the chain is built where the call's
+// id is known — so a point may keep the few facts that are produced rather
+// than decided: the ledger entry and execution the attempt opened, the
+// resolved skill-install facts, the classifier's verdict, the out-of-scope
+// fact the policy found, and a gate that could not see. None of it is a
+// decision: every decision is a point's own answer, and nothing here can
+// allow a call.
+type kernelCall struct {
+	kernel            *effectKernel
+	entryID           string
+	execID            int64
+	install           *ApprovalInstall
+	classifierFact    *classifierFact
+	outOfScope        *OutOfScopeFact
+	classifierGateErr error
+}
+
+// authorityChain is the kernel's composition for one call: one policy point,
+// the approval adapter, the guards that can only refuse, and the attempt step.
+// The order is the pipeline's, so a person's answer is followed by the guards
+// that read the grant as it stands then — a file changed while the question
+// was open fails its evidence, and an approved widening reaches the capability.
+func (k *effectKernel) authorityChain(state *kernelCall) AuthorityChain {
+	return AuthorityChain{
+		PreCalls: []PreCall{kernelPolicy{state: state}},
+		Approver: kernelApprover{state: state},
+		Guards: []Guard{
+			kernelGrantGuard{kernel: k},
+			kernelFloorGuard{kernel: k},
+			kernelEvidenceGuard{state: state},
+		},
+		Attempts: kernelAttempts{state: state},
+		execute: func(ctx context.Context, call Call, decl agenttools.Tool, capability agenttools.Capability, raw []byte) (string, error) {
+			if err := k.announce(call, state); err != nil {
+				return "", err
+			}
+			return k.runWithRetained(decl, call.CallID(), ctx, capability, raw)
+		},
+	}
+}
+
+// announce is the visible tool call: the one place that holds the
+// declaration the gate decided with, the resolved resources derived from the
+// validated arguments and the ledger entry the attempt was recorded under.
+// It runs in the caller's own runtime, after the capability is constructed,
+// which is where it has always run.
+func (k *effectKernel) announce(call Call, state *kernelCall) error {
+	if k.onCall == nil {
+		return nil
+	}
+	decl := call.Declaration()
+	resources, _ := call.Resources()
+	return k.onCall(ToolCall{
+		Tool:       decl.Name,
+		CallID:     call.CallID(),
+		Args:       call.Arguments(),
+		EntryID:    state.entryID,
+		Effect:     decl.Effect,
+		Resource:   matchedResource(resources),
+		OpensBlock: decl.OpensBlock,
+	})
+}
+
+// kernelPolicy is the kernel's one policy point: command classification is a
+// fact preparation derived, and this point reads it together with the row
+// scope, the matrix, the standing rules and the standing declines a person
+// gave. It answers Allow, Deny or Ask, and it does the pre-ask work the
+// question needs — the skill install resolved so the question is about a
+// skill rather than an address, and the classifier consulted so a suspect
+// proposal asks before it runs.
+type kernelPolicy struct{ state *kernelCall }
+
+func (p kernelPolicy) Decide(ctx context.Context, call Call) Decision {
+	k := p.state.kernel
+	decl := call.Declaration()
+	args := call.Arguments()
+	resources, resourceDeclaration := call.Resources()
+	invocation := call.Invocation()
+	tool := decl.Name
+	rawArgs := string(call.RawParams())
+	approved := k.proposalApproved(tool, call.CallID(), rawArgs)
+
+	// A person's own no is read before the matrix: it is the strongest answer
+	// and the most specific. A command's no is matched on its canonical
+	// invocation, because an effect-wide refusal would cover unrelated
+	// commands; a non-command tool's no stands for its effect class.
+	if k.approvals != nil {
+		if kind, declined := k.approvals.DeclinedKind(k.proposal(tool, call.CallID(), rawArgs)); declined {
+			return Deny{Reason: refusalResult(tool, RefusedByPerson, kind)}
+		}
+		if decl.CommandArg == "" {
+			if kind, standing := k.approvals.DeclinedEffect(call.RunID(), decl.Effect); standing {
+				return Deny{Reason: refusalResult(tool, RefusedByPerson, kind)}
+			}
+		} else if kind, standing := k.approvals.DeclinedInvocation(call.RunID(), invocation); standing {
+			return Deny{Reason: refusalResult(tool, RefusedByPerson, kind)}
+		}
+	}
+
+	outcome, reason, verdict := k.decideInvocationWithReason(decl, resources, resourceDeclaration, invocation)
+	outOfScope := outOfScopeFact(verdict)
+	skillMutation := isSkillMutationTool(decl)
+	// askNow raises the question this call needs — unless the floor refuses
+	// the call first, because a question whose yes the floor would refuse is
+	// the lie this shape exists to remove: the person would be walked through
+	// answering something that can never run. A PERMITTED call does not come
+	// through here, and reaches the chain's floor Guard instead
+	// (kernelFloorGuard), which is the enforcement that survives an answer and
+	// the one the record names. One implementation, read twice, exactly as the
+	// tool endpoint's policy point and its gate share one effect reading.
+	//
+	// The GRANT's interval is not read here, and the asymmetry is the
+	// design's: the floor is standing, so no answer can move it, while the
+	// grant is an interval the answer renews (ADR-anntnxdj decision 3 mints a
+	// fresh grant after an answer). The guards read the grant as it stands
+	// after the person spoke — a call that waited does not run on authority
+	// that expired while it waited.
+	askNow := func() Decision {
+		if reason, refused := (kernelFloorGuard{kernel: k}).Refuse(ctx, call); refused {
+			return Deny{Reason: reason}
+		}
+		return Ask{Reason: kernelAskReason(tool, decl.Effect, outOfScope)}
+	}
+	if outcome == policyRefuse {
+		return Deny{Reason: refusalResult(tool, reason, "")}
+	}
+	if outcome == policyAsk && !skillMutation {
+		if approved {
+			// The person answered this exact proposal; the guards that
+			// follow read that answer, and the install and classifier work
+			// below is skipped for the same reason a resume must not re-ask
+			// them (a second preview would compare the bytes with
+			// themselves, and a second consultation would ask about a call
+			// the person just answered).
+			return Allow{}
+		}
+		if bounded := k.boundWideningAsk(tool, decl.Effect, outOfScope); bounded != nil {
+			return Deny{Reason: bounded.text}
+		}
+		p.state.outOfScope = outOfScope
+		return askNow()
+	}
+
+	// The call is resolved before anything judges it (nocx-ojfuc.1): an
+	// address is not something anybody can approve, so the fetch happens
+	// before the classifier and before the person is asked.
+	if decl.Name == "skills.install" && !approved {
+		facts, err := k.resolveSkillInstallFacts(ctx, decl, args)
+		if err != nil {
+			// The store's refusals are already sentences that name the step
+			// that refused, in the person's words, and nothing was written —
+			// so this is the call's answer, not a failed run.
+			k.info("agent tool: skills.install could not be resolved", "error", err)
+			return Deny{Reason: "I could not read a skill at that address, so nothing was proposed and nothing was installed: " + err.Error()}
+		}
+		p.state.install = facts
+	}
+	if k.classifier != nil && !approved {
+		ask, fact, err := k.classifyProposal(ctx, decl, call.CallID(), rawArgs, args, resources, p.state.install)
+		if err != nil {
+			// The classifier's input gate could not see, and nothing leaves
+			// when the gate cannot see: the call is not run and the run
+			// fails. The sentence below is never shown — the kernel returns
+			// the gate's own error — but an answer is what a Decision is.
+			p.state.classifierGateErr = fmt.Errorf("agent tool %q: classifier gate: %w", decl.Name, err)
+			return Deny{Reason: "the classifier gate could not screen this call, so it was not run"}
+		}
+		if ask != nil {
+			p.state.classifierFact = fact
+			p.state.outOfScope = outOfScope
+			return askNow()
+		}
+		p.state.classifierFact = fact
+	}
+	if skillMutation && !approved {
+		// A skill write is never auto-permitted: it is a question even under a
+		// permitting row, because what it proposes is instructions the model
+		// would follow later.
+		if bounded := k.boundWideningAsk(tool, decl.Effect, outOfScope); bounded != nil {
+			return Deny{Reason: bounded.text}
+		}
+		p.state.outOfScope = outOfScope
+		return askNow()
+	}
+	return Allow{}
+}
+
+// kernelAskReason is the sentence the pipeline carries beside a question. The
+// question a person sees is the approval request's own shape; this names why
+// the call is being asked about, and is what a chain with no approver would
+// report.
+func kernelAskReason(tool string, effect content.Effect, outOfScope *OutOfScopeFact) string {
+	reason := fmt.Sprintf("nocx asks the person before %q runs, because this run's policy asks about %s", tool, effect)
+	if outOfScope != nil {
+		reason += fmt.Sprintf("; it named %s %q, which is outside what this question may reach", outOfScope.Resource.Kind, outOfScope.Resource.ID)
+	}
+	return reason
+}
+
+// kernelApprover is the ADAPTER that keeps the kernel's own suspension exactly
+// as it was: the proposal is recorded in the ledger, its file versions and
+// expansions are bound, the approval store holds the pending question, and the
+// call returns the same *ApprovalRequestedError eino turns into an interrupt
+// (the adapter trips the batch latch with it). nocx-a62cl.3.4 replaces this
+// type with a service that blocks the call on the person's answer; nothing
+// else about the kernel's points changes then, which is why it stays small and
+// isolated here.
+type kernelApprover struct{ state *kernelCall }
+
+func (a kernelApprover) Answer(ctx context.Context, call Call, _ Ask) Answer {
+	k := a.state.kernel
+	decl := call.Declaration()
+	resources, _ := call.Resources()
+	invocation := call.Invocation()
+	callID := call.CallID()
+	rawArgs := string(call.RawParams())
+	var escalation error
+	if a.state.classifierFact != nil {
+		request := k.request(decl, callID, rawArgs, resources, a.state.install)
+		request.OutOfScope = a.state.outOfScope
+		escalation = k.escalateClassifier(ctx, decl, callID, rawArgs, request, a.state.classifierFact, resources, invocation)
+	} else {
+		escalation = k.escalate(ctx, decl, callID, rawArgs, call.Arguments(), resources, invocation, a.state.outOfScope, a.state.install)
+	}
+	if escalation != nil {
+		// A suspension is an Unanswered answer by the pipeline's vocabulary:
+		// nobody has answered yet, and the error underneath is what carries
+		// the request to the surface. A ledger failure travels the same way
+		// and fails the run, because its cause is not a suspension.
+		return Unanswered{Err: escalation}
+	}
+	return Unanswered{Err: errors.New("the approval escalation returned without a suspension")}
+}
+
+// kernelGrantGuard is the grant's own interval: past its deadline there is no
+// authority for any row to read a decision out of. It is a Guard rather than a
+// PreCall because the interval is read AFTER the answer, where ADR-anntnxdj
+// decision 3 mints the grant the call will actually run under: a call that
+// waited does not run on authority that expired while it waited. It cannot
+// allow either — no answer turns an expired grant back into permission — and
+// the capability constructor enforces the same bound independently
+// (agenttools.withinGrantLifetime).
+type kernelGrantGuard struct{ kernel *effectKernel }
+
+func (g kernelGrantGuard) Refuse(_ context.Context, call Call) (string, bool) {
+	if !g.kernel.grant.Expired(time.Now()) {
+		return "", false
+	}
+	return refusalResult(call.Tool(), RefusedExpired, ""), true
+}
+
+// kernelFloorGuard is the fixed floor and the raw-command floor: the operations
+// no policy may enable. It can only refuse, so no answer a person gives can
+// turn one back into permission.
+type kernelFloorGuard struct{ kernel *effectKernel }
+
+func (g kernelFloorGuard) Refuse(_ context.Context, call Call) (string, bool) {
+	invocation := call.Invocation()
+	resources, _ := call.Resources()
+	if reason, denied := g.kernel.floorRefusal(invocation, resources); denied {
+		return refusalResult(call.Tool(), RefusedByFloor, "", reason), true
+	}
+	decl := call.Declaration()
+	if decl.CommandArg == "" {
+		return "", false
+	}
+	command, ok := call.Arguments()[decl.CommandArg].(string)
+	if !ok {
+		return "", false
+	}
+	if reason, denied := g.kernel.grant.Policy.FloorRawCommandRefusal(command); denied {
+		return refusalResult(call.Tool(), RefusedByFloor, "", reason), true
+	}
+	return "", false
+}
+
+// kernelEvidenceGuard is what the wait can invalidate: the file versions and
+// the expansion values the person was shown, re-read now, after the answer and
+// before the capability exists. A file that changed while the question was open
+// no longer has the version the answer covered, and an approval that covered
+// different bytes must not run.
+type kernelEvidenceGuard struct{ state *kernelCall }
+
+func (g kernelEvidenceGuard) Refuse(ctx context.Context, call Call) (string, bool) {
+	k := g.state.kernel
+	if k.approvals == nil {
+		return "", false
+	}
+	proposal := k.proposal(call.Tool(), call.CallID(), string(call.RawParams()))
+	if !k.approvals.IsApproved(proposal) {
+		return "", false
+	}
+	if err := k.approvals.VerifyApprovedFileVersions(proposal); err != nil {
+		return refusalResult(call.Tool(), RefusedFileChanged, "", err.Error()), true
+	}
+	if shown, ok := k.approvals.ApprovedExpansions(proposal); ok && len(shown) > 0 {
+		if err := VerifyExpansions(ctx, k.runSeams.expansions, k.runCtx.Session, shown); err != nil {
+			return refusalResult(call.Tool(), RefusedExpansionChanged, "", err.Error()), true
+		}
+	}
+	return "", false
+}
+
+// kernelAttempts is the durable attempt: it exists from before the effect until
+// the caller records its outcome. A failed write stops the call, because a call
+// that cannot be recorded does not run.
+type kernelAttempts struct{ state *kernelCall }
+
+func (a kernelAttempts) Open(ctx context.Context, call Call) error {
+	k := a.state.kernel
+	decl := call.Declaration()
+	resources, _ := call.Resources()
+	execID, entryID, err := k.openAttempt(ctx, decl, call.CallID(), string(call.RawParams()), resources, a.state.classifierFact)
+	if err != nil {
+		return fmt.Errorf("agent tool %q: record attempt: %w", decl.Name, err)
+	}
+	a.state.execID, a.state.entryID = execID, entryID
+	return nil
+}
+
 // ── policy ────────────────────────────────────────────────────────────────
 
 type policyOutcome int
@@ -677,23 +1000,16 @@ const (
 	policyRefuse
 )
 
-// The fourth result is the VERDICT the answer came from, and it is returned
+// The third result is the VERDICT the answer came from, and it is returned
 // rather than recomputed because the ask needs its cause and its resource: an
 // out-of-scope question that does not name what fell outside cannot offer the
 // only answer that would change it (design §5.3).
-func (m *effectKernel) decideInvocationWithReason(t agenttools.Tool, resources []agenttools.ResourceRef, resourceDeclaration bool, invocation content.Invocation) (policyOutcome, PolicyRefusalReason, string, content.Verdict) {
-	// The grant's own interval, before any row is consulted: past the
-	// deadline there is no authority for the matrix to read a decision out
-	// of. Deciding it here is what keeps the attempt out of the ledger — a
-	// call that never had authority is not an attempt — and what makes the
-	// refusal an ANSWER; the enforcement is the capability constructor,
-	// which cannot be reasoned around (agenttools.withinGrantLifetime).
-	if m.grant.Expired(time.Now()) {
-		return policyRefuse, RefusedExpired, "", content.Verdict{Decision: content.DecisionRefuse}
-	}
-	if reason, denied := m.floorRefusal(invocation, resources); denied {
-		return policyRefuse, RefusedByFloor, reason, content.Verdict{Decision: content.DecisionRefuse}
-	}
+//
+// What this answers is what the person's ROWS say. The grant's own interval and
+// the fixed floors are Guards, not part of this: both can only refuse, both
+// must survive a person's yes, and both are read after the answer — see
+// kernelGrantGuard and kernelFloorGuard.
+func (m *effectKernel) decideInvocationWithReason(t agenttools.Tool, resources []agenttools.ResourceRef, resourceDeclaration bool, invocation content.Invocation) (policyOutcome, PolicyRefusalReason, content.Verdict) {
 	verdict := m.verdict(t, resources, resourceDeclaration, invocation)
 	switch verdict.Decision {
 	case content.DecisionRefuse:
@@ -703,16 +1019,16 @@ func (m *effectKernel) decideInvocationWithReason(t agenttools.Tool, resources [
 		// resource outside an EDITABLE row scope is no longer either — it
 		// is the ask below (design §5.3).
 		if verdict.Cause == content.OutOfScopeFence {
-			return policyRefuse, RefusedOutOfScope, "", verdict
+			return policyRefuse, RefusedOutOfScope, verdict
 		}
-		return policyRefuse, RefusedByDecision, "", verdict
+		return policyRefuse, RefusedByDecision, verdict
 	case content.DecisionPermit:
 		if isSkillMutationTool(t) {
-			return policyAsk, "", "", verdict
+			return policyAsk, "", verdict
 		}
-		return policyPermit, "", "", verdict
+		return policyPermit, "", verdict
 	default:
-		return policyAsk, "", "", verdict
+		return policyAsk, "", verdict
 	}
 }
 
@@ -1855,151 +2171,18 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		}
 	}
 
-	var execID int64
-	var entryID string
-	transform := func(prepared *preparedInvocation) error {
-		prepared.decl, prepared.invocation = classifyCall(prepared.decl, prepared.args)
-		if prepared.decl.CommandArg == "" {
-			prepared.invocation.Parsed = true
-		}
-		return nil
-	}
-	gate := func(prepared *preparedInvocation) (bool, *modelResult, error) {
-		decl := prepared.decl
-		args := prepared.args
-		resources := prepared.resources
-		invocation := prepared.invocation
-		if reason, denied := k.floorRefusal(invocation, resources); denied {
-			result := modelResult{text: refusalResult(decl.Name, RefusedByFloor, "", reason), kind: modelNocxMessage}
-			return false, &result, nil
-		}
-		if decl.CommandArg != "" {
-			if command, ok := args[decl.CommandArg].(string); ok {
-				if reason, denied := k.grant.Policy.FloorRawCommandRefusal(command); denied {
-					result := modelResult{text: refusalResult(decl.Name, RefusedByFloor, "", reason), kind: modelNocxMessage}
-					return false, &result, nil
-				}
-			}
-		}
-		if k.approvals != nil {
-			if kind, declined := k.approvals.DeclinedKind(k.proposal(decl.Name, callID, rawArgs)); declined {
-				result := modelResult{text: refusalResult(decl.Name, RefusedByPerson, kind), kind: modelNocxMessage}
-				return false, &result, nil
-			}
-			if decl.CommandArg == "" {
-				if kind, standing := k.approvals.DeclinedEffect(k.runID, decl.Effect); standing {
-					result := modelResult{text: refusalResult(decl.Name, RefusedByPerson, kind), kind: modelNocxMessage}
-					return false, &result, nil
-				}
-			} else if kind, standing := k.approvals.DeclinedInvocation(k.runID, invocation); standing {
-				result := modelResult{text: refusalResult(decl.Name, RefusedByPerson, kind), kind: modelNocxMessage}
-				return false, &result, nil
-			}
-		}
-		outcome, refusal, floorReason, verdict := k.decideInvocationWithReason(decl, resources, prepared.resourceDeclaration, invocation)
-		skillMutation := isSkillMutationTool(decl)
-		// What fell outside, and under which bound — nil unless something did.
-		// The ask carries it; the bound below decides whether the ask happens.
-		outOfScope := outOfScopeFact(verdict)
-		switch outcome {
-		case policyRefuse:
-			result := modelResult{text: refusalResult(decl.Name, refusal, "", floorReason), kind: modelNocxMessage}
-			return false, &result, nil
-		case policyAsk:
-			if !skillMutation {
-				ap := k.proposal(decl.Name, callID, rawArgs)
-				if k.approvals != nil && k.approvals.IsApproved(ap) {
-					break
-				}
-				if bounded := k.boundWideningAsk(decl.Name, decl.Effect, outOfScope); bounded != nil {
-					return false, bounded, nil
-				}
-				return false, nil, k.escalate(ctx, decl, callID, rawArgs, args, resources, invocation, outOfScope, nil)
-			}
-		}
-		// 3a. THE CALL IS RESOLVED BEFORE ANYTHING JUDGES IT (nocx-ojfuc.1).
-		//
-		// skills.install's whole argument is an address, and an address is
-		// not something anybody can approve: the name, the description, the
-		// files that will land and every scan finding in them are in a
-		// document nobody has fetched yet. So the fetch happens HERE — after
-		// the policy has decided the call's class is not refused and its
-		// destination is inside the row's scopes, before the classifier is
-		// consulted and before the person is asked — and what is asked about
-		// is a skill rather than a URL.
-		//
-		// THE ALTERNATIVE, REJECTED, WAS TO ASK FIRST AND FETCH AFTER. The
-		// question would name an address, the person would approve an
-		// address, and the bytes that arrived afterwards would be whatever
-		// answered it. internal/skill is built for this order: Preview shows,
-		// Install re-fetches and refuses unless the bytes are the ones shown.
-		//
-		// It is skipped on an APPROVED resume, and that is not an
-		// optimisation: a second preview would remember the CURRENT digest,
-		// so Install would compare the bytes against themselves and the
-		// "the bytes moved between the question and the answer" refusal
-		// would never fire again.
-		var installFacts *ApprovalInstall
-		if decl.Name == "skills.install" && !k.proposalApproved(decl.Name, callID, rawArgs) {
-			resolved, resolveErr := k.resolveSkillInstallFacts(ctx, decl, args)
-			if resolveErr != nil {
-				// The store's refusals are already sentences that name the
-				// step that refused, in the person's words, and nothing was
-				// written — so this reaches the model as an ANSWER, the way
-				// the skill summarizer's decline does, rather than failing
-				// the run.
-				k.info("agent tool: skills.install could not be resolved", "error", resolveErr)
-				result := modelResult{
-					text: "I could not read a skill at that address, so nothing was proposed and nothing was installed: " + resolveErr.Error(),
-					kind: modelNocxMessage,
-				}
-				return false, &result, nil
-			}
-			installFacts = resolved
-		}
-		var classifierFact *classifierFact
-		if k.classifier != nil && !k.proposalApproved(decl.Name, callID, rawArgs) {
-			ask, fact, classifyErr := k.classifyProposal(ctx, decl, callID, rawArgs, args, resources, installFacts)
-			if classifyErr != nil {
-				return false, nil, fmt.Errorf("agent tool %q: classifier gate: %w", decl.Name, classifyErr)
-			}
-			if ask != nil {
-				return false, nil, k.escalateClassifier(ctx, decl, callID, rawArgs, ask, fact, resources, invocation)
-			}
-			classifierFact = fact
-		}
-		if skillMutation && !k.proposalApproved(decl.Name, callID, rawArgs) {
-			if bounded := k.boundWideningAsk(decl.Name, decl.Effect, outOfScope); bounded != nil {
-				return false, bounded, nil
-			}
-			if classifierFact != nil {
-				ask := k.request(decl, callID, rawArgs, resources, installFacts)
-				ask.OutOfScope = outOfScope
-				return false, nil, k.escalateClassifier(ctx, decl, callID, rawArgs, ask, classifierFact, resources, invocation)
-			}
-			return false, nil, k.escalate(ctx, decl, callID, rawArgs, args, resources, invocation, outOfScope, installFacts)
-		}
-		if k.approvals != nil {
-			ap := k.proposal(decl.Name, callID, rawArgs)
-			if k.approvals.IsApproved(ap) {
-				if verifyErr := k.approvals.VerifyApprovedFileVersions(ap); verifyErr != nil {
-					result := modelResult{text: refusalResult(decl.Name, RefusedFileChanged, "", verifyErr.Error()), kind: modelNocxMessage}
-					return false, &result, nil
-				}
-				if shown, ok := k.approvals.ApprovedExpansions(ap); ok && len(shown) > 0 {
-					if verifyErr := VerifyExpansions(ctx, k.runSeams.expansions, k.runCtx.Session, shown); verifyErr != nil {
-						result := modelResult{text: refusalResult(decl.Name, RefusedExpansionChanged, "", verifyErr.Error()), kind: modelNocxMessage}
-						return false, &result, nil
-					}
-				}
-			}
-		}
-		var err error
-		execID, entryID, err = k.openAttempt(ctx, decl, callID, rawArgs, resources, classifierFact)
-		if err != nil {
-			return false, nil, fmt.Errorf("agent tool %q: record attempt: %w", decl.Name, err)
-		}
-		return true, nil, nil
+	// The call runs through the authority pipeline (nocx-a62cl.3.2). What the
+	// kernel used to do in one gate closure is the chain's points now:
+	// command classification is a fact preparation derived, the matrix,
+	// standing rules, standing declines and row scope are the policy PreCall,
+	// the floors and the file-version/expansion evidence are Guards, the
+	// attempt opens between them and the narrowed capability, and the
+	// approver is an adapter that keeps the kernel's own suspension exactly
+	// until nocx-a62cl.3.4 replaces it with a service that blocks.
+	state := &kernelCall{kernel: k}
+	pipeline, pipelineErr := NewPipeline(k.dispatcher, k.authorityChain(state))
+	if pipelineErr != nil {
+		return modelResult{}, pipelineErr
 	}
 	request := ToolInvocation{
 		Context:    ctx,
@@ -2008,66 +2191,24 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		Grant:      k.grant,
 		RawParams:  []byte(rawArgs),
 	}
-	// The call runs through the authority pipeline (nocx-a62cl.2.3). Its own
-	// steps are the pipeline's links for now: the transform prepares the
-	// declaration, the gate is the policy decision, the pre-execute step
-	// announces the call after Narrow, and the executor is the kernel's
-	// retained-result wrapper. None of them is a point yet — taking the kernel
-	// apart is stage 2 — and the chain carries no PreCall, approver, guard or
-	// screen, so a refusal here is still the gate's answer and an escalation
-	// still suspends through the kernel's own error.
-	var aborted *modelResult
-	pipeline, pipelineErr := NewPipeline(k.dispatcher, AuthorityChain{
-		prepare: transform,
-		decide: func(_ context.Context, _ Call, prepared *preparedInvocation) (Decision, error) {
-			continueExecution, result, gateErr := gate(prepared)
-			if gateErr != nil {
-				return nil, gateErr
-			}
-			if !continueExecution {
-				aborted = result
-				reason := ""
-				if result != nil {
-					reason = result.text
-				}
-				return Deny{Reason: reason}, nil
-			}
-			return Allow{}, nil
-		},
-		beforeTool: func(_ context.Context, _ Call, prepared *preparedInvocation, _ agenttools.Capability) error {
-			if k.onCall == nil {
-				return nil
-			}
-			return k.onCall(ToolCall{
-				Tool:       prepared.decl.Name,
-				CallID:     callID,
-				Args:       prepared.args,
-				EntryID:    entryID,
-				Effect:     prepared.decl.Effect,
-				Resource:   matchedResource(prepared.resources),
-				OpensBlock: prepared.decl.OpensBlock,
-			})
-		},
-		execute: func(runCtx context.Context, decl agenttools.Tool, capability agenttools.Capability, raw []byte) (string, error) {
-			return k.runWithRetained(decl, callID, runCtx, capability, raw)
-		},
-		// The run lease ends the run's context as an OUTCOME to record, not as
-		// a reason to skip the call: a timed-out lease must still reach the
-		// executor and have its result, error and cause recorded.
-		callerOwnsCancellation: true,
-	})
-	if pipelineErr != nil {
-		return modelResult{}, pipelineErr
-	}
 	outcome, dispatchErr := pipeline.run(request, k.attempt, callID)
-	// The gate's refusal is an answer, exactly as it was before the pipeline:
-	// its own modelResult, in the call's slot, with the run continuing.
-	if aborted != nil {
-		return *aborted, nil
-	}
 	if dispatchErr != nil {
-		if outcome.prepared != nil && execID != 0 {
-			_ = k.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
+		// A gate that could not see is a run failure, never an answer:
+		// nothing leaves when the gate cannot see.
+		if state.classifierGateErr != nil {
+			return modelResult{}, state.classifierGateErr
+		}
+		// A point's refusal is an ANSWER (nocx-uvac6.1): the sentence is
+		// ours, it rides the refused call's own slot, and the run continues
+		// until it reaches a terminal state of its own accord. A refusal
+		// that carries a cause is a cancellation, a failure underneath or an
+		// escalation's suspension, and stays an error.
+		var refusal *PipelineRefusal
+		if errors.As(dispatchErr, &refusal) && refusal.Cause == nil {
+			return modelResult{text: refusal.Reason, kind: modelNocxMessage}, nil
+		}
+		if state.execID != 0 {
+			_ = k.closeAttempt(ctx, state.execID, content.TermFailed, content.EntryFailure)
 		}
 		if errors.Is(dispatchErr, ErrInvalidResult) && outcome.prepared != nil {
 			decl := outcome.prepared.decl
@@ -2079,9 +2220,6 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 			return modelResult{}, fmt.Errorf("%w: tool %q: %v", ErrMalformedModelOutput, name, dispatchErr)
 		}
 		return modelResult{}, dispatchErr
-	}
-	if outcome.aborted != nil {
-		return *outcome.aborted, nil
 	}
 	prepared := outcome.prepared
 	decl := prepared.decl
@@ -2117,7 +2255,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 	// TermAgentDeclined names the agent's own no, which this is not, and
 	// content owns that vocabulary.
 	if runErr != nil && capabilityRefusal(runErr) {
-		_ = k.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
+		_ = k.closeAttempt(ctx, state.execID, content.TermFailed, content.EntryFailure)
 		return modelResult{text: refusalResult(decl.Name, RefusedOutOfScope, ""), kind: modelNocxMessage}, nil
 	}
 
@@ -2132,7 +2270,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		// Detection failed: the result is withheld and the run fails —
 		// the masking service's fail-closed contract, and the gate's:
 		// nothing leaves when the gate cannot see.
-		_ = k.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
+		_ = k.closeAttempt(ctx, state.execID, content.TermFailed, content.EntryFailure)
 		return modelResult{}, &EgressScreeningError{Tool: decl.Name, Gate: "egress", Err: screenErr}
 	}
 	if len(egress) > 0 {
@@ -2164,7 +2302,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 			// surface renders.
 			req := k.egressRequest(decl, callID, rawArgs, resources, egress, runErr != nil)
 			if k.approvals != nil {
-				ap.EntryID = entryID
+				ap.EntryID = state.entryID
 				// Egress approval releases an already-retained result; it
 				// does not authorise another file operation.
 				ap.FileVersionState = FileVersionBindingNotApplicable
@@ -2177,7 +2315,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 			// The attempt of THIS pass closes as interrupted: the call
 			// ran and its result was withheld pending the decision; the
 			// approved call is a SUBSEQUENT attempt of the same entry.
-			_ = k.closeAttempt(ctx, execID, content.TermInterrupted, content.EntryInterrupted)
+			_ = k.closeAttempt(ctx, state.execID, content.TermInterrupted, content.EntryInterrupted)
 			return modelResult{}, &EgressRequestedError{Request: req}
 		}
 	}
@@ -2204,7 +2342,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 	// of that command's own output, stored for a surface that will never
 	// ask for it.
 	if runErr == nil && !decl.OpensBlock {
-		k.recordToolResult(ctx, entryID, out)
+		k.recordToolResult(ctx, state.entryID, out)
 	}
 
 	// A person's Stop is a successful tool exchange carrying an explicit
@@ -2213,7 +2351,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 	// select the user-killed reason. The result remains model-visible so the
 	// model is told not to retry it.
 	if runErr == nil && runResultStopped(decl.Name, out) {
-		if err := k.closeAttempt(ctx, execID, content.TermUserKilled, content.EntryInterrupted); err != nil {
+		if err := k.closeAttempt(ctx, state.execID, content.TermUserKilled, content.EntryInterrupted); err != nil {
 			return modelResult{}, fmt.Errorf("agent tool %q: record stopped outcome: %w", decl.Name, err)
 		}
 		return modelResult{text: out, kind: modelToolOutput}, nil
@@ -2241,7 +2379,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		// termination reason and no change to the executions CHECK set.
 		var stillRunning *RunStillRunningError
 		if errors.As(runErr, &stillRunning) {
-			_ = k.closeAttempt(ctx, execID, content.TermCompleted, content.EntrySuccess)
+			_ = k.closeAttempt(ctx, state.execID, content.TermCompleted, content.EntrySuccess)
 			return modelResult{
 				text: RunStillRunningSentence(decl.Name, stillRunning),
 				kind: modelNocxMessage,
@@ -2252,18 +2390,18 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		// answer. The call did nothing and changed nothing, so it is a
 		// result the model reads — never a failed run.
 		if errors.Is(runErr, ErrRunNotWaiting) {
-			_ = k.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
+			_ = k.closeAttempt(ctx, state.execID, content.TermFailed, content.EntryFailure)
 			return modelResult{text: runNotWaitingResult(decl.Name), kind: modelNocxMessage}, nil
 		}
 		var leaseErr *RunLeaseError
 		if errors.As(runErr, &leaseErr) {
-			_ = k.closeAttempt(ctx, execID, leaseErr.Reason, content.EntryFailure)
+			_ = k.closeAttempt(ctx, state.execID, leaseErr.Reason, content.EntryFailure)
 			if leaseErr.SubmissionExpired {
 				return modelResult{}, leaseErr
 			}
 			return modelResult{text: leaseResult(decl.Name, leaseErr), kind: modelToolOutput}, nil
 		}
-		_ = k.closeAttempt(ctx, execID, terminationReasonOf(runErr), content.EntryFailure)
+		_ = k.closeAttempt(ctx, state.execID, terminationReasonOf(runErr), content.EntryFailure)
 		// A CALL THAT CHANGED NOTHING IS A RESULT, NOT THE END OF THE TURN
 		// (nocx-y0h3h). Two arms above already draw this line for the two
 		// cases session.run happens to produce; the line itself is not about
@@ -2284,7 +2422,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		return modelResult{}, &ToolFailedError{Tool: decl.Name, Err: runErr}
 	}
 
-	if err := k.closeAttempt(ctx, execID, content.TermCompleted, content.EntrySuccess); err != nil {
+	if err := k.closeAttempt(ctx, state.execID, content.TermCompleted, content.EntrySuccess); err != nil {
 		return modelResult{}, fmt.Errorf("agent tool %q: record outcome: %w", decl.Name, err)
 	}
 	// The RESULT, unframed. Marking a result as untrusted data for a model to

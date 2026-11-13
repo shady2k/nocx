@@ -186,7 +186,7 @@ func TestAWorktreeSpawnIsDecidedAcrossBothRaisedRows(t *testing.T) {
 			if resErr != nil {
 				t.Fatalf("ResolveResources: %v", resErr)
 			}
-			outcome, _, _, _ := mw.kernel.decideInvocationWithReason(raised, resources, true, content.Invocation{Parsed: true})
+			outcome, _, _ := mw.kernel.decideInvocationWithReason(raised, resources, true, content.Invocation{Parsed: true})
 			if outcome != tc.want {
 				t.Fatalf("outcome = %v, want %v", outcome, tc.want)
 			}
@@ -222,7 +222,7 @@ func TestAPlainSpawnDecidesOnItsOwnRow(t *testing.T) {
 	if resErr != nil {
 		t.Fatalf("ResolveResources: %v", resErr)
 	}
-	if outcome, _, _, _ := mw.kernel.decideInvocationWithReason(raised, resources, true, content.Invocation{Parsed: true}); outcome != policyPermit {
+	if outcome, _, _ := mw.kernel.decideInvocationWithReason(raised, resources, true, content.Invocation{Parsed: true}); outcome != policyPermit {
 		t.Fatalf("plain spawn under a mutation-refusing grant = %v, want permit", outcome)
 	}
 }

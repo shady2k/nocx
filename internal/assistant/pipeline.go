@@ -18,18 +18,41 @@ import (
 	"fmt"
 
 	"github.com/shady2k/nocx/internal/agenttools"
+	"github.com/shady2k/nocx/internal/content"
 )
 
 // Call is one exact proposal, as every point sees it: the run, the attempt, the
-// tool, the model's own id for the call and a hash of the canonical arguments.
-// Every field is a copy taken when the call entered the pipeline and there is no
-// way to change one afterwards, so what a person approved is what executes.
+// tool, the model's own id for the call, a hash of the canonical arguments and
+// the facts preparation derived from those arguments. Every field is a copy
+// taken when the call entered the pipeline and there is no way to change one
+// afterwards, so what a person approved is what executes.
+//
+// The facts are read-only and they are the SAME for every point, which is what
+// lets a point decide on what the call actually is rather than on the model's
+// spelling: the declaration with its per-call classification applied, the
+// validated arguments, the resources they resolved, the canonical command
+// parse and the grant. A point that reads them reads what preparation
+// validated and what the tool will run with.
 type Call struct {
 	runID   string
 	attempt int
 	tool    string
 	callID  string
 	argHash string
+	facts   *callFacts
+}
+
+// callFacts is what preparation derived from one call. The pipeline builds it
+// once, before any point runs, and never changes it afterwards.
+type callFacts struct {
+	decl              agenttools.Tool
+	args              map[string]any
+	resources         []agenttools.ResourceRef
+	resourceDeclared  bool
+	invocation        content.Invocation
+	invocationEffects []content.Effect
+	grant             content.Grant
+	rawParams         []byte
 }
 
 // RunID is the run this call belongs to.
@@ -48,6 +71,76 @@ func (c Call) CallID() string { return c.callID }
 // is bound by, so a changed argument never matches an earlier yes.
 func (c Call) ArgHash() string { return c.argHash }
 
+// Declaration is the tool the call reaches, with its per-call classification
+// applied: a declaration that names a shell command has the effect that
+// command actually reaches, and every point sees that same declaration.
+func (c Call) Declaration() agenttools.Tool {
+	if c.facts == nil {
+		return agenttools.Tool{}
+	}
+	return c.facts.decl
+}
+
+// Arguments is the validated argument object the declaration's own schema
+// accepted. It is a copy, so a point cannot change what the tool runs with.
+func (c Call) Arguments() map[string]any {
+	if c.facts == nil || c.facts.args == nil {
+		return nil
+	}
+	out := make(map[string]any, len(c.facts.args))
+	for name, value := range c.facts.args {
+		out[name] = value
+	}
+	return out
+}
+
+// Resources is every resource preparation resolved from the validated
+// arguments. declares is false when the declaration names no resource at all,
+// which is a different fact from a resource-bearing declaration whose current
+// call touches none.
+func (c Call) Resources() (resources []agenttools.ResourceRef, declares bool) {
+	if c.facts == nil {
+		return nil, false
+	}
+	return append([]agenttools.ResourceRef(nil), c.facts.resources...), c.facts.resourceDeclared
+}
+
+// Invocation is the canonical command parse the policy reads: the one
+// derivation of what the command names, shared by every point.
+func (c Call) Invocation() content.Invocation {
+	if c.facts == nil {
+		return content.Invocation{}
+	}
+	return cloneInvocation(c.facts.invocation)
+}
+
+// InvocationEffects is the effect set THIS call reaches when the declaration
+// derives one from its arguments — nil when the declared set stands.
+func (c Call) InvocationEffects() []content.Effect {
+	if c.facts == nil {
+		return nil
+	}
+	return append([]content.Effect(nil), c.facts.invocationEffects...)
+}
+
+// Grant is the authority this call runs under. It is a fact of the call, not a
+// decision about it: a point reads the grant to know what the rows say.
+func (c Call) Grant() content.Grant {
+	if c.facts == nil {
+		return content.Grant{}
+	}
+	return c.facts.grant
+}
+
+// RawParams is the exact argument bytes the model sent, copied. It is what an
+// approval is bound by and what the tool executes.
+func (c Call) RawParams() []byte {
+	if c.facts == nil {
+		return nil
+	}
+	return append([]byte(nil), c.facts.rawParams...)
+}
+
 // Decision is a PreCall's answer about one call. The interface is sealed, so
 // the set is exactly Allow, Deny and Ask: no package outside this one can add a
 // fourth answer that the pipeline would have to guess at.
@@ -57,8 +150,13 @@ type Decision interface{ decision() }
 type Allow struct{}
 
 // Deny refuses the call, and Reason says why in words a person and a model can
-// both read.
-type Deny struct{ Reason string }
+// both read. Cause carries the error underneath a refusal that had one — a
+// call whose context had already ended, or a gate that could not see — for a
+// caller that classifies it; it never changes the answer, which is still a no.
+type Deny struct {
+	Reason string
+	Cause  error
+}
 
 // Ask says the call needs a person's answer before it may go on. Facts are what
 // that person is shown beside the question — advisory evidence, never a
@@ -146,45 +244,33 @@ type Screen interface {
 	Inspect(ctx context.Context, c Call, r Outbound) Verdict
 }
 
+// Attempts opens the durable record of one call's execution. The pipeline
+// calls it after every point that may refuse and before the capability is
+// constructed, so the attempt exists from before the effect until the caller
+// records its outcome — the interval ADR-0028 states with both ends. An error
+// fails the run: a call that cannot be recorded does not run.
+//
+// The pipeline owns WHEN it opens; the caller owns what is written, because
+// what an attempt is made of belongs to the caller's own store.
+type Attempts interface {
+	Open(ctx context.Context, c Call) error
+}
+
 // AuthorityChain is one kind of caller's points, in the order they run. An
 // empty field means that kind of caller has no such point: a chain with no
 // PreCall allows every call that reaches it, a chain with no approver refuses
-// every Ask, and a chain with no Guard or Screen adds nothing.
+// every Ask, and a chain with no Guard, Screen or attempt step adds nothing.
 type AuthorityChain struct {
 	PreCalls []PreCall
 	Approver Approver
 	Guards   []Guard
 	Screens  []Screen
+	Attempts Attempts
 
-	// The kernel's own steps (nocx-a62cl.2.3), until stage 2 rewrites its
-	// policy onto the points above. They are unexported because they are the
-	// kernel's machinery rather than the authority vocabulary the record
-	// names: prepare refines the declaration before the call's facts are
-	// derived (command classification), decide is the kernel's policy step —
-	// which may fail, and whose refusals are answers rather than faults — and
-	// beforeTool announces the call after the declaration is narrowed. Each is
-	// called at the place the pipeline owns, and none receives a continuation,
-	// so none can skip, repeat or replace the execution.
-	// preparedGuards binds grant facts after preparation, per call, without
-	// storing mutable call state on a shared dispatcher or changing Call's
-	// identity. The returned links still have only Guard's refusal power.
-	preparedGuards func(*preparedInvocation) []Guard
-	prepare        func(*preparedInvocation) error
-	decide         func(context.Context, Call, *preparedInvocation) (Decision, error)
-	beforeTool     func(context.Context, Call, *preparedInvocation, agenttools.Capability) error
-	// execute is the caller's own runtime for the one tool call. Nil uses the
-	// operation's executor, which is what the tool endpoint wants.
+	// execute is the caller's own runtime for the one tool call — the kernel's
+	// retained-result path, the tool endpoint's declared executors. Nil uses
+	// the operation's executor.
 	execute dispatchExecutor
-
-	// callerOwnsCancellation says this caller's own steps decide what a
-	// cancelled context means, so the pipeline does not refuse the call before
-	// they run. The kernel's run lease is why: a lease that timed out ends the
-	// run's context and its outcome must still be recorded, because that write
-	// closes the command-to-turn interval
-	// (run_test.go's TestMiddleware_RunLeaseOutcomeRecordsCauseAfterCancellation).
-	// The zero value is the pipeline's own rule: a call whose context ended is
-	// a refusal, which is what the tool endpoint's chain wants.
-	callerOwnsCancellation bool
 }
 
 // Pipeline runs calls through one chain. It is the fixed half of the authority
@@ -227,12 +313,20 @@ func (e *PipelineRefusal) Error() string {
 // Unwrap exposes the cause to errors.Is and errors.As.
 func (e *PipelineRefusal) Unwrap() error { return e.Cause }
 
-// Dispatch runs one call through the chain, in the only order there is: schema,
-// the caller's own decision step, PreCall*, the approver on an Ask, Guard*, the
-// declaration's Narrow, the tool exactly once, Screen*. Every point observes
-// ctx, and a context that ended is a refusal wherever the pipeline notices it —
-// except for a chain whose caller owns what cancellation means (the kernel's
-// run lease), which AuthorityChain.callerOwnsCancellation states.
+// Dispatch runs one call through the chain, in the only order there is: schema
+// and the call's facts, PreCall*, the approver on an Ask, Guard*, the attempt,
+// the declaration's Narrow, the tool exactly once, Screen*.
+//
+// A call whose context ended BEFORE it entered the pipeline is its caller's
+// own business: the caller may still need the call's outcome recorded — the
+// kernel's run lease is exactly that, a run whose context ended as an outcome
+// to write (run_test.go's
+// TestMiddleware_RunLeaseOutcomeRecordsCauseAfterCancellation) — so the
+// pipeline does not refuse it on the caller's behalf. A chain that wants such
+// a call refused says so with its own point (the tool endpoint's first
+// PreCall). A context that ends WHILE the call is in the pipeline is a
+// refusal wherever the pipeline notices it: an answer that arrived after the
+// caller gave up does not authorise anything.
 func (p *Pipeline) Dispatch(invocation ToolInvocation, attempt int, callID string) (string, error) {
 	outcome, err := p.run(invocation, attempt, callID)
 	if err != nil {
@@ -248,7 +342,7 @@ func (p *Pipeline) Dispatch(invocation ToolInvocation, attempt int, callID strin
 func (p *Pipeline) run(invocation ToolInvocation, attempt int, callID string) (dispatchOutcome, error) {
 	invocation.RawParams = append([]byte(nil), invocation.RawParams...)
 	ctx := invocation.Context
-	prepared, err := p.operation.prepare(invocation, p.chain.prepare)
+	prepared, err := p.operation.prepare(invocation)
 	if err != nil {
 		return dispatchOutcome{}, err
 	}
@@ -258,43 +352,34 @@ func (p *Pipeline) run(invocation ToolInvocation, attempt int, callID string) (d
 		tool:    prepared.decl.Name,
 		callID:  callID,
 		argHash: canonicalArgHash(string(invocation.RawParams)),
+		facts: &callFacts{
+			decl:              prepared.decl,
+			args:              prepared.args,
+			resources:         prepared.resources,
+			resourceDeclared:  prepared.resourceDeclaration,
+			invocation:        prepared.invocation,
+			invocationEffects: prepared.invocationEffects,
+			grant:             invocation.Grant,
+			rawParams:         invocation.RawParams,
+		},
 	}
-	if !p.chain.callerOwnsCancellation {
-		if refusal := cancelled(ctx, call, "before any policy decided it"); refusal != nil {
-			return dispatchOutcome{}, refusal
-		}
+	// enteredCancelled is the caller's own context, read once: a context that
+	// ended before this call reached the pipeline is not the pipeline's to
+	// refuse (see Dispatch's comment).
+	enteredCancelled := ctx.Err() != nil
+	if refusal := cancelled(ctx, call, enteredCancelled, "before any policy decided it"); refusal != nil {
+		return dispatchOutcome{}, refusal
 	}
-	var asked *Ask
-	if p.chain.decide != nil {
-		decision, decideErr := p.chain.decide(ctx, call, &prepared)
-		if decideErr != nil {
-			return dispatchOutcome{}, decideErr
-		}
-		switch answer := decision.(type) {
-		case Allow:
-			// the call goes on to the chain's own points
-		case Deny:
-			return dispatchOutcome{prepared: &prepared}, &PipelineRefusal{Call: call, Reason: answer.Reason}
-		case Ask:
-			asked = &Ask{Reason: answer.Reason, Facts: append([]string(nil), answer.Facts...)}
-		default:
-			return dispatchOutcome{}, &PipelineRefusal{Call: call, Reason: fmt.Sprintf("%T answered neither allow, deny nor ask, and an unanswered decision is a refusal", p.chain.decide)}
-		}
-	}
-	asked, err = p.decide(ctx, call, asked)
+	asked, err := p.decide(ctx, call, nil, enteredCancelled)
 	if err != nil {
 		return dispatchOutcome{}, err
 	}
 	if asked != nil {
-		if refusal := p.answer(ctx, call, *asked); refusal != nil {
+		if refusal := p.answer(ctx, call, *asked, enteredCancelled); refusal != nil {
 			return dispatchOutcome{}, refusal
 		}
 	}
-	guards := p.chain.Guards
-	if p.chain.preparedGuards != nil {
-		guards = append(append([]Guard(nil), guards...), p.chain.preparedGuards(&prepared)...)
-	}
-	for _, guard := range guards {
+	for _, guard := range p.chain.Guards {
 		reason, refused := guard.Refuse(ctx, call)
 		if !refused {
 			continue
@@ -302,25 +387,20 @@ func (p *Pipeline) run(invocation ToolInvocation, attempt int, callID string) (d
 		if reason == "" {
 			reason = "a guard refused the call and gave no reason"
 		}
-		return dispatchOutcome{}, &PipelineRefusal{Call: call, Reason: reason}
+		return dispatchOutcome{prepared: &prepared}, &PipelineRefusal{Call: call, Reason: reason}
 	}
-	if !p.chain.callerOwnsCancellation {
-		if refusal := cancelled(ctx, call, "before the tool could run"); refusal != nil {
-			return dispatchOutcome{}, refusal
+	if refusal := cancelled(ctx, call, enteredCancelled, "before the tool could run"); refusal != nil {
+		return dispatchOutcome{}, refusal
+	}
+	if p.chain.Attempts != nil {
+		if openErr := p.chain.Attempts.Open(ctx, call); openErr != nil {
+			return dispatchOutcome{prepared: &prepared}, openErr
 		}
 	}
-	beforeExecute := func(prepared *preparedInvocation, capability agenttools.Capability) error {
-		if p.chain.beforeTool != nil {
-			if beforeErr := p.chain.beforeTool(ctx, call, prepared, capability); beforeErr != nil {
-				return beforeErr
-			}
-		}
-		if !p.chain.callerOwnsCancellation {
-			return cancelled(ctx, call, "immediately before execution")
-		}
-		return nil
+	beforeExecute := func(*preparedInvocation, agenttools.Capability) error {
+		return cancelled(ctx, call, enteredCancelled, "immediately before execution")
 	}
-	outcome, err := p.operation.executePrepared(&prepared, beforeExecute, p.chain.execute)
+	outcome, err := p.operation.executePrepared(&prepared, call, beforeExecute, p.chain.execute)
 	if err != nil {
 		return outcome, err
 	}
@@ -329,7 +409,7 @@ func (p *Pipeline) run(invocation ToolInvocation, attempt int, callID string) (d
 		outbound.Text = outcome.runErr.Error()
 	}
 	for _, screen := range p.chain.Screens {
-		if refusal := p.inspect(ctx, call, screen, outbound); refusal != nil {
+		if refusal := p.inspect(ctx, call, screen, outbound, enteredCancelled); refusal != nil {
 			return dispatchOutcome{}, refusal
 		}
 	}
@@ -339,7 +419,7 @@ func (p *Pipeline) run(invocation ToolInvocation, attempt int, callID string) (d
 // decide runs every PreCall in order. A Deny refuses the call at once. Every
 // pending Ask contributes its reason and facts to one approval request, so an
 // approval answers all questions rather than silently losing later questions.
-func (p *Pipeline) decide(ctx context.Context, call Call, asked *Ask) (*Ask, error) {
+func (p *Pipeline) decide(ctx context.Context, call Call, asked *Ask, enteredCancelled bool) (*Ask, error) {
 	for _, precall := range p.chain.PreCalls {
 		switch decision := precall.Decide(ctx, call).(type) {
 		case Allow:
@@ -349,7 +429,7 @@ func (p *Pipeline) decide(ctx context.Context, call Call, asked *Ask) (*Ask, err
 			if reason == "" {
 				reason = "a policy point denied the call and gave no reason"
 			}
-			return nil, &PipelineRefusal{Call: call, Reason: reason}
+			return nil, &PipelineRefusal{Call: call, Reason: reason, Cause: decision.Cause}
 		case Ask:
 			if asked == nil {
 				asked = &Ask{Reason: decision.Reason, Facts: append([]string(nil), decision.Facts...)}
@@ -368,8 +448,8 @@ func (p *Pipeline) decide(ctx context.Context, call Call, asked *Ask) (*Ask, err
 // could not reach anybody, a decline and a context that ended during the wait
 // are all refusals: "no approver, or no answer, is a refusal", and a call that
 // waited ten minutes does not run on a context that ended while it waited.
-func (p *Pipeline) answer(ctx context.Context, call Call, ask Ask) error {
-	if refusal := cancelled(ctx, call, "before anyone could be asked"); refusal != nil {
+func (p *Pipeline) answer(ctx context.Context, call Call, ask Ask, enteredCancelled bool) error {
+	if refusal := cancelled(ctx, call, enteredCancelled, "before anyone could be asked"); refusal != nil {
 		return refusal
 	}
 	if p.chain.Approver == nil {
@@ -379,7 +459,7 @@ func (p *Pipeline) answer(ctx context.Context, call Call, ask Ask) error {
 		}
 	}
 	given := p.chain.Approver.Answer(ctx, call, ask)
-	if refusal := cancelled(ctx, call, "while it waited for an answer"); refusal != nil {
+	if refusal := cancelled(ctx, call, enteredCancelled, "while it waited for an answer"); refusal != nil {
 		return refusal
 	}
 	switch answer := given.(type) {
@@ -401,7 +481,7 @@ func (p *Pipeline) answer(ctx context.Context, call Call, ask Ask) error {
 // inspect runs one screen over the bytes that are about to leave. A screen
 // decides whether they go, never what they say: Pass and an approved Ask release
 // the exact result the tool produced, and Refuse withholds it.
-func (p *Pipeline) inspect(ctx context.Context, call Call, screen Screen, outbound Outbound) error {
+func (p *Pipeline) inspect(ctx context.Context, call Call, screen Screen, outbound Outbound, enteredCancelled bool) error {
 	switch verdict := screen.Inspect(ctx, call, outbound).(type) {
 	case Pass:
 		return nil
@@ -412,16 +492,21 @@ func (p *Pipeline) inspect(ctx context.Context, call Call, screen Screen, outbou
 		}
 		return &PipelineRefusal{Call: call, Reason: reason}
 	case Ask:
-		return p.answer(ctx, call, verdict)
+		return p.answer(ctx, call, verdict, enteredCancelled)
 	default:
 		return &PipelineRefusal{Call: call, Reason: fmt.Sprintf("%T answered neither pass, refuse nor ask, and an unanswered verdict is a refusal", screen)}
 	}
 }
 
 // cancelled is the pipeline's own observation of ctx, beside the one every point
-// makes. A call whose context ended is a refusal that names when it ended,
-// whether the point that would have run next noticed or not.
-func cancelled(ctx context.Context, call Call, when string) error {
+// makes. A context that ends while the call is in the pipeline is a refusal
+// that names when it ended, whether the point that would have run next noticed
+// or not. A context that had already ended when the call arrived is its
+// caller's own outcome to record, and is not refused here.
+func cancelled(ctx context.Context, call Call, enteredCancelled bool, when string) error {
+	if enteredCancelled {
+		return nil
+	}
 	if err := ctx.Err(); err != nil {
 		return &PipelineRefusal{Call: call, Reason: fmt.Sprintf("the call was cancelled %s: %v", when, err), Cause: err}
 	}

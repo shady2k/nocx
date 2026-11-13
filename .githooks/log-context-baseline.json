@@ -574,13 +574,13 @@
     },
     {
       "file": "internal/assistant/kernel.go",
-      "line": 2014,
-      "text": "result := modelResult{text: refusalResult(decl.Name, RefusedExpansionChanged, \"\", verifyErr.Error()), kind: modelNocxMessage}"
+      "line": 970,
+      "text": "return refusalResult(call.Tool(), RefusedExpansionChanged, \"\", err.Error()), true"
     },
     {
       "file": "internal/assistant/kernel.go",
-      "line": 2009,
-      "text": "result := modelResult{text: refusalResult(decl.Name, RefusedFileChanged, \"\", verifyErr.Error()), kind: modelNocxMessage}"
+      "line": 966,
+      "text": "return refusalResult(call.Tool(), RefusedFileChanged, \"\", err.Error()), true"
     },
     {
       "file": "internal/assistant/kernel.go",
@@ -599,8 +599,8 @@
     },
     {
       "file": "internal/assistant/kernel.go",
-      "line": 1976,
-      "text": "text: \"I could not read a skill at that address, so nothing was proposed and nothing was installed: \" + resolveErr.Error(),"
+      "line": 826,
+      "text": "return Deny{Reason: \"I could not read a skill at that address, so nothing was proposed and nothing was installed: \" + err.Error()}"
     },
     {
       "file": "internal/assistant/presentation.go",

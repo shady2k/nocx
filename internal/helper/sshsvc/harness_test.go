@@ -168,9 +168,13 @@ type fixture struct {
 	kbdPrompts  []string
 	// the forward plane (nocx-50w7p.8): the policy the server applies, the
 	// listeners it bound, and the direct-tcpip targets it was asked to reach.
-	allowForward  bool
-	permitListen  func(host string, port int) bool
-	forwards      map[string]net.Listener
+	allowForward bool
+	permitListen func(host string, port int) bool
+	forwards     map[string]net.Listener
+	// forwardOwner names the connection each listener was granted on, so a
+	// connection ending frees its own listeners and no others (what a real
+	// sshd does).
+	forwardOwner  map[string]*gossh.ServerConn
 	forwardBinds  []forwardBind
 	directTargets []string
 	// the exec plane (nocx-50w7p.9 and nocx-50w7p.10): the commands this host
@@ -430,7 +434,23 @@ func (f *fixture) serve(conn net.Conn, config *gossh.ServerConfig) {
 	if err != nil {
 		return
 	}
-	defer func() { _ = sconn.Close() }()
+	defer func() {
+		// A connection ending frees the remote listeners it created: a real
+		// sshd does, and a pane that released its transport (socket-first
+		// teardown) must not be reported as having left one behind.
+		f.mu.Lock()
+		for key, owner := range f.forwardOwner {
+			if owner == sconn {
+				if ln := f.forwards[key]; ln != nil {
+					_ = ln.Close()
+				}
+				delete(f.forwards, key)
+				delete(f.forwardOwner, key)
+			}
+		}
+		f.mu.Unlock()
+		_ = sconn.Close()
+	}()
 	go f.serveGlobalRequests(sconn, reqs)
 	for newChan := range chans {
 		f.mu.Lock()
@@ -560,7 +580,12 @@ func (f *fixture) handleForward(sconn *gossh.ServerConn, req *gossh.Request) {
 	if f.forwards == nil {
 		f.forwards = map[string]net.Listener{}
 	}
-	f.forwards[net.JoinHostPort(addr, strconv.Itoa(tcpAddr.Port))] = ln
+	bound := net.JoinHostPort(addr, strconv.Itoa(tcpAddr.Port))
+	f.forwards[bound] = ln
+	if f.forwardOwner == nil {
+		f.forwardOwner = map[string]*gossh.ServerConn{}
+	}
+	f.forwardOwner[bound] = sconn
 	f.forwardBinds = append(f.forwardBinds, forwardBind{requestedHost: addr, requestedPort: int(rport), allocatedPort: tcpAddr.Port})
 	f.mu.Unlock()
 

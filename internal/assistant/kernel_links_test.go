@@ -48,6 +48,8 @@ func guardLinkName(guard Guard) string {
 	switch guard.(type) {
 	case kernelGrantGuard:
 		return "grant guard"
+	case kernelPolicyGuard:
+		return "policy guard"
 	case kernelFloorGuard:
 		return "floor guard"
 	case kernelEvidenceGuard:
@@ -135,7 +137,7 @@ func TestTheKernelChainComposesEveryLink(t *testing.T) {
 	if _, ok := withService.Approver.(serviceApprover); !ok {
 		t.Fatalf("approver is %T, want serviceApprover", withService.Approver)
 	}
-	wantGuards := []string{"grant guard", "floor guard", "evidence guard"}
+	wantGuards := []string{"grant guard", "policy guard", "floor guard", "evidence guard"}
 	if len(chain.Guards) != len(wantGuards) {
 		t.Fatalf("guards = %d, want %d (%v)", len(chain.Guards), len(wantGuards), wantGuards)
 	}

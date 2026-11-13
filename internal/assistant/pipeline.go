@@ -78,7 +78,7 @@ func (c Call) Declaration() agenttools.Tool {
 	if c.facts == nil {
 		return agenttools.Tool{}
 	}
-	return c.facts.decl
+	return copyDeclaration(c.facts.decl)
 }
 
 // Arguments is the validated argument object the declaration's own schema
@@ -89,7 +89,7 @@ func (c Call) Arguments() map[string]any {
 	}
 	out := make(map[string]any, len(c.facts.args))
 	for name, value := range c.facts.args {
-		out[name] = value
+		out[name] = copyArgument(value)
 	}
 	return out
 }
@@ -129,7 +129,7 @@ func (c Call) Grant() content.Grant {
 	if c.facts == nil {
 		return content.Grant{}
 	}
-	return c.facts.grant
+	return copyGrant(c.facts.grant)
 }
 
 // RawParams is the exact argument bytes the model sent, copied. It is what an
@@ -401,12 +401,16 @@ func (p *Pipeline) Dispatch(invocation ToolInvocation, attempt int, callID strin
 // error apart from a refusal, which the kernel's caller needs to record the
 // attempt's outcome. The tool endpoint sees only Dispatch.
 func (p *Pipeline) run(invocation ToolInvocation, attempt int, callID string) (dispatchOutcome, error) {
+	return p.runOrdered(invocation, attempt, callID, false)
+}
+
+func (p *Pipeline) runOrdered(invocation ToolInvocation, attempt int, callID string, held bool) (dispatchOutcome, error) {
 	invocation.RawParams = append([]byte(nil), invocation.RawParams...)
 	ctx := invocation.Context
 	// The turn's order comes first: a call that is not this turn's turn has
 	// not started, and a call queued behind a declined one is refused with
 	// that decline rather than run on its own (ADR-anntnxdj §2).
-	if p.chain.Order != nil {
+	if p.chain.Order != nil && !held {
 		release, declined, err := p.chain.Order.enter(ctx)
 		if err != nil {
 			return dispatchOutcome{}, &PipelineRefusal{
@@ -620,6 +624,16 @@ func (p *Pipeline) inspect(ctx context.Context, call Call, screen Screen, outbou
 		}
 		switch answer := given.(type) {
 		case Approved:
+			if p.chain.MintGrant != nil {
+				if fresh, ok := p.chain.MintGrant(ctx, call); ok {
+					call = call.withGrant(fresh)
+				}
+			}
+			if attempts, ok := p.chain.Attempts.(interface {
+				Continue(context.Context, Call) error
+			}); ok {
+				return attempts.Continue(ctx, call)
+			}
 			return nil
 		case Declined:
 			// The bytes ARE the call's result, and a no means they never
@@ -666,4 +680,53 @@ func errText(err error) string {
 		return "the approver failed without saying why"
 	}
 	return fmt.Sprint(err)
+}
+
+// copyArgument copies the JSON values accepted by a tool's parameter schema.
+func copyArgument(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, v := range x {
+			out[k] = copyArgument(v)
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for i, v := range x {
+			out[i] = copyArgument(v)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+func copyGrant(g content.Grant) content.Grant {
+	g.Effects = append([]content.Effect(nil), g.Effects...)
+	g.Scopes = append([]content.GrantScope(nil), g.Scopes...)
+	for _, row := range []*content.EffectRow{&g.Policy.Observe, &g.Policy.MutateReversible, &g.Policy.MutateDestructive, &g.Policy.PrivilegeChange, &g.Policy.Disclose, &g.Policy.CrossBoundary, &g.Policy.Delegate} {
+		row.Scopes = append([]content.GrantScope(nil), row.Scopes...)
+	}
+	g.Policy.Rules = append([]content.InvocationRule(nil), g.Policy.Rules...)
+	for i := range g.Policy.Rules {
+		s := &g.Policy.Rules[i].Selector
+		s.Exact = append([][]string(nil), s.Exact...)
+		for j := range s.Exact {
+			s.Exact[j] = append([]string(nil), s.Exact[j]...)
+		}
+		if s.HasFeature != nil {
+			f := *s.HasFeature
+			s.HasFeature = &f
+		}
+	}
+	return g
+}
+
+func copyDeclaration(d agenttools.Tool) agenttools.Tool {
+	d.Declaration.Effect = append([]content.Effect(nil), d.Declaration.Effect...)
+	d.ResourceKinds = append([]content.ResourceKind(nil), d.ResourceKinds...)
+	d.ParamsSchema = append([]byte(nil), d.ParamsSchema...)
+	d.ResultSchema = append([]byte(nil), d.ResultSchema...)
+	return d
 }

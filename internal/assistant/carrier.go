@@ -40,7 +40,7 @@ func (c *callsCarrier) Declare(permitted []agenttools.Tool) ([]tool.BaseTool, er
 }
 
 func (c *callsCarrier) UnknownTool(name, _ string) (string, error) {
-	if refused := c.effectKernel.registry.RefusedEffects(c.effectKernel.grant, name); len(refused) > 0 {
+	if refused := c.effectKernel.registry.RefusedEffects(c.effectKernel.currentGrant(), name); len(refused) > 0 {
 		if len(refused) == 1 {
 			return refusalResult(name, RefusedByDecision, ""), nil
 		}
@@ -52,7 +52,7 @@ func (c *callsCarrier) UnknownTool(name, _ string) (string, error) {
 
 func permittedNames(k *effectKernel) []string {
 	var out []string
-	for _, t := range k.registry.ForGrant(k.grant) {
+	for _, t := range k.registry.ForGrant(k.currentGrant()) {
 		out = append(out, t.Name)
 	}
 	return out

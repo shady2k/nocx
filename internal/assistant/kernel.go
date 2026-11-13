@@ -42,6 +42,7 @@ import (
 	"fmt"
 	"io/fs"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -369,6 +370,7 @@ const maxArgsBytes = 64 << 10
 // (ADR-0020 decision 5), and only a new attempt carries a different one.
 type effectKernel struct {
 	log       log.Logger
+	grantMu   sync.RWMutex
 	grant     content.Grant
 	registry  agenttools.Registry
 	ledger    AttemptLedger
@@ -604,6 +606,7 @@ type kernelCall struct {
 	kernel     *effectKernel
 	entryID    string
 	execID     int64
+	attempt    int
 	outOfScope *OutOfScopeFact
 	// egressGateErr is a screen that could not see. A Verdict can only pass,
 	// refuse or ask, so the kernel records the failure here and reports it as
@@ -636,6 +639,7 @@ func (k *effectKernel) authorityChain(state *kernelCall) AuthorityChain {
 		},
 		Guards: []Guard{
 			kernelGrantGuard{kernel: k},
+			kernelPolicyGuard{state: state},
 			kernelFloorGuard{kernel: k},
 			kernelEvidenceGuard{state: state},
 		},
@@ -677,8 +681,10 @@ func (k *effectKernel) mintGrantAfterAnswer() (content.Grant, bool) {
 	// that follows the answer is a new unit of work under a new authority,
 	// and the calls after it are minted from the same policy. A run with no
 	// fresh grant is left exactly as it was.
-	k.grant = *fresh
-	return k.grant, true
+	k.grantMu.Lock()
+	k.grant = copyGrant(*fresh)
+	k.grantMu.Unlock()
+	return k.currentGrant(), true
 }
 
 // announce is the visible tool call: the one place that holds the
@@ -710,6 +716,10 @@ func (k *effectKernel) announce(call Call, state *kernelCall) error {
 type kernelPolicy struct{ state *kernelCall }
 
 func (p kernelPolicy) Decide(ctx context.Context, call Call) Decision {
+	return p.decide(ctx, call, false)
+}
+
+func (p kernelPolicy) decide(ctx context.Context, call Call, refusalOnly bool) Decision {
 	k := p.state.kernel
 	decl := call.Declaration()
 	resources, resourceDeclaration := call.Resources()
@@ -736,6 +746,12 @@ func (p kernelPolicy) Decide(ctx context.Context, call Call) Decision {
 	}
 
 	outcome, reason, verdict := k.decideInvocationWithReason(decl, resources, resourceDeclaration, invocation)
+	if refusalOnly {
+		if outcome == policyRefuse {
+			return Deny{Reason: refusalResult(tool, reason, "")}
+		}
+		return Allow{}
+	}
 	outOfScope := outOfScopeFact(verdict)
 	// askNow raises the question this call needs — unless the floor refuses
 	// the call first, because a question whose yes the floor would refuse is
@@ -866,6 +882,17 @@ func (m *effectKernel) prepareQuestion(ctx context.Context, call Call, state *ke
 	return m.escalate(ctx, decl, callID, rawArgs, call.Arguments(), resources, invocation, state.outOfScope)
 }
 
+// kernelPolicyGuard reuses the policy's refusal after the wait. An Ask is
+// already answered; a new refusal is not authority a person's yes can override.
+type kernelPolicyGuard struct{ state *kernelCall }
+
+func (g kernelPolicyGuard) Refuse(ctx context.Context, call Call) (string, bool) {
+	if deny, ok := kernelPolicy(g).decide(ctx, call, true).(Deny); ok {
+		return deny.Reason, true
+	}
+	return "", false
+}
+
 // kernelGrantGuard is the grant's own interval: past its deadline there is no
 // authority for any row to read a decision out of. It is a Guard rather than a
 // PreCall because the interval is read AFTER the answer, where ADR-anntnxdj
@@ -953,6 +980,29 @@ func (a kernelAttempts) Open(ctx context.Context, call Call) error {
 		return fmt.Errorf("agent tool %q: record attempt: %w", decl.Name, err)
 	}
 	a.state.execID, a.state.entryID = execID, entryID
+	a.state.attempt = 1
+	if k.approvals != nil {
+		if _, ok := k.approvals.EntryIDFor(k.proposal(call.Tool(), call.CallID(), string(call.RawParams()))); ok {
+			a.state.attempt = 2
+		}
+	}
+	return nil
+}
+
+// Continue records the approved release as the same entry's next attempt.
+// The tool's retained result stays on the stack; no capability is rebuilt.
+func (a kernelAttempts) Continue(ctx context.Context, call Call) error {
+	k := a.state.kernel
+	if err := k.closeAttempt(ctx, a.state.execID, content.TermInterrupted, content.EntryInterrupted); err != nil {
+		return err
+	}
+	a.state.execID = 0
+	a.state.attempt++
+	execID, err := startAttemptExecution(ctx, k.ledger, call.Grant(), a.state.entryID, a.state.attempt)
+	if err != nil {
+		return err
+	}
+	a.state.execID = execID
 	return nil
 }
 
@@ -1694,7 +1744,7 @@ func (m *effectKernel) noteCause(ctx context.Context, causedEntryID string) {
 // interval "the attempt exists from before the effect until the outcome or a
 // terminal reason is recorded".
 func (m *effectKernel) closeAttempt(ctx context.Context, execID int64, reason content.TerminationReason, status content.EntryStatus) error {
-	if m.ledger == nil {
+	if m.ledger == nil || execID == 0 {
 		return nil
 	}
 	// Same defect, same fix as attemptRecordingDispatcher.Dispatch
@@ -1837,8 +1887,26 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 	// attempt opens between them and the narrowed capability, and the
 	// approver is an adapter that keeps the kernel's own suspension exactly
 	// until nocx-a62cl.3.4 replaces it with a service that blocks.
+	release, declined, enterErr := k.order.enter(ctx)
+	if enterErr != nil {
+		return modelResult{}, &PipelineRefusal{
+			Call:   Call{runID: k.runID, tool: name},
+			Reason: "the call was cancelled while it waited for its turn: " + errText(enterErr),
+			Cause:  enterErr,
+		}
+	}
+	defer release()
+	if declined != nil {
+		reason := declined.Reason
+		if reason == "" {
+			reason = "a person declined the call before this one"
+		}
+		return modelResult{text: reason, kind: modelNocxMessage}, nil
+	}
 	state := &kernelCall{kernel: k}
-	pipeline, pipelineErr := NewPipeline(k.dispatcher, k.authorityChain(state))
+	chain := k.authorityChain(state)
+	// The kernel retains the slot through outcome recording, beyond run.
+	pipeline, pipelineErr := NewPipeline(k.dispatcher, chain)
 	if pipelineErr != nil {
 		return modelResult{}, pipelineErr
 	}
@@ -1849,13 +1917,16 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		Grant:      k.grant,
 		RawParams:  []byte(rawArgs),
 	}
-	outcome, dispatchErr := pipeline.run(request, k.attempt, callID)
+	outcome, dispatchErr := pipeline.runOrdered(request, k.attempt, callID, true)
 	if dispatchErr != nil {
 		// A screen that could not see is a run failure, never an answer:
 		// nothing leaves when the screen cannot see, and it reaches here
 		// as the screen's Refuse: a Verdict cannot carry an error, so the
 		// screen recorded it and the kernel reports it.
 		if state.egressGateErr != nil {
+			if state.execID != 0 {
+				_ = k.closeAttempt(ctx, state.execID, content.TermFailed, content.EntryFailure)
+			}
 			var refusal *PipelineRefusal
 			tool := name
 			if errors.As(dispatchErr, &refusal) && refusal.Call.Tool() != "" {
@@ -2166,4 +2237,11 @@ func markedWindows(in []MarkedSessionWindow) []agenttools.MarkedSessionWindow {
 		})
 	}
 	return out
+}
+
+// currentGrant is the snapshot for catalogue readers outside the turn slot.
+func (k *effectKernel) currentGrant() content.Grant {
+	k.grantMu.RLock()
+	defer k.grantMu.RUnlock()
+	return copyGrant(k.grant)
 }

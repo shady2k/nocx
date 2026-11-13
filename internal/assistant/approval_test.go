@@ -337,10 +337,13 @@ func TestAsk_AnApprovedEgressQuestionCompletesTheThread(t *testing.T) {
 	if err != nil || e == nil {
 		t.Fatalf("thread entry: %v (err %v)", e, err)
 	}
-	if len(e.Executions) != 1 {
-		t.Fatalf("thread executions = %+v, want one — the call ran once and its result was released, not re-run", e.Executions)
+	if len(e.Executions) != 2 {
+		t.Fatalf("thread executions = %+v, want interrupted execution and approved release", e.Executions)
 	}
-	ex := e.Executions[0]
+	if e.Executions[0].Attempt != 1 || term(e.Executions[0].TerminationReason) != content.TermInterrupted || e.Executions[1].Attempt != 2 {
+		t.Fatalf("approval did not continue the same entry: %+v", e.Executions)
+	}
+	ex := e.Executions[1]
 	if ex.TerminationReason == nil || term(ex.TerminationReason) != content.TermCompleted {
 		t.Fatalf("the attempt closed %v, want completed after the answer", ex.TerminationReason)
 	}

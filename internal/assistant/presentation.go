@@ -54,7 +54,7 @@ func (s *presentationState) Names() []string {
 }
 
 func (m *policyMiddleware) presentationProjection() agenttools.PresentationProjection {
-	grant := m.kernel.grant
+	grant := m.kernel.currentGrant()
 	if m.grantProvider != nil {
 		grant = m.grantProvider()
 	}
@@ -73,7 +73,7 @@ func (m *policyMiddleware) searchTools(ctx context.Context, rawArgs string) (str
 		return "", fmt.Errorf("tools.search: invalid arguments: %w", err)
 	}
 	projection := m.presentationProjection()
-	grant := m.kernel.grant
+	grant := m.kernel.currentGrant()
 	if m.grantProvider != nil {
 		grant = m.grantProvider()
 	}

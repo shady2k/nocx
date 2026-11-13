@@ -8,14 +8,16 @@ package assistant
 // receives a continuation, so none can skip, repeat or replace the execution:
 // the pipeline calls the next point itself.
 //
-// This file is the seam later stages plug into. Today's callers still pass
-// dispatch.go's ad-hoc transform, gate and beforeExecute steps; moving the tool
-// endpoint and the kernel onto this pipeline is nocx-a62cl.2.2 and
-// nocx-a62cl.2.3.
+// This file is the seam later stages plug into. The kernel's in-process calls
+// already run through it (nocx-a62cl.2.3), with its own preparation, policy and
+// pre-execute steps as links until stage 2 rewrites them onto the points; the
+// tool endpoint follows in nocx-a62cl.2.2.
 
 import (
 	"context"
 	"fmt"
+
+	"github.com/shady2k/nocx/internal/agenttools"
 )
 
 // Call is one exact proposal, as every point sees it: the run, the attempt, the
@@ -153,6 +155,32 @@ type AuthorityChain struct {
 	Approver Approver
 	Guards   []Guard
 	Screens  []Screen
+
+	// The kernel's own steps (nocx-a62cl.2.3), until stage 2 rewrites its
+	// policy onto the points above. They are unexported because they are the
+	// kernel's machinery rather than the authority vocabulary the record
+	// names: prepare refines the declaration before the call's facts are
+	// derived (command classification), decide is the kernel's policy step —
+	// which may fail, and whose refusals are answers rather than faults — and
+	// beforeTool announces the call after the declaration is narrowed. Each is
+	// called at the place the pipeline owns, and none receives a continuation,
+	// so none can skip, repeat or replace the execution.
+	prepare    func(*preparedInvocation) error
+	decide     func(context.Context, Call, *preparedInvocation) (Decision, error)
+	beforeTool func(context.Context, Call, *preparedInvocation, agenttools.Capability) error
+	// execute is the caller's own runtime for the one tool call. Nil uses the
+	// operation's executor, which is what the tool endpoint wants.
+	execute dispatchExecutor
+
+	// callerOwnsCancellation says this caller's own steps decide what a
+	// cancelled context means, so the pipeline does not refuse the call before
+	// they run. The kernel's run lease is why: a lease that timed out ends the
+	// run's context and its outcome must still be recorded, because that write
+	// closes the command-to-turn interval
+	// (run_test.go's TestMiddleware_RunLeaseOutcomeRecordsCauseAfterCancellation).
+	// The zero value is the pipeline's own rule: a call whose context ended is
+	// a refusal, which is what the tool endpoint's chain wants.
+	callerOwnsCancellation bool
 }
 
 // Pipeline runs calls through one chain. It is the fixed half of the authority
@@ -196,14 +224,28 @@ func (e *PipelineRefusal) Error() string {
 func (e *PipelineRefusal) Unwrap() error { return e.Cause }
 
 // Dispatch runs one call through the chain, in the only order there is: schema,
-// PreCall*, the approver on an Ask, Guard*, the declaration's Narrow, the tool
-// exactly once, Screen*. Every point observes ctx, and a context that ended is
-// a refusal wherever the pipeline notices it.
+// the caller's own decision step, PreCall*, the approver on an Ask, Guard*, the
+// declaration's Narrow, the tool exactly once, Screen*. Every point observes
+// ctx, and a context that ended is a refusal wherever the pipeline notices it —
+// except for a chain whose caller owns what cancellation means (the kernel's
+// run lease), which AuthorityChain.callerOwnsCancellation states.
 func (p *Pipeline) Dispatch(invocation ToolInvocation, attempt int, callID string) (string, error) {
-	ctx := invocation.Context
-	prepared, err := p.operation.prepare(invocation, nil)
+	outcome, err := p.run(invocation, attempt, callID)
 	if err != nil {
 		return "", err
+	}
+	return outcome.output, outcome.runErr
+}
+
+// run is Dispatch's whole body, returning the dispatch outcome as well: the
+// prepared call a carrier must screen after the tool ran, and the tool's own
+// error apart from a refusal, which the kernel's caller needs to record the
+// attempt's outcome. The tool endpoint sees only Dispatch.
+func (p *Pipeline) run(invocation ToolInvocation, attempt int, callID string) (dispatchOutcome, error) {
+	ctx := invocation.Context
+	prepared, err := p.operation.prepare(invocation, p.chain.prepare)
+	if err != nil {
+		return dispatchOutcome{}, err
 	}
 	call := Call{
 		runID:   invocation.RunContext.RunID,
@@ -212,16 +254,35 @@ func (p *Pipeline) Dispatch(invocation ToolInvocation, attempt int, callID strin
 		callID:  callID,
 		argHash: canonicalArgHash(string(invocation.RawParams)),
 	}
-	if refusal := cancelled(ctx, call, "before any policy decided it"); refusal != nil {
-		return "", refusal
+	if !p.chain.callerOwnsCancellation {
+		if refusal := cancelled(ctx, call, "before any policy decided it"); refusal != nil {
+			return dispatchOutcome{}, refusal
+		}
 	}
-	asked, err := p.decide(ctx, call)
+	var asked *Ask
+	if p.chain.decide != nil {
+		decision, decideErr := p.chain.decide(ctx, call, &prepared)
+		if decideErr != nil {
+			return dispatchOutcome{}, decideErr
+		}
+		switch answer := decision.(type) {
+		case Allow:
+			// the call goes on to the chain's own points
+		case Deny:
+			return dispatchOutcome{prepared: &prepared}, &PipelineRefusal{Call: call, Reason: answer.Reason}
+		case Ask:
+			asked = &answer
+		default:
+			return dispatchOutcome{}, &PipelineRefusal{Call: call, Reason: fmt.Sprintf("%T answered neither allow, deny nor ask, and an unanswered decision is a refusal", p.chain.decide)}
+		}
+	}
+	asked, err = p.decide(ctx, call, asked)
 	if err != nil {
-		return "", err
+		return dispatchOutcome{}, err
 	}
 	if asked != nil {
 		if refusal := p.answer(ctx, call, *asked); refusal != nil {
-			return "", refusal
+			return dispatchOutcome{}, refusal
 		}
 	}
 	for _, guard := range p.chain.Guards {
@@ -232,14 +293,22 @@ func (p *Pipeline) Dispatch(invocation ToolInvocation, attempt int, callID strin
 		if reason == "" {
 			reason = "a guard refused the call and gave no reason"
 		}
-		return "", &PipelineRefusal{Call: call, Reason: reason}
+		return dispatchOutcome{}, &PipelineRefusal{Call: call, Reason: reason}
 	}
-	if refusal := cancelled(ctx, call, "before the tool could run"); refusal != nil {
-		return "", refusal
+	if !p.chain.callerOwnsCancellation {
+		if refusal := cancelled(ctx, call, "before the tool could run"); refusal != nil {
+			return dispatchOutcome{}, refusal
+		}
 	}
-	outcome, err := p.operation.executePrepared(&prepared, nil, nil)
+	var beforeExecute func(*preparedInvocation, agenttools.Capability) error
+	if p.chain.beforeTool != nil {
+		beforeExecute = func(prepared *preparedInvocation, capability agenttools.Capability) error {
+			return p.chain.beforeTool(ctx, call, prepared, capability)
+		}
+	}
+	outcome, err := p.operation.executePrepared(&prepared, beforeExecute, p.chain.execute)
 	if err != nil {
-		return "", err
+		return outcome, err
 	}
 	outbound := Outbound{Text: outcome.output, WasError: outcome.runErr != nil}
 	if outcome.runErr != nil {
@@ -247,18 +316,17 @@ func (p *Pipeline) Dispatch(invocation ToolInvocation, attempt int, callID strin
 	}
 	for _, screen := range p.chain.Screens {
 		if refusal := p.inspect(ctx, call, screen, outbound); refusal != nil {
-			return "", refusal
+			return dispatchOutcome{}, refusal
 		}
 	}
-	return outcome.output, outcome.runErr
+	return outcome, nil
 }
 
 // decide runs every PreCall in order. A Deny refuses the call at once. The first
 // Ask is remembered and the remaining PreCalls still run, because a later point
 // may refuse the call outright and a question nobody needs to answer is worse
 // than none — at most one question is put to a person for one call.
-func (p *Pipeline) decide(ctx context.Context, call Call) (*Ask, error) {
-	var asked *Ask
+func (p *Pipeline) decide(ctx context.Context, call Call, asked *Ask) (*Ask, error) {
 	for _, precall := range p.chain.PreCalls {
 		switch decision := precall.Decide(ctx, call).(type) {
 		case Allow:

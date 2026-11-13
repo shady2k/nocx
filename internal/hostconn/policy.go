@@ -1,7 +1,7 @@
 package hostconn
 
 // The connection's prober and the ONE closing policy (design §5.3, "Silence
-// and closing").
+// and closing" and "On a wake signal").
 //
 // The rule the whole file exists for: SILENCE ENDS NOTHING BY ITSELF. A probe
 // that does not come back is evidence, and the evidence is shown to a person.
@@ -11,9 +11,18 @@ package hostconn
 // never closed for silence: the person chooses to wait or to reconnect, and
 // waiting costs a click while a wrong close costs the work.
 //
+// A WAKE is the same policy with a shorter clock: the machine was asleep, every
+// connection was frozen, and the one thing worth knowing is whether anything
+// survived. So each live connection is asked to answer at once (unless a probe
+// is already parked — a second would queue behind the mux's send lock), and an
+// answer that does not come reads stalled five seconds after the signal (Q4).
+// Thirty seconds without one ends a helper-owned connection: a socket that
+// crossed a sleep is usually dead. A plain-shell connection follows the silence
+// rule and asks.
+//
 // Every moment here is the injected clock's (clock.go). The policy is therefore
-// assertable in seconds of simulated time, and the fault harness states Q3, Q5
-// and the ten-minute case without waiting for any of them.
+// assertable in seconds of simulated time, and the fault harness states Q3, Q4,
+// Q5 and the ten-minute case without waiting for any of them.
 
 import (
 	"context"
@@ -44,19 +53,56 @@ const (
 	// stays silent: five minutes, from the owner's "three minutes and then it
 	// connected". A plain-shell connection has no such budget.
 	SilenceCloseBudget = 5 * time.Minute
+	// WakeProbeDeadline is how long a connection may take to answer the probe a
+	// WAKE sent before it reads stalled: Q4's "within 5 s of the wake signal".
+	WakeProbeDeadline = 5 * time.Second
+	// WakeCloseAfter is how long a helper-owned connection may stay unanswered
+	// after a wake before the policy ends it: a socket that crossed a sleep is
+	// usually dead, and reattaching loses nothing.
+	WakeCloseAfter = 30 * time.Second
 )
 
-// guard is one connection's prober and closing policy. It runs for as long as
-// the connection is the supervisor's live one.
-//
-// TIME. Every moment here is the injected clock's, and a move acts at the
-// moment it was DUE rather than at the moment the loop noticed it: a test that
-// advances thirty seconds at once must see the probe sent at fifteen and its
-// deadline missed at thirty, exactly as a machine that had been left alone
-// would have. That is what makes Q3 ("stalled within 30 s") assertable without
-// waiting for it.
+// guardState is one connection's prober state: what is in flight, what is due,
+// and whether the connection is proving itself after a wake.
+type guardState struct {
+	// probeOut is non-nil while a probe is outstanding. There is at most one: a
+	// parked SendRequest holds the mux's send lock, so a second probe would
+	// queue behind it and measure nothing.
+	probeOut chan error
+	// probedAt is when the outstanding probe was SENT, and silentSince is the
+	// moment silence began (the send of the probe that did not come back). Zero
+	// silentSince means the connection is not stalled.
+	probedAt    monoclock.Nanos
+	silentSince monoclock.Nanos
+	nextProbe   monoclock.Nanos
+	// lookOut is non-nil while a look-only dial is in flight.
+	lookOut      chan error
+	nextLook     monoclock.Nanos
+	lookSent     monoclock.Nanos
+	lookAnswered bool
+	lookAt       monoclock.Nanos
+	nudged       bool
+	// wokeAt is the moment of the last wake signal while this connection has
+	// not answered since; zero once it has. It shortens the probe's deadline
+	// and bounds the close.
+	wokeAt monoclock.Nanos
+}
+
+// prober drives one live connection's probe cadence and closing policy.
+type prober struct {
+	sup    *Supervisor
+	live   *live
+	gen    uint64
+	clock  Clock
+	prober Prober
+	looker Looker
+	st     guardState
+}
+
+// guard starts the connection's prober. It runs for as long as the connection
+// is the supervisor's live one.
 func (s *Supervisor) guard(l *live, gen uint64) {
-	prober, ok := l.link.(Prober)
+	probe, ok := l.link.(Prober)
 	if !ok {
 		// A carrier that cannot ask the far side a question never reads
 		// stalled: it stays honest about what it cannot measure
@@ -64,190 +110,224 @@ func (s *Supervisor) guard(l *live, gen uint64) {
 		return
 	}
 	looker, _ := l.link.(Looker)
+	g := &prober{
+		sup: s, live: l, gen: gen, clock: s.clock, prober: probe, looker: looker,
+		st: guardState{nextProbe: l.nextProbe},
+	}
+	g.run()
+}
 
-	var (
-		// probeOut is non-nil while a probe is outstanding. There is at most
-		// one: a parked SendRequest holds the mux's send lock, so a second
-		// probe would queue behind it and measure nothing.
-		probeOut chan error
-		probedAt monoclock.Nanos
-		// silentSince is the moment the outstanding probe was sent — the last
-		// moment the connection could have been answering. Zero while the
-		// connection is not stalled.
-		silentSince monoclock.Nanos
-		nextProbe   = l.nextProbe
-		cadence     = l.probeInterval
-		// lookOut is non-nil while a look-only dial is in flight.
-		lookOut  chan error
-		nextLook monoclock.Nanos
-		// lookAnswered is set by the first look the host answers, and it stops
-		// the cadence: a look can be logged as a preauth close, and a person
-		// whose link is down must not be locked out by their own client.
-		lookAnswered bool
-		lookAt       monoclock.Nanos
-		lookSent     monoclock.Nanos
-		nudged       bool
-	)
-
+// run is the loop. A due move acts at the moment it was DUE rather than at the
+// moment the loop noticed it: a test that advances thirty seconds at once must
+// see the probe sent at fifteen and its deadline missed at thirty, exactly as a
+// machine that had been left alone would have.
+func (g *prober) run() {
 	for {
-		now := s.clock.Now()
-		wait := nextProbe
-		switch {
-		case probeOut != nil && silentSince == 0:
-			wait = probedAt + span(ProbeDeadline)
-		case silentSince != 0:
-			wait = s.nextPolicyMove(now, silentSince, nextLook, lookAnswered, lookAt, lookOut != nil)
-		}
+		now := g.clock.Now()
+		wait := g.next(now)
 		if now >= wait {
-			// The move is due, and it acts at the moment it was due.
-			if s.policyDue(l, gen, wait, now,
-				cadence, &probeOut, &probedAt, &silentSince, &nextProbe,
-				&lookOut, &nextLook, &lookAnswered, &lookAt, &lookSent, &nudged,
-				prober, looker) {
+			if g.due(wait) {
 				return
 			}
 			continue
 		}
 		select {
-		case <-l.stop:
+		case <-g.live.stop:
 			return
-		case err := <-probeOut:
-			probeOut = nil
-			if err != nil {
-				// The transport has ended under the probe. The watcher on
-				// Done reports it, and it is a fact rather than an inference
-				// (design §5.3: "A transport error closes at once").
+		case at := <-g.live.wake:
+			g.woke(at)
+		case err := <-g.st.probeOut:
+			if g.probeResult(err) {
 				return
 			}
-			// It answered. How long it took is the measurement the product
-			// shows for a slow host; it is never a liveness verdict on its
-			// own.
-			s.answered(l, gen)
-			s.observe(l, Observation{Answered: true, RoundTrip: time.Duration(s.clock.Now() - probedAt)})
-			silentSince, lookAnswered, nudged, lookOut, lookAt = 0, false, false, nil, 0
-			// The cadence is measured from the probe's SEND, not from the
-			// moment this loop got to the answer: a host that answers late
-			// must not also be asked late.
-			nextProbe = probedAt + span(cadence)
-		case err := <-lookOut:
-			lookOut = nil
-			if err != nil {
-				// The host did not answer a new connection: the evidence is
-				// that it is away, and the connection stays as it is.
-				nextLook = lookSent + span(LookInterval)
-				continue
-			}
-			if !lookAnswered {
-				lookAnswered, lookAt = true, s.clock.Now()
-				if !nudged {
-					nudged = true
-					// ONE nudge, only after a look: a request with no reply
-					// wanted passes a parked probe, and a host that rebooted
-					// answers it with a reset — a transport error, and an
-					// unaided reconnect (Q5). A host that still holds the flow
-					// acknowledges it and nothing changes, so it can end no
-					// live shell.
-					if err := prober.Nudge(); err != nil {
-						return
-					}
-				}
-			}
-		case <-s.clock.After(time.Duration(wait - now)):
+		case err := <-g.st.lookOut:
+			g.lookResult(err)
+		case <-g.clock.After(time.Duration(wait - now)):
 		}
 	}
 }
 
-// nextPolicyMove answers when the policy next has something to do while the
-// connection is stalled.
-func (s *Supervisor) nextPolicyMove(now, silentSince, nextLook monoclock.Nanos, lookAnswered bool, lookAt monoclock.Nanos, lookInFlight bool) monoclock.Nanos {
-	if s.HoldsPlainShell() {
+// next answers when the policy next has something to do.
+func (g *prober) next(now monoclock.Nanos) monoclock.Nanos {
+	st := &g.st
+	switch {
+	case st.probeOut != nil && st.silentSince == 0:
+		if st.wokeAt != 0 {
+			return st.wokeAt + span(WakeProbeDeadline)
+		}
+		return st.probedAt + span(ProbeDeadline)
+	case st.silentSince != 0:
+		return g.nextStalled(now)
+	}
+	return st.nextProbe
+}
+
+// nextStalled answers when the policy next has something to do on a connection
+// that has stopped answering.
+func (g *prober) nextStalled(now monoclock.Nanos) monoclock.Nanos {
+	st := &g.st
+	if g.sup.HoldsPlainShell() {
 		// No close is due on a connection carrying a plain shell: that is the
 		// person's choice. The moves that remain are a look that has not been
 		// made and the probe's own answer (its channel is a select case) —
-		// waiting on a budget that may never be spent would only keep the
-		// loop awake.
-		if !lookAnswered && !lookInFlight {
-			return nextLook
+		// waiting on a budget that may never be spent would only keep the loop
+		// awake.
+		if !st.lookAnswered && st.lookOut == nil {
+			return st.nextLook
 		}
 		return now + span(SilenceCloseBudget)
 	}
-	next := silentSince + span(SilenceCloseBudget)
-	if !lookAnswered && !lookInFlight && nextLook < next {
-		next = nextLook
+	next := st.silentSince + span(SilenceCloseBudget)
+	if st.wokeAt != 0 {
+		if due := st.wokeAt + span(WakeCloseAfter); due < next {
+			next = due
+		}
 	}
-	if grace := lookAt + span(LookGrace); lookAnswered && grace < next {
+	if !st.lookAnswered && st.lookOut == nil && st.nextLook < next {
+		next = st.nextLook
+	}
+	if grace := st.lookAt + span(LookGrace); st.lookAnswered && grace < next {
 		next = grace
 	}
 	return next
 }
 
-// policyDue performs the one move that was due at `at`, observed at `now`, and
-// reports whether the guard should end.
-func (s *Supervisor) policyDue(
-	l *live, gen uint64, at, now monoclock.Nanos, cadence time.Duration,
-	probeOut *chan error, probedAt *monoclock.Nanos, silentSince *monoclock.Nanos,
-	nextProbe *monoclock.Nanos, lookOut *chan error, nextLook *monoclock.Nanos,
-	lookAnswered *bool, lookAt *monoclock.Nanos, lookSent *monoclock.Nanos, nudged *bool,
-	prober Prober, looker Looker,
-) bool {
+// due performs the one move that was due at `at`, and reports whether the guard
+// should end.
+func (g *prober) due(at monoclock.Nanos) bool {
+	st := &g.st
+	now := g.clock.Now()
 	switch {
-	case *probeOut == nil && *silentSince == 0:
-		// Ask the connection to answer.
-		out := make(chan error, 1)
-		*probeOut = out
-		*probedAt = at
-		*nextProbe = at + span(cadence)
-		go func() {
-			// Probe takes no context: a call that does not come back stays
-			// parked inside the library, holding the mux's send lock. That is
-			// the design's own state (design §5.3: "the parked probe"), and it
-			// is why the deadline is the supervisor's and not the call's.
-			_, err := prober.Probe(context.Background())
-			out <- err
-		}()
+	case st.probeOut == nil && st.silentSince == 0:
+		g.startProbe(at)
 		return false
-	case *silentSince == 0:
+	case st.silentSince == 0:
 		// The probe passed its deadline. Silence is now the state, and the
 		// probe stays parked: it is the evidence that will notice the answer.
-		*silentSince = *probedAt
-		*nextLook = *probedAt + span(LookInterval)
-		s.silent(l, gen, time.Duration(now-*probedAt))
-		s.observe(l, Observation{Answered: false})
+		st.silentSince = st.probedAt
+		st.nextLook = st.probedAt + span(LookInterval)
+		g.sup.silent(g.live, g.gen, time.Duration(now-st.probedAt))
+		g.sup.observe(g.live, Observation{Answered: false})
 		return false
 	}
 
 	// Stalled. A look, if one is due and none is in flight.
-	if *lookOut == nil && !*lookAnswered && now >= *nextLook {
-		if looker == nil {
-			// No look is possible (a routed plan, or a carrier without one):
-			// the budget is the only bound left.
-			*nextLook = now + span(SilenceCloseBudget)
-			return false
-		}
-		out := make(chan error, 1)
-		*lookOut = out
-		*lookSent = at
-		*nextLook = at + span(LookInterval)
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), ProbeDeadline)
-			defer cancel()
-			out <- looker.Look(ctx)
-		}()
+	if st.lookOut == nil && !st.lookAnswered && now >= st.nextLook {
+		g.startLook(at)
 		return false
 	}
 
-	// A helper-owned connection closes on the evidence: 30 s after the host
-	// answered a look while the flow stayed silent, or at the outer budget.
-	if s.HoldsPlainShell() {
+	// A helper-owned connection closes on the evidence: thirty seconds after a
+	// wake without an answer, thirty after the host answered a look while the
+	// flow stayed silent, or at the outer budget.
+	if g.sup.HoldsPlainShell() {
 		return false
 	}
-	if *lookAnswered && now >= *lookAt+span(LookGrace) {
-		return s.endForSilence(l, gen, "the host answers new connections and this one has been silent past the grace")
+	if st.wokeAt != 0 && now >= st.wokeAt+span(WakeCloseAfter) {
+		return g.sup.endForSilence(g.live, g.gen, "did not answer after the wake")
 	}
-	if now >= *silentSince+span(SilenceCloseBudget) {
-		return s.endForSilence(l, gen, "silent past the close budget")
+	if st.lookAnswered && now >= st.lookAt+span(LookGrace) {
+		return g.sup.endForSilence(g.live, g.gen, "the host answers new connections and this one has been silent past the grace")
+	}
+	if now >= st.silentSince+span(SilenceCloseBudget) {
+		return g.sup.endForSilence(g.live, g.gen, "silent past the close budget")
 	}
 	return false
+}
+
+// startProbe asks the connection to answer, as of `at`.
+func (g *prober) startProbe(at monoclock.Nanos) {
+	out := make(chan error, 1)
+	g.st.probeOut = out
+	g.st.probedAt = at
+	g.st.nextProbe = at + span(g.live.probeInterval)
+	go func() {
+		// Probe takes no context: a call that does not come back stays parked
+		// inside the library, holding the mux's send lock. That is the design's
+		// own state (design §5.3: "the parked probe"), and it is why the
+		// deadline is the supervisor's and not the call's.
+		_, err := g.prober.Probe(context.Background())
+		out <- err
+	}()
+}
+
+// startLook makes one look-only dial, as of `at`.
+func (g *prober) startLook(at monoclock.Nanos) {
+	out := make(chan error, 1)
+	g.st.lookOut = out
+	g.st.lookSent = at
+	g.st.nextLook = at + span(LookInterval)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), ProbeDeadline)
+		defer cancel()
+		out <- g.looker.Look(ctx)
+	}()
+}
+
+// woke starts the connection's proof of life after a wake signal seen at `at`.
+//
+// The moment is the signal's, not this loop's: a fan-out that ran a moment late
+// must still measure the five seconds from the signal, or a slow scheduler
+// would buy the connection time it has not earned.
+func (g *prober) woke(at monoclock.Nanos) {
+	g.st.wokeAt = at
+	if g.st.probeOut == nil {
+		// The probe a wake sends is due at the signal: the loop's next pass
+		// sees nextProbe == at and starts it there.
+		g.st.nextProbe = at
+	}
+	// With a probe already outstanding nothing is sent: it is the evidence, and
+	// a second would queue behind the mux's send lock. Its deadline becomes the
+	// wake's, because an answer is what the wake asked for.
+}
+
+// probeResult applies one probe's answer or failure; it reports whether the
+// guard should end.
+func (g *prober) probeResult(err error) bool {
+	g.st.probeOut = nil
+	if err != nil {
+		// The transport has ended under the probe. The watcher on Done reports
+		// it, and it is a fact rather than an inference (design §5.3: "A
+		// transport error closes at once").
+		return true
+	}
+	g.sup.answered(g.live, g.gen)
+	g.sup.observe(g.live, Observation{Answered: true, RoundTrip: time.Duration(g.clock.Now() - g.st.probedAt)})
+	// The cadence is measured from the probe's SEND, not from the moment this
+	// loop got to the answer: a host that answers late must not also be asked
+	// late.
+	g.st.nextProbe = g.st.probedAt + span(g.live.probeInterval)
+	g.st.silentSince, g.st.lookAnswered, g.st.nudged = 0, false, false
+	g.st.lookOut, g.st.lookAt, g.st.lookSent, g.st.wokeAt = nil, 0, 0, 0
+	return false
+}
+
+// lookResult applies one look-only dial's answer.
+func (g *prober) lookResult(err error) {
+	g.st.lookOut = nil
+	if err != nil {
+		// The host did not answer a new connection: the evidence is that it is
+		// away, and the connection stays as it is.
+		g.st.nextLook = g.st.lookSent + span(LookInterval)
+		return
+	}
+	if g.st.lookAnswered {
+		return
+	}
+	g.st.lookAnswered, g.st.lookAt = true, g.clock.Now()
+	if g.st.nudged {
+		return
+	}
+	g.st.nudged = true
+	// ONE nudge, only after a look: a request with no reply wanted passes a
+	// parked probe, and a host that rebooted answers it with a reset — a
+	// transport error, and an unaided reconnect (Q5). A host that still holds
+	// the flow acknowledges it and nothing changes, so it can end no live
+	// shell.
+	if err := g.prober.Nudge(); err != nil {
+		// The transport is over; the watcher on Done reports it.
+		return
+	}
 }
 
 // silent reports the connection stalled, with how long it has gone unanswered.

@@ -30,6 +30,7 @@ import (
 	"github.com/shady2k/nocx/internal/hostconn"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/wakesource"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -45,19 +46,34 @@ type Carrier struct {
 	conns  *hostconn.Manager
 }
 
-// New builds the carrier over this machine's ssh client, on the process's
-// clock: the same client the helper already holds, because the pool in it is the
-// connection table and a second client would be a second pool (AD-4).
-func New(client *ssh.RealClient, logger log.Logger) *Carrier {
-	return NewWithClock(client, logger, hostconn.RealClock{})
+// Options is what a caller decides about the carrier's connection manager.
+type Options struct {
+	// Clock is the supervisor's time source; nil is the process's.
+	Clock hostconn.Clock
+	// Wake is the machine's wake source; nil is ONE WITH NO SIGNAL, which is
+	// what a test driving its own signal wants. The production constructor
+	// (New) supplies internal/wakesource's.
+	Wake hostconn.WakeSource
 }
 
-// NewWithClock is New on an injected clock. The fault harness states "within
-// 30 s" and "after ten minutes" by advancing time, not by waiting for it
-// (design §10), and the policy being asserted is the supervisor's.
-func NewWithClock(client *ssh.RealClient, logger log.Logger, clock hostconn.Clock) *Carrier {
+// New builds the carrier over this machine's ssh client, on the process's clock
+// and the machine's wake source: the same client the helper already holds,
+// because the pool in it is the connection table and a second client would be a
+// second pool (AD-4), and the two clocks the helper itself cannot read any
+// other way (design §5.3, "On a wake signal").
+func New(client *ssh.RealClient, logger log.Logger) *Carrier {
+	return NewWithOptions(client, logger, Options{Wake: wakesource.New()})
+}
+
+// NewWithOptions is New with the clock and the wake source decided by the
+// caller. The fault harness states "within 30 s", "within five seconds of the
+// signal" and "after ten minutes" by advancing a clock and by pulling a wake
+// source, not by waiting (design §10), and the policy being asserted is the
+// supervisor's.
+func NewWithOptions(client *ssh.RealClient, logger log.Logger, opts Options) *Carrier {
 	c := &Carrier{client: client, log: logger}
-	c.conns = hostconn.NewManager(c, logger, hostconn.WithClock(clock))
+	c.conns = hostconn.NewManager(c, logger,
+		hostconn.WithClock(opts.Clock), hostconn.WithWakeSource(opts.Wake))
 	return c
 }
 

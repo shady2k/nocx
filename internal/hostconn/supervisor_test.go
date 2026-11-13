@@ -148,8 +148,15 @@ func manager(t *testing.T, c *memoryCarrier) (*hostconn.Manager, *hostconn.Super
 // managerOn puts the same pair on a clock the test advances.
 func managerOn(t *testing.T, c *memoryCarrier, clock hostconn.Clock) (*hostconn.Manager, *hostconn.Supervisor) {
 	t.Helper()
+	return managerWith(t, c, clock, nil)
+}
+
+// managerWith puts the pair on an injected clock and, when given, a wake
+// source.
+func managerWith(t *testing.T, c *memoryCarrier, clock hostconn.Clock, wake hostconn.WakeSource) (*hostconn.Manager, *hostconn.Supervisor) {
+	t.Helper()
 	_, logger := logtest.New(t)
-	m := hostconn.NewManager(c, logger, hostconn.WithClock(clock))
+	m := hostconn.NewManager(c, logger, hostconn.WithClock(clock), hostconn.WithWakeSource(wake))
 	return m, m.Supervisor(plan().Key)
 }
 

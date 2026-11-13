@@ -539,3 +539,176 @@ func TestAHealthyConnectionNeverReadsStalledOverTenMinutes(t *testing.T) {
 		}
 	}
 }
+
+// ─── wake from sleep (nocx-oalo1.4.5) ────────────────────────────────────
+//
+// The machine's suspend is the test's to report: no CI machine can sleep, so the
+// stand's wake source is pulled and the clock is advanced. What is asserted is
+// the design's own sentence — one probe per connection at once, five seconds of
+// silence reads stalled (Q4), thirty ends a helper-owned connection, and a plain
+// shell follows the silence rule.
+
+// TestAWakeProbesAHealthyConnectionWithoutRedialingIt — a wake asks the
+// connection to prove itself, and a link that answers stays exactly where it is.
+func TestAWakeProbesAHealthyConnectionWithoutRedialingIt(t *testing.T) {
+	const password = "correct horse battery staple"
+	f := newFixture(t, password, newSigner(t))
+	proxy := sshtest.NewFaultProxy(t, f.addr)
+	clock := hostconntest.New()
+	stand := newStandOnClock(t, &coordinator{
+		password: password, verdict: proto.HostKeyTrusted, fingerprint: f.hostKeyFingerprint(),
+	}, discardLogger(), clock)
+	destination := destinationAt(t, proxy.Addr())
+
+	holder, err := stand.carrier.Acquire(context.Background(), supervisedSpec(t, f, destination, false))
+	if err != nil {
+		t.Fatalf("hold the connection: %v", err)
+	}
+	t.Cleanup(holder.Release)
+
+	stand.wake.Wake()
+	waittest.WaitFor(t, "the wake's probe to be answered", func() bool {
+		probes, _ := f.keepalivesSeen()
+		return probes == 1
+	})
+	// No clock advance at all: the probe is the wake's, sent at the signal.
+	if got := lastState(holder.States()).Kind; got != hostconn.Connected {
+		t.Fatalf("a healthy connection reads %v after a wake, want connected", got)
+	}
+	if got := f.connections(); got != 1 {
+		t.Fatalf("%d connections after a wake on a healthy link, want 1: a wake proves the connection, it does not redial it", got)
+	}
+}
+
+// TestAWakeOverAParkedProbeReadsStalledInFiveSecondsAndIsNotDoubled is Q4 and
+// the "one probe in flight" half together: the link is held, the wake's probe is
+// the one that does not come back, a second wake while it is parked sends
+// nothing, and when the wire is released exactly one probe reaches the host.
+func TestAWakeOverAParkedProbeReadsStalledInFiveSecondsAndIsNotDoubled(t *testing.T) {
+	const password = "correct horse battery staple"
+	f := newFixture(t, password, newSigner(t))
+	proxy := sshtest.NewFaultProxy(t, f.addr)
+	clock := hostconntest.New()
+	stand := newStandOnClock(t, &coordinator{
+		password: password, verdict: proto.HostKeyTrusted, fingerprint: f.hostKeyFingerprint(),
+	}, discardLogger(), clock)
+	destination := destinationAt(t, proxy.Addr())
+
+	holder, err := stand.carrier.Acquire(context.Background(), supervisedSpec(t, f, destination, false))
+	if err != nil {
+		t.Fatalf("hold the connection: %v", err)
+	}
+	t.Cleanup(holder.Release)
+
+	// Everything on the wire is held from here: the wake's probe cannot be
+	// answered, and a look-only dial has nowhere to get its version line from.
+	proxy.HoldBanner()
+	stand.wake.Wake()
+	clock.Advance(hostconn.WakeProbeDeadline)
+	waittest.WaitFor(t, "the connection to read stalled within the wake's five seconds", func() bool {
+		return lastState(holder.States()).Kind == hostconn.Stalled
+	})
+	if got := lastState(holder.States()).Silent; got != hostconn.WakeProbeDeadline {
+		t.Fatalf("stalled reports %v of silence, want %v (the wake's probe)", got, hostconn.WakeProbeDeadline)
+	}
+
+	// A second signal while that probe is parked: one probe is in flight, and a
+	// second would queue behind the mux's send lock and measure nothing.
+	stand.wake.Wake()
+
+	proxy.Release()
+	waittest.WaitFor(t, "the parked probe's answer", func() bool {
+		return lastState(holder.States()).Kind == hostconn.Connected
+	})
+	probes, _ := f.keepalivesSeen()
+	if probes != 1 {
+		t.Fatalf("the host answered %d probes, want 1: a wake with a parked probe must not double it", probes)
+	}
+}
+
+// TestAWakeClosesAHelperOwnedConnectionAndReconnects — thirty seconds after the
+// signal with no answer, and nothing is lost by closing it.
+func TestAWakeClosesAHelperOwnedConnectionAndReconnects(t *testing.T) {
+	const password = "correct horse battery staple"
+	f := newFixture(t, password, newSigner(t))
+	proxy := sshtest.NewFaultProxy(t, f.addr)
+	clock := hostconntest.New()
+	stand := newStandOnClock(t, &coordinator{
+		password: password, verdict: proto.HostKeyTrusted, fingerprint: f.hostKeyFingerprint(),
+	}, discardLogger(), clock)
+	destination := destinationAt(t, proxy.Addr())
+
+	holder, err := stand.carrier.Acquire(context.Background(), supervisedSpec(t, f, destination, false))
+	if err != nil {
+		t.Fatalf("hold the connection: %v", err)
+	}
+	t.Cleanup(holder.Release)
+
+	proxy.SilenceEstablished()
+	stand.wake.Wake()
+	clock.Advance(hostconn.WakeProbeDeadline)
+	waittest.WaitFor(t, "the stall", func() bool {
+		return lastState(holder.States()).Kind == hostconn.Stalled
+	})
+
+	clock.Advance(hostconn.WakeCloseAfter)
+	waittest.WaitFor(t, "the connection to be closed after the wake", func() bool {
+		state := lastState(holder.States())
+		return state.Kind == hostconn.Reconnecting && state.Cause == hostconn.CauseSilence
+	})
+	if !holder.Lost() {
+		t.Fatal("the transport outlived the wake's close")
+	}
+	// The next acquire dials afresh: the closed connection is not handed out.
+	next, err := stand.carrier.Acquire(context.Background(), supervisedSpec(t, f, destination, false))
+	if err != nil {
+		t.Fatalf("Acquire after the wake's close: %v", err)
+	}
+	t.Cleanup(next.Release)
+	if f.connections() < 2 {
+		t.Fatalf("%d connections after the wake's close, want a fresh dial", f.connections())
+	}
+}
+
+// TestAPlainShellConnectionSurvivesAWake — the person's terminal is not the
+// policy's to close, wake or no wake.
+func TestAPlainShellConnectionSurvivesAWake(t *testing.T) {
+	const password = "correct horse battery staple"
+	f := newFixture(t, password, newSigner(t))
+	proxy := sshtest.NewFaultProxy(t, f.addr)
+	clock := hostconntest.New()
+	stand := newStandOnClock(t, &coordinator{
+		password: password, verdict: proto.HostKeyTrusted, fingerprint: f.hostKeyFingerprint(),
+	}, discardLogger(), clock)
+	destination := destinationAt(t, proxy.Addr())
+
+	shell := stand.openShell(t, destination)
+	holder, err := stand.carrier.Acquire(context.Background(), supervisedSpec(t, f, destination, false))
+	if err != nil {
+		t.Fatalf("hold the connection: %v", err)
+	}
+	t.Cleanup(holder.Release)
+
+	proxy.SilenceEstablished()
+	stand.wake.Wake()
+	clock.Advance(hostconn.WakeProbeDeadline)
+	waittest.WaitFor(t, "the stall", func() bool {
+		return lastState(holder.States()).Kind == hostconn.Stalled
+	})
+
+	clock.Advance(10 * time.Minute)
+	if got := lastState(holder.States()).Kind; got != hostconn.Stalled {
+		t.Fatalf("a plain-shell connection reads %v ten minutes after a wake, want stalled", got)
+	}
+	if holder.Lost() {
+		t.Fatal("a plain-shell connection was closed after a wake")
+	}
+	if _, err := shell.Write([]byte("still here\n")); err != nil {
+		t.Fatalf("a plain shell refused a write after a wake: %v", err)
+	}
+
+	proxy.Pass()
+	waittest.WaitFor(t, "the connection to answer again", func() bool {
+		return lastState(holder.States()).Kind == hostconn.Connected
+	})
+}

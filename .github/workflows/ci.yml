@@ -128,8 +128,9 @@ jobs:
   # pull request (a release branch, a release calling this workflow), runs
   # everything. This workflow is NOT supporting here, and neither is whatever in
   # .githooks CI itself runs -- images/, check-deadcode.mjs and its baseline,
-  # check-log-context.mjs, which ci-frontend tests -- since they decide how
-  # everything else is checked, so a change to them runs every job. The four
+  # check-log-context.mjs and check-connection-owners.mjs, which ci-pipeline
+  # tests -- since they decide how everything else is checked, so a change to
+  # them runs every job. The four
   # git hooks and scripts/connect-clone.sh are supporting: CI never executes
   # them, so a product run proves nothing about a change to them, and AGENTS.md
   # "Git authority" names .githooks/ as a change that owes review, not the
@@ -208,7 +209,15 @@ jobs:
         run: |
           node --test scripts/publish-nightly.test.mjs scripts/product-change.test.mjs scripts/quarantine.test.mjs scripts/changed-tests.test.mjs scripts/import-branch-beads.test.mjs scripts/workflow-wiring.test.mjs scripts/helper-hashes.test.mjs scripts/build-identity.test.mjs
           python3 -m unittest discover -s scripts -p 'verify_built_artifact_test.py'
-          node --test .githooks/check-log-context.test.mjs .githooks/check-operation-scopes.test.mjs frontend/scripts/operations-contract.test.mjs
+          node --test .githooks/check-log-context.test.mjs .githooks/check-operation-scopes.test.mjs .githooks/check-connection-owners.test.mjs frontend/scripts/operations-contract.test.mjs
+      # THE CONNECTION-OWNER RATCHET, on this tree (ADR-ba6xet1b). The hook runs
+      # it on a commit that touches Go; this runs it on every pull request, so a
+      # branch whose Go commit was made with --no-verify is still refused here.
+      # It reads tracked source text through git — no Go toolchain, no cgo
+      # archives, no build — which is why it can live in this job rather than in
+      # the product ones, and why it costs about a quarter of a second.
+      - name: The connection-owner ratchet
+        run: node .githooks/check-connection-owners.mjs
       - name: Promotion and cask fixtures by path
         run: |
           shopt -s nullglob

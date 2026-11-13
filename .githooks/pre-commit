@@ -48,7 +48,7 @@ if [ "${#CHANGED[@]}" -gt 0 ]; then
             # they do not change product behavior. Ratchets still invalidate
             # product scoping because they decide what product code is checked.
             .githooks/backlog-gate/*|.githooks/pre-commit|.githooks/commit-msg|.githooks/pre-merge-commit|.githooks/pre-push|scripts/connect-clone.sh) ;;
-            .githooks/check-deadcode*|.githooks/check-log-context*|.githooks/check-control-goroutines*|.githooks/check-operation-scopes*|.githooks/images/*|Makefile|.golangci.yml)
+            .githooks/check-deadcode*|.githooks/check-log-context*|.githooks/check-control-goroutines*|.githooks/check-operation-scopes*|.githooks/check-connection-owners*|.githooks/images/*|Makefile|.golangci.yml)
                 RUN_GO=1; RUN_FE=1; RUN_E2E=1 ;;
             .githooks/*) ;;
             *.go|go.mod|go.sum)                 RUN_GO=1 ;;
@@ -291,6 +291,20 @@ if [ "$RUN_GO" = 1 ]; then
     host_gate "operation-scope ratchet" node .githooks/check-operation-scopes.mjs
 else
     ok "operation-scope ratchet — skipped (no Go changes staged)"
+fi
+
+# --- 3d3. connection-owner ratchet (Go changes only, same reasoning: a regex
+# over the tree, ~0.25 s over 2,516 tracked .go files). ADR-ba6xet1b says a fact
+# about an SSH connection has one owner, the backend's connection manager, and
+# the renderer draws its answer rather than deciding one; this refuses a NEW
+# import of x/crypto/ssh, network dial, ExitError read or keepalive outside the
+# transport packages, against a baseline that may only shrink. Its renderer
+# half is nocx-oalo1.3.5. Regenerate:
+# node .githooks/update-connection-owners-baseline.mjs ----------------------
+if [ "$RUN_GO" = 1 ]; then
+    host_gate "connection-owner ratchet" node .githooks/check-connection-owners.mjs
+else
+    ok "connection-owner ratchet — skipped (no Go changes staged)"
 fi
 
 # --- 3e. decision records: one identifier, one record (nocx-hyh2p) ---------

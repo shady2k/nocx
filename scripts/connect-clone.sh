@@ -39,6 +39,7 @@ done
 for f in package.json package-lock.json eslint.config.mjs .prettierrc.json .prettierignore \
     .githooks/check-control-goroutines.mjs .githooks/control-goroutines-baseline.json \
     .githooks/check-log-context.mjs .githooks/log-context-baseline.json \
+    .githooks/check-connection-owners.mjs .githooks/connection-owners-baseline.json \
     scripts/site-forbidden-phrases.txt; do
     [ -r "$f" ] || need "$f is missing or unreadable"
 done

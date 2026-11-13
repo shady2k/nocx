@@ -236,6 +236,7 @@ was left alone.
 | qy0pf1va | 2026-11-12 | [The Darwin helper owns its responsible code from spawn](qy0pf1va-the-darwin-helper-owns-its-responsible-code-from-spawn.md) | Accepted (owner direction; `nocx-vh2hr.1.26`; refines ADR-0104) |
 | q0bqxcev | 2026-11-12 | [A past run's quarantine is judged at that run](q0bqxcev-a-past-runs-quarantine-is-judged-at-that-run.md) | Accepted (owner decision, 2026-11-12, «Да»; `nocx-vh2hr.1.27`; superseded whole by ADR-gvnw2nv8, which removes the promotion's per-PR CI audit) |
 | gvnw2nv8 | 2026-11-13 | [A stable promotion trusts the owner's trial, not a re-audit of merged CI](gvnw2nv8-a-stable-promotion-trusts-the-owners-trial.md) | Accepted (owner decision, 2026-11-13, «И зачем такие сложности? Я же сам вручную делаю промоушн. Ответственность на мне.»; `nocx-vh2hr.1.30`; supersedes ADR-0097's per-PR CI verification clause, the promotion clause of ADR-xf4p9fzd and ADR-0bawnmfg, and ADR-q0bqxcev whole) |
+| ba6xet1b | 2026-11-13 | [A connection fact has one owner, and a check keeps it that way](ba6xet1b-a-connection-fact-has-one-owner.md) | Accepted (owner decision, 2026-11-13, «Должен быть архитектурный запрет на вторые поверхности»; `nocx-oalo1.3.4`; extends ADR-akhhb098, proposes no supersession — the Go half is `.githooks/check-connection-owners.mjs`, the renderer half is `nocx-oalo1.3.5`) |
 
 ## Adding one
 

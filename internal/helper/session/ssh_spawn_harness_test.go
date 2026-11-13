@@ -150,6 +150,9 @@ type sshFixture struct {
 	// incoming connection to the request that created it.
 	tcpForwards  map[string]net.Listener
 	unixForwards map[string]net.Listener
+	// forwardOwner names the connection each listener was granted on, so a
+	// connection ending frees its own listeners and no others.
+	forwardOwner map[string]*gossh.ServerConn
 	// forwardGranted and forwardClosed wake on a listener the far host grants
 	// and withdraws, and grantedPorts carries the ports, so a test waits on the
 	// far host's own events rather than polling them.
@@ -245,7 +248,14 @@ func (f *sshFixture) serve(conn net.Conn, config *gossh.ServerConfig) {
 	if err != nil {
 		return
 	}
-	defer func() { _ = sconn.Close() }()
+	defer func() {
+		// A CONNECTION ENDING FREES THE LISTENERS IT GREW. A real sshd drops a
+		// remote forward when the connection that asked for it goes away, and a
+		// pane that releases its transport (socket-first teardown) must not be
+		// reported as having left a listener on somebody else's machine.
+		f.closeForwardsOf(sconn)
+		_ = sconn.Close()
+	}()
 	f.mu.Lock()
 	f.conns++
 	f.mu.Unlock()
@@ -353,7 +363,12 @@ func (f *sshFixture) serveGlobalRequests(sconn *gossh.ServerConn, reqs <-chan *g
 			}
 			port := f.boundPort(ln)
 			f.mu.Lock()
-			f.tcpForwards[net.JoinHostPort(p.Addr, strconv.Itoa(port))] = ln
+			name := net.JoinHostPort(p.Addr, strconv.Itoa(port))
+			f.tcpForwards[name] = ln
+			if f.forwardOwner == nil {
+				f.forwardOwner = map[string]*gossh.ServerConn{}
+			}
+			f.forwardOwner[name] = sconn
 			f.mu.Unlock()
 			var reply []byte
 			if p.Port == 0 {
@@ -394,6 +409,10 @@ func (f *sshFixture) serveGlobalRequests(sconn *gossh.ServerConn, reqs <-chan *g
 			}
 			f.mu.Lock()
 			f.unixForwards[p.SocketPath] = ln
+			if f.forwardOwner == nil {
+				f.forwardOwner = map[string]*gossh.ServerConn{}
+			}
+			f.forwardOwner[p.SocketPath] = sconn
 			f.mu.Unlock()
 			_ = req.Reply(true, nil)
 			go f.acceptForwardedUnix(sconn, ln, p.SocketPath)
@@ -441,6 +460,21 @@ func (f *sshFixture) closeAllForwards() {
 	}
 	for name := range f.unixForwards {
 		names = append(names, name)
+	}
+	f.mu.Unlock()
+	for _, name := range names {
+		f.closeForward(name)
+	}
+}
+
+// closeForwardsOf frees every listener the given connection was granted.
+func (f *sshFixture) closeForwardsOf(sconn *gossh.ServerConn) {
+	f.mu.Lock()
+	var names []string
+	for name, owner := range f.forwardOwner {
+		if owner == sconn {
+			names = append(names, name)
+		}
 	}
 	f.mu.Unlock()
 	for _, name := range names {

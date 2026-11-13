@@ -65,20 +65,49 @@ func newLink(pool *ssh.PooledConn, lookAddr string) *link {
 	return l
 }
 
-// lookAddress is where a look-only dial for this plan goes, or "" when this
-// carrier will not make one. A routed destination is the case: reaching it
-// without a key exchange means going through the hop, which is a connection of
-// its own, and claiming the destination answered while the hop is the thing
-// that did would be evidence about the wrong machine.
+// lookAddress is where a look-only dial for this plan goes: the FIRST endpoint
+// on the route, which for a direct connection is the destination itself.
+//
+// §5.3 asks for the look "on the same route" (review finding 11). A routed
+// destination cannot be spoken to without a key exchange on the bastion, and a
+// look is TCP and the version line and nothing else, so the furthest endpoint
+// this side can ask that way is the first hop: its answer says the path and the
+// bastion are up, which is evidence about the route the connection uses. A host
+// BEHIND the bastion is looked at through the bastion's own session once
+// channels move behind the carrier (design §5.1.2) — claiming otherwise here
+// would be evidence about the wrong machine.
 func lookAddress(plan hostconn.Plan, spec ssh.PooledSpec) string {
-	if len(plan.Route) > 0 {
-		return ""
+	if len(spec.Route) > 0 {
+		first := spec.Route[0]
+		return net.JoinHostPort(first.Host, strconv.Itoa(first.Port))
 	}
 	return net.JoinHostPort(spec.Host, strconv.Itoa(spec.Port))
 }
 
 // Done is closed when the transport has ended.
 func (l *link) Done() <-chan struct{} { return l.done }
+
+// Dead reports whether the transport has ended, answered by the pool's own
+// marker: the library sets it when it closes the socket, inside its teardown
+// and before Wait returns, so admission never has to wait for this file's
+// watcher goroutine (review finding 5).
+func (l *link) Dead() bool {
+	if l == nil || l.pool == nil {
+		return false
+	}
+	return l.pool.Dead()
+}
+
+// Tainted reports whether the pool has retired this connection from new
+// admission (a detached writer's cap, a credential rotation). The supervisor
+// honours it: one owner decides "may this connection be reused", and it is the
+// pool.
+func (l *link) Tainted() bool {
+	if l == nil || l.pool == nil {
+		return false
+	}
+	return l.pool.Tainted()
+}
 
 // Err is why it ended, and is meaningful only once Done is closed.
 func (l *link) Err() error {
@@ -166,11 +195,19 @@ func (l *link) Look(ctx context.Context) error {
 // readVersionLine reads one CRLF-terminated version line, bounded the way the
 // protocol bounds it: a peer that sends a novel instead of a version string has
 // not answered the look.
+//
+// A line that did not arrive whole is not an answer (review comment): a peer
+// that sends "SSH-" and then hangs or errors has said nothing, and counting its
+// partial bytes as an answered version exchange would make a look evidence of a
+// host that is not there.
 func readVersionLine(conn net.Conn) ([]byte, error) {
 	r := bufio.NewReader(io.LimitReader(conn, 512))
 	line, err := r.ReadBytes('\n')
-	if err != nil && len(line) == 0 {
+	if err != nil {
 		return nil, err
+	}
+	if len(line) < 2 || line[len(line)-2] != '\r' {
+		return nil, fmt.Errorf("the peer's version line ended without CRLF (%d bytes)", len(line))
 	}
 	return line, nil
 }

@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 
 	"github.com/shady2k/nocx/internal/hostconn"
 	"github.com/shady2k/nocx/internal/log"
@@ -141,9 +142,18 @@ func (c *Carrier) Dial(ctx context.Context, plan hostconn.Plan, sink hostconn.Ev
 	// version exchange.
 	cfg := *spec.Config
 	inner := cfg.HostKeyCallback
+	// STAGE REPORTING ENDS WITH THE DIAL (review finding 3). The library calls
+	// the host-key callback again on every REKEY, long after Dial returned;
+	// reporting then would take the supervisor's mutex from x/crypto's
+	// key-exchange loop, which is exactly the loop a close waits for — a
+	// deadlock. A report outside the dial is dropped.
+	stages := &dialStages{sink: sink}
+	stages.begin()
+	defer stages.finish()
+	reportStage := stages.report
 	cfg.HostKeyCallback = func(hostname string, remote net.Addr, key gossh.PublicKey) error {
-		sink(hostconn.Event{Kind: hostconn.StageReached, Stage: hostconn.StageKeyExchange})
-		sink(hostconn.Event{Kind: hostconn.StageReached, Stage: hostconn.StageSignIn})
+		reportStage(hostconn.StageKeyExchange)
+		reportStage(hostconn.StageSignIn)
 		if inner == nil {
 			// A plan with no verdict is not a connection this helper can
 			// verify: the coordinator always supplies one, and guessing here
@@ -154,17 +164,20 @@ func (c *Carrier) Dial(ctx context.Context, plan hostconn.Plan, sink hostconn.Ev
 	}
 	spec.Config = &cfg
 	spec.WrapConn = func(conn net.Conn) net.Conn {
-		sink(hostconn.Event{Kind: hostconn.StageReached, Stage: hostconn.StageTCP})
-		return &versionExchange{Conn: conn, sink: sink}
+		reportStage(hostconn.StageTCP)
+		return &versionExchange{Conn: conn, report: reportStage}
 	}
 
-	// THE CLOSING POLICY'S ONE INPUT FROM THIS SIDE: may a connection that has
-	// stopped answering be closed? Not while a plain shell rides it — that is
-	// the person's choice (design §5.3). The pool's release barrier asks this
-	// before it closes anything for silence, and the answer comes from the
-	// supervisor, which is the party that counts holders.
-	kept := c.conns.Supervisor(plan.Key)
-	spec.AllowSilentClose = func() bool { return !kept.HoldsPlainShell() }
+	// THE RELEASE BARRIER'S ONE PROBER (design §5.3; review finding 1): the pool
+	// waits for the far side to have answered before re-asking a refused
+	// session, and the answer comes from the supervisor's own prober — the
+	// probe already parked is the evidence, and no second keepalive is sent.
+	sup := c.conns.Supervisor(plan.Key)
+	spec.Barrier = sup.Probe
+	// EVERY HOP IS A CONNECTION THE SUPERVISOR OWNS (review finding 4): it gets
+	// its own link, watcher, prober and wake probe, and the dialler riding it
+	// holds a lease rather than a bare pool entry nothing watches.
+	spec.HopAcquire = c.acquireHop
 
 	pooled, err := c.client.AcquirePooled(ctx, spec)
 	if err != nil {
@@ -208,6 +221,26 @@ func dialFailure(err error) hostconn.Event {
 	return hostconn.Event{Kind: hostconn.Lost, Cause: hostconn.CauseLostLink}
 }
 
+// dialStages is one dial's stage reporter: it answers while that dial is in
+// flight and nothing after it. The library's host-key callback outlives the
+// dial (a rekey calls it again), and a report then would take the supervisor's
+// mutex from the key-exchange loop a close waits for.
+type dialStages struct {
+	sink    hostconn.EventSink
+	dialing atomic.Bool
+}
+
+func (d *dialStages) begin() { d.dialing.Store(true) }
+
+func (d *dialStages) finish() { d.dialing.Store(false) }
+
+func (d *dialStages) report(stage hostconn.Stage) {
+	if d.sink == nil || !d.dialing.Load() {
+		return
+	}
+	d.sink(hostconn.Event{Kind: hostconn.StageReached, Stage: stage})
+}
+
 // versionExchange reports the SSH version exchange as the stage it is: the
 // server's version line is the first bytes this connection ever reads, and
 // nothing above the socket can see it. It reports once and forwards every byte
@@ -215,14 +248,43 @@ func dialFailure(err error) hostconn.Event {
 // backend never sniffs the stream" true of this seam too.
 type versionExchange struct {
 	net.Conn
-	once sync.Once
-	sink hostconn.EventSink
+	once   sync.Once
+	report func(hostconn.Stage)
 }
 
 func (c *versionExchange) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
 	if n > 0 {
-		c.once.Do(func() { c.sink(hostconn.Event{Kind: hostconn.StageReached, Stage: hostconn.StageSSHVersion}) })
+		c.once.Do(func() { c.report(hostconn.StageSSHVersion) })
 	}
 	return n, err
+}
+
+// acquireHop is the carrier's HopAcquire: it dials one hop of a route through
+// the supervisor, exactly as a destination is dialled, and answers a reference
+// the dialler releases by giving its lease back.
+//
+// The hop's own identity is the same five components (its endpoint, account,
+// credential and the route before it), which is why the hop's supervisor and
+// the pool entry the same facts describe are one connection: PlanFor derives
+// the key from the spec and the pool derives the same key from the same spec.
+func (c *Carrier) acquireHop(ctx context.Context, hop ssh.PooledHop, prefix []ssh.PooledHop) (*ssh.PooledConn, error) {
+	spec := ssh.PooledSpec{
+		Host:     hop.Host,
+		Port:     hop.Port,
+		User:     hop.User,
+		Identity: hop.Identity,
+		Config:   hop.Config,
+		Route:    prefix,
+	}
+	lease, err := c.conns.Acquire(ctx, PlanFor(spec))
+	if err != nil {
+		return nil, err
+	}
+	pooled, ok := Pooled(lease.Link())
+	if !ok {
+		lease.Release()
+		return nil, fmt.Errorf("sshconn: the hop %s@%s:%d has a carrier with no channels", hop.User, hop.Host, hop.Port)
+	}
+	return ssh.Borrow(pooled.Client(), lease.Release), nil
 }

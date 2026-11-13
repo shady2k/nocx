@@ -34,6 +34,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	gossh "golang.org/x/crypto/ssh"
@@ -88,7 +89,7 @@ func dialFSFixture(t *testing.T, rc *RealClient, srv *fsTestServer) *gossh.Clien
 		Auth:            []gossh.AuthMethod{gossh.PublicKeys(srv.userSigner)},
 		HostKeyCallback: gossh.FixedHostKey(srv.hostSigner.PublicKey()),
 	}
-	gclient, err := (&dialer{client: rc}).dialDirect(context.Background(), srv.addr, gcfg, srv.addr, "test", nil)
+	gclient, err := (&dialer{client: rc}).dialDirect(context.Background(), srv.addr, gcfg, srv.addr, "test", nil, &atomic.Bool{})
 	if err != nil {
 		t.Fatalf("dial the fixture: %v", err)
 	}

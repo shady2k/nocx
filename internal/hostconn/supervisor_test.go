@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,11 +28,13 @@ type memoryLink struct {
 	err       error
 	// The far side's behaviour, scripted per test: nil answers at once and the
 	// look is answered by the host.
-	probe  func() (time.Duration, error)
-	nudge  func() error
-	look   func() error
-	looks  int
-	nudges int
+	probe   func() (time.Duration, error)
+	nudge   func() error
+	look    func() error
+	looks   int
+	nudges  int
+	dead    atomic.Bool
+	tainted atomic.Bool
 }
 
 func newMemoryLink() *memoryLink {
@@ -81,6 +84,12 @@ func (l *memoryLink) Look(context.Context) error {
 	}
 	return nil
 }
+
+// Dead and Tainted make this link answer the two synchronous facts a real
+// carrier offers: has the transport ended, and has the pool retired it.
+func (l *memoryLink) Dead() bool { return l.dead.Load() }
+
+func (l *memoryLink) Tainted() bool { return l.tainted.Load() }
 
 // counters reads what the supervisor asked this link to do.
 func (l *memoryLink) counters() (looks, nudges int) {

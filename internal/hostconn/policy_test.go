@@ -189,28 +189,38 @@ func TestAHelperOwnedConnectionClosesAtTheSilenceBudget(t *testing.T) {
 }
 
 // TestAHealthyConnectionNeverReadsStalledOverTenMinutes is the paired success:
-// a connection that answers is never reported as silence, for forty probes.
+// a connection that answers is never reported as silent, for forty probes.
+//
+// The probes are ASKED FOR, not left to the cadence's scheduling: each
+// `Supervisor.Probe` is the connection making itself answer now (the same act
+// the release barrier asks for), so the test states "forty answers arrive and
+// none is silence" without depending on when a timer happened to be noticed.
 func TestAHealthyConnectionNeverReadsStalledOverTenMinutes(t *testing.T) {
 	clock := hostconntest.New()
 	link := newQuietLink()
-	// Answers every probe at once.
 	var probes atomic.Int64
 	link.memoryLink.probe = func() (time.Duration, error) {
 		probes.Add(1)
 		return time.Millisecond, nil
 	}
 	mgr, sup := managerOn(t, quietCarrier(link), clock)
-	acquire(t, mgr, hostconn.HoldsPlainShell)
+	lease := acquire(t, mgr, hostconn.HoldsPlainShell)
 
 	for i := 0; i < 40; i++ {
 		clock.Advance(hostconn.ProbeInterval)
-		// Each probe must have been asked and answered before the next
-		// interval; the state is the observable.
-		waittest.WaitFor(t, "the probe to be answered", func() bool {
-			return probes.Load() >= int64(i+1)
-		})
-		if got := sup.Current().Kind; got != hostconn.Connected {
-			t.Fatalf("a healthy connection reads %v after %v", got, time.Duration(i+1)*hostconn.ProbeInterval)
+		if err := sup.Probe(context.Background()); err != nil {
+			t.Fatalf("probe %d: %v", i+1, err)
+		}
+		if got := last(lease.States()).Kind; got == hostconn.Stalled {
+			t.Fatalf("a healthy connection reads %v after %d probes", got, i+1)
+		}
+	}
+	if got := probes.Load(); got < 40 {
+		t.Fatalf("%d probes for forty asks, want at least forty", got)
+	}
+	for _, state := range lease.States() {
+		if state.Kind == hostconn.Stalled {
+			t.Fatalf("a healthy connection was reported stalled: %v", lease.States())
 		}
 	}
 }

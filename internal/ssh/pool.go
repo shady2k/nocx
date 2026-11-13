@@ -28,16 +28,26 @@ type sshClientConn interface {
 // is idempotent (sync.Once) so a target whose session errors and is then
 // released by tab-close cannot double-release the bastion.
 type pooledSSHConn struct {
-	client    sshClientConn
+	client sshClientConn
+	// barrier is the connection manager's answer to "has the far side
+	// answered one request", for the release barrier (PooledSpec.Barrier).
+	barrier   func(ctx context.Context) error
 	release   func() // releases the jump handle, nil for direct conns
 	closeOnce sync.Once
 
-	// mu guards allowSilentClose, which is written after construction and read
-	// by Close from another goroutine.
+	// mu guards nothing that outlives construction any more; kept so a field
+	// added here has one place to be read under.
 	mu sync.Mutex
-	// allowSilentClose is the closing policy's answer for this connection: may
-	// a barrier that cannot get an answer close it? Nil means nobody counts.
-	allowSilentClose func() bool
+	// ended is set by the dial's own connection marker the instant the library
+	// closes the socket — inside x/crypto's teardown, before Wait returns. It
+	// is what makes "this transport has ended" answerable synchronously, so
+	// admission cannot hand a dead connection out in the window before any
+	// watcher goroutine runs (nocx-oalo1.4.6, review finding 5).
+	ended *atomic.Bool
+	// tainted records that the pool has retired this connection from new
+	// admission (Taint). The supervisor honours it: a connection the pool will
+	// not hand out is not one it hands out either.
+	tainted atomic.Bool
 	// dead records that this connection has been closed, so the pool can
 	// refuse to hand it to anyone else. See isDead.
 	dead atomic.Bool
@@ -191,56 +201,53 @@ func sessionRefused(err error) bool {
 // closed an ordered fact rather than a race — the wait between the two attempts
 // newSession makes (see it for the measurement and why this rather than a
 // delay).
+//
+// THE CONNECTION'S ONE PROBER ANSWERS IT (design §5.3; review finding 1). This
+// call used to send its own reply-wanting keepalive, which made the barrier a
+// second prober: it queued behind the supervisor's parked probe on the mux's
+// send lock, accumulated one parked request per refusal, and closed the whole
+// connection after its own ten seconds — without the supervisor's look grace or
+// its silence budget. Now it asks the connection manager, which reuses the
+// probe already parked (it is the evidence) or starts one, and answers with the
+// far side's own ordering. A barrier that gets no answer fails THIS channel's
+// open and leaves the connection alone: whether silence ends a connection is
+// the one closing policy's decision, never this call's.
 func (c *pooledSSHConn) awaitSessionRelease(gclient *gossh.Client) error {
-	// ANY answer counts, including the SSH_MSG_REQUEST_FAILURE an OpenSSH
-	// server sends for a request type it does not implement: the verdict is
-	// that the server ANSWERED, which is a completed pass of its loop, not the
-	// payload it carried.
-	finished, err := sendProbe(gclient, sessionReleaseBudget)
+	_ = gclient
+	if c.barrier == nil {
+		// A connection dialled outside the helper's manager (a test fake, a
+		// direct dial): there is no prober to ask, and the one thing this call
+		// must not do is invent one.
+		return errNoBarrier
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), sessionReleaseBudget)
+	defer cancel()
+	err := c.barrier(ctx)
 	if err == nil {
 		return nil
 	}
-	if !errors.Is(err, errProbeSilent) {
-		return err
-	}
-	// A peer that answered NOTHING inside the budget is not one to ask for a
-	// session: gossh.Client.NewSession takes no context and no deadline, so the
-	// request would park with nothing left to end it.
-	//
-	// THE CLOSER OBEYS THE ONE CLOSING POLICY (design §5.3, "Every closer that
-	// answers silence obeys this rule"). Closing the transport is the only
-	// thing that unparks the request — and it is also the one thing that would
-	// end a plain shell somebody is working in because ANOTHER channel met
-	// MaxSessions. So the policy is asked first: on a connection carrying a
-	// plain shell this channel's open fails and the connection stays, and the
-	// barrier's parked probe is the same parked probe the policy already owns.
-	if c.silentCloseAllowed() {
-		_ = c.Close()
-		<-finished
-		return fmt.Errorf("ssh: the far side did not answer before the session was re-asked: %w", err)
-	}
-	return fmt.Errorf("ssh: the far side did not answer before the session was re-asked, and this connection carries a plain shell a close would end: %w", err)
+	return fmt.Errorf("ssh: the far side did not answer before the session was re-asked: %w", err)
 }
 
-// silentCloseAllowed asks the closing policy whether this connection may be
-// closed for silence. A connection with no policy (dialled outside the pool, or
-// a test fake) answers true, which is what every caller did before the policy
-// existed.
-func (c *pooledSSHConn) silentCloseAllowed() bool {
-	c.mu.Lock()
-	policy := c.allowSilentClose
-	c.mu.Unlock()
-	if policy == nil {
-		return true
-	}
-	return policy()
-}
+// errNoBarrier is what a connection with no prober to ask answers the release
+// barrier with: it fails the channel's open rather than sending a second
+// keepalive, which is the behaviour the one-prober rule requires.
+var errNoBarrier = errors.New("ssh: this connection has no prober to ask")
+
+// Tainted reports whether the pool has retired this connection from new
+// admission (a detached writer's cap, a credential rotation).
+func (c *pooledSSHConn) Tainted() bool { return c.tainted.Load() }
 
 // isDead reports whether this connection has been closed. It is a MARK, never
 // a probe: asking the far end would put a network round trip under the pool's
 // mutex, which is the shape of defect the keepalive prober was just cured of
 // (ssh_keepalive.go).
-func (c *pooledSSHConn) isDead() bool { return c.dead.Load() }
+func (c *pooledSSHConn) isDead() bool {
+	if c.dead.Load() {
+		return true
+	}
+	return c.ended != nil && c.ended.Load()
+}
 
 // deadConn is the part of a pooled connection the pool consults before
 // handing it to a second caller. Only *pooledSSHConn implements it; a test
@@ -596,6 +603,9 @@ func (p *ConnPool) Taint(h *poolHandle) {
 	if h == nil || h.pool != p {
 		return
 	}
+	if conn, ok := h.conn.(*pooledSSHConn); ok {
+		conn.tainted.Store(true)
+	}
 	p.mu.Lock()
 	h.ref.detachCount++
 	p.detachedWriters++
@@ -697,46 +707,4 @@ func (p *ConnPool) Count() int {
 // real gossh.Dial (direct or via a jump host acquired from this pool).
 func (p *ConnPool) defaultDial(key poolKey) (sshClientConn, error) {
 	return nil, fmt.Errorf("pool dial not configured for %s@%s:%d", key.user, key.host, key.port)
-}
-
-// errProbeSilent is returned when a probe did not come back inside its budget.
-// It is not one more failure: see the comment at its only use.
-var errProbeSilent = errors.New("ssh: probe did not return")
-
-// sendProbe sends one keepalive and waits at most budget for it.
-//
-// WHY A GOROUTINE AT ALL. x/crypto's SendRequest takes no context and no
-// deadline: it writes the global request and then blocks on a bare channel
-// receive, holding globalSentMu for the whole wait. The probe therefore has to
-// be watchable from outside, and a caller that gives up on it can still wait
-// for the goroutine rather than leak it — that is what the returned channel is
-// for. It is the release barrier's use, where the ANSWER is the ordering fact
-// and the budget is only a backstop; the connection's own liveness is the
-// supervisor's prober and not this function (design §5.3).
-//
-// WHAT COUNTS AS ALIVE. Any answer, whatever it says. A server replies
-// SSH_MSG_REQUEST_FAILURE to keepalive@openssh.com because the request type is
-// not one it implements — that is what x/crypto's own DiscardRequests does and
-// what OpenSSH's server does — so `ok` is false on a perfectly healthy link and
-// OpenSSH's client counts any reply as proof of life for the same reason.
-func sendProbe(target interface {
-	SendRequest(name string, wantReply bool, payload []byte) (bool, []byte, error)
-}, budget time.Duration,
-) (<-chan struct{}, error) {
-	type result struct{ err error }
-	res := make(chan result, 1)
-	finished := make(chan struct{})
-	go func() {
-		defer close(finished)
-		_, _, err := target.SendRequest("keepalive@openssh.com", true, nil)
-		res <- result{err: err}
-	}()
-	timer := time.NewTimer(budget)
-	defer timer.Stop()
-	select {
-	case r := <-res:
-		return finished, r.err
-	case <-timer.C:
-		return finished, errProbeSilent
-	}
 }

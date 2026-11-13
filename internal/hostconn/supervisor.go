@@ -131,25 +131,53 @@ func NewManager(carrier Carrier, logger log.Logger, opts ...Option) *Manager {
 		opt(m)
 	}
 	if m.wake != nil {
-		go m.watchWakes()
-		if sleeps, ok := m.wake.(SleepSource); ok {
-			go m.watchSleeps(sleeps)
-		}
+		go m.watchControl()
 	}
 	return m
 }
 
-// watchSleeps tells every supervisor when the machine is going to sleep. It
-// runs for the life of the manager, which is the life of the helper process.
-func (m *Manager) watchSleeps(src SleepSource) {
-	for at := range src.Sleeps() {
-		m.sleepAll(at)
+// controlEdge is one OS control edge on its way to a connection's guard: the
+// machine is going to sleep, or it has woken, at a clock reading.
+//
+// The edges are ONE ordered stream rather than two channels, because the order
+// is the fact: a wake must never be applied before the sleep that precedes it
+// (the connection would stay suspended, which is the defect the review found).
+// The guard still compares the readings it receives, so a stream that arrives
+// out of order — two goroutines' sends meeting in a select — cannot invert
+// them.
+type controlEdge struct {
+	sleep bool
+	at    monoclock.Nanos
+}
+
+// watchControl reads both OS inputs in ONE goroutine and fans each edge out to
+// every supervisor, tagged with which it is.
+func (m *Manager) watchControl() {
+	var sleeps <-chan monoclock.Nanos
+	if src, ok := m.wake.(SleepSource); ok {
+		sleeps = src.Sleeps()
+	}
+	for {
+		select {
+		case at, ok := <-m.wake.Wakes():
+			if !ok {
+				return
+			}
+			m.controlAll(controlEdge{at: at})
+		case at, ok := <-sleeps:
+			if !ok {
+				// The sleep input ended; the wakes still arrive, and the
+				// supervisor's pause is a sleep's to clear only.
+				sleeps = nil
+				continue
+			}
+			m.controlAll(controlEdge{sleep: true, at: at})
+		}
 	}
 }
 
-// sleepAll marks every connection with the moment the machine is about to
-// sleep. A supervisor with no connection has nothing to mark.
-func (m *Manager) sleepAll(at monoclock.Nanos) {
+// controlAll hands one edge to every supervisor.
+func (m *Manager) controlAll(edge controlEdge) {
 	m.mu.Lock()
 	sups := make([]*Supervisor, 0, len(m.sups))
 	for _, sup := range m.sups {
@@ -157,30 +185,7 @@ func (m *Manager) sleepAll(at monoclock.Nanos) {
 	}
 	m.mu.Unlock()
 	for _, sup := range sups {
-		sup.Suspend(at)
-	}
-}
-
-// watchWakes fans one wake signal out to every supervisor. It runs for the life
-// of the manager, which is the life of the helper process.
-func (m *Manager) watchWakes() {
-	for at := range m.wake.Wakes() {
-		m.wakeAll(at)
-	}
-}
-
-// wakeAll tells every connection the machine has woken, at the moment the signal
-// names. A supervisor with no connection has nothing to prove, and its Wake is a
-// no-op.
-func (m *Manager) wakeAll(at monoclock.Nanos) {
-	m.mu.Lock()
-	sups := make([]*Supervisor, 0, len(m.sups))
-	for _, sup := range m.sups {
-		sups = append(sups, sup)
-	}
-	m.mu.Unlock()
-	for _, sup := range sups {
-		sup.Wake(at)
+		sup.control(edge)
 	}
 }
 
@@ -198,7 +203,10 @@ func (m *Manager) Supervisor(key Key) *Supervisor {
 	defer m.mu.Unlock()
 	sup := m.sups[key]
 	if sup == nil {
-		sup = &Supervisor{key: key, carrier: m.carrier, log: m.log, clock: m.clock, mgr: m}
+		sup = &Supervisor{
+			key: key, carrier: m.carrier, log: m.log, clock: m.clock, mgr: m,
+			changed: make(chan struct{}),
+		}
 		m.sups[key] = sup
 	}
 	return sup
@@ -229,11 +237,20 @@ type Supervisor struct {
 	// generation is bumped for every link, so a watcher belonging to a link
 	// that has since been replaced cannot move the state of the new one.
 	generation uint64
+	// changed is closed and replaced on every state move, so an Acquire
+	// waiting for a stalled connection to recover (or to end) wakes on the
+	// change rather than on a duration.
+	changed chan struct{}
 	// riders is how many connections carrying a plain shell are dialled
 	// THROUGH this one. It is the hop half of the count: a hop's plain shells
 	// are its own plus those of everything riding it, and a hop with a rider
 	// may no more be closed for silence than a connection with a shell.
 	riders int
+	// wakeAt and sleepAt are the latest OS control edges seen while no
+	// connection was live to take them — a wake during the dial's own window
+	// must still make the connection prove itself at once (design §5.3, Q4).
+	wakeAt  monoclock.Nanos
+	sleepAt monoclock.Nanos
 }
 
 // live is one connection under the supervisor, and the count that decides when
@@ -246,32 +263,41 @@ type live struct {
 	holders     int
 	plainShells int
 	route       []Key
-	// stop ends this connection's guard: its probe cadence, its looks and any
-	// parked probe's reporting. It is closed once.
+	// rideHops are the hops this GENERATION holds a rider on, and riding says
+	// whether it does. Rider accounting follows the generation the lease
+	// holds, never the supervisor's current pointer: an old lease letting go
+	// must not subtract a new connection's protection.
+	rideHops []Key
+	riding   bool
+	// closing is set under the mutex when this connection is being retired:
+	// admission is fenced at that instant, and Acquire waits on closed rather
+	// than dialing into a pool that still holds this transport.
+	closing atomic.Bool
+	// closed is closed when the physical teardown has finished.
+	closed chan struct{}
+	// stop ends this connection's guard.
 	stop     chan struct{}
 	stopOnce sync.Once
-	// wake carries the machine's wake signal to this connection's guard, from
-	// the manager's one fan-out, with the moment it was seen. It holds one
-	// pending signal: two wakes nobody has read yet are one fact for a
-	// connection that has not answered the first.
-	wake chan monoclock.Nanos
-	// sleep carries the machine's "about to sleep" edge, the same way.
-	sleep chan monoclock.Nanos
+	// control carries the OS's sleep and wake edges to the guard, in the
+	// order the manager received them.
+	control chan controlEdge
+	// ask asks the guard for one probe now, for a caller that needs the far
+	// side's own ordering (the pool's release barrier).
+	ask chan struct{}
+	// waiters are the callers waiting for the next probe's outcome.
+	waiters map[chan error]struct{}
 	// suspended is set by the guard when the machine is going to sleep and
 	// cleared by the wake. The guard writes it; a holder and the journal read
 	// it ("my connection is paused because the machine is asleep").
 	suspended atomic.Bool
-	// nextProbe is when the guard asks this connection to answer. It is set
-	// when the connection becomes live rather than when the goroutine happens
-	// to start: the cadence belongs to the connection, and a guard scheduled a
-	// moment late must not move it.
-	nextProbe monoclock.Nanos
-	// probeInterval is this connection's probe cadence: the plan's, or the
-	// design's default.
+	// nextProbe is when the guard asks this connection to answer, and
+	// initialWokeAt carries a wake that arrived while this connection was
+	// being dialled — the guard starts with it, so the five-second proof is
+	// not lost between a successful dial and its publication.
+	nextProbe     monoclock.Nanos
+	initialWoke   monoclock.Nanos
 	probeInterval time.Duration
 	// observers are the holders that asked to be told what a probe finds.
-	// They are per lease because they are per shell: the app's liveness
-	// surface is keyed by the session that asked for it.
 	observers map[*Lease]func(Observation)
 }
 
@@ -291,38 +317,78 @@ const maxSteps = 32
 // is the state a person is in while the first dial runs.
 func (s *Supervisor) Acquire(ctx context.Context, plan Plan) (*Lease, error) {
 	for {
+		var (
+			fenced  chan struct{}
+			retire  *live
+			cause   Cause
+			changed chan struct{}
+		)
 		s.mu.Lock()
-		if s.live != nil {
-			select {
-			case <-s.live.link.Done():
-				// The transport is over and the watcher has not run yet. A
-				// corpse is not a connection to hand to a caller — that is the
-				// whole of nocx-oalo1.4.6 — so it is recorded as lost and a
-				// fresh dial follows.
-				stale := s.live
-				s.live = nil
-				s.generation++
-				s.advance(Event{Kind: Lost, Cause: CauseLostLink})
-				// THE POOL ENTRY GOES BEFORE THE LOCK DOES. A caller that
-				// arrives once this connection is out of `live` dials, and
-				// the pool would still be holding this transport until Close
-				// runs — handing the dying connection to the next pane, which
-				// is the defect nocx-oalo1.4.6 exists for, one window later.
-				_ = stale.link.Close()
-				s.mu.Unlock()
-				continue
+		if l := s.live; l != nil {
+			switch {
+			case l.closing.Load():
+				// Admission is fenced while the physical teardown runs. The
+				// caller waits for it rather than dialing: the old transport is
+				// still in the pool until the close finishes, and handing it
+				// out is the defect nocx-oalo1.4.6 exists for.
+				fenced = l.closed
+			case linkDead(l.link):
+				// The transport has ended, whether or not the watcher has run:
+				// the carrier marks it dead at the moment the library closes
+				// the socket, so this window is not "before the goroutine ran".
+				retire, cause = l, CauseLostLink
+			case linkTainted(l.link):
+				// The pool has retired this connection from new admission (a
+				// detached writer's cap, a credential rotation). The supervisor
+				// honours that fact rather than holding a second opinion.
+				retire, cause = l, CauseTainted
 			default:
-			}
-			s.live.holders++
-			if plan.Holds&HoldsPlainShell != 0 {
-				s.live.plainShells++
-				if s.live.plainShells == 1 {
-					s.rideLocked(1)
+				select {
+				case <-l.link.Done():
+					retire, cause = l, CauseLostLink
+				default:
 				}
 			}
-			lease := &Lease{sup: s, held: s.live, link: s.live.link, holds: plan.Holds}
+			if retire == nil && fenced == nil {
+				if s.state.Kind == Stalled {
+					// NO CHANNEL IS ASKED OF A STALLED CONNECTION (design
+					// §5.3): NewSession takes no deadline and would park. The
+					// acquire waits for the state to move — recovered, ended,
+					// or the caller's deadline.
+					changed = s.changed
+				} else {
+					l.holders++
+					if plan.Holds&HoldsPlainShell != 0 {
+						l.plainShells++
+						if l.plainShells == 1 {
+							s.rideLocked(l, 1)
+						}
+					}
+					lease := &Lease{sup: s, held: l, link: l.link, holds: plan.Holds}
+					s.mu.Unlock()
+					return lease, nil
+				}
+			}
 			s.mu.Unlock()
-			return lease, nil
+			switch {
+			case fenced != nil:
+				select {
+				case <-fenced:
+					continue
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			case changed != nil:
+				select {
+				case <-changed:
+					continue
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			default:
+				s.retireLive(retire, Event{Kind: Lost, Cause: cause}, "")
+				continue
+			}
 		}
 		if wait := s.dialing; wait != nil {
 			s.mu.Unlock()
@@ -336,6 +402,7 @@ func (s *Supervisor) Acquire(ctx context.Context, plan Plan) (*Lease, error) {
 		flight := make(chan struct{})
 		s.dialing = flight
 		s.beginAttempt()
+		dialStarted := s.clock.Now()
 		s.mu.Unlock()
 
 		link, err := s.carrier.Dial(ctx, plan, s.report)
@@ -356,20 +423,32 @@ func (s *Supervisor) Acquire(ctx context.Context, plan Plan) (*Lease, error) {
 			probeInterval = ProbeInterval
 		}
 		live := &live{
-			link: link, holders: 1, route: plan.Route, probeInterval: probeInterval,
-			nextProbe: s.clock.Now() + span(probeInterval),
-			stop:      make(chan struct{}), wake: make(chan monoclock.Nanos, 1), sleep: make(chan monoclock.Nanos, 1),
-			observers: make(map[*Lease]func(Observation)),
+			link: link, holders: 1, route: plan.Route, rideHops: plan.Route,
+			probeInterval: probeInterval,
+			nextProbe:     s.clock.Now() + span(probeInterval),
+			stop:          make(chan struct{}),
+			closed:        make(chan struct{}),
+			control:       make(chan controlEdge, 4),
+			ask:           make(chan struct{}, 1),
+			waiters:       make(map[chan error]struct{}),
+			observers:     make(map[*Lease]func(Observation)),
 		}
 		if plan.Holds&HoldsPlainShell != 0 {
 			live.plainShells = 1
+		}
+		// A WAKE THAT ARRIVED WHILE THIS CONNECTION WAS BEING DIALED IS NOT
+		// LOST (design §5.3): the connection proves itself at once, with the
+		// wake's own five seconds, instead of waiting for the ordinary cadence.
+		if s.wakeAt != 0 && s.wakeAt >= dialStarted {
+			live.initialWoke = s.wakeAt
+			live.nextProbe = s.clock.Now()
 		}
 		s.live = live
 		s.generation++
 		gen := s.generation
 		s.advance(Event{Kind: SignedIn})
 		if live.plainShells > 0 {
-			s.rideLocked(1)
+			s.rideLocked(live, 1)
 		}
 		lease := &Lease{sup: s, held: live, link: link, holds: plan.Holds}
 		s.mu.Unlock()
@@ -377,6 +456,36 @@ func (s *Supervisor) Acquire(ctx context.Context, plan Plan) (*Lease, error) {
 		go s.watch(link, gen)
 		go s.guard(live, gen)
 		return lease, nil
+	}
+}
+
+// retireLive ends one connection: admission is fenced under the mutex, the
+// transport is closed OUTSIDE it — the library's own close waits for its
+// key-exchange loop, and that loop's host-key callback must never find this
+// mutex held (a rekey would deadlock) — and only then is the state published
+// and the generation dropped.
+func (s *Supervisor) retireLive(l *live, event Event, why string) {
+	if l == nil || !l.closing.CompareAndSwap(false, true) {
+		return
+	}
+	l.stopGuard()
+	s.mu.Lock()
+	s.notifyWaiters(l, ErrLinkLost)
+	s.mu.Unlock()
+
+	_ = l.link.Close()
+
+	s.mu.Lock()
+	close(l.closed)
+	s.dropRidersLocked(l)
+	if s.live == l {
+		s.live = nil
+		s.generation++
+		s.advance(event)
+	}
+	s.mu.Unlock()
+	if why != "" {
+		s.log.Warn("hostconn: closing a connection", "connection", s.key.String(), "why", why)
 	}
 }
 
@@ -405,6 +514,10 @@ func (s *Supervisor) advance(event Event) {
 	}
 	moved := !samePoint(next, s.state)
 	s.state = next
+	if s.changed != nil {
+		close(s.changed)
+		s.changed = make(chan struct{})
+	}
 	if !moved {
 		return
 	}
@@ -425,25 +538,22 @@ func (s *Supervisor) advance(event Event) {
 // Nothing else in the process learns it: x/crypto stores the read error and
 // returns it from every later write, so a shell that is not writing, and a
 // helper path that acquires with no prober, see a connection that looks alive
-// until somebody asks it something. The transport is taken out of the pool
-// HERE, at the moment it ends, rather than when the last holder happens to
-// unwind — which is what makes the next acquire dial afresh instead of being
-// handed the corpse the owner met on 2026-11-13.
+// until somebody asks it something. The carrier marks the transport dead the
+// moment the library closes it (so admission stops at that instant, not when
+// this goroutine runs), and this watcher retires the connection and reports it.
 func (s *Supervisor) watch(link Link, gen uint64) {
 	<-link.Done()
 	s.mu.Lock()
-	if s.generation == gen && s.live != nil && s.live.link == link {
-		s.live = nil
-		s.advance(Event{Kind: Lost, Cause: CauseLostLink})
-		// The holders' leases keep pointing at this link so they can say the
-		// link is lost; the supervisor's own reference ends here, and it ends
-		// BEFORE the lock does — see Acquire's stale branch: a caller that
-		// arrives once the connection is out of `live` must not find it still
-		// in the pool.
-		_ = link.Close()
-		s.log.Warn("hostconn: the connection's transport ended", "connection", s.key.String(), "error", link.Err())
+	live := s.live
+	if live == nil || live.link != link || s.generation != gen {
+		// The connection this watcher belongs to has already been replaced or
+		// retired; its retirer closed it.
+		s.mu.Unlock()
+		return
 	}
 	s.mu.Unlock()
+	s.log.Warn("hostconn: the connection's transport ended", "connection", s.key.String(), "error", link.Err())
+	s.retireLive(live, Event{Kind: Lost, Cause: CauseLostLink}, "")
 }
 
 // release gives one holder's reference back, and closes the connection when it
@@ -458,44 +568,61 @@ func (s *Supervisor) release(lease *Lease) {
 	if lease.holds&HoldsPlainShell != 0 && held.plainShells > 0 {
 		held.plainShells--
 		if held.plainShells == 0 {
-			s.rideLocked(-1)
+			s.rideLocked(held, -1)
 		}
 	}
 	delete(held.observers, lease)
 	last = held.holders == 0
-	if last {
-		switch {
-		case s.live == held:
-			// The ordinary end: the last holder of the live connection lets
-			// go, so it is nobody's connection any more.
-			s.live = nil
-			s.generation++
-			s.advance(Event{Kind: Closed, Cause: CauseReleased})
-		case s.live == nil && s.state.Kind == Reconnecting:
-			// The transport ended while this holder still had it, and now the
-			// last one has let go: there is nothing left to reconnect for.
-			s.advance(Event{Kind: Closed, Cause: CauseReleased})
-		}
-	}
-	if last {
+	switch {
+	case !last:
+	case s.live == held:
+		// The last holder of the live connection lets go: retire it, outside
+		// the mutex, through the same fence everything else uses.
+		s.mu.Unlock()
 		held.stopGuard()
-		// The pool reference goes under the lock, for the same reason as the
-		// other two closers: the next acquire must not be handed a transport
-		// this supervisor has already let go of.
-		_ = lease.link.Close()
+		s.retireLive(held, Event{Kind: Closed, Cause: CauseReleased}, "")
+		return
+	case s.live == nil && s.state.Kind == Reconnecting:
+		// The transport ended while this holder still had it, and now the
+		// last one has let go: there is nothing left to reconnect for.
+		s.advance(Event{Kind: Closed, Cause: CauseReleased})
 	}
 	s.mu.Unlock()
+	if last {
+		held.stopGuard()
+	}
 }
 
-// rideLocked tells the hops this connection is dialled through that a plain
-// shell rides them, or that the last one has left. Called with the mutex held;
-// `delta` is +1 or -1.
-func (s *Supervisor) rideLocked(delta int) {
-	if s.mgr == nil || s.live == nil {
+// rideLocked tells the hops THIS GENERATION is dialled through that a plain
+// shell rides them, or that the last one has left. The hops are the live's own,
+// not the supervisor's current pointer: an old lease letting go must not
+// subtract a new connection's protection. Called with the mutex held; `delta`
+// is +1 or -1.
+func (s *Supervisor) rideLocked(l *live, delta int) {
+	if s.mgr == nil || l == nil {
 		return
 	}
-	for _, hop := range s.live.route {
-		s.mgr.Supervisor(hop).addRider(delta)
+	if delta > 0 {
+		if l.riding {
+			return
+		}
+		l.riding = true
+		for _, hop := range l.rideHops {
+			s.mgr.Supervisor(hop).addRider(1)
+		}
+		return
+	}
+	s.dropRidersLocked(l)
+}
+
+// dropRidersLocked removes this generation's rider contribution once.
+func (s *Supervisor) dropRidersLocked(l *live) {
+	if s.mgr == nil || l == nil || !l.riding {
+		return
+	}
+	l.riding = false
+	for _, hop := range l.rideHops {
+		s.mgr.Supervisor(hop).addRider(-1)
 	}
 }
 
@@ -517,10 +644,20 @@ func (s *Supervisor) addRider(delta int) {
 func (s *Supervisor) HoldsPlainShell() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.holdsPlainShellLocked()
+}
+
+// holdsPlainShellLocked is HoldsPlainShell for a caller that already holds the
+// mutex: the closing policy rechecks it under the same lock it closes under, so
+// a shell acquired in between cannot be closed for silence.
+func (s *Supervisor) holdsPlainShellLocked() bool {
 	if s.riders > 0 {
 		return true
 	}
-	return s.live != nil && s.live.plainShells > 0
+	if s.live == nil {
+		return false
+	}
+	return s.live.plainShells > 0
 }
 
 // Observe asks to be told what each probe of this connection finds. The
@@ -530,7 +667,7 @@ func (l *Lease) Observe(fn func(Observation)) {
 		return
 	}
 	l.sup.mu.Lock()
-	if l.sup.live == l.held {
+	if l.sup.live == l.held && !l.held.closing.Load() {
 		l.held.observers[l] = fn
 	}
 	l.sup.mu.Unlock()
@@ -553,22 +690,35 @@ func (s *Supervisor) observe(held *live, obs Observation) {
 	}
 }
 
-// Wake tells this connection the machine has woken from sleep: prove yourself
-// now, in the policy's five seconds from `at`. With no connection there is
-// nothing to prove, and a signal already waiting for the guard is not queued
-// twice.
-func (s *Supervisor) Wake(at monoclock.Nanos) {
+// control hands one OS edge to this connection, or remembers it while there is
+// no connection to take it (a wake during the dial must not be lost).
+func (s *Supervisor) control(edge controlEdge) {
 	s.mu.Lock()
+	if edge.sleep {
+		s.sleepAt = edge.at
+	} else {
+		s.wakeAt = edge.at
+	}
 	live := s.live
+	closing := live != nil && live.closing.Load()
 	s.mu.Unlock()
-	if live == nil {
+	if live == nil || closing {
 		return
 	}
 	select {
-	case live.wake <- at:
+	case live.control <- edge:
 	default:
 	}
 }
+
+// Wake tells this connection the machine has woken from sleep: prove yourself
+// now, in the policy's five seconds from `at`.
+func (s *Supervisor) Wake(at monoclock.Nanos) { s.control(controlEdge{at: at}) }
+
+// Suspend tells this connection the machine is about to sleep. The guard stops
+// asking for answers until a wake arrives: a probe sent into the sleep would
+// park across it and its silence would be evidence of nothing.
+func (s *Supervisor) Suspend(at monoclock.Nanos) { s.control(controlEdge{sleep: true, at: at}) }
 
 // Suspended reports whether the machine is known to be going to sleep and this
 // connection has not been woken since. It is the fact a connection's journal
@@ -581,19 +731,51 @@ func (s *Supervisor) Suspended() bool {
 	return live != nil && live.suspended.Load()
 }
 
-// Suspend tells this connection the machine is about to sleep. The guard stops
-// asking for answers until a wake arrives: a probe sent into the sleep would
-// park across it and its silence would be evidence of nothing.
-func (s *Supervisor) Suspend(at monoclock.Nanos) {
+// Probe asks this connection to produce evidence that the far side is
+// answering, and waits for it, bounded by ctx.
+//
+// It is the pool's release barrier: after a session was closed and the next
+// open was refused, the far side has to have completed one request before the
+// request is re-asked, and the connection has exactly ONE prober that can get
+// that answer. A probe already parked is the evidence (it will answer on the
+// same far side pass), so no second request is sent; if none is outstanding one
+// is started now.
+func (s *Supervisor) Probe(ctx context.Context) error {
 	s.mu.Lock()
 	live := s.live
-	s.mu.Unlock()
-	if live == nil {
-		return
+	if live == nil || live.closing.Load() {
+		s.mu.Unlock()
+		return ErrLinkLost
 	}
+	out := make(chan error, 1)
+	live.waiters[out] = struct{}{}
+	s.mu.Unlock()
+
 	select {
-	case live.sleep <- at:
+	case live.ask <- struct{}{}:
 	default:
+	}
+
+	select {
+	case err := <-out:
+		return err
+	case <-ctx.Done():
+		s.mu.Lock()
+		delete(live.waiters, out)
+		s.mu.Unlock()
+		return ctx.Err()
+	}
+}
+
+// notifyWaiters tells every caller waiting for a probe answer what happened.
+// Called with the mutex held.
+func (s *Supervisor) notifyWaiters(l *live, err error) {
+	for ch := range l.waiters {
+		select {
+		case ch <- err:
+		default:
+		}
+		delete(l.waiters, ch)
 	}
 }
 
@@ -656,6 +838,14 @@ func (l *Lease) Release() {
 	})
 }
 
+// Current answers the state of the connection this lease rides.
+func (l *Lease) Current() State {
+	if l == nil || l.sup == nil {
+		return State{}
+	}
+	return l.sup.Current()
+}
+
 // Suspended reports whether the connection this lease rides is paused because
 // the machine is going to sleep.
 func (l *Lease) Suspended() bool {
@@ -669,6 +859,9 @@ func (l *Lease) Suspended() bool {
 func (l *Lease) Lost() bool {
 	if l == nil || l.link == nil {
 		return false
+	}
+	if dead, ok := l.link.(DeadLink); ok && dead.Dead() {
+		return true
 	}
 	select {
 	case <-l.link.Done():
@@ -693,4 +886,43 @@ func (l *Lease) Steps() []Step {
 		return nil
 	}
 	return l.sup.Steps()
+}
+
+// DeadLink is what a Link offers when it can say, synchronously, that its
+// transport has ended. The supervisor consults it before handing a connection
+// to a caller: a carrier that can answer closes the window between the
+// transport dying and the Done channel closing.
+type DeadLink interface {
+	Dead() bool
+}
+
+// TaintedLink is what a Link offers when its connection has been retired from
+// new admission by its own transport (the pool's detached-writer cap). The
+// supervisor honours it: a connection the pool will not hand out is not one it
+// hands out either.
+type TaintedLink interface {
+	Tainted() bool
+}
+
+// linkDead answers whether a link's transport has ended, by the best evidence
+// the carrier can give: its synchronous check first, the Done channel after.
+func linkDead(l Link) bool {
+	if dead, ok := l.(DeadLink); ok && dead.Dead() {
+		return true
+	}
+	select {
+	case <-l.Done():
+		return true
+	default:
+		return false
+	}
+}
+
+// linkTainted answers whether the carrier's own transport has retired this
+// connection from new admission.
+func linkTainted(l Link) bool {
+	if tainted, ok := l.(TaintedLink); ok {
+		return tainted.Tainted()
+	}
+	return false
 }

@@ -108,6 +108,10 @@ const (
 	// (design §5.3). A connection carrying a plain shell is never ended this
 	// way: that is the person's choice.
 	CauseSilence Cause = "silence"
+	// CauseTainted is the transport's own pool retiring the connection from
+	// new admission (a detached writer's cap, a credential rotation): the
+	// supervisor honours the pool's decision and hands out nothing more.
+	CauseTainted Cause = "tainted"
 )
 
 // State is one point of the machine. Only the fields its Kind names are set;

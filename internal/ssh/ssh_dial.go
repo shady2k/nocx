@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/shady2k/nocx/internal/operation/catalog"
@@ -38,7 +39,7 @@ type dialer struct {
 // unblocks the handshake. The goroutine is drain-safe because the buffered
 // channel (size 1) ensures the send always succeeds. The caller sees
 // ctx.Err(), not an incidental "use of closed network connection" error.
-func (d *dialer) dialDirect(ctx context.Context, addr string, cfg *gossh.ClientConfig, host, user string, wrap func(net.Conn) net.Conn) (*gossh.Client, error) {
+func (d *dialer) dialDirect(ctx context.Context, addr string, cfg *gossh.ClientConfig, host, user string, wrap func(net.Conn) net.Conn, ended *atomic.Bool) (*gossh.Client, error) {
 	d.client.log.Info("Dialing directly", "addr", addr, "user", cfg.User)
 
 	netConn, err := d.dialWithCtx(ctx, "tcp", addr, cfg.Timeout)
@@ -53,6 +54,9 @@ func (d *dialer) dialDirect(ctx context.Context, addr string, cfg *gossh.ClientC
 	if wrap != nil {
 		netConn = wrap(netConn)
 	}
+	// The end marker goes on LAST, so the library's close — on any path, the
+	// handshake's failure included — is the instant it is set.
+	netConn = &endMarked{Conn: netConn, ended: ended}
 
 	type hsResult struct {
 		conn  gossh.Conn

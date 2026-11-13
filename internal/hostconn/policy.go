@@ -91,6 +91,11 @@ type guardState struct {
 	// on a sleeping machine: the process is frozen, and a probe sent into the
 	// sleep would park and answer first thing on resume.
 	suspendedAt monoclock.Nanos
+	// lastEdge is the clock reading of the newest OS control edge this guard
+	// has applied. Edges arrive from one stream but two goroutines' sends can
+	// still cross in a select; an edge older than the one in hand is stale and
+	// is ignored, so a wake can never be undone by the sleep that preceded it.
+	lastEdge monoclock.Nanos
 }
 
 // prober drives one live connection's probe cadence and closing policy.
@@ -117,7 +122,7 @@ func (s *Supervisor) guard(l *live, gen uint64) {
 	looker, _ := l.link.(Looker)
 	g := &prober{
 		sup: s, live: l, gen: gen, clock: s.clock, prober: probe, looker: looker,
-		st: guardState{nextProbe: l.nextProbe},
+		st: guardState{nextProbe: l.nextProbe, wokeAt: l.initialWoke},
 	}
 	g.run()
 }
@@ -155,10 +160,14 @@ func (g *prober) run() {
 		select {
 		case <-g.live.stop:
 			return
-		case at := <-g.live.sleep:
-			g.suspend(at)
-		case at := <-g.live.wake:
-			g.woke(at)
+		case <-g.live.ask:
+			// A caller needs the far side's own ordering (the pool's release
+			// barrier): ask now, or let the probe already parked be the
+			// evidence. Timed as the wake mk its due moment so the loop acts
+			// at once.
+			g.st.nextProbe = g.clock.Now()
+		case edge := <-g.live.control:
+			g.applyControl(edge)
 		case outcome := <-g.st.probeOut:
 			if g.probeResult(outcome) {
 				return
@@ -170,18 +179,35 @@ func (g *prober) run() {
 	}
 }
 
-// drainControl applies any sleep or wake edge that has already arrived.
+// drainControl applies every sleep or wake edge already in hand, in the order
+// they were queued and with the timestamp check that makes an out-of-order
+// arrival harmless.
 func (g *prober) drainControl() {
-	select {
-	case at := <-g.live.sleep:
-		g.suspend(at)
-	default:
+	for {
+		select {
+		case edge := <-g.live.control:
+			g.applyControl(edge)
+		default:
+			return
+		}
 	}
-	select {
-	case at := <-g.live.wake:
-		g.woke(at)
-	default:
+}
+
+// applyControl applies one OS edge, refusing one older than the edge already
+// applied: a wake followed by a stale sleep must not suspend a resumed
+// connection.
+func (g *prober) applyControl(edge controlEdge) {
+	if edge.at != 0 && g.st.lastEdge != 0 && edge.at < g.st.lastEdge {
+		return
 	}
+	if edge.at != 0 {
+		g.st.lastEdge = edge.at
+	}
+	if edge.sleep {
+		g.suspend(edge.at)
+		return
+	}
+	g.woke(edge.at)
 }
 
 // drainReady applies any probe or look result that has already arrived, and
@@ -370,6 +396,12 @@ func (g *prober) woke(at monoclock.Nanos) {
 // guard should end.
 func (g *prober) probeResult(outcome probeOutcome) bool {
 	g.st.probeOut = nil
+	// THE BARRIER'S WAITERS ARE PART OF THIS ANSWER (review finding 1): the
+	// pool's release barrier asked this connection to produce one, and the
+	// same outcome is what it needs — no second keepalive, no second closer.
+	g.sup.mu.Lock()
+	g.sup.notifyWaiters(g.live, outcome.err)
+	g.sup.mu.Unlock()
 	if outcome.err != nil {
 		// The transport has ended under the probe. The watcher on Done reports
 		// it, and it is a fact rather than an inference (design §5.3: "A
@@ -385,8 +417,13 @@ func (g *prober) probeResult(outcome probeOutcome) bool {
 	// loop got to the answer: a host that answers late must not also be asked
 	// late.
 	g.st.nextProbe = g.st.probedAt + span(g.live.probeInterval)
-	g.st.suspendedAt = 0
-	g.live.suspended.Store(false)
+	// AN ANSWER DOES NOT CLEAR A LATER SLEEP: a probe sent before the sleep
+	// edge answered about a machine that was already going away. The guard
+	// asks nothing more until the wake.
+	if g.st.suspendedAt == 0 || g.st.probedAt >= g.st.suspendedAt {
+		g.st.suspendedAt = 0
+		g.live.suspended.Store(false)
+	}
 	g.st.silentSince, g.st.lookAnswered, g.st.nudged = 0, false, false
 	g.st.lookOut, g.st.lookAt, g.st.lookSent, g.st.wokeAt = nil, 0, 0, 0
 	return false
@@ -414,10 +451,15 @@ func (g *prober) lookResult(err error) {
 	// transport error, and an unaided reconnect (Q5). A host that still holds
 	// the flow acknowledges it and nothing changes, so it can end no live
 	// shell.
-	if err := g.prober.Nudge(); err != nil {
-		// The transport is over; the watcher on Done reports it.
-		return
-	}
+	// OFF THE LOOP: a nudge is a transport write, and a write can wait behind
+	// a rekey or a blocked peer. The guard's budgets, wakes and stop must not
+	// wait with it; the watcher on Done reports a transport that the write
+	// discovers is over.
+	go func() {
+		if err := g.prober.Nudge(); err != nil {
+			g.sup.log.Debug("hostconn: the post-look nudge failed", "connection", g.sup.key.String(), "error", err)
+		}
+	}()
 }
 
 // silent reports the connection stalled, with how long it has gone unanswered.
@@ -441,21 +483,18 @@ func (s *Supervisor) answered(l *live, gen uint64) {
 // endForSilence closes a connection the policy may close, and records why. The
 // state is `reconnecting` — the transport is whole but the connection is over,
 // and the next acquire dials afresh.
+//
+// THE PLAIN-SHELL RECHECK IS UNDER THIS LOCK, with the close decision: a lease
+// that declares a shell between the policy's look and this call must not be
+// closed for silence, and only the same critical section can promise that.
 func (s *Supervisor) endForSilence(l *live, gen uint64, why string) bool {
 	s.mu.Lock()
-	if s.live != l || s.generation != gen {
+	if s.live != l || s.generation != gen || s.holdsPlainShellLocked() {
 		s.mu.Unlock()
-		return true
+		return false
 	}
-	s.live = nil
-	s.generation++
-	s.advance(Event{Kind: Lost, Cause: CauseSilence})
-	// The pool reference goes BEFORE the lock does: a caller that acquires
-	// once the state reads reconnecting must dial, and the pool must already
-	// have forgotten this transport (see Acquire's stale branch).
-	_ = l.link.Close()
 	s.mu.Unlock()
-	s.log.Warn("hostconn: closing a connection that stopped answering", "connection", s.key.String(), "why", why)
+	s.retireLive(l, Event{Kind: Lost, Cause: CauseSilence}, why)
 	return true
 }
 

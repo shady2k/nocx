@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { existsSync, readFileSync } from 'node:fs'
 import { scanSource, violationKey } from './check-i18n-hardcoded.mjs'
 
 /**
@@ -205,4 +206,15 @@ describe('imperative DOM text', () => {
       scanSource('s.ts', "export const f = (el: HTMLElement) => { el.textContent = '·' }"),
     ).toEqual([])
   })
+})
+
+// Deleted surfaces must not keep exemptions after their code is removed.
+it('the hardcoded-copy baseline only names files that still exist', () => {
+  const baseline = JSON.parse(
+    readFileSync(new URL('./i18n-hardcoded-baseline.json', import.meta.url), 'utf8'),
+  )
+  const missing = [...new Set(baseline.violations.map((v) => v.file))].filter(
+    (file) => !existsSync(new URL(`../${file}`, import.meta.url)),
+  )
+  expect(missing).toEqual([])
 })

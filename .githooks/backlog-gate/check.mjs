@@ -186,6 +186,8 @@ const isIdea = (cfg, i) =>
 //   Serves: O1, O2          (a stage — the outcome ids it serves)
 //   Seen at: signup, receipt  (a feature — the places a person reaches its outcome)
 //   Preparatory: <reason>   (a stage — prefactoring, and why)
+//   Design: <where it is recorded>  (a feature — the record that holds its design)
+//   Design: tailored past — <reason>  (a feature — the design step was not needed)
 //
 // Each is matched case-insensitively, at the start of a line, with an optional
 // leading `-`, `*` or `>`, exactly like the DONE WHEN recognition above: a
@@ -238,6 +240,22 @@ const preparatoryOf = (i) =>
   !isPlaceholder(afterMarker(i, 'preparatory')) &&
   (afterMarker(i, 'preparatory').match(/[\p{L}\p{N}]/gu) || []).length >= 3;
 
+// Where a feature's design is recorded, one line, in two shapes: the decision
+// record that holds it, or the statement that the step was tailored past with
+// the reason — a small bug or a trivial change makes none of the things design
+// is for. A line with neither names nothing, and a tailoring with no reason is a
+// shape without a decision. What is read is the declaration, never the record it
+// names: the gate cannot see a document's content, and a record that is wrong or
+// empty is found by the person reading it, not here.
+const TAILORED_PAST = /^tailored past\b\s*(?:[\u2014\u2013:-]+\s*)?(.*)$/i;
+const designOf = (i) => {
+  const value = afterMarker(i, 'design');
+  if (isPlaceholder(value)) return null;
+  const tailored = TAILORED_PAST.exec(value);
+  const words = (tailored ? tailored[1] : value).match(/[\p{L}\p{N}]/gu) || [];
+  return words.length >= 3 ? (tailored ? 'tailored' : 'recorded') : null;
+};
+
 // The DONE WHEN text of one issue, lowercased, from the first marker to the
 // next heading, with this syntax's own lines stripped first. The same slice
 // hasCriterion has always read, kept honest by one owner.
@@ -246,7 +264,7 @@ const criterionTextOf = (i) => {
   for (const mk of CRITERION_MARKERS) {
     const at = b.indexOf(mk);
     if (at >= 0) return b.slice(at + mk.length).split(/\n\s*#/)[0]
-      .split('\n').filter((l) => !/^\s*[-*>]?\s*(?:serves|seen at|preparatory|agreed direction|agreed plan)\s*:/i.test(l)).join('\n');
+      .split('\n').filter((l) => !/^\s*[-*>]?\s*(?:serves|seen at|preparatory|design|agreed direction|agreed plan)\s*:/i.test(l)).join('\n');
   }
   return '';
 };
@@ -591,15 +609,20 @@ const CHECKS = [
   {
     id: 'unobservable-first-stage',
     severity: 'error',
-    why: 'A feature whose first work is architecture shows a person nothing at any step until the last one. One such step is real prefactoring and is allowed with its reason; after it, a stage that still hides the feature from the person means the milestone said where they would see something and the breakdown does not pass through it. A feature that names no place in its body is not judged here — a known limit: without the place, the rule has nothing to bind to.',
-    fix: 'Green looks like this: the feature names in its Seen at line the place a person reaches its outcome, and the stage first in line has a DONE WHEN that names that place too — a person does the thing there — or that first stage says Preparatory with its reason, and the stage after it reaches the person. More than one preparatory stage before anything observable, or none at all, is the breakdown to re-cut.',
+    why: 'A feature whose work is architecture shows a person nothing at any step until the last one. One such step is real prefactoring and is allowed with its reason; after it, every stage still has to end where the feature said the person would see something, or the breakdown builds one layer across at a time and the whole flow meets a real input at the end, where a re-cut is expensive. The checked thing is a declaration: a DONE WHEN that names one of the places the feature names, never proof that the place then shows the feature. Three limits are stated. A stage the breakdown has not reached yet — still coarse, with no work filed under it — is not a stage this rule reads: the plan\'s later stages are judged when the run breaks them down, before it builds them, and nothing here can tell a coarse stage from a task filed under the feature by mistake. A stage accepted but not yet landed is still open in the tracker and is judged with the rest, because the export carries no accepted-but-open state and the declaration is still one a run can change. And a feature that names no place in its body is not judged at all: without the place, the rule has nothing to bind to.',
+    fix: 'Green looks like this: the feature names in its Seen at line every place a person reaches its outcome, and every stage of the breakdown that carries work has a DONE WHEN naming one of them — a person does the thing there — or is the one Preparatory stage, with its reason, placed before the first stage that reaches the person and followed at once by a stage that is still open and reaches them. A stage that ends nowhere the person can open, a preparatory stage after the first observable one, a second preparatory stage, and a preparatory stage whose only successors are deferred or closed, are the breakdown to re-cut; a stage whose place the feature forgot is fixed by naming that place on the feature first.',
     run: (m) =>
       m.issues.flatMap((f) => {
         if (f.type !== 'epic' || !(m.children.get(f.id) || []).length) return [];
         const handles = seenAtOf(f);
         if (!handles.length) return [];
-        const stages = (m.children.get(f.id) || []).map((id) => m.by.get(id)).filter((i) => isStage(m, i))
+        const all = (m.children.get(f.id) || []).map((id) => m.by.get(id)).filter((i) => isStage(m, i))
           .sort((a, b) => ((Date.parse(a.createdAt) || Infinity) - (Date.parse(b.createdAt) || Infinity) || (a.id < b.id ? -1 : 1)));
+        // The order is the whole breakdown's, because where the one preparatory
+        // stage stands is a fact about the plan and not about what is still
+        // open; a stage already closed is the project's history — it was judged
+        // when work stood there and cannot change now — so its place counts and
+        // it is never refused itself.
         // A criterion that is only a placeholder names nothing a person sees,
         // even when the declared handle appears in it.
         const observable = (i) => {
@@ -607,21 +630,36 @@ const CHECKS = [
           return !isPlaceholder(t) && handles.some((h) => t.includes(h));
         };
         const note = (i) => `the stage ${i.id} shows a person nothing: DONE WHEN names none of ${handles.join(', ')}, which the feature ${f.id} declares as the places a person reaches the outcome of ${f.id}`;
-        let allowed = true;
-        for (let k = 0; k < stages.length; k++) {
-          const s = stages[k];
-          if (preparatoryOf(s)) {
-            if (allowed && k === stages.length - 1)
-              return [{ id: s.id, ref: f.id, note: `${note(s)}; the stage is declared Preparatory, but the feature has no later stage, so the person would reach those places nowhere` }];
-            if (!allowed)
-              return [{ id: s.id, ref: f.id, note: `${note(s)}; and it is the second preparatory stage, and the first was already allowed once and must be followed by the observable one` }];
-            allowed = false;
+        // One preparatory stage is ground moved before the person's path can
+        // run, and it is only that while it comes first and while the path then
+        // does run: a stage still live after it has to reach the person, and
+        // work that is only deferred, or already closed, is no successor for
+        // that. Every stage after the first one that reaches the person widens
+        // that path, so a step nobody can open belongs inside such a stage as a
+        // task, not beside it as one.
+        let spent = false;
+        let reached = false;
+        const out = [];
+        for (const [k, s] of all.entries()) {
+          const live = LIVE(s.status);
+          if (observable(s)) {
+            reached = true;
             continue;
           }
-          if (observable(s)) return [];
-          return [{ id: s.id, ref: f.id, note: note(s) }];
+          if (preparatoryOf(s)) {
+            const next = all.slice(k + 1).some((t) => LIVE(t.status) && observable(t));
+            if (reached && live)
+              out.push({ id: s.id, ref: f.id, note: `${note(s)}; it is declared Preparatory, and a stage before it already ends where a person can open it, so what it moves is not ground that the person's path needs first` });
+            else if (spent && live)
+              out.push({ id: s.id, ref: f.id, note: `${note(s)}; and it is the second preparatory stage, and the first was already allowed once and must be followed by the observable one` });
+            else if (!next && live)
+              out.push({ id: s.id, ref: f.id, note: `${note(s)}; the stage is declared Preparatory, but no later stage still open reaches those places, so the person would reach them nowhere` });
+            else if (next) spent = true;
+            continue;
+          }
+          if (live) out.push({ id: s.id, ref: f.id, note: note(s) });
         }
-        return [];
+        return out;
       }),
   },
   {
@@ -777,8 +815,8 @@ const CHECKS = [
   {
     id: 'started-without-agreement',
     severity: 'error',
-    why: 'Autonomous work starts on an agreement about what the owner was shown, and on nothing else. A run that starts without one breaks the feature into stages nobody agreed, writes their criteria itself and takes the first task: a plan becomes work, and the first the owner sees of it is a pull request that rewrites the core of the product, or a failure much later in the path their decision said should not exist. Every step that should have caught it was a step inside a skill, and a step is what a run skips without anyone seeing it skipped.',
-    fix: 'Green looks like this: the feature carries two lines in its body, each with when the owner agreed it and their own words — `Agreed direction: <time> — "<their words>"` for how the system will meet the outcome, with the inventory of what already does that job, and `Agreed plan: <time> — "<their words>"` for the stages, what each makes true, their DONE WHEN and their order — and the direction was agreed first. Where the work is already under way, put the plan to the owner before the next stage is taken and record it as it is given; scope they have not seen goes back to them as a proposal. A feature already under way when a project adopted this rule cannot honestly acquire the record afterwards: it is listed once in the config\'s `agreementExempt`, as work in flight is listed for the time records, so the rule judges what starts after it; under `block-new` an unlisted one is old debt against the baseline and is printed without blocking.',
+    why: 'Autonomous work starts on an agreement about what the owner was shown, and on nothing else. A run that starts without one breaks the feature into stages nobody agreed, writes their criteria itself and takes the first task: a plan becomes work, and the first the owner sees of it is a pull request that rewrites the core of the product, or a failure much later in the path their decision said should not exist. The direction the plan stands on is a design, and a plan cut before that design is recorded is the second design drawn by whoever broke the work down: it picks the building blocks, the interfaces and the ownership of state the run then builds, with no inventory and no comparison behind them. Every step that should have caught it was a step inside a skill, and a step is what a run skips without anyone seeing it skipped. What the design half checks is a declaration, not the record: the feature says where the design is kept, or why the step was tailored past, and whether the record it names holds a real design is found by the person who reads it.',
+    fix: 'Green looks like this: the feature carries three lines in its body — `Agreed direction: <time> — "<their words>"` for how the system will meet the outcome, with the inventory of what already does that job, agreed first; `Design: <where it is recorded>` naming the decision record that holds the design, or `Design: tailored past — <reason>` where the change makes none of the things a design is for; and `Agreed plan: <time> — "<their words>"` for the stages, what each makes true, their DONE WHEN and their order. Where the work is already under way, put the plan to the owner before the next stage is taken and record it as it is given; scope they have not seen goes back to them as a proposal. A feature already under way when a project adopted this rule cannot honestly acquire the record afterwards: it is listed once in the config\'s `agreementExempt`, as work in flight is listed for the time records, so the rule judges what starts after it; under `block-new` an unlisted one is old debt against the baseline and is printed without blocking.',
     run: (m, cfg) => m.issues.flatMap((f) => {
       if (f.type !== 'epic' || !LIVE(f.status)) return [];
       // A leaf under a feature, or a feature never broken down, is the shortest
@@ -799,6 +837,7 @@ const CHECKS = [
       const plan = agreedOf(f, 'plan');
       const out = [];
       if (!direction) out.push({ id: f.id, ref: 'direction', note: `${work}, and the feature records no agreed direction: an "Agreed direction:" line with the time and the owner's own words is what a plan is built on` });
+      if (!designOf(f)) out.push({ id: f.id, ref: 'design', note: `${work}, and the feature records neither where its design is nor that the design step was tailored past: a "Design:" line names the decision record the design is kept in, or says it was tailored past with the reason, and a breakdown cut before that line exists was cut by whoever reached for the plan first` });
       if (!plan) out.push({ id: f.id, ref: 'plan', note: `${work}, and the feature records no agreed plan: the stages, what each makes true and their DONE WHEN were never shown to the owner, so the run is building a plan they have not seen` });
       else if (direction && plan.at < direction.at) out.push({ id: f.id, ref: 'plan', note: `${work}, and the plan was agreed at ${plan.value.split(/\s+/)[0]}, before the direction at ${direction.value.split(/\s+/)[0]}: the plan was shown against a direction the owner had not yet agreed` });
       return out;
@@ -915,9 +954,16 @@ function bulkClusters(m, threshold) {
 
 // The version of the set these rules shipped with. A project holds a COPY of
 // this file, and this is how anybody tells that the copy has fallen behind.
-const RULES_VERSION = '0.66.0';
+const RULES_VERSION = '0.68.0';
 
 const STRENGTHS = ['block', 'block-new', 'report'];
+
+// How a project's work reaches its main line. The gate needs the value only to
+// refuse one the set does not describe: its rules read the main line and
+// revisions, which every practice records the same way. Nothing here branches
+// on the value, and no rule is added per practice.
+const WAYS_OF_WORKING = ['feature-branch-pr', 'github-flow', 'trunk-based'];
+const RETAINED_WAY_OF_WORKING = 'feature-branch-pr';
 
 /** Thrown for anything that is the caller's mistake; main turns it into exit 2. */
 class Misuse extends Error {}
@@ -945,6 +991,18 @@ function checkedConfig(raw, where) {
     throw new Misuse(`${where}: findingBudget must be a whole number or null`);
   if (cfg.currentMilestone != null && !cfg.milestoneLabels.includes(cfg.currentMilestone))
     throw new Misuse(`${where}: currentMilestone "${cfg.currentMilestone}" is not in milestoneLabels`);
+  // A practice is one value, so a project cannot compose one no source
+  // describes. Absent is the practice every project landed by before the value
+  // existed, which is what keeps an older config working unchanged.
+  if (cfg.execution != null && (typeof cfg.execution !== 'object' || Array.isArray(cfg.execution)))
+    throw new Misuse(`${where}: execution must be an object holding this project's execution settings`);
+  // Absent is the retained practice; a name the set does not describe is
+  // refused. `null` is not absent: a config that carries the key and a value the
+  // set cannot read is broken, and reading it as the retained one would hide that.
+  const practice = cfg.execution?.wayOfWorking;
+  if (practice !== undefined && !WAYS_OF_WORKING.includes(practice))
+    throw new Misuse(`${where}: execution.wayOfWorking ${JSON.stringify(practice)} is not one of ${WAYS_OF_WORKING.map((w) => `"${w}"`).join(', ')}`);
+  cfg.execution = { ...(cfg.execution || {}), wayOfWorking: practice === undefined ? RETAINED_WAY_OF_WORKING : practice };
   return cfg;
 }
 
@@ -1311,7 +1369,7 @@ function runSelftest(cfg, projectConfigPath) {
   const unagreed = load('bad', 'started-without-agreement.json');
   const agreeFires = (exempt) => evaluate(unagreed, { ...cfg, agreementExempt: exempt }, ['started-without-agreement'])
     .results[0].violations.length;
-  say(agreeFires(['F1']) === 0 && agreeFires([]) === 2, 'the agreement rule: a feature listed at adoption, and the work under it, are exempt; nothing else is');
+  say(agreeFires(['F1']) === 0 && agreeFires([]) === 3, 'the agreement rule: a feature listed at adoption, and the work under it, are exempt; nothing else is');
   // A bulk edit made every issue look touched today, which hides the stale
   // hold. Ages from the snapshot taken before it bring the violation back.
   const edited = { ...dirty, issues: dirty.issues.map((i) => ({ ...i, updatedAt: dirty.generatedAt })) };
@@ -1393,6 +1451,43 @@ function runSelftest(cfg, projectConfigPath) {
   say(/config of this checkout/.test(budget) && /main line/.test(budget),
     'a config-driven refusal says it judged by this checkout\'s config, and that the main line may differ');
   say(!/config of this checkout/.test(unreceipted), 'a rule whose verdict reads no config carries no such note');
+
+  // The practice a project records decides who merges, when a landing happens
+  // and what a demo shows. None of that is the gate's to judge: its rules read
+  // the main line's commits and a revision, which every practice records the
+  // same way. So the same three delivered leaves are read under each of the
+  // three practiced configs and have to name the same violation, exactly.
+  for (const practice of WAYS_OF_WORKING) {
+    for (const name of ['merged-but-open.owner-merged.json', 'merged-but-open.run-merged.json', 'merged-but-open.commit-landed.json']) {
+      const backlog = load('bad', name);
+      const got = evaluate(backlog, { ...cfg, execution: { ...(cfg.execution || {}), wayOfWorking: practice } }, null)
+        .results.flatMap((r) => r.violations.map((v) => `${r.id}|${v.id}|${v.ref || ''}`)).sort();
+      const want = backlog.expectViolations.slice().sort();
+      say(got.join(' ') === want.join(' '), `practice ${practice}: ${name} → [${got.join(' ') || 'nothing'}]${got.join(' ') === want.join(' ') ? '' : `  expected [${want.join(' ')}]`}`);
+    }
+  }
+  // One value, one owner: the three practices are accepted, an absent one is
+  // the retained practice, and a fourth name is refused by naming the three.
+  say(checkedConfig({}, 'a config with no practice').execution.wayOfWorking === RETAINED_WAY_OF_WORKING,
+    'an absent practice is the retained one once the config is read, so an older config is unchanged');
+  // Recording a practice changes nothing else a project already decided: the
+  // review rule, its preference and its fallback stay exactly what they were,
+  // which is what a project keeping today's practice must find.
+  const kept = checkedConfig({ execution: { reviewPreference: 'different-model', reviewFallback: 'disclosed self-review', landing: 'pull-request' } }, 'a retained config');
+  say(JSON.stringify(kept.execution) === JSON.stringify({ reviewPreference: 'different-model', reviewFallback: 'disclosed self-review', landing: 'pull-request', wayOfWorking: RETAINED_WAY_OF_WORKING }),
+    'a retained config keeps its review rule, its preference, its fallback and its landing, and gains only the practice it already had');
+  for (const practice of [...WAYS_OF_WORKING, undefined]) {
+    const config = put(`practice-${practice || 'absent'}.json`, { ...cfg, execution: { ...(cfg.execution || {}), ...(practice ? { wayOfWorking: practice } : {}) } });
+    const done = run('--config', config, '--strength', 'block', stale);
+    say(done.status === 1, `cli: a config recording ${practice || 'no practice (the retained one)'} is read and judged → exit ${done.status}`);
+  }
+  for (const wrong of ['git-flow', '', 'GitHub-Flow', 3, null, true]) {
+    const config = put(`practice-wrong.json`, { ...cfg, execution: { wayOfWorking: wrong } });
+    const done = run('--config', config, '--strength', 'block', stale);
+    const says = `${done.stdout}${done.stderr}`;
+    say(done.status === 2 && WAYS_OF_WORKING.every((w) => says.includes(`"${w}"`)),
+      `cli: the practice ${JSON.stringify(wrong)} is refused, naming the three → exit ${done.status}`);
+  }
 
   console.log(failures ? `\n${failures} failure(s)` : '\nall fixtures pass');
   return failures ? 1 : 0;

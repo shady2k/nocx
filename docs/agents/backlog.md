@@ -1,7 +1,10 @@
 # Backlog integration
 
-Maintained by `setup-shady2k-skills`. This update installs setup protocol
-**0.66.0 from released plugin 0.137.0**, tracked by nocx-3an1s.3. The release
+Maintained by `setup-shady2k-skills`. The checks are at setup protocol **0.68.0 from
+released plugin 0.143.0** (nocx-9z27m, 2026-11-13): only the five checks changed, the
+tracker mechanism, its recipe and the support modules stay as 0.137.0 shipped them, and
+the config gained the recorded practice below. The 0.66.0 update before it came from
+released plugin 0.137.0, tracked by nocx-3an1s.3. That release
 includes the repairs for exact recording recovery (nocx-zjpwl), existing-hook
 upgrades (nocx-hm9qc), and the synchronized candidate-size proof (nocx-9v4x0);
 those upstream blockers are closed. The refreshed branch's checker selftests,
@@ -165,6 +168,16 @@ keeps every later change.
 
 ## Checks and execution
 
+- **How work reaches main: `github-flow`** (owner, 2026-11-13, «Да» to the recommendation):
+  a branch per change — a stage, a fix, a task taken alone — opened as its own pull request
+  and merged as soon as its checks are green; a branch lives at most
+  `execution.maxBranchDays`. Read from: authors other than the owner commit here; `main` has
+  no required review or required check; the stable promotion is the owner's own trial
+  (ADR-gvnw2nv8); and for two weeks before this the SSH foundation and the fixes had already
+  landed one pull request per stage, merged by the coordinator on green CI. A run lands each
+  accepted stage on its own, and the next stage builds on what landed. Merging still needs the
+  owner's yes where AGENTS.md says so.
+
 - **Backlog adapter:** [`adapter.mjs`](../../.githooks/backlog-gate/adapter.mjs) reads the
   tracked export for historical and gate exports. `--at <rev>` reads any revision
   (`:0` is staged), `--export <path>` reads a file; with neither flag it reads the working tree.
@@ -187,8 +200,9 @@ keeps every later change.
   `check-present.mjs` and `check-product.mjs`, with `time-format.mjs`,
   `document-format.mjs`, `regular-file.mjs` and `argv.mjs`, in [`.githooks/backlog-gate/`](../../.githooks/backlog-gate/).
   These are byte-for-byte copies of the plugin files under
-  `skills/backlog/setup-shady2k-skills/` of released plugin 0.137.0 (setup protocol
-  0.66.0), never edited here; the tracker recipe is `trackers/br.mjs` beside them.
+  `skills/backlog/setup-shady2k-skills/` of released plugin 0.143.0 (setup protocol
+  0.68.0) for the five checks and of 0.137.0 for the rest, which 0.143.0 ships unchanged,
+  never edited here; the tracker recipe is `trackers/br.mjs` beside them.
   Compare each copy with that source. Run all five `--selftest` commands from
   the plugin directory, where their fixtures live; `check.mjs` additionally
   takes `--config <repo>/.githooks/backlog-gate/config.json` for portability.
@@ -406,7 +420,7 @@ connect` runs this connector before it checks the backlog inputs.
   ```
 
   The mechanism's `version` output must be `0.137.0`; all five check versions must
-  be `0.66.0`. Repository wrapper tests, recoverable real-entry-point proofs
+  be `0.68.0`, compared against 0.143.0's setup folder. Repository wrapper tests, recoverable real-entry-point proofs
   (including clone-connection failure diagnostics), review and PR checks remain
   required before acceptance. Real reboot and a second real machine are not
   proved by these isolated suites.

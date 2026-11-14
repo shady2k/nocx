@@ -546,3 +546,53 @@ arrive as protocol failures rather than as the working connections they are mean
 to be. An 11-helper reading a password identity behaves exactly as one speaking 10
 did — the break is confined to the kind that changed. Two peers that disagree
 refuse each other at hello in both directions.
+
+## What landed with `nocx-oalo1.5.3`, and why `Version` moved to 27
+
+The **connection vocabulary**: one forward op, `connection`, and one
+notification, `connection-state`. Together they are how a pane learns what its
+SSH connection is doing — and the reason they are two shapes rather than one is
+the same reason the pane exists before the shell does.
+
+`connection` answers which supervisor a RESOLVED destination's shell will ride.
+It is a derivation and not a mint: the helper turns the destination into the
+same key its own `spawn-ssh` acquire will use — endpoint, account, credential
+principal and route — and answers a digest of it. That is what lets a
+coordinator bind a pane to a connection BEFORE anything dials (design §5.5), so
+the first `pane.connection` observation is `opening`, at a stage, while the
+shell channel does not exist. A minted id would need a table and would disagree
+with the pool's key under the first bug.
+
+`connection-state` is a notification because a state is revised for as long as
+the connection exists, in both directions, and there is no request to answer. It
+carries a sequence number per connection, which is how a receiver refuses an
+observation that arrives after a newer one; it names exactly the fields its
+state makes true (a stage only while opening, a person only while waiting, a
+cause only when failed or ended, an attempt only while reconnecting); and it
+carries the two measurements a surface shows — `plainShells`, how many shells a
+close would end, and `roundTripMs`/`slow`, the newest probe and its grade. It
+travels on the connection the request arrived on and is never broadcast: a
+helper serves several coordinators (D12), and another coordinator's pane is not
+this one's to draw.
+
+Two decisions worth naming rather than leaving to a reader:
+
+- **The event is flat and the coordinator's own schema is the strict half.**
+  Every state's companion fields are `omitempty` here because a frozen
+  generation is fenced on the FIELDS it may send, not on the combination of
+  them; `contracts/pane.connection.schema.json` is where a stage is forbidden on
+  `connected`, with one branch per state.
+- **`plain` is deliberately absent.** It names the system's ssh process, which
+  is a carrier this helper is not. A value no producer can reach must not be a
+  value the wire admits.
+
+The version moved because the closed set of ssh events a reader switches on
+changed, and because the op is the half that degrades: a 26-helper answers
+`unknown_op` to `connection`, which a coordinator reads as "this machine's
+helper is older than this app" — the honest refusal, since a pane with no
+connection state would be a blank head rather than a wrong one. Nothing has
+shipped at 26, so the two peers this fences are both ours; the number moves now
+so the next generation inherits a truthful statement.
+
+The schemas are frozen from here like every sibling's: a new op degrades, and a
+new FIELD on one of these shapes does not.

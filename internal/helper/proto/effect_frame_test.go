@@ -161,11 +161,12 @@ func TestCommandSnapshotEffectFrameRoundTripsItsTypedPayload(t *testing.T) {
 // for: the fence's job is to refuse a peer that does not agree about this
 // number, so a bump that nothing asserts is a bump a later edit takes back
 // inside a change about something else. It names the LAST reason the number
-// moved — the removal of the unsent keepalive frame type (nocx-oalo1.3.2),
-// which changes the closed set a reader switches on.
+// moved — the connection vocabulary (nocx-oalo1.5.3): the `connection` op and
+// the `connection-state` event, and with them a closed set of ssh service
+// events a reader switches on.
 func TestHelperProtocolVersionBumpedForTheFrameSet(t *testing.T) {
-	if Version != "26" {
-		t.Fatalf("helper protocol version = %q, want 26", Version)
+	if Version != "27" {
+		t.Fatalf("helper protocol version = %q, want 27", Version)
 	}
 }
 

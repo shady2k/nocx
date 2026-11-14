@@ -525,6 +525,8 @@ func (c *Client) sessionNotify(payload []byte) {
 			c.forwardedTCPIP(raw)
 		case proto.EventForwardClosed:
 			c.forwardClosed(raw)
+		case proto.EventConnectionState:
+			c.connectionState(raw)
 		}
 		return
 	case proto.ServiceSession:

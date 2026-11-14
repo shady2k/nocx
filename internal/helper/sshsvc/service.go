@@ -55,6 +55,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shady2k/nocx/internal/connkey"
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/hostconn"
@@ -89,6 +90,12 @@ type Client interface {
 	// the reference and must Close it; the connection itself closes when the
 	// last reference does.
 	Acquire(ctx context.Context, spec ssh.PooledSpec) (*hostconn.Lease, error)
+	// WatchConnection subscribes to one connection's observations, starting
+	// with the state it is in now, and answers the function that ends the
+	// subscription. It is how a pane learns the dial's stages before its own
+	// shell exists (design §5.5, §5.6): the supervisor is the one party that
+	// knows, and a watcher holds no reference and closes nothing.
+	WatchConnection(key connkey.Key, fn func(hostconn.Facts)) func()
 }
 
 // ProbeTimeout bounds one probe's handshake. It is the same number the
@@ -174,7 +181,7 @@ func (s *Service) Name() string { return proto.ServiceSSH }
 // a helper that claimed to answer `sign` would be claiming to hold key
 // material it does not have.
 func (s *Service) Ops() []string {
-	ops := append(append(append([]string{proto.OpProbe}, s.channelOps()...), s.forwardOps()...), s.probeOps()...)
+	ops := append(append(append([]string{proto.OpProbe, proto.OpConnection}, s.channelOps()...), s.forwardOps()...), s.probeOps()...)
 	ops = append(ops, s.laneOps()...)
 	return append(ops, s.toolSocketOps()...)
 }
@@ -186,6 +193,8 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 	switch op {
 	case proto.OpProbe:
 		return host.SchemaFor(proto.ProbeParams{})
+	case proto.OpConnection:
+		return host.SchemaFor(proto.ConnectionParams{})
 	case proto.OpOpen:
 		return host.SchemaFor(proto.OpenChannelParams{})
 	case proto.OpClose:
@@ -255,6 +264,14 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 			}
 		}
 		return s.probe(ctx, p)
+	case proto.OpConnection:
+		var p proto.ConnectionParams
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, fmt.Errorf("%w: %w", errBadProbeParams, err)
+			}
+		}
+		return s.connection(p)
 	case proto.OpOpen:
 		var p proto.OpenChannelParams
 		if len(params) > 0 {

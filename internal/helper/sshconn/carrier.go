@@ -28,6 +28,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/shady2k/nocx/internal/connkey"
 	"github.com/shady2k/nocx/internal/hostconn"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -100,6 +101,19 @@ func (c *Carrier) DialAuth(ctx context.Context, spec ssh.PooledSpec) (*ssh.Poole
 // the one door every channel, shell, forward and lease goes through.
 func (c *Carrier) Acquire(ctx context.Context, spec ssh.PooledSpec) (*hostconn.Lease, error) {
 	return c.conns.Acquire(ctx, PlanFor(spec))
+}
+
+// WatchConnection registers fn for every observation of one connection,
+// starting with the state it is in now, and answers the function that ends the
+// subscription.
+//
+// It is the carrier's door to the supervisor for a reader that is not a holder:
+// the ssh service asks it on behalf of a pane whose shell has not been opened
+// yet, so the pane can be told the dial's stages while they are happening. A
+// watcher does not hold the connection and cannot close it; what it gets is
+// what the machine already knows.
+func (c *Carrier) WatchConnection(key connkey.Key, fn func(hostconn.Facts)) func() {
+	return c.conns.Supervisor(key).Watch(fn)
 }
 
 // PlanFor renders a pooled spec into the plan the supervisor keys a connection

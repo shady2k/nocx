@@ -87,6 +87,165 @@ type Step struct {
 	At    monoclock.Nanos
 }
 
+// Facts is one observation of a supervisor's connection: the state a pane is
+// told, and the measurements the state carries.
+//
+// IT IS THE NEUTRAL VOCABULARY, and deliberately not the wire shape. The helper
+// protocol's connection event (internal/helper/proto) is a different package's
+// declaration, and this one exists so the supervisor can say what it knows
+// without importing the wire it will be published on. A facts value is a
+// SNAPSHOT: Seq orders them, and the rest is what was true when it was taken.
+type Facts struct {
+	// Key is the connection this is about, and Seq is its place in that
+	// connection's sequence — monotonic for the life of the supervisor, so a
+	// reader can refuse an observation older than the last one it applied.
+	Key Key
+	Seq uint64
+	// State is the machine's point, with an empty Opening stage resolved to
+	// the first stage an attempt reaches.
+	State State
+	// StateFor is how long this state has been the state, at observation. It
+	// is what a renderer ticks forward locally instead of polling for.
+	StateFor time.Duration
+	// LookAnsweredAt is how long ago a look-only dial was answered for the
+	// CURRENT stall, and LookAnswered says whether one was. A look is evidence
+	// about the host, never a verdict on this flow (design §5.3).
+	LookAnswered    bool
+	LookAnsweredFor time.Duration
+	// PlainShells is how many shells would end if this connection closed: its
+	// own and those on every connection dialled through it.
+	PlainShells int
+	// Measured reports whether a probe has answered on this connection, and
+	// RoundTrip and Slow are that measurement and its grade.
+	Measured  bool
+	RoundTrip time.Duration
+	Slow      bool
+}
+
+// watcher is one consumer of a supervisor's facts. The channel is buffered so a
+// publisher never blocks the guard; a full buffer means the consumer is not
+// reading, and the newest observation is the one that matters.
+type watcher struct {
+	ch   chan Facts
+	done chan struct{}
+}
+
+// Watch registers fn to be called with every observation of this connection,
+// starting with the state it is in now. It answers a function that ends the
+// subscription; it is safe to call once, and calling it twice is harmless.
+//
+// THE CURRENT STATE IS DELIVERED AT ONCE, and that is not a convenience: a pane
+// that joins a connection somebody else dialled must learn it is connected
+// without waiting for the next probe, and the alternative — one observation per
+// transition only — would leave that pane blank for fifteen seconds.
+func (s *Supervisor) Watch(fn func(Facts)) (stop func()) {
+	if fn == nil {
+		return func() {}
+	}
+	w := &watcher{ch: make(chan Facts, 64), done: make(chan struct{})}
+	s.mu.Lock()
+	if s.watchers == nil {
+		s.watchers = make(map[*watcher]struct{})
+	}
+	s.watchers[w] = struct{}{}
+	// THE FIRST OBSERVATION OCCUPIES A SEQUENCE OF ITS OWN. A consumer refuses
+	// anything not greater than the last sequence it applied, and the zero a
+	// fresh supervisor starts at is not greater than itself — so a subscription
+	// that delivered seq 0 would be discarded as stale by the very reader that
+	// asked for it.
+	s.seq++
+	current := s.factsLocked()
+	s.mu.Unlock()
+	go func() {
+		if !deliver(w, current, fn) {
+			return
+		}
+		for {
+			select {
+			case f := <-w.ch:
+				if !deliver(w, f, fn) {
+					return
+				}
+			case <-w.done:
+				return
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.mu.Lock()
+			delete(s.watchers, w)
+			s.mu.Unlock()
+			close(w.done)
+		})
+	}
+}
+
+// deliver calls fn unless the subscription has ended. The check gives a stop
+// that races a queued observation the last word, so a callback cannot start
+// after Watch's own stop returned.
+func deliver(w *watcher, f Facts, fn func(Facts)) bool {
+	select {
+	case <-w.done:
+		return false
+	default:
+	}
+	fn(f)
+	return true
+}
+
+// notifyLocked publishes the current facts to every watcher. Called with the
+// mutex held, and the sends are non-blocking: the guard must never wait for a
+// reader, and a full buffer is a reader that is behind, not a connection that
+// stopped.
+func (s *Supervisor) notifyLocked() {
+	if len(s.watchers) == 0 {
+		return
+	}
+	s.seq++
+	f := s.factsLocked()
+	for w := range s.watchers {
+		select {
+		case w.ch <- f:
+		default:
+		}
+	}
+}
+
+// factsLocked is the current observation. Called with the mutex held.
+func (s *Supervisor) factsLocked() Facts {
+	now := s.clock.Now()
+	state := s.state
+	if state.Kind == Opening && state.Stage == "" {
+		// The zero State is an attempt that has not reached a stage yet, and
+		// `resolve` is the stage it is at. Saying so is honest; an empty stage
+		// is a shape the wire does not admit.
+		state.Stage = StageResolve
+	}
+	f := Facts{Key: s.key, Seq: s.seq, State: state, PlainShells: s.plainShellsLocked()}
+	if s.stateSince != 0 {
+		f.StateFor = time.Duration(now - s.stateSince)
+	}
+	if s.lookAnsweredAt != 0 && s.state.Kind == Stalled {
+		f.LookAnswered = true
+		f.LookAnsweredFor = time.Duration(now - s.lookAnsweredAt)
+	}
+	f.Measured, f.RoundTrip, f.Slow = s.haveObs, s.lastObs.RoundTrip, s.slow
+	return f
+}
+
+// lookAnswered records that a look-only dial answered, for the stall in
+// progress. It is evidence a person is shown; it ends nothing by itself.
+func (s *Supervisor) lookAnswered(l *live, gen uint64) {
+	s.mu.Lock()
+	if s.live == l && s.generation == gen && s.state.Kind == Stalled {
+		s.lookAnsweredAt = s.clock.Now()
+		s.notifyLocked()
+	}
+	s.mu.Unlock()
+}
+
 // Manager answers the supervisor for a key, creating it the first time that
 // key is seen.
 //
@@ -258,6 +417,34 @@ type Supervisor struct {
 	// must still make the connection prove itself at once (design §5.3, Q4).
 	wakeAt  monoclock.Nanos
 	sleepAt monoclock.Nanos
+
+	// THE OBSERVATION A PANE IS TOLD (design §5.3, §5.6). A supervisor's state
+	// is a fact a surface draws, and until stage 3 the only reader was a log
+	// line: so the path is kept here in the same terms the wire states it.
+	//
+	// stateSince is when the current State was entered, on the supervisor's own
+	// clock. stateMs is the difference at observation, which is what lets a
+	// renderer tick locally instead of receiving a number per second.
+	stateSince monoclock.Nanos
+	// lookAnsweredAt is when a look-only dial was last answered for the CURRENT
+	// stall, and is zero when no look has answered. It is evidence about the
+	// HOST, never about this flow (design §5.3).
+	lookAnsweredAt monoclock.Nanos
+	// lastObs is the newest probe measurement and whether one exists. It is
+	// per CONNECTION, because the prober is: a new transport under the same key
+	// starts with no measurement.
+	lastObs Observation
+	haveObs bool
+	// slow is the GRADE of that measurement, kept across observations because
+	// the grade has hysteresis (GradeRoundTrip).
+	slow bool
+	// seq numbers the Facts this supervisor publishes. It is monotonic for the
+	// life of the supervisor, so a consumer can refuse an observation that
+	// arrives after a newer one — a late event for an old epoch.
+	seq uint64
+	// watchers are the parties currently reading this connection's facts. The
+	// map is bounded by the panes the coordinator says ride this connection.
+	watchers map[*watcher]struct{}
 }
 
 // live is one connection under the supervisor, and the count that decides when
@@ -270,12 +457,14 @@ type live struct {
 	holders     int
 	plainShells int
 	route       []Key
-	// rideHops are the hops this GENERATION holds a rider on, and riding says
-	// whether it does. Rider accounting follows the generation the lease
-	// holds, never the supervisor's current pointer: an old lease letting go
-	// must not subtract a new connection's protection.
+	// rideHops are the hops this GENERATION holds a rider on, and ridden is
+	// how many plain shells this generation contributes to them. Rider
+	// accounting follows the generation the lease holds, never the
+	// supervisor's current pointer: an old lease letting go must not subtract
+	// a new connection's protection. The count is a count rather than a flag
+	// because `plainShells` on the wire is a number — "1 shell ends, or 3".
 	rideHops []Key
-	riding   bool
+	ridden   int
 	// closing is set under the mutex when this connection is being retired:
 	// admission is fenced at that instant, and Acquire waits on closed rather
 	// than dialing into a pool that still holds this transport.
@@ -538,9 +727,10 @@ func (s *Supervisor) Acquire(ctx context.Context, plan Plan) (*Lease, error) {
 					l.holders++
 					if plan.Holds&HoldsPlainShell != 0 {
 						l.plainShells++
-						if l.plainShells == 1 {
-							s.rideLocked(l, 1)
-						}
+						// EVERY shell is counted, not only the first: the hop
+						// protects the connection either way, and the wire
+						// says how many shells a close would end.
+						s.rideLocked(l, 1)
 					}
 					lease := &Lease{sup: s, held: l, link: l.link, holds: plan.Holds}
 					s.mu.Unlock()
@@ -629,6 +819,10 @@ func (s *Supervisor) Acquire(ctx context.Context, plan Plan) (*Lease, error) {
 		s.live = live
 		s.generation++
 		gen := s.generation
+		// A NEW TRANSPORT HAS NO MEASUREMENT AND NO STALL: the prober that
+		// produced the previous one ended with the connection it belonged to.
+		s.haveObs, s.lastObs, s.slow = false, Observation{}, false
+		s.lookAnsweredAt = 0
 		s.advance(Event{Kind: SignedIn})
 		if live.plainShells > 0 {
 			s.rideLocked(live, 1)
@@ -716,10 +910,23 @@ func (s *Supervisor) advance(event Event) {
 	}
 	moved := !samePoint(next, s.state)
 	s.state = next
+	if moved || s.stateSince == 0 {
+		s.stateSince = s.clock.Now()
+	}
+	if next.Kind != Stalled {
+		// A look answered for a stall that is over is not evidence about the
+		// next one.
+		s.lookAnsweredAt = 0
+	}
 	if s.changed != nil {
 		close(s.changed)
 		s.changed = make(chan struct{})
 	}
+	// THE OBSERVATION GOES OUT BEFORE THE PATH IS RECORDED, and for the
+	// still-silent case too: `stalled` that stays stalled has not moved along
+	// the path, but how long it has been stalled DID change, and that is the
+	// number a pane draws.
+	s.notifyLocked()
 	if !moved {
 		return
 	}
@@ -769,9 +976,7 @@ func (s *Supervisor) release(lease *Lease) {
 	}
 	if lease.holds&HoldsPlainShell != 0 && held.plainShells > 0 {
 		held.plainShells--
-		if held.plainShells == 0 {
-			s.rideLocked(held, -1)
-		}
+		s.rideLocked(held, -1)
 	}
 	delete(held.observers, lease)
 	last = held.holders == 0
@@ -798,37 +1003,41 @@ func (s *Supervisor) release(lease *Lease) {
 	}
 }
 
-// rideLocked tells the hops THIS GENERATION is dialled through that a plain
-// shell rides them, or that the last one has left. The hops are the live's own,
+// rideLocked tells the hops THIS GENERATION is dialled through that one more
+// plain shell rides them, or that one has left. The hops are the live's own,
 // not the supervisor's current pointer: an old lease letting go must not
 // subtract a new connection's protection. Called with the mutex held; `delta`
-// is +1 or -1.
+// is +1 or -1, and a hop's count is every shell on everything it carries.
 func (s *Supervisor) rideLocked(l *live, delta int) {
-	if s.mgr == nil || l == nil {
+	if s.mgr == nil || l == nil || delta == 0 {
 		return
 	}
-	if delta > 0 {
-		if l.riding {
+	if delta < 0 {
+		// A generation whose riders left with its transport contributes
+		// nothing more: a lease that unwinds afterwards must not subtract the
+		// REPLACEMENT's protection from the hop.
+		if l.ridden <= 0 {
 			return
 		}
-		l.riding = true
-		for _, hop := range l.rideHops {
-			s.mgr.Supervisor(hop).addRider(1)
+		if -delta > l.ridden {
+			delta = -l.ridden
 		}
-		return
 	}
-	s.dropRidersLocked(l)
+	for _, hop := range l.rideHops {
+		s.mgr.Supervisor(hop).addRider(delta)
+	}
+	l.ridden += delta
 }
 
-// dropRidersLocked removes this generation's rider contribution once.
+// dropRidersLocked removes this generation's whole rider contribution once.
 func (s *Supervisor) dropRidersLocked(l *live) {
-	if s.mgr == nil || l == nil || !l.riding {
+	if s.mgr == nil || l == nil || l.ridden == 0 {
 		return
 	}
-	l.riding = false
 	for _, hop := range l.rideHops {
-		s.mgr.Supervisor(hop).addRider(-1)
+		s.mgr.Supervisor(hop).addRider(-l.ridden)
 	}
+	l.ridden = 0
 }
 
 // addRider counts one connection carrying a plain shell that is dialled through
@@ -856,13 +1065,18 @@ func (s *Supervisor) HoldsPlainShell() bool {
 // mutex: the closing policy rechecks it under the same lock it closes under, so
 // a shell acquired in between cannot be closed for silence.
 func (s *Supervisor) holdsPlainShellLocked() bool {
-	if s.riders > 0 {
-		return true
+	return s.plainShellsLocked() > 0
+}
+
+// plainShellsLocked is how many shells would end if this connection closed:
+// its own, plus every shell on a connection dialled through it. It is the
+// number the wire carries, and the policy reads it as a boolean.
+func (s *Supervisor) plainShellsLocked() int {
+	n := s.riders
+	if s.live != nil {
+		n += s.live.plainShells
 	}
-	if s.live == nil {
-		return false
-	}
-	return s.live.plainShells > 0
+	return n
 }
 
 // Observe asks to be told what each probe of this connection finds. The
@@ -878,7 +1092,9 @@ func (l *Lease) Observe(fn func(Observation)) {
 	l.sup.mu.Unlock()
 }
 
-// observe reports one probe result to every holder that asked.
+// observe reports one probe result to every holder that asked, and records it
+// as this connection's measurement — the one number a surface shows about how
+// fast the far side is answering.
 func (s *Supervisor) observe(held *live, obs Observation) {
 	s.mu.Lock()
 	fns := make([]func(Observation), 0, len(held.observers))
@@ -886,6 +1102,13 @@ func (s *Supervisor) observe(held *live, obs Observation) {
 		fns = append(fns, fn)
 	}
 	current := s.live == held
+	if current && obs.Answered {
+		// A probe that never came back measured nothing: reporting the budget
+		// it spent would report the timeout, not the host.
+		s.lastObs, s.haveObs = obs, true
+		s.slow = GradeRoundTrip(s.slow, obs.RoundTrip)
+		s.notifyLocked()
+	}
 	s.mu.Unlock()
 	if !current {
 		return

@@ -1207,12 +1207,17 @@ type stand struct {
 	carrier *sshconn.Carrier
 	// wake is the stand's wake source: the machine's suspend is the test's to
 	// report (design §10, nocx-oalo1.4.5), because no CI machine can sleep.
-	wake      *hostconntest.WakeSource
-	toHelper  *recorder
-	toCoord   *recorder
-	cancel    context.CancelFunc
-	served    chan struct{}
-	closeOnce sync.Once
+	wake *hostconntest.WakeSource
+	// connEvents is what the helper told this coordinator about a connection,
+	// in the order it said it (design §5.6). It is buffered and the producer
+	// never blocks: a test reads the observations it is about, and the ones it
+	// is not about are dropped rather than stalling a dial.
+	connEvents chan proto.ConnectionStateEvent
+	toHelper   *recorder
+	toCoord    *recorder
+	cancel     context.CancelFunc
+	served     chan struct{}
+	closeOnce  sync.Once
 }
 
 func newStand(t *testing.T, c *coordinator) *stand {
@@ -1237,9 +1242,10 @@ func newStandOnClock(t *testing.T, c *coordinator, logger *slog.Logger, clock ho
 
 	helperEnd, coordEnd := net.Pipe()
 	s := &stand{
-		toHelper: &recorder{Conn: helperEnd},
-		toCoord:  &recorder{Conn: coordEnd},
-		served:   make(chan struct{}),
+		connEvents: make(chan proto.ConnectionStateEvent, 256),
+		toHelper:   &recorder{Conn: helperEnd},
+		toCoord:    &recorder{Conn: coordEnd},
+		served:     make(chan struct{}),
 	}
 	// The dialer is the REAL one: DialAuth is the seam the daemon's client
 	// offers, and a probe tested against a fake dialer would be a probe tested
@@ -1275,6 +1281,15 @@ func newStandOnClock(t *testing.T, c *coordinator, logger *slog.Logger, clock ho
 		SentinelTTL: 5 * time.Second,
 		Reverse:     c.registry(),
 		Log:         discardLogger(),
+		// Every connection observation the helper sends lands here, including
+		// the ones that arrive while a dial is still running: the frame and
+		// its routing are the shipped path, which is the point of this stand.
+		OnConnectionEvent: func(ev proto.ConnectionStateEvent) {
+			select {
+			case s.connEvents <- ev:
+			default:
+			}
+		},
 	})
 	if err != nil {
 		t.Fatalf("client.Dial: %v", err)

@@ -12,6 +12,8 @@ package session
 import (
 	"testing"
 	"time"
+
+	"github.com/shady2k/nocx/internal/hostconn"
 )
 
 func TestRoundTripGrade_EntersAndLeavesAtDifferentThresholds(t *testing.T) {
@@ -20,7 +22,7 @@ func TestRoundTripGrade_EntersAndLeavesAtDifferentThresholds(t *testing.T) {
 		t.Error("120ms graded slow — a cross-continent link is not a struggling host")
 	}
 	// One that takes half a second to answer a request it does not parse is.
-	if !roundTripGrade(false, slowRoundTripEnter) {
+	if !roundTripGrade(false, hostconn.SlowRoundTripEnter) {
 		t.Error("the enter threshold did not grade slow")
 	}
 	// And once slow, it stays slow until it is comfortably better — the gap

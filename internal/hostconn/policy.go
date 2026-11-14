@@ -542,6 +542,9 @@ func (g *prober) lookResult(err error) {
 		return
 	}
 	g.st.lookAnswered, g.st.lookAt = true, g.clock.Now()
+	// The supervisor keeps the same fact for the wire: "a new connection
+	// answered", which is evidence a person is shown and a verdict on nothing.
+	g.sup.lookAnswered(g.live, g.gen)
 	if g.st.nudged {
 		return
 	}

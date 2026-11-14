@@ -352,4 +352,21 @@ package proto
 // switches on is part of this number, so the number moves: a 25-generation
 // that still recognised 9 would have no reason to refuse it, and two peers
 // disagreeing about the set is exactly what hello exists to catch.
-const Version = "26"
+//
+// This is 27 rather than 26 because the wire grew a CONNECTION vocabulary
+// (nocx-oalo1.5.3): the `connection` op, which answers which supervisor a
+// destination's shell will ride before any socket exists, and the
+// `connection-state` notification, which revises that supervisor's state for
+// the pane's whole life. The op is the half that degrades: a 26-helper answers
+// `unknown_op`, which a coordinator reads as "this machine's helper is older
+// than this app" — and that is exactly the refusal a coordinator needs, because
+// a pane with no connection state would be a blank head rather than a wrong
+// one. The event is the half that does not: a 26-coordinator has no handler for
+// a notification it did not expect, drops it, and loses no state it ever had.
+// The bump is taken anyway, and the freeze's own rule is why: a generation
+// whose closed set of events differs is a generation that disagrees about what
+// the wire carries, and hello is where that is decided rather than discovered.
+// Nothing has shipped at 26, so the two peers this fences are both ours; the
+// number moves now so that the generation after this one inherits a truthful
+// statement rather than a widened one.
+const Version = "27"

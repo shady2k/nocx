@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.connection-state.schema.json",
+  "title": "HelperSSHConnectionStateEvent",
+  "description": "One observation of an ssh connection, sent to the coordinator that opened the pane riding it (nocx-oalo1.5.3). It is a NOTIFICATION because a connection's state is revised for as long as the connection exists, in both directions, and there is no request to answer. `seq` orders observations of one connection, which is how a receiver refuses one that arrives after a newer one. The helper names exactly the fields its state makes true: a stage only while opening, a person only while waiting, a cause only when failed or ended, an attempt only while reconnecting. The coordinator's own `pane.connection` schema is the stricter half (one branch per state); this shape stays flat because a frozen generation is fenced on the FIELDS, not on the combination.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["connectionId", "seq", "state", "stateMs"],
+  "properties": {
+    "connectionId": {
+      "description": "The supervisor's connection, the same value the `connection` op answered for the destination.",
+      "type": "string",
+      "minLength": 1
+    },
+    "seq": {
+      "description": "Monotonic per connection for the life of the supervisor. A receiver drops anything not greater than the last sequence it applied; that is how a late observation of an older moment is refused.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "state": {
+      "description": "The transport state, in hostconn.Kind's own spellings: opening, waiting_person, connected, stalled, reconnecting, failed, ended. `plain` is NOT here: it names a system ssh process, which is a carrier this helper is not, and a state a producer cannot reach must not be a value its wire admits.",
+      "type": "string",
+      "enum": [
+        "opening",
+        "waiting_person",
+        "connected",
+        "stalled",
+        "reconnecting",
+        "failed",
+        "ended"
+      ]
+    },
+    "stage": {
+      "description": "Where an opening is: resolve, tcp, ssh-version, key-exchange, sign-in, shell. Present exactly when state is opening.",
+      "type": "string",
+      "enum": ["resolve", "tcp", "ssh-version", "key-exchange", "sign-in", "shell"]
+    },
+    "person": {
+      "description": "What a waiting_person state waits for. Present exactly when state is waiting_person. `key-signature` is an unanswered agent sign call, which cannot be told from a slow agent, so its text says a touch may be needed.",
+      "type": "string",
+      "enum": [
+        "host-key",
+        "helper-consent",
+        "vault-unlock",
+        "passphrase",
+        "password",
+        "second-factor",
+        "key-signature"
+      ]
+    },
+    "cause": {
+      "description": "Why a failed or ended connection stopped. Present exactly for those two states. `silence` never appears on a failure that ended a plain shell: design §5.3 makes that the person's choice.",
+      "type": "string",
+      "enum": [
+        "host-key-changed",
+        "auth-rejected",
+        "no-auth-method",
+        "lost-link",
+        "released",
+        "silence",
+        "tainted"
+      ]
+    },
+    "attempt": {
+      "description": "How many attempts a reconnecting connection has made since it last worked. Present exactly when state is reconnecting.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "stateMs": {
+      "description": "How long the connection has been in this state, at the observation, in milliseconds. The renderer ticks it locally from here, so a quiet connection costs no frames. Always present, including on a still-silent stalled connection whose measurement grew.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "lookAnsweredAt": {
+      "description": "When a look-only dial was answered during the current stall, RFC3339 in UTC. It says the HOST accepts new connections while this flow is silent — evidence a person is shown, never a verdict on the flow. Present only while stalled, and only once a look has answered.",
+      "type": "string"
+    },
+    "plainShells": {
+      "description": "How many shells would end if this connection closed: its own, and those of everything dialed through it. It is what makes 'Reconnect ends 2 shells' sayable, and it is why silence never closes a connection carrying one. Present for connected and stalled.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "roundTripMs": {
+      "description": "The newest probe's measurement, in milliseconds. Absent until a probe has answered; absent and zero are the same statement — nothing measured — and a reader must treat them alike.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "slow": {
+      "description": "Whether the backend GRADES that measurement slow. It is sent rather than left to a reader to threshold, because the grade has hysteresis and a reader holding only the milliseconds cannot reproduce it.",
+      "type": "boolean"
+    }
+  }
+}

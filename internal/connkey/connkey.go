@@ -16,7 +16,13 @@
 // three copies of one rule.
 package connkey
 
-import "fmt"
+import (
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"fmt"
+	"strconv"
+)
 
 // Key identifies one connection.
 //
@@ -42,3 +48,38 @@ type Key struct {
 // String names the connection in logs and errors without the route, which is
 // usually empty and always long.
 func (k Key) String() string { return fmt.Sprintf("%s@%s:%d/%s", k.User, k.Host, k.Port, k.Identity) }
+
+// ID is the connection's public name: what a pane is bound to and what a
+// connection event is keyed by.
+//
+// IT IS A DIGEST AND NOT String(), and the difference is load-bearing in two
+// ways. String() deliberately omits the route, so two connections reached
+// through different bastions would share it — an authorization mistake, not a
+// cosmetic one. And it carries the account and the credential principal, which
+// a renderer has no business reading. A digest over the full identity, spelled
+// with lengths so that no two component lists can render alike, is the same
+// identity the pool and the supervisor key a connection by, in a form that is
+// safe to publish and stable across processes.
+//
+// Stable is what makes it usable: a coordinator rebinding a pane after a
+// restart, or a second coordinator asking about the same destination, computes
+// the same id, because it is derived from the key and nothing else.
+func (k Key) ID() string {
+	h := sha256.New()
+	write := func(s string) {
+		var n [8]byte
+		binary.BigEndian.PutUint64(n[:], uint64(len(s)))
+		h.Write(n[:])
+		h.Write([]byte(s))
+	}
+	write(k.Host)
+	// The port joins the digest as its decimal spelling, not as eight bytes:
+	// an int cannot be converted to uint64 without the possibility of a
+	// negative value becoming a small positive one, and the spelling is
+	// injective for the values a port can hold without that conversion at all.
+	write(strconv.Itoa(k.Port))
+	write(k.User)
+	write(k.Identity)
+	write(k.Route)
+	return hex.EncodeToString(h.Sum(nil))[:32]
+}

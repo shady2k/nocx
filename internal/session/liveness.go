@@ -32,6 +32,7 @@ package session
 import (
 	"time"
 
+	"github.com/shady2k/nocx/internal/hostconn"
 	"github.com/shady2k/nocx/internal/ssh"
 )
 
@@ -108,36 +109,18 @@ type Observation struct {
 	RoundTrip  time.Duration
 }
 
-// The two round-trip thresholds, and why there are two.
-//
-// A link sitting exactly at one threshold would flap: probe, slow, probe,
-// fine, probe, slow — an indicator blinking at the probe interval, which is
-// worse than no indicator because it draws the eye and says nothing. So the
-// grade ENTERS slow at one number and LEAVES it at a lower one, and the gap
-// between them is what a steady link cannot cross by jitter alone.
-//
-// The numbers are chosen against what an SSH keepalive round trip normally
-// is: single-digit milliseconds on a LAN, tens across a continent, and low
-// hundreds on a satellite or a badly congested link. Half a second is past
-// all of those — a host that takes that long to answer a request it does not
-// even parse is busy, not far away.
-const (
-	slowRoundTripEnter = 500 * time.Millisecond
-	slowRoundTripLeave = 300 * time.Millisecond
-)
-
 // roundTripGrade folds a measured round trip into the two states the product
-// draws, carrying the previous grade so the thresholds can differ by
-// direction. A zero measurement is not a grade: nothing was measured, so the
-// previous one stands.
+// draws.
+//
+// IT IS hostconn's FUNCTION, and this is a delegation rather than a second
+// copy. The grade belongs to the party that measures: the connection's one
+// prober lives in hostconn, and pane.connection carries the same two words
+// session.liveness does. Two threshold tables would agree everywhere anyone
+// looked and disagree exactly at the boundary, which is this repository's most
+// recurrent defect — and the helper, which has to grade a pane whose session
+// does not exist yet, cannot import this package.
 func roundTripGrade(prevSlow bool, rtt time.Duration) bool {
-	if rtt <= 0 {
-		return prevSlow
-	}
-	if prevSlow {
-		return rtt > slowRoundTripLeave
-	}
-	return rtt >= slowRoundTripEnter
+	return hostconn.GradeRoundTrip(prevSlow, rtt)
 }
 
 // livenessForExit maps how a session ended onto the terminal half of the set.

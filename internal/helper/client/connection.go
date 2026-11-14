@@ -1,0 +1,47 @@
+package client
+
+// The connection half of the ssh service's client: the two questions a
+// coordinator asks about a pane's connection (design §5.3, §5.6; stage 3).
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+
+	"github.com/shady2k/nocx/internal/helper/proto"
+)
+
+// ConnectionID asks the helper which connection a destination's shell will
+// ride. It dials nothing and asks no person: the answer is the supervisor key
+// derived from the resolved destination, which is why it can be asked BEFORE
+// the shell is opened and why the pane can be bound that early.
+//
+// A helper that does not answer the op is older than this app; the error is the
+// ordinary `unknown_op` refusal, and the caller is expected to read it that way.
+func (c *Client) ConnectionID(ctx context.Context, destination proto.SSHDestination) (string, error) {
+	var result proto.ConnectionResult
+	if err := c.Call(ctx, proto.ServiceSSH, proto.OpConnection, proto.ConnectionParams{
+		Destination: destination,
+	}, &result); err != nil {
+		return "", err
+	}
+	if result.ConnectionID == "" {
+		return "", fmt.Errorf("helper: the connection op answered no connection id")
+	}
+	return result.ConnectionID, nil
+}
+
+// connectionState routes one `ssh.connection-state` notification to the
+// configured observer. A caller with no observer pays no unmarshal: the frame
+// is dropped by its own shape, not by a state.
+func (c *Client) connectionState(raw json.RawMessage) {
+	if c.cfg.OnConnectionEvent == nil {
+		return
+	}
+	var ev proto.ConnectionStateEvent
+	if err := json.Unmarshal(raw, &ev); err != nil {
+		c.log.Warn("malformed connection-state notification", "err", err)
+		return
+	}
+	c.cfg.OnConnectionEvent(ev)
+}

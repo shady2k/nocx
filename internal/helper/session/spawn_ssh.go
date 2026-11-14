@@ -57,6 +57,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/bootstrapstream"
+	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/helper/sshsvc"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
@@ -75,6 +76,12 @@ import (
 type ShellOpener interface {
 	OpenPaneListeners(ctx context.Context, spec sshsvc.PaneSpec) (*sshsvc.PaneListeners, error)
 	OpenShell(ctx context.Context, spec sshsvc.ShellSpec) (*sshsvc.ShellChannel, error)
+	// Watch reports this pane's connection to the coordinator that asked for
+	// it, and answers the function that ends the report (design §5.5, §5.6).
+	// It is taken BEFORE anything dials: the pane listeners below acquire the
+	// connection first, and the stages a pane is told about are the ones that
+	// happen while it is still empty.
+	Watch(ctx context.Context, destination proto.SSHDestination) (func(), error)
 }
 
 // sshSpawner is the SSHSpawner this build wires into the session service.
@@ -122,6 +129,23 @@ func NewSSHSpawner(opener ShellOpener, logger *slog.Logger) SSHSpawner {
 // that waited would hold the op for the whole bootstrap budget, and a
 // coordinator's pane would appear fifteen seconds after it was asked for.
 func (p *sshSpawner) SpawnSSH(ctx context.Context, req SSHSpawnRequest) (Process, error) {
+	// THE PANE IS TOLD WHAT ITS CONNECTION IS DOING FROM BEFORE THE FIRST
+	// DIAL, not from the moment a shell exists (design §5.6). The
+	// subscription is taken here because this is the earliest point that
+	// knows which coordinator asked and which destination it named, and it
+	// outlives this function with the session: a connection that stalls an
+	// hour later is still this pane's.
+	stopWatch, err := p.opener.Watch(ctx, req.Destination)
+	if err != nil {
+		return nil, err
+	}
+	kept := false
+	defer func() {
+		if !kept {
+			stopWatch()
+		}
+	}()
+
 	kind := shellintegration.ShellKind(req.Shell)
 	if kind == "" {
 		kind = shellintegration.ShellAuto
@@ -260,8 +284,11 @@ func (p *sshSpawner) SpawnSSH(ctx context.Context, req SSHSpawnRequest) (Process
 		pane:          pane,
 		done:          make(chan struct{}),
 		bootstrapDone: make(chan struct{}),
+		stopWatch:     stopWatch,
 		log:           p.log.With("session", req.SessionID),
 	}
+	kept = true
+
 	// The stream is TAKEN OVER here and read from exactly one place from now
 	// on: the feed the bootstrap and, afterwards, the session's pump both read
 	// from. Starting it before the bootstrap is what makes a deadline able to
@@ -335,6 +362,10 @@ type sshProcess struct {
 	// loopback listener, which finished the machine's teardown when the
 	// session ends. Nil for a pane that asked for none.
 	pane *sshsvc.PaneListeners
+	// stopWatch ends this pane's subscription to its connection's state. It is
+	// the session's rather than the spawn's because the pane's head keeps
+	// drawing the connection for the session's whole life.
+	stopWatch func()
 
 	// bootstrapDone closes when the launcher's bootstrap has finished with the
 	// stream, whatever the outcome. Read waits on it, which is what makes the
@@ -442,6 +473,13 @@ func (p *sshProcess) Resize(_ context.Context, cols, rows, _, _ uint16) error {
 // is close-session; this is the shutdown and failure path, and both reach the
 // same object.
 func (p *sshProcess) Close() error {
+	p.mu.Lock()
+	stop := p.stopWatch
+	p.stopWatch = nil
+	p.mu.Unlock()
+	if stop != nil {
+		stop()
+	}
 	err := p.ch.Close()
 	p.feed.close(err)
 	if p.pane != nil {

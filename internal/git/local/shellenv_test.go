@@ -141,3 +141,15 @@ func TestEnvCacheFailureRememberedThenRetried(t *testing.T) {
 		t.Fatalf("retry resolve: state=%s env=%v, want resolved", state, env)
 	}
 }
+
+func TestResolveShellEnvRefusesOverflowAfterPATH(t *testing.T) {
+	shell := filepath.Join(t.TempDir(), "overflow-shell")
+	script := "#!/bin/sh\nprintf '" + shellenv.Marker + "PATH=/usr/bin\\000'\nwhile :; do printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; done\n"
+	if err := os.WriteFile(shell, []byte(script), 0o755); err != nil { //nolint:gosec // executable fixture
+		t.Fatal(err)
+	}
+	env, err := resolveShellEnv(context.Background(), shell, time.Second, 64)
+	if env != nil || err == nil || !strings.Contains(err.Error(), "output cap reached") {
+		t.Fatalf("resolveShellEnv = %v, %v; want no environment and explicit overflow", env, err)
+	}
+}

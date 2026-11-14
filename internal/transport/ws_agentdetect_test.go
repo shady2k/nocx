@@ -22,7 +22,10 @@ import (
 // so the detector's real resolution and real probes run against fixtures.
 type detectionShell struct{ path string }
 
-func (s detectionShell) Path(context.Context) (string, error) { return s.path, nil }
+func (s detectionShell) Environment(context.Context) ([]string, string, error) {
+	cwd, err := os.UserHomeDir()
+	return []string{"PATH=" + s.path}, cwd, err
+}
 
 func agentDetectionConnection(t *testing.T, detector AgentDetector) (*websocket.Conn, func()) {
 	t.Helper()
@@ -108,5 +111,29 @@ func TestAgentRecordsDetect_DTOConformsToContract(t *testing.T) {
 			t.Fatalf("%s: %v", test.name, err)
 		}
 		validateJSON(t, loadSchema(t, "agentRecords.detect.schema.json"), raw, test.name+" DTO")
+	}
+}
+
+func TestAgentRecordsDetectRefreshRejectsNull(t *testing.T) {
+	for _, raw := range []string{`{}`, `{"refresh":false}`, `{"refresh":true}`} {
+		if reason := validateAgentRecordsDetect(json.RawMessage(raw)); reason != "" {
+			t.Fatalf("valid params %s rejected: %s", raw, reason)
+		}
+	}
+	if reason := validateAgentRecordsDetect(json.RawMessage(`{"refresh":null}`)); reason == "" {
+		t.Fatal("refresh:null accepted, but the wire schema requires a boolean when present")
+	}
+}
+
+func TestAgentRecordsDetectRejectsNullRefreshOverTheWire(t *testing.T) {
+	conn, cleanup := agentDetectionConnection(t, nil)
+	defer cleanup()
+	raw := jsonrpcCall(t, conn, "agentRecords.detect", map[string]any{"refresh": nil})
+	var response rpcEnvelope
+	if err := json.Unmarshal(raw, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Error == nil || response.Error.Code != -32602 {
+		t.Fatalf("null refresh response = %s, want invalid params", raw)
 	}
 }

@@ -73,6 +73,9 @@ type Spec struct {
 	// hands it the scrubbed, locale-completed environment the pane's shell
 	// gets, and detection hands it the backend's own.
 	Env []string
+	// Dir is the explicit working directory for startup and the dump. Empty
+	// preserves the caller's working directory.
+	Dir string
 	// Login makes the shell read its login files as well as its interactive
 	// ones. It is the one fact that differs between the callers: a pane
 	// starts `shell -i`, so git asks for the interactive shell; Settings
@@ -85,9 +88,9 @@ type Spec struct {
 	MaxOut  int64
 }
 
-// errOutputCap is the sink's "enough". Returning it from Write stops exec's
-// copy and, through onFull, stops the shell — the deliberate cut.
-var errOutputCap = errors.New("shellenv: output cap reached")
+// ErrOutputCap means the dump was refused because the shell exceeded MaxOut.
+// No retained prefix is authoritative, even if it already contains PATH.
+var ErrOutputCap = errors.New("shellenv: output cap reached")
 
 // Env runs the shell and returns the exported environment a child of it would
 // receive, NUL-delimited by `env -0` and parsed into NAME=VALUE records. The
@@ -104,15 +107,22 @@ func Env(ctx context.Context, spec Spec) ([]string, error) {
 	if spec.Login {
 		argv = append(argv, "-l")
 	}
-	argv = append(argv, "-i", "-c", "printf '"+Marker+"'; exec /usr/bin/env -0")
+	tail := "printf '" + Marker + "'; exec /usr/bin/env -0"
+	if spec.Dir != "" {
+		// Startup files may change directory. Restore the same explicit cwd
+		// that the caller will use for PATH lookup and child processes.
+		tail = "cd -- '" + strings.ReplaceAll(spec.Dir, "'", "'\\''") + "' && " + tail
+	}
+	argv = append(argv, "-i", "-c", tail)
 
 	stopped := make(chan struct{})
 	var stopOnce sync.Once
 	sink := &cappedSink{max: spec.MaxOut}
 	sink.onFull = func() { stopOnce.Do(func() { close(stopped) }) }
 
-	cmd := exec.Command(argv[0], argv[1:]...) //nolint:gosec // the shell is the caller's, the tail is fixed literals
+	cmd := exec.Command(argv[0], argv[1:]...) //nolint:gosec // the shell is the caller's; the directory is shell-quoted
 	cmd.Env = spec.Env
+	cmd.Dir = spec.Dir
 	cmd.Stdout = sink
 	cmd.Stderr = io.Discard
 	// The shell leads its own group, so stopping it reaches anything an rc
@@ -143,9 +153,7 @@ func Env(ctx context.Context, spec Spec) ([]string, error) {
 
 	switch {
 	case sink.full():
-		// The cap stopped the shell. What it printed before that is what
-		// there is, and it is parsed below: a marker that arrived is still a
-		// usable dump.
+		return nil, ErrOutputCap
 	case ctx.Err() != nil:
 		return nil, ctx.Err()
 	case waitErr != nil:
@@ -191,12 +199,12 @@ func (s *cappedSink) Write(p []byte) (int, error) {
 	room := s.max - int64(len(s.buf))
 	if room <= 0 {
 		s.reachedCap()
-		return 0, errOutputCap
+		return 0, ErrOutputCap
 	}
 	if int64(len(p)) > room {
 		s.buf = append(s.buf, p[:room]...)
 		s.reachedCap()
-		return int(room), errOutputCap
+		return int(room), ErrOutputCap
 	}
 	s.buf = append(s.buf, p...)
 	return len(p), nil
@@ -234,8 +242,12 @@ func parseEnvDump(out string) ([]string, error) {
 	if i < 0 {
 		return nil, errors.New("the shell printed no environment dump")
 	}
+	dump := out[i+len(Marker):]
+	if dump != "" && !strings.HasSuffix(dump, "\x00") {
+		return nil, errors.New("the shell printed an incomplete environment record")
+	}
 	var env []string
-	for _, record := range strings.Split(out[i+len(Marker):], "\x00") {
+	for _, record := range strings.Split(dump, "\x00") {
 		eq := strings.IndexByte(record, '=')
 		if eq <= 0 {
 			continue // the trailing empty record, or a name-less fragment

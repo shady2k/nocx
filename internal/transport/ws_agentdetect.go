@@ -51,7 +51,7 @@ type agentRecordsDetectParams struct {
 
 func validateAgentRecordsDetect(raw json.RawMessage) string {
 	var p agentRecordsDetectParams
-	return decodeObject(raw, &p)
+	return decodeObject(raw, &p, "refresh")
 }
 
 type agentDetectionHandlers struct {

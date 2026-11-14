@@ -160,29 +160,79 @@ func TestEnvRunsTheShellInTheModeTheCallerAsksFor(t *testing.T) {
 	}
 }
 
-// A shell that keeps printing is stopped at the output cap, and what it wrote
-// before that is still the answer — a timeout would have answered with the
-// context's error instead, so the two outcomes are told apart by the reason.
+// A PATH in the retained prefix cannot make an overflowing dump authoritative.
 func TestEnvStopsAtTheOutputCap(t *testing.T) {
 	dir := t.TempDir()
 	shell := filepath.Join(dir, "chatty-shell")
-	script := "#!/bin/sh\nprintf '" + Marker + "'\nwhile :; do printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; done\n"
+	script := "#!/bin/sh\nprintf '" + Marker + "PATH=/usr/bin\\000'\nwhile :; do printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; done\n"
 	if err := os.WriteFile(shell, []byte(script), 0o755); err != nil { //nolint:gosec // executable fixture
 		t.Fatal(err)
 	}
-	_, err := Env(context.Background(), Spec{
+	env, err := Env(context.Background(), Spec{
 		Shell:   shell,
 		Env:     os.Environ(),
 		Timeout: 5 * time.Second,
 		MaxOut:  64,
 	})
-	if err == nil {
-		t.Fatal("a shell that overflowed the cap resolved an environment")
+	if err == nil || env != nil {
+		t.Fatalf("overflow resolved an environment: %v, %v", env, err)
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("the cap did not stop the shell; it ran to its timeout: %v", err)
 	}
-	if !strings.Contains(err.Error(), "no PATH") {
-		t.Fatalf("err = %v, want the truncated dump's reason", err)
+	if !errors.Is(err, ErrOutputCap) {
+		t.Fatalf("err = %v, want an explicit output-cap error", err)
 	}
+}
+
+func TestParseEnvDumpRefusesIncompleteRecord(t *testing.T) {
+	for _, dump := range []string{Marker + "PATH=/usr/bin", envDump("PATH=/usr/bin") + "TOKEN=partial"} {
+		if env, err := parseEnvDump(dump); err == nil || env != nil {
+			t.Fatalf("parseEnvDump(%q) = %v, %v; want no environment and an error", dump, env, err)
+		}
+	}
+}
+
+func TestEnvUsesDesignatedDirectoryAndKeepsExports(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "home with ' quote")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	shell := filepath.Join(t.TempDir(), "startup-shell")
+	// Simulate startup files changing cwd before the shell evaluates -c.
+	script := `#!/bin/sh
+export STARTUP_CWD="$PWD"
+cd /
+while [ "$1" != -c ]; do shift; done
+shift
+export SHELL_TOKEN=resolved
+unset BACKEND_ONLY
+printf() { export DUMP_CWD="$PWD"; command printf "$@"; }
+eval "$1"
+`
+	if err := os.WriteFile(shell, []byte(script), 0o755); err != nil { //nolint:gosec // executable fixture
+		t.Fatal(err)
+	}
+	env, err := Env(context.Background(), Spec{Shell: shell, Env: []string{"PATH=relative-bin", "HOME=" + home, "BACKEND_ONLY=stale"}, Dir: home, Timeout: time.Second, MaxOut: 64 << 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsEnv(env, "SHELL_TOKEN=resolved") || containsEnv(env, "BACKEND_ONLY=stale") || !containsEnv(env, "HOME="+home) {
+		t.Fatalf("resolved exports = %v", env)
+	}
+	if !containsEnv(env, "STARTUP_CWD="+home) {
+		t.Fatalf("startup cwd not designated home: %v", env)
+	}
+	if !containsEnv(env, "DUMP_CWD="+home) {
+		t.Fatalf("dump cwd not designated home: %v", env)
+	}
+}
+
+func containsEnv(env []string, want string) bool {
+	for _, entry := range env {
+		if entry == want {
+			return true
+		}
+	}
+	return false
 }

@@ -28,7 +28,6 @@
 package agentdetect
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -42,6 +41,7 @@ import (
 	"github.com/shady2k/nocx/internal/agentapproval"
 	"github.com/shady2k/nocx/internal/agentrecord"
 	"github.com/shady2k/nocx/internal/loginshell"
+	"github.com/shady2k/nocx/internal/proc"
 	"github.com/shady2k/nocx/internal/shellenv"
 )
 
@@ -62,13 +62,13 @@ const (
 	maxEnvDump = 256 << 10
 )
 
-// Shell answers the one question detection asks a shell: where is this
-// person's login-shell PATH. It is an interface because the answer is a
+// Shell answers which full environment and working directory this
+// person's login shell gives a probe. It is an interface because the answer is a
 // subprocess against a machine's own configuration, and a test supplies the
 // PATH it wants to ask about rather than hoping the machine running the suite
 // is configured the right way.
 type Shell interface {
-	Path(ctx context.Context) (string, error)
+	Environment(ctx context.Context) ([]string, string, error)
 }
 
 // LoginShell is the production Shell: the person's login shell, run once.
@@ -82,24 +82,17 @@ type Shell interface {
 // caller's.
 type LoginShell struct{}
 
-// Path runs the login shell and returns the PATH it resolved.
-func (LoginShell) Path(ctx context.Context) (string, error) {
-	env, err := shellenv.Env(ctx, shellenv.Spec{
-		Shell: loginshell.New().Resolve().Path,
-		// The backend's own environment, not git's scrubbed one: detection
-		// asks what the person's shell gives, and scrubbing is the pane's
-		// concern, not this question's.
-		Env:     os.Environ(),
-		Login:   true,
-		Timeout: loginShellTimeout,
-		MaxOut:  maxEnvDump,
-	})
+// Environment resolves the full login environment at the person's home directory.
+func (LoginShell) Environment(ctx context.Context) ([]string, string, error) {
+	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
-	// Env refuses an environment without PATH, so this lookup cannot fail.
-	path, _ := shellenv.Path(env)
-	return path, nil
+	env, err := shellenv.Env(ctx, shellenv.Spec{
+		Shell: loginshell.New().Resolve().Path, Env: os.Environ(), Dir: home,
+		Login: true, Timeout: loginShellTimeout, MaxOut: maxEnvDump,
+	})
+	return env, home, err
 }
 
 // Detector runs detection passes and caches the last answer.
@@ -107,6 +100,7 @@ type Detector struct {
 	mu     sync.Mutex
 	shell  Shell
 	cached []agentrecord.Detection
+	flight *detectionPass
 	// probeTimeout is a field so a test can make a hung probe cheap to
 	// observe; production leaves it at probeTimeout.
 	probeTimeout time.Duration
@@ -118,6 +112,12 @@ func New(shell Shell) *Detector {
 	return &Detector{shell: shell, probeTimeout: probeTimeout}
 }
 
+type detectionPass struct {
+	done chan struct{}
+	rows []agentrecord.Detection
+	err  error
+}
+
 // Detect answers for every agent the assistant can run, in the record's order.
 // The answer is cached; refresh asks the login shell again.
 //
@@ -127,25 +127,45 @@ func (d *Detector) Detect(ctx context.Context, refresh bool) ([]agentrecord.Dete
 	if d == nil || d.shell == nil {
 		return nil, errors.New("agentdetect: no login shell is wired")
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	d.mu.Lock()
-	defer d.mu.Unlock()
+	if pass := d.flight; pass != nil {
+		d.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-pass.done:
+			return append([]agentrecord.Detection(nil), pass.rows...), pass.err
+		}
+	}
 	if d.cached != nil && !refresh {
-		return append([]agentrecord.Detection(nil), d.cached...), nil
+		rows := append([]agentrecord.Detection(nil), d.cached...)
+		d.mu.Unlock()
+		return rows, nil
 	}
+	pass := &detectionPass{done: make(chan struct{})}
+	d.flight = pass
+	d.mu.Unlock()
+	rows, err := d.detect(ctx)
+	d.mu.Lock()
+	pass.rows, pass.err = rows, err
+	if err == nil {
+		d.cached = rows
+	}
+	d.flight = nil
+	close(pass.done)
+	d.mu.Unlock()
+	return append([]agentrecord.Detection(nil), rows...), err
+}
 
-	path, err := d.shell.Path(ctx)
+func (d *Detector) detect(ctx context.Context) ([]agentrecord.Detection, error) {
+	env, cwd, err := d.shell.Environment(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("agentdetect: the login shell's PATH could not be read: %w", err)
+		return nil, fmt.Errorf("agentdetect: the login shell's environment could not be read: %w", err)
 	}
-	// The probes run with the login shell's PATH and the backend's remaining
-	// environment: a CLI whose own shebang is `env node` finds node where the
-	// person's shell would, and nothing else is taken from a shell run for a
-	// different question.
-	env := withPath(os.Environ(), path)
-	// A relative PATH entry is relative to where the login shell started,
-	// which is the person's home directory. It is only consulted for such an
-	// entry; an absolute one never uses it.
-	cwd, _ := os.UserHomeDir()
+	path, _ := shellenv.Path(env)
 
 	agents := agentrecord.SupportedAgents()
 	rows := make([]agentrecord.Detection, 0, len(agents))
@@ -161,9 +181,9 @@ func (d *Detector) Detect(ctx context.Context, refresh bool) ([]agentrecord.Dete
 		if executable, resolveErr := agentapproval.IdentityForExecutableInPath(agent.Command, path, cwd); resolveErr == nil {
 			row.Found = true
 			row.Readiness = agentrecord.ReadinessInstalled
-			row.Version = d.version(ctx, executable.Path, agent.VersionArgs, env)
+			row.Version = d.version(ctx, executable.Path, agent.VersionArgs, env, cwd)
 			if agent.Readiness != nil {
-				row.Readiness = d.readiness(ctx, executable.Path, *agent.Readiness, env)
+				row.Readiness = d.readiness(ctx, executable.Path, *agent.Readiness, env, cwd)
 			}
 		}
 		rows = append(rows, row)
@@ -171,14 +191,13 @@ func (d *Detector) Detect(ctx context.Context, refresh bool) ([]agentrecord.Dete
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	d.cached = rows
 	return append([]agentrecord.Detection(nil), rows...), nil
 }
 
 // version runs the command's version flag and returns the first non-empty line
 // it printed. Empty means it printed nothing usable, or could not run.
-func (d *Detector) version(ctx context.Context, executable string, args []string, env []string) string {
-	out, _, err := d.run(ctx, executable, args, env)
+func (d *Detector) version(ctx context.Context, executable string, args []string, env []string, cwd string) string {
+	out, _, err := d.run(ctx, executable, args, env, cwd, true)
 	if err != nil {
 		return ""
 	}
@@ -193,8 +212,8 @@ func (d *Detector) version(ctx context.Context, executable string, args []string
 // readiness runs the agent's own probe and reads its exit status through the
 // record's answers. A status the record does not interpret, or a probe that
 // could not run or did not finish, is unknown.
-func (d *Detector) readiness(ctx context.Context, executable string, probe agentrecord.ReadinessProbe, env []string) agentrecord.Readiness {
-	_, exit, err := d.run(ctx, executable, probe.Args, env)
+func (d *Detector) readiness(ctx context.Context, executable string, probe agentrecord.ReadinessProbe, env []string, cwd string) agentrecord.Readiness {
+	_, exit, err := d.run(ctx, executable, probe.Args, env, cwd, false)
 	if err != nil {
 		return agentrecord.ReadinessUnknown
 	}
@@ -209,42 +228,45 @@ func (d *Detector) readiness(ctx context.Context, executable string, probe agent
 // run executes one probe under its own bound and reports the exit status of a
 // process that ran. An error means the process did not run, or did not finish:
 // its output and status are then not an answer.
-func (d *Detector) run(ctx context.Context, executable string, args []string, env []string) (string, int, error) {
+// maxVersionOutput is a byte prefix, not an unbounded CLI transcript.
+const maxVersionOutput = 4096
+
+// prefixSink drains all writes but retains only the bounded prefix.
+type prefixSink struct{ data []byte }
+
+func (s *prefixSink) Write(p []byte) (int, error) {
+	n := len(p)
+	room := maxVersionOutput - len(s.data)
+	if len(p) > room {
+		p = p[:room]
+	}
+	s.data = append(s.data, p...)
+	return n, nil
+}
+
+func (d *Detector) run(ctx context.Context, executable string, args []string, env []string, cwd string, capture bool) (string, int, error) {
 	ctx, cancel := context.WithTimeout(ctx, d.probeTimeout)
 	defer cancel()
-	argv := append([]string{executable}, args...)
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec // executable is the resolved record command, args are the record's
-	cmd.Env = env
+	cmd := exec.CommandContext(ctx, executable, args...) //nolint:gosec // resolved record command and record args
+	cmd.Env, cmd.Dir = env, cwd
 	cmd.Stderr = io.Discard
-	// A probe that leaves a child holding its stdout must not hold the pass
-	// open after the probe itself was killed.
-	cmd.WaitDelay = time.Second
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
+	var stdout prefixSink
+	cmd.Stdout = io.Discard
+	if capture {
+		cmd.Stdout = &stdout
+	}
+	proc.InOwnGroup(cmd)
+	cmd.Cancel = func() error { return proc.KillGroupImmediately(cmd) }
 	err := cmd.Run()
-	switch {
-	case err == nil:
-		return stdout.String(), 0, nil
-	case ctx.Err() != nil:
+	if ctx.Err() != nil {
 		return "", -1, ctx.Err()
+	}
+	if err == nil {
+		return string(stdout.data), 0, nil
 	}
 	var exit *exec.ExitError
 	if errors.As(err, &exit) {
-		return stdout.String(), exit.ExitCode(), nil
+		return string(stdout.data), exit.ExitCode(), nil
 	}
 	return "", -1, err
-}
-
-// withPath replaces PATH in env, rather than appending a second copy: two PATH
-// entries are one environment nobody can predict, because which one a child
-// sees is the platform's choice.
-func withPath(env []string, path string) []string {
-	out := make([]string, 0, len(env)+1)
-	for _, kv := range env {
-		if strings.HasPrefix(kv, "PATH=") {
-			continue
-		}
-		out = append(out, kv)
-	}
-	return append(out, "PATH="+path)
 }

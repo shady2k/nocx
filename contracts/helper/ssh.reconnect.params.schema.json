@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.reconnect.params.schema.json",
+  "title": "HelperSSHReconnectParams",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["destination"],
+  "properties": {
+    "destination": {
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/destination"
+    },
+    "expectedSeq": {
+      "type": "integer",
+      "minimum": 1
+    }
+  }
+}

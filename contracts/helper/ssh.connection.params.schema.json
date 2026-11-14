@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/helper/ssh.connection.params.schema.json",
   "title": "HelperSSHConnectionParams",
-  "description": "Ask which connection a destination's shell will ride (nocx-oalo1.5.3). It is a question with NO side effect: the helper derives the same supervisor key its own `spawn-ssh` acquire will use, from the resolved destination alone — no credential is resolved, no socket is dialed, no person is asked — and answers it. That is what lets a coordinator bind a pane to its connection BEFORE the shell exists, so the pane's first `pane.connection` arrives while the dial is still opening (design §5.5). The destination is the same shape every other op takes, for the reason those ops share it: a connection's identity includes the route and the credential principal, and a loose copy of the address would name a different connection.",
+  "description": "Names a destination’s connection and installs its observation stream. When paneId is present, the request also retains a logical pane hold with the supplied reconnect policy before dialing. Destination-only queries do not retain a pane hold.",
   "type": "object",
   "additionalProperties": false,
   "required": ["destination"],
@@ -10,6 +10,14 @@
     "destination": {
       "description": "The resolved destination whose connection is asked about. Resolved by the coordinator, which reads ~/.ssh/config and holds the credential binding; the helper only turns it into the identity the pool keys a connection by.",
       "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/destination"
+    },
+    "paneId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reconnectPolicy": {
+      "type": "string",
+      "enum": ["auto", "ask", "never"]
     }
   }
 }

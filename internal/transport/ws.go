@@ -1076,10 +1076,14 @@ type WSServer struct {
 	paneMu      sync.Mutex
 	paneRecords map[string]*paneRecord
 	paneEpochs  map[string]uint64
-	// paneReconnections is the connection policy's notice that a reconnect is
-	// being carried out (ws_pane_reconnect.go). Nil is a server with no
-	// connection policy wired; no offer exists then.
-	paneReconnections PaneReconnections
+	// panePublishGate is a test seam: called under paneMu between admission and
+	// enqueue, so a test can force the two-publisher interleaving the epoch
+	// guard exists for. Nil in production.
+	panePublishGate func()
+	// paneConnectionPolicy is the connection policy's notice that a reconnect
+	// is being carried out and that a pane is gone (ws_pane_reconnect.go). Nil
+	// is a server with no connection policy wired; no offer exists then.
+	paneConnectionPolicy PaneConnectionPolicy
 
 	// connsMu protects conns and connsRegistered. One entry per active
 	// WebSocket connection.
@@ -4937,6 +4941,11 @@ func (s *WSServer) closeSessionsForPanes(paneIDs map[string]struct{}) {
 	}
 	for pane := range panes {
 		s.closePaneSessions(pane)
+		// THE PANE IS GONE, so its binding goes too. A shared connection
+		// outlives one pane, and without this every later observation of it
+		// would still be produced and published for a pane that no longer
+		// exists — in the transport's maps and in the policy owner's.
+		s.unbindPane(pane)
 	}
 }
 

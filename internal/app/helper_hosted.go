@@ -140,6 +140,10 @@ type hostedSpawnResult struct {
 	// this is the departure.
 	DetachLifecycle    func()
 	ObserveOutputHoles func(func(lost uint64, reason string))
+	// ConnectionID names the SSH connection this remote pane's shell rides
+	// (design §5.6), so the adoption can be addressed to the connection it
+	// belongs to. Empty for every local pane: it rides no connection.
+	ConnectionID string
 	// PublishFailure is why this pane's integration bundle did not reach the
 	// host, when it did not (nocx-1kejz.4). EMPTY for a pane nothing was
 	// published for and for one whose copy landed.

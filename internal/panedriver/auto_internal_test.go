@@ -74,7 +74,7 @@ func TestAutoReconnectsADroppedPaneByItself(t *testing.T) {
 	d := autoDriver(t, PolicyAuto, sched)
 	calls := 0
 	d.SetAction(func(string, uint64) error { calls++; return nil })
-	d.Apply(drop(1, 1, causeLostLink))
+	d.ApplyFrom("helper-test", drop(1, 1, causeLostLink))
 	d.Bind("pane-1", "conn-a")
 	if sched.count() == 0 {
 		t.Fatal("auto scheduled no retry for a network-class drop")
@@ -94,7 +94,7 @@ func TestAskAndNeverDoNotReconnectByThemselves(t *testing.T) {
 			d := autoDriver(t, policy, sched)
 			calls := 0
 			d.SetAction(func(string, uint64) error { calls++; return nil })
-			d.Apply(drop(1, 1, causeLostLink))
+			d.ApplyFrom("helper-test", drop(1, 1, causeLostLink))
 			d.Bind("pane-1", "conn-a")
 			if sched.count() != 0 {
 				t.Fatalf("policy %q scheduled an automatic retry", policy)
@@ -114,7 +114,7 @@ func TestANonNetworkCauseIsNotRetried(t *testing.T) {
 	sched := &fakeScheduler{}
 	d := autoDriver(t, PolicyAuto, sched)
 	d.SetAction(func(string, uint64) error { return nil })
-	d.Apply(proto.ConnectionStateEvent{
+	d.ApplyFrom("helper-test", proto.ConnectionStateEvent{
 		ConnectionID: "conn-a", Seq: 1, State: proto.ConnectionFailed, Cause: "host-key-changed",
 	})
 	d.Bind("pane-1", "conn-a")
@@ -130,7 +130,7 @@ func TestAReconnectInFlightSuppressesTheAutomaticOne(t *testing.T) {
 	d := autoDriver(t, PolicyAuto, sched)
 	calls := 0
 	d.SetAction(func(string, uint64) error { calls++; return nil })
-	d.Apply(drop(1, 1, causeLostLink))
+	d.ApplyFrom("helper-test", drop(1, 1, causeLostLink))
 	d.Bind("pane-1", "conn-a")
 	d.ReconnectStarted("pane-1")
 	sched.fireAll()
@@ -152,7 +152,7 @@ func TestTheBackoffGrowsAndCapsAtFifteenSeconds(t *testing.T) {
 		sched.mu.Lock()
 		sched.pending = nil
 		sched.mu.Unlock()
-		d.Apply(drop(epochs[i-1], i, causeLostLink))
+		d.ApplyFrom("helper-test", drop(epochs[i-1], i, causeLostLink))
 		d.Bind("pane-1", "conn-a")
 	}
 	sched.mu.Lock()

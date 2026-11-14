@@ -79,6 +79,35 @@ func TestPaneConnectionWireKeepsThePresenceRulesOfTheState(t *testing.T) {
 	}
 }
 
+// TestAReconnectingCauseStaysOffTheWire: the retry cause is the backend's
+// decision input, and the renderer's exact reconnecting branch has no room for
+// it (design §5.6 names a cause for failed and ended only).
+func TestAReconnectingCauseStaysOffTheWire(t *testing.T) {
+	wire := paneConnectionWire(panedriver.Snapshot{
+		PaneID: "pane-1", ConnectionID: "conn-1", ConnectionEpoch: 3,
+		InstanceID: "instance-1",
+		Transport:  panedriver.Transport{State: "reconnecting", Attempt: 2, Cause: "lost-link", StateMs: 400},
+		Attempt:    panedriver.Attempt{Shown: "none", Candidate: "none"},
+		ObservedAt: time.Now(),
+	})
+	if wire.Transport.Cause != "" {
+		t.Fatalf("a reconnecting payload carried cause %q", wire.Transport.Cause)
+	}
+	if wire.Transport.Attempt != 2 {
+		t.Fatalf("attempt = %d, want 2", wire.Transport.Attempt)
+	}
+	failed := paneConnectionWire(panedriver.Snapshot{
+		PaneID: "pane-1", ConnectionID: "conn-1", ConnectionEpoch: 4,
+		InstanceID: "instance-1",
+		Transport:  panedriver.Transport{State: "failed", Cause: "host-key-changed"},
+		Attempt:    panedriver.Attempt{Shown: "none", Candidate: "none"},
+		ObservedAt: time.Now(),
+	})
+	if failed.Transport.Cause != "host-key-changed" {
+		t.Fatalf("a failed payload lost its cause: %+v", failed.Transport)
+	}
+}
+
 // TestPaneConnectionWireCarriesTheOfferOnlyWhenThereIsOne: the object's
 // PRESENCE is the button (design §5.8), so nil and an empty object are not the
 // same statement.

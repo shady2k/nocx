@@ -105,13 +105,20 @@ func TestAPanesConnectionIsReportedBeforeItsShellExists(t *testing.T) {
 		t.Fatal("the connection op answered no id")
 	}
 
-	// The spawner's order: subscribe, then open. The subscription is what
-	// makes the dial's stages visible.
-	stop, err := stand.service.Watch(ctx, destination)
-	if err != nil {
-		t.Fatalf("watch the pane's connection: %v", err)
+	// The earliest request that names the destination STARTS THE
+	// SUBSCRIPTION, before anything dials — the coordinator's publish path,
+	// which precedes the spawn, is one such dial. The named-connection call
+	// above already did it; no observation has been produced yet.
+	first := awaitConnEvent(t, stand)
+	if first.State != proto.ConnectionOpening {
+		t.Fatalf("the first observation is %q, want opening", first.State)
 	}
-	defer stop()
+	if first.Stage == "" {
+		t.Fatal("the first opening carries no stage")
+	}
+	if first.ConnectionID != connectionID {
+		t.Fatalf("the observation names %q, the op answered %q", first.ConnectionID, connectionID)
+	}
 
 	// Hold the SSH version exchange: the TCP connection is up, the handshake
 	// has not started, and no shell can exist.
@@ -131,16 +138,6 @@ func TestAPanesConnectionIsReportedBeforeItsShellExists(t *testing.T) {
 	}()
 	<-started
 
-	first := awaitConnEvent(t, stand)
-	if first.State != proto.ConnectionOpening {
-		t.Fatalf("the first observation is %q, want opening", first.State)
-	}
-	if first.Stage == "" {
-		t.Fatal("the first opening carries no stage")
-	}
-	if first.ConnectionID != connectionID {
-		t.Fatalf("the observation names %q, the op answered %q", first.ConnectionID, connectionID)
-	}
 	select {
 	case got := <-done:
 		if got.shell != nil {
@@ -185,11 +182,9 @@ func TestABlackholedConnectionReadsStalledWithinThirtySeconds(t *testing.T) {
 
 	destination := destinationAt(t, proxy.Addr())
 	ctx := host.WithConnection(context.Background(), stand.helper)
-	stop, err := stand.service.Watch(ctx, destination)
-	if err != nil {
-		t.Fatalf("watch the pane's connection: %v", err)
+	if _, err := stand.client.ConnectionID(ctx, destination); err != nil {
+		t.Fatalf("name the pane's connection: %v", err)
 	}
-	defer stop()
 	log := collect(stand)
 
 	shell := stand.openShell(t, destination)
@@ -268,11 +263,6 @@ func TestAHealthyOpenReportsItsStagesThenConnectedAndNothingElse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("name the connection: %v", err)
 	}
-	stop, err := stand.service.Watch(ctx, destination)
-	if err != nil {
-		t.Fatalf("watch the connection: %v", err)
-	}
-	defer stop()
 	log := collect(stand)
 
 	// A LITTLE LATENCY, so a measurement has a value at all: a loopback probe

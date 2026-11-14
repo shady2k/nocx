@@ -56,5 +56,5 @@ func (c *Client) connectionState(raw json.RawMessage) {
 		c.log.Warn("malformed connection-state notification", "err", err)
 		return
 	}
-	c.cfg.OnConnectionEvent(ev)
+	c.cfg.OnConnectionEvent(c.instanceID, ev)
 }

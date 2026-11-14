@@ -16,18 +16,24 @@ package sshsvc
 // minted id would need a table and would disagree with the pool's key under the
 // first bug; a digest of the key cannot.
 //
-// # Why the watch is per pane and not per connection
+// # Why the watch starts with the connection and not with the spawn
 //
-// A connection can carry several panes, and each pane's own spawn says which
-// coordinator connection should hear about it. The subscription therefore
-// belongs to the spawn, is taken before the first acquire (the pane listeners
-// dial before the shell), and ends when the session ends. Duplicate
-// observations of one connection are harmless: the coordinator drops a
-// sequence it has already applied, and that is cheaper than a
-// subscription-with-refcount table this generation does not need.
+// The dial can precede the spawn: the coordinator publishes the integration
+// bundle over the same destination first, and that publish acquires the
+// connection. A subscription installed by `spawn-ssh` would miss the handshake —
+// possibly all of it, at a password prompt — and the pane's first news would be
+// a shell that already exists. The `connection` op is the earliest request that
+// names the destination, so the listener starts there, before anything dials.
+//
+// It is ONE subscription per (coordinator connection, connection). Panes share
+// a connection, and a per-pane subscription would put every observation on the
+// wire once per pane; the coordinator's sequence fence would drop the copies,
+// but reading them is not free. The subscription ends when a write to that
+// coordinator fails, which is the one event that says nobody is listening.
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/shady2k/nocx/internal/connkey"
@@ -37,22 +43,121 @@ import (
 	"github.com/shady2k/nocx/internal/ssh"
 )
 
-// connection answers which connection this destination's shell will ride.
+// connection answers which connection this destination's shell will ride, and
+// STARTS ITS OBSERVATIONS if this coordinator is not already listening.
 //
-// It dials nothing, resolves no secret and asks no person: the key is a
-// function of the resolved destination the coordinator already sent, and the
-// derivation is the pool's own. An address that cannot name a connection is
-// refused with the same vocabulary a probe refuses an incomplete destination
-// with, because "this cannot be dialled" and "this cannot be named" are one
-// question at this layer.
-func (s *Service) connection(p proto.ConnectionParams) (proto.ConnectionResult, error) {
+// The subscription belongs here rather than to the spawn because the dial can
+// start before the spawn: the coordinator publishes the shell-integration
+// bundle over the same destination first, and that publish acquires the
+// connection. A watch installed with the spawn would miss the handshake —
+// possibly the whole of it, waiting at a password — and the pane would be told
+// nothing until the shell already existed. The op is the earliest request that
+// names the destination, so it is where the listener starts.
+//
+// ONE SUBSCRIPTION PER (COORDINATOR, CONNECTION). Panes share a connection;
+// two subscriptions would put every observation on the wire twice, and the
+// coordinator's sequence fence would drop the duplicate at the cost of reading
+// it. The subscription ends when writing to that coordinator fails, which is
+// the one event that says nobody is listening any more.
+func (s *Service) connection(ctx context.Context, p proto.ConnectionParams) (proto.ConnectionResult, error) {
 	if err := validateDestinationAddress(p.Destination); err != nil {
 		return proto.ConnectionResult{}, err
 	}
 	if err := validateIdentity(p.Destination.Identity); err != nil {
 		return proto.ConnectionResult{}, err
 	}
-	return proto.ConnectionResult{ConnectionID: connectionKey(p.Destination).ID()}, nil
+	key := connectionKey(p.Destination)
+	if conn, _ := host.ConnectionFrom(ctx).(*host.Host); conn != nil {
+		s.ensureConnectionWatch(conn, key)
+	}
+	return proto.ConnectionResult{ConnectionID: key.ID()}, nil
+}
+
+// connectionWatchKey identifies one observation subscription: the coordinator
+// connection it reports on, and the connection it reports about.
+type connectionWatchKey struct {
+	host       *host.Host
+	connection string
+}
+
+// connectionWatch is one subscription's lifetime. The Watch call delivers its
+// first observation SYNCHRONOUSLY, so a write that fails can happen before the
+// cancel function exists; the holder records that and closes the subscription
+// as soon as it can.
+type connectionWatch struct {
+	mu      sync.Mutex
+	stop    func()
+	stopped bool
+}
+
+func (w *connectionWatch) set(stop func()) {
+	w.mu.Lock()
+	if w.stopped {
+		w.mu.Unlock()
+		stop()
+		return
+	}
+	w.stop = stop
+	w.mu.Unlock()
+}
+
+func (w *connectionWatch) close() func() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.stopped = true
+	stop := w.stop
+	w.stop = nil
+	return stop
+}
+
+// ensureConnectionWatch starts this coordinator's subscription for one
+// connection, if it has none.
+func (s *Service) ensureConnectionWatch(conn *host.Host, key connkey.Key) {
+	k := connectionWatchKey{host: conn, connection: key.ID()}
+	s.mu.Lock()
+	if s.connectionWatches == nil {
+		s.connectionWatches = make(map[connectionWatchKey]*connectionWatch)
+	}
+	if _, ok := s.connectionWatches[k]; ok {
+		// SOMEONE ALREADY LISTENS FOR THIS COORDINATOR. The earlier
+		// subscription is the one; a second would duplicate every observation.
+		s.mu.Unlock()
+		return
+	}
+	holder := &connectionWatch{}
+	s.connectionWatches[k] = holder
+	s.mu.Unlock()
+
+	stop := s.client.WatchConnection(key, func(f hostconn.Facts) {
+		err := conn.SendNotification(proto.Notification{
+			Service: proto.ServiceSSH,
+			Event:   proto.EventConnectionState,
+			Params:  connectionEvent(f),
+		})
+		if err == nil {
+			return
+		}
+		s.log.Debug("ssh: a connection observation could not be sent",
+			"connection", key.ID(), "error", err)
+		s.forgetConnectionWatch(k, holder)
+	})
+	holder.set(stop)
+}
+
+// forgetConnectionWatch ends and removes one subscription, if it is still the
+// one installed (a failed write races nothing, but a replacement must not be
+// stopped by its predecessor's error).
+func (s *Service) forgetConnectionWatch(k connectionWatchKey, holder *connectionWatch) {
+	s.mu.Lock()
+	if s.connectionWatches[k] != holder {
+		s.mu.Unlock()
+		return
+	}
+	delete(s.connectionWatches, k)
+	s.mu.Unlock()
+	if stop := holder.close(); stop != nil {
+		stop()
+	}
 }
 
 // disconnect closes the connection a destination rides, if this helper holds
@@ -83,40 +188,6 @@ func (s *Service) disconnect(p proto.DisconnectParams) (proto.DisconnectResult, 
 func (s *Service) Disconnect(_ context.Context, d proto.SSHDestination) (bool, error) {
 	res, err := s.disconnect(proto.DisconnectParams{Destination: d})
 	return res.Closed, err
-}
-
-// Watch begins reporting one pane's connection to the coordinator that asked,
-// and answers the function that ends the report.
-//
-// It must be called BEFORE the first acquire for the pane: the pane listeners
-// dial before the shell does, and the stages that matter most are the first
-// ones. The listener receives the state the connection is already in at once,
-// so a pane joining a connection somebody else dialled is not blank.
-func (s *Service) Watch(ctx context.Context, d proto.SSHDestination) (func(), error) {
-	conn, _ := host.ConnectionFrom(ctx).(*host.Host)
-	if conn == nil {
-		// A pane's spawn is coordinator-initiated, so this is the re-dial case:
-		// there is nowhere to send an observation, and the honest answer is the
-		// same refusal the other ops give rather than a silent stream.
-		return nil, errNoAuthChannel
-	}
-	if err := validateDestinationAddress(d); err != nil {
-		return nil, err
-	}
-	if err := validateIdentity(d.Identity); err != nil {
-		return nil, err
-	}
-	key := connectionKey(d)
-	return s.client.WatchConnection(key, func(f hostconn.Facts) {
-		if err := conn.SendNotification(proto.Notification{
-			Service: proto.ServiceSSH,
-			Event:   proto.EventConnectionState,
-			Params:  connectionEvent(f),
-		}); err != nil {
-			s.log.Debug("ssh: a connection observation could not be sent",
-				"connection", key.ID(), "error", err)
-		}
-	}), nil
 }
 
 // connectionKey derives the pool/supervisor identity a destination's dial will
@@ -159,7 +230,13 @@ func connectionEvent(f hostconn.Facts) proto.ConnectionStateEvent {
 	case hostconn.Failed, hostconn.Ended:
 		ev.Cause = string(f.State.Cause)
 	case hostconn.Reconnecting:
+		// THE CAUSE RIDES A RECONNECTING STATE TOO, and it is load-bearing:
+		// only a network-class loss is retried automatically (design §5.3), so a
+		// coordinator that could not tell a lost link from a silence close would
+		// either retry what a person decided or refuse to retry what nobody
+		// did.
 		ev.Attempt = f.State.Attempt
+		ev.Cause = string(f.State.Cause)
 	}
 	if f.LookAnswered {
 		// The wire carries an instant and hostconn carries an age: the clock

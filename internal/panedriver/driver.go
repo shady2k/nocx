@@ -131,6 +131,12 @@ type Driver struct {
 	// pane on a host that is already connected.
 	conns map[string]*connection
 
+	// source is the helper instance the cached observations came from. A
+	// connection id is a destination digest and outlives a helper process,
+	// while a sequence belongs to one supervisor's lifetime; without this
+	// fence a replacement helper's observations would look stale until they
+	// exceeded the old helper's last sequence.
+	source string
 	// policy answers ssh.reconnect's value. Nil is never, the conservative
 	// answer: nothing reconnects by itself until the composition root says so.
 	policy func() string
@@ -239,6 +245,33 @@ func (d *Driver) ReconnectStarted(paneID string) {
 	d.mu.Unlock()
 }
 
+// Unbind forgets one pane. It is the close's half of Bind, and it drops the
+// automatic retry with the binding: an observation of a connection nobody's
+// pane rides any more has nobody to be about.
+func (d *Driver) Unbind(paneID string) {
+	if d == nil || paneID == "" {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if b := d.panes[paneID]; b != nil {
+		if c := d.conns[b.connectionID]; c != nil {
+			delete(c.panes, paneID)
+		}
+		delete(d.panes, paneID)
+	}
+	if cancel := d.autos[paneID]; cancel != nil {
+		cancel()
+		delete(d.autos, paneID)
+	}
+	delete(d.autoSeq, paneID)
+	delete(d.inFlight, paneID)
+}
+
+// PaneClosed is the transport's seam name for Unbind: a pane left the layout,
+// so its binding and any automatic retry go with it.
+func (d *Driver) PaneClosed(paneID string) { d.Unbind(paneID) }
+
 // ReconnectFinished ends the interval ReconnectStarted opened.
 func (d *Driver) ReconnectFinished(paneID string) {
 	if d == nil || paneID == "" {
@@ -280,6 +313,11 @@ func (d *Driver) Bind(paneID, connectionID string) {
 		if old := d.conns[b.connectionID]; old != nil {
 			delete(old.panes, paneID)
 		}
+		// THE PREVIOUS CONNECTION'S SHELL IS NOT THIS ONE'S. A pane that moves
+		// to another connection has no session there until an adoption names
+		// one, and carrying the old id would publish a session on the wrong
+		// connection for as long as the new one takes to adopt.
+		b.sessionID = ""
 	}
 	if b == nil {
 		b = &binding{}
@@ -313,16 +351,25 @@ func (d *Driver) Bind(paneID, connectionID string) {
 // It is a separate event rather than a field of every observation: the session
 // id exists once, when a shell is adopted, and repeating it on every later
 // observation would make a state that did not change look like one that had.
-func (d *Driver) AdoptSession(paneID, sessionID, instanceID string) {
-	if d == nil || paneID == "" || sessionID == "" {
+// AdoptSession records the session a pane's shell became, FOR THE CONNECTION
+// the caller opened it on, and publishes it beside the connection's current
+// state.
+//
+// IT IS REFUSED WHEN THE PANE NO LONGER RIDES THAT CONNECTION, and that refusal
+// is the point: an adoption is the second half of an open that can be overtaken
+// — a pane rebound to another connection while the first open was still
+// adopting — and accepting the late half would overwrite the new binding with
+// the old shell under a freshly minted epoch, which nothing downstream could
+// tell from the truth.
+func (d *Driver) AdoptSession(paneID, connectionID, sessionID, instanceID string) {
+	if d == nil || paneID == "" || connectionID == "" || sessionID == "" {
 		return
 	}
 	d.mu.Lock()
 	b := d.panes[paneID]
-	if b == nil {
-		// A pane that was never bound has no connection to name, and an
-		// observation with an empty connectionId is a shape the wire does not
-		// admit.
+	if b == nil || b.connectionID != connectionID {
+		// A pane that was never bound has no connection to name, and a pane
+		// that has moved on is not the pane this shell belongs to.
 		d.mu.Unlock()
 		return
 	}
@@ -345,6 +392,38 @@ func (d *Driver) AdoptSession(paneID, sessionID, instanceID string) {
 	d.emit(snap)
 }
 
+// SetSource adopts the helper instance the driver is reading from. A CHANGED
+// source is a replaced helper: its supervisors start their sequences at 1 under
+// the same connection ids, so every cached observation is dropped and every
+// automatic retry is cancelled. A pane binding while the new helper has said
+// nothing yet publishes nothing — the driver no longer has a state to replay,
+// which is the honest answer rather than the previous helper's.
+func (d *Driver) SetSource(instance string) {
+	if d == nil || instance == "" {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if instance == d.source {
+		return
+	}
+	first := d.source == ""
+	d.source = instance
+	if first {
+		return
+	}
+	for _, c := range d.conns {
+		c.seq = 0
+		c.transport = Transport{}
+		c.quality = nil
+		c.observed = time.Time{}
+	}
+	for paneID, cancel := range d.autos {
+		cancel()
+		delete(d.autos, paneID)
+	}
+}
+
 // Apply folds one connection observation into every pane bound to it.
 //
 // An observation that is not newer than the last applied for its connection is
@@ -352,7 +431,13 @@ func (d *Driver) AdoptSession(paneID, sessionID, instanceID string) {
 // applying it would move a pane's state backwards. That is the late-event rule
 // design §5.6 states as "a late one is refused", at the connection's boundary
 // rather than the pane's, because the sequence belongs to the connection.
-func (d *Driver) Apply(ev proto.ConnectionStateEvent) {
+// ApplyFrom folds one connection observation into every pane bound to it, as
+// reported by one helper instance.
+//
+// An observation from a helper the driver has already replaced is REFUSED: its
+// sequence was taken against a supervisor that no longer exists, and applying
+// it would move a pane's state backwards under the new helper's name.
+func (d *Driver) ApplyFrom(source string, ev proto.ConnectionStateEvent) {
 	if d == nil || ev.ConnectionID == "" {
 		return
 	}
@@ -362,6 +447,14 @@ func (d *Driver) Apply(ev proto.ConnectionStateEvent) {
 		return
 	}
 	d.mu.Lock()
+	if source != "" {
+		if d.source == "" {
+			d.source = source
+		} else if d.source != source {
+			d.mu.Unlock()
+			return
+		}
+	}
 	c := d.conns[ev.ConnectionID]
 	if c == nil {
 		c = &connection{panes: make(map[string]struct{})}
@@ -576,36 +669,86 @@ func (d *Driver) runAuto(paneID string) {
 // fromEvent converts the helper protocol's event into this package's neutral
 // state, refusing a state or an accompanying field the contract does not admit.
 func fromEvent(ev proto.ConnectionStateEvent) (Transport, *Quality, error) {
-	t := Transport{
-		State:   ev.State,
-		Stage:   ev.Stage,
-		Person:  ev.Person,
-		Cause:   ev.Cause,
-		Attempt: ev.Attempt,
-		StateMs: ev.StateMs,
+	// THE FIELDS ARE TAKEN PER STATE, and a field the state does not own is
+	// REFUSED rather than ignored. A flat struct makes that a real possibility —
+	// a connected event carrying a stage decodes perfectly — and copying it
+	// would publish a renderer payload the stricter pane.connection schema
+	// forbids, from a helper payload its own schema accepted.
+	t := Transport{State: ev.State, StateMs: ev.StateMs}
+	forbidden := func(fields map[string]string) error {
+		for value, name := range fields {
+			if value != "" {
+				return fmt.Errorf("%s carries %s", ev.State, name)
+			}
+		}
+		return nil
 	}
+	ownStage, ownPerson, ownCause := "", "", ""
 	switch ev.State {
 	case proto.ConnectionOpening:
 		if ev.Stage == "" {
 			return Transport{}, nil, fmt.Errorf("opening with no stage")
 		}
+		if err := forbidden(map[string]string{ev.Person: "person", ev.Cause: "cause"}); err != nil {
+			return Transport{}, nil, err
+		}
+		if ev.Attempt != 0 {
+			return Transport{}, nil, fmt.Errorf("opening carries attempt")
+		}
+		ownStage = ev.Stage
 	case proto.ConnectionWaitingPerson:
 		if ev.Person == "" {
 			return Transport{}, nil, fmt.Errorf("waiting_person with no person")
 		}
-	case proto.ConnectionConnected, proto.ConnectionStalled:
+		if err := forbidden(map[string]string{ev.Stage: "stage", ev.Cause: "cause"}); err != nil {
+			return Transport{}, nil, err
+		}
+		if ev.Attempt != 0 {
+			return Transport{}, nil, fmt.Errorf("waiting_person carries attempt")
+		}
+		ownPerson = ev.Person
+	case proto.ConnectionConnected:
+		if err := forbidden(map[string]string{ev.Stage: "stage", ev.Person: "person", ev.Cause: "cause"}); err != nil {
+			return Transport{}, nil, err
+		}
+		if ev.Attempt != 0 {
+			return Transport{}, nil, fmt.Errorf("connected carries attempt")
+		}
+		t.PlainShells, t.HasPlainShells = ev.PlainShells, true
+	case proto.ConnectionStalled:
+		if err := forbidden(map[string]string{ev.Stage: "stage", ev.Person: "person", ev.Cause: "cause"}); err != nil {
+			return Transport{}, nil, err
+		}
+		if ev.Attempt != 0 {
+			return Transport{}, nil, fmt.Errorf("stalled carries attempt")
+		}
 		t.PlainShells, t.HasPlainShells = ev.PlainShells, true
 	case proto.ConnectionReconnecting:
 		if ev.Attempt < 1 {
 			return Transport{}, nil, fmt.Errorf("reconnecting with attempt %d", ev.Attempt)
 		}
+		if ev.Cause == "" {
+			return Transport{}, nil, fmt.Errorf("reconnecting with no cause")
+		}
+		if err := forbidden(map[string]string{ev.Stage: "stage", ev.Person: "person"}); err != nil {
+			return Transport{}, nil, err
+		}
+		ownCause = ev.Cause
 	case proto.ConnectionFailed, proto.ConnectionEnded:
 		if ev.Cause == "" {
 			return Transport{}, nil, fmt.Errorf("%s with no cause", ev.State)
 		}
+		if err := forbidden(map[string]string{ev.Stage: "stage", ev.Person: "person"}); err != nil {
+			return Transport{}, nil, err
+		}
+		if ev.Attempt != 0 {
+			return Transport{}, nil, fmt.Errorf("%s carries attempt", ev.State)
+		}
+		ownCause = ev.Cause
 	default:
 		return Transport{}, nil, fmt.Errorf("state %q is not a connection state", ev.State)
 	}
+	t.Stage, t.Person, t.Cause, t.Attempt = ownStage, ownPerson, ownCause, ev.Attempt
 	if ev.LookAnsweredAt != "" {
 		at, err := time.Parse(time.RFC3339, ev.LookAnsweredAt)
 		if err != nil {

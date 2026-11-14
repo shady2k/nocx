@@ -11,6 +11,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/log"
@@ -105,41 +106,14 @@ func TestPaneConnectionDTOConformsToContract(t *testing.T) {
 	})
 }
 
-// TestPaneConnectionOverTheWireConformsToContract drives the real publisher on a
-// real socket, one notification per state, and validates the bytes the renderer
-// actually receives.
-func TestPaneConnectionOverTheWireConformsToContract(t *testing.T) {
-	schema := loadSchema(t, "pane.connection.schema.json")
-	ws, stop := newPaneConnectionServer(t)
-	defer stop()
-	conn := connectWS(t, ws)
-	wc := soleWSConn(t, ws)
-	ws.bindPane("pane-1", wc, newConnState(), openParams{PaneID: "pane-1", Cols: 80, Rows: 24})
-
-	// ONE EPOCH PER OBSERVATION, in a fixed order: the publisher refuses a
-	// sequence that is not newer, and a map's order would make the first
-	// observation a different state on every run.
-	states := paneConnectionStates()
-	order := []string{"opening", "waiting_person", "connected", "stalled", "reconnecting", "failed", "ended", "plain"}
-	epochs := []uint64{1, 2, 3, 4, 5, 6, 7, 8}
-	for i, state := range order {
-		payload := states[state]
-		payload.ConnectionEpoch = epochs[i]
-		ws.PublishPaneConnection(payload)
-		raw := readNotification(t, conn, "pane.connection", wantWithin)
-		validateJSON(t, schema, raw, "pane.connection over the wire: "+state)
-		var got struct {
-			PaneID string `json:"paneId"`
-			Epoch  uint64 `json:"connectionEpoch"`
-		}
-		if err := json.Unmarshal(raw, &got); err != nil {
-			t.Fatalf("%s: unmarshal: %v", state, err)
-		}
-		if got.PaneID != payload.PaneID || got.Epoch != payload.ConnectionEpoch {
-			t.Fatalf("%s: read %s/%d, sent %s/%d", state, got.PaneID, got.Epoch, payload.PaneID, payload.ConnectionEpoch)
-		}
-	}
-}
+// THE OVER-THE-WIRE CONFORMANCE TEST IS NOT HERE. It lives in internal/app
+// (`TestPaneConnection_OverTheWireConformsToContract`) because the producer is
+// the whole chain — helper observation, driver, composition adapter, publisher —
+// and a test that builds this package's DTOs and calls PublishPaneConnection
+// directly would keep passing with that chain disconnected (review finding 7).
+// What stays in this package is the shape each state must have (the DTO test
+// above, including `plain`, which no producer reaches yet) and the ordering
+// guard below, which is the publisher's own contract.
 
 // TestPaneConnectionRefusesAnEpochItHasAlreadyPassed is the guard read as a
 // frame: a stale epoch published between two fresh ones must not appear, which
@@ -173,6 +147,121 @@ func TestPaneConnectionRefusesAnEpochItHasAlreadyPassed(t *testing.T) {
 		if epochs[i] != want[i] {
 			t.Fatalf("epochs over the wire = %v, want %v: a stale epoch was sent", epochs, want)
 		}
+	}
+}
+
+// TestTheEpochGuardSerializesPublication is finding 5 of the 5.3 review: two
+// publishers that both pass the epoch check must reach the socket in epoch
+// order, or a stale observation (including one from a connection the pane has
+// left) can arrive after a newer one.
+func TestTheEpochGuardSerializesPublication(t *testing.T) {
+	ws, stop := newPaneConnectionServer(t)
+	defer stop()
+	conn := connectWS(t, ws)
+	wc := soleWSConn(t, ws)
+	bindTestPane(t, ws, wc, "pane-1")
+
+	admitted := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	ws.panePublishGate = func() {
+		once.Do(func() {
+			close(admitted)
+			<-release
+		})
+	}
+
+	first := paneConnectionStates()["opening"]
+	first.ConnectionEpoch = 1
+	go func() { ws.PublishPaneConnection(first) }()
+	<-admitted
+
+	second := paneConnectionStates()["opening"]
+	second.ConnectionEpoch = 2
+	done := make(chan struct{})
+	go func() {
+		ws.PublishPaneConnection(second)
+		close(done)
+	}()
+	// The second publisher must be waiting on the guard the first holds.
+	close(release)
+	<-done
+
+	var epochs []uint64
+	for i := 0; i < 2; i++ {
+		raw := readNotification(t, conn, "pane.connection", wantWithin)
+		var got struct {
+			Epoch uint64 `json:"connectionEpoch"`
+		}
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		epochs = append(epochs, got.Epoch)
+	}
+	if epochs[0] != 1 || epochs[1] != 2 {
+		t.Fatalf("epochs over the wire = %v, want [1 2]", epochs)
+	}
+}
+
+// panePolicySpy records the policy notices the transport sends.
+type panePolicySpy struct {
+	mu      sync.Mutex
+	started []string
+	closed  []string
+}
+
+func (p *panePolicySpy) ReconnectStarted(paneID string) {
+	p.mu.Lock()
+	p.started = append(p.started, paneID)
+	p.mu.Unlock()
+}
+func (p *panePolicySpy) ReconnectFinished(string) {}
+func (p *panePolicySpy) PaneClosed(paneID string) {
+	p.mu.Lock()
+	p.closed = append(p.closed, paneID)
+	p.mu.Unlock()
+}
+
+func (p *panePolicySpy) closedPanes() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.closed...)
+}
+
+// TestPaneCloseRemovesTheBinding is finding 4 of the 5.3 review: a pane that
+// left the layout must stop producing notifications for a connection other
+// panes keep alive.
+func TestPaneCloseRemovesTheBinding(t *testing.T) {
+	ws, stop := newPaneConnectionServer(t)
+	defer stop()
+	spy := &panePolicySpy{}
+	ws.paneConnectionPolicy = spy
+	conn := connectWS(t, ws)
+	wc := soleWSConn(t, ws)
+	bindTestPane(t, ws, wc, "pane-1")
+
+	publishTestConnection(ws, "pane-1", 1, "connected", nil)
+	readNotification(t, conn, "pane.connection", wantWithin)
+
+	ws.closeSessionsForPanes(map[string]struct{}{"pane-1": {}})
+	if got := spy.closedPanes(); len(got) != 1 || got[0] != "pane-1" {
+		t.Fatalf("policy saw closures %v, want [pane-1]", got)
+	}
+
+	// Epoch 2 is published while the pane is gone: it must reach nobody. A
+	// rebind then publishes 3, and reading 3 — not 2 — is the proof.
+	publishTestConnection(ws, "pane-1", 2, "connected", nil)
+	ws.bindPane("pane-1", wc, newConnState(), openParams{PaneID: "pane-1", Cols: 80, Rows: 24})
+	publishTestConnection(ws, "pane-1", 3, "connected", nil)
+	raw := readNotification(t, conn, "pane.connection", wantWithin)
+	var got struct {
+		Epoch uint64 `json:"connectionEpoch"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Epoch != 3 {
+		t.Fatalf("read epoch %d, want 3: an observation was published for a closed pane", got.Epoch)
 	}
 }
 

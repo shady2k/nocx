@@ -160,6 +160,12 @@ type Service struct {
 	// process-scoped while the connections are per-coordinator, so identity is
 	// a random id and not anything derived from a connection (lease_id.go).
 	leases map[proto.LeaseID]*probeLease
+	// connectionWatches is one observation subscription per (coordinator
+	// connection, connection), started by the `connection` op — BEFORE the
+	// publish that may dial — and ended by a failed write. One per connection
+	// and not one per pane: panes share a connection, and duplicates would be
+	// the same fact sent twice to one coordinator.
+	connectionWatches map[connectionWatchKey]*connectionWatch
 }
 
 // Compile-time proof that this satisfies the host's registerable service and
@@ -278,7 +284,7 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 				return nil, fmt.Errorf("%w: %w", errBadProbeParams, err)
 			}
 		}
-		return s.connection(p)
+		return s.connection(ctx, p)
 	case proto.OpDisconnect:
 		var p proto.DisconnectParams
 		if len(params) > 0 {

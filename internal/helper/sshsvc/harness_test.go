@@ -1213,11 +1213,14 @@ type stand struct {
 	// never blocks: a test reads the observations it is about, and the ones it
 	// is not about are dropped rather than stalling a dial.
 	connEvents chan proto.ConnectionStateEvent
-	toHelper   *recorder
-	toCoord    *recorder
-	cancel     context.CancelFunc
-	served     chan struct{}
-	closeOnce  sync.Once
+	// peerInstance is the helper instance this client handshook with; every
+	// observation it delivers is stamped with that value.
+	peerInstance string
+	toHelper     *recorder
+	toCoord      *recorder
+	cancel       context.CancelFunc
+	served       chan struct{}
+	closeOnce    sync.Once
 }
 
 func newStand(t *testing.T, c *coordinator) *stand {
@@ -1284,7 +1287,7 @@ func newStandOnClock(t *testing.T, c *coordinator, logger *slog.Logger, clock ho
 		// Every connection observation the helper sends lands here, including
 		// the ones that arrive while a dial is still running: the frame and
 		// its routing are the shipped path, which is the point of this stand.
-		OnConnectionEvent: func(ev proto.ConnectionStateEvent) {
+		OnConnectionEvent: func(_ string, ev proto.ConnectionStateEvent) {
 			select {
 			case s.connEvents <- ev:
 			default:
@@ -1295,6 +1298,7 @@ func newStandOnClock(t *testing.T, c *coordinator, logger *slog.Logger, clock ho
 		t.Fatalf("client.Dial: %v", err)
 	}
 	s.client = c2
+	s.peerInstance = c2.InstanceID()
 	t.Cleanup(s.stop)
 	return s
 }

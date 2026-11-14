@@ -176,10 +176,11 @@ type Config struct {
 	// connection is built, and a helper that dials has nobody else to ask.
 	Reverse *client.ReverseRegistry
 	// OnConnectionEvent receives an ssh connection's observations from the
-	// helper (client.Config.OnConnectionEvent). It is carried here for the
-	// same reason Reverse is: this is where the coordinator's own connection is
-	// built, and a connection's state has no other route back.
-	OnConnectionEvent func(proto.ConnectionStateEvent)
+	// helper (client.Config.OnConnectionEvent), stamped with the helper
+	// instance that produced them. It is carried here for the same reason
+	// Reverse is: this is where the coordinator's own connection is built, and
+	// a connection's state has no other route back.
+	OnConnectionEvent func(sourceInstance string, ev proto.ConnectionStateEvent)
 }
 
 // Open reaches the helper for one generation on this machine: it dials the

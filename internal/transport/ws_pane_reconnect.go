@@ -40,26 +40,30 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 )
 
-// PaneReconnections is the policy owner's notice of a reconnect in flight.
+// PaneConnectionPolicy is the policy owner, as the transport calls it.
 //
 // It is a seam this package DECLARES and the composition root adapts to
 // internal/panedriver (design §5.1.1): the transport knows how to carry a
-// reconnect out, and panedriver knows whether one should happen — including its
-// own automatic retry, which must not start a second one while a press is
-// running. A nil seam is a server with no connection policy wired; every offer
-// is then absent, because only the policy owner publishes one.
-type PaneReconnections interface {
+// reconnect out and when a pane is gone, and panedriver knows whether a retry
+// should happen and which panes it still owns. A nil seam is a server with no
+// connection policy wired; every offer is then absent, because only the policy
+// owner publishes one.
+type PaneConnectionPolicy interface {
 	// ReconnectStarted notes that this pane's reconnect is being carried out.
 	// It must be cheap and must not block: it runs inside the request.
 	ReconnectStarted(paneID string)
 	// ReconnectFinished ends that interval, whether the reconnect succeeded or
 	// not. It is safe to call once per Started.
 	ReconnectFinished(paneID string)
+	// PaneClosed says this pane no longer exists. The policy owner drops its
+	// binding — and with it any automatic retry — because an observation of a
+	// connection the pane no longer rides has nobody to be about.
+	PaneClosed(paneID string)
 }
 
-// WithPaneReconnections wires the connection policy's in-flight notice.
-func WithPaneReconnections(p PaneReconnections) WSServerOption {
-	return func(s *WSServer) { s.paneReconnections = p }
+// WithPaneConnectionPolicy wires the connection policy's notices.
+func WithPaneConnectionPolicy(p PaneConnectionPolicy) WSServerOption {
+	return func(s *WSServer) { s.paneConnectionPolicy = p }
 }
 
 // The reconnect's refusals, each a different thing for a surface to do.
@@ -226,7 +230,7 @@ func (h paneReconnectHandlers) handle(ctx context.Context, req jsonrpcRequest) {
 		return
 	}
 
-	if seam := h.machine.paneReconnections; seam != nil {
+	if seam := h.machine.paneConnectionPolicy; seam != nil {
 		seam.ReconnectStarted(params.PaneID)
 		defer seam.ReconnectFinished(params.PaneID)
 	}

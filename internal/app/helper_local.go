@@ -560,6 +560,17 @@ func (o *localHelperOpener) setSSHTargets(resolver sshTargetResolver) {
 	o.sshTargets = resolver
 }
 
+// notePaneSource tells the driver which helper instance the observations it is
+// about to receive come from. It is the fence that lets a replacement helper's
+// first observation be accepted (its sequence starts at 1 under the same
+// connection id) and the previous helper's late one be refused.
+func notePaneSource(driver *panedriver.Driver, c *helperclient.Client) {
+	if driver == nil || c == nil {
+		return
+	}
+	driver.SetSource(c.InstanceID())
+}
+
 // paneConnections answers the driver this opener reports connection state
 // through, read under the opener's own lock with the rest of its wiring.
 func (o *localHelperOpener) paneConnections() *panedriver.Driver {
@@ -836,9 +847,9 @@ func (o *localHelperOpener) openHostedOnce(ctx context.Context, cfg session.Conf
 	// along (design §5.6). It is a separate observation rather than a field
 	// repeated on every later one: a state that did not change must not look
 	// like one that did.
-	if cfg.PaneID != "" {
+	if cfg.PaneID != "" && res.ConnectionID != "" {
 		if driver := o.paneConnections(); driver != nil {
-			driver.AdoptSession(cfg.PaneID, string(sid), string(res.Session.Identity().InstanceID))
+			driver.AdoptSession(cfg.PaneID, res.ConnectionID, string(sid), string(res.Session.Identity().InstanceID))
 		}
 	}
 	// Adoption transferred the shell to the registry, but no pane owns it
@@ -1046,8 +1057,10 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 	// buys is that the first observation of the dial — opening, at a stage —
 	// reaches the pane while the shell does not exist yet. Binding after the
 	// spawn would deliver exactly the news the pane was opened for to nobody.
+	var connectionID string
 	if cfg.PaneID != "" {
-		connectionID, cerr := spawn.client.ConnectionID(ctx, ssh.WireDestination(target))
+		var cerr error
+		connectionID, cerr = spawn.client.ConnectionID(ctx, ssh.WireDestination(target))
 		if cerr != nil {
 			return hostedSpawnResult{}, fmt.Errorf("name the ssh pane's connection: %w", cerr)
 		}
@@ -1309,6 +1322,10 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 	// and the open's own error, which is the right answer there, is already on
 	// its way back.
 	res.PublishFailure = publishFailure
+	// THE CONNECTION THIS SHELL RIDES, carried to the adoption so a late one
+	// from a connection the pane has since left is refused (internal/panedriver's
+	// AdoptSession).
+	res.ConnectionID = connectionID
 	// THE FINGERPRINT THIS SPAWN'S OWN HANDSHAKE JUST VERIFIED, read back by
 	// the storage identity it was resolved under (nocx-y6fh7 items 5, 6): the
 	// coordinator's verifyHostKey reverse handler recorded it moments ago, on
@@ -1657,6 +1674,13 @@ func (o *localHelperOpener) connect(ctx context.Context) (*helperclient.Client, 
 			// start the installed generation below.
 			o.dropIfLost(existing)
 		default:
+			// THE HELPER INSTANCE THE DRIVER IS READING FROM IS THIS ONE
+			// (design §5.6, review finding 3): a connection id is a destination
+			// digest that outlives a helper process, while a sequence belongs
+			// to one supervisor's lifetime. Naming the instance here resets
+			// what a replaced helper's numbers would otherwise look stale
+			// against.
+			notePaneSource(paneConns, existing)
 			return existing, string(installed.Generation), nil
 		}
 	}
@@ -1671,9 +1695,9 @@ func (o *localHelperOpener) connect(ctx context.Context) (*helperclient.Client, 
 		// THE CONNECTION'S OBSERVATIONS COME BACK ON THIS CONNECTION (design
 		// §5.6): the helper that dials reports each pane's connection state
 		// here, and the driver maps it to the panes bound to that connection.
-		OnConnectionEvent: func(ev proto.ConnectionStateEvent) {
+		OnConnectionEvent: func(source string, ev proto.ConnectionStateEvent) {
 			if paneConns != nil {
-				paneConns.Apply(ev)
+				paneConns.ApplyFrom(source, ev)
 			}
 		},
 	})
@@ -1689,6 +1713,7 @@ func (o *localHelperOpener) connect(ctx context.Context) (*helperclient.Client, 
 		o.client = c
 		o.connectedAt = time.Now()
 		o.mu.Unlock()
+		notePaneSource(paneConns, c)
 		return c, string(installed.Generation), nil
 	}
 	// A second open raced this one and stored its connection first. The loser

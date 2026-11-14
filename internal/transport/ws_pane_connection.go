@@ -133,6 +133,27 @@ func (s *WSServer) bindPane(paneID string, wconn *wsConn, state *connState, para
 	s.paneMu.Unlock()
 }
 
+// unbindPane forgets one pane. It is called when the pane closes, not when its
+// session does: a reconnect closes a session and keeps the pane, and a pane that
+// left the layout has neither.
+//
+// BOTH maps and the policy owner are cleared, and the policy owner last: it may
+// publish from its own goroutine, and a record that is already gone cannot
+// resurrect it.
+func (s *WSServer) unbindPane(paneID string) {
+	if paneID == "" {
+		return
+	}
+	s.paneMu.Lock()
+	delete(s.paneRecords, paneID)
+	delete(s.paneEpochs, paneID)
+	policy := s.paneConnectionPolicy
+	s.paneMu.Unlock()
+	if policy != nil {
+		policy.PaneClosed(paneID)
+	}
+}
+
 // paneRecordOf answers one pane's backend record, or nil.
 func (s *WSServer) paneRecordOf(paneID string) *paneRecord {
 	s.paneMu.Lock()
@@ -166,6 +187,13 @@ func (s *WSServer) PublishPaneConnection(p PaneConnection) {
 	if p.PaneID == "" || p.ConnectionEpoch == 0 {
 		return
 	}
+	// THE GUARD COVERS THE ENQUEUE, not only the decision. Recording the
+	// epoch under the lock and releasing it before writing let two publishers
+	// pass the check in the wrong order: A admits epoch 1, pauses; B admits
+	// and writes 2; A writes 1 — and the socket carries a decreasing epoch,
+	// including an observation of a connection the pane has already left. The
+	// write is a bounded, non-blocking enqueue, so holding the lock across it
+	// costs the other panes one enqueue apiece.
 	s.paneMu.Lock()
 	if p.ConnectionEpoch <= s.paneEpochs[p.PaneID] {
 		s.paneMu.Unlock()
@@ -174,18 +202,22 @@ func (s *WSServer) PublishPaneConnection(p PaneConnection) {
 	if s.paneEpochs == nil {
 		s.paneEpochs = make(map[string]uint64)
 	}
-	s.paneEpochs[p.PaneID] = p.ConnectionEpoch
 	rec := s.paneRecords[p.PaneID]
 	var wconn *wsConn
 	if rec != nil {
-		rec.offer = p.Reconnect != nil
 		wconn = rec.wconn
 	}
+	if s.panePublishGate != nil {
+		s.panePublishGate()
+	}
+	if wconn != nil {
+		if err := wconn.TryNotify("pane.connection", mustMarshal(p)); err != nil {
+			s.log.Debug("write pane.connection notification", "pane", p.PaneID, "error", err)
+		}
+	}
+	s.paneEpochs[p.PaneID] = p.ConnectionEpoch
+	if rec != nil {
+		rec.offer = p.Reconnect != nil
+	}
 	s.paneMu.Unlock()
-	if wconn == nil {
-		return
-	}
-	if err := wconn.TryNotify("pane.connection", mustMarshal(p)); err != nil {
-		s.log.Debug("write pane.connection notification", "pane", p.PaneID, "error", err)
-	}
 }

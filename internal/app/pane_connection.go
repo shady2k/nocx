@@ -24,10 +24,15 @@ func paneConnectionWire(s panedriver.Snapshot) transport.PaneConnection {
 		InstanceID:      s.InstanceID,
 		SessionID:       s.SessionID,
 		Transport: transport.PaneConnectionTransport{
-			State:   s.Transport.State,
-			Stage:   s.Transport.Stage,
-			Person:  s.Transport.Person,
-			Cause:   s.Transport.Cause,
+			State:  s.Transport.State,
+			Stage:  s.Transport.Stage,
+			Person: s.Transport.Person,
+			// CAUSE IS A FACT ABOUT THE END, NOT ABOUT AN ATTEMPT (design §5.6).
+			// The coordinator keeps the retry cause internally (it decides
+			// auto-retry on it), but the renderer's exact branch admits a cause
+			// only on failed and ended — where a person is being told why the
+			// connection stopped.
+			Cause:   causeOnTheWire(s),
 			Attempt: s.Transport.Attempt,
 			StateMs: s.Transport.StateMs,
 			// THE POINTER IS THE WHOLE POINT: connected with no plain shell
@@ -57,6 +62,16 @@ func paneConnectionWire(s panedriver.Snapshot) transport.PaneConnection {
 		p.Reconnect = &transport.PaneConnectionReconnect{EndsShells: s.Reconnect.EndsShells}
 	}
 	return p
+}
+
+// causeOnTheWire answers the cause for the states the renderer's contract gives
+// one to, and empty otherwise.
+func causeOnTheWire(s panedriver.Snapshot) string {
+	switch s.Transport.State {
+	case "failed", "ended":
+		return s.Transport.Cause
+	}
+	return ""
 }
 
 // plainShellsOf answers the count for the states that carry one, and nil for

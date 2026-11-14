@@ -156,10 +156,14 @@ func (s *Supervisor) Watch(fn func(Facts)) (stop func()) {
 	s.seq++
 	current := s.factsLocked()
 	s.mu.Unlock()
+	// THE CURRENT STATE IS DELIVERED BEFORE WATCH RETURNS. A goroutine's first
+	// message runs at the scheduler's pleasure, so a caller that started a dial
+	// immediately after subscribing could see the dial's first stage overtake
+	// the state the subscription exists to establish. Delivering it here makes
+	// the subscription a barrier: after Watch, the reader has the state, and
+	// every later observation is ordered behind it by the same channel.
+	fn(current)
 	go func() {
-		if !deliver(w, current, fn) {
-			return
-		}
 		for {
 			select {
 			case f := <-w.ch:

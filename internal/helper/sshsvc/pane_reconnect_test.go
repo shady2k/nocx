@@ -107,14 +107,9 @@ func TestTheOfferNamesTheShellWithinThirtySecondsAndTheReconnectDialsAnew(t *tes
 	}
 	rs.driver.Bind("pane-1", connectionID)
 
-	stop, err := rs.service.Watch(ctx, destination)
-	if err != nil {
-		t.Fatalf("watch: %v", err)
-	}
-	defer stop()
 	go func() {
 		for ev := range rs.connEvents {
-			rs.driver.Apply(ev)
+			rs.driver.ApplyFrom(rs.peerInstance, ev)
 		}
 	}()
 
@@ -212,14 +207,9 @@ func TestUnderNeverADropOffersTheButtonAndNothingReconnectsByItself(t *testing.T
 		t.Fatalf("name the connection: %v", err)
 	}
 	rs.driver.Bind("pane-1", connectionID)
-	stop, err := rs.service.Watch(ctx, destination)
-	if err != nil {
-		t.Fatalf("watch: %v", err)
-	}
-	defer stop()
 	go func() {
 		for ev := range rs.connEvents {
-			rs.driver.Apply(ev)
+			rs.driver.ApplyFrom(rs.peerInstance, ev)
 		}
 	}()
 
@@ -238,7 +228,8 @@ func TestUnderNeverADropOffersTheButtonAndNothingReconnectsByItself(t *testing.T
 		},
 		func() bool {
 			_, ok := rs.findSnapshot(func(s panedriver.Snapshot) bool {
-				return s.PaneID == "pane-1" && s.Transport.State == proto.ConnectionReconnecting && s.Reconnect != nil
+				return s.PaneID == "pane-1" && s.Transport.State == proto.ConnectionReconnecting && s.Reconnect != nil &&
+					s.Transport.Cause == "lost-link"
 			})
 			return ok
 		})
@@ -268,5 +259,50 @@ func TestTheDisconnectShapesConformToTheirFrozenContract(t *testing.T) {
 	}
 	if err := validateHelperJSON(resultSchema, result); err != nil {
 		t.Fatalf("disconnect result does not satisfy its contract: %v\n%s", err, result)
+	}
+}
+
+// TestTheConnectionStateContractAdmitsOnlyPossibleShapes is finding 6 of the
+// 5.3 review: the frozen helper ABI must not accept a state carrying a field
+// its state cannot own, or a payload that satisfies it can produce a renderer
+// payload the stricter contract forbids.
+func TestTheConnectionStateContractAdmitsOnlyPossibleShapes(t *testing.T) {
+	schema := loadHelperSchema(t, "ssh.connection-state.schema.json")
+	valid := []proto.ConnectionStateEvent{
+		{ConnectionID: "conn-1", Seq: 1, State: proto.ConnectionOpening, Stage: "tcp"},
+		{ConnectionID: "conn-1", Seq: 2, State: proto.ConnectionWaitingPerson, Person: "password"},
+		{ConnectionID: "conn-1", Seq: 3, State: proto.ConnectionConnected, PlainShells: 1},
+		{ConnectionID: "conn-1", Seq: 4, State: proto.ConnectionStalled, StateMs: 45000, PlainShells: 1, LookAnsweredAt: "2026-11-14T07:00:00Z"},
+		{ConnectionID: "conn-1", Seq: 5, State: proto.ConnectionReconnecting, Attempt: 2, Cause: "lost-link"},
+		{ConnectionID: "conn-1", Seq: 6, State: proto.ConnectionFailed, Cause: "host-key-changed"},
+		{ConnectionID: "conn-1", Seq: 7, State: proto.ConnectionEnded, Cause: "released"},
+	}
+	for i, ev := range valid {
+		raw, err := json.Marshal(ev)
+		if err != nil {
+			t.Fatalf("marshal %d: %v", i, err)
+		}
+		if err := validateHelperJSON(schema, raw); err != nil {
+			t.Fatalf("a possible %s was refused: %v\n%s", ev.State, err, raw)
+		}
+	}
+
+	invalid := []proto.ConnectionStateEvent{
+		{ConnectionID: "conn-1", Seq: 1, State: proto.ConnectionOpening},
+		{ConnectionID: "conn-1", Seq: 2, State: proto.ConnectionConnected, Stage: "tcp"},
+		{ConnectionID: "conn-1", Seq: 3, State: proto.ConnectionConnected, Cause: "released"},
+		{ConnectionID: "conn-1", Seq: 4, State: proto.ConnectionWaitingPerson, Stage: "tcp"},
+		{ConnectionID: "conn-1", Seq: 5, State: proto.ConnectionReconnecting, Attempt: 1},
+		{ConnectionID: "conn-1", Seq: 6, State: proto.ConnectionFailed},
+		{ConnectionID: "conn-1", Seq: 7, State: proto.ConnectionStalled, Stage: "tcp"},
+	}
+	for i, ev := range invalid {
+		raw, err := json.Marshal(ev)
+		if err != nil {
+			t.Fatalf("marshal %d: %v", i, err)
+		}
+		if err := validateHelperJSON(schema, raw); err == nil {
+			t.Fatalf("an impossible %s was admitted: %s", ev.State, raw)
+		}
 	}
 }

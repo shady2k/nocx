@@ -2138,7 +2138,7 @@ func New(opts ...Option) (*App, error) {
 	// The policy owner's in-flight notice (design §5.1.1: transport declares the
 	// seam it calls, the root adapts). It is how a person's press tells the
 	// automatic retry not to start beside it.
-	tpOpts = append(tpOpts, transport.WithPaneReconnections(paneConns))
+	tpOpts = append(tpOpts, transport.WithPaneConnectionPolicy(paneConns))
 	tpOpts = append(tpOpts, transport.WithDiagnostics(diag, appDiagnosticsProvider{
 		opener: localOpener, logPath: logFilePath,
 	}))

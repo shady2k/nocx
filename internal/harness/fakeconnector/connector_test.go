@@ -116,11 +116,40 @@ func fakeDriver(t *testing.T, setup harnesstest.DriverSetup) harnesstest.Fixture
 
 func TestProtocolCommandsAndResponse(t *testing.T) {
 	c := fakeconnector.New(fakeconnector.Config{})
-	commands := c.Commands(harness.TurnSpec{Text: "hello", ConversationID: "conversation"})
-	if len(commands) != 1 || commands[0].Name != "prompt" {
-		t.Fatalf("commands: %+v", commands)
+	defer func() { _ = c.Close(context.Background()) }()
+	codec := c.NewCodec(harness.SessionInfo{ConversationID: "conversation", Generation: 7})
+	setup := codec.Setup()
+	if len(setup) != 1 || setup[0].Command.Name != "initialize" || setup[0].Prompt || setup[0].Check == nil {
+		t.Fatalf("setup: %+v", setup)
 	}
-	raw, err := c.Encode("command-1", commands[0])
+	raw, err := codec.Encode("setup-1", setup[0].Command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var initialize protocol.Command
+	if err = json.Unmarshal(raw, &initialize); err != nil {
+		t.Fatal(err)
+	}
+	if initialize.Session == nil || initialize.Session.ConversationID != "conversation" || initialize.Session.Generation != 7 {
+		t.Fatalf("initialize: %+v", initialize)
+	}
+	decoded, err := codec.Decode([]byte(`{"kind":"response","id":"setup-1","payload":{"conversationId":"conversation","generation":7}}`))
+	if err != nil || decoded.Response == nil || decoded.Response.ID != "setup-1" || len(decoded.Events) != 0 {
+		t.Fatalf("decode: %+v, %v", decoded, err)
+	}
+	if err = setup[0].Check(decoded.Response.Payload); err != nil {
+		t.Fatal(err)
+	}
+	for _, payload := range []any{nil, "wrong", map[string]any{"conversationId": "other", "generation": float64(7)}, map[string]any{"conversationId": "conversation", "generation": float64(8)}} {
+		if err = setup[0].Check(payload); err == nil {
+			t.Fatalf("accepted wrong payload: %+v", payload)
+		}
+	}
+	steps := codec.BeginTurn(harness.TurnSpec{Text: "hello", ConversationID: "conversation"})
+	if len(steps) != 1 || !steps[0].Prompt || steps[0].Command.Name != "prompt" {
+		t.Fatalf("turn: %+v", steps)
+	}
+	raw, err = codec.Encode("command-1", steps[0].Command)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,12 +160,36 @@ func TestProtocolCommandsAndResponse(t *testing.T) {
 	if command.ID != "command-1" || command.Prompt.Text != "hello" {
 		t.Fatalf("wire: %+v", command)
 	}
-	decoded, err := c.Decode([]byte(`{"kind":"response","id":"command-1"}`))
-	if err != nil || decoded.Response == nil || decoded.Response.ID != "command-1" {
-		t.Fatalf("decode: %+v, %v", decoded, err)
+	decoded, err = codec.Decode([]byte(`{"kind":"response","id":"command-1","reason":"rejected","payload":{"detail":"bad"}}`))
+	if err != nil || decoded.Response == nil || decoded.Response.Error != "rejected" || len(decoded.Events) != 0 {
+		t.Fatalf("response: %+v, %v", decoded, err)
 	}
-	if got := c.Cancel(); len(got) != 1 || got[0].Name != "abort" {
+	if got := codec.CancelSequence(); len(got) != 1 || got[0].Name != "abort" {
 		t.Fatalf("cancel: %+v", got)
 	}
-	_ = c.Close(context.Background())
+}
+
+func TestCodecsArePerIncarnation(t *testing.T) {
+	c := fakeconnector.New(fakeconnector.Config{})
+	defer func() { _ = c.Close(context.Background()) }()
+	first := c.NewCodec(harness.SessionInfo{ConversationID: "one", Generation: 1})
+	second := c.NewCodec(harness.SessionInfo{ConversationID: "two", Generation: 2})
+	restarted := c.NewCodec(harness.SessionInfo{ConversationID: "one", Generation: 3})
+	if first == second || first == restarted || second == restarted {
+		t.Fatal("codec instances shared")
+	}
+	for i, codec := range []harness.Codec{first, second, restarted} {
+		conversation := []string{"one", "two", "one"}[i]
+		raw, err := codec.Encode("init", codec.Setup()[0].Command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wire protocol.Command
+		if err = json.Unmarshal(raw, &wire); err != nil {
+			t.Fatal(err)
+		}
+		if wire.Session.ConversationID != conversation || wire.Session.Generation != uint64(i+1) { //nolint:gosec // loop index is bounded by fixture count
+			t.Fatalf("incarnation %d: %+v", i, wire.Session)
+		}
+	}
 }

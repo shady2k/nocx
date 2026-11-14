@@ -23,21 +23,47 @@ type TurnError struct{ Reason string }
 
 func (e *TurnError) Error() string { return e.Reason }
 
-// Protocol describes wire commands, never process or turn state.
+// Protocol describes process launch and creates isolated wire state for each
+// process incarnation. The actor owns command execution and response matching.
 type Protocol interface {
 	Start(context.Context, TurnSpec) (Launch, error)
-	Commands(TurnSpec) []Command
-	Cancel() []Command
+	NewCodec(SessionInfo) Codec
+}
+
+// SessionInfo identifies one process incarnation within a conversation.
+type SessionInfo struct {
+	ConversationID string
+	Generation     uint64
+}
+
+// Codec belongs to one process incarnation, never to multiple sessions.
+// Setup runs once. BeginTurn resets turn-local decoding state and supplies the
+// turn plan. Each step advances only after its command's matched response.
+type Codec interface {
+	Setup() []Step
+	BeginTurn(TurnSpec) []Step
+	CancelSequence() []Command
 	Encode(id string, command Command) ([]byte, error)
 	Decode(line []byte) (Decoded, error)
 }
+
+// Step is a response-dependent command. Check may inspect the matched response
+// payload and update codec state needed by later commands. Only the final step
+// may set Prompt; only that step admits turn events.
+type Step struct {
+	Command Command
+	Check   func(any) error
+	Prompt  bool
+}
+
 type Command struct {
 	Name    string
 	Payload any
 }
 type Response struct {
-	ID    string
-	Error string
+	ID      string
+	Error   string
+	Payload any
 }
 type Decoded struct {
 	Events   []Event
@@ -49,6 +75,10 @@ type Launch struct {
 	Dir  string
 }
 type Base struct {
+	// Tools creates a tool endpoint owned by one process incarnation.
+	Tools ToolSessionFactory
+	// Observe receives actor transitions synchronously; callbacks must not block.
+	Observe        func(Transition)
 	MaxLineBytes   int
 	MaxStderrBytes int
 	// ShutdownTimeout overrides the ten-second cancel/shutdown bound for tests.

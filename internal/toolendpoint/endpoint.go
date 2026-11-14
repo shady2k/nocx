@@ -307,6 +307,12 @@ func (e *Endpoint) RetireAdmissions(session string, epoch AdmissionEpoch) int {
 // accepted calls and authorizer releases. The authority owner must prevent new
 // publications for this interval before calling it, as with RetireAdmissions.
 func (e *Endpoint) SettleAdmissions(scope string, epoch AdmissionEpoch) {
+	_ = e.SettleAdmissionsContext(context.Background(), scope, epoch)
+}
+
+// SettleAdmissionsContext closes admission connections and waits for accepted
+// work. A caller deadline does not reopen admissions or forget pending work.
+func (e *Endpoint) SettleAdmissionsContext(ctx context.Context, scope string, epoch AdmissionEpoch) error {
 	e.RetireAdmissions(scope, epoch)
 	e.mu.Lock()
 	var waiting []<-chan struct{}
@@ -317,8 +323,13 @@ func (e *Endpoint) SettleAdmissions(scope string, epoch AdmissionEpoch) {
 	}
 	e.mu.Unlock()
 	for _, done := range waiting {
-		<-done
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
+	return nil
 }
 
 // PendingAdmissions reports accepted calls, including calls waiting for an

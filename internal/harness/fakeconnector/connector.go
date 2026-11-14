@@ -62,16 +62,42 @@ func (c *Connector) Start(ctx context.Context, spec harness.TurnSpec) (harness.L
 	return harness.Launch{Argv: []string{c.cfg.AgentPath}, Env: []string{"FAKEAGENT_SCRIPT=" + string(script)}, Dir: spec.Dir}, nil
 }
 
-// Commands supplies the input for one turn.
-func (c *Connector) Commands(spec harness.TurnSpec) []harness.Command {
-	return []harness.Command{{Name: "prompt", Payload: protocol.Prompt{ConversationID: spec.ConversationID, Text: spec.Text, Model: spec.Model, SystemPrompt: spec.SystemPrompt, Tools: spec.Tools}}}
+// NewCodec allocates wire state for one process incarnation.
+func (c *Connector) NewCodec(info harness.SessionInfo) harness.Codec {
+	return &codec{info: info}
 }
 
-func (c *Connector) Cancel() []harness.Command { return []harness.Command{{Name: "abort"}} }
+type codec struct {
+	info harness.SessionInfo
+}
 
-func (c *Connector) Encode(id string, command harness.Command) ([]byte, error) {
+func (c *codec) Setup() []harness.Step {
+	session := protocol.Session{ConversationID: c.info.ConversationID, Generation: c.info.Generation}
+	return []harness.Step{{Command: harness.Command{Name: "initialize", Payload: session}, Check: func(payload any) error {
+		value, ok := payload.(map[string]any)
+		if !ok || value["conversationId"] != session.ConversationID || value["generation"] != float64(session.Generation) {
+			return fmt.Errorf("fakeconnector: invalid initialize response: %v", payload)
+		}
+		return nil
+	}}}
+}
+
+func (c *codec) BeginTurn(spec harness.TurnSpec) []harness.Step {
+	return []harness.Step{{Command: harness.Command{Name: "prompt", Payload: protocol.Prompt{ConversationID: spec.ConversationID, Text: spec.Text, Model: spec.Model, SystemPrompt: spec.SystemPrompt, Tools: spec.Tools}}, Prompt: true}}
+}
+
+func (c *codec) CancelSequence() []harness.Command { return []harness.Command{{Name: "abort"}} }
+
+func (c *codec) Encode(id string, command harness.Command) ([]byte, error) {
 	wire := protocol.Command{ID: id, Name: command.Name}
-	if command.Name == "prompt" {
+	switch command.Name {
+	case "initialize":
+		session, ok := command.Payload.(protocol.Session)
+		if !ok {
+			return nil, fmt.Errorf("fakeconnector: invalid initialize payload")
+		}
+		wire.Session = &session
+	case "prompt":
 		prompt, ok := command.Payload.(protocol.Prompt)
 		if !ok {
 			return nil, fmt.Errorf("fakeconnector: invalid prompt payload")
@@ -82,13 +108,13 @@ func (c *Connector) Encode(id string, command harness.Command) ([]byte, error) {
 	return append(raw, '\n'), err
 }
 
-func (c *Connector) Decode(line []byte) (harness.Decoded, error) {
+func (c *codec) Decode(line []byte) (harness.Decoded, error) {
 	var wire protocol.Line
 	if err := json.Unmarshal(line, &wire); err != nil {
 		return harness.Decoded{}, err
 	}
 	if wire.Kind == "response" {
-		return harness.Decoded{Response: &harness.Response{ID: wire.ID, Error: wire.Reason}}, nil
+		return harness.Decoded{Response: &harness.Response{ID: wire.ID, Error: wire.Reason, Payload: wire.Payload}}, nil
 	}
 	events, err := decode(line)
 	return harness.Decoded{Events: events}, err

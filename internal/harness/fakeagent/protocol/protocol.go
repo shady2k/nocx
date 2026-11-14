@@ -79,13 +79,14 @@ const (
 
 // Line is one event the fake agent writes to stdout.
 type Line struct {
-	Kind   string `json:"kind"`
-	Text   string `json:"text,omitempty"`
-	ID     string `json:"id,omitempty"`
-	Name   string `json:"name,omitempty"`
-	Model  string `json:"model,omitempty"`
-	Usage  *Usage `json:"usage,omitempty"`
-	Reason string `json:"reason,omitempty"`
+	Kind    string `json:"kind"`
+	Text    string `json:"text,omitempty"`
+	ID      string `json:"id,omitempty"`
+	Name    string `json:"name,omitempty"`
+	Model   string `json:"model,omitempty"`
+	Usage   *Usage `json:"usage,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+	Payload any    `json:"payload,omitempty"`
 }
 
 // Usage is the fake agent's stated usage.
@@ -108,9 +109,16 @@ type Prompt struct {
 	SystemPrompt   string             `json:"systemPrompt,omitempty"`
 }
 
+// Session identifies the process incarnation acknowledged during setup.
+type Session struct {
+	ConversationID string `json:"conversationId"`
+	Generation     uint64 `json:"generation"`
+}
+
 // Command carries a session command and the actor's correlation id.
 type Command struct {
-	ID     string  `json:"id"`
-	Name   string  `json:"name"`
-	Prompt *Prompt `json:"prompt,omitempty"`
+	ID      string   `json:"id"`
+	Name    string   `json:"name"`
+	Prompt  *Prompt  `json:"prompt,omitempty"`
+	Session *Session `json:"session,omitempty"`
 }

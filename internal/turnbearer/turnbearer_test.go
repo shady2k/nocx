@@ -2,6 +2,7 @@ package turnbearer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
+	"github.com/shady2k/nocx/internal/harness"
 	"github.com/shady2k/nocx/internal/toolendpoint"
 )
 
@@ -20,13 +22,22 @@ type testEndpoint struct {
 }
 
 func (*testEndpoint) SocketPath() string { return "/test.sock" }
-func (e *testEndpoint) SettleAdmissions(scope string, _ toolendpoint.AdmissionEpoch) {
+func (e *testEndpoint) SettleAdmissionsContext(ctx context.Context, scope string, _ toolendpoint.AdmissionEpoch) error {
 	if e.entered != nil {
-		e.entered <- scope
+		select {
+		case e.entered <- scope:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	if e.release != nil {
-		<-e.release
+		select {
+		case <-e.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
+	return nil
 }
 
 func (e *testEndpoint) PendingAdmissions(string, toolendpoint.AdmissionEpoch) bool { return e.pending }
@@ -333,5 +344,49 @@ func TestRetireClearsAuthorityAndSecret(t *testing.T) {
 	retire()
 	if s.token != "" || s.authority.Tools != nil {
 		t.Fatal("retirement retained secret or authority")
+	}
+}
+
+func TestToolSessionDeadlineKeepsAuthorityClosedUntilSettlement(t *testing.T) {
+	e := &testEndpoint{pending: true, release: make(chan struct{})}
+	m := NewMinter(e, "helper")
+	session, bridge, err := m.ToolSessions()(context.Background(), harness.SessionInfo{ConversationID: "conversation", Generation: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := strings.SplitN(bridge.Env[0], "=", 2)[1]
+	if err := session.BeginTurn(testRunTools("first")); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := session.EndTurn(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("EndTurn: %v", err)
+	}
+	if _, ok := m.Lookup(token); ok {
+		t.Fatal("timed out settlement reopened authority")
+	}
+	if !session.Pending() {
+		t.Fatal("timed out settlement hid accepted work")
+	}
+	if err := session.BeginTurn(testRunTools("second")); err == nil {
+		t.Fatal("turn overlapped timed out settlement")
+	}
+	if err := session.Retire(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Retire: %v", err)
+	}
+	if !session.Pending() {
+		t.Fatal("retirement hid accepted work")
+	}
+	close(e.release)
+	e.pending = false
+	if err := session.Retire(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.Lookup(token); ok {
+		t.Fatal("retired bearer admitted")
+	}
+	if err := session.Retire(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -17,13 +17,6 @@ import (
 	"github.com/shady2k/nocx/internal/proc"
 )
 
-// TurnActivity is driven by the endpoint. A receipt belongs to this exact turn,
-// not whichever turn happens to run when its completion arrives.
-type TurnActivity interface {
-	AcceptCall(context.Context) (func(), error)
-	Approval(context.Context) (func(), error)
-}
-
 type SessionManager struct {
 	mu       sync.Mutex
 	base     Base
@@ -85,12 +78,10 @@ func (m *SessionManager) Close(ctx context.Context) error {
 }
 
 type request struct {
-	turn     *actorTurn
-	cancel   bool
-	activity int
-	release  bool
-	reply    chan error
-	close    bool
+	turn   *actorTurn
+	cancel bool
+	reply  chan error
+	close  bool
 }
 type actorTurn struct {
 	ctx      context.Context
@@ -138,37 +129,6 @@ func (t *actorTurn) Wait(ctx context.Context) (Outcome, error) {
 		return Outcome{}, ctx.Err()
 	}
 }
-func (t *actorTurn) AcceptCall(ctx context.Context) (func(), error) { return t.activity(ctx, 1) }
-func (t *actorTurn) Approval(ctx context.Context) (func(), error)   { return t.activity(ctx, 2) }
-func (t *actorTurn) activity(ctx context.Context, kind int) (func(), error) {
-	reply := make(chan error, 1)
-	select {
-	case t.session.in <- request{turn: t, activity: kind, reply: reply}:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-t.done:
-		return nil, errors.New("harness: stale turn")
-	}
-	// Once submitted, admission's answer must be observed to avoid losing a receipt.
-	var err error
-	select {
-	case err = <-reply:
-	case <-t.session.done:
-		return nil, errors.New("harness: session closed")
-	}
-	if err != nil {
-		return nil, err
-	}
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			select {
-			case t.session.in <- request{turn: t, activity: kind, release: true}:
-			case <-t.session.done:
-			}
-		})
-	}, nil
-}
 
 func publish(t *actorTurn, ev Event) {
 	// One slot is reserved for the terminal. Cancellation may abandon queued deltas.
@@ -184,11 +144,6 @@ func publish(t *actorTurn, ev Event) {
 
 func failure(reason string) Event {
 	return Event{Kind: EventFailure, Failure: &Failure{Reason: reason}}
-}
-
-type startResult struct {
-	child *child
-	err   error
 }
 
 type lineResult struct {
@@ -322,6 +277,46 @@ func (s *session) close(ctx context.Context) error {
 	}
 }
 
+// Transition is an observation of an actor action, not a source of state.
+// Observe callbacks must not block. Data contains bytes actually written to stdin.
+type Transition struct {
+	Kind             string
+	Generation, Turn uint64
+	Data             []byte
+}
+
+type pendingStep struct {
+	id               string
+	generation, turn uint64
+	step             Step
+}
+type (
+	settlement struct {
+		generation, turn uint64
+		err              error
+	}
+	cleanupResult struct {
+		generation uint64
+		err        error
+	}
+	incarnationStart struct {
+		generation uint64
+		child      *child
+		tools      ToolSession
+		bridge     ToolBridge
+		err        error
+	}
+)
+
+func disposeChild(c *child) error {
+	if c == nil {
+		return nil
+	}
+	c.kill()
+	c.finish()
+	return <-c.gone
+}
+
 func (s *session) loop() {
 	defer close(s.done)
 	bound := s.base.ShutdownTimeout
@@ -334,106 +329,203 @@ func (s *session) loop() {
 	}
 	tick := time.NewTicker(time.Millisecond)
 	defer tick.Stop()
-	var c *child
-	var starting <-chan startResult
-	var stopStart context.CancelFunc
+	var process *child
+	var codec Codec
+	var tools ToolSession
 	var current *actorTurn
 	var queue []*actorTurn
+	var generation, turnNumber, serial uint64
+	var starting, retiring, closing, cancelling, promptWritten, settling, settled bool
+	var deathPending bool
 	var terminal *Event
-	var commands []Command
-	var wire []byte
+	var plan []Step
+	var cancelCommands []Command
+	var pending *pendingStep
+	var frame []byte
+	var frameWritten int
+	var frameStep Step
 	var delivery []Event
-	var calls, approvals int
-	var cancelling, closing, ending bool
 	var deadline time.Time
+	var stopStart context.CancelFunc
+	var settleCancel context.CancelFunc
 	idleAt := time.Now().Add(idle)
-	var serial uint64
-	var turnNumber uint64
-	var stdoutEnded bool
-	pending := map[string]bool{}
-	setTerminal := func(ev Event) {
-		if terminal == nil {
-			if cancelling {
-				ev = failure("cancelled")
+	starts := make(chan incarnationStart)
+	settlements := make(chan settlement)
+	cleanups := make(chan cleanupResult)
+	observe := func(kind string, data []byte) {
+		if s.base.Observe != nil {
+			var turn uint64
+			if current != nil {
+				turn = current.number
 			}
-			terminal = &ev
-			commands = nil
-			wire = nil
+			s.base.Observe(Transition{Kind: kind, Generation: generation, Turn: turn, Data: append([]byte(nil), data...)})
 		}
 	}
+	// Cleanup owns only blocking pipe/reaper waits. It never changes actor state.
+	retire := func() {
+		if retiring {
+			return
+		}
+		retiring = true
+		if stopStart != nil {
+			stopStart()
+			stopStart = nil
+		}
+		starting = false
+		child, sessionTools, gen := process, tools, generation
+		cleanupDeadline := deadline
+		if cleanupDeadline.IsZero() {
+			cleanupDeadline = time.Now().Add(bound)
+		}
+		if child != nil {
+			child.kill()
+		}
+		process = nil
+		codec = nil
+		tools = nil
+		frame = nil
+		pending = nil
+		plan = nil
+		cancelCommands = nil
+		go func() {
+			ctx, cancel := context.WithDeadline(context.Background(), cleanupDeadline)
+			defer cancel()
+			var err error
+			if sessionTools != nil {
+				err = sessionTools.Retire(ctx)
+			}
+			err = errors.Join(err, disposeChild(child))
+			select {
+			case cleanups <- cleanupResult{gen, err}:
+			case <-s.done:
+			}
+		}()
+	}
+	settle := func() {
+		if current == nil || settling || settled {
+			return
+		}
+		settling = true
+		gen, number, sessionTools := generation, current.number, tools
+		ctx := context.Background()
+		var cancel context.CancelFunc
+		if !deadline.IsZero() {
+			ctx, cancel = context.WithDeadline(ctx, deadline)
+		} else {
+			ctx, cancel = context.WithTimeout(ctx, bound)
+		}
+		settleCancel = cancel
+		go func() {
+			var err error
+			if sessionTools != nil {
+				err = sessionTools.EndTurn(ctx)
+			}
+			cancel()
+			select {
+			case settlements <- settlement{gen, number, err}:
+			case <-s.done:
+			}
+		}()
+	}
+	choose := func(ev Event) {
+		if current == nil || terminal != nil {
+			return
+		}
+		if cancelling {
+			ev = failure("cancelled")
+		}
+		terminal = &ev
+		plan = nil
+		pending = nil
+		// A selected terminal prevents new work. A partially written work frame
+		// cannot be reused by any later command.
+		if len(frame) > 0 && frameWritten > 0 {
+			retire()
+		}
+		frame = nil
+		observe("terminal-taken", []byte(ev.Kind))
+		settle()
+	}
+	fail := func(reason string) { choose(failure(reason)); retire() }
 	cancelTurn := func() {
-		if current == nil || cancelling {
+		if current == nil {
 			return
 		}
 		if terminal != nil {
-			delivery = nil // Keep an already selected terminal, even for a stalled reader.
+			delivery = nil
+			return
+		}
+		if cancelling {
 			return
 		}
 		cancelling = true
+		deadline = time.Now().Add(bound)
+		observe("cancel", nil)
 		delivery = nil
+		plan = nil
+		pending = nil
+		// Never append abort to the suffix of an incomplete JSON frame.
+		partial := len(frame) > 0 && frameWritten > 0
+		frame = nil
+		settle()
 		if stopStart != nil {
 			stopStart()
+			stopStart = nil
 		}
-		commands = s.protocol.Cancel()
-		wire = nil
-		deadline = time.Now().Add(bound)
+		if starting || process == nil || partial {
+			choose(failure("cancelled"))
+			retire()
+			return
+		}
+		cancelCommands = codec.CancelSequence()
+	}
+	begin := func(t *actorTurn) {
+		current = t
+		cancelling = false
+		promptWritten = false
+		settling = false
+		settled = false
+		terminal = nil
+		delivery = nil
+		frame = nil
+		pending = nil
+		deadline = time.Time{}
+		observe("begin-turn", nil)
+		if tools != nil {
+			if err := tools.BeginTurn(t.spec.Authority); err != nil {
+				fail(fmt.Sprint("tools: ", err))
+				return
+			}
+		}
+		plan = codec.BeginTurn(t.spec)
 	}
 	for {
-		if current != nil && terminal != nil && calls == 0 && approvals == 0 && len(delivery) == 0 {
+		// Publication is the only point at which Wait and Events become terminal.
+		if current != nil && terminal != nil && settled && len(delivery) == 0 {
+			observe("terminal", nil)
 			publish(current, *terminal)
-			pending = map[string]bool{}
 			current = nil
 			terminal = nil
-			commands = nil
-			wire = nil
-			if cancelling && c != nil {
-				ending = true
-				_ = c.stdin.Close()
-			}
+			plan = nil
+			pending = nil
+			frame = nil
 			idleAt = time.Now().Add(idle)
+			if cancelling {
+				retire()
+			}
 		}
-		if c == nil && current == nil && len(queue) > 0 && !closing {
-			current = queue[0]
-			turnNumber++
-			current.number = turnNumber
-			queue = queue[1:]
-			cancelling = false
-			ending = false
-			launchCtx, cancelStart := context.WithCancel(current.ctx)
-			stopStart = cancelStart
-			result := make(chan startResult, 1)
-			starting = result
-			spec := current.spec
-			go func() {
-				launch, err := s.protocol.Start(launchCtx, spec)
-				var process *child
-				if err == nil {
-					process, err = spawn(launchCtx, s.base, launch)
-				}
-				result <- startResult{child: process, err: err}
-			}()
-			stdoutEnded = false
-		}
-		if c != nil && current == nil && !ending && len(queue) > 0 && !closing {
-			current = queue[0]
-			turnNumber++
-			current.number = turnNumber
-			queue = queue[1:]
-			cancelling = false
-			commands = s.protocol.Commands(current.spec)
-		}
-		if closing && current == nil && c == nil {
+		if closing && current == nil && !starting && !retiring && process == nil {
 			return
 		}
 		var lines <-chan lineResult
-		var observed <-chan error
-		var ctxDone <-chan struct{}
-		if c != nil {
-			observed = c.observed
-			if !stdoutEnded && len(delivery) == 0 && (current == nil || len(current.events) < 64 || cancelling || terminal != nil) {
-				lines = c.lines
+		var exited <-chan error
+		if process != nil {
+			exited = process.observed
+			if len(delivery) == 0 {
+				lines = process.lines
 			}
 		}
+		var ctxDone <-chan struct{}
 		if current != nil && terminal == nil && !cancelling {
 			ctxDone = current.ctx.Done()
 		}
@@ -443,21 +535,75 @@ func (s *session) loop() {
 			output = current.events
 			next = delivery[0]
 		}
-		select {
-		case result := <-starting:
-			starting = nil
-			if stopStart != nil {
-				stopStart()
-				stopStart = nil
+		handleLine := func(result lineResult) {
+			if process == nil || codec == nil {
+				return
 			}
-			c = result.child
 			if result.err != nil {
-				setTerminal(failure(result.err.Error()))
-			} else if cancelling {
-				commands = s.protocol.Cancel()
-			} else {
-				commands = s.protocol.Commands(current.spec)
+				if errors.Is(result.err, io.EOF) {
+					deathPending = true
+					settle()
+					retire()
+					return
+				}
+				reason := fmt.Sprint("the agent stdout ended: ", result.err)
+				if errors.Is(result.err, errLineTooLong) {
+					reason = "the agent wrote a line longer than " + strconv.Itoa(s.base.MaxLineBytes) + " bytes"
+				}
+				fail(reason)
+				return
 			}
+			line := bytes.TrimSpace(result.line)
+			if len(line) == 0 {
+				return
+			}
+			decoded, err := codec.Decode(line)
+			if err != nil {
+				fail(fmt.Sprint("agent protocol: ", err))
+				return
+			}
+			if response := decoded.Response; response != nil {
+				if pending == nil || pending.id != response.ID || pending.generation != generation || current == nil || pending.turn != current.number {
+					return
+				}
+				if pending != nil && pending.id == response.ID && pending.generation == generation && current != nil && pending.turn == current.number {
+					step := pending.step
+					pending = nil
+					if response.Error != "" {
+						fail(response.Error)
+						return
+					}
+					if step.Check != nil {
+						if err := step.Check(response.Payload); err != nil {
+							fail(fmt.Sprint("agent response: ", err))
+							return
+						}
+					}
+					if len(plan) > 0 {
+						plan = plan[1:]
+					}
+				}
+			}
+			for _, ev := range decoded.Events {
+				if current == nil || !promptWritten {
+					fail("agent output before a turn prompt was written")
+					return
+				}
+				if terminal != nil {
+					fail("agent output after the turn terminal")
+					return
+				}
+				if ev.Kind == EventEnd || ev.Kind == EventFailure {
+					choose(ev)
+					if cancelling {
+						retire()
+					}
+				} else if !cancelling {
+					delivery = append(delivery, ev)
+				}
+			}
+		}
+		select {
 		case output <- next:
 			delivery = delivery[1:]
 		case r := <-s.in:
@@ -467,18 +613,22 @@ func (s *session) loop() {
 					publish(t, failure("cancelled"))
 				}
 				queue = nil
-				cancelTurn()
-				if c != nil && current == nil {
-					ending = true
-					deadline = time.Now().Add(bound)
-					_ = c.stdin.Close()
+				if current != nil {
+					cancelTurn()
+				} else if process != nil || starting {
+					retire()
 				}
 			}
-			if r.turn != nil && !r.cancel && r.activity == 0 {
+			if r.turn != nil && !r.cancel {
 				if closing {
 					publish(r.turn, failure("cancelled"))
 				} else {
+					turnNumber++
+					r.turn.number = turnNumber
 					queue = append(queue, r.turn)
+					if s.base.Observe != nil {
+						s.base.Observe(Transition{Kind: "turn-queued", Generation: generation, Turn: r.turn.number})
+					}
 				}
 			}
 			if r.cancel {
@@ -495,132 +645,201 @@ func (s *session) loop() {
 				}
 				r.reply <- nil
 			}
-			if r.activity != 0 {
-				if r.turn != current || (!r.release && (terminal != nil || cancelling)) {
-					if r.reply != nil {
-						r.reply <- errors.New("harness: stale turn")
-					}
-					continue
-				}
-				n := &calls
-				if r.activity == 2 {
-					n = &approvals
-				}
-				if r.release {
-					*n--
-				} else {
-					*n++
-					r.reply <- nil
-				}
-			}
 		case <-ctxDone:
 			cancelTurn()
-		case result := <-lines:
+		case result := <-starts:
+			if result.generation != generation || !starting || retiring {
+				go func() {
+					_ = disposeChild(result.child)
+					if result.tools != nil {
+						ctx, cancel := context.WithTimeout(context.Background(), bound)
+						defer cancel()
+						_ = result.tools.Retire(ctx)
+					}
+				}()
+				continue
+			}
+			starting = false
+			if stopStart != nil {
+				stopStart()
+				stopStart = nil
+			}
+			process, tools = result.child, result.tools
 			if result.err != nil {
-				stdoutEnded = true
-				if current != nil && !errors.Is(result.err, io.EOF) {
-					reason := fmt.Sprint("the agent stdout ended: ", result.err)
-					if errors.Is(result.err, errLineTooLong) {
-						reason = "the agent wrote a line longer than " + strconv.Itoa(s.base.MaxLineBytes) + " bytes"
-					}
-					setTerminal(failure(reason))
-				}
-				ending = true
-				deadline = time.Now().Add(bound)
-				_ = c.stdin.Close()
+				fail(fmt.Sprint(result.err))
 				continue
 			}
-			line := bytes.TrimSpace(result.line)
-			if len(line) == 0 {
-				continue
+			codec = s.protocol.NewCodec(SessionInfo{ConversationID: current.spec.ConversationID, Generation: generation})
+			spec := current.spec
+			if len(result.bridge.Command) > 0 {
+				spec.Tools = result.bridge
+				current.spec = spec
 			}
-			decoded, err := s.protocol.Decode(line)
-			if err != nil {
-				if current != nil {
-					reason := fmt.Sprint("agent protocol: ", err)
-					setTerminal(failure(reason))
-				}
-				ending = true
-				c.kill()
-				continue
-			}
-			if response := decoded.Response; response != nil {
-				if pending[response.ID] {
-					delete(pending, response.ID)
-					if response.Error != "" && current != nil {
-						setTerminal(failure(response.Error))
-					}
-				}
-			}
-			for _, ev := range decoded.Events {
-				if current == nil {
-					ending = true
-					deadline = time.Now().Add(bound)
-					_ = c.stdin.Close()
-					break
-				}
-				if terminal != nil {
+			if tools != nil {
+				if err := tools.BeginTurn(spec.Authority); err != nil {
+					fail(fmt.Sprint("tools: ", err))
 					continue
 				}
-				if ev.Kind == EventEnd || ev.Kind == EventFailure {
-					setTerminal(ev)
-				} else if !cancelling {
-					delivery = append(delivery, ev)
+			}
+			plan = append(codec.Setup(), codec.BeginTurn(spec)...)
+		case result := <-settlements:
+			if current == nil || result.generation != generation || result.turn != current.number {
+				continue
+			}
+			settling = false
+			settled = true
+			if settleCancel != nil {
+				settleCancel()
+				settleCancel = nil
+			}
+			observe("settled", nil)
+			if result.err != nil && !cancelling {
+				terminalEvent := failure(fmt.Sprint("tool settlement: ", result.err))
+				terminal = &terminalEvent
+				retire()
+			}
+		case result := <-cleanups:
+			if result.generation == generation {
+				retiring = false
+				if deathPending {
+					deathPending = false
+					reason := "the agent exited without an end event"
+					if result.err != nil {
+						reason = exitReason(result.err)
+					}
+					choose(failure(reason))
 				}
 			}
-		case <-observed:
-			c.kill()
-			c.finish()
-			err := <-c.gone
-			if current != nil {
-				reason := "the agent exited without an end event"
-				if err != nil {
-					reason = exitReason(err)
-				}
-				if text := c.stderr.String(); text != "" {
-					reason += ": " + text
-				}
-				setTerminal(failure(reason))
-			}
-			c = nil
-			ending = false
-			pending = map[string]bool{}
+		case line := <-lines:
+			handleLine(line)
+		case <-exited:
+			deathPending = true
+			settle()
+			retire()
 		case now := <-tick.C:
-			if c == nil {
+			if current != nil && cancelling && !deadline.IsZero() && !now.Before(deadline) {
+				choose(failure("cancelled"))
+				retire()
+			}
+			// A queued line wins over admission and writes, never over cancellation.
+			if lines != nil {
+				select {
+				case line := <-lines:
+					handleLine(line)
+					continue
+				default:
+				}
+			}
+			if current == nil && process != nil && !retiring && !now.Before(idleAt) {
+				observe("idle-expired", nil)
+				if tools == nil || !tools.Pending() {
+					retire()
+				}
+			}
+			if current == nil && !retiring && !starting && len(queue) > 0 && !closing {
+				t := queue[0]
+				queue = queue[1:]
+				if process != nil {
+					begin(t)
+				} else {
+					generation++
+					current = t
+					cancelling = false
+					promptWritten = false
+					settling = false
+					settled = false
+					terminal = nil
+					deadline = time.Time{}
+					starting = true
+					observe("begin-turn", nil)
+					ctx, cancel := context.WithCancel(t.ctx)
+					stopStart = cancel
+					info := SessionInfo{ConversationID: t.spec.ConversationID, Generation: generation}
+					spec := t.spec
+					go func() {
+						var ts ToolSession
+						var bridge ToolBridge
+						var err error
+						if s.base.Tools != nil {
+							ts, bridge, err = s.base.Tools(ctx, info)
+						}
+						if len(bridge.Command) > 0 {
+							spec.Tools = bridge
+						}
+						var launch Launch
+						var child *child
+						if err == nil {
+							launch, err = s.protocol.Start(ctx, spec)
+						}
+						if err == nil {
+							child, err = spawn(ctx, s.base, launch)
+						}
+						result := incarnationStart{generation: info.Generation, child: child, tools: ts, bridge: bridge, err: err}
+						select {
+						case starts <- result:
+						case <-ctx.Done():
+							_ = disposeChild(child)
+							if ts != nil {
+								retireCtx, cancel := context.WithTimeout(context.Background(), bound)
+								defer cancel()
+								_ = ts.Retire(retireCtx)
+							}
+						case <-s.done:
+							_ = disposeChild(child)
+							if ts != nil {
+								retireCtx, cancel := context.WithTimeout(context.Background(), bound)
+								defer cancel()
+								_ = ts.Retire(retireCtx)
+							}
+						}
+					}()
+				}
+			}
+			if process == nil || current == nil || terminal != nil {
 				continue
 			}
-			if (cancelling || ending) && !deadline.IsZero() && !now.Before(deadline) {
-				c.kill()
-			}
-			if current == nil && !ending && !now.Before(idleAt) {
-				ending = true
-				deadline = now.Add(bound)
-				_ = c.stdin.Close()
-			}
-			if current != nil && terminal == nil && len(wire) == 0 && len(commands) > 0 {
+			if len(frame) == 0 {
+				var step Step
+				if cancelling {
+					if len(cancelCommands) == 0 {
+						continue
+					}
+					step = Step{Command: cancelCommands[0]}
+					cancelCommands = cancelCommands[1:]
+				} else {
+					if pending != nil || len(plan) == 0 {
+						continue
+					}
+					step = plan[0]
+				}
 				serial++
-				id := strconv.FormatUint(serial, 10)
-				command := commands[0]
-				commands = commands[1:]
+				id := strconv.FormatUint(generation, 10) + "/" + strconv.FormatUint(current.number, 10) + "/" + strconv.FormatUint(serial, 10)
 				var err error
-				wire, err = s.protocol.Encode(id, command)
+				frame, err = codec.Encode(id, step.Command)
 				if err != nil {
-					reason := fmt.Sprint(err)
-					setTerminal(failure(reason))
+					fail(fmt.Sprint(err))
 					continue
 				}
-				pending[id] = true
+				frameWritten = 0
+				frameStep = step
+				if !cancelling {
+					pending = &pendingStep{id: id, generation: generation, turn: current.number, step: step}
+				}
 			}
-			if len(wire) > 0 {
-				n, err := syscall.Write(c.fd, wire)
+			if len(frame) > 0 {
+				n, err := syscall.Write(process.fd, frame)
 				if n > 0 {
-					wire = wire[n:]
+					observe("write", frame[:n])
+					frame = frame[n:]
+					frameWritten += n
 				}
 				if err != nil && !errors.Is(err, syscall.EAGAIN) && !errors.Is(err, syscall.EINTR) {
-					reason := fmt.Sprint("agent stdin: ", err)
-					setTerminal(failure(reason))
-					ending = true
-					c.kill()
+					fail(fmt.Sprint("agent stdin: ", err))
+					continue
+				}
+				if len(frame) == 0 && frameStep.Prompt && !cancelling {
+					promptWritten = true
+					observe("prompt-written", nil)
 				}
 			}
 		}

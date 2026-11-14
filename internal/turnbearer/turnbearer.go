@@ -35,7 +35,8 @@ type turnLifetime struct {
 	live       bool
 	ctx        context.Context
 	cancel     context.CancelFunc
-	admissions sync.WaitGroup
+	admissions int
+	drained    chan struct{}
 }
 
 // StartAdmission tracks admission cleanup until done is called. The returned
@@ -52,7 +53,7 @@ func (a Authority) StartAdmission(ctx context.Context) (context.Context, func(),
 	if !lifetime.live {
 		return nil, nil, false
 	}
-	lifetime.admissions.Add(1)
+	lifetime.admissions++
 	ctx, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(lifetime.ctx, cancel)
 	var once sync.Once
@@ -60,7 +61,12 @@ func (a Authority) StartAdmission(ctx context.Context) (context.Context, func(),
 		once.Do(func() {
 			stop()
 			cancel()
-			lifetime.admissions.Done()
+			lifetime.mu.Lock()
+			lifetime.admissions--
+			if !lifetime.live && lifetime.admissions == 0 {
+				close(lifetime.drained)
+			}
+			lifetime.mu.Unlock()
 		})
 	}
 	return ctx, done, true
@@ -93,7 +99,7 @@ type Registry interface {
 // The owner closes publication before settling admissions.
 type Endpoint interface {
 	SocketPath() string
-	SettleAdmissions(scope string, epoch toolendpoint.AdmissionEpoch)
+	SettleAdmissionsContext(context.Context, string, toolendpoint.AdmissionEpoch) error
 	PendingAdmissions(scope string, epoch toolendpoint.AdmissionEpoch) bool
 }
 
@@ -110,6 +116,7 @@ type session struct {
 	authority Authority
 	settling  chan struct{}
 	retired   bool
+	closed    bool
 }
 
 // NewMinter constructs the session registry without touching the endpoint.
@@ -152,13 +159,39 @@ func (m *Minter) Mint(id string) (TurnBridge, func(), error) {
 			s.retired = true
 			s.token = ""
 			m.mu.Unlock()
-			m.endTurn(s)
+			_ = m.endTurnContext(context.Background(), s)
 			m.mu.Lock()
-			delete(m.sessions, id)
+			if m.sessions[id] == s {
+				delete(m.sessions, id)
+			}
 			m.mu.Unlock()
 		})
 	}
 	return bridge, retire, nil
+}
+
+// RetireContext revokes the bearer before bounded settlement. A deadline keeps
+// the session registered and retired so unsettled work cannot be replaced.
+func (m *Minter) RetireContext(ctx context.Context, id string) error {
+	m.mu.Lock()
+	s := m.sessions[id]
+	if s != nil {
+		s.retired = true
+		s.token = ""
+	}
+	m.mu.Unlock()
+	if s == nil {
+		return nil
+	}
+	if err := m.endTurnContext(ctx, s); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	if m.sessions[id] == s {
+		delete(m.sessions, id)
+	}
+	m.mu.Unlock()
+	return nil
 }
 
 // BeginTurn attaches fresh authority to a minted session. The previous turn
@@ -182,8 +215,9 @@ func (m *Minter) BeginTurn(id string, authority Authority) error {
 		return errors.New("turnbearer: session already has a turn")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	authority.lifetime = &turnLifetime{live: true, ctx: ctx, cancel: cancel}
+	authority.lifetime = &turnLifetime{live: true, ctx: ctx, cancel: cancel, drained: make(chan struct{})}
 	s.authority = authority
+	s.closed = false
 	return nil
 }
 
@@ -191,41 +225,69 @@ func (m *Minter) BeginTurn(id string, authority Authority) error {
 // connections and waits until admission cleanup and accepted calls have settled.
 // The session bearer remains available for the next BeginTurn. Ending an idle or unknown session is a no-op.
 func (m *Minter) EndTurn(id string) {
+	_ = m.EndTurnContext(context.Background(), id)
+}
+
+// EndTurnContext preserves the closed authority if settlement hits a deadline.
+// The caller may retry; another turn cannot start until settlement succeeds.
+func (m *Minter) EndTurnContext(ctx context.Context, id string) error {
 	m.mu.Lock()
 	s := m.sessions[id]
 	m.mu.Unlock()
-	if s != nil {
-		m.endTurn(s)
+	if s == nil {
+		return nil
 	}
+	return m.endTurnContext(ctx, s)
 }
 
-func (m *Minter) endTurn(s *session) {
-	m.mu.Lock()
-	if s.settling != nil {
-		done := s.settling
+func (m *Minter) endTurnContext(ctx context.Context, s *session) error {
+	for {
+		m.mu.Lock()
+		if s.settling != nil {
+			done := s.settling
+			m.mu.Unlock()
+			select {
+			case <-done:
+				continue
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		authority := s.authority
+		if authority.lifetime == nil {
+			m.mu.Unlock()
+			return nil
+		}
+		done := make(chan struct{})
+		s.settling = done
+		s.closed = true
 		m.mu.Unlock()
-		<-done
-		return
-	}
-	authority := s.authority
-	if authority.lifetime == nil {
+		authority.lifetime.mu.Lock()
+		if authority.lifetime.live {
+			authority.lifetime.live = false
+			authority.lifetime.cancel()
+			if authority.lifetime.admissions == 0 {
+				close(authority.lifetime.drained)
+			}
+		}
+		authority.lifetime.mu.Unlock()
+		err := m.endpoint.SettleAdmissionsContext(ctx, toolendpoint.TurnScope(authority.Tools.RunContext().RunID), toolendpoint.TurnEpoch)
+		if err == nil {
+			select {
+			case <-authority.lifetime.drained:
+			case <-ctx.Done():
+				err = ctx.Err()
+			}
+		}
+		m.mu.Lock()
+		if err == nil {
+			s.authority = Authority{}
+		}
+		s.settling = nil
+		close(done)
 		m.mu.Unlock()
-		return
+		return err
 	}
-	done := make(chan struct{})
-	s.settling = done
-	m.mu.Unlock()
-	authority.lifetime.mu.Lock()
-	authority.lifetime.live = false
-	authority.lifetime.cancel()
-	authority.lifetime.mu.Unlock()
-	m.endpoint.SettleAdmissions(toolendpoint.TurnScope(authority.Tools.RunContext().RunID), toolendpoint.TurnEpoch)
-	authority.lifetime.admissions.Wait()
-	m.mu.Lock()
-	s.authority = Authority{}
-	s.settling = nil
-	close(done)
-	m.mu.Unlock()
 }
 
 // Pending reports accepted tool work, including an approval waiting for an
@@ -256,7 +318,7 @@ func (m *Minter) Lookup(token string) (Authority, bool) {
 	var found Authority
 	matched := false
 	for _, s := range m.sessions {
-		if subtle.ConstantTimeCompare([]byte(s.token), []byte(token)) == 1 && !s.retired && s.authority.lifetime != nil && s.settling == nil {
+		if subtle.ConstantTimeCompare([]byte(s.token), []byte(token)) == 1 && !s.retired && !s.closed && s.authority.lifetime != nil && s.settling == nil {
 			found = s.authority
 			matched = true
 		}

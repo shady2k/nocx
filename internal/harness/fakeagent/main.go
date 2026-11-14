@@ -65,6 +65,12 @@ func main() {
 	turn := 0
 	for command := range commands {
 		switch command.Name {
+		case "initialize":
+			if command.Session == nil {
+				emit(protocol.Line{Kind: "response", ID: command.ID, Reason: "missing session"})
+				continue
+			}
+			emit(protocol.Line{Kind: "response", ID: command.ID, Payload: command.Session})
 		case "prompt":
 			if done != nil {
 				<-done

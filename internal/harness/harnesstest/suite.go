@@ -93,15 +93,6 @@ func RunFakeProcessChecks(t *testing.T, factory Factory) {
 		if readPID(t, pidFile) == pid {
 			t.Fatal("cancelled session was reused")
 		}
-		oldActivity, ok := turn.(harness.TurnActivity)
-		if !ok {
-			t.Fatal("missing turn activity")
-		}
-		if release, lateErr := oldActivity.AcceptCall(context.Background()); lateErr == nil {
-			release()
-			t.Fatal("stale turn admitted call")
-		}
-
 		if cancelErr := turn.Cancel(context.Background()); cancelErr != nil {
 			t.Fatal(cancelErr)
 		}
@@ -153,7 +144,8 @@ func RunFakeProcessChecks(t *testing.T, factory Factory) {
 		if err := syscall.Mkfifo(gate, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		h := factory(t, Setup{AgentPath: agent, ToolServerPath: server, Script: protocol.Script{Gate: gate, Turns: [][]protocol.Step{{{Kind: protocol.StepAnswer, Text: "first"}, {Kind: protocol.StepGate}, {Kind: protocol.StepEnd, Model: "fake-model"}}, {{Kind: protocol.StepAnswer, Text: "second"}, {Kind: protocol.StepEnd, Model: "fake-model"}}}}})
+		trace := newTransitions()
+		h := factory(t, Setup{AgentPath: agent, ToolServerPath: server, Base: harness.Base{Observe: trace.observe}, Script: protocol.Script{Gate: gate, Turns: [][]protocol.Step{{{Kind: protocol.StepAnswer, Text: "first"}, {Kind: protocol.StepGate}, {Kind: protocol.StepEnd, Model: "fake-model"}}, {{Kind: protocol.StepAnswer, Text: "second"}, {Kind: protocol.StepEnd, Model: "fake-model"}}}}})
 		defer func() { _ = sessionCloser(t, h).Close(context.Background()) }()
 		spec := harness.TurnSpec{ConversationID: "conversation-1", Dir: dir}
 		first, err := h.Run(context.Background(), spec)
@@ -165,11 +157,8 @@ func RunFakeProcessChecks(t *testing.T, factory Factory) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		select {
-		case ev := <-second.Events():
-			t.Fatalf("second turn produced output before first settled: %+v", ev)
-		default:
-		}
+		trace.wait(t, "turn-queued", 2)
+		trace.assertCount(t, "prompt-written", 1)
 		ReleaseGate(t, gate)
 		collect(t, first)
 		if _, err := first.Wait(context.Background()); err != nil {
@@ -179,60 +168,66 @@ func RunFakeProcessChecks(t *testing.T, factory Factory) {
 		if len(events) != 2 || events[0].Text != "second" {
 			t.Fatalf("second turn: %+v", events)
 		}
+		trace.assertBefore(t, "terminal", 1, "prompt-written", 2)
 	})
 
-	t.Run("accepted calls delay terminal and queued turn", func(t *testing.T) {
+	t.Run("endpoint settlement delays terminal and queued turn", func(t *testing.T) {
 		dir := t.TempDir()
-		gate := filepath.Join(dir, "gate")
-		if err := syscall.Mkfifo(gate, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		h := factory(t, Setup{AgentPath: agent, ToolServerPath: server, Base: harness.Base{IdleTimeout: 20 * time.Millisecond}, Script: protocol.Script{Gate: gate, Turns: [][]protocol.Step{{{Kind: protocol.StepAnswer, Text: "ready"}, {Kind: protocol.StepGate}, {Kind: protocol.StepEnd, Model: "fake-model"}}, {{Kind: protocol.StepEnd, Model: "fake-model"}}}}})
-		defer func() { _ = sessionCloser(t, h).Close(context.Background()) }()
+		tools := newTestToolSession(true)
+		trace := newTransitions()
+		tools.onReturn = func() { trace.observe(harness.Transition{Kind: "end-turn-return"}) }
+		h := factory(t, Setup{AgentPath: agent, ToolServerPath: server, Base: harness.Base{Tools: tools.factory, Observe: trace.observe}, Script: protocol.Script{Steps: []protocol.Step{{Kind: protocol.StepEnd, Model: "fake-model"}}}})
+		defer func() {
+			tools.release()
+			_ = sessionCloser(t, h).Close(context.Background())
+		}()
 		spec := harness.TurnSpec{ConversationID: "conversation-1", Dir: dir}
 		turn, err := h.Run(context.Background(), spec)
 		if err != nil {
 			t.Fatal(err)
 		}
-		nextEvent(t, turn.Events(), 5*time.Second)
-		activity, ok := turn.(harness.TurnActivity)
-		if !ok {
-			t.Fatal("turn lacks endpoint activity")
-		}
-		settle, err := activity.AcceptCall(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
-		approval, err := activity.Approval(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
+		waitSignal(t, tools.ending, "endpoint EndTurn entry")
 		next, err := h.Run(context.Background(), spec)
 		if err != nil {
 			t.Fatal(err)
 		}
-		ReleaseGate(t, gate)
-		ctx, cancel := context.WithCancel(context.Background())
+		trace.wait(t, "turn-queued", 2)
+		trace.assertCount(t, "terminal", 0)
+		trace.assertCount(t, "prompt-written", 1)
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		_, waitErr := turn.Wait(ctx)
 		cancel()
-		_, err = turn.Wait(ctx)
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("terminal published before calls settled: %v", err)
+		if !errors.Is(waitErr, context.DeadlineExceeded) {
+			t.Fatalf("Wait completed while EndTurn remained blocked: %v", waitErr)
 		}
-		settle()
-		select {
-		case ev := <-next.Events():
-			t.Fatalf("next turn ran while approval pending: %+v", ev)
-		default:
+		tools.release()
+		assertSuccessfulEnd(t, collect(t, turn))
+		assertSuccessfulEnd(t, collect(t, next))
+		trace.assertBefore(t, "end-turn-return", 1, "terminal", 1)
+		trace.assertBefore(t, "settled", 1, "terminal", 1)
+		trace.assertBefore(t, "terminal", 1, "prompt-written", 2)
+		if !tools.returned.Load() {
+			t.Fatal("terminal published before EndTurn returned")
 		}
-		approval()
-		events := collect(t, turn)
-		if len(events) != 1 || events[0].Kind != harness.EventEnd {
-			t.Fatalf("terminal: %+v", events)
+	})
+	t.Run("pending approval survives confirmed idle expiry", func(t *testing.T) {
+		dir := t.TempDir()
+		pidFile := filepath.Join(dir, "agent.pid")
+		tools := newTestToolSession(false)
+		tools.pending.Store(true)
+		trace := newTransitions()
+		h := factory(t, Setup{AgentPath: agent, ToolServerPath: server, Base: harness.Base{IdleTimeout: 20 * time.Millisecond, Tools: tools.factory, Observe: trace.observe}, Script: protocol.Script{PIDFile: pidFile, Steps: []protocol.Step{{Kind: protocol.StepEnd, Model: "fake-model"}}}})
+		defer func() { _ = sessionCloser(t, h).Close(context.Background()) }()
+		runSuccessful(t, h, dir)
+		waitFile(t, pidFile)
+		pid := readPID(t, pidFile)
+		trace.wait(t, "idle-expired", 1)
+		if !tools.pending.Load() || tools.retired.Load() || !alive(pid) {
+			t.Fatal("idle expiry retired an endpoint with a pending approval")
 		}
-		events = collect(t, next)
-		if len(events) != 1 || events[0].Kind != harness.EventEnd {
-			t.Fatalf("queued turn: %+v", events)
-		}
+		tools.pending.Store(false)
+		trace.wait(t, "idle-expired", 2)
+		waittest.WaitFor(t, "agent expires after approval settles", func() bool { return !alive(pid) })
 	})
 	t.Run("synthetic failures", func(t *testing.T) { testFailures(t, factory, agent, server) })
 }
@@ -361,7 +356,7 @@ func testFailures(t *testing.T, factory Factory, agentPath, serverPath string) {
 		events := collect(t, turn)
 		last := events[len(events)-1]
 		if last.Kind != harness.EventFailure || last.Failure == nil || !strings.Contains(last.Failure.Reason, "status 7") {
-			t.Fatalf("last event = %+v, want a failure naming the exit", last)
+			t.Fatalf("last event = %+v, failure = %+v; want a failure naming the exit", last, last.Failure)
 		}
 		_, err := turn.Wait(context.Background())
 		if err == nil || !strings.Contains(fmt.Sprint(err), "status 7") {

@@ -198,6 +198,8 @@ type TurnSpec struct {
 	Dir string
 	// Tools is how this turn's tools reach the agent.
 	Tools ToolBridge
+	// Authority is the assistant kernel for this turn, never a previous turn.
+	Authority TurnAuthority
 }
 
 // ToolBridge is the turn's one way to nocx's tools: the argv the agent's MCP

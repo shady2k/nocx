@@ -77,6 +77,12 @@ revision. It does not extract the unused text `Screen`; public `Snapshot` and co
 checks add that text through the existing reader, preserving spacer and blank trimming.
 An unreadable screen still produces no new frame, never a partial one.
 
+Ghostty history reads reuse temporary cell-facts and UTF-8 buffers only within
+one locked range read, departure capture or pre-erasure capture. Returned rows
+own their cells and grapheme strings; they never borrow this scratch. No buffer
+is retained as a terminal-wide cache, and the existing grapheme-growth ceiling,
+read-error boundary and row-stream budgets remain unchanged.
+
 ## Module Map
 
 **Backend (Go core)** — one interface, one responsibility each:

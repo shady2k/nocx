@@ -26,6 +26,7 @@ import (
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	nocxlog "github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/toolendpoint/panebind"
+	"github.com/shady2k/nocx/internal/toolendpoint/turnbind"
 	"github.com/shady2k/nocx/internal/workers"
 )
 
@@ -556,14 +557,14 @@ func (e *Endpoint) readPresentedToken(conn *net.UnixConn, reader *bufio.Reader) 
 	if err != nil {
 		return "", nil
 	}
-	if first[0] != panebind.TokenMagic[0] {
+	if first[0] != turnbind.TokenMagic[0] {
 		return "", nil
 	}
 	if err := conn.SetReadDeadline(time.Now().Add(paneRecordTimeout)); err != nil {
 		return "", err
 	}
 	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
-	return panebind.ReadToken(reader)
+	return turnbind.ReadToken(reader)
 }
 
 func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {

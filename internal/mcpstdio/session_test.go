@@ -736,7 +736,7 @@ func (c *interruptConn) SetReadDeadline(time.Time) error { return nil }
 // sibling is given its chance by a scheduling point rather than by a wait.
 func TestACancelledCallsInterruptCannotFailASiblingsWrite(t *testing.T) {
 	conn := newInterruptConn()
-	link := newEndpointLink("shared.sock", fixedDialer{conn: conn}, "", discardLogger)
+	link := newEndpointLink("shared.sock", fixedDialer{conn: conn}, endpointBearer{}, discardLogger)
 	t.Cleanup(link.close)
 
 	// A SCHEDULING POINT, NOT A DURATION, and the same one this file already
@@ -922,7 +922,7 @@ func (c *readEndObservingConn) Read(p []byte) (int, error) {
 // A DIAL THAT GENUINELY FAILS IS NAMED, and it is the same answer the wire has
 // always carried for it.
 func TestADialThatFailsIsNamedEndpointUnavailable(t *testing.T) {
-	link := newEndpointLink(filepath.Join(storagetest.SocketDir(t), "missing.sock"), &net.Dialer{}, "", discardLogger)
+	link := newEndpointLink(filepath.Join(storagetest.SocketDir(t), "missing.sock"), &net.Dialer{}, endpointBearer{}, discardLogger)
 	_, _, err := link.call(context.Background(), "alpha.first", json.RawMessage(`{}`))
 	if !errors.Is(err, ErrEndpointUnavailable) {
 		t.Fatalf("call error = %v, want %v", err, ErrEndpointUnavailable)
@@ -971,7 +971,7 @@ func TestACallWhoseWriteFailsRedialsRatherThanLosingTheCall(t *testing.T) {
 		writeJSONLine(t, conn, rpcEnvelope{JSONRPC: "2.0", ID: request.ID, Result: json.RawMessage(`{"after":true}`)})
 	})
 	dialer := &firstWriteFailsDialer{inner: &net.Dialer{}}
-	link := newEndpointLink(endpoint.socket(), dialer, "", discardLogger)
+	link := newEndpointLink(endpoint.socket(), dialer, endpointBearer{}, discardLogger)
 	t.Cleanup(link.close)
 
 	result, upstream, err := link.call(context.Background(), "alpha.first", json.RawMessage(`{}`))
@@ -1063,7 +1063,7 @@ func TestAFrameCutShortIsRetriedRatherThanWaitedOn(t *testing.T) {
 		writeJSONLine(t, conn, rpcEnvelope{JSONRPC: "2.0", ID: request.ID, Result: json.RawMessage(`{"after":true}`)})
 	})
 	dialer := &shortWriteDialer{inner: &net.Dialer{}}
-	link := newEndpointLink(endpoint.socket(), dialer, "", discardLogger)
+	link := newEndpointLink(endpoint.socket(), dialer, endpointBearer{}, discardLogger)
 	t.Cleanup(link.close)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1147,7 +1147,7 @@ func TestACancelledWriterDoesNotOpenItsTurn(t *testing.T) {
 // either way, because nothing is connected.
 func TestACancelledCallIsNeverSentToTheEndpoint(t *testing.T) {
 	dialer := &countingDialer{conn: newDeliveringFailureConn()}
-	link := newEndpointLink("ignored.sock", dialer, "", discardLogger)
+	link := newEndpointLink("ignored.sock", dialer, endpointBearer{}, discardLogger)
 	t.Cleanup(link.close)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1235,7 +1235,7 @@ func (d fixedDialer) DialContext(context.Context, string, string) (net.Conn, err
 // the difference is every other writer behind the same descriptor.
 func TestAnInterruptedWriteDoesNotParkTheCaller(t *testing.T) {
 	conn := newStuckConn()
-	link := newEndpointLink("stuck.sock", fixedDialer{conn: conn}, "", discardLogger)
+	link := newEndpointLink("stuck.sock", fixedDialer{conn: conn}, endpointBearer{}, discardLogger)
 	t.Cleanup(link.close)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1424,7 +1424,7 @@ func (d *countingDialer) count() int {
 // write itself reported.
 func TestAWriteThatDeliveredTheWholeFrameIsNotRetried(t *testing.T) {
 	dialer := &countingDialer{conn: newDeliveringFailureConn()}
-	link := newEndpointLink("ambiguous.sock", dialer, "", discardLogger)
+	link := newEndpointLink("ambiguous.sock", dialer, endpointBearer{}, discardLogger)
 	t.Cleanup(link.close)
 
 	_, _, err := link.call(context.Background(), "alpha.first", json.RawMessage(`{}`))

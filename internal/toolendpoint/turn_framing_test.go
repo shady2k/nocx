@@ -10,7 +10,7 @@ import (
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
-	"github.com/shady2k/nocx/internal/toolendpoint/panebind"
+	"github.com/shady2k/nocx/internal/toolendpoint/turnbind"
 )
 
 type turnCapableAuthorizer struct{ *testAuthorizer }
@@ -104,7 +104,7 @@ func TestPartialBearerIsRefusedNotLocal(t *testing.T) {
 	if !ok {
 		t.Fatal("endpoint did not return a Unix connection")
 	}
-	_, _ = io.WriteString(conn, panebind.TokenMagic+"abcd")
+	_, _ = io.WriteString(conn, turnbind.TokenMagic+"abcd")
 	_ = conn.CloseWrite()
 	got := readResponse(t, conn)
 	if got.Error == nil || dispatch.callCount() != 0 {

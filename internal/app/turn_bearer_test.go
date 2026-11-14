@@ -13,6 +13,7 @@ package app
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"os"
@@ -34,6 +35,7 @@ import (
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/toolendpoint"
 	"github.com/shady2k/nocx/internal/toolendpoint/panebind"
+	"github.com/shady2k/nocx/internal/toolendpoint/turnbind"
 	"github.com/shady2k/nocx/internal/turnbearer"
 	"github.com/shady2k/nocx/internal/waittest"
 )
@@ -167,7 +169,7 @@ func turnGrantForTest() content.Grant {
 func envToken(t *testing.T, env []string) string {
 	t.Helper()
 	for _, entry := range env {
-		if value, ok := strings.CutPrefix(entry, panebind.TokenEnvVar+"="); ok {
+		if value, ok := strings.CutPrefix(entry, turnbind.TokenEnvVar+"="); ok {
 			return value
 		}
 	}
@@ -203,11 +205,10 @@ func TestATurnBearerIsAdmittedAndItsCallCarriesTheTurnsGrant(t *testing.T) {
 	if len(token) != panebind.TokenHexLen {
 		t.Fatalf("the bearer is %d characters, want %d", len(token), panebind.TokenHexLen)
 	}
-	for i := 0; i < len(token); i++ {
-		if !panebind.StartsToken(token[i]) {
-			t.Fatalf("the bearer carries %q, which is not its alphabet", token[i])
-		}
+	if _, err = hex.DecodeString(token); err != nil {
+		t.Fatalf("invalid bearer hex: %v", err)
 	}
+
 	second, _, err := stand.minter.Mint(turnbearer.Authority{
 		Tools: &testTurnTools{ctx: agenttools.RunContext{RunID: "run-turn-2", Session: string(stand.sess.ID())}, grant: grant, dispatcher: stand.dispatcher},
 	})

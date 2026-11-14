@@ -357,3 +357,48 @@ func TestARecordForAnotherPaneIsABadRequestWhenItIsNotOnTheLane(t *testing.T) {
 		t.Fatalf("code = %d, want %d for bytes that are not a request", response.Error.Code, rpcParseError)
 	}
 }
+
+func TestLegacyRawPaneBearerIsAdmittedOnHelperLane(t *testing.T) {
+	auth := &testAuthorizer{}
+	dispatch := &testDispatcher{out: `{"held":[]}`}
+	ep := forwardedEndpoint(t, auth, dispatch)
+	conn := dialEndpoint(t, ep)
+	record, err := panebind.Encode(testPaneSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Literal old-build wire fixture, independent of this build's token encoder.
+	legacy := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"
+	if _, err = conn.Write(append(record, []byte(legacy+testPaneRequestA+"\n")...)); err != nil {
+		t.Fatal(err)
+	}
+	response := readResponse(t, conn)
+	if response.Error != nil {
+		t.Fatalf("legacy pane bridge refused: %+v", response.Error)
+	}
+	if auth.seenPeer(t).Token != testPaneToken || dispatch.callCount() != 1 {
+		t.Fatal("legacy token or request lost")
+	}
+	encoded, err := panebind.EncodeToken(testPaneToken)
+	if err != nil || string(encoded) != legacy {
+		t.Fatalf("pane encoding = %q, %v; want legacy frame", encoded, err)
+	}
+}
+
+func TestHelperLaneDoesNotAcceptTurnFrame(t *testing.T) {
+	auth := &testAuthorizer{}
+	dispatch := &testDispatcher{}
+	ep := forwardedEndpoint(t, auth, dispatch)
+	conn := dialEndpoint(t, ep)
+	record, err := panebind.Encode(testPaneSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Write(append(record, []byte("NXTB1:"+testPaneToken+"\n"+testPaneRequestA+"\n")...)); err != nil {
+		t.Fatal(err)
+	}
+	response := readResponse(t, conn)
+	if response.Error == nil || auth.callCount() != 0 || dispatch.callCount() != 0 {
+		t.Fatal("helper lane accepted a turn frame")
+	}
+}

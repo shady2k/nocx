@@ -35,7 +35,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/toolendpoint"
-	"github.com/shady2k/nocx/internal/toolendpoint/panebind"
+	"github.com/shady2k/nocx/internal/toolendpoint/turnbind"
 )
 
 // Authority binds a bearer to the assistant's already-built run, not a
@@ -136,7 +136,7 @@ func (m *Minter) Mint(authority Authority) (TurnBridge, func(), error) {
 
 	bridge := TurnBridge{
 		Command: []string{m.helper, "mcp", "--socket", m.endpoint.SocketPath()},
-		Env:     []string{panebind.TokenEnvVar + "=" + token},
+		Env:     []string{turnbind.TokenEnvVar + "=" + token},
 	}
 	var once sync.Once
 	retire := func() {

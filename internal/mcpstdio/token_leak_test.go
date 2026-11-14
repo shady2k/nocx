@@ -165,7 +165,7 @@ func TestTheBridgesLogsNeverCarryTheBearer(t *testing.T) {
 func TestTheBridgesLogsNeverCarryTheBearerWhenTheEndpointIsGone(t *testing.T) {
 	logs := &lockedLogs{}
 	link := newEndpointLink(
-		filepath.Join(storagetest.SocketDir(t), "no-endpoint-here.sock"), &net.Dialer{}, testBearer,
+		filepath.Join(storagetest.SocketDir(t), "no-endpoint-here.sock"), &net.Dialer{}, endpointBearer{kind: paneBearer, token: testBearer},
 		slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

@@ -143,8 +143,7 @@ const TokenEnvVar = "NOCX_AGENT_TOKEN"
 // what the mint produces; a value of any other length is not one of ours.
 const (
 	TokenHexLen = 64
-	TokenMagic  = "NXTB1:"
-	TokenLen    = len(TokenMagic) + TokenHexLen + 1
+	TokenLen    = TokenHexLen + 1
 )
 
 // ErrShortToken means the connection ended before a whole bearer arrived, and
@@ -157,11 +156,6 @@ var (
 	ErrNotAToken  = errors.New("toolendpoint: these bytes are not a tool token")
 )
 
-// StartsToken reports whether b is in the raw bearer hex alphabet.
-func StartsToken(b byte) bool {
-	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f')
-}
-
 // isTokenHex is the bearer's alphabet and length: lower-case hex, exactly
 // TokenHexLen of it. Deliberately not isSessionHex, which is the same shape today
 // and a different question.
@@ -169,8 +163,8 @@ func isTokenHex(s string) bool {
 	if len(s) != TokenHexLen {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
-		if !StartsToken(s[i]) {
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			return false
 		}
 	}
@@ -182,23 +176,17 @@ func EncodeToken(token string) ([]byte, error) {
 	if !isTokenHex(token) {
 		return nil, ErrNotAToken
 	}
-	return []byte(TokenMagic + token + "\n"), nil
+	return []byte(token + "\n"), nil
 }
 
 // ReadToken reads one bearer, never past it.
 func ReadToken(r io.Reader) (string, error) {
 	buf := make([]byte, TokenLen)
-	if _, err := io.ReadFull(r, buf[:1]); err != nil {
+	if _, err := io.ReadFull(r, buf); err != nil {
 		return "", fmt.Errorf("%w: %v", ErrShortToken, err)
 	}
-	if buf[0] != TokenMagic[0] {
+	if buf[TokenHexLen] != '\n' || !isTokenHex(string(buf[:TokenHexLen])) {
 		return "", ErrNotAToken
 	}
-	if _, err := io.ReadFull(r, buf[1:]); err != nil {
-		return "", fmt.Errorf("%w: %v", ErrShortToken, err)
-	}
-	if string(buf[:len(TokenMagic)]) != TokenMagic || buf[TokenLen-1] != '\n' || !isTokenHex(string(buf[len(TokenMagic):TokenLen-1])) {
-		return "", ErrNotAToken
-	}
-	return string(buf[len(TokenMagic) : TokenLen-1]), nil
+	return string(buf[:TokenHexLen]), nil
 }

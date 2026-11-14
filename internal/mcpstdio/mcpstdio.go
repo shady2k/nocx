@@ -20,6 +20,7 @@ import (
 
 	nocxlog "github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/toolendpoint/panebind"
+	"github.com/shady2k/nocx/internal/toolendpoint/turnbind"
 )
 
 const (
@@ -59,11 +60,12 @@ type Config struct {
 	// request (nocx-50w7p.16). It is a SECRET: this adapter writes it to its
 	// endpoint and nowhere else — never to a log, never to a child, never to
 	// its own output stream, which for a bridge is the agent's stdin/stdout.
-	// Empty for a caller that presents none, which is every local agent: the
-	// endpoint reads a preamble only on the helper's lane, and a bridge that
-	// wrote one anyway would put bytes the far side never asked for in front
-	// of a request.
-	Token         string
+	// Empty for a caller that presents no pane bearer. Local coordinator
+	// turns use TurnToken instead; a bridge with neither writes no preamble.
+	Token string
+	// TurnToken authenticates a coordinator turn using a distinct frame.
+	// Token and TurnToken are mutually exclusive.
+	TurnToken     string
 	ServerName    string
 	ServerVersion string
 	// Logger receives this bridge's LIFECYCLE diagnostics and never its
@@ -86,7 +88,7 @@ var discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 type Server struct {
 	socket        string
 	dialer        Dialer
-	token         string
+	bearer        endpointBearer
 	serverName    string
 	serverVersion string
 	logger        *slog.Logger
@@ -103,6 +105,13 @@ func New(cfg Config) (*Server, error) {
 	if strings.TrimSpace(cfg.Socket) == "" {
 		return nil, fmt.Errorf("%w: socket is empty", ErrInvalidConfig)
 	}
+	if cfg.Token != "" && cfg.TurnToken != "" {
+		return nil, fmt.Errorf("%w: pane and turn tokens are mutually exclusive", ErrInvalidConfig)
+	}
+	bearer := endpointBearer{kind: paneBearer, token: cfg.Token}
+	if cfg.TurnToken != "" {
+		bearer = endpointBearer{kind: turnBearer, token: cfg.TurnToken}
+	}
 	if cfg.Dialer == nil {
 		cfg.Dialer = &net.Dialer{}
 	}
@@ -118,7 +127,7 @@ func New(cfg Config) (*Server, error) {
 	return &Server{
 		socket:        cfg.Socket,
 		dialer:        cfg.Dialer,
-		token:         cfg.Token,
+		bearer:        bearer,
 		serverName:    cfg.ServerName,
 		serverVersion: cfg.ServerVersion,
 		logger:        cfg.Logger,
@@ -133,11 +142,11 @@ func New(cfg Config) (*Server, error) {
 // this process from outside travel by exactly one route each, and this is the
 // route for the diagnostics (nocx-50w7p.16).
 func Serve(ctx context.Context, input io.Reader, output io.WriteCloser, socket string, logger *slog.Logger) error {
-	// THE PANE'S BEARER, read from this process's own environment and from
-	// nowhere else (nocx-50w7p.16). The agent's MCP client passes it from the
+	// The pane or turn bearer is read from this process's own environment
+	// and nowhere else. The agent's MCP client passes it from the
 	// staged config, so it is this process alone that holds it — never a
 	// sibling, never a child, never a log line.
-	server, err := New(Config{Socket: socket, Token: os.Getenv(panebind.TokenEnvVar), Logger: logger})
+	server, err := New(Config{Socket: socket, Token: os.Getenv(panebind.TokenEnvVar), TurnToken: os.Getenv(turnbind.TokenEnvVar), Logger: logger})
 	if err != nil {
 		return err
 	}
@@ -166,7 +175,7 @@ func (s *Server) Serve(ctx context.Context, input io.Reader, output io.WriteClos
 	// and that it stopped — and the bearer itself is NOT among them: whether
 	// one was handed in is a boolean, the value is what admits into a pane, and
 	// this is the one process that holds it in the clear (nocx-50w7p.16).
-	s.logger.Info("mcp bridge serving", "socket", s.socket, "bearer_presented", s.token != "")
+	s.logger.Info("mcp bridge serving", "socket", s.socket, "bearer_presented", s.bearer.token != "")
 	defer s.logger.Info("mcp bridge stopped", "socket", s.socket)
 	// ONE ENDPOINT CONNECTION FOR THE LIFE OF THIS SESSION. A connection IS
 	// the endpoint's admission interval (ADR-0058): toolendpoint's serve calls
@@ -179,7 +188,7 @@ func (s *Server) Serve(ctx context.Context, input io.Reader, output io.WriteClos
 	// words as a problem with the caller, though the peer was never in
 	// question. One shared connection is that interval expressed literally,
 	// and the endpoint already serves concurrent requests on it.
-	link := newEndpointLink(s.socket, s.dialer, s.token, s.logger)
+	link := newEndpointLink(s.socket, s.dialer, s.bearer, s.logger)
 	var requests sync.WaitGroup
 	defer func() {
 		// Cancel first, then close, then wait. Cancelling is what every
@@ -848,14 +857,39 @@ func callFlightFrom(ctx context.Context) *callFlight {
 // so serialising the requests here would reproduce the defect one layer up:
 // the long-poll would hold the lock, and the call a coordinator needs to run
 // beside a wait would be exactly the call that waits.
+type bearerKind uint8
+
+const (
+	paneBearer bearerKind = iota
+	turnBearer
+)
+
+// endpointBearer keeps the wire format explicit. A rejected turn credential
+// must never be retried as a pane credential (or the reverse).
+type endpointBearer struct {
+	kind  bearerKind
+	token string
+}
+
+func (b endpointBearer) encode() ([]byte, error) {
+	switch b.kind {
+	case paneBearer:
+		return panebind.EncodeToken(b.token)
+	case turnBearer:
+		return turnbind.EncodeToken(b.token)
+	default:
+		return nil, errors.New("mcpstdio: invalid bearer kind")
+	}
+}
+
 type endpointLink struct {
 	socket string
 	dialer Dialer
-	// token is presented once, right after the dial and before any request:
+	// bearer is presented once, right after the dial and before any request:
 	// the endpoint reads its preamble before it decides anything, and a call
 	// that arrived first would be refused for a bearer that was about to be
 	// said.
-	token string
+	bearer endpointBearer
 	// logger receives this link's own diagnostics: a dial that failed and a
 	// connection that was made. Never the bearer, and never a request — the
 	// payloads this link carries are the agent's calls (nocx-50w7p.16).
@@ -867,11 +901,11 @@ type endpointLink struct {
 	stopped bool
 }
 
-func newEndpointLink(socket string, dialer Dialer, token string, logger *slog.Logger) *endpointLink {
+func newEndpointLink(socket string, dialer Dialer, bearer endpointBearer, logger *slog.Logger) *endpointLink {
 	if logger == nil {
 		logger = discardLogger
 	}
-	return &endpointLink{socket: socket, dialer: dialer, token: token, logger: logger}
+	return &endpointLink{socket: socket, dialer: dialer, bearer: bearer, logger: logger}
 }
 
 // close releases the shared connection when the stdio session ends. The
@@ -915,8 +949,8 @@ func (l *endpointLink) attach(ctx context.Context) (*endpointConn, int64, error)
 		// Only when there is one: a local agent's connection is not on the
 		// helper's lane and the endpoint reads no preamble on it, so writing
 		// bytes here would be bytes in front of a request.
-		if l.token != "" {
-			token, err := panebind.EncodeToken(l.token)
+		if l.bearer.token != "" {
+			token, err := l.bearer.encode()
 			if err != nil {
 				_ = raw.Close()
 				return nil, 0, err

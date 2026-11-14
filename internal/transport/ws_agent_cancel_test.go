@@ -4,17 +4,23 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // A real assistant run owns the renderer request until the renderer resolves
@@ -493,5 +499,354 @@ func cancelCallPreservingNotifications(t *testing.T, conn *websocket.Conn, runID
 			_ = conn.SetReadDeadline(time.Time{})
 			return raw, notifications
 		}
+	}
+}
+
+// ── a call blocked inside its executor (nocx-a62cl.4.1) ───────────────────
+
+// blockedFetchFetcher is fetch.url's dependency, and it never answers on its
+// own: the tool's executor is blocked inside it until the call's context ends.
+// It is the seam a REAL executor holds — the pipeline, the narrowed capability
+// and executeFetchURL all run — so what the test watches is the call's own
+// context and not a fake standing in for the tool.
+type blockedFetchFetcher struct {
+	started chan struct{}
+	stopped chan time.Time
+	release chan struct{}
+	calls   atomic.Int64
+	once    sync.Once
+}
+
+// blockedFetchText is what the released fetcher returns, so the paired
+// no-cancel journey can prove the same call completes once.
+const blockedFetchText = "the page said hello"
+
+func (f *blockedFetchFetcher) FetchText(ctx context.Context, req apifetch.TextRequest) (apifetch.TextDocument, error) {
+	f.calls.Add(1)
+	f.once.Do(func() { close(f.started) })
+	select {
+	case <-ctx.Done():
+		f.stopped <- time.Now()
+		return apifetch.TextDocument{}, ctx.Err()
+	case <-f.release:
+		return apifetch.TextDocument{URL: req.URL, ContentType: "text/plain", Text: blockedFetchText}, nil
+	}
+}
+
+// fetchCallingProvider is the model fake: the first request proposes
+// fetch.url, every later one answers. It keeps every request body, because
+// "no tool result reached the model" is a fact about the bytes it was sent.
+type fetchCallingProvider struct {
+	mu     sync.Mutex
+	bodies []string
+}
+
+func (p *fetchCallingProvider) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	p.mu.Lock()
+	p.bodies = append(p.bodies, string(body))
+	n := len(p.bodies)
+	p.mu.Unlock()
+	if n == 1 {
+		streamToolCallChunk(w, "fetch.url", `{"url":"https://example.test/page"}`)
+		return
+	}
+	streamAnswerChunk(w, "The page answered.")
+}
+
+func (p *fetchCallingProvider) toolResultBodies() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []string
+	for _, body := range p.bodies {
+		if strings.Contains(body, `"role":"tool"`) {
+			out = append(out, body)
+		}
+	}
+	return out
+}
+
+// wireFrame is one frame the tap read: a response (id) or a notification
+// (method). Notifications are kept in arrival order, which is the order the
+// socket delivered them in.
+type wireFrame struct {
+	id     string
+	method string
+	params json.RawMessage
+	result json.RawMessage
+}
+
+// readFrames reads the tap until done says the window is over.
+func readFrames(t *testing.T, tap *socketTap, what string, done func([]wireFrame) bool) []wireFrame {
+	t.Helper()
+	var frames []wireFrame
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case raw, ok := <-tap.msgs:
+			if !ok {
+				t.Fatalf("socket closed before %s", what)
+			}
+			var envelope struct {
+				ID     *json.RawMessage `json:"id"`
+				Method string           `json:"method"`
+				Params json.RawMessage  `json:"params"`
+				Result json.RawMessage  `json:"result"`
+			}
+			if json.Unmarshal(raw, &envelope) != nil {
+				continue
+			}
+			frame := wireFrame{method: envelope.Method, params: envelope.Params, result: envelope.Result}
+			if envelope.ID != nil {
+				frame.id = string(*envelope.ID)
+			}
+			frames = append(frames, frame)
+			if done(frames) {
+				return frames
+			}
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	t.Fatalf("%s never arrived; frames so far: %+v", what, frames)
+	return nil
+}
+
+func runStateIn(frames []wireFrame, runID int64) (state string, at int) {
+	for i, frame := range frames {
+		if frame.method != "agent.runState" {
+			continue
+		}
+		var st struct {
+			RunID int64  `json:"runId"`
+			State string `json:"state"`
+		}
+		if json.Unmarshal(frame.params, &st) == nil && st.RunID == runID {
+			state, at = st.State, i
+		}
+	}
+	return state, at
+}
+
+// askRunIDIn is the run id the ask's own response minted.
+func askRunIDIn(frames []wireFrame, id string) (int64, bool) {
+	for _, frame := range frames {
+		if frame.id != id {
+			continue
+		}
+		var res struct {
+			RunID int64 `json:"runId"`
+		}
+		if json.Unmarshal(frame.result, &res) == nil && res.RunID != 0 {
+			return res.RunID, true
+		}
+	}
+	return 0, false
+}
+
+func answered(frames []wireFrame, id string) bool {
+	for _, frame := range frames {
+		if frame.id == id {
+			return true
+		}
+	}
+	return false
+}
+
+// fetchActionAttempt reads fetch.url's action entry back from the ledger.
+func fetchActionAttempt(t *testing.T, led content.LedgerRepository) *content.LedgerEntry {
+	t.Helper()
+	summaries, err := led.ListEntries(context.Background(), 100)
+	if err != nil {
+		t.Fatalf("ListEntries: %v", err)
+	}
+	for _, s := range summaries {
+		if s.Kind != content.EntryAction || s.Intent != "fetch.url" {
+			continue
+		}
+		entry, entryErr := led.Entry(context.Background(), s.ID)
+		if entryErr != nil {
+			t.Fatalf("Entry(%s): %v", s.ID, entryErr)
+		}
+		return entry
+	}
+	return nil
+}
+
+// TestAgentCancel_StopsACallBlockedInItsExecutor is the stage's Go assertion
+// (nocx-a62cl.4.1): the person stops the turn while a tool call is running
+// inside its executor. The call's context ends within a second, the attempt
+// records the person's stop rather than a tool failure, nothing about the
+// call reaches the model afterwards, no agent.run* event follows the cancelled
+// state, and the next question in the same block works.
+func TestAgentCancel_StopsACallBlockedInItsExecutor(t *testing.T) {
+	provider := &fetchCallingProvider{}
+	model := httptest.NewServer(provider)
+	defer model.Close()
+	fetcher := &blockedFetchFetcher{
+		started: make(chan struct{}),
+		stopped: make(chan time.Time, 1),
+		release: make(chan struct{}),
+	}
+	h := newAskHarnessWithOpts(t, mustClient(t),
+		WithAgentPolicy(autonomousPolicyStore(t)), WithAgentFetcher(fetcher))
+	h.createEndpointAt(model.URL)
+	sid := openLocalSession(t, h.conn)
+	res, errObj := askOverWire(t, h.conn, map[string]any{
+		"askId": "cancel-in-executor", "sessionId": sid, "question": "fetch that page", "cwd": "/repo",
+	}, 21)
+	if errObj != nil {
+		t.Fatalf("agent.ask: %+v", errObj)
+	}
+	select {
+	case <-fetcher.started:
+	case <-time.After(30 * time.Second):
+		t.Fatal("fetch.url's executor never started")
+	}
+
+	tap := newSocketTap(h.conn)
+	stoppedAt := time.Now()
+	cancelReq, marshalErr := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 22, "method": "agent.cancel", "params": map[string]any{"runId": res.RunID},
+	})
+	if marshalErr != nil {
+		t.Fatalf("marshal agent.cancel: %v", marshalErr)
+	}
+	if writeErr := h.conn.WriteMessage(websocket.TextMessage, cancelReq); writeErr != nil {
+		t.Fatalf("write agent.cancel: %v", writeErr)
+	}
+
+	// THE CALL'S OWN CONTEXT, not the run's state: the executor is blocked in
+	// its dependency and only its context can free it.
+	select {
+	case at := <-fetcher.stopped:
+		if elapsed := at.Sub(stoppedAt); elapsed > time.Second {
+			t.Fatalf("the call's context ended %s after agent.cancel, want within a second", elapsed)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the call's context was never cancelled")
+	}
+
+	first := readFrames(t, tap, "the cancelled run state", func(frames []wireFrame) bool {
+		state, _ := runStateIn(frames, res.RunID)
+		return answered(frames, "22") && state == string(content.RunCancelled)
+	})
+	if _, at := runStateIn(first, res.RunID); at == 0 && first[0].method != "agent.runState" {
+		t.Fatalf("no cancelled agent.runState for run %d in %+v", res.RunID, first)
+	}
+
+	// THE ATTEMPT RECORDS THE PERSON'S STOP, not a failure of the tool: the
+	// call did not fail, it was stopped, and the ledger is the record.
+	entry := fetchActionAttempt(t, h.db.Ledger())
+	if entry == nil {
+		t.Fatal("fetch.url left no action entry")
+	}
+	waittest.WaitForTimeout(t, "the attempt to close", 10*time.Second, func() bool {
+		entry = fetchActionAttempt(t, h.db.Ledger())
+		return entry != nil && len(entry.Executions) == 1 && entry.Executions[0].TerminationReason != nil
+	})
+	if reason := *entry.Executions[0].TerminationReason; reason != content.TermUserKilled {
+		t.Fatalf("the attempt recorded %q, want the person's stop %q", reason, content.TermUserKilled)
+	}
+	if entry.Status != content.EntryInterrupted {
+		t.Fatalf("the attempt's entry is %q, want %q — the call was stopped, not failed", entry.Status, content.EntryInterrupted)
+	}
+
+	// THE NEXT QUESTION IN THE SAME BLOCK WORKS, and it is the end of the
+	// observation window: every frame between the cancelled state and this
+	// turn's completion has been read, so "nothing followed" is a statement
+	// about a closed interval rather than about a moment.
+	askReq, askErr := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 23, "method": "agent.ask", "params": map[string]any{
+			"askId": "after-cancel", "sessionId": sid, "question": "now answer me plainly",
+			"cwd": "/repo", "attachedContent": []any{},
+		},
+	})
+	if askErr != nil {
+		t.Fatalf("marshal the next agent.ask: %v", askErr)
+	}
+	if writeErr := h.conn.WriteMessage(websocket.TextMessage, askReq); writeErr != nil {
+		t.Fatalf("write the next agent.ask: %v", writeErr)
+	}
+	second := readFrames(t, tap, "the next turn's completion", func(frames []wireFrame) bool {
+		nextRun, ok := askRunIDIn(frames, "23")
+		if !ok {
+			return false
+		}
+		state, _ := runStateIn(frames, nextRun)
+		return state == string(content.RunCompleted)
+	})
+	after := append(first, second...)
+	_, cancelledAt := runStateIn(after, res.RunID)
+	for i := cancelledAt + 1; i < len(after); i++ {
+		frame := after[i]
+		if frame.method == "" {
+			continue
+		}
+		if !strings.HasPrefix(frame.method, "agent.run") {
+			continue
+		}
+		var envelope struct {
+			RunID int64 `json:"runId"`
+		}
+		if json.Unmarshal(frame.params, &envelope) == nil && envelope.RunID == res.RunID {
+			t.Fatalf("%s for the cancelled run %d arrived after its cancelled state", frame.method, res.RunID)
+		}
+	}
+
+	// NOTHING OF THE CALL REACHED THE MODEL: the stopped call's result would be
+	// the only thing that could put a tool message in a request.
+	if bodies := provider.toolResultBodies(); len(bodies) != 0 {
+		t.Fatalf("the model was sent %d tool result(s) after the stop: %s", len(bodies), bodies[0])
+	}
+}
+
+// TestAgentCancel_TheSameCallWithoutAStopCompletesOnce is the paired half: the
+// identical call, released instead of stopped, runs its tool once and its
+// result reaches the model. Without it, "the result was withheld" would also
+// be true of a call that never produced one.
+func TestAgentCancel_TheSameCallWithoutAStopCompletesOnce(t *testing.T) {
+	provider := &fetchCallingProvider{}
+	model := httptest.NewServer(provider)
+	defer model.Close()
+	fetcher := &blockedFetchFetcher{
+		started: make(chan struct{}),
+		stopped: make(chan time.Time, 1),
+		release: make(chan struct{}),
+	}
+	h := newAskHarnessWithOpts(t, mustClient(t),
+		WithAgentPolicy(autonomousPolicyStore(t)), WithAgentFetcher(fetcher))
+	h.createEndpointAt(model.URL)
+	sid := openLocalSession(t, h.conn)
+	res, errObj := askOverWire(t, h.conn, map[string]any{
+		"askId": "complete-in-executor", "sessionId": sid, "question": "fetch that page", "cwd": "/repo",
+	}, 24)
+	if errObj != nil {
+		t.Fatalf("agent.ask: %+v", errObj)
+	}
+	select {
+	case <-fetcher.started:
+	case <-time.After(30 * time.Second):
+		t.Fatal("fetch.url's executor never started")
+	}
+	close(fetcher.release)
+
+	tap := newSocketTap(h.conn)
+	readFrames(t, tap, "the run's completion", func(frames []wireFrame) bool {
+		state, _ := runStateIn(frames, res.RunID)
+		return state == string(content.RunCompleted)
+	})
+	if calls := fetcher.calls.Load(); calls != 1 {
+		t.Fatalf("the tool ran %d times, want exactly 1", calls)
+	}
+	select {
+	case at := <-fetcher.stopped:
+		t.Fatalf("the call's context ended at %s with nobody stopping it", at)
+	default:
+	}
+	waittest.WaitForTimeout(t, "the result to reach the model", 10*time.Second, func() bool {
+		return len(provider.toolResultBodies()) == 1
+	})
+	if !strings.Contains(provider.toolResultBodies()[0], blockedFetchText) {
+		t.Fatalf("the model's tool result does not carry what the page said")
 	}
 }

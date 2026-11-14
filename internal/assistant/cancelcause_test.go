@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/shady2k/nocx/internal/content"
 )
 
 func TestProgramEndedSentence_ReturnsNamedProcessCancellation(t *testing.T) {
@@ -26,5 +28,26 @@ func TestProgramEndedSentence_SaysNothingAboutAnOrdinaryCancellation(t *testing.
 	}
 	if _, ok := ProgramEndedSentence(errors.New("something else")); ok {
 		t.Fatal("an unrelated error was reported as a process-ended run")
+	}
+}
+
+func TestTurnEndedReason_NamesTheEndingSomebodyChose(t *testing.T) {
+	for _, reason := range []content.TerminationReason{content.TermUserKilled, content.TermAnswerRevoked} {
+		cause := TurnEndedCause(reason)
+		if !errors.Is(cause, context.Canceled) {
+			t.Fatalf("cause %v must remain a cancellation", cause)
+		}
+		got, ok := TurnEndedReason(cause)
+		if !ok || got != reason {
+			t.Fatalf("TurnEndedReason(%v) = %q, %v; want %q, true", cause, got, ok, reason)
+		}
+	}
+}
+
+func TestTurnEndedReason_SaysNothingAboutAnEndingNobodyChose(t *testing.T) {
+	for _, err := range []error{context.Canceled, context.DeadlineExceeded, errors.New("something else"), nil} {
+		if got, ok := TurnEndedReason(err); ok {
+			t.Fatalf("TurnEndedReason(%v) = %q, true; want no reason", err, got)
+		}
 	}
 }

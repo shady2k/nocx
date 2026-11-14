@@ -142,24 +142,29 @@ type agentRunControl struct {
 }
 
 type agentRunDrive struct {
-	cancel context.CancelFunc
+	// cancel ends the drive WITH ITS CAUSE: the reason the run is ending
+	// travels with the cancellation, so a tool call the end caught closes its
+	// attempt with the same word the run closes with — the person's stop, an
+	// answer taken back — rather than as a tool failure or a lost connection
+	// (nocx-a62cl.4.1).
+	cancel context.CancelCauseFunc
 }
 
 type agentRunControlContextKey struct{}
 
 func (c *agentRunControl) beginDrive(parent context.Context) (context.Context, func()) {
-	ctx, cancel := context.WithCancel(parent)
+	ctx, cancel := context.WithCancelCause(parent)
 	drive := &agentRunDrive{cancel: cancel}
 	c.mu.Lock()
 	if c.cancelled || c.terminalized {
-		cancel()
+		cancel(context.Canceled)
 	} else {
 		c.drive = drive
 	}
 	c.mu.Unlock()
 	ctx = context.WithValue(ctx, agentRunControlContextKey{}, c)
 	return ctx, func() {
-		cancel()
+		cancel(context.Canceled)
 		c.mu.Lock()
 		if c.drive == drive {
 			c.drive = nil
@@ -230,12 +235,17 @@ func (c *agentRunControl) beginCancel() bool {
 	return true
 }
 
-func (c *agentRunControl) cancelContext() {
+// cancelContext ends the drive for ONE stated reason: the person's Stop or an
+// answer taken back. A run ended for any other reason — a closed window, a
+// cancelled request — reaches the drive through its own parent and carries no
+// reason of its own, so what a call records is "interrupted" rather than a
+// decision nobody took.
+func (c *agentRunControl) cancelContext(reason content.TerminationReason) {
 	c.mu.Lock()
 	drive := c.drive
 	c.mu.Unlock()
 	if drive != nil {
-		drive.cancel()
+		drive.cancel(assistant.TurnEndedCause(reason))
 	}
 }
 
@@ -1631,7 +1641,7 @@ func (h agentHandlers) handleCancel(ctx context.Context, req jsonrpcRequest) {
 		sentence = "no local process group to signal — the execution keeps running"
 		hasDetails = true
 	}
-	rc.control.cancelContext()
+	rc.control.cancelContext(reason)
 	rc.control.finishCancel(state, reason, sentence, hasDetails)
 	h.terminalize(ctx, rc, state, reason, sentence, h.r)
 	result := agentCancelResponse{
@@ -2823,7 +2833,7 @@ func (s *WSServer) StopRunsForRevokedAnswer(
 		}
 		runCtx, _ := log.StartTrace(ctx, runTrace(id))
 		rc.control.cancelRunLeases()
-		rc.control.cancelContext()
+		rc.control.cancelContext(content.TermAnswerRevoked)
 		rc.control.finishCancel(content.RunCancelled, content.TermAnswerRevoked, sentence, true)
 		h.terminalize(runCtx, rc, content.RunCancelled, content.TermAnswerRevoked, sentence, r)
 		stopped = append(stopped, id)

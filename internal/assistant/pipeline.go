@@ -502,6 +502,16 @@ func (p *Pipeline) runOrdered(invocation ToolInvocation, attempt int, callID str
 	if err != nil {
 		return outcome, err
 	}
+	// The turn can end WHILE the tool runs, which is the one interval no point
+	// covers: beforeExecute closes just before the body and the screens open
+	// just after it. What the body produced is still the call's result, so a
+	// turn that ended in between leaves nothing to hand back — the person
+	// stopped the answer, and a result delivered now would reach a model whose
+	// run is over. The refusal carries the context's own error, so a caller
+	// records it as the cancellation it is rather than as a tool failure.
+	if refusal := cancelled(ctx, call, enteredCancelled, "while the tool was running"); refusal != nil {
+		return dispatchOutcome{}, refusal
+	}
 	outbound := Outbound{Text: outcome.output, WasError: outcome.runErr != nil}
 	if outcome.runErr != nil {
 		outbound.Text = outcome.runErr.Error()

@@ -553,3 +553,58 @@ func TestPipeline_EveryPointSeesTheSameImmutableCall(t *testing.T) {
 		t.Fatal("the call carries no argument hash, so an approval could not be bound to it")
 	}
 }
+
+// TestPipeline_ACallTheTurnEndCaughtHandsNothingBack is stage 4's assertion
+// (nocx-a62cl.4.1): the person's Stop lands while the tool is running, and the
+// call's result does not leave afterwards. Nothing was refused before the
+// tool — the policy permitted it, the capability was built and the body ran
+// exactly once — so the only thing that can stop the result is the pipeline's
+// own observation of the context after the execution.
+//
+// The paired half is the same call with a live turn: it returns its result,
+// once. Without it, "the result was withheld" would also be true of a pipeline
+// that never returns anything.
+func TestPipeline_ACallTheTurnEndCaughtHandsNothingBack(t *testing.T) {
+	t.Run("the turn ends while the tool runs", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		pipeline, planted := pipelineForTest(t, AuthorityChain{})
+		planted.onRun = cancel
+
+		invocation := pipelineInvocationForTest()
+		invocation.Context = ctx
+
+		out, err := pipeline.Dispatch(invocation, 1, "call-stopped")
+
+		if planted.runs != 1 {
+			t.Fatalf("the tool's body ran %d times, want exactly 1", planted.runs)
+		}
+		if out != "" {
+			t.Fatalf("the call's result left after the turn ended: %q", out)
+		}
+		var refusal *PipelineRefusal
+		if !errors.As(err, &refusal) {
+			t.Fatalf("dispatch error = %v, want a refusal naming the ended turn", err)
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("refusal cause = %v, want the context's own cancellation", refusal.Cause)
+		}
+		if !strings.Contains(refusal.Reason, "while the tool was running") {
+			t.Fatalf("refusal = %q, want it to say the turn ended while the tool ran", refusal.Reason)
+		}
+	})
+
+	t.Run("the same call with a live turn returns once", func(t *testing.T) {
+		pipeline, planted := pipelineForTest(t, AuthorityChain{})
+		out, err := pipeline.Dispatch(pipelineInvocationForTest(), 1, "call-live")
+		if err != nil {
+			t.Fatalf("dispatch: %v", err)
+		}
+		if planted.runs != 1 {
+			t.Fatalf("the tool's body ran %d times, want exactly 1", planted.runs)
+		}
+		if out != pipelineTestResult {
+			t.Fatalf("result = %q, want the tool's own answer %q", out, pipelineTestResult)
+		}
+	})
+}

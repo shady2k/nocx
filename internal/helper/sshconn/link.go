@@ -189,10 +189,14 @@ func lookThrough(ctx context.Context, hop *gossh.Client, dest string) error {
 		return fmt.Errorf("look %s through the first hop: %w", dest, err)
 	}
 	defer func() { _ = conn.Close() }()
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(deadline)
-	}
-	line, err := readVersionLine(conn)
+	// A CHANNEL IS NOT A SOCKET (nocx-oalo1.4.3): x/crypto's channel conn answers
+	// SetDeadline without honouring it, so a context deadline cannot free the
+	// version read below. A destination that accepts the channel and never speaks
+	// would park this look until the hop's connection ended — and the guard has
+	// ONE look slot, so no later look would ever run and the connection would
+	// stop collecting the evidence the person is shown. Cancellation closes the
+	// channel, which is the only thing that frees its read.
+	line, err := readVersionLineWithin(ctx, conn)
 	if err != nil {
 		return fmt.Errorf("look %s through the first hop: %w", dest, err)
 	}
@@ -211,10 +215,7 @@ func lookDirect(ctx context.Context, addr string) error {
 		return fmt.Errorf("look %s: %w", addr, err)
 	}
 	defer func() { _ = conn.Close() }()
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(deadline)
-	}
-	line, err := readVersionLine(conn)
+	line, err := readVersionLineWithin(ctx, conn)
 	if err != nil {
 		return fmt.Errorf("look %s: %w", addr, err)
 	}
@@ -222,6 +223,27 @@ func lookDirect(ctx context.Context, addr string) error {
 		return fmt.Errorf("look %s: the peer sent %q, which is not an SSH version line", addr, line)
 	}
 	return nil
+}
+
+// readVersionLineWithin reads one version line on a connection the context may
+// not be able to interrupt with a deadline, and frees the read when the context
+// ends by closing the connection.
+//
+// It is the ONE way a look reads its answer, both direct and routed, so there is
+// one answer to "what stops a silent peer". A deadline is the cheaper mechanism
+// where it exists and is still used for the DIAL (lookDirect's net.Dialer); the
+// read is guarded by the close, which works on a socket and on a channel alike.
+func readVersionLineWithin(ctx context.Context, conn io.ReadWriteCloser) ([]byte, error) {
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
+	return readVersionLine(conn)
 }
 
 // readVersionLine reads one CRLF-terminated version line, bounded the way the
@@ -232,7 +254,7 @@ func lookDirect(ctx context.Context, addr string) error {
 // that sends "SSH-" and then hangs or errors has said nothing, and counting its
 // partial bytes as an answered version exchange would make a look evidence of a
 // host that is not there.
-func readVersionLine(conn net.Conn) ([]byte, error) {
+func readVersionLine(conn io.Reader) ([]byte, error) {
 	r := bufio.NewReader(io.LimitReader(conn, 512))
 	line, err := r.ReadBytes('\n')
 	if err != nil {

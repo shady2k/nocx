@@ -1557,6 +1557,8 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'agents.installed.failedHead': 'Could not look for the agents:',
   'agents.installed.notInstalled': 'Not installed',
   'agents.installed.installed': 'Installed',
+  'agents.installed.notConfigured': 'Not configured',
+  'agents.installed.models': 'Models available to this agent:',
   'agents.installed.ready': 'Ready',
   'agents.installed.notReady': 'Not ready',
   'agents.installed.invalid': 'Not usable',

@@ -4,6 +4,7 @@ import type {
   AgentRecordsListResult,
   Resume as ListedResume,
 } from './generated/agentRecords.list'
+import type { AgentRecordsCatalogueResult } from './generated/agentRecords.catalogue'
 import type { AgentRecordsDetectResult } from './generated/agentRecords.detect'
 import type { AgentRecordsRemoveResult } from './generated/agentRecords.remove'
 import type {
@@ -42,6 +43,14 @@ export class AgentRecordsClient {
 
   remove(id: string): Promise<AgentRecordsRemoveResult> {
     return this.dispatcher.call<AgentRecordsRemoveResult>('agentRecords.remove', { id })
+  }
+
+  /** Connector readiness and the models it can run; Refresh bypasses the cached pass. */
+  catalogue(refresh = false): Promise<AgentRecordsCatalogueResult> {
+    return this.dispatcher.call<AgentRecordsCatalogueResult>(
+      'agentRecords.catalogue',
+      refresh ? { refresh: true } : {},
+    )
   }
 
   /**

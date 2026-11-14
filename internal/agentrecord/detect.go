@@ -37,7 +37,7 @@ const (
 	// ReadinessReady means the agent's own probe said it can answer.
 	ReadinessReady Readiness = "ready"
 	// ReadinessNotReady means the agent is installed and its own probe said
-	// it cannot answer yet — pi with no provider configured is the case.
+	// it cannot answer yet.
 	ReadinessNotReady Readiness = "not_ready"
 	// ReadinessInvalid means the agent's own probe reported that what it is
 	// configured with is not usable.
@@ -103,18 +103,6 @@ var supportedAgents = []SupportedAgent{
 		DisplayName: "pi",
 		Command:     "pi",
 		VersionArgs: []string{"--version"},
-		// pi is the one agent here that states whether it can answer:
-		// `pi auth check` exits 0 when it is ready, 1 when it is not, and 2
-		// when what it is configured with is not usable (measured on 1.5.2,
-		// ADR-anntnxdj decision 6).
-		Readiness: &ReadinessProbe{
-			Args: []string{"auth", "check"},
-			Answers: []ProbeAnswer{
-				{Exit: 0, Readiness: ReadinessReady},
-				{Exit: 1, Readiness: ReadinessNotReady},
-				{Exit: 2, Readiness: ReadinessInvalid},
-			},
-		},
 	},
 	{
 		ID:          "omp",

@@ -1,0 +1,82 @@
+//go:build darwin
+
+package harness
+
+import (
+	"errors"
+	"fmt"
+
+	"golang.org/x/sys/unix"
+)
+
+// observeExit reports that the agent's leader exited without reaping it, so
+// the session keeps the process identity until its group signals finish
+// (ADR-sr71cdyt).
+func observeExit(pid int) error {
+	fd, err := unix.Kqueue()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = unix.Close(fd) }()
+	change := unix.Kevent_t{Ident: pidIdent(pid), Filter: unix.EVFILT_PROC, Flags: unix.EV_ADD | unix.EV_ONESHOT, Fflags: unix.NOTE_EXIT}
+	events := make([]unix.Kevent_t, 1)
+	for {
+		n, err := unix.Kevent(fd, []unix.Kevent_t{change}, events, nil)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		// A process already exited before registration remains ours until Wait.
+		if errors.Is(err, unix.ESRCH) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			continue
+		}
+		return validateExitEvent(pid, events[0])
+	}
+}
+
+func validateExitEvent(pid int, event unix.Kevent_t) error {
+	if event.Ident != pidIdent(pid) || event.Filter != unix.EVFILT_PROC {
+		return fmt.Errorf("unexpected exit observation: %+v", event)
+	}
+	if event.Flags&unix.EV_ERROR != 0 {
+		if event.Data == int64(unix.ESRCH) {
+			// It exited before registration; Wait still owns the child identity.
+			return nil
+		}
+		if event.Data == 0 {
+			return errors.New("exit observation returned a receipt without exit")
+		}
+		return fmt.Errorf("exit observation registration: %w", unix.Errno(event.Data))
+	}
+	if event.Fflags&unix.NOTE_EXIT == 0 {
+		return fmt.Errorf("unexpected exit observation: %+v", event)
+	}
+	return nil
+}
+
+func groupRunning(pgid int) (bool, error) {
+	entries, err := unix.SysctlKinfoProcSlice("kern.proc.all")
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range entries {
+		if int(entry.Eproc.Pgid) == pgid && entry.Proc.P_stat != 5 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// pidIdent is a kqueue identifier for a process id. A pid the kernel gave us
+// is positive; a non-positive one maps to an identifier no process has.
+func pidIdent(pid int) uint64 {
+	if pid <= 0 {
+		return 0
+	}
+	return uint64(pid) // #nosec G115 -- pid is positive, checked above
+}

@@ -1332,6 +1332,8 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'agents.installed.failedHead': 'Не удалось найти агентов:',
   'agents.installed.notInstalled': 'Не установлен',
   'agents.installed.installed': 'Установлен',
+  'agents.installed.notConfigured': 'Не настроен',
+  'agents.installed.models': 'Модели, доступные этому агенту:',
   'agents.installed.ready': 'Готов',
   'agents.installed.notReady': 'Не готов',
   'agents.installed.invalid': 'Непригоден',

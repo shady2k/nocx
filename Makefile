@@ -579,6 +579,10 @@ ci-full: ci-os-split ci-local-ssh-split ci ci-mac ci-backend ci-linux ci-fronten
 # table which device a path belongs to, and that question has one answer per
 # platform (mounts_darwin.go / mounts_linux.go). A provider that can say
 # neither still gets a domain of its own, but the reading is the OS's.
+# internal/harness and its harnesstest joined with the agent harness
+# (nocx-a62cl.14): a session watches its agent's exit and process group
+# through the kernel (lifecycle_linux.go waitid, lifecycle_darwin.go kqueue),
+# and the conformance suite reads process state the same per-platform way.
 OS_PKG_DIRS := cmd/e2e-sshd cmd/nocx-helper internal/apicoll internal/app internal/contentkey \
                internal/coordinator internal/desktopidentity \
                internal/filesystem/local internal/git \
@@ -587,7 +591,8 @@ OS_PKG_DIRS := cmd/e2e-sshd cmd/nocx-helper internal/apicoll internal/app intern
                internal/loginshell internal/nativeports internal/procwatch \
                internal/pty internal/reveal internal/ssh/mux \
                internal/storage internal/update internal/vault/system \
-               internal/peerpin internal/monoclock internal/emulator/ghostty/ghosttytest
+               internal/peerpin internal/monoclock internal/emulator/ghostty/ghosttytest \
+               internal/harness internal/harness/harnesstest
 # One list owns both partitions; a second hand-kept regex can silently leave a
 # new OS package in the portable set even after OS_PKG_DIRS is corrected.
 os_pkg_empty :=

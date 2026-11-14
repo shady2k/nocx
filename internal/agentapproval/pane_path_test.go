@@ -31,6 +31,10 @@ func TestIdentityForExecutableInPanePath(t *testing.T) {
 		{"absolute command", command, "/nonexistent", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			resolved, err := LookupExecutableInPath(tc.command, tc.path, tc.cwd)
+			if err != nil || resolved != want.Path {
+				t.Fatalf("lookup=%q, %v, want %q", resolved, err, want.Path)
+			}
 			got, err := IdentityForExecutableInPath(tc.command, tc.path, tc.cwd)
 			if err != nil || got != want {
 				t.Fatalf("identity=%+v, %v, want %+v", got, err, want)
@@ -101,5 +105,28 @@ func TestPanePathFollowsSymlinksBeforeParentComponents(t *testing.T) {
 		if err != nil || got != want {
 			t.Fatalf("command=%q PATH=%q: %+v, %v, want %+v", tc.command, tc.path, got, err, want)
 		}
+	}
+}
+
+func TestPanePathIdentityDoesNotSkipUnreadableExecutable(t *testing.T) {
+	first, second := t.TempDir(), t.TempDir()
+	program := filepath.Join(first, "agent")
+	if err := os.WriteFile(program, []byte("#!/bin/sh\nexit 0\n"), 0o111); err != nil { //nolint:gosec // execute-only fixture
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(second, "agent"), []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil { //nolint:gosec // executable fixture
+		t.Fatal(err)
+	}
+	if _, err := os.ReadFile(program); err == nil { //nolint:gosec // test TempDir executable fixture
+		t.Skip("requires a user without read access to execute-only files")
+	}
+	path := first + string(os.PathListSeparator) + second
+	resolved, err := LookupExecutableInPath("agent", path, first)
+	if err != nil || resolved != program {
+		t.Fatalf("lookup=%q, %v, want %q", resolved, err, program)
+	}
+	got, err := IdentityForExecutableInPath("agent", path, first)
+	if err == nil || !strings.Contains(err.Error(), "read executable") || got != (Executable{}) {
+		t.Fatalf("identity=%+v, %v; want unreadable first executable refusal", got, err)
 	}
 }

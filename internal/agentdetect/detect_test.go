@@ -77,11 +77,10 @@ func detectionByID(t *testing.T, rows []agentrecord.Detection, id string) agentr
 	return agentrecord.Detection{}
 }
 
-// A login-shell PATH holding a pi that prints its version and answers
-// `auth check` ready, a codex that prints only a version, and no claude at
-// all. pi is found with the version it printed and the readiness its own
-// probe reported; codex is found and installed, which is all it states;
-// claude is not installed; and every agent of the record appears exactly once.
+// A login-shell PATH holding pi and codex that print their versions, and no
+// claude at all. Detection reports installation only: pi readiness depends on
+// the selected model and provider, not an argumentless auth check.
+// Every agent of the record appears exactly once.
 func TestDetectFindsPiOnTheLoginShellPathAndClaudeNowhere(t *testing.T) {
 	dir := t.TempDir()
 	writeExecutable(t, filepath.Join(dir, "pi"), `#!/bin/sh
@@ -118,8 +117,8 @@ printf 'codex-cli 0.167.1\n'
 	}
 
 	pi := detectionByID(t, rows, "pi")
-	if !pi.Found || pi.Version != "pi 1.5.2" || pi.Readiness != agentrecord.ReadinessReady {
-		t.Fatalf("pi = %+v, want found with its version and ready", pi)
+	if !pi.Found || pi.Version != "pi 1.5.2" || pi.Readiness != agentrecord.ReadinessInstalled {
+		t.Fatalf("pi = %+v, want found with its version and installed only", pi)
 	}
 	codex := detectionByID(t, rows, "codex")
 	if !codex.Found || codex.Version != "codex-cli 0.167.1" || codex.Readiness != agentrecord.ReadinessInstalled {
@@ -131,29 +130,50 @@ printf 'codex-cli 0.167.1\n'
 	}
 }
 
+// Readiness interprets only the exit statuses supplied by a probe record.
+func TestReadinessUsesTheProbesAnswers(t *testing.T) {
+	probe := agentrecord.ReadinessProbe{
+		Args: []string{"check"},
+		Answers: []agentrecord.ProbeAnswer{
+			{Exit: 0, Readiness: agentrecord.ReadinessReady},
+			{Exit: 1, Readiness: agentrecord.ReadinessNotReady},
+			{Exit: 2, Readiness: agentrecord.ReadinessInvalid},
+		},
+	}
+	for _, test := range []struct {
+		exit int
+		want agentrecord.Readiness
+	}{
+		{0, agentrecord.ReadinessReady},
+		{1, agentrecord.ReadinessNotReady},
+		{2, agentrecord.ReadinessInvalid},
+		{3, agentrecord.ReadinessUnknown},
+	} {
+		t.Run(strconv.Itoa(test.exit), func(t *testing.T) {
+			dir := t.TempDir()
+			command := filepath.Join(dir, "probe")
+			writeExecutable(t, command, fmt.Sprintf("#!/bin/sh\n[ \"$1\" = check ] || exit 99\nexit %d\n", test.exit))
+			d := New(fakeShell{})
+			if got := d.readiness(context.Background(), command, probe, nil, dir); got != test.want {
+				t.Fatalf("exit %d reported %q, want %q", test.exit, got, test.want)
+			}
+		})
+	}
+}
+
 // A probe that never exits is bounded and answers unknown. It must not be read
 // as ready, which is the exit status a probe that finished would have given.
-func TestDetectReportsAHangingProbeAsUnknown(t *testing.T) {
+func TestReadinessReportsAHangingProbeAsUnknown(t *testing.T) {
 	dir := t.TempDir()
-	writeExecutable(t, filepath.Join(dir, "pi"), `#!/bin/sh
-case "$1" in
-  --version) printf 'pi 1.5.2\n' ;;
-  auth) exec /bin/sleep 30 ;;
-esac
-`)
+	command := filepath.Join(dir, "probe")
+	writeExecutable(t, command, "#!/bin/sh\nexec /bin/sleep 30\n")
 	detector := New(fakeShell{path: dir})
 	detector.probeTimeout = 100 * time.Millisecond
-
-	rows, err := detector.Detect(context.Background(), false)
-	if err != nil {
-		t.Fatalf("Detect: %v", err)
+	probe := agentrecord.ReadinessProbe{
+		Answers: []agentrecord.ProbeAnswer{{Exit: 0, Readiness: agentrecord.ReadinessReady}},
 	}
-	pi := detectionByID(t, rows, "pi")
-	if !pi.Found || pi.Version != "pi 1.5.2" {
-		t.Fatalf("pi = %+v, want found with the version its other probe printed", pi)
-	}
-	if pi.Readiness != agentrecord.ReadinessUnknown {
-		t.Fatalf("hanging probe reported %q, want unknown", pi.Readiness)
+	if got := detector.readiness(context.Background(), command, probe, nil, dir); got != agentrecord.ReadinessUnknown {
+		t.Fatalf("hanging probe reported %q, want unknown", got)
 	}
 }
 
@@ -306,18 +326,15 @@ func TestDetectUsesFullResolvedEnvironment(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("NOCX_REMOVED", "backend-only")
 	writeExecutable(t, filepath.Join(dir, "pi"), `#!/bin/sh
-case "$1" in
- --version) printf 'pi env\n' ;;
- auth) [ "$NOCX_CREDENTIAL" = 'resolved credential' ] && [ "${NOCX_REMOVED+x}" != x ] ;;
-esac
+[ "$NOCX_CREDENTIAL" = 'resolved credential' ] && [ "${NOCX_REMOVED+x}" != x ] && printf 'pi env\n'
 `)
 	d := New(resolvedShell{env: []string{"PATH=" + dir, "NOCX_CREDENTIAL=resolved credential"}, cwd: dir})
 	rows, err := d.Detect(context.Background(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := detectionByID(t, rows, "pi").Readiness; got != agentrecord.ReadinessReady {
-		t.Fatalf("readiness %s, want ready with resolved environment only", got)
+	if got := detectionByID(t, rows, "pi").Version; got != "pi env" {
+		t.Fatalf("version %q, want version from resolved environment only", got)
 	}
 }
 
@@ -329,10 +346,7 @@ func TestDetectUsesResolvedWorkingDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeExecutable(t, filepath.Join(bin, "pi"), `#!/bin/sh
-case "$1" in
- --version) printf 'pi cwd\n' ;;
- auth) [ "$PWD" = "$HOME" ] ;;
-esac
+[ "$PWD" = "$HOME" ] && printf 'pi cwd\n'
 `)
 	d := New(resolvedShell{env: []string{"PATH=bin", "HOME=" + home}, cwd: home})
 	rows, err := d.Detect(context.Background(), false)
@@ -340,7 +354,7 @@ esac
 		t.Fatal(err)
 	}
 	pi := detectionByID(t, rows, "pi")
-	if !pi.Found || pi.Readiness != agentrecord.ReadinessReady {
+	if !pi.Found || pi.Version != "pi cwd" || pi.Readiness != agentrecord.ReadinessInstalled {
 		t.Fatalf("relative lookup/probe cwd differs: %+v", pi)
 	}
 }

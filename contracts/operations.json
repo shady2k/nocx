@@ -1291,6 +1291,59 @@
       "preempts": []
     },
     {
+      "id": "agentRecords.catalogue",
+      "kind": "method",
+      "owner": "request",
+      "phases": [
+        {
+          "name": "run",
+          "resources": [],
+          "dependencies": [
+            "config",
+            "filesystem"
+          ]
+        }
+      ],
+      "turn": {
+        "millis": 30000,
+        "basis": "read",
+        "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
+      },
+      "max": {
+        "millis": 35000,
+        "basis": "read",
+        "note": "read: connector catalogue pass bounded at 30 s, including login shell, readiness and model subprocesses"
+      },
+      "silence": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "answer": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "recovery": {
+        "kind": "none",
+        "millis": 0,
+        "basis": "",
+        "note": ""
+      },
+      "merge": "same-key",
+      "waiting": "Reading your agents' models",
+      "row": "past-wait",
+      "expired": "retry-read",
+      "resources": [],
+      "dependencies": [
+        "config",
+        "filesystem"
+      ],
+      "preempts": []
+    },
+    {
       "id": "agentRecords.detect",
       "kind": "method",
       "owner": "request",

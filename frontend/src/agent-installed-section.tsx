@@ -2,10 +2,11 @@
  * WHICH OF THE AGENTS THE ASSISTANT CAN RUN ARE ON THIS COMPUTER
  * (nocx-a62cl.12.2, ADR-anntnxdj decision 6).
  *
- * The backend answers one question — `agentRecords.detect` — and this page is
+ * The backend answers `agentRecords.detect` and `agentRecords.catalogue`; this page is
  * the surface for it: five rows, each found or not on the person's login
  * shell's PATH, the version the command printed, and the readiness the
- * agent's own probe reported. Nothing here starts an agent, and nothing here
+ * agent's connector reports (or its static probe without a connector). Ready
+ * connectors also list their models as information. Nothing here starts an agent, and nothing here
  * changes how the assistant answers: eino still answers until 4b, and this
  * page is the list 4b's entry will read.
  *
@@ -30,6 +31,7 @@
  */
 import { For, Show, createSignal, onMount } from 'solid-js'
 import type { Agent } from './generated/agentRecords.detect'
+import type { AgentRecordsCatalogueResult } from './generated/agentRecords.catalogue'
 import type { AgentRecordsClient } from './agent-records-client'
 import { Button } from './ui/button'
 import { PageSection } from './ui/page-section'
@@ -37,6 +39,8 @@ import { RecordRow } from './ui/record-row'
 import { StatusCard } from './ui/status-card'
 import type { StatusDotTone } from './ui/status-dot'
 import { t } from './i18n/locale-model'
+
+type ConnectorAgent = AgentRecordsCatalogueResult['agents'][number]
 
 export interface AgentInstalledSectionProps {
   client: AgentRecordsClient
@@ -70,12 +74,38 @@ function readinessStatus(readiness: Agent['readiness']): {
   }
 }
 
+function connectorStatus(readiness: ConnectorAgent['readiness']): {
+  tone: StatusDotTone
+  text: string
+} {
+  switch (readiness.state) {
+    case 'not_installed':
+      return readinessStatus('not_installed')
+    case 'not_configured':
+      return { tone: 'warning', text: t('agents.installed.notConfigured', 'Not configured') }
+    case 'ready':
+      return readinessStatus('ready')
+  }
+}
+
+function connectorDetail(agent: ConnectorAgent | undefined): string[] {
+  if (agent === undefined) return []
+  const lines = agent.readiness.message ? [agent.readiness.message] : []
+  if (agent.readiness.state === 'ready' && agent.models.length > 0) {
+    lines.push(t('agents.installed.models', 'Models available to this agent:'))
+    lines.push(...agent.models.map((model) => `${model.name} (${model.id})`))
+  }
+  return lines
+}
+
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
 export function AgentInstalledSection(props: AgentInstalledSectionProps) {
   const [agents, setAgents] = createSignal<readonly Agent[]>([])
+  const [connectors, setConnectors] = createSignal<readonly ConnectorAgent[]>([])
+  const connector = (id: string) => connectors().find((agent) => agent.id === id)
   /** True until the first answer arrives — the placeholder, never a claim. */
   const [loading, setLoading] = createSignal(true)
   /** True while a read is in flight, so Refresh cannot stack passes. */
@@ -86,7 +116,12 @@ export function AgentInstalledSection(props: AgentInstalledSectionProps) {
     setBusy(true)
     setError('')
     try {
-      setAgents((await props.client.detect(refresh)).agents)
+      const [detected, catalogue] = await Promise.all([
+        props.client.detect(refresh),
+        props.client.catalogue(refresh),
+      ])
+      setAgents(detected.agents)
+      setConnectors(catalogue.agents)
     } catch (err) {
       setError(
         `${t('agents.installed.failedHead', 'Could not look for the agents:')} ${message(err)}`,
@@ -150,7 +185,12 @@ export function AgentInstalledSection(props: AgentInstalledSectionProps) {
                 <RecordRow
                   title={agent.displayName}
                   meta={agent.version === '' ? undefined : agent.version}
-                  status={readinessStatus(agent.readiness)}
+                  status={
+                    connector(agent.id)
+                      ? connectorStatus(connector(agent.id)!.readiness)
+                      : readinessStatus(agent.readiness)
+                  }
+                  detail={connectorDetail(connector(agent.id))}
                   actions={null}
                 />
               </div>

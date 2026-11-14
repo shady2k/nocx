@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agentRecords.catalogue.params.schema.json",
+  "title": "AgentRecordsCatalogueParams",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {
+    "refresh": {
+      "type": "boolean"
+    }
+  }
+}

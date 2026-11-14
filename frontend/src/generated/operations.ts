@@ -205,6 +205,16 @@ const CALL_OPERATIONS: Readonly<Record<string, CallOperationDeclaration>> = {
     maxMs: 30000,
     answerMs: null,
   },
+  'agentRecords.catalogue': {
+    waiting: "Reading your agents' models",
+    row: 'past-wait',
+    expired: 'retry-read',
+    merge: 'same-key',
+    domain: 'config',
+    turnMs: 30000,
+    maxMs: 35000,
+    answerMs: null,
+  },
   'agentRecords.detect': {
     waiting: 'Finding your agents',
     row: 'past-wait',

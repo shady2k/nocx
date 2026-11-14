@@ -39,12 +39,12 @@ func agentDetectionConnection(t *testing.T, detector AgentDetector) (*websocket.
 }
 
 // The REAL result off the REAL socket, with a login-shell PATH holding a pi
-// that prints its version and answers auth check ready, and no claude: pi is
-// found, with its version and ready; claude is not installed; every agent of
+// that prints its version, and no claude: pi is found and installed;
+// connector readiness is separate. Claude is not installed; every agent of
 // the record appears exactly once.
 func TestAgentRecordsDetect_OverTheWireConformsToContract(t *testing.T) {
 	dir := t.TempDir()
-	script := "#!/bin/sh\ncase \"$1\" in\n  --version) printf 'pi 1.5.2\\n' ;;\n  auth) exit 0 ;;\nesac\n"
+	script := "#!/bin/sh\ncase \"$1\" in\n  --version) printf 'pi 1.5.2\\n' ;;\nesac\n"
 	if err := os.WriteFile(filepath.Join(dir, "pi"), []byte(script), 0o700); err != nil { //nolint:gosec // executable fixture
 		t.Fatal(err)
 	}
@@ -83,8 +83,8 @@ func TestAgentRecordsDetect_OverTheWireConformsToContract(t *testing.T) {
 	}
 
 	pi := byID["pi"]
-	if !pi.Found || pi.Version != "pi 1.5.2" || pi.Readiness != agentrecord.ReadinessReady {
-		t.Fatalf("pi = %+v, want found with its version and ready", pi)
+	if !pi.Found || pi.Version != "pi 1.5.2" || pi.Readiness != agentrecord.ReadinessInstalled {
+		t.Fatalf("pi = %+v, want found with its version and installed", pi)
 	}
 	claude := byID["claude"]
 	if claude.Found || claude.Version != "" || claude.Readiness != agentrecord.ReadinessNotInstalled {

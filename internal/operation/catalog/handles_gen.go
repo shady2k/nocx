@@ -25,6 +25,7 @@ var (
 	OpAgentType                       = methodHandle("agent.type")
 	OpAgentAccessForget               = methodHandle("agentAccess.forget")
 	OpAgentAccessList                 = methodHandle("agentAccess.list")
+	OpAgentRecordsCatalogue           = methodHandle("agentRecords.catalogue")
 	OpAgentRecordsDetect              = methodHandle("agentRecords.detect")
 	OpAgentRecordsList                = methodHandle("agentRecords.list")
 	OpAgentRecordsRemove              = methodHandle("agentRecords.remove")

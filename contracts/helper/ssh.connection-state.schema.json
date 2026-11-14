@@ -223,15 +223,7 @@
         "cause": {
           "description": "Why a connection stopped or lost its transport. REQUIRED for failed, ended and reconnecting; forbidden otherwise. On reconnecting it is what tells a network-class loss (retryable) from a silence close or a taint (not), so the number is not decoration.",
           "type": "string",
-          "enum": [
-            "host-key-changed",
-            "auth-rejected",
-            "no-auth-method",
-            "lost-link",
-            "released",
-            "silence",
-            "tainted"
-          ]
+          "enum": ["lost-link", "silence"]
         },
         "plainShells": {
           "description": "How many shells would end if this connection closed: its own, and those of everything dialed through it. Optional on every state because it is a count the supervisor carries, and a state that has none omits it (zero and absent are the same count).",
@@ -277,15 +269,7 @@
         "cause": {
           "description": "Why a connection stopped or lost its transport. REQUIRED for failed, ended and reconnecting; forbidden otherwise. On reconnecting it is what tells a network-class loss (retryable) from a silence close or a taint (not), so the number is not decoration.",
           "type": "string",
-          "enum": [
-            "host-key-changed",
-            "auth-rejected",
-            "no-auth-method",
-            "lost-link",
-            "released",
-            "silence",
-            "tainted"
-          ]
+          "enum": ["host-key-changed", "auth-rejected", "no-auth-method"]
         },
         "plainShells": {
           "description": "How many shells would end if this connection closed: its own, and those of everything dialed through it. Optional on every state because it is a count the supervisor carries, and a state that has none omits it (zero and absent are the same count).",
@@ -331,15 +315,7 @@
         "cause": {
           "description": "Why a connection stopped or lost its transport. REQUIRED for failed, ended and reconnecting; forbidden otherwise. On reconnecting it is what tells a network-class loss (retryable) from a silence close or a taint (not), so the number is not decoration.",
           "type": "string",
-          "enum": [
-            "host-key-changed",
-            "auth-rejected",
-            "no-auth-method",
-            "lost-link",
-            "released",
-            "silence",
-            "tainted"
-          ]
+          "enum": ["lost-link", "released", "silence", "tainted"]
         },
         "plainShells": {
           "description": "How many shells would end if this connection closed: its own, and those of everything dialed through it. Optional on every state because it is a count the supervisor carries, and a state that has none omits it (zero and absent are the same count).",

@@ -58,16 +58,15 @@
  * Playwright assertion cannot sit inside that window without depending on
  * timing.
  *
- * ## The probe's cadence is the connection's, not this spec's
+ * ## The probe's cadence
  *
- * The two profile options below are still stated, because the profile is where
- * a person says how often their connection should be asked. What a test may
- * NOT do is derive a wait from them: since stage 2 the ONE prober belongs to
- * the connection's supervisor (design §5.3), its interval is the first holder's
- * (the shell-integration publish dials first in this open order, so the
- * fifteen-second default is what runs), and its soft deadline is the design's
- * fixed 15 s. Silence is therefore reported within 30 s, which is what the
- * polls below allow for — a state, never a duration.
+ * The profile below states it, and the ONE prober obeys it whichever holder
+ * dialled the connection first — the shell-integration publish does, in this
+ * open order, and it states nothing (design §5.3, and the supervisor's rule
+ * that the smallest STATED interval wins). A soft deadline equals the cadence
+ * when the cadence is under the design's 15 s, so silence is reported two
+ * cadences after the last answer. That is what the polls support, and none of
+ * them derives a wait from the numbers: they wait on states.
  */
 import { mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
@@ -85,18 +84,18 @@ const BOUNDARY = '[data-reconnect-boundary="true"]'
 const RECONNECT_SETTING = '.ui-settings-row[data-key="ssh.reconnect"] select'
 
 /**
- * The connection's probe settings, as a person's profile states them.
+ * The connection's probe cadence, as a person's profile states it — and it is
+ * the cadence this spec gets, whichever holder dialled first (§5.3: "a
+ * profile's keepalive settings still apply and map onto these").
  *
- * They are still seeded — the profile is where a person says how often their
- * connection should be asked (contracts/profiles.create.params.schema.json) —
- * but since stage 2 neither number decides when this spec sees anything: the
- * connection has ONE prober, it belongs to the supervisor, and its soft
- * deadline is the design's fixed 15 s rather than a count of missed intervals
- * (design §5.3, and the header's cadence note). The polls below are budgeted
- * for that worst case; nothing here derives a wait from these values.
+ * TWO SECONDS, not one: a probe's soft deadline equals the cadence whenever
+ * the cadence is under the design's 15 s, so a one-second cadence would give
+ * this spec's own slow fault (400 ms each way, about 800 ms of round trip)
+ * only 200 ms of head room before a late answer read as silence. Two seconds
+ * keeps the fault comfortably inside its deadline and still detects silence in
+ * four, against the fifteen-second default this used to be stuck with.
  */
-const KEEPALIVE_INTERVAL_MS = 1000
-const KEEPALIVE_COUNT_MAX = 2
+const KEEPALIVE_INTERVAL_MS = 2000
 
 /** Rewrite the fixture's known_hosts line onto the port the client will
  *  actually dial. The line is keyed by host:port and the client reaches the
@@ -217,7 +216,6 @@ async function wire(page: Page, home: string): Promise<Wired> {
       user: 'e2e',
       keyPath: fixture.userKey,
       keepaliveInterval: KEEPALIVE_INTERVAL_MS,
-      keepaliveCountMax: KEEPALIVE_COUNT_MAX,
       desiredMode: 'script',
     },
   })

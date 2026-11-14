@@ -311,11 +311,11 @@ type live struct {
 	// wakes for it without polling.
 	ready chan struct{}
 	// controlProcessed counts the OS control edges this connection's guard has
-	// PROCESSED — applied, or refused as older than the edge in hand. A refused
-	// edge leaves no other trace, so this count is how a caller outside the
-	// guard knows it has caught up with what it was told: today the tests that
-	// must assert the ABSENCE of an effect, and stage 3's journal when it says
-	// what the machine did (design §5.9).
+	// FINISHED with — applied, or refused as older than the edge in hand. A
+	// refused edge leaves no other trace at all, so a count is the only way an
+	// observer outside the guard can know it has caught up; its one reader is the
+	// test seam in export_test.go, and what it replaces is a sleep that proved
+	// nothing.
 	controlProcessed atomic.Uint64
 	// waiters are the callers waiting for the next probe's outcome.
 	waiters map[chan error]struct{}
@@ -956,22 +956,6 @@ func (s *Supervisor) Wake(at monoclock.Nanos) { s.control(controlEdge{at: at}) }
 // asking for answers until a wake arrives: a probe sent into the sleep would
 // park across it and its silence would be evidence of nothing.
 func (s *Supervisor) Suspend(at monoclock.Nanos) { s.control(controlEdge{sleep: true, at: at}) }
-
-// ControlEdgesSeen answers how many OS control edges this connection's guard has
-// processed since the connection was dialled — each applied, or refused as older
-// than the edge already in hand. The count is the guard's own statement of
-// having caught up: a refused edge produces no state change and no other trace,
-// so a caller that must assert the absence of an effect after an edge waits on
-// this, never on a pause.
-func (s *Supervisor) ControlEdgesSeen() uint64 {
-	s.mu.Lock()
-	l := s.live
-	s.mu.Unlock()
-	if l == nil {
-		return 0
-	}
-	return l.controlProcessed.Load()
-}
 
 // Suspended reports whether the machine is known to be going to sleep and this
 // connection has not been woken since. It is the fact a connection's journal

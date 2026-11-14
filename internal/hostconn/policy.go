@@ -210,10 +210,13 @@ func (g *prober) drainControl() {
 // applied: a wake followed by a stale sleep must not suspend a resumed
 // connection.
 func (g *prober) applyControl(edge controlEdge) {
-	// COUNTED BEFORE THE STALENESS CHECK, because a refused edge is processed
-	// too — and it is the refusal a caller most needs to be told about, since
-	// it leaves no other trace.
-	g.live.controlProcessed.Add(1)
+	// COUNTED ON THE WAY OUT, never on the way in: the count is the guard's
+	// statement that it has FINISHED with the edge, and a wait on it is a wait
+	// for suspend() or woke() to have run. Bumped at the door it would answer
+	// before the edge did anything — a pause with a number.
+	defer g.live.controlProcessed.Add(1)
+	// A refused edge is counted too: it is the one that leaves no other trace,
+	// and the refusal is exactly what a caller may be waiting to be told.
 	if edge.at != 0 && g.st.lastEdge != 0 && edge.at < g.st.lastEdge {
 		return
 	}

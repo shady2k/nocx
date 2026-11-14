@@ -189,20 +189,21 @@ func TestASleepEdgeNewerThanAWakeIsNotUndone(t *testing.T) {
 	waittest.WaitFor(t, "the resume", func() bool { return !lease.Suspended() })
 }
 
-// syncGuard queues one control edge and waits until the guard has PROCESSED it,
-// so a test that asserts the ABSENCE of an effect reads it after the edge was
+// syncGuard queues one control edge and waits until the guard has FINISHED with
+// it, so a test that asserts the ABSENCE of an effect reads it after the edge was
 // certainly applied.
 //
-// The count is the guard's own statement — an edge older than the one in hand is
-// refused and leaves no other trace — and it is the only observable a refused
-// edge has. A pause would prove nothing: it would pass on a slow machine and
-// fail on a fast one, which is the shape AGENTS.md forbids.
+// The count is the guard's own statement, and it is the only trace a refused edge
+// has — an edge older than the one in hand changes nothing. A pause would prove
+// nothing: it would pass on a slow machine and fail on a fast one, which is the
+// shape AGENTS.md forbids. The count is a test seam (export_test.go), because
+// nothing in the product asks it.
 func syncGuard(t *testing.T, sup *hostconn.Supervisor, queue func()) {
 	t.Helper()
-	before := sup.ControlEdgesSeen()
+	before := hostconn.ControlEdgesSeen(sup)
 	queue()
-	waittest.WaitFor(t, "the guard to process the control edge", func() bool {
-		return sup.ControlEdgesSeen() > before
+	waittest.WaitFor(t, "the guard to finish the control edge", func() bool {
+		return hostconn.ControlEdgesSeen(sup) > before
 	})
 }
 

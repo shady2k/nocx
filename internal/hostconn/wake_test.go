@@ -15,6 +15,7 @@ import (
 	"github.com/shady2k/nocx/internal/hostconn"
 	"github.com/shady2k/nocx/internal/hostconn/hostconntest"
 	"github.com/shady2k/nocx/internal/log/logtest"
+	"github.com/shady2k/nocx/internal/monoclock"
 	"github.com/shady2k/nocx/internal/waittest"
 )
 
@@ -231,4 +232,29 @@ func TestAPreSleepEdgePausesTheProberUntilTheWake(t *testing.T) {
 	waittest.WaitFor(t, "the stall", func() bool {
 		return sup.Current().Kind == hostconn.Stalled
 	})
+}
+
+// TestACountedControlEdgeIsOneTheGuardHasFinished — the count syncGuard waits on
+// is a synchronization point and not a hint: the moment the guard has counted an
+// edge, the fact that edge applies is already there to read, with no second wait
+// and no pause.
+//
+// The count is bumped on the way OUT of applyControl (a defer), so this holds by
+// construction; the test is what would catch a future change that moved the bump
+// back to the door, where a reader could see the count while suspend() or woke()
+// had not run yet — a pause wearing a number.
+func TestACountedControlEdgeIsOneTheGuardHasFinished(t *testing.T) {
+	clock := hostconntest.New()
+	_, _, mgr, sup := wakeStand(t, clock)
+	lease := acquire(t, mgr, hostconn.HoldsPlainShell)
+
+	syncGuard(t, sup, func() { sup.Suspend(clock.Now()) })
+	if !lease.Suspended() {
+		t.Fatal("the sleep was counted before it was applied")
+	}
+
+	syncGuard(t, sup, func() { sup.Wake(clock.Now() + monoclock.Nanos(time.Second)) })
+	if lease.Suspended() {
+		t.Fatal("the wake was counted before it was applied")
+	}
 }

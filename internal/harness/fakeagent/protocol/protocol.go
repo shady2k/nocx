@@ -4,10 +4,17 @@
 // an agent stream, call a tool, hang, fail and exit on cue.
 package protocol
 
+import "github.com/shady2k/nocx/internal/harness"
+
 // Script is what the fake agent does in one turn. It arrives in the
 // FAKEAGENT_SCRIPT environment variable as JSON.
 type Script struct {
-	Steps []Step `json:"steps"`
+	// CompleteOnEOF models an RPC agent that waits for stdin closure after End.
+	CompleteOnEOF bool   `json:"completeOnEOF,omitempty"`
+	PromptFile    string `json:"promptFile,omitempty"`
+	HangFile      string `json:"hangFile,omitempty"`
+	Gate          string `json:"gate,omitempty"`
+	Steps         []Step `json:"steps"`
 	// PIDFile, when set, receives the fake agent's own process id.
 	PIDFile string `json:"pidFile,omitempty"`
 	// ChildPIDFile, when set, receives the pid of a child a StepChild left
@@ -46,6 +53,8 @@ const (
 	StepAnswer StepKind = "answer"
 	// StepReasoning streams one reasoning delta.
 	StepReasoning StepKind = "reasoning"
+	// StepBridge starts an idle bridge and holds its stdin open.
+	StepBridge StepKind = "bridge"
 	// StepTool calls one tool through the turn's bridge, then writes the
 	// result to ResultFile.
 	StepTool StepKind = "tool"
@@ -55,6 +64,8 @@ const (
 	StepFail StepKind = "fail"
 	// StepHang blocks until the process is stopped.
 	StepHang StepKind = "hang"
+	// StepGate waits for the suite to release a FIFO after observing a delta.
+	StepGate StepKind = "gate"
 	// StepExit exits with Code, without an end event unless one came first.
 	StepExit StepKind = "exit"
 	// StepChild starts a long-lived child in the same process group and
@@ -82,11 +93,13 @@ type Usage struct {
 }
 
 // Prompt is the one line a connector writes to the fake agent's stdin. It is
-// the turn's input; the script stays in the environment because it is the
-// fixture, not the conversation.
+// the turn's input and bridge configuration; only the non-secret fixture
+// script arrives through the environment.
 type Prompt struct {
-	ConversationID string `json:"conversationId,omitempty"`
-	Text           string `json:"text,omitempty"`
-	Model          string `json:"model,omitempty"`
-	SystemPrompt   string `json:"systemPrompt,omitempty"`
+	Tools          harness.ToolBridge `json:"tools"`
+	Dir            string             `json:"dir,omitempty"`
+	ConversationID string             `json:"conversationId,omitempty"`
+	Text           string             `json:"text,omitempty"`
+	Model          string             `json:"model,omitempty"`
+	SystemPrompt   string             `json:"systemPrompt,omitempty"`
 }

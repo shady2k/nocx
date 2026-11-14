@@ -22,8 +22,8 @@ import (
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "-child" {
-		// A child the turn left behind: it stays until its group is stopped.
-		select {}
+		// A child the turn left behind: acknowledge readiness before blocking.
+		block(func() { _, _ = fmt.Fprintln(os.Stdout, "ready") })
 	}
 
 	stdin := bufio.NewReader(os.Stdin)
@@ -52,6 +52,9 @@ func main() {
 	if !script.IgnoreStdinEOF {
 		go func() {
 			_, _ = io.Copy(io.Discard, stdin)
+			if script.CompleteOnEOF {
+				os.Exit(0)
+			}
 			os.Exit(1)
 		}()
 	}
@@ -59,12 +62,11 @@ func main() {
 		_ = os.WriteFile(script.PIDFile, []byte(strconv.Itoa(os.Getpid())), 0o600)
 	}
 
-	var bridge harness.ToolBridge
-	if raw := os.Getenv("FAKEAGENT_TOOLS"); raw != "" {
-		if err := json.Unmarshal([]byte(raw), &bridge); err != nil {
-			fmt.Fprintf(os.Stderr, "fakeagent: tool bridge: %v\n", err)
-			os.Exit(2)
-		}
+	bridge := prompt.Tools
+	if script.PromptFile != "" {
+		prompt.Dir, _ = os.Getwd()
+		raw, _ := json.Marshal(prompt)
+		_ = os.WriteFile(script.PromptFile, raw, 0o600)
 	}
 
 	out := json.NewEncoder(os.Stdout)
@@ -79,6 +81,17 @@ func main() {
 			emit(protocol.Line{Kind: "answer", Text: step.Text})
 		case protocol.StepReasoning:
 			emit(protocol.Line{Kind: "reasoning", Text: step.Text})
+		case protocol.StepBridge:
+			cmd := exec.Command(bridge.Command[0], bridge.Command[1:]...) //nolint:gosec // fixture bridge argv
+			cmd.Env = append(os.Environ(), bridge.Env...)
+			input, err := cmd.StdinPipe()
+			if err != nil {
+				os.Exit(2)
+			}
+			if err := cmd.Start(); err != nil {
+				os.Exit(2)
+			}
+			defer func() { _ = input.Close(); _ = cmd.Wait() }()
 		case protocol.StepTool:
 			calls++
 			id := "call-" + strconv.Itoa(calls)
@@ -103,8 +116,20 @@ func main() {
 			emit(protocol.Line{Kind: "end", Model: model, Usage: step.Usage})
 		case protocol.StepFail:
 			emit(protocol.Line{Kind: "failure", Reason: step.Reason})
+		case protocol.StepGate:
+			gate, err := os.Open(script.Gate)
+			if err != nil {
+				os.Exit(2)
+			}
+			var b [1]byte
+			_, _ = gate.Read(b[:])
+			_ = gate.Close()
 		case protocol.StepHang:
-			select {}
+			block(func() {
+				if script.HangFile != "" {
+					_ = os.WriteFile(script.HangFile, []byte("blocked"), 0o600)
+				}
+			})
 		case protocol.StepExit:
 			os.Exit(step.Code)
 		case protocol.StepChild:
@@ -114,12 +139,19 @@ func main() {
 				os.Exit(1)
 			}
 			child := exec.Command(self, "-child") //nolint:gosec // this program's own path
-			child.Stdout = nil
+			childOut, err := child.StdoutPipe()
+			if err != nil {
+				os.Exit(2)
+			}
 			child.Stderr = nil
 			if err := child.Start(); err != nil {
 				emit(protocol.Line{Kind: "failure", Reason: fmt.Sprintf("cannot start the child: %v", err)})
 				os.Exit(1)
 			}
+			if _, err := bufio.NewReader(childOut).ReadString('\n'); err != nil {
+				os.Exit(2)
+			}
+			_ = childOut.Close()
 			if script.ChildPIDFile != "" {
 				_ = os.WriteFile(script.ChildPIDFile, []byte(strconv.Itoa(child.Process.Pid)), 0o600)
 			}
@@ -181,6 +213,7 @@ func callTool(bridge harness.ToolBridge, name string, arguments map[string]any) 
 	// variable, which is how the suite proves the bridge's environment
 	// reached the server and not the agent.
 	args["agent_secret"] = os.Getenv("NOCX_TEST_SECRET")
+	args["agent_environment"] = os.Environ()
 
 	if err := encoder.Encode(map[string]any{
 		"jsonrpc": "2.0", "id": 2, "method": "tools/call",
@@ -215,4 +248,19 @@ type rpcResponse struct {
 		Code    int    `json:"code"`
 		Message string `json:"message"`
 	} `json:"error"`
+}
+
+// A pollable pipe with its writer held open needs a signal to stop it.
+func block(ready func()) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		os.Exit(2)
+	}
+	defer func() { _ = r.Close() }()
+	defer func() { _ = w.Close() }()
+	if ready != nil {
+		ready()
+	}
+	var b [1]byte
+	_, _ = r.Read(b[:])
 }

@@ -42,25 +42,27 @@ func (c *Connector) Readiness(ctx context.Context) harness.Readiness {
 	return harness.Readiness{State: harness.Ready, Message: "the fake agent is ready"}
 }
 
+// Facts states the fixture's actual limits: it forwards conversation IDs but
+// does not retain conversations between processes.
+func (c *Connector) Facts() harness.Facts {
+	return harness.Facts{ToolBoundary: harness.NocxToolsOnly, ReportsAnsweringModel: true}
+}
+
 // Run starts one scripted turn.
 func (c *Connector) Run(ctx context.Context, spec harness.TurnSpec) (harness.Turn, error) {
 	script, err := json.Marshal(c.cfg.Script)
 	if err != nil {
 		return nil, fmt.Errorf("fakeconnector: script: %w", err)
 	}
-	tools, err := json.Marshal(spec.Tools)
-	if err != nil {
-		return nil, fmt.Errorf("fakeconnector: tool bridge: %w", err)
-	}
 	env := []string{
 		"FAKEAGENT_SCRIPT=" + string(script),
-		"FAKEAGENT_TOOLS=" + string(tools),
 	}
 	process, err := c.cfg.Base.Start(ctx, harness.Launch{
-		Argv:   []string{c.cfg.AgentPath},
-		Env:    env,
-		Dir:    spec.Dir,
-		Decode: decode,
+		Argv:          []string{c.cfg.AgentPath},
+		Env:           env,
+		Dir:           spec.Dir,
+		Decode:        decode,
+		CompleteOnEnd: c.cfg.Script.CompleteOnEOF,
 	})
 	if err != nil {
 		return nil, err
@@ -72,6 +74,7 @@ func (c *Connector) Run(ctx context.Context, spec harness.TurnSpec) (harness.Tur
 		Text:           spec.Text,
 		Model:          spec.Model,
 		SystemPrompt:   spec.SystemPrompt,
+		Tools:          spec.Tools,
 	}); err != nil {
 		_ = process.Cancel(ctx)
 		_, _ = process.Wait(ctx)

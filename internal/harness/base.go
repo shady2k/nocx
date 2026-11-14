@@ -52,6 +52,12 @@ type Launch struct {
 	Dir string
 	// Decode reads the agent's own protocol off stdout.
 	Decode Decoder
+	// CompleteOnEnd closes stdin after a terminal protocol response. RPC agents
+	// that exit on stdin EOF use this; other connectors call CloseStdin themselves.
+	CompleteOnEnd bool
+	// FailureReason translates bounded stderr after an unsuccessful exit. An empty
+	// result keeps the shared exit reason. It is never called on successful exit.
+	FailureReason func(stderr string, exitErr error) string
 }
 
 // Base is the shared process ownership every connector uses: the agent runs in
@@ -60,6 +66,10 @@ type Launch struct {
 type Base struct {
 	// MaxLineBytes bounds one stdout line; zero means DefaultMaxLineBytes.
 	MaxLineBytes int
+	// MaxStderrBytes bounds captured diagnostics; zero uses 64 KiB.
+	MaxStderrBytes int
+	// ShutdownTimeout bounds graceful shutdown after stdin closes. Zero uses one second.
+	ShutdownTimeout time.Duration
 }
 
 // Start runs one agent process and returns its turn.
@@ -75,8 +85,14 @@ func (b Base) Start(ctx context.Context, launch Launch) (*Process, error) {
 		return nil, err
 	}
 
-	cmd := exec.Command(launch.Argv[0], launch.Argv[1:]...) //nolint:gosec // the connector states the agent's argv
-	cmd.Env = append(env, launch.Env...)
+	env = mergeEnvironment(env, launch.Env)
+	executable, err := resolveExecutable(launch.Argv[0], env, launch.Dir)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(executable, launch.Argv[1:]...) //nolint:gosec // the connector states the agent's argv
+	cmd.Env = env
+	cmd.WaitDelay = time.Second
 	cmd.Dir = launch.Dir
 	// The agent leads its own group, so Cancel and a leftover child are one
 	// signal away and neither reaches nocx.
@@ -94,7 +110,12 @@ func (b Base) Start(ctx context.Context, launch Launch) (*Process, error) {
 	}
 	cmd.Stdin = stdinR
 	cmd.Stdout = stdoutW
-	cmd.Stderr = io.Discard
+	maxStderr := b.MaxStderrBytes
+	if maxStderr <= 0 {
+		maxStderr = 64 << 10
+	}
+	stderr := &diagnostics{max: maxStderr}
+	cmd.Stderr = stderr
 
 	if err := cmd.Start(); err != nil {
 		_ = stdinR.Close()
@@ -113,17 +134,33 @@ func (b Base) Start(ctx context.Context, launch Launch) (*Process, error) {
 	if maxLine <= 0 {
 		maxLine = DefaultMaxLineBytes
 	}
+	shutdownTimeout := b.ShutdownTimeout
+	if shutdownTimeout <= 0 {
+		shutdownTimeout = time.Second
+	}
 	p := &Process{
-		cmd:      cmd,
-		stdin:    stdinW,
-		stdout:   stdoutR,
-		decode:   launch.Decode,
-		maxLine:  maxLine,
-		events:   make(chan Event, 64),
-		done:     make(chan struct{}),
-		procDone: make(chan struct{}),
+		cmd:             cmd,
+		stdin:           stdinW,
+		stdout:          stdoutR,
+		decode:          launch.Decode,
+		maxLine:         maxLine,
+		events:          make(chan Event, 64),
+		done:            make(chan struct{}),
+		procDone:        make(chan struct{}),
+		stopped:         make(chan struct{}),
+		completeOnEnd:   launch.CompleteOnEnd,
+		failureReason:   launch.FailureReason,
+		stderr:          stderr,
+		shutdownTimeout: shutdownTimeout,
 	}
 	go p.reap()
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = p.Cancel(context.Background())
+		case <-p.done:
+		}
+	}()
 	go p.pump(ctx)
 	return p, nil
 }
@@ -157,10 +194,19 @@ type Process struct {
 	decode  Decoder
 	maxLine int
 
-	events   chan Event
-	done     chan struct{}
-	procDone chan struct{}
-	waitErr  error
+	events          chan Event
+	done            chan struct{}
+	procDone        chan struct{}
+	waitErr         error
+	cleanupErr      error
+	stopped         chan struct{}
+	completeOnEnd   bool
+	failureReason   func(string, error) string
+	stderr          *diagnostics
+	reaped          bool
+	shutdownTimeout time.Duration
+	shutdownOnce    sync.Once
+	shutdownErr     error
 
 	mu        sync.Mutex
 	finished  bool
@@ -177,27 +223,56 @@ func (p *Process) Events() <-chan Event { return p.events }
 // here; the shared base owns when the pipe is closed.
 func (p *Process) Stdin() io.Writer { return p.stdin }
 
-func (p *Process) Cancel(ctx context.Context) error {
+// CloseStdin requests graceful protocol shutdown, without cancelling the turn.
+func (p *Process) CloseStdin() error {
+	err := p.stdin.Close()
+	p.shutdownOnce.Do(func() {
+		go func() {
+			timer := time.NewTimer(p.shutdownTimeout)
+			defer timer.Stop()
+			select {
+			case <-p.procDone:
+				return
+			case <-timer.C:
+			}
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			if !p.reaped {
+				p.shutdownErr = errors.New("the agent did not exit after stdin closed")
+				_ = p.killLocked()
+				_ = p.stdout.Close()
+			}
+		}()
+	})
+	return err
+}
+
+func (p *Process) Cancel(_ context.Context) error {
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.finished {
-		p.mu.Unlock()
 		return nil
 	}
 	p.cancelled = true
-	p.mu.Unlock()
-
-	var cancelErr error
-	p.cancelOnce.Do(func() {
-		if err := proc.KillGroupImmediately(p.cmd); err != nil && !errors.Is(err, syscall.ESRCH) {
-			cancelErr = fmt.Errorf("harness: the agent's process group could not be stopped: %w", err)
-		}
-		// Closing stdin is the polite half: a program that watches it leaves
-		// even if a signal is late. The group kill is the one that must hold.
-		_ = p.stdin.Close()
-	})
-	return cancelErr
+	p.cancelOnce.Do(func() { close(p.stopped) })
+	_ = p.stdin.Close()
+	_ = p.stdout.Close()
+	if p.reaped {
+		return nil
+	}
+	return p.killLocked()
 }
 
+// killLocked is only called while the leader is still owned and unreaped.
+func (p *Process) killLocked() error {
+	if err := proc.KillGroupImmediately(p.cmd); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return fmt.Errorf("harness: the agent's process group could not be stopped: %w", err)
+	}
+	return nil
+}
+
+// Wait's context belongs to this observer, not the running turn. Only the
+// context passed to Start or Cancel stops the agent.
 func (p *Process) Wait(ctx context.Context) (Outcome, error) {
 	select {
 	case <-p.done:
@@ -207,24 +282,35 @@ func (p *Process) Wait(ctx context.Context) (Outcome, error) {
 	}
 }
 
-// reap owns the one Wait on the process. When it returns, the leader is gone;
-// anything the agent left in its group is killed here, because the group id
-// stays allocated while a member lives and the leader's pid cannot be reused
-// while it names that group.
+// reap observes exit without releasing the leader's PID. All group signals
+// finish under mu before Wait can release that identity. Cancel uses the same
+// lock and never signals once reaped is set.
 func (p *Process) reap() {
+	observeErr := observeExit(p.cmd.Process.Pid)
+	p.mu.Lock()
+	var signalErr error
+	if observeErr == nil {
+		signalErr = p.killLocked()
+	}
+	// Failed observation does not prove we still own this identity. In
+	// particular ECHILD can mean another reaper already released it.
+	p.reaped = true
+	p.mu.Unlock()
 	p.waitErr = p.cmd.Wait()
+	p.cleanupErr = errors.Join(observeErr, signalErr, awaitGroupGone(p.cmd.Process.Pid))
 	close(p.procDone)
-	_ = proc.KillGroupImmediately(p.cmd)
 }
 
 // pump reads the agent's stdout until it closes, then finalizes the turn. The
 // terminal event is the last one forwarded: a stream that closes exactly once
 // is the contract, and an event after the terminal one would be a second end.
 func (p *Process) pump(ctx context.Context) {
+	defer func() { _ = p.stdout.Close() }()
 	var terminal *Event
 	var protocolErr string
 
 	reader := bufio.NewReaderSize(p.stdout, 64<<10)
+readLoop:
 	for {
 		line, err := readBoundedLine(reader, p.maxLine)
 		if err != nil {
@@ -249,24 +335,36 @@ func (p *Process) pump(ctx context.Context) {
 				log.From(ctx).Warn("agent event after the terminal one was dropped", "kind", ev.Kind)
 				continue
 			}
-			p.events <- ev
+			select {
+			case p.events <- ev:
+			case <-p.stopped:
+				break readLoop
+			}
+
 			if ev.Kind == EventEnd || ev.Kind == EventFailure {
 				done := ev
 				terminal = &done
+				if p.completeOnEnd {
+					_ = p.CloseStdin()
+				}
 			}
 		}
 	}
 
-	_ = p.stdin.Close()
+	_ = p.CloseStdin()
 	// A line this side could not read is a turn this side must stop. A
 	// stream that simply ended is not: the process is expected to exit, and
 	// the reaper kills whatever it left once it has. Killing here would race
 	// a normally exiting agent and turn its clean exit into a signal.
 	if protocolErr != "" {
-		_ = proc.KillGroupImmediately(p.cmd)
+		p.mu.Lock()
+		if !p.reaped {
+			_ = p.killLocked()
+		}
+		p.mu.Unlock()
 	}
 	<-p.procDone
-	p.awaitGroupGone()
+	_ = p.stdout.Close()
 	p.finish(terminal, protocolErr)
 }
 
@@ -276,31 +374,47 @@ func (p *Process) pump(ctx context.Context) {
 func (p *Process) finish(terminal *Event, protocolErr string) {
 	p.mu.Lock()
 	cancelled := p.cancelled
+	shutdownErr := p.shutdownErr
 	p.finished = true
 	p.mu.Unlock()
 
 	switch {
+	case p.cleanupErr != nil:
+		p.err = &TurnError{Reason: "the agent's process group could not be cleaned up: " + p.cleanupErr.Error()}
+		if terminal == nil {
+			p.sendFailure(p.err.Error())
+		}
 	case cancelled:
 		if terminal == nil {
-			p.events <- Event{Kind: EventFailure, Failure: &Failure{Reason: "cancelled"}}
+			p.sendFailure("cancelled")
 		}
 		p.err = ErrCancelled
+	case shutdownErr != nil:
+		p.err = &TurnError{Reason: fmt.Sprint(shutdownErr)}
+		if terminal == nil {
+			p.sendFailure(p.err.Error())
+		}
 	case protocolErr != "":
 		if terminal == nil {
-			p.events <- Event{Kind: EventFailure, Failure: &Failure{Reason: protocolErr}}
+			p.sendFailure(protocolErr)
 		}
 		p.err = &TurnError{Reason: protocolErr}
 	case terminal != nil && terminal.Kind == EventFailure:
 		p.err = &TurnError{Reason: terminal.Failure.Reason}
 	case p.waitErr != nil:
 		reason := exitReason(p.waitErr)
+		if p.failureReason != nil {
+			if diagnostic := p.failureReason(p.stderr.String(), p.waitErr); diagnostic != "" {
+				reason = diagnostic
+			}
+		}
 		if terminal == nil {
-			p.events <- Event{Kind: EventFailure, Failure: &Failure{Reason: reason}}
+			p.sendFailure(reason)
 		}
 		p.err = &TurnError{Reason: reason}
 	case terminal == nil:
 		reason := "the agent ended without an end event"
-		p.events <- Event{Kind: EventFailure, Failure: &Failure{Reason: reason}}
+		p.sendFailure(reason)
 		p.err = &TurnError{Reason: reason}
 	case terminal.Kind == EventEnd:
 		p.outcome = Outcome{Model: terminal.End.Model, Usage: terminal.End.Usage}
@@ -342,21 +456,60 @@ func readBoundedLine(r *bufio.Reader, max int) ([]byte, error) {
 	}
 }
 
-// awaitGroupGone waits until no process is left in the agent's group. SIGKILL
-// was already sent; the loop observes the kernel's answer rather than sleeping
-// for a duration.
-func (p *Process) awaitGroupGone() {
-	if p.cmd.Process == nil {
+// sendFailure cannot keep cancellation alive when the consumer disconnected.
+func (p *Process) sendFailure(reason string) {
+	ev := Event{Kind: EventFailure, Failure: &Failure{Reason: reason}}
+	select {
+	case p.events <- ev:
 		return
+	default:
 	}
-	pgid := p.cmd.Process.Pid
-	for {
-		err := syscall.Kill(-pgid, 0)
-		if errors.Is(err, syscall.ESRCH) {
-			return
+	select {
+	case <-p.stopped:
+		// The disconnected consumer cannot free space. Discard one queued delta,
+		// retaining the sole terminal failure as the final event.
+		select {
+		case <-p.events:
+		default:
 		}
-		if err != nil && !errors.Is(err, syscall.EPERM) {
-			return
+		p.events <- ev
+	case p.events <- ev:
+	}
+}
+
+type diagnostics struct {
+	mu   sync.Mutex
+	data []byte
+	max  int
+}
+
+func (d *diagnostics) Write(raw []byte) (int, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	n := min(len(raw), d.max-len(d.data))
+	d.data = append(d.data, raw[:n]...)
+	return len(raw), nil
+}
+func (d *diagnostics) String() string { d.mu.Lock(); defer d.mu.Unlock(); return string(d.data) }
+
+// Zombie descendants have already terminated and cannot hold resources or run.
+// Their parent's reaping policy is outside this per-turn process owner.
+func awaitGroupGone(pgid int) error {
+	return awaitGroupGoneWith(pgid, time.Second, groupRunning)
+}
+
+func awaitGroupGoneWith(pgid int, budget time.Duration, running func(int) (bool, error)) error {
+	deadline := time.Now().Add(budget)
+	for {
+		alive, err := running(pgid)
+		if err != nil {
+			return err
+		}
+		if !alive {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return errors.New("process group still has running members")
 		}
 		time.Sleep(2 * time.Millisecond)
 	}

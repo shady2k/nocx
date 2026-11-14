@@ -20,8 +20,8 @@ type Harness interface {
 	// Readiness reports whether this agent can run a turn now, and what to
 	// tell a person when it cannot.
 	Readiness(ctx context.Context) Readiness
-	// Run starts one turn. The returned Turn owns the agent process; it is
-	// the caller's to cancel and to wait for.
+	// Run starts one turn. Cancelling ctx ends the turn just as Cancel does.
+	// The returned Turn owns the agent process; it is the caller's to wait for.
 	Run(ctx context.Context, spec TurnSpec) (Turn, error)
 }
 
@@ -29,13 +29,17 @@ type Harness interface {
 type Turn interface {
 	// Events is the turn's stream. It is ordered, closes exactly once, and
 	// carries one terminal event (an end or a failure) before it closes. The
-	// channel must be drained: the caller that stops reading stops the turn's
-	// progress through it.
+	// channel must be drained for lossless delivery. Cancellation still ends
+	// the turn when a disconnected consumer stops reading; queued deltas may
+	// be discarded to make room for the terminal failure.
 	Events() <-chan Event
 	// Cancel stops the turn and everything it started. It is safe to call
 	// after the turn ended.
 	Cancel(ctx context.Context) error
-	// Wait returns only once the process and anything it started are gone.
+	// Wait returns once the process and anything it started have terminated,
+	// or reports a cleanup failure. Terminated orphan zombies belong to their
+	// OS reaper, not to the turn. Cancelling this observer's ctx stops only
+	// this wait, never the turn; cancel Run's ctx or call Cancel to stop it.
 	// Its result is the turn's truth: a non-zero exit or a stream that ended
 	// without an end event is an error, whatever the last event said.
 	Wait(ctx context.Context) (Outcome, error)
@@ -51,6 +55,28 @@ type Steerer interface {
 // role picker. A connector without it runs on the agent's own default.
 type Cataloguer interface {
 	Models(ctx context.Context) ([]Model, error)
+}
+
+// ConnectorFacts states facts the product must show independently of optional
+// operations. Every supported connector implements this alongside Harness.
+type ConnectorFacts interface {
+	Facts() Facts
+}
+
+// ToolBoundary states whether built-in tools are disabled or merely discouraged.
+type ToolBoundary string
+
+const (
+	NocxToolsOnly          ToolBoundary = "nocx_tools_only"
+	NocxToolsByInstruction ToolBoundary = "nocx_tools_by_instruction"
+)
+
+// Facts describes guarantees, not a guess based on the agent's name. A connector
+// unable to report the answering model cannot promise to pin it across turns.
+type Facts struct {
+	ToolBoundary              ToolBoundary
+	ContinuesConversationByID bool
+	ReportsAnsweringModel     bool
 }
 
 // EventKind names one kind of event in a turn's ordered stream. The set is

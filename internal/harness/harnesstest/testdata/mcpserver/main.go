@@ -8,21 +8,11 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"strconv"
 )
 
 func main() {
-	if os.Getenv("MCP_BLOCK") == "1" {
-		// A blocked call never reaches the scan loop again, so the only
-		// thing that can end this process is its stdin closing. Nothing
-		// else reads stdin in this mode, which is why the watchdog can.
-		go func() {
-			_, _ = io.Copy(io.Discard, os.Stdin)
-			os.Exit(0)
-		}()
-	}
 	if pidFile := os.Getenv("MCP_PIDFILE"); pidFile != "" {
 		_ = os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0o600)
 	}
@@ -56,12 +46,14 @@ func main() {
 		case "notifications/initialized":
 		case "tools/call":
 			if os.Getenv("MCP_BLOCK") == "1" {
-				// A blocked call: only the death of this process's stdin
-				// ends it, which is what Cancel and a dead backend must do.
-				select {}
+				_ = os.WriteFile(os.Getenv("MCP_BLOCKEDFILE"), []byte("tools/call"), 0o600)
+				// Keep scanning: one reader owns requests and observes EOF.
+				continue
 			}
 			agentSecret, _ := request.Params.Arguments["agent_secret"].(string)
+			environment, _ := json.Marshal(request.Params.Arguments["agent_environment"])
 			text := fmt.Sprintf("server_secret=%s;agent_secret=%s", os.Getenv("NOCX_TEST_SECRET"), agentSecret)
+			text += ";agent_environment=" + string(environment)
 			_ = out.Encode(map[string]any{
 				"jsonrpc": "2.0", "id": request.ID,
 				"result": map[string]any{

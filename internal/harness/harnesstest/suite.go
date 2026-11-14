@@ -31,7 +31,6 @@ import (
 const (
 	fakeAgentPackage = "github.com/shady2k/nocx/internal/harness/fakeagent"
 	mcpServerPackage = "github.com/shady2k/nocx/internal/harness/harnesstest/testdata/mcpserver"
-	hostPackage      = "github.com/shady2k/nocx/internal/harness/harnesstest/testdata/host"
 )
 
 // Setup is what the suite gives a connector's factory: the programs it may
@@ -47,7 +46,7 @@ type Setup struct {
 type Factory func(t *testing.T, setup Setup) harness.Harness
 
 // Run runs every conformance check against the connector factory.
-func Run(t *testing.T, factory Factory) {
+func Run(t *testing.T, hostPackage string, factory Factory) {
 	t.Helper()
 
 	bin := t.TempDir()
@@ -67,6 +66,18 @@ func Run(t *testing.T, factory Factory) {
 	t.Run("Cancel during a blocked tool call ends the turn with no event after", func(t *testing.T) {
 		testCancelDuringTool(t, factory, agentPath, serverPath)
 	})
+	t.Run("successful RPC completion closes stdin", func(t *testing.T) {
+		script := protocol.Script{CompleteOnEOF: true, Steps: []protocol.Step{
+			{Kind: protocol.StepEnd, Model: "fake-model"}, {Kind: protocol.StepHang},
+		}}
+		turn := start(t, factory, agentPath, serverPath, script, harness.ToolBridge{}, harness.TurnSpec{Dir: t.TempDir()})
+		collect(t, turn)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if _, err := turn.Wait(ctx); err != nil {
+			t.Fatal(err)
+		}
+	})
 	t.Run("a failure is reported as a failure", func(t *testing.T) {
 		testFailures(t, factory, agentPath, serverPath)
 	})
@@ -80,8 +91,22 @@ func Run(t *testing.T, factory Factory) {
 
 func testOrderedStream(t *testing.T, factory Factory, agentPath, serverPath string) {
 	t.Helper()
-	script := protocol.Script{Steps: []protocol.Step{
+	target, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), "working-directory")
+	if err = os.Symlink(target, dir); err != nil {
+		t.Fatal(err)
+	}
+	gate := filepath.Join(dir, "gate")
+	if err = syscall.Mkfifo(gate, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	promptFile := filepath.Join(dir, "prompt")
+	script := protocol.Script{Gate: gate, PromptFile: promptFile, Steps: []protocol.Step{
 		{Kind: protocol.StepAnswer, Text: "Hel"},
+		{Kind: protocol.StepGate},
 		{Kind: protocol.StepReasoning, Text: "thinking"},
 		{Kind: protocol.StepAnswer, Text: "lo"},
 		{Kind: protocol.StepEnd, Model: "fake-model", Usage: &protocol.Usage{
@@ -89,10 +114,29 @@ func testOrderedStream(t *testing.T, factory Factory, agentPath, serverPath stri
 		}},
 	}}
 	turn := start(t, factory, agentPath, serverPath, script, harness.ToolBridge{}, harness.TurnSpec{
-		ConversationID: "conversation-1", Text: "hello", SystemPrompt: "system",
-		Dir: t.TempDir(),
+		ConversationID: "conversation-1", Text: "hello", Model: "chosen-model", SystemPrompt: "system",
+		Dir: dir,
 	})
-	events := collect(t, turn)
+	first := nextEvent(t, turn.Events(), 5*time.Second)
+	// The process cannot finish until the consumer has observed its delta.
+	writer, err := os.OpenFile(gate, os.O_WRONLY, 0) //nolint:gosec // test TempDir FIFO
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = writer.Write([]byte("x"))
+	_ = writer.Close()
+	events := append([]harness.Event{first}, collect(t, turn)...)
+	raw, err := os.ReadFile(promptFile) //nolint:gosec // test TempDir
+	if err != nil {
+		t.Fatal(err)
+	}
+	var prompt protocol.Prompt
+	if err = json.Unmarshal(raw, &prompt); err != nil {
+		t.Fatal(err)
+	}
+	if prompt.ConversationID != "conversation-1" || prompt.Text != "hello" || prompt.SystemPrompt != "system" || prompt.Model != "chosen-model" || prompt.Dir != target {
+		t.Fatalf("forwarded prompt = %+v", prompt)
+	}
 
 	want := []harness.EventKind{
 		harness.EventAnswerDelta, harness.EventReasoningDelta,
@@ -172,11 +216,11 @@ func testToolBridge(t *testing.T, factory Factory, agentPath, serverPath string)
 	if !strings.Contains(string(result), "server_secret="+secret) {
 		t.Fatalf("the bridge did not see its own environment: %q", result)
 	}
-	if !strings.HasSuffix(string(result), "agent_secret=") {
-		t.Fatalf("the agent saw the bridge's environment: %q", result)
+	if strings.Contains(strings.SplitN(string(result), ";agent_environment=", 2)[1], secret) {
+		t.Fatal("the agent environment contains the bridge secret")
 	}
 	serverPID := readPID(t, serverPIDFile)
-	waitGone(t, serverPID, "the tool bridge")
+	assertGone(t, serverPID, "the tool bridge")
 }
 
 func testCancelDuringStream(t *testing.T, factory Factory, agentPath, serverPath string) {
@@ -185,6 +229,7 @@ func testCancelDuringStream(t *testing.T, factory Factory, agentPath, serverPath
 	agentPIDFile := filepath.Join(dir, "agent.pid")
 	script := protocol.Script{
 		PIDFile:        agentPIDFile,
+		HangFile:       filepath.Join(dir, "hang"),
 		IgnoreStdinEOF: true,
 		Steps: []protocol.Step{
 			{Kind: protocol.StepAnswer, Text: "first"},
@@ -199,12 +244,13 @@ func testCancelDuringStream(t *testing.T, factory Factory, agentPath, serverPath
 	if events[0].Kind != harness.EventAnswerDelta {
 		t.Fatalf("first event = %+v, want an answer delta", events[0])
 	}
+	waitFile(t, filepath.Join(dir, "hang"))
 	if err := turn.Cancel(context.Background()); err != nil {
 		t.Fatalf("Cancel: %v", err)
 	}
 	events = append(events, collectWithin(t, turn.Events(), 2*time.Second)...)
 	assertCancelled(t, turn, events)
-	waitGone(t, readPID(t, agentPIDFile), "the agent")
+	assertGone(t, readPID(t, agentPIDFile), "the agent")
 }
 
 func testCancelDuringTool(t *testing.T, factory Factory, agentPath, serverPath string) {
@@ -226,6 +272,7 @@ func testCancelDuringTool(t *testing.T, factory Factory, agentPath, serverPath s
 			"NOCX_TEST_SECRET=bridge-only-secret",
 			"MCP_PIDFILE=" + serverPIDFile,
 			"MCP_BLOCK=1",
+			"MCP_BLOCKEDFILE=" + filepath.Join(dir, "blocked"),
 		},
 	}
 	turn := start(t, factory, agentPath, serverPath, script, tools, harness.TurnSpec{
@@ -236,20 +283,20 @@ func testCancelDuringTool(t *testing.T, factory Factory, agentPath, serverPath s
 	if events[0].Kind != harness.EventToolStarted {
 		t.Fatalf("first event = %+v, want the tool call", events[0])
 	}
-	waitFile(t, serverPIDFile)
+	waitFile(t, filepath.Join(dir, "blocked"))
 	if err := turn.Cancel(context.Background()); err != nil {
 		t.Fatalf("Cancel: %v", err)
 	}
 	events = append(events, collectWithin(t, turn.Events(), 2*time.Second)...)
 	assertCancelled(t, turn, events)
-	waitGone(t, readPID(t, agentPIDFile), "the agent")
-	waitGone(t, readPID(t, serverPIDFile), "the blocked tool bridge")
+	assertGone(t, readPID(t, agentPIDFile), "the agent")
+	assertGone(t, readPID(t, serverPIDFile), "the blocked tool bridge")
 }
 
 func assertCancelled(t *testing.T, turn harness.Turn, events []harness.Event) {
 	t.Helper()
-	if len(events) == 0 {
-		t.Fatal("no events before the stream closed")
+	if len(events) != 2 {
+		t.Fatalf("events after cancellation must be only failure: %v", kinds(events))
 	}
 	last := events[len(events)-1]
 	if last.Kind != harness.EventFailure || last.Failure == nil || last.Failure.Reason != "cancelled" {
@@ -363,28 +410,44 @@ func testNoProcessAfterWait(t *testing.T, factory Factory, agentPath, serverPath
 	if _, err := turn.Wait(context.Background()); err == nil || !strings.Contains(fmt.Sprint(err), "without an end event") {
 		t.Fatalf("Wait error = %v, want the missing end", err)
 	}
-	waitGone(t, readPID(t, agentPIDFile), "the agent")
-	waitGone(t, readPID(t, childPIDFile), "the child the agent left")
+	assertGone(t, readPID(t, agentPIDFile), "the agent")
+	assertGone(t, readPID(t, childPIDFile), "the child the agent left")
 }
 
 func testParentDeath(t *testing.T, agentPath, serverPath, hostPath string) {
+	t.Helper()
+	for _, state := range []string{"idle", "stream", "tool"} {
+		t.Run(state, func(t *testing.T) { testParentDeathState(t, agentPath, serverPath, hostPath, state) })
+	}
+}
+
+func testParentDeathState(t *testing.T, agentPath, serverPath, hostPath, state string) {
 	t.Helper()
 	dir := t.TempDir()
 	agentPIDFile := filepath.Join(dir, "agent.pid")
 	serverPIDFile := filepath.Join(dir, "server.pid")
 	script := protocol.Script{
-		PIDFile: agentPIDFile,
+		HangFile: filepath.Join(dir, "hang"),
+		PIDFile:  agentPIDFile,
 		Steps: []protocol.Step{
 			{Kind: protocol.StepTool, Name: "probe"},
 			{Kind: protocol.StepEnd},
 		},
 	}
+	if state != "tool" {
+		script.Steps = []protocol.Step{{Kind: protocol.StepBridge}, {Kind: protocol.StepHang}}
+		if state == "stream" {
+			script.Steps = append([]protocol.Step{{Kind: protocol.StepAnswer, Text: "streaming"}}, script.Steps...)
+		}
+	}
+
 	tools := harness.ToolBridge{
 		Command: []string{serverPath},
 		Env: []string{
 			"NOCX_TEST_SECRET=bridge-only-secret",
 			"MCP_PIDFILE=" + serverPIDFile,
 			"MCP_BLOCK=1",
+			"MCP_BLOCKEDFILE=" + filepath.Join(dir, "blocked"),
 		},
 	}
 	scriptJSON, err := json.Marshal(script)
@@ -415,7 +478,13 @@ func testParentDeath(t *testing.T, agentPath, serverPath, hostPath string) {
 
 	waitFile(t, agentPIDFile)
 	waitFile(t, serverPIDFile)
+	if state == "tool" {
+		waitFile(t, filepath.Join(dir, "blocked"))
+	} else {
+		waitFile(t, filepath.Join(dir, "hang"))
+	}
 	agentPID := readPID(t, agentPIDFile)
+	t.Cleanup(func() { _ = syscall.Kill(-agentPID, syscall.SIGKILL) })
 	serverPID := readPID(t, serverPIDFile)
 
 	// The backend is gone: no Cancel, no Wait, just the process that held
@@ -426,7 +495,7 @@ func testParentDeath(t *testing.T, agentPath, serverPath, hostPath string) {
 	_, _ = host.Process.Wait()
 
 	waittest.WaitForTimeout(t, "the agent and its bridge to be gone", time.Second, func() bool {
-		return !alive(agentPID) && !alive(serverPID)
+		return !alive(agentPID) && (serverPID == 0 || !alive(serverPID))
 	})
 }
 
@@ -497,7 +566,7 @@ func kinds(events []harness.Event) []harness.EventKind {
 func build(t *testing.T, dir, name, pkg string) string {
 	t.Helper()
 	out := filepath.Join(dir, name)
-	cmd := exec.Command("go", "build", "-o", out, pkg) //nolint:gosec // the package paths are this suite's own constants
+	cmd := exec.Command("go", "build", "-p", "1", "-o", out, pkg) //nolint:gosec // the package paths are this suite's own constants
 	cmd.Env = os.Environ()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -526,16 +595,16 @@ func waitFile(t *testing.T, path string) {
 		raw, err := os.ReadFile(path) //nolint:gosec // test TempDir
 		return fmt.Sprintf("read error: %v, content: %q", err, raw)
 	}, func() bool {
-		_, err := os.Stat(path)
-		return err == nil
+		raw, err := os.ReadFile(path) //nolint:gosec // test TempDir
+		return err == nil && len(raw) > 0
 	})
 }
 
-func waitGone(t *testing.T, pid int, what string) {
+func assertGone(t *testing.T, pid int, what string) {
 	t.Helper()
-	waittest.WaitForDetail(t, what+" to be gone", func() string {
-		return fmt.Sprintf("pid %d is still alive", pid)
-	}, func() bool { return !alive(pid) })
+	if alive(pid) {
+		t.Fatalf("%s (pid %d) remains immediately after Wait", what, pid)
+	}
 }
 
 func alive(pid int) bool {

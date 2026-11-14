@@ -79,10 +79,10 @@ func (s *WSServer) closePaneSessions(paneID string) {
 }
 
 // ReconnectPane replaces a held shell after the supervisor restores transport.
-func (s *WSServer) ReconnectPane(ctx context.Context, paneID string) (resultErr error) {
+func (s *WSServer) ReconnectPane(ctx context.Context, paneID string, expectedBinding uint64) (resultErr error) {
 	s.paneMu.Lock()
 	rec := s.paneRecords[paneID]
-	if rec == nil {
+	if rec == nil || expectedBinding == 0 || rec.bindingGeneration != expectedBinding {
 		s.paneMu.Unlock()
 		return errPaneNotBound
 	}
@@ -91,7 +91,7 @@ func (s *WSServer) ReconnectPane(ctx context.Context, paneID string) (resultErr 
 		s.paneMu.Unlock()
 		select {
 		case <-registered:
-			return s.ReconnectPane(ctx, paneID)
+			return s.ReconnectPane(ctx, paneID, expectedBinding)
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -107,7 +107,7 @@ func (s *WSServer) ReconnectPane(ctx context.Context, paneID string) (resultErr 
 		return errOpenShuttingDown
 	}
 	s.paneMu.Lock()
-	if s.paneRecords[paneID] != rec || ctx.Err() != nil || rec.ctx.Err() != nil {
+	if s.paneRecords[paneID] != rec || rec.bindingGeneration != expectedBinding || ctx.Err() != nil || rec.ctx.Err() != nil {
 		s.paneMu.Unlock()
 		return context.Canceled
 	}

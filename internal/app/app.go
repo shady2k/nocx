@@ -2158,8 +2158,8 @@ func New(opts ...Option) (*App, error) {
 	// to do it, through the SAME path a person's press takes. The context is
 	// the server's, not the request's: an automatic reconnect must outlive the
 	// frame that caused it.
-	paneConns.SetAction(func(ctx context.Context, paneID string, _ uint64) error {
-		return tp.ReconnectPane(ctx, paneID)
+	paneConns.SetAction(func(ctx context.Context, paneID string, binding uint64) error {
+		return tp.ReconnectPane(ctx, paneID, binding)
 	})
 	helperReg.publishEffect = tp.PublishSessionEffect
 	helperReg.blockRows = tp

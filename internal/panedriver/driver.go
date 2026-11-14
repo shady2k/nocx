@@ -179,7 +179,8 @@ func New(instanceID string, logger log.Logger) *Driver {
 	return d
 }
 
-// SetAction installs the shell replacement callback. It runs once per held
+// SetAction installs the shell replacement callback. Its third argument is the
+// expected binding generation, not an observation epoch. It runs once per held
 // shell after a loss returns to connected. Its context ends when the pane
 // closes; the open path must check it
 // before registering the replacement shell. The supervisor owns retry policy.
@@ -405,7 +406,6 @@ func (d *Driver) ApplyFrom(source string, ev proto.ConnectionStateEvent) {
 	snaps := make([]Snapshot, 0, len(c.panes))
 	type replacement struct {
 		pane       string
-		epoch      uint64
 		binding    *binding
 		ctx        context.Context
 		generation uint64
@@ -419,7 +419,7 @@ func (d *Driver) ApplyFrom(source string, ev proto.ConnectionStateEvent) {
 			}
 			if ev.State == proto.ConnectionConnected && b.lost && !b.replacing && b.shellFailure == nil {
 				b.replacing = true
-				replacements = append(replacements, replacement{paneID, b.epoch, b, b.ctx, b.generation})
+				replacements = append(replacements, replacement{paneID, b, b.ctx, b.generation})
 			}
 		}
 	}
@@ -430,7 +430,7 @@ func (d *Driver) ApplyFrom(source string, ev proto.ConnectionStateEvent) {
 	}
 	if action != nil {
 		for _, r := range replacements {
-			d.launchAction(r.ctx, r.pane, r.binding, r.generation, r.epoch, action)
+			d.launchAction(r.ctx, r.pane, r.binding, r.generation, action)
 		}
 	}
 }
@@ -464,16 +464,16 @@ func (d *Driver) RequestShellRetry(ctx context.Context, paneID string, epoch uin
 	b.replacing = true
 	generation := b.generation
 	d.mu.Unlock()
-	d.launchAction(b.ctx, paneID, b, generation, epoch, action)
+	d.launchAction(b.ctx, paneID, b, generation, action)
 	return nil
 }
 
-func (d *Driver) launchAction(ctx context.Context, pane string, b *binding, generation, epoch uint64, action func(context.Context, string, uint64) error) {
+func (d *Driver) launchAction(ctx context.Context, pane string, b *binding, generation uint64, action func(context.Context, string, uint64) error) {
 	d.mu.Lock()
 	live := d.panes[pane] == b && b.generation == generation && ctx.Err() == nil
 	d.mu.Unlock()
 	if live {
-		go func() { _ = action(ctx, pane, epoch) }()
+		go func() { _ = action(ctx, pane, generation) }()
 	}
 }
 

@@ -1062,6 +1062,7 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 		}
 		if driver := o.paneConnections(); driver != nil {
 			bindingGeneration = driver.Bind(cfg.PaneID, connectionID)
+			transport.BindPaneConnection(ctx, bindingGeneration)
 		}
 	}
 	// THE GENERATION THE LAUNCH NAMES HAS TO BE ON THE FAR SIDE BEFORE THE

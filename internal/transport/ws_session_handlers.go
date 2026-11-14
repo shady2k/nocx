@@ -519,6 +519,16 @@ func (h openHandlers) openInto(ctx context.Context, wconn *wsConn, state *connSt
 		h.sess.bindPane(params.PaneID, wconn, state, params)
 	}
 
+	if machine, ok := h.sess.(*WSServer); ok && paneRecord != nil {
+		bindCtx := ctx
+		ctx = context.WithValue(ctx, paneBindingKey{}, func(generation uint64) {
+			machine.paneMu.Lock()
+			defer machine.paneMu.Unlock()
+			if machine.paneRecords[params.PaneID] == paneRecord && bindCtx.Err() == nil {
+				paneRecord.bindingGeneration = generation
+			}
+		})
+	}
 	opened, err := h.opener.Open(ctx, spec)
 	if err != nil {
 		return openResult{}, err

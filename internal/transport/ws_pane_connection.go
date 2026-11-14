@@ -130,6 +130,8 @@ type paneRecord struct {
 	busy               bool
 	registering        chan struct{}
 	connectionSequence uint64
+	// Filled only by this open's binding callback, never by delayed notifications.
+	bindingGeneration uint64
 }
 
 // bindPane records that this connection is the one a pane's notifications go
@@ -139,6 +141,15 @@ type paneRecord struct {
 // exists for.
 func (s *WSServer) bindPane(paneID string, wconn *wsConn, state *connState, params openParams) {
 	_, _ = s.bindPaneForOpen(s.lifetimeCtx, paneID, wconn, state, params)
+}
+
+type paneBindingKey struct{}
+
+// BindPaneConnection associates the driver's binding with the exact open that created it.
+func BindPaneConnection(ctx context.Context, generation uint64) {
+	if bind, ok := ctx.Value(paneBindingKey{}).(func(uint64)); ok {
+		bind(generation)
+	}
 }
 
 type paneReconnectOpenKey struct{}

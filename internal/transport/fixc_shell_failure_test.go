@@ -27,9 +27,10 @@ type fixcHostedOpener struct {
 }
 
 func (o *fixcHostedOpener) OpenHosted(ctx context.Context, cfg session.Config, _ string) (HostedSessionOpen, bool, error) {
+	generation := o.driver.Bind(cfg.PaneID, "conn-1")
+	BindPaneConnection(ctx, generation)
 	s, err := o.reg.Adopt(ctx, cfg, o.id, &helperOpenTestChannel{done: make(chan struct{})})
 	if err == nil {
-		generation := o.driver.Bind(cfg.PaneID, "conn-1")
 		o.driver.AdoptSession(cfg.PaneID, "conn-1", string(s.ID()), "instance-1", generation)
 	}
 	return HostedSessionOpen{Session: s, Host: cfg.Host, Account: "alice", Generation: "fixc"}, true, err
@@ -70,7 +71,9 @@ func TestReplacementShellFailureRetainsActionableRecoveryOnHealthyTransport(t *t
 		}
 		return "remote.example", &ssh.ConnectConfig{User: "alice"}, nil
 	}}), WithHelperSessionOpener(&fixcHostedOpener{reg: reg, id: replacementID, driver: driver}), WithPaneConnectionPolicy(driver))
-	driver.SetAction(func(ctx context.Context, pane string, _ uint64) error { return ws.ReconnectPane(ctx, pane) })
+	driver.SetAction(func(ctx context.Context, pane string, binding uint64) error {
+		return ws.ReconnectPane(ctx, pane, binding)
+	})
 	driver.SetPublisher(func(s panedriver.Snapshot) {
 		shells := s.Transport.PlainShells
 		p := PaneConnection{PaneID: s.PaneID, ConnectionID: s.ConnectionID, ConnectionEpoch: s.ConnectionEpoch, InstanceID: s.InstanceID, SessionID: s.SessionID, Transport: PaneConnectionTransport{State: s.Transport.State, StateMs: s.Transport.StateMs, PlainShells: &shells}, Attempt: PaneConnectionAttempt{Shown: "none", Candidate: "none"}, ObservedAt: "2026-11-14T11:00:00Z"}
@@ -98,12 +101,13 @@ func TestReplacementShellFailureRetainsActionableRecoveryOnHealthyTransport(t *t
 	}
 	defer func() { _ = reg.EndSession(sharedID) }()
 	state.add(shared)
-	driver.Bind(helperOpenPane, "conn-1")
+	initialBinding := driver.Bind(helperOpenPane, "conn-1")
+	ws.paneRecordOf(helperOpenPane).bindingGeneration = initialBinding
 	driver.ApplyFrom("helper", proto.ConnectionStateEvent{ConnectionID: "conn-1", Seq: 1, State: proto.ConnectionConnected})
 	_ = readNotification(t, conn, "pane.connection", wantWithin)
 
 	// This is the real post-return shell action, not a constructed failure DTO.
-	if err := ws.ReconnectPane(ctx, helperOpenPane); err == nil {
+	if err := ws.ReconnectPane(ctx, helperOpenPane, initialBinding); err == nil {
 		t.Fatal("sealed vault unexpectedly opened shell")
 	}
 	readFailure := func() fixcFailureFrame {
@@ -211,10 +215,11 @@ func TestOldReplacementFailureCannotPoisonReusedPane(t *testing.T) {
 	wc := &wsConn{}
 	params := openParams{PaneID: helperOpenPane, Kind: "ssh", ProfileID: "saved", Cols: 80, Rows: 24}
 	ws.bindPane(helperOpenPane, wc, newConnState(), params)
-	driver.Bind(helperOpenPane, "conn-1")
+	initialBinding := driver.Bind(helperOpenPane, "conn-1")
+	ws.paneRecordOf(helperOpenPane).bindingGeneration = initialBinding
 	driver.ApplyFrom("helper", proto.ConnectionStateEvent{ConnectionID: "conn-1", Seq: 1, State: proto.ConnectionConnected})
 	result := make(chan error, 1)
-	go func() { result <- ws.ReconnectPane(ctx, helperOpenPane) }()
+	go func() { result <- ws.ReconnectPane(ctx, helperOpenPane, initialBinding) }()
 	waittest.WaitFor(t, "old replacement reached resolver", func() bool {
 		select {
 		case <-entered:
@@ -257,10 +262,11 @@ func TestFailedFirstOpenRecoversToFirstOwnedShell(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 	state := newConnState()
 	ws.bindPane(helperOpenPane, soleWSConn(t, ws), state, openParams{PaneID: helperOpenPane, Kind: "ssh", ProfileID: "saved", Cols: 80, Rows: 24})
-	driver.Bind(helperOpenPane, "conn-1")
+	initialBinding := driver.Bind(helperOpenPane, "conn-1")
+	ws.paneRecordOf(helperOpenPane).bindingGeneration = initialBinding
 	result := make(chan error, 1)
-	driver.SetAction(func(ctx context.Context, pane string, _ uint64) error {
-		err := ws.ReconnectPane(ctx, pane)
+	driver.SetAction(func(ctx context.Context, pane string, binding uint64) error {
+		err := ws.ReconnectPane(ctx, pane, binding)
 		result <- err
 		return err
 	})

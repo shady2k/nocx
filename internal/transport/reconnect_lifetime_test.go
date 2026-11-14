@@ -50,7 +50,8 @@ func TestOldReconnectTeardownCannotEraseReopenedPaneLifetime(t *testing.T) {
 	}
 	oldState.add(old)
 	result := make(chan error, 1)
-	go func() { result <- ws.ReconnectPane(context.Background(), params.PaneID) }()
+	ws.paneRecordOf(params.PaneID).bindingGeneration = 1
+	go func() { result <- ws.ReconnectPane(context.Background(), params.PaneID, 1) }()
 	waittest.WaitFor(t, "old shell teardown entered", func() bool {
 		select {
 		case <-barrier.entered:

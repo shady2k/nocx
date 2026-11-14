@@ -35,7 +35,9 @@ func TestPaneConnection_OverTheWireConformsToContract(t *testing.T) {
 			AuthorizedEndpoint: srv.addr, DesiredMode: "raw", Shell: "bash",
 		}}), transport.WithPaneConnectionPolicy(paneConnectionOwner{Driver: driver, opener: opener}))
 	driver.SetPublisher(func(s panedriver.Snapshot) { ws.PublishPaneConnection(paneConnectionWire(s)) })
-	driver.SetAction(func(ctx context.Context, pane string, _ uint64) error { return ws.ReconnectPane(ctx, pane) })
+	driver.SetAction(func(ctx context.Context, pane string, binding uint64) error {
+		return ws.ReconnectPane(ctx, pane, binding)
+	})
 	if err := ws.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}

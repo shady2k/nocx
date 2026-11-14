@@ -12,14 +12,18 @@ package app
 // be asserting about a wire nobody writes.
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/shady2k/nocx/internal/log"
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
@@ -37,9 +41,22 @@ import (
 // turnPaneAccess is a stand-in for the run's DescendantPaneAccess. The turn
 // arm carries whatever the mint was given, so the test can tell the turn's
 // capability from the pane caller's (which has none).
+type testTurnTools struct {
+	ctx        agenttools.RunContext
+	grant      content.Grant
+	dispatcher assistant.ToolDispatcher
+	admissions int
+}
+
+func (t *testTurnTools) RunContext() agenttools.RunContext { return t.ctx }
+func (t *testTurnTools) Admit() (assistant.ToolInvocation, error) {
+	t.admissions++
+	return assistant.ToolInvocation{RunContext: t.ctx, Grant: t.grant, Dispatcher: t.dispatcher}, nil
+}
+
 type turnPaneAccess struct{ run string }
 
-// turnDispatcher is the assistant chain at the endpoint's boundary. It records
+// turnDispatcher is a recording boundary fake. It records
 // every invocation it is handed and can hold one open until its context ends,
 // which is what makes a retirement's cancellation observable.
 type turnDispatcher struct {
@@ -150,7 +167,7 @@ func turnGrantForTest() content.Grant {
 func envToken(t *testing.T, env []string) string {
 	t.Helper()
 	for _, entry := range env {
-		if value, ok := strings.CutPrefix(entry, "NOCX_AGENT_TOKEN="); ok {
+		if value, ok := strings.CutPrefix(entry, panebind.TokenEnvVar+"="); ok {
 			return value
 		}
 	}
@@ -170,8 +187,7 @@ func TestATurnBearerIsAdmittedAndItsCallCarriesTheTurnsGrant(t *testing.T) {
 	grant := turnGrantForTest()
 	paneAccess := &turnPaneAccess{run: "run-turn-1"}
 	bridge, _, err := stand.minter.Mint(turnbearer.Authority{
-		RunID: "run-turn-1", Session: string(stand.sess.ID()),
-		PaneAccess: paneAccess, Grant: grant,
+		Tools: &testTurnTools{ctx: agenttools.RunContext{RunID: "run-turn-1", Session: string(stand.sess.ID()), PaneAccess: paneAccess}, grant: grant, dispatcher: stand.dispatcher},
 	})
 	if err != nil {
 		t.Fatalf("mint a turn bearer: %v", err)
@@ -193,7 +209,7 @@ func TestATurnBearerIsAdmittedAndItsCallCarriesTheTurnsGrant(t *testing.T) {
 		}
 	}
 	second, _, err := stand.minter.Mint(turnbearer.Authority{
-		RunID: "run-turn-2", Session: string(stand.sess.ID()), Grant: grant,
+		Tools: &testTurnTools{ctx: agenttools.RunContext{RunID: "run-turn-2", Session: string(stand.sess.ID())}, grant: grant, dispatcher: stand.dispatcher},
 	})
 	if err != nil {
 		t.Fatalf("mint a second turn bearer: %v", err)
@@ -245,7 +261,7 @@ func TestAWrongOrRetiredTurnBearerIsRefused(t *testing.T) {
 	stand := newTurnStand(t, &turnDispatcher{})
 	grant := turnGrantForTest()
 	bridge, retire, err := stand.minter.Mint(turnbearer.Authority{
-		RunID: "run-retired", Session: string(stand.sess.ID()), Grant: grant,
+		Tools: &testTurnTools{ctx: agenttools.RunContext{RunID: "run-retired", Session: string(stand.sess.ID())}, grant: grant, dispatcher: stand.dispatcher},
 	})
 	if err != nil {
 		t.Fatalf("mint a turn bearer: %v", err)
@@ -276,7 +292,7 @@ func TestRetiringATurnCancelsItsBlockedCallAndClosesItsConnection(t *testing.T) 
 	dispatcher := &turnDispatcher{hold: true, held: make(chan struct{}), stop: make(chan struct{})}
 	stand := newTurnStand(t, dispatcher)
 	bridge, retire, err := stand.minter.Mint(turnbearer.Authority{
-		RunID: "run-held", Session: string(stand.sess.ID()), Grant: turnGrantForTest(),
+		Tools: &testTurnTools{ctx: agenttools.RunContext{RunID: "run-held", Session: string(stand.sess.ID())}, grant: turnGrantForTest(), dispatcher: stand.dispatcher},
 	})
 	if err != nil {
 		t.Fatalf("mint a turn bearer: %v", err)
@@ -318,7 +334,7 @@ func TestRetiringATurnCancelsItsBlockedCallAndClosesItsConnection(t *testing.T) 
 func TestATurnBearerIsAdmittedAgainAfterItsBridgeReconnects(t *testing.T) {
 	stand := newTurnStand(t, &turnDispatcher{})
 	bridge, _, err := stand.minter.Mint(turnbearer.Authority{
-		RunID: "run-reconnect", Session: string(stand.sess.ID()), Grant: turnGrantForTest(),
+		Tools: &testTurnTools{ctx: agenttools.RunContext{RunID: "run-reconnect", Session: string(stand.sess.ID())}, grant: turnGrantForTest(), dispatcher: stand.dispatcher},
 	})
 	if err != nil {
 		t.Fatalf("mint a turn bearer: %v", err)
@@ -351,7 +367,7 @@ func TestAPanesCallerIsAdmittedAlongsideATurnBearer(t *testing.T) {
 	dispatcher := &turnDispatcher{}
 	stand := newTurnStand(t, dispatcher)
 	bridge, _, err := stand.minter.Mint(turnbearer.Authority{
-		RunID: "run-beside", Session: string(stand.sess.ID()), Grant: turnGrantForTest(),
+		Tools: &testTurnTools{ctx: agenttools.RunContext{RunID: "run-beside", Session: string(stand.sess.ID())}, grant: turnGrantForTest(), dispatcher: stand.dispatcher},
 	})
 	if err != nil {
 		t.Fatalf("mint a turn bearer: %v", err)
@@ -388,5 +404,133 @@ func TestAPanesCallerIsAdmittedAlongsideATurnBearer(t *testing.T) {
 	}
 	if !turn || !pane {
 		t.Fatalf("the chain saw turn=%v pane=%v, want both: %+v", turn, pane, calls)
+	}
+}
+
+func TestTurnAdmissionUsesBoundContextAndMintsOnEveryConnection(t *testing.T) {
+	stand := newTurnStand(t, &turnDispatcher{})
+	bound := agenttools.RunContext{
+		RunID: "bound", Session: string(stand.sess.ID()),
+		AutomaticSessionItems: []string{"attachment"},
+		ControllerIdentity:    session.Identity{},
+		PaneAccess:            &turnPaneAccess{run: "bound"},
+	}
+	tools := &testTurnTools{ctx: bound, grant: turnGrantForTest(), dispatcher: stand.dispatcher}
+	bridge, _, err := stand.minter.Mint(turnbearer.Authority{Tools: tools})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tools.admissions != 0 {
+		t.Fatal("Mint minted a grant before admission")
+	}
+	first := newS14MCPClientWithToken(t, stand.endpoint.SocketPath(), envToken(t, bridge.Env))
+	if resp := s14Await(t, first.startCall(t, "alpha.call", map[string]any{})); resp.failed != "" {
+		t.Fatal(resp.failed)
+	}
+	if calls := stand.dispatcher.recorded(); len(calls) != 1 || !reflect.DeepEqual(calls[0].RunContext, bound) {
+		t.Fatalf("admission reconstructed the bound run context: %+v", calls)
+	}
+	second := newS14MCPClientWithToken(t, stand.endpoint.SocketPath(), envToken(t, bridge.Env))
+	if resp := s14Await(t, second.startCall(t, "alpha.call", map[string]any{})); resp.failed == "" {
+		t.Fatal("simultaneous second connection was admitted")
+	}
+	if err := first.writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	waittest.WaitFor(t, "first connection release", func() bool { return len(stand.endpoint.AdmittedSessions()) == 0 })
+	third := newS14MCPClientWithToken(t, stand.endpoint.SocketPath(), envToken(t, bridge.Env))
+	if resp := s14Await(t, third.startCall(t, "alpha.call", map[string]any{})); resp.failed != "" {
+		t.Fatal(resp.failed)
+	}
+	if tools.admissions != 2 {
+		t.Fatalf("grant owner called %d times, want admission and reconnect", tools.admissions)
+	}
+}
+
+type turnSecret struct{ value string }
+
+func (s turnSecret) FindKnown(_ context.Context, text string) ([]assistant.KnownMatch, error) {
+	if at := strings.Index(text, s.value); at >= 0 {
+		return []assistant.KnownMatch{{Start: at, End: at + len(s.value), SecretName: "test-secret"}}, nil
+	}
+	return nil, nil
+}
+
+type turnPerson struct {
+	store  *assistant.ApprovalStore
+	asked  chan *assistant.ApprovalRequest
+	answer chan struct{}
+	egress chan struct{}
+}
+
+func (q *turnPerson) Ask(ctx context.Context, req *assistant.ApprovalRequest) assistant.Answer {
+	q.asked <- req
+	select {
+	case <-q.answer:
+	case <-ctx.Done():
+		return assistant.Unanswered{Err: ctx.Err()}
+	}
+	q.store.Approve(assistant.Approval{RunID: req.RunID, Attempt: req.Attempt, Tool: req.Tool, CallID: req.CallID, ArgHash: req.ArgHash, Effect: req.Effect})
+	return assistant.Approved{}
+}
+
+func (q *turnPerson) AskEgress(_ context.Context, req *assistant.EgressRequest) assistant.Answer {
+	close(q.egress)
+	return assistant.Declined{Reason: "keep the secret local"}
+}
+
+func TestTurnBearerSelectsRealAssistantApprovalAndEgressChain(t *testing.T) {
+	stand := newTurnStand(t, &turnDispatcher{})
+	client, _, err := assistant.NewClientAndRegistry(log.NewSlogAdapter(nil), nil, content.Floor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secret.txt")
+	secret := "a-bearer-test-secret-not-for-the-agent" //nolint:gosec // synthetic vault material for the egress test
+	if err = os.WriteFile(path, []byte(secret), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	grant := content.EffectPolicy{Observe: content.EffectRow{Decision: content.DecisionAsk}}.AsGrant([]content.GrantScope{{Kind: content.ResourcePath, ID: dir}})
+	store := assistant.NewApprovalStore()
+	person := &turnPerson{store: store, asked: make(chan *assistant.ApprovalRequest, 1), answer: make(chan struct{}), egress: make(chan struct{})}
+	tools, err := assistant.BindRunTools(client, assistant.AskParams{
+		Grant: &grant, FreshGrant: func() *content.Grant { return &grant },
+		RunID: "real-chain", SessionID: string(stand.sess.ID()), Attempt: 1,
+		AttemptLedger: attemptLedgerForTest(t), KnownMaterial: turnSecret{value: secret}, Approvals: store, Questioner: person,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge, _, err := stand.minter.Mint(turnbearer.Authority{Tools: tools})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridgeClient := newS14MCPClientWithToken(t, stand.endpoint.SocketPath(), envToken(t, bridge.Env))
+	result := bridgeClient.startCall(t, "files.read", map[string]any{"path": path})
+	select {
+	case <-person.asked:
+	case early := <-result:
+		t.Fatalf("call answered without reaching assistant approval: %s", early.raw)
+	case <-time.After(10 * time.Second):
+		t.Fatal("assistant ask did not reach approval service")
+	}
+	select {
+	case <-result:
+		t.Fatal("call answered before approval")
+	default:
+	}
+	close(person.answer)
+	resp := s14Await(t, result)
+	select {
+	case <-person.egress:
+	default:
+		t.Fatal("assistant egress screen was bypassed")
+	}
+	if strings.Contains(string(resp.result), secret) || strings.Contains(resp.failed, secret) {
+		t.Fatal("declined secret reached bridge")
+	}
+	if len(stand.dispatcher.recorded()) != 0 {
+		t.Fatal("turn routed through pane dispatcher")
 	}
 }

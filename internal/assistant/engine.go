@@ -327,51 +327,14 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 		grant := *p.Grant
 		grant.Policy = grant.Policy.WithFloor(c.floor)
 		permitted := c.tools.ForGrant(grant)
-		// The approval store is the client's own (process-lifetime, one
-		// per client, keyed by the exact proposal); a caller may pass one
-		// explicitly.
-		approvals := p.Approvals
-		if approvals == nil {
-			approvals = c.approvals
-		}
-		// The fresh grant of ADR-anntnxdj §3: the caller's mint, wearing the
-		// floor every grant this engine hands a run wears. The floor is the
-		// ENGINE's (it is the build's), and a mint that came back without it
-		// would be a second, weaker authority for the calls after an answer.
-		var freshGrant func() *content.Grant
-		if p.FreshGrant != nil {
-			freshGrant = func() *content.Grant {
-				minted := p.FreshGrant()
-				if minted == nil {
-					return nil
-				}
-				fresh := *minted
-				fresh.Policy = fresh.Policy.WithFloor(c.floor)
-				return &fresh
-			}
-		}
-		mw, err := newPolicyMiddleware(askLog, grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.SessionID, p.Attempt, p.TurnEntryID, p.Requester, Attachments{AutomaticItems: p.AutomaticSessionItems, MarkedWindows: p.MarkedSessionWindows}, func(call ToolCall) error {
+		kernel, err := c.bindRunKernel(askLog, p, func(call ToolCall) error {
 			return sink(AskEvent{Kind: AskToolCall, Call: &call})
-		}, toolSeams{
-			sessions:          p.SessionSource,
-			screenCapture:     p.ScreenCapture,
-			noteOperation:     p.NoteOperation,
-			snippetOperation:  p.SnippetOperation,
-			fetcher:           p.Fetcher,
-			snapshots:         c.snapshots,
-			runID:             p.RunID,
-			expansions:        p.Expansions,
-			workerStore:       p.Workers,
-			workerEnvironment: p.WorkerEnvironment,
-			scripts:           p.Scripts,
-			cwd:               p.Cwd,
-			paneAccessBinder:  p.PaneAccessBinder,
-			questioner:        p.Questioner,
-			freshGrant:        freshGrant,
 		})
 		if err != nil {
 			return err
 		}
+		mw := middlewareForKernel(kernel)
+
 		if p.Presentation != nil {
 			mw.presentation = *p.Presentation
 			mw.presentationState = newPresentationState(p.Presentation.Loaded)

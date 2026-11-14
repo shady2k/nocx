@@ -143,7 +143,8 @@ const TokenEnvVar = "NOCX_AGENT_TOKEN"
 // what the mint produces; a value of any other length is not one of ours.
 const (
 	TokenHexLen = 64
-	TokenLen    = TokenHexLen + 1
+	TokenMagic  = "NXTB1:"
+	TokenLen    = len(TokenMagic) + TokenHexLen + 1
 )
 
 // ErrShortToken means the connection ended before a whole bearer arrived, and
@@ -156,13 +157,7 @@ var (
 	ErrNotAToken  = errors.New("toolendpoint: these bytes are not a tool token")
 )
 
-// StartsToken reports whether b can begin a bearer this build understands.
-//
-// A connection off the helper's lane presents a bearer only when it has one —
-// every local agent presents none — so a reader has to decide from the FIRST
-// byte whether the bytes ahead are a preamble or the first request. A JSON-RPC
-// request starts with '{' or whitespace; a bearer starts with a lower-case hex
-// digit. The alphabet is stated here because this package owns it.
+// StartsToken reports whether b is in the raw bearer hex alphabet.
 func StartsToken(b byte) bool {
 	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f')
 }
@@ -187,7 +182,7 @@ func EncodeToken(token string) ([]byte, error) {
 	if !isTokenHex(token) {
 		return nil, ErrNotAToken
 	}
-	return []byte(token + "\n"), nil
+	return []byte(TokenMagic + token + "\n"), nil
 }
 
 // ReadToken reads one bearer, never past it.
@@ -196,8 +191,8 @@ func ReadToken(r io.Reader) (string, error) {
 	if _, err := io.ReadFull(r, buf); err != nil {
 		return "", fmt.Errorf("%w: %v", ErrShortToken, err)
 	}
-	if buf[TokenHexLen] != '\n' || !isTokenHex(string(buf[:TokenHexLen])) {
+	if string(buf[:len(TokenMagic)]) != TokenMagic || buf[TokenLen-1] != '\n' || !isTokenHex(string(buf[len(TokenMagic):TokenLen-1])) {
 		return "", ErrNotAToken
 	}
-	return string(buf[:TokenHexLen]), nil
+	return string(buf[len(TokenMagic) : TokenLen-1]), nil
 }

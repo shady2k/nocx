@@ -26,6 +26,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/shady2k/nocx/internal/toolendpoint/panebind"
 )
 
 // bearerDialer hands the bridge one end of an in-memory connection and READS
@@ -148,14 +150,14 @@ func TestTheBridgePresentsTheBearerBeforeAnyRequest(t *testing.T) {
 	if _, _, err := link.attach(context.Background()); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
-	got := dialer.awaitBytes(t, len(testBearer)+1)
-	if !strings.HasPrefix(got, testBearer+"\n") {
+	got := dialer.awaitBytes(t, panebind.TokenLen)
+	if !strings.HasPrefix(got, panebind.TokenMagic+testBearer+"\n") {
 		t.Fatalf("the connection began with %q, want the bearer and nothing before it", got)
 	}
 	// AND IT IS FIRST: no attach may put a byte in front of it, so once the
 	// bearer has arrived the connection is quiet until the caller writes.
-	if got != testBearer+"\n" {
-		t.Fatalf("the bridge wrote %q after the bearer, before any request", got[len(testBearer)+1:])
+	if got != panebind.TokenMagic+testBearer+"\n" {
+		t.Fatalf("the bridge wrote %q after the bearer, before any request", got[panebind.TokenLen:])
 	}
 }
 
@@ -188,7 +190,7 @@ func TestTheRequestFollowsTheBearerOnTheSameConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}
-	if got := dialer.awaitBytes(t, len(testBearer)+1); got != testBearer+"\n" {
+	if got := dialer.awaitBytes(t, panebind.TokenLen); got != panebind.TokenMagic+testBearer+"\n" {
 		t.Fatalf("the connection began with %q, want the bearer alone", got)
 	}
 	// THE CALLER'S REQUEST, through the same send path the server uses, so what
@@ -197,15 +199,15 @@ func TestTheRequestFollowsTheBearerOnTheSameConnection(t *testing.T) {
 	if _, err := conn.send(context.Background(), 1, "tools/list", nil); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	got := dialer.awaitBytes(t, len(testBearer)+1+1)
-	if !strings.HasPrefix(got, testBearer+"\n") {
+	got := dialer.awaitBytes(t, panebind.TokenLen+1)
+	if !strings.HasPrefix(got, panebind.TokenMagic+testBearer+"\n") {
 		t.Fatalf("the connection began with %q, want the bearer and nothing before it", got)
 	}
-	after := got[len(testBearer)+1:]
+	after := got[panebind.TokenLen:]
 	if !strings.Contains(after, "tools/list") {
 		t.Fatalf("the bearer was followed by %q, want the caller's request", after)
 	}
-	if strings.Index(got, "tools/list") < len(testBearer)+1 {
+	if strings.Index(got, "tools/list") < panebind.TokenLen {
 		t.Fatalf("the request overtook the bearer: %q", got)
 	}
 }
@@ -222,7 +224,7 @@ func TestAReconnectPresentsTheBearerAgain(t *testing.T) {
 	if _, _, err := link.attach(ctx); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
-	if got := dialer.awaitBytes(t, len(testBearer)+1); !strings.HasPrefix(got, testBearer+"\n") {
+	if got := dialer.awaitBytes(t, panebind.TokenLen); !strings.HasPrefix(got, panebind.TokenMagic+testBearer+"\n") {
 		t.Fatalf("the first connection began with %q, want the bearer", got)
 	}
 
@@ -247,7 +249,7 @@ func TestAReconnectPresentsTheBearerAgain(t *testing.T) {
 
 	// AND THE NEW CONNECTION CARRIES THE BEARER: its own bytes, not the first
 	// connection's continued.
-	if got := dialer.awaitBytesAt(t, 1, len(testBearer)+1); !strings.HasPrefix(got, testBearer+"\n") {
+	if got := dialer.awaitBytesAt(t, 1, panebind.TokenLen); !strings.HasPrefix(got, panebind.TokenMagic+testBearer+"\n") {
 		t.Fatalf("the reconnected connection began with %q, want the bearer again", got)
 	}
 }

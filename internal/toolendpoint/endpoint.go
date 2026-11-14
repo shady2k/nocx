@@ -154,7 +154,7 @@ type Endpoint struct {
 	// hold two intervals with identical approval, and only the epoch says which
 	// of them a live connection belongs to.
 	admitted map[string]map[*net.UnixConn]AdmissionEpoch
-	// retired is the highest epoch per session whose interval has ENDED, and
+	// retired is the highest epoch per pane whose interval has ENDED, and
 	// it only ever moves forward. A publication naming an epoch at or below it
 	// is refused: the interval that decided the admission is over, so a
 	// connection arriving late from it must not be recorded. It is the one
@@ -220,7 +220,9 @@ type SessionAdmissions interface {
 	// RetireAdmissions ends the authority an interval carried. Every live
 	// connection admitted for the session under an epoch at or before epoch is
 	// closed — which cancels the request contexts in flight on it — and every
-	// later publication naming one of those epochs is refused. It returns how
+	// later pane publication naming one of those epochs is refused. Turn
+	// authorizers must hold their live-authority guard across publication and
+	// mark it inactive before calling RetireAdmissions. It returns how
 	// many connections it closed.
 	//
 	// It is idempotent in the sense that matters: retiring an epoch that was
@@ -265,13 +267,18 @@ func (e *Endpoint) RetireAdmissions(session string, epoch AdmissionEpoch) int {
 		return 0
 	}
 	e.mu.Lock()
-	if epoch > e.retired[session] {
+	// Turn authority guards publication until retirement has made it inactive.
+	// Its unique scopes need no permanent endpoint tombstones; pane intervals do.
+	if !strings.HasPrefix(session, TurnScope("")) && epoch > e.retired[session] {
 		e.retired[session] = epoch
 	}
 	// The floor, not the argument, decides what is closed: an epoch retired
 	// earlier has already been refused, and a connection stamped with it
 	// cannot exist. Reading it back keeps the two in one place.
-	floor := e.retired[session]
+	floor := epoch
+	if retired := e.retired[session]; retired > floor {
+		floor = retired
+	}
 	var connections []*net.UnixConn
 	for conn, admitted := range e.admitted[session] {
 		if admitted <= floor {
@@ -541,50 +548,22 @@ func (e *Endpoint) readPaneRecord(conn *net.UnixConn) (string, string, error) {
 	return "", "", err
 }
 
-// readPresentedToken reads the bearer a connection off the helper's lane
-// presents ahead of its first request, and answers empty when it presents
-// none.
-//
-// A BEARER IS OPTIONAL HERE AND A RECORD IS NOT. On the helper's lane the
-// helper's pane record must come first (readPaneRecord); a connection that
-// dials this socket itself is either an ordinary local agent, which presents
-// nothing, or the assistant turn's bridge, which presents the bearer
-// nocx-server minted for that turn (ADR-anntnxdj decision 3). The first byte
-// decides: a JSON-RPC request starts with '{' or whitespace, and a bearer
-// starts with a lower-case hex digit. Bytes that begin like a bearer and then
-// fail its reader are refused rather than read as a request — those bytes are
-// a claim, and a malformed claim is not silence.
-//
-// The deadline is a HANG LIMIT and is cleared whether or not the read worked:
-// it bounds a peer that connected and said nothing, and what follows is a
-// long-lived request loop whose own window starts at the top of the loop.
+// readPresentedToken distinguishes an explicit turn preamble from JSON.
+// Local admission has already happened; no local request is dispatched until
+// this first-byte check completes. A partial preamble has one absolute limit.
 func (e *Endpoint) readPresentedToken(conn *net.UnixConn, reader *bufio.Reader) (string, error) {
+	first, err := reader.Peek(1)
+	if err != nil {
+		return "", nil
+	}
+	if first[0] != panebind.TokenMagic[0] {
+		return "", nil
+	}
 	if err := conn.SetReadDeadline(time.Now().Add(paneRecordTimeout)); err != nil {
 		return "", err
 	}
-	first, err := reader.Peek(1)
-	if err != nil {
-		_ = conn.SetReadDeadline(time.Time{})
-		// A peer that said nothing and is gone is not a claim about a turn;
-		// the decision below answers it exactly as it did before this way in
-		// existed, and the read loop ends on the same EOF.
-		if isReadTimeout(err) || errors.Is(err, io.EOF) {
-			return "", nil
-		}
-		return "", err
-	}
-	if !panebind.StartsToken(first[0]) {
-		_ = conn.SetReadDeadline(time.Time{})
-		return "", nil
-	}
-	token, err := panebind.ReadToken(reader)
-	_ = conn.SetReadDeadline(time.Time{})
-	return token, err
-}
-
-func isReadTimeout(err error) bool {
-	var netErr net.Error
-	return errors.As(err, &netErr) && netErr.Timeout()
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
+	return panebind.ReadToken(reader)
 }
 
 func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
@@ -607,27 +586,6 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 			return
 		}
 		peer.Pane, peer.Token = pane, token
-	} else if admitter, ok := e.cfg.Auth.(TurnBearerAdmitter); ok && admitter.AdmitsTurnBearer() {
-		// A CONNECTION OFF THE HELPER'S LANE MAY PRESENT A TURN'S BEARER
-		// (ADR-anntnxdj decision 3). It is read BEFORE the decision, like the
-		// helper's record, because the authorizer decides on it: nocx-server
-		// starts the assistant's agent, so its bridge is not in a pane's
-		// process tree, and the bearer is the only thing that names the turn
-		// it belongs to. A connection that presents none is served exactly as
-		// before — no bytes consumed, the same JSON ahead of it.
-		//
-		// The capability is asked first: an authorizer that cannot admit a
-		// turn has nothing to decide from these bytes, and a peer that
-		// connects and says nothing must still be refused at once.
-		reader = bufio.NewReaderSize(conn, maxEnvelopeBytes)
-		token, err := e.readPresentedToken(conn, reader)
-		if err != nil {
-			code, message, reason := rpcErrorFor(err)
-			e.observePeerRefusal(peer, reason)
-			e.writeError(conn, nil, code, message, reason)
-			return
-		}
-		peer.Token = token
 	}
 
 	// published records that the authorizer admitted this connection through
@@ -637,14 +595,47 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 	// rather than served.
 	published := false
 	publishedSession := ""
-	invocation, release, err := e.cfg.Auth.Admit(peer, func(session string, epoch AdmissionEpoch) bool {
-		if !e.publishAdmission(session, epoch, conn) {
-			return false
+	admit := func() (assistant.ToolInvocation, func(), error) {
+		return e.cfg.Auth.Admit(peer, func(session string, epoch AdmissionEpoch) bool {
+			if !e.publishAdmission(session, epoch, conn) {
+				return false
+			}
+			published = true
+			publishedSession = session
+			return true
+		})
+	}
+	invocation, release, err := admit()
+	if !onLane {
+		if admitter, ok := e.cfg.Auth.(TurnBearerAdmitter); ok && admitter.AdmitsTurnBearer() {
+			reader = bufio.NewReaderSize(conn, maxEnvelopeBytes)
+			// A refused local peer may still present a turn bearer, but cannot
+			// reserve a serve goroutine forever without sending its claim.
+			if err != nil {
+				_ = conn.SetReadDeadline(time.Now().Add(paneRecordTimeout))
+			}
+			token, readErr := e.readPresentedToken(conn, reader)
+			_ = conn.SetReadDeadline(time.Time{})
+			if readErr != nil || token != "" {
+				if published {
+					e.forgetSession(publishedSession, conn)
+					published = false
+					publishedSession = ""
+				}
+				if release != nil {
+					release()
+					release = nil
+				}
+				if readErr != nil {
+					err = readErr
+				} else {
+					peer.Token = token
+					invocation, release, err = admit()
+				}
+			}
 		}
-		published = true
-		publishedSession = session
-		return true
-	})
+	}
+
 	if err == nil && !published {
 		err = errUnpublishedAdmission
 	}
@@ -791,6 +782,10 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 			requestInvocation.Terminal = terminal
 			requestInvocation.Method = request.Method
 			requestInvocation.RawParams = append(json.RawMessage(nil), request.Params...)
+			dispatch := e.cfg.Dispatch
+			if requestInvocation.Dispatcher != nil {
+				dispatch = requestInvocation.Dispatcher
+			}
 			var result string
 			var dispatchErr error
 			// TWO ANSWERS COME FROM THE GRANT RATHER THAN FROM THE
@@ -804,10 +799,10 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 				result = string(instructions)
 			} else if request.Method == "tools.catalogue" {
 				var catalogueResult []byte
-				catalogueResult, dispatchErr = buildCatalogue(e.cfg.Dispatch, requestInvocation.Grant)
+				catalogueResult, dispatchErr = buildCatalogue(dispatch, requestInvocation.Grant)
 				result = string(catalogueResult)
 			} else {
-				result, dispatchErr = e.cfg.Dispatch.Dispatch(requestInvocation)
+				result, dispatchErr = dispatch.Dispatch(requestInvocation)
 			}
 			dispatchErr = terminal.Delivery(requestCtx, dispatchErr)
 			// Retire before publishing any answer: its recipient may reuse the id

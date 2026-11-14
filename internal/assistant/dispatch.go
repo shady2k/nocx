@@ -17,6 +17,8 @@ import (
 // session and grant are already bound by the caller adapter; method params
 // cannot add authority to either one.
 type ToolInvocation struct {
+	// Dispatcher selects the admitted run's own authority pipeline.
+	Dispatcher ToolDispatcher
 	// Terminal is shared by cancellation, attempt recording and delivery.
 	Terminal   *CallTerminal
 	Context    context.Context

@@ -660,13 +660,10 @@ func newS14MCPClientWithToken(t *testing.T, socket, token string) *s14MCPClient 
 	t.Helper()
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
-	srv, err := mcpstdio.New(mcpstdio.Config{Socket: socket, Token: token})
-	if err != nil {
-		t.Fatalf("mcpstdio.New: %v", err)
-	}
+	t.Setenv("NOCX_AGENT_TOKEN", token)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- srv.Serve(ctx, inR, outW) }()
+	go func() { done <- mcpstdio.Serve(ctx, inR, outW, socket, nil) }()
 
 	c := &s14MCPClient{writer: inW, pending: make(map[string]chan s14MCPResult)}
 	go c.readLoop(outR)

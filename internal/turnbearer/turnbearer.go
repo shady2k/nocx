@@ -14,10 +14,9 @@
 //
 // # What the bearer carries
 //
-// Exactly what the in-process assistant run has: the run's id, the pane's
-// session, the run's pane access and the run's grant. Nothing is derived here;
-// the caller supplies the authority the run was minted with, so this package
-// cannot become a second place that decides what an assistant run may do.
+// The assistant's already-built run handle. The handle owns the complete bound
+// context, grant minting at admission and refresh after an answer, and the same
+// authority pipeline the in-process caller uses.
 //
 // # The secret
 //
@@ -34,25 +33,34 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/toolendpoint"
 	"github.com/shady2k/nocx/internal/toolendpoint/panebind"
 )
 
-// Authority is the authority one assistant turn's bearer carries: the same
-// facts the in-process run is minted with.
+// Authority binds a bearer to the assistant's already-built run, not a
+// reconstruction of its grant or pane capabilities.
 type Authority struct {
-	// RunID is the turn's run, the identity the ledger and the block use.
-	RunID string
-	// Session is the pane the person asked from.
-	Session string
-	// PaneAccess is the run's authority over panes it spawned, exactly as the
-	// in-process run binds it (internal/app's pane-access hub, keyed by this
-	// run id).
-	PaneAccess any
-	// Grant is the run's authority over its tools, minted by the same owner
-	// the in-process run mints from (transport's runGrantFor).
-	Grant content.Grant
+	Tools    assistant.TurnTools
+	lifetime *turnLifetime
+}
+
+// turnLifetime serializes publication with retirement without retaining a
+// permanent endpoint tombstone for every completed turn.
+type turnLifetime struct {
+	mu   sync.Mutex
+	live bool
+}
+
+// Publish makes publication part of the live bearer decision. A lookup made
+// before retirement cannot publish after retirement has closed this lifetime.
+func (a Authority) Publish(publish func() bool) bool {
+	if a.lifetime == nil {
+		return false
+	}
+	a.lifetime.mu.Lock()
+	defer a.lifetime.mu.Unlock()
+	return a.lifetime.live && publish()
 }
 
 // TurnBridge is the MCP server entry the agent launches for one turn: the argv
@@ -110,9 +118,11 @@ func (m *Minter) Mint(authority Authority) (TurnBridge, func(), error) {
 		return TurnBridge{}, nil, errors.New("turnbearer: no endpoint")
 	case m.helper == "":
 		return TurnBridge{}, nil, errors.New("turnbearer: no helper binary for the bridge")
-	case authority.RunID == "":
+	case authority.Tools == nil:
+		return TurnBridge{}, nil, errors.New("turnbearer: no assistant run")
+	case authority.Tools.RunContext().RunID == "":
 		return TurnBridge{}, nil, errors.New("turnbearer: no run id")
-	case authority.Session == "":
+	case authority.Tools.RunContext().Session == "":
 		return TurnBridge{}, nil, errors.New("turnbearer: no session")
 	}
 	token, err := mintToken()
@@ -120,6 +130,7 @@ func (m *Minter) Mint(authority Authority) (TurnBridge, func(), error) {
 		return TurnBridge{}, nil, err
 	}
 	m.mu.Lock()
+	authority.lifetime = &turnLifetime{live: true}
 	m.turns = append(m.turns, turn{token: token, authority: authority})
 	m.mu.Unlock()
 
@@ -130,14 +141,14 @@ func (m *Minter) Mint(authority Authority) (TurnBridge, func(), error) {
 	var once sync.Once
 	retire := func() {
 		once.Do(func() {
-			// Refuse further admissions first, then close what is already
-			// admitted. Both orders are safe against a concurrent admission —
-			// the endpoint's retirement sets a floor the publication is
-			// checked against — but this one makes a reconnect that races the
-			// retirement find no turn at all rather than a connection that is
-			// about to be closed.
+			// Close publication first. A lookup already in flight still holds
+			// this lifetime and cannot publish after the live bit is cleared.
+			// Then remove the secret and close any published connection.
+			authority.lifetime.mu.Lock()
+			authority.lifetime.live = false
+			authority.lifetime.mu.Unlock()
 			m.forget(token)
-			m.endpoint.RetireAdmissions(toolendpoint.TurnScope(authority.RunID), toolendpoint.TurnEpoch)
+			m.endpoint.RetireAdmissions(toolendpoint.TurnScope(authority.Tools.RunContext().RunID), toolendpoint.TurnEpoch)
 		})
 	}
 	return bridge, retire, nil
@@ -179,6 +190,7 @@ func (m *Minter) forget(token string) {
 			kept = append(kept, t)
 		}
 	}
+	clear(m.turns[len(kept):])
 	m.turns = kept
 }
 

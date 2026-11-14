@@ -607,22 +607,10 @@ func (a *toolAuthorizer) Admit(peer toolendpoint.Peer, publish func(session stri
 	return invocation, release, nil
 }
 
-// admitTurn decides authority for the assistant's bridge from the bearer
-// nocx-server minted for one turn.
-//
-// WHAT IT CARRIES IS WHAT THE IN-PROCESS RUN CARRIES, and it is supplied
-// rather than derived: the mint holds the run id, the pane, the run's pane
-// access and the run's grant, all minted by the owners the in-process run
-// already uses. This function adds the facts that belong to every admitted
-// caller — the workspace, the session's identity, the descendant read and
-// write paths — from the same fields Admit's other arms use, so there is one
-// derivation of them and not a second one beside the run's.
-//
-// THE SLOT IS THE TURN'S OWN. A turn's bridge must not compete with the pane's
-// caller for the pane's seat: a person's own agent in that pane keeps working
-// while the assistant's turn is open (ADR-anntnxdj decision 3). One live
-// connection per turn, released when it ends, so a reconnect within the turn
-// is admitted.
+// admitTurn binds a connection to the turn's existing assistant kernel. Its
+// admission method invokes the run's grant owner and carries its complete bound
+// context unchanged. Publication and retirement share the bearer's lifetime lock.
+// The turn owns a slot distinct from the pane caller's slot.
 func (a *toolAuthorizer) admitTurn(token string, publish func(session string, epoch toolendpoint.AdmissionEpoch) bool) (assistant.ToolInvocation, func(), error) {
 	if a == nil || a.turnGrants == nil {
 		return assistant.ToolInvocation{}, nil, toolendpoint.ErrTurnBearerRefused
@@ -631,32 +619,18 @@ func (a *toolAuthorizer) admitTurn(token string, publish func(session string, ep
 	if !live {
 		return assistant.ToolInvocation{}, nil, toolendpoint.ErrTurnBearerRefused
 	}
-	release, acquired := a.turnSlots.acquire(session.ID(turn.RunID))
+	release, acquired := a.turnSlots.acquire(session.ID(turn.Tools.RunContext().RunID))
 	if !acquired {
 		return assistant.ToolInvocation{}, nil, toolendpoint.ErrSessionCallerActive
 	}
-	invocation := assistant.ToolInvocation{
-		Context: context.Background(),
-		RunContext: agenttools.RunContext{
-			RunID:      turn.RunID,
-			Session:    turn.Session,
-			Workspace:  a.workspace,
-			PaneAccess: turn.PaneAccess,
-		},
-		Grant: turn.Grant,
+	invocation, err := turn.Tools.Admit()
+	if err != nil {
+		release()
+		return assistant.ToolInvocation{}, nil, err
 	}
-	if a.sessions != nil {
-		// The same identity the in-process run's binder reads, from the same
-		// registry. A session this coordinator does not hold leaves it zero,
-		// exactly as the binder does when its own Get fails.
-		if sess, err := a.sessions.Get(session.ID(turn.Session)); err == nil && sess != nil {
-			invocation.RunContext.ControllerIdentity = sess.Identity()
-		}
-	}
-	invocation.RunContext.SessionReads = a.sessionReads
-	invocation.RunContext.SessionKeys = a.sessionKeys
-	invocation.RunContext.SessionMessages = a.sessionMessages
-	if !publish(toolendpoint.TurnScope(turn.RunID), toolendpoint.TurnEpoch) {
+	if !turn.Publish(func() bool {
+		return publish(toolendpoint.TurnScope(turn.Tools.RunContext().RunID), toolendpoint.TurnEpoch)
+	}) {
 		release()
 		return assistant.ToolInvocation{}, nil, toolendpoint.ErrTurnBearerRefused
 	}

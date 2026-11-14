@@ -50,12 +50,16 @@ func newPolicyMiddleware(logger log.Logger, grant content.Grant, registry agentt
 	if err != nil {
 		return nil, err
 	}
+	return middlewareForKernel(k), nil
+}
+
+func middlewareForKernel(k *effectKernel) *policyMiddleware {
 	return &policyMiddleware{
 		carrier:           &callsCarrier{effectKernel: k},
 		kernel:            k,
-		grantProvider:     func() content.Grant { return grant },
+		grantProvider:     k.currentGrant,
 		presentationState: newPresentationState(nil),
-	}, nil
+	}
 }
 
 // WrapInvokableToolCall installs the pipeline on one tool call.

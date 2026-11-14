@@ -39,7 +39,8 @@ func kernelFor(t *testing.T, grant content.Grant, ledger AttemptLedger) *effectK
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	k, err := newEffectKernel(nil, grant, reg, ledger, nil, &fakeKnownMaterial{}, "run-1", "", 1, "turn-entry", nil, Attachments{}, nil)
+	k, err := newEffectKernel(nil, grant, reg, ledger, nil, &fakeKnownMaterial{}, "run-1", "", 1, "turn-entry", nil, Attachments{}, nil,
+		toolSeams{paneEnvironment: localPaneEnvironment()})
 	if err != nil {
 		t.Fatalf("newEffectKernel: %v", err)
 	}
@@ -270,7 +271,7 @@ func TestAPolicyAskDoesNotBecomeAFilesystemRead(t *testing.T) {
 	}
 
 	// And the capability minted from that very grant still refuses it.
-	capability, err := decl.Narrow(grant, refs, agenttools.RunContext{})
+	capability, err := decl.Narrow(grant, refs, localRunContext())
 	if err != nil {
 		t.Fatalf("narrow files.read: %v", err)
 	}
@@ -288,7 +289,7 @@ func TestAPolicyAskDoesNotBecomeAFilesystemRead(t *testing.T) {
 	if outcome, _, _ := kernel.decideInvocationWithReason(decl, escapeRefs, true, content.Invocation{Parsed: true}); outcome != policyPermit {
 		t.Fatalf("policy on the symlink %q gave outcome=%v; the lexical predicate cannot see the escape and must permit it here", escape, outcome)
 	}
-	escapeCapability, err := decl.Narrow(grant, escapeRefs, agenttools.RunContext{})
+	escapeCapability, err := decl.Narrow(grant, escapeRefs, localRunContext())
 	if err != nil {
 		t.Fatalf("narrow files.read for the symlink: %v", err)
 	}

@@ -1200,6 +1200,13 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		SessionSource: h.sessions,
 		Expansions:    h.expansions,
 		Workers:       h.workerStore,
+		// Where this pane is: the environmentForSession value the run's
+		// prompt facts already carry, which is also what the ledger records
+		// for the run — one derivation, read here rather than made again. It
+		// travels so a tool that can only act on this machine refuses a pane
+		// on another one instead of reading the local disk (ADR-anntnxdj §5,
+		// decision 3).
+		Environment: rc.promptFacts.Env,
 		// The one environment a spawn can reach in this slice: the machine
 		// nocx itself runs on. Derived through content's own id rule so the
 		// run fence and the tool's resolver name the same string without

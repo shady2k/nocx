@@ -29,6 +29,11 @@ func testAskParams(baseURL string) AskParams {
 		Model:     "probe-model",
 		SessionID: "lane-1",
 		Messages:  []Message{{Role: "user", Content: "hi"}},
+		// The pane these runs are asked from is on this machine, stated rather
+		// than left to a zero value: a run that names no pane is one the file
+		// tools refuse, and the transport always names it
+		// (environmentForSession).
+		Environment: localPaneEnvironment(),
 	}
 }
 

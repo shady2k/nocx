@@ -245,6 +245,15 @@ type AskParams struct {
 	// the tools refuse and say so, rather than starting a worker into
 	// something that would not hold it.
 	Workers WorkerRecord
+	// Environment is where the pane this run was asked in is — the identity
+	// the transport derives from the session's own facts
+	// (environmentForSession, the one owner of "where is this session") and
+	// hands over with the question. The kernel puts it on the run's
+	// agenttools.RunContext, where a tool that can only act on this machine
+	// reads it and refuses a pane elsewhere (ADR-anntnxdj §5, decision 3).
+	// The zero value names no pane, which those tools refuse rather than
+	// assume this machine.
+	Environment content.Environment
 	// WorkerEnvironment names the environment a spawn would reach. The
 	// composition root owns it, for the reason the tool's resolver is a
 	// constant: the spawner opens a local session, so a value the model

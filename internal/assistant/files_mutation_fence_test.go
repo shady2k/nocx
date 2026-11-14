@@ -91,7 +91,7 @@ func middlewareWatchingCalls(t *testing.T, grant content.Grant, ledger AttemptLe
 	mw, err := newPolicyMiddleware(nil, grant, reg, ledger, approvals, &fakeKnownMaterial{}, "run-1", "", 1, "", nil, Attachments{}, func(c ToolCall) error {
 		watch.seen = append(watch.seen, c)
 		return nil
-	})
+	}, toolSeams{paneEnvironment: localPaneEnvironment()})
 	if err != nil {
 		t.Fatalf("newPolicyMiddleware: %v", err)
 	}
@@ -285,11 +285,11 @@ func TestExecuteFilesMutations_HandTheCapabilityRefusalToTheKernelSeam(t *testin
 			if !ok {
 				t.Fatalf("%s not registered", tc.tool)
 			}
-			refs, err := decl.ResolveResources(map[string]any{"path": tc.path}, agenttools.RunContext{})
+			refs, err := decl.ResolveResources(map[string]any{"path": tc.path}, localRunContext())
 			if err != nil {
 				t.Fatalf("ResolveResources: %v", err)
 			}
-			capability, err := decl.Narrow(grant, refs, agenttools.RunContext{})
+			capability, err := decl.Narrow(grant, refs, localRunContext())
 			if err != nil {
 				t.Fatalf("Narrow: %v", err)
 			}

@@ -99,6 +99,15 @@ const (
 	// and it is why the refusal comes BEFORE the attempt is opened rather
 	// than after.
 	RefusedExpired PolicyRefusalReason = "refused-expired"
+	// RefusedRemotePane: this call's tool acts on THE MACHINE NOCX RUNS ON
+	// (files.read, files.edit, files.create are built on local.New()), and
+	// the pane the person asked from is on another one. Until stage 8 gives
+	// those tools the pane's own provider there is no capability that could
+	// do the work, so the call is refused and says the remote file tools are
+	// coming — the sentence a person and a model both read. It is not about
+	// this call's arguments, so proposing the same call differently changes
+	// nothing.
+	RefusedRemotePane PolicyRefusalReason = "refused-remote-pane"
 	// RefusedExpansionChanged: a value the person was shown beside the
 	// verbatim command moved between the question and this call, or could
 	// not be read again to check (nocx-4h0m7.5). Without substitution there
@@ -509,6 +518,7 @@ func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools
 		runCtx: agenttools.RunContext{
 			RunID:                 runID,
 			Session:               sessionID,
+			Environment:           runSeams.paneEnvironment,
 			AutomaticSessionItems: append([]string(nil), attached.AutomaticItems...),
 			MarkedSessionWindows:  markedWindows(attached.MarkedWindows),
 			ControllerIdentity:    controllerIdentity,
@@ -639,6 +649,7 @@ func (k *effectKernel) authorityChain(state *kernelCall) AuthorityChain {
 		},
 		Guards: []Guard{
 			kernelGrantGuard{kernel: k},
+			kernelPaneGuard{kernel: k},
 			kernelPolicyGuard{state: state},
 			kernelFloorGuard{kernel: k},
 			kernelEvidenceGuard{state: state},
@@ -912,6 +923,31 @@ func (g kernelGrantGuard) Refuse(_ context.Context, call Call) (string, bool) {
 		return "", false
 	}
 	return refusalResult(call.Tool(), RefusedExpired, ""), true
+}
+
+// kernelPaneGuard refuses a tool that acts on THIS machine's disk when the
+// run's pane is on another one (ADR-anntnxdj §5, decision 3): until stage 8
+// files.read, files.edit and files.create are built on local.New(), and on an
+// SSH pane they would read and write the local disk instead of the host the
+// person is working on.
+//
+// It is a GUARD and not a PreCall because it can only refuse — the policy may
+// well permit this call and that is not the question being asked — and it is
+// the ANSWER half of one fact whose GUARANTEE half is the capability
+// constructor (agenttools.narrow.go's localPaneOnly): the guard is what makes
+// the model read our sentence instead of a failure about a constructor, the
+// same split RefusedExpired uses. A chain that forgot this link still cannot
+// reach the disk, because no capability comes into existence.
+type kernelPaneGuard struct{ kernel *effectKernel }
+
+func (g kernelPaneGuard) Refuse(_ context.Context, call Call) (string, bool) {
+	if !agenttools.ReachesLocalDisk(call.Tool()) {
+		return "", false
+	}
+	if g.kernel.runCtx.Environment.Kind == content.EnvLocal {
+		return "", false
+	}
+	return refusalResult(call.Tool(), RefusedRemotePane, ""), true
 }
 
 // kernelFloorGuard is the fixed floor and the raw-command floor: the operations
@@ -1466,6 +1502,11 @@ func refusalResult(tool string, reason PolicyRefusalReason, kind DeclineKind, de
 		// keep trying. Only the person can start a turn, so the answer is
 		// to say so in words.
 		return "REFUSED: nocx did not run your call to " + tool + ": the authority this question was given has expired. Nothing further will run under it. Say what you were about to do, in words, so the person can ask again."
+	case RefusedRemotePane:
+		// The sentence names the reason the call has no capability at all,
+		// and what a model can still do: the pane's own shell is reachable
+		// (session.run acts where the pane is), the local disk is not.
+		return "REFUSED: nocx did not run your call to " + tool + ": this pane is on another machine, and nocx's file tools act on the machine nocx runs on — the remote file tools are coming. Use session.run to do the work in the pane, or say in words what you would need."
 	case RefusedFileChanged:
 		reason := "the file changed since approval, so the old approval no longer applies"
 		if len(detail) > 0 && detail[0] != "" {

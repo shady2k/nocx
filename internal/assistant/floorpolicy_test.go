@@ -23,7 +23,8 @@ func TestFloor_RefusesUnderMostPermissivePolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	k, err := newEffectKernel(nil, grant, reg, &fakeLedger{}, nil, &fakeKnownMaterial{}, "run-floor", "session-floor", 1, "", nil, Attachments{}, nil)
+	k, err := newEffectKernel(nil, grant, reg, &fakeLedger{}, nil, &fakeKnownMaterial{}, "run-floor", "session-floor", 1, "", nil, Attachments{}, nil,
+		toolSeams{paneEnvironment: localPaneEnvironment()})
 	if err != nil {
 		t.Fatalf("newEffectKernel: %v", err)
 	}
@@ -114,7 +115,8 @@ func TestFloor_ReasonIsTruthfulForReadAndWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	k, err := newEffectKernel(nil, grant, reg, &fakeLedger{}, nil, &fakeKnownMaterial{}, "run-floor-reason", "session-floor-reason", 1, "", nil, Attachments{}, nil)
+	k, err := newEffectKernel(nil, grant, reg, &fakeLedger{}, nil, &fakeKnownMaterial{}, "run-floor-reason", "session-floor-reason", 1, "", nil, Attachments{}, nil,
+		toolSeams{paneEnvironment: localPaneEnvironment()})
 	if err != nil {
 		t.Fatalf("newEffectKernel: %v", err)
 	}

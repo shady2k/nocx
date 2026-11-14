@@ -399,7 +399,7 @@ func middlewareForTurn(t *testing.T, grant content.Grant, ledger AttemptLedger, 
 	if source, ok := requester.(ScreenCaptureSource); ok {
 		screenCapture = source
 	}
-	mw, err := newPolicyMiddleware(nil, grant, reg, ledger, approvals, known, "run-1", sessionID, 1, turnEntryID, requester, Attachments{}, nil, toolSeams{screenCapture: screenCapture})
+	mw, err := newPolicyMiddleware(nil, grant, reg, ledger, approvals, known, "run-1", sessionID, 1, turnEntryID, requester, Attachments{}, nil, toolSeams{screenCapture: screenCapture, paneEnvironment: localPaneEnvironment()})
 	if err != nil {
 		t.Fatalf("newPolicyMiddleware: %v", err)
 	}
@@ -940,7 +940,7 @@ func TestMiddleware_StandingDeclineDoesNotLeakAcrossRuns(t *testing.T) {
 	if regErr != nil {
 		t.Fatalf("Assemble: %v", regErr)
 	}
-	mw2, mwErr := newPolicyMiddleware(nil, grant, reg, &fakeLedger{}, approvals, &fakeKnownMaterial{}, "run-2", "", 1, "", nil, Attachments{}, nil)
+	mw2, mwErr := newPolicyMiddleware(nil, grant, reg, &fakeLedger{}, approvals, &fakeKnownMaterial{}, "run-2", "", 1, "", nil, Attachments{}, nil, toolSeams{paneEnvironment: localPaneEnvironment()})
 	if mwErr != nil {
 		t.Fatalf("newPolicyMiddleware(run-2): %v", mwErr)
 	}
@@ -1334,11 +1334,11 @@ func TestExecuteFilesRead_WindowIsHonest(t *testing.T) {
 	if !ok {
 		t.Fatal("files.read not in the registry")
 	}
-	refs, err := decl.ResolveResources(map[string]any{"path": short}, agenttools.RunContext{})
+	refs, err := decl.ResolveResources(map[string]any{"path": short}, localRunContext())
 	if err != nil {
 		t.Fatalf("ResolveResources: %v", err)
 	}
-	narrowed, err := decl.Narrow(grant, refs, agenttools.RunContext{})
+	narrowed, err := decl.Narrow(grant, refs, localRunContext())
 	if err != nil {
 		t.Fatalf("Narrow: %v", err)
 	}
@@ -1364,11 +1364,11 @@ func TestExecuteFilesRead_WindowIsHonest(t *testing.T) {
 	// a zero-length window, no error.
 	empty := filepath.Join(dir, "empty.txt")
 	writeFile(t, empty, "")
-	emptyRefs, err := decl.ResolveResources(map[string]any{"path": empty}, agenttools.RunContext{})
+	emptyRefs, err := decl.ResolveResources(map[string]any{"path": empty}, localRunContext())
 	if err != nil {
 		t.Fatalf("ResolveResources(empty): %v", err)
 	}
-	emptyNarrowed, err := decl.Narrow(grant, emptyRefs, agenttools.RunContext{})
+	emptyNarrowed, err := decl.Narrow(grant, emptyRefs, localRunContext())
 	if err != nil {
 		t.Fatalf("Narrow(empty): %v", err)
 	}
@@ -1938,7 +1938,7 @@ func TestMiddleware_RefusesWhenAnyResolvedResourceIsOutsideScope(t *testing.T) {
 	if !found {
 		t.Fatal("files.read declaration not found")
 	}
-	mw, err := newPolicyMiddleware(nil, grant, reg, &fakeLedger{}, nil, &fakeKnownMaterial{}, "run-1", "", 1, "", nil, Attachments{}, nil)
+	mw, err := newPolicyMiddleware(nil, grant, reg, &fakeLedger{}, nil, &fakeKnownMaterial{}, "run-1", "", 1, "", nil, Attachments{}, nil, toolSeams{paneEnvironment: localPaneEnvironment()})
 	if err != nil {
 		t.Fatalf("newPolicyMiddleware: %v", err)
 	}

@@ -39,7 +39,7 @@ func TestExecuteFilesEditChangesTheScopedFile(t *testing.T) {
 	if !ok {
 		t.Fatal("files.read not registered")
 	}
-	capRead, narrowErr := readDecl.Narrow(grant, []agenttools.ResourceRef{{Kind: content.ResourcePath, ID: path}}, agenttools.RunContext{})
+	capRead, narrowErr := readDecl.Narrow(grant, []agenttools.ResourceRef{{Kind: content.ResourcePath, ID: path}}, localRunContext())
 	if narrowErr != nil {
 		t.Fatalf("Narrow read: %v", narrowErr)
 	}
@@ -53,7 +53,7 @@ func TestExecuteFilesEditChangesTheScopedFile(t *testing.T) {
 	if decodeErr := json.Unmarshal([]byte(readOut), &readResult); decodeErr != nil {
 		t.Fatalf("decode read result: %v", decodeErr)
 	}
-	capEdit, editNarrowErr := decl.Narrow(grant, []agenttools.ResourceRef{{Kind: content.ResourcePath, ID: path}}, agenttools.RunContext{})
+	capEdit, editNarrowErr := decl.Narrow(grant, []agenttools.ResourceRef{{Kind: content.ResourcePath, ID: path}}, localRunContext())
 	if editNarrowErr != nil {
 		t.Fatalf("Narrow edit: %v", editNarrowErr)
 	}
@@ -97,11 +97,11 @@ func TestExecuteFilesCreateCreatesScopedFile(t *testing.T) {
 	if !ok {
 		t.Fatal("files.create not registered")
 	}
-	refs, err := decl.ResolveResources(map[string]any{"path": path}, agenttools.RunContext{})
+	refs, err := decl.ResolveResources(map[string]any{"path": path}, localRunContext())
 	if err != nil {
 		t.Fatalf("ResolveResources: %v", err)
 	}
-	capability, err := decl.Narrow(grant, refs, agenttools.RunContext{})
+	capability, err := decl.Narrow(grant, refs, localRunContext())
 	if err != nil {
 		t.Fatalf("Narrow: %v", err)
 	}
@@ -144,11 +144,11 @@ func TestExecuteFilesCreateCreatesScopedFile(t *testing.T) {
 	if !ok {
 		t.Fatal("files.read not registered")
 	}
-	readRefs, err := readDecl.ResolveResources(map[string]any{"path": escapeExistingPath}, agenttools.RunContext{})
+	readRefs, err := readDecl.ResolveResources(map[string]any{"path": escapeExistingPath}, localRunContext())
 	if err != nil {
 		t.Fatalf("ResolveResources(read escape): %v", err)
 	}
-	readCapability, err := readDecl.Narrow(grant, readRefs, agenttools.RunContext{})
+	readCapability, err := readDecl.Narrow(grant, readRefs, localRunContext())
 	if err != nil {
 		t.Fatalf("Narrow(read escape): %v", err)
 	}
@@ -164,11 +164,11 @@ func TestExecuteFilesCreateCreatesScopedFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hashline.Read(escape): %v", err)
 	}
-	editRefs, err := editDecl.ResolveResources(map[string]any{"path": escapeExistingPath}, agenttools.RunContext{})
+	editRefs, err := editDecl.ResolveResources(map[string]any{"path": escapeExistingPath}, localRunContext())
 	if err != nil {
 		t.Fatalf("ResolveResources(edit escape): %v", err)
 	}
-	editCapability, err := editDecl.Narrow(grant, editRefs, agenttools.RunContext{})
+	editCapability, err := editDecl.Narrow(grant, editRefs, localRunContext())
 	if err != nil {
 		t.Fatalf("Narrow(edit escape): %v", err)
 	}
@@ -194,11 +194,11 @@ func TestExecuteFilesCreateCreatesScopedFile(t *testing.T) {
 	if string(outside) != "outside\n" {
 		t.Fatalf("escaped file = %q, want unchanged", outside)
 	}
-	escapeRefs, err := decl.ResolveResources(map[string]any{"path": escapePath}, agenttools.RunContext{})
+	escapeRefs, err := decl.ResolveResources(map[string]any{"path": escapePath}, localRunContext())
 	if err != nil {
 		t.Fatalf("ResolveResources(escape): %v", err)
 	}
-	escapeCapability, err := decl.Narrow(grant, escapeRefs, agenttools.RunContext{})
+	escapeCapability, err := decl.Narrow(grant, escapeRefs, localRunContext())
 	if err != nil {
 		t.Fatalf("Narrow(escape): %v", err)
 	}

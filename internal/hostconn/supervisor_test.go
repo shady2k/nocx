@@ -567,3 +567,50 @@ func TestAHoldersStatedCadenceReachesTheOneProber(t *testing.T) {
 	clock.Advance(time.Second)
 	waittest.WaitFor(t, "the tightest stated cadence to keep running", func() bool { return probes.Load() == 4 })
 }
+
+// TestAConnectionThatAnswersEveryProbeNeverReadsStalled is the shape a cadence
+// LONGER than the soft deadline must not break: a person may ask to be probed
+// every thirty seconds, the deadline is fifteen, and a healthy link answers
+// each probe at once — so the deadline must never fire on an answer that was
+// given. Silence is a property of a probe that is OUTSTANDING (sent and
+// unanswered); it is never measured from the last answer, and nothing may
+// report a stall the host did not cause.
+//
+// Ten minutes of the injected clock, one second at a time, on a thirty-second
+// cadence: twenty probes, every one answered, and the supervisor's own path
+// must contain no stalled state at all.
+func TestAConnectionThatAnswersEveryProbeNeverReadsStalled(t *testing.T) {
+	var probes atomic.Int32
+	link := newMemoryLink()
+	link.probe = func() (time.Duration, error) {
+		probes.Add(1)
+		return time.Millisecond, nil
+	}
+	carrier := &memoryCarrier{dial: func(hostconn.EventSink) (hostconn.Link, error) { return link, nil }}
+	clock := hostconntest.New()
+	_, sup := managerOn(t, carrier, clock)
+
+	slow := plan()
+	slow.ProbeInterval = 30 * time.Second
+	lease, err := sup.Acquire(context.Background(), slow)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	t.Cleanup(lease.Release)
+
+	for elapsed := time.Duration(0); elapsed < 10*time.Minute; elapsed += time.Second {
+		clock.Advance(time.Second)
+	}
+
+	// Every probe was answered, and the path says so.
+	waittest.WaitFor(t, "the ten minutes' probes to be counted", func() bool { return probes.Load() >= 19 })
+	for _, state := range sup.States() {
+		if state.Kind == hostconn.Stalled {
+			t.Fatalf("a healthy link on a 30s cadence read %v after %d probe(s): silence was measured from something that answered",
+				state, probes.Load())
+		}
+	}
+	if got := sup.Current().Kind; got != hostconn.Connected {
+		t.Fatalf("a healthy connection reads %v after ten minutes, want connected", got)
+	}
+}

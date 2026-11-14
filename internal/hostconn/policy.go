@@ -40,6 +40,20 @@ const (
 	// within 30 s of a cut (Q3), and the parked probe is what notices the far
 	// side the moment it answers.
 	ProbeDeadline = 15 * time.Second
+	// AnswerDeliveryGrace is how long a probe that has passed its deadline is
+	// given for an answer it has ALREADY produced to reach the guard, before
+	// that probe is read as silence.
+	//
+	// IT IS REAL TIME ON PURPOSE. The probe's answer is produced by a
+	// goroutine, and the guard judges the deadline on the injected clock: a
+	// test that advances ten minutes in one pass — and a machine resuming from
+	// a sleep — can put the guard at the deadline before the answer's own
+	// goroutine has run, and an answer that was given is not silence. The
+	// window is small enough to be nothing on a real link (a probe that
+	// answers takes milliseconds) and large enough for a goroutine to be
+	// scheduled; it changes no deadline, only the order in which two facts
+	// already true are read.
+	AnswerDeliveryGrace = 25 * time.Millisecond
 	// LookInterval is how often, while stalled, a look-only dial is made: TCP
 	// and the SSH version exchange on a new connection, no key exchange and no
 	// sign-in. The answer is evidence about the HOST, never a verdict on the
@@ -299,11 +313,20 @@ func (g *prober) due(at monoclock.Nanos) bool {
 		g.startProbe(at)
 		return false
 	case st.silentSince == 0:
-		// The probe passed its deadline. Silence is now the state, and the
-		// probe stays parked: it is the evidence that will notice the answer.
+		// The probe passed its deadline — but only a probe that is still
+		// OUTSTANDING is silence, and the answer may already exist.
+		if outcome, answered := g.awaitAnswer(); answered {
+			return g.probeResult(outcome)
+		}
+		// Silence is now the state, and the probe stays parked: it is the
+		// evidence that will notice the answer.
 		st.silentSince = st.probedAt
 		st.nextLook = st.probedAt + span(LookInterval)
-		g.sup.silent(g.live, g.gen, time.Duration(now-st.probedAt))
+		// The moment the deadline expired, not the moment the guard got here:
+		// the grace above may have delayed the reading, and a state that
+		// claimed more silence than the deadline is a measurement of the
+		// scheduler.
+		g.sup.silent(g.live, g.gen, time.Duration(at-st.probedAt))
 		g.sup.observe(g.live, Observation{Answered: false})
 		return false
 	}
@@ -330,6 +353,33 @@ func (g *prober) due(at monoclock.Nanos) bool {
 		return g.sup.endForSilence(g.live, g.gen, "silent past the close budget")
 	}
 	return false
+}
+
+// awaitAnswer gives an outstanding probe one real-time moment to deliver an
+// answer it has already produced, and reports whether one arrived.
+//
+// THE DEADLINE IS NOT A VERDICT (design §5.3, and the defect measured on a
+// thirty-second cadence): silence is a property of a probe that is SENT AND
+// UNANSWERED, never of a clock that passed the deadline first. The answer and
+// the deadline are two facts from two clocks — the injected one moves the
+// deadline, the answer is produced by a goroutine — so a guard that wakes to
+// find both true must read the answer. A guard that judged on the clock alone
+// reported a healthy link stalled and, on a connection with no plain shell,
+// closed it for silence: the flap this window removes.
+func (g *prober) awaitAnswer() (probeOutcome, bool) {
+	if g.st.probeOut == nil {
+		return probeOutcome{}, false
+	}
+	timer := time.NewTimer(AnswerDeliveryGrace)
+	defer timer.Stop()
+	select {
+	case outcome := <-g.st.probeOut:
+		return outcome, true
+	case <-timer.C:
+		return probeOutcome{}, false
+	case <-g.live.stop:
+		return probeOutcome{}, false
+	}
 }
 
 // probeOutcome is one probe's answer: how long the far side took, measured by

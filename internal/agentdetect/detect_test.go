@@ -187,3 +187,17 @@ func TestDetectRefusesToAnswerWhenTheLoginShellFails(t *testing.T) {
 		t.Fatalf("Detect answered rows %+v alongside its error", rows)
 	}
 }
+
+// TestLoginShellPathSucceedsOnAnOrdinaryMachine runs the production path — the
+// real login shell through internal/shellenv — because every test above fakes
+// the shell, and a resolver that only works against fakes is the defect the
+// paired-success rule exists for.
+func TestLoginShellPathSucceedsOnAnOrdinaryMachine(t *testing.T) {
+	path, err := LoginShell{}.Path(context.Background())
+	if err != nil {
+		t.Fatalf("LoginShell.Path: %v", err)
+	}
+	if path == "" {
+		t.Fatal("the login shell resolved an empty PATH")
+	}
+}

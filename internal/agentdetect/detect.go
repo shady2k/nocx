@@ -42,6 +42,7 @@ import (
 	"github.com/shady2k/nocx/internal/agentapproval"
 	"github.com/shady2k/nocx/internal/agentrecord"
 	"github.com/shady2k/nocx/internal/loginshell"
+	"github.com/shady2k/nocx/internal/shellenv"
 )
 
 const (
@@ -59,11 +60,6 @@ const (
 	// greets the person is normal and small; one that writes without end must
 	// not cost detection its memory.
 	maxEnvDump = 256 << 10
-	// envDumpMarker separates whatever an rc file printed on its way past
-	// from the environment dump that follows it, exactly as
-	// internal/git/local's resolver does (shellenv.go). Everything before the
-	// marker is discarded.
-	envDumpMarker = "\n__nocx_agent_path__\n"
 )
 
 // Shell answers the one question detection asks a shell: where is this
@@ -80,72 +76,31 @@ type Shell interface {
 // It is run with `-l -i` — a login shell, and interactive — because the
 // question is the login shell's PATH and because zsh, the shipping platform's
 // default, keeps its PATH in .zshrc, which a non-interactive shell never
-// reads. It then EXECS `env -0`, so what is parsed is the environment a child
-// of that shell would actually receive, NUL-delimited and with no quoting to
-// undo. internal/git/local resolves the same environment for git; this is a
-// second run of the same incantation because that resolver is private to the
-// git factory, whose cache lives as long as one repository handle, and
-// detection needs its own lifetime and its own refresh.
+// reads. The incantation itself (the marker, `env -0`, the bound, the cap and
+// the parse) is internal/shellenv's, shared with internal/git/local, which
+// asks the same question for git; only the mode and the numbers are this
+// caller's.
 type LoginShell struct{}
 
 // Path runs the login shell and returns the PATH it resolved.
 func (LoginShell) Path(ctx context.Context) (string, error) {
-	shell := loginshell.New().Resolve().Path
-	ctx, cancel := context.WithTimeout(ctx, loginShellTimeout)
-	defer cancel()
-	// Absolute /usr/bin/env for the reason git's resolver gives: a broken
-	// PATH is one of the states this must still resolve through.
-	cmd := exec.CommandContext(ctx, shell, "-l", "-i", "-c", "printf '"+envDumpMarker+"'; exec /usr/bin/env -0") //nolint:gosec // shell is from the account record or a detected path
-	cmd.Env = os.Environ()
-	cmd.WaitDelay = time.Second
-	var out cappedBuffer
-	out.max = maxEnvDump
-	cmd.Stdout = &out
-	cmd.Stderr = io.Discard
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() != nil {
-			return "", fmt.Errorf("the login shell %s did not answer within %s", shell, loginShellTimeout)
-		}
-		return "", fmt.Errorf("the login shell %s exited: %w", shell, err)
+	env, err := shellenv.Env(ctx, shellenv.Spec{
+		Shell: loginshell.New().Resolve().Path,
+		// The backend's own environment, not git's scrubbed one: detection
+		// asks what the person's shell gives, and scrubbing is the pane's
+		// concern, not this question's.
+		Env:     os.Environ(),
+		Login:   true,
+		Timeout: loginShellTimeout,
+		MaxOut:  maxEnvDump,
+	})
+	if err != nil {
+		return "", err
 	}
-	return pathFromEnvDump(out.String())
+	// Env refuses an environment without PATH, so this lookup cannot fail.
+	path, _ := shellenv.Path(env)
+	return path, nil
 }
-
-// pathFromEnvDump reads PATH out of the NUL-delimited dump `env -0` printed.
-// Anything before the marker is an rc file's greeting and is not parsed.
-func pathFromEnvDump(dump string) (string, error) {
-	i := strings.Index(dump, envDumpMarker)
-	if i < 0 {
-		return "", errors.New("the login shell printed no environment")
-	}
-	for _, record := range strings.Split(dump[i+len(envDumpMarker):], "\x00") {
-		if path, ok := strings.CutPrefix(record, "PATH="); ok && path != "" {
-			return path, nil
-		}
-	}
-	return "", errors.New("the login shell resolved an environment with no PATH")
-}
-
-// cappedBuffer keeps the first max bytes written and silently drops the rest.
-// It always reports a full write, so a chatty process is never blocked by the
-// cap and never has to be killed for it.
-type cappedBuffer struct {
-	buf bytes.Buffer
-	max int
-}
-
-func (b *cappedBuffer) Write(p []byte) (int, error) {
-	n := len(p)
-	if room := b.max - b.buf.Len(); room > 0 {
-		if len(p) > room {
-			p = p[:room]
-		}
-		b.buf.Write(p)
-	}
-	return n, nil
-}
-
-func (b *cappedBuffer) String() string { return b.buf.String() }
 
 // Detector runs detection passes and caches the last answer.
 type Detector struct {
@@ -181,9 +136,6 @@ func (d *Detector) Detect(ctx context.Context, refresh bool) ([]agentrecord.Dete
 	path, err := d.shell.Path(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("agentdetect: the login shell's PATH could not be read: %w", err)
-	}
-	if strings.TrimSpace(path) == "" {
-		return nil, errors.New("agentdetect: the login shell reported an empty PATH")
 	}
 	// The probes run with the login shell's PATH and the backend's remaining
 	// environment: a CLI whose own shebang is `env node` finds node where the

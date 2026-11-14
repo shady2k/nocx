@@ -9,104 +9,13 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/git"
+	"github.com/shady2k/nocx/internal/shellenv"
 )
-
-// envDump renders what `printf <marker>; exec env -0` puts on stdout, so the
-// parser tests state their input in the shape the shell actually produces.
-func envDump(records ...string) string {
-	out := envDumpMarker
-	for _, r := range records {
-		out += r + "\x00"
-	}
-	return out
-}
 
 // dumpEnvScript is the tail every fake shell in this package ends with: the
 // marker, then the same `exec env -0` production runs. Fake shells that must
 // resolve to a controlled environment run it under `env -i`.
-const dumpEnvScript = "printf '" + envDumpMarker + "'\nexec /usr/bin/env -0\n"
-
-// TestParseEnvDumpKeepsValuesVerbatim: there is no quoting to undo, so a
-// value carrying spaces, quotes, an equals sign or a newline survives exactly
-// — the class of value the export -p parser this replaced had to reconstruct,
-// and could get wrong (nocx-58gq).
-func TestParseEnvDumpKeepsValuesVerbatim(t *testing.T) {
-	env, err := parseEnvDump(envDump(
-		"PATH=/usr/bin:/bin",
-		"SPACES=a b c",
-		"QUOTES=say \"hi\" and 'bye'",
-		"EQUALS=k=v",
-		"MULTILINE=line1\nline2",
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := map[string]string{}
-	for _, kv := range env {
-		p := strings.IndexByte(kv, '=')
-		got[kv[:p]] = kv[p+1:]
-	}
-	want := map[string]string{
-		"PATH":      "/usr/bin:/bin",
-		"SPACES":    "a b c",
-		"QUOTES":    "say \"hi\" and 'bye'",
-		"EQUALS":    "k=v",
-		"MULTILINE": "line1\nline2",
-	}
-	for k, v := range want {
-		if got[k] != v {
-			t.Errorf("%s = %q, want %q", k, got[k], v)
-		}
-	}
-	if len(got) != len(want) {
-		t.Errorf("parsed %d entries, want %d: %v", len(got), len(want), got)
-	}
-}
-
-func TestParseEnvDumpDropsPWD(t *testing.T) {
-	env, err := parseEnvDump(envDump("PWD=/stale/path", "KEEP=v"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, kv := range env {
-		if strings.HasPrefix(kv, "PWD=") {
-			t.Fatalf("PWD survived: %v", env)
-		}
-	}
-}
-
-// TestParseEnvDumpDiscardsWhatTheRcFilesPrinted: an rc file that greets the
-// user writes to the same stdout, and the marker is what separates it from
-// the dump. Nothing before the marker is parsed — not even a line that looks
-// exactly like a record.
-func TestParseEnvDumpDiscardsWhatTheRcFilesPrinted(t *testing.T) {
-	env, err := parseEnvDump("welcome to the shell\nNOISE=not-an-entry\n" + envDump("PATH=/usr/bin"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(env) != 1 || env[0] != "PATH=/usr/bin" {
-		t.Fatalf("parsed = %v, want only the records after the marker", env)
-	}
-}
-
-// TestParseEnvDumpWithoutMarkerDegrades: no marker means the shell never
-// reached the dump — a degrade with a reason, never a silently empty
-// environment that would read as "resolved, and it happens to be bare".
-func TestParseEnvDumpWithoutMarkerDegrades(t *testing.T) {
-	if _, err := parseEnvDump("PATH=/usr/bin\x00"); err == nil {
-		t.Fatal("a dump with no marker parsed as an environment")
-	}
-}
-
-func TestParseEnvDumpDropsMalformedRecords(t *testing.T) {
-	env, err := parseEnvDump(envDump("PATH=/usr/bin", "=novalue", "bad name=x", "1LEADING=x"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(env) != 1 || env[0] != "PATH=/usr/bin" {
-		t.Fatalf("parsed = %v, want only the well-formed record", env)
-	}
-}
+const dumpEnvScript = "printf '" + shellenv.Marker + "'\nexec /usr/bin/env -0\n"
 
 // TestResolveShellEnvSucceedsOnAnOrdinaryMachine is D6's paired success
 // test: on an ordinary machine the resolver produces a PATH-carrying
@@ -117,7 +26,7 @@ func TestResolveShellEnvSucceedsOnAnOrdinaryMachine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveShellEnv(%s): %v", shell, err)
 	}
-	if !hasPATH(env) {
+	if _, ok := shellenv.Path(env); !ok {
 		t.Fatalf("resolved environment has no PATH: %v", env)
 	}
 	for _, kv := range env {
@@ -160,7 +69,7 @@ func TestResolveShellEnvNoPathDegrades(t *testing.T) {
 	script := filepath.Join(dir, "empty-shell")
 	// #nosec G306 — the script must be executable: the resolver execs it.
 	if err := os.WriteFile(script, []byte("#!/bin/sh\n"+
-		"printf '"+envDumpMarker+"'\nexec /usr/bin/env -i FOO=bar /usr/bin/env -0\n"), 0o755); err != nil {
+		"printf '"+shellenv.Marker+"'\nexec /usr/bin/env -i FOO=bar /usr/bin/env -0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	_, err := resolveShellEnv(context.Background(), script, time.Second, 64<<10)
@@ -175,12 +84,12 @@ func TestEnvCacheResolveAndFail(t *testing.T) {
 	shell := filepath.Join(dir, "ok-shell")
 	// #nosec G306 — the script must be executable: the resolver execs it.
 	if err := os.WriteFile(shell, []byte("#!/bin/sh\n"+
-		"printf '"+envDumpMarker+"'\nexec /usr/bin/env -i PATH=/usr/bin X=1 /usr/bin/env -0\n"), 0o755); err != nil {
+		"printf '"+shellenv.Marker+"'\nexec /usr/bin/env -i PATH=/usr/bin X=1 /usr/bin/env -0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	c := newEnvCache(shell, time.Second, 64<<10)
 	env, state, _ := c.resolve(context.Background())
-	if state != git.EnvResolved || !hasPATH(env) {
+	if _, ok := shellenv.Path(env); state != git.EnvResolved || !ok {
 		t.Fatalf("first resolve: state=%s env=%v", state, env)
 	}
 	// Cached: the second resolve must not re-run the shell. Prove it by
@@ -224,11 +133,11 @@ func TestEnvCacheFailureRememberedThenRetried(t *testing.T) {
 	c.lastTry = time.Now().Add(-time.Hour)
 	// #nosec G306 — the script must be executable: the resolver execs it.
 	if err := os.WriteFile(shell, []byte("#!/bin/sh\n"+
-		"printf '"+envDumpMarker+"'\nexec /usr/bin/env -i PATH=/usr/bin /usr/bin/env -0\n"), 0o755); err != nil {
+		"printf '"+shellenv.Marker+"'\nexec /usr/bin/env -i PATH=/usr/bin /usr/bin/env -0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	env, state, _ := c.resolve(context.Background())
-	if state != git.EnvResolved || !hasPATH(env) {
+	if _, ok := shellenv.Path(env); state != git.EnvResolved || !ok {
 		t.Fatalf("retry resolve: state=%s env=%v, want resolved", state, env)
 	}
 }

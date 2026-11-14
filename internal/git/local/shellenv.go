@@ -3,13 +3,14 @@ package local
 import (
 	"context"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/loginshell"
+	"github.com/shady2k/nocx/internal/operation/catalog"
+	"github.com/shady2k/nocx/internal/shellenv"
 )
 
 // The resolved environment (spec D6): git's subprocesses — notably the
@@ -35,10 +36,11 @@ import (
 // never holds the panel. Only the commit path blocks on resolution, joining
 // the shared attempt or retrying a remembered failure after a cooldown, so
 // D6's guarantee — the commit runs with the resolved environment when one is
-// obtainable — still holds. The invocation below is unchanged (`-i`, 5 s
-// default): it is the only non-pty way to read the rc files the way the
-// pty's shell reads them, and the cost is now paid once in the background,
-// not on every open.
+// obtainable — still holds. The invocation is unchanged (`-i`, 5 s default),
+// now stated once in internal/shellenv and shared with internal/agentdetect:
+// it is the only non-pty way to read the rc files the way the pty's shell
+// reads them, and the cost is now paid once in the background, not on every
+// open.
 type envCache struct {
 	mu       sync.Mutex
 	shell    string
@@ -178,142 +180,48 @@ func (c *envCache) waitSettled() {
 	}
 }
 
-// envDumpMarker separates whatever the rc files printed on their way past —
-// a greeting, a version notice, a fastfetch — from the environment dump that
-// follows it. Everything before the first occurrence is discarded; the bytes
-// after it are the dump and nothing else, because `exec` leaves no shell
-// behind to write again.
-const envDumpMarker = "\n__nocx_env_dump__\n"
-
-// resolveShellEnv runs the user's shell interactively — so it reads the rc
-// files the way the pty's shell does — and then EXECS `env -0`, so what
-// arrives is the exported environment a child of that shell would actually
-// receive, NUL-delimited. Bounded by a deadline and an output cap, both
-// enforced by the same machinery git itself runs under: the deadline is the
-// run spec's wall-clock ceiling and the cap is the stdout sink's, so a hung
-// rc file or a chatty one cannot hold the resolver open.
-//
-// The `-i` is what makes the shell read its rc files the way the pty's shell
-// does (nocx-6pz0); a non-pty reimplementation of rc loading (sourcing
-// ~/.bashrc by hand) would be a second answer that diverges from the pty's
-// shell startup, and an interactive shell without a tty hanging in an rc file
-// is a bounded, remembered failure, no longer a cost every open pays.
-//
-// `env -0` rather than `export -p`, which is what this ran until nocx-58gq.
-// POSIX says `export -p` writes the exported variables in a re-enterable
-// form; zsh does not write the ones tied to an array — PATH, FPATH and SHLVL
-// — so on macOS, whose default shell IS zsh, the resolver read an
-// environment with no PATH on EVERY machine and D6 degraded for every user of
-// the shipping platform. There is no portable `export -p` incantation that
-// includes them (`typeset -x` is not in dash), and the paired-success test
-// was reporting it the whole time from the one shell CI does not run
-// (AGENTS.md rule 2). `env` is the same question asked of the kernel instead
-// of the shell: it needs no un-quoting, it cannot disagree with itself
-// between shells, and it is literally the environment a child gets — which is
-// what D6 hands to git. Absolute path because a broken PATH is one of the
-// states this must still resolve through; a missing /usr/bin/env fails the
-// exec and degrades with the shell's exit status, which is honest.
-func resolveShellEnv(ctx context.Context, shell string, timeout time.Duration, maxOut int64) ([]string, error) {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	// The shell starts from the same scrubbed launcher environment plus
-	// terminal vars as the pty's shells (pty_local.go:132), so the resolved
-	// environment and the tab's agree about everything except what the tab
-	// created itself. The scrub list and the locale gap-fill are copied from
-	// internal/pty rather than imported: they are that package's private
-	// vocabulary, and the comment naming this copy is what keeps the two in
-	// step.
-	sink := &byteSink{max: maxOut}
-	res := run(ctx, spec{
-		argv:      []string{shell, "-i", "-c", "printf '" + envDumpMarker + "'; exec /usr/bin/env -0"},
-		env:       withUTF8Locale(append(scrubLauncherSession(os.Environ()), "TERM=xterm-256color", "COLORTERM=truecolor")),
-		sink:      sink,
-		deadline:  time.Now().Add(timeout),
-		stderrMax: 64 << 10,
-	})
-	if res.cancelled {
-		return nil, ctx.Err()
-	}
-	if res.err != nil {
-		return nil, res.err
-	}
-	if res.exitCode != 0 {
-		return nil, &degradedError{reason: "the shell exited " + strconv.Itoa(res.exitCode) + " while resolving the environment"}
-	}
-
-	env, err := parseEnvDump(string(sink.buf))
-	if err != nil {
-		return nil, &degradedError{reason: err.Error()}
-	}
-	if !hasPATH(env) {
-		return nil, &degradedError{reason: "the shell resolved an environment with no PATH"}
-	}
-	return env, nil
-}
-
 // degradedError is a plain reason carrier; the distinction the product needs
 // is the EnvState, and the reason is the panel's text.
 type degradedError struct{ reason string }
 
 func (e *degradedError) Error() string { return e.reason }
 
-func hasPATH(env []string) bool {
-	for _, kv := range env {
-		if strings.HasPrefix(kv, "PATH=") && len(kv) > len("PATH=") {
-			return true
-		}
-	}
-	return false
-}
-
-// parseEnvDump parses the NUL-delimited output of `env -0` that follows
-// envDumpMarker. Everything before the marker is whatever the rc files
-// printed and is discarded; each record after it is one NAME=VALUE exactly as
-// the kernel holds it, so there is no quoting to undo and a value containing
-// a newline, a space or a quote survives verbatim.
+// resolveShellEnv asks internal/shellenv for the environment the user's shell
+// gives a child of it. The incantation — the marker, `env -0`, the bound, the
+// cap and the parse — lives there because internal/agentdetect asks the same
+// question for Settings, and two copies of it would agree everywhere anyone
+// looked and disagree in the one place that mattered (ADR-anntnxdj decision 6).
 //
-// A record whose name is not a valid environment-variable name is dropped
-// rather than failing the resolution: it is the shape a stray write from a
-// background job in an rc file takes, and one of those must not cost the user
-// the whole environment.
+// The mode is this caller's, and it is the interactive shell rather than the
+// login shell: the pty starts `shell -i`, so `-i` is what makes the shell read
+// the rc files the way the pane's shell does (nocx-6pz0). Detection asks for
+// `-l -i` because its question is the login shell's PATH; D6's guarantee is
+// the environment the pane's shell gives, which is this one.
 //
-// PWD is dropped: it is per-process state, and the stale copy the shell
-// exported would lie to hooks about where they are.
-func parseEnvDump(out string) ([]string, error) {
-	i := strings.Index(out, envDumpMarker)
-	if i < 0 {
-		return nil, &degradedError{reason: "the shell printed no environment dump"}
-	}
-	var env []string
-	for _, record := range strings.Split(out[i+len(envDumpMarker):], "\x00") {
-		eq := strings.IndexByte(record, '=')
-		if eq <= 0 {
-			continue // the trailing empty record, or a name-less fragment
-		}
-		name := record[:eq]
-		if !validName(name) || name == "PWD" {
-			continue
-		}
-		env = append(env, record)
+// The shell is a process this adapter starts, and it ran under the
+// git-process operation while the incantation lived here; the scope keeps the
+// catalogue's coverage of it unchanged (ADR-8eej3e66).
+func resolveShellEnv(ctx context.Context, shell string, timeout time.Duration, maxOut int64) ([]string, error) {
+	scope := catalog.BeginInternal(ctx, catalog.OpInternalGitProcess)
+	defer scope.Complete()
+	env, err := shellenv.Env(ctx, shellenv.Spec{
+		Shell: shell,
+		// The shell starts from the same scrubbed launcher environment plus
+		// terminal vars as the pty's shells (pty_local.go:132), so the
+		// resolved environment and the tab's agree about everything except
+		// what the tab created itself. The scrub list and the locale gap-fill
+		// are copied from internal/pty rather than imported: they are that
+		// package's private vocabulary, and the comment naming this copy is
+		// what keeps the two in step.
+		Env:     withUTF8Locale(append(scrubLauncherSession(os.Environ()), "TERM=xterm-256color", "COLORTERM=truecolor")),
+		Login:   false,
+		Timeout: timeout,
+		MaxOut:  maxOut,
+	})
+	if err != nil {
+		return nil, &degradedError{reason: err.Error()}
 	}
 	return env, nil
-}
-
-func validName(s string) bool {
-	if s == "" {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c == '_':
-		case c >= '0' && c <= '9' && i > 0:
-		default:
-			return false
-		}
-	}
-	return true
 }
 
 // detectShell asks the one owner of "which shell is this user's login shell"

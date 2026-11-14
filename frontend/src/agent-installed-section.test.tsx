@@ -47,7 +47,8 @@ function agent(readiness: Agent['readiness']): Agent {
 
 function client(answer: { agents: Agent[] } = { agents: [CLAUDE, PI] }) {
   const detect = vi.fn().mockResolvedValue(answer)
-  return { api: { detect } as unknown as AgentRecordsClient, detect }
+  const catalogue = vi.fn().mockResolvedValue({ agents: [] })
+  return { api: { detect, catalogue } as unknown as AgentRecordsClient, detect, catalogue }
 }
 
 function row(container: HTMLElement, id: string): HTMLElement {
@@ -107,7 +108,10 @@ describe('AgentInstalledSection', () => {
       .fn()
       .mockResolvedValueOnce({ agents: [PI] })
       .mockResolvedValueOnce({ agents: [agent('not_installed')] })
-    const api = { detect } as unknown as AgentRecordsClient
+    const api = {
+      detect,
+      catalogue: vi.fn().mockResolvedValue({ agents: [] }),
+    } as unknown as AgentRecordsClient
     const view = render(() => <AgentInstalledSection client={api} />)
 
     await waitFor(() => expect(view.container.textContent).toContain('Ready'))
@@ -151,7 +155,14 @@ describe('AgentInstalledSection', () => {
         .mockResolvedValueOnce({ agents: [PI] })
         .mockReturnValueOnce(pending)
       const view = render(() => (
-        <AgentInstalledSection client={{ detect } as unknown as AgentRecordsClient} />
+        <AgentInstalledSection
+          client={
+            {
+              detect,
+              catalogue: vi.fn().mockResolvedValue({ agents: [] }),
+            } as unknown as AgentRecordsClient
+          }
+        />
       ))
       await waitFor(() => expect(view.container.textContent).toContain(PI.version))
 
@@ -182,7 +193,10 @@ describe('AgentInstalledSection', () => {
       .fn()
       .mockResolvedValueOnce({ agents: [PI] })
       .mockRejectedValueOnce(new Error('the login shell /bin/bash exited: exit status 1'))
-    const api = { detect } as unknown as AgentRecordsClient
+    const api = {
+      detect,
+      catalogue: vi.fn().mockResolvedValue({ agents: [] }),
+    } as unknown as AgentRecordsClient
     const view = render(() => <AgentInstalledSection client={api} />)
 
     await waitFor(() => expect(view.container.textContent).toContain('Ready'))
@@ -193,5 +207,79 @@ describe('AgentInstalledSection', () => {
     // the silent degrade AGENTS.md names.
     await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('exit status 1'))
     expect(view.container.textContent).toContain('Ready')
+  })
+})
+
+describe('connector catalogue in Settings', () => {
+  afterEach(() => {
+    cleanup()
+    setActiveLocale('en')
+  })
+
+  it.each([
+    ['en', 'Ready', 'Not configured', 'Models available to this agent:'],
+    ['ru', 'Готов', 'Не настроен', 'Модели, доступные этому агенту:'],
+  ] as const)(
+    'uses connector readiness and shows its models as information in %s',
+    async (locale, ready, notConfigured, heading) => {
+      setActiveLocale(locale)
+      const { api, catalogue } = client({ agents: [{ ...PI, readiness: 'installed' }, CLAUDE] })
+      catalogue
+        .mockResolvedValueOnce({
+          agents: [
+            {
+              id: 'pi',
+              readiness: { state: 'ready', message: '' },
+              models: [{ id: 'fake/e2e-model', name: 'E2E model' }],
+            },
+          ],
+        })
+        .mockResolvedValueOnce({
+          agents: [
+            {
+              id: 'pi',
+              readiness: { state: 'not_configured', message: 'Configure a provider' },
+              models: [{ id: 'hidden-model', name: 'Hidden model' }],
+            },
+          ],
+        })
+      const view = render(() => <AgentInstalledSection client={api} />)
+      await waitFor(() => expect(row(view.container, 'pi').textContent).toContain('E2E model'))
+      expect(row(view.container, 'pi').textContent).toContain(ready)
+      expect(row(view.container, 'pi').textContent).toContain(heading)
+      expect(row(view.container, 'pi').textContent).toContain('fake/e2e-model')
+      expect(row(view.container, 'pi').querySelector('select,input,button')).toBeNull()
+      expect(catalogue).toHaveBeenLastCalledWith(false)
+      fireEvent.click(
+        screen.getByRole('button', { name: locale === 'en' ? 'Refresh' : 'Обновить' }),
+      )
+      await waitFor(() => expect(row(view.container, 'pi').textContent).toContain(notConfigured))
+      expect(row(view.container, 'pi').textContent).toContain('Configure a provider')
+      expect(row(view.container, 'pi').textContent).not.toContain('E2E model')
+      expect(row(view.container, 'pi').textContent).not.toContain('Hidden model')
+      expect(catalogue).toHaveBeenLastCalledWith(true)
+    },
+  )
+
+  it('reports a catalogue failure and retains the previous connector facts', async () => {
+    const { api, catalogue } = client()
+    catalogue
+      .mockResolvedValueOnce({
+        agents: [
+          {
+            id: 'pi',
+            readiness: { state: 'ready', message: '' },
+            models: [{ id: 'fake/e2e-model', name: 'E2E model' }],
+          },
+        ],
+      })
+      .mockRejectedValueOnce(new Error('catalogue unavailable'))
+    const view = render(() => <AgentInstalledSection client={api} />)
+    await waitFor(() => expect(row(view.container, 'pi').textContent).toContain('E2E model'))
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    await waitFor(() =>
+      expect(screen.getByRole('alert').textContent).toContain('catalogue unavailable'),
+    )
+    expect(row(view.container, 'pi').textContent).toContain('E2E model')
   })
 })

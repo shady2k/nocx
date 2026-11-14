@@ -803,6 +803,11 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 			[]byte(`{"refresh":false}`),
 			[]byte(`{"refresh":true}`),
 		},
+		"agentRecords.catalogue": {
+			[]byte(`{}`),
+			[]byte(`{"refresh":false}`),
+			[]byte(`{"refresh":true}`),
+		},
 		"agentRecords.save": {
 			[]byte(`{"id":"custom-agent","displayName":"Custom agent","command":"/usr/bin/env","args":["--flag"],"icon":"sparkles","colour":"#ffffff","disabled":false,"env":["MODE=dev"],"resume":{"sessionIdArgs":[],"resumeIdArgs":[],"resumeCwdArgs":[]}}`),
 		},

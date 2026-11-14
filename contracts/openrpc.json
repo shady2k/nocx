@@ -2231,6 +2231,108 @@
       }
     },
     {
+      "name": "agentRecords.catalogue",
+      "params": [
+        {
+          "name": "params",
+          "required": false,
+          "schema": {
+            "$ref": "https://nocx.local/contracts/agentRecords.catalogue.params.schema.json"
+          }
+        }
+      ],
+      "errors": [
+        {
+          "code": -32601,
+          "message": "Method not found",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32603,
+          "message": "Internal error",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32005,
+          "message": "This call did not start, or its work reached its declared deadline",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/operation.expired.schema.json"
+          }
+        }
+      ],
+      "x-nocx-agent-disposition": "operation-owned",
+      "x-nocx-operation": {
+        "id": "agentRecords.catalogue",
+        "kind": "method",
+        "owner": "request",
+        "phases": [
+          {
+            "name": "run",
+            "resources": [],
+            "dependencies": [
+              "config",
+              "filesystem"
+            ]
+          }
+        ],
+        "turn": {
+          "millis": 30000,
+          "basis": "read",
+          "note": "the owner's rule of ADR-8eej3e66 §8: a person's call waits, visibly, and is never refused for busyness — 30 s outlasts any legitimate wait for one resource (the longest declared work bound ahead of a call is five minutes) and still ends a stuck queue"
+        },
+        "max": {
+          "millis": 35000,
+          "basis": "read",
+          "note": "read: connector catalogue pass bounded at 30 s, including login shell, readiness and model subprocesses"
+        },
+        "silence": {
+          "kind": "none",
+          "millis": 0,
+          "basis": "",
+          "note": ""
+        },
+        "answer": {
+          "kind": "none",
+          "millis": 0,
+          "basis": "",
+          "note": ""
+        },
+        "recovery": {
+          "kind": "none",
+          "millis": 0,
+          "basis": "",
+          "note": ""
+        },
+        "merge": "same-key",
+        "waiting": "Reading your agents' models",
+        "row": "past-wait",
+        "expired": "retry-read",
+        "resources": [],
+        "dependencies": [
+          "config",
+          "filesystem"
+        ],
+        "preempts": []
+      },
+      "result": {
+        "name": "agentRecords.catalogueResult",
+        "schema": {
+          "$ref": "https://nocx.local/contracts/agentRecords.catalogue.schema.json"
+        }
+      }
+    },
+    {
       "name": "agentRecords.detect",
       "params": [
         {
@@ -26056,6 +26158,9 @@
     },
     {
       "$ref": "https://nocx.local/contracts/agentAccess.list.schema.json"
+    },
+    {
+      "$ref": "https://nocx.local/contracts/agentRecords.catalogue.schema.json"
     },
     {
       "$ref": "https://nocx.local/contracts/agentRecords.detect.schema.json"

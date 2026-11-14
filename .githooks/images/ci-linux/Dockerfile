@@ -36,6 +36,8 @@ FROM --platform=linux/amd64 bash:3.2 AS bash32
 RUN mkdir -p /out \
  && cp -L /usr/local/bin/bash /lib/ld-musl-x86_64.so.1 /usr/lib/libncursesw.so.6 /out/
 
+FROM --platform=linux/amd64 node:24-bookworm-slim AS node
+
 FROM --platform=linux/amd64 ubuntu:24.04
 
 ARG GO_VERSION=1.26.5
@@ -55,6 +57,9 @@ RUN apt-get update \
       libgtk-3-dev libwebkit2gtk-4.1-dev \
  && rm -rf /var/lib/apt/lists/*
 
+# Node is needed by the real pi connector integration tests.
+COPY --from=node /usr/local/ /usr/local/
+RUN npm install --global @earendil-works/pi-coding-agent@1.5.2
 
 # setup-go with `go-version: '1.26'` resolves to the newest 1.26.x, which is
 # what the job actually runs; GO_VERSION pins it here so a red run can be

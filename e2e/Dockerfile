@@ -54,7 +54,9 @@ RUN set -eux; \
     tar -C /usr/local -xzf /tmp/go.tgz; \
     rm /tmp/go.tgz
 ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
-ENV GOTOOLCHAIN=local
+ENV GOTOOLCHAIN=go1.26.5
+ENV GOSUMDB=sum.golang.org
+ENV GOFLAGS=-p=1
 
 # The shells the integration tests drive. They FAIL rather than skip when the
 # shell they exist to prove is absent (nocx-gd84), so a thin image would report
@@ -112,5 +114,8 @@ RUN set -eux; \
     rm /tmp/zig.tar.xz; \
     ln -sf "/opt/zig-${zig_arch}-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig; \
     zig version
+
+# The connector's real CLI, pinned for reproducible Settings/model checks.
+RUN npm install --global @earendil-works/pi-coding-agent@1.5.2
 
 WORKDIR /work

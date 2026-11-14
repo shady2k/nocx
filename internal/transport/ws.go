@@ -546,6 +546,7 @@ type WSServer struct {
 	// this computer (nocx-a62cl.12.1). Named by the composition root; unset,
 	// agentRecords.detect answers "not available" rather than an empty list.
 	agentDetection AgentDetector
+	agentCatalogue AgentCatalogue
 	// liveEffects is which of that policy's seven rows govern anything at
 	// all: the effect classes at least one DECLARED tool carries. It is
 	// static, derived at build time from the tool declaration table, and it
@@ -2225,6 +2226,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.agentAccessSpecs()...)
 	specs = append(specs, s.agentRecordsSpecs()...)
 	specs = append(specs, s.agentDetectionSpecs()...)
+	specs = append(specs, s.agentCatalogueSpecs()...)
 	specs = append(specs, s.agentEmittingSpecs()...)
 	specs = append(specs, s.agentRuleStoreSpecs()...)
 	specs = append(specs, s.agentCalibrationSpecs()...)

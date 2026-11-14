@@ -39,3 +39,17 @@ describe('the agent-record client’s detection call', () => {
     expect(calls[0]).toEqual(['agentRecords.detect', { refresh: true }])
   })
 })
+
+describe('the agent-record client’s catalogue call', () => {
+  it('reads cached connector facts and forwards an explicit refresh', async () => {
+    const { client, calls } = spied()
+    await client.catalogue()
+    await client.catalogue(false)
+    await client.catalogue(true)
+    expect(calls).toEqual([
+      ['agentRecords.catalogue', {}],
+      ['agentRecords.catalogue', {}],
+      ['agentRecords.catalogue', { refresh: true }],
+    ])
+  })
+})

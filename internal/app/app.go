@@ -45,6 +45,8 @@ import (
 	"github.com/shady2k/nocx/internal/filesystem/sftp"
 	gitlocal "github.com/shady2k/nocx/internal/git/local"
 	"github.com/shady2k/nocx/internal/git/registry"
+	"github.com/shady2k/nocx/internal/harness"
+	"github.com/shady2k/nocx/internal/harness/pi"
 	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/helper/deploy"
 	helperartifacts "github.com/shady2k/nocx/internal/helper/deploy/artifacts"
@@ -1780,6 +1782,7 @@ func New(opts ...Option) (*App, error) {
 	// person's login shell's PATH (nocx-a62cl.12.1). Built here, cached by the
 	// detector until Settings asks for a refresh.
 	tpOpts = append(tpOpts, transport.WithAgentDetection(agentdetect.New(agentdetect.LoginShell{})))
+	tpOpts = append(tpOpts, transport.WithAgentCatalogue(harness.NewCatalogue(map[string]harness.Harness{"pi": pi.New(paths.DataDir(), nil)})))
 	tpOpts = append(tpOpts, transport.WithRemoteLifecycle(remoteLifecycle))
 	tpOpts = append(tpOpts, transport.WithLifecyclePublisher(lifecyclePub))
 
